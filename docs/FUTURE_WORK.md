@@ -69,7 +69,7 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 5a. **#250** — a model held whole here, which the card holds only part of, was routed through two
    peers at 0.1 tok/s where the same machine answers locally in ~5 s (report #035). Its
    window-narrowing contributor closed as #248, the idle model holding the card as #249, and a layer
-   is now priced as its own model's (prior half); pricing a MEASURED peer across models is left.
+   is now priced as its own model's, a measured peer's figure per model too; left: the rigs.
 
 **P2 — speed and completeness**
 6. *(#152 closed 2026-10-09 — the guess-check stream runs on the boomerang and with a peer
@@ -479,8 +479,15 @@ answers in ~5 s. Several contributors (diagnosis rule 6). Each is a hypothesis u
   `GgufTensorMeta::active_bytes_per_layer` (the header's own tensor sizes; the manifest's table is
   not needed), read through `NodeCandidate::prior_ms_per_layer` by both routers;
   `a_light_layer_is_not_sent_a_round_trip_away_for_a_faster_card` flips the route on the factor
-  alone and is red without it. A/B `SWARMLLM_LAYER_PRICE=reference`. Left: the measured half
-  (`PeerSpeed` per reference layer).
+  alone and is red without it. A/B `SWARMLLM_LAYER_PRICE=reference`.
+  **Done, the measured half (2026-10-12, unreleased), changed from the design:** a peer's figures
+  are kept per (peer, model) (`peer_speed::ModelSpeed`, read only through
+  `SharedState::peer_model_speed`), and a model the peer has not run for us is priced from its
+  stated speed. NOT per reference layer: a card's decode step is bound by kernel submissions (a
+  small model's layer costs more than its bytes say) and a decode figure has the round trip folded
+  in, so a scaled figure would be wrong twice. Gossip keeps `ms_per_layer` raw for older nodes and
+  adds `LatencyObservation::layer_work` (serde default), which a receiver divides by. Red without
+  it: `a_peer_measured_on_one_model_is_unmeasured_for_another`.
 - **The prompt is priced on the processor prior** for a hybrid local route even with layers on the
   card, while #138 made a mixture-of-experts prompt 3.5-4.7× faster on both.
 - **An idle model held the card** (#249, closed): a 14B "idle 20m" still had 9.2 GB, which is what
@@ -491,7 +498,7 @@ locally and answered here (23.2 s vs 9.6 s on main). By the 7B prior the local h
 at ~84 s against the reported pipeline's 278 s, so in the report the local route was most likely
 unavailable (narrowed) rather than out-priced. Priced by the design above, the report's plan
 changes little: compute scales down on both routes, and the local route then wins by more. Next:
-the measured half of the design; then the shape on this box (Qwen3-30B-A3B Q2_K whole, split
+the shape on this box (Qwen3-30B-A3B Q2_K whole, split
 26/22 card/processor, `~/swarmllm-138/`) with a peer holding the middle, reading the planner's
 local price (`DIAG: pipeline candidate … layer_work=`) against the measured local time. Dense
 models above 7B now cost more compute, so before release a WAN split rig

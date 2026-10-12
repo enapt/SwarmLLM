@@ -115,7 +115,7 @@ pub fn serialize_peer_to_json(
     //
     // `samples` rides with it because a minimum over two samples and one over
     // forty are not the same claim, and nothing else on this row says which.
-    let decode_terms = state.observed_decode_terms(&peer.node_id);
+    let decode_terms = state.latest_decode_terms(&peer.node_id);
     let (measured_min_rtt_ms, rtt_samples) = state
         .metrics
         .network_coord_samples

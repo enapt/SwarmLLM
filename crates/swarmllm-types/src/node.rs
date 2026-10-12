@@ -651,10 +651,18 @@ impl NodeCapability {
 /// One entry in `NodeCapability::observed_latencies`: the sender observed
 /// this `peer` takes `ms_per_layer` to serve a distributed-inference
 /// segment (averaged via the sender's local EMA).
+///
+/// `ms_per_layer` is a layer of whichever model the sender last measured the
+/// peer on, as it always was. `layer_work` says what that model's layer weighs
+/// in reference layers (a 7B Q4's), so a receiver can put the figure on the
+/// scale of the model it is pricing (#250). An older node omits it and ignores
+/// it; a receiver reads it absent as 1.0, which is how every figure was read.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LatencyObservation {
     pub peer: NodeId,
     pub ms_per_layer: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_work: Option<f32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

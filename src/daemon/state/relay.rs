@@ -614,7 +614,10 @@ impl super::SharedState {
                     .get(&node)
                     .map(|(e, s)| (Some(*e), *s))
                     .unwrap_or((None, 0));
-                let speed = self.metrics.peer_speed.get(&node);
+                let entry = self.metrics.peer_speed.get(&node);
+                // The model this peer was measured on most recently: a row has
+                // no model to ask about, and figures are kept per model (#250).
+                let speed = entry.as_ref().and_then(|s| s.latest());
                 super::PeerPerformanceRow {
                     node_id: node.to_string(),
                     rtt_ms: peer.as_ref().and_then(|p| p.latency_ms),

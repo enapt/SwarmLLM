@@ -31,7 +31,7 @@ Admission runs at load time, too late to reshape a plan (#452). **`ModelProcessP
 
 ## A layer is priced as the model it belongs to (2026-10-12, #250)
 
-**`NodeCandidate::prior_ms_per_layer`** is the one prior from a stated speed (`vertex_cost`, greedy): the 7B-reference layer time × `layer_work`, the model's active bytes per layer over the reference's (`scheduler::layer_work_for` ← `GgufTensorMeta::active_bytes_per_layer`, experts at `expert_used_count / expert_count`). `est_tokens_per_sec` stays in 7B units for ratios and sorts. Measured `PeerSpeed` is not yet normalised across models. A/B `SWARMLLM_LAYER_PRICE=reference`.
+**`NodeCandidate::prior_ms_per_layer`** is the one prior from a stated speed (`vertex_cost`, greedy): the 7B-reference layer time × `layer_work`, the model's active bytes per layer over the reference's (`scheduler::layer_work_for` ← `GgufTensorMeta::active_bytes_per_layer`, experts at `expert_used_count / expert_count`). `est_tokens_per_sec` stays in 7B units for ratios and sorts. A/B `SWARMLLM_LAYER_PRICE=reference`. **A measured figure is kept per (peer, model)** (`peer_speed::ModelSpeed`): every pricing or deadline read goes through `SharedState::peer_model_speed`, and a model the peer has not run for us is unmeasured — never scaled from another model's figure. Gossip carries `layer_work` beside the raw figure (`LatencyObservation`).
 
 → `docs/invariants/scheduling.md` § "A layer is priced as the model it belongs to"
 

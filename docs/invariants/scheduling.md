@@ -3589,13 +3589,31 @@ control arm still chose the split. `a_layer_weighs_what_it_reads`,
 `a_token_reads_the_experts_it_is_routed_to_and_the_layers_whole`. A/B inside one binary:
 `SWARMLLM_LAYER_PRICE=reference`. The plan logs it (`DIAG: pipeline candidate … layer_work=`).
 
-**What a change must keep, and what is open.** A measured peer is still priced by its own ms per
-layer (`PeerSpeed`, keyed by NODE), which reflects whichever model it served. That is right
-when it served this one, and wrong across models, as before. Normalising a sample by its
-model's `layer_work` is the second half of #250. Dense models above 7B now cost more compute
-against the network, so a split onto a faster card is priced more attractive. Before release, a
-WAN split rig must show that this adds no route slower than the one it replaced
-(`docs/plans/regional_pipelines.md`).
+**The measured half: a peer's figures are kept per model (same day).** `PeerSpeed` was keyed by
+NODE, so a peer timed on a 2B priced a 30B's layers at the 2B's figure — in the ranking, and in
+the deadline `SegmentBudget` gives a segment (`predict_segment_ms`), where a figure from a
+smaller model is too short. It now holds a `ModelSpeed` per model, and every read for pricing or
+waiting goes through `SharedState::peer_model_speed(node, model)`: a model the peer has not run
+for us is UNMEASURED and priced from its stated speed — the answer an unmeasured or stale peer
+already got, which bounds the risk. Delivery stays per node (it measures the path, not the
+model). The design first said "store per reference layer and scale"; it was not done, because
+scaling a measured figure by bytes is wrong twice: a card's decode step is bound by how many
+kernels it submits (a small model's layer costs more than its bytes say), and a decode figure
+has the round trip folded in, which does not scale with the layer. Petals keys by model for the
+same reason. Gossip is the one place a figure crosses models: `LatencyObservation` keeps
+`ms_per_layer` raw (how an older node reads it) and adds `layer_work` (`#[serde(default)]`,
+ignored by older nodes); a receiver divides by it — clamped to `LAYER_WORK_RANGE`, it is a
+stranger's number — and puts the result on each model's scale. Display (`peer_performance_rows`,
+the peer listing) shows the model measured most recently (`PeerSpeed::latest`). Tests:
+`a_peer_measured_on_one_model_is_unmeasured_for_another` and
+`a_peers_figure_on_one_model_never_prices_another`, both red when `PeerSpeed::model` answers with
+the latest model; `gossip_is_put_on_the_scale_of_each_model_it_prices`, red without the scale.
+
+**What a change must keep, and what is open.** Never answer a pricing or deadline read from
+another model's figure (`PeerSpeed::latest` is for display only). Dense models above 7B now cost
+more compute against the network, so a split onto a faster card is priced more attractive.
+Before release, a WAN split rig must show that this adds no route slower than the one it
+replaced (`docs/plans/regional_pipelines.md`).
 
 ## Inference Router Queue
 

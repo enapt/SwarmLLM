@@ -24,18 +24,24 @@
 //! that predicts neither, and which is simply an artefact of whatever mix of
 //! prefill and decode samples happened to arrive.
 //!
-//! # Why normalising by activation bytes makes this model-independent
+//! # Why every figure is kept per model
 //!
-//! `activation_bytes = tokens × hidden_dim × 4`, and prefill work is
-//! proportional to `layers × tokens × hidden_dim`. Dividing by
-//! `layers × activation_bytes` therefore cancels the model's width as well as
-//! the prompt length, so one coefficient per peer transfers across models. It
-//! is a first-order model: attention is quadratic in prompt length and
-//! quantisation varies, so the coefficient drifts somewhat with very long
-//! prompts. It is used to size a *timeout* with a safety factor, not to make a
+//! `activation_bytes = tokens × hidden_dim × 4`, so dividing by
+//! `layers × activation_bytes` cancels the prompt length. It was once taken to
+//! cancel the model too, so one coefficient per peer would transfer across
+//! models; it does not — a layer's work grows with its weights, roughly the
+//! square of the width, and a mixture-of-experts layer reads only the experts
+//! a token is routed to. Since #250 (2026-10-12) every speed figure is kept
+//! per (peer, model) — [`ModelSpeed`] — and a model a peer has not run for us
+//! is priced from its advertised capability. Prefill remains a first-order
+//! model: attention is quadratic in prompt length, so the coefficient drifts
+//! with very long prompts. It sizes a *timeout* with a safety factor, not a
 //! precise promise.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
+
+use crate::types::ModelId;
 
 /// Which half of inference a sample came from. Prefill and decode have
 /// separate coefficients — see the module docs.
@@ -177,10 +183,19 @@ impl LinearFit {
     }
 }
 
-/// Observed compute speed of one peer, plus how reliably the path to it
-/// actually delivers.
+/// Observed compute speed of one peer on ONE model (#250).
+///
+/// Kept per model because a layer of one model is not a layer of another: a
+/// 30B-A3B's reads ~35 MB a token, a dense 32B's ~310 MB, and before this one
+/// figure per peer priced both from whichever model it had last run. Scaling a
+/// sample by bytes would not fix it: a card's decode step is bound by how many
+/// kernels it submits rather than the bytes they read, so a small model's layer
+/// costs more than its bytes say, and a decode figure has the round trip folded
+/// into it, which does not scale with the layer at all. A model this peer has
+/// not run for us is priced from its advertised capability — what an
+/// unmeasured or stale peer has always been priced from.
 #[derive(Debug, Clone)]
-pub struct PeerSpeed {
+pub struct ModelSpeed {
     /// EMA of ms per (layer × activation byte) during prefill.
     prefill_ms_per_layer_byte: Option<f32>,
     /// The same coefficient from WARM samples only — the one that may RANK.
@@ -209,55 +224,44 @@ pub struct PeerSpeed {
     decode_samples: u32,
     delegated_samples: u32,
     updated_at: Instant,
-    /// EMA over "did this reply arrive intact", 1.0 = nothing lost.
-    ///
-    /// **This measures the PATH, not the hardware.** Every `StreamingToken` is
-    /// an independent fire-and-forget send with no acknowledgement and no
-    /// retransmission, so one drop truncates a reply permanently — the
-    /// reassembler may only release the consecutive run. Measured 2026-08-20:
-    /// all six losses in a session were on peers 450-650 ms away and none on
-    /// the peer at 1 ms, despite that one serving more requests.
-    ///
-    /// Kept apart from the speed coefficients because a lossy link says nothing
-    /// about how fast a peer computes — conflating them is what recorded an RTX
-    /// 4050 at 345 ms/layer against its real 3.1. Kept apart from trust because
-    /// **nobody is at fault**: the peer generated the whole answer and we asked
-    /// for it correctly; the path between lost it. Docking a peer's reputation
-    /// for that is the wrong-culprit mistake this codebase has made twice.
-    ///
-    /// Starts optimistic at 1.0 and needs no minimum sample count: with
-    /// `ALPHA` at 0.3 a single loss moves it to 0.7, a 1.4x penalty, which is a
-    /// nudge rather than a verdict, and a genuinely lossy path converges down
-    /// fast.
-    delivery_intact_ratio: f32,
-    delivery_samples: u32,
-    /// Separate from `updated_at` on purpose. A truncated stream records a
-    /// delivery sample but deliberately records NO speed sample, so sharing one
-    /// timestamp would let losses keep a stale speed figure alive for as long
-    /// as they kept arriving.
-    delivery_updated_at: Instant,
+    /// What one of this model's layers weighs, in reference layers
+    /// (`scheduler::layer_work_for`), taken at the model's first sample. Only
+    /// gossip converts by it: what we send is per reference layer, and what we
+    /// receive is put on this model's scale.
+    layer_work: f32,
 }
 
-impl Default for PeerSpeed {
+impl Default for ModelSpeed {
     fn default() -> Self {
+        Self::new(1.0, None)
+    }
+}
+
+impl ModelSpeed {
+    /// A model's first entry for a peer. `gossip_seed` is what other nodes
+    /// reported of the peer, per reference layer: it starts the decode EMA on
+    /// this model's scale and never ranks by itself (`decode_samples` stays 0
+    /// — see [`Self::ranking_ms_per_layer`]).
+    pub fn new(layer_work: f32, gossip_seed: Option<f32>) -> Self {
+        let layer_work = if layer_work.is_finite() && layer_work > 0.0 {
+            layer_work
+        } else {
+            1.0
+        };
         Self {
             prefill_ms_per_layer_byte: None,
             warm_prefill_ms_per_layer_byte: None,
-            decode_ms_per_layer: None,
+            decode_ms_per_layer: gossip_seed.map(|s| s * layer_work),
             delegated_ms_per_layer: None,
             decode_fit: LinearFit::default(),
             prefill_samples: 0,
             decode_samples: 0,
             delegated_samples: 0,
             updated_at: Instant::now(),
-            delivery_intact_ratio: 1.0,
-            delivery_samples: 0,
-            delivery_updated_at: Instant::now(),
+            layer_work,
         }
     }
-}
 
-impl PeerSpeed {
     /// Fold one completed segment into the matching EMA.
     ///
     /// Samples that cannot be normalised are ignored rather than poisoning the
@@ -495,52 +499,6 @@ impl PeerSpeed {
         self.delegated_samples
     }
 
-    /// Record whether one completed reply from this peer arrived intact.
-    ///
-    /// Binary rather than the fraction delivered, because a truncated answer is
-    /// a failed answer whether it lost two tokens or fifty-seven — the caller
-    /// cannot use either.
-    pub fn observe_delivery(&mut self, intact: bool) {
-        let sample = if intact { 1.0 } else { 0.0 };
-        self.delivery_intact_ratio = ALPHA * sample + (1.0 - ALPHA) * self.delivery_intact_ratio;
-        self.delivery_samples = self.delivery_samples.saturating_add(1);
-        self.delivery_updated_at = Instant::now();
-    }
-
-    /// Fraction of recent replies from this peer that arrived intact, or `None`
-    /// when we have not delivered from it recently enough to say.
-    ///
-    /// Expires on the same clock as the speed figures, for the same reason: a
-    /// link that was lossy an hour ago may be fine now, and a figure that never
-    /// decays is a ratchet. Falling back to "unknown" prices the peer exactly
-    /// like one we have never used, which cannot be worse than never having
-    /// tried it.
-    pub fn intact_delivery_ratio(&self) -> Option<f32> {
-        if self.delivery_samples == 0 || self.delivery_updated_at.elapsed() >= RANKING_STALE_AFTER {
-            return None;
-        }
-        Some(self.delivery_intact_ratio)
-    }
-
-    pub fn delivery_samples(&self) -> u32 {
-        self.delivery_samples
-    }
-
-    /// How much more work it takes, in expectation, to get one intact answer
-    /// out of this peer.
-    ///
-    /// This is not a tuning knob: if a fraction `p` of replies arrive intact,
-    /// getting one intact reply costs `1/p` attempts in expectation. A perfect
-    /// path multiplies by 1 and changes nothing; a path delivering 5% of
-    /// replies multiplies by 20. Clamped by [`MIN_INTACT_DELIVERY_RATIO`] so a
-    /// bad run cannot price a peer out beyond recovery.
-    pub fn expected_attempts_multiplier(&self) -> f32 {
-        match self.intact_delivery_ratio() {
-            None => 1.0,
-            Some(p) => 1.0 / p.clamp(MIN_INTACT_DELIVERY_RATIO, 1.0),
-        }
-    }
-
     /// Fold in a per-layer figure that another node gossiped to us, weighted
     /// by how much we trust the reporter.
     ///
@@ -590,6 +548,151 @@ impl PeerSpeed {
     pub fn updated_at(&self) -> Instant {
         self.updated_at
     }
+}
+
+/// What we have measured of one peer: how fast it computes each model it ran
+/// for us, and how reliably the path to it delivers.
+#[derive(Debug, Clone)]
+pub struct PeerSpeed {
+    /// Per model — see [`ModelSpeed`] for why one model's figure never prices
+    /// another's layers. As many entries as models this node routes through
+    /// the peer; `forget_models_idle_for` drops the ones it stopped running.
+    models: HashMap<ModelId, ModelSpeed>,
+    /// A decode figure gossiped about this peer, in ms per REFERENCE layer (a
+    /// 7B Q4's), kept to seed a model we have not measured it on yet.
+    gossip_seed: Option<f32>,
+    /// When a gossip merge last moved [`Self::gossip_seed`], or the entry was
+    /// made. [`Self::updated_at`] adds the models' own clocks.
+    updated_at: Instant,
+    /// EMA over "did this reply arrive intact", 1.0 = nothing lost.
+    ///
+    /// **This measures the PATH, not the hardware.** Every `StreamingToken` is
+    /// an independent fire-and-forget send with no acknowledgement and no
+    /// retransmission, so one drop truncates a reply permanently — the
+    /// reassembler may only release the consecutive run. Measured 2026-08-20:
+    /// all six losses in a session were on peers 450-650 ms away and none on
+    /// the peer at 1 ms, despite that one serving more requests.
+    ///
+    /// Kept apart from the speed coefficients because a lossy link says nothing
+    /// about how fast a peer computes — conflating them is what recorded an RTX
+    /// 4050 at 345 ms/layer against its real 3.1. Kept apart from trust because
+    /// **nobody is at fault**: the peer generated the whole answer and we asked
+    /// for it correctly; the path between lost it. Docking a peer's reputation
+    /// for that is the wrong-culprit mistake this codebase has made twice.
+    ///
+    /// Starts optimistic at 1.0 and needs no minimum sample count: with
+    /// `ALPHA` at 0.3 a single loss moves it to 0.7, a 1.4x penalty, which is a
+    /// nudge rather than a verdict, and a genuinely lossy path converges down
+    /// fast.
+    delivery_intact_ratio: f32,
+    delivery_samples: u32,
+    /// Separate from `updated_at` on purpose. A truncated stream records a
+    /// delivery sample but deliberately records NO speed sample, so sharing one
+    /// timestamp would let losses keep a stale speed figure alive for as long
+    /// as they kept arriving.
+    delivery_updated_at: Instant,
+}
+
+impl Default for PeerSpeed {
+    fn default() -> Self {
+        Self {
+            models: HashMap::new(),
+            gossip_seed: None,
+            updated_at: Instant::now(),
+            delivery_intact_ratio: 1.0,
+            delivery_samples: 0,
+            delivery_updated_at: Instant::now(),
+        }
+    }
+}
+
+impl PeerSpeed {
+    /// `model`'s figures for this peer, or `None` when it has never run that
+    /// model for us — the caller then prices it as an unmeasured peer.
+    pub fn model(&self, model: &ModelId) -> Option<&ModelSpeed> {
+        self.models.get(model)
+    }
+
+    /// `model`'s figures for this peer, made on its first sample. `layer_work`
+    /// is asked only then.
+    pub fn model_mut(
+        &mut self,
+        model: &ModelId,
+        layer_work: impl FnOnce() -> f32,
+    ) -> &mut ModelSpeed {
+        let seed = self.gossip_seed;
+        self.models
+            .entry(model.clone())
+            .or_insert_with(|| ModelSpeed::new(layer_work(), seed))
+    }
+
+    /// The model this peer was measured on most recently — for DISPLAY, which
+    /// has no model to ask about. Never for pricing (see [`ModelSpeed`]).
+    pub fn latest(&self) -> Option<&ModelSpeed> {
+        self.models.values().max_by_key(|m| m.updated_at)
+    }
+
+    /// What we gossip about this peer: the freshest ranking figure, per layer
+    /// of the model it came from, and that model's weight in reference layers
+    /// (`LatencyObservation::layer_work`). The figure stays per layer of its
+    /// own model because that is how an older node reads it (#250).
+    pub fn ranking_for_gossip(&self) -> Option<(f32, f32)> {
+        self.models
+            .values()
+            .filter_map(|m| {
+                m.ranking_ms_per_layer()
+                    .map(|ms| (m.updated_at, ms, m.layer_work))
+            })
+            .max_by_key(|(at, _, _)| *at)
+            .map(|(_, ms, work)| (ms, work))
+    }
+
+    /// Fold in a figure another node gossiped about this peer, per reference
+    /// layer, weighted by how much we trust the reporter. It refines each
+    /// model's decode figure on that model's scale and seeds the models
+    /// measured later; [`ModelSpeed::merge_ranking_sample`] carries the trust
+    /// rules, unchanged.
+    pub fn merge_ranking_sample(
+        &mut self,
+        sample_ms_per_reference_layer: f32,
+        weight: f32,
+        seed_threshold: f32,
+    ) {
+        let sample = sample_ms_per_reference_layer;
+        if !sample.is_finite() || sample <= 0.0 || weight <= 0.0 {
+            return;
+        }
+        let effective_alpha = ALPHA * weight.clamp(0.0, 1.0);
+        match self.gossip_seed {
+            Some(prev) => {
+                self.gossip_seed = Some(effective_alpha * sample + (1.0 - effective_alpha) * prev);
+                self.updated_at = Instant::now();
+            }
+            None if weight >= seed_threshold => {
+                self.gossip_seed = Some(sample);
+                self.updated_at = Instant::now();
+            }
+            None => {}
+        }
+        for speed in self.models.values_mut() {
+            let on_its_scale = sample * speed.layer_work;
+            speed.merge_ranking_sample(on_its_scale, weight, seed_threshold);
+        }
+    }
+
+    /// Drop the models this peer has not run for us within `ttl`.
+    pub fn forget_models_idle_for(&mut self, now: Instant, ttl: Duration) {
+        self.models
+            .retain(|_, m| now.duration_since(m.updated_at) <= ttl);
+    }
+
+    /// The newest speed sample or gossip merge, on any model.
+    pub fn updated_at(&self) -> Instant {
+        self.models
+            .values()
+            .map(|m| m.updated_at)
+            .fold(self.updated_at, std::cmp::max)
+    }
 
     /// Has this peer gone quiet for longer than `ttl`? Stale entries are
     /// evicted rather than decayed: a peer we have not routed to in an hour
@@ -597,7 +700,53 @@ impl PeerSpeed {
     /// nodes stay permanently de-ranked ("the routing ratchet") while departed
     /// peers accumulated in the map.
     pub fn is_stale(&self, now: Instant, ttl: std::time::Duration) -> bool {
-        now.duration_since(self.updated_at) > ttl
+        now.duration_since(self.updated_at()) > ttl
+    }
+
+    /// Record whether one completed reply from this peer arrived intact.
+    ///
+    /// Binary rather than the fraction delivered, because a truncated answer is
+    /// a failed answer whether it lost two tokens or fifty-seven — the caller
+    /// cannot use either.
+    pub fn observe_delivery(&mut self, intact: bool) {
+        let sample = if intact { 1.0 } else { 0.0 };
+        self.delivery_intact_ratio = ALPHA * sample + (1.0 - ALPHA) * self.delivery_intact_ratio;
+        self.delivery_samples = self.delivery_samples.saturating_add(1);
+        self.delivery_updated_at = Instant::now();
+    }
+
+    /// Fraction of recent replies from this peer that arrived intact, or `None`
+    /// when we have not delivered from it recently enough to say.
+    ///
+    /// Expires on the same clock as the speed figures, for the same reason: a
+    /// link that was lossy an hour ago may be fine now, and a figure that never
+    /// decays is a ratchet. Falling back to "unknown" prices the peer exactly
+    /// like one we have never used, which cannot be worse than never having
+    /// tried it.
+    pub fn intact_delivery_ratio(&self) -> Option<f32> {
+        if self.delivery_samples == 0 || self.delivery_updated_at.elapsed() >= RANKING_STALE_AFTER {
+            return None;
+        }
+        Some(self.delivery_intact_ratio)
+    }
+
+    pub fn delivery_samples(&self) -> u32 {
+        self.delivery_samples
+    }
+
+    /// How much more work it takes, in expectation, to get one intact answer
+    /// out of this peer.
+    ///
+    /// This is not a tuning knob: if a fraction `p` of replies arrive intact,
+    /// getting one intact reply costs `1/p` attempts in expectation. A perfect
+    /// path multiplies by 1 and changes nothing; a path delivering 5% of
+    /// replies multiplies by 20. Clamped by [`MIN_INTACT_DELIVERY_RATIO`] so a
+    /// bad run cannot price a peer out beyond recovery.
+    pub fn expected_attempts_multiplier(&self) -> f32 {
+        match self.intact_delivery_ratio() {
+            None => 1.0,
+            Some(p) => 1.0 / p.clamp(MIN_INTACT_DELIVERY_RATIO, 1.0),
+        }
     }
 }
 
@@ -614,7 +763,7 @@ mod tests {
     /// that motivated splitting the EMA.
     #[test]
     fn prefill_and_decode_do_not_contaminate_each_other() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         // 8-layer segment, 213268 bytes of activations, 10199 ms.
         s.observe(WorkKind::Prefill, 10_199, 8, 213_268, true);
         // Same peer, same segment, single-token decode: 150 ms.
@@ -640,7 +789,7 @@ mod tests {
     /// cut off a legitimately slow prefill.
     #[test]
     fn prediction_scales_with_prompt_size_and_layers() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         s.observe(WorkKind::Prefill, 1_000, 4, 100_000, true);
 
         let base = s.predict_ms(WorkKind::Prefill, 4, 100_000).unwrap();
@@ -654,7 +803,7 @@ mod tests {
 
     #[test]
     fn unseen_work_kinds_predict_nothing_rather_than_guessing() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         assert_eq!(s.predict_ms(WorkKind::Prefill, 4, 1000), None);
         assert_eq!(s.predict_ms(WorkKind::Decode, 4, 1000), None);
 
@@ -669,7 +818,7 @@ mod tests {
 
     #[test]
     fn unnormalisable_samples_are_ignored() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         s.observe(WorkKind::Prefill, 500, 0, 1000, true); // zero layers
         s.observe(WorkKind::Prefill, 500, 4, 0, true); // zero bytes
         assert_eq!(s.prefill_samples(), 0);
@@ -681,7 +830,7 @@ mod tests {
 
     #[test]
     fn the_ema_follows_a_peer_that_changes_speed() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         s.observe(WorkKind::Decode, 100, 1, 0, true);
         let first = s.predict_ms(WorkKind::Decode, 1, 0).unwrap();
         assert!((first - 100.0).abs() < 0.01, "first sample seeds directly");
@@ -698,14 +847,14 @@ mod tests {
 
     #[test]
     fn ranking_prefers_decode_but_falls_back_to_prefill() {
-        let mut only_prefill = PeerSpeed::default();
+        let mut only_prefill = ModelSpeed::default();
         only_prefill.observe(WorkKind::Prefill, 10_199, 8, 213_268, true);
         assert!(
             only_prefill.ranking_ms_per_layer().is_some(),
             "a prefill-only peer must still be rankable"
         );
 
-        let mut both = PeerSpeed::default();
+        let mut both = ModelSpeed::default();
         both.observe(WorkKind::Prefill, 10_199, 8, 213_268, true);
         both.observe(WorkKind::Decode, 150, 8, 16_384, true);
         assert!((both.ranking_ms_per_layer().unwrap() - 18.75).abs() < 0.1);
@@ -715,7 +864,7 @@ mod tests {
     /// measurements — it can rank a peer, never claim how fast it prefills.
     #[test]
     fn gossip_cannot_seed_the_prefill_coefficient() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         s.merge_ranking_sample(500.0, 1.0, 0.3);
         assert!(
             s.predict_ms(WorkKind::Prefill, 8, 213_268).is_none(),
@@ -731,11 +880,11 @@ mod tests {
 
     #[test]
     fn gossip_only_seeds_an_unseen_peer_when_trusted_enough() {
-        let mut low = PeerSpeed::default();
+        let mut low = ModelSpeed::default();
         low.merge_ranking_sample(500.0, 0.29, 0.3);
         assert_eq!(low.decode_ms_per_layer, None);
 
-        let mut high = PeerSpeed::default();
+        let mut high = ModelSpeed::default();
         high.merge_ranking_sample(500.0, 0.3, 0.3);
         assert_eq!(high.decode_ms_per_layer, Some(500.0));
     }
@@ -743,7 +892,7 @@ mod tests {
     /// A direct observation must dominate hearsay about the same peer.
     #[test]
     fn gossip_refines_but_does_not_overwrite_a_measurement() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         s.observe(WorkKind::Decode, 100, 1, 0, true);
         s.merge_ranking_sample(10_000.0, 1.0, 0.3);
         let after = s.ranking_ms_per_layer().unwrap();
@@ -770,8 +919,8 @@ mod tests {
 mod ranking_staleness_tests {
     use super::*;
 
-    fn measured_slow() -> PeerSpeed {
-        let mut s = PeerSpeed::default();
+    fn measured_slow() -> ModelSpeed {
+        let mut s = ModelSpeed::default();
         // One slow decode sample, as a cold model load would produce.
         s.observe(WorkKind::Decode, 2_200, 22, 4096, true);
         s
@@ -837,7 +986,7 @@ mod ranking_trusts_only_what_it_measured {
     /// instead — 0.23 tok/s end to end, against 36 for the same box locally.
     #[test]
     fn a_gossiped_figure_does_not_rank_a_peer_we_have_never_used() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         s.merge_ranking_sample(1063.0, 1.0, 0.0);
         assert_eq!(
             s.ranking_ms_per_layer(),
@@ -852,7 +1001,7 @@ mod ranking_trusts_only_what_it_measured {
     /// gossip may refine it.
     #[test]
     fn our_own_measurement_ranks_and_gossip_may_then_refine_it() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         s.observe(WorkKind::Decode, 160, 16, 16_384, true);
         let mine = s.ranking_ms_per_layer().expect("our own sample must rank");
         assert!(
@@ -870,7 +1019,7 @@ mod ranking_trusts_only_what_it_measured {
     /// chance — the sample that ranks it is the one it can never repeat.
     #[test]
     fn a_cold_segment_does_not_set_the_ranking_figure() {
-        let mut cold = PeerSpeed::default();
+        let mut cold = ModelSpeed::default();
         cold.observe(WorkKind::Decode, 17_000, 16, 16_384, false);
         assert_eq!(
             cold.ranking_ms_per_layer(),
@@ -879,7 +1028,7 @@ mod ranking_trusts_only_what_it_measured {
         );
 
         // The same segment once the model is resident is a real measurement.
-        let mut warm = PeerSpeed::default();
+        let mut warm = ModelSpeed::default();
         warm.observe(WorkKind::Decode, 160, 16, 16_384, true);
         assert!(warm.ranking_ms_per_layer().is_some());
     }
@@ -888,7 +1037,7 @@ mod ranking_trusts_only_what_it_measured {
     /// feeds the prefill coefficient that sizes timeouts.
     #[test]
     fn a_cold_segment_still_sizes_the_timeout() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         s.observe(WorkKind::Prefill, 10_000, 8, 200_000, false);
         assert!(
             s.predict_ms(WorkKind::Prefill, 8, 200_000).is_some(),
@@ -903,7 +1052,7 @@ mod ranking_trusts_only_what_it_measured {
     /// the prefill coefficient and priced an RTX 3070 at 196 ms a layer.
     #[test]
     fn a_cold_prefill_sample_times_a_load_and_does_not_rank() {
-        let mut cold = PeerSpeed::default();
+        let mut cold = ModelSpeed::default();
         cold.observe(WorkKind::Prefill, 2448, 1, 204_564, false);
         assert!(
             cold.predict_ms(WorkKind::Prefill, 1, 204_564).is_some(),
@@ -917,7 +1066,7 @@ mod ranking_trusts_only_what_it_measured {
         );
 
         // The control: the same segment once the model is resident ranks.
-        let mut warm = PeerSpeed::default();
+        let mut warm = ModelSpeed::default();
         warm.observe(WorkKind::Prefill, 2448, 1, 204_564, true);
         let ranked = warm
             .ranking_ms_per_layer()
@@ -983,7 +1132,8 @@ mod ranking_trusts_only_what_it_measured {
     #[test]
     fn a_delivery_sample_does_not_refresh_the_speed_clock() {
         let mut s = PeerSpeed::default();
-        s.observe(WorkKind::Decode, 160, 16, 16_384, true);
+        s.model_mut(&ModelId("m".into()), || 1.0)
+            .observe(WorkKind::Decode, 160, 16, 16_384, true);
         let speed_clock = s.updated_at();
 
         s.observe_delivery(false);
@@ -1004,7 +1154,7 @@ mod two_term_tests {
 
     /// Feed a peer whose real behaviour is `fixed + per_layer × layers`, at
     /// widths a router would actually give it, and check both terms come back.
-    fn observe_synthetic(s: &mut PeerSpeed, fixed: u64, per_layer: u64, widths: &[u32]) {
+    fn observe_synthetic(s: &mut ModelSpeed, fixed: u64, per_layer: u64, widths: &[u32]) {
         for &layers in widths {
             s.observe(
                 WorkKind::Decode,
@@ -1025,7 +1175,7 @@ mod two_term_tests {
     /// 32 layers on the peer that took a chain from 152 ms/token to 3768.
     #[test]
     fn a_small_segment_on_an_expensive_peer_is_not_priced_as_a_small_cost() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         observe_synthetic(&mut s, 1000, 5, &[32, 16, 24, 8, 32, 16]);
 
         let (fixed, per_layer) = s
@@ -1062,7 +1212,7 @@ mod two_term_tests {
     /// separable and nothing about its pricing may change.
     #[test]
     fn a_peer_always_given_the_same_width_keeps_the_proportional_price() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         observe_synthetic(&mut s, 1000, 5, &[16, 16, 16, 16, 16, 16]);
         assert!(
             s.decode_terms().is_none(),
@@ -1079,7 +1229,7 @@ mod two_term_tests {
     /// a line and cannot disagree with it.
     #[test]
     fn a_fit_needs_more_samples_than_it_has_parameters() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         observe_synthetic(&mut s, 1000, 5, &[32, 8]);
         assert!(s.decode_terms().is_none());
         observe_synthetic(&mut s, 1000, 5, &[24, 16]);
@@ -1094,7 +1244,7 @@ mod two_term_tests {
     /// visit and suppresses splitting everywhere.
     #[test]
     fn a_genuinely_proportional_peer_fits_almost_no_fixed_cost() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         observe_synthetic(&mut s, 0, 20, &[32, 16, 24, 8, 32, 16]);
         let (fixed, per_layer) = s.decode_terms().expect("widths vary");
         assert!(fixed < 40.0, "fixed term {fixed} should be ~0");
@@ -1106,7 +1256,7 @@ mod two_term_tests {
     /// does not describe these samples, and the EMA is the better answer.
     #[test]
     fn a_fit_that_comes_out_negative_declines_rather_than_clamping() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         // Cost FALLING with width is not something a peer does; it is what a
         // one-off stall on a narrow segment looks like.
         for (layers, ms) in [(4u32, 5_000u64), (8, 3_000), (16, 1_500), (32, 400)] {
@@ -1122,7 +1272,7 @@ mod two_term_tests {
     /// fell out of rotation keeps its price for ever — the routing ratchet.
     #[test]
     fn the_fit_goes_stale_with_the_rest_of_the_measurement() {
-        let mut s = PeerSpeed::default();
+        let mut s = ModelSpeed::default();
         observe_synthetic(&mut s, 1000, 5, &[32, 16, 24, 8]);
         assert!(s.decode_terms().is_some());
         s.updated_at = Instant::now()
@@ -1132,5 +1282,71 @@ mod two_term_tests {
             s.decode_terms().is_none(),
             "a stale fit must fall back like a stale EMA does"
         );
+    }
+}
+
+/// One model's figure never prices another's layers (#250).
+#[cfg(test)]
+mod per_model_tests {
+    use super::*;
+
+    fn model(name: &str) -> ModelId {
+        ModelId(name.into())
+    }
+
+    fn decode_warm(s: &mut PeerSpeed, m: &ModelId, work: f32, ms_per_layer: u64) {
+        for _ in 0..3 {
+            s.model_mut(m, || work)
+                .observe(WorkKind::Decode, ms_per_layer * 16, 16, 16_384, true);
+        }
+    }
+
+    /// The defect: a peer measured on a small model priced a large one's
+    /// layers at the small one's figure, and the other way round.
+    #[test]
+    fn a_peers_figure_on_one_model_never_prices_another() {
+        let mut s = PeerSpeed::default();
+        decode_warm(&mut s, &model("small"), 0.1, 2);
+        assert_eq!(
+            s.model(&model("small"))
+                .and_then(ModelSpeed::ranking_ms_per_layer),
+            Some(2.0)
+        );
+        assert!(
+            s.model(&model("large")).is_none(),
+            "a model this peer never ran for us is priced as unmeasured"
+        );
+    }
+
+    /// Gossip carries its model's weight and lands on each model's scale.
+    #[test]
+    fn gossip_is_put_on_the_scale_of_each_model_it_prices() {
+        let mut measured = PeerSpeed::default();
+        decode_warm(&mut measured, &model("dense-32b"), 2.0, 40);
+        let (ms, work) = measured.ranking_for_gossip().unwrap();
+        assert_eq!(
+            (ms, work),
+            (40.0, 2.0),
+            "the raw figure, as older nodes read it"
+        );
+
+        let mut heard = PeerSpeed::default();
+        heard.merge_ranking_sample(ms / work, 1.0, 0.3);
+        let moe = heard.model_mut(&model("moe-30b-a3b"), || 0.25);
+        assert_eq!(moe.decode_ms_per_layer, Some(5.0));
+        assert!(
+            moe.ranking_ms_per_layer().is_none(),
+            "a gossiped seed still never ranks a peer we have not measured"
+        );
+    }
+
+    #[test]
+    fn a_model_the_peer_stopped_running_is_forgotten() {
+        let mut s = PeerSpeed::default();
+        decode_warm(&mut s, &model("m"), 1.0, 5);
+        let later = Instant::now() + Duration::from_secs(120);
+        s.forget_models_idle_for(later, Duration::from_secs(60));
+        assert!(s.model(&model("m")).is_none());
+        assert!(s.latest().is_none());
     }
 }

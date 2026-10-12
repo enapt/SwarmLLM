@@ -318,7 +318,7 @@ struct PublishedRoom {
 /// 1.0, the old price, when this node holds no header for the model, when the
 /// header does not say how many experts a token uses, or under
 /// `SWARMLLM_LAYER_PRICE=reference` (the A/B switch, read once).
-fn layer_work_for(state: &SharedState, model_id: &ModelId) -> f32 {
+pub(crate) fn layer_work_for(state: &SharedState, model_id: &ModelId) -> f32 {
     static REFERENCE_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *REFERENCE_ONLY
         .get_or_init(|| std::env::var("SWARMLLM_LAYER_PRICE").is_ok_and(|v| v == "reference"))
@@ -341,8 +341,13 @@ fn layer_work_for(state: &SharedState, model_id: &ModelId) -> f32 {
 pub(super) fn layer_work_from_bytes(active_bytes_per_layer: f64) -> f32 {
     let reference = f64::from(crate::model::auto_manage::vram::MODEL_SIZE_7B_Q4_GB) * 1e9
         / f64::from(parallax::BASELINE_LAYER_COUNT);
-    ((active_bytes_per_layer / reference) as f32).clamp(0.02, 50.0)
+    ((active_bytes_per_layer / reference) as f32)
+        .clamp(*LAYER_WORK_RANGE.start(), *LAYER_WORK_RANGE.end())
 }
+
+/// What a layer's weight is held to, whether computed here or gossiped by a
+/// peer (`SharedState::merge_peer_segment_latency`).
+pub(crate) const LAYER_WORK_RANGE: std::ops::RangeInclusive<f32> = 0.02..=50.0;
 
 impl NodeCandidate {
     /// The static price of one of THIS model's layers on this candidate, in ms
@@ -4032,10 +4037,14 @@ impl PipelineScheduler {
                 if local_on_processor && self.shared_state.gpu_info.is_some() {
                     (None, None)
                 } else {
-                    match self.shared_state.observed_decode_terms(&node_id) {
+                    match self
+                        .shared_state
+                        .observed_decode_terms(&node_id, &manifest.id)
+                    {
                         Some((fixed, per_layer)) => (Some(per_layer), Some(fixed)),
                         None => (
-                            self.shared_state.observed_latency_ms_per_layer(&node_id),
+                            self.shared_state
+                                .observed_latency_ms_per_layer(&node_id, &manifest.id),
                             None,
                         ),
                     }
@@ -4046,7 +4055,8 @@ impl PipelineScheduler {
             let observed_delegated_ms_per_layer = if &node_id == local_node_id {
                 None
             } else {
-                self.shared_state.observed_delegated_ms_per_layer(&node_id)
+                self.shared_state
+                    .observed_delegated_ms_per_layer(&node_id, &manifest.id)
             };
             // No path to ourselves, so nothing can be lost on the way.
             let expected_attempts = if &node_id == local_node_id {
@@ -4061,7 +4071,7 @@ impl PipelineScheduler {
                 None
             } else {
                 self.shared_state
-                    .observed_prefill_ms_per_layer_byte(&node_id)
+                    .observed_prefill_ms_per_layer_byte(&node_id, &manifest.id)
             };
             // Which prefill prior applies — a card reads a prompt ~40x faster
             // than it writes a reply, a processor ~4.5x. It follows the device

@@ -3212,7 +3212,9 @@ mod tests {
         }];
 
         assert!(
-            state.observed_latency_ms_per_layer(&peer).is_none(),
+            state
+                .observed_latency_ms_per_layer(&peer, &ModelId("test-model".into()))
+                .is_none(),
             "nothing measured yet — if this starts as Some the test proves nothing"
         );
 
@@ -3220,7 +3222,9 @@ mod tests {
         run_one_verify_round(&state, &segments, vec![7]).await;
 
         assert!(
-            state.observed_latency_ms_per_layer(&peer).is_some(),
+            state
+                .observed_latency_ms_per_layer(&peer, &ModelId("test-model".into()))
+                .is_some(),
             "a single-token verify is an ordinary decode step and MUST be \
              recorded — without this the scheduler ranks a peer on the speed it \
              advertises about itself no matter how slowly it actually answered"
@@ -3253,7 +3257,9 @@ mod tests {
         run_one_verify_round(&state, &segments, vec![7, 8, 9]).await;
 
         assert!(
-            state.observed_latency_ms_per_layer(&peer).is_none(),
+            state
+                .observed_latency_ms_per_layer(&peer, &ModelId("test-model".into()))
+                .is_none(),
             "a batch of drafts is not one decode step; recording it as one \
              overstates ms/layer by roughly the draft width"
         );

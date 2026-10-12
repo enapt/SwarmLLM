@@ -1863,6 +1863,7 @@ pub(crate) async fn dispatch_network_messages(
                                             shared_state.merge_peer_segment_latency(
                                                 &obs.peer,
                                                 obs.ms_per_layer,
+                                                obs.layer_work,
                                                 sender_trust,
                                             );
                                         }

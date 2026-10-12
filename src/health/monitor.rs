@@ -1176,38 +1176,44 @@ impl HealthMonitor {
         // extra per broadcast, well under the 4 MB gossip cap.
         const MAX_OBSERVED: usize = 32;
         let observed_latencies = {
-            let mut entries: Vec<(crate::types::NodeId, f32, f32)> = self
+            let mut entries: Vec<(crate::types::NodeId, f32, f32, f32)> = self
                 .shared_state
                 .metrics
                 .peer_speed
                 .iter()
-                // Gossip carries the ranking-scale per-layer figure; a peer we
-                // have only ever prefilled through still has one.
+                // Gossip carries the ranking-scale per-layer figure of the
+                // model we last measured the peer on, with that model's
+                // weight so a receiver pricing another model can scale it
+                // (#250); a peer we have only ever prefilled through still
+                // has one.
                 .filter_map(|r| {
                     r.value()
-                        .ranking_ms_per_layer()
-                        .map(|ms| (r.key().clone(), ms))
+                        .ranking_for_gossip()
+                        .map(|(ms, work)| (r.key().clone(), ms, work))
                 })
-                .map(|(peer_id, ms)| {
+                .map(|(peer_id, ms, work)| {
                     let trust = self
                         .shared_state
                         .peer_registry
                         .get(&peer_id)
                         .map(|p| p.trust_score)
                         .unwrap_or(0.5);
-                    (peer_id, ms, trust)
+                    (peer_id, ms, work, trust)
                 })
                 .collect();
             // Higher trust first. Stable ordering (partial_cmp handles NaN by
             // treating as Less — but trust_scores are clamped [0,1]).
-            entries.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+            entries.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
             entries.truncate(MAX_OBSERVED);
             entries
                 .into_iter()
-                .map(|(peer, ms_per_layer, _)| crate::types::LatencyObservation {
-                    peer,
-                    ms_per_layer,
-                })
+                .map(
+                    |(peer, ms_per_layer, layer_work, _)| crate::types::LatencyObservation {
+                        peer,
+                        ms_per_layer,
+                        layer_work: Some(layer_work),
+                    },
+                )
                 .collect::<Vec<_>>()
         };
 
@@ -2757,6 +2763,7 @@ mod tests {
             observed_latencies: vec![crate::types::LatencyObservation {
                 peer: crate::types::NodeId([9u8; 32]),
                 ms_per_layer: 1.5,
+                layer_work: None,
             }],
             relay_capable: false,
             protocol_version: 1,

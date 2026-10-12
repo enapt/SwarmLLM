@@ -182,7 +182,9 @@ impl SegmentBudget {
             // of a remote first segment was budgeted as a PREFILL, 15 s a
             // layer, however fast the peer had been measured answering the
             // identical step a moment earlier (gotcha #434).
-            _ => state.predict_segment_ms(node_id, kind, num_layers, activation_bytes),
+            // Measured on THIS model only (#250): a peer timed on a 0.5B is not
+            // given a 0.5B's deadline for a 32B's layers.
+            _ => state.predict_segment_ms(node_id, model_id, kind, num_layers, activation_bytes),
         };
 
         let (base, basis) = match measured {

@@ -1001,8 +1001,8 @@ pub(super) fn spawn_prefix_probe_handler(
                                 let pick = candidates
                                     .into_iter()
                                     .min_by(|a, b| {
-                                        let la = shared_state.observed_latency_ms_per_layer(a).unwrap_or(f32::INFINITY);
-                                        let lb = shared_state.observed_latency_ms_per_layer(b).unwrap_or(f32::INFINITY);
+                                        let la = shared_state.observed_latency_ms_per_layer(a, &event.model_id).unwrap_or(f32::INFINITY);
+                                        let lb = shared_state.observed_latency_ms_per_layer(b, &event.model_id).unwrap_or(f32::INFINITY);
                                         la.partial_cmp(&lb)
                                             .unwrap_or(std::cmp::Ordering::Equal)
                                             .then_with(|| a.0.cmp(&b.0))

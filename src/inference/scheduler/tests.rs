@@ -1406,7 +1406,9 @@ fn peer_segment_latency_ema_math() {
         4,
         0,
     );
-    let v1 = state.observed_latency_ms_per_layer(&node).unwrap();
+    let v1 = state
+        .observed_latency_ms_per_layer(&node, &speed_test_model())
+        .unwrap();
     assert!((v1 - 5.0).abs() < 1e-5, "first sample EMA = {v1}");
     // Second sample: 40 ms over 4 layers → 10 ms/layer. EMA = 0.3*10 + 0.7*5 = 6.5.
     state.record_peer_segment_latency(
@@ -1417,7 +1419,9 @@ fn peer_segment_latency_ema_math() {
         4,
         0,
     );
-    let v2 = state.observed_latency_ms_per_layer(&node).unwrap();
+    let v2 = state
+        .observed_latency_ms_per_layer(&node, &speed_test_model())
+        .unwrap();
     assert!((v2 - 6.5).abs() < 1e-5, "second sample EMA = {v2}");
     // Width-normalised: a 2-layer segment at 20 ms → 10 ms/layer.
     state.record_peer_segment_latency(
@@ -1428,7 +1432,9 @@ fn peer_segment_latency_ema_math() {
         2,
         0,
     );
-    let v3 = state.observed_latency_ms_per_layer(&node).unwrap();
+    let v3 = state
+        .observed_latency_ms_per_layer(&node, &speed_test_model())
+        .unwrap();
     // EMA = 0.3*10 + 0.7*6.5 = 7.55.
     assert!((v3 - 7.55).abs() < 1e-5, "third sample EMA = {v3}");
     // Zero-layer guard: no panic, no update.
@@ -1440,11 +1446,42 @@ fn peer_segment_latency_ema_math() {
         0,
         0,
     );
-    let v4 = state.observed_latency_ms_per_layer(&node).unwrap();
+    let v4 = state
+        .observed_latency_ms_per_layer(&node, &speed_test_model())
+        .unwrap();
     assert!((v4 - 7.55).abs() < 1e-5, "zero-layer update = {v4}");
     // Unknown peer: None.
     let unknown = NodeId([8u8; 32]);
-    assert!(state.observed_latency_ms_per_layer(&unknown).is_none());
+    assert!(state
+        .observed_latency_ms_per_layer(&unknown, &speed_test_model())
+        .is_none());
+}
+
+/// #250: a peer timed on one model is unmeasured for another — neither its
+/// price nor its deadline comes from the first model's layers.
+#[test]
+fn a_peer_measured_on_one_model_is_unmeasured_for_another() {
+    let state = make_shared_state();
+    let node = NodeId([21u8; 32]);
+    mark_model_warm(&state, &node);
+    for _ in 0..2 {
+        state.record_peer_segment_latency(
+            &node,
+            &speed_test_model(),
+            crate::daemon::state::WorkKind::Decode,
+            20,
+            4,
+            0,
+        );
+    }
+    let other = ModelId("a-much-larger-model".into());
+    assert!(state
+        .observed_latency_ms_per_layer(&node, &speed_test_model())
+        .is_some());
+    assert!(state.observed_latency_ms_per_layer(&node, &other).is_none());
+    assert!(state
+        .predict_segment_ms(&node, &other, crate::daemon::state::WorkKind::Decode, 4, 0)
+        .is_none());
 }
 
 #[test]
@@ -1456,8 +1493,10 @@ fn merge_peer_segment_latency_zero_trust_is_noop() {
     mark_model_warm(&state, &node);
 
     // No entry yet + weight 0 → no insert.
-    state.merge_peer_segment_latency(&node, 100.0, 0.0);
-    assert!(state.observed_latency_ms_per_layer(&node).is_none());
+    state.merge_peer_segment_latency(&node, 100.0, None, 0.0);
+    assert!(state
+        .observed_latency_ms_per_layer(&node, &speed_test_model())
+        .is_none());
 
     // Seed a direct observation, then try to poison it with weight 0.
     state.record_peer_segment_latency(
@@ -1468,9 +1507,13 @@ fn merge_peer_segment_latency_zero_trust_is_noop() {
         4,
         0,
     );
-    let before = state.observed_latency_ms_per_layer(&node).unwrap();
-    state.merge_peer_segment_latency(&node, 9999.0, 0.0);
-    let after = state.observed_latency_ms_per_layer(&node).unwrap();
+    let before = state
+        .observed_latency_ms_per_layer(&node, &speed_test_model())
+        .unwrap();
+    state.merge_peer_segment_latency(&node, 9999.0, None, 0.0);
+    let after = state
+        .observed_latency_ms_per_layer(&node, &speed_test_model())
+        .unwrap();
     assert!(
         (after - before).abs() < 1e-6,
         "zero-trust merge must be a no-op (before={before}, after={after})"
@@ -1490,14 +1533,14 @@ fn merge_peer_segment_latency_below_seed_threshold_skips_insert() {
     // figure this node never measured, so a purely gossiped value reads as None
     // there however well-trusted the reporter. The seeding rule under test is
     // unchanged.
-    state.merge_peer_segment_latency(&stranger, 500.0, 0.1);
+    state.merge_peer_segment_latency(&stranger, 500.0, None, 0.1);
     assert!(!state.metrics.peer_speed.contains_key(&stranger));
 
-    state.merge_peer_segment_latency(&stranger, 500.0, 0.29);
+    state.merge_peer_segment_latency(&stranger, 500.0, None, 0.29);
     assert!(!state.metrics.peer_speed.contains_key(&stranger));
 
     // Exactly at the threshold seeds.
-    state.merge_peer_segment_latency(&stranger, 500.0, 0.3);
+    state.merge_peer_segment_latency(&stranger, 500.0, None, 0.3);
     assert!(
         state.metrics.peer_speed.contains_key(&stranger),
         "at the threshold the entry must be created"
@@ -1521,13 +1564,17 @@ fn merge_peer_segment_latency_trust_weighted_ema() {
         2,
         0,
     );
-    let v0 = state.observed_latency_ms_per_layer(&node).unwrap();
+    let v0 = state
+        .observed_latency_ms_per_layer(&node, &speed_test_model())
+        .unwrap();
     assert!((v0 - 10.0).abs() < 1e-5);
 
     // Foreign sample of 100 ms/layer at weight 1.0 →
     // effective_α = 0.3, EMA = 0.3*100 + 0.7*10 = 37.0.
-    state.merge_peer_segment_latency(&node, 100.0, 1.0);
-    let v1 = state.observed_latency_ms_per_layer(&node).unwrap();
+    state.merge_peer_segment_latency(&node, 100.0, None, 1.0);
+    let v1 = state
+        .observed_latency_ms_per_layer(&node, &speed_test_model())
+        .unwrap();
     assert!(
         (v1 - 37.0).abs() < 1e-4,
         "weight=1.0 merge, expected 37.0, got {v1}"
@@ -1545,8 +1592,10 @@ fn merge_peer_segment_latency_trust_weighted_ema() {
         2,
         0,
     );
-    state2.merge_peer_segment_latency(&node, 100.0, 0.5);
-    let v2 = state2.observed_latency_ms_per_layer(&node).unwrap();
+    state2.merge_peer_segment_latency(&node, 100.0, None, 0.5);
+    let v2 = state2
+        .observed_latency_ms_per_layer(&node, &speed_test_model())
+        .unwrap();
     assert!(
         (v2 - 23.5).abs() < 1e-4,
         "weight=0.5 merge, expected 23.5, got {v2}"
@@ -1577,12 +1626,16 @@ fn merge_peer_segment_latency_preserves_direct_observations() {
             0,
         );
     }
-    let before = state.observed_latency_ms_per_layer(&node).unwrap();
+    let before = state
+        .observed_latency_ms_per_layer(&node, &speed_test_model())
+        .unwrap();
     assert!((before - 10.0).abs() < 1e-5);
 
     // Foreign reports our own observed value back to us at full trust.
-    state.merge_peer_segment_latency(&node, before, 1.0);
-    let after = state.observed_latency_ms_per_layer(&node).unwrap();
+    state.merge_peer_segment_latency(&node, before, None, 1.0);
+    let after = state
+        .observed_latency_ms_per_layer(&node, &speed_test_model())
+        .unwrap();
     assert!(
         (after - before).abs() < 1e-5,
         "matching foreign sample must not move the EMA (before={before}, after={after})"
@@ -1595,11 +1648,13 @@ fn merge_peer_segment_latency_ignores_bad_samples() {
     let state = make_shared_state();
     let node = NodeId([14u8; 32]);
 
-    state.merge_peer_segment_latency(&node, f32::NAN, 1.0);
-    state.merge_peer_segment_latency(&node, f32::INFINITY, 1.0);
-    state.merge_peer_segment_latency(&node, 0.0, 1.0);
-    state.merge_peer_segment_latency(&node, -5.0, 1.0);
-    assert!(state.observed_latency_ms_per_layer(&node).is_none());
+    state.merge_peer_segment_latency(&node, f32::NAN, None, 1.0);
+    state.merge_peer_segment_latency(&node, f32::INFINITY, None, 1.0);
+    state.merge_peer_segment_latency(&node, 0.0, None, 1.0);
+    state.merge_peer_segment_latency(&node, -5.0, None, 1.0);
+    assert!(state
+        .observed_latency_ms_per_layer(&node, &speed_test_model())
+        .is_none());
 }
 
 // ---------------------------------------------------------------------------

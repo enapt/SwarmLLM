@@ -2140,10 +2140,21 @@ impl SharedState {
         // the very first one, which is the one that paid to load the model.
         let key = (node_id.clone(), model_id.clone());
         let was_warm = self.metrics.peer_model_warm_at.contains_key(&key);
+        // The model's weight is asked only for its first sample on this peer,
+        // and BEFORE the entry is held: `gguf_meta_for` may parse a header off
+        // the disk, which must not stall every reader of this map's shard.
+        let first_on_this_model = !self
+            .metrics
+            .peer_speed
+            .get(node_id)
+            .is_some_and(|s| s.model(model_id).is_some());
+        let layer_work = first_on_this_model
+            .then(|| crate::inference::scheduler::layer_work_for(self, model_id));
         self.metrics
             .peer_speed
             .entry(node_id.clone())
             .or_default()
+            .model_mut(model_id, || layer_work.unwrap_or(1.0))
             .observe(kind, segment_ms, layers, activation_bytes, was_warm);
         // This peer has now demonstrably got the model resident, so the next
         // forward does not need the cold-load allowance.
@@ -2152,19 +2163,35 @@ impl SharedState {
             .insert(key, std::time::Instant::now());
     }
 
-    /// Predicted wall-clock ms for a segment of this shape on this peer, or
-    /// `None` when we have not measured the relevant kind of work from it.
+    /// Predicted wall-clock ms for a segment of `model_id` of this shape on
+    /// this peer, or `None` when we have not measured the relevant kind of
+    /// work from it on that model.
     pub fn predict_segment_ms(
         &self,
         node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
         kind: peer_speed::WorkKind,
         layers: u32,
         activation_bytes: usize,
     ) -> Option<f32> {
+        self.peer_model_speed(node_id, model_id, |s| {
+            s.predict_ms(kind, layers, activation_bytes)
+        })
+    }
+
+    /// What we measured of `node_id` running `model_id` — the one read of
+    /// `metrics.peer_speed` for pricing and waiting. A figure from another
+    /// model never answers (#250, `peer_speed::ModelSpeed`).
+    fn peer_model_speed<T>(
+        &self,
+        node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+        read: impl FnOnce(&peer_speed::ModelSpeed) -> Option<T>,
+    ) -> Option<T> {
         self.metrics
             .peer_speed
             .get(node_id)
-            .and_then(|s| s.predict_ms(kind, layers, activation_bytes))
+            .and_then(|s| s.model(model_id).and_then(read))
     }
 
     /// Has this peer served this model recently enough that it is probably
@@ -2202,6 +2229,10 @@ impl SharedState {
         let mut removed = stale.len();
         for key in stale {
             self.metrics.peer_speed.remove(&key);
+        }
+        // A peer still in use keeps only the models it still runs for us.
+        for mut speed in self.metrics.peer_speed.iter_mut() {
+            speed.forget_models_idle_for(now, ttl);
         }
         let stale_warm: Vec<_> = self
             .metrics
@@ -2716,33 +2747,46 @@ impl SharedState {
         );
     }
 
-    /// Read the observed per-layer latency EMA for a peer. Returns None when
-    /// this peer has no observed samples yet (caller falls back to static
-    /// capability estimate).
-    pub fn observed_latency_ms_per_layer(&self, node_id: &crate::types::NodeId) -> Option<f32> {
-        self.metrics
-            .peer_speed
-            .get(node_id)
-            .and_then(|s| s.ranking_ms_per_layer())
+    /// Read the observed per-layer latency EMA for a peer running `model_id`.
+    /// Returns None when this peer has no observed samples on that model yet
+    /// (caller falls back to static capability estimate).
+    pub fn observed_latency_ms_per_layer(
+        &self,
+        node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+    ) -> Option<f32> {
+        self.peer_model_speed(node_id, model_id, |s| s.ranking_ms_per_layer())
     }
 
-    /// `(fixed_ms_per_visit, ms_per_layer)` for a decode step on this peer,
-    /// when its samples span enough segment widths to tell the two apart.
+    /// `(fixed_ms_per_visit, ms_per_layer)` for a decode step of `model_id` on
+    /// this peer, when its samples span enough segment widths to tell the two
+    /// apart.
     ///
     /// `None` is the ordinary answer and prices the peer exactly as it always
     /// was — a peer holding one shard of one model is always given the same
-    /// width and can never identify a fixed term. See `PeerSpeed::decode_terms`
+    /// width and can never identify a fixed term. See `ModelSpeed::decode_terms`
     /// for the measurement that makes the second term worth having.
-    pub fn observed_decode_terms(&self, node_id: &crate::types::NodeId) -> Option<(f32, f32)> {
+    pub fn observed_decode_terms(
+        &self,
+        node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+    ) -> Option<(f32, f32)> {
+        self.peer_model_speed(node_id, model_id, |s| s.decode_terms())
+    }
+
+    /// The decode terms of whichever model this peer was measured on most
+    /// recently — for the peer listing, which has no model to ask about. Never
+    /// for pricing: see `peer_speed::ModelSpeed`.
+    pub fn latest_decode_terms(&self, node_id: &crate::types::NodeId) -> Option<(f32, f32)> {
         self.metrics
             .peer_speed
             .get(node_id)
-            .and_then(|s| s.decode_terms())
+            .and_then(|s| s.latest().and_then(|m| m.decode_terms()))
     }
 
-    /// This peer's MEASURED prefill coefficient, in ms per (layer x activation
-    /// byte). `None` when we have never prefilled through it, or the figure has
-    /// gone stale.
+    /// This peer's MEASURED prefill coefficient on `model_id`, in ms per (layer
+    /// x activation byte). `None` when we have never prefilled that model
+    /// through it, or the figure has gone stale.
     ///
     /// Deliberately not folded into `observed_latency_ms_per_layer`: that one
     /// answers "how fast does this peer decode", which is what ranks a
@@ -2751,11 +2795,9 @@ impl SharedState {
     pub fn observed_prefill_ms_per_layer_byte(
         &self,
         node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
     ) -> Option<f32> {
-        self.metrics
-            .peer_speed
-            .get(node_id)
-            .and_then(|s| s.prefill_ms_per_layer_byte())
+        self.peer_model_speed(node_id, model_id, |s| s.prefill_ms_per_layer_byte())
     }
 
     /// How many inference requests this node is working on **right now** — the
@@ -2920,18 +2962,19 @@ impl SharedState {
         allowed
     }
 
-    /// What we have measured of this peer running a **whole model** for us, per
-    /// layer, in ms. `None` when we have never delegated to it.
+    /// What we have measured of this peer running the whole of `model_id` for
+    /// us, per layer, in ms. `None` when we have never delegated it there.
     ///
     /// The companion to [`Self::observed_latency_ms_per_layer`], which carries a
     /// per-token round trip that a delegated run does not pay. The scheduler
     /// picks between them by the shape of the vertex it is pricing; see
     /// `scheduler::parallax::vertex_cost`.
-    pub fn observed_delegated_ms_per_layer(&self, node_id: &crate::types::NodeId) -> Option<f32> {
-        self.metrics
-            .peer_speed
-            .get(node_id)
-            .and_then(|s| s.delegated_ms_per_layer())
+    pub fn observed_delegated_ms_per_layer(
+        &self,
+        node_id: &crate::types::NodeId,
+        model_id: &crate::types::ModelId,
+    ) -> Option<f32> {
+        self.peer_model_speed(node_id, model_id, |s| s.delegated_ms_per_layer())
     }
 
     /// Record whether one completed reply from this peer arrived intact.
@@ -3120,10 +3163,10 @@ impl SharedState {
             // first (deterministic).
             let best = candidates.into_iter().min_by(|a, b| {
                 let la = self
-                    .observed_latency_ms_per_layer(a)
+                    .observed_latency_ms_per_layer(a, model_id)
                     .unwrap_or(f32::INFINITY);
                 let lb = self
-                    .observed_latency_ms_per_layer(b)
+                    .observed_latency_ms_per_layer(b, model_id)
                     .unwrap_or(f32::INFINITY);
                 la.partial_cmp(&lb)
                     .unwrap_or(std::cmp::Ordering::Equal)
@@ -3258,6 +3301,10 @@ impl SharedState {
 
     /// Merge a foreign observation (received via `NodeCapabilityUpdate`
     /// gossip) into the local EMA, weighted by the gossip sender's trust.
+    /// `sample_ms_per_layer` is a layer of the model the sender measured, and
+    /// `layer_work` that model's weight in reference layers
+    /// (`LatencyObservation::layer_work`, `None` from an older sender, read as
+    /// 1.0) — REQUIRED, so no caller merges a figure off its scale (#250).
     /// `weight` is the sender's trust score clamped to `[0, 1]`; the
     /// effective α collapses to `0.3 * weight` so trust=0 is a no-op and
     /// trust=1 matches a direct local sample. When no local entry exists
@@ -3268,12 +3315,19 @@ impl SharedState {
         &self,
         node_id: &crate::types::NodeId,
         sample_ms_per_layer: f32,
+        layer_work: Option<f32>,
         weight: f32,
     ) {
         const SEED_THRESHOLD: f32 = 0.3;
         if weight <= 0.0 || !sample_ms_per_layer.is_finite() || sample_ms_per_layer <= 0.0 {
             return;
         }
+        // A stranger's figure: held to the range a weight we compute is.
+        let range = crate::inference::scheduler::LAYER_WORK_RANGE;
+        let layer_work = layer_work
+            .filter(|w| w.is_finite())
+            .map_or(1.0, |w| w.clamp(*range.start(), *range.end()));
+        let per_reference_layer = sample_ms_per_layer / layer_work;
         // Merge into an existing entry, or create one only if the reporter is
         // trusted enough to seed. `or_default` would create an empty entry for
         // an untrusted reporter, which `merge_ranking_sample` would then treat
@@ -3283,7 +3337,7 @@ impl SharedState {
                 .peer_speed
                 .entry(node_id.clone())
                 .or_default()
-                .merge_ranking_sample(sample_ms_per_layer, weight, SEED_THRESHOLD);
+                .merge_ranking_sample(per_reference_layer, weight, SEED_THRESHOLD);
         }
     }
 
