@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #257**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #258**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -492,12 +492,12 @@ answers in ~5 s. Several contributors (diagnosis rule 6). Each is a hypothesis u
   table (sizes and names) and the header (`GgufTensorMeta` needs `expert_used_count`, serde
   default). Store a measured peer's coefficient per REFERENCE layer (divide by the sampled model's
   factor when observed, multiply by the priced model's), so a sample on one model prices another.
-  **Done, the prior half (2026-10-12, unreleased):** `NodeCandidate::layer_work` from
+  **Done, the prior half (2026-10-12, released in v0.3.236):** `NodeCandidate::layer_work` from
   `GgufTensorMeta::active_bytes_per_layer` (the header's own tensor sizes; the manifest's table is
   not needed), read through `NodeCandidate::prior_ms_per_layer` by both routers;
   `a_light_layer_is_not_sent_a_round_trip_away_for_a_faster_card` flips the route on the factor
   alone and is red without it. A/B `SWARMLLM_LAYER_PRICE=reference`.
-  **Done, the measured half (2026-10-12, unreleased), changed from the design:** a peer's figures
+  **Done, the measured half (2026-10-12, released in v0.3.236), changed from the design:** a peer's figures
   are kept per (peer, model) (`peer_speed::ModelSpeed`, read only through
   `SharedState::peer_model_speed`), and a model the peer has not run for us is priced from its
   stated speed. NOT per reference layer: a card's decode step is bound by kernel submissions (a
@@ -957,6 +957,22 @@ tensor-core MMQ port (large). Not checked at long context: Qwen 3.5 (reference i
 and a MoE model whole on the card (none fits 8 GB). Separately, GLM-4-9B disagrees with llama.cpp
 at a few positions on every path (tokenizer re-tokenisation is the lead) — pre-existing.
 
+#### #257 — On the card, every long prompt after a node's first reads ~3x slower
+`P2` · perf-local · **OPEN** — 2026-10-12 · history: none (found at the v0.3.236 gate)
+
+Measured 2026-10-12 on the RTX 3070 Laptop: an isolated node, Qwen2.5-Coder-7B whole on the card,
+a short warm-up, then three unique ~4,000-token prompts one after another, `max_tokens` 1. The
+first reads at 1,300-1,600 tok/s, the second and third at 500-600. v0.3.235 and v0.3.236 do the
+same (six nodes, alternated). So did gate235's own runs: 1,538 → 616 / 814 here, and the 8B's
+1,312 → 637 / 844. The gate printed only the best prompt, which hid it. The lead is not
+established. The card reads 512 tokens per forward only when the prompt is ALONE in the slot
+table (`PrefillPacer::chunk_size_for`, where `sharing` = more than one active slot gives the
+pacer's width, ≤ 128 by default). A finished request whose slot stays in `slot_table.active()`
+would pace every later prompt as shared. Nothing logs the chosen width, so the next step is to
+run the same shape at `-v` and read `chunk_tokens` on `DIAG: BatchGenerate prefill chunk ran`
+for each of the three prompts. Then rule out the card's clocks (idle at 210 MHz between runs;
+heat, gotcha #825).
+
 #### #137 — Our processor decode trails llama.cpp's by ~12% at the same width, and loses where llama.cpp gains from 8 threads
 `P3` · perf-local · **OPEN, narrowed 2026-10-11** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3
 
@@ -1337,7 +1353,7 @@ the thread sampler (`examples/thread_sample.py`).
 Qwen3-14B on a 12 GB card: `/v1/models` says `max_model_len: 8192` (the declared limit under
 `DEFAULT_MAX_SEQ_LEN`), but with the weights loaded the KV budget is 860 MB, and a 6,228-token
 prompt was refused (`short_by_mb=259`; usable ≈ 5k). A client (Open WebUI, Home Assistant) learns this only from failed
-requests. **Done (2), 2026-10-12, unreleased:** the refusal now names the longest prompt that fits
+requests. **Done (2), 2026-10-12, released in v0.3.236:** the refusal now names the longest prompt that fits
 ("up to about 4608 tokens with this model here", `model_worker::longest_prompt_that_fits`, rounded
 down to the cache's growth step and less the reply reserve). Next: (1) while a worker is loaded,
 report the positions its KV budget admits as the effective limit (`max_model_len_for`, both
@@ -1875,7 +1891,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-12, unreleased** (#244, #248, #249, #253, #254; #251 (1), #251 (2) per model, #251 (4) and #252 (2) of open entries)
+**Closed 2026-10-12, released in v0.3.236 (2026-10-12)** (#244, #248, #249, #253, #254; #251 (1), #251 (2) per model, #251 (4) and #252 (2) of open entries)
 - #244 — **a split's reply no longer pauses for seconds while the node reads the graphics
   card's memory.** `nvidia-smi` (2-6 s on WSL with the card busy) was waited for on a thread
   that also runs the node's network task, so a peer's answers sat unread. The 12h release-check
