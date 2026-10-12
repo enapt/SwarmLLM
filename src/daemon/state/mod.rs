@@ -60,6 +60,23 @@ pub use tp_allreduce::TpAllReduceCollector;
 /// a pattern (one flaky peer, one bad model) without turning into a log.
 pub const MAX_RECENT_FAILURES: usize = 20;
 
+/// DB tree of the models kept on this computer (#251) — model id → `true`.
+pub(crate) const KEPT_ON_THIS_COMPUTER_TREE: &str = "kept_on_this_computer";
+
+/// The models kept on this computer, as stored. An `Err` is a read that failed,
+/// never "none kept" — the caller fails closed on it.
+fn load_kept_on_this_computer(
+    db: &crate::storage::db::Database,
+) -> Result<dashmap::DashSet<crate::types::ModelId>, crate::error::SwarmError> {
+    let set = dashmap::DashSet::new();
+    for (key, kept) in db.get_all_json::<bool>(KEPT_ON_THIS_COMPUTER_TREE)? {
+        if kept {
+            set.insert(crate::types::ModelId(key));
+        }
+    }
+    Ok(set)
+}
+
 /// Completed traces kept for `GET /api/admin/diagnostics`. Larger than the
 /// failure ring because successful requests are the baseline you compare a
 /// slow one against, and they are cheap (no strings beyond node ids).
@@ -1182,6 +1199,19 @@ impl SharedState {
         // SEC: wrap in `Zeroizing` so the local copy is scrubbed on drop —
         // this lives across the whole `Arc::new(Self { ... })` block and
         // through `decrypt_config` below.
+        // A privacy setting that cannot be read fails CLOSED: every model is
+        // then kept here until a write manages to read the tree (#251).
+        let (kept_on_this_computer, kept_unread) = match load_kept_on_this_computer(&db) {
+            Ok(set) => (set, false),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "could not read which models are kept on this computer — keeping EVERY \
+                     model's requests here until it can be read"
+                );
+                (dashmap::DashSet::new(), true)
+            }
+        };
         let signing_key_bytes: zeroize::Zeroizing<[u8; 32]> =
             zeroize::Zeroizing::new(identity.signing_key_bytes());
         let state = Arc::new(Self {
@@ -1358,6 +1388,8 @@ impl SharedState {
                     }
                     map
                 },
+                kept_on_this_computer,
+                kept_on_this_computer_unread: std::sync::atomic::AtomicBool::new(kept_unread),
                 model_request_counts: DashMap::new(),
                 resource_schedule: RwLock::new(config.resources.schedule.clone()),
                 prune_history: RwLock::new(VecDeque::new()),
@@ -2452,6 +2484,61 @@ impl SharedState {
             .is_some_and(|v| *v)
     }
 
+    /// Does the owner keep `model_id` on this computer (#251)? Its requests
+    /// then run here or are refused (`SwarmError::KeptOnThisComputer`): no
+    /// other computer sees any of them — not the prompt, not a hidden state,
+    /// not an image. Unlike "Start and finish on this computer", which still
+    /// hands peers the middle of the model. Ask it through
+    /// `pool::scope::request_scope` wherever a request's data could leave.
+    ///
+    /// Every model, while the stored setting could not be read (fails closed).
+    pub fn kept_on_this_computer(&self, model_id: &crate::types::ModelId) -> bool {
+        self.models
+            .kept_on_this_computer_unread
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || self.models.kept_on_this_computer.contains(model_id)
+    }
+
+    /// Is any model kept on this computer? The cheap first question for a
+    /// path that would otherwise resolve a model name to ask the one above.
+    pub fn keeps_any_model_here(&self) -> bool {
+        self.models
+            .kept_on_this_computer_unread
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || !self.models.kept_on_this_computer.is_empty()
+    }
+
+    /// The one writer of [`Self::kept_on_this_computer`]: in memory at once,
+    /// then persisted. A persist failure is returned with memory already
+    /// changed: a failed ON holds until a restart, a failed OFF comes back on
+    /// after one — both lean towards keeping requests here. While the stored
+    /// setting is unreadable, a write first reads it again and is refused if
+    /// it still cannot: changing one model must not drop the others.
+    pub fn keep_on_this_computer(
+        &self,
+        model_id: &crate::types::ModelId,
+        keep: bool,
+    ) -> Result<(), crate::error::SwarmError> {
+        use std::sync::atomic::Ordering::Relaxed;
+        if self.models.kept_on_this_computer_unread.load(Relaxed) {
+            for m in load_kept_on_this_computer(&self.db)?.iter() {
+                self.models.kept_on_this_computer.insert(m.clone());
+            }
+            self.models
+                .kept_on_this_computer_unread
+                .store(false, Relaxed);
+            tracing::info!("the models kept on this computer could be read again");
+        }
+        if keep {
+            self.models.kept_on_this_computer.insert(model_id.clone());
+            self.db
+                .put_json(KEPT_ON_THIS_COMPUTER_TREE, &model_id.0, &true)
+        } else {
+            self.models.kept_on_this_computer.remove(model_id);
+            self.db.remove(KEPT_ON_THIS_COMPUTER_TREE, &model_id.0)
+        }
+    }
+
     /// Pure rule behind [`SharedState::privacy_required_shards`], split out so
     /// the decision is testable without a registry — same shape as
     /// [`SharedState::resolve_encrypted_pipeline_inner`] above.
@@ -2937,7 +3024,16 @@ impl SharedState {
             return false;
         }
         let shedding_load = self.should_offer_work_to_the_swarm();
-        let has_peers = !self.connected_node_ids.is_empty();
+        // Peers to ask are the peers THIS request may reach
+        // (`pool::scope::request_scope`): a model kept on this computer, or
+        // private mode with no pool member connected, has nobody to ask, and a
+        // scheduling pass could only choose here (#251). Skipped when shedding,
+        // which declines the fast path whatever it says.
+        let has_peers = !shedding_load
+            && match crate::pool::scope::request_scope(self, model_id) {
+                None => !self.connected_node_ids.is_empty(),
+                Some(scope) => self.connected_node_ids.iter().any(|n| scope.contains(&*n)),
+            };
         // Ask the cheap questions first. `serves_on_cpu` prices the model,
         // which reads its header off disk — fine once per request, not fine
         // once per model in a listing, and this became a listing consumer when
@@ -3114,189 +3210,6 @@ impl SharedState {
             .get(node_id)
             .map(|s| s.expected_attempts_multiplier())
             .unwrap_or(1.0)
-    }
-
-    /// Item 8 Phase 2: longest-prefix cross-node cache lookup. Walks the
-    /// chained BLAKE3 manifest of `prompt_tokens` at `block_size` granularity
-    /// from longest → shortest, returning the first `(peer, block_hash,
-    /// token_count)` triple whose peer set contains a non-self member. The
-    /// caller then dispatches a KV-fetch to that peer.
-    ///
-    /// Self-entries recorded by the loopback forwarder are SKIPPED here —
-    /// local hits are already served by the in-process `PrefixCache`, so a
-    /// "remote" fetch to ourselves would only waste a round trip.
-    ///
-    /// Observed per-peer latency (via `observed_latency_ms_per_layer`) breaks
-    /// ties at the same block_hash so the fastest peer wins when multiple
-    /// holders are available. Peers without observed samples tie-break by
-    /// NodeId for determinism.
-    pub fn best_cross_node_prefix_match(
-        &self,
-        model_id: &crate::types::ModelId,
-        prompt_tokens: &[u32],
-        block_size: usize,
-    ) -> Option<(crate::types::NodeId, [u8; 32], u32)> {
-        if block_size == 0 || prompt_tokens.is_empty() {
-            return None;
-        }
-        let manifest = crate::inference::split::compute_block_hashes(prompt_tokens, block_size);
-        if manifest.is_empty() {
-            return None;
-        }
-        let our_id = self.identity.node_id();
-        let model_index = self.models.cross_node_prefix_index.get(model_id)?;
-        // Walk longest-first. First peer that isn't self wins.
-        for entry in manifest.iter().rev() {
-            let Some(holders) = model_index.get(&entry.block_hash) else {
-                continue;
-            };
-            let candidates: Vec<crate::types::NodeId> = holders
-                .iter()
-                .map(|r| r.clone())
-                .filter(|n| n != our_id)
-                .collect();
-            if candidates.is_empty() {
-                continue;
-            }
-            // Pick the peer with the lowest observed per-layer latency; if
-            // none have observed samples, fall back to the NodeId that sorts
-            // first (deterministic).
-            let best = candidates.into_iter().min_by(|a, b| {
-                let la = self
-                    .observed_latency_ms_per_layer(a, model_id)
-                    .unwrap_or(f32::INFINITY);
-                let lb = self
-                    .observed_latency_ms_per_layer(b, model_id)
-                    .unwrap_or(f32::INFINITY);
-                la.partial_cmp(&lb)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0))
-            });
-            if let Some(peer) = best {
-                return Some((peer, entry.block_hash, entry.token_count));
-            }
-        }
-        None
-    }
-
-    /// Item 8 Phase 2: end-to-end helper used by the admit-time KV-fetch
-    /// path. Looks up the longest cross-node prefix match for `prompt_tokens`,
-    /// installs a oneshot, dispatches `NetworkCommand::SendPrefixKvFetch` to
-    /// the best peer, awaits the reply with `timeout_ms`, BLAKE3-verifies
-    /// the returned snapshot tokens match the requested block hash, then
-    /// deserializes the snapshot onto `device`.
-    ///
-    /// Returns `Ok(None)` for any "no hit" outcome (no index entry, peer
-    /// miss, timeout, verification failure) so callers can unconditionally
-    /// fall through to normal prefill. Returns `Ok(Some((snap, token_count)))`
-    /// when a trusted KV snapshot is available — caller hydrates.
-    pub async fn try_fetch_cross_node_prefix(
-        &self,
-        network_tx: &tokio::sync::mpsc::Sender<crate::types::NetworkCommand>,
-        model_id: &crate::types::ModelId,
-        prompt_tokens: &[u32],
-        block_size: usize,
-        device: &candle_core::Device,
-        timeout_ms: u64,
-    ) -> Result<Option<(crate::inference::split::KvSnapshot, usize)>, crate::error::SwarmError>
-    {
-        let Some((peer, block_hash, token_count)) =
-            self.best_cross_node_prefix_match(model_id, prompt_tokens, block_size)
-        else {
-            return Ok(None);
-        };
-        let Some(peer_bytes) = self.peer_id_map.get(&peer).map(|r| r.clone()) else {
-            tracing::debug!(%peer, "prefix-kv fetch: no peer_id_bytes in map — skipping");
-            return Ok(None);
-        };
-        let fetch_id = uuid::Uuid::new_v4();
-        let (tx, rx) = tokio::sync::oneshot::channel::<Option<Vec<u8>>>();
-        self.pending_prefix_kv_fetches.insert(fetch_id, tx);
-        // RAII cleanup: if the caller is cancelled before the response
-        // lands, the oneshot drops automatically; the manager's later
-        // resolve attempt becomes a no-op. Also remove ourselves so we
-        // don't leak the DashMap entry on the cancellation path.
-        struct FetchGuard<'a> {
-            state: &'a SharedState,
-            fetch_id: uuid::Uuid,
-        }
-        impl<'a> Drop for FetchGuard<'a> {
-            fn drop(&mut self) {
-                self.state.pending_prefix_kv_fetches.remove(&self.fetch_id);
-            }
-        }
-        let _guard = FetchGuard {
-            state: self,
-            fetch_id,
-        };
-        let cmd = crate::types::NetworkCommand::SendPrefixKvFetch {
-            target_peer_bytes: peer_bytes,
-            request_id: fetch_id,
-            model_id: model_id.clone(),
-            block_hash,
-        };
-        if let Err(e) = network_tx.send(cmd).await {
-            tracing::debug!(error = %e, "prefix-kv fetch: network_tx send failed");
-            return Ok(None);
-        }
-        let bytes_opt =
-            match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
-                Ok(Ok(payload)) => payload,
-                Ok(Err(_)) => {
-                    tracing::debug!("prefix-kv fetch: oneshot dropped before response");
-                    None
-                }
-                Err(_) => {
-                    tracing::debug!(timeout_ms, "prefix-kv fetch: timed out");
-                    None
-                }
-            };
-        let Some(bytes) = bytes_opt else {
-            return Ok(None);
-        };
-        let (snap, tokens_from_peer) =
-            match crate::inference::split::deserialize_snapshot(&bytes, device) {
-                Ok(x) => x,
-                Err(e) => {
-                    tracing::warn!(%peer, error = %e, "prefix-kv: deserialize failed");
-                    return Ok(None);
-                }
-            };
-        // BLAKE3 verify: re-hash the peer-provided tokens and compare against
-        // the hash we asked for. Untrusted peers can't forge a matching chain.
-        if !crate::inference::split::verify_token_hash_chain(
-            &tokens_from_peer,
-            block_size,
-            snap.token_count,
-            &block_hash,
-        ) {
-            tracing::warn!(
-                %peer,
-                fetch_id = %fetch_id,
-                "prefix-kv: BLAKE3 verify failed — peer returned mismatched tokens (rejected)"
-            );
-            return Ok(None);
-        }
-        // Also require that `tokens_from_peer` is a strict prefix of OUR
-        // prompt — otherwise the peer could hand us a VALID snapshot from
-        // some other prompt that happens to have the same prefix length.
-        // Chained-hash property already guarantees this, but belt + braces.
-        if tokens_from_peer.len() > prompt_tokens.len()
-            || &prompt_tokens[..tokens_from_peer.len()] != tokens_from_peer.as_slice()
-        {
-            tracing::warn!(
-                %peer,
-                "prefix-kv: peer tokens don't prefix-match our prompt (rejected)"
-            );
-            return Ok(None);
-        }
-        tracing::info!(
-            %peer,
-            matched_tokens = token_count,
-            snapshot_bytes = bytes.len(),
-            "DIAG: prefix-kv fetch HIT"
-        );
-        Ok(Some((snap, token_count as usize)))
     }
 
     /// Merge a foreign observation (received via `NodeCapabilityUpdate`

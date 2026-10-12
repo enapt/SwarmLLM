@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::atomic::Ordering::Relaxed;
 
 use crate::daemon::state::SharedState;
-use crate::types::NodeId;
+use crate::types::{ModelId, NodeId};
 
 /// Whether this peer is one the operator has explicitly admitted to their pool.
 ///
@@ -81,6 +81,54 @@ pub fn allowed_node_set(shared: &SharedState) -> Option<HashSet<NodeId>> {
     }
 
     Some(allowed)
+}
+
+/// Which computers a request for `model_id` may reach (`None` = any) — the
+/// ONE answer for every path that sends a request's data to another node:
+/// the scheduler's candidates, the whole-model hand-off, the HTTP forward to
+/// a pool peer, an image sent for encoding, a prefix-cache fetch, and the
+/// local fast path's "is there anyone to ask" (#251). Guard:
+/// `every_path_a_request_leaves_by_asks_its_scope`.
+///
+/// - The owner keeps this model on this computer → this node alone.
+/// - Private mode → [`allowed_node_set`], plus the foreign pools the owner
+///   opted into when no pool device holds the model ([`cross_pool_extras`]).
+///
+/// `None` is "unrestricted ROUTING", never trust: handing a peer a secret
+/// still needs [`is_pool_member`].
+pub fn request_scope(shared: &SharedState, model_id: &ModelId) -> Option<HashSet<NodeId>> {
+    if shared.kept_on_this_computer(model_id) {
+        return Some(HashSet::from([shared.identity.node_id().clone()]));
+    }
+    let mut scope = allowed_node_set(shared)?;
+    scope.extend(cross_pool_extras(shared, model_id));
+    Some(scope)
+}
+
+/// The parts of `manifest` that no node in its request scope holds — what a
+/// private-mode refusal names (`SwarmError::PrivateModeUnavailable`), asked by
+/// the scheduler and by the cloud gate (`api::providers::cloud_refused_for`).
+pub fn parts_outside_scope(
+    shared: &SharedState,
+    manifest: &crate::types::ModelManifest,
+) -> Vec<u32> {
+    let scope = request_scope(shared, &manifest.id).unwrap_or_default();
+    manifest
+        .shards
+        .iter()
+        .filter(|s| {
+            let sid = crate::types::ShardId {
+                model_id: manifest.id.clone(),
+                index: s.index,
+            };
+            !shared
+                .model_registry
+                .shard_holders(&sid)
+                .iter()
+                .any(|h| scope.contains(h))
+        })
+        .map(|s| s.index)
+        .collect()
 }
 
 /// Returns the effective pool size for auto-manage calculations.
@@ -261,6 +309,59 @@ mod tests {
             !is_pool_member(&state, &stranger),
             "an unrestricted routing scope must not make a stranger trusted"
         );
+    }
+
+    /// **A model kept on this computer reaches nobody else — private mode or
+    /// not, pool members included** (#251). Its scope is this node alone, and
+    /// a model next to it keeps the node-wide answer.
+    #[test]
+    fn a_model_kept_on_this_computer_is_scoped_to_this_node_alone() {
+        let state = make_state(Config::default());
+        let me = state.identity.node_id().clone();
+        let kept = crate::types::ModelId("kept".into());
+        let other = crate::types::ModelId("other".into());
+        // THE CONTROL: nothing kept, private mode off → unrestricted.
+        assert!(request_scope(&state, &kept).is_none());
+
+        state.keep_on_this_computer(&kept, true).unwrap();
+        assert_eq!(
+            request_scope(&state, &kept),
+            Some(HashSet::from([me.clone()]))
+        );
+        assert!(
+            request_scope(&state, &other).is_none(),
+            "the setting is per model"
+        );
+
+        // Private mode with a LAN peer allowed: the kept model still reaches
+        // nobody but this node, the other model reaches the LAN peer.
+        state.credits.private_mode.store(true, Relaxed);
+        let lan = crate::types::NodeId([5u8; 32]);
+        state.peer_registry.insert(
+            lan.clone(),
+            crate::types::PeerInfo {
+                node_id: lan.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(1),
+                trust_score: 0.5,
+                peer_id_bytes: None,
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: true,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        );
+        assert_eq!(request_scope(&state, &kept), Some(HashSet::from([me])));
+        assert!(request_scope(&state, &other).unwrap().contains(&lan));
+
+        // Turning it off restores the node-wide answer.
+        state.keep_on_this_computer(&kept, false).unwrap();
+        assert!(request_scope(&state, &kept).unwrap().contains(&lan));
     }
 
     /// The local node is always itself.

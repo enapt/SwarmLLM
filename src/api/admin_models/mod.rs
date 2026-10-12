@@ -10,8 +10,9 @@ pub use adapters::{delete_adapter, list_adapters, register_adapter, RegisterAdap
 pub use helpers::serialize_acquisition_to_json;
 pub use lifecycle::{
     delete_model, enable_model_privacy, get_model_auto_manage, get_model_encrypted_pipeline,
-    set_model_auto_manage, set_model_encrypted_pipeline, unload_model, EncryptedPipelineUpdate,
-    ModelAutoManageUpdate,
+    get_model_keep_on_this_computer, set_model_auto_manage, set_model_encrypted_pipeline,
+    set_model_keep_on_this_computer, unload_model, EncryptedPipelineUpdate,
+    KeepOnThisComputerUpdate, ModelAutoManageUpdate,
 };
 pub use listing::{
     add_model_interest, download_queue, list_models, model_acquisition_status, model_metadata,

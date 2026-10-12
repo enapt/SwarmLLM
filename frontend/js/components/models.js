@@ -452,13 +452,18 @@
 
       var policy = { enabled: true, max_shards: 0, prune_enabled: true };
       var encStatus = { encrypted_pipeline: false, ready: false, has_first_shard: false, has_last_shard: false, shard_count: 0 };
+      // null = not read: the checkbox is then disabled, so Save cannot write
+      // a default over the real setting.
+      var keepStatus = null;
       try {
         var results = await Promise.all([
           App.authFetch(U.modelApiUrl(modelId, 'auto-manage')),
           App.authFetch(U.modelApiUrl(modelId, 'encrypted-pipeline')),
+          App.authFetch(U.modelApiUrl(modelId, 'keep-on-this-computer')),
         ]);
         if (results[0].ok) policy = await results[0].json();
         if (results[1].ok) encStatus = await results[1].json();
+        if (results[2].ok) keepStatus = await results[2].json();
       } catch (e) {
         App.ui.showBanner('error', I18n.t('models.policy_load_failed'));
       }
@@ -493,6 +498,15 @@
           '<span class="' + encReadyClass + '" style="font-size:0.65rem">' + encReadyText + '</span>' +
           encOverheadNote +
         '</div>' +
+        '<div class="am-row" style="flex-direction:column;gap:0.2rem">' +
+          '<label><input type="checkbox" id="am-keep-' + U.safeId(modelId) + '"' +
+            (keepStatus && keepStatus.keep_on_this_computer ? ' checked' : '') + (keepStatus ? '' : ' disabled') +
+            '> &#127968; ' + U.escapeHtml(I18n.t('models.keep_here')) + '</label>' +
+          '<span class="text-muted" style="font-size:0.65rem">' + U.escapeHtml(I18n.t('models.keep_here_hint')) + '</span>' +
+          (keepStatus && !keepStatus.whole_model_here
+            ? '<span class="text-warning" style="font-size:0.65rem">&#9888; ' + U.escapeHtml(I18n.t('models.keep_here_not_whole')) + '</span>'
+            : '') +
+        '</div>' +
         '<div class="am-row">' +
           '<button class="btn btn-sm btn-primary" data-am-save="' + U.escapeHtml(modelId) + '">' + U.escapeHtml(I18n.t('actions.save')) + '</button>' +
         '</div>';
@@ -505,6 +519,7 @@
       var maxEl = document.getElementById('am-max-' + sid);
       var pruneEl = document.getElementById('am-prune-' + sid);
       var encryptedEl = document.getElementById('am-encrypted-' + sid);
+      var keepEl = document.getElementById('am-keep-' + sid);
       if (!enabledEl || !maxEl) return;
 
       try {
@@ -528,6 +543,17 @@
           if (!encResp.ok) {
             var encData = await encResp.json().catch(function() { return {}; });
             encErr = U.extractErrorMessage(encData, I18n.t('models.enc_pipeline_save_failed'));
+          }
+        }
+        if (!encErr && keepEl && !keepEl.disabled) {
+          var keepResp = await App.authFetch(U.modelApiUrl(modelId, 'keep-on-this-computer'), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: keepEl.checked }),
+          });
+          if (!keepResp.ok) {
+            var keepData = await keepResp.json().catch(function() { return {}; });
+            encErr = U.extractErrorMessage(keepData, I18n.t('models.keep_here_save_failed'));
           }
         }
 

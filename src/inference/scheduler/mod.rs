@@ -2616,6 +2616,17 @@ impl PipelineScheduler {
 
         let start = std::time::Instant::now();
 
+        // A model the owner keeps on this computer runs here whole or not at
+        // all (#251). Refused up front when this computer does not hold all of
+        // it: every plan for it would need a peer for the rest.
+        if self.shared_state.kept_on_this_computer(model_id)
+            && !self.shared_state.has_complete_split_model(model_id)
+        {
+            return Err(SwarmError::KeptOnThisComputer {
+                model_id: manifest.name.clone(),
+            });
+        }
+
         // Per-model choice, then explicit global, then on automatically when this
         // node holds both ends — see `encrypted_pipeline_for`. Asked per REQUEST
         // because a `swarm_route` override can release the very ends the
@@ -2658,6 +2669,11 @@ impl PipelineScheduler {
             &local_on_processor,
         );
         if candidates.is_empty() {
+            if self.shared_state.kept_on_this_computer(model_id) {
+                return Err(SwarmError::KeptOnThisComputer {
+                    model_id: manifest.name.clone(),
+                });
+            }
             // In private mode, give a specific error showing which shards are missing
             if self
                 .shared_state
@@ -2665,31 +2681,15 @@ impl PipelineScheduler {
                 .private_mode
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
-                // Find which shards no allowed node holds. R134.7: also fold in
-                // cross-pool extras so the error message matches what
-                // gather_candidates considered eligible.
-                let mut allowed =
-                    crate::pool::scope::allowed_node_set(&self.shared_state).unwrap_or_default();
-                allowed.extend(crate::pool::scope::cross_pool_extras(
-                    &self.shared_state,
-                    &manifest.id,
-                ));
-                let missing: Vec<u32> = manifest
-                    .shards
-                    .iter()
-                    .filter(|s| {
-                        let sid = ShardId {
-                            model_id: manifest.id.clone(),
-                            index: s.index,
-                        };
-                        let holders = self.shared_state.model_registry.shard_holders(&sid);
-                        !holders.iter().any(|h| allowed.contains(h))
-                    })
-                    .map(|s| s.index)
-                    .collect();
+                // Which shards no allowed node holds — the same scope
+                // gather_candidates considered eligible, cross-pool extras
+                // included (R134.7).
                 return Err(SwarmError::PrivateModeUnavailable {
                     model_id: manifest.name.clone(),
-                    missing_shards: missing,
+                    missing_shards: crate::pool::scope::parts_outside_scope(
+                        &self.shared_state,
+                        &manifest,
+                    ),
                 });
             }
             return Err(SwarmError::InsufficientCapacity(model_id.clone()));
@@ -3673,24 +3673,10 @@ impl PipelineScheduler {
         local_runs_on_processor: &dyn Fn() -> bool,
     ) -> Vec<NodeCandidate> {
         let prompt_tokens = prompt.tokens;
-        // Private mode: compute allowed node set (None = unrestricted).
-        // R134.7: when `allow_cross_pool_inference` is on and the local pool
-        // can't serve this model, union the cross-pool extras into the
-        // allowed set. No-op when both flags aren't on or when a local pool
-        // member already holds the model.
-        let allowed_set = {
-            let base = crate::pool::scope::allowed_node_set(&self.shared_state);
-            let extras = crate::pool::scope::cross_pool_extras(&self.shared_state, &manifest.id);
-            match (base, extras.is_empty()) {
-                (None, _) => None,
-                (Some(set), true) => Some(set),
-                (Some(set), false) => {
-                    let mut merged = set;
-                    merged.extend(extras);
-                    Some(merged)
-                }
-            }
-        };
+        // Which computers this request may reach (None = any): this node
+        // alone for a model kept on this computer (#251), else private mode's
+        // set with any cross-pool extras the owner opted into (R134.7).
+        let allowed_set = crate::pool::scope::request_scope(&self.shared_state, &manifest.id);
 
         // Average bytes a layer occupies, for the per-peer capacity bound
         // below. The manifest is the only size the coordinator has; it is the

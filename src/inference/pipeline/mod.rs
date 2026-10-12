@@ -31,8 +31,7 @@ use crate::daemon::SharedState;
 use crate::error::SwarmError;
 use crate::inference::router::{InferenceOutput, StreamingTokenTx, TokenLogProbEntry};
 use crate::types::{
-    InferenceError, InferenceRequest, LayerResult, ModelId, NetworkCommand, NetworkFinishReason,
-    PipelineAssignment, SwarmMessage,
+    InferenceRequest, LayerResult, ModelId, NetworkCommand, NetworkFinishReason, PipelineAssignment,
 };
 
 pub(crate) use prompt::render_prompt_from_header;
@@ -1392,23 +1391,6 @@ impl PipelineExecutor {
 
         // Distributed execution path (also handles single-node split-model execution)
         self.execute_distributed(token_tx).await
-    }
-}
-
-/// Broadcast a pipeline error to the network so peers can update shard availability.
-pub async fn broadcast_pipeline_error(
-    network_tx: &mpsc::Sender<NetworkCommand>,
-    request_id: uuid::Uuid,
-    error: &str,
-) {
-    let error_msg = SwarmMessage::InferenceError(InferenceError {
-        request_id,
-        error: error.to_string(),
-        recoverable: false,
-    });
-
-    if let Err(e) = network_tx.send(NetworkCommand::Broadcast(error_msg)).await {
-        tracing::warn!(error = %e, "Failed to broadcast pipeline error");
     }
 }
 

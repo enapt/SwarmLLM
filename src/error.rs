@@ -197,6 +197,17 @@ pub enum SwarmError {
     ProviderError { status: u16, body: String },
 
     // Private mode
+    /// The owner keeps this model on this computer (#251), and this computer
+    /// cannot run the request on its own — it does not hold all of the model,
+    /// or (an image request) its image encoder. A POLICY refusal, like the two
+    /// privacy variants: retrying can never help, and nothing is sent out
+    /// instead. Its own variant because its advice differs from private
+    /// mode's: fetch the model HERE, or turn the per-model setting off.
+    #[error(
+        "{model_id} is kept on this computer, and this computer cannot run this request on its own"
+    )]
+    KeptOnThisComputer { model_id: String },
+
     /// `missing_shards` may hold `MMPROJ_SHARD_INDEX`: no pool device holds
     /// the model's image encoder, and a request carrying an image may not send
     /// it to one outside the pool (`pipeline::vision`).
@@ -832,6 +843,13 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
             err.to_string(),
             "private_mode_error",
         ),
+        // Its own type: the owner's per-model choice, not private mode, and
+        // the caller's fix is a different one (#251).
+        SwarmError::KeptOnThisComputer { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "kept_on_this_computer_error",
+        ),
         // The two ends of the same policy refusal, and deliberately the same
         // `error_type`: to a caller this is one situation — prompt privacy is
         // on and this node does not hold enough of the model to honour it. They
@@ -1342,6 +1360,18 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
         // and the only one that changes where the user's prompts travel, so
         // offering it casually would trade someone's privacy for convenience
         // without telling them.
+        // The way out is named in the order that keeps the request here:
+        // fetch the rest of the model to this computer first; turning the
+        // setting off — which lets other computers run it — last, with that
+        // consequence said.
+        SwarmError::KeptOnThisComputer { .. } => Some((
+            "kept_on_this_computer",
+            "“Keep on this computer” is on for this model, so its requests run only here — and \
+             this computer can't run this one on its own: it doesn't have all of the model (or, \
+             for a picture, the part that reads images). Download the rest from the model's card \
+             on the Dashboard, or turn the setting off with the ⚙ button on that card — but then \
+             other people's computers can run your requests. Retrying as-is won't help.",
+        )),
         SwarmError::PrivateModeUnavailable { .. } => Some((
             "private_mode_unavailable",
             "Private mode keeps your prompts on your own devices and your local network, \
@@ -1460,6 +1490,9 @@ mod tests {
             SwarmError::PromptPrivacyUnavailable {
                 model_id: "m".into(),
             },
+            SwarmError::KeptOnThisComputer {
+                model_id: "m".into(),
+            },
             SwarmError::PrivateModeUnavailable {
                 model_id: "m".into(),
                 missing_shards: vec![0],
@@ -1547,6 +1580,9 @@ mod tests {
                 missing_shards: vec![],
             },
             SwarmError::PromptPrivacyUnavailable {
+                model_id: "m".to_string(),
+            },
+            SwarmError::KeptOnThisComputer {
                 model_id: "m".to_string(),
             },
         ] {
@@ -1836,6 +1872,9 @@ mod tests {
     fn permanent_failures_are_never_told_to_retry() {
         for err in [
             SwarmError::PromptPrivacyUnavailable {
+                model_id: "m".into(),
+            },
+            SwarmError::KeptOnThisComputer {
                 model_id: "m".into(),
             },
             // Permanent because no amount of waiting frees disk, and its hint

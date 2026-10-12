@@ -391,6 +391,23 @@ card behaviour drifts with uptime (#755). The discriminating run is the same rig
 longer, at ~48-60 h — FECS in "at once" and none in "one after the other" there would put the cause in
 the driver with two contexts, with nothing of ours. Not past ~100 h (#804: TDRs came at 150 h+).
 
+**Step (a) at 48 h, 2026-10-12 06:09-06:21Z (Windows up 48 h, booted 06:08:59Z 10-10):** the same rig,
+arms 10x longer (2000 rounds, ~100 s), live node stopped, under the kit. serial 06:09:54 — 0;
+overlap 06:12:53 — 0; serial 06:14:35 — 0; **overlap 06:17:47 — 3 FECS** (nvlddmkm 13 "Graphics FECS
+Exception: Logging error 0x2", all at 06:18:52Z, ~65 s in, both processes running); no TDR (no
+Display 4101, no nvlddmkm 14). The kit stopped the rig, but one more serial arm ran (06:20:26, 0): it
+checked its abort marker only BEFORE settling, and the 30 s Windows poll wrote the event during the
+settle — `safety_settle` now checks again after; the per-arm count, which printed 0 for the arm with
+the events, now waits one poll. So: ~6 min of one-after-the-other card work, 0 events; ~3 min of
+two-at-once, one burst of 3 — with no SwarmLLM code on the card. FECS is the unit that runs the
+graphics engine's context switches (nouveau's `gf100` "fecs methods for pausing ctxsw"; NVIDIA
+publishes nothing on its multi-process switching), so two contexts meeting on this driver at ~48 h
+is enough to log one. One burst is evidence, not proof, and it does not explain 10-04's illegal
+access or clear our code — it says a FECS by itself is not evidence of a fault of ours. Next: (b)
+above; and whether keeping a card's work in ONE process on Windows/WSL (the drafter in the target's
+worker, never a second CUDA process on the card) is worth its cost — #754/#755's drafter shape is
+the one product path known to put two processes on one card.
+
 #### #193 — A whole-model reply travels as independent messages; only the serving node dying now loses it
 `P3` · reliability · **PARTIAL** — 2026-09-02 · absorbs archive § "The reply stream has no reliability layer…" and § "Intermittent token loss on the remote-generate fast path"; history: archive § "Replies truncated on the remote-generate fast path"
 
@@ -1511,7 +1528,7 @@ starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items bel
 preconditions for ever switching enforcement on, not work for now.
 
 #### #251 — `owned_by: "local"` reads as "my data stays here"; it means "every part is held here"
-`P2` · privacy · **PARTIAL** — 2026-10-12 · history: report #035 (a tester, v0.3.232-.234)
+`P2` · privacy · **PARTIAL** — 2026-10-12 · history: report #035 (a tester, v0.3.232-.234); (1), (2) per model and (4) done 2026-10-12
 
 `api::model_source_for` answers `local` when this node holds every part, which says nothing about
 where a request runs. A model the card cannot hold whole may be split with peers (#250). The default boomerang starts and
@@ -1520,10 +1537,25 @@ to text (`docs/ARCHITECTURE.md` § Pipeline Privacy Model). Today a user can kee
 computer only node-wide (a pool with `private_mode = true` and `private_mode_allow_lan = false`).
 `x-swarm-route` reports the route on the OpenAI and Anthropic surfaces. **Done (1), 2026-10-12:**
 the book's OpenAI page says what `owned_by` means, what a peer sees, how to keep requests here and
-where the route is reported. Next: (2) a "keep on this computer"
-choice per model in the dashboard and per request (`swarm_route`), answered by the local route or
-a policy refusal (`PrivateModeUnavailable` shape, 503, never "retry") — never silently abroad;
-(3) the route on the surfaces that lack it. A NON-streamed `/v1/responses` already carries
+where the route is reported. **Done (2) per model, 2026-10-12:** "Keep on this computer" on the
+model's ⚙ panel (`PUT /api/admin/models/{id}/keep-on-this-computer`). `pool::scope::request_scope`
+is now the one answer to which nodes a request may reach (kept → this node; else private mode's set),
+asked by every path a request's data leaves by (guard `every_path_a_request_leaves_by_asks_its_scope`);
+a kept model this computer cannot run whole is refused as `KeptOnThisComputer` (503, never "retry").
+Enumerating the paths found three more holes, closed with it: the image encoder went to its nearest
+holder in private mode (`c84c12dd`), the prefix-KV probe asked any holder of the cached blocks, and
+every failed request was broadcast to the whole swarm with its error text (only ever logged by the
+receivers — removed). And a cloud provider is chosen by NAME, so a local model called `mistral…`,
+`llama-…`, `gemma…` or `deepseek…` could go to that provider when the swarm lacked a part of it:
+`providers::cloud_refused_for` now refuses a kept model on every cloud path (guard
+`every_cloud_path_asks_whether_the_model_is_kept_here`). A kept model's stored prompt openings are
+neither announced nor served to peers. **Done (4), 2026-10-12:** private mode had the same cloud
+hole for a model of the swarm; in private mode a model with a manifest here now never goes to a
+cloud provider (`PrivateModeUnavailable`, naming the parts no pool device holds —
+`pool::scope::parts_outside_scope`, shared with the scheduler). A cloud-only name still goes, being
+the owner's own configuration, and so does an explicit `provider:` prefix (the caller's own choice of
+a cloud model; the same prompt could go under the provider's model name). A kept model refuses both. Left: (2b) the same choice per REQUEST (a `swarm_route` value or
+header on all four surfaces); (3) the route on the surfaces that lack it. A NON-streamed `/v1/responses` already carries
 `x-swarm-route`, `-segments`, `-peers`, `-nodes` and `server-timing`, copied from the chat
 handler's response (`create_response`; checked on v0.3.235, 2026-10-12). A STREAMED one carries
 none: `stream::run_streaming` returns the SSE before it awaits the chat call, so its headers
@@ -1839,7 +1871,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-12, unreleased** (#244, #248, #249, #253, #254; #251 (1) and #252 (2) of open entries)
+**Closed 2026-10-12, unreleased** (#244, #248, #249, #253, #254; #251 (1), #251 (2) per model, #251 (4) and #252 (2) of open entries)
 - #244 — **a split's reply no longer pauses for seconds while the node reads the graphics
   card's memory.** `nvidia-smi` (2-6 s on WSL with the card busy) was waited for on a thread
   that also runs the node's network task, so a peer's answers sat unread. The 12h release-check
@@ -1859,6 +1891,18 @@ grep `^| N |`).
   holding its middle, the memory check every 30 s): v0.3.235 narrowed the loaded model to 8 of 16
   parts at "pressure 0.80" 4 s after it loaded, and the next request took 23.2 s; main narrowed
   nothing and answered it in 9.6 s.
+- #251 (2) — **a model can now be kept on this computer.** "Keep on this computer" on a model's
+  ⚙ panel runs its requests only here: no other computer, in the swarm or a cloud provider, is
+  handed the prompt, the work in progress, a picture or the reply. Where this computer cannot run a
+  request alone, it is refused with a reason naming the setting and how to fix it, never sent out
+  (report #035). Making every path ask one question (`pool::scope::request_scope`) closed three gaps
+  private mode already had: a picture went to the nearest computer that could read images
+  (`c84c12dd`), a computer outside the pool could be asked for stored work matching a prompt's
+  opening (by its hash), and every failed request was announced to the whole swarm with its error
+  text. #251 (4): in private mode a model of the swarm is no longer sent to a cloud provider whose
+  name it happens to match (`deepseek…`, `mistral…`, `gemma…`) when the pool lacks a part of it;
+  the refusal names the missing parts. Guards:
+  `every_path_a_request_leaves_by_asks_its_scope`, `every_cloud_path_asks_whether_the_model_is_kept_here`.
 - #253 — **a Linux NVIDIA download missing NVIDIA's CUDA libraries now says so at startup and
   runs on the processor**, instead of failing every request with "worker closed connection
   mid-generate". cuBLAS, cuBLASLt, cuRAND and NVRTC are looked up once, the same way the loader

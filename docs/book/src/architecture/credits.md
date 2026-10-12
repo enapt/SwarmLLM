@@ -90,7 +90,6 @@ Tiers are calculated from your credit balance relative to the network:
 
 When distributed inference fails:
 - The requesting node is penalized (configurable `penalty_serve_failure`, default 50 credits)
-- A `broadcast_pipeline_error()` message is sent to all pipeline participants
 
 ## Transaction Security
 

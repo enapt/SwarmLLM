@@ -214,6 +214,11 @@ async fn try_cloud_proxy(
     req: &ChatCompletionRequest,
     is_forwarded: bool,
 ) -> Result<Option<axum::response::Response>, ApiError> {
+    // Reached only once nothing local or in the request's scope could take
+    // it, so a kept model's answer is the refusal (#251).
+    if let Some(refusal) = crate::api::providers::cloud_refused_for(state, &req.model).await {
+        return Err(ApiError(refusal));
+    }
     // Claude subscription: proxy through local CLI subprocess (higher priority than API key)
     #[cfg(feature = "claude-subscription")]
     if let Some(sub_config) =

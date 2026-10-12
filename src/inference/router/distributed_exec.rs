@@ -972,7 +972,6 @@ pub(super) async fn execute_request(
 
     // Execute the distributed pipeline
     let execute_start = std::time::Instant::now();
-    let network_tx_for_error = network_tx.clone();
     let mut pipeline = PipelineExecutor::new(
         shared_state.clone(),
         network_tx,
@@ -1047,12 +1046,6 @@ pub(super) async fn execute_request(
                     had_remote_segment,
                     "Skipping credit penalty — failure is not attributable to a peer"
                 );
-                crate::inference::pipeline::broadcast_pipeline_error(
-                    &network_tx_for_error,
-                    request.id,
-                    &e.to_string(),
-                )
-                .await;
                 return result;
             }
 
@@ -1115,14 +1108,11 @@ pub(super) async fn execute_request(
                     "Applied credit penalty for distributed inference failure"
                 );
             }
-
-            // Broadcast pipeline error so peers can update shard availability
-            crate::inference::pipeline::broadcast_pipeline_error(
-                &network_tx_for_error,
-                request.id,
-                &e.to_string(),
-            )
-            .await;
+            // A failure is not announced to the swarm: the broadcast that did
+            // so was only ever LOGGED by its receivers, and its text named the
+            // model — telling every peer what failed here, private mode and
+            // "Keep on this computer" included (#251). Receivers still decode
+            // `SwarmMessage::InferenceError` from older senders.
         }
     }
     result
@@ -1192,6 +1182,7 @@ fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool
         | SwarmError::ModelNotAvailable(_)
         | SwarmError::InsufficientCapacity(_)
         | SwarmError::PrivateModeUnavailable { .. }
+        | SwarmError::KeptOnThisComputer { .. }
         | SwarmError::PromptPrivacyUnavailable { .. }
         // Our own setting, refusing because of what is on our own disk. Both
         // ends of it name this machine and nobody else's.

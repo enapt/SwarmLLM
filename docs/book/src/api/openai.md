@@ -162,7 +162,13 @@ graphics card cannot hold whole may still be run with peers' help, and peers
 then compute on the model's working data for the layers they run. They are not
 handed the prompt as text, but that data can be turned back into much of it
 ([Security > Start and finish on this computer](../architecture/security.md#start-and-finish-on-this-computer-boomerang)).
-To keep every request on your own computers, use a private pool with
+To keep one model's requests on this computer, turn on **Keep on this
+computer** in the model's ⚙ panel on the Dashboard (or
+`PUT /api/admin/models/{id}/keep-on-this-computer` with `{"enabled": true}`):
+no other computer, in the swarm or a cloud provider, is then handed anything of
+those requests, and one this computer cannot run alone is refused with
+`kept_on_this_computer_error` (503) instead of being sent out. To keep every
+request on your own computers, use a private pool with
 `private_mode = true` and `private_mode_allow_lan = false`
 ([Joining the network > Private Networks](../getting-started/joining-network.md#private-networks)). The
 `x-swarm-route` response header names the computers that answered.

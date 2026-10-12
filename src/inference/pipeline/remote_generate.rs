@@ -389,7 +389,9 @@ pub(crate) fn delegation_eligible(exec: &PipelineExecutor) -> bool {
     if encrypted || exec.shared_state.config.inference.local_embedding_privacy {
         return false;
     }
-    if crate::pool::scope::allowed_node_set(&exec.shared_state).is_some() {
+    // Any restriction on where this request may go (private mode, a model kept
+    // on this computer) keeps it off the hand-off, which plans nothing more.
+    if crate::pool::scope::request_scope(&exec.shared_state, &exec.request.model_id).is_some() {
         return false;
     }
     true

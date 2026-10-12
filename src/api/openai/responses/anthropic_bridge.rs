@@ -635,6 +635,14 @@ pub async fn try_proxy_anthropic_responses(
     req: &ResponsesRequest,
 ) -> Result<Option<Response>, ApiError> {
     let stream = req.stream.unwrap_or(false);
+    // Tried BEFORE local inference: a kept model skips the cloud, and the
+    // local path gives the answer (#251).
+    if crate::api::providers::cloud_refused_for(state, &req.model)
+        .await
+        .is_some()
+    {
+        return Ok(None);
+    }
 
     let config = state.shared_state.metrics.providers_config.read().await;
     let provider = match resolve_provider(&req.model, &config) {

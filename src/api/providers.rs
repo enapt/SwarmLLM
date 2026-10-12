@@ -392,6 +392,75 @@ pub(crate) fn get_provider_client() -> &'static reqwest::Client {
     &PROVIDER_CLIENT
 }
 
+/// Why a request for `model` may not go to a cloud provider, or `None` when
+/// it may. A cloud provider is chosen by NAME (`resolve_provider`'s prefix
+/// rules: `mistral…`, `llama-…`, `gemma…`, `deepseek…`), so a model of the
+/// swarm can match one, and with that provider's key saved the swarm missing a
+/// part of the model sent its prompt to the provider (#251). Refused:
+/// - a model the owner keeps on this computer → `KeptOnThisComputer`;
+/// - in private mode, a model of the swarm (one with a manifest here) →
+///   `PrivateModeUnavailable`, naming the parts no pool device holds. A name
+///   with no manifest is a cloud model, and the owner's own configuration.
+///
+/// Asked under the name as asked and as resolved (`auto`, a display name).
+/// The kept check also asks the name after a `provider:` prefix (the name the
+/// provider is sent): the owner said this model's requests stay here. Private
+/// mode does not: `deepseek:<name>` is a cloud request by its caller's own
+/// choice, and private mode governs the swarm — the same prompt could be sent
+/// under the provider's own model name. Where the cloud
+/// is the last resort (`/v1/chat/completions`, `/v1/messages`) the caller
+/// answers with the refusal; where it is tried FIRST (the Responses API) the
+/// caller skips the cloud and lets the local path answer. Guard:
+/// `every_cloud_path_asks_whether_the_model_is_kept_here`.
+pub async fn cloud_refused_for(state: &AppState, model: &str) -> Option<crate::error::SwarmError> {
+    let shared = &state.shared_state;
+    if !shared
+        .credits
+        .private_mode
+        .load(std::sync::atomic::Ordering::Relaxed)
+        && !shared.keeps_any_model_here()
+    {
+        return None;
+    }
+    let resolved = crate::api::openai::resolve_model_for_inference(state, model).await;
+    // `openai:<id>` names a provider explicitly, and the provider is sent the
+    // name after the colon — so that name is asked too.
+    cloud_refusal(shared, model, &resolved)
+}
+
+/// [`cloud_refused_for`]'s answer for a name already resolved.
+fn cloud_refusal(
+    shared: &crate::daemon::state::SharedState,
+    model: &str,
+    resolved: &str,
+) -> Option<crate::error::SwarmError> {
+    let private_mode = shared
+        .credits
+        .private_mode
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let unprefixed = model.split_once(':').map_or(model, |(_, m)| m);
+    if let Some(kept) = [model, resolved, unprefixed]
+        .iter()
+        .find(|m| shared.kept_on_this_computer(&crate::types::ModelId(m.to_string())))
+    {
+        return Some(crate::error::SwarmError::KeptOnThisComputer {
+            model_id: kept.to_string(),
+        });
+    }
+    if !private_mode {
+        return None;
+    }
+    let manifest = [model, resolved].iter().find_map(|m| {
+        shared
+            .model_registry
+            .get_manifest(&crate::types::ModelId(m.to_string()))
+    })?;
+    Some(crate::error::SwarmError::PrivateModeUnavailable {
+        missing_shards: crate::pool::scope::parts_outside_scope(shared, &manifest),
+        model_id: manifest.name,
+    })
+}
+
 /// Proxy an OpenAI-compatible chat completion request to a cloud provider.
 /// Called from openai.rs as a fallback when no local model matches.
 pub async fn try_proxy_openai(
@@ -605,6 +674,11 @@ pub async fn try_proxy_openai_responses(
         .get("model")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
+    // Tried BEFORE local inference, so a kept model skips the cloud rather
+    // than being refused here: the local path gives the answer.
+    if cloud_refused_for(state, model).await.is_some() {
+        return Ok(None);
+    }
 
     let config = state.shared_state.metrics.providers_config.read().await;
     let provider = match resolve_provider(model, &config).or_else(|| {
@@ -840,6 +914,95 @@ pub async fn list_providers(State(state): State<AppState>) -> Json<serde_json::V
 mod tests {
     use super::*;
     use crate::config::{CustomProvider, ProviderEntry, ProvidersConfig};
+
+    /// **A model of the swarm never reaches a cloud provider while private
+    /// mode is on, nor a model kept on this computer at all** (#251). A cloud
+    /// provider is picked by NAME, so `deepseek-…`, `mistral…` and `gemma…`
+    /// models of the swarm matched one: with that provider's key saved, a
+    /// private-mode request the pool could not complete went to the provider.
+    /// A cloud model (no manifest here) is the owner's own configuration and
+    /// still goes.
+    #[test]
+    fn private_mode_and_a_kept_model_refuse_the_cloud_for_a_model_of_the_swarm() {
+        use crate::error::SwarmError;
+        use std::sync::atomic::Ordering::Relaxed;
+        let temp = tempfile::tempdir().unwrap();
+        let (shared, _, _) = crate::daemon::state::SharedState::new(
+            crate::config::Config::default(),
+            crate::identity::Identity::generate(),
+            crate::storage::db::Database::open(temp.path()).unwrap(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::inference::executor::ModelExecutor::new(),
+            )),
+            None,
+        );
+        let swarm_model = crate::types::ModelId("deepseek-swarm-7b".into());
+        shared
+            .model_registry
+            .register_manifest(crate::types::ModelManifest {
+                id: swarm_model.clone(),
+                name: "DeepSeek Swarm 7B".into(),
+                architecture: crate::types::ModelArchitecture::Llama,
+                num_layers: 28,
+                num_params_billions: 7.0,
+                quantization: crate::types::Quantization::Q4KM,
+                total_size_bytes: 4_000_000_000,
+                shard_count: 1,
+                shards: vec![crate::types::ShardInfo {
+                    index: 0,
+                    layer_range: (0, 28),
+                    size_bytes: 4_000_000_000,
+                    hash: [0u8; 32],
+                    tensors: vec![],
+                }],
+                tokenizer_hash: [0u8; 32],
+                manifest_hash: [0u8; 32],
+                publisher: crate::types::NodeId([0u8; 32]),
+                publish_date: chrono::Utc::now(),
+                license: "MIT".into(),
+                mmproj: None,
+                context_length: None,
+            });
+
+        // THE CONTROL: private mode off, nothing kept → the cloud may answer.
+        let id = "deepseek-swarm-7b";
+        assert!(cloud_refusal(&shared, id, id).is_none());
+
+        shared.credits.private_mode.store(true, Relaxed);
+        match cloud_refusal(&shared, id, id) {
+            Some(SwarmError::PrivateModeUnavailable {
+                model_id,
+                missing_shards,
+            }) => {
+                assert_eq!(model_id, "DeepSeek Swarm 7B");
+                assert_eq!(missing_shards, vec![0], "no pool device holds part 0");
+            }
+            other => panic!("a model of the swarm must stay in the pool: {other:?}"),
+        }
+        assert!(
+            cloud_refusal(&shared, "deepseek-chat", "deepseek-chat").is_none(),
+            "a cloud model is the owner's own configuration"
+        );
+        let prefixed = "deepseek:deepseek-swarm-7b";
+        assert!(
+            cloud_refusal(&shared, prefixed, prefixed).is_none(),
+            "an explicit provider prefix is a cloud request, which private mode does not govern"
+        );
+
+        // Kept on this computer: refused with private mode off too, and under
+        // the provider's prefix — the owner said its requests stay here.
+        shared.credits.private_mode.store(false, Relaxed);
+        shared.keep_on_this_computer(&swarm_model, true).unwrap();
+        for name in [id, prefixed] {
+            assert!(
+                matches!(
+                    cloud_refusal(&shared, name, name),
+                    Some(SwarmError::KeptOnThisComputer { .. })
+                ),
+                "{name}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn private_ip_blocking_resolver_filters_loopback() {

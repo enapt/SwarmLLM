@@ -44,6 +44,16 @@ pub struct ModelMgmt {
     /// request for the shard again (HF shard download, single-shard download,
     /// a pool pin to this device).
     pub removed_by_user: DashMap<crate::types::ShardId, bool>,
+    /// Models the owner keeps on this computer (#251): their requests run here
+    /// or are refused, never on another computer. Persisted in the
+    /// `kept_on_this_computer` DB tree; write ONLY
+    /// `SharedState::keep_on_this_computer`, read ONLY
+    /// `SharedState::kept_on_this_computer` (and through it
+    /// `pool::scope::request_scope`).
+    pub kept_on_this_computer: dashmap::DashSet<crate::types::ModelId>,
+    /// The stored set could not be read at startup: every model counts as kept
+    /// until `SharedState::keep_on_this_computer` reads it (fails closed).
+    pub kept_on_this_computer_unread: std::sync::atomic::AtomicBool,
     /// Shards where P2P download has exhausted all peer attempts in this session.
     /// Signals auto_manage to force the HF path even when peer holders are registered.
     /// Cleared when a download for the shard successfully completes.
@@ -1049,6 +1059,8 @@ mod tests {
             loading_models: DashMap::new(),
             locked_shards: DashMap::new(),
             removed_by_user: DashMap::new(),
+            kept_on_this_computer: dashmap::DashSet::new(),
+            kept_on_this_computer_unread: std::sync::atomic::AtomicBool::new(false),
             shard_p2p_failed: dashmap::DashSet::new(),
             uncorroborated_origin_parts: DashMap::new(),
             shards_needing_repair: dashmap::DashSet::new(),

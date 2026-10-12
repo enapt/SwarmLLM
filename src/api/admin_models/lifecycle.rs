@@ -694,3 +694,54 @@ pub async fn set_model_encrypted_pipeline(
         },
     })))
 }
+
+/// GET /api/admin/models/:model_id/keep-on-this-computer — whether this
+/// model's requests are kept on this computer (#251), and whether this
+/// computer holds all of the model, which is what lets them run here.
+pub async fn get_model_keep_on_this_computer(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
+    Ok(Json(keep_on_this_computer_status(&state, model_id)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct KeepOnThisComputerUpdate {
+    pub enabled: bool,
+}
+
+/// PUT /api/admin/models/:model_id/keep-on-this-computer — keep this model's
+/// requests on this computer, or let them use other computers again.
+///
+/// Turning it on is never refused, even when this computer does not hold the
+/// whole model: requests are then refused with `KeptOnThisComputer`, whose
+/// hint names the fix — failing CLOSED, the same choice the prompt-privacy
+/// switch made (`set_model_encrypted_pipeline`).
+pub async fn set_model_keep_on_this_computer(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+    JsonBody(body): JsonBody<KeepOnThisComputerUpdate>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
+    let mid = crate::types::ModelId(model_id.clone());
+    state
+        .shared_state
+        .keep_on_this_computer(&mid, body.enabled)
+        .map_err(ApiError)?;
+    tracing::info!(
+        model = %model_id,
+        enabled = body.enabled,
+        "Per-model keep on this computer updated"
+    );
+    Ok(Json(keep_on_this_computer_status(&state, model_id)))
+}
+
+fn keep_on_this_computer_status(state: &AppState, model_id: String) -> serde_json::Value {
+    let mid = crate::types::ModelId(model_id.clone());
+    serde_json::json!({
+        "model_id": model_id,
+        "keep_on_this_computer": state.shared_state.kept_on_this_computer(&mid),
+        "whole_model_here": state.shared_state.has_complete_split_model(&mid),
+    })
+}

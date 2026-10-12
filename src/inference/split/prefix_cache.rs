@@ -849,8 +849,8 @@ impl PrefixCache {
     /// Item 8 Phase 2b: hydrate a per-request KV entry directly from
     /// serialized snapshot bytes returned by a remote peer. Returns the
     /// number of tokens seeded, or an error if deserialization failed.
-    /// Does NOT re-BLAKE3-verify — that happens earlier in the daemon's
-    /// `try_fetch_cross_node_prefix` helper.
+    /// Does NOT re-BLAKE3-verify — the daemon's prefix probe
+    /// (`daemon::background`, `verify_fetched_snapshot`) has done that.
     pub fn hydrate_request_from_bytes(
         &self,
         kv_store: &KvCacheStore,

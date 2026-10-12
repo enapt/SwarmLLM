@@ -4604,6 +4604,33 @@ fn live_sharing_gate_near(text: &str, at: usize) -> bool {
     })
 }
 
+/// Does code within the sharing gate's window of line `at` ask whether the model
+/// is kept on this computer (#251)? Same reach as `live_sharing_gate_near`: the
+/// check sits beside the node-wide gate at both sites.
+fn kept_gate_near(text: &str, at: usize) -> bool {
+    const GATE_WINDOW: usize = 25;
+    let lines: Vec<&str> = text.lines().collect();
+    let lo = at.saturating_sub(GATE_WINDOW + 1);
+    let hi = (at + GATE_WINDOW).min(lines.len());
+    lines[lo..hi]
+        .iter()
+        .any(|l| !l.trim_start().starts_with("//") && l.contains("kept_on_this_computer("))
+}
+
+#[test]
+fn the_kept_model_sharing_guard_sees_a_missing_check() {
+    let gated =
+        "if s.kept_on_this_computer(&m) { continue; }\nsend(SwarmMessage::PrefixCacheAnnounce(a));";
+    let line = marker_lines(gated, "SwarmMessage::PrefixCacheAnnounce")[0];
+    assert!(kept_gate_near(gated, line));
+    let ungated = "// s.kept_on_this_computer(&m)\nsend(SwarmMessage::PrefixCacheAnnounce(a));";
+    let line = marker_lines(ungated, "SwarmMessage::PrefixCacheAnnounce")[0];
+    assert!(
+        !kept_gate_near(ungated, line),
+        "a commented-out check is no check"
+    );
+}
+
 /// The guard must catch an ungated send and a send gated on the boot snapshot,
 /// and must not fire on the two shapes the codebase actually uses. Without this
 /// the check can silently weaken back into the whole-file version it replaced.
@@ -4685,6 +4712,12 @@ fn nothing_leaves_this_node_with_a_prompt_in_it_unless_sharing_is_on() {
                  path puts prompt-derived data on the wire, so it must be opt-in, \
                  and the gate must come from the LIVE config — turning a privacy \
                  setting off has to take effect without a restart (gotcha #281)."
+            );
+            assert!(
+                kept_gate_near(&src, line_no),
+                "{rel}:{line_no}: {what} does not ask `kept_on_this_computer` — a model \
+                 kept on this computer shares nothing of its prompts, whatever the \
+                 node-wide setting says (#251)."
             );
         }
     }
@@ -7467,6 +7500,174 @@ fn the_privacy_map_guard_catches_the_form_the_defect_took() {
     assert!(!statements(commented)
         .iter()
         .any(|(_, t)| t.contains("encrypted_pipeline_models")));
+}
+
+/// **Every path a request's data can leave by asks `pool::scope::request_scope`.**
+/// Private mode was a node-wide set (`allowed_node_set`) that each path asked on
+/// its own, and two did not: an image went to the nearest holder of the image
+/// encoder, a prompt prefix to any peer holding its cached blocks (#251). The
+/// per-model "Keep on this computer" made the question per REQUEST, so it has
+/// one answer and every path asks it.
+///
+/// Two halves. Each request path below must ask `request_scope`. And
+/// `allowed_node_set` itself is read only by shard management, where the data
+/// moving is public model weights and keeping a model here does not apply —
+/// a new request path asking it would honour private mode and skip the
+/// per-model setting, which is the shape both leaks had.
+#[test]
+fn every_path_a_request_leaves_by_asks_its_scope() {
+    let request_paths = [
+        // Candidates for every plan: splits, hand-offs, standbys.
+        "src/inference/scheduler/mod.rs",
+        // Whole-model hand-off to one peer.
+        "src/inference/pipeline/remote_generate.rs",
+        // An image sent to the holder of the image encoder.
+        "src/inference/pipeline/vision.rs",
+        // A prompt prefix asked of the peers holding its cached blocks.
+        "src/daemon/background.rs",
+        // An HTTP request forwarded to a peer that has the model.
+        "src/api/openai/resolver.rs",
+        // The fast path: whether there is anyone to ask.
+        "src/daemon/state/mod.rs",
+    ];
+    let mut missing = Vec::new();
+    for rel in request_paths {
+        let src = std::fs::read_to_string(rel).unwrap_or_default();
+        if !statements(&src)
+            .iter()
+            .any(|(_, t)| t.contains("scope::request_scope("))
+        {
+            missing.push(rel);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "these request paths no longer ask `pool::scope::request_scope` which \
+         nodes the request may reach: {missing:?}"
+    );
+
+    let shard_management = [
+        // Defines it, and `request_scope` builds on it.
+        "src/pool/scope.rs",
+        // Which shards to fetch, keep and prune — public weights.
+        "src/model/auto_manage/",
+    ];
+    let mut offenders = Vec::new();
+    for path in rust_files_under(std::path::Path::new("src")) {
+        let rel = path.to_string_lossy().replace('\\', "/");
+        if shard_management.iter().any(|a| rel.contains(a)) {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let lines: Vec<&str> = src.lines().collect();
+        for (line, text) in statements(&src) {
+            if !text.contains("allowed_node_set(") {
+                continue;
+            }
+            // `SharedState::select_best_allowed_peer` chooses whom to
+            // download a SHARD from; the file also holds the fast path, so
+            // only that one function is exempt, not the file.
+            let enclosing = lines[..line.min(lines.len())].iter().rev().find(|l| {
+                let t = l.trim_start();
+                (t.starts_with("fn ") || t.starts_with("pub") || t.starts_with("async"))
+                    && t.contains("fn ")
+                    && !t.starts_with("//")
+            });
+            if rel.ends_with("src/daemon/state/mod.rs")
+                && enclosing.is_some_and(|l| l.contains("fn select_best_allowed_peer("))
+            {
+                continue;
+            }
+            offenders.push(format!("{rel}:{line}: {}", text.trim()));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a request path asks `allowed_node_set`, which honours private mode but \
+         not \"Keep on this computer\" — ask `pool::scope::request_scope`:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// **A model kept on this computer never goes to a cloud provider either.**
+/// Provider routing is by NAME, and a local model's name matches a provider's
+/// prefix rule (`mistral…`, `llama-…`, `gemma…`, `deepseek…`) — with that
+/// provider's key saved, a kept model the swarm could not finish sent its
+/// prompt to the provider (#251). Each cloud entry point asks
+/// `providers::cloud_refused_for` BEFORE its first cloud call, and a new file
+/// resolving a provider has to be added here, where the question is asked.
+#[test]
+fn every_cloud_path_asks_whether_the_model_is_kept_here() {
+    let cloud_calls = [
+        "try_get_claude_subscription(",
+        "try_proxy_openai(",
+        "proxy_to_anthropic(",
+        "resolve_provider(",
+        "provider_model_map",
+    ];
+    let entry_points = [
+        ("src/api/openai/mod.rs", "async fn try_cloud_proxy("),
+        ("src/api/anthropic/mod.rs", "pub async fn messages("),
+        (
+            "src/api/providers.rs",
+            "pub async fn try_proxy_openai_responses(",
+        ),
+        (
+            "src/api/openai/responses/anthropic_bridge.rs",
+            "pub async fn try_proxy_anthropic_responses(",
+        ),
+    ];
+    for (file, signature) in entry_points {
+        let src = std::fs::read_to_string(file).unwrap();
+        let body = fn_body(&src, signature)
+            .unwrap_or_else(|| panic!("{file}: `{signature}` is gone — update this guard"));
+        let gate = body.find("cloud_refused_for(").unwrap_or_else(|| {
+            panic!("{file}: `{signature}` no longer asks `providers::cloud_refused_for`")
+        });
+        for call in cloud_calls {
+            if let Some(at) = body.find(call) {
+                assert!(
+                    gate < at,
+                    "{file}: `{signature}` reaches `{call}` before asking \
+                     `cloud_refused_for` — a kept model's prompt would go out first"
+                );
+            }
+        }
+    }
+
+    // Who resolves a provider at all: the module itself, the four entry
+    // points' files, and the provider-status listing (it probes a provider,
+    // and carries no request).
+    let known = [
+        "src/api/providers.rs",
+        "src/api/openai/mod.rs",
+        "src/api/anthropic/mod.rs",
+        "src/api/openai/responses/anthropic_bridge.rs",
+        "src/api/admin_providers.rs",
+    ];
+    let mut strangers = Vec::new();
+    for path in rust_files_under(std::path::Path::new("src")) {
+        let rel = path.to_string_lossy().replace('\\', "/");
+        if known.iter().any(|k| rel.ends_with(k)) {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for (line, text) in statements(&src) {
+            if text.contains("resolve_provider(") {
+                strangers.push(format!("{rel}:{line}: {}", text.trim()));
+            }
+        }
+    }
+    assert!(
+        strangers.is_empty(),
+        "a new path resolves a cloud provider — ask `providers::cloud_refused_for` \
+         before it sends anything, and add it to this guard:\n{}",
+        strangers.join("\n")
+    );
 }
 
 /// **This node's region is auto-detected, and three sites asked for the typed

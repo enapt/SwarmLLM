@@ -963,6 +963,7 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
         E::SegmentFailoverExhausted(_) => "SegmentFailoverExhausted",
         E::ReplyTruncated(_) => "ReplyTruncated",
         E::PrivateModeUnavailable { .. } => "PrivateModeUnavailable",
+        E::KeptOnThisComputer { .. } => "KeptOnThisComputer",
         E::PromptPrivacyUnavailable { .. } => "PromptPrivacyUnavailable",
         E::PromptPrivacyNeedsFinalShard { .. } => "PromptPrivacyNeedsFinalShard",
         E::ModelIncompleteInSwarm { .. } => "ModelIncompleteInSwarm",

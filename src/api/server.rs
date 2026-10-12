@@ -359,6 +359,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/models/{id}/encrypted-pipeline",
             get(admin::get_model_encrypted_pipeline).put(admin::set_model_encrypted_pipeline),
         )
+        // Per-model "keep on this computer": requests run only here (#251)
+        .route(
+            "/api/admin/models/{id}/keep-on-this-computer",
+            get(admin::get_model_keep_on_this_computer).put(admin::set_model_keep_on_this_computer),
+        )
         // One action to make prompt privacy possible: fetch the first and last
         // pieces of a model. Privacy then engages on its own.
         .route(

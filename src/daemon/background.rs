@@ -865,6 +865,11 @@ pub(super) fn spawn_prefix_announce_forwarder(
                     if !shared_state.cfg().inference.share_prefix_cache_with_peers {
                         continue;
                     }
+                    // Nor for a model kept on this computer, whatever the
+                    // node-wide setting says (#251).
+                    if shared_state.kept_on_this_computer(&event.model_id) {
+                        continue;
+                    }
                     let announce = crate::types::PrefixCacheAnnounce {
                         node_id: our_id.clone(),
                         model_id: event.model_id,
@@ -974,6 +979,10 @@ pub(super) fn spawn_prefix_probe_handler(
                         .config
                         .inference
                         .cross_node_prefix_trust_min;
+                    // A fetch tells its peer which opening this prompt has,
+                    // so it goes only where the request itself may (#251:
+                    // private mode, a model kept on this computer).
+                    let scope = crate::pool::scope::request_scope(&shared_state, &event.model_id);
                     let mut best: Option<(crate::types::NodeId, [u8; 32], u32)> = None;
                     if let Some(model_index) = shared_state
                         .models
@@ -986,6 +995,7 @@ pub(super) fn spawn_prefix_probe_handler(
                                     .iter()
                                     .map(|r| r.clone())
                                     .filter(|n| n != our_id)
+                                    .filter(|n| scope.as_ref().is_none_or(|s| s.contains(n)))
                                     .filter(|n| {
                                         shared_state
                                             .credits

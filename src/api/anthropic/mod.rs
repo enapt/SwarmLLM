@@ -399,6 +399,12 @@ pub async fn messages(
     // path — an Anthropic request reshaped into OpenAI form. The explicit
     // prefix still wins over the name heuristic, so `openai:claude-x` is not
     // hijacked by the Anthropic branch below.
+    //
+    // Never for a model the owner keeps on this computer: nothing here could
+    // run it, and its prompt may not leave (#251).
+    if let Some(refusal) = providers::cloud_refused_for(&state, &model).await {
+        return Err(ApiError(refusal));
+    }
     let (upstream_model, anthropic_allowed) = route_model(&req.model);
     let lower_model = upstream_model.to_lowercase();
 

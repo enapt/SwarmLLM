@@ -269,6 +269,12 @@ The per-shard tensor table is ~92% of a manifest and is derived, not sent: **`da
 
 → `docs/invariants/network.md` § "A manifest's tensor table is DERIVED data, and the shard count is its OUTPUT"
 
+## A request reaches only the nodes its scope names, on every path (2026-10-12)
+
+**`pool::scope::request_scope(shared, model_id)` is the single answer** to which nodes a request's data may reach — "Keep on this computer" (this node alone) or private mode's set; `allowed_node_set` is for shard management only. Guards `every_path_a_request_leaves_by_asks_its_scope`, `every_cloud_path_asks_whether_the_model_is_kept_here` (`providers::cloud_refused_for`). A failure is never broadcast to the swarm.
+
+→ `docs/invariants/network.md` § "A request reaches only the nodes its scope names, on every path"
+
 ## Network coordinates: publish them rough, feed them a MINIMUM
 
 `NodeCapability.coord` (Vivaldi, `features::NETWORK_COORDS`) is published however rough (`a_brand_new_node_still_publishes_its_coordinate`; `is_usable()` is the CONSUMER's gate). Feed the windowed MINIMUM, never a raw sample — **`SharedState::observe_network_coord`** is the single writer, `LatencyFilter` takes the minimum (not Serf's median). Size a time window against its fill rate: `LATENCY_WINDOW_MIN_SAMPLES`, `LATENCY_SAMPLE_MAX_AGE_MS`.

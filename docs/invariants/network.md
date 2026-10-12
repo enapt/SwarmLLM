@@ -1721,6 +1721,52 @@ Guard: `lan_membership_is_never_decided_from_what_a_peer_told_us`.
 
 → `docs/invariants/network.md`
 
+## A request reaches only the nodes its scope names, on every path (2026-10-12, #251)
+
+**`pool::scope::request_scope(shared, model_id)` is the one answer to "which nodes may this
+request's data reach"**: this node alone for a model kept on this computer; private mode's
+`allowed_node_set` plus `cross_pool_extras` otherwise; `None` = unrestricted routing (never trust —
+a credential still needs `is_pool_member`). `allowed_node_set` itself is for shard management, where
+what moves is public weights.
+
+### What it replaced
+
+Private mode was a node-wide set each path asked on its own. Adding a per-model "Keep on this
+computer" (report #035) meant enumerating every path a request's data leaves by, and three did not
+ask at all:
+
+- **The image encoder** (`pipeline/vision.rs`) went to the nearest holder of the model's mmproj,
+  pool or not — a picture left a private-mode pool (`c84c12dd`).
+- **The prefix-KV probe** (`daemon/background.rs`) asked any peer holding the cached blocks of a
+  prompt's opening, sending their hashes — enough to confirm a guessed prompt.
+- **`broadcast_pipeline_error`** gossiped every failed distributed request to the whole swarm with
+  `e.to_string()` — the model's name, and for a policy refusal the setting. Its receivers only
+  LOGGED it (`router::handle_network_message`); "so peers can update shard availability" was never
+  implemented. Removed; receivers still decode `SwarmMessage::InferenceError` (additive rule).
+
+And a fourth, outside the swarm: **cloud providers are chosen by NAME** (`providers::resolve_provider`
+prefix rules), so a local model called `mistral…`, `llama-…`, `gemma…` or `deepseek…` went to that
+provider (with its key saved) whenever the swarm lacked a part of it. `providers::cloud_refused_for`
+refuses a kept model on the two last-resort cloud paths and skips the cloud on the Responses API's
+two cloud-FIRST passthroughs, so the local path answers.
+
+Two unscoped helpers turned out to be dead (`SharedState::best_cross_node_prefix_match`,
+`try_fetch_cross_node_prefix` — the live probe is in `background.rs`) and were deleted rather than
+scoped.
+
+### What a change must keep
+
+- A new path that sends a request's prompt, tokens, hidden states, KV, image or reply to another
+  machine asks `request_scope` — `every_path_a_request_leaves_by_asks_its_scope` lists the paths and
+  fails on an `allowed_node_set(` read outside shard management.
+- A new path that resolves a cloud provider asks `cloud_refused_for` before its first cloud call —
+  `every_cloud_path_asks_whether_the_model_is_kept_here` (ordered within each entry function).
+- A kept model this computer cannot run whole is a POLICY refusal (`KeptOnThisComputer`, 503, own
+  `error_type`, non-penalty, a hint that never says retry), refused up front in
+  `assemble_pipeline_for` and again if `gather_candidates` finds nobody.
+- `local_fast_path_for` counts only connected peers INSIDE the scope as "peers to ask".
+- Left (FUTURE_WORK #251): the per-REQUEST form, and private mode's own cloud hole for a swarm model.
+
 ## A network coordinate must be published rough, and fed a MINIMUM
 
 **Rule**: `.claude/rules/arch-network.md` § "Network coordinates".

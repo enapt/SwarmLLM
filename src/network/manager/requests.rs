@@ -378,9 +378,18 @@ impl NetworkManager {
                     .cfg()
                     .inference
                     .share_prefix_cache_with_peers;
-                if !is_authenticated || !sharing_enabled {
+                // A model kept on this computer shares nothing of its prompts,
+                // whatever the node-wide setting says (#251).
+                let kept = self.shared_state.kept_on_this_computer(&req.model_id);
+                if !is_authenticated || !sharing_enabled || kept {
                     if !is_authenticated {
                         tracing::warn!(%peer, "PrefixKvFetch from unauthenticated peer — rejecting");
+                    } else if kept {
+                        tracing::debug!(
+                            %peer,
+                            model = %req.model_id,
+                            "PrefixKvFetch declined — the model is kept on this computer"
+                        );
                     } else {
                         tracing::debug!(
                             %peer,

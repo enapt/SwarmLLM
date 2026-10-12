@@ -201,6 +201,70 @@ fn assemble_multi_node_pipeline() {
     assert_eq!(assignment.segments[1].layer_range, (16, 32));
 }
 
+/// **A model kept on this computer is never planned onto a peer** (#251).
+/// Two peers hold all of it; this node holds none. Unkept, the plan uses them
+/// (the control); kept, the request is refused as `KeptOnThisComputer` — a
+/// policy refusal naming the setting — rather than planned outside it.
+#[test]
+fn a_model_kept_on_this_computer_is_never_planned_onto_a_peer() {
+    let state = make_shared_state();
+    let local_id = state.identity.node_id().clone();
+    let model = ModelId("kept-model".into());
+    let shard = |index: u32, layer_range: (u32, u32)| ShardInfo {
+        index,
+        layer_range,
+        size_bytes: 1_000_000_000,
+        hash: [0u8; 32],
+        tensors: vec![],
+    };
+    state.model_registry.register_manifest(make_manifest(
+        "kept-model",
+        32,
+        vec![shard(0, (0, 16)), shard(1, (16, 32))],
+    ));
+    for (byte, index) in [(2u8, 0u32), (3, 1)] {
+        let peer = NodeId([byte; 32]);
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: model.clone(),
+                index,
+            },
+            peer.clone(),
+        );
+        state.peer_registry.insert(
+            peer.clone(),
+            PeerInfo {
+                node_id: peer.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(10),
+                trust_score: 0.9,
+                peer_id_bytes: None,
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: true,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        );
+        state.connected_node_ids.insert(peer);
+    }
+    let scheduler = PipelineScheduler::new(state.clone());
+
+    // THE CONTROL: not kept, the peers serve it.
+    let plan = scheduler.assemble_pipeline(&model, &local_id).unwrap();
+    assert!(plan.segments.iter().all(|s| s.node_id != local_id));
+
+    state.keep_on_this_computer(&model, true).unwrap();
+    match scheduler.assemble_pipeline(&model, &local_id) {
+        Err(SwarmError::KeptOnThisComputer { .. }) => {}
+        other => panic!("a kept model must be refused, not planned: {other:?}"),
+    }
+}
+
 /// Routing prices a peer by what forwarding to it has actually cost when it
 /// has that figure, and by the health ping only until then. The ping is
 /// taken idle; the acknowledgement latency is taken on real work and sees a

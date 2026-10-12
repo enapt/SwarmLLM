@@ -46,9 +46,10 @@ pub struct ProgressEvent {
 }
 
 /// Item 8 Phase 2b: worker-initiated cross-node prefix-KV probe. The
-/// daemon's probe handler drains these off the channel, runs
-/// `SharedState::try_fetch_cross_node_prefix`, and sends the (possibly
-/// empty) result back via `ModelProcessPool::send_prefix_fetch_result`.
+/// daemon's probe handler (`daemon::background`) drains these off the
+/// channel, fetches from a peer inside the request's scope
+/// (`pool::scope::request_scope`), and sends the (possibly empty) result
+/// back via `ModelProcessPool::send_prefix_fetch_result`.
 #[derive(Clone, Debug)]
 pub struct PrefixProbeEvent {
     pub model_id: ModelId,

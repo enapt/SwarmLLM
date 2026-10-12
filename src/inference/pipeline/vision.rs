@@ -68,16 +68,21 @@ impl PipelineExecutor {
         if mmproj_holders.is_empty() {
             return Err(SwarmError::VisionEncoderUnavailable(model_id.clone()));
         }
-        // The image goes only where private mode lets this request go
-        // (`pool::scope::allowed_node_set`, the gate the plan was built
-        // under). Until 2026-10-12 this picked ANY holder when the plan's
-        // first node had no encoder, so a private-mode node could hand the
-        // user's image to a computer outside its pool.
+        // The image goes only where this request may go
+        // (`pool::scope::request_scope`, the scope the plan was built under).
+        // Until 2026-10-12 this picked ANY holder when the plan's first node
+        // had no encoder, so a private-mode node could hand the user's image
+        // to a computer outside its pool.
         let mmproj_holders = in_request_scope(
             mmproj_holders,
-            crate::pool::scope::allowed_node_set(&self.shared_state).as_ref(),
+            crate::pool::scope::request_scope(&self.shared_state, model_id).as_ref(),
         );
         if mmproj_holders.is_empty() {
+            if self.shared_state.kept_on_this_computer(model_id) {
+                return Err(SwarmError::KeptOnThisComputer {
+                    model_id: model_id.0.clone(),
+                });
+            }
             return Err(SwarmError::PrivateModeUnavailable {
                 model_id: model_id.0.clone(),
                 missing_shards: vec![crate::types::MMPROJ_SHARD_INDEX],
