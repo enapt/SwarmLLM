@@ -595,6 +595,10 @@ struct WorkerHandle {
     /// the same "prediction versus fact" mistake `placed_on_cpu_because` exists
     /// to avoid.
     charged_against_ram: bool,
+    /// A card/processor split's processor share, in MB, charged to the RAM
+    /// budget at spawn beside `charged_mb`'s card share (#264); 0 for a worker
+    /// on one device. Released with the worker.
+    host_share_mb: u64,
 }
 
 /// Longest path a Unix domain socket may have, INCLUDING its NUL terminator.
@@ -1830,6 +1834,64 @@ pub(crate) fn charges_ram(going_to_cpu: bool, gpu_detected: bool, build_has_cuda
     going_to_cpu || !gpu_detected || !build_has_cuda
 }
 
+/// What a spawn's admission charged, carried onto its worker so the release
+/// subtracts exactly this worker's share (`WorkerHandle::charged_mb`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SpawnCharge {
+    /// `mb` is against the RAM budget (`charges_ram`), else the card's.
+    against_ram: bool,
+    mb: u64,
+    /// A card/processor split's processor share, against RAM (#264).
+    host_share_mb: u64,
+}
+
+impl SpawnCharge {
+    /// Whichever budget the worker is charged against is the one its release
+    /// subtracts from; a split's RAM charge is its processor share.
+    fn decided(charge_ram: bool, vram_mb: u64, ram_mb: u64) -> Self {
+        if charge_ram {
+            Self {
+                against_ram: true,
+                mb: ram_mb,
+                host_share_mb: 0,
+            }
+        } else {
+            Self {
+                against_ram: false,
+                mb: vram_mb,
+                host_share_mb: ram_mb,
+            }
+        }
+    }
+}
+
+/// The layers a spawn charges to the machine's memory: the whole `segment`
+/// when it lands there (`charges_ram`), a card/processor split's
+/// processor-held run — the layers after its first `on_card` — and nothing for
+/// a model wholly on the card.
+///
+/// **A split's processor share was charged to nothing** (#264): its weights,
+/// their conversation cache and the worker process sat outside
+/// `resources.max_ram_mb`, a processor worker started beside it was admitted
+/// into memory the split already held, and its processor-side cache had no
+/// budget from the daemon (#262). Charged here, it goes through the same RAM
+/// admission, refusal and `--kv-budget-bytes` grant as a processor placement.
+fn ram_charged_run(
+    charge_ram: bool,
+    segment: (u32, u32),
+    hybrid_layers: Option<(usize, usize)>,
+) -> Option<(u32, u32)> {
+    if charge_ram {
+        return Some(segment);
+    }
+    let (on_card, _) = hybrid_layers?;
+    let start = segment
+        .0
+        .saturating_add(u32::try_from(on_card).unwrap_or(u32::MAX))
+        .min(segment.1);
+    (start < segment.1).then_some((start, segment.1))
+}
+
 /// Add `mb` to a model's recorded charge.
 ///
 /// Segments of one model share a worker, so a second segment ADDS to what the
@@ -1849,6 +1911,7 @@ struct DepartedWorker {
     freed_gpu_memory: bool,
     charged_mb: u64,
     charged_against_ram: bool,
+    host_share_mb: u64,
 }
 
 impl From<&WorkerHandle> for DepartedWorker {
@@ -1867,6 +1930,7 @@ impl From<&WorkerHandle> for DepartedWorker {
             freed_gpu_memory: h.holds_gpu_memory(),
             charged_mb: h.charged_mb.load(Ordering::Acquire),
             charged_against_ram: h.charged_against_ram,
+            host_share_mb: h.host_share_mb,
         }
     }
 }
@@ -5576,8 +5640,9 @@ impl ModelProcessPool {
                 "Model will run on the CPU"
             );
         }
-        // Anything landing in system RAM — a CPU-only node, or the fallback
-        // just taken above — is charged against the RAM budget. There is no
+        // Anything landing in system RAM — a CPU-only node, the fallback just
+        // taken above, or a card/processor split's processor share
+        // (`ram_charged_run`, #264) — is charged against the RAM budget. There is no
         // further device to demote to, so this refuses rather than degrades:
         // swapping would slow every other request on the machine, not just
         // this model, and nothing in the response would say so.
@@ -5612,8 +5677,8 @@ impl ModelProcessPool {
             self.release_vram_charge(model_id, charged_vram_mb);
             charged_vram_mb = 0;
         }
-        if charge_ram {
-            let estimated = self.estimate_cpu_footprint_mb(model_id, Some(segment));
+        if let Some(ram_run) = ram_charged_run(charge_ram, segment, hybrid_layers) {
+            let estimated = self.estimate_cpu_footprint_mb(model_id, Some(ram_run));
             // Refusing is the last resort: first reclaim memory from models
             // nothing is using, then ask again (`admit_to_cpu_as`, a tenant's
             // only). Only then does the user see an error.
@@ -5651,7 +5716,7 @@ impl ModelProcessPool {
                             self.ram_budget_note(),
                         )
                     });
-                let message = match self.cpu_footprint_detail(model_id, Some(segment)) {
+                let message = match self.cpu_footprint_detail(model_id, Some(ram_run)) {
                     Some((footprint, effective_context, source)) => {
                         crate::model::auto_manage::vram::describe_cpu_refusal(
                             &model_id.0,
@@ -5678,7 +5743,7 @@ impl ModelProcessPool {
                 // where a re-plan can produce a different answer.
                 return Err(SwarmError::LocalMemoryUnavailable(message));
             }
-            self.record_cpu_kv_budget(model_id, Some(segment));
+            self.record_cpu_kv_budget(model_id, Some(ram_run));
         }
 
         // Armed only across the await, so the `Ok`/`Err` arms below keep owning
@@ -5696,14 +5761,7 @@ impl ModelProcessPool {
                 .spawn_worker(
                     model_id,
                     placed_on_cpu_because,
-                    charge_ram,
-                    // Whichever budget this worker is charged against is the one
-                    // its release must subtract from.
-                    if charge_ram {
-                        charged_ram_mb
-                    } else {
-                        charged_vram_mb
-                    },
+                    SpawnCharge::decided(charge_ram, charged_vram_mb, charged_ram_mb),
                     estimated,
                     hybrid_layers,
                 )
@@ -5897,12 +5955,7 @@ impl ModelProcessPool {
         &self,
         model_id: &ModelId,
         placed_on_cpu_because: Option<CpuReason>,
-        charged_against_ram: bool,
-        // What this spawn's admission actually put into the reserved map, in
-        // MB, against whichever budget `charged_against_ram` names. Carried so
-        // the release can subtract this worker's own share — see
-        // `WorkerHandle::charged_mb`.
-        charged_mb: u64,
+        charge: SpawnCharge,
         gpu_estimate_mb: u64,
         // A partial split decided by admission: `(this many of the worker's
         // layers go on the card, layers in total)`, the rest on the processor.
@@ -6336,9 +6389,10 @@ impl ModelProcessPool {
             last_used: AtomicU64::new(0),
             kv_holders: std::sync::Mutex::new(std::collections::HashMap::new()),
             placed_on_cpu_because,
-            charged_mb: AtomicU64::new(charged_mb),
+            charged_mb: AtomicU64::new(charge.mb),
             charged_segments: std::sync::Mutex::new(Vec::new()),
-            charged_against_ram,
+            charged_against_ram: charge.against_ram,
+            host_share_mb: charge.host_share_mb,
             gpu_estimate_mb,
             // Only a split is worth recording; a worker wholly on the card
             // says so through `placed_on_cpu_because: None` alone.
@@ -7585,6 +7639,7 @@ impl ModelProcessPool {
             freed_gpu_memory,
             charged_mb,
             charged_against_ram,
+            host_share_mb,
         } = departed;
         // Exactly what THIS worker was charged, not the model's whole entry: a
         // replacement can already have been admitted under the same key while
@@ -7597,6 +7652,11 @@ impl ModelProcessPool {
             self.release_ram_charge(model_id, charged_mb);
         } else {
             self.release_vram_charge(model_id, charged_mb);
+        }
+        // A split's processor share, charged to the machine beside its card
+        // share (#264).
+        if host_share_mb > 0 {
+            self.release_ram_charge(model_id, host_share_mb);
         }
         tracing::info!(
             model_id = %model_id,
@@ -9354,6 +9414,7 @@ mod tests {
             charged_segments: std::sync::Mutex::new(Vec::new()),
             placed_on_cpu_because,
             charged_against_ram,
+            host_share_mb: 0,
             gpu_estimate_mb: 0,
             gpu_layers_on_card,
         })
@@ -10738,6 +10799,65 @@ mod admission_tests {
         // With 2500 MB already committed, the charge stays inside what is left.
         assert!(p.admit_to_gpu(&ModelId("other".into()), 2500));
         assert!(p.card_share_of_split_mb(&m, (0, 28), n) <= 500);
+    }
+
+    /// **A card/processor split charges the MACHINE for the layers it keeps on
+    /// the processor** (#264): the run after its card layers, through the same
+    /// RAM admission as a processor placement. Charged nothing, the split's
+    /// processor weights and caches sat outside `resources.max_ram_mb` and a
+    /// processor worker beside it was admitted into memory it already held.
+    #[test]
+    fn a_split_charges_the_machine_for_the_layers_it_keeps_on_the_processor() {
+        // A split of 0..28 with 10 on the card keeps 10..28 on the processor.
+        assert_eq!(
+            ram_charged_run(false, (0, 28), Some((10, 28))),
+            Some((10, 28))
+        );
+        assert_eq!(
+            ram_charged_run(false, (8, 40), Some((12, 32))),
+            Some((20, 40))
+        );
+        // A placement wholly on the processor is charged its whole segment;
+        // one wholly on the card, nothing.
+        assert_eq!(ram_charged_run(true, (0, 28), None), Some((0, 28)));
+        assert_eq!(ram_charged_run(false, (0, 28), None), None);
+        // The split's two charges: its card share against the card, its
+        // processor share against the machine.
+        assert_eq!(
+            SpawnCharge::decided(false, 2_000, 3_000),
+            SpawnCharge {
+                against_ram: false,
+                mb: 2_000,
+                host_share_mb: 3_000,
+            }
+        );
+        assert_eq!(SpawnCharge::decided(true, 0, 3_000).host_share_mb, 0);
+    }
+
+    /// A departing split gives BOTH charges back (#264): its card share to
+    /// the card's budget and its processor share to the machine's.
+    #[test]
+    fn a_departing_split_gives_back_both_of_its_charges() {
+        let p = pool();
+        let m = ModelId("split-14b".into());
+        add_reserved(&p.vram_reserved_mb, &m, 2_000);
+        add_reserved(&p.ram_reserved_mb, &m, 3_000);
+        p.after_worker_gone_charge(
+            &m,
+            DepartedWorker {
+                freed_gpu_memory: true,
+                charged_mb: 2_000,
+                charged_against_ram: false,
+                host_share_mb: 3_000,
+            },
+            "test",
+        );
+        assert_eq!(p.vram_committed_mb(), 0);
+        assert_eq!(
+            p.ram_committed_mb(),
+            0,
+            "the processor share is released too"
+        );
     }
 
     /// A memory refusal is remembered as the layers it would have ADDED, the

@@ -38,6 +38,8 @@ A resource taken before an `.await` is returned by a guard that releases on DROP
 
 **`SharedState::committed_memory_mb`** is the single answer to "how much memory is committed", asked of `ModelProcessPool` (`vram_committed_mb` / `ram_committed_mb`). Never sum `split_models` (headers, no worker). Guard: `a_memory_budget_is_charged_by_the_pool_never_by_the_metadata_map`.
 
+**Every byte a spawn places is charged to the device it lands on** — a card/processor split's card share to the card (`card_share_of_split_mb`) AND its processor share to the machine (`process_pool::ram_charged_run`, through the same `admit_to_cpu_as` / `record_cpu_kv_budget` as a processor placement; #264). `SpawnCharge` carries both onto the worker (`WorkerHandle::host_share_mb`) and a departure releases both.
+
 → `docs/invariants/memory.md` § "A budget is charged by whatever owns the resource"
 
 ## The contribution level caps the SWARM's work, not the owner's prompt (2026-09-26)

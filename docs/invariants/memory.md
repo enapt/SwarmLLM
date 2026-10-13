@@ -2727,8 +2727,36 @@ shows no regression rather than the bug). Tests: `a_claim_is_weighed_against_the
 
 **Residuals.** A refusal's `layers_that_fit` (#263) scales the whole range by the refusing home's
 fraction, so a split refused on one side is re-planned to fewer layers than would fit — conservative.
-The split's processor-held WEIGHTS are still charged to no RAM budget at admission (FUTURE_WORK
-#264); until they are, its host KV budget comes from the machine, not from `resources.max_ram_mb`.
+The split's processor-held weights were charged to no RAM budget either — #264, closed the same
+day (§ "A split's processor share is charged to the machine"): since then the daemon hands the
+split `--kv-budget-bytes` and the machine's figure is only the fallback.
+
+## A split's processor share is charged to the machine (2026-10-13, FUTURE_WORK #264)
+
+Found closing #262. A card/processor split (`get_or_spawn_once`'s `hybrid_layers`) was charged
+its card share (`card_share_of_split_mb`, 2026-10-08) and nothing else: `charges_ram` is false for a
+placement that reaches the card, so the processor-held layers' weights (~5 GB for Qwen2.5-14B
+20/28), their conversation cache and the worker process sat outside `resources.max_ram_mb`;
+`ram_committed_mb` left them out, so a processor worker started beside the split was admitted into
+memory the split already held; and the split never got `--kv-budget-bytes`, so its processor-side
+cache was bounded only by the machine (#262's fallback). Ollama weighs exactly this share —
+`TotalSize − VRAMSize` — against the machine's free memory before it loads (`llm/server.go`).
+
+**The rule.** `process_pool::ram_charged_run(charge_ram, segment, hybrid_layers)` is the one answer
+to "which layers does this spawn charge to the machine": the whole segment for a processor
+placement, the run after the card's layers for a split, nothing for a model wholly on the card.
+That run goes through the SAME block a processor placement does — `estimate_cpu_footprint_mb`,
+`admit_to_cpu_as` (reclaiming idle models first), the itemised refusal
+(`LocalMemoryUnavailable`, so the router re-plans), and `record_cpu_kv_budget`, whose grant the
+worker's loader prefers for the split's host side (#262). `SpawnCharge::decided` carries both
+charges onto the worker (`charged_mb` against the card, `host_share_mb` against RAM) and
+`after_worker_gone_charge` releases both. Tests:
+`a_split_charges_the_machine_for_the_layers_it_keeps_on_the_processor`,
+`a_departing_split_gives_back_both_of_its_charges` — both red with the split arm / the second
+release removed.
+
+**Residual.** A LATER segment loaded into a split worker (`charge_additional_segment`) is charged to
+the worker's one accountant (`holds_gpu_memory` → the card), wherever the loader puts its layers.
 
 ## Machine memory is read in one place, and a container's limit counts (2026-10-09)
 
