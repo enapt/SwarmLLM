@@ -65,7 +65,8 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
    "Decided — not doing".)*
 4. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
 5. **#220** — a worker's card faulted once (illegal memory access) and the driver took 14 minutes
-   to reset; the kernel is still unknown (the sanitizer attaches here since 2026-10-10 — run it under the kit).
+   to reset; the kernel is still unknown — ~27 min of its shape under memcheck (10-10, 10-13, the tool proven in
+   the card workers) found nothing; (c) one process per card weighed and declined on that evidence (see the entry).
 5a. **#250** — a model held whole here, which the card holds only part of, was routed through two
    peers at 0.1 tok/s where the same machine answers locally in ~5 s (report #035). Its
    window-narrowing contributor closed as #248, the idle model holding the card as #249, and a layer
@@ -409,6 +410,31 @@ access or clear our code — it says a FECS by itself is not evidence of a fault
 above; and whether keeping a card's work in ONE process on Windows/WSL (the drafter in the target's
 worker, never a second CUDA process on the card) is worth its cost — #754/#755's drafter shape is
 the one product path known to put two processes on one card.
+
+**Step (b), 2026-10-13 02:44-02:58Z (fresh boot, Windows up 2.5 h, released .236):** the 10-04 shape under memcheck
+again (`~/swarmllm-220/rig.sh 1 6 32`, rebuilt after the 10-12 disk cleanup deleted the 10-10 copy): six requests
+of 32 tokens (`split_rig.sh`'s new `REPEAT_MAX_TOKENS`, so six request boundaries fit where 120 tokens gave one), all
+answered, 78-136 s each; **no invalid access reported, 0 card faults, 0 driver events in 29 kit polls.** The tool
+was proven IN both card workers this time, not inferred from their slowness: their `/proc/<pid>/maps` held
+`libsanitizer-collection.so` and four more of its libraries, and node B's processor worker (the control) none. Two
+rig facts learned on the way: `--log-file …/%p.log` names the sanitizer FRONT-END's pid, so every process of one
+session writes one file (the second file is `split_rig.sh`'s `--version` call); and no log ends in an `ERROR
+SUMMARY`, even with the node stopped first and 120 s given (`san-a.sh` now forwards the stop to A's daemon alone) —
+a worker is killed with its daemon, so only an error line, written as it is found, can appear. With 10-10's ~15 min
+at 61 h, ~27 min of this shape under memcheck have reported nothing; the 10-04 illegal access stays unreproduced and
+its kernel unknown.
+
+**(c) weighed 2026-10-13 — not doing it on this evidence.** Moving the drafter into the target's worker was the
+proposed way to keep a card's work in one process. Two findings stop it. First, the drafter is not the only such
+path: every model gets its own worker (`ModelProcessPool.workers` is keyed by model id), so ANY two models on the
+card are two CUDA processes — the shape Ollama runs everywhere with a runner per model. Second, a worker is built
+for one model: its `models` map is keyed by layer range alone (`ensure_model_loaded` and `subsumed_segment_keys`
+never compare the model id, so a drafter `(0,24)` beside a target `(0,24)` would be served the wrong weights, and
+a target `(0,28)` would evict it), `kv_model_key` and the prefix cache are range-scoped, every charge, idle unload
+and reclaim is per worker, and the drafter's prompt read-ahead would serialise behind the target's prompt pass in
+one worker loop (`dsd.rs` `read_ahead`). That is a redesign of the worker for one case of many, with nothing yet
+tying the shutdowns to two contexts (step (a) logged FECS, never a TDR). Revisit if a fault or reset is caught with
+two of our processes on the card and not with one.
 
 #### #193 — A whole-model reply travels as independent messages; only the serving node dying now loses it
 `P3` · reliability · **PARTIAL** — 2026-09-02 · absorbs archive § "The reply stream has no reliability layer…" and § "Intermittent token loss on the remote-generate fast path"; history: archive § "Replies truncated on the remote-generate fast path"

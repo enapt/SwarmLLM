@@ -42,6 +42,9 @@
 #          EXTRA_TOML, e.g. EXTRA_TOML=$'[inference]\nactivation_compression = false'.
 #          REPEAT_GAP=S waits S seconds between runs (default 0) — past the
 #          pool's 5 s reclaim floor, a worker idle between turns is reclaimable.
+#          REPEAT_MAX_TOKENS=N caps each reply (default 120) — under a tool that
+#          slows the card ~100x (compute-sanitizer), 120 tokens outlast the
+#          client's 900 s and the run sees one request boundary, not REPEAT.
 #          RIG_TEMPERATURE=0.7 asks every question at that temperature (default 0,
 #          greedy) — for speculation that must hold at the temperatures clients send.
 #   (any mode) DRAFTER=<model id> also gives A that model WHOLE, from the same
@@ -1140,7 +1143,7 @@ if [ "$MODE" = repeat ]; then
   : > "$OUT/repeat.jsonl"
   for i in $(seq 1 "${REPEAT:-3}"); do
     [ "$i" -gt 1 ] && sleep "${REPEAT_GAP:-0}"
-    ask "$PROMPT" 120 "repeat$i" | tee -a "$OUT/repeat.jsonl" | cut -c1-160
+    ask "$PROMPT" "${REPEAT_MAX_TOKENS:-120}" "repeat$i" | tee -a "$OUT/repeat.jsonl" | cut -c1-160
   done
   # Not "the first only" any more: since the tail walks the guesses (a few ids back,
   # not a vocabulary) the payoff gate keeps the loop on while rounds average past its
