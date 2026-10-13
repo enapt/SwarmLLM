@@ -70,6 +70,24 @@ pub async fn drain(state: &Arc<SharedState>) -> bool {
 /// holds it now).
 pub const HANDOFF_PID_VAR: &str = "SWARMLLM_UPDATE_HANDOFF_PID";
 
+/// Set on the process an update restarts into, on every platform, so it knows
+/// the user did not just launch it. Syncthing's `STRESTART` is the precedent:
+/// its browser opens on start unless the start is an internal restart. Ours
+/// opened a dashboard tab after every automatic update, and an open tab
+/// reconnects by itself (#267).
+pub const RESTARTED_BY_UPDATE_VAR: &str = "SWARMLLM_RESTARTED_BY_UPDATE";
+
+/// Did an update restart this process, rather than the user starting it?
+///
+/// The handoff variable answers too: a Windows build from before the marker
+/// existed still sets it on the replacement, so the first update off such a
+/// build is recognised as well. A Unix build that old execs with neither, and
+/// that one update still opens a tab.
+pub fn restarted_by_update() -> bool {
+    std::env::var_os(RESTARTED_BY_UPDATE_VAR).is_some()
+        || std::env::var_os(HANDOFF_PID_VAR).is_some()
+}
+
 /// Longest a replacement waits for its predecessor. Generous relative to what
 /// it is waiting for — a process that has already called `exit` — and bounded
 /// because waiting forever on a predecessor that will not die is worse than
@@ -278,7 +296,7 @@ pub fn exec_into(exe: &std::path::Path) -> std::io::Error {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        std::process::Command::new(exe).args(&args).exec()
+        replacement_command(exe, &args).exec()
     }
 
     #[cfg(windows)]
@@ -293,7 +311,14 @@ pub fn exec_into(exe: &std::path::Path) -> std::io::Error {
         // And it passes NO handle but stdio: std's `Command` handed the
         // replacement our QUIC socket, which it then could not bind (#769).
         let me = std::process::id().to_string();
-        match spawn_without_inherited_handles(exe, &args, &[(HANDOFF_PID_VAR, me.as_str())]) {
+        match spawn_without_inherited_handles(
+            exe,
+            &args,
+            &[
+                (HANDOFF_PID_VAR, me.as_str()),
+                (RESTARTED_BY_UPDATE_VAR, "1"),
+            ],
+        ) {
             Ok(_) => {
                 tracing::info!("Replacement process spawned — exiting");
                 std::process::exit(0);
@@ -307,6 +332,18 @@ pub fn exec_into(exe: &std::path::Path) -> std::io::Error {
         let _ = args;
         std::io::Error::other("restarting into an update is not supported on this platform")
     }
+}
+
+/// The command `exec_into` replaces this process with on Unix: the same
+/// arguments, and the marker that says an update started it.
+#[cfg(unix)]
+fn replacement_command(
+    exe: &std::path::Path,
+    args: &[std::ffi::OsString],
+) -> std::process::Command {
+    let mut command = std::process::Command::new(exe);
+    command.args(args).env(RESTARTED_BY_UPDATE_VAR, "1");
+    command
 }
 
 /// Start `exe` with `args` and the given environment additions, passing it NO
@@ -558,6 +595,29 @@ mod tests {
         assert!(
             waited.is_none(),
             "the wait must give up rather than hang a node's startup on a stuck predecessor"
+        );
+    }
+
+    /// The process an update execs into is told an update started it, so it
+    /// does not open a dashboard tab beside the one already reconnecting (#267).
+    /// An ordinary start carries no marker, or no launch would ever open one.
+    #[cfg(unix)]
+    #[test]
+    fn the_process_an_update_starts_knows_an_update_started_it() {
+        let args = [std::ffi::OsString::from("run"), "-p".into(), "8800".into()];
+        let command = replacement_command(std::path::Path::new("/opt/swarmllm"), &args);
+        let marker = command
+            .get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new(RESTARTED_BY_UPDATE_VAR))
+            .and_then(|(_, value)| value);
+        assert_eq!(marker, Some(std::ffi::OsStr::new("1")));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            args.iter().map(|a| a.as_os_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            !restarted_by_update(),
+            "the test process was not started by an update, and must not read as one"
         );
     }
 

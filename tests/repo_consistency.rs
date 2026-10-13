@@ -12853,3 +12853,50 @@ fn the_machine_memory_guard_sees_a_reader_rustfmt_has_wrapped() {
     assert_eq!(found.len(), 2, "{found:?}");
     assert!(found[0].starts_with("src/model/x.rs") && found[1].starts_with("src/api/y.rs"));
 }
+
+/// The number assigned to `name` in `src` (`const NAME: u64 = 45;`,
+/// `var NAME = 30000;`), digits only.
+fn assigned_number(src: &str, name: &str) -> Option<u64> {
+    let at = src.find(name)?;
+    let after_eq = &src[at..][src[at..].find('=')? + 1..];
+    let digits: String = after_eq
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '_')
+        .filter(|c| *c != '_')
+        .collect();
+    digits.parse().ok()
+}
+
+/// **A restarted node waits for an open dashboard longer than that dashboard
+/// can take to come back** (#267). The page retries its connection on a backoff
+/// capped by `WS_RETRY_MAX_MS`, then asks for a ticket; a window shorter than
+/// that opens a second tab beside a first that was about to reconnect — which
+/// is the defect the window exists to stop. The two numbers live in two
+/// languages, so only this compares them.
+#[test]
+fn the_dashboard_reconnect_window_outlasts_the_pages_retry_backoff() {
+    let root = repo_root();
+    let page =
+        std::fs::read_to_string(root.join("frontend/js/components/notifications.js")).unwrap();
+    let daemon = std::fs::read_to_string(root.join("src/daemon/background.rs")).unwrap();
+    let retry_max_ms =
+        assigned_number(&page, "WS_RETRY_MAX_MS").expect("notifications.js sets WS_RETRY_MAX_MS");
+    let window_secs = assigned_number(&daemon, "const DASHBOARD_RECONNECT_WINDOW_SECS")
+        .expect("background.rs sets DASHBOARD_RECONNECT_WINDOW_SECS");
+    // A ticket round trip and Chrome's once-a-second batching of a hidden
+    // tab's timers, with room to spare.
+    let margin_ms = 10_000;
+    assert!(
+        window_secs * 1000 >= retry_max_ms + margin_ms,
+        "a restarted node waits {window_secs} s for an open dashboard to reconnect, but the page \
+         may wait {retry_max_ms} ms between attempts: raise DASHBOARD_RECONNECT_WINDOW_SECS to at \
+         least {} s",
+        (retry_max_ms + margin_ms).div_ceil(1000)
+    );
+    assert_eq!(assigned_number("var X_MS = 30000;", "X_MS"), Some(30000));
+    assert_eq!(
+        assigned_number("const Y: u64 = 1_500;", "const Y"),
+        Some(1500)
+    );
+}

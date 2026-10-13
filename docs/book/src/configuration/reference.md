@@ -191,7 +191,7 @@ value it booted with.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `open_browser_on_start` | boolean | `true` | Open dashboard on launch |
+| `open_browser_on_start` | boolean | `true` | Open dashboard on launch — not when an update restarted the node, and not beside a dashboard that was already open and reconnects |
 
 ## `[api]` — API Authentication
 

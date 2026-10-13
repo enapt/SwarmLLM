@@ -113,7 +113,7 @@ level = "info"                 # trace, debug, info, warn, error
 format = "pretty"              # "pretty" or "json"
 
 [ui]
-open_browser_on_start = true   # Open browser to dashboard/setup on launch
+open_browser_on_start = true   # Open browser to dashboard/setup on launch (not after an update, nor beside an open one)
 
 [updates]
 # Left commented so the built-in defaults apply. The .deb/.rpm install copies

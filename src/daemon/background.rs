@@ -741,10 +741,91 @@ pub(super) fn spawn_key_rotation(
     });
 }
 
-/// Open browser on first start if configured.
+/// How long a start waits for a dashboard that was open when the node last ran
+/// to reconnect, before opening another. The page retries on a backoff capped at
+/// 30 s (`WS_RETRY_MAX_MS` in `notifications.js`), then asks for a ticket, and
+/// Chrome batches a hidden tab's timers to once a second; its once-a-minute
+/// "intensive" throttling needs a chain of five nested timers, and every retry
+/// starts from a network callback, not a timer. Guard:
+/// `the_dashboard_reconnect_window_outlasts_the_pages_retry_backoff`.
+const DASHBOARD_RECONNECT_WINDOW_SECS: u64 = 45;
+
+/// How often a running node notes whether a dashboard is connected.
+const DASHBOARD_OPEN_SAMPLE_SECS: u64 = 5;
+
+/// File in the data directory whose presence says a dashboard was connected the
+/// last time the node looked — which is what the NEXT start needs to know,
+/// however this run ends, a crash included.
+const DASHBOARD_OPEN_HINT: &str = "dashboard_open";
+
+/// What a start does about the dashboard.
+#[derive(Debug, PartialEq, Eq)]
+enum DashboardOnStart {
+    /// An update restarted the node: the user launched nothing, and a tab that
+    /// was open reconnects by itself.
+    Leave,
+    /// No dashboard was open: this is a launch, and it shows the dashboard.
+    OpenNow,
+    /// A dashboard was open when the node last ran. It is retrying and will
+    /// reconnect; open one only if it does not.
+    OpenUnlessOneReconnects,
+}
+
+/// One answer for every start (#267). It used to be "open, always": every
+/// automatic update and every restart opened one more tab beside the tabs
+/// already reconnecting, and a machine restarted by scripts collected 25 of
+/// them, 8.5 GB of browser memory.
+fn dashboard_on_start(restarted_by_update: bool, dashboard_was_open: bool) -> DashboardOnStart {
+    if restarted_by_update {
+        DashboardOnStart::Leave
+    } else if dashboard_was_open {
+        DashboardOnStart::OpenUnlessOneReconnects
+    } else {
+        DashboardOnStart::OpenNow
+    }
+}
+
+/// Wait up to `window` for `connected` to answer true; did it?
+async fn a_dashboard_connects_within(
+    connected: impl Fn() -> bool,
+    window: std::time::Duration,
+    poll: std::time::Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        if connected() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
+/// Record whether a dashboard is connected, for the next start.
+async fn note_dashboard_open(hint: &std::path::Path, open: bool) {
+    let written = if open {
+        tokio::fs::write(hint, b"").await
+    } else {
+        match tokio::fs::remove_file(hint).await {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    };
+    if let Err(e) = written {
+        tracing::debug!(error = %e, path = %hint.display(), "Could not note whether a dashboard is open");
+    }
+}
+
+/// Show the dashboard when the user launches the node (`ui.open_browser_on_start`)
+/// — but not when an update restarted it, and not beside a dashboard that is
+/// already open and reconnecting ([`dashboard_on_start`]). Then keep noting
+/// whether one is connected, which is how the next start knows.
 pub(super) fn spawn_browser_open(
     tasks: &mut BackgroundTasks,
     config: &Config,
+    shared_state: Arc<SharedState>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     if !config.ui.open_browser_on_start {
@@ -758,15 +839,65 @@ pub(super) fn spawn_browser_open(
     } else {
         format!("{url}/setup")
     };
+    let hint = config.node.data_dir.join(DASHBOARD_OPEN_HINT);
+    let was_open = hint.exists();
+    let on_start = dashboard_on_start(crate::update_restart::restarted_by_update(), was_open);
     tasks.spawn(async move {
-        // Small delay to let the server bind, abort on shutdown
-        tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
-                if let Err(e) = open_browser(&target) {
-                    tracing::debug!(error = %e, "Could not open browser automatically");
-                }
+        let connected = || {
+            shared_state
+                .metrics
+                .ws_connection_count
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+        };
+        let open = match on_start {
+            DashboardOnStart::Leave => {
+                tracing::info!(
+                    "Restarted by an update — not opening a dashboard; an open one reconnects by itself"
+                );
+                false
             }
-            _ = shutdown_rx.changed() => {}
+            // Small delay to let the server bind, abort on shutdown
+            DashboardOnStart::OpenNow => tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => true,
+                _ = shutdown_rx.changed() => return "browser_open",
+            },
+            DashboardOnStart::OpenUnlessOneReconnects => tokio::select! {
+                reconnected = a_dashboard_connects_within(
+                    connected,
+                    std::time::Duration::from_secs(DASHBOARD_RECONNECT_WINDOW_SECS),
+                    std::time::Duration::from_millis(500),
+                ) => {
+                    if reconnected {
+                        tracing::info!("The dashboard that was open reconnected — not opening another");
+                    }
+                    !reconnected
+                }
+                _ = shutdown_rx.changed() => return "browser_open",
+            },
+        };
+        if open {
+            if let Err(e) = open_browser(&target) {
+                tracing::debug!(error = %e, "Could not open browser automatically");
+            }
+        }
+        let mut noted = was_open;
+        let mut sample =
+            tokio::time::interval(std::time::Duration::from_secs(DASHBOARD_OPEN_SAMPLE_SECS));
+        sample.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            // Shutdown first: the dashboards drop as the node stops, and noting
+            // that would tell the next start nobody was looking.
+            tokio::select! {
+                biased;
+                _ = shutdown_rx.changed() => break,
+                _ = sample.tick() => {}
+            }
+            let now_open = connected();
+            if now_open != noted {
+                note_dashboard_open(&hint, now_open).await;
+                noted = now_open;
+            }
         }
         "browser_open"
     });
@@ -1827,5 +1958,72 @@ mod verification_summary_tests {
     fn a_clean_verification_pass_stays_clean() {
         let s = verification_summary(20, 0, 0, 0);
         assert_eq!(s, "Verified 20 shards");
+    }
+}
+
+#[cfg(test)]
+mod dashboard_on_start_tests {
+    use super::{
+        a_dashboard_connects_within, dashboard_on_start, note_dashboard_open, DashboardOnStart,
+    };
+    use std::time::Duration;
+
+    /// **A restart the node made itself opens nothing, and a dashboard that was
+    /// open is given the chance to reconnect** (#267). The node used to open a
+    /// tab on every start: each automatic update and each restart added one
+    /// beside the tabs already reconnecting.
+    #[test]
+    fn only_a_launch_with_no_dashboard_open_opens_one_at_once() {
+        assert_eq!(dashboard_on_start(true, false), DashboardOnStart::Leave);
+        assert_eq!(dashboard_on_start(true, true), DashboardOnStart::Leave);
+        assert_eq!(
+            dashboard_on_start(false, true),
+            DashboardOnStart::OpenUnlessOneReconnects
+        );
+        assert_eq!(dashboard_on_start(false, false), DashboardOnStart::OpenNow);
+    }
+
+    /// The wait ends as soon as a dashboard connects, and gives up at the
+    /// window — when the tab was closed while the node was down, one opens.
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_for_a_reconnecting_dashboard_ends_either_way() {
+        let polls = std::sync::atomic::AtomicU32::new(0);
+        let reconnects_on_the_fourth_look =
+            || polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 3;
+        let started = tokio::time::Instant::now();
+        assert!(
+            a_dashboard_connects_within(
+                reconnects_on_the_fourth_look,
+                Duration::from_secs(45),
+                Duration::from_millis(500)
+            )
+            .await
+        );
+        assert_eq!(started.elapsed(), Duration::from_millis(1500));
+
+        let started = tokio::time::Instant::now();
+        assert!(
+            !a_dashboard_connects_within(
+                || false,
+                Duration::from_secs(45),
+                Duration::from_millis(500)
+            )
+            .await
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(45));
+    }
+
+    /// The note is what the next start reads, so both directions must land,
+    /// and noting "closed" twice is not an error.
+    #[tokio::test]
+    async fn the_dashboard_note_records_both_directions() {
+        let dir = tempfile::tempdir().unwrap();
+        let hint = dir.path().join("dashboard_open");
+        note_dashboard_open(&hint, true).await;
+        assert!(hint.exists());
+        note_dashboard_open(&hint, false).await;
+        assert!(!hint.exists());
+        note_dashboard_open(&hint, false).await;
+        assert!(!hint.exists());
     }
 }

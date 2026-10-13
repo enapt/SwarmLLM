@@ -303,7 +303,9 @@ broadcast, so the withdrawal reverses itself when the condition clears. Guard:
     PoolManager, AutoShardManager, HfWatcher (R112), UpdateChecker — the last
     skipped only for `run --no-update-check`; a file `mode = "off"` still gets it).
     An `--anchor` node also skips AutoShardManager and HfWatcher, so it runs 10.
-13. Open browser if ui.open_browser_on_start is true (setup wizard or admin)
+13. Open browser if ui.open_browser_on_start is true (setup wizard or admin) — never after an
+    update restart (`SWARMLLM_RESTARTED_BY_UPDATE`), and after waiting up to 45 s for a dashboard
+    that was open when the node last ran to reconnect (`dashboard_open` marker, #267)
 14. tokio::select! on Ctrl+C signal or any task exit
 15. Signal graceful shutdown via watch channel, save peer cache, flush redb database
 ```
@@ -1628,6 +1630,7 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 ├── config.toml          # User configuration
 ├── identity.key         # Ed25519 keypair (optionally encrypted)
 ├── db.redb              # redb database (migrated from sled db/ directory)
+├── dashboard_open       # present while a dashboard is connected; the next start waits for it to reconnect (#267)
 └── models/
     ├── llama3-70b-q4km/
     │   ├── manifest.json

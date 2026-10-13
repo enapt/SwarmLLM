@@ -695,7 +695,12 @@ impl Daemon {
             network_tx.clone(),
             shutdown_rx.clone(),
         );
-        background::spawn_browser_open(&mut background_tasks, &self.config, shutdown_rx.clone());
+        background::spawn_browser_open(
+            &mut background_tasks,
+            &self.config,
+            shared_state.clone(),
+            shutdown_rx.clone(),
+        );
         // Anchor nodes never load models — skip autoload entirely (the main
         // memory win: no candle model weights in RAM).
         if !anchor {
