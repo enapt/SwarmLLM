@@ -2438,6 +2438,24 @@ keep-alive to expire), so there was nothing to borrow. Test
 `promotion_reads_the_card_as_it_stands_now` (red with the stored figure; also asserts a busy
 worker causes no reading).
 
+**…and a SPLIT was never weighed at all (the same day, #260 again).** The live-reading fix
+covered only a worker `placed_on_cpu_because`, but admission SPLITS a model before it gives up
+the card (`get_or_spawn`'s `hybrid_layers`), so a model squeezed by another program is far more
+often split than sent to the processor — the report's own "one swarmllm GPU process at 1.4 GB,
+too small to be Mistral" was a split's card share. The real-path rig (`~/swarmllm-260/node2.sh`,
+5,000 MB held on the 8 GB card) reproduced exactly that: gemma-2-2b split 11 of 26 layers, and
+after the hold was released two more requests reused the split with no retirement line.
+`WorkerHandle::short_of_the_card` now answers "placed short of the card for want of memory" —
+processor OR split (a split is only ever admission's answer; the user's own `gpu_layers` never
+makes one) — and the split's own card charge (`card_mb_held`) counts as given back when it is
+retired (`PromotionInputs::own_card_mb`; without it a 5,005 MB model holding 1,400 MB never fits
+a 6,000 MB budget). A split of a model larger than the card could EVER give — a 14B on 8 GB —
+would have read `nvidia-smi` on every request after 5 s idle, so `PromotionInputs::ceiling_mb`
+(`auto_manage::vram_budget_ceiling`: the budget with no other program on the card, from the live
+config alone) dismisses it before any reading. Tests `a_split_worker_moves_whole_once_the_card_has_room`
+(red with the old `placed_on_cpu_because` gate), `a_split_worker_counts_its_own_share_of_the_card`,
+`a_model_larger_than_the_card_could_ever_give_is_not_weighed`.
+
 ## "Used recently" has four answers, and one of them is never written locally
 
 `model::auto_manage::prune::effective_idle_secs` combines all of them — a

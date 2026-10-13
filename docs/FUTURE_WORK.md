@@ -1116,7 +1116,16 @@ pass.** A 512-token forward of the 14B takes 3.60 s against llama.cpp's ~1.28: t
 layers' attention 0.59 s, RoPE/norms/activation 0.63 s, 0.50 s unattributed — llama.cpp's
 scheduler also moves the weightless ops between two offloaded ones to the card ("expand"
 passes), where each of our projections ships its activation up and its product back (~150 MB
-a layer at 512 tokens by arithmetic, about the layer's weights). Then the copy itself: the
+a layer at 512 tokens by arithmetic, about the layer's weights). Read in llama.cpp
+(`ggml-backend.cpp` `ggml_backend_sched_split_graph`, 2026-10-13, not yet traced with
+`GGML_SCHED_DEBUG`): pass 1 offloads the weighted ops ("1.off", ROPE and FLASH_ATTN_EXT exempt
+from the weight check), pass 2's "expand gpu down/up" (1129-1170) puts every unassigned op
+between them on the card — norms, RoPE, Q·K, softmax, ·V, the GLU — and only the K/V writes stay
+on the processor, pinned by the cache's host buffer (`ggml_set_rows` → `1.vsrc`); pass 5 copies
+the cache views up (1399-1420). So a processor layer's whole prompt pass runs on the card at
+~4-6 link crossings, against our ~10 with attention and the elementwise work on the processor.
+The shape (1c) should take: a processor layer of a ≥ 32-token forward run WHOLE on the card —
+its weights, the hidden state once each way, its cache read up and the new rows written back. Then the copy itself: the
 experts' stage costs ~57-62 ms a layer whatever the tokens (1.25 s for 22 layers at 355
 tokens, 1.49 s at 512), ~34 ms of it ~226 MB at this card's LINK speed. Measured 2026-10-13
 (`~/swarmllm-138b/bench.sh`, a CUDA micro-bench, live node stopped, min of 10): the link tops
@@ -1991,14 +2000,23 @@ grep `^| N |`).
   `SharedState::parts_missing_here` (manifest, the registry's holdings, the files), and the
   refusal names the parts this computer lacks. Test
   `a_kept_model_held_whole_runs_here_without_a_registration` (red with the old gate).
-- #260 — **a model sent to the processor while another program held the graphics card moves
-  back to the card once that program lets go.** The promotion check weighed the card budget
-  the last ADMISSION had stored, so a model refused the card while (in the report) Ollama held
-  6.2 GB kept that squeezed figure: Mistral 7B stayed at 12 tok/s with ~8 GB free, and reached
-  55 tok/s only after an unload. `ModelProcessPool::promotion_weighed` now reads the card as it
-  stands (`vram_budget_now`, the reading admission takes), only for a demoted worker idle past
-  the floor, so a busy worker costs no `nvidia-smi`. Test
-  `promotion_reads_the_card_as_it_stands_now` (red reading the stored figure).
+- #260 — **a model squeezed off the graphics card by another program moves back to the card,
+  whole, once that program lets go.** Two halves. (1) The promotion check weighed the card
+  budget the last ADMISSION had stored, so a model refused the card while (in the report)
+  Ollama held 6.2 GB kept that squeezed figure: Mistral 7B stayed at 12 tok/s with ~8 GB free,
+  and reached 55 tok/s only after an unload. `ModelProcessPool::promotion_weighed` now reads the
+  card as it stands (`vram_budget_now`, the reading admission takes), only for a demoted worker
+  idle past the floor, so a busy worker costs no `nvidia-smi`. Test
+  `promotion_reads_the_card_as_it_stands_now` (red reading the stored figure). (2) Only a worker
+  wholly on the processor was ever weighed, but admission SPLITS a model between the card and
+  the processor before it gives the card up — the report's 1.4 GB "too small to be Mistral" was
+  a split's share, and the real-path rig reproduced it (gemma-2-2b split 11 of 26 beside a
+  5,000 MB hold, still split after the hold was released). `WorkerHandle::short_of_the_card`
+  takes the split too, its own card share counted as given back, and a model larger than the
+  card could ever give (`vram_budget_ceiling`) is never weighed, so a 14B split on an 8 GB card
+  reads nothing. Tests `a_split_worker_moves_whole_once_the_card_has_room`,
+  `a_split_worker_counts_its_own_share_of_the_card`,
+  `a_model_larger_than_the_card_could_ever_give_is_not_weighed`.
 - #257 — **under WSL2, a long prompt after a node's first no longer waits seconds on the graphics
   card before it is read.** With the prefix cache on, each long prompt ended by keeping a copy of
   its conversation memory on the card (264 MB for a ~4,800-token prompt on a 7B). Held between

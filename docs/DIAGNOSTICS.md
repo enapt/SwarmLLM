@@ -180,10 +180,11 @@ To reproduce on a machine that has them, hide them from one run:
 produce `--gpu-layers 0` and were indistinguishable before v0.3.x.
 **`device=` in the worker's own line is the answer**, not the daemon's intent.
 
-Coming back the other way (v0.3.130+):
+Coming back the other way (v0.3.130+; a card/processor SPLIT too since #260, v0.3.237) — on the
+first request after the worker has been idle 5 s, never while a conversation holds it:
 
 ```
-Graphics memory has freed up — retiring this model's processor worker ...
+Graphics memory has freed up — retiring this model's worker, which runs on the processor in whole or in part ...
 Model worker stopped and its memory budget released  device="cpu"
 Freeing graphics memory from an idle model ... for_model=X
 DIAG: admitting model to GPU  model=X

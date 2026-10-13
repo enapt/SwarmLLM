@@ -312,8 +312,10 @@ fn vram_make_room_min_idle_secs() -> u64 {
 /// gathers these values does nothing but gather them.
 #[derive(Debug, Clone, Copy)]
 struct PromotionInputs {
-    /// This node put the running worker on the processor (`--gpu-layers 0`).
-    cpu_placed: bool,
+    /// This node put the running worker on the processor (`--gpu-layers 0`),
+    /// or split it between the card and the processor, for want of card
+    /// memory — the two placements a card with more room would not have made.
+    short_of_the_card: bool,
     /// A reason this model would go to the processor again whatever the memory
     /// situation: the user's own `gpu_layers = 0`, or a card below this build's
     /// kernel floor. **A VRAM pin is deliberately NOT one of them** — that is
@@ -332,6 +334,16 @@ struct PromotionInputs {
     idle_secs: u64,
     /// What the card would have to give it, as admission priced it.
     gpu_estimate_mb: u64,
+    /// The most this node's card budget could ever be — no other program
+    /// holding any of it (`inference_vram_budget_mb` with nothing else on the
+    /// card); 0 when unknown. A model above it can never move whole, so the
+    /// card is not read for it: a 14B split on an 8 GB card asks on every
+    /// request.
+    ceiling_mb: u64,
+    /// Card memory the worker already holds and gives back when it is
+    /// retired — a split's share of the card (`card_share_of_split_mb`); 0 for
+    /// a worker on the processor.
+    own_card_mb: u64,
     budget_mb: u64,
     committed_mb: u64,
     /// Megabytes the pool would be willing to reclaim from OTHER models right
@@ -362,8 +374,16 @@ struct PromotionInputs {
 /// Four guards, three of them carried over from [`plan_vram_reclaim`] because
 /// this destroys something that is working and they are what makes that safe:
 ///
-/// - **Only a worker this node demoted.** On a machine with no card,
-///   `cpu_placed` is false and there is nowhere to promote to.
+/// - **Only a worker this node demoted** — to the processor, or to a
+///   card/processor split (`short_of_the_card`). On a machine with no card it
+///   is false and there is nowhere to promote to. The split was left out until
+///   2026-10-13 (#260): admission splits a model before it gives up the card,
+///   so a model squeezed by another program was far more often split than sent
+///   to the processor — the report's Mistral 7B ran 1.4 GB of itself on the
+///   card at 12.7 tok/s, 55 once unloaded and reloaded whole. A split's own
+///   share of the card (`own_card_mb`) is given back by retiring it, and a
+///   model larger than the card could ever give (`ceiling_mb`) is never
+///   weighed.
 /// - **The reason must actually be gone** (`reason_still_holds`). Of the three
 ///   causes in [`ModelProcessPool::cpu_reason`], only the OOM pin ever clears —
 ///   so this fires on the event that lifted it rather than polling for one.
@@ -386,22 +406,24 @@ fn should_return_to_gpu(i: &PromotionInputs) -> bool {
     if !promotion_is_worth_weighing(i) || i.budget_mb == 0 {
         return false;
     }
-    let free_after_reclaim = i
-        .budget_mb
-        .saturating_sub(i.committed_mb.saturating_sub(i.reclaimable_mb));
-    i.gpu_estimate_mb <= free_after_reclaim
+    let held_by_others = i
+        .committed_mb
+        .saturating_sub(i.own_card_mb)
+        .saturating_sub(i.reclaimable_mb);
+    i.gpu_estimate_mb <= i.budget_mb.saturating_sub(held_by_others)
 }
 
 /// The guards of [`should_return_to_gpu`] that need no reading of the card —
 /// so the card is read only for a worker that could actually move
 /// ([`ModelProcessPool::promotion_weighed`]).
 fn promotion_is_worth_weighing(i: &PromotionInputs) -> bool {
-    i.cpu_placed
+    i.short_of_the_card
         && !i.permanently_cpu_bound
         && !i.reason_still_holds
         && !i.busy
         && i.idle_secs >= vram_make_room_min_idle_secs()
         && i.gpu_estimate_mb != 0
+        && (i.ceiling_mb == 0 || i.gpu_estimate_mb <= i.ceiling_mb)
 }
 
 static RESPONSE_ATTEMPT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -1451,6 +1473,28 @@ impl WorkerHandle {
             .saturating_sub(self.last_used.load(Ordering::Relaxed))
     }
 
+    /// Did this node place the worker short of the card for want of its
+    /// memory — on the processor, or split between the two? A split is only
+    /// ever admission's answer to a card without room for the whole model
+    /// (`get_or_spawn`'s `hybrid_layers`); the user's own `gpu_layers` never
+    /// makes one.
+    fn short_of_the_card(&self) -> bool {
+        self.placed_on_cpu_because.is_some()
+            || self
+                .gpu_layers_on_card
+                .is_some_and(|(on_card, total)| on_card < total)
+    }
+
+    /// Card memory this worker holds and gives back when it is retired: a
+    /// split's charge, which is against the card. 0 for a worker charged
+    /// against RAM (the processor) or wholly on the card (never promoted).
+    fn card_mb_held(&self) -> u64 {
+        if self.charged_against_ram || self.gpu_layers_on_card.is_none() {
+            return 0;
+        }
+        self.charged_mb.load(Ordering::Acquire)
+    }
+
     /// True when `request_id`'s entry has been taken over by a later attempt.
     /// Distinguishes "a retry displaced me" from "the worker really died",
     /// which present identically as a closed response channel.
@@ -2208,6 +2252,10 @@ pub struct ModelProcessPool {
     /// the moment a model is admitted, not as it stood when the node started.
     /// See [`Self::vram_budget_now`].
     vram_budget_source: std::sync::OnceLock<Box<dyn Fn() -> Option<u64> + Send + Sync>>,
+    /// The most that budget could be with no other program on the card —
+    /// `auto_manage::vram_budget_ceiling`, read from the live config without
+    /// asking the card. Unset (tests, a node with no card) is no ceiling.
+    vram_ceiling_source: std::sync::OnceLock<Box<dyn Fn() -> Option<u64> + Send + Sync>>,
     /// CPU threads each worker's rayon pool may use. 0 until set at startup,
     /// which the spawn path reads as "not configured" and leaves alone.
     cpu_threads: std::sync::atomic::AtomicUsize,
@@ -2490,6 +2538,7 @@ impl ModelProcessPool {
             cpu_pinned_models: dashmap::DashSet::new(),
             vram_budget_mb: std::sync::atomic::AtomicU64::new(0),
             vram_budget_source: std::sync::OnceLock::new(),
+            vram_ceiling_source: std::sync::OnceLock::new(),
             cpu_threads: std::sync::atomic::AtomicUsize::new(0),
             owner_prefill_threads: std::sync::atomic::AtomicUsize::new(0),
             vram_reserved_mb: dashmap::DashMap::new(),
@@ -3200,6 +3249,12 @@ impl ModelProcessPool {
         let _ = self.vram_budget_source.set(source);
     }
 
+    /// Where the promotion check reads the most the card budget could ever be
+    /// (set once, by `SharedState::new`). See [`PromotionInputs::ceiling_mb`].
+    pub fn set_vram_ceiling_source(&self, source: Box<dyn Fn() -> Option<u64> + Send + Sync>) {
+        let _ = self.vram_ceiling_source.set(source);
+    }
+
     /// The card budget a model is admitted against: read again at the moment
     /// of admission, falling back to the last reading.
     ///
@@ -3755,12 +3810,13 @@ impl ModelProcessPool {
     ///
     /// Cheap enough for the request path — which is where it has to run, since
     /// the whole point is to act when the model is next wanted rather than on a
-    /// timer. `cpu_placed` is a plain field, so a worker on the card (and every
-    /// worker on a node without one) is dismissed by a bool read; the atomics
-    /// and the small `vram_reserved_mb` sum are only reached for a model this
-    /// node has actually demoted. Nothing here touches the disk.
+    /// timer. [`WorkerHandle::short_of_the_card`] reads two plain fields, so a
+    /// worker wholly on the card (and every worker on a node without one) is
+    /// dismissed by them; the atomics and the small `vram_reserved_mb` sum are
+    /// only reached for a model this node has actually demoted. Nothing here
+    /// touches the disk.
     fn worker_should_return_to_gpu(&self, model_id: &ModelId, handle: &WorkerHandle) -> bool {
-        if handle.placed_on_cpu_because.is_none() {
+        if !handle.short_of_the_card() {
             return false;
         }
         self.promotion_weighed(model_id, handle, !self.gpu_is_usable())
@@ -3778,7 +3834,8 @@ impl ModelProcessPool {
     /// tok/s after an unload). Ollama, by comparison, never moves a loaded
     /// runner; it waits for the keep-alive to expire. The read costs one
     /// `nvidia-smi` (~0.1 s), so it is taken only once every guard that needs
-    /// no reading has passed: a demoted worker idle past the floor.
+    /// no reading has passed: a demoted worker idle past the floor, of a model
+    /// no larger than the card could ever give.
     fn promotion_weighed(
         &self,
         model_id: &ModelId,
@@ -3786,12 +3843,18 @@ impl ModelProcessPool {
         permanently_cpu_bound: bool,
     ) -> bool {
         let mut inputs = PromotionInputs {
-            cpu_placed: handle.placed_on_cpu_because.is_some(),
+            short_of_the_card: handle.short_of_the_card(),
             permanently_cpu_bound,
             reason_still_holds: self.cpu_reason(model_id).is_some(),
             busy: handle.in_use(self.conversation_window()),
             idle_secs: handle.idle_secs(),
             gpu_estimate_mb: handle.gpu_estimate_mb,
+            ceiling_mb: self
+                .vram_ceiling_source
+                .get()
+                .and_then(|source| source())
+                .unwrap_or(0),
+            own_card_mb: handle.card_mb_held(),
             budget_mb: 0,
             committed_mb: 0,
             reclaimable_mb: 0,
@@ -3801,8 +3864,10 @@ impl ModelProcessPool {
         }
         inputs.budget_mb = self.vram_budget_now();
         inputs.committed_mb = self.vram_committed_mb();
-        inputs.reclaimable_mb =
-            self.reclaimable_vram_mb(model_id, handle.gpu_estimate_mb, inputs.budget_mb);
+        // Retiring the worker gives its own share back, so only the rest has
+        // to be found among the other models.
+        let still_needed = handle.gpu_estimate_mb.saturating_sub(inputs.own_card_mb);
+        inputs.reclaimable_mb = self.reclaimable_vram_mb(model_id, still_needed, inputs.budget_mb);
         should_return_to_gpu(&inputs)
     }
 
@@ -5177,8 +5242,8 @@ impl ModelProcessPool {
                 budget_mb = self
                     .vram_budget_mb
                     .load(std::sync::atomic::Ordering::Relaxed),
-                "Graphics memory has freed up — retiring this model's processor worker \
-                 so it can be admitted to the GPU again"
+                "Graphics memory has freed up — retiring this model's worker, which runs \
+                 on the processor in whole or in part, so it can be admitted to the GPU whole"
             );
             // Drops the worker and its RAM charge; the spawn below re-runs
             // admission from scratch. Deliberately says nothing here about
@@ -8271,6 +8336,62 @@ mod tests {
         );
     }
 
+    /// **#260 as the report placed it**: with Ollama on the card, admission
+    /// SPLIT Mistral 7B — 12 of its 32 layers, 1,400 MB, on the card — rather
+    /// than send it to the processor, and a split was never weighed for a move
+    /// back. Once Ollama lets go it moves whole, its own 1,400 MB counted as
+    /// given back; and a model larger than the card could ever give is not
+    /// weighed, so the card is not read for it.
+    #[tokio::test]
+    async fn a_split_worker_moves_whole_once_the_card_has_room() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize};
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-promote-split"));
+        pool.set_gpu_layers(-1);
+        let card = Arc::new(AtomicU64::new(2_600));
+        let ceiling = Arc::new(AtomicU64::new(7_958));
+        let reads = Arc::new(AtomicUsize::new(0));
+        {
+            let (card, reads) = (card.clone(), reads.clone());
+            pool.set_vram_budget_source(Box::new(move || {
+                reads.fetch_add(1, Ordering::Relaxed);
+                Some(card.load(Ordering::Relaxed))
+            }));
+            let ceiling = ceiling.clone();
+            pool.set_vram_ceiling_source(Box::new(move || Some(ceiling.load(Ordering::Relaxed))));
+        }
+        let mistral = ModelId("mistral-7b".into());
+        add_reserved(&pool.vram_reserved_mb, &mistral, 1_400);
+        let a_minute_ago = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .expect("a clock old enough to express the idle time");
+        let mut h =
+            fake_worker_handle_split(false, None, false, a_minute_ago, Some((12, 32))).await;
+        {
+            let only = Arc::get_mut(&mut h).expect("one owner");
+            only.gpu_estimate_mb = 5_005;
+            only.charged_mb.store(1_400, Ordering::Release);
+        }
+        assert!(
+            !pool.promotion_weighed(&mistral, &h, false),
+            "Ollama still holds the card: stay split"
+        );
+
+        card.store(7_958, Ordering::Relaxed); // `ollama stop`
+        assert!(
+            pool.promotion_weighed(&mistral, &h, false),
+            "7,958 MB for a 5,005 MB model: the split must move whole"
+        );
+
+        ceiling.store(5_004, Ordering::Relaxed);
+        let before = reads.load(Ordering::Relaxed);
+        assert!(!pool.promotion_weighed(&mistral, &h, false));
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            before,
+            "a model larger than the card could ever give is not weighed"
+        );
+    }
+
     /// **A worker that cannot grow takes the card back from an idle model** —
     /// the reclaim a fresh spawn has always run, missing from growth until
     /// 2026-09-27. 500 + 3138 committed, 32 x 170 = 5440 to add: refused as it
@@ -10628,12 +10749,14 @@ mod admission_tests {
     /// worker and the model stayed there for as long as it lived.
     fn promotable() -> PromotionInputs {
         PromotionInputs {
-            cpu_placed: true,
+            short_of_the_card: true,
             permanently_cpu_bound: false,
             reason_still_holds: false,
             busy: false,
             idle_secs: 300,
             gpu_estimate_mb: 2200,
+            ceiling_mb: 0,
+            own_card_mb: 0,
             budget_mb: 6141,
             committed_mb: 653,
             reclaimable_mb: 0,
@@ -10654,8 +10777,40 @@ mod admission_tests {
     #[test]
     fn a_worker_this_node_did_not_demote_is_left_alone() {
         let mut i = promotable();
-        i.cpu_placed = false;
+        i.short_of_the_card = false;
         assert!(!should_return_to_gpu(&i));
+    }
+
+    /// **#260, the report's own placement**: admission splits a model before it
+    /// gives up the card, so the squeezed Mistral 7B held 1.4 GB of the card
+    /// (its share) beside 6.2 GB of Ollama's. Once Ollama let go, the share it
+    /// holds is given back by retiring it: 5,005 fits 6,000 only counting that.
+    #[test]
+    fn a_split_worker_counts_its_own_share_of_the_card() {
+        let mut i = promotable();
+        i.gpu_estimate_mb = 5_005;
+        i.budget_mb = 6_000;
+        i.committed_mb = 1_400;
+        assert!(
+            !should_return_to_gpu(&i),
+            "the control: weighed as if the share were another model's, it does not fit"
+        );
+        i.own_card_mb = 1_400;
+        assert!(
+            should_return_to_gpu(&i),
+            "retiring the split gives its 1,400 MB back: 5,005 <= 6,000"
+        );
+    }
+
+    /// A model the card could never hold whole — a 14B split on an 8 GB card —
+    /// is not weighed at all, so the card is not read on every request for it.
+    #[test]
+    fn a_model_larger_than_the_card_could_ever_give_is_not_weighed() {
+        let mut i = promotable();
+        i.ceiling_mb = 2_199;
+        assert!(!promotion_is_worth_weighing(&i));
+        i.ceiling_mb = 2_200;
+        assert!(promotion_is_worth_weighing(&i));
     }
 
     /// The two reasons that never clear — `gpu_layers = 0` and a card below

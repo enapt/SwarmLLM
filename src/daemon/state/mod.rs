@@ -1580,6 +1580,17 @@ impl SharedState {
                         .and_then(|s| crate::model::auto_manage::compute_vram_budget(&s))
                 }));
         }
+        // …and the most it could be, so a model the card could never hold whole
+        // is not weighed for a move back to it on every request.
+        {
+            let weak = std::sync::Arc::downgrade(&state);
+            state
+                .model_process_pool
+                .set_vram_ceiling_source(Box::new(move || {
+                    weak.upgrade()
+                        .and_then(|s| crate::model::auto_manage::vram_budget_ceiling(&s))
+                }));
+        }
         // CPU parallelism, resolved the same way. Without this a single request
         // took every core on the machine whatever the contribution level said —
         // measured at 529-534% of 600% on a 6-core node set to Minimal.

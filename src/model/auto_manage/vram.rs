@@ -1411,6 +1411,19 @@ pub fn compute_vram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
     )
 }
 
+/// The most [`compute_vram_budget`] could ever answer: the same budget with no
+/// other program holding any of the card. Asks the live config and nothing
+/// else — no `nvidia-smi` — so the promotion check can dismiss a model larger
+/// than the card could ever give before it reads the card
+/// (`process_pool::PromotionInputs::ceiling_mb`).
+pub fn vram_budget_ceiling(shared: &crate::daemon::SharedState) -> Option<u64> {
+    let gpu_total = shared.gpu_info.as_ref()?.vram_total_mb;
+    shared
+        .cfg()
+        .resources
+        .inference_vram_budget_mb(gpu_total, Some(0), shared.contribution())
+}
+
 /// Percentage of *currently free* system RAM a configured budget may claim.
 ///
 /// The memory twin of the storage budget's free-disk clamp
