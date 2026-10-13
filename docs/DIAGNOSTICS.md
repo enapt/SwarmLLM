@@ -1141,11 +1141,12 @@ sends each projection alone):
 
 | Level | What | Where |
 |-------|------|-------|
-| INFO | `DIAG: processor-held layers read a prompt on the card` — `projection_layers` (layers whose attention and feed-forward projections were given the card), `expert_layers` (mixture-of-experts layers whose chosen experts were), `min_tokens` (32: a shorter forward stays on the processor); once per load of a card/processor split. `expert_layers` = 0 on a split with MoE layers on the processor means the card kernel cannot read them (their types, or Llama 4's input weighting) — and then the split reads the configured chunk, not 512 | split/loader/mod.rs |
+| INFO | `DIAG: processor-held layers read a prompt on the card` — `projection_layers` (layers whose attention and feed-forward projections were given the card), `expert_layers` (mixture-of-experts layers whose chosen experts were), `min_tokens` (32: a shorter forward stays on the processor), `activation_kb_per_token` (the largest such layer's activations a prompt token, the slope its chunks are sized by — #138 (1e)); once per load of a card/processor split. `expert_layers` = 0 on a split with MoE layers on the processor means the card kernel cannot read them (their types, or Llama 4's input weighting) — and then the split reads the configured chunk, not 512 | split/loader/mod.rs |
 | WARN | `DIAG: a prompt's processor-held projection could not run on the card; the processor ran it` — `error`; once per worker. The card refused a weight's copy or its product (most often out of memory); that call ran on the processor, the reply unchanged | layers/mod.rs |
 | WARN | `DIAG: a prompt's processor-held experts could not run on the card; the processor ran them` — `error`; once per worker. The card refused the stack (most often out of memory); every such call runs the processor path, the reply unchanged | layers/mod.rs |
 | INFO | `DIAG: a processor-held layer read a prompt chunk whole on the card` — `min_tokens`; once per worker (#138 (1c)). A processor-held standard attention layer (Llama, Qwen, Mistral, Qwen3 MoE — not DeepSeek's MLA, not Qwen 3.5's) ran a whole forward of ≥ 32 tokens on the card — norms, RoPE, attention and activations too, its cache read up and its new rows written back. Absent on a split that reads prompts: an adapter is loaded, the chunk is under 32 tokens, or `SWARMLLM_PROMPT_CARD_LAYERS=0` (then each projection still goes alone, (1b)) | split/executor.rs |
 | INFO | `DIAG: how a split's prompt copies reach the card` — `beside`; once per worker, at the first processor-held weight a prompt copies to the card (#138 (1d)). `beside=true`: copies run on the card's copy stream into its 256 MB copy ring while the card multiplies, and the card copies each one out card-to-card (`CudaDevice::clone_htod_beside`). `beside=false`: each copy waits for the card's queued work first — `SWARMLLM_PROMPT_CARD_COPY_STREAM=0`, the legacy stream (`SWARMLLM_CUDA_OWN_STREAM=0`), or the copy stream could not be made. A copy of more than 128 MB, or one made while a decode step is captured, goes the waiting way even with `beside=true` | layers/mod.rs |
+| INFO | `DIAG: a split's prompt chunk sized from the card's room` — `tokens`, `room_mb` (card memory free beside what is in use, after a synchronize), `budget_mb` (that less the card's margin), `last_forward_took_mb` (what the last prompt forward took beyond what stayed: copies, activations, the cache it added), `activation_kb_per_token`, `kept_kb_per_token`, `history_kb_per_position`; once per worker, the first chunk a split copying its weights to the card sized past 512 (#138 (1e), `SplitModel::prompt_reader`). Absent: no forward measured yet (the first chunk of a worker's first prompt reads 512), the card's room fits no more than 512, a prompt layer has fallen back to the processor (WARN above — sizing then stays at 512 for the worker's life), standard attention is forced, or `SWARMLLM_PROMPT_CHUNK_ROOM=0`. `SWARMLLM_PROFILE=1`'s `PROF seq_len=` lines show the sizes each forward read | split/model.rs |
 | WARN | `DIAG: a processor-held layer could not read a prompt chunk on the card; the processor ran it` — `error`; once per worker. The card refused the layer (most often out of memory); its cache was cut back to what it held before and the processor reran the layer, the reply unchanged | split/executor.rs |
 
 ## Performance Diagnostics
@@ -1711,13 +1712,16 @@ ops per token per layer — not bit-identical, so judge both against llama.cpp
 (FUTURE_WORK #228 (3)).
 
 **Measure a prompt in the shape a node reads it.** `test-split` reads the whole
-prompt in one forward; a node reads 128 tokens a forward unless the model reads
-its prompts on the card (`SplitModel::reads_prompts_on_card`: wholly on the card,
-or a split whose every processor layer sends its heavy multiplies there — a dense
-layer's projections, a MoE layer's experts — then 512;
-`prefill_pacer::prompt_chunk_ceiling`). The loader's line
+prompt in one forward unless given `--prompt-chunk N`, which reads it through the
+node's own `forward_prompt_in_chunks` at a configured N. A node reads 128 tokens a
+forward unless the model reads its prompts on the card
+(`SplitModel::prompt_reader`): wholly on the card, 512; a split whose every
+processor layer sends its heavy multiplies there — a dense layer's projections,
+a MoE layer's experts — at least 512 and as many as the card has room for, up
+to 4096 (#138 (1e); `DIAG: a split's prompt chunk sized from the card's room`
+says what the room was). The loader's line
 `DIAG: processor-held layers read a prompt on the card` counts the layers given
-(`projection_layers`, `expert_layers`). Pass `--prompt-chunk 128` (or 512) — the old per-expert MoE path took 46 s for a 681-token prompt that way
+(`projection_layers`, `expert_layers`). Pass `--prompt-chunk 128` — the old per-expert MoE path took 46 s for a 681-token prompt that way
 against 20 s in one forward, so a one-forward figure understated what users met
 by more than half (#138, 2026-10-11).
 

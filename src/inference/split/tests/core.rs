@@ -1770,7 +1770,9 @@ fn a_prompts_processor_projections_read_on_the_card_give_the_processors_answer()
     }
 
     // The loader's pass gives a processor layer's every projection the card;
-    // the chunk ceiling then reads 512 a forward for the split.
+    // the chunk ceiling then reads at least 512 a forward for the split.
+    use crate::inference::layers::prompt_bytes_per_token;
+    use crate::inference::prefill_pacer::{prompt_chunk_ceiling, PromptReader, CARD_CHUNK_TOKENS};
     let mut model = make_test_split_model(2, 256);
     model.layer_devices = vec![device.clone(); 2];
     assert!(!model.reads_prompts_on_card());
@@ -1780,6 +1782,12 @@ fn a_prompts_processor_projections_read_on_the_card_give_the_processors_answer()
         "projections not asked for"
     );
     assert!(!model.reads_prompts_on_card());
+    assert_eq!(model.prompt_reader(0), PromptReader::Processor);
+    assert_eq!(
+        prompt_bytes_per_token(&mut model.layers),
+        0,
+        "no layer copies"
+    );
     assert_eq!(
         let_processor_layers_read_prompts_on(&mut model.layers, &device, true, true),
         PromptCardGiven {
@@ -1794,6 +1802,65 @@ fn a_prompts_processor_projections_read_on_the_card_give_the_processors_answer()
             .all(|p| p.prompt_card.is_some()));
     }
     assert!(model.reads_prompts_on_card());
+    // #138 (1e): the slope its chunks are sized by is each projection's input
+    // and output rows at f32 — attention's four 256 + 256, the feed-forward's
+    // three 256 + 1,024 — and with no card to read the room of, the floor.
+    assert_eq!(
+        prompt_bytes_per_token(&mut model.layers),
+        4 * (4 * (256 + 256) + 3 * (256 + 1024))
+    );
+    assert_eq!(
+        model.prompt_reader(0),
+        PromptReader::CardCopyingWeights { room_tokens: 0 }
+    );
+    assert_eq!(
+        prompt_chunk_ceiling(128, model.prompt_reader(0)),
+        CARD_CHUNK_TOKENS
+    );
+}
+
+/// #138 (1e): a split's next prompt forward is predicted from the last one the
+/// card's pool measured — its take again at the same shape, each token and
+/// position of history it differs by priced, and the causal mask's growth,
+/// the one term faster than the chunk, counted in full.
+#[test]
+fn a_prompt_forward_is_predicted_from_the_last_one_measured() {
+    use crate::inference::split::model::{MeasuredPrompt, PromptTokenBytes};
+    let last = MeasuredPrompt {
+        tokens: 512,
+        index_pos: 0,
+        took_bytes: 900 << 20,
+    };
+    let per = PromptTokenBytes {
+        activations: 300 << 10,
+        kept: 80 << 10,
+        history: 24 << 10,
+    };
+    let mask = |t: u64, at: u64| 8 * t * (at + t);
+    assert_eq!(
+        last.predicted_bytes(per, 512, 0),
+        900 << 20,
+        "the same shape"
+    );
+    // Twice the tokens from the start: 512 more of each per-token cost, 512
+    // more positions of history, and the larger mask.
+    assert_eq!(
+        last.predicted_bytes(per, 1024, 0),
+        (900 << 20) + 512 * (380 << 10) + 512 * (24 << 10) + mask(1024, 0) - mask(512, 0)
+    );
+    // The next chunk of the same prompt, as long again: only its history and
+    // mask differ.
+    assert_eq!(
+        last.predicted_bytes(per, 512, 512),
+        (900 << 20) + 512 * (24 << 10) + mask(512, 512) - mask(512, 0)
+    );
+    // Fewer tokens predict less, and never below nothing.
+    assert!(last.predicted_bytes(per, 256, 0) < 900 << 20);
+    let small = MeasuredPrompt {
+        took_bytes: 1,
+        ..last
+    };
+    assert_eq!(small.predicted_bytes(per, 32, 0), 0);
 }
 
 /// A processor layer of a prompt chunk runs whole on the card it was given

@@ -174,9 +174,11 @@ enum Commands {
         /// Prompt text
         #[arg(long, default_value = "Hello, how are you?")]
         prompt: String,
-        /// Read the prompt this many tokens per forward, as a node does
-        /// (`inference.prefill_chunk_tokens`: 128 unless the model is wholly
-        /// on the card); 0 reads it in one forward
+        /// Read the prompt as a node does, this many tokens per forward
+        /// (`inference.prefill_chunk_tokens`, 128) raised as a node raises it:
+        /// to 512 on the card, and on a card/processor split copying its
+        /// weights to the card to what the card has room for; 0 reads it in
+        /// one forward
         #[arg(long, default_value = "0")]
         prompt_chunk: usize,
         // `--gpu-layers` is the GLOBAL option above, not one of this

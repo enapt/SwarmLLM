@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #262**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #263**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate; #257 closed on 2026-10-13 (under WSL2 a card's saved prompts are kept in host RAM) and #258 opened from its measurement; #138 (1), (1b), (1c) and (1d) shipped on 2026-10-13 (a card/processor split runs a prompt's processor-held experts, then every processor-held projection, then each processor-held layer whole, on the card, copying the next weights while the card computes); #259 and #260 opened and closed the same day from a tester's report (a kept model bigger than the card was refused; a model sent to the processor while another program held the card never moved back), #261 opened from it.
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate; #257 closed on 2026-10-13 (under WSL2 a card's saved prompts are kept in host RAM) and #258 opened from its measurement; #138 (1), (1b), (1c) and (1d) shipped on 2026-10-13 (a card/processor split runs a prompt's processor-held experts, then every processor-held projection, then each processor-held layer whole, on the card, copying the next weights while the card computes); #259 and #260 opened and closed the same day from a tester's report (a kept model bigger than the card was refused; a model sent to the processor while another program held the card never moved back), #261 opened from it; #138 (1e) the same day (a split reads a prompt in chunks as large as the card has room for), and #262 opened from its rig (a split's conversation budget charges the processor's caches to the card).
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -89,8 +89,8 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     accumulation shipped 2026-10-09; its smaller items are P3; #138 (1) on 2026-10-13: a split's
     prompt experts run on the card, 1.4x; (1b) the same day: every processor-held projection,
     a dense 14B split's prompt 5.3-5.7x; (1c) the same day: each processor layer whole on the card,
-    1.6x more; (1d) the same day: the weight copies beside the products, 3-9% — fewer, bigger
-    prompt chunks are next). *(#137 narrowed to P3 on
+    1.6x more; (1d) the same day: the weight copies beside the products, 3-9%; (1e) the same
+    day: prompt chunks as large as the card has room for, 1.5-1.7x). *(#137 narrowed to P3 on
     2026-10-11: decode ran outside its thread pool on every default node — fixed: a 14B split
     1.19x, now level with llama.cpp; a 3B processor-only 1.14-1.39x; ~12% behind it remains.)* (`docs/plans/faster_than_local.md`).
 12. **#3**, **#180** — the routing cost model charges a constant where the reply length
@@ -1139,17 +1139,25 @@ forward and 8.71 / 8.71 → **7.91 / 7.90 s** at 128; the 30B level (5.45 / 5.73
 its experts still copy the waiting way); +256 MB of card, replies identical in every pair
 (`docs/invariants/inference.md` § "A split's prompt copies run beside the card's work").
 
-**Left, in order of what they cost us:** (1e) **fewer forwards — the chunk size.** Each forward
-re-copies every processor-held weight (4.6 GB for the 14B), so a 2,664-token prompt (the
-888-token one ×3, copies beside) took 10.05 s at 512 a forward, 6.93 s at 1,024, 5.81 s whole;
-the card pool's peak 4,989 / 5,097 / 5,461 MB (~0.28-0.36 MB a token for the 14B's working set,
-flash attention keeping it ~linear). `prefill_pacer::prompt_chunk_ceiling` takes 512 for any
-split read on the card; it could take the live card room (free − the safety margin − this
-request's KV still to come) over a per-token working set of ~4 × (6H + 3(q + 2kv) + 3I) bytes,
-floor 512 (callers: `executor.rs` `forward_prompt_in_chunks`, `model_worker.rs` `chunk_size_for`;
-`test-split` has its own chunk loop, so a rig needs the node path). ⚠ The 1,024-a-forward
-reply differed from 512's and the whole read's at token 16 — score against llama.cpp before
-shipping a bigger chunk. (1f) the warm forward is not yet bound by its copies: profiled, copies
+**Done 2026-10-13, (1e) — a split reads a prompt in chunks as large as the card has room
+for:** every forward re-copies every processor-held weight (4.6 GB for the 14B), so fewer
+forwards win. `SplitModel::prompt_reader(index_pos)` answers the ceiling for every prompt pass:
+512-4096 tokens from the card's free memory (after a synchronize, less the budget margin) over
+the forward PREDICTED from the last one MEASURED (`begin_prompt_measure` /
+`end_prompt_measure` on the pool's high-water mark; `MeasuredPrompt::predicted_bytes` adds the
+largest copying layer's activations per token, `layers::prompt_bytes_per_token`, the card's
+caches, the history a card-run processor layer pulls up and the causal mask). 512 until
+something is measured, after any card fallback, or under forced standard attention. One binary
+(`SWARMLLM_PROMPT_CHUNK_ROOM=0` = before), ABBA, Windows up 12.3 h, `~/swarmllm-138c/ab1h.sh`,
+`test-split --prompt-chunk 128` through the node's own chunk loop: the 14B 20/28's 2,606-token
+prompt 10.13 / 8.77 → **5.92 / 5.15 s** (two forwards, 512 + 2,094), 4,324 tokens 14.55 →
+**9.48 s**; the card at most 6.9 GB of 8, replies llama.cpp's first choice at every pick (2,606)
+or a near-tie in both arms (4,324). The 30B 26/22 had no room and read 512 in both arms
+(`docs/invariants/inference.md` § "A split's prompt chunk is as large as the card has room
+for"). Its every arm, both binaries, was refused part-way by the card's conversation budget:
+#262.
+
+**Left, in order of what they cost us:** (1f) the warm forward is not yet bound by its copies: profiled, copies
 833 ms + unattributed 528 (before: 1,215 + 248). This card has ONE async copy engine, so the
 ring's card-to-card move queues behind the next upload — measured not to matter alone
 (`~/swarmllm-138c/reuse.cu` variant 7, the move as a kernel: 296-298 ms against 282-307).
@@ -1441,6 +1449,27 @@ against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hy
 StarCoder2, inert while refused).
 
 ### Memory and admission
+
+#### #262 — A card/processor split's conversation budget charges the processor's caches to the card
+`P2` · memory · **OPEN** — 2026-10-13 · history: none (#138 (1e)'s rig)
+
+A split worker's KV budget is the CARD's (`split::loader` counts only the card-held layers in
+`kv_bytes_per_token`), but every check weighs it against `KvCacheStore::occupancy`, which sums
+every layer's cache wherever it lives (`KvCacheEntry::occupancy`) — the processor-held layers'
+f32 caches in host memory included. Consumers: the growth claim (`claim_room`, `executor.rs`),
+prompt admission (`admit_prompt` via `ensure_room_for_prompt`), the reconciliation with the
+card (`kv_budget_now` → `budget_reconciled_with_device`) and `snapshot_room`. Seen: the 30B
+26/22 on 8 GB (card budget 371 MB; card 52 KB a token, host 88) was refused at a different
+forward in every arm of a 2,585-token prompt, and the refusal blamed "other conversations
+… using 220 MB" with `live_entries=1` — the 220 MB was its own host-side cache. The 14B 20/28
+(card 80 KB a token, host 224) reaches a refusal at ~a quarter of what its card holds. And
+the advice is wrong: "a shorter conversation will not help" (the `busy` branch, `others` =
+store total − own card-figure bytes). The other half: the host side is charged nowhere —
+admission charges a split only its card share (`card_share_of_split_mb`) and
+`record_cpu_kv_budget` runs only for a processor placement, so the miscount is today the
+only bound on a split's host-side cache. Next: charge each device's caches to that device's
+budget (card bytes to the card budget, host bytes to a host budget the daemon hands a split
+worker as it does a processor one), and the refusal's `others` from the same split.
 
 #### #256 — On WSL, `nvidia-smi` waits for a busy card, so a reading taken mid-reply is "unknown"
 `P3` · memory · **OPEN** — 2026-10-12 · history: #244's fix (archive § "Closed after 2026-10-02" → #244)

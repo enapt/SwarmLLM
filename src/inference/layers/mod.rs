@@ -142,6 +142,23 @@ impl QMatMul {
         }
     }
 
+    /// Elements of one token's input and output rows through this projection
+    /// — what each token of a prompt chunk costs it in activations (#138 (1e),
+    /// [`prompt_bytes_per_token`]). A slice of a fused weight is charged the
+    /// fused weight's whole output, which its call computes before slicing.
+    pub(crate) fn row_elems(&self) -> usize {
+        use candle_core::quantized::QMatMul as Q;
+        let m = match &self.inner {
+            QMatMulInner::Standard(m) => m,
+            QMatMulInner::FusedSlice { fused, .. } => fused.as_ref(),
+        };
+        let dims = match m {
+            Q::QTensor(q) => q.shape().dims().to_vec(),
+            Q::Tensor(t) | Q::TensorF16(t) => t.dims().to_vec(),
+        };
+        dims.iter().take(2).sum()
+    }
+
     /// Create a shared fused QMatMul that can be used by multiple FusedSlice variants.
     pub(crate) fn make_fused(
         qtensor: QTensor,
@@ -1038,6 +1055,52 @@ pub(crate) fn let_processor_layers_read_prompts_on(
     given
 }
 
+/// Card bytes each token of a prompt chunk costs the largest processor-held
+/// layer that reads its prompt on the card ([`LayerVariant::reads_its_prompt_on_a_card`]),
+/// or 0 when none does — the slope `SplitModel::prompt_reader` sizes a chunk
+/// by (#138 (1e)). Each projection's input and output rows at f32, a
+/// mixture-of-experts layer's chosen experts once per slot (`n_experts_used`)
+/// and its router. Measured against the 14B's card pool (`~/swarmllm-138c/ab1e.sh`):
+/// 0.36 MB a token here against 0.22-0.28 the pool grew by (its KV aside) —
+/// the figure errs high, which is the side a card that spills silently
+/// (gotcha #826) needs it on. Takes `&mut` only because
+/// [`LayerVariant::projections_mut`] does.
+pub(crate) fn prompt_bytes_per_token(layers: &mut [LayerVariant]) -> u64 {
+    let mut most = 0usize;
+    for layer in layers {
+        if !layer.reads_its_prompt_on_a_card() {
+            continue;
+        }
+        let mut elems: usize = layer.projections_mut().iter().map(|p| p.row_elems()).sum();
+        if let FfnVariant::MoE(moe) = layer.ffn_mut() {
+            if let Some(e) = moe.experts.first() {
+                elems += moe.n_experts_used
+                    * (e.gate.row_elems() + e.up.row_elems() + e.down.row_elems());
+            }
+            elems += moe.gate.dims().iter().take(2).sum::<usize>();
+        }
+        most = most.max(elems);
+    }
+    (most as u64) * 4
+}
+
+/// How many times a processor-held layer's prompt work has fallen back from
+/// the card to the processor in this process — out of the card's memory, most
+/// likely. `SplitModel::prompt_reader` stops sizing chunks past
+/// `CARD_CHUNK_TOKENS` once it is not zero (#138 (1e)).
+static PROMPT_CARD_FALLBACKS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Count one fallback of [`PROMPT_CARD_FALLBACKS`].
+pub(crate) fn note_prompt_card_fallback() {
+    PROMPT_CARD_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Has any processor-held layer's prompt work fallen back to the processor?
+pub(crate) fn prompt_card_fell_back() -> bool {
+    PROMPT_CARD_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
+
 /// `SWARMLLM_PROMPT_CARD_LAYERS=0` keeps a processor layer's prompt work to its
 /// projections (#138 (1b)) instead of running the whole layer on the card —
 /// the A/B arm of [`LayerOnTheCard`]. Read once.
@@ -1263,6 +1326,7 @@ impl LayerOnTheCard {
 /// Logged once per process: a prompt's processor-held projection could not
 /// run on the card (out of its memory, most likely) and ran on the processor.
 fn note_projection_stayed_on_the_processor(e: &candle_core::Error) {
+    note_prompt_card_fallback();
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         tracing::warn!(
@@ -1275,6 +1339,7 @@ fn note_projection_stayed_on_the_processor(e: &candle_core::Error) {
 /// Logged once per process: a prompt's processor experts could not run on the
 /// card (out of its memory, most likely) and ran on the processor instead.
 fn note_experts_stayed_on_the_processor(e: &candle_core::Error) {
+    note_prompt_card_fallback();
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         tracing::warn!(

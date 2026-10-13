@@ -154,6 +154,18 @@ impl Slot {
         matches!(self.state, SlotState::Decoding { .. })
     }
 
+    /// Where this slot's next prompt chunk starts, while it is `Prefilling` —
+    /// what a split sizes that chunk against (`SplitModel::prompt_reader`).
+    pub fn next_prefill_pos(&self) -> Option<usize> {
+        match &self.state {
+            SlotState::Prefilling {
+                next_chunk_index_pos,
+                ..
+            } => Some(*next_chunk_index_pos),
+            SlotState::Decoding { .. } => None,
+        }
+    }
+
     /// `generated_count` is only meaningful in `Decoding` state — `Prefilling`
     /// hasn't emitted any tokens yet.
     pub fn generated_count(&self) -> usize {

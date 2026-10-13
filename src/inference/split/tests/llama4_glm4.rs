@@ -418,6 +418,7 @@ fn test_llama4_moe_layer_forward() {
         batch_fellback: 0,
         batch_stats_reported_at: None,
         decode_graph: Default::default(),
+        prompt_room: Default::default(),
     };
 
     let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));

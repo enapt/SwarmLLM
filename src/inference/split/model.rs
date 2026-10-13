@@ -99,6 +99,104 @@ pub struct SplitModel {
     /// and the graph if so — see [`crate::inference::cuda_graph`]. Decided at
     /// the first decode step; `SWARMLLM_CUDA_GRAPH=1` only.
     pub(super) decode_graph: crate::inference::cuda_graph::DecodeGraphSlot,
+    /// What sizes a prompt chunk when this segment's processor-held layers
+    /// copy their weights to the card (#138 (1e)) — [`Self::prompt_reader`].
+    pub(super) prompt_room: PromptRoom,
+}
+
+/// What sizes a prompt chunk on a split copying its processor-held layers'
+/// weights to the card (#138 (1e)): a per-token slope from the layers' shapes
+/// and the last prompt forward the card's memory pool measured.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PromptRoom {
+    /// `layers::prompt_bytes_per_token`: the largest copying layer's
+    /// activations a token. 0 where no processor-held layer copies its
+    /// weights — nothing is then measured or sized.
+    pub(crate) bytes_per_token: u64,
+    /// The last prompt forward measured on the card.
+    pub(crate) last: Option<MeasuredPrompt>,
+}
+
+/// One prompt forward as the card's memory pool saw it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MeasuredPrompt {
+    /// Its tokens and the position it started at.
+    pub(crate) tokens: usize,
+    pub(crate) index_pos: usize,
+    /// The most the pool held during it beyond what was in use as it began
+    /// (`USED_MEM_HIGH` less `USED_MEM_CURRENT`): the weights it copied over,
+    /// its activations, the cache it added — everything but what stays.
+    pub(crate) took_bytes: u64,
+}
+
+/// What each further prompt token costs a forward on the card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PromptTokenBytes {
+    /// The largest copying layer's activations.
+    pub(crate) activations: u64,
+    /// What the card-held layers' caches keep of it.
+    pub(crate) kept: u64,
+    /// What one card-run processor layer pulls up of its cache per position
+    /// already held — the prompt's history, charged per position, not per
+    /// token of the chunk.
+    pub(crate) history: u64,
+}
+
+impl MeasuredPrompt {
+    /// The card memory a prompt forward of `tokens` starting at `index_pos`
+    /// will take beyond what is in use as it begins, predicted from this one:
+    /// its measured take, plus or minus `per` for each token and each position
+    /// of history it differs by, and the difference in causal masks — f32
+    /// `[tokens, index_pos + tokens]`, counted twice for the copy a card-run
+    /// processor layer takes of it (`SplitModel::causal_mask`), the one term
+    /// that grows faster than the chunk.
+    pub(crate) fn predicted_bytes(
+        &self,
+        per: PromptTokenBytes,
+        tokens: usize,
+        index_pos: usize,
+    ) -> u64 {
+        let slope = i128::from(per.activations) + i128::from(per.kept);
+        let mask = |t: usize, at: usize| 8 * t as i128 * (at + t) as i128;
+        let took = i128::from(self.took_bytes)
+            + (tokens as i128 - self.tokens as i128) * slope
+            + ((index_pos + tokens) as i128 - (self.index_pos + self.tokens) as i128)
+                * i128::from(per.history)
+            + mask(tokens, index_pos)
+            - mask(self.tokens, self.index_pos);
+        took.clamp(0, i128::from(u64::MAX)) as u64
+    }
+}
+
+/// `SWARMLLM_PROMPT_CHUNK_ROOM=0` reads a split's prompt 512 tokens a forward,
+/// as before #138 (1e) — the A/B of [`SplitModel::prompt_reader`]. Read once.
+fn prompt_chunks_sized_by_room() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_PROMPT_CHUNK_ROOM").as_deref() != Ok("0"))
+}
+
+/// Logged once per process: the first prompt chunk a split sized from the
+/// card's room, and what it was sized from (#138 (1e)).
+fn note_prompt_chunk_sized(
+    tokens: usize,
+    room: u64,
+    budget: u64,
+    last_took: u64,
+    per: PromptTokenBytes,
+) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::info!(
+            tokens,
+            room_mb = room >> 20,
+            budget_mb = budget >> 20,
+            last_forward_took_mb = last_took >> 20,
+            activation_kb_per_token = per.activations >> 10,
+            kept_kb_per_token = per.kept >> 10,
+            history_kb_per_position = per.history >> 10,
+            "DIAG: a split's prompt chunk sized from the card's room"
+        )
+    });
 }
 
 impl SplitModel {
@@ -136,11 +234,11 @@ impl SplitModel {
     /// Does this segment read a prompt's heavy work on the graphics card? Every
     /// layer there, or a card/processor split whose every processor layer sends
     /// a prompt's heavy work to the card (`LayerVariant::reads_its_prompt_on_a_card`:
-    /// its projections, #138 (1b), or its experts, #138 (1)). What the callers
-    /// of [`crate::inference::prefill_pacer::prompt_chunk_ceiling`] ask — never
-    /// [`Self::runs_entirely_on_card`], which the drafter and admission timing
-    /// ask: such a split reads 512 tokens a forward, so each processor layer's
-    /// weights cross to the card once per 512 tokens, not per 128.
+    /// its projections, #138 (1b), or its experts, #138 (1)). What
+    /// [`Self::prompt_reader`] asks — never [`Self::runs_entirely_on_card`]
+    /// alone, which the drafter and admission timing ask: such a split reads
+    /// at least 512 tokens a forward, so each processor layer's weights cross
+    /// to the card once per chunk, not per 128 tokens.
     pub(crate) fn reads_prompts_on_card(&self) -> bool {
         self.runs_entirely_on_card()
             || (!self.layer_devices.is_empty()
@@ -150,6 +248,138 @@ impl SplitModel {
                     .zip(&self.layer_devices)
                     .filter(|(_, d)| d.is_cpu())
                     .all(|(layer, _)| layer.reads_its_prompt_on_a_card()))
+    }
+
+    /// What reads a prompt chunk starting at `index_pos` on this segment — the
+    /// ONE answer every prompt pass sizes its chunk by
+    /// (`prefill_pacer::prompt_chunk_ceiling`): the forward's own chunk loop
+    /// and the batched table's solo prompt. A split copying its processor
+    /// layers' weights to the card is told how many tokens the card has room
+    /// for NOW (#138 (1e)): it re-copies every one of them per forward, so a
+    /// 2,664-token prompt on the 14B took 10.05 s at 512 a forward, 6.93 s at
+    /// 1,024 and 5.81 s whole (`docs/invariants/inference.md`).
+    pub(crate) fn prompt_reader(
+        &self,
+        index_pos: usize,
+    ) -> crate::inference::prefill_pacer::PromptReader {
+        use crate::inference::prefill_pacer::PromptReader;
+        if self.runs_entirely_on_card() {
+            PromptReader::Card
+        } else if self.reads_prompts_on_card() {
+            PromptReader::CardCopyingWeights {
+                room_tokens: self.prompt_room_tokens(index_pos),
+            }
+        } else {
+            PromptReader::Processor
+        }
+    }
+
+    /// How many prompt tokens one forward starting at `index_pos` can read
+    /// before the card runs short, or 0 when that is not known — no forward
+    /// measured yet, a card that will not say, a prompt layer that has already
+    /// fallen back to the processor (out of the card's memory, most likely:
+    /// `layers::prompt_card_fell_back`), or standard attention forced (its
+    /// scores grow with the square of the chunk). 0 reads at
+    /// `CARD_CHUNK_TOKENS`, as before this was measured.
+    ///
+    /// The card's room is what it has free beside what is in use now, after a
+    /// synchronize (`kv_budget::device_free_and_total_bytes`), less the margin
+    /// every budget on the card keeps; a forward of `t` tokens is predicted
+    /// from the last one measured ([`MeasuredPrompt::predicted_bytes`]). Every
+    /// forward of a chunk measures again, so a prediction that was wrong is
+    /// corrected at the next chunk. `SWARMLLM_PROMPT_CHUNK_ROOM=0` = 512 a
+    /// forward, the A/B.
+    fn prompt_room_tokens(&self, index_pos: usize) -> usize {
+        use crate::inference::prefill_pacer::{CARD_CHUNK_TOKENS, COPIED_CHUNK_MAX_TOKENS};
+        let Some(last) = self.prompt_room.last else {
+            return 0;
+        };
+        let Some(card) = self.card() else {
+            return 0;
+        };
+        if !prompt_chunks_sized_by_room()
+            || crate::inference::layers::prompt_card_fell_back()
+            || crate::inference::attn_kernel::is_force_standard_attn()
+        {
+            return 0;
+        }
+        let Some((room, total)) = super::kv_budget::device_free_and_total_bytes(card) else {
+            return 0;
+        };
+        let budget = room.saturating_sub(super::kv_budget::device_free_margin_bytes(total));
+        let per_token = self.prompt_bytes_per_token_on_card();
+        let fits = |t: usize| last.predicted_bytes(per_token, t, index_pos) <= budget;
+        let (mut fit, mut over) = (CARD_CHUNK_TOKENS, COPIED_CHUNK_MAX_TOKENS + 1);
+        if !fits(fit) {
+            return 0;
+        }
+        while over - fit > 1 {
+            let mid = fit + (over - fit) / 2;
+            if fits(mid) {
+                fit = mid;
+            } else {
+                over = mid;
+            }
+        }
+        note_prompt_chunk_sized(fit, room, budget, last.took_bytes, per_token);
+        fit
+    }
+
+    /// The card bytes a prompt forward's every further token costs this
+    /// segment: the largest copying layer's activations
+    /// (`PromptRoom::bytes_per_token`) and what the card-held layers' caches
+    /// keep of it.
+    fn prompt_bytes_per_token_on_card(&self) -> PromptTokenBytes {
+        // `kv_bytes_per_token` is the card-held layers' figure (the loader's
+        // budget counts only what the card holds), so a layer's share is it
+        // over the CARD's layers, never over the segment's.
+        let on_card = self.layer_devices.iter().filter(|d| d.is_cuda()).count() as u64;
+        let per_layer_kv = self.kv_bytes_per_token / on_card.max(1);
+        PromptTokenBytes {
+            activations: self.prompt_room.bytes_per_token,
+            kept: self.kv_bytes_per_token,
+            // A card-run processor layer pulls its cache history up for the
+            // chunk (#138 (1c)): as f32 and again as the attention kernel's
+            // f16, against a figure kept at f16 (2 bytes) or f32 (4) — three
+            // times it covers either.
+            history: per_layer_kv * 3,
+        }
+    }
+
+    /// Measure a prompt forward of `seq_len` tokens, when this segment copies
+    /// its weights to the card for one: synchronize, so what is in use is
+    /// what stays, then start the pool's high-water mark again. `None` when
+    /// it is not measured.
+    pub(super) fn begin_prompt_measure(&self, seq_len: usize) -> Option<u64> {
+        if self.prompt_room.bytes_per_token == 0
+            || seq_len < crate::inference::layers::PROMPT_ON_CARD_MIN_TOKENS
+        {
+            return None;
+        }
+        let card = self.card()?;
+        card.synchronize().ok()?;
+        crate::inference::cuda_pool::take_peak_use(card)?;
+        crate::inference::cuda_pool::usage(card).map(|u| u.used)
+    }
+
+    /// Record what the forward begun by [`Self::begin_prompt_measure`] took.
+    pub(super) fn end_prompt_measure(
+        &mut self,
+        in_use_before: Option<u64>,
+        seq_len: usize,
+        index_pos: usize,
+    ) {
+        let Some(before) = in_use_before else {
+            return;
+        };
+        let Some(peak) = self.card().and_then(crate::inference::cuda_pool::peak_use) else {
+            return;
+        };
+        self.prompt_room.last = Some(MeasuredPrompt {
+            tokens: seq_len,
+            index_pos,
+            took_bytes: peak.saturating_sub(before),
+        });
     }
 
     /// The model's context window in tokens.

@@ -2234,6 +2234,9 @@ impl SplitModel {
         // mixture-of-experts layer's chosen experts (#138 (1)). Given here,
         // once every layer is built, whatever branch built it. The A/Bs:
         // `SWARMLLM_PROMPT_CARD_PROJECTIONS=0`, `SWARMLLM_MOE_PROMPT_CARD=0`.
+        // What each prompt token costs those layers on the card sizes their
+        // chunks (#138 (1e), `SplitModel::prompt_reader`); 0 when none copies.
+        let mut prompt_bytes_per_token = 0;
         if let Some(card) = placement.card_beside_the_processor(layers.len()) {
             let given = crate::inference::layers::let_processor_layers_read_prompts_on(
                 &mut layers,
@@ -2241,10 +2244,12 @@ impl SplitModel {
                 std::env::var("SWARMLLM_PROMPT_CARD_PROJECTIONS").as_deref() != Ok("0"),
                 std::env::var("SWARMLLM_MOE_PROMPT_CARD").as_deref() != Ok("0"),
             );
+            prompt_bytes_per_token = crate::inference::layers::prompt_bytes_per_token(&mut layers);
             tracing::info!(
                 projection_layers = given.projection_layers,
                 expert_layers = given.expert_layers,
                 min_tokens = crate::inference::layers::PROMPT_ON_CARD_MIN_TOKENS,
+                activation_kb_per_token = prompt_bytes_per_token >> 10,
                 "DIAG: processor-held layers read a prompt on the card"
             );
         }
@@ -2307,6 +2312,10 @@ impl SplitModel {
             batch_fellback: 0,
             batch_stats_reported_at: None,
             decode_graph: Default::default(),
+            prompt_room: super::model::PromptRoom {
+                bytes_per_token: prompt_bytes_per_token,
+                last: None,
+            },
         })
     }
 }

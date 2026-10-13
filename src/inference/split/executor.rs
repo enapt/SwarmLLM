@@ -275,7 +275,9 @@ impl SplitModel {
     /// On a model that runs entirely on the card the chunk is at least
     /// `prefill_pacer::CARD_CHUNK_TOKENS` (`prompt_chunk_ceiling`): 128 is
     /// milliseconds there, so a cancel still lands within a fraction of a
-    /// second, and the larger chunk reads the prompt ~15% faster.
+    /// second, and the larger chunk reads the prompt ~15% faster. On a split
+    /// copying its weights to the card each chunk is sized as it starts, from
+    /// the card's room then (`SplitModel::prompt_reader`, #138 (1e)).
     #[allow(clippy::too_many_arguments)]
     pub fn forward_prompt_in_chunks(
         &mut self,
@@ -287,15 +289,13 @@ impl SplitModel {
         skip_embedding: bool,
         chunk_tokens: usize,
     ) -> Result<Tensor, SwarmError> {
-        let chunk_tokens = match chunk_tokens {
+        let ceiling = |model: &Self, at: usize| match chunk_tokens {
             0 => 0,
-            n => crate::inference::prefill_pacer::prompt_chunk_ceiling(
-                n,
-                self.reads_prompts_on_card(),
-            ),
+            n => crate::inference::prefill_pacer::prompt_chunk_ceiling(n, model.prompt_reader(at)),
         };
+        let first_chunk = ceiling(self, index_pos);
         let seq_len = input.dim(1).map_err(SwarmError::internal)?;
-        if chunk_tokens == 0 || seq_len <= chunk_tokens {
+        if first_chunk == 0 || seq_len <= first_chunk {
             let (out, _) = self.forward_inner_impl(
                 input,
                 index_pos,
@@ -321,6 +321,11 @@ impl SplitModel {
                     super::kv_cache::CANCELLED_MID_FORWARD.to_string(),
                 ));
             }
+            let chunk_tokens = if start == 0 {
+                first_chunk
+            } else {
+                ceiling(self, index_pos + start)
+            };
             let len = chunk_tokens.min(seq_len - start);
             let part = input
                 .narrow(1, start, len)
@@ -763,6 +768,10 @@ impl SplitModel {
             || crate::inference::prof::enabled()
             || crate::inference::prof::counting_kernels())
         .then(std::time::Instant::now);
+        // What the card takes for a prompt forward of a split copying its
+        // weights there sizes the next one (#138 (1e)); read before the
+        // profile's report below resets the pool's high-water mark.
+        let prompt_measure = self.begin_prompt_measure(input.dim(1).unwrap_or(1));
         // Use component presence rather than layer indices for shard-aware is_first/is_last
         let is_first = self.tok_embeddings.is_some();
         let is_last = self.output.is_some();
@@ -1343,6 +1352,9 @@ impl SplitModel {
             hidden.into_tensor().map_err(SwarmError::internal)
         };
 
+        if result.is_ok() {
+            self.end_prompt_measure(prompt_measure, seq_len, index_pos);
+        }
         if let Some(start) = forward_start {
             let forward_ms = start.elapsed().as_millis() as u64;
             tracing::debug!(
@@ -2452,6 +2464,7 @@ fn note_a_layer_ran_on_the_card() {
 /// Logged once per process: a processor-held layer could not read its prompt
 /// chunk on the card and the processor ran it.
 fn note_a_layer_stayed_on_the_processor(e: &SwarmError) {
+    crate::inference::layers::note_prompt_card_fallback();
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         tracing::warn!(

@@ -161,6 +161,18 @@ pub(crate) fn take_peak_use(device: &Device) -> Option<u64> {
     None
 }
 
+/// [`take_peak_use`] without the reset: the peak since the last reset, for a
+/// reader that must not take it from the profile's per-forward report
+/// (`SplitModel`'s prompt measurement, #138 (1e)).
+pub(crate) fn peak_use(device: &Device) -> Option<u64> {
+    #[cfg(feature = "candle-cuda")]
+    if let Device::Cuda(dev) = device {
+        return cuda::peak_use(dev).ok().flatten();
+    }
+    let _ = device;
+    None
+}
+
 /// Bytes this process may allocate on `device` from memory its pool already
 /// holds — added to `cuMemGetInfo`'s free figure wherever this process asks
 /// "how much room do I have". Zero when unknown: conservative, never larger
@@ -405,6 +417,19 @@ mod cuda {
                 sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_CURRENT,
             )?,
         })
+    }
+
+    /// The pool's high watermark of memory in use (`USED_MEM_HIGH`), left as
+    /// it is.
+    pub(super) fn peak_use(dev: &candle_core::CudaDevice) -> Result<Option<u64>, DriverError> {
+        let Some(pool) = current_pool(dev)? else {
+            return Ok(None);
+        };
+        attribute(
+            pool,
+            sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH,
+        )
+        .map(Some)
     }
 
     /// The pool's high watermark of memory in use (`USED_MEM_HIGH`), then

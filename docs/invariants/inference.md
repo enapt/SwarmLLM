@@ -2134,7 +2134,8 @@ once per worker): the card out of memory costs time, never the reply.
 **Why 512 tokens a forward.** Every forward copies the chosen experts again, and
 at top-8 a 128-token chunk already touches nearly all 128 — so 128 a forward is
 four copies of what one 512 forward copies. `SplitModel::reads_prompts_on_card`
-answers the chunk ceiling for every caller of `prompt_chunk_ceiling` (the slot
+(through `prompt_reader` since (1e), which reads more than 512 where the card has
+room) answers the chunk ceiling for every caller of `prompt_chunk_ceiling` (the slot
 table's solo prompt, a segment's prompt pass); `runs_entirely_on_card` keeps its
 own questions (the drafter's single-step reads, admission's card timing). The 2026-10-11 measurement of 512
 against 128 alone (#138's entry) is why a split without the card path keeps 128.
@@ -2191,9 +2192,9 @@ that call (WARN once): it costs time, never the reply. The loader marks once
 (`let_processor_layers_read_prompts_on`, through `LayerVariant::projections_mut`
 — every projection of every layer kind), and only weights held in HOST memory
 (`weight_is_on_the_processor`): a card layer is never given a second copy. A
-split whose every processor layer reads its heavy part on the card reads 512
-tokens a forward (`reads_prompts_on_card` → `prompt_chunk_ceiling`; at 128 the
-weights cross four times as often).
+split whose every processor layer reads its heavy part on the card reads at least 512
+tokens a forward (`prompt_reader` → `prompt_chunk_ceiling`; at 128 the
+weights cross four times as often; more where the card has room, (1e)).
 
 **Measured** (one binary `1afbfea4`, `SWARMLLM_PROMPT_CARD_PROJECTIONS=0` = old,
 Windows up 4.3 h, live node stopped, safety kit, `~/swarmllm-138b/ab.sh`):
@@ -2374,7 +2375,7 @@ ring's card-to-card move queues behind the next upload; `reuse.cu` variant 7
 (4.6 GB for the 14B), so FEWER forwards win more than overlap: the 14B's prompt
 ×3 (2,664 tokens) took 10.05 s at 512 a forward, 6.93 s at 1,024 and 5.81 s
 whole, the pool's peak 4,989 / 5,097 / 5,461 MB — ~0.28-0.36 MB a token of
-working set. That is FUTURE_WORK #138's next item.
+working set. That is FUTURE_WORK #138's next item, (1e) below.
 
 **Verified.** `a_splits_prompt_copies_arrive_intact_and_hold_a_bounded_share_of_the_card`
 (card only): 48 copies of 16 MB, three times round the ring, each multiplied
@@ -2383,6 +2384,78 @@ and the card's pool grows 320 MB (the ring + 4 weights), 3 of 3; with the
 ring's wait removed it fails 3 of 3 (layer 4 or 5 arrives as another's).
 Replies: each pair gave the same 16 tokens at the same chunk size, all four
 pairs (the ring changes when a weight arrives, never what it is).
+
+### A split's prompt chunk is as large as the card has room for (2026-10-13, #138 (1e))
+
+**What it replaced.** A card/processor split whose processor-held layers read a
+prompt on the card read it 512 tokens a forward, whatever the card held — and
+every forward re-copies every processor-held weight (4.6 GB for the 14B 20/28).
+The (1d) rig read the 14B's prompt ×3 (2,664 tokens) in 10.05 s at 512 a
+forward, 6.93 s at 1,024 and 5.81 s whole, the pool's peak 4,989 / 5,097 /
+5,461 MB. llama.cpp fixes its chunk (`-ub`, default 512) and its users raise
+it by hand — 380 → 2,091 tok/s at `-ub 8192` with experts in RAM on an RTX
+3090, paid in card workspace; SGLang and vLLM fix theirs too and say to lower
+it on an out-of-memory. Here a card over its memory under WSL2 does not fail —
+it spills to host memory at link speed (gotcha #826) — so the size is read
+from the card as it stands, not configured.
+
+**What replaced it.** `SplitModel::prompt_reader(index_pos)` is the one answer
+for every prompt pass (`prefill_pacer::prompt_chunk_ceiling`; the forward's own
+chunk loop sizes EACH chunk as it starts, the batched table its solo prompt):
+`CardCopyingWeights { room_tokens }`, clamped to 512-4096. The room is the
+card's free memory beside what is in use after a synchronize
+(`kv_budget::device_free_and_total_bytes`) less the margin every card budget
+keeps; the forward it must hold is PREDICTED from the last one MEASURED
+(`MeasuredPrompt::predicted_bytes`): every prompt forward of such a split
+records what the pool took beyond what stayed (`begin_prompt_measure`
+synchronizes and restarts `USED_MEM_HIGH`, `end_prompt_measure` reads it before
+the profile's report resets it), and the next adds a slope per token — the
+largest copying layer's activations, each projection's input and output rows at
+f32 (`layers::prompt_bytes_per_token`, 0.36 MB a token for the 14B against
+the 0.22-0.28 its pool grew by), and what the card-held caches keep — plus the
+history a card-run processor layer pulls up per position and the causal mask's
+growth (`[t, index_pos + t]` f32, the one term faster than the chunk). A
+fixed part (copies in flight, the ring, dequantized weights) never needs a
+model: it is inside the measurement. The first chunk of a worker's first prompt
+has nothing measured and reads 512; a fallback of any prompt layer to the
+processor, or forced standard attention (scores grow with the square), pins 512
+for the worker's life. A/B `SWARMLLM_PROMPT_CHUNK_ROOM=0`.
+
+**Measured** (one binary, ABBA, Windows up 12.3 h, binary `1a261725`, live node stopped, safety
+kit, `~/swarmllm-138c/ab1h.sh`; `test-split` reads through
+`forward_prompt_in_chunks` at the node's configured 128):
+
+| Qwen2.5-14B Q4_K_M 20/28 | 512 a forward (before) | sized from the room | forwards | pool reserved / peak |
+|---|---|---|---|---|
+| 2,606 tokens (the #138 prompt ×3) | 10.13 / 8.77 s | **5.92 / 5.15 s** (1.7x) | 6 → 2 (512 + 2,094) | 5,216-5,248 / 4,989 → 5,824 / 5,364 MB |
+| 4,324 tokens (×5) | 14.55 s | **9.48 s** (1.5x) | 9 → 2 (512 + 3,812) | 5,632 / 5,113 → 6,176 / 5,920 MB |
+
+The card at most 6,905-6,941 MiB of 8,192 (nvidia-smi, the desktop's ~900
+included) against 6,316-6,376 before: no spill. The sizing line fired on every
+room arm — `room_mb=2608`, a 4,096-token forward predicted at 2,198 MB from the
+512-token one's measured 650. The rig's binary divided the card's KV figure by
+all 48 layers (33 KB a token kept, 4 of history, where 80 and 12 are right);
+corrected before the commit, which lifts that prediction to ~2,350 MB — the
+same choice on both prompts. The 30B 26/22 left no room: every chunk read 512
+in both arms (no sizing line), and every arm of BOTH was refused part-way by
+the card's conversation budget (371 MB at 2,585 tokens) — a budget that
+charges the processor-held layers' caches, which live in host memory, against
+the card (FUTURE_WORK #262), not this change.
+
+**Replies** (scored against llama.cpp, `score_many.py`, 16 tokens): the
+2,606-token prompt gave the same reply in all four arms, llama.cpp's first
+choice at every pick. At 4,324 the two arms agree for 15 picks — both leave
+llama.cpp's choice at pick 10 the same way (rank 2, 0.15 logits) — and differ
+at the 16th, a near-tie in both (rank 3 at 0.31 sized, rank 2 at 0.11 before).
+
+**Verified.** `a_split_copying_its_weights_reads_what_the_card_has_room_for`
+(the clamp, 512-4096, and that a configured ceiling above it stands),
+`a_prompt_forward_is_predicted_from_the_last_one_measured` (the slope, the
+history and the mask terms against hand arithmetic), and the projections test
+now asserts the loader's per-token figure (`4 × Σ(in + out)` over a layer's
+projections) and that a split with nothing measured reads 512.
+`chats_sharing_the_card_keep_the_pacers_choice` passes a reader that panics if
+asked: while chats share the tick, the room is never read.
 
 ### Llama 4 routes like llama.cpp hardcodes it, and normalises Q/K after RoPE (2026-09-25)
 
@@ -2777,11 +2850,14 @@ tensor-core `mma` — which the vendored kernels do not. llama.cpp's default `n_
   passes the check. `SWARMLLM_QMATMUL_CUBLAS=0` = MMQ always; `SWARMLLM_QMATMUL_CUBLAS_MIN_ROWS`
   moves the threshold for a measurement; `SWARMLLM_QMATMUL_CUBLAS_ACC=32` accumulates every weight
   in f32 (below).
-- `prefill_pacer::prompt_chunk_ceiling(configured, on_card)` — the configured ceiling, raised to
-  `CARD_CHUNK_TOKENS` (512) on a model that runs ENTIRELY on the card. Read by the batched
-  table for a prompt with nobody waiting (`PrefillPacer::chunk_size_for`; while chats share the
-  tick the pacer's choice stands), and by `SplitModel::forward_prompt_in_chunks`, which a
-  segment's prompt pass and the drafter take. A card/processor split keeps the configured one.
+- `prefill_pacer::prompt_chunk_ceiling(configured, reader)` — the configured ceiling, raised to
+  `CARD_CHUNK_TOKENS` (512) on a model that runs ENTIRELY on the card (`PromptReader::Card`).
+  Read by the batched table for a prompt with nobody waiting (`PrefillPacer::chunk_size_for`;
+  while chats share the tick the pacer's choice stands), and by
+  `SplitModel::forward_prompt_in_chunks`, which a segment's prompt pass and the drafter take.
+  A card/processor split that reads its prompts on the card takes 512 or more from the card's
+  room (`PromptReader::CardCopyingWeights`, § "A split's prompt chunk is as large as the card
+  has room for"); one that does not keeps the configured one.
 
 **Measured 2026-09-28/29** (RTX 3070 Laptop 8 GB, WSL2, Windows uptime ~6 h, isolated node, live
 node stopped, SINGLE requests; unique prompts, `max_tokens` 1, best of 3;

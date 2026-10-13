@@ -54,22 +54,48 @@ pub const MIN_CHUNK_TOKENS: usize = 8;
 /// its per-chunk weight dequantization.
 pub const CARD_CHUNK_TOKENS: usize = 512;
 
+/// The most prompt tokens one forward of a split that copies its weights to
+/// the card may read, however much room the card has (#138 (1e)). Past it a
+/// forward's copies are a small share of its time: llama.cpp users with
+/// experts in RAM report prompt speed rising to `-ub` 8192 (380 → 2,091 tok/s
+/// on an RTX 3090), but each step past 4096 halves an already small share,
+/// and the card's room is the limit long before it on the cards we measure.
+pub const COPIED_CHUNK_MAX_TOKENS: usize = 4096;
+
+/// What reads a prompt's heavy work on a model — `SplitModel::prompt_reader`'s
+/// answer, and what [`prompt_chunk_ceiling`] sizes a forward by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptReader {
+    /// The processor, or a split part of which reads on it: the configured
+    /// ceiling — 512 tokens there can be tens of seconds (gotcha #191).
+    Processor,
+    /// A card holding every layer.
+    Card,
+    /// A card/processor split whose processor-held layers copy their weights
+    /// to the card for every forward (#138 (1)-(1d)): a forward of `t` tokens
+    /// re-copies all of them, so fewer, larger forwards copy less.
+    /// `room_tokens` is what the card has room for, as
+    /// `SplitModel::prompt_reader` measured it.
+    CardCopyingWeights { room_tokens: usize },
+}
+
 /// The most prompt tokens one forward may read: `configured`, raised to
-/// [`CARD_CHUNK_TOKENS`] when the model reads its prompts on the card
-/// (`SplitModel::reads_prompts_on_card`).
+/// [`CARD_CHUNK_TOKENS`] on a card, and on a split copying its weights to the
+/// card to the tokens the card has room for, up to
+/// [`COPIED_CHUNK_MAX_TOKENS`] (never below [`CARD_CHUNK_TOKENS`], the size
+/// such a split read at before it was measured). A larger configured ceiling
+/// is the operator's and stands.
 ///
 /// The ONE answer for every prompt pass — the batched table's solo prompt
-/// ([`PrefillPacer::chunk_size_for`]), a pipeline segment's prompt pass and the
-/// drafter's. A card/processor split is not "on the card": its processor
-/// layers are the slow part and keep the configured ceiling — unless each of
-/// them sends its prompt's experts to the card (a mixture-of-experts model,
-/// FUTURE_WORK #138 (1)), where 512 tokens a forward copies each layer's
-/// experts a quarter as often.
-pub fn prompt_chunk_ceiling(configured: usize, on_card: bool) -> usize {
-    if on_card {
-        configured.max(CARD_CHUNK_TOKENS)
-    } else {
-        configured
+/// ([`PrefillPacer::chunk_size_for`]), a pipeline segment's prompt pass
+/// (`SplitModel::forward_prompt_in_chunks`) and the drafter's.
+pub fn prompt_chunk_ceiling(configured: usize, reader: PromptReader) -> usize {
+    match reader {
+        PromptReader::Processor => configured,
+        PromptReader::Card => configured.max(CARD_CHUNK_TOKENS),
+        PromptReader::CardCopyingWeights { room_tokens } => {
+            configured.max(room_tokens.clamp(CARD_CHUNK_TOKENS, COPIED_CHUNK_MAX_TOKENS))
+        }
     }
 }
 
@@ -140,16 +166,16 @@ impl PrefillPacer {
         }
     }
 
-    /// [`Self::chunk_size`] for a model that may run entirely on the card: a
-    /// prompt with nobody waiting on the tick reads at
-    /// [`prompt_chunk_ceiling`]; while slots share the tick the pacer's own
-    /// choice stands, since a larger chunk there is a longer stall for every
-    /// chat decoding beside it.
-    pub fn chunk_size_for(&self, sharing: bool, on_card: bool) -> usize {
+    /// [`Self::chunk_size`] for a model that may read its prompts on the card:
+    /// a prompt with nobody waiting on the tick reads at
+    /// [`prompt_chunk_ceiling`], `reader` asked only then (it may read the
+    /// card); while slots share the tick the pacer's own choice stands, since
+    /// a larger chunk there is a longer stall for every chat decoding beside it.
+    pub fn chunk_size_for(&self, sharing: bool, reader: impl FnOnce() -> PromptReader) -> usize {
         if sharing {
             self.chunk_size(true)
         } else {
-            prompt_chunk_ceiling(self.max_tokens, on_card)
+            prompt_chunk_ceiling(self.max_tokens, reader())
         }
     }
 
@@ -379,26 +405,50 @@ mod tests {
 
     #[test]
     fn a_prompt_alone_on_the_card_reads_in_card_sized_chunks() {
-        assert_eq!(prompt_chunk_ceiling(128, true), CARD_CHUNK_TOKENS);
+        assert_eq!(
+            prompt_chunk_ceiling(128, PromptReader::Card),
+            CARD_CHUNK_TOKENS
+        );
         // A larger configured ceiling is the operator's and stands.
-        assert_eq!(prompt_chunk_ceiling(2048, true), 2048);
+        assert_eq!(prompt_chunk_ceiling(2048, PromptReader::Card), 2048);
         // The processor keeps what was configured — 512 tokens there can be
         // tens of seconds of one forward (gotcha #191).
-        assert_eq!(prompt_chunk_ceiling(128, false), 128);
-        assert_eq!(prompt_chunk_ceiling(32, false), 32);
+        assert_eq!(prompt_chunk_ceiling(128, PromptReader::Processor), 128);
+        assert_eq!(prompt_chunk_ceiling(32, PromptReader::Processor), 32);
 
         let p = PrefillPacer::new(128, 200);
-        assert_eq!(p.chunk_size_for(false, true), CARD_CHUNK_TOKENS);
-        assert_eq!(p.chunk_size_for(false, false), 128);
+        assert_eq!(
+            p.chunk_size_for(false, || PromptReader::Card),
+            CARD_CHUNK_TOKENS
+        );
+        assert_eq!(p.chunk_size_for(false, || PromptReader::Processor), 128);
+    }
+
+    /// #138 (1e): a split copying its weights to the card reads what the card
+    /// has room for — never less than it read before it was measured, never
+    /// more than the cap — and an operator's larger ceiling still stands.
+    #[test]
+    fn a_split_copying_its_weights_reads_what_the_card_has_room_for() {
+        let copying = |room_tokens| PromptReader::CardCopyingWeights { room_tokens };
+        assert_eq!(prompt_chunk_ceiling(128, copying(1500)), 1500);
+        assert_eq!(prompt_chunk_ceiling(128, copying(0)), CARD_CHUNK_TOKENS);
+        assert_eq!(prompt_chunk_ceiling(128, copying(100)), CARD_CHUNK_TOKENS);
+        assert_eq!(
+            prompt_chunk_ceiling(128, copying(usize::MAX)),
+            COPIED_CHUNK_MAX_TOKENS
+        );
+        assert_eq!(prompt_chunk_ceiling(8192, copying(1500)), 8192);
     }
 
     #[test]
     fn chats_sharing_the_card_keep_the_pacers_choice() {
         // A bigger chunk while another slot decodes is a longer stall for it;
-        // only a prompt with nobody waiting gets the card-sized chunk.
+        // only a prompt with nobody waiting gets the card-sized chunk — and the
+        // card is not read for one that will not get it.
         let mut p = PrefillPacer::new(128, 200);
         p.observe(128, Duration::from_millis(640)); // 5 ms/token → 40 fits 200 ms
-        assert_eq!(p.chunk_size_for(true, true), p.chunk_size(true));
-        assert!(p.chunk_size_for(true, true) < 128);
+        let never = || -> PromptReader { panic!("a shared tick must not read the card") };
+        assert_eq!(p.chunk_size_for(true, never), p.chunk_size(true));
+        assert!(p.chunk_size(true) < 128);
     }
 }
