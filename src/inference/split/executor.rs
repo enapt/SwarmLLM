@@ -540,21 +540,31 @@ impl SplitModel {
     /// capture has been checked on dense layers held whole on one device, and
     /// on Qwen 3.5's: its DeltaNet layers write their state into buffers kept
     /// for it, never the state they read (`SsmState`, #228 (4)), and on the
-    /// card kernel only. MoE routing still copies scores to the host.
+    /// card kernel only. A mixture-of-experts feed-forward is checked where its
+    /// experts are stacked on the card ([`ffn_capture_ineligibility`]).
     fn decode_graph_ineligibility(&self) -> Option<&'static str> {
         if !self.layer_devices.is_empty() {
             return Some("the model is split between the card and the processor");
         }
-        let checked = self.layers.iter().all(|layer| match layer {
-            LayerVariant::Dense(lw) => matches!(lw.ffn, FfnVariant::Dense(_)),
-            LayerVariant::Qwen35Attn { ffn, .. } => matches!(ffn, FfnVariant::Dense(_)),
-            LayerVariant::Qwen35Ssm { weights, ffn, .. } => {
-                matches!(ffn, FfnVariant::Dense(_)) && weights.delta_rule_runs_on_the_card_kernel()
+        for layer in &self.layers {
+            let ffn = match layer {
+                LayerVariant::Dense(lw) => &lw.ffn,
+                LayerVariant::Qwen35Attn { ffn, .. } => ffn,
+                LayerVariant::Qwen35Ssm { weights, ffn, .. } => {
+                    if !weights.delta_rule_runs_on_the_card_kernel() {
+                        return Some(
+                            "a recurrent layer whose state is not updated by the card kernel",
+                        );
+                    }
+                    ffn
+                }
+                LayerVariant::DeepSeek { .. } => {
+                    return Some("a layer type the capture has not been checked on (MLA)")
+                }
+            };
+            if let Some(why) = ffn_capture_ineligibility(ffn) {
+                return Some(why);
             }
-            _ => false,
-        });
-        if !checked {
-            return Some("a layer type the capture has not been checked on (MoE, MLA)");
         }
         None
     }
@@ -2319,6 +2329,28 @@ impl SplitModel {
         }?;
 
         Ok(result)
+    }
+}
+
+/// Why a decode step through this feed-forward may NOT be captured, if it may
+/// not. A mixture-of-experts layer whose experts are stacked on the card
+/// (`MoeFfn::experts_stacked`) routes, sorts and multiplies on the card: no
+/// host copy, no memset into memory the capture allocates (the one-row
+/// `moe_gemm_gguf` takes its scratch with `cudaMallocAsync`, which becomes a
+/// graph memory node and updates like candle's own, #221). Every other MoE path
+/// copies the router's scores to the host ([`crate::inference::layers::MoeFfn`]'s
+/// `route`) — experts kept in the machine's memory (#138 (3)), and the card's
+/// per-expert fallback — and a copy inside a capture is refused.
+fn ffn_capture_ineligibility(ffn: &FfnVariant) -> Option<&'static str> {
+    match ffn {
+        FfnVariant::Dense(_) => None,
+        FfnVariant::MoE(moe) if moe.stacked.is_some() => None,
+        FfnVariant::MoE(moe) if moe.experts_on_the_processor() => {
+            Some("a mixture-of-experts layer keeps its experts in the machine's memory")
+        }
+        FfnVariant::MoE(_) => {
+            Some("a mixture-of-experts layer routes its experts on the processor")
+        }
     }
 }
 

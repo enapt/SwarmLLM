@@ -3966,6 +3966,41 @@ prompt tokens are identical and the kernel probe is unchanged (top-1 200/200, wo
 ms a step, ~96 GB/s of its 2.5 GB of weights against the card's 448 — where that goes is
 FUTURE_WORK #228 (7).
 
+## A mixture-of-experts layer stacked on the card is captured too (2026-10-14, FUTURE_WORK #138 (2))
+
+**What refused it.** `decode_graph_ineligibility` let no MoE layer into a capture ("unchecked").
+A layer whose experts are STACKED (`StackedExperts::fit`, `MoeFfn::experts_stacked`) needs nothing
+the capture forbids: routing on the card (`topk_on_device`: arg-sort, gather, softmax), the ids
+grouped by candle's sort, three `moe_gemm_gguf` launches on the device's own stream, whose one-row
+kernel takes its q8_1 scratch with `cudaMallocAsync`/`cudaFreeAsync` — graph memory nodes, which
+update like candle's own allocations — and no memset, no host copy. `ffn_capture_ineligibility`
+is now the per-layer answer; the card's per-expert fallback (`route`: the scores to the host,
+each expert's tokens gathered with ids sent back up) and MLA stay out.
+
+**Checked on a real model's layers.** Nothing here that stacks fits the 8 GB card whole: the
+small test MoE files' experts are 400 wide (Qwen 3.5-MoE 0.87B), not a multiple of 32, so their
+down projection can only be F16 — which `fit` refuses — and Qwen3-30B-A3B is 11.3 GB at Q2_K.
+So `~/swarmllm-138f/q3moe-24L.gguf` is that Q2_K file's first 24 layers (`truncate_gguf.py`:
+`block_count` rewritten, the rest copied) — the same weights, routing and dtypes, 5.8 GB, its
+text not meant to be good. `moegraph2.sh`, `test-split` greedy, 6,000 tokens, two interleaved
+rounds, live node stopped, decode time = wall less the load read off the log (`steps2.py`):
+
+| arm | ms a token | tok/s |
+|---|---|---|
+| `SWARMLLM_CUDA_GRAPH=0` | 14.75 / 15.53 | 67.8 / 64.4 |
+| capture, 2 layers a group | 12.20 / 12.59 | 82.0 / 79.4 |
+| capture, 1 layer a group | 12.43 / 12.69 | 80.5 / 78.8 |
+
+The ids are the same in all six (`c1e1e775`). The capture fired: 4,874-5,101 launches a run, all
+but one updated in place (one `TOPOLOGY_CHANGED` rebuild at the start), 0 refused, 10-11 steps
+uncaptured (a conversation's first). Recording costs 4.2-5.0 ms a step on the host, overlapped
+with the card's previous group.
+
+⚠ **A reply hashed with the log in it is not a reply.** `test-split` logs to stdout, and the
+capture's decision line lands INSIDE the streamed `Generated:` line — so two identical replies
+hashed differently and "the captured MoE output differs run to run" was briefly believed (gotcha
+#840). Compare the `Token IDs:` line, or strip timestamped lines first.
+
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 
 Each names the ONE place a decision is made. A second implementation of any of
