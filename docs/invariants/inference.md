@@ -2477,7 +2477,7 @@ and `experts_device_for(layer)` say where a layer's experts go — the first n
 CARD-held layers' to the processor; `split::loader::load_moe_ffn` takes the
 PLACEMENT and the layer index rather than a device, so no per-family loop can
 place experts differently. The loader's card budget takes those experts' bytes
-off (`routed_expert_bytes`), and `card_beside_the_processor` gives the card
+off (`split::routed_expert_bytes`), and `card_beside_the_processor` gives the card
 to such a layer for a prompt. The forward needed no new path:
 `MoeFfn::forward_untimed` routes on the card, `route` brings the scores down,
 the activation comes down once, the processor's one-region path runs the
@@ -2514,8 +2514,77 @@ The card's f16 prompt kernel is 0.149 off the processor's answer on the test's
 synthetic layer (largest output 5.56), on the existing path alike — that path
 was judged against llama.cpp on a real model (#138 (1)).
 
-**Not yet:** the daemon never asks for it — `test-split --cpu-moe-layers N`
-sets `split::CPU_EXPERT_LAYERS`; the pool's choice and its charges are stage B.
+`test-split --cpu-moe-layers N` sets `split::CPU_EXPERT_LAYERS` directly; the
+daemon's choice is the next section.
+
+### The pool keeps experts in RAM before it splits by layer (2026-10-14, #138 (3) stage B)
+
+**What it replaced.** For a model that did not fit the card the pool had one
+answer, `split_for_card`: the first layers whole on the card, the rest whole
+on the processor. Stage A made a better placement for a mixture-of-experts
+model possible, and nothing asked for it.
+
+**What llama.cpp does.** `--fit` (its fit-params logic) first asks whether the
+model fits "with only dense weights in device memory", then overflows the
+routed experts of the fewest layers to host memory ("48 layers (34
+overflowing)") — and shortens the context to make room ("context size reduced
+from 40960 to 4096"). We keep the first half and not the second: a split here
+promises its full context (the #104 rule, `split_for_card`'s terms).
+
+**What replaced it.** `process_pool::card_split` asks
+`experts_in_ram_for_card` first: the fewest FIRST layers whose routed experts,
+kept in RAM, leave weights − those experts + every layer's cache at the full
+`effective_context` within the card's room less
+`FORWARD_BUFFER_RESERVE_BYTES`. Only a model with no experts, or one that does
+not fit even with every layer's experts in RAM, falls back to
+`split_for_card`. The per-layer expert bytes come from the header in the same
+read as the footprint (`segment_geometry`, `split::routed_expert_bytes` — the
+one function the loader also uses). The result is a `CardSplit`:
+
+- `Layers { on_card, total }` → `--gpu-layers on_card`, as before;
+- `ExpertsInRam { in_ram, total }` → `--gpu-layers -1 --cpu-moe-layers in_ram`
+  (`worker_placement_args`), the card charged the segment's estimate less those
+  experts (`card_share_of_split_mb` → `experts_in_ram_mb`), the machine those
+  experts alone (`ram_charged_share` → `RamShare::Experts`, through
+  `admit_to_cpu_as`). No `record_cpu_kv_budget`: every cache is on the card.
+
+The planner is told `(total − in_ram, total)` (`CardSplit::card_share`); the
+worker summary, `/v1/status` and the models list carry `expert_layers_in_ram`,
+and the dashboard says "the bulk of N layers in this computer's memory". A
+refusal by the RAM budget names the experts (`describe_experts_refusal`).
+A/B: `SWARMLLM_EXPERTS_IN_RAM=0` = the whole-layer split.
+
+**Measured through the daemon** (Qwen3-30B-A3B Q2_K, 48 layers, 8 GB card;
+candidate with `resources.max_ram_mb = 9000` in a copied config — see below;
+128-token replies, 3 per arm after a warm-up, `SWARMLLM_PROFILE=1`, ABBA,
+Windows up ~18-19 h, `~/swarmllm-138e/verify3.sh`, safety kit, 0 driver
+events). The pool chose every layer on the card with the experts of the first
+**25** in RAM (stage A's rig used 23: the daemon also charges every layer's
+cache at 8192 positions and keeps the forward reserve) against **26** whole
+layers. The card held 6262 MiB against 6678-6966; the machine was charged
+5213 MB against 5530. Median decode step **50 / 54 ms** (p10 38 / 40) against
+55 / 55 (p10 47 / 47); streamed replies 2-3 **20.2, 22.4 / 18.7, 19.5 tok/s**
+against 17.2, 18.8 / 17.2, 18.5 (reply 1 is slow in every arm: the decode
+pool's width is calibrated on a worker's first reply). The processor's experts
+took 23.8-31.8 ms of a step — the gap to llama.cpp at this placement is still
+there (stage A: ~72% of its speed).
+
+**Found on the way, #266:** at the default contribution level a 16 GB GPU
+node's RAM budget is 4997 MB, so since #264 (unreleased) it refused this model
+under EITHER placement, which v0.3.236 runs.
+
+**Verified.** Mechanism on the real path: the daemon's INFO line ("placing all
+48 layers there and keeping the routed experts of the first 25"), the worker's
+("keeping the routed experts of the first 25 card-held layers in RAM"), the
+loader's (`experts_mb=5212`), `/v1/status` worker `gpu_layers_on_card 48,
+layers_total 48, expert_layers_in_ram 25`. Tests:
+`a_mixture_of_experts_model_keeps_every_layer_on_the_card_and_the_fewest_experts_in_ram`
+(minimal to within one layer's experts; heavy-first layers need fewer; a dense
+model and a card too small fall back),
+`a_split_keeping_experts_in_ram_charges_each_device_for_its_share` (both
+charges, the worker's arguments, the planner's share),
+`a_resident_split_worker_reports_its_card_share_to_the_planner` and
+`a_refusal_of_experts_kept_in_ram_says_what_they_are_and_what_limited_the_budget`.
 
 ### Llama 4 routes like llama.cpp hardcodes it, and normalises Q/K after RoPE (2026-09-25)
 

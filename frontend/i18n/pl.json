@@ -825,6 +825,8 @@
   "placement.configured": "Ustawiłeś ten komputer na korzystanie wyłącznie z procesora.",
   "placement.cuda_libraries_missing": "Biblioteki CUDA firmy NVIDIA dla karty graficznej nie są zainstalowane, więc używany jest procesor. Zainstaluj je i uruchom SwarmLLM ponownie — dziennik podaje, których brakuje.",
   "placement.driver_not_answering": "Sterownik grafiki nie odpowiada — być może resetuje kartę. W tym czasie ten model korzysta z procesora i sam wróci na kartę graficzną.",
+  "placement.experts_in_ram": "Wszystkie {total} warstw na karcie graficznej, większość {in_ram} z nich w pamięci tego komputera",
+  "placement.experts_in_ram_detail": "Model jest za duży dla karty, więc większość {in_ram} warstw zostaje w pamięci tego komputera, gdzie przetwarza ją procesor. Dlatego jest wolniejszy od modelu w całości na karcie. Zwolnij pamięć graficzną, aby przenieść tam więcej.",
   "placement.gpu_too_old": "Ta karta graficzna jest starsza niż obsługuje ta wersja, więc używany jest procesor.",
   "placement.gpu_unavailable": "SwarmLLM stracił dostęp do karty graficznej — zwykle dlatego, że sterownik zaktualizował się w trakcie działania. Uruchom SwarmLLM ponownie, aby to naprawić.",
   "placement.hybrid": "{on} z {total} warstw na karcie graficznej",

@@ -1690,6 +1690,12 @@ quarter of the cost.
 `moe ffn on the processor` (routing to combine, by the device its EXPERTS are on —
 a card-held layer keeping them in RAM, `test-split --cpu-moe-layers N` and the
 INFO line `Experts in the machine's memory: …`, is the processor's, #138 (3)).
+A node chooses that placement itself for a MoE model too big for its card: the
+daemon logs `Model does not fit the card whole — placing all N layers there and
+keeping the routed experts of the first K in the machine's memory`, the worker
+runs with `--gpu-layers -1 --cpu-moe-layers K`, and `/v1/status`'s `workers`
+and the models list carry `expert_layers_in_ram`. A/B inside one binary:
+`SWARMLLM_EXPERTS_IN_RAM=0` on the DAEMON places it by whole layers instead.
 Before 2026-10-11 its whole expert feed-forward sat in `unattributed`, ~80% of a
 step. On a card, run it once with `SWARMLLM_PROFILE_SYNC=1` too. With the experts
 kept stacked (the default since 2026-10-11) nothing in the layer waits for the

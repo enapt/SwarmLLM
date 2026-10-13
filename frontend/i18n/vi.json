@@ -825,6 +825,8 @@
   "placement.configured": "Bạn đã đặt máy tính này chỉ dùng bộ xử lý.",
   "placement.cuda_libraries_missing": "Chưa cài thư viện CUDA của NVIDIA cho card đồ họa nên bộ xử lý được dùng thay thế. Hãy cài chúng rồi khởi động lại SwarmLLM — nhật ký ghi rõ thư viện nào còn thiếu.",
   "placement.driver_not_answering": "Trình điều khiển đồ họa không phản hồi — có thể nó đang khởi động lại card. Trong lúc đó, mô hình này dùng bộ xử lý và sẽ tự quay lại card đồ họa.",
+  "placement.experts_in_ram": "Cả {total} lớp đều trên card đồ họa, phần lớn của {in_ram} lớp trong số đó nằm trong bộ nhớ của máy tính này",
+  "placement.experts_in_ram_detail": "Mô hình quá lớn so với card, nên phần lớn của {in_ram} lớp vẫn nằm trong bộ nhớ của máy tính này và do bộ xử lý xử lý. Vì vậy nó chậm hơn mô hình nằm hoàn toàn trên card. Giải phóng bộ nhớ đồ họa để chuyển thêm lên đó.",
   "placement.gpu_too_old": "Card đồ họa này cũ hơn mức bản dựng này hỗ trợ, nên bộ xử lý được dùng thay thế.",
   "placement.gpu_unavailable": "SwarmLLM không còn dùng được card đồ họa, thường là do trình điều khiển được cập nhật khi đang chạy. Khởi động lại SwarmLLM để khắc phục.",
   "placement.hybrid": "{on} trong {total} lớp chạy trên card đồ họa",

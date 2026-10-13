@@ -207,6 +207,10 @@ enum Commands {
         /// Device placement: -1 = auto (GPU when available), 0 = CPU only, >0 = GPU.
         #[arg(long, default_value = "-1", allow_negative_numbers = true)]
         gpu_layers: i32,
+        /// How many of the card's mixture-of-experts layers, from the first,
+        /// keep their routed experts in RAM (daemon-decided). 0 = none.
+        #[arg(long, default_value = "0")]
+        cpu_moe_layers: usize,
         /// KV-cache session TTL in seconds (default 600)
         #[arg(long, default_value = "600")]
         kv_cache_ttl: u64,
@@ -510,6 +514,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             data_dir,
             shard_window,
             gpu_layers,
+            cpu_moe_layers,
             kv_cache_ttl,
             prefix_cache_enabled,
             prefix_cache_max_entries,
@@ -574,6 +579,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
                 ngram_pred_tokens,
                 batched_prefill_forward,
                 gpu_layers,
+                cpu_moe_layers,
             };
             swarmllm::inference::model_worker::run_worker(
                 socket,

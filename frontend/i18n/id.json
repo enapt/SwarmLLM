@@ -825,6 +825,8 @@
   "placement.configured": "Anda menyetel komputer ini untuk hanya memakai prosesor.",
   "placement.cuda_libraries_missing": "Pustaka CUDA dari NVIDIA untuk kartu grafis belum terpasang, jadi prosesor yang dipakai. Pasang pustakanya lalu mulai ulang SwarmLLM — log menyebutkan mana yang tidak ada.",
   "placement.driver_not_answering": "Driver grafis tidak merespons — mungkin sedang mengatur ulang kartu. Sementara itu model ini memakai prosesor dan akan kembali ke kartu grafis dengan sendirinya.",
+  "placement.experts_in_ram": "Semua {total} lapisan di kartu grafis, sebagian besar dari {in_ram} di antaranya di memori komputer ini",
+  "placement.experts_in_ram_detail": "Model ini terlalu besar untuk kartu, jadi sebagian besar dari {in_ram} lapisan tetap di memori komputer ini, tempat prosesor mengerjakannya. Karena itu model ini lebih lambat daripada model yang sepenuhnya di kartu. Kosongkan memori grafis untuk memindahkan lebih banyak ke sana.",
   "placement.gpu_too_old": "Kartu grafis ini lebih lama daripada yang didukung versi ini, jadi prosesor yang dipakai.",
   "placement.gpu_unavailable": "SwarmLLM kehilangan akses ke kartu grafis, biasanya karena drivernya diperbarui saat sedang berjalan. Mulai ulang SwarmLLM untuk memperbaikinya.",
   "placement.hybrid": "{on} dari {total} lapisan di kartu grafis",

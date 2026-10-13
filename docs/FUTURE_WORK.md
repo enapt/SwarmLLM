@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate; #257 closed on 2026-10-13 (under WSL2 a card's saved prompts are kept in host RAM) and #258 opened from its measurement; #138 (1), (1b), (1c) and (1d) shipped on 2026-10-13 (a card/processor split runs a prompt's processor-held experts, then every processor-held projection, then each processor-held layer whole, on the card, copying the next weights while the card computes); #259 and #260 opened and closed the same day from a tester's report (a kept model bigger than the card was refused; a model sent to the processor while another program held the card never moved back), #261 opened from it; #138 (1e) the same day (a split reads a prompt in chunks as large as the card has room for), and #262 opened from its rig (a split's conversation budget charges the processor's caches to the card); #263 opened and closed the same day from a tester's report (a split's local segments refused a long prompt only after the peers had read it, and the retry planned the same split), then #262 (each cache charged to the memory it lives in), and #264 opened from it and closed the same day (a split's processor-held weights are charged to the memory limit), #265 opened from that; #138 (3)'s first stage the same day (a mixture-of-experts layer on the card can keep its experts in RAM, measured from `test-split`: 1.2-1.7x decode at the same card bytes).
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate; #257 closed on 2026-10-13 (under WSL2 a card's saved prompts are kept in host RAM) and #258 opened from its measurement; #138 (1), (1b), (1c) and (1d) shipped on 2026-10-13 (a card/processor split runs a prompt's processor-held experts, then every processor-held projection, then each processor-held layer whole, on the card, copying the next weights while the card computes); #259 and #260 opened and closed the same day from a tester's report (a kept model bigger than the card was refused; a model sent to the processor while another program held the card never moved back), #261 opened from it; #138 (1e) the same day (a split reads a prompt in chunks as large as the card has room for), and #262 opened from its rig (a split's conversation budget charges the processor's caches to the card); #263 opened and closed the same day from a tester's report (a split's local segments refused a long prompt only after the peers had read it, and the retry planned the same split), then #262 (each cache charged to the memory it lives in), and #264 opened from it and closed the same day (a split's processor-held weights are charged to the memory limit), #265 opened from that; #138 (3)'s first stage the same day (a mixture-of-experts layer on the card can keep its experts in RAM, measured from `test-split`: 1.2-1.7x decode at the same card bytes); its second on 2026-10-14 (the daemon chooses it for a mixture-of-experts model that does not fit the card), #266 opened from its rig.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -91,8 +91,9 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     a dense 14B split's prompt 5.3-5.7x; (1c) the same day: each processor layer whole on the card,
     1.6x more; (1d) the same day: the weight copies beside the products, 3-9%; (1e) the same
     day: prompt chunks as large as the card has room for, 1.5-1.7x; (3) stage A the same day:
-    a MoE layer on the card keeps its experts in RAM, decode 1.2-1.7x at equal card bytes —
-    stage B, the daemon choosing it, is next). *(#137 narrowed to P3 on
+    a MoE layer on the card keeps its experts in RAM, decode 1.2-1.7x at equal card bytes;
+    stage B on 2026-10-14: the daemon chooses it, ~10% faster decode and ~0.4-0.7 GB less of
+    the card than the whole-layer split). *(#137 narrowed to P3 on
     2026-10-11: decode ran outside its thread pool on every default node — fixed: a 14B split
     1.19x, now level with llama.cpp; a 3B processor-only 1.14-1.39x; ~12% behind it remains.)* (`docs/plans/faster_than_local.md`).
 12. **#3**, **#180** — the routing cost model charges a constant where the reply length
@@ -1175,7 +1176,7 @@ routed on the card, the activation and scores come down, the processor runs the 
 region, the answer goes back; a prompt of ≥ 32 copies the chosen experts to the card (1). A
 segment with such a layer works on the processor (`SplitModel::cpu_layer_count`, the decode
 pool's key) and reads prompts through `CardCopyingWeights`. Reached by `test-split
---cpu-moe-layers N` only — **the daemon does not choose it yet: stage B, next.** Qwen3-30B-A3B
+--cpu-moe-layers N` here; the daemon chooses it since stage B (below). Qwen3-30B-A3B
 Q2_K at the SAME ~5.9 GB of layers on the card, 867-token prompt read 128 a forward, 64 reply
 tokens, ABBA, one binary, Windows up 16.3 h (`~/swarmllm-138d/ab3.sh`): 26 whole layers a
 median decode step of 49 / 68 ms, every layer on the card with 23 layers' experts in RAM **40 /
@@ -1185,6 +1186,22 @@ we run this placement at ~72% of its speed. Replies (`~/swarmllm-138d/score.py`,
 through llama-cpp-python 0.3.16): both arms leave llama.cpp's first choice at the same two
 tokens (7: 0.76, 11: 0.105, our numerics either way); where they part (token 25) the new
 placement takes llama.cpp's first choice and 26 whole layers one 0.193 behind it.
+
+**Done 2026-10-14, (3) stage B — the daemon keeps experts in RAM before it splits by layer:**
+llama.cpp's `--fit` first asks whether a model fits with only its dense weights on the card,
+then overflows the fewest layers' experts. `process_pool::card_split` does the same on
+`split_for_card`'s terms (every layer's cache at the full context, #104): the fewest first
+layers' experts in RAM (`experts_in_ram_for_card`, bytes from `split::routed_expert_bytes` in
+the footprint's own header read), else the whole-layer split. The worker takes `--gpu-layers -1
+--cpu-moe-layers K`; the card is charged the rest, the machine those experts (`RamShare::Experts`);
+the planner, `/v1/status`, the models list and the dashboard say so (`expert_layers_in_ram`).
+A/B `SWARMLLM_EXPERTS_IN_RAM=0`. Through the daemon, ABBA, Windows up ~18-19 h, profiled
+(`~/swarmllm-138e/verify3.sh`): 48 layers on the card with 25 layers' experts in RAM against 26
+whole layers — card 6262 MiB against 6678-6966, RAM 5213 MB against 5530, median decode step
+**50 / 54 ms** against 55 / 55, replies 2-3 **20.2-22.4 / 18.7-19.5 tok/s** against 17.2-18.8
+(`docs/invariants/inference.md` § "The pool keeps experts in RAM before it splits by layer").
+Its first rig found #266: at the default contribution level a 16 GB node's RAM budget refused the
+model under either placement.
 
 **Left, in order of what they cost us:** (1f) the warm forward is not yet bound by its copies: profiled, copies
 833 ms + unattributed 528 (before: 1,215 + 248). This card has ONE async copy engine, so the
@@ -1204,13 +1221,9 @@ a full card falls back to the processor (WARN once); under WSL2 a pool grown aft
 may be slow at high uptime (#257), measured at 3.1 h only. (2) **MoE layers in decode-step
 capture**: a stacked layer has
 no host copy, so a MoE model whole on a card could be captured (`executor.rs` still excludes
-MoE as unchecked; a 26/22 split stays uncaptured regardless). (3) **stage B — the daemon
-chooses experts in RAM**: for a MoE model that does not fit, `process_pool::split_for_card`
-offers every layer on the card with the fewest layers' experts in RAM (the routed-expert bytes
-read off the header into `VramFootprintInputs`), the worker takes `--cpu-moe-layers K`
-(`split::CPU_EXPERT_LAYERS`), the card is charged the rest and the machine those experts (#264's
-`SpawnCharge`), every layer's cache charged to the card. Then the gap to llama.cpp at the same
-placement (40 vs 29 ms): the processor's 23 layers of experts took 21.6-24 ms of a step. Seen, not chased: the first 1-2 decode
+MoE as unchecked; a 26/22 split stays uncaptured regardless). (3) **the gap to llama.cpp at
+the experts-in-RAM placement** (40 vs 29 ms in stage A's rig): the processor's 23-25 layers of
+experts take 21.6-31.8 ms of a step at the default 4 decode threads. Seen, not chased: the first 1-2 decode
 steps after a 681-token single-forward prompt took 2-4x a settled step on both the stacked
 and per-expert paths (not after a one-row prompt) — prompt temporaries pressing card memory
 is the likely reading; a node chunks card prompts at 512 tokens.
@@ -1482,6 +1495,17 @@ against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hy
 StarCoder2, inert while refused).
 
 ### Memory and admission
+
+#### #266 — A default 16 GB node with a graphics card refuses a split model that v0.3.236 runs
+`P1` · memory · **OPEN** — 2026-10-14 · history: found by #138 (3) stage B's rig
+
+Since #264 (on main, unreleased) a card/processor split's processor share is charged to
+`inference_ram_budget_mb`, which for a node with a card is half its RAM scaled by the contribution
+level — at the default (Minimal) 31% of RAM, **4997 MB on 16 GB**. Qwen3-30B-A3B Q2_K needs 5213 MB
+with its experts in RAM or 5530 MB as 26 whole layers, so the owner's own request was refused under
+either placement while ~13 GB of the machine stood available; v0.3.236 runs it. The contribution
+level is meant to cap the swarm's work, not the owner's (`process_pool::Requester`). Blocks the next
+release.
 
 #### #265 — A later range loaded into a card/processor split worker is charged to the card whatever the loader does with it
 `P3` · memory · **OPEN** — 2026-10-13 · history: found closing #264
@@ -2080,7 +2104,7 @@ grep `^| N |`).
   outside `resources.max_ram_mb`, so a processor-only model loaded beside the split was admitted
   into memory the split already held, and the split's processor-side conversation memory had no
   grant of its own. The spawn now charges that share through the same memory admission, refusal
-  and conversation grant as a processor placement (`process_pool::ram_charged_run`,
+  and conversation grant as a processor placement (`process_pool::ram_charged_share`,
   `SpawnCharge`), and a departing split gives both charges back. On this node (Windows up 15.1 h):
   Qwen2.5-14B split 30/18, the processor share charged, its processor-side conversation memory
   granted 1,525 MB (`--kv-budget-bytes`, read by the worker in place of the machine's 12 GB), one

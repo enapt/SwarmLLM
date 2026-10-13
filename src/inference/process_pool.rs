@@ -543,15 +543,15 @@ struct WorkerHandle {
     /// `gguf_header.bin` and scans the model directory, which is fine once per
     /// spawn and not fine once per request.
     gpu_estimate_mb: u64,
-    /// A hybrid split — `(layers on the card, layers in total)` — when admission
-    /// chose one; `None` for a worker wholly on either device.
+    /// A card/processor split — whole layers, or experts kept in RAM — when
+    /// admission chose one; `None` for a worker wholly on either device.
     ///
     /// Recorded because nothing else says it. The split was decided here, sent
     /// to the worker as `--gpu-layers`, logged once at spawn, and then existed
     /// nowhere a person could read: the models page showed `fits_on_gpu:
     /// true` and no placement note for a model running 13 of its 28 layers on
     /// the card, so a user could not tell why it was slower than expected.
-    gpu_layers_on_card: Option<(usize, usize)>,
+    card_split: Option<CardSplit>,
     /// What this worker put into the pool's reserved-memory map, in MB — its
     /// spawn's admission charge plus every additional segment charged to it.
     /// `charged_against_ram` says which of the two maps.
@@ -1488,20 +1488,18 @@ impl WorkerHandle {
     /// Did this node place the worker short of the card for want of its
     /// memory — on the processor, or split between the two? A split is only
     /// ever admission's answer to a card without room for the whole model
-    /// (`get_or_spawn`'s `hybrid_layers`); the user's own `gpu_layers` never
+    /// (`get_or_spawn`'s `card_split`); the user's own `gpu_layers` never
     /// makes one.
     fn short_of_the_card(&self) -> bool {
         self.placed_on_cpu_because.is_some()
-            || self
-                .gpu_layers_on_card
-                .is_some_and(|(on_card, total)| on_card < total)
+            || self.card_split.is_some_and(CardSplit::is_short_of_the_card)
     }
 
     /// Card memory this worker holds and gives back when it is retired: a
     /// split's charge, which is against the card. 0 for a worker charged
     /// against RAM (the processor) or wholly on the card (never promoted).
     fn card_mb_held(&self) -> u64 {
-        if self.charged_against_ram || self.gpu_layers_on_card.is_none() {
+        if self.charged_against_ram || self.card_split.is_none() {
             return 0;
         }
         self.charged_mb.load(Ordering::Acquire)
@@ -1865,31 +1863,83 @@ impl SpawnCharge {
     }
 }
 
-/// The layers a spawn charges to the machine's memory: the whole `segment`
-/// when it lands there (`charges_ram`), a card/processor split's
-/// processor-held run — the layers after its first `on_card` — and nothing for
-/// a model wholly on the card.
+/// The worker arguments that say where its layers go — the placement the
+/// spawn decided, the ONE statement of where the worker is going, used for
+/// both the spawn argument and the handle.
+fn worker_placement_args(
+    placed_on_cpu_because: Option<CpuReason>,
+    card_split: Option<CardSplit>,
+    configured_gpu_layers: i32,
+) -> Vec<String> {
+    let gpu_layers = match (placed_on_cpu_because, card_split) {
+        (Some(_), _) => 0,
+        // A partial split: the worker places this many of its layers on the
+        // card and the rest on the processor. Reaches the loader through
+        // `GPU_LAYER_LIMIT`, the same route `--kv-budget-bytes` takes — the
+        // daemon decides, the worker obeys.
+        (None, Some(CardSplit::Layers { on_card, .. })) => on_card as i32,
+        // Every layer on the card, whatever count the user set: the experts
+        // below are what this placement keeps off it.
+        (None, Some(CardSplit::ExpertsInRam { .. })) => -1,
+        (None, None) => configured_gpu_layers,
+    };
+    let mut args = vec!["--gpu-layers".to_string(), gpu_layers.to_string()];
+    // ...and the layers whose routed experts stay in RAM, which reach the
+    // loader through `split::CPU_EXPERT_LAYERS` (#138 (3)).
+    if let (None, Some(CardSplit::ExpertsInRam { in_ram, .. })) =
+        (placed_on_cpu_because, card_split)
+    {
+        args.push("--cpu-moe-layers".to_string());
+        args.push(in_ram.to_string());
+    }
+    args
+}
+
+/// What a spawn keeps in the machine's memory, and so charges to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RamShare {
+    /// Layers `[start, end)` — weights, conversation cache and the process —
+    /// the whole segment of a processor placement, or a whole-layer split's
+    /// processor run.
+    Layers((u32, u32)),
+    /// The routed experts of the segment's first `layers`, beside a card that
+    /// holds everything else of them, their caches included
+    /// ([`CardSplit::ExpertsInRam`]).
+    Experts { layers: usize },
+}
+
+/// What a spawn charges to the machine's memory: the whole `segment` when it
+/// lands there (`charges_ram`), a whole-layer split's processor-held run — the
+/// layers after its first `on_card` — the experts a split keeps in RAM, and
+/// nothing for a model wholly on the card.
 ///
 /// **A split's processor share was charged to nothing** (#264): its weights,
 /// their conversation cache and the worker process sat outside
 /// `resources.max_ram_mb`, a processor worker started beside it was admitted
 /// into memory the split already held, and its processor-side cache had no
 /// budget from the daemon (#262). Charged here, it goes through the same RAM
-/// admission, refusal and `--kv-budget-bytes` grant as a processor placement.
-fn ram_charged_run(
+/// admission and refusal as a processor placement — and a run of layers, the
+/// same `--kv-budget-bytes` grant.
+fn ram_charged_share(
     charge_ram: bool,
     segment: (u32, u32),
-    hybrid_layers: Option<(usize, usize)>,
-) -> Option<(u32, u32)> {
+    split: Option<CardSplit>,
+) -> Option<RamShare> {
     if charge_ram {
-        return Some(segment);
+        return Some(RamShare::Layers(segment));
     }
-    let (on_card, _) = hybrid_layers?;
-    let start = segment
-        .0
-        .saturating_add(u32::try_from(on_card).unwrap_or(u32::MAX))
-        .min(segment.1);
-    (start < segment.1).then_some((start, segment.1))
+    match split? {
+        CardSplit::Layers { on_card, .. } => {
+            let start = segment
+                .0
+                .saturating_add(u32::try_from(on_card).unwrap_or(u32::MAX))
+                .min(segment.1);
+            (start < segment.1).then_some(RamShare::Layers((start, segment.1)))
+        }
+        CardSplit::ExpertsInRam { in_ram, .. } => {
+            (in_ram > 0).then_some(RamShare::Experts { layers: in_ram })
+        }
+    }
 }
 
 /// Add `mb` to a model's recorded charge.
@@ -2119,11 +2169,15 @@ pub struct WorkerSummary {
     pub dead: bool,
     /// What admission priced the model at, in MB; 0 when unpriced.
     pub gpu_estimate_mb: u64,
-    /// For a hybrid split, how many of `layers_total` run on the card; `None`
-    /// for a worker wholly on either device.
+    /// For a card/processor split, how many of `layers_total` are on the
+    /// card — all of them when some keep their experts in RAM; `None` for a
+    /// worker wholly on either device.
     pub gpu_layers_on_card: Option<u32>,
-    /// Layers in the model this worker runs, known only for a hybrid split.
+    /// Layers in the model this worker runs, known only for a split.
     pub layers_total: Option<u32>,
+    /// Of those, how many keep their routed experts in the machine's memory
+    /// (`CardSplit::ExpertsInRam`); `None` otherwise.
+    pub expert_layers_in_ram: Option<u32>,
 }
 
 /// How many of a segment's layers go on the card when the whole segment does
@@ -2147,27 +2201,7 @@ fn split_for_card(
     if layers == 0 {
         return None;
     }
-    // KV geometry per layer, in the units `kv_bytes_per_token` takes —
-    // averaged over the segment's layers, because only `kv_layers` of them
-    // keep a cache (a recurrent layer holds a fixed state; Qwen 3.5, #228).
-    let kv_elems = ((inputs.head_count_kv * inputs.head_dim).saturating_mul(inputs.kv_layers))
-        .div_ceil(inputs.segment_layers.max(1)) as usize;
-    // The card's layers keep their cache the way the loader will build it —
-    // the half cache, or f32 plus the flash mirror for a grouped-query model
-    // where that does not apply — and the split must charge what the loader
-    // charges (`split::loader`, its KV budget), or it leaves the card less
-    // room for a conversation than the model serves: GLM-4-9B split 36/40 on
-    // an 8 GB card covered ~5,300 of its 8,192 tokens (#104's follow-up). The
-    // same rule the loader asks (`layers::kv_storage`); a hybrid split is
-    // always on a card. The loader's one other condition — MLA (DeepSeek-2)
-    // is always f32 — cannot arise here: that architecture is refused above.
-    let storage = crate::inference::layers::kv_storage(
-        true,
-        inputs.attention,
-        inputs.head_count as usize,
-        inputs.head_count_kv as usize,
-        inputs.head_dim as usize,
-    );
+    let (kv_elems, storage) = card_kv_geometry(inputs);
     let n = crate::inference::split::hybrid::plan_gpu_layers(
         available_bytes,
         inputs.quantized_weight_bytes,
@@ -2178,6 +2212,138 @@ fn split_for_card(
         inputs.effective_context,
     );
     (n > 0).then_some((n, layers))
+}
+
+/// A segment's KV geometry per layer as a card keeps it: the elements a token
+/// stores per layer, in the units `kv_bytes_per_token` takes, and the storage.
+///
+/// Averaged over the segment's layers, because only `kv_layers` of them keep a
+/// cache (a recurrent layer holds a fixed state; Qwen 3.5, #228). The card's
+/// layers keep their cache the way the loader will build it — the half cache,
+/// or f32 plus the flash mirror for a grouped-query model where that does not
+/// apply — and a split must charge what the loader charges (`split::loader`,
+/// its KV budget), or it leaves the card less room for a conversation than the
+/// model serves: GLM-4-9B split 36/40 on an 8 GB card covered ~5,300 of its
+/// 8,192 tokens (#104's follow-up). The same rule the loader asks
+/// (`layers::kv_storage`); a split is always on a card. The loader's one other
+/// condition — MLA (DeepSeek-2) is always f32 — cannot arise: that
+/// architecture is never split.
+fn card_kv_geometry(
+    inputs: &crate::model::auto_manage::vram::VramFootprintInputs,
+) -> (usize, crate::inference::split::kv_cache::KvStorage) {
+    let kv_elems = ((inputs.head_count_kv * inputs.head_dim).saturating_mul(inputs.kv_layers))
+        .div_ceil(inputs.segment_layers.max(1)) as usize;
+    let storage = crate::inference::layers::kv_storage(
+        true,
+        inputs.attention,
+        inputs.head_count as usize,
+        inputs.head_count_kv as usize,
+        inputs.head_dim as usize,
+    );
+    (kv_elems, storage)
+}
+
+/// Where a segment that does not fit the card whole goes instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardSplit {
+    /// Its first `on_card` of `total` layers on the card, the rest on the
+    /// processor (`--gpu-layers`).
+    Layers { on_card: usize, total: usize },
+    /// Every layer on the card except the routed experts of its first
+    /// `in_ram`, which stay in the machine's memory and run on the processor
+    /// (`--cpu-moe-layers`, llama.cpp's `--n-cpu-moe`; FUTURE_WORK #138 (3)).
+    ExpertsInRam { in_ram: usize, total: usize },
+}
+
+impl CardSplit {
+    /// `(layers whose feed-forward runs on the card, layers in total)` — what
+    /// "placed short of the card" reads and what the planner blends the two
+    /// devices' speeds by (`scheduler::split_tokens_per_sec`). For experts in
+    /// RAM that counts a layer whose experts stay there as the processor's,
+    /// which prices it a little slow: the routed experts are nearly all of
+    /// such a layer's reading, and its attention stays on the card (30B-A3B
+    /// on an 8 GB card: 40 ms a step with 23 layers' experts in RAM, 49 ms
+    /// with 22 whole layers on the processor, 2026-10-13).
+    pub fn card_share(self) -> (usize, usize) {
+        match self {
+            Self::Layers { on_card, total } => (on_card, total),
+            Self::ExpertsInRam { in_ram, total } => (total.saturating_sub(in_ram), total),
+        }
+    }
+
+    /// Layers wholly or partly on the processor, so ever short of the card.
+    fn is_short_of_the_card(self) -> bool {
+        let (on_card, total) = self.card_share();
+        on_card < total
+    }
+}
+
+/// The fewest of a segment's first layers whose routed experts must stay in
+/// the machine's memory for everything else of every layer — attention, the
+/// router, shared experts, the whole KV cache — to fit `available_bytes` of
+/// card; `None` when the segment has no routed experts, or when even all of
+/// them in RAM leave the rest too large.
+///
+/// **What llama.cpp's own fitting does** (`--fit`, `llama_params_fit_impl`):
+/// it puts "only dense weights in device memory" first, then lets routed
+/// experts overflow to system memory, layer by layer ("48 layers (34
+/// overflowing)"). Measured here on Qwen3-30B-A3B Q2_K and an 8 GB card
+/// (2026-10-13): 40 ms a decode step with 23 layers' experts in RAM against
+/// 49-68 ms for 26 whole layers on the card, prompts alike — a token reads 8
+/// of 128 experts, so the processor's share is small, while a whole layer
+/// there also runs attention over the conversation.
+///
+/// Charged by the same terms as [`split_for_card`] — the reserve for a
+/// forward's transient buffers and the KV cache at the model's full context —
+/// so the two placements promise a conversation the same room.
+/// `expert_bytes[i]` is layer `i` of the segment's routed-expert bytes
+/// (`split::routed_expert_bytes`), exact per layer: a quantization mix gives
+/// some layers' experts more bits than others.
+fn experts_in_ram_for_card(
+    inputs: &crate::model::auto_manage::vram::VramFootprintInputs,
+    expert_bytes: &[u64],
+    available_bytes: u64,
+) -> Option<usize> {
+    if !inputs.splits_across_devices
+        || expert_bytes.len() != inputs.segment_layers as usize
+        || expert_bytes.iter().all(|&b| b == 0)
+    {
+        return None;
+    }
+    let (kv_elems, storage) = card_kv_geometry(inputs);
+    let kv = crate::inference::split::kv_budget::kv_bytes_per_token(1, kv_elems, kv_elems, storage)
+        .saturating_mul(inputs.effective_context)
+        .saturating_mul(inputs.segment_layers);
+    let usable = available_bytes
+        .saturating_sub(crate::inference::split::hybrid::FORWARD_BUFFER_RESERVE_BYTES);
+    let mut on_card = inputs.quantized_weight_bytes.saturating_add(kv);
+    // At least one: this is asked only of a segment admission found too large
+    // for the card whole.
+    for (layer, &bytes) in expert_bytes.iter().enumerate() {
+        on_card = on_card.saturating_sub(bytes);
+        if on_card <= usable {
+            return Some(layer + 1);
+        }
+    }
+    None
+}
+
+/// How a segment too large for `available_bytes` of card is placed: every
+/// layer on the card with the fewest layers' experts in RAM where it has
+/// routed experts and the rest fits ([`experts_in_ram_for_card`]), otherwise
+/// its first layers on the card and the rest on the processor
+/// ([`split_for_card`]); `None` leaves it to the processor.
+fn card_split(
+    inputs: &crate::model::auto_manage::vram::VramFootprintInputs,
+    expert_bytes: &[u64],
+    available_bytes: u64,
+) -> Option<CardSplit> {
+    let total = inputs.segment_layers as usize;
+    if let Some(in_ram) = experts_in_ram_for_card(inputs, expert_bytes, available_bytes) {
+        return Some(CardSplit::ExpertsInRam { in_ram, total });
+    }
+    split_for_card(inputs, available_bytes)
+        .map(|(on_card, total)| CardSplit::Layers { on_card, total })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2479,6 +2645,10 @@ pub struct ModelProcessPool {
     #[cfg(test)]
     pub(crate) test_footprint_inputs:
         DashMap<ModelId, crate::model::auto_manage::vram::VramFootprintInputs>,
+    /// Each layer's routed-expert bytes for a test model, whole model — what
+    /// `segment_geometry` would read off the header. Absent = a dense model.
+    #[cfg(test)]
+    pub(crate) test_expert_bytes: DashMap<ModelId, Vec<u64>>,
     /// A test's stand-in for a usable graphics card (`card_in_play`), which a
     /// build without the CUDA feature never has.
     #[cfg(test)]
@@ -2658,6 +2828,8 @@ impl ModelProcessPool {
             test_cost_curve: DashMap::new(),
             #[cfg(test)]
             test_footprint_inputs: DashMap::new(),
+            #[cfg(test)]
+            test_expert_bytes: DashMap::new(),
             #[cfg(test)]
             test_card_in_play: std::sync::atomic::AtomicBool::new(false),
         }
@@ -2899,8 +3071,53 @@ impl ModelProcessPool {
             .store(gpu_layers, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// The `--gpu-layers` value a worker for `model_id` should be spawned with.
-    /// A model pinned to the CPU by a previous OOM overrides the config.
+    /// What a card/processor split of `segment` puts on the card, by the
+    /// admission estimator, never more than the room the split was sized
+    /// against (`partial_gpu_layers`) — so the charge keeps the committed total
+    /// inside the budget, as a whole-card admission does. Whole layers: its
+    /// first `on_card`. Experts kept in RAM: the whole segment, less the
+    /// experts the machine holds ([`Self::experts_in_ram_mb`]).
+    fn card_share_of_split_mb(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        split: CardSplit,
+    ) -> u64 {
+        let room = self
+            .vram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(self.vram_committed_mb());
+        let share = match split {
+            CardSplit::Layers { on_card, .. } => {
+                let end = segment
+                    .0
+                    .saturating_add(u32::try_from(on_card).unwrap_or(u32::MAX))
+                    .min(segment.1);
+                self.estimate_gpu_footprint_mb(model_id, Some((segment.0, end)))
+            }
+            CardSplit::ExpertsInRam { in_ram, .. } => self
+                .estimate_gpu_footprint_mb(model_id, Some(segment))
+                .saturating_sub(self.experts_in_ram_mb(model_id, segment, in_ram)),
+        };
+        share.min(room)
+    }
+
+    /// The routed experts of `segment`'s first `in_ram` layers, in MB rounded
+    /// up — what a [`CardSplit::ExpertsInRam`] keeps in the machine's memory,
+    /// by the loader's own count (`split::routed_expert_bytes`). 0 when the
+    /// header cannot be read.
+    fn experts_in_ram_mb(&self, model_id: &ModelId, segment: (u32, u32), in_ram: usize) -> u64 {
+        self.segment_geometry(model_id, Some(segment))
+            .map(|(_, experts)| {
+                experts
+                    .iter()
+                    .take(in_ram)
+                    .fold(0u64, |sum, &b| sum.saturating_add(b))
+                    .div_ceil(1024 * 1024)
+            })
+            .unwrap_or(0)
+    }
+
     /// How many layers of this model would fit on the card, when the whole
     /// thing does not.
     ///
@@ -2931,38 +3148,18 @@ impl ModelProcessPool {
     /// alternative is the whole model on the processor, and this moves layers
     /// off it. The cost is one hidden-state copy per forward, which is a few
     /// KB while decoding.
-    /// `(layers on the card, layers in total)` for a model that does not fit
-    /// whole but partly does; `None` when it fits, when nothing fits, or when
-    /// hybrid placement is switched off.
-    /// What a card/processor split of `segment` puts on the card: its first
-    /// `on_card` layers, by the admission estimator, never more than the room
-    /// the split was sized against (`partial_gpu_layers`) — so the charge
-    /// keeps the committed total inside the budget, as a whole-card admission
-    /// does.
-    fn card_share_of_split_mb(
-        &self,
-        model_id: &ModelId,
-        segment: (u32, u32),
-        on_card: usize,
-    ) -> u64 {
-        let end = segment
-            .0
-            .saturating_add(u32::try_from(on_card).unwrap_or(u32::MAX))
-            .min(segment.1);
-        let room = self
-            .vram_budget_mb
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .saturating_sub(self.vram_committed_mb());
-        self.estimate_gpu_footprint_mb(model_id, Some((segment.0, end)))
-            .min(room)
-    }
-
+    ///
+    /// The placement for a model that does not fit whole but partly does
+    /// ([`card_split`]: every layer on the card with the fewest layers' routed
+    /// experts in RAM where the model has them, else its first layers on the
+    /// card); `None` when it fits, when nothing fits, or when hybrid placement
+    /// is switched off.
     fn partial_gpu_layers(
         &self,
         model_id: &ModelId,
         segment: Option<(u32, u32)>,
         estimated_mb: u64,
-    ) -> Option<(usize, usize)> {
+    ) -> Option<CardSplit> {
         if std::env::var("SWARMLLM_HYBRID_OFFLOAD").as_deref() == Ok("0") {
             return None;
         }
@@ -2974,10 +3171,21 @@ impl ModelProcessPool {
         if available_mb >= estimated_mb {
             return None;
         }
-        let inputs = self.footprint_inputs(model_id, segment)?;
-        split_for_card(&inputs, available_mb.saturating_mul(1024 * 1024))
+        let (inputs, mut expert_bytes) = self.segment_geometry(model_id, segment)?;
+        // A/B inside one binary: `0` places a mixture-of-experts model by
+        // whole layers, as before #138 (3).
+        if std::env::var("SWARMLLM_EXPERTS_IN_RAM").as_deref() == Ok("0") {
+            expert_bytes.clear();
+        }
+        card_split(
+            &inputs,
+            &expert_bytes,
+            available_mb.saturating_mul(1024 * 1024),
+        )
     }
 
+    /// The `--gpu-layers` value a worker for `model_id` should be spawned with.
+    /// A model pinned to the CPU by a previous OOM overrides the config.
     fn effective_gpu_layers(&self, model_id: &ModelId) -> i32 {
         match self.cpu_reason(model_id) {
             Some(_) => 0,
@@ -3163,10 +3371,28 @@ impl ModelProcessPool {
         model_id: &ModelId,
         segment: Option<(u32, u32)>,
     ) -> Option<crate::model::auto_manage::vram::VramFootprintInputs> {
+        self.segment_geometry(model_id, segment)
+            .map(|(inputs, _)| inputs)
+    }
+
+    /// [`Self::footprint_inputs`] and, from the same read of the header, each
+    /// of the segment's layers' routed-expert bytes (`split::routed_expert_bytes`,
+    /// all 0 for a dense model) — what [`card_split`] weighs keeping experts
+    /// in RAM by.
+    fn segment_geometry(
+        &self,
+        model_id: &ModelId,
+        segment: Option<(u32, u32)>,
+    ) -> Option<(
+        crate::model::auto_manage::vram::VramFootprintInputs,
+        Vec<u64>,
+    )> {
         use crate::model::auto_manage::vram::VramFootprintInputs;
         #[cfg(test)]
         if let Some(whole) = self.test_footprint_inputs.get(model_id) {
             let mut i = *whole;
+            let all_layers = whole.segment_layers as usize;
+            let (first, end) = segment.map_or((0, all_layers), |(s, e)| (s as usize, e as usize));
             if let Some((start, end)) = segment {
                 let layers = u64::from(end.saturating_sub(start));
                 i.quantized_weight_bytes =
@@ -3175,7 +3401,14 @@ impl ModelProcessPool {
                 i.kv_layers = whole.kv_layers * layers / whole.segment_layers.max(1);
                 i.is_first = start == 0;
             }
-            return Some(i);
+            let experts = self
+                .test_expert_bytes
+                .get(model_id)
+                .map(|per_layer| {
+                    per_layer[first.min(per_layer.len())..end.min(per_layer.len())].to_vec()
+                })
+                .unwrap_or_else(|| vec![0; end.saturating_sub(first)]);
+            return Some((i, experts));
         }
         let model_dir = crate::model::shard::model_dir(&self.data_dir, &model_id.0);
         let header = model_dir.join(crate::model::shard::HEADER_FILENAME);
@@ -3290,8 +3523,11 @@ impl ModelProcessPool {
             first_layer,
             first_layer + segment_layers as usize,
         ) as u64;
+        let expert_bytes = (first_layer..first_layer + segment_layers as usize)
+            .map(|layer| crate::inference::split::routed_expert_bytes(&ct, layer, layer + 1))
+            .collect();
 
-        Some(VramFootprintInputs {
+        let inputs = VramFootprintInputs {
             quantized_weight_bytes: segment_weight_bytes,
             unquantized_bytes_per_element,
             embedding_gatherable,
@@ -3311,7 +3547,8 @@ impl ModelProcessPool {
             attention: crate::inference::layers::KvAttention::of(
                 &crate::inference::model_arch::ModelArch::from_gguf_arch(&arch),
             ),
-        })
+        };
+        Some((inputs, expert_bytes))
     }
 
     /// Set the GPU memory budget used for admission. 0 disables the check.
@@ -4805,7 +5042,9 @@ impl ModelProcessPool {
             return None;
         }
         let estimated = self.estimated_gpu_mb(model_id)?;
-        let (_, total) = self.partial_gpu_layers(model_id, None, estimated)?;
+        let (_, total) = self
+            .partial_gpu_layers(model_id, None, estimated)?
+            .card_share();
         Some(u32::try_from(total).unwrap_or(u32::MAX))
     }
 
@@ -4818,13 +5057,14 @@ impl ModelProcessPool {
     /// (`scheduler::split_tokens_per_sec`).
     pub fn card_share_for_planning(&self, model_id: &ModelId) -> Option<(usize, usize)> {
         if let Some(worker) = self.live_worker(model_id) {
-            return worker.gpu_layers_on_card;
+            return worker.card_split.map(CardSplit::card_share);
         }
         if !self.planning_on_card(model_id) {
             return None;
         }
         let estimated = self.estimated_gpu_mb(model_id)?;
         self.partial_gpu_layers(model_id, None, estimated)
+            .map(CardSplit::card_share)
     }
 
     /// Remember what this node's loader just refused a request — the layers the
@@ -5503,8 +5743,8 @@ impl ModelProcessPool {
         let mut placed_on_cpu_because = self.cpu_reason(model_id);
         let mut going_to_cpu = placed_on_cpu_because.is_some();
         // Set when the model does not fit the card whole but part of it does:
-        // `(layers on the card, layers in total)`.
-        let mut hybrid_layers: Option<(usize, usize)> = None;
+        // whole layers on the card, or every layer with some experts in RAM.
+        let mut card_split: Option<CardSplit> = None;
         // What the card would have to give this model. Read from disk ONCE per
         // spawn: the admission gate weighs it, the CPU-fallback log reports it,
         // and the worker carries it so a later request can ask whether the
@@ -5534,26 +5774,35 @@ impl ModelProcessPool {
             // guess is paced by its slowest layer, which would be on the
             // processor anyway.
             if !admitted && !guest {
-                if let Some((n, total)) =
-                    self.partial_gpu_layers(model_id, Some(segment), estimated)
-                {
-                    tracing::info!(
-                        model = %model_id,
-                        gpu_layers = n,
-                        total_layers = total,
-                        estimated_mb = estimated,
-                        "Model does not fit the card whole — placing its first {n} of {total} \
-                         layers there and the rest on the processor"
-                    );
-                    hybrid_layers = Some((n, total));
-                    // The card holds its first `n` layers, so the card budget
-                    // is charged for them. It was charged nothing: the share
+                if let Some(split) = self.partial_gpu_layers(model_id, Some(segment), estimated) {
+                    match split {
+                        CardSplit::Layers { on_card, total } => tracing::info!(
+                            model = %model_id,
+                            gpu_layers = on_card,
+                            total_layers = total,
+                            estimated_mb = estimated,
+                            "Model does not fit the card whole — placing its first {on_card} of \
+                             {total} layers there and the rest on the processor"
+                        ),
+                        CardSplit::ExpertsInRam { in_ram, total } => tracing::info!(
+                            model = %model_id,
+                            expert_layers_in_ram = in_ram,
+                            total_layers = total,
+                            estimated_mb = estimated,
+                            "Model does not fit the card whole — placing all {total} layers \
+                             there and keeping the routed experts of the first {in_ram} in the \
+                             machine's memory"
+                        ),
+                    }
+                    card_split = Some(split);
+                    // The card holds its share, so the card budget is charged
+                    // for it. It was charged nothing: the share
                     // then read as ANOTHER program's memory, which overran a
                     // configured `max_gpu_vram_mb` by exactly that share (a
                     // 14B split here took 5782 MB against a 5000 MB cap,
                     // 2026-10-08) and left an idle split worker out of every
                     // reclaim, whose candidates are workers with a charge.
-                    charged_vram_mb = self.card_share_of_split_mb(model_id, segment, n);
+                    charged_vram_mb = self.card_share_of_split_mb(model_id, segment, split);
                     add_reserved(&self.vram_reserved_mb, model_id, charged_vram_mb);
                     // It IS going to the card, just not all of it, so this is
                     // not a CPU fallback and must not be reported as one.
@@ -5642,7 +5891,7 @@ impl ModelProcessPool {
         }
         // Anything landing in system RAM — a CPU-only node, the fallback just
         // taken above, or a card/processor split's processor share
-        // (`ram_charged_run`, #264) — is charged against the RAM budget. There is no
+        // (`ram_charged_share`, #264) — is charged against the RAM budget. There is no
         // further device to demote to, so this refuses rather than degrades:
         // swapping would slow every other request on the machine, not just
         // this model, and nothing in the response would say so.
@@ -5677,8 +5926,13 @@ impl ModelProcessPool {
             self.release_vram_charge(model_id, charged_vram_mb);
             charged_vram_mb = 0;
         }
-        if let Some(ram_run) = ram_charged_run(charge_ram, segment, hybrid_layers) {
-            let estimated = self.estimate_cpu_footprint_mb(model_id, Some(ram_run));
+        if let Some(ram_share) = ram_charged_share(charge_ram, segment, card_split) {
+            let estimated = match ram_share {
+                RamShare::Layers(run) => self.estimate_cpu_footprint_mb(model_id, Some(run)),
+                // The experts alone: the process is charged to the card beside
+                // them, and their layers' caches live there.
+                RamShare::Experts { layers } => self.experts_in_ram_mb(model_id, segment, layers),
+            };
             // Refusing is the last resort: first reclaim memory from models
             // nothing is using, then ask again (`admit_to_cpu_as`, a tenant's
             // only). Only then does the user see an error.
@@ -5716,8 +5970,22 @@ impl ModelProcessPool {
                             self.ram_budget_note(),
                         )
                     });
-                let message = match self.cpu_footprint_detail(model_id, Some(ram_run)) {
-                    Some((footprint, effective_context, source)) => {
+                let detail = match ram_share {
+                    RamShare::Layers(run) => self.cpu_footprint_detail(model_id, Some(run)),
+                    RamShare::Experts { .. } => None,
+                };
+                let message = match (ram_share, detail) {
+                    (RamShare::Experts { layers }, _) => {
+                        crate::model::auto_manage::vram::describe_experts_refusal(
+                            &model_id.0,
+                            estimated,
+                            layers,
+                            budget,
+                            &note,
+                            in_use,
+                        )
+                    }
+                    (_, Some((footprint, effective_context, source))) => {
                         crate::model::auto_manage::vram::describe_cpu_refusal(
                             &model_id.0,
                             &footprint,
@@ -5728,7 +5996,7 @@ impl ModelProcessPool {
                             in_use,
                         )
                     }
-                    None => format!(
+                    (_, None) => format!(
                         "{} needs about {} MB of memory but this node's budget allows {} MB \
                          and {} MB is already in use. Raise `resources.max_ram_mb`, or free \
                          memory by unloading another model.",
@@ -5743,7 +6011,11 @@ impl ModelProcessPool {
                 // where a re-plan can produce a different answer.
                 return Err(SwarmError::LocalMemoryUnavailable(message));
             }
-            self.record_cpu_kv_budget(model_id, Some(ram_run));
+            // A conversation cache on the processor needs its grant; experts
+            // kept in RAM leave every cache on the card.
+            if let RamShare::Layers(run) = ram_share {
+                self.record_cpu_kv_budget(model_id, Some(run));
+            }
         }
 
         // Armed only across the await, so the `Ok`/`Err` arms below keep owning
@@ -5763,7 +6035,7 @@ impl ModelProcessPool {
                     placed_on_cpu_because,
                     SpawnCharge::decided(charge_ram, charged_vram_mb, charged_ram_mb),
                     estimated,
-                    hybrid_layers,
+                    card_split,
                 )
                 .await;
             charge.handed_back_to_the_caller();
@@ -5957,11 +6229,11 @@ impl ModelProcessPool {
         placed_on_cpu_because: Option<CpuReason>,
         charge: SpawnCharge,
         gpu_estimate_mb: u64,
-        // A partial split decided by admission: `(this many of the worker's
-        // layers go on the card, layers in total)`, the rest on the processor.
-        // `None` is the all-or-nothing placement `placed_on_cpu_because`
-        // describes.
-        gpu_layers_override: Option<(usize, usize)>,
+        // A card/processor split decided by admission: whole layers on the
+        // card and the rest on the processor, or every layer on the card with
+        // some layers' experts in RAM. `None` is the all-or-nothing placement
+        // `placed_on_cpu_because` describes.
+        card_split: Option<CardSplit>,
     ) -> Result<WorkerHandle, SwarmError> {
         use interprocess::local_socket::{tokio::prelude::*, ListenerOptions};
 
@@ -6184,21 +6456,11 @@ impl ModelProcessPool {
         // the split loader called `Device::cuda_if_available(0)` unconditionally
         // and `inference.gpu_layers` was read only by the legacy llama.cpp
         // executor, so a CUDA build ignored the setting entirely.
-        args.push("--gpu-layers".to_string());
-        // The placement the caller decided — the ONE statement of where this
-        // worker is going, used for both the spawn argument and the handle.
-        args.push(
-            match (placed_on_cpu_because, gpu_layers_override) {
-                (Some(_), _) => 0,
-                // A partial split: the worker places this many of its layers on
-                // the card and the rest on the processor. Reaches the loader
-                // through `GPU_LAYER_LIMIT`, the same route `--kv-budget-bytes`
-                // takes — the daemon decides, the worker obeys.
-                (None, Some((n, _))) => n as i32,
-                (None, None) => self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed),
-            }
-            .to_string(),
-        );
+        args.extend(worker_placement_args(
+            placed_on_cpu_because,
+            card_split,
+            self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed),
+        ));
         if let Some(b) = self.cpu_kv_budget_bytes.get(model_id) {
             args.push("--kv-budget-bytes".to_string());
             args.push(b.value().to_string());
@@ -6396,7 +6658,7 @@ impl ModelProcessPool {
             gpu_estimate_mb,
             // Only a split is worth recording; a worker wholly on the card
             // says so through `placed_on_cpu_because: None` alone.
-            gpu_layers_on_card: gpu_layers_override.filter(|_| placed_on_cpu_because.is_none()),
+            card_split: card_split.filter(|_| placed_on_cpu_because.is_none()),
         })
     }
 
@@ -7761,8 +8023,15 @@ impl ModelProcessPool {
                     age_secs: h.spawned_at.elapsed().as_secs(),
                     dead: h.dead.load(Ordering::Acquire),
                     gpu_estimate_mb: h.gpu_estimate_mb,
-                    gpu_layers_on_card: h.gpu_layers_on_card.map(|(n, _)| n as u32),
-                    layers_total: h.gpu_layers_on_card.map(|(_, t)| t as u32),
+                    gpu_layers_on_card: h.card_split.map(|split| match split {
+                        CardSplit::Layers { on_card, .. } => on_card as u32,
+                        CardSplit::ExpertsInRam { total, .. } => total as u32,
+                    }),
+                    layers_total: h.card_split.map(|split| split.card_share().1 as u32),
+                    expert_layers_in_ram: h.card_split.and_then(|split| match split {
+                        CardSplit::ExpertsInRam { in_ram, .. } => Some(in_ram as u32),
+                        CardSplit::Layers { .. } => None,
+                    }),
                 }
             })
             .collect();
@@ -7770,15 +8039,12 @@ impl ModelProcessPool {
         out
     }
 
-    /// The hybrid split a resident worker runs with — `(layers on the card,
-    /// layers in total)` — or `None` when the model has no worker or its
-    /// worker is wholly on one device. The models page reads this so a model
-    /// running 13 of 28 layers on the card says so, instead of showing
-    /// `fits_on_gpu: true` and nothing else.
-    pub fn hybrid_gpu_layers(&self, model_id: &ModelId) -> Option<(usize, usize)> {
-        self.workers
-            .get(model_id)
-            .and_then(|h| h.gpu_layers_on_card)
+    /// The card/processor split a resident worker runs with, or `None` when
+    /// the model has no worker or its worker is wholly on one device. The
+    /// models page reads this so a model running 13 of 28 layers on the card
+    /// says so, instead of showing `fits_on_gpu: true` and nothing else.
+    pub fn card_split_of(&self, model_id: &ModelId) -> Option<CardSplit> {
+        self.workers.get(model_id).and_then(|h| h.card_split)
     }
 
     /// Models with at least one request in flight *right now*.
@@ -8628,8 +8894,17 @@ mod tests {
         let a_minute_ago = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(60))
             .expect("a clock old enough to express the idle time");
-        let mut h =
-            fake_worker_handle_split(false, None, false, a_minute_ago, Some((12, 32))).await;
+        let mut h = fake_worker_handle_split(
+            false,
+            None,
+            false,
+            a_minute_ago,
+            Some(CardSplit::Layers {
+                on_card: 12,
+                total: 32,
+            }),
+        )
+        .await;
         {
             let only = Arc::get_mut(&mut h).expect("one owner");
             only.gpu_estimate_mb = 5_005;
@@ -9362,13 +9637,13 @@ mod tests {
     }
 
     /// [`fake_worker_handle_spawned`] for a worker running a card/processor
-    /// split: `(layers on the card, layers in total)`.
+    /// split.
     async fn fake_worker_handle_split(
         dead_now: bool,
         placed_on_cpu_because: Option<CpuReason>,
         charged_against_ram: bool,
         spawned_at: std::time::Instant,
-        gpu_layers_on_card: Option<(usize, usize)>,
+        card_split: Option<CardSplit>,
     ) -> Arc<WorkerHandle> {
         use interprocess::local_socket::{tokio::prelude::*, ListenerOptions};
         let name = format!(
@@ -9416,7 +9691,7 @@ mod tests {
             charged_against_ram,
             host_share_mb: 0,
             gpu_estimate_mb: 0,
-            gpu_layers_on_card,
+            card_split,
         })
     }
 
@@ -9433,7 +9708,10 @@ mod tests {
             None,
             false,
             std::time::Instant::now(),
-            Some((13, 28)),
+            Some(CardSplit::Layers {
+                on_card: 13,
+                total: 28,
+            }),
         )
         .await;
         p.workers.insert(split.clone(), h);
@@ -9442,6 +9720,38 @@ mod tests {
         let h = fake_worker_handle_spawned(false, None, false, std::time::Instant::now()).await;
         p.workers.insert(whole.clone(), h);
         assert_eq!(p.card_share_for_planning(&whole), None);
+
+        // Experts kept in RAM (#138 (3)): every layer is on the card, which
+        // the summary says, and the planner is given the layers whose experts
+        // run there. It is short of the card, so promotion weighs it.
+        let moe = ModelId("qwen3-30b-a3b".into());
+        let h = fake_worker_handle_split(
+            false,
+            None,
+            false,
+            std::time::Instant::now(),
+            Some(CardSplit::ExpertsInRam {
+                in_ram: 23,
+                total: 48,
+            }),
+        )
+        .await;
+        assert!(h.short_of_the_card());
+        p.workers.insert(moe.clone(), h);
+        assert_eq!(p.card_share_for_planning(&moe), Some((25, 48)));
+        let summary = p
+            .worker_summaries()
+            .into_iter()
+            .find(|s| s.model == moe.0)
+            .expect("listed");
+        assert_eq!(
+            (
+                summary.gpu_layers_on_card,
+                summary.layers_total,
+                summary.expert_layers_in_ram
+            ),
+            (Some(48), Some(48), Some(23))
+        );
     }
 
     /// A spawn charges the shared memory budget and only then waits for the
@@ -10676,6 +10986,166 @@ mod admission_tests {
         assert!(some_kv > all_kv, "{some_kv} layers vs {all_kv}");
     }
 
+    const MIB: u64 = 1024 * 1024;
+
+    /// Qwen3-30B-A3B Q2_K's shape: 48 layers of 208 MiB of routed experts
+    /// and 8 MiB of everything else, plus 340 MiB of embedding and output.
+    fn thirty_b_a3b() -> crate::model::auto_manage::vram::VramFootprintInputs {
+        use crate::inference::model_arch::ModelArch;
+        use crate::inference::split::hybrid::arch_supports_hybrid;
+        crate::model::auto_manage::vram::VramFootprintInputs {
+            quantized_weight_bytes: (48 * (208 + 8) + 340) * MIB,
+            unquantized_bytes_per_element: None,
+            vocab_size: 151_936,
+            embedding_length: 2048,
+            segment_layers: 48,
+            kv_layers: 48,
+            head_count_kv: 4,
+            head_count: 32,
+            head_dim: 128,
+            rope_dim: 128,
+            effective_context: 8192,
+            is_first: true,
+            embedding_gatherable: true,
+            // `qwen3moe` loads as the Qwen2 family.
+            splits_across_devices: arch_supports_hybrid(&ModelArch::from_gguf_arch("qwen3moe")),
+            attention: crate::inference::layers::KvAttention::Standard,
+        }
+    }
+
+    /// **A mixture-of-experts model that does not fit the card keeps EVERY
+    /// layer there and the fewest layers' routed experts in RAM** (#138 (3)),
+    /// as llama.cpp's own fitting does — not its first layers on the card and
+    /// the rest, attention and all, on the processor. Measured on this shape
+    /// and an 8 GB card: 40 ms a decode step with 23 layers' experts in RAM,
+    /// 49-68 ms with 26 whole layers on the card (2026-10-13).
+    #[test]
+    fn a_mixture_of_experts_model_keeps_every_layer_on_the_card_and_the_fewest_experts_in_ram() {
+        let moe = thirty_b_a3b();
+        let experts = vec![208 * MIB; 48];
+        let room = 6_500 * MIB;
+        let Some(CardSplit::ExpertsInRam { in_ram, total }) = card_split(&moe, &experts, room)
+        else {
+            panic!("{:?}", card_split(&moe, &experts, room));
+        };
+        assert_eq!(total, 48);
+        assert!(in_ram > 0 && in_ram < 48, "{in_ram}");
+        // The FEWEST: one more layer's experts of room is one fewer in RAM,
+        // one less is one more.
+        assert_eq!(
+            card_split(&moe, &experts, room + 208 * MIB),
+            Some(CardSplit::ExpertsInRam {
+                in_ram: in_ram - 1,
+                total
+            })
+        );
+        assert_eq!(
+            card_split(&moe, &experts, room - 208 * MIB),
+            Some(CardSplit::ExpertsInRam {
+                in_ram: in_ram + 1,
+                total
+            })
+        );
+        // Counted per layer, not averaged: a quantization mix that gives the
+        // first layers' experts more bits frees the room in fewer layers.
+        let mut heavy_first = experts.clone();
+        heavy_first[..4].fill(416 * MIB);
+        let Some(CardSplit::ExpertsInRam { in_ram: fewer, .. }) =
+            card_split(&moe, &heavy_first, room)
+        else {
+            panic!("still experts in RAM");
+        };
+        assert!(fewer < in_ram, "{fewer} vs {in_ram}");
+
+        // A dense model has no experts to keep back: whole layers, as before.
+        assert!(matches!(
+            card_split(&moe, &[0; 48], room),
+            Some(CardSplit::Layers { on_card, total: 48 }) if on_card < 48
+        ));
+        // A card too small for everything but the experts — attention and the
+        // whole conversation cache of all 48 layers — is split by layers too.
+        assert!(matches!(
+            card_split(&moe, &experts, 1_000 * MIB),
+            Some(CardSplit::Layers { .. }) | None
+        ));
+        // And an architecture the loader will not split gets neither.
+        let unsplittable = crate::model::auto_manage::vram::VramFootprintInputs {
+            splits_across_devices: false,
+            ..moe
+        };
+        assert_eq!(card_split(&unsplittable, &experts, room), None);
+    }
+
+    /// **Experts kept in RAM are charged to the machine and the rest to the
+    /// card** — each device for exactly what it holds, by the same estimators
+    /// a whole-layer split is charged by (#240, #264) — and the worker is told
+    /// to put every layer on the card and which experts to keep back.
+    #[test]
+    fn a_split_keeping_experts_in_ram_charges_each_device_for_its_share() {
+        let p = pool();
+        p.test_card_in_play
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        p.set_vram_budget_mb(7_000);
+        let m = ModelId("qwen3-30b-a3b".into());
+        p.test_footprint_inputs.insert(m.clone(), thirty_b_a3b());
+        p.test_expert_bytes.insert(m.clone(), vec![208 * MIB; 48]);
+        let segment = (0, 48);
+        let estimated = p.estimate_gpu_footprint_mb(&m, Some(segment));
+        assert!(
+            estimated > 7_000,
+            "fixture: does not fit whole ({estimated})"
+        );
+        let split = p
+            .partial_gpu_layers(&m, Some(segment), estimated)
+            .expect("fixture: it splits");
+        let CardSplit::ExpertsInRam { in_ram, total: 48 } = split else {
+            panic!("{split:?}");
+        };
+
+        assert_eq!(
+            p.experts_in_ram_mb(&m, segment, in_ram),
+            in_ram as u64 * 208
+        );
+        assert_eq!(
+            p.card_share_of_split_mb(&m, segment, split),
+            (estimated - in_ram as u64 * 208).min(7_000),
+            "the card: the whole segment less the experts the machine holds"
+        );
+        assert_eq!(
+            ram_charged_share(false, segment, Some(split)),
+            Some(RamShare::Experts { layers: in_ram })
+        );
+        assert_eq!(
+            worker_placement_args(None, Some(split), 20),
+            [
+                "--gpu-layers",
+                "-1",
+                "--cpu-moe-layers",
+                &in_ram.to_string()
+            ],
+            "every layer on the card, whatever count the user set"
+        );
+        // A whole-layer split and a processor placement say nothing of experts.
+        assert_eq!(
+            worker_placement_args(
+                None,
+                Some(CardSplit::Layers {
+                    on_card: 26,
+                    total: 48
+                }),
+                -1
+            ),
+            ["--gpu-layers", "26"]
+        );
+        assert_eq!(
+            worker_placement_args(Some(CpuReason::NotEnoughVram), Some(split), -1),
+            ["--gpu-layers", "0"]
+        );
+        // The planner prices it by the layers whose experts run on the card.
+        assert_eq!(p.card_share_for_planning(&m), Some((48 - in_ram, 48)));
+    }
+
     /// The planner is told this node can hold a model the loader would SPLIT
     /// across the card and the processor (FUTURE_WORK #129). The bound counted
     /// the card alone, so a cold Mistral-7B — 17 of 32 layers on an 8 GB card —
@@ -10780,10 +11250,13 @@ mod admission_tests {
             },
         );
         let estimated = p.estimate_gpu_footprint_mb(&m, Some((0, 28)));
-        let (n, _) = p
+        let split = p
             .partial_gpu_layers(&m, Some((0, 28)), estimated)
             .expect("fixture: the model splits");
-        let share = p.card_share_of_split_mb(&m, (0, 28), n);
+        let CardSplit::Layers { on_card: n, .. } = split else {
+            panic!("a dense model splits by whole layers: {split:?}");
+        };
+        let share = p.card_share_of_split_mb(&m, (0, 28), split);
         assert!(share > 0, "the card share is charged");
         assert_eq!(
             share,
@@ -10798,7 +11271,7 @@ mod admission_tests {
 
         // With 2500 MB already committed, the charge stays inside what is left.
         assert!(p.admit_to_gpu(&ModelId("other".into()), 2500));
-        assert!(p.card_share_of_split_mb(&m, (0, 28), n) <= 500);
+        assert!(p.card_share_of_split_mb(&m, (0, 28), split) <= 500);
     }
 
     /// **A card/processor split charges the MACHINE for the layers it keeps on
@@ -10808,19 +11281,35 @@ mod admission_tests {
     /// processor worker beside it was admitted into memory it already held.
     #[test]
     fn a_split_charges_the_machine_for_the_layers_it_keeps_on_the_processor() {
+        let layers = |on_card, total| Some(CardSplit::Layers { on_card, total });
         // A split of 0..28 with 10 on the card keeps 10..28 on the processor.
         assert_eq!(
-            ram_charged_run(false, (0, 28), Some((10, 28))),
-            Some((10, 28))
+            ram_charged_share(false, (0, 28), layers(10, 28)),
+            Some(RamShare::Layers((10, 28)))
         );
         assert_eq!(
-            ram_charged_run(false, (8, 40), Some((12, 32))),
-            Some((20, 40))
+            ram_charged_share(false, (8, 40), layers(12, 32)),
+            Some(RamShare::Layers((20, 40)))
+        );
+        // Experts kept in RAM charge the machine for those experts alone.
+        assert_eq!(
+            ram_charged_share(
+                false,
+                (0, 48),
+                Some(CardSplit::ExpertsInRam {
+                    in_ram: 23,
+                    total: 48
+                })
+            ),
+            Some(RamShare::Experts { layers: 23 })
         );
         // A placement wholly on the processor is charged its whole segment;
         // one wholly on the card, nothing.
-        assert_eq!(ram_charged_run(true, (0, 28), None), Some((0, 28)));
-        assert_eq!(ram_charged_run(false, (0, 28), None), None);
+        assert_eq!(
+            ram_charged_share(true, (0, 28), None),
+            Some(RamShare::Layers((0, 28)))
+        );
+        assert_eq!(ram_charged_share(false, (0, 28), None), None);
         // The split's two charges: its card share against the card, its
         // processor share against the machine.
         assert_eq!(

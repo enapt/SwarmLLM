@@ -127,6 +127,10 @@ pub struct WorkerOptions {
     /// worker's whole layer window on one device, so any positive value means
     /// the same thing as auto — see `force_cpu_for` for the mapping.
     pub gpu_layers: i32,
+    /// How many of the card's mixture-of-experts layers, from the first, keep
+    /// their routed experts in RAM (`--cpu-moe-layers`; the pool's
+    /// `CardSplit::ExpertsInRam`). 0 = none.
+    pub cpu_moe_layers: usize,
 }
 
 impl Default for WorkerOptions {
@@ -139,6 +143,7 @@ impl Default for WorkerOptions {
             batch_generate: false,
             batch_generate_max_slots: 8,
             gpu_layers: -1,
+            cpu_moe_layers: 0,
             prefill_chunk_tokens: 128,
             prefill_target_ms: 200,
             // Off unless a caller asks. The daemon always does, from
@@ -185,8 +190,10 @@ pub async fn run_worker(
         ngram_pred_tokens,
         batched_prefill_forward,
         gpu_layers,
+        cpu_moe_layers,
     } = options;
     set_worker_force_cpu(gpu_layers);
+    set_worker_cpu_moe_layers(cpu_moe_layers);
     // The local draft-free speculator's shape, built once. `num_pred_tokens ==
     // 0` is how `inference.ngram_lookup_enabled = false` arrives, so there is
     // no separate switch to disagree with the width.
@@ -816,6 +823,21 @@ fn set_worker_force_cpu(gpu_layers: i32) {
             gpu_layers,
             "model-worker: placing the first {gpu_layers} layers of this window on the \
              graphics card and the rest on the processor"
+        );
+    }
+}
+
+/// Apply `--cpu-moe-layers` to this process. Called once from `run_worker`;
+/// the loader reads it through `split::cpu_expert_layers`, as it reads
+/// `--gpu-layers` through `GPU_LAYER_LIMIT` — the daemon decides, the worker
+/// obeys.
+fn set_worker_cpu_moe_layers(layers: usize) {
+    crate::inference::split::CPU_EXPERT_LAYERS.store(layers, std::sync::atomic::Ordering::Relaxed);
+    if layers > 0 {
+        tracing::info!(
+            layers,
+            "model-worker: keeping the routed experts of the first {layers} card-held layers \
+             in RAM"
         );
     }
 }

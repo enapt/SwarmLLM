@@ -2742,10 +2742,11 @@ memory the split already held; and the split never got `--kv-budget-bytes`, so i
 cache was bounded only by the machine (#262's fallback). Ollama weighs exactly this share —
 `TotalSize − VRAMSize` — against the machine's free memory before it loads (`llm/server.go`).
 
-**The rule.** `process_pool::ram_charged_run(charge_ram, segment, hybrid_layers)` is the one answer
-to "which layers does this spawn charge to the machine": the whole segment for a processor
-placement, the run after the card's layers for a split, nothing for a model wholly on the card.
-That run goes through the SAME block a processor placement does — `estimate_cpu_footprint_mb`,
+**The rule.** `process_pool::ram_charged_share(charge_ram, segment, card_split)` is the one answer
+to "what does this spawn charge to the machine": the whole segment for a processor placement, the
+run after the card's layers for a whole-layer split (`RamShare::Layers`), the experts a split keeps
+in RAM (`RamShare::Experts`, #138 (3) stage B — below), nothing for a model wholly on the card.
+A run of layers goes through the SAME block a processor placement does — `estimate_cpu_footprint_mb`,
 `admit_to_cpu_as` (reclaiming idle models first), the itemised refusal
 (`LocalMemoryUnavailable`, so the router re-plans), and `record_cpu_kv_budget`, whose grant the
 worker's loader prefers for the split's host side (#262). `SpawnCharge::decided` carries both
@@ -2754,6 +2755,14 @@ charges onto the worker (`charged_mb` against the card, `host_share_mb` against 
 `a_split_charges_the_machine_for_the_layers_it_keeps_on_the_processor`,
 `a_departing_split_gives_back_both_of_its_charges` — both red with the split arm / the second
 release removed.
+
+**Experts kept in RAM (2026-10-14, #138 (3) stage B).** A `CardSplit::ExpertsInRam` puts every
+layer on the card and the routed experts of its first K in host memory. The machine is charged
+those experts alone — `experts_in_ram_mb`, the loader's own count (`split::routed_expert_bytes`)
+— through the same `admit_to_cpu_as` and refusal; no `record_cpu_kv_budget`, because every layer's
+cache is on the card. The card is charged the whole segment by the admission estimator LESS
+those experts (`card_share_of_split_mb`), capped at the room the split was sized against.
+Test: `a_split_keeping_experts_in_ram_charges_each_device_for_its_share`.
 
 **Residual.** A LATER segment loaded into a split worker (`charge_additional_segment`) is charged to
 the worker's one accountant (`holds_gpu_memory` → the card), wherever the loader puts its layers.

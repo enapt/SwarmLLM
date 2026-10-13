@@ -761,11 +761,26 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             // the model's layers are on the card. `fits_on_gpu: true` alone
             // told a user nothing about a model running 13 of 28 layers there
             // and the rest on the processor — the only trace of the split was
-            // one log line at spawn.
-            let hybrid = pool.hybrid_gpu_layers(&model_id);
+            // one log line at spawn. A split that keeps every layer on the card
+            // and some layers' experts in RAM says so instead (#138 (3)):
+            // "48 of 48 layers on the card" beside "the rest runs on the
+            // processor" would contradict itself.
+            let split = pool.card_split_of(&model_id);
             obj.insert(
                 "gpu_layers_on_card".to_string(),
-                serde_json::json!(hybrid.map(|(n, _)| n)),
+                serde_json::json!(split.and_then(|split| match split {
+                    crate::inference::process_pool::CardSplit::Layers { on_card, .. } =>
+                        Some(on_card),
+                    crate::inference::process_pool::CardSplit::ExpertsInRam { .. } => None,
+                })),
+            );
+            obj.insert(
+                "expert_layers_in_ram".to_string(),
+                serde_json::json!(split.and_then(|split| match split {
+                    crate::inference::process_pool::CardSplit::ExpertsInRam { in_ram, .. } =>
+                        Some(in_ram),
+                    crate::inference::process_pool::CardSplit::Layers { .. } => None,
+                })),
             );
             obj.insert("num_layers".to_string(), serde_json::json!(m.num_layers));
             obj.insert("acquisition".to_string(), serde_json::json!(acq_state));

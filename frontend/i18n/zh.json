@@ -825,6 +825,8 @@
   "placement.configured": "你已将此电脑设置为仅使用处理器。",
   "placement.cuda_libraries_missing": "未安装显卡所需的 NVIDIA CUDA 库，因此改用处理器。安装后重启 SwarmLLM 即可使用显卡——日志中列出了缺少的库。",
   "placement.driver_not_answering": "显卡驱动没有响应——它可能正在重置显卡。在此期间，该模型使用处理器运行，之后会自动回到显卡。",
+  "placement.experts_in_ram": "全部 {total} 层都在显卡上，其中 {in_ram} 层的大部分在本机内存中",
+  "placement.experts_in_ram_detail": "这个模型对显卡来说太大，所以 {in_ram} 层的大部分留在本机内存中，由处理器处理。因此它比完全在显卡上的模型慢。释放显存可以把更多内容移到显卡上。",
   "placement.gpu_too_old": "这张显卡比此版本支持的更旧，因此改用处理器。",
   "placement.gpu_unavailable": "SwarmLLM 无法再使用显卡，通常是运行期间显卡驱动被更新了。重启 SwarmLLM 即可恢复。",
   "placement.hybrid": "{total} 层中有 {on} 层在显卡上",

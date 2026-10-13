@@ -825,6 +825,8 @@
   "placement.configured": "이 컴퓨터를 프로세서만 사용하도록 설정했습니다.",
   "placement.cuda_libraries_missing": "그래픽 카드용 NVIDIA CUDA 라이브러리가 설치되어 있지 않아 프로세서를 사용합니다. 설치한 뒤 SwarmLLM을 다시 시작하세요. 빠진 라이브러리는 로그에 나와 있습니다.",
   "placement.driver_not_answering": "그래픽 드라이버가 응답하지 않습니다. 카드를 재설정하는 중일 수 있습니다. 그동안 이 모델은 프로세서를 사용하며, 이후 자동으로 그래픽 카드로 돌아갑니다.",
+  "placement.experts_in_ram": "{total}개 레이어 모두 그래픽 카드에 있고, 그중 {in_ram}개의 대부분은 이 컴퓨터의 메모리에 있음",
+  "placement.experts_in_ram_detail": "모델이 카드에 다 들어가지 않아 {in_ram}개 레이어의 대부분을 이 컴퓨터의 메모리에 두고 프로세서가 처리합니다. 그래서 카드에 전부 올라간 모델보다 느립니다. 그래픽 메모리를 확보하면 더 많은 부분을 카드로 옮길 수 있습니다.",
   "placement.gpu_too_old": "이 그래픽 카드는 이 빌드가 지원하는 것보다 오래되어 프로세서를 사용합니다.",
   "placement.gpu_unavailable": "SwarmLLM이 그래픽 카드를 사용할 수 없게 되었습니다. 보통 실행 중에 드라이버가 업데이트된 경우입니다. SwarmLLM을 다시 시작하면 해결됩니다.",
   "placement.hybrid": "{total}개 레이어 중 {on}개가 그래픽 카드에서 실행",

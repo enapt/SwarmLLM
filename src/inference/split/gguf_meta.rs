@@ -160,6 +160,22 @@ pub(crate) fn layers_keeping_kv(ct: &gguf_file::Content, start: usize, end: usiz
         .count()
 }
 
+/// The bytes of layers `[start, end)`'s routed expert stacks
+/// (`ffn_{gate,up,down}_exps`), 0 for a dense layer — what keeping their
+/// experts in the machine's memory takes off the card (#138 (3)). The ONE
+/// answer for the loader, which places them, and the pool, which chooses how
+/// many and charges each device for them.
+pub(crate) fn routed_expert_bytes(ct: &gguf_file::Content, start: usize, end: usize) -> u64 {
+    (start..end)
+        .flat_map(|layer| {
+            ["ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"]
+                .map(|t| format!("blk.{layer}.{t}.weight"))
+        })
+        .filter_map(|name| ct.tensor_infos.get(&name))
+        .map(tensor_byte_size)
+        .fold(0u64, u64::saturating_add)
+}
+
 /// Metadata extracted from GGUF header, stored in manifest for all nodes.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GgufTensorMeta {

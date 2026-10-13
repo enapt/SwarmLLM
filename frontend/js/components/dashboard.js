@@ -1431,7 +1431,19 @@
         // split was one log line at spawn, and the card showed `fits_on_gpu:
         // true` for a model running 13 of its 28 layers on the card — so a
         // user could not tell why it was slower than the number promised.
-        if (!cpuReason && hostedShards > 0 && typeof m.gpu_layers_on_card === 'number' && m.num_layers > 0) {
+        // A mixture-of-experts model can instead keep EVERY layer on the card
+        // and the bulk of some of them — their experts — in this computer's
+        // memory (`expert_layers_in_ram`, #138 (3)); "N of N layers on the
+        // card, the rest on the processor" would contradict itself.
+        if (!cpuReason && hostedShards > 0 && typeof m.expert_layers_in_ram === 'number' && m.num_layers > 0) {
+          placementSectionHtml =
+            '<div class="mce-line mce-section-state-amber" title="' + U.escapeHtml(I18n.t('placement.tip')) + '">' +
+              '<span class="mce-line-icon">🖥</span>' +
+              '<span class="mce-line-text"><b>' +
+                U.escapeHtml(I18n.t('placement.experts_in_ram', { total: m.num_layers, in_ram: m.expert_layers_in_ram })) +
+              '</b> — ' + U.escapeHtml(I18n.t('placement.experts_in_ram_detail', { in_ram: m.expert_layers_in_ram })) + '</span>' +
+            '</div>';
+        } else if (!cpuReason && hostedShards > 0 && typeof m.gpu_layers_on_card === 'number' && m.num_layers > 0) {
           placementSectionHtml =
             '<div class="mce-line mce-section-state-amber" title="' + U.escapeHtml(I18n.t('placement.tip')) + '">' +
               '<span class="mce-line-icon">🖥</span>' +

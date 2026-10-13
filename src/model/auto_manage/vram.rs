@@ -473,12 +473,39 @@ pub fn describe_cpu_refusal(
     } else {
         ""
     };
-    let mut s = format!(
+    let s = format!(
         "{model} needs about {total_mb} MB of memory: {} MB of weights{weights_note}, \
          {kv_clause}, {other_mb} MB of embeddings, tables and overhead. This node's budget \
          allows {budget_mb} MB",
         f.weights_bytes / MB,
     );
+    finish_ram_refusal(s, budget_note, in_use_mb)
+}
+
+/// The refusal for a model placed on the card with some layers' routed experts
+/// kept in system RAM (`process_pool::CardSplit::ExpertsInRam`, #138 (3)):
+/// what the RAM is for — those experts alone, the rest of the model and its
+/// conversation memory being on the card — then the budget as
+/// [`describe_cpu_refusal`] states it.
+pub fn describe_experts_refusal(
+    model: &str,
+    experts_mb: u64,
+    expert_layers: usize,
+    budget_mb: u64,
+    budget_note: &str,
+    in_use_mb: u64,
+) -> String {
+    let s = format!(
+        "{model} needs about {experts_mb} MB of memory for the experts of {expert_layers} of its \
+         layers, kept in RAM beside the graphics card, which holds the rest of the model. This \
+         node's budget allows {budget_mb} MB"
+    );
+    finish_ram_refusal(s, budget_note, in_use_mb)
+}
+
+/// The budget's note, what is in use and what the owner can do — the tail every
+/// RAM refusal shares.
+fn finish_ram_refusal(mut s: String, budget_note: &str, in_use_mb: u64) -> String {
     if !budget_note.is_empty() {
         s.push_str(" (");
         s.push_str(budget_note);
@@ -2503,6 +2530,34 @@ mod footprint_tests {
         // What the old message priced — the whole ceiling — and why it read as 10x.
         let ceiling = resident_footprint(&i, true, 32768);
         assert_eq!(ceiling.kv_bytes / (1024 * 1024), 24576);
+    }
+
+    /// Experts kept in RAM beside the card (#138 (3)) are refused saying what
+    /// the memory is for and what limited the budget — measured 2026-10-14:
+    /// Qwen3-30B-A3B Q2_K's 25 layers' experts, 5213 MB, against a GPU node's
+    /// default 4997 MB, refused with neither said.
+    #[test]
+    fn a_refusal_of_experts_kept_in_ram_says_what_they_are_and_what_limited_the_budget() {
+        let msg = describe_experts_refusal(
+            "qwen3-30b-a3b-instruct-2507-q2-k",
+            5213,
+            25,
+            4997,
+            "auto-sized to 4997 MB from 15991 MB of RAM",
+            0,
+        );
+        assert!(
+            msg.contains("5213 MB of memory for the experts of 25 of its layers"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("budget allows 4997 MB (auto-sized to 4997 MB from 15991 MB of RAM)"),
+            "{msg}"
+        );
+        assert!(
+            msg.ends_with("free memory by unloading another model."),
+            "{msg}"
+        );
     }
 
     #[test]

@@ -825,6 +825,8 @@
   "placement.configured": "Bu bilgisayarı yalnızca işlemciyi kullanacak şekilde ayarladınız.",
   "placement.cuda_libraries_missing": "Ekran kartı için NVIDIA'nın CUDA kitaplıkları kurulu değil, bu yüzden işlemci kullanılıyor. Bunları kurup SwarmLLM'i yeniden başlatın; eksik olanlar günlükte yazıyor.",
   "placement.driver_not_answering": "Grafik sürücüsü yanıt vermiyor — kartı sıfırlıyor olabilir. Bu sırada bu model işlemciyi kullanır ve kendiliğinden grafik kartına geri döner.",
+  "placement.experts_in_ram": "{total} katmanın tamamı ekran kartında, {in_ram} tanesinin büyük kısmı bu bilgisayarın belleğinde",
+  "placement.experts_in_ram_detail": "Model ekran kartına sığmayacak kadar büyük, bu yüzden {in_ram} katmanın büyük kısmı bu bilgisayarın belleğinde kalır ve onu işlemci işler. Bu nedenle tamamı ekran kartında olan bir modelden daha yavaştır. Daha fazlasını oraya taşımak için grafik belleği boşaltın.",
   "placement.gpu_too_old": "Bu ekran kartı bu sürümün desteklediğinden eski, bu yüzden işlemci kullanılıyor.",
   "placement.gpu_unavailable": "SwarmLLM ekran kartına erişimini kaybetti; genellikle çalışırken sürücü güncellenmiştir. Düzeltmek için SwarmLLM'i yeniden başlatın.",
   "placement.hybrid": "{total} katmandan {on} tanesi ekran kartında",

@@ -153,23 +153,6 @@ fn segment_weight_bytes(
     total
 }
 
-/// The bytes of layers `from..to`'s routed expert stacks
-/// (`ffn_{gate,up,down}_exps`) — what keeping their experts in the machine's
-/// memory takes off the card (#138 (3)). 0 for a dense layer.
-fn routed_expert_bytes(ct: &gguf_file::Content, from: usize, to: usize) -> u64 {
-    (from..to)
-        .flat_map(|layer| {
-            ["ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"]
-                .map(|t| format!("blk.{layer}.{t}.weight"))
-        })
-        .filter_map(|name| ct.tensor_infos.get(&name))
-        .map(|info| {
-            info.shape.elem_count() as u64 * info.ggml_dtype.type_size() as u64
-                / info.ggml_dtype.block_size().max(1) as u64
-        })
-        .sum()
-}
-
 /// One of a GGUF's stacked expert tensors (`ffn_{gate,up,down}_exps`), cut into
 /// one QUANTIZED matrix per expert and placed on `device`.
 ///
@@ -692,8 +675,11 @@ impl SplitModel {
             Some(n) if hybrid_ok && device.is_cuda() => n.min(device_layers),
             _ => 0,
         };
-        let experts_in_ram_bytes =
-            routed_expert_bytes(&ct, layer_start, layer_start + experts_in_ram_layers);
+        let experts_in_ram_bytes = crate::inference::split::routed_expert_bytes(
+            &ct,
+            layer_start,
+            layer_start + experts_in_ram_layers,
+        );
         // KV bytes per position over layers `from..to` kept on a card or on
         // the processor — not a recurrent layer's fixed state
         // (`split::layers_keeping_kv`).
