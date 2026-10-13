@@ -321,8 +321,8 @@ fn a_kept_model_held_whole_runs_here_without_a_registration() {
     match scheduler.assemble_pipeline(&model, &local_id) {
         Err(e @ SwarmError::KeptOnThisComputer { .. }) => {
             assert!(
-                e.to_string().contains("[1]"),
-                "the refusal names the part: {e}"
+                e.to_string().contains("does not hold part 2"),
+                "the refusal names the part as the activity feed numbers it (index 1): {e}"
             );
         }
         other => panic!("a part gone from disk must be refused: {other:?}"),

@@ -497,20 +497,27 @@ pub fn reclassify_flattened_error(message: &str) -> Option<SwarmError> {
     None
 }
 
-/// What `PrivateModeUnavailable` is missing: its shards by number, and the image
-/// encoder by name — `MMPROJ_SHARD_INDEX` is a sentinel, not a shard anyone
-/// could look for. "shards: [..]" keeps the wording the message always had.
+/// What a refusal names as missing: its parts numbered from 1 as the activity
+/// feed numbers them (`ShardId::display_index` — "Pruned part 9" is index 8),
+/// and the image encoder by name — `MMPROJ_SHARD_INDEX` is a sentinel, not a
+/// part anyone could look for. It printed raw indices (`shards: [8]`), so a
+/// refusal and the feed named the same part two different numbers.
 fn missing_parts(missing: &[u32]) -> String {
     let encoder = missing.contains(&crate::types::MMPROJ_SHARD_INDEX);
-    let shards: Vec<u32> = missing
+    let parts: Vec<String> = missing
         .iter()
-        .copied()
-        .filter(|i| *i != crate::types::MMPROJ_SHARD_INDEX)
+        .filter(|i| **i != crate::types::MMPROJ_SHARD_INDEX)
+        .map(|i| (i + 1).to_string())
         .collect();
-    match (shards.is_empty(), encoder) {
+    let named = match parts.len() {
+        0 => "some of its parts".to_string(),
+        1 => format!("part {}", parts[0]),
+        _ => format!("parts {}", parts.join(", ")),
+    };
+    match (parts.is_empty(), encoder) {
         (true, true) => "its image encoder".to_string(),
-        (false, true) => format!("shards: {shards:?}, and its image encoder"),
-        (_, false) => format!("shards: {shards:?}"),
+        (false, true) => format!("{named}, and its image encoder"),
+        (_, false) => named,
     }
 }
 

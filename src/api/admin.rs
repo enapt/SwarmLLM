@@ -626,12 +626,19 @@ pub async fn diagnostics(
         for a in addrs.iter().take(10) {
             let _ = writeln!(out, "  {a}");
         }
+        // A capped list says so: "(13)" over ten lines read as three lost.
+        if addrs.len() > 10 {
+            let _ = writeln!(out, "  … and {} more", addrs.len() - 10);
+        }
         if addrs.is_empty() {
             let _ = writeln!(out, "  (none — no invite code can be minted)");
         }
     }
 
     let _ = writeln!(out, "\n-- peers ({}) --", ss.connected_node_ids.len());
+    if ss.connected_node_ids.len() > 20 {
+        let _ = writeln!(out, "  (the first 20)");
+    }
     for entry in ss.connected_node_ids.iter().take(20) {
         let _ = writeln!(out, "  {}", entry.key());
     }
