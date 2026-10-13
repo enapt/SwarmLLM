@@ -2627,6 +2627,62 @@ for the whole prompt at birth, and a later piece appends without growing. #10's 
 the FINAL piece only; a piece outside its span is refused (`PromptSpan::holds`). The batch path
 never takes a piece (`forward_is_schedulable`).
 
+## A split's local segments are admitted together, before the first forward (2026-10-13, FUTURE_WORK #263)
+
+`PipelineExecutor::forward_through_segments` — the choke point every prompt pass goes through
+(the kept pass, the pass in pieces, the plain one) — asks this node's worker, before any segment
+runs, to admit the prompt over EVERY range the plan gives this node at once
+(`ModelProcessPool::admit_prompt` → `DaemonMsg::AdmitPrompt` →
+`model_worker::admit_prompt_up_front`). One decision: `admit_prompt_over` is
+`ensure_room_for_prompt`'s body over several ranges — the per-token cost summed (a range inside a
+loaded one pays its share; a range not loaded yet pays the loaded layers' average), the tightest
+budget binding, the same reply reserve, release of finished conversations and eviction of cached
+prompts. Admitted, the worker records the ranges (`KvCacheStore::record_ranges_admitted`); each
+local segment's first forward then starts its cache afresh WITHOUT forgetting the request's
+promise (`clear_request_caches`, not `clear_request`) and skips its own admission
+(`admitted_up_front`). The served-context refusal still runs per forward.
+
+**What it replaced.** Each local segment was admitted when its own forward arrived, against one
+shared store. A tester's node (test round 3, v0.3.236, RTX 3060 12 GB) was planned three local
+segments of Qwen2.5-14B (0..1, 8..20, 32..48 — 30 of 48 layers) between peers in Italy, Belgium
+and Thailand; a 6,002-token prompt's first two segments fit, and the LAST was refused
+(`budget_mb=388 short_by_mb=378`) after the peers had read the prompt for 277 s, 125 s and 30 s.
+The same shape on v0.3.235 cost 12 s of remote prefill. vLLM asks the block manager
+`can_allocate` for a whole sequence group before scheduling its prefill and never per layer
+during it; a prompt that can never fit is `AllocStatus.NEVER`, not a retry.
+
+**Only where a peer takes part** — a plan of this node alone loses nothing to the per-segment
+check, which a first local segment runs before anyone else anyway. A prompt that is not text (an
+image, pre-made embeddings) and a worker not running the model yet are left to the per-segment
+check: nothing loaded can be weighed, and `admit_prompt` answers yes. A refusal cleans the
+request's bookkeeping at once (a reservation would otherwise hold room until the re-plan) and
+carries `layers_that_fit` — the share of the asked-for cache the room holds, times the plan's
+local layers, rounded down — which the re-plan holds this node's TOTAL layers to
+(`docs/invariants/scheduling.md` § "A re-plan is warranted by a changed fact"). Log line on the
+coordinator: `DIAG: KV admission up front — …`.
+
+**The wait is bounded, and the bound is not on the work** (`UP_FRONT_ADMISSION_WAIT`, 1 s). A
+worker answers one message at a time (`run_worker`'s loop awaits each `handle_daemon_msg`), so an
+admission sent while it reads ANOTHER request's prompt is answered only when that forward ends —
+time a peer's first segment of this request never used to wait. The answer itself is a budget
+sum and one device reading. Past the bound the pass goes ahead as before, each local segment
+admitting itself; the admission still reaches the worker ahead of this request's forwards, so a
+late "yes" is still recorded and honoured, and a late "no" leaves the per-segment check to refuse.
+The conversation is noted on the worker (`note_conversation`) only on a "yes". Test:
+`an_up_front_admission_does_not_wait_on_a_busy_worker` (a fake worker that never reads).
+
+**Worker IPC compatibility.** A worker can be newer than its daemon, never the reverse in one
+binary; the worker sends `PromptAdmitted` / `PromptRefused` only in answer to `AdmitPrompt`.
+
+**Residuals.** A PEER's segments are still admitted per segment at the peer (the planner charges
+them the prompt's cache through `PublishedRoom`). The planner itself does not yet ask our cache
+room before planning — #252 (1). A later attempt of the same request that sends no admission (a
+re-plan of this node alone) finds the earlier attempt's record: a subset of ranges the same
+prompt was admitted for, under the same reservation, so it is still covered. Tests:
+`an_up_front_admission_survives_each_segments_first_forward` (kv_cache),
+`a_refused_prompt_says_how_many_of_its_layers_fit`,
+`a_prompt_is_admitted_up_front_only_where_a_worker_runs_the_model`.
+
 ## Machine memory is read in one place, and a container's limit counts (2026-10-09)
 
 `daemon::machine_memory::machine_memory()` is the one reading of how much memory this process

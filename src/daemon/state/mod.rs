@@ -51,7 +51,9 @@ pub use models::{
 };
 pub use peer_outliers::PeerOutliers;
 pub use peer_speed::{PeerSpeed, WorkKind};
-pub use relay::{PeerServe, RelayForwardCounter, RelayProvenFeatures, RelayRoute, ServeKind};
+pub use relay::{
+    LocalMemoryRefusal, PeerServe, RelayForwardCounter, RelayProvenFeatures, RelayRoute, ServeKind,
+};
 pub use tp_allreduce::TpAllReduceCollector;
 
 // ---- Main SharedState ----
@@ -816,11 +818,10 @@ pub struct SharedState {
     ///
     /// Read by [`crate::inference::scheduler`] when deciding whether this node
     /// may take the whole model, and how many NEW layers it may take in a split
-    /// — the value is the fewest layers the loader refused to add, when the
-    /// refusal came from a load (`ModelProcessPool::take_layers_refused`);
+    /// — the value says what each kind of refusal measured (`LocalMemoryRefusal`);
     /// released by [`SharedState::release_request_state`] with every other
     /// per-request map.
-    pub local_memory_refusals: dashmap::DashMap<uuid::Uuid, Option<u32>>,
+    pub local_memory_refusals: dashmap::DashMap<uuid::Uuid, LocalMemoryRefusal>,
 
     /// The peers each request THIS node led ran segments on, across every
     /// attempt — what it tells, once the request is over, that the request is

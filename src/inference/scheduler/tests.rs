@@ -501,6 +501,8 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
         fresh_run_layers: None,
+        prompt_memory_refused: false,
+        memory_refused_this_request: false,
         goodput_bytes_per_sec: None,
     }
 }
@@ -769,6 +771,8 @@ fn greedy_assign_multi_range_candidate() {
             split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
             fresh_run_layers: None,
+            prompt_memory_refused: false,
+            memory_refused_this_request: false,
             goodput_bytes_per_sec: None,
         },
         NodeCandidate {
@@ -804,6 +808,8 @@ fn greedy_assign_multi_range_candidate() {
             split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
             fresh_run_layers: None,
+            prompt_memory_refused: false,
+            memory_refused_this_request: false,
             goodput_bytes_per_sec: None,
         },
     ];
@@ -1832,6 +1838,8 @@ fn cost_cand(
         split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
         fresh_run_layers: None,
+        prompt_memory_refused: false,
+        memory_refused_this_request: false,
         goodput_bytes_per_sec: None,
     }
 }
@@ -3231,6 +3239,8 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
         fresh_run_layers: None,
+        prompt_memory_refused: false,
+        memory_refused_this_request: false,
         goodput_bytes_per_sec: None,
     };
 
@@ -3329,6 +3339,8 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
         fresh_run_layers: None,
+        prompt_memory_refused: false,
+        memory_refused_this_request: false,
         goodput_bytes_per_sec: None,
     };
     let seg = |byte: u8, r: (u32, u32)| PipelineSegment {
@@ -3427,6 +3439,8 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
         fresh_run_layers: None,
+        prompt_memory_refused: false,
+        memory_refused_this_request: false,
         goodput_bytes_per_sec: None,
     };
 
@@ -6927,6 +6941,94 @@ fn a_replan_after_a_refused_range_gives_this_node_fewer_new_layers() {
     // Another request is planned as before: the record is this request's.
     let other = local_candidate_for(&state, &local, &mid, uuid::Uuid::new_v4());
     assert_eq!(other.max_hostable_layers, Some(estimate));
+}
+
+/// **A re-plan after this node's conversation memory refused the prompt holds
+/// ALL its layers to what the cache fits** (#263), held and new alike — the
+/// search then charges held layers their width
+/// (`a_prompt_this_nodes_memory_refused_is_replanned_with_its_held_layers_counted`).
+/// The load refusal's record bounds new layers only, which a node holding
+/// the layers it was planned already satisfies.
+#[test]
+fn a_replan_after_a_refused_prompt_holds_this_node_to_the_layers_that_fit() {
+    let (state, local, mid) = a_card_holder_of_a_model_it_must_split();
+    let rid = uuid::Uuid::new_v4();
+
+    // THE CONTROL: before any refusal, the card's estimate stands and held
+    // layers are charged as before.
+    let before = local_candidate_for(&state, &local, &mid, rid);
+    let estimate = before.max_hostable_layers.expect("fixture: a card bound");
+    assert!(
+        estimate > 5,
+        "fixture: the estimate must offer more, got {estimate}"
+    );
+    assert!(!before.prompt_memory_refused);
+    assert!(!before.memory_refused_this_request);
+
+    state.model_process_pool.note_layers_fitting(rid, 5);
+    state.note_local_memory_refusal(rid);
+    assert_eq!(state.local_layers_fitting_for_request(rid), Some(5));
+    assert_eq!(state.local_layers_refused_for_request(rid), None);
+
+    let after = local_candidate_for(&state, &local, &mid, rid);
+    assert_eq!(after.max_hostable_layers, Some(5));
+    assert!(after.prompt_memory_refused);
+    assert!(after.memory_refused_this_request);
+    assert_eq!(after.fresh_run_layers, None);
+
+    // A second refusal can only tighten it, and a load refusal of the same
+    // request keeps both facts.
+    state.model_process_pool.note_layers_fitting(rid, 8);
+    let refused: Result<(), crate::error::SwarmError> = Err(
+        crate::error::SwarmError::LocalMemoryUnavailable("8 layers 20..28".into()),
+    );
+    state
+        .model_process_pool
+        .note_load_refusal(rid, &mid, (20, 28), &refused);
+    state.note_local_memory_refusal(rid);
+    assert_eq!(state.local_layers_fitting_for_request(rid), Some(5));
+    assert_eq!(state.local_layers_refused_for_request(rid), Some(8));
+
+    let other = local_candidate_for(&state, &local, &mid, uuid::Uuid::new_v4());
+    assert_eq!(other.max_hostable_layers, Some(estimate));
+    assert!(!other.prompt_memory_refused, "the record is this request's");
+    assert!(!other.memory_refused_this_request);
+}
+
+/// **Once this node's memory refused THIS request, greedy's relaxed pass keeps
+/// its bound** (#263). The search's last rung already declines to plan past it;
+/// the fallback beneath it dropped every bound on its second pass and rebuilt
+/// the refused plan — two re-plans in under a second on `split_rig.sh latekv`,
+/// each ending in the same refusal.
+#[test]
+fn a_relaxed_greedy_pass_keeps_this_nodes_bound_once_its_memory_refused_the_request() {
+    let state = make_shared_state();
+    let scheduler = PipelineScheduler::new(state);
+    // A peer holds the head; only this node holds the tail, and its memory
+    // fits 5 of the tail's 8 layers.
+    let head = simple_candidate(2, vec![(0, 20)]);
+    let mut here = simple_candidate(1, vec![(20, 28)]);
+    here.max_hostable_layers = Some(5);
+
+    // THE CONTROL: before any refusal the relaxed pass routes past the bound,
+    // and this node's own admission decides.
+    let unrefused = scheduler.greedy_assign(
+        28,
+        &[head.clone(), here.clone()],
+        None,
+        false,
+        false,
+        super::Purpose::Route,
+    );
+    assert!(unrefused.is_ok(), "{unrefused:?}");
+
+    here.memory_refused_this_request = true;
+    let refused =
+        scheduler.greedy_assign(28, &[head, here], None, false, false, super::Purpose::Route);
+    assert!(
+        matches!(refused, Err(SwarmError::SwarmShortOfMemory { .. })),
+        "a refused node must not be planned past its bound again: {refused:?}"
+    );
 }
 
 /// Two card peers holding every part of a 32-layer model (4 GB, so 125 MB a

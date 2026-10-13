@@ -73,6 +73,18 @@ pub enum DaemonMsg {
         model_id: ModelId,
         block_hash: [u8; 32],
     },
+    /// Admit a split's prompt over EVERY range this worker will run for the
+    /// request, before the pipeline sends its first forward (FUTURE_WORK #263).
+    /// Answered with `WorkerMsg::PromptAdmitted` or `WorkerMsg::PromptRefused`.
+    ///
+    /// Each local segment used to be admitted on its own when its forward
+    /// arrived, against the one store the request's earlier segments had
+    /// already filled — so the LAST local segment of a long prompt was refused
+    /// after the peers between had read it for minutes. Asked once, up front, a
+    /// refusal costs no other computer anything. A daemon sends it only to a
+    /// worker spawned from its own binary or a newer one, so no worker that
+    /// cannot read it ever receives it.
+    AdmitPrompt(IpcAdmitPrompt),
     /// Abandon a request the daemon no longer wants a reply for.
     ///
     /// Sent when a `forward` / `generate` future is dropped before it
@@ -141,6 +153,19 @@ pub enum WorkerMsg {
     },
     /// The guesses a `DaemonMsg::Draft` asked for, in order.
     Drafted { request_id: Uuid, tokens: Vec<u32> },
+    /// A `DaemonMsg::AdmitPrompt` fitted: the request's cache is promised over
+    /// every range it named, and their forwards ask nothing more. Sent only in
+    /// answer to that message, so only to a daemon that reads it.
+    PromptAdmitted { request_id: Uuid },
+    /// A `DaemonMsg::AdmitPrompt` did not fit. `message` is the refusal the
+    /// owner reads (`LocalMemoryUnavailable`'s); `layers_that_fit` is how many
+    /// of this model's layers' caches the room holds at this prompt's length —
+    /// the fact the re-plan needs and a bare refusal never gave it (#263).
+    PromptRefused {
+        request_id: Uuid,
+        message: String,
+        layers_that_fit: u32,
+    },
     /// A single decoded token (for streaming Generate).
     Token {
         request_id: Uuid,
@@ -295,6 +320,18 @@ impl ProgressPhase {
             ProgressPhase::Prefill => "prefill",
         }
     }
+}
+
+/// `DaemonMsg::AdmitPrompt`'s body: one request's prompt, and every layer range
+/// this worker will run for it in the plan about to start.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct IpcAdmitPrompt {
+    pub request_id: Uuid,
+    pub model_id: ModelId,
+    pub layer_ranges: Vec<(u32, u32)>,
+    /// The whole prompt, in positions — what every range's cache will hold
+    /// once the prompt pass is done, a kept opening (#10) included.
+    pub prompt_tokens: u32,
 }
 
 /// Forward-pass request header (activation bytes are the binary payload).
@@ -622,6 +659,8 @@ enum WorkerMsgTag {
     LayerResult,
     BatchResult,
     Drafted,
+    PromptAdmitted,
+    PromptRefused,
     Token,
     GenerateDone,
     CardAllocationProbe,
@@ -894,6 +933,8 @@ mod tests {
                 WorkerMsg::LayerResult(_) => WorkerMsgTag::LayerResult,
                 WorkerMsg::BatchResult { .. } => WorkerMsgTag::BatchResult,
                 WorkerMsg::Drafted { .. } => WorkerMsgTag::Drafted,
+                WorkerMsg::PromptAdmitted { .. } => WorkerMsgTag::PromptAdmitted,
+                WorkerMsg::PromptRefused { .. } => WorkerMsgTag::PromptRefused,
                 WorkerMsg::Token { .. } => WorkerMsgTag::Token,
                 WorkerMsg::GenerateDone { .. } => WorkerMsgTag::GenerateDone,
                 WorkerMsg::CardAllocationProbe { .. } => WorkerMsgTag::CardAllocationProbe,
@@ -917,6 +958,14 @@ mod tests {
             WorkerMsg::Drafted {
                 request_id: Uuid::nil(),
                 tokens: vec![],
+            },
+            WorkerMsg::PromptAdmitted {
+                request_id: Uuid::nil(),
+            },
+            WorkerMsg::PromptRefused {
+                request_id: Uuid::nil(),
+                message: String::new(),
+                layers_that_fit: 3,
             },
         ] {
             let written = serde_json::to_value(&m).unwrap()["t"].clone();

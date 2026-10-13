@@ -76,6 +76,12 @@ In `handle_forward` the FIRST piece of a `prompt_span` clears, restores and is a
 
 → `docs/invariants/memory.md` § "A prompt pass read in pieces is admitted once"
 
+## A split's local segments are admitted together, before the first forward (2026-10-13, #263)
+
+**`ModelProcessPool::admit_prompt`** (`DaemonMsg::AdmitPrompt`), asked once from `forward_through_segments` when a peer takes part, admits the prompt over every range the plan gives this node — the same decision as one segment's (`model_worker::admit_prompt_over`) — before any peer reads it. A segment admitted up front clears with `clear_request_caches` (never `clear_request`, which forgets the promise) and skips its own admission. A refusal carries `layers_that_fit` for the re-plan. The wait is bounded (`UP_FRONT_ADMISSION_WAIT`): a worker busy with another forward answers late, and the pass goes ahead per segment.
+
+→ `docs/invariants/memory.md` § "A split's local segments are admitted together"
+
 ## A model loaded for ANOTHER model's request is a guest (2026-09-28)
 
 **`process_pool::Tenancy` is a REQUIRED argument of `get_or_spawn`.** A `Guest` (the drafter, `ModelProcessPool::draft`) takes only memory that stands free: no reclaim, split, promotion, growth or notice. `dsd.rs` reads ahead only once `holds_segment`.

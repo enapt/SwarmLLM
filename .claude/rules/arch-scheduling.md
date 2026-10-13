@@ -97,7 +97,7 @@ The whole-model hand-off waits in `hand_off` when the priced search will run; it
 
 ## A re-plan is warranted by a changed fact, never by a failed attempt
 
-`SwarmError::LocalMemoryUnavailable` is the one local failure `should_retry_after` re-plans; the router first calls `SharedState::note_local_memory_refusal(request_id)` so `local_can_hold_every_layer` stops the second plan handing this node the whole model — and, where a LOAD refused (`ModelProcessPool::note_load_refusal`), gives it fewer new layers than it refused to add and no fresh-worker split (`local_layers_refused_for_request`), or a node holding PART of a model is re-planned the ranges it just refused (#234).
+`SwarmError::LocalMemoryUnavailable` is the one local failure `should_retry_after` re-plans; the router first calls `SharedState::note_local_memory_refusal(request_id)` so `local_can_hold_every_layer` stops the second plan handing this node the whole model — and, where a LOAD refused (`ModelProcessPool::note_load_refusal`), gives it fewer new layers than it refused to add and no fresh-worker split (`local_layers_refused_for_request`), or a node holding PART of a model is re-planned the ranges it just refused (#234). Where its conversation memory refused the PROMPT (`ModelProcessPool::admit_prompt`), the re-plan holds ALL its layers, held ones included, to the layers that fit (`local_layers_fitting_for_request` → `NodeCandidate::prompt_memory_refused`, under which `capacity_charge` is the width; #263). After either refusal, no planner's relaxed pass lifts this node's bound (`NodeCandidate::memory_refused_this_request`, greedy's `cap_of`).
 
 → `docs/invariants/scheduling.md` § "A re-plan is warranted by a changed fact, never by a failed attempt"
 

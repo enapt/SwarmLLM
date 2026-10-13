@@ -714,6 +714,48 @@ the old effect alone. Test: `a_replan_after_a_refused_range_gives_this_node_fewe
 (red with the cap ignored; its control plans the estimate, and another request is
 untouched).
 
+**A refusal of the PROMPT bars all this node's layers, held ones included
+(2026-10-13, #263).** A tester's node held 30 of Qwen2.5-14B's 48 layers in three
+local segments between peers in Italy, Belgium and Thailand; a 6,002-token prompt's
+cache did not fit beside the weights, and the LAST local segment refused it after
+the peers had read the prompt (277 s, 125 s and 30 s). The refusal named no layers,
+so the re-plan — which charges the local node only the layers it would ADD
+(`layers_it_would_add`, right for weights: held ones cost nothing new) — built the
+same 30-layer plan and failed the same way: two requests, four attempts, ~15 min of
+peers' time, no reply. A held layer's WEIGHTS are free; its share of this prompt's
+cache is not, which is exactly what `PublishedRoom` already charged a peer (gotcha
+#447) and nothing charged us. Now the refusal comes from the up-front admission
+(`ModelProcessPool::admit_prompt`, `docs/invariants/memory.md` § "A split's local
+segments are admitted together") and carries the layers the cache fits at this
+length (`model_worker::layers_that_fit`, rounded DOWN so the re-plan cannot fall
+one layer short again); `note_local_memory_refusal` keeps it beside the load's
+figure (`LocalMemoryRefusal`, each the fewest across refusals);
+`gather_candidates` turns it into a TOTAL — `max_hostable_layers = min(held + room
+for new, fit)` — and sets `NodeCandidate::prompt_memory_refused`, under which
+`capacity_charge` is a range's WIDTH. `parallax`'s `local_added` asks
+`capacity_charge` (it asked `layers_it_would_add` directly; identical for the local
+node before this), so the vertex filter and the DP's running total agree. Greedy
+already reads `max_hostable_layers` as a total. vLLM's `AllocStatus.NEVER` is the
+same idea from the other side: a prompt that cannot fit is not re-queued for the
+same answer. Tests: `a_replan_after_a_refused_prompt_holds_this_node_to_the_layers_that_fit`
+(gather side) and `a_prompt_this_nodes_memory_refused_is_replanned_with_its_held_layers_counted`
+(the search: 30 held layers planned as the control, ≤ 10 after) — both red with
+the clamp and the width charge removed.
+
+**…and on every pass of every planner.** The real-path rig (`split_rig.sh latekv`,
+A's cache 74 MB short of a 5,097-token prompt) refused up front in 0.8 s against
+the release's 261 s, but still re-planned TWICE: the search's last rung declined
+to plan past the refused node ("not planning past that bound a second time"), and
+the greedy fallback beneath it relaxed EVERY bound on its second pass — the local
+node's included — and rebuilt the refused plan. `NodeCandidate::memory_refused_this_request`
+(set for this node from `local_memory_refused_for_request`, load and prompt
+refusals alike) now keeps `max_hostable_layers` in force in `greedy_assign_inner`'s
+`cap_of` on the relaxed pass too, so the answer is `SwarmShortOfMemory` at once
+when nobody else holds the layers. A field on the candidate, set where candidates
+are built, rather than an argument each greedy caller could pass wrong. Test:
+`a_relaxed_greedy_pass_keeps_this_nodes_bound_once_its_memory_refused_the_request`
+(red with the field ignored).
+
 **From the rules file (moved 2026-10-02):**
 
 **`SwarmError::LocalMemoryUnavailable`** is what this node's own loader returns

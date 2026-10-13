@@ -256,6 +256,20 @@ struct NodeCandidate {
     /// may use the run's WIDTH up to this; a plan giving it two or more is held
     /// to `max_hostable_layers` in layers added, as before (2026-10-08).
     fresh_run_layers: Option<u32>,
+    /// For THIS node only: its conversation memory refused this request's
+    /// prompt (`ModelProcessPool::admit_prompt`, #263). Every layer a segment
+    /// runs needs the prompt's cache, held weights or not, so while set
+    /// [`Self::capacity_charge`] is a range's WIDTH and `max_hostable_layers`
+    /// the most layers this node may run in all — never only the new ones,
+    /// or the re-plan rebuilds the plan whose layers it already held.
+    prompt_memory_refused: bool,
+    /// For THIS node only: its loader or its conversation memory has refused
+    /// this request (`SharedState::local_memory_refused_for_request`). Every
+    /// planner then holds it to `max_hostable_layers`, the relaxed passes
+    /// included — the search's last rung already declines to plan past it, and
+    /// the greedy fallback beneath it rebuilt the refused plan on its relaxed
+    /// pass, three attempts in under a second on the #263 rig.
+    memory_refused_this_request: bool,
 }
 
 /// Assumed load speed for a node that has not reported its own
@@ -428,7 +442,12 @@ impl NodeCandidate {
     ///   for new layers is exactly what its cap measures (#95); for a peer that
     ///   published nothing, holding nothing we know of, it is the width, and
     ///   its figure already folds in residency (`PeerResidency`).
+    /// - This node once its conversation memory refused the prompt: the width
+    ///   ([`Self::prompt_memory_refused`]).
     fn capacity_charge(&self, range: (u32, u32)) -> u32 {
+        if self.prompt_memory_refused {
+            return range.1.saturating_sub(range.0);
+        }
         let added = self.layers_it_would_add(range);
         match self.published_room {
             Some(room) => {
@@ -4182,6 +4201,21 @@ impl PipelineScheduler {
                         let below = refused.saturating_sub(1);
                         ours = Some(ours.map_or(below, |k| k.min(below)));
                     }
+                    // Its conversation memory's verdict on this prompt bounds
+                    // every layer here, held ones included: the held layers'
+                    // weights were never the shortfall, their caches were
+                    // (#263). Room for new layers still counts, in the same
+                    // total.
+                    if let Some(fit) = self
+                        .shared_state
+                        .local_layers_fitting_for_request(request_id)
+                    {
+                        let held: u32 = held_ranges
+                            .iter()
+                            .map(|h| h.range.1.saturating_sub(h.range.0))
+                            .sum();
+                        ours = Some(ours.map_or(fit, |add| held.saturating_add(add).min(fit)));
+                    }
                     // Our own held ranges say what is resident here exactly;
                     // our own loads say how fast the rest would arrive.
                     let load = cold_load_ms_per_layer(
@@ -4388,6 +4422,15 @@ impl PipelineScheduler {
                 split_openings,
                 cold_load_ms_per_layer: cold_load_per_layer,
                 fresh_run_layers,
+                prompt_memory_refused: is_local
+                    && self
+                        .shared_state
+                        .local_layers_fitting_for_request(request_id)
+                        .is_some(),
+                memory_refused_this_request: is_local
+                    && self
+                        .shared_state
+                        .local_memory_refused_for_request(request_id),
             });
         }
 
@@ -4445,6 +4488,8 @@ impl PipelineScheduler {
                 // This node only: the one run a fresh worker would split across
                 // card and processor; any further run is held to the bound above.
                 fresh_run_layers = ?c.fresh_run_layers,
+                // This node only: the bound above is then ALL its layers (#263).
+                prompt_memory_refused = c.prompt_memory_refused,
                 // Beside the bound, because the bound is room for NEW layers:
                 // `Some(0)` next to held ranges is a node that can still run
                 // the split it is already holding (#95), not one with no room.
@@ -4793,9 +4838,11 @@ impl PipelineScheduler {
         // What a node may be given in this pass: its advertised room, or once
         // that bound is relaxed, what a peer could ever hold — the same
         // ceiling `parallax::CapacityBound::PeersAtCeiling` holds the search
-        // to. This node has no ceiling here: its loader decides, as before.
+        // to. This node has no ceiling here: its loader decides, as before —
+        // until it HAS decided, for this request, and then its bound stands on
+        // every pass (`memory_refused_this_request`, #263).
         let cap_of = |c: &NodeCandidate| {
-            c.within_ceiling(if respect_capacity {
+            c.within_ceiling(if respect_capacity || c.memory_refused_this_request {
                 c.max_hostable_layers
             } else {
                 None

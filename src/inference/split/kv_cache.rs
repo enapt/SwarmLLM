@@ -801,6 +801,13 @@ pub struct KvCacheStore {
     /// (`cpu_pools::in_phase_pool`). Released with the rest of a request's
     /// bookkeeping, and swept like it.
     owner_requests: dashmap::DashMap<String, std::time::Instant>,
+    /// Layer ranges a request's prompt was admitted for UP FRONT, all at once
+    /// (`DaemonMsg::AdmitPrompt`, FUTURE_WORK #263): `request_id -> (ranges,
+    /// when)`. A forward's own admission stands aside for a range in here
+    /// (`admitted_up_front`) — its cache was promised with the rest, and
+    /// admitting it again would weigh the request against its own promise.
+    /// Released with the rest of a request's bookkeeping, and swept like it.
+    ranges_admitted: dashmap::DashMap<String, (Vec<(u32, u32)>, std::time::Instant)>,
 }
 
 /// `SWARMLLM_KV_RESERVE=0` records no reservation, so a prompt grows into its
@@ -1103,6 +1110,7 @@ impl KvCacheStore {
             admitted_claims: dashmap::DashMap::new(),
             reserved_positions: dashmap::DashMap::new(),
             owner_requests: dashmap::DashMap::new(),
+            ranges_admitted: dashmap::DashMap::new(),
         }
     }
 
@@ -1216,6 +1224,24 @@ impl KvCacheStore {
         }
         self.admitted_claims
             .insert(request_id.to_string(), (bytes, std::time::Instant::now()));
+    }
+
+    /// Record that `request_id`'s prompt was admitted up front over `ranges`
+    /// (FUTURE_WORK #263). Replaces an earlier record — a re-plan admits its
+    /// own shape afresh.
+    pub(crate) fn record_ranges_admitted(&self, request_id: &str, ranges: Vec<(u32, u32)>) {
+        self.ranges_admitted
+            .insert(request_id.to_string(), (ranges, std::time::Instant::now()));
+    }
+
+    /// Was `range` covered by `request_id`'s up-front admission? A range inside
+    /// an admitted one counts: a forward's range is a plan segment, which a
+    /// failover may only narrow.
+    pub(crate) fn admitted_up_front(&self, request_id: &str, range: (u32, u32)) -> bool {
+        self.ranges_admitted.get(request_id).is_some_and(|r| {
+            r.0.iter()
+                .any(|&(start, end)| start <= range.0 && range.1 <= end)
+        })
     }
 
     /// Bytes promised to admitted prompts that their caches do not hold yet.
@@ -1468,6 +1494,15 @@ impl KvCacheStore {
         // owed. Every worker path that finishes or abandons a request already
         // comes through here.
         self.forget_request_bookkeeping(request_id);
+        self.clear_request_caches(model_key, request_id);
+    }
+
+    /// [`Self::clear_request`]'s caches without its bookkeeping: the start of a
+    /// prompt pass over a range whose cache was admitted up front with the
+    /// request's other ranges (FUTURE_WORK #263). The pass starts its cache
+    /// afresh; the promise, the reservation and the owner's mark were made for
+    /// the whole request and stay until it ends.
+    pub(crate) fn clear_request_caches(&self, model_key: &str, request_id: &str) {
         let key = Self::cache_key(model_key, request_id);
         self.caches.remove(key.as_str());
         // Also clear TP-keyed cache entries for the same request
@@ -1489,6 +1524,8 @@ impl KvCacheStore {
         self.reserved_positions
             .retain(|_, (_, at)| at.elapsed() <= ttl);
         self.owner_requests.retain(|_, at| at.elapsed() <= ttl);
+        self.ranges_admitted
+            .retain(|_, (_, at)| at.elapsed() <= ttl);
         let before = self.caches.len();
         self.caches
             .retain(|_, entry| entry.last_accessed.elapsed() <= ttl);
@@ -1522,6 +1559,7 @@ impl KvCacheStore {
         self.admitted_claims.remove(request_id);
         self.reserved_positions.remove(request_id);
         self.owner_requests.remove(request_id);
+        self.ranges_admitted.remove(request_id);
     }
 
     /// Drop the cache of every conversation nobody has touched for `idle` — a
@@ -1749,6 +1787,50 @@ mod tests {
         store.mark_owner_request("r3");
         store.cleanup_request_id("r3");
         assert!(!store.serves_the_owner("r3"), "and by the other cleanup");
+    }
+
+    /// **An up-front admission outlives the start of each segment's prompt
+    /// pass, and goes with the request** (#263). Every local segment's first
+    /// forward starts its cache afresh; were that to forget the request's
+    /// admission as `clear_request` does, the second segment would admit itself
+    /// again — weighed against its own request's promise — and the late refusal
+    /// the up-front check exists to prevent would be back.
+    #[test]
+    fn an_up_front_admission_survives_each_segments_first_forward() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        assert!(!store.admitted_up_front("r1", (0, 1)), "nothing admitted");
+        store.set_reserved_positions("r1", 6656);
+        store.record_ranges_admitted("r1", vec![(0, 1), (8, 20), (32, 48)]);
+        assert!(store.admitted_up_front("r1", (8, 20)));
+        assert!(
+            store.admitted_up_front("r1", (34, 48)),
+            "a range inside an admitted one counts"
+        );
+        assert!(
+            !store.admitted_up_front("r1", (1, 8)),
+            "a peer's range was never ours to admit"
+        );
+        assert!(!store.admitted_up_front("r2", (8, 20)), "per request");
+
+        store.clear_request_caches("m", "r1");
+        assert!(
+            store.admitted_up_front("r1", (32, 48)),
+            "a segment's first forward keeps the request's admission"
+        );
+        assert_eq!(store.reserved_positions("r1"), 6656, "and its reservation");
+
+        store.clear_request("m", "r1");
+        assert!(
+            !store.admitted_up_front("r1", (32, 48)),
+            "the request's end"
+        );
+        assert_eq!(store.reserved_positions("r1"), 0);
+        store.record_ranges_admitted("r3", vec![(0, 4)]);
+        store.cleanup_request_id("r3");
+        assert!(
+            !store.admitted_up_front("r3", (0, 4)),
+            "and the other cleanup"
+        );
     }
 
     /// The reservation lives exactly as long as the request: recorded by the

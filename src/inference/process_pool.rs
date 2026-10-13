@@ -110,6 +110,12 @@ pub(crate) const CONVERSATION_GAP_SECS: u64 = 120;
 /// so anything older than [`LAYERS_REFUSED_FOR`] is one no router will take.
 const LAYERS_REFUSED_KEPT: usize = 64;
 const LAYERS_REFUSED_FOR: std::time::Duration = std::time::Duration::from_secs(600);
+/// How long a pipeline waits for its up-front admission before going ahead
+/// without it (`ModelProcessPool::admit_prompt`). Not a bound on the work —
+/// the answer is a budget sum and one device reading, milliseconds — but on how
+/// long this request's peers may be held while our worker finishes ANOTHER
+/// request's forward, which the old per-segment admission never waited for.
+const UP_FRONT_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Per-request buffered channel capacity for multiplexed worker responses.
 /// Long decode streams emit one WorkerMsg::Token per generated token; 256 gives
@@ -741,6 +747,8 @@ fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
         WorkerMsg::Token { request_id, .. }
         | WorkerMsg::GenerateDone { request_id, .. }
         | WorkerMsg::Drafted { request_id, .. }
+        | WorkerMsg::PromptAdmitted { request_id }
+        | WorkerMsg::PromptRefused { request_id, .. }
         | WorkerMsg::Error { request_id, .. } => Some(*request_id),
         // `PrefixSnapshotResponse` is correlated by `request_id` via the
         // normal response-routing channel — `fetch_local_snapshot`
@@ -2219,6 +2227,10 @@ pub struct ModelProcessPool {
     /// record of the refusal (`take_layers_refused`). See
     /// [`Self::note_load_refusal`].
     layers_refused: DashMap<Uuid, (u32, std::time::Instant)>,
+    /// Layers of a request this node's conversation memory held at its
+    /// prompt's length, when the up-front admission refused it — kept like
+    /// `layers_refused` until the router takes them (`take_layers_fitting`).
+    layers_fitting: DashMap<Uuid, (u32, std::time::Instant)>,
     data_dir: PathBuf,
     /// Active shard windows: which shards each model worker should load.
     /// If absent, the worker loads all on-disk shards (default behavior).
@@ -2532,6 +2544,7 @@ impl ModelProcessPool {
             spawn_lock: Mutex::new(()),
             spawn_failures: DashMap::new(),
             layers_refused: DashMap::new(),
+            layers_fitting: DashMap::new(),
             data_dir,
             active_shard_windows: DashMap::new(),
             gpu_layers: std::sync::atomic::AtomicI32::new(-1),
@@ -4793,6 +4806,162 @@ impl ModelProcessPool {
     /// refused any — taken, so a later refusal starts afresh.
     pub fn take_layers_refused(&self, request_id: Uuid) -> Option<u32> {
         self.layers_refused
+            .remove(&request_id)
+            .map(|(_, (layers, _))| layers)
+    }
+
+    /// Admit `admit.prompt_tokens` of conversation memory over every range a
+    /// plan gives this node, at once, before the pipeline sends its first
+    /// forward (`DaemonMsg::AdmitPrompt`, FUTURE_WORK #263).
+    ///
+    /// **Why before, and why all at once.** Each local segment used to admit
+    /// itself as its forward arrived, so a plan with a local segment after a
+    /// peer's learned this node had no room only once the peers had read the
+    /// prompt — a tester's 6,002-token prompt waited 277 s, 125 s and 30 s on
+    /// three countries' prefill before our last segment refused, and the
+    /// re-plan, given no new fact, built the same plan and failed the same way.
+    /// vLLM asks the same question at the same moment for the same reason: the
+    /// block manager's `can_allocate` is answered for a sequence group before
+    /// it is scheduled for prefill, never per layer during it.
+    ///
+    /// `Ok` when no worker is running the model — nothing is loaded to weigh,
+    /// and each forward admits itself as it always has. A refusal is a
+    /// `LocalMemoryUnavailable`, which the router re-plans, with how many of
+    /// the ranges' layers fit at this length recorded for that re-plan
+    /// ([`Self::take_layers_fitting`]).
+    pub async fn admit_prompt(
+        &self,
+        admit: IpcAdmitPrompt,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<(), SwarmError> {
+        let Some(handle) = self.live_worker(&admit.model_id) else {
+            return Ok(());
+        };
+        let request_id = admit.request_id;
+        let model_id = admit.model_id.clone();
+        let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
+        let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
+        let attempt_token = guard.token;
+        {
+            let mut writer = handle.writer.lock().await;
+            if let Err(e) = send_daemon(&mut *writer, &DaemonMsg::AdmitPrompt(admit), &[]).await {
+                drop(writer);
+                self.evict_this_worker(&model_id, &handle, "IPC send failed");
+                tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
+                guard.disarm();
+                return Err(SwarmError::ServiceUnavailable(format!(
+                    "send AdmitPrompt: {e}"
+                )));
+            }
+        }
+        let wait = async {
+            loop {
+                match resp_rx.recv().await {
+                    Some((msg, _)) => match msg {
+                        WorkerMsg::PromptAdmitted { request_id: rid } if rid == request_id => {
+                            guard.disarm();
+                            // The admission holds a reservation for this request
+                            // until its forwards arrive, so the worker is in use
+                            // from here (`kv_holders`).
+                            handle.note_conversation(request_id);
+                            return Ok(());
+                        }
+                        WorkerMsg::PromptRefused {
+                            request_id: rid,
+                            message,
+                            layers_that_fit,
+                        } if rid == request_id => {
+                            guard.disarm();
+                            tracing::info!(
+                                %request_id,
+                                model = %model_id,
+                                layers_that_fit,
+                                "DIAG: KV admission up front — this node's segments of the plan \
+                                 cannot hold the prompt; refused before any peer read it, the \
+                                 re-plan holds this node to the layers that fit"
+                            );
+                            self.note_layers_fitting(request_id, layers_that_fit);
+                            return Err(self.classify_worker_error(&model_id, message, false, true));
+                        }
+                        WorkerMsg::Error {
+                            request_id: rid,
+                            message,
+                            fatal,
+                            local_memory_refusal,
+                        } if rid == request_id => {
+                            guard.disarm();
+                            return Err(self.classify_worker_error(
+                                &model_id,
+                                message,
+                                fatal,
+                                local_memory_refusal,
+                            ));
+                        }
+                        _ => continue,
+                    },
+                    None => {
+                        guard.disarm();
+                        return Err(self.reply_channel_closed(
+                            &model_id,
+                            &handle,
+                            request_id,
+                            attempt_token,
+                            "before admission",
+                        ));
+                    }
+                }
+            }
+        };
+        // A worker answers one message at a time, so an admission sent while it
+        // is reading another request's prompt waits for that forward to end —
+        // which a peer's first segment of THIS request need not have done. The
+        // answer itself takes milliseconds; a worker that has not given it by
+        // `UP_FRONT_ADMISSION_WAIT` is busy, and the pass goes ahead as it always
+        // did, each local segment admitting itself. The admission still reaches
+        // the worker ahead of this request's forwards, which see its record.
+        let bounded = async {
+            match tokio::time::timeout(UP_FRONT_ADMISSION_WAIT, wait).await {
+                Ok(answer) => answer.map(Some),
+                Err(_busy) => Ok(None),
+            }
+        };
+        match crate::inference::cancel::unless_cancelled(bounded, cancel.as_ref()).await? {
+            Some(()) => Ok(()),
+            None => {
+                guard.disarm();
+                tracing::info!(
+                    %request_id,
+                    model = %model_id,
+                    wait_ms = UP_FRONT_ADMISSION_WAIT.as_millis() as u64,
+                    "DIAG: KV admission up front — the worker is busy with another forward; \
+                     each local segment admits itself instead"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Remember how many of a request's local layers this node's conversation
+    /// memory holds at its prompt's length — the fewest, across refusals.
+    pub(crate) fn note_layers_fitting(&self, request_id: Uuid, layers: u32) {
+        if self.layers_fitting.len() > LAYERS_REFUSED_KEPT {
+            self.layers_fitting
+                .retain(|_, (_, at)| at.elapsed() < LAYERS_REFUSED_FOR);
+        }
+        self.layers_fitting
+            .entry(request_id)
+            .and_modify(|(kept, at)| {
+                *kept = (*kept).min(layers);
+                *at = std::time::Instant::now();
+            })
+            .or_insert((layers, std::time::Instant::now()));
+    }
+
+    /// The layers this node's conversation memory held for `request_id` when
+    /// its admission refused the prompt ([`Self::admit_prompt`]) — taken, like
+    /// [`Self::take_layers_refused`].
+    pub fn take_layers_fitting(&self, request_id: Uuid) -> Option<u32> {
+        self.layers_fitting
             .remove(&request_id)
             .map(|(_, (layers, _))| layers)
     }
@@ -8028,6 +8197,41 @@ mod tests {
         fake_worker_handle_on(dead_now, Some(CpuReason::Configured), true).await
     }
 
+    /// **An up-front admission never holds a pipeline for a worker busy with
+    /// another request** (#263). A worker answers one message at a time, so
+    /// one reading another request's prompt answers only when that forward
+    /// ends — time a peer's first segment of THIS request never used to wait.
+    /// Past `UP_FRONT_ADMISSION_WAIT` the pass goes ahead, each local segment
+    /// admitting itself as before, and nothing is recorded or evicted. This
+    /// fake worker never reads its socket: the busy case, held forever.
+    #[tokio::test]
+    async fn an_up_front_admission_does_not_wait_on_a_busy_worker() {
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-admit-busy"));
+        let m = ModelId("busy".into());
+        let h = fake_worker_handle(false).await;
+        p.workers.insert(m.clone(), h.clone());
+        let rid = Uuid::new_v4();
+        let admit = IpcAdmitPrompt {
+            request_id: rid,
+            model_id: m.clone(),
+            layer_ranges: vec![(0, 4)],
+            prompt_tokens: 6002,
+        };
+        let started = std::time::Instant::now();
+        let answer = p.admit_prompt(admit, None).await;
+        let took = started.elapsed();
+        assert!(answer.is_ok(), "{answer:?}");
+        assert!(
+            took >= UP_FRONT_ADMISSION_WAIT && took < UP_FRONT_ADMISSION_WAIT * 3,
+            "waited {took:?}"
+        );
+        assert_eq!(p.take_layers_fitting(rid), None);
+        assert!(
+            p.live_worker(&m).is_some(),
+            "a busy worker is not a dead one"
+        );
+    }
+
     /// Admit `mb` against the RAM budget and insert a worker that records
     /// having been charged it — what a real spawn does, in the order it does
     /// it. Tests that charge the pool but leave the handle at zero are testing
@@ -10559,6 +10763,32 @@ mod admission_tests {
         assert_eq!(p.take_layers_refused(rid), Some(5));
         assert_eq!(p.take_layers_refused(rid), None, "taken once");
         assert_eq!(p.take_layers_refused(other), None);
+    }
+
+    /// **A prompt is admitted up front only where a worker runs the model**,
+    /// and a refusal's figure — the layers its cache fits in — is kept as the
+    /// fewest across refusals and handed over once, beside the load's (#263).
+    /// With no worker there is nothing loaded to weigh: the answer is yes, and
+    /// each forward admits itself as it always has.
+    #[tokio::test]
+    async fn a_prompt_is_admitted_up_front_only_where_a_worker_runs_the_model() {
+        let p = pool();
+        let rid = Uuid::new_v4();
+        let admit = IpcAdmitPrompt {
+            request_id: rid,
+            model_id: ModelId("not-running".into()),
+            layer_ranges: vec![(0, 1), (8, 20), (32, 48)],
+            prompt_tokens: 6002,
+        };
+        assert!(p.admit_prompt(admit, None).await.is_ok());
+        assert_eq!(p.take_layers_fitting(rid), None, "nothing refused");
+
+        p.note_layers_fitting(rid, 15);
+        p.note_layers_fitting(rid, 9);
+        p.note_layers_fitting(Uuid::new_v4(), 2);
+        assert_eq!(p.take_layers_fitting(rid), Some(9), "the fewest");
+        assert_eq!(p.take_layers_fitting(rid), None, "taken once");
+        assert_eq!(p.take_layers_refused(rid), None, "a separate fact");
     }
 
     /// The combined accessor and the single-answer methods must agree.

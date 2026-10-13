@@ -1126,12 +1126,15 @@ pub(super) fn route_shortest_path(
         |vi: usize| -> bool { &candidates[vertices[vi].cand_idx].node_id == local_node_id };
     // What a local range costs against `local_cap`: the layers it would ADD
     // to what this node's worker already holds (#95), which for a node
-    // holding nothing is its width, exactly as before.
+    // holding nothing is its width, exactly as before — and its width again
+    // once this node's conversation memory has refused the prompt (#263).
+    // The one definition, `NodeCandidate::capacity_charge`, as the vertex
+    // filter above asks it.
     let local_added = |range: (u32, u32)| -> u32 {
         candidates
             .iter()
             .find(|c| &c.node_id == local_node_id)
-            .map_or(range.1 - range.0, |c| c.layers_it_would_add(range))
+            .map_or(range.1 - range.0, |c| c.capacity_charge(range))
     };
     // A path's local total is carried as (what earlier local runs added, where
     // the CURRENT local run began). Two adjacent local vertices are merged into
@@ -1456,6 +1459,8 @@ mod tests {
             split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
             fresh_run_layers: None,
+            prompt_memory_refused: false,
+            memory_refused_this_request: false,
             goodput_bytes_per_sec: None,
         }
     }
@@ -2631,6 +2636,64 @@ mod tests {
         assert_eq!(runs_and_layers(&segs, &local), (1, 32), "{segs:?}");
     }
 
+    /// **Once this node's conversation memory has refused a prompt, the re-plan
+    /// counts the layers it already holds** (#263). A tester's node held 30 of
+    /// a 48-layer model's layers; the prompt's cache did not fit beside them,
+    /// and the re-plan — charging held layers nothing, since their weights cost
+    /// nothing new — handed it the same 30 and failed the same way, twice.
+    ///
+    /// Here this node's worker holds [0..20) and [30..40), ten times cheaper a
+    /// layer than the peer holding everything, with no room for a new layer.
+    #[test]
+    fn a_prompt_this_nodes_memory_refused_is_replanned_with_its_held_layers_counted() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![(0, 20), (30, 40)], 0, 0.0, true, true, 40.0);
+        me.node_id = local.clone();
+        me.held_ranges = vec![
+            crate::inference::process_pool::HeldRange {
+                range: (0, 20),
+                releasable_layers: 0,
+            },
+            crate::inference::process_pool::HeldRange {
+                range: (30, 40),
+                releasable_layers: 0,
+            },
+        ];
+        me.max_hostable_layers = Some(0);
+        let peer = cand(2, vec![(0, 40)], 30, 0.0, true, true, 4.0);
+        let route = |me: &NodeCandidate| {
+            route_shortest_path(
+                40,
+                &[me.clone(), peer.clone()],
+                &local,
+                false,
+                true,
+                CapacityBound::Everyone,
+                None,
+            )
+            .expect("the peer covers everything")
+        };
+
+        // THE CONTROL: held layers cost no new room, so every one of them is
+        // planned here — the plan the refusal was of.
+        assert_eq!(
+            runs_and_layers(&route(&me), &local).1,
+            30,
+            "fixture: the held layers are planned here"
+        );
+
+        // After the refusal: room for 10 layers' caches, held or not.
+        let mut refused = me.clone();
+        refused.prompt_memory_refused = true;
+        refused.max_hostable_layers = Some(10);
+        let segs = route(&refused);
+        let (_, layers) = runs_and_layers(&segs, &local);
+        assert!(
+            (1..=10).contains(&layers),
+            "{layers} layers against a cache that holds 10: {segs:?}"
+        );
+    }
+
     /// Report #029: a route everyone can afford must be EXPRESSIBLE, not merely
     /// preferred once proposed.
     ///
@@ -3766,6 +3829,8 @@ mod transfer_cost_tests {
             split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
             fresh_run_layers: None,
+            prompt_memory_refused: false,
+            memory_refused_this_request: false,
         }
     }
 

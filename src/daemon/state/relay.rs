@@ -58,6 +58,32 @@ pub struct RelayProvenFeatures {
     pub proven_at: Instant,
 }
 
+/// What this node's memory refusals of one request measured — the fact a
+/// re-plan needs to be a different plan (`SharedState::note_local_memory_refusal`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LocalMemoryRefusal {
+    /// The fewest layers a LOAD refused to add (`take_layers_refused`).
+    pub layers_refused: Option<u32>,
+    /// The fewest of the plan's local layers the conversation memory held at
+    /// the prompt's length (`take_layers_fitting`, #263).
+    pub layers_fitting: Option<u32>,
+}
+
+impl LocalMemoryRefusal {
+    /// A second refusal of the same request can only tighten the record: each
+    /// figure keeps its fewest, and one a refusal did not measure is kept.
+    pub fn tightened_by(self, later: Self) -> Self {
+        let fewest = |a: Option<u32>, b: Option<u32>| match (a, b) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        Self {
+            layers_refused: fewest(self.layers_refused, later.layers_refused),
+            layers_fitting: fewest(self.layers_fitting, later.layers_fitting),
+        }
+    }
+}
+
 impl super::SharedState {
     /// Record that `origin` is reachable via the relay peer a `RelayedEnvelope`
     /// just arrived from. Keyed by `origin`'s peer-id bytes so the send path can
@@ -106,6 +132,7 @@ impl super::SharedState {
         self.request_peers.remove(request_id);
         // A refusal the router never took into its record (no re-plan followed).
         let _ = self.model_process_pool.take_layers_refused(*request_id);
+        let _ = self.model_process_pool.take_layers_fitting(*request_id);
         self.planned_past_offered_memory.remove(request_id);
         self.route_plan_overrides.remove(request_id);
         self.salvaged_replies.remove(request_id);
@@ -167,16 +194,21 @@ impl super::SharedState {
     /// the whole model" alone barred nothing from a node holding PART of one,
     /// which was re-planned the very ranges it had refused (2026-10-07). The
     /// fewest across refusals is kept, so a second refusal can only tighten it.
+    ///
+    /// When the refusal came from the up-front admission of the prompt's
+    /// conversation memory (`ModelProcessPool::admit_prompt`), the record says
+    /// how many of the plan's local layers that memory held at this length
+    /// (`take_layers_fitting`), and the re-plan holds this node's TOTAL layers
+    /// to it — the weights were never the problem, so a cap on new ones would
+    /// rebuild the plan that just failed (#263).
     pub fn note_local_memory_refusal(&self, request_id: uuid::Uuid) {
-        let refused = self.model_process_pool.take_layers_refused(request_id);
+        let refused = LocalMemoryRefusal {
+            layers_refused: self.model_process_pool.take_layers_refused(request_id),
+            layers_fitting: self.model_process_pool.take_layers_fitting(request_id),
+        };
         self.local_memory_refusals
             .entry(request_id)
-            .and_modify(|kept| {
-                *kept = match (*kept, refused) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
-                }
-            })
+            .and_modify(|kept| *kept = kept.tightened_by(refused))
             .or_insert(refused);
     }
 
@@ -192,7 +224,16 @@ impl super::SharedState {
     pub fn local_layers_refused_for_request(&self, request_id: uuid::Uuid) -> Option<u32> {
         self.local_memory_refusals
             .get(&request_id)
-            .and_then(|kept| *kept)
+            .and_then(|kept| kept.layers_refused)
+    }
+
+    /// The most layers of this request this node's conversation memory holds
+    /// at its prompt's length, if the up-front admission refused it — a bound
+    /// on ALL the layers a re-plan gives this node, held or not.
+    pub fn local_layers_fitting_for_request(&self, request_id: uuid::Uuid) -> Option<u32> {
+        self.local_memory_refusals
+            .get(&request_id)
+            .and_then(|kept| kept.layers_fitting)
     }
 
     /// Remember the peers an attempt at this request ran segments on.

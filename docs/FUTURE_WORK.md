@@ -1456,27 +1456,6 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
-#### #263 — A split whose local segments cannot hold a long prompt's cache refuses only after the peers have read it, and the retry plans the same shape
-`P1` · memory · **OPEN** — 2026-10-13 · history: a tester's report (test round 3, v0.3.236, RTX 3060 12 GB); the same shape in report #035 (#252)
-
-Qwen2.5-14B, ~6,000-token prompt, "start and finish on this computer" on: the plan gave the
-tester's node 30 of 48 layers in THREE local segments (0..1, 8..20, 32..48) between peers in
-Italy, Belgium and Thailand. Each local segment is admitted on its own when its forward arrives
-(`model_worker::ensure_room_for_prompt`, per `SplitModel` range, against one shared store), so
-the first two fit and the LAST was refused (`KV admission — refusing this prompt before prefill
-… budget_mb=388 short_by_mb=378`) after the peers had read the prompt for 30-277 s. The router
-re-planned (`should_retry_after` → `LocalMemoryUnavailable`) but the refusal recorded no new fact:
-`note_local_memory_refusal` carries only a LOAD refusal's layer count, so the re-plan bars only a
-whole-model plan and built the same shape — two requests, four attempts, ~15 min of peers'
-time, 0 tokens. Two gaps: (a) nothing admits a request's local cache before the pipeline starts
-(vLLM's scheduler asks `can_allocate` for the whole sequence before its prefill and answers a
-prompt that can never fit with `AllocStatus.NEVER`, not a retry); (b) the search charges a
-peer's HELD layers this prompt's cache (`PublishedRoom`, gotcha #447) and the local node's held
-layers nothing (`capacity_charge` → `layers_it_would_add`), so a node holding 30 layers is planned
-30 at any prompt length. Next: admit the request's cache for every local range at once before
-the first forward, and let a refusal carry the layers that fit, which the re-plan holds this
-node's TOTAL to. Then the planner itself could ask: #252 (1)'s worker-reported cache room.
-
 #### #262 — A card/processor split's conversation budget charges the processor's caches to the card
 `P2` · memory · **OPEN** — 2026-10-13 · history: none (#138 (1e)'s rig)
 
@@ -1524,7 +1503,10 @@ requests. **Done (2), 2026-10-12, released in v0.3.236:** the refusal now names 
 down to the cache's growth step and less the reply reserve). Next: (1) while a worker is loaded,
 report the positions its KV budget admits as the effective limit (`max_model_len_for`, both
 `/v1/models` and the MCP model list) — the daemon does not know the worker's card KV budget, so the
-worker has to report it first. Never shorten the context itself (`arch-worker-memory.md` § "A
+worker has to report it first. The same figure, gossiped, would let a planner size this node's and
+a PEER's share of a split before asking: since #263 a split's LOCAL segments are admitted together
+before any peer reads the prompt, and a re-plan holds this node to what fits, but a peer's segment
+is still admitted when its forward arrives. Never shorten the context itself (`arch-worker-memory.md` § "A
 card's KV budget is kept whatever the context setting").
 
 #### #187 — Head-room admission prices load and runtime on two different bases
@@ -2072,7 +2054,37 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-13, ships in the next release** (#257, #259, #260)
+**Closed 2026-10-13, ships in the next release** (#257, #259, #260, #263)
+- #263 — **a split whose part on this computer cannot hold a long prompt's conversation memory
+  now says so before any other computer reads the prompt, and the retry does not plan the same
+  split again.** A tester's node (v0.3.236, RTX 3060 12 GB, Qwen2.5-14B, ~6,000 tokens, "start
+  and finish on this computer") held 30 of 48 layers in three local segments between peers in
+  Italy, Belgium and Thailand; each segment was admitted on its own as its forward arrived, so
+  the LAST refused after the peers had read the prompt for 30-277 s, and the re-plan — which
+  charged this node's held layers nothing for the prompt — built the same plan: two requests,
+  four attempts, ~15 min of peers' time, no reply. Now (1) every local range is admitted at
+  once before the first forward (`ModelProcessPool::admit_prompt` → `DaemonMsg::AdmitPrompt`,
+  vLLM's `can_allocate` before prefill; a worker busy with another forward is waited 1 s, then
+  each segment admits itself as before); (2) a refusal carries the layers the cache fits
+  (`model_worker::layers_that_fit`), and the re-plan holds ALL this node's layers, held ones
+  included, to that (`NodeCandidate::prompt_memory_refused`); (3) no planner's relaxed pass
+  lifts a refused node's bound (`memory_refused_this_request`, greedy's `cap_of` — it had
+  rebuilt the refused plan twice). Real path (`split_rig.sh latekv`, both nodes on the
+  processor, A's cache 74 MB short of a 5,097-token prompt, Windows up 13.7-14.1 h): v0.3.236
+  answered 503 after **261 s** with B reading the prompt twice; this fix answers 503 in
+  **0.3 s** with one up-front refusal, one re-plan that stops at once, nothing logged on B, and
+  the refusal naming the length that fits ("up to about 3584 tokens"). Tests
+  `an_up_front_admission_survives_each_segments_first_forward`,
+  `a_refused_prompt_says_how_many_of_its_layers_fit`,
+  `a_prompt_is_admitted_up_front_only_where_a_worker_runs_the_model`,
+  `an_up_front_admission_does_not_wait_on_a_busy_worker`,
+  `a_replan_after_a_refused_prompt_holds_this_node_to_the_layers_that_fit`,
+  `a_prompt_this_nodes_memory_refused_is_replanned_with_its_held_layers_counted`,
+  `a_relaxed_greedy_pass_keeps_this_nodes_bound_once_its_memory_refused_the_request` (the
+  planner tests red with their fix off). Left open: a PEER's segment is still admitted when its
+  forward arrives, and a planner that knew each node's cache room could size the split before
+  asking — both #252 (1). The tester's cold run that went to a peer was this node's own
+  restart (a rig's), whose card budget was then 1,439 MB: chosen correctly.
 - #259 — **"Keep on this computer" no longer refuses a model this computer holds whole and
   runs.** The request gate and the model's `whole_model_here` asked for a registration in
   `split_models`, and `auto_manage::scan` registers nothing past the graphics budget, so a model

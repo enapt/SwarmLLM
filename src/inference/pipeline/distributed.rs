@@ -844,6 +844,13 @@ impl PipelineExecutor {
         pre_embedded: bool,
         generated_ids: &[u32],
     ) -> Result<LayerResult, SwarmError> {
+        // Every caller's prompt pass comes through here, so this is where this
+        // node's own segments are admitted — all of them, before any peer
+        // starts reading the prompt (#263).
+        if sequence_num == 0 && precomputed_vision.is_none() && !pre_embedded {
+            self.admit_local_segments_up_front(request_id, &initial_activations)
+                .await?;
+        }
         // A split's prompt pass that keeps its prompt between turns
         // (`split_prompt_cache`, FUTURE_WORK #10) — every caller's prompt pass
         // comes through here, the plain loop's and the guess-checking ones'.
@@ -894,6 +901,54 @@ impl PipelineExecutor {
             generated_ids,
         )
         .await
+    }
+
+    /// Admit this prompt's conversation memory on THIS node for every segment
+    /// the plan gives it, at once, before any segment runs (FUTURE_WORK #263).
+    ///
+    /// Each local segment used to be admitted as its forward arrived. A plan
+    /// with one of ours AFTER a peer's therefore found out we had no room only
+    /// once the peers had read the prompt: a tester's 6,002-token prompt spent
+    /// 277 s, 125 s and 30 s of three countries' prefill before our last
+    /// segment refused, and two requests became four attempts and 15 minutes
+    /// for no reply. Asked here, the refusal costs one round trip to our own
+    /// worker, and it carries how many layers fit, which the re-plan holds this
+    /// node to (`SharedState::note_local_memory_refusal`).
+    ///
+    /// Only where a peer takes part: a plan of ours alone loses nothing to the
+    /// per-segment check. A prompt that is not text (an image, embeddings sent
+    /// pre-made) is left to that check, as are workers not running the model
+    /// yet ([`ModelProcessPool::admit_prompt`]).
+    ///
+    /// [`ModelProcessPool::admit_prompt`]: crate::inference::process_pool::ModelProcessPool::admit_prompt
+    async fn admit_local_segments_up_front(
+        &self,
+        request_id: uuid::Uuid,
+        prompt_bytes: &[u8],
+    ) -> Result<(), SwarmError> {
+        let local = self.shared_state.identity.node_id().clone();
+        let segments = &self.assignment.segments;
+        let layer_ranges: Vec<(u32, u32)> = segments
+            .iter()
+            .filter(|s| s.node_id == local)
+            .map(|s| s.layer_range)
+            .collect();
+        if layer_ranges.is_empty() || layer_ranges.len() == segments.len() {
+            return Ok(());
+        }
+        let Some(ids) = self.tokenize_prompt(prompt_bytes) else {
+            return Ok(());
+        };
+        let admit = crate::inference::worker_ipc::IpcAdmitPrompt {
+            request_id,
+            model_id: segments[0].shard_id.model_id.clone(),
+            layer_ranges,
+            prompt_tokens: u32::try_from(ids.len()).unwrap_or(u32::MAX),
+        };
+        self.shared_state
+            .model_process_pool
+            .admit_prompt(admit, self.request.cancel.clone())
+            .await
     }
 
     /// The forward as it always ran, with the peer-error check — what

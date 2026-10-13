@@ -1691,9 +1691,17 @@ async fn handle_forward(
     let prompt_span = fwd.prompt_span.filter(|_| fwd.sequence_num == 0);
     let first_piece = prompt_span.is_none_or(|s| s.starts_at(fwd.index_pos));
 
-    // Clear per-request KV-cache at the start of a new request (prefill)
+    // Clear per-request KV-cache at the start of a new request (prefill). A
+    // range admitted up front with the request's others keeps that admission:
+    // it was made for the whole request (`DaemonMsg::AdmitPrompt`, #263).
+    let admitted_up_front =
+        fwd.sequence_num == 0 && kv_store.admitted_up_front(&req_id_str, fwd.layer_range);
     if fwd.sequence_num == 0 && first_piece {
-        kv_store.clear_request(&model_key, &req_id_str);
+        if admitted_up_front {
+            kv_store.clear_request_caches(&model_key, &req_id_str);
+        } else {
+            kv_store.clear_request(&model_key, &req_id_str);
+        }
     }
 
     // The owner's own segment of a request this node coordinates is the
@@ -2018,14 +2026,19 @@ async fn handle_forward(
             // one: the local-embedder path sends its prompt pass at a nonzero
             // position too, with nothing before it.
             let restoring = restored.as_ref().map_or(0, |s| s.token_count);
-            ensure_room_for_prompt(
-                model,
-                kv_store,
-                prefix_cache,
-                &req_id_str,
-                restoring + positions,
-                REPLY_RESERVE_POSITIONS,
-            )?;
+            // Admitted up front, for every range of this request at once, before
+            // the pipeline sent anything: asking again would weigh the request
+            // against its own promise.
+            if !admitted_up_front {
+                ensure_room_for_prompt(
+                    model,
+                    kv_store,
+                    prefix_cache,
+                    &req_id_str,
+                    restoring + positions,
+                    REPLY_RESERVE_POSITIONS,
+                )?;
+            }
         }
     }
     if let Some(snapshot) = &restored {
@@ -3191,6 +3204,60 @@ fn ensure_room_for_prompt(
     prompt_tokens: usize,
     reply_positions: usize,
 ) -> Result<(), SwarmError> {
+    let width = model.layer_end.saturating_sub(model.layer_start) as u32;
+    admit_prompt_over(
+        &[(model, width)],
+        0,
+        kv_store,
+        prefix_cache,
+        request_id,
+        prompt_tokens,
+        reply_positions,
+    )
+    .map_err(|refused| refused.error)
+}
+
+/// A prompt [`admit_prompt_over`] would not take: the cache it `needed`, in
+/// bytes over every range, and how far the room fell `short_by` — what
+/// [`layers_that_fit`] turns into the figure a re-plan holds this node to
+/// (FUTURE_WORK #263).
+struct PromptRefusal {
+    error: SwarmError,
+    needed: u64,
+    short_by: u64,
+}
+
+/// How many of `layers` a prompt's cache fits in, when the room holds
+/// `needed - short_by` of the `needed` bytes it asked for: every layer costs
+/// the prompt the same, so the same share of them, rounded DOWN — a re-plan
+/// held to this must fit, never fall one layer short again.
+fn layers_that_fit(layers: u32, needed: u64, short_by: u64) -> u32 {
+    if needed == 0 {
+        return layers;
+    }
+    let room = needed.saturating_sub(short_by);
+    u32::try_from(u64::from(layers) * room / needed).unwrap_or(layers)
+}
+
+/// The ONE admission decision for a prompt's cache, over every range of this
+/// worker the prompt will run through: `ranges` pairs each loaded model with
+/// the layers of it the prompt uses (its width, or fewer where a plan's range
+/// sits inside a loaded one), and `unloaded_per_token` charges ranges not
+/// loaded yet. One range is a segment's forward or a `Generate`, exactly as
+/// before; several are an up-front admission (`DaemonMsg::AdmitPrompt`). The
+/// ranges share one card and one store, so the tightest of their budgets binds.
+fn admit_prompt_over(
+    ranges: &[(&SplitModel, u32)],
+    unloaded_per_token: u64,
+    kv_store: &KvCacheStore,
+    prefix_cache: &PrefixCache,
+    request_id: &str,
+    prompt_tokens: usize,
+    reply_positions: usize,
+) -> Result<(), PromptRefusal> {
+    let Some(context_window) = ranges.iter().map(|(m, _)| m.context_window()).min() else {
+        return Ok(());
+    };
     // The prompt plus the reply's reserve, rounded to whole quanta, so an
     // admitted request can decode its whole reply (or its first quantum, for
     // a long one) without meeting the per-chunk guard. A reply longer than a
@@ -3207,7 +3274,7 @@ fn ensure_room_for_prompt(
     // a copy of everything so far at each step (FUTURE_WORK #32). Recorded
     // before any budget question, because a node with no budget to check
     // still pays for the growth.
-    kv_store.set_reserved_positions(request_id, positions.min(model.context_window()));
+    kv_store.set_reserved_positions(request_id, positions.min(context_window));
     if !prefix_cache_charged() {
         return Ok(());
     }
@@ -3240,13 +3307,28 @@ fn ensure_room_for_prompt(
     // model's worker, the full build's second CUDA context — and on the
     // released v0.3.149 it admitted a prompt into ~300 MB of real room, which
     // WSL2 served from host memory at 1.95 tok/s rather than refusing.
-    let (Some(budget), per_token) = model.kv_budget_now(live, cached) else {
+    let mut budget: Option<u64> = None;
+    let mut load_time_budget: Option<u64> = None;
+    let mut per_token = unloaded_per_token;
+    for &(model, used) in ranges {
+        let (now, model_per_token) = model.kv_budget_now(live, cached);
+        // A range of which the prompt uses part pays for that part.
+        let width = model.layer_end.saturating_sub(model.layer_start).max(1) as u64;
+        per_token = per_token.saturating_add(model_per_token * u64::from(used).min(width) / width);
+        if let Some(b) = now {
+            budget = Some(budget.map_or(b, |kept| kept.min(b)));
+        }
+        if let Some(b) = model.kv_budget().0 {
+            load_time_budget = Some(load_time_budget.map_or(b, |kept| kept.min(b)));
+        }
+    }
+    let Some(budget) = budget else {
         return Ok(());
     };
     if per_token == 0 {
         return Ok(());
     }
-    let load_time_budget = model.kv_budget().0.unwrap_or(budget);
+    let load_time_budget = load_time_budget.unwrap_or(budget);
     let mb = |b: u64| b / (1024 * 1024);
     use crate::inference::split::kv_budget::{admit_prompt, PromptAdmission};
     let mut verdict = admit_prompt(budget, live, cached, per_token, positions);
@@ -3326,14 +3408,102 @@ fn ensure_room_for_prompt(
     // identical to the peer-side refusal — see the variant's own doc — so the
     // class travels on `WorkerMsg::Error::local_memory_refusal` rather than in
     // the text.
-    Err(SwarmError::LocalMemoryUnavailable(prompt_refusal_message(
+    let needed = positions as u64 * per_token;
+    let error = SwarmError::LocalMemoryUnavailable(prompt_refusal_message(
         prompt_tokens,
         mb(live),
         mb(budget),
         mb(short_by),
-        other_conversations_hold_the_room(live, budget, positions as u64 * per_token),
+        other_conversations_hold_the_room(live, budget, needed),
         longest_prompt_that_fits(budget, per_token, reply_positions),
-    )))
+    ));
+    Err(PromptRefusal {
+        error,
+        needed,
+        short_by,
+    })
+}
+
+/// Answer a `DaemonMsg::AdmitPrompt`: admit the request's prompt over every
+/// range the plan gives this worker, at once, before the pipeline sends its
+/// first forward (FUTURE_WORK #263). `Ok` with nothing recorded when none of
+/// the ranges is loaded yet — there is nothing to weigh, and each forward then
+/// admits itself as it always has. A refusal says how many of the ranges'
+/// layers the room holds at this length: the fact the coordinator's re-plan
+/// needs, which a forward's own refusal never carried.
+fn admit_prompt_up_front(
+    models: &HashMap<(usize, usize, usize, usize), SplitModel>,
+    kv_store: &KvCacheStore,
+    prefix_cache: &PrefixCache,
+    admit: &crate::inference::worker_ipc::IpcAdmitPrompt,
+) -> Result<(), (SwarmError, u32)> {
+    let request_id = admit.request_id.to_string();
+    // Each range: the loaded model holding it (a plan's range may sit inside a
+    // loaded one) and the layers of it the prompt uses.
+    let mut loaded: Vec<(&SplitModel, u32)> = Vec::new();
+    let mut unloaded_layers = 0u32;
+    for &(start, end) in &admit.layer_ranges {
+        let width = end.saturating_sub(start);
+        let holder = models
+            .iter()
+            .filter(|((_, _, tp_rank, tp_size), _)| *tp_rank == 0 && *tp_size == 1)
+            .find(|((ls, le, _, _), _)| *ls <= start as usize && end as usize <= *le)
+            .map(|(_, m)| m);
+        match holder {
+            Some(model) => loaded.push((model, width)),
+            None => unloaded_layers = unloaded_layers.saturating_add(width),
+        }
+    }
+    if loaded.is_empty() {
+        return Ok(());
+    }
+    // A range not loaded yet costs what the loaded ones cost a layer: the same
+    // model's layers on the same device.
+    let (loaded_per_token, loaded_layers) =
+        loaded
+            .iter()
+            .fold((0u64, 0u64), |(bytes, layers), &(model, used)| {
+                let width = model.layer_end.saturating_sub(model.layer_start).max(1) as u64;
+                let used = u64::from(used).min(width);
+                (
+                    bytes.saturating_add(model.kv_budget().1 * used / width),
+                    layers + used,
+                )
+            });
+    let unloaded_per_token = loaded_per_token * u64::from(unloaded_layers) / loaded_layers.max(1);
+    // The pass starts every range's cache afresh, so an earlier attempt's
+    // caches for this request (a re-plan keeps the request's id) are not
+    // weighed against it; the forwards would clear them anyway.
+    kv_store.cleanup_request_id(&request_id);
+    match admit_prompt_over(
+        &loaded,
+        unloaded_per_token,
+        kv_store,
+        prefix_cache,
+        &request_id,
+        admit.prompt_tokens as usize,
+        REPLY_RESERVE_POSITIONS,
+    ) {
+        Ok(()) => {
+            kv_store.record_ranges_admitted(&request_id, admit.layer_ranges.clone());
+            Ok(())
+        }
+        Err(refused) => {
+            // Nothing of this attempt runs here now: the reservation the
+            // admission recorded before it weighed would hold room against
+            // every other conversation until the re-plan's own admission.
+            kv_store.cleanup_request_id(&request_id);
+            let layers: u32 = admit
+                .layer_ranges
+                .iter()
+                .map(|(start, end)| end.saturating_sub(*start))
+                .sum();
+            Err((
+                refused.error,
+                layers_that_fit(layers, refused.needed, refused.short_by),
+            ))
+        }
+    }
 }
 
 /// The longest prompt this worker admits with no other conversation held: the
@@ -3474,6 +3644,31 @@ mod reply_reserve_tests {
         assert!(over > budget, "{over} <= {budget}");
         assert_eq!(longest_prompt_that_fits(budget, 0, reserve), 0);
         assert_eq!(longest_prompt_that_fits(100, per_token, reserve), 0);
+    }
+
+    /// **A refused prompt says how many of its layers the room holds, and a
+    /// plan held to that many fits** (#263). The tester's shape: 30 of a 48-layer
+    /// model's layers here, ~750 MB of cache asked for at 6,656 positions, 388 MB
+    /// of room. The re-plan this figure bounds must not fall short again, so it
+    /// rounds down.
+    #[test]
+    fn a_refused_prompt_says_how_many_of_its_layers_fit() {
+        let mb = 1024 * 1024u64;
+        let (needed, room) = (750 * mb, 388 * mb);
+        let fit = layers_that_fit(30, needed, needed - room);
+        assert_eq!(fit, 15);
+        assert!(
+            u64::from(fit) * needed / 30 <= room,
+            "the re-plan's cache must fit"
+        );
+        assert!(
+            u64::from(fit + 1) * needed / 30 > room,
+            "and no more layers than that"
+        );
+        // No room at all is no layers; nothing asked for is every layer.
+        assert_eq!(layers_that_fit(30, needed, needed), 0);
+        assert_eq!(layers_that_fit(30, needed, 2 * needed), 0);
+        assert_eq!(layers_that_fit(30, 0, 0), 30);
     }
 }
 
@@ -5403,6 +5598,18 @@ async fn handle_daemon_msg(
                     send_worker_error(writer, request_id, e).await;
                 }
             }
+        }
+        DaemonMsg::AdmitPrompt(admit) => {
+            let request_id = admit.request_id;
+            let reply = match admit_prompt_up_front(models, kv_store, prefix_cache, &admit) {
+                Ok(()) => WorkerMsg::PromptAdmitted { request_id },
+                Err((error, layers_that_fit)) => WorkerMsg::PromptRefused {
+                    request_id,
+                    message: error.to_string(),
+                    layers_that_fit,
+                },
+            };
+            let _ = send_worker(writer, &reply, &[]).await;
         }
         DaemonMsg::CancelRequest { request_id } => {
             // The reader task intercepts these before they reach the main

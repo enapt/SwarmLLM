@@ -223,8 +223,21 @@
 #          (`dispatch_inference`) armed no guard and the reply ran on to its end
 #          (FUTURE_WORK #220's rig): an older release is the control arm, and
 #          should FAIL. Default model tinyllama.
+#   latekv  FUTURE_WORK #263: a split whose LOCAL segment comes after a peer's,
+#          where this node's conversation memory cannot hold a long prompt. A
+#          holds the last two shards on the processor with a tight RAM budget
+#          (RAM_A, MB, as A's `resources.max_ram_mb`), B every shard but the
+#          last. q1 (short) loads A's worker; q2 is a ~5,500-token prompt. Set
+#          RAM_A from a probe: run with RAM_A=6000, read A's `CPU worker KV
+#          budget` line, then RAM_A = 6000 - headroom_mb + 10. An older release
+#          is the control: B reads the prompt, A's segment refuses it, the
+#          re-plan builds the same plan and B reads it again — 503 after two
+#          prefills. PASS = A logged `KV admission up front` before B read
+#          anything, A's late refusal (`refusing this prompt before prefill` on
+#          a forward) never happened, and q2 answered 200 on a plan giving A
+#          fewer layers. Default model llama-3.2-3b.
 #
-# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|latekv <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -238,6 +251,8 @@
 #              default 400%) and reads it as its machine, so the room it advertises
 #              follows its own use, not the machine's free RAM (#162 b)
 #   EXTRA_TOML appended to EVERY node's config.toml (default: nothing)
+#   RAM_A      latekv: A's `resources.max_ram_mb` (EXTRA_TOML may not open
+#              [resources] beside it)
 #   MODELS_DIR where the shards come from (default: the live node's)
 #   OUT        where logs and replies go (default: a temp dir, printed)
 #
@@ -252,7 +267,10 @@ set -u
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice or keep"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|latekv) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep or latekv"; exit 2 ;; esac
+if [ -n "${RAM_A:-}" ] && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[resources\]'; then
+  echo "RAM_A is written to A's [resources]; EXTRA_TOML may not open that table too"; exit 2
+fi
 if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[inference\]'; then
   echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
 fi
@@ -282,6 +300,12 @@ if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ 
   [ "$MODE" = repeat ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = disconnect ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = keep ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
+elif [ "$MODE" = latekv ]; then
+  [ "$N" -ge 3 ] || { echo "latekv needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
+  PREV=$(echo "$SHARDS" | tail -2 | head -1)
+  SHARDS_A="${SHARDS_A:-$PREV,$LAST}"
+  SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vx "$LAST" | paste -sd,)}"
+  GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
 elif [ "$MODE" = splitcache ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
@@ -444,6 +468,8 @@ CFG
     fi
   fi
   [ -n "$extra" ] && printf '\n%s\n' "$extra" >> "$d/config.toml"
+  [ "$(basename "$d")" = A ] && [ -n "${RAM_A:-}" ] \
+    && printf '\n[resources]\nmax_ram_mb = %s\n' "$RAM_A" >> "$d/config.toml"
   return 0
 }
 start() { # dir port bin gpu [memory limit]
@@ -745,6 +771,27 @@ if [ "$MODE" = softunload ]; then
   T0=$(date +%s.%N)
   ask "Explain in three sentences why the sky is blue." 64 q2 | tee -a "$OUT/replies.jsonl"
   echo "softunload: q2 took $(python3 -c "print(round($(date +%s.%N) - $T0, 1))") s"
+  exit 0
+fi
+if [ "$MODE" = latekv ]; then
+  ask "What is the capital of France? Answer in one sentence." 16 q1 | tee "$OUT/replies.jsonl"
+  echo "latekv: A's worker — $(grep -m1 'CPU worker KV budget' "$BASE/A/node.log" | grep -oE '(kv_budget_mb|typical_kv_mb|headroom_mb)=[0-9]+' | paste -sd' ')"
+  PROMPT="Here are some notes on household appliances. $(for i in $(seq 1 120); do printf 'A refrigerator moves heat from its inside to the room using a refrigerant that evaporates in the cold coils and condenses in the warm ones; the compressor drives the cycle and the thermostat decides when it runs. '; done)Using only these notes, say in one sentence what the compressor does."
+  printf '%s' "$PROMPT" > "$OUT/prompt.txt"
+  MARK_A=$(wc -l < "$BASE/A/node.log"); MARK_B=$(wc -l < "$BASE/B/node.log")
+  T0=$(date +%s.%N)
+  ask "$PROMPT" 16 q2 | tee -a "$OUT/replies.jsonl"
+  echo "latekv: q2 took $(python3 -c "print(round($(date +%s.%N) - $T0, 1))") s"
+  tail -n +"$((MARK_A + 1))" "$BASE/A/node.log" > "$OUT/A.q2.log"
+  tail -n +"$((MARK_B + 1))" "$BASE/B/node.log" > "$OUT/B.q2.log"
+  # The worker logs `refusing this prompt before prefill` for BOTH kinds of
+  # refusal; the coordinator's up-front line tells them apart.
+  UPFRONT=$(grep -c 'KV admission up front — this node' "$OUT/A.q2.log")
+  WORKER=$(grep -c 'refusing this prompt before prefill' "$OUT/A.q2.log")
+  echo "latekv: A refused up front: $UPFRONT, A refused a forward: $((WORKER - UPFRONT))," \
+    "A re-planned: $(grep -c 'retrying with fresh pipeline' "$OUT/A.q2.log")"
+  grep -m3 -oE 'route=[a-z_]+ segments=[0-9]+ nodes=[0-9a-f,]+' "$OUT/A.q2.log" | sed 's/^/latekv: /'
+  grep -oE 'prompt_memory_refused=true' "$OUT/A.q2.log" | sort | uniq -c | sed 's/^/latekv: candidate lines /'
   exit 0
 fi
 if [ "$MODE" = split ]; then
