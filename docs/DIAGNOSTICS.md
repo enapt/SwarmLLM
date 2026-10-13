@@ -1133,6 +1133,14 @@ refused 19 chunks and cut 3 of 3 replies short; v0.3.216 refused none.
 **Verify the mechanism fired** by `launched` > 0 on a `--features cuda` build, and compare replies against a
 run without the switches — the same kernels in the same order, so byte-identical.
 
+**A card/processor split's mixture-of-experts layers run a prompt's experts on the card** (since 2026-10-13,
+FUTURE_WORK #138 (1); `SWARMLLM_MOE_PROMPT_CARD=0` keeps them on the processor):
+
+| Level | What | Where |
+|-------|------|-------|
+| INFO | `DIAG: processor-held expert layers run a prompt's experts on the card` — `layers` (how many processor layers were given the card), `min_tokens` (32: a shorter forward stays on the processor); once per load. Absent on a split with MoE layers on the processor means a layer the card kernel cannot read (its types, or Llama 4's input weighting) — and then the split reads the configured chunk, not 512 | split/loader/mod.rs |
+| WARN | `DIAG: a prompt's processor-held experts could not run on the card; the processor ran them` — `error`; once per worker. The card refused the stack (most often out of memory); every such call runs the processor path, the reply unchanged | layers/mod.rs |
+
 ## Performance Diagnostics
 
 ### Identifying Slow Requests
@@ -1676,7 +1684,10 @@ next stage that waits — over a 681-token prompt that read as 3-5 s of `output
 projection`. One matrix per expert (`SWARMLLM_MOE_CARD=per-expert`) copies the
 router scores to the host, so there the card stage absorbs queued attention
 work instead. The other A/B switches: `SWARMLLM_MOE_CARD_PROMPT=rows` (a prompt
-on the one-row kernel), `SWARMLLM_MOE_CPU=per-expert` (FUTURE_WORK #138).
+on the one-row kernel), `SWARMLLM_MOE_CPU=per-expert` (FUTURE_WORK #138). A
+card/processor split adds a third, `moe ffn of a processor layer, run on the card
+(prompt)`: a processor layer's experts for a forward of ≥ 32 tokens, copied to
+the card and run there — mostly the copy (`SWARMLLM_MOE_PROMPT_CARD=0` = old).
 Under every quantized product on the processor, `SWARMLLM_QMATMUL_ROWS=per-row`
 sends the several-row kernels (Q4_K, Q6_K, Q2_K, Q3_K) through the per-row loop —
 bit-identical replies, so any difference is the kernels' time.
@@ -1688,9 +1699,10 @@ ops per token per layer — not bit-identical, so judge both against llama.cpp
 (FUTURE_WORK #228 (3)).
 
 **Measure a prompt in the shape a node reads it.** `test-split` reads the whole
-prompt in one forward; a node reads 128 tokens a forward unless the model is
-wholly on the card (`prefill_pacer::prompt_chunk_ceiling`). Pass `--prompt-chunk
-128` — the old per-expert MoE path took 46 s for a 681-token prompt that way
+prompt in one forward; a node reads 128 tokens a forward unless the model reads
+its prompts on the card (`SplitModel::reads_prompts_on_card`: wholly on the card,
+or a split whose every processor layer sends its experts there — then 512;
+`prefill_pacer::prompt_chunk_ceiling`). Pass `--prompt-chunk 128` (or 512) — the old per-expert MoE path took 46 s for a 681-token prompt that way
 against 20 s in one forward, so a one-forward figure understated what users met
 by more than half (#138, 2026-10-11).
 

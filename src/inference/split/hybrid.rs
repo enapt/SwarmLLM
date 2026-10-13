@@ -299,6 +299,11 @@ impl LayerPlacement {
     pub(crate) fn is_hybrid(&self, layer_count: usize) -> bool {
         self.gpu.is_some() && self.gpu_layers < layer_count
     }
+
+    /// The card, when this segment's other layers sit on the processor.
+    pub(crate) fn card_beside_the_processor(&self, layer_count: usize) -> Option<&Device> {
+        self.gpu.as_ref().filter(|_| self.is_hybrid(layer_count))
+    }
 }
 
 #[cfg(test)]

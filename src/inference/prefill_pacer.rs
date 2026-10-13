@@ -55,12 +55,16 @@ pub const MIN_CHUNK_TOKENS: usize = 8;
 pub const CARD_CHUNK_TOKENS: usize = 512;
 
 /// The most prompt tokens one forward may read: `configured`, raised to
-/// [`CARD_CHUNK_TOKENS`] when the model runs entirely on the card.
+/// [`CARD_CHUNK_TOKENS`] when the model reads its prompts on the card
+/// (`SplitModel::reads_prompts_on_card`).
 ///
 /// The ONE answer for every prompt pass — the batched table's solo prompt
 /// ([`PrefillPacer::chunk_size_for`]), a pipeline segment's prompt pass and the
 /// drafter's. A card/processor split is not "on the card": its processor
-/// layers are the slow part and keep the configured ceiling.
+/// layers are the slow part and keep the configured ceiling — unless each of
+/// them sends its prompt's experts to the card (a mixture-of-experts model,
+/// FUTURE_WORK #138 (1)), where 512 tokens a forward copies each layer's
+/// experts a quarter as often.
 pub fn prompt_chunk_ceiling(configured: usize, on_card: bool) -> usize {
     if on_card {
         configured.max(CARD_CHUNK_TOKENS)

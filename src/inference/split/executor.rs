@@ -289,7 +289,7 @@ impl SplitModel {
             0 => 0,
             n => crate::inference::prefill_pacer::prompt_chunk_ceiling(
                 n,
-                self.runs_entirely_on_card(),
+                self.reads_prompts_on_card(),
             ),
         };
         let seq_len = input.dim(1).map_err(SwarmError::internal)?;

@@ -742,6 +742,11 @@ pub(crate) struct MoeFfn {
     /// The routed experts as the file stacks them, on a card — set instead of
     /// [`Self::experts`] where [`StackedExperts::fit`] says so.
     pub(crate) stacked: Option<StackedExperts>,
+    /// The card a processor-held layer sends a prompt's experts to — the card
+    /// its model's other layers run on, set after load by
+    /// [`let_processor_experts_read_prompts_on`]. `None` on a card layer, on a
+    /// model with no card, and where the card kernel cannot read the experts.
+    pub(crate) prompt_card: Option<Device>,
     // Shared experts (always active, optional)
     pub(crate) shared_gate: Option<QMatMul>,
     pub(crate) shared_down: Option<QMatMul>,
@@ -818,6 +823,48 @@ impl StackedExperts {
 fn prompt_on_tensor_cores() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("SWARMLLM_MOE_CARD_PROMPT").as_deref() != Ok("rows"))
+}
+
+/// The fewest tokens for which a processor-held layer sends a prompt's experts
+/// to the card: llama.cpp's `GGML_OP_OFFLOAD_MIN_BATCH` (32), read at
+/// `4b1a27f` (`ggml_backend_cuda_device_offload_op`). Well above
+/// `cuda_graph::MAX_POSITIONS`, so the copies never run inside a captured step.
+pub(crate) const MOE_PROMPT_ON_CARD_MIN_TOKENS: usize = 32;
+
+/// Give every processor-held mixture-of-experts layer the card its model's
+/// other layers run on, so that a prompt chunk of at least
+/// [`MOE_PROMPT_ON_CARD_MIN_TOKENS`] runs its experts there — the chosen
+/// experts copied over for the call, as llama.cpp runs a `MUL_MAT_ID` whose
+/// weights sit in RAM (FUTURE_WORK #138 (1)). Asked ONCE, by the loader, after
+/// every layer is built, so no load path can miss it; a layer the card kernel
+/// cannot read ([`StackedExperts::fit`]) is left alone. Returns how many
+/// layers were given the card.
+pub(crate) fn let_processor_experts_read_prompts_on(
+    layers: &mut [LayerVariant],
+    card: &Device,
+) -> usize {
+    let mut given = 0;
+    for layer in layers {
+        if let FfnVariant::MoE(moe) = layer.ffn_mut() {
+            if moe.experts_could_stack_on_a_card() {
+                moe.prompt_card = Some(card.clone());
+                given += 1;
+            }
+        }
+    }
+    given
+}
+
+/// Logged once per process: a prompt's processor experts could not run on the
+/// card (out of its memory, most likely) and ran on the processor instead.
+fn note_experts_stayed_on_the_processor(e: &candle_core::Error) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::warn!(
+            error = %e,
+            "DIAG: a prompt's processor-held experts could not run on the card; the processor ran them"
+        )
+    });
 }
 
 /// `t` as a tensor whose data starts at the first element of its own storage
@@ -1090,6 +1137,8 @@ impl MoeFfn {
     pub(crate) fn forward(&self, x: &Tensor) -> CandleResult<Tensor> {
         let stage = if x.device().is_cuda() {
             P::MoeCard
+        } else if self.card_for_prompt(x).is_some() {
+            P::MoeSentToCard
         } else {
             P::MoeCpu
         };
@@ -1107,6 +1156,18 @@ impl MoeFfn {
                 .reshape((b_sz, seq_len, hidden));
         }
         let expert_batches = self.route(&x_flat)?;
+        if let Some(card) = self.card_for_prompt(x) {
+            match self.processor_experts_on_the_card(card, &x_flat, &expert_batches) {
+                Ok(routed) => {
+                    return self
+                        .add_shared_expert(&x_flat, routed)?
+                        .reshape((b_sz, seq_len, hidden));
+                }
+                // Out of card memory, most likely: the processor answers this
+                // call exactly as it did before the card was offered.
+                Err(e) => note_experts_stayed_on_the_processor(&e),
+            }
+        }
         let routed = if self.experts_fit_one_region(x, &expert_batches) {
             self.experts_in_one_region(&x_flat, &expert_batches, num_tokens, hidden)?
         } else {
@@ -1114,6 +1175,107 @@ impl MoeFfn {
         };
         self.add_shared_expert(&x_flat, routed)?
             .reshape((b_sz, seq_len, hidden))
+    }
+
+    /// Could this layer's per-expert weights be stacked for the card kernel?
+    /// Every expert quantized on the processor, one type and shape per
+    /// projection, and types the kernel reads ([`StackedExperts::fit`]).
+    pub(crate) fn experts_could_stack_on_a_card(&self) -> bool {
+        let Some(first) = self.experts.first() else {
+            return false;
+        };
+        let quantized = |w: &QMatMul| {
+            w.quantized_weight()
+                .filter(|q| q.device().is_cpu())
+                .cloned()
+        };
+        let projections =
+            |e: &ExpertFfn| [quantized(&e.gate), quantized(&e.up), quantized(&e.down)];
+        let [Some(gate), Some(up), Some(down)] = projections(first) else {
+            return false;
+        };
+        let same = |a: &QTensor, b: &QTensor| a.dtype() == b.dtype() && a.shape() == b.shape();
+        let uniform = self.experts.iter().all(|e| match projections(e) {
+            [Some(g), Some(u), Some(d)] => same(&g, &gate) && same(&u, &up) && same(&d, &down),
+            _ => false,
+        });
+        let width = |q: &QTensor| q.shape().dims().last().copied().unwrap_or(0);
+        uniform
+            && self.experts.len() == self.gate.dim(0).unwrap_or(0)
+            && StackedExperts::fit(
+                true,
+                [gate.dtype(), up.dtype(), down.dtype()],
+                [width(&gate), width(&down)],
+                self.routing,
+            )
+    }
+
+    /// The card this call's experts go to: a processor-held layer given one
+    /// ([`Self::prompt_card`]), on a prompt of at least
+    /// [`MOE_PROMPT_ON_CARD_MIN_TOKENS`] tokens.
+    fn card_for_prompt(&self, x: &Tensor) -> Option<&Device> {
+        let tokens = x.dims().iter().rev().skip(1).product::<usize>();
+        self.prompt_card
+            .as_ref()
+            .filter(|_| tokens >= MOE_PROMPT_ON_CARD_MIN_TOKENS && x.device().is_cpu())
+    }
+
+    /// A processor-held layer's routed experts for a prompt, run on `card`:
+    /// routed on the processor as ever, each projection's CHOSEN experts copied
+    /// to a stack on the card ([`QTensor::stack_some`] — llama.cpp copies only
+    /// the used experts too), then [`Self::stacked_products`] as a card layer
+    /// runs them; the answer comes back to the processor. The stacks live for
+    /// this call only, from the card's memory pool.
+    fn processor_experts_on_the_card(
+        &self,
+        card: &Device,
+        x_flat: &Tensor,
+        batches: &[Vec<(usize, f32)>],
+    ) -> CandleResult<Tensor> {
+        let num_tokens = x_flat.dim(0)?;
+        let n_experts = self.experts.len();
+        let k = self.n_experts_used.clamp(1, n_experts);
+        // Each token's picks, from the routing grouped by expert.
+        let (mut ids, mut weights) = (vec![0u32; num_tokens * k], vec![0f32; num_tokens * k]);
+        let mut picked = vec![0usize; num_tokens];
+        for (e, batch) in batches.iter().enumerate() {
+            for &(t, w) in batch {
+                let slot = picked[t];
+                if slot >= k {
+                    candle_core::bail!("token {t} routed to more than {k} experts");
+                }
+                (ids[t * k + slot], weights[t * k + slot]) = (e as u32, w);
+                picked[t] += 1;
+            }
+        }
+        if picked.iter().any(|&n| n != k) {
+            candle_core::bail!("a token routed to fewer than {k} experts");
+        }
+        let used: Vec<usize> = (0..n_experts).filter(|&e| !batches[e].is_empty()).collect();
+        let stack = |w: fn(&ExpertFfn) -> &QMatMul| -> CandleResult<std::sync::Arc<QTensor>> {
+            let parts = used
+                .iter()
+                .map(|&e| match w(&self.experts[e]).quantized_weight() {
+                    Some(q) => Ok((e, q.as_ref())),
+                    None => candle_core::bail!("expert {e} is not quantized"),
+                })
+                .collect::<CandleResult<Vec<_>>>()?;
+            Ok(std::sync::Arc::new(QTensor::stack_some(
+                card, n_experts, &parts,
+            )?))
+        };
+        let stacked = StackedExperts {
+            gate: stack(|e| &e.gate)?,
+            up: stack(|e| &e.up)?,
+            down: stack(|e| &e.down)?,
+        };
+        let x = x_flat.to_device(card)?;
+        let ids = Tensor::from_vec(ids, (num_tokens, k), card)?;
+        let weights = Tensor::from_vec(weights, (num_tokens, k), card)?;
+        let routed = self.stacked_products(&x, &stacked, k, |_, start, len| {
+            Ok((ids.narrow(0, start, len)?, weights.narrow(0, start, len)?))
+        })?;
+        routed.to_device(x_flat.device())
     }
 
     /// Every token's chosen experts and weights, grouped by expert: entry `e`
@@ -1471,9 +1633,26 @@ impl MoeFfn {
         x_flat: &Tensor,
         stacked: &StackedExperts,
     ) -> CandleResult<Tensor> {
+        let k = self.n_experts_used.clamp(1, self.gate.dim(0)?);
+        self.stacked_products(x_flat, stacked, k, |x, _, _| {
+            topk_on_device(&x.matmul(&self.gate.t()?)?, k, self.routing)
+        })
+    }
+
+    /// [`Self::experts_stacked`]'s products, for whichever routing `pick`
+    /// answers: `pick(x, start, len)` gives tokens `start..start + len`'s
+    /// `(ids [len, k] u32, weights [len, k] f32)` on `x`'s device — routed on
+    /// the card for a card layer, the processor's routing copied over for a
+    /// processor layer's prompt ([`Self::processor_experts_on_the_card`]).
+    fn stacked_products(
+        &self,
+        x_flat: &Tensor,
+        stacked: &StackedExperts,
+        k: usize,
+        pick: impl Fn(&Tensor, usize, usize) -> CandleResult<(Tensor, Tensor)>,
+    ) -> CandleResult<Tensor> {
         const STACKED_IDS_PER_CALL: usize = 4096;
         let (num_tokens, hidden) = x_flat.dims2()?;
-        let k = self.n_experts_used.clamp(1, self.gate.dim(0)?);
         let chunk = (STACKED_IDS_PER_CALL / k).max(1);
         let mut parts = Vec::with_capacity(num_tokens.div_ceil(chunk));
         let mut start = 0;
@@ -1484,9 +1663,8 @@ impl MoeFfn {
                     .narrow(0, start, len)?
                     .to_dtype(candle_core::DType::F32)?,
             )?;
-            let scores = x.matmul(&self.gate.t()?)?;
-            let (ids, weights) = topk_on_device(&scores, k, self.routing)?;
-            let (expert_ids, token_ids) = ids.flatten_all()?.sort_last_dim(true)?;
+            let (ids, weights) = pick(&x, start, len)?;
+            let (expert_ids, token_ids) = own_storage(ids)?.flatten_all()?.sort_last_dim(true)?;
             let (expert_ids, token_ids) = (own_storage(expert_ids)?, own_storage(token_ids)?);
             let prompt = len > MOE_CARD_ONE_ROW_MAX_TOKENS && prompt_on_tensor_cores();
             let gemm = |input: &Tensor, w: &QTensor, scale: Option<Tensor>| {
@@ -1637,6 +1815,32 @@ pub(crate) enum LayerVariant {
         attention_norm: RmsNorm,
         post_attention_norm: RmsNorm,
     },
+}
+
+impl LayerVariant {
+    /// The layer's feed-forward, whichever kind of layer holds it.
+    pub(crate) fn ffn(&self) -> &FfnVariant {
+        match self {
+            LayerVariant::Dense(w) => &w.ffn,
+            LayerVariant::DeepSeek { ffn, .. }
+            | LayerVariant::Qwen35Attn { ffn, .. }
+            | LayerVariant::Qwen35Ssm { ffn, .. } => ffn,
+        }
+    }
+
+    pub(crate) fn ffn_mut(&mut self) -> &mut FfnVariant {
+        match self {
+            LayerVariant::Dense(w) => &mut w.ffn,
+            LayerVariant::DeepSeek { ffn, .. }
+            | LayerVariant::Qwen35Attn { ffn, .. }
+            | LayerVariant::Qwen35Ssm { ffn, .. } => ffn,
+        }
+    }
+
+    /// Does this layer send a prompt's experts to a card (#138 (1))?
+    pub(crate) fn sends_prompt_experts_to_a_card(&self) -> bool {
+        matches!(self.ffn(), FfnVariant::MoE(m) if m.prompt_card.is_some())
+    }
 }
 
 /// Qwen 3.5 full-attention layer weights (llama.cpp `qwen35.cpp`

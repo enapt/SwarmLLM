@@ -913,6 +913,51 @@ impl QTensor {
         self.storage.data()
     }
 
+    /// SwarmLLM patch: a `[slots, rows, cols]` stack on `device` holding only
+    /// the `[rows, cols]` tensors `parts` names, each at its slot — every part
+    /// of one type and shape. The other slots are zero and must never be read:
+    /// a processor-held mixture-of-experts layer stacks the experts one prompt
+    /// chunk chose, for a card kernel that reads the experts it is handed ids
+    /// of (`cuda::load_quantized_entries`). Each part's bytes are copied from
+    /// where they are; the processor arm builds the stack on the host.
+    pub fn stack_some(device: &Device, slots: usize, parts: &[(usize, &QTensor)]) -> Result<Self> {
+        let Some((_, first)) = parts.first() else {
+            crate::bail!("stack_some: no parts")
+        };
+        let (dtype, dims) = (first.dtype(), first.shape().dims().to_vec());
+        let [rows, cols] = dims[..] else {
+            crate::bail!("stack_some: parts must be 2-D, got {dims:?}")
+        };
+        let entry_bytes = first.storage_size_in_bytes();
+        let bytes = parts
+            .iter()
+            .map(|(slot, t)| {
+                if t.dtype() != dtype || t.shape().dims() != dims {
+                    crate::bail!("stack_some: part {slot} is {:?} {:?}, not {dtype:?} {dims:?}", t.dtype(), t.shape())
+                }
+                Ok((*slot, t.data()?))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let storage = match device {
+            Device::Cuda(d) => {
+                let parts: Vec<(usize, &[u8])> = bytes.iter().map(|(s, b)| (*s, b.as_ref())).collect();
+                cuda::load_quantized_entries(d, dtype, slots, entry_bytes, &parts)?
+            }
+            Device::Cpu => {
+                let mut stack = vec![0u8; slots * entry_bytes];
+                for (slot, b) in &bytes {
+                    if *slot >= slots || b.len() != entry_bytes {
+                        crate::bail!("stack_some: slot {slot} of {slots} with {} bytes", b.len())
+                    }
+                    stack[slot * entry_bytes..(slot + 1) * entry_bytes].copy_from_slice(b);
+                }
+                QStorage::from_data(Cow::Owned(stack), device, dtype)?
+            }
+            Device::Metal(_) => crate::bail!("stack_some: not implemented on Metal"),
+        };
+        Self::new(storage, (slots, rows, cols))
+    }
+
     /// SwarmLLM patch: rows of a `[vocab, hidden]` quantized tensor, gathered
     /// on whatever device the tensor lives on, returned still quantized.
     ///

@@ -262,6 +262,7 @@ fn load_moe_ffn<R: std::io::Read + std::io::Seek>(
         gate: router,
         experts,
         stacked,
+        prompt_card: None,
         shared_gate,
         shared_down,
         shared_up,
@@ -2225,6 +2226,26 @@ impl SplitModel {
                 missed,
                 "projections that keep an f32 accumulator on a card (llama.cpp's rule for this architecture)"
             );
+        }
+
+        // A processor-held mixture-of-experts layer runs a prompt's experts on
+        // the card its model's other layers use, as llama.cpp does (#138 (1)) —
+        // given here, once every layer is built, whatever branch built it.
+        // `SWARMLLM_MOE_PROMPT_CARD=0` keeps them on the processor (the A/B).
+        if let Some(card) = placement.card_beside_the_processor(layers.len()) {
+            if std::env::var("SWARMLLM_MOE_PROMPT_CARD").as_deref() != Ok("0") {
+                let given = crate::inference::layers::let_processor_experts_read_prompts_on(
+                    &mut layers,
+                    card,
+                );
+                if given > 0 {
+                    tracing::info!(
+                        layers = given,
+                        min_tokens = crate::inference::layers::MOE_PROMPT_ON_CARD_MIN_TOKENS,
+                        "DIAG: processor-held expert layers run a prompt's experts on the card"
+                    );
+                }
+            }
         }
 
         let has_biases = layers

@@ -1361,6 +1361,43 @@ pub fn load_quantized<T: super::GgmlType + Send + Sync + 'static>(
     }))
 }
 
+/// SwarmLLM patch: a quantized stack of `entries` slots of `entry_bytes` each
+/// on the card, holding only the slots `parts` names — `(slot, bytes)`, each
+/// copied to `slot * entry_bytes`. Every other slot stays zero and must never be
+/// read. A processor-held mixture-of-experts layer sends a prompt chunk's
+/// chosen experts this way, one copy per expert straight from where the
+/// processor keeps it (llama.cpp copies only the used experts too:
+/// `ggml_backend_sched_compute_splits`, SwarmLLM FUTURE_WORK #138). The stack
+/// is padded as [`load_quantized`] pads one, and the copies run on the
+/// device's one stream, ordered with the kernels that read them.
+pub fn load_quantized_entries(
+    device: &CudaDevice,
+    dtype: GgmlDType,
+    entries: usize,
+    entry_bytes: usize,
+    parts: &[(usize, &[u8])],
+) -> Result<super::QStorage> {
+    let len = entries * entry_bytes;
+    let padded_len = len + MATRIX_ROW_PADDING * dtype.type_size() / dtype.block_size();
+    let mut inner = device.alloc_zeros::<u8>(padded_len)?;
+    for &(slot, bytes) in parts {
+        if slot >= entries || bytes.len() != entry_bytes {
+            crate::bail!(
+                "load_quantized_entries: slot {slot} of {entries} with {} bytes, expected {entry_bytes}",
+                bytes.len()
+            )
+        }
+        let at = slot * entry_bytes;
+        device.memcpy_htod(bytes, &mut inner.slice_mut(at..at + entry_bytes))?;
+    }
+    Ok(QStorage::Cuda(QCudaStorage {
+        data: PaddedCudaSlice { inner, len },
+        device: device.clone(),
+        dtype,
+        accumulate_f32: false,
+    }))
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

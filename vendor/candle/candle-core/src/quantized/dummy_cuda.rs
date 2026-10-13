@@ -100,3 +100,14 @@ pub fn load_quantized<T: super::GgmlType + Send + Sync + 'static>(
 ) -> Result<super::QStorage> {
     Err(Error::NotCompiledWithCudaSupport)
 }
+
+/// SwarmLLM patch: the CUDA build's `load_quantized_entries`.
+pub fn load_quantized_entries(
+    _device: &CudaDevice,
+    _dtype: super::GgmlDType,
+    _entries: usize,
+    _entry_bytes: usize,
+    _parts: &[(usize, &[u8])],
+) -> Result<super::QStorage> {
+    Err(Error::NotCompiledWithCudaSupport)
+}

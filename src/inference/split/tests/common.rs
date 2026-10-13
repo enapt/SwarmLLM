@@ -363,6 +363,7 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         )
         .unwrap(),
         stacked: None,
+        prompt_card: None,
         shared_gate: None,
         shared_down: None,
         shared_up: None,

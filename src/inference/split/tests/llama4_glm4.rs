@@ -275,6 +275,7 @@ fn test_ffn_variant_moe_forward() {
         )
         .unwrap(),
         stacked: None,
+        prompt_card: None,
         shared_gate: None,
         shared_down: None,
         shared_up: None,
@@ -342,6 +343,7 @@ fn test_llama4_moe_layer_forward() {
                 )
                 .unwrap(),
                 stacked: None,
+                prompt_card: None,
                 shared_gate: None,
                 shared_down: None,
                 shared_up: None,

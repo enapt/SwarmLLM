@@ -2104,6 +2104,63 @@ card` 39-52 → 5.4-7.9 ms unsynced, 47.5 → 13.2 ms synced. llama.cpp at the s
 tokens took 21.5-24.1 s stacked and 23.2-24.8 s per expert, ~17 s of it in the
 processor layers' experts.
 
+### A split's processor-held experts read a prompt on the card (2026-10-13, #138 (1))
+
+**What it replaced.** A card/processor split ran its processor layers' experts on
+the processor at every token count. Qwen3-30B-A3B Q2_K split 26/22 spent 4.5 s of
+an 867-token prompt's 11.0 s there, read 128 tokens a forward as a node reads it.
+
+**What llama.cpp does.** Its scheduler hands an op whose weights sit in host
+memory to the card when the batch is ≥ `GGML_OP_OFFLOAD_MIN_BATCH` (32;
+`ggml_backend_cuda_device_offload_op`, `ggml-cuda.cu:5615-5634` at `4b1a27f`),
+and for `MUL_MAT_ID` copies only the experts the ids name, in contiguous runs
+(`ggml-backend.cpp:1693-1770`). It also keeps such weights in PINNED host memory
+whenever a card is present (`llama-model.cpp:1090-1104`).
+
+**What replaced it.** The loader marks once, after every layer is built, each
+processor-held MoE layer the card kernel can read
+(`layers::let_processor_experts_read_prompts_on` →
+`MoeFfn::experts_could_stack_on_a_card`: every expert quantized on the
+processor, one type and shape per projection, `StackedExperts::fit`'s rules — so
+never Llama 4, which weights the experts' input). A forward of ≥
+`MOE_PROMPT_ON_CARD_MIN_TOKENS` is routed on the processor as before, then
+`MoeFfn::processor_experts_on_the_card` writes each token's k picks, copies the
+chosen experts into a zeroed `[n_experts, rows, cols]` stack on the card
+(`QTensor::stack_some` → vendored `cuda::load_quantized_entries`; an unchosen
+slot is never named by an id) and runs `stacked_products` — the same products the
+card's own layers run. Any error runs the processor path for that call (a WARN
+once per worker): the card out of memory costs time, never the reply.
+
+**Why 512 tokens a forward.** Every forward copies the chosen experts again, and
+at top-8 a 128-token chunk already touches nearly all 128 — so 128 a forward is
+four copies of what one 512 forward copies. `SplitModel::reads_prompts_on_card`
+answers the chunk ceiling for every caller of `prompt_chunk_ceiling` (the slot
+table's solo prompt, a segment's prompt pass); `runs_entirely_on_card` keeps its
+own questions (the drafter's single-step reads, admission's card timing). The 2026-10-11 measurement of 512
+against 128 alone (#138's entry) is why a split without the card path keeps 128.
+
+**Measured** (867 tokens, 26/22, ABBA, one binary, `SWARMLLM_MOE_PROMPT_CARD=0`
+= old, Windows up 3.1 h, `~/swarmllm-138/ab.sh`): 128 a forward 11.00 / 11.07 s
+old against 12.69 / 12.90 s new; 512 a forward 9.23 / 9.39 s old against
+7.80 / 7.92 s new. A node went from the first figure to the last: 1.4x. The new
+stage costs ~57-62 ms a layer whatever the tokens (1.25 s for 22 layers at 355
+tokens, 1.49 s at 512) — the copy, ~200 MB a layer from pageable memory, one
+copy per expert per projection; it is #138 (1b).
+
+**Verified** against llama-cpp-python 0.3.16, both arms on one probe binary
+(`logits_reference_probe`, `LOGITS_PROBE_GPU_LAYERS=26`, the same 867 tokens read 512
+a chunk, the last 64 positions + 4 decode steps kept, `~/swarmllm-138/probe.sh`): new
+median cosine 0.99952, worst 0.9653, top-1 65/68; old 0.99955, 0.9683, 64/68 — the
+worst at the SAME position in both, a Q2_K router near-tie, not the path. The arms'
+logits differ on all 68 rows (max 1.99), so the switch did change the path. The
+16-token replies: every arm of a path gives one reply, and the two paths part at
+token 12, where the new path's pick is llama.cpp's third (0.105 logits behind) and
+the old one's its first; at 128 a forward the old path parts from llama.cpp at token
+15 instead (0.176). Tests: `a_stack_of_some_experts_puts_each_at_its_slot`,
+`a_prompts_processor_experts_go_to_the_card_only_where_it_can_take_them` (the marking,
+`reads_prompts_on_card`, and a refused card leaving the processor's answer bit for bit
+— red when the fallback returns the error instead).
+
 ### Llama 4 routes like llama.cpp hardcodes it, and normalises Q/K after RoPE (2026-09-25)
 
 llama.cpp's Llama 4 graph reads NO routing key: `build_moe_ffn(..., norm_w =

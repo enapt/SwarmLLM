@@ -188,6 +188,7 @@ fn test_moe_forward_single_expert() {
         )
         .unwrap(),
         stacked: None,
+        prompt_card: None,
         shared_gate: None,
         shared_down: None,
         shared_up: None,
@@ -225,6 +226,7 @@ fn test_moe_forward_multi_expert() {
         )
         .unwrap(),
         stacked: None,
+        prompt_card: None,
         shared_gate: None,
         shared_down: None,
         shared_up: None,
@@ -272,6 +274,7 @@ fn test_shared_expert_integration() {
         )
         .unwrap(),
         stacked: None,
+        prompt_card: None,
         shared_gate: None,
         shared_down: None,
         shared_up: None,
@@ -290,6 +293,7 @@ fn test_shared_expert_integration() {
         )
         .unwrap(),
         stacked: None,
+        prompt_card: None,
         shared_gate: Some(make_qmatmul(hidden, intermediate)),
         shared_down: Some(make_qmatmul(intermediate, hidden)),
         shared_up: Some(make_qmatmul(hidden, intermediate)),
@@ -699,6 +703,7 @@ fn the_batched_moe_forward_is_bit_identical_to_routing_token_by_token() {
                     )
                     .unwrap(),
                     stacked: None,
+                    prompt_card: None,
                     shared_gate: (shared > 0).then(|| dense(intermediate, hidden)),
                     shared_down: (shared > 0).then(|| dense(hidden, intermediate)),
                     shared_up: (shared > 0).then(|| dense(intermediate, hidden)),
@@ -786,6 +791,7 @@ fn one_region_experts_are_bit_identical_to_one_at_a_time() {
                         })
                         .collect(),
                     stacked: None,
+                    prompt_card: None,
                     shared_gate: None,
                     shared_down: None,
                     shared_up: None,
@@ -1071,6 +1077,7 @@ fn a_llama4_expert_is_weighted_on_its_input() {
             gate: gate.clone(),
             experts: ExpertFfn::from_stacked(&g, &u, &d).unwrap(),
             stacked: None,
+            prompt_card: None,
             shared_gate: None,
             shared_down: None,
             shared_up: None,
@@ -1127,4 +1134,140 @@ fn a_llama4_expert_is_weighted_on_its_input() {
         checked >= 3,
         "only {checked} seeds had a positive top logit"
     );
+}
+
+/// A processor-held layer's experts for one prompt chunk are stacked with only
+/// the chosen ones in place (`QTensor::stack_some`, #138 (1)): each at its own
+/// slot, the rest zero — the bytes the card kernel is handed ids into.
+#[test]
+fn a_stack_of_some_experts_puts_each_at_its_slot() {
+    use candle_core::quantized::GgmlDType as G;
+    let device = Device::Cpu;
+    let experts: Vec<QTensor> = (0..4)
+        .map(|_| {
+            let w = Tensor::randn(0f32, 0.05, (32, 256), &device).unwrap();
+            QTensor::quantize(&w, G::Q4K).unwrap()
+        })
+        .collect();
+    let stack = QTensor::stack_some(&device, 4, &[(1, &experts[1]), (3, &experts[3])]).unwrap();
+    assert_eq!(stack.shape().dims(), &[4, 32, 256]);
+    let (bytes, entry) = (stack.data().unwrap(), experts[0].storage_size_in_bytes());
+    let slot = |s: usize| &bytes[s * entry..(s + 1) * entry];
+    assert_eq!(slot(1), experts[1].data().unwrap().as_ref());
+    assert_eq!(slot(3), experts[3].data().unwrap().as_ref());
+    assert!(
+        slot(0).iter().chain(slot(2)).all(|&b| b == 0),
+        "an unchosen slot holds bytes"
+    );
+    // A part of another shape is refused, never written at a shifted offset.
+    let narrow = QTensor::quantize(
+        &Tensor::zeros((16, 256), DType::F32, &device).unwrap(),
+        G::Q4K,
+    )
+    .unwrap();
+    assert!(QTensor::stack_some(&device, 4, &[(0, &experts[0]), (1, &narrow)]).is_err());
+}
+
+/// Which processor-held layers are given the card for a prompt's experts, and
+/// from how many tokens: a layer the card kernel reads, never one that weights
+/// its experts' INPUT (Llama 4), and only from `MOE_PROMPT_ON_CARD_MIN_TOKENS`.
+/// A card that cannot run the call — here the processor, which has no grouped
+/// kernel, standing in for a card out of memory — leaves the answer exactly
+/// the processor's.
+#[test]
+fn a_prompts_processor_experts_go_to_the_card_only_where_it_can_take_them() {
+    use crate::inference::layers::{
+        let_processor_experts_read_prompts_on, ExpertFfn, FfnVariant, LayerVariant,
+        MOE_PROMPT_ON_CARD_MIN_TOKENS,
+    };
+    use candle_core::quantized::GgmlDType as G;
+    let device = Device::Cpu;
+    let (hidden, intermediate, n_experts) = (256usize, 512usize, 8usize);
+    let quantized = |o: usize, i: usize| {
+        let w = Tensor::randn(0f32, 0.05, (o, i), &device).unwrap();
+        QMatMul::from_qtensor(QTensor::quantize(&w, G::Q4K).unwrap()).unwrap()
+    };
+    let moe = |routing| MoeFfn {
+        gate: Tensor::randn(0f32, 0.3, (n_experts, hidden), &device).unwrap(),
+        experts: (0..n_experts)
+            .map(|_| ExpertFfn {
+                gate: quantized(intermediate, hidden),
+                up: quantized(intermediate, hidden),
+                down: quantized(hidden, intermediate),
+            })
+            .collect(),
+        stacked: None,
+        prompt_card: None,
+        shared_gate: None,
+        shared_down: None,
+        shared_up: None,
+        shared_gate_inp: None,
+        n_experts_used: 2,
+        routing,
+    };
+    let llama4 = MoeRoutingConfig {
+        gating_func: MoeGatingFunc::Sigmoid,
+        renormalize_weights: false,
+        weight_before_ffn: true,
+    };
+    let plain = moe(MoeRoutingConfig::default());
+    assert!(plain.experts_could_stack_on_a_card());
+    assert!(!moe(llama4).experts_could_stack_on_a_card());
+
+    // The loader's pass over a segment: the plain layer is given the card, the
+    // Llama 4 one is not.
+    let mut model = make_test_split_model(2, hidden);
+    for (layer, m) in model.layers.iter_mut().zip([plain.clone(), moe(llama4)]) {
+        let LayerVariant::Dense(w) = layer else {
+            panic!("make_test_split_model builds dense layers")
+        };
+        w.ffn = FfnVariant::MoE(m);
+    }
+    let layers = &mut model.layers;
+    assert_eq!(let_processor_experts_read_prompts_on(layers, &device), 1);
+    let given = |l: &LayerVariant| match l {
+        LayerVariant::Dense(w) => matches!(&w.ffn, FfnVariant::MoE(m) if m.prompt_card.is_some()),
+        _ => false,
+    };
+    assert!(given(&layers[0]) && !given(&layers[1]));
+
+    // The chunk ceiling's question: a split reads 512 tokens a forward only
+    // when EVERY processor layer sends its prompt's experts to the card.
+    model.layer_devices = vec![device.clone(); 2];
+    assert!(
+        !model.reads_prompts_on_card(),
+        "a processor layer that keeps its experts reads the configured chunk"
+    );
+    let LayerVariant::Dense(w) = &mut model.layers[1] else {
+        unreachable!()
+    };
+    let FfnVariant::MoE(m) = &mut w.ffn else {
+        unreachable!()
+    };
+    m.prompt_card = Some(device.clone());
+    assert!(model.reads_prompts_on_card());
+    model.layer_devices.clear();
+    assert!(
+        !model.reads_prompts_on_card(),
+        "a model wholly on the processor is no card/processor split"
+    );
+
+    let offered = MoeFfn {
+        prompt_card: Some(device.clone()),
+        ..plain.clone()
+    };
+    for tokens in [
+        1,
+        MOE_PROMPT_ON_CARD_MIN_TOKENS - 1,
+        MOE_PROMPT_ON_CARD_MIN_TOKENS,
+        100,
+    ] {
+        let x = Tensor::randn(0f32, 1.0, (1, tokens, hidden), &device).unwrap();
+        let flat = |t: Tensor| -> Vec<f32> { t.flatten_all().unwrap().to_vec1().unwrap() };
+        assert_eq!(
+            flat(offered.forward(&x).unwrap()),
+            flat(plain.forward(&x).unwrap()),
+            "{tokens} tokens: a refused card must leave the processor's answer"
+        );
+    }
 }
