@@ -17,7 +17,9 @@ use super::entry::BatchItem;
 use super::kv_cache::KvCacheStore;
 use super::model::SplitModel;
 use super::{FfnVariant, LayerVariant, SsmState};
+use crate::inference::layers::{LayerOnTheCard, LayerWeights};
 use crate::inference::residual_norm::Residual;
+use candle_core::Device;
 
 /// Did this forward run into the context window because the REPLY grew into it,
 /// rather than because the prompt was too long to start?
@@ -1042,7 +1044,20 @@ impl SplitModel {
                 // decoding, a few MB during prefill) and one of the mask. That is
                 // the whole per-token cost of hybrid placement, and it is why the
                 // boundary has to stay contiguous.
-                if let Some(target) = self.layer_devices.get(layer_idx) {
+                // A processor layer of a prompt chunk runs whole on the card
+                // (#138 (1c)), so the activation and its mask go there instead.
+                let card_layer = match layer {
+                    LayerVariant::Dense(lw)
+                        if self
+                            .layer_devices
+                            .get(layer_idx)
+                            .is_some_and(|d| d.is_cpu()) =>
+                    {
+                        LayerOnTheCard::card_for(lw, seq_len, lora_param.is_some())
+                    }
+                    _ => None,
+                };
+                if let Some(target) = card_layer.or(self.layer_devices.get(layer_idx)) {
                     if !hidden.device().same_device(target) {
                         // A pending residual sum is taken on the device it was
                         // produced on, then moved — a fused add+norm cannot span
@@ -1078,52 +1093,34 @@ impl SplitModel {
                 };
                 match layer {
                     LayerVariant::Dense(lw) => {
-                        // The previous layer's closing residual add is resolved
-                        // HERE, fused into this norm — see `inference::residual_norm`.
-                        let (residual, x) = crate::inference::prof::timed!(
-                            crate::inference::prof::Stage::Norms,
-                            hidden.add_norm(&lw.attention_norm)
-                        )
-                        .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
-                        let mut attn = lw
-                            .forward_attn(
-                                &x,
+                        hidden = match card_layer {
+                            None => dense_layer(
+                                lw,
+                                None,
+                                hidden,
                                 mask.as_ref(),
                                 index_pos,
                                 &mut layer_kv_caches[layer_idx],
                                 max_seq_len,
                                 kv_reserve,
                                 lora_param,
-                            )
-                            .map_err(|e| SwarmError::Internal(format!("attn: {e}")))?;
-                        // Gemma 2 post-attention norm: normalize before residual add
-                        if let Some(ref post_norm) = lw.post_attention_norm {
-                            attn = post_norm.forward(&attn).map_err(|e| {
-                                SwarmError::Internal(format!("post_attn_norm: {e}"))
-                            })?;
-                        }
-                        let (residual, x) = crate::inference::prof::timed!(
-                            crate::inference::prof::Stage::Norms,
-                            Residual::pending(attn, residual).add_norm(&lw.ffn_norm)
-                        )
-                        .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
-                        let mut x = match &lw.ffn {
-                            FfnVariant::Dense(mlp) => mlp
-                                .forward(&x, lora_param)
-                                .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?,
-                            FfnVariant::MoE(moe) => moe
-                                .forward(&x)
-                                .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
+                            )?,
+                            Some(card) => {
+                                let (h, m) = dense_layer_on_the_card(
+                                    lw,
+                                    card,
+                                    hidden,
+                                    mask.take(),
+                                    index_pos,
+                                    seq_len,
+                                    &mut layer_kv_caches[layer_idx],
+                                    max_seq_len,
+                                    kv_reserve,
+                                )?;
+                                mask = m;
+                                h
+                            }
                         };
-                        // Gemma 2 post-FFN norm: normalize before residual add
-                        if let Some(ref post_norm) = lw.post_ffw_norm {
-                            x = post_norm
-                                .forward(&x)
-                                .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
-                        }
-                        // Not added here: the next norm point takes this sum
-                        // (`Residual::add_norm`), fused on CUDA.
-                        hidden = Residual::pending(x, residual);
                     }
                     LayerVariant::DeepSeek {
                         attention,
@@ -2300,6 +2297,166 @@ impl SplitModel {
 
         Ok(result)
     }
+}
+
+/// One dense layer's forward, from the residual stream to the residual stream.
+/// `on_card` runs a processor layer's copy readied on the card
+/// ([`LayerOnTheCard`], #138 (1c)) — the same steps, its cache kept where it
+/// lives.
+#[allow(clippy::too_many_arguments)]
+fn dense_layer(
+    lw: &LayerWeights,
+    on_card: Option<&LayerOnTheCard>,
+    hidden: Residual,
+    mask: Option<&Tensor>,
+    index_pos: usize,
+    cache: &mut Option<LayerKv>,
+    max_seq_len: usize,
+    kv_reserve: usize,
+    lora_param: Option<(&LoraAdapter, usize)>,
+) -> Result<Residual, SwarmError> {
+    let lw = on_card.map_or(lw, |c| &c.weights);
+    // The previous layer's closing residual add is resolved
+    // HERE, fused into this norm — see `inference::residual_norm`.
+    let (residual, x) = crate::inference::prof::timed!(
+        crate::inference::prof::Stage::Norms,
+        hidden.add_norm(&lw.attention_norm)
+    )
+    .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
+    let mut attn = match on_card {
+        Some(c) => c.forward_attn(&x, mask, index_pos, cache, max_seq_len, kv_reserve),
+        None => lw.forward_attn(
+            &x,
+            mask,
+            index_pos,
+            cache,
+            max_seq_len,
+            kv_reserve,
+            lora_param,
+        ),
+    }
+    .map_err(|e| SwarmError::Internal(format!("attn: {e}")))?;
+    // Gemma 2 post-attention norm: normalize before residual add
+    if let Some(ref post_norm) = lw.post_attention_norm {
+        attn = post_norm
+            .forward(&attn)
+            .map_err(|e| SwarmError::Internal(format!("post_attn_norm: {e}")))?;
+    }
+    let (residual, x) = crate::inference::prof::timed!(
+        crate::inference::prof::Stage::Norms,
+        Residual::pending(attn, residual).add_norm(&lw.ffn_norm)
+    )
+    .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
+    let mut x = match &lw.ffn {
+        FfnVariant::Dense(mlp) => mlp
+            .forward(&x, lora_param)
+            .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?,
+        FfnVariant::MoE(moe) => moe
+            .forward(&x)
+            .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
+    };
+    // Gemma 2 post-FFN norm: normalize before residual add
+    if let Some(ref post_norm) = lw.post_ffw_norm {
+        x = post_norm
+            .forward(&x)
+            .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
+    }
+    // Not added here: the next norm point takes this sum
+    // (`Residual::add_norm`), fused on CUDA.
+    Ok(Residual::pending(x, residual))
+}
+
+/// [`dense_layer`] for a processor layer run whole on `card` for a prompt
+/// chunk (#138 (1c)). Anything the card refuses — out of its memory, most
+/// likely — runs the layer on the processor from the same input, its cache cut
+/// back to where it stood, exactly as it ran before the card was offered.
+/// Answers the mask on the device the layer finished on, which the next
+/// layer's move reads.
+#[allow(clippy::too_many_arguments)]
+fn dense_layer_on_the_card(
+    lw: &LayerWeights,
+    card: &Device,
+    hidden: Residual,
+    mask: Option<Tensor>,
+    index_pos: usize,
+    seq_len: usize,
+    cache: &mut Option<LayerKv>,
+    max_seq_len: usize,
+    kv_reserve: usize,
+) -> Result<(Residual, Option<Tensor>), SwarmError> {
+    // A forward from position 0 starts the cache over, whatever it held.
+    let held = match cache.as_ref() {
+        Some(c) if index_pos > 0 => c.current_seq_len(),
+        _ => 0,
+    };
+    let tried = LayerOnTheCard::of(lw, card, index_pos, seq_len)
+        .map_err(|e| SwarmError::Internal(format!("layer to the card: {e}")))
+        .and_then(|on_card| {
+            dense_layer(
+                lw,
+                Some(&on_card),
+                hidden.clone(),
+                mask.as_ref(),
+                index_pos,
+                cache,
+                max_seq_len,
+                kv_reserve,
+                None,
+            )
+        });
+    let e = match tried {
+        Ok(h) => {
+            note_a_layer_ran_on_the_card();
+            return Ok((h, mask));
+        }
+        Err(e) => e,
+    };
+    note_a_layer_stayed_on_the_processor(&e);
+    if let Some(c) = cache.as_mut() {
+        c.truncate(held);
+    }
+    let down = |what: &str, t: candle_core::Result<Tensor>| {
+        t.and_then(|t| t.to_device(&Device::Cpu))
+            .map_err(|e| SwarmError::Internal(format!("{what} back to the processor: {e}")))
+    };
+    let hidden = Residual::Ready(down("activation", hidden.into_tensor())?);
+    let mask = mask.map(|m| down("mask", Ok(m))).transpose()?;
+    let h = dense_layer(
+        lw,
+        None,
+        hidden,
+        mask.as_ref(),
+        index_pos,
+        cache,
+        max_seq_len,
+        kv_reserve,
+        None,
+    )?;
+    Ok((h, mask))
+}
+
+/// Logged once per process: a processor-held layer has read a prompt chunk
+/// whole on the card (#138 (1c)) — the mechanism fired.
+fn note_a_layer_ran_on_the_card() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::info!(
+            min_tokens = crate::inference::layers::PROMPT_ON_CARD_MIN_TOKENS,
+            "DIAG: a processor-held layer read a prompt chunk whole on the card"
+        )
+    });
+}
+
+/// Logged once per process: a processor-held layer could not read its prompt
+/// chunk on the card and the processor ran it.
+fn note_a_layer_stayed_on_the_processor(e: &SwarmError) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::warn!(
+            error = %e,
+            "DIAG: a processor-held layer could not read a prompt chunk on the card; the processor ran it"
+        )
+    });
 }
 
 #[cfg(test)]

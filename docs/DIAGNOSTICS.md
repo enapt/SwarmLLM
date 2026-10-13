@@ -1136,13 +1136,16 @@ run without the switches — the same kernels in the same order, so byte-identic
 
 **A card/processor split's processor layers multiply a prompt on the card** (since 2026-10-13, FUTURE_WORK #138
 (1) experts and (1b) projections — llama.cpp's op offload; `SWARMLLM_MOE_PROMPT_CARD=0` keeps the experts on the
-processor, `SWARMLLM_PROMPT_CARD_PROJECTIONS=0` the projections):
+processor, `SWARMLLM_PROMPT_CARD_PROJECTIONS=0` the projections; (1c) runs a dense layer whole, `SWARMLLM_PROMPT_CARD_LAYERS=0`
+sends each projection alone):
 
 | Level | What | Where |
 |-------|------|-------|
 | INFO | `DIAG: processor-held layers read a prompt on the card` — `projection_layers` (layers whose attention and feed-forward projections were given the card), `expert_layers` (mixture-of-experts layers whose chosen experts were), `min_tokens` (32: a shorter forward stays on the processor); once per load of a card/processor split. `expert_layers` = 0 on a split with MoE layers on the processor means the card kernel cannot read them (their types, or Llama 4's input weighting) — and then the split reads the configured chunk, not 512 | split/loader/mod.rs |
 | WARN | `DIAG: a prompt's processor-held projection could not run on the card; the processor ran it` — `error`; once per worker. The card refused a weight's copy or its product (most often out of memory); that call ran on the processor, the reply unchanged | layers/mod.rs |
 | WARN | `DIAG: a prompt's processor-held experts could not run on the card; the processor ran them` — `error`; once per worker. The card refused the stack (most often out of memory); every such call runs the processor path, the reply unchanged | layers/mod.rs |
+| INFO | `DIAG: a processor-held layer read a prompt chunk whole on the card` — `min_tokens`; once per worker (#138 (1c)). A processor-held standard attention layer (Llama, Qwen, Mistral, Qwen3 MoE — not DeepSeek's MLA, not Qwen 3.5's) ran a whole forward of ≥ 32 tokens on the card — norms, RoPE, attention and activations too, its cache read up and its new rows written back. Absent on a split that reads prompts: an adapter is loaded, the chunk is under 32 tokens, or `SWARMLLM_PROMPT_CARD_LAYERS=0` (then each projection still goes alone, (1b)) | split/executor.rs |
+| WARN | `DIAG: a processor-held layer could not read a prompt chunk on the card; the processor ran it` — `error`; once per worker. The card refused the layer (most often out of memory); its cache was cut back to what it held before and the processor reran the layer, the reply unchanged | split/executor.rs |
 
 ## Performance Diagnostics
 

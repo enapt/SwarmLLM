@@ -2226,6 +2226,66 @@ reply across its two runs. Test
 three fused slices at 1, 31, 32 and 100 tokens bit-identical to the plain path;
 the marking; red when `on_the_card` hands every weight the first copy).
 
+### A split's processor-held layers read a prompt whole on the card (2026-10-13, #138 (1c))
+
+**What it replaced.** After (1b) every processor-held projection crossed to the
+card alone: its activation up, its product back, and attention, RoPE, the norms
+and the activation ran on the processor between them. llama.cpp's scheduler
+does not stop at the weighted ops: pass 2's "expand gpu down/up"
+(`ggml_backend_sched_split_graph`, `ggml-backend.cpp` 1129-1170 at `4b1a27f`)
+puts every unassigned op between two offloaded ones on the card — norms, RoPE,
+Q·K, softmax, ·V, the GLU — and only the K/V writes stay on the processor,
+pinned by the cache's host buffer; pass 5 copies the cache views up
+(1399-1420).
+
+**What replaced it.** `split::executor::dense_layer_on_the_card` runs a
+processor-held `LayerVariant::Dense` layer of a ≥ 32-token chunk on the card
+(`LayerOnTheCard::card_for` the gate: the layer's attention and feed-forward
+were marked by (1b)/(1), no adapter, `SWARMLLM_PROMPT_CARD_LAYERS` not `0`).
+`LayerOnTheCard::of` copies the small tensors — norms, biases, Q/K norms, the
+router — and the RoPE rows `0..index_pos + seq_len`; the projections copy their
+own weights as (1b) does, now with the activation already there. **The cache
+stays on the processor** (`LayerWeights::attend`'s `cache_home`): the chunk's
+new K/V rows go down and are appended there, the history comes up. ⚠ candle's
+`to_device` on a narrowed view uploads the WHOLE storage it views, so every
+upload of a narrowed tensor (cache history, RoPE rows) goes through
+`force_contiguous()` first. Any error cuts the cache back to what it held
+(`truncate(held)`) and reruns the layer on the processor (WARN once). The
+batched loop keeps (1b): its forwards are decode batches.
+
+**Measured** (one binary, `SWARMLLM_PROMPT_CARD_LAYERS=0` = (1b), ABBA, Windows
+up 6.8 h, live node stopped, safety kit, `~/swarmllm-138c/ab.sh`, 512 a forward,
+the DIAG line in every new arm, no fallback):
+
+| | (1b) | (1c) |
+|---|---|---|
+| Qwen2.5-14B Q4_K_M 20/28, 888 tokens | 8.18 / 8.24 s | **5.21 / 5.17 s** |
+| Qwen3-30B-A3B Q2_K 26/22, 867 tokens | 6.74 / 7.12 s | **6.21 / 5.22 s** |
+
+The box read (1b) slower than its own morning (6.5-7.0 s for the 14B); the
+arms interleave in one binary, so the ratio holds: **1.6x** for the 14B, where
+28 of 48 layers are on the processor, 1.2x for the 30B (22 of 48, its experts
+already on the card). The 14B's first 512-token forward went 5.12 → 2.83 s;
+attention, RoPE, norms and the activation now take 55 ms of it (the processor
+spent ~1.2 s on them), and the quantized products — weight copies included —
+are 80%. ⚠ The cache history crosses up for every chunk: ~8 KB a position a
+layer for the 14B at f32, ~2 GB a chunk at 8K tokens of 28 layers, about a
+third of the weights it copies — llama.cpp's pass 5 pays the same, and the
+processor's attention over that history costs more.
+
+**Verified** against llama-cpp-python 0.3.16, teacher-forced (`score_many.py`):
+each arm gave one reply across its two runs, and every pick where the arms
+part is a near-tie already named above. The 14B's (1c) reply takes llama.cpp's
+second at token 10, 0.0003 behind (the tie the morning's arms split the other
+way); (1b)'s is its first at all 16. The 30B's (1c) reply takes llama.cpp's
+third at token 12 (0.105, where (1) alone landed), (1b)'s its second (0.069);
+token 8 is the same 0.76 tie in both. Test
+`a_prompt_chunk_read_whole_on_the_card_gives_the_processors_answer` (the
+processor standing in for the card: two 40-token chunks and a decoded token
+through the executor bit-identical to the plain path; the layer run directly,
+its output and its kept cache, because the executor's fallback would hide an
+error; the gate at 31 tokens and with an adapter).
+
 ### Llama 4 routes like llama.cpp hardcodes it, and normalises Q/K after RoPE (2026-09-25)
 
 llama.cpp's Llama 4 graph reads NO routing key: `build_moe_ffn(..., norm_w =

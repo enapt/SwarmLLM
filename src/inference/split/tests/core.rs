@@ -1795,3 +1795,92 @@ fn a_prompts_processor_projections_read_on_the_card_give_the_processors_answer()
     }
     assert!(model.reads_prompts_on_card());
 }
+
+/// A processor layer of a prompt chunk runs whole on the card it was given
+/// (#138 (1c)): norms, biases and the RoPE rows the chunk reads copied over,
+/// the cache kept where it lives. The processor stands in for the card, so
+/// every product must come back bit for bit — over two chunks, the second
+/// reading RoPE rows from position `chunk` off a warm cache, then a decoded
+/// token. The layer is also run directly, output and kept cache both, because
+/// the executor falls back to the processor on any error and would hide one;
+/// `attend` takes its cache-home branch even here, where the "card" is the
+/// processor.
+#[test]
+fn a_prompt_chunk_read_whole_on_the_card_gives_the_processors_answer() {
+    use crate::inference::layers::{
+        let_processor_layers_read_prompts_on, LayerOnTheCard, PROMPT_ON_CARD_MIN_TOKENS,
+    };
+    let device = Device::Cpu;
+    let hidden = 128;
+    let chunk = PROMPT_ON_CARD_MIN_TOKENS + 8;
+    let flat = |t: &Tensor| -> Vec<f32> { t.flatten_all().unwrap().to_vec1().unwrap() };
+    let mut model = make_test_split_model(2, hidden);
+    model.layer_devices = vec![device.clone(); 2];
+    let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let first = Tensor::randn(0f32, 1.0, (1, chunk, hidden), &device).unwrap();
+    let second = Tensor::randn(0f32, 1.0, (1, chunk, hidden), &device).unwrap();
+    let token = Tensor::randn(0f32, 1.0, (1, 1, hidden), &device).unwrap();
+    let run = |model: &mut SplitModel, request: &str| -> Vec<Vec<f32>> {
+        vec![
+            flat(&model.forward(&first, 0, &store, request).unwrap()),
+            flat(&model.forward(&second, chunk, &store, request).unwrap()),
+            flat(&model.forward(&token, 2 * chunk, &store, request).unwrap()),
+        ]
+    };
+    let processor = run(&mut model, "processor");
+
+    let dense = |model: &SplitModel| match &model.layers[0] {
+        LayerVariant::Dense(lw) => lw.clone(),
+        _ => unreachable!("the test model is dense"),
+    };
+    assert!(LayerOnTheCard::card_for(&dense(&model), chunk, false).is_none());
+    let_processor_layers_read_prompts_on(&mut model.layers, &device, true, true);
+    let lw = dense(&model);
+    assert!(LayerOnTheCard::card_for(&lw, chunk, false).is_some());
+    assert!(
+        LayerOnTheCard::card_for(&lw, PROMPT_ON_CARD_MIN_TOKENS - 1, false).is_none(),
+        "a chunk under the batch llama.cpp offloads at stays"
+    );
+    assert!(
+        LayerOnTheCard::card_for(&lw, chunk, true).is_none(),
+        "an adapter's weights stay where they were loaded"
+    );
+    assert_eq!(run(&mut model, "card"), processor);
+
+    let causal = |query: usize, keys: usize| -> Tensor {
+        let offset = keys - query;
+        let rows: Vec<f32> = (0..query)
+            .flat_map(|i| {
+                (0..keys).map(move |j| {
+                    if j > offset + i {
+                        f32::NEG_INFINITY
+                    } else {
+                        0.0
+                    }
+                })
+            })
+            .collect();
+        Tensor::from_slice(&rows, (query, keys), &device).unwrap()
+    };
+    let kept = |c: &Option<LayerKv>| -> (Vec<f32>, Vec<f32>) {
+        let c = c.as_ref().expect("the layer keeps a cache");
+        (
+            flat(&c.k().unwrap().unwrap()),
+            flat(&c.v().unwrap().unwrap()),
+        )
+    };
+    let (mut here, mut there) = (None, None);
+    for (i, x) in [&first, &second].into_iter().enumerate() {
+        let pos = i * chunk;
+        let mask = causal(chunk, pos + chunk);
+        let want = lw
+            .forward_attn(x, Some(&mask), pos, &mut here, 128, 0, None)
+            .unwrap();
+        let on_card = LayerOnTheCard::of(&lw, &device, pos, chunk).unwrap();
+        let got = on_card
+            .forward_attn(x, Some(&mask), pos, &mut there, 128, 0)
+            .unwrap();
+        assert_eq!(flat(&got), flat(&want), "chunk {i}, the layer itself");
+        assert_eq!(kept(&there), kept(&here), "chunk {i}, the cache it kept");
+    }
+}

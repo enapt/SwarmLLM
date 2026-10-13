@@ -224,11 +224,13 @@ single-character early return and the output walk — and **both were
 
 → `docs/invariants/inference.md` § "A mixture-of-experts layer keeps its experts quantized"
 
-## A card/processor split multiplies a prompt on the card (2026-10-13, #138 (1)/(1b))
+## A card/processor split multiplies a prompt on the card (2026-10-13, #138 (1)/(1b)/(1c))
 
 llama.cpp's op offload (`ggml_backend_sched` "1.off"): a forward of ≥ `PROMPT_ON_CARD_MIN_TOKENS` (32) copies each processor-held weight to the card for the call. **`layers::QMatMul::forward` / `forward_shared` are the ONE choke point for projections** (`QMatMul::prompt_card` → `on_the_card`; a fused weight copied once; its f32 mark travels with the copy); a MoE layer's chosen experts go via `QTensor::stack_some` (`MoeFfn::processor_experts_on_the_card`). Any refusal runs the processor path (WARN once). The loader gives the card ONCE, to weights in host memory only (`layers::let_processor_layers_read_prompts_on`, `prompt_card_for` the one token rule). **`SplitModel::reads_prompts_on_card` is the chunk-ceiling question** (512 when every processor layer reads its heavy part on the card — at 128 every weight crosses four times as often), never `runs_entirely_on_card` (the drafter's and admission timing's). The link, not pinned memory, bounds the copy here (pageable 6.5 of 6.7 GB/s). A 14B split 20/28 read 888 tokens in 36.8 s and reads them in 6.5-7.0. A/B `SWARMLLM_PROMPT_CARD_PROJECTIONS=0`, `SWARMLLM_MOE_PROMPT_CARD=0`.
 
-→ `docs/invariants/inference.md` § "A split's processor-held experts read a prompt on the card", § "A split's processor-held projections read a prompt on the card"
+**A processor-held `LayerVariant::Dense` layer runs a ≥ 32-token chunk WHOLE on the card** (1c, llama.cpp's "expand gpu down/up" + pass 5): `LayerOnTheCard::of` copies its norms, biases and RoPE rows over, `card_for` is the gate (a marked attention and feed-forward, no adapter). **The KV cache stays HOME on the processor** (`attend`'s `cache_home`: new rows go down, history comes up) — never give a processor layer a card cache. **`to_device` on a view copies the WHOLE storage**: `force_contiguous()` before uploading a narrowed tensor (cache history, RoPE rows). A refusal cuts the cache back (`truncate(held)`) and reruns the layer on the processor (WARN once); the batched loop keeps (1b). A/B `SWARMLLM_PROMPT_CARD_LAYERS=0`.
+
+→ `docs/invariants/inference.md` § "A split's processor-held experts read a prompt on the card", § "A split's processor-held projections read a prompt on the card", § "A split's processor-held layers read a prompt whole on the card"
 
 ## A card/processor split is placed in EVERY per-layer loop, and offered only where the loader makes it (2026-09-25)
 

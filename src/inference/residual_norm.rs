@@ -67,6 +67,15 @@ impl RmsNorm {
         let weight = weight.dequantize(&weight.device())?;
         Ok(Self { weight, eps })
     }
+
+    /// This norm with its weight copied to `device` — a processor-held layer
+    /// run on the card for one prompt chunk (`layers::LayerOnTheCard`).
+    pub(crate) fn to_device(&self, device: &Device) -> Result<Self> {
+        Ok(Self {
+            weight: self.weight.to_device(device)?,
+            eps: self.eps,
+        })
+    }
 }
 
 impl Module for RmsNorm {
@@ -80,6 +89,10 @@ impl Module for RmsNorm {
 /// `Pending { delta, base }` means `delta + base`, in that operand order —
 /// which is the order every site in `SplitModel` wrote it (`attn + residual`,
 /// `x + residual`), so the composed path adds exactly as before.
+///
+/// `Clone` shares the tensors: a layer the card could not finish is run again
+/// from the same input on the processor (`executor::dense_layer_on_the_card`).
+#[derive(Clone)]
 pub(crate) enum Residual {
     Ready(Tensor),
     Pending { delta: Tensor, base: Tensor },

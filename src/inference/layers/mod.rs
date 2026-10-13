@@ -215,7 +215,22 @@ impl QMatMul {
                 Err(e) => note_projection_stayed_on_the_processor(&e),
             }
         }
-        self.forward_here(xs)
+        match Self::brought_to_the_processor(xs, &[self])? {
+            Some(down) => self.forward_here(&down)?.to_device(xs.device()),
+            None => self.forward_here(xs),
+        }
+    }
+
+    /// `xs` brought down to the processor, where `ws` hold their weights and
+    /// `xs` is on a card — a processor layer run on the card for a prompt
+    /// ([`LayerOnTheCard`]) whose projection could not follow it there (out
+    /// of card memory, or a block under [`PROMPT_ON_CARD_MIN_TOKENS`]).
+    /// `None` when `xs` is already where the weights are.
+    fn brought_to_the_processor(xs: &Tensor, ws: &[&Self]) -> CandleResult<Option<Tensor>> {
+        if xs.device().is_cpu() || !ws.iter().all(|w| w.weight_is_on_the_processor()) {
+            return Ok(None);
+        }
+        xs.to_device(&Device::Cpu).map(Some)
     }
 
     /// The product on the device that holds the weight.
@@ -263,7 +278,13 @@ impl QMatMul {
                 Err(e) => note_projection_stayed_on_the_processor(&e),
             }
         }
-        Self::forward_shared_here(xs, ws)
+        match Self::brought_to_the_processor(xs, ws)? {
+            Some(down) => Self::forward_shared_here(&down, ws)?
+                .into_iter()
+                .map(|t| t.to_device(xs.device()))
+                .collect(),
+            None => Self::forward_shared_here(xs, ws),
+        }
     }
 
     /// [`Self::forward_shared`] on the device that holds the weights.
@@ -953,12 +974,16 @@ fn prompt_on_tensor_cores() -> bool {
 pub(crate) const PROMPT_ON_CARD_MIN_TOKENS: usize = 32;
 
 /// The card a forward of `x` sends a processor-held weight's work to: the one
-/// it was given (`prompt_card`), when `x` is on the processor and holds at
-/// least [`PROMPT_ON_CARD_MIN_TOKENS`] tokens. The ONE rule, for a projection
-/// ([`QMatMul`]) and for a layer's experts ([`MoeFfn`]) alike.
+/// it was given (`prompt_card`), when `x` holds at least
+/// [`PROMPT_ON_CARD_MIN_TOKENS`] tokens and is on the processor — or already on
+/// that card, where a processor layer runs whole for a prompt chunk
+/// ([`LayerOnTheCard`]). The ONE rule, for a projection ([`QMatMul`]) and for a
+/// layer's experts ([`MoeFfn`]) alike.
 fn prompt_card_for<'a>(prompt_card: Option<&'a Device>, x: &Tensor) -> Option<&'a Device> {
     let tokens = x.dims().iter().rev().skip(1).product::<usize>();
-    prompt_card.filter(|_| tokens >= PROMPT_ON_CARD_MIN_TOKENS && x.device().is_cpu())
+    prompt_card.filter(|card| {
+        tokens >= PROMPT_ON_CARD_MIN_TOKENS && (x.device().is_cpu() || x.device().same_device(card))
+    })
 }
 
 /// What [`let_processor_layers_read_prompts_on`] gave a card.
@@ -1003,6 +1028,122 @@ pub(crate) fn let_processor_layers_read_prompts_on(
         }
     }
     given
+}
+
+/// `SWARMLLM_PROMPT_CARD_LAYERS=0` keeps a processor layer's prompt work to its
+/// projections (#138 (1b)) instead of running the whole layer on the card —
+/// the A/B arm of [`LayerOnTheCard`]. Read once.
+fn whole_layers_read_prompts_on_the_card() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_PROMPT_CARD_LAYERS").as_deref() != Ok("0"))
+}
+
+/// A processor-held dense layer readied to read ONE prompt chunk wholly on the
+/// card (#138 (1c)): its norms, biases and the RoPE rows the chunk reads are
+/// copied over; its projections stay where they are and still copy their
+/// weights for the call ([`QMatMul::prompt_card`]), now against an activation
+/// already on the card; its KV cache stays on the processor
+/// ([`LayerWeights::attend`]).
+///
+/// (1b) sent only the projections, so the activation crossed the link around
+/// every one of them — about ten crossings a layer — and attention, RoPE, the
+/// norms and the activation function ran on the processor: 1.2 s of a 3.6 s
+/// 512-token forward on a 14B split, where llama.cpp takes ~1.3 s in all.
+/// llama.cpp's scheduler runs the ops between an offloaded layer's matmuls on
+/// the card too ("expand gpu down/up", `ggml_backend_sched_split_graph`, read
+/// at `4b1a27f`), so the hidden state crosses once each way per run of
+/// processor layers and only the cache's history comes up per layer.
+pub(crate) struct LayerOnTheCard {
+    pub(crate) weights: LayerWeights,
+    /// Where the layer's own weights and cache live — the processor.
+    cache_home: Device,
+}
+
+impl LayerOnTheCard {
+    /// The card a chunk of `tokens` takes `layer` to: the one its projections
+    /// were given ([`let_processor_layers_read_prompts_on`]), for at least
+    /// [`PROMPT_ON_CARD_MIN_TOKENS`] tokens, when its feed-forward can follow
+    /// — a dense one (its projections were given the card with the rest), or
+    /// experts that may stack there ([`MoeFfn::prompt_card`]). Never with an
+    /// adapter, whose weights stay where they were loaded.
+    pub(crate) fn card_for(layer: &LayerWeights, tokens: usize, adapter: bool) -> Option<&Device> {
+        let card = layer.attention_wq.prompt_card.as_ref()?;
+        let ffn_follows = match &layer.ffn {
+            FfnVariant::Dense(_) => true,
+            FfnVariant::MoE(moe) => moe.prompt_card.is_some(),
+        };
+        (whole_layers_read_prompts_on_the_card()
+            && !adapter
+            && ffn_follows
+            && tokens >= PROMPT_ON_CARD_MIN_TOKENS)
+            .then_some(card)
+    }
+
+    /// `layer` readied on `card` for a chunk of `seq_len` positions from
+    /// `index_pos`. `force_contiguous` before each upload: a view's upload
+    /// carries its whole buffer, and the RoPE table is the model's whole
+    /// context.
+    pub(crate) fn of(
+        layer: &LayerWeights,
+        card: &Device,
+        index_pos: usize,
+        seq_len: usize,
+    ) -> CandleResult<Self> {
+        let norm = |n: &RmsNorm| n.to_device(card);
+        let some_norm = |n: &Option<RmsNorm>| n.as_ref().map(norm).transpose();
+        let some = |t: &Option<Tensor>| t.as_ref().map(|t| t.to_device(card)).transpose();
+        // `apply_rotary_emb` reads rows `index_pos..index_pos + seq_len`.
+        let rows = |t: &Tensor| {
+            t.narrow(0, 0, index_pos + seq_len)?
+                .force_contiguous()?
+                .to_device(card)
+        };
+        let ffn = match &layer.ffn {
+            FfnVariant::Dense(mlp) => FfnVariant::Dense(mlp.clone()),
+            FfnVariant::MoE(moe) => FfnVariant::MoE(moe.routed_on(card)?),
+        };
+        Ok(Self {
+            weights: LayerWeights {
+                attention_bq: some(&layer.attention_bq)?,
+                attention_bk: some(&layer.attention_bk)?,
+                attention_bv: some(&layer.attention_bv)?,
+                attention_norm: norm(&layer.attention_norm)?,
+                attn_q_norm: some_norm(&layer.attn_q_norm)?,
+                attn_k_norm: some_norm(&layer.attn_k_norm)?,
+                ffn,
+                ffn_norm: norm(&layer.ffn_norm)?,
+                post_attention_norm: some_norm(&layer.post_attention_norm)?,
+                post_ffw_norm: some_norm(&layer.post_ffw_norm)?,
+                cos: rows(&layer.cos)?,
+                sin: rows(&layer.sin)?,
+                ..layer.clone()
+            },
+            cache_home: Device::Cpu,
+        })
+    }
+
+    /// The layer's attention on the card, its cache written and read where it
+    /// lives.
+    pub(crate) fn forward_attn(
+        &self,
+        x: &Tensor,
+        mask: Option<&Tensor>,
+        index_pos: usize,
+        kv_cache: &mut Option<LayerKv>,
+        max_seq_len: usize,
+        kv_reserve: usize,
+    ) -> CandleResult<Tensor> {
+        self.weights.attend(
+            x,
+            mask,
+            index_pos,
+            kv_cache,
+            Some(&self.cache_home),
+            max_seq_len,
+            kv_reserve,
+            None,
+        )
+    }
 }
 
 /// Logged once per process: a prompt's processor-held projection could not
@@ -1330,13 +1471,41 @@ impl MoeFfn {
                 Err(e) => note_experts_stayed_on_the_processor(&e),
             }
         }
-        let routed = if self.experts_fit_one_region(x, &expert_batches) {
-            self.experts_in_one_region(&x_flat, &expert_batches, num_tokens, hidden)?
+        // The processor runs them: an activation on the card — a processor
+        // layer run whole there for a prompt (`LayerOnTheCard`) — comes down
+        // once for them, and their answer goes back.
+        let experts_here = self
+            .experts
+            .first()
+            .is_some_and(|e| e.gate.weight_is_on_the_processor());
+        let x_here = if experts_here && !x_flat.device().is_cpu() {
+            x_flat.to_device(&Device::Cpu)?
         } else {
-            self.experts_one_at_a_time(&x_flat, &expert_batches, num_tokens, hidden)?
+            x_flat.clone()
         };
-        self.add_shared_expert(&x_flat, routed)?
+        let routed = if self.experts_fit_one_region(&x_here, &expert_batches) {
+            self.experts_in_one_region(&x_here, &expert_batches, num_tokens, hidden)?
+        } else {
+            self.experts_one_at_a_time(&x_here, &expert_batches, num_tokens, hidden)?
+        };
+        self.add_shared_expert(&x_flat, routed.to_device(x_flat.device())?)?
             .reshape((b_sz, seq_len, hidden))
+    }
+
+    /// This layer with its router and its shared expert's gate copied to
+    /// `card`, for a processor layer run whole there for a prompt chunk
+    /// ([`LayerOnTheCard`]): routing reads the activation where it lies, and
+    /// the experts and shared expert still copy their weights for the call.
+    fn routed_on(&self, card: &Device) -> CandleResult<Self> {
+        Ok(Self {
+            gate: self.gate.to_device(card)?,
+            shared_gate_inp: self
+                .shared_gate_inp
+                .as_ref()
+                .map(|w| w.to_device(card))
+                .transpose()?,
+            ..self.clone()
+        })
     }
 
     /// Could this layer's per-expert weights be stacked for the card kernel?
@@ -3794,12 +3963,12 @@ fn rms_over_last_dim(x: &Tensor, eps: f64) -> CandleResult<Tensor> {
 }
 
 impl LayerWeights {
-    /// How this layer keeps its KV cache on the device `x` is on —
-    /// [`kv_storage`], asked with this layer's head geometry.
-    fn kv_storage(&self, x: &Tensor) -> KvStorage {
+    /// How this layer keeps its KV cache on `device` — [`kv_storage`], asked
+    /// with this layer's head geometry.
+    fn kv_storage_on(&self, device: &Device) -> KvStorage {
         // Standard attention by construction: MLA layers run `forward_mla`.
         kv_storage(
-            x.device().is_cuda(),
+            device.is_cuda(),
             KvAttention::Standard,
             self.n_head,
             self.n_kv_head,
@@ -3834,6 +4003,33 @@ impl LayerWeights {
         mask: Option<&Tensor>,
         index_pos: usize,
         kv_cache: &mut Option<LayerKv>,
+        max_seq_len: usize,
+        kv_reserve: usize,
+        lora: Option<(&LoraAdapter, usize)>,
+    ) -> CandleResult<Tensor> {
+        self.attend(
+            x,
+            mask,
+            index_pos,
+            kv_cache,
+            None,
+            max_seq_len,
+            kv_reserve,
+            lora,
+        )
+    }
+
+    /// [`Self::forward_attn`], with the layer's cache kept on `cache_home`
+    /// whatever device `x` is on ([`LayerOnTheCard`]). Taken even when the two
+    /// are the same device, so a test with no card runs this branch too.
+    #[allow(clippy::too_many_arguments)]
+    fn attend(
+        &self,
+        x: &Tensor,
+        mask: Option<&Tensor>,
+        index_pos: usize,
+        kv_cache: &mut Option<LayerKv>,
+        cache_home: Option<&Device>,
         max_seq_len: usize,
         kv_reserve: usize,
         lora: Option<(&LoraAdapter, usize)>,
@@ -3926,20 +4122,48 @@ impl LayerWeights {
         crate::inference::prof::add(P::AttnShape, __shape_t.elapsed().as_nanos() as u64);
 
         // KV-cache: use pre-allocated KvCache buffers (avoids Tensor::cat per step)
-        let (k, v) = append_to_cache(
-            kv_cache,
-            &k,
-            &v,
-            index_pos,
-            self.kv_storage(x),
-            max_seq_len,
-            kv_reserve,
-        )?;
+        let (k, v) = match cache_home {
+            None => append_to_cache(
+                kv_cache,
+                &k,
+                &v,
+                index_pos,
+                self.kv_storage_on(x.device()),
+                max_seq_len,
+                kv_reserve,
+            )?,
+            // The cache stays on its layer's own device: the new rows go down
+            // to it, and the history it then holds comes up for the attention.
+            // llama.cpp's scheduler does the same for a processor layer it
+            // offloads — its K/V write is pinned to the host cache and the
+            // cache views are copied to the card (`ggml_backend_sched` pass 5,
+            // read at `4b1a27f`). `force_contiguous` copies only the positions
+            // written: a view's upload carries its whole buffer.
+            Some(home) => {
+                let (k, v) = append_to_cache(
+                    kv_cache,
+                    &k.to_device(home)?,
+                    &v.to_device(home)?,
+                    index_pos,
+                    self.kv_storage_on(home),
+                    max_seq_len,
+                    kv_reserve,
+                )?;
+                (
+                    k.force_contiguous()?.to_device(x.device())?,
+                    v.force_contiguous()?.to_device(x.device())?,
+                )
+            }
+        };
 
         // The f16 BSHD mirror, if this cache is maintaining one — lets the CUDA
         // flash arm skip converting the whole history every token. A half
-        // cache has none: flash reads it where it lies (`run_attention`).
-        let mirror = kv_cache.as_ref().and_then(|c| c.flash_operands());
+        // cache has none: flash reads it where it lies (`run_attention`). A
+        // cache kept elsewhere has none either: its history was just copied.
+        let mirror = match cache_home {
+            Some(_) => None,
+            None => kv_cache.as_ref().and_then(|c| c.flash_operands()),
+        };
 
         // Unified attention dispatch: flash (CPU/GPU) or standard matmul fallback.
         // All backends return BHSD (b, n_head, seq, head_dim).
@@ -4135,7 +4359,7 @@ impl LayerWeights {
                 &ki,
                 &vi,
                 index_pos,
-                self.kv_storage(x),
+                self.kv_storage_on(x.device()),
                 max_seq_len,
                 kv_reserves.get(i).copied().unwrap_or(0),
             )?;
