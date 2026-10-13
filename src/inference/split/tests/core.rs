@@ -5,7 +5,7 @@
 use super::super::super::layers::{run_attention, standard_attention};
 use super::super::*;
 use super::common::*;
-use crate::inference::split::kv_cache::LayerKv;
+use crate::inference::split::kv_cache::{KvHome, LayerKv};
 use candle_core::quantized::QTensor;
 use candle_core::{Device, Tensor};
 
@@ -300,9 +300,9 @@ fn a_finished_requests_admission_claim_does_not_outlive_its_cache() {
     let store = KvCacheStore::new(std::time::Duration::from_secs(600));
 
     store.get_or_create("model-a", "req-1", 2);
-    store.record_prompt_admission("req-1", 1848 * 1024 * 1024);
+    store.record_prompt_admission("req-1", KvHome::Host, 1848 * 1024 * 1024);
     assert_eq!(
-        store.outstanding_admission_bytes(),
+        store.outstanding_admission_bytes(KvHome::Host),
         1848 * 1024 * 1024,
         "a prompt admitted but not yet prefilled is owed in full"
     );
@@ -311,7 +311,7 @@ fn a_finished_requests_admission_claim_does_not_outlive_its_cache() {
     store.cleanup_request_id("req-1");
 
     assert_eq!(
-        store.outstanding_admission_bytes(),
+        store.outstanding_admission_bytes(KvHome::Host),
         0,
         "the cleanup freed this request's cache, so nothing may still be owed \
          for it — without the claim release the draw-down goes with the cache \

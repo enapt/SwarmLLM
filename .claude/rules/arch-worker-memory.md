@@ -106,6 +106,12 @@ In `handle_forward` the FIRST piece of a `prompt_span` clears, restores and is a
 
 → `docs/invariants/memory.md` § "A card's free memory is read after a synchronize"
 
+## A cache is charged to the memory it lives in (2026-10-13, #262)
+
+A card/processor split keeps its card-held layers' caches on the card and the rest in host memory: **`KvHome`** names the memory, **`KvOccupancy::allocated_in(home)`** is the only figure a budget is weighed against (`allocated_bytes` counts every device — report it, never compare it), and **`SplitModel::kv_homes`** lists every memory a model charges — the growth claim (`claim_room(home, …)`) and admission (`admit_prompt_over` → `admit_prompt_in`, promises per home) ask each. A split's processor side has its own budget (`host_kv_budget_bytes`: `--kv-budget-bytes`, else the machine's available memory less the margin), reconciled with the machine at every claim.
+
+→ `docs/invariants/memory.md` § "A cache is charged to the memory it lives in"
+
 ## A card's KV budget is kept whatever the context setting (2026-10-09)
 
 The loader records the card's KV budget with or without `inference.max_seq_len_override`. Skipped (as it was until 2026-10-09), a node set up for an agent admitted every prompt and spilled the cache into host memory — #440's crawl. A budget refuses one request that does not fit NOW; it never shortens a context.

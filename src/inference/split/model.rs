@@ -5,6 +5,7 @@ use candle_core::{Device, Tensor};
 
 use crate::error::SwarmError;
 
+use super::kv_cache::KvHome;
 use super::token_embedding::TokenEmbedding;
 use super::{LayerVariant, ModelArch, QMatMul, SplitTokenizer};
 
@@ -71,9 +72,20 @@ pub struct SplitModel {
     /// shorter to guard against a case most never reach, and did not bound
     /// concurrency at all.
     pub(super) kv_budget_bytes: Option<u64>,
-    /// KV bytes one sequence position costs across this segment's layers.
-    /// Paired with `kv_budget_bytes`; 0 when unknown.
+    /// KV bytes one sequence position costs across the layers `device`
+    /// holds — a card/processor split's CARD-held layers only. Paired with
+    /// `kv_budget_bytes`; 0 when unknown.
     pub(super) kv_bytes_per_token: u64,
+    /// A card/processor split's second budget (#262): what its processor-held
+    /// layers' caches may take of the machine's memory — the daemon's
+    /// `--kv-budget-bytes` when it handed one, else what the machine had
+    /// available at load less the margin — reconciled with the machine at
+    /// every claim, as the card's is with the card. `None` for a model on one
+    /// device, and when the machine's memory cannot be read.
+    pub(super) host_kv_budget_bytes: Option<u64>,
+    /// Paired with `host_kv_budget_bytes`: KV bytes a position costs the
+    /// processor-held layers of a split. 0 for a model on one device.
+    pub(super) host_kv_bytes_per_token: u64,
     /// Pre-computed KV cache store key: "{layer_start}-{layer_end}-{total_layers}".
     /// Avoids a `format!` allocation on every forward pass.
     pub(super) kv_model_key: String,
@@ -491,12 +503,35 @@ impl SplitModel {
         (self.batch_calls, self.batch_fellback)
     }
 
-    /// Return the KV cache model key (used for cache cleanup).
-    /// The runtime KV budget and the per-position cost it is measured in:
-    /// `(budget_bytes, bytes_per_token)`. `None` budget means unknown, and an
-    /// unknown budget admits everything (never a zero one).
-    pub(crate) fn kv_budget(&self) -> (Option<u64>, u64) {
-        (self.kv_budget_bytes, self.kv_bytes_per_token)
+    /// The memory this model's primary KV budget is drawn from: its device's.
+    pub(crate) fn kv_home(&self) -> KvHome {
+        KvHome::of(&self.device)
+    }
+
+    /// Every memory this model's caches are charged to: its device's, and for
+    /// a card/processor split the machine's as well (#262). A decision about
+    /// KV room asks EACH: one that weighed only the card let the processor-held
+    /// caches grow against nothing, and one that weighed the card with both
+    /// devices' bytes refused a split at a quarter of what its card held.
+    pub(crate) fn kv_homes(&self) -> impl Iterator<Item = KvHome> {
+        let primary = self.kv_home();
+        let host =
+            (primary == KvHome::Card && self.host_kv_bytes_per_token > 0).then_some(KvHome::Host);
+        std::iter::once(primary).chain(host)
+    }
+
+    /// The runtime KV budget in `home` and the per-position cost it is
+    /// measured in: `(budget_bytes, bytes_per_token)`. `None` budget means
+    /// unknown, and an unknown budget admits everything (never a zero one);
+    /// `(None, 0)` for a memory this model keeps no cache in.
+    pub(crate) fn kv_budget(&self, home: KvHome) -> (Option<u64>, u64) {
+        if home == self.kv_home() {
+            (self.kv_budget_bytes, self.kv_bytes_per_token)
+        } else if home == KvHome::Host {
+            (self.host_kv_budget_bytes, self.host_kv_bytes_per_token)
+        } else {
+            (None, 0)
+        }
     }
 
     /// The KV budget as the device can honour it NOW, for a decision about to
@@ -512,11 +547,24 @@ impl SplitModel {
     /// everything. A device that cannot report its memory (a driver that will
     /// not say, a machine whose totals read zero) leaves the load-time budget
     /// as it was.
-    pub(crate) fn kv_budget_now(&self, live_bytes: u64, cached_bytes: u64) -> (Option<u64>, u64) {
-        let Some(budget) = self.kv_budget_bytes else {
-            return (None, self.kv_bytes_per_token);
+    ///
+    /// `live_bytes` are the store's bytes IN `home` (`KvOccupancy::allocated_in`).
+    pub(crate) fn kv_budget_now(
+        &self,
+        home: KvHome,
+        live_bytes: u64,
+        cached_bytes: u64,
+    ) -> (Option<u64>, u64) {
+        let (Some(budget), per_token) = self.kv_budget(home) else {
+            return (None, self.kv_budget(home).1);
         };
-        let reconciled = match super::kv_budget::device_free_and_total_bytes(&self.device) {
+        let processor = Device::Cpu;
+        let device = if home == self.kv_home() {
+            &self.device
+        } else {
+            &processor
+        };
+        let reconciled = match super::kv_budget::device_free_and_total_bytes(device) {
             Some((free, total)) => super::kv_budget::budget_reconciled_with_device(
                 budget,
                 live_bytes,
@@ -532,17 +580,17 @@ impl SplitModel {
                 budget_now_mb = reconciled / (1024 * 1024),
                 live_mb = live_bytes / (1024 * 1024),
                 cached_mb = cached_bytes / (1024 * 1024),
-                device = if self.device.is_cpu() {
-                    "processor"
-                } else {
-                    "card"
+                device = match home {
+                    KvHome::Host => "processor",
+                    KvHome::Card => "card",
                 },
                 "DIAG: KV budget reconciled with the device — less room than the load-time figure"
             );
         }
-        (Some(reconciled), self.kv_bytes_per_token)
+        (Some(reconciled), per_token)
     }
 
+    /// Return the KV cache model key (used for cache cleanup).
     pub fn kv_model_key(&self) -> &str {
         &self.kv_model_key
     }

@@ -52,6 +52,7 @@ const CANCEL_RETENTION_SECS: u64 = 60;
 const KV_OCCUPANCY_REPORT_SECS: u64 = 30;
 use crate::error::SwarmError;
 use crate::inference::slot_table::{Slot, SlotTable};
+use crate::inference::split::kv_cache::KvHome;
 use crate::inference::split::{
     self, BatchItem, KvCacheStore, PrefixCache, SnapshotHome, SnapshotRoom, SplitModel,
 };
@@ -610,6 +611,7 @@ pub async fn run_worker(
                 tracing::debug!(
                     entries = occ.entries,
                     allocated_mb = occ.allocated_bytes / 1_000_000,
+                    of_which_host_mb = occ.host_bytes / 1_000_000,
                     used_mb = occ.used_bytes / 1_000_000,
                     utilisation_pct = (occ.utilisation() * 100.0).round() as u64,
                     tokens = occ.tokens,
@@ -3066,7 +3068,8 @@ fn host_ram_positions(
     use crate::inference::split::kv_budget::{
         host_free_and_total_bytes, host_snapshot_budget, plan_snapshot,
     };
-    let per_token = model.kv_budget().1;
+    // A snapshot copies every layer's cache, card-held and processor-held.
+    let per_token: u64 = model.kv_homes().map(|home| model.kv_budget(home).1).sum();
     let Some((available, total)) = host_free_and_total_bytes() else {
         return usize::MAX;
     };
@@ -3105,12 +3108,13 @@ fn positions_beside_live(
     if !prefix_cache_charged() {
         return usize::MAX;
     }
-    let allocated = kv_store.occupancy().allocated_bytes;
+    let home = model.kv_home();
+    let allocated = kv_store.occupancy().allocated_in(home);
     let cached = prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64;
     // Against the card as it stands, not the budget predicted at load: a
     // snapshot is a device allocation the size of the prompt, taken on a card
     // that may hold tenants the load-time figure never saw.
-    let (Some(budget), per_token) = model.kv_budget_now(allocated, cached) else {
+    let (Some(budget), per_token) = model.kv_budget_now(home, allocated, cached) else {
         return usize::MAX;
     };
     if per_token == 0 {
@@ -3246,6 +3250,11 @@ fn layers_that_fit(layers: u32, needed: u64, short_by: u64) -> u32 {
 /// loaded yet. One range is a segment's forward or a `Generate`, exactly as
 /// before; several are an up-front admission (`DaemonMsg::AdmitPrompt`). The
 /// ranges share one card and one store, so the tightest of their budgets binds.
+///
+/// Decided in EVERY memory the ranges keep caches in (`SplitModel::kv_homes`,
+/// #262): a card/processor split's card-held layers against the card, its
+/// processor-held layers against the machine, and what it promises is recorded
+/// only once every one has room.
 fn admit_prompt_over(
     ranges: &[(&SplitModel, u32)],
     unloaded_per_token: u64,
@@ -3278,15 +3287,66 @@ fn admit_prompt_over(
     if !prefix_cache_charged() {
         return Ok(());
     }
+    let mut homes: Vec<KvHome> = Vec::new();
+    for &(model, _) in ranges {
+        for home in model.kv_homes() {
+            if !homes.contains(&home) {
+                homes.push(home);
+            }
+        }
+    }
+    let mut promises: Vec<(KvHome, u64)> = Vec::new();
+    for (i, &home) in homes.iter().enumerate() {
+        // A range not loaded yet is charged where the loaded ones keep their
+        // primary caches — the first memory asked.
+        let unloaded = if i == 0 { unloaded_per_token } else { 0 };
+        let promise = admit_prompt_in(
+            home,
+            ranges,
+            unloaded,
+            kv_store,
+            prefix_cache,
+            request_id,
+            prompt_tokens,
+            reply_positions,
+            positions,
+        )?;
+        promises.extend(promise.map(|bytes| (home, bytes)));
+    }
+    // Record what this prompt has been promised, so the NEXT one is weighed
+    // against it rather than against memory it is about to take. Released by
+    // `clear_request`, which every path that finishes or abandons a request
+    // already calls.
+    for (home, bytes) in promises {
+        kv_store.record_prompt_admission(request_id, home, bytes);
+    }
+    Ok(())
+}
+
+/// [`admit_prompt_over`]'s decision in ONE memory: `Ok(Some(bytes))` promised
+/// there, `Ok(None)` when no range keeps a budget there, else the refusal.
+#[allow(clippy::too_many_arguments)]
+fn admit_prompt_in(
+    home: KvHome,
+    ranges: &[(&SplitModel, u32)],
+    unloaded_per_token: u64,
+    kv_store: &KvCacheStore,
+    prefix_cache: &PrefixCache,
+    request_id: &str,
+    prompt_tokens: usize,
+    reply_positions: usize,
+    positions: usize,
+) -> Result<Option<u64>, PromptRefusal> {
     let occupancy = kv_store.occupancy();
+    let in_home = occupancy.allocated_in(home);
     // Prompts already admitted whose prefill has not written its cache yet.
     // Without this the decision is made against an occupancy that does not
     // contain them: on the batched path `admit_slot` marks a slot `Prefilling`
     // and returns to the message loop, so the next prompt is weighed against
     // memory the previous one has already been promised. Drawn down by what
     // each has actually allocated, so nothing is charged twice.
-    let promised = kv_store.outstanding_admission_bytes();
-    let mut live = occupancy.allocated_bytes.saturating_add(promised);
+    let promised = kv_store.outstanding_admission_bytes(home);
+    let mut live = in_home.saturating_add(promised);
     let cached = prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64;
     // Nothing of THIS request is in the store yet, so anything live belongs to
     // an earlier one — a request still decoding, or one whose cache outlived
@@ -3299,6 +3359,7 @@ fn admit_prompt_over(
             store_entries = occupancy.entries,
             live_mb = live / (1024 * 1024),
             live_tokens = occupancy.tokens,
+            memory = ?home,
             "DIAG: KV admission — the store already holds caches from earlier requests"
         );
     }
@@ -3311,22 +3372,22 @@ fn admit_prompt_over(
     let mut load_time_budget: Option<u64> = None;
     let mut per_token = unloaded_per_token;
     for &(model, used) in ranges {
-        let (now, model_per_token) = model.kv_budget_now(live, cached);
+        let (now, model_per_token) = model.kv_budget_now(home, live, cached);
         // A range of which the prompt uses part pays for that part.
         let width = model.layer_end.saturating_sub(model.layer_start).max(1) as u64;
         per_token = per_token.saturating_add(model_per_token * u64::from(used).min(width) / width);
         if let Some(b) = now {
             budget = Some(budget.map_or(b, |kept| kept.min(b)));
         }
-        if let Some(b) = model.kv_budget().0 {
+        if let Some(b) = model.kv_budget(home).0 {
             load_time_budget = Some(load_time_budget.map_or(b, |kept| kept.min(b)));
         }
     }
     let Some(budget) = budget else {
-        return Ok(());
+        return Ok(None);
     };
     if per_token == 0 {
-        return Ok(());
+        return Ok(None);
     }
     let load_time_budget = load_time_budget.unwrap_or(budget);
     let mb = |b: u64| b / (1024 * 1024);
@@ -3341,19 +3402,20 @@ fn admit_prompt_over(
             request_id,
         );
         if freed > 0 {
-            live = live.saturating_sub(freed);
+            // What was freed in THIS memory: the release counts every device.
+            live = kv_store
+                .occupancy()
+                .allocated_in(home)
+                .saturating_add(kv_store.outstanding_admission_bytes(home));
             verdict = admit_prompt(budget, live, cached, per_token, positions);
         }
     }
-    // Record what this prompt has been promised, so the NEXT one is weighed
-    // against it rather than against memory it is about to take. Released by
-    // `clear_request`, which every path that finishes or abandons a request
-    // already calls.
-    let claim = || kv_store.record_prompt_admission(request_id, positions as u64 * per_token);
+    // What this prompt is promised here, recorded by the caller once every
+    // memory has room.
+    let promise = positions as u64 * per_token;
     let short_by = match verdict {
         PromptAdmission::Fits => {
-            claim();
-            return Ok(());
+            return Ok(Some(promise));
         }
         PromptAdmission::EvictBytes(needed) => {
             let freed = prefix_cache.release(needed as usize, SnapshotHome::BesideLive) as u64;
@@ -3373,8 +3435,7 @@ fn admit_prompt_over(
                 "DIAG: KV admission — evicted cached prompts so this prompt's cache fits on the device"
             );
             if freed >= needed {
-                claim();
-                return Ok(());
+                return Ok(Some(promise));
             }
             needed - freed
         }
@@ -3390,6 +3451,7 @@ fn admit_prompt_over(
         budget_mb = mb(budget),
         load_time_budget_mb = mb(load_time_budget),
         short_by_mb = mb(short_by),
+        memory = ?home,
         "DIAG: KV admission — refusing this prompt before prefill: it would not fit on the device"
     );
     // "budget" unqualified is the wrong word here, and the sibling refusal in
@@ -3408,7 +3470,7 @@ fn admit_prompt_over(
     // identical to the peer-side refusal — see the variant's own doc — so the
     // class travels on `WorkerMsg::Error::local_memory_refusal` rather than in
     // the text.
-    let needed = positions as u64 * per_token;
+    let needed = promise;
     let error = SwarmError::LocalMemoryUnavailable(prompt_refusal_message(
         prompt_tokens,
         mb(live),
@@ -3466,7 +3528,7 @@ fn admit_prompt_up_front(
                 let width = model.layer_end.saturating_sub(model.layer_start).max(1) as u64;
                 let used = u64::from(used).min(width);
                 (
-                    bytes.saturating_add(model.kv_budget().1 * used / width),
+                    bytes.saturating_add(model.kv_budget(model.kv_home()).1 * used / width),
                     layers + used,
                 )
             });

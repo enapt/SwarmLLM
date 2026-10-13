@@ -2683,6 +2683,53 @@ prompt was admitted for, under the same reservation, so it is still covered. Tes
 `a_refused_prompt_says_how_many_of_its_layers_fit`,
 `a_prompt_is_admitted_up_front_only_where_a_worker_runs_the_model`.
 
+## A cache is charged to the memory it lives in (2026-10-13, FUTURE_WORK #262)
+
+**What was wrong.** A card/processor split (`process_pool::split_for_card`, `hybrid::LayerPlacement`)
+keeps its card-held layers' caches on the card and its processor-held layers' caches in host memory.
+The loader set ONE budget — the card's — and priced a position at the card-held layers only
+(`kv_bytes_per_token` over `layers_on_device`, #104), but every check weighed it against
+`KvCacheStore::occupancy().allocated_bytes`, which `KvCacheEntry::occupancy` summed over every
+layer wherever it lived. So the card's budget was charged the host-side caches too: on #138 (1e)'s
+rig the 30B-A3B Q2_K 26/22 on an 8 GB card (card budget 303 MB, 52 KB a position on the card, 88 KB
+on the processor) was refused a 2,585-token prompt at position 2,176 in every arm — `in_use_mb=280
+live_entries=1 budget_mb=303` — and the message said "other conversations on this node are using
+176 MB … a shorter conversation will not help": the 176 MB was its own host-side cache. The other
+half: the host side was charged NOWHERE. Admission charges a split only its card share
+(`card_share_of_split_mb`), `record_cpu_kv_budget` runs only for a processor placement, so the
+miscount was the only bound a split's host-side cache had.
+
+**The rule.** `kv_cache::KvHome` (`Card`, `Host`) names a memory; `KvOccupancy::host_bytes` splits the
+store's figure by the device each cache tensor is on, and **`allocated_in(home)` is the only figure a
+budget is weighed against** — `allocated_bytes` stays as the every-device report. `SplitModel::kv_homes`
+lists every memory a model charges (its device's, plus `Host` for a split); `kv_budget(home)` /
+`kv_budget_now(home, live, cached)` answer per memory (the host side reconciled with the machine via
+`device_free_and_total_bytes(&Device::Cpu)`, as a processor worker's is — gotcha #462). Consumers
+ask each: the executor's growth claim (`claim_room(home, …)`, a REQUIRED argument), prompt
+admission (`admit_prompt_over` → `admit_prompt_in` per home; the promises — `admitted_claims` now
+one figure per home, drawn down by what the request wrote IN that home — are recorded only once
+every home has room), `positions_beside_live` (the model's own home) and the host snapshot sizing
+(every home's per-position cost: a snapshot copies every layer). The split's host budget
+(`host_kv_budget_bytes`) is the daemon's `--kv-budget-bytes` when it handed one, else the machine's
+available memory at load less `device_free_margin_bytes` — the bound the reconciliation applies at
+every claim anyway. Prior art: vLLM keeps a block pool per device (GPU blocks vs CPU swap blocks);
+Ollama weighs a split's processor share (`TotalSize − VRAMSize`) against the machine's free memory,
+not the card's (`llm/server.go`).
+
+**Measured** (`~/swarmllm-262/kv.sh`, `swarmllm test-split --prompt-chunk 128`, the released
+v0.3.236 as control, Windows up 14.5 h, 0 driver events): the 30B 26/22 on the 2,585-token prompt —
+release refused at position 2,176 (above), this fix read the whole prompt and replied, logging the
+host side (22 layers, 88 KB a position, 12,327 MB); the 14B Q4_K_M 20/28 on 6,901 tokens — both
+replied, the same 16 tokens (this card state left the card budget room for 28,171 positions, so it
+shows no regression rather than the bug). Tests: `a_claim_is_weighed_against_the_caches_in_its_own_memory`,
+`an_admission_promise_is_kept_and_drawn_down_per_memory` — both red with `allocated_bytes` back in
+`claim_room` and the draw-down.
+
+**Residuals.** A refusal's `layers_that_fit` (#263) scales the whole range by the refusing home's
+fraction, so a split refused on one side is re-planned to fewer layers than would fit — conservative.
+The split's processor-held WEIGHTS are still charged to no RAM budget at admission (FUTURE_WORK
+#264); until they are, its host KV budget comes from the machine, not from `resources.max_ram_mb`.
+
 ## Machine memory is read in one place, and a container's limit counts (2026-10-09)
 
 `daemon::machine_memory::machine_memory()` is the one reading of how much memory this process

@@ -768,7 +768,7 @@ pub struct KvCacheStore {
     /// over its cancelled-request set; `None` means never cancelled here.
     cancel_oracle: std::sync::Mutex<Option<CancelOracle>>,
     /// Prompts admitted whose cache has not been fully written yet:
-    /// `request_id -> (bytes admission promised, when)`.
+    /// `request_id -> (bytes admission promised in each KvHome, when)`.
     ///
     /// **Why a prompt's admission has to be recorded, not just decided.**
     /// `ensure_room_for_prompt` reads live occupancy, decides, evicts and
@@ -782,7 +782,7 @@ pub struct KvCacheStore {
     ///
     /// Same shape as `ModelProcessPool::vram_reserved_mb` does for whole
     /// models, one level down.
-    admitted_claims: dashmap::DashMap<String, (u64, std::time::Instant)>,
+    admitted_claims: dashmap::DashMap<String, ([u64; 2], std::time::Instant)>,
     /// Positions a request's caches are built to hold from their FIRST
     /// allocation: `request_id -> (positions, when)`. Set by the worker the
     /// moment a prompt's length is known (`ensure_room_for_prompt`), read by
@@ -882,6 +882,37 @@ pub(crate) struct KvCacheEntry {
     pub(crate) last_accessed: std::time::Instant,
 }
 
+/// Which memory a KV budget is drawn from (#262): a graphics card's, or the
+/// machine's. A card/processor split keeps the caches of its card-held layers
+/// on the card and the rest in host memory, and each is charged to its own
+/// budget — the card's figure once covered both, so a split was refused at a
+/// quarter of what its card held and told the room was "other conversations".
+/// vLLM keeps one block pool per device for the same reason, and Ollama weighs
+/// a split's processor share against the machine's memory, not the card's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KvHome {
+    Card,
+    Host,
+}
+
+impl KvHome {
+    /// Where a cache allocated on `device` lives.
+    pub(crate) fn of(device: &candle_core::Device) -> Self {
+        if device.is_cuda() {
+            Self::Card
+        } else {
+            Self::Host
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Card => 0,
+            Self::Host => 1,
+        }
+    }
+}
+
 /// What a [`KvCacheStore`] is currently holding.
 ///
 /// `allocated_bytes` is the figure that matters, and it is NOT `token_count`
@@ -896,8 +927,12 @@ pub(crate) struct KvCacheEntry {
 pub struct KvOccupancy {
     /// Number of live cache entries — one per (model, request).
     pub entries: usize,
-    /// Bytes actually reserved by the K/V tensors, including unused headroom.
+    /// Bytes actually reserved by the K/V tensors, including unused headroom,
+    /// on EVERY device — a figure to report, never to weigh against a budget:
+    /// a budget is one device's, and reads [`Self::allocated_in`].
     pub allocated_bytes: u64,
+    /// Of `allocated_bytes`, the bytes in the machine's memory.
+    pub host_bytes: u64,
     /// Bytes covering positions that have really been written.
     pub used_bytes: u64,
     /// Sequence positions written across every entry and layer.
@@ -908,6 +943,14 @@ pub struct KvOccupancy {
 }
 
 impl KvOccupancy {
+    /// The allocated bytes in `home` — what a budget for that memory charges.
+    pub(crate) fn allocated_in(&self, home: KvHome) -> u64 {
+        match home {
+            KvHome::Card => self.allocated_bytes.saturating_sub(self.host_bytes),
+            KvHome::Host => self.host_bytes,
+        }
+    }
+
     /// Fraction of the reservation that holds real tokens, 0.0 when nothing is
     /// allocated. A persistently low value means the growth quantum is too
     /// coarse for the conversations this node actually serves.
@@ -930,13 +973,15 @@ impl KvCacheEntry {
             || self.ssm_states.iter().any(Option::is_some)
     }
 
-    /// Bytes this entry reserves, and how many of them hold real tokens.
+    /// Bytes this entry reserves, how many of them hold real tokens, and how
+    /// many are in host memory (`entries` = 1, no `external_bytes`).
     ///
     /// Reads the ALLOCATED buffer (`Cache::all_data`), not the used window
     /// (`Cache::current_data`), because the allocated buffer is what the
     /// process is holding — see [`KvOccupancy`].
-    pub(crate) fn occupancy(&self) -> (u64, u64, usize) {
+    pub(crate) fn occupancy(&self) -> KvOccupancy {
         let mut allocated = 0u64;
+        let mut host = 0u64;
         let mut used = 0u64;
         let mut tokens = 0usize;
         for kv in self.layers.iter().flatten() {
@@ -951,6 +996,9 @@ impl KvCacheEntry {
                 let elem = data.dtype().size_in_bytes() as u64;
                 let total = data.elem_count() as u64 * elem;
                 allocated += total;
+                if KvHome::of(data.device()) == KvHome::Host {
+                    host += total;
+                }
                 let cap = cache.max_seq_len().max(1);
                 let live = cache.current_seq_len();
                 used += total / cap as u64 * live as u64;
@@ -964,9 +1012,19 @@ impl KvCacheEntry {
                 let bytes = t.elem_count() as u64 * t.dtype().size_in_bytes() as u64;
                 allocated += bytes;
                 used += bytes;
+                if KvHome::of(t.device()) == KvHome::Host {
+                    host += bytes;
+                }
             }
         }
-        (allocated, used, tokens)
+        KvOccupancy {
+            entries: 1,
+            allocated_bytes: allocated,
+            host_bytes: host,
+            used_bytes: used,
+            tokens,
+            external_bytes: 0,
+        }
     }
 
     /// Truncate every layer's KV cache to exactly `target_len` sequence
@@ -1217,13 +1275,15 @@ impl KvCacheStore {
     /// Record that a prompt has been admitted for `bytes` it has not yet
     /// allocated. Replaces any earlier claim for the same request — a retry
     /// re-admits rather than stacking.
-    pub(crate) fn record_prompt_admission(&self, request_id: &str, bytes: u64) {
-        if bytes == 0 {
+    pub(crate) fn record_prompt_admission(&self, request_id: &str, home: KvHome, bytes: u64) {
+        let mut claim = self.admitted_claims.get(request_id).map_or([0; 2], |c| c.0);
+        claim[home.index()] = bytes;
+        if claim == [0; 2] {
             self.admitted_claims.remove(request_id);
             return;
         }
         self.admitted_claims
-            .insert(request_id.to_string(), (bytes, std::time::Instant::now()));
+            .insert(request_id.to_string(), (claim, std::time::Instant::now()));
     }
 
     /// Record that `request_id`'s prompt was admitted up front over `ranges`
@@ -1251,7 +1311,7 @@ impl KvCacheStore {
     /// the same memory. That is also what bounds the damage if a claim is ever
     /// left behind: a fully-prefilled request contributes zero whether or not
     /// anything removed its entry.
-    pub(crate) fn outstanding_admission_bytes(&self) -> u64 {
+    pub(crate) fn outstanding_admission_bytes(&self, home: KvHome) -> u64 {
         if self.admitted_claims.is_empty() {
             // The overwhelming common case — no scan at all.
             return 0;
@@ -1264,7 +1324,7 @@ impl KvCacheStore {
         let keys: Vec<(String, u64)> = self
             .caches
             .iter()
-            .map(|e| (e.key().clone(), e.value().occupancy().0))
+            .map(|e| (e.key().clone(), e.value().occupancy().allocated_in(home)))
             .collect();
         for (k, allocated) in &keys {
             if let Some(rid) = k.split('\0').nth(1) {
@@ -1278,7 +1338,7 @@ impl KvCacheStore {
                     .get(c.key().as_str())
                     .copied()
                     .unwrap_or(0);
-                c.value().0.saturating_sub(written)
+                c.value().0[home.index()].saturating_sub(written)
             })
             .sum()
     }
@@ -1324,6 +1384,7 @@ impl KvCacheStore {
     /// `claimant` is in the middle of.
     pub(crate) fn claim_room(
         &self,
+        home: KvHome,
         budget_bytes: u64,
         kv_bytes_per_token: u64,
         positions: usize,
@@ -1331,7 +1392,9 @@ impl KvCacheStore {
     ) -> Result<(), ClaimRefused> {
         use super::kv_budget::claim_exceeds_headroom;
         let claim = kv_bytes_per_token.saturating_mul(positions as u64);
-        let in_use = |occ: &KvOccupancy| occ.allocated_bytes.saturating_add(occ.external_bytes);
+        // The prefix cache's snapshots are charged where they are kept beside
+        // the live cache — a processor worker's, so `Host` — and nowhere else.
+        let in_use = |occ: &KvOccupancy| occ.allocated_in(home).saturating_add(occ.external_bytes);
         let occ = self.occupancy();
         if !claim_exceeds_headroom(budget_bytes, in_use(&occ), kv_bytes_per_token, positions) {
             return Ok(());
@@ -1361,7 +1424,7 @@ impl KvCacheStore {
                 }
                 return Err(ClaimRefused {
                     in_use_bytes: in_use(&occ),
-                    live_bytes: occ.allocated_bytes,
+                    live_bytes: occ.allocated_in(home),
                     external_bytes: occ.external_bytes,
                     entries: occ.entries,
                 });
@@ -1369,7 +1432,7 @@ impl KvCacheStore {
         }
         Err(ClaimRefused {
             in_use_bytes: in_use(&occ),
-            live_bytes: occ.allocated_bytes,
+            live_bytes: occ.allocated_in(home),
             external_bytes: occ.external_bytes,
             entries: occ.entries,
         })
@@ -1596,7 +1659,7 @@ impl KvCacheStore {
             if request == keep || entry.last_accessed.elapsed() < idle {
                 return true;
             }
-            freed = freed.saturating_add(entry.occupancy().0);
+            freed = freed.saturating_add(entry.occupancy().allocated_bytes);
             finished.push(request.to_string());
             false
         });
@@ -1644,11 +1707,12 @@ impl KvCacheStore {
     pub fn occupancy(&self) -> KvOccupancy {
         let mut out = KvOccupancy::default();
         for entry in self.caches.iter() {
-            let (allocated, used, tokens) = entry.value().occupancy();
+            let one = entry.value().occupancy();
             out.entries += 1;
-            out.allocated_bytes += allocated;
-            out.used_bytes += used;
-            out.tokens += tokens;
+            out.allocated_bytes += one.allocated_bytes;
+            out.host_bytes += one.host_bytes;
+            out.used_bytes += one.used_bytes;
+            out.tokens += one.tokens;
         }
         out.external_bytes = self
             .external_reserved
@@ -1683,7 +1747,7 @@ mod tests {
 
         // A budget of zero refuses anything, which is all this needs.
         let refused = store
-            .claim_room(0, 1024, 1, "r")
+            .claim_room(KvHome::Host, 0, 1024, 1, "r")
             .expect_err("a zero budget must refuse");
         assert_eq!(
             refused.in_use_bytes,
@@ -1953,14 +2017,14 @@ mod tests {
     fn a_prompt_admitted_but_not_yet_prefilled_is_still_charged() {
         let store = KvCacheStore::new(std::time::Duration::from_secs(600));
         assert_eq!(
-            store.outstanding_admission_bytes(),
+            store.outstanding_admission_bytes(KvHome::Host),
             0,
             "nothing admitted yet"
         );
 
-        store.record_prompt_admission("first", 4_000_000);
+        store.record_prompt_admission("first", KvHome::Host, 4_000_000);
         assert_eq!(
-            store.outstanding_admission_bytes(),
+            store.outstanding_admission_bytes(KvHome::Host),
             4_000_000,
             "a prompt that has been promised memory must be visible to the next one"
         );
@@ -1976,20 +2040,20 @@ mod tests {
         assert!(allocated > 0, "the fixture must actually allocate");
 
         // Promised twice what it has written so far.
-        store.record_prompt_admission("r", allocated * 2);
+        store.record_prompt_admission("r", KvHome::Host, allocated * 2);
         assert_eq!(
-            store.outstanding_admission_bytes(),
+            store.outstanding_admission_bytes(KvHome::Host),
             allocated,
             "only the part not yet written is still owed"
         );
 
         // Once it has written at least what it promised, it owes nothing —
         // which is also what bounds a claim nothing ever removes.
-        store.record_prompt_admission("r", allocated);
-        assert_eq!(store.outstanding_admission_bytes(), 0);
-        store.record_prompt_admission("r", allocated / 2);
+        store.record_prompt_admission("r", KvHome::Host, allocated);
+        assert_eq!(store.outstanding_admission_bytes(KvHome::Host), 0);
+        store.record_prompt_admission("r", KvHome::Host, allocated / 2);
         assert_eq!(
-            store.outstanding_admission_bytes(),
+            store.outstanding_admission_bytes(KvHome::Host),
             0,
             "saturating: a request that overshot its promise is not a credit"
         );
@@ -2000,10 +2064,10 @@ mod tests {
     #[test]
     fn finishing_a_request_releases_its_promise() {
         let store = KvCacheStore::new(std::time::Duration::from_secs(600));
-        store.record_prompt_admission("r", 4_000_000);
-        assert_eq!(store.outstanding_admission_bytes(), 4_000_000);
+        store.record_prompt_admission("r", KvHome::Host, 4_000_000);
+        assert_eq!(store.outstanding_admission_bytes(KvHome::Host), 4_000_000);
         store.clear_request("m", "r");
-        assert_eq!(store.outstanding_admission_bytes(), 0);
+        assert_eq!(store.outstanding_admission_bytes(KvHome::Host), 0);
     }
 
     /// A prompt admitted and then never prefilled at all is the one case the
@@ -2011,12 +2075,12 @@ mod tests {
     #[test]
     fn a_promise_that_was_never_taken_up_expires() {
         let store = KvCacheStore::new(std::time::Duration::from_millis(0));
-        store.record_prompt_admission("abandoned", 4_000_000);
-        assert_eq!(store.outstanding_admission_bytes(), 4_000_000);
+        store.record_prompt_admission("abandoned", KvHome::Host, 4_000_000);
+        assert_eq!(store.outstanding_admission_bytes(KvHome::Host), 4_000_000);
         std::thread::sleep(std::time::Duration::from_millis(5));
         store.cleanup_expired();
         assert_eq!(
-            store.outstanding_admission_bytes(),
+            store.outstanding_admission_bytes(KvHome::Host),
             0,
             "a claim must not outlive its request for ever"
         );
@@ -2144,22 +2208,26 @@ mod tests {
             }));
         }
         // Budget covers live + cached + a claim of 10 at 1 byte: fits, no eviction.
-        assert!(store.claim_room(live + 1000 + 10, 1, 10, "r").is_ok());
+        assert!(store
+            .claim_room(KvHome::Host, live + 1000 + 10, 1, 10, "r")
+            .is_ok());
         assert_eq!(evictor_calls.load(Ordering::Relaxed), 0);
         // 300 over: the evictor gives back 300 and the claim is admitted.
-        assert!(store.claim_room(live + 1000 + 10 - 300, 1, 10, "r").is_ok());
+        assert!(store
+            .claim_room(KvHome::Host, live + 1000 + 10 - 300, 1, 10, "r")
+            .is_ok());
         assert_eq!(store.occupancy().external_bytes, 700);
         // Now 800 over what remains: only 300 more can go; refused, naming
         // what the device still holds after the eviction.
         let refused = store
-            .claim_room(live + 700 + 10 - 800, 1, 10, "r")
+            .claim_room(KvHome::Host, live + 700 + 10 - 800, 1, 10, "r")
             .expect_err("cannot fit even with every evictable byte gone");
         assert_eq!(store.occupancy().external_bytes, 400);
         assert_eq!(refused.in_use_bytes, live + 400);
         // With no evictor installed a store refuses as it always did.
         let bare = KvCacheStore::new(std::time::Duration::from_secs(60));
         bare.set_external_reserved(1000);
-        assert!(bare.claim_room(500, 1, 10, "r").is_err());
+        assert!(bare.claim_room(KvHome::Host, 500, 1, 10, "r").is_err());
     }
 
     /// A cache for `request`, last touched `idle` ago, holding `n` positions.
@@ -2172,6 +2240,63 @@ mod tests {
         entry.last_accessed = std::time::Instant::now()
             .checked_sub(idle)
             .expect("a clock old enough to express the idle time");
+    }
+
+    /// **A budget is charged only the caches in its own memory** (#262). A
+    /// card/processor split's card budget was weighed against every layer's
+    /// cache, the processor-held layers' host memory included: a 30B split
+    /// 26/22 on an 8 GB card was refused a 2,585-token prompt "for other
+    /// conversations' 220 MB" with one live entry — its own host-side cache.
+    /// Here the store holds only host-memory caches: the card has room for
+    /// all of a claim, the machine for none of it.
+    #[test]
+    fn a_claim_is_weighed_against_the_caches_in_its_own_memory() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        conversation(&store, "split", 256, std::time::Duration::ZERO);
+        let occ = store.occupancy();
+        let host = occ.allocated_bytes;
+        assert!(host > 0);
+        assert_eq!(occ.allocated_in(KvHome::Host), host);
+        assert_eq!(occ.allocated_in(KvHome::Card), 0);
+        // A budget the live cache already fills.
+        let budget = host;
+        assert!(
+            store
+                .claim_room(KvHome::Card, budget, 1, 10, "split")
+                .is_ok(),
+            "the card holds none of these caches"
+        );
+        let refused = store
+            .claim_room(KvHome::Host, budget, 1, 10, "split")
+            .expect_err("the machine holds all of them");
+        assert_eq!(refused.live_bytes, host);
+    }
+
+    /// **A prompt's promise is kept per memory, and drawn down only by what
+    /// it has written THERE** (#262): a split's card promise must not be paid
+    /// off by its host-side caches, nor its host promise by the card's.
+    #[test]
+    fn an_admission_promise_is_kept_and_drawn_down_per_memory() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        store.record_prompt_admission("r", KvHome::Card, 4_000_000);
+        store.record_prompt_admission("r", KvHome::Host, 2_000_000);
+        assert_eq!(store.outstanding_admission_bytes(KvHome::Card), 4_000_000);
+        assert_eq!(store.outstanding_admission_bytes(KvHome::Host), 2_000_000);
+        // The request writes host-memory caches: only the host promise shrinks.
+        conversation(&store, "r", 256, std::time::Duration::ZERO);
+        let written = store.occupancy().allocated_in(KvHome::Host);
+        assert!(written > 0 && written < 2_000_000);
+        assert_eq!(store.outstanding_admission_bytes(KvHome::Card), 4_000_000);
+        assert_eq!(
+            store.outstanding_admission_bytes(KvHome::Host),
+            2_000_000 - written
+        );
+        // Withdrawing one memory's promise keeps the other's.
+        store.record_prompt_admission("r", KvHome::Card, 0);
+        assert_eq!(store.outstanding_admission_bytes(KvHome::Card), 0);
+        assert!(store.outstanding_admission_bytes(KvHome::Host) > 0);
+        store.cleanup_request_id("r");
+        assert_eq!(store.outstanding_admission_bytes(KvHome::Host), 0);
     }
 
     /// **A conversation that is over gives its room to one that is not**
@@ -2192,7 +2317,9 @@ mod tests {
         store.set_reserved_positions("ended", 1024);
         // Room for both caches only: a claim of 10 more bytes does not fit
         // until the ended conversation goes.
-        assert!(store.claim_room(2 * one, 1, 10, "live").is_ok());
+        assert!(store
+            .claim_room(KvHome::Host, 2 * one, 1, 10, "live")
+            .is_ok());
         let occ = store.occupancy();
         assert_eq!(
             occ.entries, 1,
@@ -2210,7 +2337,9 @@ mod tests {
         let busy = KvCacheStore::new(std::time::Duration::from_secs(600));
         conversation(&busy, "other", 4, gap / 2);
         conversation(&busy, "live", 4, std::time::Duration::ZERO);
-        assert!(busy.claim_room(2 * one, 1, 10, "live").is_err());
+        assert!(busy
+            .claim_room(KvHome::Host, 2 * one, 1, 10, "live")
+            .is_err());
         assert_eq!(busy.occupancy().entries, 2);
 
         // The claimant's own cache stays, however long it was silent.

@@ -651,14 +651,10 @@ impl SplitModel {
             device.is_cuda(),
             segment_layer_count,
         );
-        // KV bytes per position ON `device`, needed by both devices' guards
-        // below — a card's guard must not count the cache of layers it
-        // does not hold.
-        let per_token = {
-            // The layers on `device` that keep a KV cache — not a recurrent
-            // layer's fixed state (`split::layers_keeping_kv`).
-            let seg_layers =
-                super::layers_keeping_kv(&ct, layer_start, layer_start + device_layers);
+        // KV bytes per position over layers `from..to` kept on a card or on
+        // the processor — not a recurrent layer's fixed state
+        // (`split::layers_keeping_kv`).
+        let kv_per_token_over = {
             let (k_elems, v_elems) = if matches!(model_arch, ModelArch::DeepSeek2) {
                 let key_length = md_get("attention.key_length")
                     .and_then(|v| v.to_u32().map_err(SwarmError::internal))
@@ -672,19 +668,67 @@ impl SplitModel {
             } else {
                 super::kv_budget::standard_kv_elems(head_count_kv, head_dim)
             };
-            // How the cache on `device` is kept — the half cache on a card, f32
-            // (plus the flash mirror for a grouped-query model where the half
-            // cache does not apply) otherwise, f32 for MLA — asked of the ONE
-            // rule the cache itself is built by (`layers::kv_storage`).
-            let storage = crate::inference::layers::kv_storage(
-                device.is_cuda(),
-                crate::inference::layers::KvAttention::of(&model_arch),
-                head_count,
-                head_count_kv,
-                head_dim,
-            );
-            super::kv_budget::kv_bytes_per_token(seg_layers, k_elems, v_elems, storage)
+            let attention = crate::inference::layers::KvAttention::of(&model_arch);
+            let ct = &ct;
+            move |from: usize, to: usize, on_card: bool| {
+                // How the cache is kept — the half cache on a card, f32 (plus
+                // the flash mirror for a grouped-query model where the half
+                // cache does not apply) otherwise, f32 for MLA — asked of the
+                // ONE rule the cache itself is built by (`layers::kv_storage`).
+                let storage = crate::inference::layers::kv_storage(
+                    on_card,
+                    attention,
+                    head_count,
+                    head_count_kv,
+                    head_dim,
+                );
+                super::kv_budget::kv_bytes_per_token(
+                    super::layers_keeping_kv(ct, from, to),
+                    k_elems,
+                    v_elems,
+                    storage,
+                )
+            }
         };
+        // KV bytes per position ON `device`, needed by both devices' guards
+        // below — a card's guard must not count the cache of layers it
+        // does not hold.
+        let per_token =
+            kv_per_token_over(layer_start, layer_start + device_layers, device.is_cuda());
+        // A card/processor split's OTHER memory (#262): the processor-held
+        // layers keep their caches in the machine's, which the card's budget
+        // neither covers nor may be charged with. The daemon's figure when it
+        // handed one (`--kv-budget-bytes`), else what the machine has
+        // available less the margin — the same bound a processor worker is
+        // held to as the machine fills (`budget_reconciled_with_device`, every
+        // claim). Ollama weighs a split's processor share against the
+        // machine's memory the same way (`llm/server.go`).
+        let mut host_kv_budget_bytes: Option<u64> = None;
+        let mut host_kv_bytes_per_token: u64 = 0;
+        if device.is_cuda() && device_layers < segment_layer_count {
+            host_kv_bytes_per_token = kv_per_token_over(
+                layer_start + device_layers,
+                layer_start + segment_layer_count,
+                false,
+            );
+            host_kv_budget_bytes = super::cpu_kv_budget_bytes().or_else(|| {
+                super::kv_budget::host_free_and_total_bytes().map(|(available, total)| {
+                    available.saturating_sub(super::kv_budget::device_free_margin_bytes(total))
+                })
+            });
+            if let Some(budget) = host_kv_budget_bytes {
+                tracing::info!(
+                    processor_layers = segment_layer_count - device_layers,
+                    budget_mb = budget / (1024 * 1024),
+                    kv_bytes_per_token = host_kv_bytes_per_token,
+                    affordable_tokens = budget
+                        .checked_div(host_kv_bytes_per_token)
+                        .map_or(context_length, |t| t as usize),
+                    "Card/processor split: the processor-held layers' conversation cache is \
+                     charged to this machine's memory, the card-held layers' to the card"
+                );
+            }
+        }
         if device.is_cuda() {
             let rows_on_demand = ct
                 .tensor_infos
@@ -2286,6 +2330,8 @@ impl SplitModel {
             masks: None,
             kv_budget_bytes,
             kv_bytes_per_token,
+            host_kv_budget_bytes,
+            host_kv_bytes_per_token,
             layer_start,
             layer_end,
             total_layers: block_count,

@@ -851,34 +851,43 @@ impl SplitModel {
         let kv_reserve = kv_cache_store
             .reserved_positions(request_id)
             .min(self.max_seq_len);
-        if let Some(load_time_budget) = self.kv_budget_bytes {
+        // Every memory this segment's caches live in is asked — the card's,
+        // and a card/processor split's machine memory too, each with its own
+        // layers' bytes (#262).
+        let mut claiming_once: Option<usize> = None;
+        for home in self.kv_homes() {
+            let (Some(load_time_budget), per_token) = self.kv_budget(home) else {
+                continue;
+            };
             // Positions this forward newly ALLOCATES — zero for almost every
             // decode step, and a whole prompt's worth on a prefill. Read off
             // the buffer the request already holds, not derived from
             // `index_pos`: a reserved cache is larger than the rounded
             // position from its first append, and the old arithmetic charged
             // a reply at every quantum boundary inside memory it already had.
-            let claiming = super::kv_budget::positions_to_allocate(
-                kv_cache_store.allocated_positions(&cache_key),
-                kv_reserve,
-                total_seq,
-                crate::inference::layers::kv_growth_quantum(self.max_seq_len),
-            );
+            let claiming = *claiming_once.get_or_insert_with(|| {
+                super::kv_budget::positions_to_allocate(
+                    kv_cache_store.allocated_positions(&cache_key),
+                    kv_reserve,
+                    total_seq,
+                    crate::inference::layers::kv_growth_quantum(self.max_seq_len),
+                )
+            });
             if claiming > 0 {
-                // The budget as the card can honour it at this moment — the
+                // The budget as the device can honour it at this moment — the
                 // load-time figure capped by what the device actually has
                 // left (`kv_budget_now`). Asked only here, at a growth
                 // boundary, so the device query stays off the per-token path.
                 let occ = kv_cache_store.occupancy();
                 let budget = self
-                    .kv_budget_now(occ.allocated_bytes, occ.external_bytes)
+                    .kv_budget_now(home, occ.allocated_in(home), occ.external_bytes)
                     .0
                     .unwrap_or(load_time_budget);
                 // Live caches PLUS the prefix cache's snapshots: the same
                 // device memory, and charged nowhere until gotcha #440 —
                 // and evictable, which `claim_room` does before refusing.
                 if let Err(refused) =
-                    kv_cache_store.claim_room(budget, self.kv_bytes_per_token, claiming, request_id)
+                    kv_cache_store.claim_room(home, budget, per_token, claiming, request_id)
                 {
                     let in_use = refused.in_use_bytes;
                     // Whether OTHER conversations hold the room this one needs
@@ -888,10 +897,9 @@ impl SplitModel {
                     // is helped by a shorter one, one that met other live
                     // chats only by waiting.
                     let own = (kv_cache_store.allocated_positions(&cache_key) as u64)
-                        .saturating_mul(self.kv_bytes_per_token);
+                        .saturating_mul(per_token);
                     let others = refused.live_bytes.saturating_sub(own);
-                    let wanted = own
-                        .saturating_add((claiming as u64).saturating_mul(self.kv_bytes_per_token));
+                    let wanted = own.saturating_add((claiming as u64).saturating_mul(per_token));
                     let busy = others > 0 && wanted <= budget;
                     // Decomposed, because the total is store-wide and reads as
                     // if it were this request's. `entries > 1` says outright
@@ -906,6 +914,7 @@ impl SplitModel {
                         snapshots_mb = refused.external_bytes / (1024 * 1024),
                         live_entries = refused.entries,
                         budget_mb = budget / (1024 * 1024),
+                        memory = ?home,
                         "DIAG: refusing to grow the KV cache past this worker's budget"
                     );
                     // Give back what THIS request already took.
