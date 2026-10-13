@@ -1223,7 +1223,21 @@ capture**: a stacked layer has
 no host copy, so a MoE model whole on a card could be captured (`executor.rs` still excludes
 MoE as unchecked; a 26/22 split stays uncaptured regardless). (3) **the gap to llama.cpp at
 the experts-in-RAM placement** (40 vs 29 ms in stage A's rig): the processor's 23-25 layers of
-experts take 21.6-31.8 ms of a step at the default 4 decode threads. Seen, not chased: the first 1-2 decode
+experts take 21.6-31.8 ms of a step at the default 4 decode threads. **Attributed 2026-10-14**
+(`~/swarmllm-138f/prof.sh`, `test-split --cpu-moe-layers 25`, 64 tokens, median of 60 steps; the
+new profile sub-stage `of which: the processor's expert products` splits the products from the
+routing, the copies and the wait around them): unsynced 39-40 ms a step at 4 threads, 37 at 8;
+the products **19.2-19.4 ms at 4 threads, 14.5 at 8** — level with llama.cpp's ~0.8 ms a layer —
+and the rest of the processor stage 5.2 ms (the copies, the top-k, the combine, and the wait for
+the card's queued work at the copy). The card stages cost ~15 ms of HOST time unsynced: kernels
+enqueued one by one, because a step with experts in RAM is never captured
+(`decode_graph_ineligibility`: MoE). Synced (`SWARMLLM_PROFILE_SYNC=1`) 58 / 54 ms, products
+16.1 / 15.5. llama.cpp 4b1a27f at the same placement, `-t 4`: tg64 32.57 ± 2.58 (30.7 ms); its
+CUDA graphs off vs on (`GGML_CUDA_DISABLE_GRAPHS=1`, 3 interleaved rounds, `graphs.sh`) 26.5 / 30.0
+/ 30.4 against 37.0 / 36.0 / 29.7 tok/s, ± up to 16 on a busy host — leaning, not decisive.
+**Next: capture the card's part of such a step in groups cut at each processor section** (the
+copies out, the products, the copy back stay uncaptured; a pageable copy inside a capture is
+garbage), as llama.cpp captures each CUDA split. Seen, not chased: the first 1-2 decode
 steps after a 681-token single-forward prompt took 2-4x a settled step on both the stacked
 and per-expert paths (not after a one-row prompt) — prompt temporaries pressing card memory
 is the likely reading; a node chunks card prompts at 512 tokens.

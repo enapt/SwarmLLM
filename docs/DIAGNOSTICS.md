@@ -1696,6 +1696,12 @@ keeping the routed experts of the first K in the machine's memory`, the worker
 runs with `--gpu-layers -1 --cpu-moe-layers K`, and `/v1/status`'s `workers`
 and the models list carry `expert_layers_in_ram`. A/B inside one binary:
 `SWARMLLM_EXPERTS_IN_RAM=0` on the DAEMON places it by whole layers instead.
+Under the processor stage, `of which: the processor's expert products` (left out
+of the sum) is the products alone; the remainder is the routing, the copies
+between the card and the machine and — unsynced — the wait for the card's
+queued work at the first copy. Without `SWARMLLM_PROFILE_SYNC=1` the CARD stages
+of such a step measure the host enqueueing kernels, not the card running them
+(2026-10-14: ~15 ms of a 40 ms step, #138 (3)).
 Before 2026-10-11 its whole expert feed-forward sat in `unattributed`, ~80% of a
 step. On a card, run it once with `SWARMLLM_PROFILE_SYNC=1` too. With the experts
 kept stacked (the default since 2026-10-11) nothing in the layer waits for the

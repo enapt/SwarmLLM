@@ -43,6 +43,11 @@ stages! {
     // layer keeping its experts in RAM (#138 (3)) is the processor's.
     MoeCard    => "moe ffn on the card  (route + experts + combine)",
     MoeCpu     => "moe ffn on the processor (route + experts + combine)",
+    // Inside `MoeCpu`, so left out of the sum: the processor's expert
+    // products alone, without the routing and the activation's trips between
+    // the card and the machine that a card layer keeping its experts in RAM
+    // makes around them (#138 (3)).
+    MoeCpuProducts => "  of which: the processor's expert products",
     // A prompt's RAM-held experts — a processor layer's, or a card layer's kept
     // in RAM — sent to the card and run there (FUTURE_WORK #138 (1)): routing,
     // the copies and the products.
@@ -217,10 +222,14 @@ pub(crate) fn dump_kernel_launches(seq_len: usize, index_pos: usize, num_layers:
 pub(crate) fn dump_and_reset(tag: &str, total_ms: f64, card: Option<&candle_core::Device>) {
     let vals: Vec<u64> = ACC.iter().map(|a| a.swap(0, Ordering::Relaxed)).collect();
     // A nested stage is already inside another one's time.
+    let nested = [
+        Stage::WeightsToCard as usize,
+        Stage::MoeCpuProducts as usize,
+    ];
     let summed: u64 = vals
         .iter()
         .enumerate()
-        .filter(|&(i, _)| i != Stage::WeightsToCard as usize)
+        .filter(|&(i, _)| !nested.contains(&i))
         .map(|(_, v)| v)
         .sum();
     let total_ns = total_ms * 1e6;

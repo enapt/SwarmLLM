@@ -1674,10 +1674,17 @@ impl MoeFfn {
         } else {
             x_flat.clone()
         };
-        let routed = if self.experts_fit_one_region(&x_here, &expert_batches) {
-            self.experts_in_one_region(&x_here, &expert_batches, num_tokens, hidden)?
+        let products = || {
+            if self.experts_fit_one_region(&x_here, &expert_batches) {
+                self.experts_in_one_region(&x_here, &expert_batches, num_tokens, hidden)
+            } else {
+                self.experts_one_at_a_time(&x_here, &expert_batches, num_tokens, hidden)
+            }
+        };
+        let routed = if experts_here {
+            crate::inference::prof::timed!(P::MoeCpuProducts, products()?)
         } else {
-            self.experts_one_at_a_time(&x_here, &expert_batches, num_tokens, hidden)?
+            products()?
         };
         self.add_shared_expert(&x_flat, routed.to_device(x_flat.device())?)?
             .reshape((b_sz, seq_len, hidden))
