@@ -2025,7 +2025,15 @@ grep `^| N |`).
   while the 14B answered `route=local segments=1` with it off. Both now ask
   `SharedState::parts_missing_here` (manifest, the registry's holdings, the files), and the
   refusal names the parts this computer lacks. Test
-  `a_kept_model_held_whole_runs_here_without_a_registration` (red with the old gate).
+  `a_kept_model_held_whole_runs_here_without_a_registration` (red with the old gate). The same
+  tester's follow-up that day found the same gate on a model that FITS the card: Mistral 7B (9/9
+  parts) read `whole_model_here: false` and was refused in 70 ms while Ollama held ~9.6 GB of a
+  12 GB card, and ran once it let go — the registration follows the card's free memory when the
+  scan looks. Reproduced on the real path (`~/swarmllm-260/keep.sh`, `HOLD_FIRST=1`: 5,000 MB held
+  before the node starts, Windows up 11.5 h): v0.3.236 answered `false` and refused in 204 ms with
+  the report's sentence; this fix answered `true` and replied here as a card/processor split (6 of
+  32 layers on the card, 21 s with the load), then whole on the card once the hold was gone
+  (0.75 s for 32 tokens), the reply the same.
 - #260 — **a model squeezed off the graphics card by another program moves back to the card,
   whole, once that program lets go.** Two halves. (1) The promotion check weighed the card
   budget the last ADMISSION had stored, so a model refused the card while (in the report)
@@ -2042,7 +2050,10 @@ grep `^| N |`).
   card could ever give (`vram_budget_ceiling`) is never weighed, so a 14B split on an 8 GB card
   reads nothing. Tests `a_split_worker_moves_whole_once_the_card_has_room`,
   `a_split_worker_counts_its_own_share_of_the_card`,
-  `a_model_larger_than_the_card_could_ever_give_is_not_weighed`.
+  `a_model_larger_than_the_card_could_ever_give_is_not_weighed`. On the real path
+  (`~/swarmllm-260/keep.sh`, Mistral 7B kept here, split 6 of 32 beside a 5,000 MB hold): once
+  the hold was released this fix moved it whole to the card (`admitting model to GPU`, 0.74 s for
+  32 tokens); v0.3.236 left it split (7.7 s, twice).
 - #257 — **under WSL2, a long prompt after a node's first no longer waits seconds on the graphics
   card before it is read.** With the prefix cache on, each long prompt ended by keeping a copy of
   its conversation memory on the card (264 MB for a ~4,800-token prompt on a 7B). Held between
