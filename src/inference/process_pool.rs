@@ -3854,8 +3854,16 @@ impl ModelProcessPool {
     /// Mistral-7B "did not fit", was bounded by RAM alone at 29 of 32 layers,
     /// and went through Italy at 47 s — on v0.3.225, whose #129 fix lived in
     /// the card branch this path never took (2026-10-05).
-    pub fn max_hostable_layers_for_planning(&self, model_id: &ModelId) -> Option<u32> {
-        self.max_local_hostable_layers(model_id, self.planning_on_card(model_id))
+    ///
+    /// `requester` is whose request is being planned
+    /// (`pipeline::requester_for_override`): a processor placement is bounded
+    /// by THEIR memory cap, as the spawn will weigh it (#266).
+    pub fn max_hostable_layers_for_planning(
+        &self,
+        model_id: &ModelId,
+        requester: Requester,
+    ) -> Option<u32> {
+        self.max_local_hostable_layers(model_id, self.planning_on_card(model_id), requester)
     }
 
     /// The ranges a live worker of `model_id` already holds, on the same device
@@ -4306,18 +4314,31 @@ impl ModelProcessPool {
         let _ = self.ram_budget_provider.set(provider);
     }
 
-    /// The RAM budget to judge an admission against, RIGHT NOW. `None` = do
-    /// not judge (no cap derivable, and none stored).
-    fn ram_budget_now(&self) -> Option<crate::model::auto_manage::vram::RamBudget> {
+    /// The RAM budget to judge an admission for `requester` against, RIGHT
+    /// NOW. `None` = do not judge (no cap derivable, and none stored).
+    ///
+    /// `requester` is REQUIRED (#266): the contribution level caps the swarm's
+    /// work, and since #264 charged a card/processor split's processor share,
+    /// its cap — 31% of RAM on a default node with a card — refused the
+    /// owner's own 30B that v0.3.236 ran. Every reader of this budget — the
+    /// spawn's admission, its reclaim, the processor-side cache grant and the
+    /// planner's bound on this node — names whose request it weighs, through
+    /// [`crate::model::auto_manage::vram::RamBudget::judging`].
+    fn ram_budget_now(
+        &self,
+        requester: Requester,
+    ) -> Option<crate::model::auto_manage::vram::RamBudget> {
         if let Some(p) = self.ram_budget_provider.get() {
-            return p();
+            return p().map(|b| b.judging(requester));
         }
         match self
             .ram_budget_mb
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             0 => None,
-            cap => Some(crate::model::auto_manage::vram::RamBudget::cap_only(cap)),
+            cap => {
+                Some(crate::model::auto_manage::vram::RamBudget::cap_only(cap).judging(requester))
+            }
         }
     }
 
@@ -4356,8 +4377,13 @@ impl ModelProcessPool {
     /// so its runtime guard refuses a conversation that would outgrow the
     /// room, with a 503 that re-routes, instead of swapping the machine.
     /// No budget configured → no guard (the pre-2026-08-21 behaviour).
-    fn record_cpu_kv_budget(&self, model_id: &ModelId, segment: Option<(u32, u32)>) {
-        let Some(budget) = self.ram_budget_now() else {
+    fn record_cpu_kv_budget(
+        &self,
+        model_id: &ModelId,
+        segment: Option<(u32, u32)>,
+        requester: Requester,
+    ) {
+        let Some(budget) = self.ram_budget_now(requester) else {
             self.cpu_kv_budget_bytes.remove(model_id);
             return;
         };
@@ -4389,8 +4415,8 @@ impl ModelProcessPool {
     /// the alternative is swapping, which does not merely slow this model down
     /// but degrades every other request on the machine, and does so without
     /// anything in the API response explaining why.
-    fn admit_to_cpu(&self, model_id: &ModelId, estimated_mb: u64) -> bool {
-        let Some(budget) = self.ram_budget_now() else {
+    fn admit_to_cpu(&self, model_id: &ModelId, estimated_mb: u64, requester: Requester) -> bool {
+        let Some(budget) = self.ram_budget_now(requester) else {
             // No budget derivable: preserve the previous behaviour rather than
             // inventing a limit.
             add_reserved(&self.ram_reserved_mb, model_id, estimated_mb);
@@ -4462,14 +4488,19 @@ impl ModelProcessPool {
     /// which is a preference; this runs only when the alternative is failing
     /// the request outright, and a worker respawns on its next use. Returns the
     /// megabytes reclaimed.
-    async fn free_ram_for_admission(&self, exclude: &ModelId, needed_mb: u64) -> u64 {
-        if self.ram_budget_now().is_none() {
+    async fn free_ram_for_admission(
+        &self,
+        exclude: &ModelId,
+        needed_mb: u64,
+        requester: Requester,
+    ) -> u64 {
+        if self.ram_budget_now(requester).is_none() {
             return 0;
         }
         let mut freed = 0u64;
         // Re-read each round: unloading a model frees real memory, which the
         // live headroom sees.
-        while let Some(budget) = self.ram_budget_now() {
+        while let Some(budget) = self.ram_budget_now(requester) {
             let committed = self.ram_committed_mb();
             if budget.allows(committed, needed_mb) {
                 break;
@@ -4543,6 +4574,7 @@ impl ModelProcessPool {
         model_id: &ModelId,
         segment: (u32, u32),
         handle: &Arc<WorkerHandle>,
+        requester: Requester,
     ) -> Result<(), GrowthRefused> {
         // Serialised against spawns for the same read-decide-charge atomicity
         // the admission gates already rely on.
@@ -4581,7 +4613,7 @@ impl ModelProcessPool {
         let admitted = if on_gpu {
             self.admit_to_gpu(model_id, net_mb)
         } else {
-            self.admit_to_cpu(model_id, net_mb)
+            self.admit_to_cpu(model_id, net_mb, requester)
         };
         if !admitted {
             // Its own variant, not `ServiceUnavailable`, for the same reason
@@ -4690,9 +4722,10 @@ impl ModelProcessPool {
         model_id: &ModelId,
         segment: (u32, u32),
         handle: Arc<WorkerHandle>,
+        requester: Requester,
     ) -> Result<Growth, SwarmError> {
         let mut refused = match self
-            .charge_additional_segment(model_id, segment, &handle)
+            .charge_additional_segment(model_id, segment, &handle, requester)
             .await
         {
             Ok(()) => return Ok(Growth::Grown(handle)),
@@ -4715,7 +4748,7 @@ impl ModelProcessPool {
                  take on the range asked for"
             );
             refused = match self
-                .charge_additional_segment(model_id, segment, &handle)
+                .charge_additional_segment(model_id, segment, &handle, requester)
                 .await
             {
                 Ok(()) => return Ok(Growth::Grown(handle)),
@@ -4970,7 +5003,12 @@ impl ModelProcessPool {
     /// `None` means unknowable — no budget, or geometry that could not be read
     /// — and never "no room", the same reading `max_hostable_layers` gives an
     /// unreadable peer.
-    pub fn max_local_hostable_layers(&self, model_id: &ModelId, on_gpu: bool) -> Option<u32> {
+    pub fn max_local_hostable_layers(
+        &self,
+        model_id: &ModelId,
+        on_gpu: bool,
+        requester: Requester,
+    ) -> Option<u32> {
         let (fixed_mb, per_layer_mb) = self.segment_cost_curve(model_id, on_gpu)?;
         // A live worker on this device has already paid the fixed terms, and
         // `charge_additional_segment` charges only the LAYERS of a further
@@ -5001,7 +5039,7 @@ impl ModelProcessPool {
                 .saturating_add(self.idle_vram_reclaimable_mb(model_id))
                 .min(budget)
         } else {
-            let budget = self.ram_budget_now()?;
+            let budget = self.ram_budget_now(requester)?;
             budget.headroom_after(self.ram_committed_mb(), 0)
         };
         // The fixed terms are paid once, whatever the segment's length.
@@ -5015,8 +5053,10 @@ impl ModelProcessPool {
     ///
     /// **A model that does not fit the card whole is not refused by the loader
     /// — it is split** (`partial_gpu_layers`: its first layers on the card, the
-    /// rest on the processor, whose share is not charged against the RAM
-    /// budget). Counting the card alone, the planner was told this node could
+    /// rest — or a mixture-of-experts model's experts — on the processor, that
+    /// share charged at the spawn to the requester's memory cap, #264/#266; a
+    /// refusal there re-plans with no fresh-worker split,
+    /// `local_layers_refused_for_request`). Counting the card alone, the planner was told this node could
     /// hold 17 of a cold Mistral-7B's 32 layers, declared "a pipeline is the
     /// only route", and sent it through Italy at 44.7 s — having priced this
     /// node at 16.8 s against that chain's 29.8 (2026-10-04; warm, the same
@@ -5554,10 +5594,18 @@ impl ModelProcessPool {
 
     /// [`Self::admit_to_gpu_as`] for the RAM budget: reclaim memory from
     /// unused models, then ask again — unless `tenancy` is a guest's.
-    async fn admit_to_cpu_as(&self, model_id: &ModelId, estimated: u64, tenancy: Tenancy) -> bool {
-        let mut admitted = self.admit_to_cpu(model_id, estimated);
+    async fn admit_to_cpu_as(
+        &self,
+        model_id: &ModelId,
+        estimated: u64,
+        tenancy: Tenancy,
+        requester: Requester,
+    ) -> bool {
+        let mut admitted = self.admit_to_cpu(model_id, estimated, requester);
         if !admitted && tenancy == Tenancy::Tenant {
-            let freed = self.free_ram_for_admission(model_id, estimated).await;
+            let freed = self
+                .free_ram_for_admission(model_id, estimated, requester)
+                .await;
             if freed > 0 {
                 tracing::info!(
                     model = %model_id,
@@ -5565,7 +5613,7 @@ impl ModelProcessPool {
                     "Reclaimed memory from unused models; retrying admission"
                 );
             }
-            admitted = self.admit_to_cpu(model_id, estimated);
+            admitted = self.admit_to_cpu(model_id, estimated, requester);
         }
         admitted
     }
@@ -5575,19 +5623,25 @@ impl ModelProcessPool {
     /// model, and its `models` map is keyed by layer range — so a worker can
     /// come to hold SEVERAL segments of one model, and each is charged as it is
     /// first asked for. See [`Self::charge_additional_segment`].
-    /// `tenancy` says whether it may take memory from other models to do it.
+    /// `tenancy` says whether it may take memory from other models to do it,
+    /// and `requester` whose memory cap a load into system memory is weighed
+    /// against (`Self::ram_budget_now`, #266).
     async fn get_or_spawn(
         &self,
         model_id: &ModelId,
         segment: (u32, u32),
         tenancy: Tenancy,
+        requester: Requester,
     ) -> Result<Arc<WorkerHandle>, SwarmError> {
         // A round ends without a worker only when another task put one in the
         // map, while this one waited for the spawn lock, that does not hold this
         // range — the next round grows it through the fast path. Bounded, so
         // contention cannot spin; running out is a local lifecycle failure.
         for _ in 0..GET_OR_SPAWN_ROUNDS {
-            if let Some(handle) = self.get_or_spawn_once(model_id, segment, tenancy).await? {
+            if let Some(handle) = self
+                .get_or_spawn_once(model_id, segment, tenancy, requester)
+                .await?
+            {
                 return Ok(handle);
             }
         }
@@ -5604,6 +5658,7 @@ impl ModelProcessPool {
         model_id: &ModelId,
         segment: (u32, u32),
         tenancy: Tenancy,
+        requester: Requester,
     ) -> Result<Option<Arc<WorkerHandle>>, SwarmError> {
         let guest = tenancy == Tenancy::Guest;
         // Fast path: worker already exists — and, unless this node demoted it
@@ -5651,7 +5706,10 @@ impl ModelProcessPool {
                 // about to load more weights, so weigh them first — and where
                 // the card will not take them, reclaim or replace the worker
                 // rather than refuse (`grow_worker`).
-                match self.grow_worker(model_id, segment, handle).await? {
+                match self
+                    .grow_worker(model_id, segment, handle, requester)
+                    .await?
+                {
                     Growth::Grown(handle) => return Ok(Some(handle)),
                     // Retired: fall through to the slow path, which spawns.
                     Growth::Respawn => {}
@@ -5936,7 +5994,9 @@ impl ModelProcessPool {
             // Refusing is the last resort: first reclaim memory from models
             // nothing is using, then ask again (`admit_to_cpu_as`, a tenant's
             // only). Only then does the user see an error.
-            let admitted = self.admit_to_cpu_as(model_id, estimated, tenancy).await;
+            let admitted = self
+                .admit_to_cpu_as(model_id, estimated, tenancy, requester)
+                .await;
             if admitted {
                 charged_ram_mb = estimated;
             }
@@ -5961,7 +6021,7 @@ impl ModelProcessPool {
                 // The figure the model was judged against RIGHT NOW, and why —
                 // the cap, or the live anti-swap headroom.
                 let (budget, note) = self
-                    .ram_budget_now()
+                    .ram_budget_now(requester)
                     .map(|b| b.limiting_figure(in_use, estimated))
                     .unwrap_or_else(|| {
                         (
@@ -6014,7 +6074,7 @@ impl ModelProcessPool {
             // A conversation cache on the processor needs its grant; experts
             // kept in RAM leave every cache on the card.
             if let RamShare::Layers(run) = ram_share {
-                self.record_cpu_kv_budget(model_id, Some(run));
+                self.record_cpu_kv_budget(model_id, Some(run), requester);
             }
         }
 
@@ -6792,7 +6852,7 @@ impl ModelProcessPool {
         // gone.
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
         let handle = self
-            .get_or_spawn(&model_id, forward.layer_range, Tenancy::Tenant)
+            .get_or_spawn(&model_id, forward.layer_range, Tenancy::Tenant, requester)
             .await;
         self.note_load_refusal(forward.request_id, &model_id, forward.layer_range, &handle);
         let handle = handle?;
@@ -6991,8 +7051,11 @@ impl ModelProcessPool {
         let model_id = d.model_id.clone();
         let request_id = d.request_id;
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
+        // Weighed against the swarm's memory cap whoever's reply it guesses
+        // for: a guest takes only what stands free, and the owner's larger cap
+        // (#266) is kept for the models the owner asks for.
         let handle = self
-            .get_or_spawn(&model_id, d.layer_range, Tenancy::Guest)
+            .get_or_spawn(&model_id, d.layer_range, Tenancy::Guest, Requester::Swarm)
             .await?;
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
         if handle.dead.load(Ordering::Acquire) {
@@ -7082,9 +7145,17 @@ impl ModelProcessPool {
             ));
         }
         // Every forward in a batch shares a model AND a layer range — see
-        // `batch_eligible`, which is what put them in one batch.
+        // `batch_eligible`, which is what put them in one batch. A batch is
+        // decode steps whose prompt passes loaded this worker, and it does not
+        // say whose requests it carries, so a load here (the worker went
+        // between them) is weighed as the swarm's — the narrower cap (#266).
         let handle = self
-            .get_or_spawn(&model_id, forwards[0].layer_range, Tenancy::Tenant)
+            .get_or_spawn(
+                &model_id,
+                forwards[0].layer_range,
+                Tenancy::Tenant,
+                Requester::Swarm,
+            )
             .await;
         for f in &forwards {
             self.note_load_refusal(f.request_id, &model_id, f.layer_range, &handle);
@@ -7357,7 +7428,7 @@ impl ModelProcessPool {
         emitted: &std::sync::atomic::AtomicBool,
     ) -> Result<crate::inference::router::InferenceOutput, SwarmError> {
         let handle = self
-            .get_or_spawn(model_id, layer_range, Tenancy::Tenant)
+            .get_or_spawn(model_id, layer_range, Tenancy::Tenant, requester)
             .await;
         self.note_load_refusal(request_id, model_id, layer_range, &handle);
         let handle = handle?;
@@ -8568,7 +8639,10 @@ mod tests {
         mb: u64,
         dead_now: bool,
     ) -> Arc<WorkerHandle> {
-        assert!(p.admit_to_cpu(m, mb), "the model must be admitted");
+        assert!(
+            p.admit_to_cpu(m, mb, Requester::Swarm),
+            "the model must be admitted"
+        );
         let h = fake_worker_handle(dead_now).await;
         h.charged_mb.store(mb, Ordering::Release);
         p.workers.insert(m.clone(), h.clone());
@@ -8663,7 +8737,7 @@ mod tests {
         // and recorded at ZERO, exactly as `get_or_spawn` records it.
         let h = admit_and_insert_cpu_worker(pool, model, 250, false).await;
         h.record_charged_segment((0, 2), 0);
-        pool.charge_additional_segment(model, (14, 40), &h)
+        pool.charge_additional_segment(model, (14, 40), &h, Requester::Swarm)
             .await
             .expect("26 more layers fit the budget");
         assert_eq!(pool.ram_committed_mb(), 2850, "fixture: 250 + 26 x 100");
@@ -8687,7 +8761,7 @@ mod tests {
         pool.set_ram_budget_mb(4300);
         let h = worker_holding_both_ends(&pool, &model).await;
 
-        pool.charge_additional_segment(&model, (0, 40), &h)
+        pool.charge_additional_segment(&model, (0, 40), &h, Requester::Swarm)
             .await
             .expect("the peak after the drop fits, so the range is admitted");
 
@@ -8718,7 +8792,7 @@ mod tests {
         let h = worker_holding_both_ends(&pool, &model).await;
 
         let refused = pool
-            .charge_additional_segment(&model, (0, 40), &h)
+            .charge_additional_segment(&model, (0, 40), &h, Requester::Swarm)
             .await
             .expect_err("2850 + 1400 > 4000");
         assert!(!refused.on_gpu, "weighed by the budget its spawn charged");
@@ -8942,13 +9016,13 @@ mod tests {
 
         // The control: growth ALONE refuses — the live node's answer.
         let refused = pool
-            .charge_additional_segment(&wanted, (0, 32), &h)
+            .charge_additional_segment(&wanted, (0, 32), &h, Requester::Swarm)
             .await
             .expect_err("3638 + 5440 > 6000 with the idle model still resident");
         assert!(refused.on_gpu);
 
         match pool
-            .grow_worker(&wanted, (0, 32), h.clone())
+            .grow_worker(&wanted, (0, 32), h.clone(), Requester::Swarm)
             .await
             .expect("the idle model's room is enough")
         {
@@ -9005,11 +9079,18 @@ mod tests {
         let drafter = ModelId("drafter-0.5b".into());
         admit_and_insert_cpu_worker(&pool, &target, 6000, false).await;
 
-        assert!(!pool.admit_to_cpu_as(&drafter, 3000, Tenancy::Guest).await);
+        assert!(
+            !pool
+                .admit_to_cpu_as(&drafter, 3000, Tenancy::Guest, Requester::Swarm)
+                .await
+        );
         assert!(pool.workers.get(&target).is_some());
         assert_eq!(pool.ram_committed_mb(), 6000);
 
-        assert!(pool.admit_to_cpu_as(&drafter, 3000, Tenancy::Tenant).await);
+        assert!(
+            pool.admit_to_cpu_as(&drafter, 3000, Tenancy::Tenant, Requester::Swarm)
+                .await
+        );
         assert!(pool.workers.get(&target).is_none());
     }
 
@@ -9081,12 +9162,16 @@ mod tests {
         let h = admit_and_insert_gpu_worker(&pool, &m, 350, std::time::Duration::ZERO).await;
         h.record_charged_segment((0, 1), 0);
 
-        let held = pool.get_or_spawn(&m, (0, 1), Tenancy::Guest).await;
+        let held = pool
+            .get_or_spawn(&m, (0, 1), Tenancy::Guest, Requester::Swarm)
+            .await;
         assert!(
             held.is_ok_and(|g| Arc::ptr_eq(&g, &h)),
             "the range it holds is handed back"
         );
-        let refused = pool.get_or_spawn(&m, (0, 24), Tenancy::Guest).await;
+        let refused = pool
+            .get_or_spawn(&m, (0, 24), Tenancy::Guest, Requester::Swarm)
+            .await;
         assert!(matches!(refused, Err(SwarmError::ServiceUnavailable(_))));
         assert!(
             !h.segment_is_charged((0, 24)),
@@ -9096,7 +9181,7 @@ mod tests {
         assert!(!pool.holds_segment(&m, (0, 24)));
 
         let grown = pool
-            .get_or_spawn(&m, (0, 24), Tenancy::Tenant)
+            .get_or_spawn(&m, (0, 24), Tenancy::Tenant, Requester::Swarm)
             .await
             .expect("a tenant grows the worker");
         assert!(Arc::ptr_eq(&grown, &h));
@@ -9114,7 +9199,7 @@ mod tests {
         let (_idle, wanted, h) = card_with_an_idle_model_and_a_one_layer_worker(&pool, 190).await;
 
         let outcome = pool
-            .grow_worker(&wanted, (0, 32), h)
+            .grow_worker(&wanted, (0, 32), h, Requester::Swarm)
             .await
             .expect("an idle worker is replaced rather than refusing the request");
         assert!(matches!(outcome, Growth::Respawn));
@@ -9155,7 +9240,7 @@ mod tests {
         let idle = setup("idle");
         admit_and_insert_gpu_worker(&idle, &other, 3138, hour).await;
         assert_eq!(
-            idle.max_local_hostable_layers(&wanted, true),
+            idle.max_local_hostable_layers(&wanted, true, Requester::Swarm),
             with_the_card_free,
             "idle for an hour: admission would take it back, so the planner may count it"
         );
@@ -9164,14 +9249,14 @@ mod tests {
         let h = admit_and_insert_gpu_worker(&busy, &other, 3138, hour).await;
         h.note_conversation(Uuid::new_v4());
         assert_eq!(
-            busy.max_local_hostable_layers(&wanted, true),
+            busy.max_local_hostable_layers(&wanted, true, Requester::Swarm),
             with_it_resident
         );
 
         let recent = setup("recent");
         admit_and_insert_gpu_worker(&recent, &other, 3138, std::time::Duration::ZERO).await;
         assert_eq!(
-            recent.max_local_hostable_layers(&wanted, true),
+            recent.max_local_hostable_layers(&wanted, true, Requester::Swarm),
             with_it_resident
         );
     }
@@ -9319,7 +9404,7 @@ mod tests {
         let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-grow-raced"));
         let (_idle, wanted, h) = card_with_an_idle_model_and_a_one_layer_worker(&pool, 190).await;
         let refused = pool
-            .charge_additional_segment(&wanted, (0, 32), &h)
+            .charge_additional_segment(&wanted, (0, 32), &h, Requester::Swarm)
             .await
             .expect_err("32 x 190 is more than the whole budget");
         assert_eq!(
@@ -9328,7 +9413,7 @@ mod tests {
             "the control: idle and untouched since it refused, it may be replaced"
         );
 
-        pool.charge_additional_segment(&wanted, (1, 2), &h)
+        pool.charge_additional_segment(&wanted, (1, 2), &h, Requester::Swarm)
             .await
             .expect("another request's one layer fits");
         assert_eq!(
@@ -9355,7 +9440,10 @@ mod tests {
         let (_idle, wanted, h) = card_with_an_idle_model_and_a_one_layer_worker(&pool, 190).await;
         h.note_conversation(Uuid::new_v4());
 
-        let err = match pool.grow_worker(&wanted, (0, 32), h.clone()).await {
+        let err = match pool
+            .grow_worker(&wanted, (0, 32), h.clone(), Requester::Swarm)
+            .await
+        {
             Err(e) => e,
             Ok(_) => panic!("a worker mid-conversation must not be replaced"),
         };
@@ -9434,12 +9522,63 @@ mod tests {
         pool.set_ram_budget_mb(1300);
 
         // No worker: a spawn pays the 60 MB of fixed terms, 1240 / 100 = 12.
-        assert_eq!(pool.max_local_hostable_layers(&model, false), Some(12));
+        assert_eq!(
+            pool.max_local_hostable_layers(&model, false, Requester::Swarm),
+            Some(12)
+        );
 
         let h = admit_and_insert_cpu_worker(&pool, &model, 250, false).await;
         h.record_charged_segment((0, 2), 0);
         // 1050 left beside it, all of it for layers: 10, not (1050 - 60) / 100 = 9.
-        assert_eq!(pool.max_local_hostable_layers(&model, false), Some(10));
+        assert_eq!(
+            pool.max_local_hostable_layers(&model, false, Requester::Swarm),
+            Some(10)
+        );
+    }
+
+    /// **The owner's own load is weighed against the owner's memory cap, the
+    /// swarm's against the contribution level's** (#266). Since #264 charged a
+    /// split's processor share, a default 16 GB node with a card — 31% of its
+    /// RAM, 4997 MB, for the swarm — refused its owner's Qwen3-30B-A3B (5213 MB
+    /// of experts kept in RAM) with 13 GB of the machine free; v0.3.236 ran it.
+    /// The planner's bound on this node answers by the cap the spawn will use.
+    #[tokio::test]
+    async fn the_owners_own_load_is_weighed_against_the_owners_memory_cap() {
+        use crate::model::auto_manage::vram::RamBudget;
+        let machine = || RamBudget::from_machine(4997, 0, 15991, 13000).with_owners_cap(12792);
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-owners-cap"));
+        pool.set_ram_budget_provider(Box::new(move || Some(machine())));
+        let thirty_b = ModelId("qwen3-30b-a3b".into());
+
+        // The planner: 200 MB of fixed terms, 100 MB a layer.
+        pool.test_cost_curve.insert(thirty_b.clone(), (200, 100));
+        let owners_room = machine().live_headroom_mb.min(12792);
+        assert_eq!(
+            pool.max_local_hostable_layers(&thirty_b, false, Requester::Swarm),
+            Some((4997 - 200) / 100)
+        );
+        assert_eq!(
+            pool.max_local_hostable_layers(&thirty_b, false, Requester::Owner),
+            Some(u32::try_from((owners_room - 200) / 100).unwrap())
+        );
+
+        // The spawn's admission, asked as `get_or_spawn` asks it.
+        assert!(
+            !pool
+                .admit_to_cpu_as(&thirty_b, 5213, Tenancy::Tenant, Requester::Swarm)
+                .await,
+            "the swarm's work stays within the contribution level"
+        );
+        assert!(
+            pool.admit_to_cpu_as(&thirty_b, 5213, Tenancy::Tenant, Requester::Owner)
+                .await,
+            "the owner's own request is not held to it"
+        );
+        assert_eq!(pool.ram_committed_mb(), 5213);
+        // Past the swarm's cap now, the swarm adds nothing; the owner can.
+        let small = ModelId("small".into());
+        assert!(!pool.admit_to_cpu(&small, 100, Requester::Swarm));
+        assert!(pool.admit_to_cpu(&small, 100, Requester::Owner));
     }
 
     /// The worker's own three cases, restated for the planner.
@@ -9767,7 +9906,7 @@ mod tests {
         let m = ModelId("abandoned".into());
 
         assert!(
-            p.admit_to_cpu(&m, 5000),
+            p.admit_to_cpu(&m, 5000, Requester::Swarm),
             "precondition: the budget admits it"
         );
         assert_eq!(p.ram_committed_mb(), 5000);
@@ -9797,7 +9936,7 @@ mod tests {
         let p = test_pool();
         p.set_ram_budget_mb(8000);
         let m = ModelId("returned".into());
-        assert!(p.admit_to_cpu(&m, 5000));
+        assert!(p.admit_to_cpu(&m, 5000, Requester::Swarm));
 
         {
             let charge = PendingSpawnCharge {
@@ -9838,7 +9977,7 @@ mod tests {
         );
         assert!(p.workers.get(&m).is_none());
         // And the budget is genuinely usable again.
-        assert!(p.admit_to_cpu(&ModelId("next".into()), 5000));
+        assert!(p.admit_to_cpu(&ModelId("next".into()), 5000, Requester::Swarm));
     }
 
     /// A replacement admitted while the corpse is still in the map keeps its
@@ -9865,7 +10004,7 @@ mod tests {
 
         // The replacement is admitted under the same key, and is still loading
         // — so `workers` still holds the corpse.
-        assert!(p.admit_to_cpu(&m, 3000));
+        assert!(p.admit_to_cpu(&m, 3000, Requester::Swarm));
         assert_eq!(
             p.ram_committed_mb(),
             8000,
@@ -9890,13 +10029,13 @@ mod tests {
         let p = test_pool();
         p.set_ram_budget_mb(6000);
         let m = ModelId("m".into());
-        assert!(p.admit_to_cpu(&m, 1000));
+        assert!(p.admit_to_cpu(&m, 1000, Requester::Swarm));
 
         p.release_ram_charge(&m, 9_999_999);
 
         assert_eq!(p.ram_committed_mb(), 0);
         assert!(
-            !p.admit_to_cpu(&ModelId("huge".into()), 7000),
+            !p.admit_to_cpu(&ModelId("huge".into()), 7000, Requester::Swarm),
             "the budget must still refuse what does not fit"
         );
     }
@@ -10058,7 +10197,7 @@ mod tests {
 
         // An unrelated model holds RAM at the same time.
         let other = ModelId("in-ram".into());
-        assert!(p.admit_to_cpu(&other, 5000));
+        assert!(p.admit_to_cpu(&other, 5000, Requester::Swarm));
 
         p.evict_this_worker(&m, &h, "test");
 
@@ -10078,7 +10217,7 @@ mod tests {
         let p = test_pool();
         p.set_ram_budget_mb(8000);
         let m = ModelId("live-one".into());
-        assert!(p.admit_to_cpu(&m, 5000));
+        assert!(p.admit_to_cpu(&m, 5000, Requester::Swarm));
         p.workers.insert(m.clone(), fake_worker_handle(false).await);
 
         assert!(
@@ -10116,7 +10255,7 @@ mod tests {
             "and its charge is released — the reap cannot do it afterwards, \
              because the entry is already gone from `workers`"
         );
-        assert!(p.admit_to_cpu(&ModelId("next".into()), 6000));
+        assert!(p.admit_to_cpu(&ModelId("next".into()), 6000, Requester::Swarm));
     }
 
     /// A caller holding a handle that has already been replaced must not evict
@@ -10130,7 +10269,7 @@ mod tests {
         let stale = fake_worker_handle(true).await;
         let live = fake_worker_handle(false).await;
         p.workers.insert(m.clone(), live.clone());
-        assert!(p.admit_to_cpu(&m, 3000));
+        assert!(p.admit_to_cpu(&m, 3000, Requester::Swarm));
 
         p.evict_this_worker(&m, &stale, "IPC send failed");
 
@@ -10198,13 +10337,13 @@ mod tests {
 
         // A DIFFERENT model is refused while the corpse holds the budget.
         assert!(
-            !p.admit_to_cpu(&ModelId("small".into()), 2000),
+            !p.admit_to_cpu(&ModelId("small".into()), 2000, Requester::Swarm),
             "the dead worker's charge blocks an unrelated model"
         );
 
         assert_eq!(p.reap_dead_workers().await, 1);
         assert_eq!(p.ram_committed_mb(), 0);
-        assert!(p.admit_to_cpu(&ModelId("small".into()), 2000));
+        assert!(p.admit_to_cpu(&ModelId("small".into()), 2000, Requester::Swarm));
     }
 
     #[test]
@@ -10320,11 +10459,14 @@ mod tests {
         }));
         let m = ModelId("llama-8b".into());
         assert!(
-            !p.admit_to_cpu(&m, 13149),
+            !p.admit_to_cpu(&m, 13149, Requester::Swarm),
             "10341 MB of headroom cannot take 13149 MB"
         );
         free.store(26000, std::sync::atomic::Ordering::Relaxed);
-        assert!(p.admit_to_cpu(&m, 13149), "18200 MB of headroom can");
+        assert!(
+            p.admit_to_cpu(&m, 13149, Requester::Swarm),
+            "18200 MB of headroom can"
+        );
         p.release_ram_charge(&m, 13149);
     }
 
@@ -10332,13 +10474,13 @@ mod tests {
     fn ram_admission_refuses_once_the_budget_is_committed() {
         let p = test_pool();
         p.set_ram_budget_mb(6000);
-        assert!(p.admit_to_cpu(&ModelId("first".into()), 4000));
+        assert!(p.admit_to_cpu(&ModelId("first".into()), 4000, Requester::Swarm));
         assert!(
-            !p.admit_to_cpu(&ModelId("second".into()), 2500),
+            !p.admit_to_cpu(&ModelId("second".into()), 2500, Requester::Swarm),
             "4000 + 2500 exceeds 6000 — must refuse rather than swap"
         );
         // Something that does fit in the remainder is still admitted.
-        assert!(p.admit_to_cpu(&ModelId("small".into()), 1500));
+        assert!(p.admit_to_cpu(&ModelId("small".into()), 1500, Requester::Swarm));
     }
 
     /// A worker loads the layer range it is asked for, not the whole model, and
@@ -10527,20 +10669,26 @@ mod tests {
         let p = test_pool();
         p.set_ram_budget_mb(6000);
         let m = ModelId("boomerang".into());
-        assert!(p.admit_to_cpu(&m, 4000), "the first segment fits");
-        assert!(p.admit_to_cpu(&m, 1500), "and so does the second");
+        assert!(
+            p.admit_to_cpu(&m, 4000, Requester::Swarm),
+            "the first segment fits"
+        );
+        assert!(
+            p.admit_to_cpu(&m, 1500, Requester::Swarm),
+            "and so does the second"
+        );
         assert_eq!(
             p.ram_committed_mb(),
             5500,
             "both segments are charged; an overwrite would report 1500"
         );
         assert!(
-            !p.admit_to_cpu(&ModelId("other".into()), 1000),
+            !p.admit_to_cpu(&ModelId("other".into()), 1000, Requester::Swarm),
             "5500 + 1000 exceeds 6000 — the second segment must still be visible"
         );
         p.release_ram_charge(&m, p.ram_committed_mb());
         assert_eq!(p.ram_committed_mb(), 0, "releasing frees every segment");
-        assert!(p.admit_to_cpu(&ModelId("other".into()), 1000));
+        assert!(p.admit_to_cpu(&ModelId("other".into()), 1000, Requester::Swarm));
     }
 
     /// A range is charged the first time it is asked for and not again — the
@@ -10577,7 +10725,7 @@ mod tests {
         let p = test_pool();
         p.set_ram_budget_mb(6000);
         assert_eq!(
-            p.max_local_hostable_layers(&ModelId("no-such-model".into()), false),
+            p.max_local_hostable_layers(&ModelId("no-such-model".into()), false, Requester::Swarm),
             None
         );
     }
@@ -10588,11 +10736,11 @@ mod tests {
         let p = test_pool();
         p.set_ram_budget_mb(6000);
         let a = ModelId("a".into());
-        assert!(p.admit_to_cpu(&a, 5000));
-        assert!(!p.admit_to_cpu(&ModelId("b".into()), 2000));
+        assert!(p.admit_to_cpu(&a, 5000, Requester::Swarm));
+        assert!(!p.admit_to_cpu(&ModelId("b".into()), 2000, Requester::Swarm));
         p.release_ram_charge(&a, 5000);
         assert!(
-            p.admit_to_cpu(&ModelId("b".into()), 2000),
+            p.admit_to_cpu(&ModelId("b".into()), 2000, Requester::Swarm),
             "the freed charge must be usable again"
         );
     }
@@ -10604,12 +10752,12 @@ mod tests {
     fn ram_admission_does_not_judge_what_it_cannot_measure() {
         let p = test_pool();
         // Budget unset.
-        assert!(p.admit_to_cpu(&ModelId("nobudget".into()), 99_999));
+        assert!(p.admit_to_cpu(&ModelId("nobudget".into()), 99_999, Requester::Swarm));
 
         let p2 = test_pool();
         p2.set_ram_budget_mb(1);
         assert!(
-            p2.admit_to_cpu(&ModelId("mystery".into()), 0),
+            p2.admit_to_cpu(&ModelId("mystery".into()), 0, Requester::Swarm),
             "an unreadable model must not be refused on a guess"
         );
     }
@@ -11201,7 +11349,7 @@ mod admission_tests {
             "a fresh worker would place all 28 — part on the card, the rest on the processor"
         );
         assert_eq!(
-            p.max_local_hostable_layers(&m, true),
+            p.max_local_hostable_layers(&m, true, Requester::Swarm),
             Some(on_card_alone),
             "but a worker growing into a further range has only the card"
         );
@@ -11214,7 +11362,10 @@ mod admission_tests {
             ..seven_b
         });
         assert_eq!(q.fresh_run_layers_for_planning(&m), None);
-        assert_eq!(q.max_local_hostable_layers(&m, true), Some(on_card_alone));
+        assert_eq!(
+            q.max_local_hostable_layers(&m, true, Requester::Swarm),
+            Some(on_card_alone)
+        );
     }
 
     /// A card/processor split charges the card for the layers it puts there

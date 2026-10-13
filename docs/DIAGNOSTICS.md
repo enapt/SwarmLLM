@@ -1918,7 +1918,10 @@ Every memory defect reported from the field since #452 (#454-#457, #461-#468)
 came from one 16 GB processor-only machine, and none of them reproduced on a
 developer box — which is why all of them shipped. Admission keys off
 `resources.max_ram_mb` rather than real RAM, so a small configured budget
-reproduces the class anywhere.
+reproduces the class anywhere. An explicit figure binds the owner's own
+requests too; left automatic, the owner's cap is 80% of RAM and only the
+swarm's is scaled by the contribution level (#266) — a refusal's note says
+which ("… for this computer's own requests").
 
 Runs an isolated node (private gossip id, no bootstrap, no mDNS, auto-manage
 off, a COPY of one model) and checks: an over-budget model is refused with its

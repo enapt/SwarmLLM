@@ -12053,15 +12053,23 @@ fn the_owners_own_segment_is_forwarded_as_the_owners() {
          unless a peer delegated it (2026-10-02)"
     );
     // And that answer is the owner's for everything but a request a peer handed
-    // us to lead (`RoutePlanOverride::lead_here`), whose work is the swarm's.
+    // us to lead (`RoutePlanOverride::lead_here`), whose work is the swarm's —
+    // given by ONE rule the scheduler's bound on this node reads too (#266).
     let pipeline = read("src/inference/pipeline/mod.rs");
-    let answer = fn_body(&pipeline, "pub(crate) fn worker_requester(")
-        .expect("worker_requester moved — move this guard with it");
+    let answer = fn_body(&pipeline, "pub(crate) fn requester_for_override(")
+        .expect("requester_for_override moved — move this guard with it");
     assert!(
         answer.contains("lead_here")
             && answer.contains("Requester::Swarm")
             && answer.contains("Requester::Owner"),
-        "worker_requester must answer Swarm for a delegated request and Owner otherwise"
+        "requester_for_override must answer Swarm for a delegated request and Owner otherwise"
+    );
+    let asked = fn_body(&pipeline, "pub(crate) fn worker_requester(")
+        .expect("worker_requester moved — move this guard with it");
+    assert!(
+        asked.contains("requester_for_override("),
+        "worker_requester must answer through requester_for_override, the rule the \
+         scheduler reads (#266)"
     );
     let worker = read("src/inference/model_worker.rs");
     let body = fn_body(&worker, "async fn handle_forward(")

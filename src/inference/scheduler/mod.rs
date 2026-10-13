@@ -4185,10 +4185,16 @@ impl PipelineScheduler {
             };
             let (max_hostable_layers, max_hostable_layers_at_face_value, cold_load_per_layer) =
                 if node_id == *local_node_id {
+                    // Bounded by the memory cap of whoever asked — the owner's,
+                    // or the swarm's for a split a peer delegated here — as the
+                    // spawn will weigh this request (#266).
+                    let requester = crate::inference::pipeline::requester_for_override(
+                        self.shared_state.route_plan_override(request_id).as_ref(),
+                    );
                     let mut ours = self
                         .shared_state
                         .model_process_pool
-                        .max_hostable_layers_for_planning(&manifest.id);
+                        .max_hostable_layers_for_planning(&manifest.id, requester);
                     // The loader's verdict on an earlier attempt at THIS request
                     // outranks the estimate it contradicted: a re-plan may give
                     // this node fewer new layers than it refused to add, never as

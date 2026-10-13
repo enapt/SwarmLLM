@@ -2767,6 +2767,53 @@ Test: `a_split_keeping_experts_in_ram_charges_each_device_for_its_share`.
 **Residual.** A LATER segment loaded into a split worker (`charge_additional_segment`) is charged to
 the worker's one accountant (`holds_gpu_memory` → the card), wherever the loader puts its layers.
 
+## The owner's own load is weighed against the owner's memory cap (2026-10-14, FUTURE_WORK #266)
+
+Found by #138 (3) stage B's first rig. #264 charged a split's processor share to the RAM budget,
+and that budget is the SWARM's: `inference_ram_budget_mb` takes half of a GPU node's RAM ("support
+work where a GPU runs the models") scaled by the contribution level, so a default (Minimal) 16 GB
+node offers 31% — 4997 MB. Qwen3-30B-A3B Q2_K on an 8 GB card needs 5213 MB of experts in RAM or
+5530 MB as 26 whole layers, and the owner's own request was refused under either placement with
+~13 GB of the machine available. v0.3.236, which charged a split nothing, ran it.
+
+**The precedent.** The contribution level is "how much of your computer SwarmLLM may use to answer
+requests from the swarm" (Settings), and since 2026-09-26 it no longer caps the owner's prompt
+reading (`owner_prefill_threads`, above). Ollama weighs a split's processor share against the
+machine's free memory alone (`llm/server.go`); no other runner caps the owner's own model to a
+fraction set for strangers (llama.cpp has no memory cap at all).
+
+**The rule.** `ResourceConfig::owners_ram_budget_mb` is the owner's cap: an explicit
+`resources.max_ram_mb` (binding everyone, as `max_cpu_threads` binds the owner's threads), else what
+a node whose processor is the whole job offers at Maximum — 80% of RAM — at any contribution level
+and with or without a card. `ram_budget_now` gives it beside the swarm's
+(`RamBudget::with_owners_cap`), and **`ModelProcessPool::ram_budget_now(requester)`** — REQUIRED —
+picks one through `RamBudget::judging`. Every reader names whose request it weighs: `get_or_spawn`
+(from `forward_direct` / `generate_attempt`'s `Requester`), `charge_additional_segment` and
+`grow_worker`, `free_ram_for_admission`, `record_cpu_kv_budget`, the refusal's figure and note
+("… for this computer's own requests"), and the planner's bound on this node
+(`max_hostable_layers_for_planning`, whose requester the scheduler reads with
+`pipeline::requester_for_override` — a split a peer delegated here is the swarm's). The drafter (a
+guest) and a decode batch (which does not say whose requests it carries) are weighed as the
+swarm's, the narrower cap. The live anti-swap headroom (70% of what is free now) is the machine's
+and binds both; the advertised `model_memory_ceiling_mb` stays the swarm's, an upper bound.
+
+**Verified on the live node** (`~/swarmllm-138e/verify4.sh`: the stage B rig's DEFAULT-config
+shape, which had refused both placements at `cap_mb=4997`; ABBA, Windows up 19.2 h, 0 driver
+events): every admission of the owner's request was now weighed at `cap_mb=12792` and noted "for
+this computer's own requests". This time the live headroom refused it: 5.7-7.4 GB of the machine was
+free (a browser held ~4 GB, 3 GB was in swap), and 70% of that is under 5213 MB. That is the
+machine, and the guard working as intended. With ~13 GB free the same placements loaded and replied
+under a 9000 MB cap, below the owner's 12792 (#138 (3) stage B's rig).
+
+**What it does not change.** The swarm's work is held where it was. A model the owner loaded past the
+swarm's cap leaves the swarm no room for ANOTHER model until it unloads; it serves the swarm's
+requests for itself as any loaded model does.
+
+Tests: `the_owners_own_load_is_weighed_against_the_owners_memory_cap` (the spawn's admission and
+the planner's bound, owner vs swarm), `a_budget_judges_the_owner_against_the_owners_cap_and_the_machine_for_both`
+(both red with `judging` ignoring the requester),
+`the_owners_memory_budget_is_the_machines_whole_job_share_at_any_level`.
+
 ## Machine memory is read in one place, and a container's limit counts (2026-10-09)
 
 `daemon::machine_memory::machine_memory()` is the one reading of how much memory this process

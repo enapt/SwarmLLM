@@ -510,6 +510,25 @@ impl ResourceConfig {
             / contribution_share_for(ContributionMode::Maximum);
         Some((base * scale) as u64)
     }
+
+    /// The memory cap the machine OWNER's own requests are weighed against —
+    /// the sibling of [`Self::owner_prefill_threads`]: an explicit
+    /// `max_ram_mb`, which binds everyone, else what a node whose processor
+    /// is the whole job offers at Maximum (80%), at any contribution level and
+    /// whether or not a card runs the rest of the model.
+    ///
+    /// [`Self::inference_ram_budget_mb`] answers for the SWARM: the contribution
+    /// level is "how much of your computer SwarmLLM may use to answer requests
+    /// from the swarm" (the Settings page), and its GPU-node base assumes system
+    /// memory is support work. Neither holds for the owner's split of a model
+    /// too big for the card, whose processor share IS the model: at the default
+    /// level that cap is 31% of RAM, 4997 MB on 16 GB, and it refused a
+    /// Qwen3-30B-A3B the owner had asked for with 13 GB of the machine free
+    /// (FUTURE_WORK #266). Ollama weighs that share against free memory alone
+    /// (`llm/server.go`); the live anti-swap headroom still applies to both.
+    pub fn owners_ram_budget_mb(&self, system_ram_total_mb: u64) -> Option<u64> {
+        self.inference_ram_budget_mb(system_ram_total_mb, false, ContributionMode::Maximum)
+    }
 }
 
 impl Default for ResourceConfig {

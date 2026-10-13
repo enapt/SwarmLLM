@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #266**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #267**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate; #257 closed on 2026-10-13 (under WSL2 a card's saved prompts are kept in host RAM) and #258 opened from its measurement; #138 (1), (1b), (1c) and (1d) shipped on 2026-10-13 (a card/processor split runs a prompt's processor-held experts, then every processor-held projection, then each processor-held layer whole, on the card, copying the next weights while the card computes); #259 and #260 opened and closed the same day from a tester's report (a kept model bigger than the card was refused; a model sent to the processor while another program held the card never moved back), #261 opened from it; #138 (1e) the same day (a split reads a prompt in chunks as large as the card has room for), and #262 opened from its rig (a split's conversation budget charges the processor's caches to the card); #263 opened and closed the same day from a tester's report (a split's local segments refused a long prompt only after the peers had read it, and the retry planned the same split), then #262 (each cache charged to the memory it lives in), and #264 opened from it and closed the same day (a split's processor-held weights are charged to the memory limit), #265 opened from that; #138 (3)'s first stage the same day (a mixture-of-experts layer on the card can keep its experts in RAM, measured from `test-split`: 1.2-1.7x decode at the same card bytes); its second on 2026-10-14 (the daemon chooses it for a mixture-of-experts model that does not fit the card), #266 opened from its rig.
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate; #257 closed on 2026-10-13 (under WSL2 a card's saved prompts are kept in host RAM) and #258 opened from its measurement; #138 (1), (1b), (1c) and (1d) shipped on 2026-10-13 (a card/processor split runs a prompt's processor-held experts, then every processor-held projection, then each processor-held layer whole, on the card, copying the next weights while the card computes); #259 and #260 opened and closed the same day from a tester's report (a kept model bigger than the card was refused; a model sent to the processor while another program held the card never moved back), #261 opened from it; #138 (1e) the same day (a split reads a prompt in chunks as large as the card has room for), and #262 opened from its rig (a split's conversation budget charges the processor's caches to the card); #263 opened and closed the same day from a tester's report (a split's local segments refused a long prompt only after the peers had read it, and the retry planned the same split), then #262 (each cache charged to the memory it lives in), and #264 opened from it and closed the same day (a split's processor-held weights are charged to the memory limit), #265 opened from that; #138 (3)'s first stage the same day (a mixture-of-experts layer on the card can keep its experts in RAM, measured from `test-split`: 1.2-1.7x decode at the same card bytes); its second on 2026-10-14 (the daemon chooses it for a mixture-of-experts model that does not fit the card), #266 opened from its rig and closed the same day (the owner's own loads are weighed against the owner's memory cap, not the swarm's).
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -1201,7 +1201,7 @@ whole layers — card 6262 MiB against 6678-6966, RAM 5213 MB against 5530, medi
 **50 / 54 ms** against 55 / 55, replies 2-3 **20.2-22.4 / 18.7-19.5 tok/s** against 17.2-18.8
 (`docs/invariants/inference.md` § "The pool keeps experts in RAM before it splits by layer").
 Its first rig found #266: at the default contribution level a 16 GB node's RAM budget refused the
-model under either placement.
+model under either placement — closed the same day (#266).
 
 **Left, in order of what they cost us:** (1f) the warm forward is not yet bound by its copies: profiled, copies
 833 ms + unattributed 528 (before: 1,215 + 248). This card has ONE async copy engine, so the
@@ -1495,17 +1495,6 @@ against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hy
 StarCoder2, inert while refused).
 
 ### Memory and admission
-
-#### #266 — A default 16 GB node with a graphics card refuses a split model that v0.3.236 runs
-`P1` · memory · **OPEN** — 2026-10-14 · history: found by #138 (3) stage B's rig
-
-Since #264 (on main, unreleased) a card/processor split's processor share is charged to
-`inference_ram_budget_mb`, which for a node with a card is half its RAM scaled by the contribution
-level — at the default (Minimal) 31% of RAM, **4997 MB on 16 GB**. Qwen3-30B-A3B Q2_K needs 5213 MB
-with its experts in RAM or 5530 MB as 26 whole layers, so the owner's own request was refused under
-either placement while ~13 GB of the machine stood available; v0.3.236 runs it. The contribution
-level is meant to cap the swarm's work, not the owner's (`process_pool::Requester`). Blocks the next
-release.
 
 #### #265 — A later range loaded into a card/processor split worker is charged to the card whatever the loader does with it
 `P3` · memory · **OPEN** — 2026-10-13 · history: found closing #264
@@ -2096,6 +2085,26 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-14, ships in the next release** (#266)
+- #266 — **your own requests are no longer held to the memory share you give the swarm.** Since
+  #264 (never released) a model split between the graphics card and the processor charged its
+  processor share to the memory limit, and on a computer with a card that limit is the SWARM's: half
+  its RAM scaled by the contribution level, 31% — 4997 MB on 16 GB — at the default. The owner's own
+  Qwen3-30B-A3B (5213 MB of experts kept in RAM, or 5530 MB as 26 whole layers) was refused with
+  13 GB free; v0.3.236 ran it. As the owner's prompt reading already was (#119), the owner's own
+  loads are now weighed against the owner's cap — `ResourceConfig::owners_ram_budget_mb`, 80% of
+  RAM, or an explicit `resources.max_ram_mb` for everyone — and the swarm's keep theirs:
+  `ModelProcessPool::ram_budget_now(requester)` is REQUIRED (`RamBudget::judging`) at the spawn,
+  growth, reclaim, the processor-side cache grant, the refusal's note and the planner's bound on this
+  node (the scheduler names the requester with `pipeline::requester_for_override`; a split a peer
+  delegated here is the swarm's). The live anti-swap headroom still binds both. On the live node the
+  same request that had been weighed at 4997 MB was weighed at 12792 ("for this computer's own
+  requests"); that evening the machine had 5.7-7.4 GB free, and the anti-swap headroom refused it.
+  Tests `the_owners_own_load_is_weighed_against_the_owners_memory_cap`,
+  `a_budget_judges_the_owner_against_the_owners_cap_and_the_machine_for_both` (both red with the
+  requester ignored), `the_owners_memory_budget_is_the_machines_whole_job_share_at_any_level`
+  (`docs/invariants/memory.md` § "The owner's own load is weighed against the owner's memory cap").
 
 **Closed 2026-10-13, ships in the next release** (#257, #259, #260, #262, #263, #264)
 - #264 — **a model split between the graphics card and the processor now counts its processor

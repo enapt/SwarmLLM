@@ -42,9 +42,11 @@ A resource taken before an `.await` is returned by a guard that releases on DROP
 
 → `docs/invariants/memory.md` § "A budget is charged by whatever owns the resource"
 
-## The contribution level caps the SWARM's work, not the owner's prompt (2026-09-26)
+## The contribution level caps the SWARM's work, not the owner's prompt or memory (2026-09-26, #266)
 
 **`process_pool::Requester`** (`Owner` / `Swarm`) is a REQUIRED argument of `ModelProcessPool::generate` and `forward_for_request` (`IpcForward::for_the_owner`); the worker records it once (`KvCacheStore::mark_owner_request`) and `cpu_pools::in_phase_pool` reads it. The owner's PROMPT reading runs on `ResourceConfig::owner_prefill_threads`; decode and the swarm's work keep the contribution width.
+
+**Memory too (#266):** `ModelProcessPool::ram_budget_now(requester)` — REQUIRED, through `get_or_spawn`, growth, reclaim, the processor-side cache grant and the planner's local bound — picks the cap via `RamBudget::judging`: the swarm's is `inference_ram_budget_mb` (contribution-scaled), the owner's `ResourceConfig::owners_ram_budget_mb` (80%, or an explicit `max_ram_mb` for both); the live anti-swap headroom binds both. The scheduler names the requester with `pipeline::requester_for_override` (a delegated split is the swarm's). A drafter and a decode batch are weighed as the swarm's.
 
 → `docs/invariants/memory.md` § "The contribution level caps the swarm's work, not the owner's prompt (2026-09-26)"
 

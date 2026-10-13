@@ -543,6 +543,13 @@ pub struct RamBudget {
     /// `FREE_RAM_HEADROOM_PCT` of what is available, or `u64::MAX` when
     /// unreadable. See [`live_headroom_mb`].
     pub live_headroom_mb: u64,
+    /// The cap this computer's OWN requests are weighed against
+    /// (`ResourceConfig::owners_ram_budget_mb`; `cap_mb` until one is given).
+    /// `cap_mb` is the swarm's, scaled by the contribution level (#266).
+    pub owners_cap_mb: u64,
+    /// Whether `cap_mb` is the owner's — set by [`Self::judging`], for the
+    /// refusal's note.
+    pub judges_the_owner: bool,
 }
 
 /// How much a NEW model may take right now without pushing the machine into
@@ -638,11 +645,13 @@ impl RamBudget {
             total_mb,
             available_mb,
             live_headroom_mb,
+            owners_cap_mb: cap_mb,
+            judges_the_owner: false,
         }
     }
 
     /// A cap with no knowledge of the machine (tests, and the fallback when no
-    /// provider is installed): only the ceiling is enforced.
+    /// provider is installed): only the ceiling is enforced, for everyone.
     pub fn cap_only(cap_mb: u64) -> Self {
         Self {
             cap_mb,
@@ -650,6 +659,32 @@ impl RamBudget {
             total_mb: 0,
             available_mb: 0,
             live_headroom_mb: u64::MAX,
+            owners_cap_mb: cap_mb,
+            judges_the_owner: false,
+        }
+    }
+
+    /// The cap the machine owner's own requests are weighed against (#266).
+    pub fn with_owners_cap(self, owners_cap_mb: u64) -> Self {
+        Self {
+            owners_cap_mb,
+            ..self
+        }
+    }
+
+    /// This budget as it judges `requester`'s request — the one way a cap is
+    /// chosen (`ModelProcessPool::ram_budget_now` takes the requester as a
+    /// REQUIRED argument and asks this). The swarm's work stays under the
+    /// contribution level's cap; the owner's goes under theirs, never less. The
+    /// live headroom is the machine's, the same for both (#266).
+    pub fn judging(self, requester: crate::inference::process_pool::Requester) -> Self {
+        match requester {
+            crate::inference::process_pool::Requester::Swarm => self,
+            crate::inference::process_pool::Requester::Owner => Self {
+                cap_mb: self.owners_cap_mb.max(self.cap_mb),
+                judges_the_owner: true,
+                ..self
+            },
         }
     }
 
@@ -691,6 +726,11 @@ impl RamBudget {
     pub fn cap_source(&self) -> String {
         if self.configured_mb > 0 {
             format!("`resources.max_ram_mb` is {} MB", self.configured_mb)
+        } else if self.judges_the_owner {
+            format!(
+                "auto-sized to {} MB from {} MB of RAM for this computer's own requests",
+                self.cap_mb, self.total_mb
+            )
         } else {
             format!(
                 "auto-sized to {} MB from {} MB of RAM",
@@ -1392,8 +1432,9 @@ pub fn node_model_budget_mb(shared: &crate::daemon::SharedState) -> Option<u64> 
 ///   (`RamBudget::cap_mb` — `resources.max_ram_mb`, or what it auto-sized to);
 /// - models on a card: the whole card plus the whole machine's memory. The
 ///   loader splits a model the card cannot hold across the card and the
-///   processor, and the processor's share is not charged against the RAM
-///   budget, so nothing tighter is certain.
+///   processor; that share is charged against the RAM cap of whoever asked
+///   (#264, #266), and the owner's cap is not the one advertised, so nothing
+///   tighter is certain.
 pub fn node_model_memory_ceiling_mb(shared: &crate::daemon::SharedState) -> Option<u64> {
     let ram = ram_budget_now(shared)?;
     if models_go_to_the_card(shared) {
@@ -1501,13 +1542,16 @@ pub fn ram_budget_now(shared: &crate::daemon::SharedState) -> Option<RamBudget> 
             .cfg()
             .resources
             .inference_ram_budget_mb(total_mb, has_gpu, shared.contribution())?;
+    let owners = shared
+        .cfg()
+        .resources
+        .owners_ram_budget_mb(total_mb)
+        .unwrap_or(by_config);
 
-    Some(RamBudget::from_machine(
-        by_config,
-        configured,
-        total_mb,
-        available_mb,
-    ))
+    Some(
+        RamBudget::from_machine(by_config, configured, total_mb, available_mb)
+            .with_owners_cap(owners),
+    )
 }
 
 #[cfg(test)]
@@ -2584,6 +2628,42 @@ mod footprint_tests {
             RamBudget::from_machine(12800, 0, 16000, 15000).cap_source(),
             "auto-sized to 12800 MB from 16000 MB of RAM"
         );
+    }
+
+    /// #266: a budget judges the owner's request against the owner's cap and
+    /// the swarm's against the contribution level's; the live anti-swap
+    /// headroom is the machine's and binds both, and a refusal names whose cap
+    /// it was.
+    #[test]
+    fn a_budget_judges_the_owner_against_the_owners_cap_and_the_machine_for_both() {
+        use crate::inference::process_pool::Requester;
+        let machine = RamBudget::from_machine(4997, 0, 15991, 13000).with_owners_cap(12792);
+        let swarm = machine.judging(Requester::Swarm);
+        let owner = machine.judging(Requester::Owner);
+        assert!(
+            !swarm.allows(0, 5213),
+            "31% of RAM refuses the 30B's experts"
+        );
+        assert!(owner.allows(0, 5213), "the owner's cap admits them");
+        assert_eq!(owner.limiting_figure(5213, 9000).0, 12792);
+        assert_eq!(
+            owner.cap_source(),
+            "auto-sized to 12792 MB from 15991 MB of RAM for this computer's own requests"
+        );
+        assert_eq!(
+            swarm.cap_source(),
+            "auto-sized to 4997 MB from 15991 MB of RAM"
+        );
+
+        // A busy machine refuses the owner too: the headroom is not theirs to waive.
+        let busy = RamBudget::from_machine(4997, 0, 15991, 4000)
+            .with_owners_cap(12792)
+            .judging(Requester::Owner);
+        assert!(!busy.allows(0, 3000), "70% of 4000 MB free is 2800");
+
+        // An explicit `max_ram_mb`, or no machine reading, is one cap for all.
+        let fixed = RamBudget::cap_only(6000).judging(Requester::Owner);
+        assert_eq!(fixed.cap_mb, 6000);
     }
 
     /// The budget is a snapshot taken at admission: the same cap judges

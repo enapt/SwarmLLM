@@ -1097,7 +1097,16 @@ pub(super) fn round_tokens_for_reply(
 pub(crate) fn worker_requester(
     request: &crate::types::InferenceRequest,
 ) -> crate::inference::process_pool::Requester {
-    if request.route_override.as_ref().is_some_and(|o| o.lead_here) {
+    requester_for_override(request.route_override.as_ref())
+}
+
+/// [`worker_requester`] for a reader that holds the request's override rather
+/// than the request — the scheduler bounding this node by the memory cap the
+/// spawn will weigh the same request against (#266).
+pub(crate) fn requester_for_override(
+    route_override: Option<&crate::inference::route_override::RoutePlanOverride>,
+) -> crate::inference::process_pool::Requester {
+    if route_override.is_some_and(|o| o.lead_here) {
         crate::inference::process_pool::Requester::Swarm
     } else {
         crate::inference::process_pool::Requester::Owner

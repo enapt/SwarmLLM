@@ -6306,9 +6306,11 @@ fn a_full_holder_with_no_room(
         .test_cost_curve
         .insert(model.clone(), (50, 100));
     assert_eq!(
-        state
-            .model_process_pool
-            .max_local_hostable_layers(&model, false),
+        state.model_process_pool.max_local_hostable_layers(
+            &model,
+            false,
+            crate::inference::process_pool::Requester::Swarm
+        ),
         Some(0),
         "fixture: this node's own bound must be zero, or the test measures nothing"
     );
@@ -6685,7 +6687,12 @@ fn the_planner_weighs_a_local_model_the_loader_would_split_on_the_card() {
         "fixture: the speed answer must be 'processor', as in the field"
     );
     assert_eq!(
-        pool.max_local_hostable_layers(&mid, false).unwrap_or(0),
+        pool.max_local_hostable_layers(
+            &mid,
+            false,
+            crate::inference::process_pool::Requester::Swarm
+        )
+        .unwrap_or(0),
         0,
         "fixture: RAM alone holds nothing here, so only the split can answer 32"
     );
@@ -6698,7 +6705,11 @@ fn the_planner_weighs_a_local_model_the_loader_would_split_on_the_card() {
     );
     assert_eq!(
         ours.max_hostable_layers,
-        pool.max_local_hostable_layers(&mid, true),
+        pool.max_local_hostable_layers(
+            &mid,
+            true,
+            crate::inference::process_pool::Requester::Swarm
+        ),
         "and what a running worker can ADD is the card's room alone"
     );
     assert!(ours.max_hostable_layers.is_some_and(|k| k < 32));

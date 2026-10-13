@@ -1654,6 +1654,26 @@ max_concurrent_requests = 42
             rc.inference_ram_budget_mb(16000, true, swarmllm_types::ContributionMode::Minimal),
             Some(3000)
         );
+        assert_eq!(
+            rc.owners_ram_budget_mb(16000),
+            Some(3000),
+            "and binds the owner too"
+        );
+    }
+
+    /// #266: the contribution level caps the swarm's memory, not the owner's —
+    /// a default node with a card offers the swarm 31% of its RAM, and its owner
+    /// the 80% a processor-only node offers at Maximum.
+    #[test]
+    fn the_owners_memory_budget_is_the_machines_whole_job_share_at_any_level() {
+        let rc = ResourceConfig::default();
+        assert_eq!(
+            rc.inference_ram_budget_mb(15991, true, swarmllm_types::ContributionMode::Minimal),
+            Some(4997),
+            "the swarm's budget on the 16 GB node #266 was found on"
+        );
+        assert_eq!(rc.owners_ram_budget_mb(15991), Some(12792));
+        assert_eq!(rc.owners_ram_budget_mb(0), None, "unreadable is not judged");
     }
 
     /// Seeding shards to peers is pure contribution, so an unset cap must not
