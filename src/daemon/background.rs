@@ -1502,6 +1502,7 @@ mod tests {
             layers: vec![Some((k, v))],
             dim: 2,
             max_seq_len: 4096,
+            restore_to: Vec::new(),
         }
     }
 
@@ -1572,6 +1573,7 @@ mod tests {
             layers: vec![Some((k, v))],
             dim: 2,
             max_seq_len: 4096,
+            restore_to: Vec::new(),
         };
         let bytes = serialize_snapshot_with_block_size(&snap, &tokens, Some(4)).unwrap();
         let last_hash = hashes.last().unwrap().block_hash;

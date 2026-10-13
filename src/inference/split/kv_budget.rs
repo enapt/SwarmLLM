@@ -208,7 +208,7 @@ pub(crate) fn budget_reconciled_with_device(
 /// with nothing else in flight: a 1,835-token prompt served, and the next of
 /// the same size refused against 683 of the real 1,336 MB, four runs of four,
 /// the prefix cache on or off. Every caller is already off the per-token path
-/// (`ensure_room_for_prompt`, `snapshot_positions_that_fit`, the executor's
+/// (`ensure_room_for_prompt`, `positions_beside_live`, the executor's
 /// guard on a growth boundary), so the wait is for work the next step would
 /// queue behind anyway. `SWARMLLM_KV_DEVICE_SYNC=0` reads without it, for the
 /// A/B inside one binary.
@@ -308,7 +308,7 @@ fn device_sync_enabled_for(v: Option<&str>) -> bool {
 /// `mem_get_info` is a driver call costing microseconds; a system-memory
 /// refresh reads `/proc/meminfo` (or the mach equivalent), which is cheap but
 /// not free. Every caller of the reconciliation is already off the per-token
-/// path — `ensure_room_for_prompt`, `snapshot_positions_that_fit`, and the
+/// path — `ensure_room_for_prompt`, `positions_beside_live`, and the
 /// per-chunk guard, which itself only runs on a growth-quantum boundary — so
 /// a short window costs nothing and bounds the syscall rate under a prefill
 /// that crosses many quanta.
@@ -500,6 +500,36 @@ pub(crate) fn plan_snapshot(
     }
 }
 
+/// The share of the machine a card's prefix-cache snapshots never take: one
+/// part in this many. See [`host_snapshot_budget`].
+pub(crate) const HOST_SNAPSHOT_RESERVE_DIVISOR: u64 = 4;
+
+/// What a card's prefix-cache snapshots may hold in host RAM (#257): the
+/// machine's available memory plus what they already hold, less a quarter of
+/// the machine. The [`plan_snapshot`] budget for a snapshot whose home is
+/// `prefix_cache::SnapshotHome::HostRam`; invariant under evicting one, as
+/// [`budget_reconciled_with_device`] is.
+///
+/// **A quarter, not the card's 5% margin**, because these bytes are a tenant
+/// no other budget can reclaim: a processor worker reconciles its live cache
+/// against the machine's available memory (gotcha #462) and sees another
+/// worker's snapshots only as memory gone. A cache of reconstructible prompts
+/// ranks below any request in hand (gotcha #440), so it takes only memory the
+/// machine is far from needing. The per-model byte cap
+/// (`inference.prefix_cache_max_mb`) still bounds it first; llama.cpp's
+/// server bounds the same cache by a fixed 8 GiB (`--cache-ram`).
+pub(crate) fn host_snapshot_budget(available_bytes: u64, total_bytes: u64, held_bytes: u64) -> u64 {
+    available_bytes
+        .saturating_add(held_bytes)
+        .saturating_sub(total_bytes / HOST_SNAPSHOT_RESERVE_DIVISOR)
+}
+
+/// `(available, total)` bytes of the machine's memory, as every processor
+/// budget here reads it, or `None` when unreadable.
+pub(crate) fn host_free_and_total_bytes() -> Option<(u64, u64)> {
+    system_free_and_total_bytes()
+}
+
 #[cfg(test)]
 mod promised_tests {
     use super::*;
@@ -548,6 +578,43 @@ mod promised_tests {
 mod tests {
     use super::*;
     use crate::inference::split::kv_cache::KvStorage;
+
+    /// A card's snapshots in host RAM never take the machine's last quarter,
+    /// and the budget does not move when one of them is evicted — the same
+    /// property that lets `plan_snapshot`'s evict-then-fit hold (#257).
+    #[test]
+    fn host_snapshots_leave_the_machine_a_quarter() {
+        const GB: u64 = 1 << 30;
+        // 16 GB machine, 10 GB available, nothing held: 10 − 4 = 6 GB.
+        assert_eq!(host_snapshot_budget(10 * GB, 16 * GB, 0), 6 * GB);
+        // Evicting 1 GB of held snapshots moves it to available: unchanged.
+        assert_eq!(
+            host_snapshot_budget(9 * GB, 16 * GB, GB),
+            host_snapshot_budget(10 * GB, 16 * GB, 0)
+        );
+        // A machine already inside its last quarter offers nothing.
+        assert_eq!(host_snapshot_budget(3 * GB, 16 * GB, 0), 0);
+        // 216 MB a snapshot (3,774 tokens of a 7B at 57,344 B each): an
+        // 8 GB machine with 2.5 GB available keeps it whole.
+        let per_token = 57_344;
+        let plan = plan_snapshot(
+            host_snapshot_budget(2 * GB + GB / 2, 8 * GB, 0),
+            0,
+            0,
+            per_token,
+            3_774,
+        );
+        assert_eq!(plan.positions, 3_774);
+        // ... and at 2.1 GB available keeps the opening that fits in 0.1 GB.
+        let plan = plan_snapshot(
+            host_snapshot_budget(2 * GB + GB / 10, 8 * GB, 0),
+            0,
+            0,
+            per_token,
+            3_774,
+        );
+        assert_eq!(plan.positions as u64, (GB / 10) / per_token);
+    }
 
     /// The snapshot is cut to the room beside the live cache, after older
     /// cached prompts have been offered up — and is skipped outright when the

@@ -2286,7 +2286,7 @@ outright. Agent harnesses send 4,100-14,400 tokens a turn (PicoClaw ~4.1K,
 nanobot 7.3-9.2K, Hermes ~9.3K, ZeroClaw ~14.4K — field report 2026-09-26), so
 by default most agent prompts were never cached. The constant protected no
 memory: a snapshot is also held to the room beside the live cache
-(`snapshot_positions_that_fit`, gotcha #440) and admission evicts cached prompts
+(`model_worker::snapshot_room`, gotcha #440) and admission evicts cached prompts
 before refusing a request. Default now 0 (no token ceiling). What a position
 weighs varies ~3x between 3B models (73.7 KB qwen2.5-3b, 229 KB llama-3.2-3b),
 which is why the ceiling is derived, not raised.

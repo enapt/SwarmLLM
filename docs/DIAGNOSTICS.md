@@ -1706,6 +1706,19 @@ the next two at ~550, all at width 512. The whole difference was the later
 prompts' first forward, which took 3.5-5.6 s with the prefix cache on and 0.1 s
 with it off. A best-of line hid this through several gates (FUTURE_WORK #257).
 
+**Did the card's memory pool take fresh memory, and where are saved prompts kept?**
+At `-v`, `DIAG: card memory reading` carries `pool_reserved_mb`. Every rise in it is a
+fresh allocation from the driver, the step that slows with Windows uptime under WSL2
+(gotcha #755). List the distinct values in order: `grep -ao 'pool_reserved_mb=[0-9]*'
+node.log | uniq`. The number of rises does not depend on uptime, only their cost does, so
+count them on a fresh boot and time them on an old one (gotcha #834).
+`DIAG: prefix-cache inserted snapshot` names each saved prompt's `home=` (`HostRam` under
+WSL2, `BesideLive` elsewhere), its `mb=` and the `copy_ms=` it cost inside the request, and
+`DIAG: prefix-cache restored a snapshot from host RAM to the card` times a hit's copy back.
+A/B inside one binary: `SWARMLLM_PREFIX_CACHE_HOME=card` (the behaviour before #257) or `=host`. On
+2026-10-13 four rounds a side read three rises after the first prompt on the card and none
+in host RAM, at 59-169 ms a copy.
+
 ## Attention-kernel A/B — `SWARMLLM_FORCE_STANDARD_ATTN=1`
 
 Forces every attention call in the process onto `standard_attention`, so the

@@ -55,7 +55,7 @@ pub use self::model::SplitModel;
 pub use self::prefix_cache::{
     compute_block_hashes, deserialize_snapshot, deserialize_snapshot_full,
     serialize_snapshot_with_block_size, snapshot_is_finite, verify_token_hash_chain, KvSnapshot,
-    PrefixCache, KV_SNAPSHOT_MAGIC, KV_SNAPSHOT_VERSION,
+    PrefixCache, SnapshotHome, SnapshotRoom, KV_SNAPSHOT_MAGIC, KV_SNAPSHOT_VERSION,
 };
 pub use self::shard_reader::{resolve_sidecars, SidecarTensor};
 pub(crate) use self::token_embedding::table_supports_row_gather;

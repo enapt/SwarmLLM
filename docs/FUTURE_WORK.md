@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate.
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate; #257 closed on 2026-10-13 (under WSL2 a card's saved prompts are kept in host RAM) and #258 opened from its measurement.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -95,8 +95,6 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 14. **#228** — Qwen 3.5's first version leaves out speculation (its card/processor split shipped
     in v0.3.230; its MoE models run, its delta rule is one op per layer and its decode steps are
     captured as CUDA graphs since v0.3.235).
-15. **#257** — with the prefix cache on, a long prompt after a node's first waits 3.5-5.6 s on
-    the card before it is read (found at the v0.3.236 gate; v0.3.235 does the same).
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -964,30 +962,18 @@ tensor-core MMQ port (large). Not checked at long context: Qwen 3.5 (reference i
 and a MoE model whole on the card (none fits 8 GB). Separately, GLM-4-9B disagrees with llama.cpp
 at a few positions on every path (tokenizer re-tokenisation is the lead) — pre-existing.
 
-#### #257 — With the prefix cache on, a long prompt after a node's first waits seconds on the card before it is read
-`P2` · perf-local · **OPEN** — 2026-10-12 · history: none (found at the v0.3.236 gate)
+#### #258 — One long prompt in about ten pauses ~0.7 s in a single middle chunk on the card
+`P3` · perf-local · **OPEN** — 2026-10-13 · history: none (seen while measuring #257)
 
-Measured 2026-10-12 on the RTX 3070 Laptop, Windows up 56 h (`~/swarmllm-257/run1.sh`, the
-deployed v0.3.236 at `-v`): an isolated node, Qwen2.5-Coder-7B whole on the card, a short
-warm-up, then three unique ~4,000-token prompts one after another, `max_tokens` 1. With the
-default prefix cache the first prompt reads at 1,365-1,573 tok/s and the second and third at
-474-640. With `[inference] prefix_cache_enabled = false` all three read at 1,355-1,580 (two
-pairs, alternated). v0.3.235 does the same, and so did gate235 (1,538 → 616 / 814, and the 8B's
-1,312 → 637 / 844); the gate's best-of line hid it.
-
-Where the time goes (debug logs `~/swarmllm-257/speed-{def,nocache}{1,2}.node.log`): every
-prompt reads 512 tokens per forward in both arms (`chunk_tokens=512`, `prefix_matched=0`). So the
-chunk width is NOT the cause; the lead first written here, in `51274672`, was wrong. What differs
-is the FIRST 512-token forward of each later prompt. With the cache on it took 5,584 and 5,549 ms,
-then 3,543 and 4,664 ms. With it off it took 99-100 ms. The rest of the pass is ~2.1 s in both arms,
-and free card memory is the same in both (1,986 vs 2,018 MB). Each request with the cache on ends
-by storing its KV as a snapshot (`DIAG: prefix-cache inserted snapshot … manifest_len` 60 → 118 →
-180 blocks of 64 tokens), logged ~0.1 s after its last chunk. The likely shape is that the
-snapshot's copies are still queued on the card's one stream when the next request's first forward
-waits on them. That is not yet shown. Next: count and time the snapshot's copies (how many,
-which direction, pageable or pinned host memory) and show the first forward waits on them. Then
-toggle the fix off and watch a test go red. In this shape every long prompt that matches no
-stored one pays the wait.
+Measured 2026-10-13 on the RTX 3070 Laptop, Windows up 1.4-1.8 h (`~/swarmllm-257/run{1,2}/`,
+Qwen2.5-Coder-7B whole on the card, isolated node at `-v`, three unique ~4,800-token prompts
+a round, `max_tokens` 1). Of 30 long prompts in ten rounds, three read at 1,200-1,264 tok/s
+instead of ~1,450-1,580. In each, ONE 512-token chunk took 0.96-1.04 s against ~0.32 s for its
+neighbours (positions 2,560 and 3,584; `DIAG: BatchGenerate prefill chunk ran` timestamps). The
+card memory pool did not grow at that chunk, and there was one in each kind of round: snapshots
+on the card, in host RAM, and the prefix cache OFF. So it is not #257's pool growth. It did not
+line up with the safety kit's 10 s `nvidia-smi` readings. Next: catch one under nsys and see what the stream waits on (a
+Windows-side poller, a clock change, a WDDM residency move).
 
 #### #137 — Our processor decode trails llama.cpp's by ~12% at the same width, and loses where llama.cpp gains from 8 threads
 `P3` · perf-local · **OPEN, narrowed 2026-10-11** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3
@@ -1906,6 +1892,36 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-13, ships in the next release** (#257)
+- #257 — **under WSL2, a long prompt after a node's first no longer waits seconds on the graphics
+  card before it is read.** With the prefix cache on, each long prompt ended by keeping a copy of
+  its conversation memory on the card (264 MB for a ~4,800-token prompt on a 7B). Held between
+  requests, that copy took room the card's memory pool needed for the NEXT prompt, so the pool
+  had to take fresh memory from the driver at that prompt's peak, and under WSL2 a fresh
+  allocation slows with Windows uptime (gotcha #755, microsoft/WSL#41701). At 56 h nsys timed it
+  at 1.1-6.9 s inside the next prompt's first forward (2026-10-12): later prompts read at 474-640
+  tok/s against 1,355-1,580 with the cache off, on v0.3.235 and v0.3.236 alike. A card's
+  saved prompts are now kept in host RAM under WSL2, as llama.cpp's server keeps its prompt cache
+  (`--cache-ram`). The `prefix_cache::SnapshotHome` choice is one decision, planned before the
+  copy and bounded by the machine's memory less a quarter (`kv_budget::host_snapshot_budget`).
+  Native Linux keeps them on the card: its pool grows fast at any uptime, so the copy would be
+  pure cost. Native Windows is not measured. A/B `SWARMLLM_PREFIX_CACHE_HOME=card|host`.
+  Measured on a FRESH boot (1.4-1.8 h, two binaries, rounds card / host / off / host / card,
+  `~/swarmllm-257/ab.sh`), where neither arm stalls (first forwards 56-234 ms): the card pool's
+  reserved size (`pool_reserved_mb`, `-v`) grew three times after the first prompt with the
+  copies on the card (5,184 → 5,472 → 5,824 → 5,856 MB, all four card rounds) and NEVER with them in host RAM
+  (5,184 flat through a cache hit, all four host rounds). Those growths are the step that
+  stalls at high uptime. The price, at any uptime: 59-169 ms to copy a snapshot off the card
+  inside its request (662 and 924 ms in one round, right after a 74-min build had filled the
+  page cache), 48-58 ms
+  to restore one, so a hit takes ~0.5 s against ~0.3 s on the card. A hit no longer compacts
+  the stored copy on the host first (that cost 1.22 s on the first build). Every reply to the
+  repeated prompt was identical across all rounds, the cache-off recompute included. Rig
+  recipe: an isolated node (`split_rig.sh`'s config), three unique ~4,800-token prompts then
+  prompt 1 again with a question appended, rounds alternated under the safety kit; read
+  `pool_reserved_mb`, `home=` and `copy_ms=` on `DIAG: prefix-cache inserted snapshot`. Still
+  owed: the end-to-end figure at ≥ 48 h of uptime (`ab.sh` again). Leaves #258.
 
 **Closed 2026-10-12, released in v0.3.236 (2026-10-12)** (#244, #248, #249, #253, #254; #251 (1), #251 (2) per model, #251 (4) and #252 (2) of open entries)
 - #244 — **a split's reply no longer pauses for seconds while the node reads the graphics

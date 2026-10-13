@@ -142,6 +142,12 @@ Prune's soft-unload narrows a loaded model only when our CHARGED graphics memory
 
 → `docs/invariants/memory.md` § "A card's memory pool keeps what the worker frees (2026-09-28)"
 
+## Under WSL2 a card's saved prompts live in host RAM (2026-10-13, #257)
+
+**`prefix_cache::SnapshotHome::for_device`** is the one answer to where a prefix-cache snapshot is kept: host RAM for a card reached through WSL2 (`cuda_pool::card_is_reached_through_wsl`), beside the live cache elsewhere. A snapshot held on the card made the NEXT prompt grow the pool, which under WSL2 slows with uptime (1.1-6.9 s at 56 h). `model_worker::snapshot_room` plans home + positions, REQUIRED by both inserts; host RAM is bounded by `kv_budget::host_snapshot_budget`; the card's budget and `release` see only `BesideLive`. A narrowed host layer stays a view. Judge a change by `pool_reserved_mb` rises, not tok/s on a fresh boot (gotcha #834). A/B `SWARMLLM_PREFIX_CACHE_HOME=card|host`.
+
+→ `docs/invariants/memory.md` § "Under WSL2 a card's saved prompts live in host RAM"
+
 ## The owner is told when fresh card memory has become slow (2026-10-01)
 
 **`cuda_pool::probe_once`** times 16 fresh 4 MB allocations once per worker at `load_device`, never per request; a probe ≥ 0.5 s reaches `ModelProcessPool::slow_card_notice` (`WorkerMsg::CardAllocationProbe`), WSL2 only, at most every 12 h. It changes nothing the node does.

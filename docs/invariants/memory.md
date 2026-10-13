@@ -864,7 +864,7 @@ was admitted against a KV-store-only figure, and its cache landed in WSL2's
 host-backed memory — 3-5 tok/s where the empty card did 19-33, with nothing
 refused and nothing logged. A cache of reconstructible data ranks below the
 request in hand. **The snapshot taken AFTER a prefill is sized the same
-way** (`plan_snapshot` → `insert_from_kv(.., max_positions)`): it is a full
+way** (`plan_snapshot` → `insert_from_kv(.., room)`): it is a full
 copy of the request's own cache, and taken whole it put the card straight
 back over the top — every reply cut at the next growth quantum, measured
 after the admission half alone had shipped to the card. Older prompts go
@@ -898,7 +898,7 @@ device memory** (2026-09-03): `SplitModel::kv_budget_now(live, cached)` =
 `min(load-time budget, live + cached + free_now − margin)`, `free_now` from
 cudarc's `mem_get_info` (microseconds), margin 5% of the card with a
 256 MB floor (`kv_budget::budget_reconciled_with_device`). Asked by
-`ensure_room_for_prompt`, `snapshot_positions_that_fit` and the per-chunk
+`ensure_room_for_prompt`, `model_worker::positions_beside_live` and the per-chunk
 guard — never on the per-token path. **The load-time budget is a
 prediction; the card is the fact**: `kv_headroom_bytes` was taken from free
 memory at load and could not see a tenant that arrived later (a second
@@ -2495,6 +2495,58 @@ Full evidence: `docs/invariants/memory.md`
 - **A prompt of known length is RESERVED, not grown into** — `KvCacheStore::set_reserved_positions` (written by the worker at the top of `ensure_room_for_prompt`, before any budget question) sizes every layer's FIRST allocation via `new_kv_cache(.., reserve_positions)`; growth by `Tensor::cat` is O(n²/quantum) in copies and one device allocation per step, none of it charged (97 GB copied and 2279 allocations for a 20837-token prompt). The guard charges what will be allocated, read off the buffer (`kv_budget::positions_to_allocate`), never derived from `index_pos`. Absent means "grow as before"; `SWARMLLM_KV_RESERVE=0` is the in-binary A/B. → `docs/invariants/memory.md` § "A prompt of known length is reserved"
 - **`inference::process_pool::worker_socket_path`** — the worker IPC socket path, and the ONLY place it is built.
 
+## Under WSL2 a card's saved prompts live in host RAM (2026-10-13, FUTURE_WORK #257)
+
+**Why.** A prefix-cache snapshot is a copy of a finished prompt's KV (264 MB for ~4,800
+tokens of Qwen2.5-Coder-7B). Kept on the card, it stays in the memory pool's used set
+between requests, so the next long prompt's peak no longer fits what the pool holds (§ "A
+card's memory pool keeps what the worker frees") and the pool takes fresh memory from the
+driver at that peak. Under WSL2 that is the call that slows with Windows uptime (§ "The owner
+is told when the card has become slow"): at 56 h nsys timed it at 1.1-6.9 s inside the next
+prompt's first 512-token forward, and later prompts read at 474-640 tok/s against
+1,355-1,580 with the cache off (2026-10-12, v0.3.235 and v0.3.236).
+
+**Research.** llama.cpp's server keeps its prompt cache in host RAM (`--cache-ram`, PR #16391,
+8 GiB by default) and copies a slot's state there LAZILY, in `get_available_slot`, when the slot
+takes a new prompt that would lose most of its context. So it pays the device-to-host copy on a
+request's path too. Its KV buffer is planned once for the whole context, so keeping the last
+prompt on the card costs it no new memory; ours is allocated per request from the pool, which
+is the difference.
+
+**Measured 2026-10-13, fresh boot (1.4-1.8 h)**, two binaries, rounds card / host / off /
+host / card. Neither arm stalls at this uptime (first forwards 56-234 ms), so the figure that
+transfers is the COUNT of pool growths (`pool_reserved_mb`): three after the first prompt with
+snapshots on the card (5,184 → 5,472 → 5,824 → 5,856 MB, all four card rounds), none in host RAM
+(5,184 flat through a hit, all four host rounds), one with the cache off. The price at any uptime:
+59-169 ms per snapshot copy inside its request (662 and 924 ms in one round right after a long
+build filled the page cache), 48-58 ms per restore; a hit ~0.5 s against ~0.3 s on the card.
+The first build also compacted a narrowed snapshot on the host before restoring it (a hit took
+1.22 s); a narrowed host layer now stays a view. Replies to the repeated prompt were identical in
+every round, the cache-off recompute included.
+
+**The rule.** `prefix_cache::SnapshotHome::for_device` is the one answer: host RAM for a CUDA
+card reached through WSL2 (`cuda_pool::card_is_reached_through_wsl`, `/dev/dxg`), beside the live
+cache everywhere else. `model_worker::snapshot_room` plans the home AND the positions that fit
+there, and both inserts REQUIRE that plan (`SnapshotRoom`), so the memory a snapshot was sized
+against is the memory it lands in. Host RAM is bounded by `kv_budget::host_snapshot_budget`
+(available + already held − a quarter of the machine, under `prefix_cache_max_mb` first); the
+card's KV budget and `set_external_reserved` count only `BesideLive` bytes; `PrefixCache::release`
+evicts only the home that needs the room. A/B `SWARMLLM_PREFIX_CACHE_HOME=card|host`.
+
+**What a change must keep.**
+- **Not on native Linux.** There the pool grows fast at any uptime, and the copy is pure cost.
+  Native Windows (WDDM without WSL's GPU paravirtualisation) is unmeasured: measure before
+  widening the gate.
+- **The copy moves one layer at a time**, dropping each card transient before the next, so the
+  card never holds more than one layer's copy (~9 MB here).
+- **A narrowed host-RAM layer stays a view** (`narrow_snapshot`); the restore copies it to the
+  card as it is and `LayerKv::append` compacts it there. Test
+  `a_host_ram_snapshot_narrows_to_a_view_and_restores_only_the_prefix` fails without it.
+- **Dropping a host-RAM snapshot frees nothing on the card.** Counting it as freed would let
+  through a refusal the card still owes (test
+  `a_snapshot_in_host_ram_is_neither_charged_to_nor_evicted_for_the_card`).
+- **Still owed:** the end-to-end figure at ≥ 48 h of uptime.
+
 ## A split's stored prompt lives in the worker's prefix cache, under its one budget (2026-10-09, FUTURE_WORK #10)
 
 A segment keeps its part of a split's prompt between turns
@@ -2505,7 +2557,7 @@ store. **Why not a store of its own:** gotcha #440 was a cache whose snapshots
 nobody charged — a long prompt's live cache spilled to host memory at 3-5 tok/s
 with nothing refused or logged. In the same cache the entries inherit the
 charge (`set_external_reserved` after storing, as the generate path does), the
-sizing before the copy (`snapshot_positions_that_fit` → `kv_budget::plan_snapshot`),
+sizing before the copy (`model_worker::snapshot_room` → `kv_budget::plan_snapshot`),
 the byte and entry caps (`evict_over_caps`, shared by both kinds), and the
 eviction before a refusal (`claim_room`'s evictor).
 

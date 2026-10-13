@@ -52,7 +52,9 @@ const CANCEL_RETENTION_SECS: u64 = 60;
 const KV_OCCUPANCY_REPORT_SECS: u64 = 30;
 use crate::error::SwarmError;
 use crate::inference::slot_table::{Slot, SlotTable};
-use crate::inference::split::{self, BatchItem, KvCacheStore, PrefixCache, SplitModel};
+use crate::inference::split::{
+    self, BatchItem, KvCacheStore, PrefixCache, SnapshotHome, SnapshotRoom, SplitModel,
+};
 use crate::inference::swift::{SwiftCalibrator, SwiftConfig};
 use crate::inference::worker_ipc::*;
 use crate::types::{NetworkFinishReason, SamplingParams};
@@ -258,8 +260,8 @@ pub async fn run_worker(
             let (Some(pc), Some(ks)) = (pc.upgrade(), ks.upgrade()) else {
                 return 0;
             };
-            let freed = pc.release(needed as usize) as u64;
-            ks.set_external_reserved(pc.bytes_total() as u64);
+            let freed = pc.release(needed as usize, SnapshotHome::BesideLive) as u64;
+            ks.set_external_reserved(pc.bytes_in(SnapshotHome::BesideLive) as u64);
             freed
         }));
     }
@@ -2335,18 +2337,19 @@ async fn handle_forward(
         .filter(|_| fwd.sequence_num == 0 && final_piece)
     {
         let held = kv_store.request_positions(&model_key, &req_id_str);
-        let keep = snapshot_positions_that_fit(model, kv_store, prefix_cache, held);
+        let room = snapshot_room(model, kv_store, prefix_cache, held);
         let blocks = prefix_cache.insert_chain_from_kv(
             &model_key,
             &req_id_str,
             kv_store,
             hint.block_tokens,
             &hint.keys,
-            keep,
+            room,
         );
-        // The stored blocks are device memory the head-room guard must see.
+        // Stored blocks kept beside the live cache are device memory the
+        // head-room guard must see.
         if prefix_cache_charged() {
-            kv_store.set_external_reserved(prefix_cache.bytes_total() as u64);
+            kv_store.set_external_reserved(prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64);
         }
         result.prompt_blocks_stored = Some(blocks);
     }
@@ -3011,11 +3014,76 @@ fn prefix_cache_charged() -> bool {
     })
 }
 
+/// Where a finished prompt's prefix-cache snapshot is kept and how many of its
+/// positions fit there — the ONE plan both inserts take (`SnapshotRoom`).
+/// Evicts older cached prompts of the same home first.
+///
+/// A card's snapshot goes to host RAM (#257) and is sized against the
+/// machine (`kv_budget::host_snapshot_budget`); one kept beside the live
+/// cache is sized against that device's KV budget (gotcha #440).
+fn snapshot_room(
+    model: &SplitModel,
+    kv_store: &KvCacheStore,
+    prefix_cache: &PrefixCache,
+    prompt_tokens: usize,
+) -> SnapshotRoom {
+    let home = SnapshotHome::for_device(model.device());
+    let max_positions = match home {
+        SnapshotHome::HostRam => host_ram_positions(model, prefix_cache, prompt_tokens),
+        SnapshotHome::BesideLive => {
+            positions_beside_live(model, kv_store, prefix_cache, prompt_tokens)
+        }
+    };
+    SnapshotRoom {
+        home,
+        max_positions,
+    }
+}
+
+/// Positions of a card's snapshot that fit in host RAM beside the
+/// snapshots already there, evicting the oldest of those first. `usize::MAX`
+/// when the machine's memory or a position's weight cannot be read. Not
+/// switched off with `SWARMLLM_KV_PREFIX_CHARGE=0`: that A/B is about the
+/// card's budget, and this is the only bound host RAM has.
+fn host_ram_positions(
+    model: &SplitModel,
+    prefix_cache: &PrefixCache,
+    prompt_tokens: usize,
+) -> usize {
+    use crate::inference::split::kv_budget::{
+        host_free_and_total_bytes, host_snapshot_budget, plan_snapshot,
+    };
+    let per_token = model.kv_budget().1;
+    let Some((available, total)) = host_free_and_total_bytes() else {
+        return usize::MAX;
+    };
+    if per_token == 0 {
+        return usize::MAX;
+    }
+    let held = prefix_cache.bytes_in(SnapshotHome::HostRam) as u64;
+    let budget = host_snapshot_budget(available, total, held);
+    let plan = plan_snapshot(budget, 0, held, per_token, prompt_tokens);
+    if plan.evict_bytes > 0 {
+        prefix_cache.release(plan.evict_bytes as usize, SnapshotHome::HostRam);
+    }
+    if plan.positions < prompt_tokens {
+        tracing::info!(
+            prompt_tokens,
+            keeping = plan.positions,
+            held_mb = held / (1024 * 1024),
+            available_mb = available / (1024 * 1024),
+            budget_mb = budget / (1024 * 1024),
+            "DIAG: prefix-cache snapshot cut to the host memory the machine can spare"
+        );
+    }
+    plan.positions
+}
+
 /// How many positions of a finished prompt to snapshot into the prefix cache
 /// so the copy fits BESIDE the request's live cache (gotcha #440). Evicts
 /// older cached prompts first. `usize::MAX` when the budget is unknown or
 /// charging is switched off.
-fn snapshot_positions_that_fit(
+fn positions_beside_live(
     model: &SplitModel,
     kv_store: &KvCacheStore,
     prefix_cache: &PrefixCache,
@@ -3025,7 +3093,7 @@ fn snapshot_positions_that_fit(
         return usize::MAX;
     }
     let allocated = kv_store.occupancy().allocated_bytes;
-    let cached = prefix_cache.bytes_total() as u64;
+    let cached = prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64;
     // Against the card as it stands, not the budget predicted at load: a
     // snapshot is a device allocation the size of the prompt, taken on a card
     // that may hold tenants the load-time figure never saw.
@@ -3048,7 +3116,7 @@ fn snapshot_positions_that_fit(
         prompt_tokens,
     );
     if plan.evict_bytes > 0 {
-        prefix_cache.release(plan.evict_bytes as usize);
+        prefix_cache.release(plan.evict_bytes as usize, SnapshotHome::BesideLive);
     }
     if plan.positions < prompt_tokens {
         tracing::info!(
@@ -3152,7 +3220,7 @@ fn ensure_room_for_prompt(
     // each has actually allocated, so nothing is charged twice.
     let promised = kv_store.outstanding_admission_bytes();
     let mut live = occupancy.allocated_bytes.saturating_add(promised);
-    let cached = prefix_cache.bytes_total() as u64;
+    let cached = prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64;
     // Nothing of THIS request is in the store yet, so anything live belongs to
     // an earlier one — a request still decoding, or one whose cache outlived
     // its reply. The store's figure was seen to wander by ~1 GB across
@@ -3206,9 +3274,9 @@ fn ensure_room_for_prompt(
             return Ok(());
         }
         PromptAdmission::EvictBytes(needed) => {
-            let freed = prefix_cache.release(needed as usize) as u64;
+            let freed = prefix_cache.release(needed as usize, SnapshotHome::BesideLive) as u64;
             // Charging is on here (checked above), so keep the guard's figure current.
-            kv_store.set_external_reserved(prefix_cache.bytes_total() as u64);
+            kv_store.set_external_reserved(prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64);
             tracing::info!(
                 request_id,
                 prompt_tokens,
@@ -3626,12 +3694,13 @@ async fn handle_generate(
     // Snapshot it into the prefix cache so future prompts sharing this
     // prefix skip the prefill work. insert_from_kv is a no-op when the
     // prompt is shorter than the configured floor or the cache is off.
-    let keep = snapshot_positions_that_fit(model, kv_store, prefix_cache, prompt_ids.len());
+    let room = snapshot_room(model, kv_store, prefix_cache, prompt_ids.len());
     let manifest =
-        prefix_cache.insert_from_kv(&model_key_string, &req_id_str, kv_store, &prompt_ids, keep);
-    // The snapshot just taken is device memory the head-room guard must see.
+        prefix_cache.insert_from_kv(&model_key_string, &req_id_str, kv_store, &prompt_ids, room);
+    // A snapshot kept beside the live cache is device memory the head-room
+    // guard must see.
     if prefix_cache_charged() {
-        kv_store.set_external_reserved(prefix_cache.bytes_total() as u64);
+        kv_store.set_external_reserved(prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64);
     }
     if !manifest.is_empty() {
         let _ = send_worker(
@@ -4828,21 +4897,18 @@ async fn step_decode_pool(
                                 continue;
                             }
                         };
-                    let keep = snapshot_positions_that_fit(
-                        model,
-                        kv_store,
-                        prefix_cache,
-                        slot.prompt_ids.len(),
-                    );
+                    let room = snapshot_room(model, kv_store, prefix_cache, slot.prompt_ids.len());
                     let manifest = prefix_cache.insert_from_kv(
                         &slot.model_key,
                         &slot.req_id_str,
                         kv_store,
                         &slot.prompt_ids,
-                        keep,
+                        room,
                     );
                     if prefix_cache_charged() {
-                        kv_store.set_external_reserved(prefix_cache.bytes_total() as u64);
+                        kv_store.set_external_reserved(
+                            prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64,
+                        );
                     }
                     if !manifest.is_empty() {
                         pending_announces.push((slot.model_id.clone(), manifest));

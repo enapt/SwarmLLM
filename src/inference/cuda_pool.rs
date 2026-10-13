@@ -198,6 +198,19 @@ fn slow_threshold() -> Duration {
     })
 }
 
+/// Whether this process reaches its card through WSL2's paravirtual GPU
+/// (`/dev/dxg`) — a node under WSL2, or in a Docker Desktop container on it.
+/// The one place a fresh card allocation is KNOWN to slow with the host's
+/// uptime (microsoft/WSL#41701, gotchas #754/#755), so the one place a
+/// prefix-cache snapshot is moved off the card to keep the pool's high-water
+/// mark down (`prefix_cache::SnapshotHome::for_device`, #257). A native Linux
+/// driver grows its pool fast at any uptime, and a native Windows build's
+/// WDDM has not been measured. Read once.
+pub(crate) fn card_is_reached_through_wsl() -> bool {
+    static WSL: OnceLock<bool> = OnceLock::new();
+    *WSL.get_or_init(|| cfg!(target_os = "linux") && std::path::Path::new("/dev/dxg").exists())
+}
+
 /// How often the owner is reminded while the probes stay slow: the slowdown
 /// lasts until Windows restarts, and a notice per worker start would nag.
 pub(crate) const SLOW_CARD_NOTICE_EVERY: Duration = Duration::from_secs(12 * 3600);

@@ -38,7 +38,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use crate::inference::split::kv_cache::LayerKv;
-use candle_core::Tensor;
+use candle_core::{Device, Tensor};
 
 use crate::error::SwarmError;
 use crate::types::PrefixBlockEntry;
@@ -155,10 +155,14 @@ pub struct KvSnapshot {
     /// when rebuilding so the restored cache has the same headroom as a
     /// freshly-created one.
     pub max_seq_len: usize,
+    /// The card each layer goes back to on a restore, for a layer whose copy
+    /// was moved OFF it into host RAM (`SnapshotHome::HostRam`, #257); `None`
+    /// — or an empty list — restores a layer where its tensors already are.
+    pub restore_to: Vec<Option<Device>>,
 }
 
 impl KvSnapshot {
-    /// Bytes of device memory this snapshot holds.
+    /// Bytes this snapshot holds, wherever it holds them.
     ///
     /// The number the retention bound actually needs. An entry's size scales
     /// with its prompt, so a count of entries says nothing useful about
@@ -174,6 +178,107 @@ impl KvSnapshot {
             })
             .sum()
     }
+
+    /// Where this snapshot's copy is kept: host RAM once any layer was moved
+    /// off its card, else beside the live cache.
+    pub fn home(&self) -> SnapshotHome {
+        if self.restore_to.iter().any(Option::is_some) {
+            SnapshotHome::HostRam
+        } else {
+            SnapshotHome::BesideLive
+        }
+    }
+
+    /// Bytes this snapshot holds in `home` — what that memory's budget is
+    /// charged for it.
+    pub fn bytes_in(&self, home: SnapshotHome) -> usize {
+        if self.home() == home {
+            self.bytes()
+        } else {
+            0
+        }
+    }
+}
+
+/// Where a prefix-cache snapshot's copy is kept (#257).
+///
+/// **Under WSL2 a card's snapshot is kept in host RAM, as llama.cpp's server
+/// keeps its prompt cache (`--cache-ram`, PR #16391).** On the card one held
+/// snapshot — 216 MB for a 3,774-token prompt on a 7B — sat in the memory
+/// pool's working set, so the NEXT long prompt's first chunk had to grow the
+/// pool at its peak (the f16 copy of the first layer's FFN-down weight beside
+/// the activations), and growth through `cuMemAllocAsync` under WSL2 took
+/// 1.1-6.9 s at 56 h of Windows uptime (nsys, 2026-10-12, v0.3.236): later
+/// prompts read at 413-522 tok/s against 1,566 with the cache off. In host
+/// RAM the pool keeps the working set a prompt pass needs.
+///
+/// **The price is paid at ANY uptime, the stall only at a high one**: on a
+/// fresh boot (1.4 h, 2026-10-13) neither arm stalled, and the copy off the
+/// card took 59-145 ms per 264 MB snapshot (924 ms at worst) inside the
+/// request. So it is taken only where the stall is known to happen
+/// (`cuda_pool::card_is_reached_through_wsl`); llama.cpp pays the same copy
+/// on a request's path, lazily, when a slot takes a new prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotHome {
+    /// On the device each layer runs on, beside the live cache, and charged
+    /// against that device's KV budget (gotcha #440): every snapshot on the
+    /// processor, and on a card outside WSL2 or under
+    /// `SWARMLLM_PREFIX_CACHE_HOME=card`.
+    BesideLive,
+    /// In host RAM, copied off the card. The card's KV budget is charged
+    /// nothing for it; the machine's memory bounds it instead
+    /// (`kv_budget::host_snapshot_budget`).
+    HostRam,
+}
+
+impl SnapshotHome {
+    /// The one answer to where a snapshot of a model whose primary device is
+    /// `device` is kept.
+    pub fn for_device(device: &Device) -> Self {
+        Self::choose(
+            device.is_cuda(),
+            crate::inference::cuda_pool::card_is_reached_through_wsl(),
+            home_override(),
+        )
+    }
+
+    /// Only a CUDA card moves its copy — on the processor the live cache
+    /// already IS host RAM, and a unified-memory device would copy into the
+    /// same memory it came from — and by default only under WSL2.
+    fn choose(on_card: bool, through_wsl: bool, forced: Option<Self>) -> Self {
+        match forced {
+            Some(home) if on_card => home,
+            _ if on_card && through_wsl => Self::HostRam,
+            _ => Self::BesideLive,
+        }
+    }
+}
+
+/// `SWARMLLM_PREFIX_CACHE_HOME=card` keeps a card's snapshots on the card (the
+/// behaviour before #257) and `=host` moves them to host RAM on any platform —
+/// both directions of the A/B inside one binary. Read once.
+fn home_override() -> Option<SnapshotHome> {
+    use std::sync::OnceLock;
+    static HOME: OnceLock<Option<SnapshotHome>> = OnceLock::new();
+    *HOME.get_or_init(
+        || match std::env::var("SWARMLLM_PREFIX_CACHE_HOME").ok()?.trim() {
+            "card" => Some(SnapshotHome::BesideLive),
+            "host" => Some(SnapshotHome::HostRam),
+            _ => None,
+        },
+    )
+}
+
+/// What one snapshot may take: where it is kept and how many positions fit
+/// there. Planned by the worker (`model_worker::snapshot_room`) and REQUIRED
+/// by both inserts, so the memory a snapshot was sized against and the memory
+/// it lands in are one decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotRoom {
+    pub home: SnapshotHome,
+    /// Positions that fit in `home`; 0 stores nothing, `usize::MAX` means no
+    /// bound is known.
+    pub max_positions: usize,
 }
 
 struct Entry {
@@ -420,17 +525,19 @@ impl PrefixCache {
         request_id: &str,
         kv_store: &KvCacheStore,
         prompt_tokens: &[u32],
-        max_positions: usize,
+        room: SnapshotRoom,
     ) -> Vec<PrefixBlockEntry> {
-        // `max_positions` is the room beside the live cache, from
+        // `room` is where the copy goes and what fits there, from
         // `kv_budget::plan_snapshot` — a snapshot that does not fit is worse
-        // than none (gotcha #440). `usize::MAX` means no device bound.
+        // than none (gotcha #440). `usize::MAX` positions means no bound.
+        let max_positions = room.max_positions;
         if max_positions == 0 {
             tracing::info!(
                 model_key,
                 request_id,
                 prompt_tokens = prompt_tokens.len(),
-                "DIAG: prefix-cache: not snapshotting — no room on the device beside the live cache"
+                home = ?room.home,
+                "DIAG: prefix-cache: not snapshotting — no room for the copy"
             );
             return Vec::new();
         }
@@ -534,7 +641,8 @@ impl PrefixCache {
             }
         }
 
-        let snap = match snapshot_at(&entry.layers, available, dim, max_seq_len) {
+        let copy_started = Instant::now();
+        let snap = match snapshot_at(&entry.layers, available, dim, max_seq_len, room.home) {
             Ok(s) => Arc::new(s),
             Err(e) => {
                 // Most likely an allocation failure on a memory-starved
@@ -551,6 +659,8 @@ impl PrefixCache {
             }
         };
         drop(entry);
+        let copy_ms = copy_started.elapsed().as_millis() as u64;
+        let (snap_bytes, snap_home) = (snap.bytes(), snap.home());
 
         let Ok(mut inner) = self.inner.write() else {
             return Vec::new();
@@ -585,6 +695,10 @@ impl PrefixCache {
             model_key,
             entries = entry_count,
             manifest_len = manifest.len(),
+            positions = available,
+            mb = snap_bytes / (1024 * 1024),
+            home = ?snap_home,
+            copy_ms = copy_ms,
             "DIAG: prefix-cache inserted snapshot"
         );
         manifest
@@ -671,9 +785,9 @@ impl PrefixCache {
     }
 
     /// Store this request's cache under a split prompt's block chain, for the
-    /// next turn's `lookup_chain`: as many WHOLE blocks as the cache holds, the
-    /// device has room beside the live cache for (`max_positions`, from
-    /// `kv_budget::plan_snapshot` — gotcha #440) and the byte ceiling allows.
+    /// next turn's `lookup_chain`: as many WHOLE blocks as the cache holds,
+    /// `room` has space for (from `kv_budget::plan_snapshot` — gotcha #440)
+    /// and the byte ceiling allows.
     /// Answers how many blocks it stored — what the coordinator may resume
     /// from here next turn; 0 stores nothing.
     pub fn insert_chain_from_kv(
@@ -683,9 +797,10 @@ impl PrefixCache {
         kv_store: &KvCacheStore,
         block_tokens: u32,
         keys: &[[u8; 32]],
-        max_positions: usize,
+        room: SnapshotRoom,
     ) -> u32 {
         let bt = block_tokens as usize;
+        let max_positions = room.max_positions;
         if !self.enabled || bt == 0 || keys.is_empty() || max_positions == 0 {
             return 0;
         }
@@ -729,7 +844,7 @@ impl PrefixCache {
                 return blocks as u32;
             }
         }
-        let snap = match snapshot_at(&entry.layers, positions, dim, max_seq_len) {
+        let snap = match snapshot_at(&entry.layers, positions, dim, max_seq_len, room.home) {
             Ok(s) => Arc::new(s),
             Err(e) => {
                 tracing::warn!(model_key, positions, error = %e,
@@ -764,6 +879,7 @@ impl PrefixCache {
             model_key,
             stored_positions = positions,
             kept,
+            home = ?room.home,
             "DIAG: prefix-cache stored a split's prompt"
         );
         if kept {
@@ -875,9 +991,27 @@ impl PrefixCache {
         let num_layers = snapshot.layers.len();
         let key = KvCacheStore::cache_key(model_key, request_id);
         let mut entry = kv_store.get_or_create_keyed(&key, num_layers);
+        let started = Instant::now();
         for (i, layer_kv) in snapshot.layers.iter().enumerate() {
             let Some((k_src, v_src)) = layer_kv else {
                 continue;
+            };
+            // A layer kept in host RAM goes back to its card first: the
+            // cache below allocates on its source's device (#257).
+            let moved;
+            let (k_src, v_src) = match snapshot.restore_to.get(i).and_then(Option::as_ref) {
+                Some(card) => {
+                    moved = k_src
+                        .to_device(card)
+                        .and_then(|k| Ok((k, v_src.to_device(card)?)))
+                        .map_err(|e| {
+                            SwarmError::Internal(format!(
+                                "prefix-cache hydrate layer {i}: copy back to the card failed: {e}"
+                            ))
+                        })?;
+                    (&moved.0, &moved.1)
+                }
+                None => (k_src, v_src),
             };
             let kv_slot = &mut entry.layers[i];
             // Reserve from the snapshot's TOKEN COUNT, not its recorded
@@ -905,6 +1039,16 @@ impl PrefixCache {
             *kv_slot = Some(kv);
         }
         entry.last_accessed = Instant::now();
+        if snapshot.home() == SnapshotHome::HostRam {
+            tracing::info!(
+                model_key,
+                request_id,
+                positions = snapshot.token_count,
+                mb = snapshot.bytes() / (1024 * 1024),
+                copy_ms = started.elapsed().as_millis() as u64,
+                "DIAG: prefix-cache restored a snapshot from host RAM to the card"
+            );
+        }
         Ok(snapshot.token_count)
     }
 
@@ -917,9 +1061,11 @@ impl PrefixCache {
             .unwrap_or(0)
     }
 
-    /// Bytes of KV held across every model — what this cache costs the device
-    /// right now, charged against the KV budget by `admit_prompt`.
-    pub fn bytes_total(&self) -> usize {
+    /// Bytes of KV held in `home` across every model. `BesideLive` is what
+    /// this cache costs the device right now, charged against the KV budget
+    /// by `admit_prompt`; `HostRam` is what it holds off the card (#257),
+    /// which that budget never sees.
+    pub fn bytes_in(&self, home: SnapshotHome) -> usize {
         self.inner
             .read()
             .ok()
@@ -927,21 +1073,25 @@ impl PrefixCache {
                 i.per_model
                     .values()
                     .flatten()
-                    .map(|e| e.snapshot.bytes())
+                    .map(|e| e.snapshot.bytes_in(home))
                     .sum()
             })
             .unwrap_or(0)
     }
 
-    /// Evict least-recently-hit entries, across every model, until at least
-    /// `needed` bytes are freed or nothing is left. Returns the bytes freed.
+    /// Evict least-recently-hit entries kept in `home`, across every model,
+    /// until at least `needed` bytes of that memory are freed or none is left.
+    /// Returns the bytes freed.
     ///
     /// Called when a request's own KV would not fit beside the cache (gotcha
     /// #440). A cached prompt is reconstructible; the request in hand is not,
     /// and a cache that pushes live memory onto the host costs far more than
     /// the prefill it saves. Oldest first, so an entry the current request
-    /// just hit — whose `last_hit` the lookup bumped — goes last.
-    pub fn release(&self, needed: usize) -> usize {
+    /// just hit — whose `last_hit` the lookup bumped — goes last. **Only
+    /// entries in `home` go**: dropping a snapshot kept in host RAM frees
+    /// nothing on the card, and counting it as freed would let a refusal the
+    /// card still owes through (#257).
+    pub fn release(&self, needed: usize, home: SnapshotHome) -> usize {
         let Ok(mut inner) = self.inner.write() else {
             return 0;
         };
@@ -954,6 +1104,7 @@ impl PrefixCache {
                     bucket
                         .iter()
                         .enumerate()
+                        .filter(|(_, e)| e.snapshot.home() == home)
                         .map(move |(i, e)| (e.last_hit.load(Ordering::Relaxed), key.clone(), i))
                 })
                 .min_by_key(|(hit, _, _)| *hit);
@@ -977,21 +1128,23 @@ impl PrefixCache {
             tracing::info!(
                 freed_mb = freed / (1024 * 1024),
                 needed_mb = needed / (1024 * 1024),
+                home = ?home,
                 remaining_mb = inner
                     .per_model
                     .values()
                     .flatten()
-                    .map(|e| e.snapshot.bytes())
+                    .map(|e| e.snapshot.bytes_in(home))
                     .sum::<usize>()
                     / (1024 * 1024),
-                "DIAG: prefix-cache released cached prompts so a request's KV fits on the device"
+                "DIAG: prefix-cache released cached prompts to make room"
             );
         }
         freed
     }
 
-    /// Bytes of KV currently held for a model. The figure the byte budget
-    /// bounds, and the one a count of entries cannot express.
+    /// Bytes of KV currently held for a model, wherever it is kept. The
+    /// figure the byte budget bounds, and the one a count of entries cannot
+    /// express.
     pub fn bytes_held(&self, model_key: &str) -> usize {
         self.inner
             .read()
@@ -1056,22 +1209,36 @@ fn narrow_snapshot(snap: &KvSnapshot, target_tokens: usize) -> Result<KvSnapshot
             layers,
             dim: snap.dim,
             max_seq_len: snap.max_seq_len,
+            restore_to: snap.restore_to.clone(),
         });
     }
     let mut out: Vec<Option<(Tensor, Tensor)>> = Vec::with_capacity(snap.layers.len());
-    for kv_opt in &snap.layers {
+    for (i, kv_opt) in snap.layers.iter().enumerate() {
         let Some((k, v)) = kv_opt else {
             out.push(None);
             continue;
         };
-        let k_narrow = k
-            .narrow(snap.dim, 0, target_tokens)
-            .and_then(|t| t.contiguous())
-            .map_err(|e| SwarmError::Internal(format!("narrow_snapshot k: {e}")))?;
-        let v_narrow = v
-            .narrow(snap.dim, 0, target_tokens)
-            .and_then(|t| t.contiguous())
-            .map_err(|e| SwarmError::Internal(format!("narrow_snapshot v: {e}")))?;
+        // A layer kept in host RAM stays a VIEW: compacting it here is a
+        // fresh host copy of the whole layer (a hit cost 0.2-0.9 s more than
+        // on the card for a 4.8K-token 7B on WSL2, 2026-10-13), while the
+        // restore copies the layer to its card as it is and
+        // `LayerKv::append` compacts it there (#257). Every other reader of a
+        // narrowed snapshot (`serialize_snapshot_*`, `snapshot_is_finite`)
+        // makes its own contiguous copy.
+        let stays_a_view = snap.restore_to.get(i).is_some_and(Option::is_some);
+        let narrow = |t: &Tensor| {
+            t.narrow(snap.dim, 0, target_tokens).and_then(|n| {
+                if stays_a_view {
+                    Ok(n)
+                } else {
+                    n.contiguous()
+                }
+            })
+        };
+        let k_narrow =
+            narrow(k).map_err(|e| SwarmError::Internal(format!("narrow_snapshot k: {e}")))?;
+        let v_narrow =
+            narrow(v).map_err(|e| SwarmError::Internal(format!("narrow_snapshot v: {e}")))?;
         out.push(Some((k_narrow, v_narrow)));
     }
     Ok(KvSnapshot {
@@ -1079,19 +1246,27 @@ fn narrow_snapshot(snap: &KvSnapshot, target_tokens: usize) -> Result<KvSnapshot
         layers: out,
         dim: snap.dim,
         max_seq_len: snap.max_seq_len,
+        restore_to: snap.restore_to.clone(),
     })
 }
 
+/// Copy positions `0..pos` of every layer's cache into a snapshot kept in
+/// `home`. For `HostRam` each card layer is narrowed on the card, copied to
+/// host memory and its card copy dropped before the next layer's, so the card
+/// never holds more than one layer's transient (~4 MB on a 7B at 4K tokens).
 fn snapshot_at(
     layers: &[Option<LayerKv>],
     pos: usize,
     dim: usize,
     max_seq_len: usize,
+    home: SnapshotHome,
 ) -> Result<KvSnapshot, SwarmError> {
     let mut out: Vec<Option<(Tensor, Tensor)>> = Vec::with_capacity(layers.len());
+    let mut restore_to: Vec<Option<Device>> = Vec::with_capacity(layers.len());
     for kv_opt in layers.iter() {
         let Some(kv) = kv_opt else {
             out.push(None);
+            restore_to.push(None);
             continue;
         };
         let cur = kv.current_seq_len();
@@ -1118,13 +1293,27 @@ fn snapshot_at(
             .narrow(dim, 0, pos)
             .and_then(|t| t.contiguous())
             .map_err(|e| SwarmError::Internal(format!("snapshot v narrow: {e}")))?;
-        out.push(Some((k_snap, v_snap)));
+        let card = k_snap.device().clone();
+        if home == SnapshotHome::HostRam && !card.is_cpu() {
+            let k_host = k_snap
+                .to_device(&Device::Cpu)
+                .map_err(|e| SwarmError::Internal(format!("snapshot k to host: {e}")))?;
+            let v_host = v_snap
+                .to_device(&Device::Cpu)
+                .map_err(|e| SwarmError::Internal(format!("snapshot v to host: {e}")))?;
+            out.push(Some((k_host, v_host)));
+            restore_to.push(Some(card));
+        } else {
+            out.push(Some((k_snap, v_snap)));
+            restore_to.push(None);
+        }
     }
     Ok(KvSnapshot {
         token_count: pos,
         layers: out,
         dim,
         max_seq_len,
+        restore_to,
     })
 }
 
@@ -1363,6 +1552,7 @@ pub fn deserialize_snapshot_full(
         layers,
         dim: header.dim,
         max_seq_len: header.max_seq_len,
+        restore_to: Vec::new(),
     };
     Ok((snap, header.tokens, header.block_size))
 }
@@ -1371,6 +1561,20 @@ pub fn deserialize_snapshot_full(
 mod tests {
     use super::*;
     use candle_core::{DType, Device};
+
+    /// Room for any snapshot, kept beside the live cache — every test here
+    /// runs on the processor, where that is the only home.
+    const ANYWHERE: SnapshotRoom = SnapshotRoom {
+        home: SnapshotHome::BesideLive,
+        max_positions: usize::MAX,
+    };
+
+    fn beside(max_positions: usize) -> SnapshotRoom {
+        SnapshotRoom {
+            home: SnapshotHome::BesideLive,
+            max_positions,
+        }
+    }
 
     fn make_fake_kv(
         kv_store: &KvCacheStore,
@@ -1405,17 +1609,17 @@ mod tests {
         for (req, base) in [("req-a", 100u32), ("req-b", 200), ("req-c", 300)] {
             make_fake_kv(&kv_store, "m", req, 2, 10);
             let tokens: Vec<u32> = (base..base + 10).collect();
-            pc.insert_from_kv("m", req, &kv_store, &tokens, usize::MAX);
+            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE);
         }
         let b: Vec<u32> = (200..210).collect();
         assert!(pc.lookup("m", &b).is_some());
-        let per_entry = pc.bytes_total() / 3;
+        let per_entry = pc.bytes_in(SnapshotHome::BesideLive) / 3;
         assert!(per_entry > 0);
 
         // Ask for a little more than one entry: two must go, a then c.
-        let freed = pc.release(per_entry + 1);
+        let freed = pc.release(per_entry + 1, SnapshotHome::BesideLive);
         assert_eq!(freed, 2 * per_entry);
-        assert_eq!(pc.bytes_total(), per_entry);
+        assert_eq!(pc.bytes_in(SnapshotHome::BesideLive), per_entry);
         let a: Vec<u32> = (100..110).collect();
         let c: Vec<u32> = (300..310).collect();
         assert!(pc.lookup("m", &a).is_none(), "a was the oldest");
@@ -1423,9 +1627,173 @@ mod tests {
         assert!(pc.lookup("m", &b).is_some(), "b was hit last and survives");
 
         // Asking for more than everything frees everything and stops.
-        assert_eq!(pc.release(usize::MAX), per_entry);
-        assert_eq!(pc.bytes_total(), 0);
-        assert_eq!(pc.release(1), 0);
+        assert_eq!(pc.release(usize::MAX, SnapshotHome::BesideLive), per_entry);
+        assert_eq!(pc.bytes_in(SnapshotHome::BesideLive), 0);
+        assert_eq!(pc.release(1, SnapshotHome::BesideLive), 0);
+    }
+
+    /// Mark the stored entry opening with `first_token` as `snapshot_at`
+    /// leaves a card's layers in host RAM — the processor standing in for the
+    /// card a CPU test cannot open.
+    fn move_off_card(pc: &PrefixCache, model_key: &str, first_token: u32) {
+        let mut inner = pc.inner.write().unwrap();
+        let entry = inner
+            .per_model
+            .get_mut(model_key)
+            .unwrap()
+            .iter_mut()
+            .find(|e| e.tokens.first() == Some(&first_token))
+            .unwrap();
+        let s = &entry.snapshot;
+        entry.snapshot = Arc::new(KvSnapshot {
+            token_count: s.token_count,
+            layers: s.layers.clone(),
+            dim: s.dim,
+            max_seq_len: s.max_seq_len,
+            restore_to: vec![Some(Device::Cpu); s.layers.len()],
+        });
+    }
+
+    /// #257: a card's snapshot kept in host RAM frees nothing on the card, so
+    /// the card's budget is never charged for it and never evicts it — even
+    /// when it is the oldest entry held.
+    #[test]
+    fn a_snapshot_in_host_ram_is_neither_charged_to_nor_evicted_for_the_card() {
+        let pc = PrefixCache::new(true, 8, 0, 4, 8192, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        for (req, base) in [("req-a", 100u32), ("req-b", 200)] {
+            make_fake_kv(&kv_store, "m", req, 2, 10);
+            let tokens: Vec<u32> = (base..base + 10).collect();
+            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE);
+        }
+        let per_entry = pc.bytes_in(SnapshotHome::BesideLive) / 2;
+        assert!(per_entry > 0);
+        move_off_card(&pc, "m", 100);
+        assert_eq!(pc.bytes_in(SnapshotHome::BesideLive), per_entry);
+        assert_eq!(pc.bytes_in(SnapshotHome::HostRam), per_entry);
+
+        // The card asks for room: only the entry on the card goes, though the
+        // one in host RAM is older.
+        assert_eq!(pc.release(1, SnapshotHome::BesideLive), per_entry);
+        assert_eq!(pc.release(1, SnapshotHome::BesideLive), 0);
+        let a: Vec<u32> = (100..110).collect();
+        let b: Vec<u32> = (200..210).collect();
+        assert!(pc.lookup("m", &b).is_none());
+        assert!(
+            pc.lookup("m", &a).is_some(),
+            "host RAM gave the card nothing"
+        );
+
+        // Host RAM's own plan evicts it.
+        assert_eq!(pc.release(1, SnapshotHome::HostRam), per_entry);
+        assert_eq!(pc.bytes_in(SnapshotHome::HostRam), 0);
+    }
+
+    /// #257: a hit on a snapshot kept in host RAM — narrowed, as every hit
+    /// is — still knows where its layers go back to, and restores them.
+    #[test]
+    fn a_snapshot_in_host_ram_is_restored_where_its_layers_run() {
+        let pc = PrefixCache::new(true, 8, 0, 4, 8192, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "req-a", 2, 10);
+        let tokens: Vec<u32> = (100..110).collect();
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
+        move_off_card(&pc, "m", 100);
+
+        let snap = pc.lookup("m", &tokens).expect("hit");
+        assert_eq!(snap.token_count, 9, "an identical prompt hits at len - 1");
+        assert_eq!(
+            snap.home(),
+            SnapshotHome::HostRam,
+            "narrowing kept the way back"
+        );
+        let restored = pc
+            .hydrate_request_from_snapshot(&kv_store, "m", "req-b", &snap)
+            .unwrap();
+        assert_eq!(restored, 9);
+        let key = KvCacheStore::cache_key("m", "req-b");
+        let entry = kv_store.get_entry(&key).unwrap();
+        for kv in entry.layers.iter() {
+            assert_eq!(kv.as_ref().unwrap().current_seq_len(), 9);
+        }
+    }
+
+    /// #257: a hit on a snapshot kept in host RAM narrows each layer to a
+    /// VIEW — compacting it on the host was a fresh copy of the whole layer —
+    /// and the restore still holds exactly the narrowed prefix. One kept
+    /// beside the live cache is compacted where it is, as before.
+    #[test]
+    fn a_host_ram_snapshot_narrows_to_a_view_and_restores_only_the_prefix() {
+        let dev = Device::Cpu;
+        // Two heads, so a prefix of the sequence dim is not contiguous.
+        let k = Tensor::arange(0f32, 48.0, &dev)
+            .unwrap()
+            .reshape((1usize, 2, 6, 4))
+            .unwrap();
+        let v = (&k + 1000.0).unwrap();
+        let snap = |restore_to: Vec<Option<Device>>| KvSnapshot {
+            token_count: 6,
+            layers: vec![Some((k.clone(), v.clone()))],
+            dim: 2,
+            max_seq_len: 4096,
+            restore_to,
+        };
+        let host = narrow_snapshot(&snap(vec![Some(Device::Cpu)]), 4).unwrap();
+        let (hk, hv) = host.layers[0].as_ref().unwrap();
+        assert!(!hk.is_contiguous() && !hv.is_contiguous(), "kept as a view");
+        let beside = narrow_snapshot(&snap(Vec::new()), 4).unwrap();
+        assert!(beside.layers[0].as_ref().unwrap().0.is_contiguous());
+
+        let pc = PrefixCache::new(true, 8, 0, 4, 8192, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        assert_eq!(
+            pc.hydrate_request_from_snapshot(&kv_store, "m", "req", &host)
+                .unwrap(),
+            4
+        );
+        let entry = kv_store
+            .get_entry(&KvCacheStore::cache_key("m", "req"))
+            .unwrap();
+        let kv = entry.layers[0].as_ref().unwrap();
+        let flat = |t: Tensor| t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let want = |t: &Tensor| flat(t.narrow(2, 0, 4).unwrap().contiguous().unwrap());
+        assert_eq!(flat(kv.k().unwrap().unwrap()), want(&k));
+        assert_eq!(flat(kv.v().unwrap().unwrap()), want(&v));
+    }
+
+    /// #257: only a card reached through WSL2 moves its snapshots off the
+    /// card by default; the switch decides for any card, never the processor.
+    #[test]
+    fn a_snapshot_leaves_the_card_by_default_only_under_wsl2() {
+        use SnapshotHome::{BesideLive, HostRam};
+        assert_eq!(SnapshotHome::choose(true, true, None), HostRam);
+        assert_eq!(SnapshotHome::choose(true, false, None), BesideLive);
+        assert_eq!(
+            SnapshotHome::choose(true, true, Some(BesideLive)),
+            BesideLive
+        );
+        assert_eq!(SnapshotHome::choose(true, false, Some(HostRam)), HostRam);
+        assert_eq!(SnapshotHome::choose(false, true, Some(HostRam)), BesideLive);
+        assert_eq!(SnapshotHome::choose(false, true, None), BesideLive);
+    }
+
+    /// On the processor the live cache already is host RAM: a snapshot asked
+    /// to go there is never marked as moved, so it stays charged to the
+    /// processor's KV budget (gotcha #440) rather than escaping it.
+    #[test]
+    fn the_processors_snapshot_stays_charged_beside_its_live_cache() {
+        assert_eq!(
+            SnapshotHome::for_device(&Device::Cpu),
+            SnapshotHome::BesideLive
+        );
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "req-a", 2, 10);
+        let key = KvCacheStore::cache_key("m", "req-a");
+        let entry = kv_store.get_entry(&key).unwrap();
+        let snap = snapshot_at(&entry.layers, 10, 2, 4096, SnapshotHome::HostRam).unwrap();
+        assert!(snap.restore_to.iter().all(Option::is_none));
+        assert_eq!(snap.home(), SnapshotHome::BesideLive);
+        assert_eq!(snap.bytes_in(SnapshotHome::BesideLive), snap.bytes());
     }
 
     #[test]
@@ -1447,7 +1815,7 @@ mod tests {
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
 
         let tokens: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
         assert_eq!(pc.entry_count("m"), 1);
 
         // New request with same tokens + 5 more: should hit at 10.
@@ -1469,7 +1837,7 @@ mod tests {
         // Six keys of 8 positions; the cache holds 40 positions: five blocks.
         let keys: Vec<[u8; 32]> = (0..6u8).map(|i| [i; 32]).collect();
         assert_eq!(
-            pc.insert_chain_from_kv("seg", "turn-1", &kv_store, 8, &keys, usize::MAX),
+            pc.insert_chain_from_kv("seg", "turn-1", &kv_store, 8, &keys, ANYWHERE),
             5
         );
         assert_eq!(
@@ -1509,12 +1877,12 @@ mod tests {
         // The room beside the live cache bounds what is kept, in whole blocks.
         make_fake_kv(&kv_store, "seg", "turn-2", 2, 40);
         assert_eq!(
-            pc.insert_chain_from_kv("seg", "turn-2", &kv_store, 8, &other, 20),
+            pc.insert_chain_from_kv("seg", "turn-2", &kv_store, 8, &other, beside(20)),
             2
         );
         // A request with no cache keeps nothing.
         assert_eq!(
-            pc.insert_chain_from_kv("seg", "none", &kv_store, 8, &keys, usize::MAX),
+            pc.insert_chain_from_kv("seg", "none", &kv_store, 8, &keys, ANYWHERE),
             0
         );
     }
@@ -1530,12 +1898,12 @@ mod tests {
         make_fake_kv(&kv_store, "m", "seg", 2, 16);
         let keys = vec![[1u8; 32], [2u8; 32]];
         assert_eq!(
-            pc.insert_chain_from_kv("m", "seg", &kv_store, 8, &keys, usize::MAX),
+            pc.insert_chain_from_kv("m", "seg", &kv_store, 8, &keys, ANYWHERE),
             2
         );
         make_fake_kv(&kv_store, "m", "tok", 2, 10);
         let tokens: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "tok", &kv_store, &tokens, usize::MAX);
+        pc.insert_from_kv("m", "tok", &kv_store, &tokens, ANYWHERE);
         assert_eq!(
             pc.entry_count("m"),
             2,
@@ -1552,7 +1920,7 @@ mod tests {
         make_fake_kv(&kv_store, "m", "seg-2", 2, 24);
         let grown = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
         assert_eq!(
-            pc.insert_chain_from_kv("m", "seg-2", &kv_store, 8, &grown, usize::MAX),
+            pc.insert_chain_from_kv("m", "seg-2", &kv_store, 8, &grown, ANYWHERE),
             3
         );
         assert_eq!(
@@ -1578,7 +1946,7 @@ mod tests {
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
 
         let tokens_a: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens_a, usize::MAX);
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens_a, ANYWHERE);
         assert_eq!(pc.entry_count("m"), 1);
 
         let mut tokens_b: Vec<u32> = (1..=6).collect();
@@ -1602,7 +1970,7 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 12);
         let tokens: Vec<u32> = (1..=12).collect();
-        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
+        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
         assert_eq!(pc.entry_count("m"), 1);
         // The announce manifest still covers every block boundary.
         assert_eq!(manifest.len(), 3);
@@ -1616,7 +1984,7 @@ mod tests {
 
         // req-a's KV is zeros (make_fake_kv); insert it.
         make_fake_kv(&kv_store, "m", "req-a", 2, 8);
-        let m1 = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
+        let m1 = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
 
         // req-b holds DIFFERENT KV content (ones) for the same tokens. If the
         // second insert re-snapshots, the cached tensors become ones; if it
@@ -1632,7 +2000,7 @@ mod tests {
                 *slot = Some(kv);
             }
         }
-        let m2 = pc.insert_from_kv("m", "req-b", &kv_store, &tokens, usize::MAX);
+        let m2 = pc.insert_from_kv("m", "req-b", &kv_store, &tokens, ANYWHERE);
 
         assert_eq!(pc.entry_count("m"), 1);
         // The skip must still report the full manifest, or the caller stops
@@ -1660,7 +2028,7 @@ mod tests {
             "req-a",
             &kv_store,
             &(1..=8).collect::<Vec<_>>(),
-            usize::MAX,
+            ANYWHERE,
         );
         make_fake_kv(&kv_store, "m", "req-b", 2, 12);
         pc.insert_from_kv(
@@ -1668,7 +2036,7 @@ mod tests {
             "req-b",
             &kv_store,
             &(1..=12).collect::<Vec<_>>(),
-            usize::MAX,
+            ANYWHERE,
         );
 
         assert_eq!(pc.entry_count("m"), 1);
@@ -1684,7 +2052,7 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
         let tokens: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
 
         let snap = pc.lookup("m", &tokens).expect("hit");
         assert_eq!(snap.token_count, 9);
@@ -1696,7 +2064,7 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
         let tokens_a: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens_a, usize::MAX);
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens_a, ANYWHERE);
 
         let tokens_b: Vec<u32> = vec![99, 98, 97, 96, 95, 94, 93, 92];
         assert!(pc.lookup("m", &tokens_b).is_none());
@@ -1708,7 +2076,7 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
         let tokens: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
+        pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
         // lookup requires at least one token left to forward, so query with a
         // longer prompt that still has `tokens` as its strict prefix.
         let lookup_tokens: Vec<u32> = (1..=12).collect();
@@ -1769,7 +2137,7 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 12);
         let tokens: Vec<u32> = (1..=12).collect();
-        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
+        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
         assert_eq!(manifest.len(), 3);
         // token_count grows by block_size (4) each entry.
         assert_eq!(manifest[0].token_count, 4);
@@ -1788,8 +2156,8 @@ mod tests {
         make_fake_kv(&kv_store, "m", "req-b", 2, 8);
         let a: Vec<u32> = vec![1, 2, 3, 4, 50, 51, 52, 53];
         let b: Vec<u32> = vec![1, 2, 3, 4, 60, 61, 62, 63];
-        let _ = pc.insert_from_kv("m", "req-a", &kv_store, &a, usize::MAX);
-        let _ = pc.insert_from_kv("m", "req-b", &kv_store, &b, usize::MAX);
+        let _ = pc.insert_from_kv("m", "req-a", &kv_store, &a, ANYWHERE);
+        let _ = pc.insert_from_kv("m", "req-b", &kv_store, &b, ANYWHERE);
         let manifest = pc.enumerate_manifest("m");
         // Block 0 (shared) appears once, plus block 1 from each prompt = 3.
         assert_eq!(manifest.len(), 3);
@@ -1811,7 +2179,7 @@ mod tests {
             "req-a",
             &kv_store,
             &(1..=8).collect::<Vec<_>>(),
-            usize::MAX,
+            ANYWHERE,
         );
         // block_tokens=0 → enumerate_manifest is empty even though the
         // entry exists (it was inserted via the always-store-tail rule).
@@ -1891,6 +2259,7 @@ mod tests {
             layers: vec![Some((k0, v0)), Some((k1, v1))],
             dim: 2,
             max_seq_len: 4096,
+            restore_to: Vec::new(),
         };
         let tokens: Vec<u32> = vec![7, 8, 9, 10];
         let bytes = serialize_snapshot_with_block_size(&snap, &tokens, None).expect("serialize");
@@ -1950,7 +2319,7 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 12);
         let tokens: Vec<u32> = (1..=12).collect();
-        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
+        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
         assert_eq!(manifest.len(), 3);
         // Request the middle block. Serving side should produce bytes
         // whose header `tokens` equal tokens[..8].
@@ -1981,6 +2350,7 @@ mod tests {
             layers: vec![Some((k, v))],
             dim: 2,
             max_seq_len: 128,
+            restore_to: Vec::new(),
         };
         assert!(snapshot_is_finite(&snap));
     }
@@ -1997,6 +2367,7 @@ mod tests {
             layers: vec![Some((k, v))],
             dim: 2,
             max_seq_len: 128,
+            restore_to: Vec::new(),
         };
         assert!(!snapshot_is_finite(&snap));
     }
@@ -2017,6 +2388,7 @@ mod tests {
             layers: vec![Some((k, v))],
             dim: 2,
             max_seq_len: 128,
+            restore_to: Vec::new(),
         };
         assert!(!snapshot_is_finite(&snap));
     }
@@ -2028,6 +2400,7 @@ mod tests {
             layers: vec![None, None],
             dim: 2,
             max_seq_len: 128,
+            restore_to: Vec::new(),
         };
         assert!(snapshot_is_finite(&snap));
     }
@@ -2038,7 +2411,7 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 8);
         let tokens: Vec<u32> = (1..=8).collect();
-        let _ = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, usize::MAX);
+        let _ = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
         // Hash derived from a different prompt should miss.
         let other = compute_block_hashes(&[99, 99, 99, 99, 99, 99, 99, 99], 4);
         assert!(pc
@@ -2057,6 +2430,7 @@ mod tests {
             layers: vec![None, Some((k, v)), None],
             dim: 2,
             max_seq_len: 128,
+            restore_to: Vec::new(),
         };
         let tokens: Vec<u32> = vec![11, 12];
         let bytes = serialize_snapshot_with_block_size(&snap, &tokens, None).unwrap();
@@ -2075,7 +2449,7 @@ mod tests {
         for (i, req) in ["r1", "r2", "r3"].iter().enumerate() {
             make_fake_kv(&kv_store, "m", req, 2, 10);
             let tokens: Vec<u32> = (i as u32 * 10..i as u32 * 10 + 10).collect();
-            pc.insert_from_kv("m", req, &kv_store, &tokens, usize::MAX);
+            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE);
         }
 
         assert_eq!(pc.entry_count("m"), 2);
@@ -2098,7 +2472,7 @@ mod tests {
                 "probe",
                 &kv_store,
                 &(0u32..10).collect::<Vec<_>>(),
-                usize::MAX,
+                ANYWHERE,
             );
             pc.bytes_held("m")
         };
@@ -2108,7 +2482,7 @@ mod tests {
         for (i, req) in ["r1", "r2", "r3", "r4", "r5"].iter().enumerate() {
             make_fake_kv(&kv_store, "m", req, 2, 10);
             let tokens: Vec<u32> = (i as u32 * 10..i as u32 * 10 + 10).collect();
-            pc.insert_from_kv("m", req, &kv_store, &tokens, usize::MAX);
+            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE);
         }
         assert!(
             pc.entry_count("m") < 5,
@@ -2140,7 +2514,7 @@ mod tests {
             "r1",
             &kv_store,
             &(0u32..10).collect::<Vec<_>>(),
-            usize::MAX,
+            ANYWHERE,
         );
         assert_eq!(pc.entry_count("m"), 1);
         assert!(pc.bytes_held("m") <= FAKE_BYTES_PER_POSITION * 5);
@@ -2162,7 +2536,7 @@ mod tests {
             "r1",
             &kv_store,
             &(0u32..10).collect::<Vec<_>>(),
-            usize::MAX,
+            ANYWHERE,
         );
         assert_eq!(pc.entry_count("m"), 1, "the opening is kept, not refused");
         let later: Vec<u32> = (0u32..10).chain(20..30).collect();
@@ -2183,13 +2557,13 @@ mod tests {
 
         let pc = PrefixCache::new(true, 8, 0, 4, 0, FAKE_BYTES_PER_POSITION * 7);
         make_fake_kv(&kv_store, "m", "r1", 2, 10);
-        pc.insert_from_kv("m", "r1", &kv_store, &tokens, usize::MAX);
+        pc.insert_from_kv("m", "r1", &kv_store, &tokens, ANYWHERE);
         assert_eq!(pc.lookup("m", &probe).unwrap().token_count, 7);
         assert_eq!(pc.bytes_held("m"), FAKE_BYTES_PER_POSITION * 7);
 
         let unbounded = PrefixCache::new(true, 8, 0, 4, 0, 0);
         make_fake_kv(&kv_store, "m", "r2", 2, 10);
-        unbounded.insert_from_kv("m", "r2", &kv_store, &tokens, usize::MAX);
+        unbounded.insert_from_kv("m", "r2", &kv_store, &tokens, ANYWHERE);
         assert_eq!(unbounded.lookup("m", &probe).unwrap().token_count, 10);
     }
 
@@ -2202,7 +2576,7 @@ mod tests {
         for (i, req) in ["r1", "r2", "r3", "r4"].iter().enumerate() {
             make_fake_kv(&kv_store, "m", req, 2, 10);
             let tokens: Vec<u32> = (i as u32 * 10..i as u32 * 10 + 10).collect();
-            pc.insert_from_kv("m", req, &kv_store, &tokens, usize::MAX);
+            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE);
         }
         assert_eq!(pc.entry_count("m"), 4);
     }
