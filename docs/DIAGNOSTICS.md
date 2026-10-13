@@ -1687,7 +1687,9 @@ in the forward path — the previous round tuned a matmul that turned out to be 
 quarter of the cost.
 
 **A mixture-of-experts model shows two more stages**, `moe ffn on the card` and
-`moe ffn on the processor` (routing to combine, by the device its layer is on).
+`moe ffn on the processor` (routing to combine, by the device its EXPERTS are on —
+a card-held layer keeping them in RAM, `test-split --cpu-moe-layers N` and the
+INFO line `Experts in the machine's memory: …`, is the processor's, #138 (3)).
 Before 2026-10-11 its whole expert feed-forward sat in `unattributed`, ~80% of a
 step. On a card, run it once with `SWARMLLM_PROFILE_SYNC=1` too. With the experts
 kept stacked (the default since 2026-10-11) nothing in the layer waits for the
@@ -1698,7 +1700,8 @@ router scores to the host, so there the card stage absorbs queued attention
 work instead. The other A/B switches: `SWARMLLM_MOE_CARD_PROMPT=rows` (a prompt
 on the one-row kernel), `SWARMLLM_MOE_CPU=per-expert` (FUTURE_WORK #138). A
 card/processor split adds a third, `moe ffn of a processor layer, run on the card
-(prompt)`: a processor layer's experts for a forward of ≥ 32 tokens, copied to
+(prompt)`: RAM-held experts — a processor layer's, or a card layer's kept in
+RAM — for a forward of ≥ 32 tokens, copied to
 the card and run there — mostly the copy (`SWARMLLM_MOE_PROMPT_CARD=0` = old).
 Its dense projections show `  of which: processor-held weights copied to the
 card (prompt)` — part of the projection stages' time, left out of their sum.

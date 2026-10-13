@@ -236,7 +236,9 @@ llama.cpp's op offload (`ggml_backend_sched` "1.off"): a forward of ≥ `PROMPT_
 
 **`split::hybrid::LayerPlacement` says where each layer goes; every per-layer loop in `split/loader/` shadows `device`, `cos`, `sin` from it on its first line.** `hybrid::layers_on_device` is the KV budget's one count; `hybrid::arch_supports_hybrid` is an allowlist the pool reads too (`process_pool::split_for_card`). Guard: `every_layer_loop_in_the_loader_places_its_layer`. Check with `swarmllm test-split --gpu-layers N` + `~/swarmllm-ref/qwen3moe/score_ids.py`.
 
-→ `docs/invariants/inference.md` § "A card/processor split is placed in every per-layer loop"
+**A card-held MoE layer may keep its routed experts in RAM** (#138 (3), llama.cpp's `--n-cpu-moe`): `LayerPlacement::experts_device_for` is the one answer and **`load_moe_ffn` takes the PLACEMENT, never a device**; the card budget takes `routed_expert_bytes` off. Such a layer works on the processor every step — ask `SplitModel::cpu_layer_count` / `works_on_the_processor`, never `layer_devices` alone (empty: the segment is unsplit, its caches all on the card). `test-split --cpu-moe-layers N`.
+
+→ `docs/invariants/inference.md` § "A card/processor split is placed in every per-layer loop", § "A card-held layer can keep its experts in RAM"
 
 ## One prefix-cache snapshot is sized by bytes, and keeps the opening (2026-09-26)
 

@@ -38,12 +38,14 @@ stages! {
     // without it the copy also waits out the card's queued work.
     WeightsToCard => "  of which: processor-held weights copied to the card (prompt)",
     // A mixture-of-experts feed-forward, routing to combine, by the device its
-    // layer sits on: a card/processor split runs both kinds in one token, and
-    // the two cost an order of magnitude apart (FUTURE_WORK #138).
+    // EXPERTS sit on: a card/processor split runs both kinds in one token, and
+    // the two cost an order of magnitude apart (FUTURE_WORK #138). A card-held
+    // layer keeping its experts in RAM (#138 (3)) is the processor's.
     MoeCard    => "moe ffn on the card  (route + experts + combine)",
     MoeCpu     => "moe ffn on the processor (route + experts + combine)",
-    // A processor layer's prompt experts, sent to the card and run there
-    // (FUTURE_WORK #138 (1)): routing, the copies and the products.
+    // A prompt's RAM-held experts — a processor layer's, or a card layer's kept
+    // in RAM — sent to the card and run there (FUTURE_WORK #138 (1)): routing,
+    // the copies and the products.
     MoeSentToCard => "moe ffn of a processor layer, run on the card (prompt)",
     // Qwen 3.5's gated delta rule — the recurrence of three layers in four,
     // token by token until 2026-10-11 (FUTURE_WORK #228 (3)).

@@ -215,6 +215,12 @@ pub(crate) struct LayerPlacement {
     /// on a plain tensor is a copy, and these are small next to the weights.
     rope_gpu: Option<(Tensor, Tensor)>,
     rope_cpu: (Tensor, Tensor),
+    /// How many of the segment's card-held layers, from the start, keep their
+    /// routed experts in the machine's memory while everything else of theirs
+    /// — attention, its cache, the router, a shared expert — stays on the card
+    /// (#138 (3), llama.cpp's `--n-cpu-moe`). 0 for none, and always 0 without
+    /// a card. A layer already on the processor holds its experts there anyway.
+    experts_on_the_processor: usize,
 }
 
 impl LayerPlacement {
@@ -238,6 +244,7 @@ impl LayerPlacement {
                 None
             },
             rope_cpu: (cos, sin),
+            experts_on_the_processor: 0,
         })
     }
 
@@ -257,7 +264,22 @@ impl LayerPlacement {
             cpu: Device::Cpu,
             rope_gpu: Some((cos, sin)),
             rope_cpu,
+            experts_on_the_processor: 0,
         })
+    }
+
+    /// The routed experts of the first `n` card-held layers kept in the
+    /// machine's memory ([`Self::experts_device_for`]). The first, as
+    /// llama.cpp's `--n-cpu-moe` picks them ("the first N layers",
+    /// `llm_add_n_cpu_ffn_overrides` over `LLM_FFN_EXPS_REGEX`, `common/arg.cpp`
+    /// at `4b1a27f` — routed experts only, the shared expert stays): which
+    /// layers does not change the work, since every MoE layer of a model costs
+    /// the same. A no-op without a card.
+    pub(crate) fn with_experts_on_the_processor(mut self, n: usize) -> Self {
+        if self.gpu.is_some() {
+            self.experts_on_the_processor = n;
+        }
+        self
     }
 
     fn on_gpu(&self, abs_layer: usize) -> bool {
@@ -280,6 +302,27 @@ impl LayerPlacement {
         }
     }
 
+    /// The device layer `abs_layer`'s routed experts load onto: the
+    /// processor for one of the first card-held layers
+    /// [`Self::with_experts_on_the_processor`] names, the layer's own device
+    /// otherwise. `split::loader::load_moe_ffn` asks it — the one loader of
+    /// experts — so no per-layer loop can place them differently.
+    pub(crate) fn experts_device_for(&self, abs_layer: usize) -> Device {
+        if self.experts_in_ram(abs_layer) {
+            self.cpu.clone()
+        } else {
+            self.device_for(abs_layer)
+        }
+    }
+
+    /// Does card-held layer `abs_layer` keep its experts in the machine's memory?
+    fn experts_in_ram(&self, abs_layer: usize) -> bool {
+        self.on_gpu(abs_layer)
+            && abs_layer
+                .checked_sub(self.layer_start)
+                .is_some_and(|offset| offset < self.experts_on_the_processor)
+    }
+
     /// The RoPE tables for that layer, already on its device.
     pub(crate) fn rope_for(&self, abs_layer: usize) -> (Tensor, Tensor) {
         match (&self.rope_gpu, self.on_gpu(abs_layer)) {
@@ -300,9 +343,12 @@ impl LayerPlacement {
         self.gpu.is_some() && self.gpu_layers < layer_count
     }
 
-    /// The card, when this segment's other layers sit on the processor.
+    /// The card, when some of this segment's weights sit on the processor —
+    /// whole layers, or a card-held layer's routed experts.
     pub(crate) fn card_beside_the_processor(&self, layer_count: usize) -> Option<&Device> {
-        self.gpu.as_ref().filter(|_| self.is_hybrid(layer_count))
+        self.gpu
+            .as_ref()
+            .filter(|_| self.is_hybrid(layer_count) || self.experts_on_the_processor > 0)
     }
 }
 
@@ -426,6 +472,62 @@ mod tests {
         // And a layer before this segment's start must never read as on-card.
         assert!(!p.on_gpu(9), "index below layer_start wrapped");
         assert_eq!(p.devices(5).len(), 5);
+    }
+
+    /// #138 (3): the experts of the first n CARD-held layers go to the
+    /// processor and nothing else of theirs does; a layer already on the
+    /// processor, a layer past n, and a placement with no card are untouched.
+    #[test]
+    fn the_first_card_layers_keep_their_experts_in_the_machines_memory() {
+        let cos = Tensor::zeros((4, 2), candle_core::DType::F32, &Device::Cpu).unwrap();
+        // `Device::Cpu` stands in for the card, as above: `split` records it
+        // as the card, and the rule is about indices.
+        let p = LayerPlacement::split(10, Device::Cpu, 3, cos.clone(), cos.clone())
+            .unwrap()
+            .with_experts_on_the_processor(2);
+        // Layers 10, 11: on the card, experts in RAM. 12: on the card, experts
+        // there too. 13: on the processor, experts with it.
+        for (layer, on_card, experts_in_ram) in [
+            (10, true, true),
+            (11, true, true),
+            (12, true, false),
+            (13, false, false),
+        ] {
+            assert_eq!(p.on_gpu(layer), on_card, "layer {layer}");
+            assert_eq!(
+                p.experts_in_ram(layer),
+                experts_in_ram,
+                "layer {layer}'s experts"
+            );
+        }
+        assert!(!p.experts_in_ram(9), "a layer below the segment wrapped");
+        assert!(p.card_beside_the_processor(5).is_some());
+
+        let whole = LayerPlacement::split(0, Device::Cpu, usize::MAX, cos.clone(), cos.clone())
+            .unwrap()
+            .with_experts_on_the_processor(1);
+        assert!(
+            !whole.is_hybrid(4),
+            "experts in RAM do not make a layer split"
+        );
+        assert!(
+            whole.card_beside_the_processor(4).is_some(),
+            "the processor-held experts are given the card for a prompt"
+        );
+        assert!(
+            LayerPlacement::split(0, Device::Cpu, usize::MAX, cos.clone(), cos.clone())
+                .unwrap()
+                .card_beside_the_processor(4)
+                .is_none(),
+            "a card holding everything has nothing beside it"
+        );
+
+        // No card: nothing to keep off it.
+        let none = LayerPlacement::uniform(0, Device::Cpu, cos.clone(), cos)
+            .unwrap()
+            .with_experts_on_the_processor(2);
+        assert!(!none.experts_in_ram(0));
+        assert!(none.card_beside_the_processor(4).is_none());
     }
 
     #[test]

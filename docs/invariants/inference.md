@@ -2457,6 +2457,66 @@ projections) and that a split with nothing measured reads 512.
 `chats_sharing_the_card_keep_the_pacers_choice` passes a reader that panics if
 asked: while chats share the tick, the room is never read.
 
+### A card-held layer can keep its experts in RAM (2026-10-13, #138 (3) stage A)
+
+**What it replaced.** Placement was per LAYER: a mixture-of-experts model that
+did not fit the card put its last layers wholly on the processor — attention,
+cache, router and experts. A layer's experts are ~96% of its bytes on
+Qwen3-30B-A3B Q2_K (208 of 216 MB), so the card's memory went mostly on
+experts while the processor ran 22 layers' attention as well.
+
+**What llama.cpp does.** `--n-cpu-moe N` keeps the routed experts of the
+FIRST N layers in host memory (`llm_add_n_cpu_ffn_overrides` over
+`LLM_FFN_EXPS_REGEX`, `common/arg.cpp` at `4b1a27f`) and everything else —
+the shared expert included — on the card. Its scheduler copies the
+activation and the ids down for each such layer's `MUL_MAT_ID`, and hands a
+batch of ≥ 32 to the card with only the used experts copied (#138 (1)).
+
+**What replaced it.** `hybrid::LayerPlacement::with_experts_on_the_processor(n)`
+and `experts_device_for(layer)` say where a layer's experts go — the first n
+CARD-held layers' to the processor; `split::loader::load_moe_ffn` takes the
+PLACEMENT and the layer index rather than a device, so no per-family loop can
+place experts differently. The loader's card budget takes those experts' bytes
+off (`routed_expert_bytes`), and `card_beside_the_processor` gives the card
+to such a layer for a prompt. The forward needed no new path:
+`MoeFfn::forward_untimed` routes on the card, `route` brings the scores down,
+the activation comes down once, the processor's one-region path runs the
+experts, the answer goes back; ≥ 32 tokens go through
+`processor_experts_on_the_card`. Every cache stays on the card (no
+`layer_devices`, so `kv_homes` is the card alone). A segment holding such a
+layer works on the processor: `SplitModel::cpu_layer_count` counts it (the
+decode pool's key — without it each step's expert regions handed off from
+outside a pool, #137), `runs_entirely_on_card` is false (the card's own step
+timing), and `reads_prompts_on_card` asks it to read on the card. The profile
+names a MoE stage by where its EXPERTS sit.
+
+**Measured** (Qwen3-30B-A3B Q2_K, 26 whole layers vs every layer on the card
+with 23 layers' experts in RAM — the same ~5.9 GB of layers either way; an
+867-token prompt read 128 a forward, 64 reply tokens; ABBA, one binary,
+Windows up 16.3 h, `~/swarmllm-138d/ab3.sh`): median decode step 49 / 68 ms
+against **40 / 40 ms**; prompt 4.96 / 4.96 s against 5.07 / 4.90. A step at
+the new placement: the processor's experts 21.6-24 ms, the card's 25 stacked
+layers 4.6 ms. llama.cpp the same day, `llama-bench -t 4`: 27 whole layers
+25.0 tok/s, `-ngl 99 -ncmoe 23` 34.5 (1.38x) — we run it at ~72%.
+
+**Verified.** Replies teacher-forced through llama-cpp-python 0.3.16
+(`~/swarmllm-138d/score.py`): both placements leave llama.cpp's first choice
+at the same two tokens (our numerics either way); where they part, the new
+one takes llama.cpp's first choice. Tests:
+`the_first_card_layers_keep_their_experts_in_the_machines_memory` (the rule
+by index), and on a card
+`a_card_layer_with_its_experts_in_ram_answers_as_a_processor_layer_does` (the
+router on the card, experts quantized one by one in RAM, the same picks, a
+decode step within 1e-4 of the processor layer and a prompt of the processor
+layer offered the card — red with the placement rule switched off) and
+`a_card_segment_keeping_its_experts_in_ram_works_on_the_processor_for_them`.
+The card's f16 prompt kernel is 0.149 off the processor's answer on the test's
+synthetic layer (largest output 5.56), on the existing path alike — that path
+was judged against llama.cpp on a real model (#138 (1)).
+
+**Not yet:** the daemon never asks for it — `test-split --cpu-moe-layers N`
+sets `split::CPU_EXPERT_LAYERS`; the pool's choice and its charges are stage B.
+
 ### Llama 4 routes like llama.cpp hardcodes it, and normalises Q/K after RoPE (2026-09-25)
 
 llama.cpp's Llama 4 graph reads NO routing key: `build_moe_ffn(..., norm_w =

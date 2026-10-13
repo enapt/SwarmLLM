@@ -47,6 +47,10 @@ pub(super) struct SplitLoadOptions<'a> {
     /// its own placement would be the second accountant that #401/#402 were
     /// about. This obeys a number; it does not choose one.
     pub gpu_layers: Option<usize>,
+    /// How many of the card-held layers, from the start, keep their routed
+    /// experts in the machine's memory (`split::cpu_expert_layers`, #138 (3)).
+    /// Obeyed the same way.
+    pub cpu_expert_layers: Option<usize>,
 }
 
 /// Element type the token-embedding table is dequantized to.
@@ -149,6 +153,23 @@ fn segment_weight_bytes(
     total
 }
 
+/// The bytes of layers `from..to`'s routed expert stacks
+/// (`ffn_{gate,up,down}_exps`) — what keeping their experts in the machine's
+/// memory takes off the card (#138 (3)). 0 for a dense layer.
+fn routed_expert_bytes(ct: &gguf_file::Content, from: usize, to: usize) -> u64 {
+    (from..to)
+        .flat_map(|layer| {
+            ["ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"]
+                .map(|t| format!("blk.{layer}.{t}.weight"))
+        })
+        .filter_map(|name| ct.tensor_infos.get(&name))
+        .map(|info| {
+            info.shape.elem_count() as u64 * info.ggml_dtype.type_size() as u64
+                / info.ggml_dtype.block_size().max(1) as u64
+        })
+        .sum()
+}
+
 /// One of a GGUF's stacked expert tensors (`ffn_{gate,up,down}_exps`), cut into
 /// one QUANTIZED matrix per expert and placed on `device`.
 ///
@@ -209,14 +230,23 @@ fn split_expert_stack<R: std::io::Read + std::io::Seek>(
 /// dequantized every expert to f32, which made every real-sized MoE model
 /// unloadable (`layers::ExpertFfn`); a family added later inherits the right
 /// behaviour by calling it.
+///
+/// Takes the PLACEMENT, not a device: layer `layer_idx` loads on
+/// `placement.device_for` and its routed experts on
+/// `placement.experts_device_for` — the machine's memory for a card-held layer
+/// whose experts stay in RAM (#138 (3)) — so no per-layer loop can put them
+/// anywhere else.
 fn load_moe_ffn<R: std::io::Read + std::io::Seek>(
     ct: &gguf_file::Content,
     reader: &mut R,
     prefix: &str,
-    device: &Device,
+    placement: &super::hybrid::LayerPlacement,
+    layer_idx: usize,
     n_experts_used: usize,
     routing: MoeRoutingConfig,
 ) -> Result<MoeFfn, SwarmError> {
+    let device = &placement.device_for(layer_idx);
+    let experts_device = &placement.experts_device_for(layer_idx);
     let name = |t: &str| format!("{prefix}.{t}.weight");
     let router = ct
         .tensor(reader, &name("ffn_gate_inp"), device)
@@ -224,12 +254,12 @@ fn load_moe_ffn<R: std::io::Read + std::io::Seek>(
         .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate_inp: {e}")))?;
     let n_router = router.dim(0).map_err(SwarmError::internal)?;
     let (experts, stacked) = if let Some(stacked) =
-        load_stacked_experts(ct, reader, prefix, device, n_router, routing)?
+        load_stacked_experts(ct, reader, prefix, experts_device, n_router, routing)?
     {
         (Vec::new(), Some(stacked))
     } else {
         (
-            load_experts_one_by_one(ct, reader, prefix, device, n_router)?,
+            load_experts_one_by_one(ct, reader, prefix, experts_device, n_router)?,
             None,
         )
     };
@@ -450,6 +480,7 @@ impl SplitModel {
                 is_last,
                 parallel_data: Some(mmap.as_ref()),
                 gpu_layers: crate::inference::split::gpu_layer_limit(),
+                cpu_expert_layers: crate::inference::split::cpu_expert_layers(),
             },
         )
     }
@@ -471,6 +502,7 @@ impl SplitModel {
             is_last,
             parallel_data,
             gpu_layers,
+            cpu_expert_layers,
         } = opts;
         // Detect architecture prefix from GGUF metadata
         let arch_str = super::gguf_arch_str(&ct);
@@ -651,6 +683,17 @@ impl SplitModel {
             device.is_cuda(),
             segment_layer_count,
         );
+        // How many of those card-held layers, from the start, keep their
+        // routed experts in the machine's memory (#138 (3)) — on a card, for
+        // an architecture whose split has been checked, never more than the
+        // card holds. The SAME count the placement below acts on and the card
+        // budget takes those experts' bytes off by.
+        let experts_in_ram_layers = match cpu_expert_layers {
+            Some(n) if hybrid_ok && device.is_cuda() => n.min(device_layers),
+            _ => 0,
+        };
+        let experts_in_ram_bytes =
+            routed_expert_bytes(&ct, layer_start, layer_start + experts_in_ram_layers);
         // KV bytes per position over layers `from..to` kept on a card or on
         // the processor — not a recurrent layer's fixed state
         // (`split::layers_keeping_kv`).
@@ -740,9 +783,9 @@ impl SplitModel {
                         info.shape.dims(),
                     )
                 });
-            // The weights THE CARD holds: its layers, plus the embedding and
-            // head this segment carries (both load on `device` in a hybrid
-            // split too).
+            // The weights THE CARD holds: its layers, less the experts kept in
+            // the machine's memory, plus the embedding and head this segment
+            // carries (both load on `device` in a hybrid split too).
             let weight_bytes = segment_weight_bytes(
                 &ct,
                 layer_start,
@@ -750,7 +793,8 @@ impl SplitModel {
                 is_first,
                 is_last,
                 rows_on_demand,
-            );
+            )
+            .saturating_sub(experts_in_ram_bytes);
 
             // A missing nvidia-smi means "unknown", never "zero" — a budget
             // of zero would refuse every request, which is far worse than the
@@ -957,7 +1001,7 @@ impl SplitModel {
         // not a card, every layer goes on `device` exactly as before — so a
         // model that fits, and every processor-only node, takes an unchanged
         // path.
-        if gpu_layers.is_some() && device.is_cuda() && !hybrid_ok {
+        if (gpu_layers.is_some() || cpu_expert_layers.is_some()) && device.is_cuda() && !hybrid_ok {
             tracing::warn!(
                 arch = %model_arch,
                 "Hybrid placement was requested but is not verified for this architecture — \
@@ -989,7 +1033,17 @@ impl SplitModel {
                 sin.clone(),
             )
             .map_err(SwarmError::internal)?,
-        };
+        }
+        .with_experts_on_the_processor(experts_in_ram_layers);
+        if experts_in_ram_layers > 0 {
+            tracing::info!(
+                layers = experts_in_ram_layers,
+                experts_mb = experts_in_ram_bytes >> 20,
+                "Experts in the machine's memory: the routed experts of the first \
+                 {experts_in_ram_layers} card-held layers stay in RAM, everything else of \
+                 theirs on the graphics card"
+            );
+        }
 
         // Helper: create RmsNorm from GGUF weight tensor.
         // Note: GGUF norm weights for Gemma models already include the +1 offset
@@ -1019,9 +1073,10 @@ impl SplitModel {
                 // Rows read out of the quantized table as they are looked up —
                 // bit-identical to the dense path and several times smaller.
                 Some(e) => Some(e),
-                // Not eligible (non-CPU device, unquantized table, or a row
-                // that is not block-aligned): dequantize the whole table, as
-                // before.
+                // Not eligible (a device with no gather — Metal; the processor
+                // and a card both have one —, an unquantized table, or a row
+                // that is not block-aligned: `rows_on_demand_eligible`):
+                // dequantize the whole table, as before.
                 //
                 // Resident for the worker's whole life at EMBEDDING_DTYPE — on
                 // a large-vocabulary model this is the biggest single
@@ -1234,7 +1289,8 @@ impl SplitModel {
                             &ct,
                             &mut file,
                             &prefix,
-                            &device,
+                            &placement,
+                            layer_idx,
                             ds_meta.n_experts_used,
                             moe_routing,
                         )?)
@@ -1426,7 +1482,8 @@ impl SplitModel {
                         &ct,
                         &mut file,
                         &prefix,
-                        &device,
+                        &placement,
+                        layer_idx,
                         n_experts_used,
                         moe_routing,
                     )?)
@@ -1556,7 +1613,8 @@ impl SplitModel {
                         &ct,
                         &mut file,
                         &prefix,
-                        &device,
+                        &placement,
+                        layer_idx,
                         n_experts_used,
                         moe_routing,
                     )?)
@@ -1694,6 +1752,9 @@ impl SplitModel {
                                 // there (review of #104, 2026-09-25).
                                 let layer_device = placement.device_for(layer_idx);
                                 let (cos, sin) = placement.rope_for(layer_idx);
+                                // Borrowed into the thread: a mixture-of-experts
+                                // layer asks it where its experts go.
+                                let placement = &placement;
                                 s.spawn(move || -> Result<LayerVariant, SwarmError> {
                                     let device_ref = &layer_device;
                                     let mut cursor = std::io::Cursor::new(mmap_ref);
@@ -1829,7 +1890,8 @@ impl SplitModel {
                                             ct_ref,
                                             &mut cursor,
                                             &prefix,
-                                            device_ref,
+                                            placement,
+                                            layer_idx,
                                             experts_used,
                                             moe_routing,
                                         )?)
@@ -2115,7 +2177,8 @@ impl SplitModel {
                             &ct,
                             file,
                             &prefix,
-                            &device,
+                            &placement,
+                            layer_idx,
                             experts_used,
                             moe_routing,
                         )?)
@@ -2444,6 +2507,120 @@ mod expert_stack_tests {
         (ct, buf)
     }
 
+    /// Layer 0 wholly on `device`, its experts in the machine's memory when
+    /// `experts_in_ram` is 1.
+    fn placed_on(
+        device: Device,
+        experts_in_ram: usize,
+    ) -> crate::inference::split::hybrid::LayerPlacement {
+        let rope = Tensor::zeros((1, 1), candle_core::DType::F32, &device).unwrap();
+        crate::inference::split::hybrid::LayerPlacement::uniform(0, device, rope.clone(), rope)
+            .unwrap()
+            .with_experts_on_the_processor(experts_in_ram)
+    }
+
+    /// #138 (3): a card-held layer told to keep its experts in RAM loads its
+    /// router on the card and every expert on the processor, one quantized
+    /// matrix each (never stacked — the card kernel cannot read RAM), in the
+    /// form a prompt's experts can be copied to the card. Fed an activation on
+    /// the card, it picks the experts the processor picks, answers a decode
+    /// step as the layer held wholly on the processor does, and a prompt as
+    /// that layer does when offered the card (#138 (1), the same kernel) —
+    /// within float rounding: the card multiplies the router itself. The
+    /// card's f16 prompt kernel is not the processor's answer (0.149 off a
+    /// largest output of 5.56 here, both paths alike); it was judged against
+    /// llama.cpp on a real model, not here.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn a_card_layer_with_its_experts_in_ram_answers_as_a_processor_layer_does() {
+        use super::MoeFfn;
+        // The card as a worker opens it (`load_device`, the one place).
+        let card = super::load_device(false);
+        if !card.is_cuda() {
+            return;
+        }
+        let (n, hidden, inter) = (8, 64, 32);
+        let (ct, mut reader) = moe_gguf(n, hidden, inter);
+        let load = |placement, reader: &mut std::io::Cursor<Vec<u8>>| {
+            load_moe_ffn(
+                &ct,
+                reader,
+                "blk.0",
+                &placement,
+                0,
+                2,
+                MoeRoutingConfig::default(),
+            )
+            .unwrap()
+        };
+        let processor = load(placed_on(Device::Cpu, 0), &mut reader);
+        let mut moe = load(placed_on(card.clone(), 1), &mut reader);
+        assert!(moe.gate.device().is_cuda(), "the router left the card");
+        assert!(moe.stacked.is_none(), "experts in RAM were stacked");
+        assert_eq!(moe.experts.len(), n);
+        assert!(
+            moe.experts_on_the_processor(),
+            "the experts went to the card"
+        );
+        // What the loader's pass gives such a layer
+        // (`let_processor_layers_read_prompts_on`): the card, for a prompt.
+        assert!(moe.experts_could_stack_on_a_card());
+        moe.prompt_card = Some(card.clone());
+        let offered = MoeFfn {
+            prompt_card: Some(card.clone()),
+            ..processor.clone()
+        };
+        let largest_gap = |a: &Tensor, b: &Tensor| {
+            (a.to_device(&Device::Cpu).unwrap() - b.to_device(&Device::Cpu).unwrap())
+                .unwrap()
+                .abs()
+                .unwrap()
+                .max_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap()
+        };
+        for tokens in [1, 40] {
+            let x = Tensor::from_vec(
+                (0..tokens * hidden)
+                    .map(|i| (i as f32 * 0.11).sin())
+                    .collect::<Vec<f32>>(),
+                (1, tokens, hidden),
+                &Device::Cpu,
+            )
+            .unwrap();
+            let flat = x.reshape((tokens, hidden)).unwrap();
+            let picks = |routes: Vec<Vec<(usize, f32)>>| -> Vec<Vec<usize>> {
+                routes
+                    .into_iter()
+                    .map(|r| r.into_iter().map(|p| p.0).collect())
+                    .collect()
+            };
+            assert_eq!(
+                picks(moe.route(&flat.to_device(&card).unwrap()).unwrap()),
+                picks(processor.route(&flat).unwrap()),
+                "{tokens} tokens: the card picked other experts"
+            );
+            let got = moe.forward(&x.to_device(&card).unwrap()).unwrap();
+            assert!(
+                got.device().is_cuda(),
+                "the answer did not come back to the card"
+            );
+            // A decode step runs the processor's own experts; a prompt runs
+            // the card's kernel, as a processor layer offered the card does.
+            let want = if tokens < crate::inference::layers::PROMPT_ON_CARD_MIN_TOKENS {
+                processor.forward(&x).unwrap()
+            } else {
+                offered.forward(&x).unwrap()
+            };
+            let gap = largest_gap(&got, &want);
+            assert!(
+                gap < 1e-4,
+                "{tokens} tokens: {gap} off the processor layer's answer"
+            );
+        }
+    }
+
     /// Each expert is its own slice of the stack, still QUANTIZED, and holds
     /// exactly that slice's values. The dtype check is the point: dequantizing
     /// the stacks made a 30B-A3B model need ~116 GB where its file is 11 GB.
@@ -2487,7 +2664,8 @@ mod expert_stack_tests {
             &ct,
             &mut reader,
             "blk.0",
-            &Device::Cpu,
+            &placed_on(Device::Cpu, 0),
+            0,
             2,
             MoeRoutingConfig::default(),
         )

@@ -212,7 +212,9 @@ fn note_prompt_chunk_sized(
 }
 
 impl SplitModel {
-    /// How many of this segment's layers run on the processor.
+    /// How many of this segment's layers work on the processor: held there,
+    /// or held on the card with their routed experts kept in the machine's
+    /// memory (#138 (3)), which the processor runs every decode step.
     ///
     /// This is the number the decode-thread calibration is keyed on
     /// (`cpu_pools::in_phase_pool`): zero for a segment entirely on the card,
@@ -222,15 +224,20 @@ impl SplitModel {
     /// segments of it, and timing the second as though it were the first is
     /// gotcha #432.
     pub(super) fn cpu_layer_count(&self) -> usize {
-        if self.layer_devices.is_empty() {
-            if self.device.is_cpu() {
-                self.layers.len()
-            } else {
-                0
-            }
-        } else {
-            self.layer_devices.iter().filter(|d| d.is_cpu()).count()
+        if self.device.is_cpu() && self.layer_devices.is_empty() {
+            return self.layers.len();
         }
+        self.layers
+            .iter()
+            .enumerate()
+            .filter(|(i, layer)| self.works_on_the_processor(*i, layer))
+            .count()
+    }
+
+    /// Does layer `i` of this segment work on the processor — held there, or
+    /// its experts kept in RAM? Never asked of a processor-only segment.
+    fn works_on_the_processor(&self, i: usize, layer: &super::LayerVariant) -> bool {
+        self.layer_devices.get(i).is_some_and(|d| d.is_cpu()) || layer.experts_on_the_processor()
     }
 
     /// Does every layer of this segment run on the graphics card?
@@ -244,22 +251,25 @@ impl SplitModel {
     }
 
     /// Does this segment read a prompt's heavy work on the graphics card? Every
-    /// layer there, or a card/processor split whose every processor layer sends
-    /// a prompt's heavy work to the card (`LayerVariant::reads_its_prompt_on_a_card`:
-    /// its projections, #138 (1b), or its experts, #138 (1)). What
-    /// [`Self::prompt_reader`] asks — never [`Self::runs_entirely_on_card`]
-    /// alone, which the drafter and admission timing ask: such a split reads
-    /// at least 512 tokens a forward, so each processor layer's weights cross
-    /// to the card once per chunk, not per 128 tokens.
+    /// layer there, or a segment on a card whose every layer working on the
+    /// processor — a split's processor layers, a card layer's experts kept in
+    /// RAM (#138 (3)) — sends a prompt's heavy work to the card
+    /// (`LayerVariant::reads_its_prompt_on_a_card`: its projections, #138 (1b),
+    /// or its experts, #138 (1)). What [`Self::prompt_reader`] asks — never
+    /// [`Self::runs_entirely_on_card`] alone, which the drafter and admission
+    /// timing ask: such a segment reads at least 512 tokens a forward, so each
+    /// RAM-held weight crosses to the card once per chunk, not per 128 tokens.
     pub(crate) fn reads_prompts_on_card(&self) -> bool {
+        // A split (it has a card by construction), or a segment on one.
+        let beside_a_card = !self.layer_devices.is_empty() || self.card().is_some();
         self.runs_entirely_on_card()
-            || (!self.layer_devices.is_empty()
+            || (beside_a_card
                 && self
                     .layers
                     .iter()
-                    .zip(&self.layer_devices)
-                    .filter(|(_, d)| d.is_cpu())
-                    .all(|(layer, _)| layer.reads_its_prompt_on_a_card()))
+                    .enumerate()
+                    .filter(|(i, layer)| self.works_on_the_processor(*i, layer))
+                    .all(|(_, layer)| layer.reads_its_prompt_on_a_card()))
     }
 
     /// What reads a prompt chunk starting at `index_pos` on this segment — the
@@ -353,8 +363,14 @@ impl SplitModel {
             // A card-run processor layer pulls its cache history up for the
             // chunk (#138 (1c)): as f32 and again as the attention kernel's
             // f16, against a figure kept at f16 (2 bytes) or f32 (4) — three
-            // times it covers either.
-            history: per_layer_kv * 3,
+            // times it covers either. A segment with no processor-held layer
+            // (its experts alone in RAM, #138 (3)) keeps every cache on the
+            // card and pulls none up.
+            history: if self.layer_devices.iter().any(|d| d.is_cpu()) {
+                per_layer_kv * 3
+            } else {
+                0
+            },
         }
     }
 

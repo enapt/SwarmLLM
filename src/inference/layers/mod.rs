@@ -1617,14 +1617,27 @@ impl MoeFfn {
     /// 4. Scatter weighted results back to token positions
     /// 5. Add shared expert output (if present)
     pub(crate) fn forward(&self, x: &Tensor) -> CandleResult<Tensor> {
-        let stage = if x.device().is_cuda() {
-            P::MoeCard
-        } else if self.card_for_prompt(x).is_some() {
+        // Named by where the EXPERTS run, wherever the activation is: a
+        // card-held layer whose experts stay in RAM (#138 (3)) is processor
+        // time for a decode step.
+        let stage = if self.card_for_prompt(x).is_some() {
             P::MoeSentToCard
-        } else {
+        } else if self.experts_on_the_processor() {
             P::MoeCpu
+        } else {
+            P::MoeCard
         };
         crate::inference::prof::timed!(stage, self.forward_untimed(x))
+    }
+
+    /// Are this layer's routed experts held in the machine's memory — a
+    /// processor-held layer's, or a card-held layer's kept in RAM (#138 (3))?
+    pub(crate) fn experts_on_the_processor(&self) -> bool {
+        self.stacked.is_none()
+            && self
+                .experts
+                .first()
+                .is_some_and(|e| e.gate.weight_is_on_the_processor())
     }
 
     fn forward_untimed(&self, x: &Tensor) -> CandleResult<Tensor> {
@@ -1651,12 +1664,11 @@ impl MoeFfn {
             }
         }
         // The processor runs them: an activation on the card — a processor
-        // layer run whole there for a prompt (`LayerOnTheCard`) — comes down
-        // once for them, and their answer goes back.
-        let experts_here = self
-            .experts
-            .first()
-            .is_some_and(|e| e.gate.weight_is_on_the_processor());
+        // layer run whole there for a prompt (`LayerOnTheCard`), or a card
+        // layer keeping its experts in RAM (#138 (3), llama.cpp's
+        // `--n-cpu-moe`: the router's scores come down in `route`) — comes
+        // down once for them, and their answer goes back.
+        let experts_here = self.experts_on_the_processor();
         let x_here = if experts_here && !x_flat.device().is_cpu() {
             x_flat.to_device(&Device::Cpu)?
         } else {
@@ -2417,6 +2429,13 @@ impl LayerVariant {
             FfnVariant::MoE(m) => m.prompt_card.is_some(),
             FfnVariant::Dense(_) => first.prompt_card.is_some(),
         }
+    }
+
+    /// Does this layer keep its routed experts in the machine's memory
+    /// ([`MoeFfn::experts_on_the_processor`])? A card-held layer that does
+    /// (#138 (3)) works on the processor every decode step.
+    pub(crate) fn experts_on_the_processor(&self) -> bool {
+        matches!(self.ffn(), FfnVariant::MoE(m) if m.experts_on_the_processor())
     }
 }
 

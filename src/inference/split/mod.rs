@@ -163,6 +163,22 @@ pub(crate) fn gpu_layer_limit() -> Option<usize> {
     }
 }
 
+/// How many of a segment's card-held mixture-of-experts layers, from the
+/// start, keep their routed experts in the machine's memory while the rest of
+/// each layer stays on the card (FUTURE_WORK #138 (3), llama.cpp's
+/// `--n-cpu-moe`; `hybrid::LayerPlacement::with_experts_on_the_processor`).
+/// `0` = none. Set once from `--cpu-moe-layers`, like [`GPU_LAYER_LIMIT`].
+pub static CPU_EXPERT_LAYERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// [`CPU_EXPERT_LAYERS`], or `None` when every card-held layer keeps its experts.
+pub(crate) fn cpu_expert_layers() -> Option<usize> {
+    match CPU_EXPERT_LAYERS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        n => Some(n),
+    }
+}
+
 pub fn cpu_kv_budget_bytes() -> Option<u64> {
     match CPU_KV_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed) {
         0 => None,

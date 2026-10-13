@@ -129,6 +129,7 @@ impl SplitModel {
                     is_last,
                     parallel_data: Some(mmap.as_ref()),
                     gpu_layers: crate::inference::split::gpu_layer_limit(),
+                    cpu_expert_layers: crate::inference::split::cpu_expert_layers(),
                 },
             );
         }
@@ -294,6 +295,7 @@ impl SplitModel {
                 // ShardReader can't be shared across threads for parallel loading
                 parallel_data: None,
                 gpu_layers: crate::inference::split::gpu_layer_limit(),
+                cpu_expert_layers: crate::inference::split::cpu_expert_layers(),
             },
         )
     }

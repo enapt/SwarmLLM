@@ -8,6 +8,7 @@ pub async fn test_split_inference(
     prompt: &str,
     prompt_chunk: usize,
     gpu_layers: Option<i32>,
+    cpu_moe_layers: usize,
 ) -> anyhow::Result<()> {
     use swarmllm::inference::split::{sample_token, SplitModel};
 
@@ -29,6 +30,15 @@ pub async fn test_split_inference(
         let n = n as usize;
         swarmllm::inference::split::GPU_LAYER_LIMIT.store(n, std::sync::atomic::Ordering::Relaxed);
         println!("Placing the first {n} layers on the graphics card, the rest on the processor");
+    }
+    // `--cpu-moe-layers`, read through the `CPU_EXPERT_LAYERS` the loader
+    // obeys (#138 (3)).
+    if cpu_moe_layers > 0 {
+        swarmllm::inference::split::CPU_EXPERT_LAYERS
+            .store(cpu_moe_layers, std::sync::atomic::Ordering::Relaxed);
+        println!(
+            "Keeping the routed experts of the first {cpu_moe_layers} card-held layers in RAM"
+        );
     }
     let mut model = SplitModel::load_from_gguf(&model_path, 0, 999, true, true, force_cpu)?;
     let total_layers = model.total_layers;

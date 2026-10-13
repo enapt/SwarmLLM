@@ -181,6 +181,11 @@ enum Commands {
         /// one forward
         #[arg(long, default_value = "0")]
         prompt_chunk: usize,
+        /// Keep the routed experts of the first N card-held layers of a
+        /// mixture-of-experts model in RAM, everything else on the card
+        /// (llama.cpp's `--n-cpu-moe`); 0 keeps them with their layer
+        #[arg(long, default_value = "0")]
+        cpu_moe_layers: usize,
         // `--gpu-layers` is the GLOBAL option above, not one of this
         // command's own: a same-named arg of another type panics clap on
         // access (the `model` comment above; `the_split_test_reads_the_global_gpu_layers`).
@@ -592,6 +597,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             max_tokens,
             prompt,
             prompt_chunk,
+            cpu_moe_layers,
         } => {
             cli::split_test::test_split_inference(
                 cli.model.clone().map(PathBuf::from),
@@ -599,6 +605,7 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
                 &prompt,
                 prompt_chunk,
                 cli.gpu_layers,
+                cpu_moe_layers,
             )
             .await
         }

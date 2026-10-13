@@ -1277,3 +1277,74 @@ fn a_prompts_processor_experts_go_to_the_card_only_where_it_can_take_them() {
         );
     }
 }
+
+/// #138 (3): a segment held on the card whose mixture-of-experts layer keeps
+/// its experts in RAM is not "entirely on the card" — the processor runs those
+/// experts every decode step (the thread pool and the card's own timing ask
+/// this) — and reads a prompt on the card, copying them over, once that layer
+/// is given the card; a dense layer beside it adds no processor work.
+#[cfg(feature = "candle-cuda")]
+#[test]
+fn a_card_segment_keeping_its_experts_in_ram_works_on_the_processor_for_them() {
+    use crate::inference::layers::{ExpertFfn, FfnVariant, LayerVariant};
+    use crate::inference::prefill_pacer::PromptReader;
+    use candle_core::quantized::GgmlDType as G;
+    let Ok(card) = Device::new_cuda(0) else {
+        return;
+    };
+    let (hidden, intermediate, n_experts) = (256usize, 512usize, 8usize);
+    let cpu = Device::Cpu;
+    let quantized = |o: usize, i: usize| {
+        let w = Tensor::randn(0f32, 0.05, (o, i), &cpu).unwrap();
+        QMatMul::from_qtensor(QTensor::quantize(&w, G::Q4K).unwrap()).unwrap()
+    };
+    let in_ram = MoeFfn {
+        gate: Tensor::randn(0f32, 0.3, (n_experts, hidden), &card).unwrap(),
+        experts: (0..n_experts)
+            .map(|_| ExpertFfn {
+                gate: quantized(intermediate, hidden),
+                up: quantized(intermediate, hidden),
+                down: quantized(hidden, intermediate),
+            })
+            .collect(),
+        stacked: None,
+        prompt_card: None,
+        shared_gate: None,
+        shared_down: None,
+        shared_up: None,
+        shared_gate_inp: None,
+        n_experts_used: 2,
+        routing: MoeRoutingConfig::default(),
+    };
+    let mut model = make_test_split_model(2, hidden);
+    let LayerVariant::Dense(w) = &mut model.layers[0] else {
+        panic!("make_test_split_model builds dense layers")
+    };
+    w.ffn = FfnVariant::MoE(in_ram);
+    // The segment on the card, unsplit: what the loader records for
+    // `--cpu-moe-layers` (no `layer_devices`).
+    model.device = card.clone();
+    model.layer_devices.clear();
+    assert_eq!(
+        model.cpu_layer_count(),
+        1,
+        "the RAM-held experts are processor work"
+    );
+    assert!(!model.runs_entirely_on_card());
+    assert!(
+        !model.reads_prompts_on_card(),
+        "experts not given the card read a prompt on the processor"
+    );
+    let LayerVariant::Dense(w) = &mut model.layers[0] else {
+        unreachable!()
+    };
+    let FfnVariant::MoE(m) = &mut w.ffn else {
+        unreachable!()
+    };
+    m.prompt_card = Some(card.clone());
+    assert!(model.reads_prompts_on_card());
+    assert!(matches!(
+        model.prompt_reader(0),
+        PromptReader::CardCopyingWeights { .. }
+    ));
+}
