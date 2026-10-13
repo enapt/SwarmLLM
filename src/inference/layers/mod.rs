@@ -35,6 +35,15 @@ fn share_projection_work() -> bool {
 #[derive(Debug, Clone)]
 pub(crate) struct QMatMul {
     pub(crate) inner: QMatMulInner,
+    /// The card a processor-held projection multiplies a prompt on: a forward
+    /// of at least [`PROMPT_ON_CARD_MIN_TOKENS`] tokens copies this weight
+    /// there for the call, as llama.cpp's op offload does (#138 (1b)). Given
+    /// once, by the loader ([`let_processor_layers_read_prompts_on`]).
+    pub(crate) prompt_card: Option<Device>,
+    /// Set by [`Self::accumulate_in_f32`] whatever device holds the weight, so
+    /// a copy made for the card keeps the f32 accumulator the card's own copy
+    /// of this projection would (#147).
+    card_accumulates_f32: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -54,9 +63,7 @@ pub(crate) enum QMatMulInner {
 impl QMatMul {
     pub(crate) fn from_qtensor(qtensor: QTensor) -> CandleResult<Self> {
         let inner = candle_core::quantized::QMatMul::from_qtensor(qtensor)?;
-        Ok(Self {
-            inner: QMatMulInner::Standard(inner),
-        })
+        Ok(Self::wrap(QMatMulInner::Standard(inner)))
     }
 
     /// Build over a tensor someone else also holds.
@@ -66,29 +73,50 @@ impl QMatMul {
     /// lookup. Sharing the `Arc` keeps one copy where there were two.
     pub(crate) fn from_arc(qtensor: std::sync::Arc<QTensor>) -> CandleResult<Self> {
         let inner = candle_core::quantized::QMatMul::from_arc(qtensor)?;
-        Ok(Self {
-            inner: QMatMulInner::Standard(inner),
-        })
+        Ok(Self::wrap(QMatMulInner::Standard(inner)))
     }
 
     /// Keep this projection's products in f32 where a card's prompt pass
     /// accumulates in f16 ([`accumulate_output_projections_in_f32`]). `false`
     /// when the weight is shared and could not be marked.
     pub(crate) fn accumulate_in_f32(&mut self) -> bool {
-        match &mut self.inner {
+        let marked = match &mut self.inner {
             QMatMulInner::Standard(q) => q.accumulate_in_f32(),
             QMatMulInner::FusedSlice { fused, .. } => {
                 std::sync::Arc::get_mut(fused).is_some_and(|q| q.accumulate_in_f32())
             }
+        };
+        self.card_accumulates_f32 = marked;
+        marked
+    }
+
+    /// Is the weight held in host memory — a processor layer's?
+    pub(crate) fn weight_is_on_the_processor(&self) -> bool {
+        use candle_core::quantized::QMatMul as Q;
+        let m = match &self.inner {
+            QMatMulInner::Standard(m) => m,
+            QMatMulInner::FusedSlice { fused, .. } => fused.as_ref(),
+        };
+        match m {
+            Q::QTensor(q) => q.device().is_cpu(),
+            Q::Tensor(t) | Q::TensorF16(t) => t.device().is_cpu(),
+        }
+    }
+
+    fn wrap(inner: QMatMulInner) -> Self {
+        Self {
+            inner,
+            prompt_card: None,
+            card_accumulates_f32: false,
         }
     }
 
     /// Over a plain (already dequantized) weight matrix, `[out, in]`.
     #[cfg(test)]
     pub(crate) fn from_dense(weight: Tensor) -> Self {
-        Self {
-            inner: QMatMulInner::Standard(candle_core::quantized::QMatMul::Tensor(weight)),
-        }
+        Self::wrap(QMatMulInner::Standard(
+            candle_core::quantized::QMatMul::Tensor(weight),
+        ))
     }
 
     /// The quantized weight behind a plain projection; `None` for a
@@ -129,9 +157,7 @@ impl QMatMul {
         offset: usize,
         len: usize,
     ) -> Self {
-        Self {
-            inner: QMatMulInner::FusedSlice { fused, offset, len },
-        }
+        Self::wrap(QMatMulInner::FusedSlice { fused, offset, len })
     }
 
     /// Narrow the weight matrix for tensor parallelism.
@@ -163,9 +189,9 @@ impl QMatMul {
                     | candle_core::quantized::QMatMul::TensorF16(t) => t.clone(),
                 };
                 let sliced = dequant.narrow(weight_dim, offset, len)?.contiguous()?;
-                Ok(Self {
-                    inner: QMatMulInner::Standard(candle_core::quantized::QMatMul::Tensor(sliced)),
-                })
+                Ok(Self::wrap(QMatMulInner::Standard(
+                    candle_core::quantized::QMatMul::Tensor(sliced),
+                )))
             }
             QMatMulInner::FusedSlice { fused, .. } => {
                 let weight_dim = if dim == 1 { 0 } else { 1 };
@@ -175,14 +201,25 @@ impl QMatMul {
                     | candle_core::quantized::QMatMul::TensorF16(t) => t.clone(),
                 };
                 let sliced = dequant.narrow(weight_dim, offset, len)?.contiguous()?;
-                Ok(Self {
-                    inner: QMatMulInner::Standard(candle_core::quantized::QMatMul::Tensor(sliced)),
-                })
+                Ok(Self::wrap(QMatMulInner::Standard(
+                    candle_core::quantized::QMatMul::Tensor(sliced),
+                )))
             }
         }
     }
 
     pub(crate) fn forward(&self, xs: &Tensor) -> CandleResult<Tensor> {
+        if let Some(card) = prompt_card_for(self.prompt_card.as_ref(), xs) {
+            match Self::on_the_card(card, xs, &[self]) {
+                Ok(mut out) => return Ok(out.remove(0)),
+                Err(e) => note_projection_stayed_on_the_processor(&e),
+            }
+        }
+        self.forward_here(xs)
+    }
+
+    /// The product on the device that holds the weight.
+    fn forward_here(&self, xs: &Tensor) -> CandleResult<Tensor> {
         match &self.inner {
             QMatMulInner::Standard(m) => m.forward(xs),
             QMatMulInner::FusedSlice { fused, offset, len } => {
@@ -216,6 +253,21 @@ impl QMatMul {
     /// Falls back to a plain loop for a mixed or single-weight group, so it is
     /// always correct to call. Returns one tensor per weight, in order.
     pub(crate) fn forward_shared(xs: &Tensor, ws: &[&Self]) -> CandleResult<Vec<Tensor>> {
+        let given = ws
+            .iter()
+            .map(|w| w.prompt_card.as_ref())
+            .collect::<Option<Vec<_>>>();
+        if let Some(card) = given.and_then(|cards| prompt_card_for(cards.first().copied(), xs)) {
+            match Self::on_the_card(card, xs, ws) {
+                Ok(out) => return Ok(out),
+                Err(e) => note_projection_stayed_on_the_processor(&e),
+            }
+        }
+        Self::forward_shared_here(xs, ws)
+    }
+
+    /// [`Self::forward_shared`] on the device that holds the weights.
+    fn forward_shared_here(xs: &Tensor, ws: &[&Self]) -> CandleResult<Vec<Tensor>> {
         if ws.len() > 1 && share_projection_work() {
             // All slices of the SAME fused weight: compute it once.
             if let QMatMulInner::FusedSlice { fused: first, .. } = &ws[0].inner {
@@ -232,7 +284,7 @@ impl QMatMul {
                                 .narrow(candle_core::D::Minus1, *offset, *len)?
                                 .contiguous(),
                             // Unreachable: `all_same` established every variant.
-                            _ => w.forward(xs),
+                            _ => w.forward_here(xs),
                         })
                         .collect();
                 }
@@ -249,7 +301,76 @@ impl QMatMul {
                 return candle_core::quantized::QMatMul::forward_shared(xs, &inners);
             }
         }
-        ws.iter().map(|w| w.forward(xs)).collect()
+        ws.iter().map(|w| w.forward_here(xs)).collect()
+    }
+
+    /// The products of `ws` against `xs`, multiplied on `card`: each weight
+    /// copied there for this call (a fused weight once, however many slices
+    /// read it), `xs` copied once, the products brought back to `xs`'s device.
+    /// llama.cpp's op offload of a RAM-held weight (#138 (1b)); its pinned
+    /// host memory buys nothing on a card whose link a pageable copy already
+    /// fills (`~/swarmllm-138b/bench.sh`, 6.5 of 6.7 GB/s).
+    pub(crate) fn on_the_card(
+        card: &Device,
+        xs: &Tensor,
+        ws: &[&Self],
+    ) -> CandleResult<Vec<Tensor>> {
+        type Fused = std::sync::Arc<candle_core::quantized::QMatMul>;
+        let mut fused_copies: Vec<(*const candle_core::quantized::QMatMul, Fused)> = Vec::new();
+        let mut copies = Vec::with_capacity(ws.len());
+        for w in ws {
+            let inner = match &w.inner {
+                QMatMulInner::Standard(m) => QMatMulInner::Standard(w.weight_on(card, m)?),
+                QMatMulInner::FusedSlice { fused, offset, len } => {
+                    let key = std::sync::Arc::as_ptr(fused);
+                    let on_card = match fused_copies.iter().find(|(k, _)| *k == key) {
+                        Some((_, c)) => c.clone(),
+                        None => {
+                            let c = std::sync::Arc::new(w.weight_on(card, fused)?);
+                            fused_copies.push((key, c.clone()));
+                            c
+                        }
+                    };
+                    QMatMulInner::FusedSlice {
+                        fused: on_card,
+                        offset: *offset,
+                        len: *len,
+                    }
+                }
+            };
+            copies.push(Self::wrap(inner));
+        }
+        let x = xs.to_device(card)?;
+        let refs: Vec<&Self> = copies.iter().collect();
+        Self::forward_shared_here(&x, &refs)?
+            .into_iter()
+            .map(|t| t.to_device(xs.device()))
+            .collect()
+    }
+
+    /// `m` copied to `card`, keeping the f32 accumulator this projection was
+    /// marked for.
+    fn weight_on(
+        &self,
+        card: &Device,
+        m: &candle_core::quantized::QMatMul,
+    ) -> CandleResult<candle_core::quantized::QMatMul> {
+        use candle_core::quantized::{QMatMul as Q, QStorage};
+        let mut copy = match m {
+            Q::QTensor(q) => {
+                let storage = QStorage::from_data(q.data()?, card, q.dtype())?;
+                Q::QTensor(std::sync::Arc::new(QTensor::new(
+                    storage,
+                    q.shape().clone(),
+                )?))
+            }
+            Q::Tensor(t) => Q::Tensor(t.to_device(card)?),
+            Q::TensorF16(t) => Q::TensorF16(t.to_device(card)?),
+        };
+        if self.card_accumulates_f32 {
+            copy.accumulate_in_f32();
+        }
+        Ok(copy)
     }
 }
 
@@ -744,7 +865,7 @@ pub(crate) struct MoeFfn {
     pub(crate) stacked: Option<StackedExperts>,
     /// The card a processor-held layer sends a prompt's experts to — the card
     /// its model's other layers run on, set after load by
-    /// [`let_processor_experts_read_prompts_on`]. `None` on a card layer, on a
+    /// [`let_processor_layers_read_prompts_on`]. `None` on a card layer, on a
     /// model with no card, and where the card kernel cannot read the experts.
     pub(crate) prompt_card: Option<Device>,
     // Shared experts (always active, optional)
@@ -825,34 +946,75 @@ fn prompt_on_tensor_cores() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_MOE_CARD_PROMPT").as_deref() != Ok("rows"))
 }
 
-/// The fewest tokens for which a processor-held layer sends a prompt's experts
-/// to the card: llama.cpp's `GGML_OP_OFFLOAD_MIN_BATCH` (32), read at
-/// `4b1a27f` (`ggml_backend_cuda_device_offload_op`). Well above
+/// The fewest tokens for which a processor-held layer sends a prompt's work to
+/// the card: llama.cpp's `GGML_OP_OFFLOAD_MIN_BATCH` (32), read at `4b1a27f`
+/// (`ggml_backend_cuda_device_offload_op`). Well above
 /// `cuda_graph::MAX_POSITIONS`, so the copies never run inside a captured step.
-pub(crate) const MOE_PROMPT_ON_CARD_MIN_TOKENS: usize = 32;
+pub(crate) const PROMPT_ON_CARD_MIN_TOKENS: usize = 32;
 
-/// Give every processor-held mixture-of-experts layer the card its model's
-/// other layers run on, so that a prompt chunk of at least
-/// [`MOE_PROMPT_ON_CARD_MIN_TOKENS`] runs its experts there — the chosen
-/// experts copied over for the call, as llama.cpp runs a `MUL_MAT_ID` whose
-/// weights sit in RAM (FUTURE_WORK #138 (1)). Asked ONCE, by the loader, after
-/// every layer is built, so no load path can miss it; a layer the card kernel
-/// cannot read ([`StackedExperts::fit`]) is left alone. Returns how many
-/// layers were given the card.
-pub(crate) fn let_processor_experts_read_prompts_on(
+/// The card a forward of `x` sends a processor-held weight's work to: the one
+/// it was given (`prompt_card`), when `x` is on the processor and holds at
+/// least [`PROMPT_ON_CARD_MIN_TOKENS`] tokens. The ONE rule, for a projection
+/// ([`QMatMul`]) and for a layer's experts ([`MoeFfn`]) alike.
+fn prompt_card_for<'a>(prompt_card: Option<&'a Device>, x: &Tensor) -> Option<&'a Device> {
+    let tokens = x.dims().iter().rev().skip(1).product::<usize>();
+    prompt_card.filter(|_| tokens >= PROMPT_ON_CARD_MIN_TOKENS && x.device().is_cpu())
+}
+
+/// What [`let_processor_layers_read_prompts_on`] gave a card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct PromptCardGiven {
+    /// Layers whose projections (attention, a dense feed-forward, a shared
+    /// expert) multiply a prompt on the card.
+    pub(crate) projection_layers: usize,
+    /// Mixture-of-experts layers whose chosen experts run a prompt there.
+    pub(crate) expert_layers: usize,
+}
+
+/// Give every processor-held layer the card its model's other layers run on,
+/// so that a prompt chunk of at least [`PROMPT_ON_CARD_MIN_TOKENS`] tokens is
+/// multiplied there, each weight copied over for the call — llama.cpp's op
+/// offload, which hands the card ANY op reading a RAM-held weight at that
+/// batch (`ggml_backend_sched` "1.off", read at `4b1a27f`). Projections
+/// (FUTURE_WORK #138 (1b)) unless `projections` is false; a mixture-of-experts
+/// layer's chosen experts (#138 (1)) unless `experts` is false, and never where
+/// the card kernel cannot read them ([`StackedExperts::fit`]). Asked ONCE, by
+/// the loader, after every layer is built, so no load path can miss it.
+pub(crate) fn let_processor_layers_read_prompts_on(
     layers: &mut [LayerVariant],
     card: &Device,
-) -> usize {
-    let mut given = 0;
+    projections: bool,
+    experts: bool,
+) -> PromptCardGiven {
+    let mut given = PromptCardGiven::default();
     for layer in layers {
+        let held = layer.projections_mut();
+        if projections && held.iter().all(|p| p.weight_is_on_the_processor()) {
+            for p in held {
+                p.prompt_card = Some(card.clone());
+            }
+            given.projection_layers += 1;
+        }
         if let FfnVariant::MoE(moe) = layer.ffn_mut() {
-            if moe.experts_could_stack_on_a_card() {
+            if experts && moe.experts_could_stack_on_a_card() {
                 moe.prompt_card = Some(card.clone());
-                given += 1;
+                given.expert_layers += 1;
             }
         }
     }
     given
+}
+
+/// Logged once per process: a prompt's processor-held projection could not
+/// run on the card (out of its memory, most likely) and ran on the processor.
+fn note_projection_stayed_on_the_processor(e: &candle_core::Error) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::warn!(
+            error = %e,
+            "DIAG: a prompt's processor-held projection could not run on the card; the processor ran it"
+        )
+    });
 }
 
 /// Logged once per process: a prompt's processor experts could not run on the
@@ -1212,12 +1374,9 @@ impl MoeFfn {
 
     /// The card this call's experts go to: a processor-held layer given one
     /// ([`Self::prompt_card`]), on a prompt of at least
-    /// [`MOE_PROMPT_ON_CARD_MIN_TOKENS`] tokens.
+    /// [`PROMPT_ON_CARD_MIN_TOKENS`] tokens ([`prompt_card_for`]).
     fn card_for_prompt(&self, x: &Tensor) -> Option<&Device> {
-        let tokens = x.dims().iter().rev().skip(1).product::<usize>();
-        self.prompt_card
-            .as_ref()
-            .filter(|_| tokens >= MOE_PROMPT_ON_CARD_MIN_TOKENS && x.device().is_cpu())
+        prompt_card_for(self.prompt_card.as_ref(), x)
     }
 
     /// A processor-held layer's routed experts for a prompt, run on `card`:
@@ -1837,9 +1996,79 @@ impl LayerVariant {
         }
     }
 
-    /// Does this layer send a prompt's experts to a card (#138 (1))?
-    pub(crate) fn sends_prompt_experts_to_a_card(&self) -> bool {
-        matches!(self.ffn(), FfnVariant::MoE(m) if m.prompt_card.is_some())
+    /// Every weight projection of this layer that goes through [`QMatMul`]:
+    /// attention, a dense feed-forward, a mixture-of-experts layer's shared
+    /// expert — not its routed experts (`MoeFfn::prompt_card`) or router.
+    pub(crate) fn projections_mut(&mut self) -> Vec<&mut QMatMul> {
+        let (mut out, ffn): (Vec<&mut QMatMul>, &mut FfnVariant) = match self {
+            LayerVariant::Dense(w) => (
+                vec![
+                    &mut w.attention_wq,
+                    &mut w.attention_wk,
+                    &mut w.attention_wv,
+                    &mut w.attention_wo,
+                ],
+                &mut w.ffn,
+            ),
+            LayerVariant::DeepSeek {
+                attention: a, ffn, ..
+            } => (
+                vec![
+                    &mut a.q_a,
+                    &mut a.q_b,
+                    &mut a.kv_a,
+                    &mut a.kv_b,
+                    &mut a.output,
+                ],
+                ffn,
+            ),
+            LayerVariant::Qwen35Attn {
+                weights: w, ffn, ..
+            } => (vec![&mut w.wq_gate, &mut w.wk, &mut w.wv, &mut w.wo], ffn),
+            LayerVariant::Qwen35Ssm {
+                weights: w, ffn, ..
+            } => (
+                vec![
+                    &mut w.wqkv,
+                    &mut w.wz,
+                    &mut w.w_beta,
+                    &mut w.w_alpha,
+                    &mut w.ssm_out,
+                ],
+                ffn,
+            ),
+        };
+        match ffn {
+            FfnVariant::Dense(m) => {
+                out.extend(m.ffn_gate.as_mut());
+                out.push(&mut m.ffn_up);
+                out.push(&mut m.ffn_down);
+            }
+            FfnVariant::MoE(m) => {
+                out.extend(m.shared_gate.as_mut());
+                out.extend(m.shared_up.as_mut());
+                out.extend(m.shared_down.as_mut());
+            }
+        }
+        out
+    }
+
+    /// Does this layer read the heavy part of a prompt on a card — a
+    /// mixture-of-experts layer its experts (#138 (1)), any other its
+    /// projections (#138 (1b))? What `SplitModel::reads_prompts_on_card` asks
+    /// of each processor layer. The loader gives a layer's projections all at
+    /// once, so the first stands for the rest.
+    pub(crate) fn reads_its_prompt_on_a_card(&self) -> bool {
+        let first = match self {
+            LayerVariant::Dense(w) => &w.attention_wq,
+            LayerVariant::DeepSeek { attention, .. } => &attention.q_a,
+            LayerVariant::Qwen35Attn { weights, .. } => &weights.wq_gate,
+            LayerVariant::Qwen35Ssm { weights, .. } => &weights.wqkv,
+        };
+        match self.ffn() {
+            FfnVariant::MoE(m) => m.prompt_card.is_some(),
+            FfnVariant::Dense(_) => first.prompt_card.is_some(),
+        }
     }
 }
 
@@ -5164,9 +5393,9 @@ mod blocked_mlp_tests {
             let n = o * i;
             let data: Vec<f32> = (0..n).map(|k| (k as f32 * seed).sin() * 0.05).collect();
             let t = Tensor::from_vec(data, (o, i), &dev).unwrap();
-            QMatMul {
-                inner: QMatMulInner::Standard(candle_core::quantized::QMatMul::Tensor(t)),
-            }
+            QMatMul::wrap(QMatMulInner::Standard(
+                candle_core::quantized::QMatMul::Tensor(t),
+            ))
         };
         Mlp {
             ffn_gate: gated.then(|| w(intermediate, hidden, 0.31)),
@@ -5314,9 +5543,9 @@ mod cuda_mlp_memory_probe {
         let w = |o: usize, i: usize, seed: f32| {
             let data: Vec<f32> = (0..o * i).map(|k| (k as f32 * seed).sin() * 0.02).collect();
             let t = Tensor::from_vec(data, (o, i), &dev).unwrap();
-            QMatMul {
-                inner: QMatMulInner::Standard(candle_core::quantized::QMatMul::Tensor(t)),
-            }
+            QMatMul::wrap(QMatMulInner::Standard(
+                candle_core::quantized::QMatMul::Tensor(t),
+            ))
         };
         let mlp = Mlp {
             ffn_gate: Some(w(intermediate, hidden, 0.0007)),

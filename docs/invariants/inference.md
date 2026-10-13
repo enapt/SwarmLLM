@@ -2119,11 +2119,11 @@ whenever a card is present (`llama-model.cpp:1090-1104`).
 
 **What replaced it.** The loader marks once, after every layer is built, each
 processor-held MoE layer the card kernel can read
-(`layers::let_processor_experts_read_prompts_on` →
+(`layers::let_processor_layers_read_prompts_on` →
 `MoeFfn::experts_could_stack_on_a_card`: every expert quantized on the
 processor, one type and shape per projection, `StackedExperts::fit`'s rules — so
 never Llama 4, which weights the experts' input). A forward of ≥
-`MOE_PROMPT_ON_CARD_MIN_TOKENS` is routed on the processor as before, then
+`PROMPT_ON_CARD_MIN_TOKENS` is routed on the processor as before, then
 `MoeFfn::processor_experts_on_the_card` writes each token's k picks, copies the
 chosen experts into a zeroed `[n_experts, rows, cols]` stack on the card
 (`QTensor::stack_some` → vendored `cuda::load_quantized_entries`; an unchosen
@@ -2161,6 +2161,70 @@ the old one's its first; at 128 a forward the old path parts from llama.cpp at t
 `a_prompts_processor_experts_go_to_the_card_only_where_it_can_take_them` (the marking,
 `reads_prompts_on_card`, and a refused card leaving the processor's answer bit for bit
 — red when the fallback returns the error instead).
+
+### A split's processor-held projections read a prompt on the card (2026-10-13, #138 (1b))
+
+**What it replaced.** (1) gave the card only a MoE layer's experts. Every other
+weight a processor layer holds — attention's q/k/v/output, a dense FFN's
+gate/up/down, a MoE layer's shared expert, a DeltaNet layer's projections — was
+multiplied on the processor at every token count. Qwen2.5-14B Q4_K_M split 20/28
+read an 888-token prompt in 35.3-36.8 s, a dense model gaining nothing from (1).
+
+**What llama.cpp does.** The same scheduler rule (1) cites is not MoE-specific:
+`ggml_backend_sched` pass "1.off" (`ggml-backend.cpp:970-975` at `4b1a27f`) sends
+ANY op whose weight sits in a host buffer to a backend whose `offload_op` accepts
+it, and the CUDA one accepts every op of ≥ `op_offload_min_batch_size` (32)
+rows — `get_op_batch_size` reads `ne[1]` for `MUL_MAT`. `llama-bench -nopo 1`
+turns it off: the same 14B split pp512 399 ± 9 tok/s with it, 19.1 without
+(`~/swarmllm-138b/dense.sh`). We read at 22 tok/s: llama.cpp without offload.
+
+**What replaced it.** `QMatMul::forward` and `forward_shared` are the one choke
+point every projection crosses, so the rule sits there, not in each layer
+kind: a `QMatMul` the loader marked (`prompt_card`) that is handed ≥
+`PROMPT_ON_CARD_MIN_TOKENS` rows on the processor (`prompt_card_for`, the one
+token rule both kinds ask) copies its weight to the card for the call
+(`weight_on`: the quantized bytes through `QStorage::from_data`, a fused weight
+once for all its slices, the f32 mark (`accumulates_outputs_in_f32`) carried
+to the copy), sends the activation, runs the card's own product and brings the
+result back (`QMatMul::on_the_card`). Any refusal runs the processor path for
+that call (WARN once): it costs time, never the reply. The loader marks once
+(`let_processor_layers_read_prompts_on`, through `LayerVariant::projections_mut`
+— every projection of every layer kind), and only weights held in HOST memory
+(`weight_is_on_the_processor`): a card layer is never given a second copy. A
+split whose every processor layer reads its heavy part on the card reads 512
+tokens a forward (`reads_prompts_on_card` → `prompt_chunk_ceiling`; at 128 the
+weights cross four times as often).
+
+**Measured** (one binary `1afbfea4`, `SWARMLLM_PROMPT_CARD_PROJECTIONS=0` = old,
+Windows up 4.3 h, live node stopped, safety kit, `~/swarmllm-138b/ab.sh`):
+
+| | old | new |
+|---|---|---|
+| 14B Q4_K_M 20/28, 888 tokens, 512 a forward | 35.63 / 35.29 s | **7.03 / 6.49 s** |
+| same, 128 a forward (a node before) | 36.80 s | 11.26 s |
+| Qwen3-30B-A3B Q2_K 26/22, 867 tokens, 512 (experts on the card in both) | 8.43 / 8.45 s | **6.13 / 7.17 s** |
+
+What a node did before is the 128 row's left: **36.8 → 6.5-7.0 s, 5.3-5.7x** for
+the 14B; 11.0 s (before (1)) → 6.1-7.2 s for the 30B. Still ~2.8x behind
+llama.cpp per 512-token forward (3.60 s against ~1.28 s): the profile's
+remainder is the processor layers' attention (0.59 s), RoPE/norms/activation
+(0.63 s) and 0.50 s unattributed — llama.cpp's scheduler ALSO moves the
+weightless ops between two offloaded ones to the card (its "expand" passes), and
+each of our projections ships its activation up and its product back (~150 MB
+a layer at 512 tokens by arithmetic, about as much as the layer's weights). That
+is #138 (1c).
+
+**Verified** against llama-cpp-python 0.3.16, teacher-forced over each arm's
+16-token reply (`score_many.py`, CPU): the 14B's new reply is llama.cpp's FIRST
+pick at all 16 tokens; the old path at 512 parts at token 10 (llama.cpp's
+second, 0.0003 behind) and at 128 at token 13 (second, 0.32). The 30B's new
+reply picks llama.cpp's second at token 12 (0.069) where (1) alone picked its
+third (0.105); token 8 is the same 0.76 near-tie in every arm. Each arm gave one
+reply across its two runs. Test
+`a_prompts_processor_projections_read_on_the_card_give_the_processors_answer`
+(the CPU standing in for the card: a Q4_K weight, a dense one, a shared pair and
+three fused slices at 1, 31, 32 and 100 tokens bit-identical to the plain path;
+the marking; red when `on_the_card` hands every weight the first copy).
 
 ### Llama 4 routes like llama.cpp hardcodes it, and normalises Q/K after RoPE (2026-09-25)
 

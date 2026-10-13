@@ -2228,24 +2228,25 @@ impl SplitModel {
             );
         }
 
-        // A processor-held mixture-of-experts layer runs a prompt's experts on
-        // the card its model's other layers use, as llama.cpp does (#138 (1)) —
-        // given here, once every layer is built, whatever branch built it.
-        // `SWARMLLM_MOE_PROMPT_CARD=0` keeps them on the processor (the A/B).
+        // A processor-held layer multiplies a prompt on the card its model's
+        // other layers use, each weight copied over for the call, as
+        // llama.cpp's op offload does — its projections (#138 (1b)) and a
+        // mixture-of-experts layer's chosen experts (#138 (1)). Given here,
+        // once every layer is built, whatever branch built it. The A/Bs:
+        // `SWARMLLM_PROMPT_CARD_PROJECTIONS=0`, `SWARMLLM_MOE_PROMPT_CARD=0`.
         if let Some(card) = placement.card_beside_the_processor(layers.len()) {
-            if std::env::var("SWARMLLM_MOE_PROMPT_CARD").as_deref() != Ok("0") {
-                let given = crate::inference::layers::let_processor_experts_read_prompts_on(
-                    &mut layers,
-                    card,
-                );
-                if given > 0 {
-                    tracing::info!(
-                        layers = given,
-                        min_tokens = crate::inference::layers::MOE_PROMPT_ON_CARD_MIN_TOKENS,
-                        "DIAG: processor-held expert layers run a prompt's experts on the card"
-                    );
-                }
-            }
+            let given = crate::inference::layers::let_processor_layers_read_prompts_on(
+                &mut layers,
+                card,
+                std::env::var("SWARMLLM_PROMPT_CARD_PROJECTIONS").as_deref() != Ok("0"),
+                std::env::var("SWARMLLM_MOE_PROMPT_CARD").as_deref() != Ok("0"),
+            );
+            tracing::info!(
+                projection_layers = given.projection_layers,
+                expert_layers = given.expert_layers,
+                min_tokens = crate::inference::layers::PROMPT_ON_CARD_MIN_TOKENS,
+                "DIAG: processor-held layers read a prompt on the card"
+            );
         }
 
         let has_biases = layers

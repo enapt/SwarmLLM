@@ -1691,3 +1691,107 @@ fn a_step_that_fails_part_way_keeps_the_conversation() {
         "the retried step must answer as if it had never failed",
     );
 }
+
+/// A processor-held projection multiplies a prompt on the card the loader gave
+/// it (#138 (1b)): each weight copied there for the call — a fused weight once
+/// for all its slices — the activation once, the products brought back. The
+/// processor stands in for the card here, so the copies run and the kernels do
+/// not change: every product must come back bit for bit. `on_the_card` is
+/// called directly as well as through `forward`, because `forward` falls back
+/// to the processor on any error and would hide a copy that fails.
+#[test]
+fn a_prompts_processor_projections_read_on_the_card_give_the_processors_answer() {
+    use crate::inference::layers::{
+        let_processor_layers_read_prompts_on, PromptCardGiven, PROMPT_ON_CARD_MIN_TOKENS,
+    };
+    use candle_core::quantized::GgmlDType as G;
+    let device = Device::Cpu;
+    let flat = |t: &Tensor| -> Vec<f32> { t.flatten_all().unwrap().to_vec1().unwrap() };
+    let q4k = |o: usize, i: usize| {
+        let w = Tensor::randn(0f32, 0.05, (o, i), &device).unwrap();
+        QMatMul::from_qtensor(QTensor::quantize(&w, G::Q4K).unwrap()).unwrap()
+    };
+    let given = |w: &QMatMul| {
+        let mut w = w.clone();
+        w.prompt_card = Some(device.clone());
+        w
+    };
+    let (a, b) = (q4k(64, 256), q4k(32, 256));
+    let dense = QMatMul::from_dense(Tensor::randn(0f32, 0.05, (48, 256), &device).unwrap());
+    let fused = QMatMul::make_fused(
+        QTensor::quantize(
+            &Tensor::randn(0f32, 0.05, (96, 256), &device).unwrap(),
+            G::Q4K,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let slices: Vec<QMatMul> = (0..3)
+        .map(|i| QMatMul::from_fused_slice(fused.clone(), i * 32, 32))
+        .collect();
+    for tokens in [
+        1,
+        PROMPT_ON_CARD_MIN_TOKENS - 1,
+        PROMPT_ON_CARD_MIN_TOKENS,
+        100,
+    ] {
+        let x = Tensor::randn(0f32, 1.0, (1, tokens, 256), &device).unwrap();
+        for w in [&a, &dense] {
+            let here = flat(&w.forward(&x).unwrap());
+            assert_eq!(
+                flat(&given(w).forward(&x).unwrap()),
+                here,
+                "{tokens} tokens"
+            );
+            let copied = QMatMul::on_the_card(&device, &x, &[w]).unwrap();
+            assert_eq!(flat(&copied[0]), here, "{tokens} tokens, the copy itself");
+        }
+        for group in [vec![&a, &b], slices.iter().collect::<Vec<_>>()] {
+            let here: Vec<Vec<f32>> = QMatMul::forward_shared(&x, &group)
+                .unwrap()
+                .iter()
+                .map(flat)
+                .collect();
+            let given_group: Vec<QMatMul> = group.iter().map(|w| given(w)).collect();
+            let given_refs: Vec<&QMatMul> = given_group.iter().collect();
+            let through: Vec<Vec<f32>> = QMatMul::forward_shared(&x, &given_refs)
+                .unwrap()
+                .iter()
+                .map(flat)
+                .collect();
+            assert_eq!(through, here, "{tokens} tokens, shared");
+            let copied: Vec<Vec<f32>> = QMatMul::on_the_card(&device, &x, &group)
+                .unwrap()
+                .iter()
+                .map(flat)
+                .collect();
+            assert_eq!(copied, here, "{tokens} tokens, shared, the copy itself");
+        }
+    }
+
+    // The loader's pass gives a processor layer's every projection the card;
+    // the chunk ceiling then reads 512 a forward for the split.
+    let mut model = make_test_split_model(2, 256);
+    model.layer_devices = vec![device.clone(); 2];
+    assert!(!model.reads_prompts_on_card());
+    assert_eq!(
+        let_processor_layers_read_prompts_on(&mut model.layers, &device, false, true),
+        PromptCardGiven::default(),
+        "projections not asked for"
+    );
+    assert!(!model.reads_prompts_on_card());
+    assert_eq!(
+        let_processor_layers_read_prompts_on(&mut model.layers, &device, true, true),
+        PromptCardGiven {
+            projection_layers: 2,
+            expert_layers: 0
+        }
+    );
+    for layer in model.layers.iter_mut() {
+        assert!(layer
+            .projections_mut()
+            .iter()
+            .all(|p| p.prompt_card.is_some()));
+    }
+    assert!(model.reads_prompts_on_card());
+}

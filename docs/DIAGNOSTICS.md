@@ -1133,12 +1133,14 @@ refused 19 chunks and cut 3 of 3 replies short; v0.3.216 refused none.
 **Verify the mechanism fired** by `launched` > 0 on a `--features cuda` build, and compare replies against a
 run without the switches — the same kernels in the same order, so byte-identical.
 
-**A card/processor split's mixture-of-experts layers run a prompt's experts on the card** (since 2026-10-13,
-FUTURE_WORK #138 (1); `SWARMLLM_MOE_PROMPT_CARD=0` keeps them on the processor):
+**A card/processor split's processor layers multiply a prompt on the card** (since 2026-10-13, FUTURE_WORK #138
+(1) experts and (1b) projections — llama.cpp's op offload; `SWARMLLM_MOE_PROMPT_CARD=0` keeps the experts on the
+processor, `SWARMLLM_PROMPT_CARD_PROJECTIONS=0` the projections):
 
 | Level | What | Where |
 |-------|------|-------|
-| INFO | `DIAG: processor-held expert layers run a prompt's experts on the card` — `layers` (how many processor layers were given the card), `min_tokens` (32: a shorter forward stays on the processor); once per load. Absent on a split with MoE layers on the processor means a layer the card kernel cannot read (its types, or Llama 4's input weighting) — and then the split reads the configured chunk, not 512 | split/loader/mod.rs |
+| INFO | `DIAG: processor-held layers read a prompt on the card` — `projection_layers` (layers whose attention and feed-forward projections were given the card), `expert_layers` (mixture-of-experts layers whose chosen experts were), `min_tokens` (32: a shorter forward stays on the processor); once per load of a card/processor split. `expert_layers` = 0 on a split with MoE layers on the processor means the card kernel cannot read them (their types, or Llama 4's input weighting) — and then the split reads the configured chunk, not 512 | split/loader/mod.rs |
+| WARN | `DIAG: a prompt's processor-held projection could not run on the card; the processor ran it` — `error`; once per worker. The card refused a weight's copy or its product (most often out of memory); that call ran on the processor, the reply unchanged | layers/mod.rs |
 | WARN | `DIAG: a prompt's processor-held experts could not run on the card; the processor ran them` — `error`; once per worker. The card refused the stack (most often out of memory); every such call runs the processor path, the reply unchanged | layers/mod.rs |
 
 ## Performance Diagnostics
@@ -1701,8 +1703,11 @@ ops per token per layer — not bit-identical, so judge both against llama.cpp
 **Measure a prompt in the shape a node reads it.** `test-split` reads the whole
 prompt in one forward; a node reads 128 tokens a forward unless the model reads
 its prompts on the card (`SplitModel::reads_prompts_on_card`: wholly on the card,
-or a split whose every processor layer sends its experts there — then 512;
-`prefill_pacer::prompt_chunk_ceiling`). Pass `--prompt-chunk 128` (or 512) — the old per-expert MoE path took 46 s for a 681-token prompt that way
+or a split whose every processor layer sends its heavy multiplies there — a dense
+layer's projections, a MoE layer's experts — then 512;
+`prefill_pacer::prompt_chunk_ceiling`). The loader's line
+`DIAG: processor-held layers read a prompt on the card` counts the layers given
+(`projection_layers`, `expert_layers`). Pass `--prompt-chunk 128` (or 512) — the old per-expert MoE path took 46 s for a 681-token prompt that way
 against 20 s in one forward, so a one-forward figure understated what users met
 by more than half (#138, 2026-10-11).
 

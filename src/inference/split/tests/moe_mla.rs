@@ -1170,15 +1170,15 @@ fn a_stack_of_some_experts_puts_each_at_its_slot() {
 
 /// Which processor-held layers are given the card for a prompt's experts, and
 /// from how many tokens: a layer the card kernel reads, never one that weights
-/// its experts' INPUT (Llama 4), and only from `MOE_PROMPT_ON_CARD_MIN_TOKENS`.
+/// its experts' INPUT (Llama 4), and only from `PROMPT_ON_CARD_MIN_TOKENS`.
 /// A card that cannot run the call — here the processor, which has no grouped
 /// kernel, standing in for a card out of memory — leaves the answer exactly
 /// the processor's.
 #[test]
 fn a_prompts_processor_experts_go_to_the_card_only_where_it_can_take_them() {
     use crate::inference::layers::{
-        let_processor_experts_read_prompts_on, ExpertFfn, FfnVariant, LayerVariant,
-        MOE_PROMPT_ON_CARD_MIN_TOKENS,
+        let_processor_layers_read_prompts_on, ExpertFfn, FfnVariant, LayerVariant, PromptCardGiven,
+        PROMPT_ON_CARD_MIN_TOKENS,
     };
     use candle_core::quantized::GgmlDType as G;
     let device = Device::Cpu;
@@ -1214,8 +1214,8 @@ fn a_prompts_processor_experts_go_to_the_card_only_where_it_can_take_them() {
     assert!(plain.experts_could_stack_on_a_card());
     assert!(!moe(llama4).experts_could_stack_on_a_card());
 
-    // The loader's pass over a segment: the plain layer is given the card, the
-    // Llama 4 one is not.
+    // The loader's pass over a segment, experts only: the plain layer is given
+    // the card, the Llama 4 one is not.
     let mut model = make_test_split_model(2, hidden);
     for (layer, m) in model.layers.iter_mut().zip([plain.clone(), moe(llama4)]) {
         let LayerVariant::Dense(w) = layer else {
@@ -1224,7 +1224,13 @@ fn a_prompts_processor_experts_go_to_the_card_only_where_it_can_take_them() {
         w.ffn = FfnVariant::MoE(m);
     }
     let layers = &mut model.layers;
-    assert_eq!(let_processor_experts_read_prompts_on(layers, &device), 1);
+    assert_eq!(
+        let_processor_layers_read_prompts_on(layers, &device, false, true),
+        PromptCardGiven {
+            projection_layers: 0,
+            expert_layers: 1
+        }
+    );
     let given = |l: &LayerVariant| match l {
         LayerVariant::Dense(w) => matches!(&w.ffn, FfnVariant::MoE(m) if m.prompt_card.is_some()),
         _ => false,
@@ -1258,8 +1264,8 @@ fn a_prompts_processor_experts_go_to_the_card_only_where_it_can_take_them() {
     };
     for tokens in [
         1,
-        MOE_PROMPT_ON_CARD_MIN_TOKENS - 1,
-        MOE_PROMPT_ON_CARD_MIN_TOKENS,
+        PROMPT_ON_CARD_MIN_TOKENS - 1,
+        PROMPT_ON_CARD_MIN_TOKENS,
         100,
     ] {
         let x = Tensor::randn(0f32, 1.0, (1, tokens, hidden), &device).unwrap();

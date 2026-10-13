@@ -135,11 +135,12 @@ impl SplitModel {
 
     /// Does this segment read a prompt's heavy work on the graphics card? Every
     /// layer there, or a card/processor split whose every processor layer sends
-    /// a prompt's experts to the card (`MoeFfn::prompt_card`, #138 (1)). What
-    /// the callers of [`crate::inference::prefill_pacer::prompt_chunk_ceiling`]
-    /// ask — never [`Self::runs_entirely_on_card`], which is card pacing's
-    /// question: such a split reads 512 tokens a forward, so each processor
-    /// layer's experts cross to the card once per 512 tokens, not per 128.
+    /// a prompt's heavy work to the card (`LayerVariant::reads_its_prompt_on_a_card`:
+    /// its projections, #138 (1b), or its experts, #138 (1)). What the callers
+    /// of [`crate::inference::prefill_pacer::prompt_chunk_ceiling`] ask — never
+    /// [`Self::runs_entirely_on_card`], which the drafter and admission timing
+    /// ask: such a split reads 512 tokens a forward, so each processor layer's
+    /// weights cross to the card once per 512 tokens, not per 128.
     pub(crate) fn reads_prompts_on_card(&self) -> bool {
         self.runs_entirely_on_card()
             || (!self.layer_devices.is_empty()
@@ -148,7 +149,7 @@ impl SplitModel {
                     .iter()
                     .zip(&self.layer_devices)
                     .filter(|(_, d)| d.is_cpu())
-                    .all(|(layer, _)| layer.sends_prompt_experts_to_a_card()))
+                    .all(|(layer, _)| layer.reads_its_prompt_on_a_card()))
     }
 
     /// The model's context window in tokens.
