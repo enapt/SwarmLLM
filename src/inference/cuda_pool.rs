@@ -148,6 +148,19 @@ pub(crate) fn usage(device: &Device) -> Option<PoolUsage> {
     None
 }
 
+/// The most `device`'s pool has had in use since the last call (since the
+/// process started, the first time), the count then started again — what one
+/// forward needed at its peak, when called after each (`prof::dump_and_reset`).
+/// `None` on the processor or a card without a pool.
+pub(crate) fn take_peak_use(device: &Device) -> Option<u64> {
+    #[cfg(feature = "candle-cuda")]
+    if let Device::Cuda(dev) = device {
+        return cuda::take_peak_use(dev).ok().flatten();
+    }
+    let _ = device;
+    None
+}
+
 /// Bytes this process may allocate on `device` from memory its pool already
 /// holds — added to `cuMemGetInfo`'s free figure wherever this process asks
 /// "how much room do I have". Zero when unknown: conservative, never larger
@@ -394,6 +407,29 @@ mod cuda {
         })
     }
 
+    /// The pool's high watermark of memory in use (`USED_MEM_HIGH`), then
+    /// reset — the driver only lets it be set to zero — so the next call
+    /// reads the peak since this one.
+    pub(super) fn take_peak_use(dev: &candle_core::CudaDevice) -> Result<Option<u64>, DriverError> {
+        let Some(pool) = current_pool(dev)? else {
+            return Ok(None);
+        };
+        let peak = attribute(
+            pool,
+            sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH,
+        )?;
+        let mut zero: u64 = 0;
+        // SAFETY: the high watermark is a `cuuint64_t`.
+        unsafe {
+            result::mem_pool::set_attribute(
+                pool,
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH,
+                (&mut zero as *mut u64).cast::<core::ffi::c_void>(),
+            )?;
+        }
+        Ok(Some(peak))
+    }
+
     /// `Ok(false)` when the card has no pool to configure.
     pub(super) fn set_release_threshold(
         dev: &candle_core::CudaDevice,
@@ -429,6 +465,12 @@ mod cuda {
         };
         dev.cuda_stream().synchronize()?;
         let before = read(pool)?;
+        // The ring a split's prompt copies land in (#138 (1d)) is this pool's
+        // memory in use while it exists; given back first, the trim below
+        // releases it with the rest. Failing leaves it where it was.
+        if let Err(e) = dev.trim_copies() {
+            tracing::debug!(error = %e, "card copy ring: could not give it back");
+        }
         // SAFETY: a valid pool; only memory no live buffer holds is released.
         unsafe { result::mem_pool::trim_to(pool, 0)? };
         Ok(Some((before, read(pool)?)))

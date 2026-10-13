@@ -83,6 +83,18 @@ pub enum QStorage {
 }
 
 impl QStorage {
+    /// SwarmLLM patch: [`Self::from_data`], except that a card's copy runs on
+    /// its copy stream (`CudaDevice::clone_htod_beside`) — a card/processor
+    /// split's prompt sends a processor-held weight this way so the copy does
+    /// not wait for the work queued on the card. Any other device is
+    /// `from_data`'s.
+    pub fn from_data_beside(data: Cow<'_, [u8]>, device: &Device, dtype: GgmlDType) -> Result<Self> {
+        match device {
+            Device::Cuda(d) => cuda::load_quantized_beside(d, &data, dtype),
+            _ => Self::from_data(data, device, dtype),
+        }
+    }
+
     pub fn from_data(data: Cow<'_, [u8]>, device: &Device, dtype: GgmlDType) -> Result<Self> {
         match device {
             Device::Cpu => Ok(Self::Cpu(dtype.from_data(data))),

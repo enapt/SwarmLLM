@@ -202,7 +202,17 @@ pub(crate) fn dump_kernel_launches(seq_len: usize, index_pos: usize, num_layers:
 /// Prints the breakdown and zeroes the counters. `total_ms` is the measured
 /// wall time of the whole forward, so the report can show what the stages do
 /// NOT account for — the gap is as informative as the stages themselves.
-pub(crate) fn dump_and_reset(tag: &str, total_ms: f64) {
+///
+/// `card` (the forward's card, `None` on the processor) adds what the card's
+/// memory pool holds. The pool keeps what it frees while serving
+/// (`cuda_pool::keep_freed_memory`), so `reserved` rising between two forwards
+/// is memory the later one needed and the earlier did not — the reading that
+/// tells a split's prompt copies held in check from ones outrunning their
+/// frees (#138 (1d)), and the one gotcha #834 says to judge a card change by.
+/// `peak` is the most the pool had in use since the previous report: the
+/// weights plus this forward's working set at its largest — what sizes a
+/// prompt chunk against the card.
+pub(crate) fn dump_and_reset(tag: &str, total_ms: f64, card: Option<&candle_core::Device>) {
     let vals: Vec<u64> = ACC.iter().map(|a| a.swap(0, Ordering::Relaxed)).collect();
     // A nested stage is already inside another one's time.
     let summed: u64 = vals
@@ -232,4 +242,15 @@ pub(crate) fn dump_and_reset(tag: &str, total_ms: f64) {
         unattributed / 1e6,
         unattributed / total_ns * 100.0
     );
+    if let Some(card) = card {
+        if let Some(u) = crate::inference::cuda_pool::usage(card) {
+            let peak = crate::inference::cuda_pool::take_peak_use(card).unwrap_or(0);
+            eprintln!(
+                "  card pool: {} MB reserved, {} MB in use, peak {} MB",
+                u.reserved >> 20,
+                u.used >> 20,
+                peak >> 20
+            );
+        }
+    }
 }

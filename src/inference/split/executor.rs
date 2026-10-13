@@ -1360,6 +1360,7 @@ impl SplitModel {
                 crate::inference::prof::dump_and_reset(
                     &format!("seq_len={seq_len} index_pos={index_pos} layers={num_layers}"),
                     start.elapsed().as_secs_f64() * 1000.0,
+                    self.card(),
                 );
             }
             crate::inference::prof::dump_kernel_launches(seq_len, index_pos, num_layers);
@@ -2137,6 +2138,7 @@ impl SplitModel {
                 crate::inference::prof::dump_and_reset(
                     &format!("BATCH batch_size={batch_size} seq_len={seq_len} index_pos={first_index_pos}"),
                     start.elapsed().as_secs_f64() * 1000.0,
+                    self.card(),
                 );
             }
         }

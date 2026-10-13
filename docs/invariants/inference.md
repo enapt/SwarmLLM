@@ -2280,7 +2280,7 @@ measured level, 3.35 / 3.77 s against 3.65 / 3.37 s). llama.cpp waits the same
 way (`ggml_backend_sched_compute_splits`: a host weight takes the synchronous
 `ggml_backend_tensor_copy` after `ggml_backend_event_synchronize`, no copy
 stream, 4b1a27f) from pinned memory: ~0.75 s of copies + ~0.5 s of products is
-its 1.28 s. What is left is FUTURE_WORK #138 (1d). ⚠ The cache history crosses up for every chunk: ~8 KB a position a
+its 1.28 s. The copies now run beside the products — next section. ⚠ The cache history crosses up for every chunk: ~8 KB a position a
 layer for the 14B at f32, ~2 GB a chunk at 8K tokens of 28 layers, about a
 third of the weights it copies — llama.cpp's pass 5 pays the same, and the
 processor's attention over that history costs more.
@@ -2297,6 +2297,92 @@ processor standing in for the card: two 40-token chunks and a decoded token
 through the executor bit-identical to the plain path; the layer run directly,
 its output and its kept cache, because the executor's fallback would hide an
 error; the gate at 31 tokens and with an adapter).
+
+### A split's prompt copies run beside the card's work, through a ring (2026-10-13, #138 (1d))
+
+**What it replaced.** After (1c) a processor-held layer's weights still crossed
+to the card on the card's ONE stream, and a copy from pageable memory on a
+stream first waits for every kernel queued there — so a 14B split's 512-token
+forward copied (0.78-1.29 s) and multiplied (~0.65 s) in turn, never at once.
+llama.cpp does the same (a synchronous `ggml_backend_tensor_copy` after
+`ggml_backend_event_synchronize`, 4b1a27f). A CUDA micro-bench
+(`~/swarmllm-138c/overlap.cu`) showed this card overlaps a pageable copy on a
+second stream with a kernel perfectly (200 MB beside a 23 ms kernel: 32.1 ms,
+the copy alone), and pinned memory is no faster (6.66 vs 6.54 GB/s).
+
+**What replaced it.** `CudaDevice::clone_htod_beside` (vendored candle) copies
+on the device's copy stream into a 256 MB copy ring (`CopyRing`, the device
+pool's memory, made at the first copy, given back at the idle trim); the
+device's stream waits for that copy, takes a buffer from its own pool, copies
+the region into it card-to-card and records that it has read it; the copy
+stream waits for that read before it writes the region again
+(`CopyRing::place`). The buffer candle gets is the device stream's like any
+other. `layers::sent_to_card` and `QMatMul::weight_on` are the only callers; a
+copy over 128 MB, one made while a decode step is captured, and the legacy
+stream go the old way. A/B `SWARMLLM_PROMPT_CARD_COPY_STREAM=0`.
+
+**Why a ring and not a buffer the copy stream allocates** (gotcha #836). Two
+designs failed first, both by the pool's RESERVED memory:
+
+- From the device's pool, the copy freed on the device's stream after its
+  product: the stream's own next allocations reuse its frees at once, in
+  stream order, so the copy stream never found one — 7,776 MB reserved for a
+  4,566 MB peak (the one-stream path reserved 4,640) and a 14B forward at
+  3.45 s instead of 1.3 once the driver backed the rest with host memory.
+- From a pool of the copy stream's own (`cuMemPoolCreate`), the copy stream
+  waiting two layers back (PyTorch FSDP's `limit_all_gathers` rate limiter):
+  48 copies of 16 MB took 768 MB, every one fresh.
+
+`~/swarmllm-138c/reuse.cu` (48 × 16 MB, a ~4 ms kernel each, two runs) names
+the rule: this driver reuses a free made on ANOTHER stream only once a
+synchronize of that stream has observed it — 768 MB whether the allocating
+stream waited for the event after the free (`REUSE_FOLLOW_EVENT_DEPENDENCIES`,
+the documented route), the host waited for it, or the pool was allowed to
+insert waits; 32 MB with a stream synchronize (no overlap), with the free made
+on the allocating stream (PyTorch's `cudaMallocAsync` backend frees there), or
+with the ring — the copies still under the kernels (252-299 ms against 227-252
+overlapped and 421-456 serial). An NVIDIA forum thread (283061) reports the
+same growth, unanswered. candle frees a buffer on the stream its tensor drops
+on, so only the ring keeps the copy stream's memory its own.
+
+**Measured** (one binary, `SWARMLLM_PROMPT_CARD_COPY_STREAM=0` = before, ABBA,
+Windows up 10.8 h, live node stopped, safety kit, `~/swarmllm-138c/ab1e.sh`, no fallback, the DIAG line saying `beside=` as each arm
+should):
+
+| | before | the ring |
+|---|---|---|
+| Qwen2.5-14B Q4_K_M 20/28, 888 tokens, 512 a forward | 3.27 / 3.56 s | **3.15 / 3.07 s** |
+| — its second (warm) forward | 1.50 / 1.55 s | 1.49 / 1.43 s |
+| — the card pool's reserve (peak in use) | 4,640-4,768 MB (4,571) | 5,024 MB (4,827) |
+| the same 14B, 128 a forward (7 forwards) | 8.71 / 8.71 s | **7.91 / 7.90 s** |
+| Qwen3-30B-A3B Q2_K 26/22, 867 tokens, 512 a forward | 5.45 / 5.73 s | 5.69 / 5.53 s |
+| — the card pool's reserve | 6,368-6,400 MB | 6,624-6,688 MB |
+
+3-9% for the dense 14B (most at 128 a forward, where seven forwards each copy
+every processor layer), level for the 30B (most of what it copies is its
+experts, stacked by `QTensor::stack_some` for (1), which still go the waiting
+way). The ring's 256 MB is the
+only memory it adds. The warm forward's profile shows why it is not the
+~0.8 s the copies alone would allow: copies 833 ms + unattributed 528 against
+1,215 + 248 — the products now wait elsewhere. One reading measured and not
+confirmed: this card has ONE async copy engine (`asyncEngineCount`), so the
+ring's card-to-card move queues behind the next upload; `reuse.cu` variant 7
+(the move as a kernel, off the copy engine) gave 296-298 ms against variant 6's
+282-307 — no clear gain, so the memcpy stays.
+
+**What it showed next.** Each forward re-copies every processor-held weight
+(4.6 GB for the 14B), so FEWER forwards win more than overlap: the 14B's prompt
+×3 (2,664 tokens) took 10.05 s at 512 a forward, 6.93 s at 1,024 and 5.81 s
+whole, the pool's peak 4,989 / 5,097 / 5,461 MB — ~0.28-0.36 MB a token of
+working set. That is FUTURE_WORK #138's next item.
+
+**Verified.** `a_splits_prompt_copies_arrive_intact_and_hold_a_bounded_share_of_the_card`
+(card only): 48 copies of 16 MB, three times round the ring, each multiplied
+eight times so the copies run ahead — every one arrives as its own layer's,
+and the card's pool grows 320 MB (the ring + 4 weights), 3 of 3; with the
+ring's wait removed it fails 3 of 3 (layer 4 or 5 arrives as another's).
+Replies: each pair gave the same 16 tokens at the same chunk size, all four
+pairs (the ring changes when a weight arrives, never what it is).
 
 ### Llama 4 routes like llama.cpp hardcodes it, and normalises Q/K after RoPE (2026-09-25)
 

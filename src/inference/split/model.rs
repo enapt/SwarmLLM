@@ -177,6 +177,14 @@ impl SplitModel {
         &self.device
     }
 
+    /// The card this model uses, if any: its primary device, or the card half
+    /// of a card/processor split.
+    pub(crate) fn card(&self) -> Option<&Device> {
+        std::iter::once(&self.device)
+            .chain(&self.layer_devices)
+            .find(|d| d.is_cuda())
+    }
+
     /// The order this model keeps query and key rows in, for an adapter's
     /// `B` matrices to be put into — see `lora::QkRowOrder`. Read off the
     /// first dense layer; a model with none has no layer an adapter reaches.

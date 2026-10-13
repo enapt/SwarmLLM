@@ -373,7 +373,7 @@ impl QMatMul {
             };
             copies.push(Self::wrap(inner));
         }
-        Ok((copies, xs.to_device(card)?))
+        Ok((copies, sent_to_card(xs, card)?))
     }
 
     /// `m` copied to `card`, keeping the f32 accumulator this projection was
@@ -386,14 +386,19 @@ impl QMatMul {
         use candle_core::quantized::{QMatMul as Q, QStorage};
         let mut copy = match m {
             Q::QTensor(q) => {
-                let storage = QStorage::from_data(q.data()?, card, q.dtype())?;
+                note_how_prompt_copies_run(card);
+                let storage = if prompt_copies_run_beside() {
+                    QStorage::from_data_beside(q.data()?, card, q.dtype())?
+                } else {
+                    QStorage::from_data(q.data()?, card, q.dtype())?
+                };
                 Q::QTensor(std::sync::Arc::new(QTensor::new(
                     storage,
                     q.shape().clone(),
                 )?))
             }
-            Q::Tensor(t) => Q::Tensor(t.to_device(card)?),
-            Q::TensorF16(t) => Q::TensorF16(t.to_device(card)?),
+            Q::Tensor(t) => Q::Tensor(sent_to_card(t, card)?),
+            Q::TensorF16(t) => Q::TensorF16(sent_to_card(t, card)?),
         };
         if self.card_accumulates_f32 {
             copy.accumulate_in_f32();
@@ -1041,6 +1046,111 @@ fn whole_layers_read_prompts_on_the_card() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_PROMPT_CARD_LAYERS").as_deref() != Ok("0"))
 }
 
+/// `SWARMLLM_PROMPT_CARD_COPY_STREAM=0` sends a processor layer's prompt copies
+/// on the card's own stream, each waiting for the work queued there — the A/B
+/// arm of [`sent_to_card`] (#138 (1d)). Read once.
+fn prompt_copies_run_beside() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_PROMPT_CARD_COPY_STREAM").as_deref() != Ok("0"))
+}
+
+/// `t` on `card` for a processor-held layer's prompt chunk, copied on the
+/// card's copy stream (`Tensor::to_device_beside`) so the copy runs while the
+/// card works through what is already queued — a copy from pageable memory on
+/// the card's own stream first waits for all of it (#138 (1d)). Every copy the
+/// prompt-card path makes goes through here or [`QMatMul::weight_on`].
+pub(crate) fn sent_to_card(t: &Tensor, card: &Device) -> CandleResult<Tensor> {
+    note_how_prompt_copies_run(card);
+    if prompt_copies_run_beside() {
+        t.to_device_beside(card)
+    } else {
+        t.to_device(card)
+    }
+}
+
+#[cfg(all(test, feature = "candle-cuda"))]
+mod copies_beside_tests {
+    use super::*;
+
+    /// #138 (1d), gotcha #836: 48 layers each copying a 16 MB weight beside the
+    /// card's stream — three times round the copy ring — and multiplying by it
+    /// for far longer than the copy takes, so the copies run ahead of the
+    /// products as a split's prompt does. Every copy must arrive intact (a ring
+    /// region written again before the card's stream read it would hand a layer
+    /// a later layer's weight), and the card's pool must grow by the ring and a
+    /// few weights, never a weight a layer: copies the copy stream allocated
+    /// itself took fresh memory every time (768 MB for these 48).
+    #[test]
+    fn a_splits_prompt_copies_arrive_intact_and_hold_a_bounded_share_of_the_card() {
+        let Ok(card) = Device::new_cuda(0) else {
+            return;
+        };
+        let Device::Cuda(dev) = &card else {
+            unreachable!()
+        };
+        if !dev.copies_beside() {
+            return;
+        }
+        crate::inference::cuda_pool::keep_freed_memory(&card);
+        const N: usize = 2048;
+        const LAYERS: usize = 48;
+        const WEIGHT: u64 = (N * N * 4) as u64;
+        let x = Tensor::ones((N, N), DType::F32, &card).unwrap();
+        card.synchronize().unwrap();
+        let before = crate::inference::cuda_pool::usage(&card).unwrap().reserved;
+        let mut arrived = Vec::with_capacity(LAYERS);
+        for layer in 0..LAYERS {
+            let weight = Tensor::full(layer as f32, (N, N), &Device::Cpu).unwrap();
+            let w = sent_to_card(&weight, &card).unwrap();
+            let mut y = x.clone();
+            for _ in 0..8 {
+                y = y.matmul(&w).unwrap();
+            }
+            let flat = w.flatten_all().unwrap();
+            arrived.push(Tensor::stack(&[flat.min(0).unwrap(), flat.max(0).unwrap()], 0).unwrap());
+        }
+        card.synchronize().unwrap();
+        let grew = crate::inference::cuda_pool::usage(&card).unwrap().reserved - before;
+        let ring = dev.copy_ring_bytes();
+        eprintln!(
+            "card pool grew {} MB for {LAYERS} copies of {} MB (copy ring {} MB)",
+            grew >> 20,
+            WEIGHT >> 20,
+            ring >> 20
+        );
+        for (layer, range) in arrived.iter().enumerate() {
+            assert_eq!(
+                range.to_vec1::<f32>().unwrap(),
+                vec![layer as f32; 2],
+                "layer {layer}'s weight arrived as another layer's (min, max)"
+            );
+        }
+        assert!(ring > 0, "the copies did not go through the copy ring");
+        assert!(
+            grew <= ring + 6 * WEIGHT,
+            "{LAYERS} copies of 16 MB grew the card's pool {} MB (bound: the {} MB ring + 6 weights)",
+            grew >> 20,
+            ring >> 20
+        );
+    }
+}
+
+/// Logged once per process: whether a split's prompt copies run beside the
+/// card's work (#138 (1d)) — `beside = false` when switched off, on the legacy
+/// stream, or when the card could not make a copy stream.
+fn note_how_prompt_copies_run(card: &Device) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    let Device::Cuda(dev) = card else {
+        return;
+    };
+    ONCE.call_once(|| {
+        tracing::info!(
+            beside = prompt_copies_run_beside() && dev.copies_beside(),
+            "DIAG: how a split's prompt copies reach the card"
+        )
+    });
+}
+
 /// A processor-held dense layer readied to read ONE prompt chunk wholly on the
 /// card (#138 (1c)): its norms, biases and the RoPE rows the chunk reads are
 /// copied over; its projections stay where they are and still copy their
@@ -1092,14 +1202,15 @@ impl LayerOnTheCard {
         index_pos: usize,
         seq_len: usize,
     ) -> CandleResult<Self> {
-        let norm = |n: &RmsNorm| n.to_device(card);
+        let norm = |n: &RmsNorm| n.sent_to_card(card);
         let some_norm = |n: &Option<RmsNorm>| n.as_ref().map(norm).transpose();
-        let some = |t: &Option<Tensor>| t.as_ref().map(|t| t.to_device(card)).transpose();
+        let some = |t: &Option<Tensor>| t.as_ref().map(|t| sent_to_card(t, card)).transpose();
         // `apply_rotary_emb` reads rows `index_pos..index_pos + seq_len`.
         let rows = |t: &Tensor| {
-            t.narrow(0, 0, index_pos + seq_len)?
-                .force_contiguous()?
-                .to_device(card)
+            sent_to_card(
+                &t.narrow(0, 0, index_pos + seq_len)?.force_contiguous()?,
+                card,
+            )
         };
         let ffn = match &layer.ffn {
             FfnVariant::Dense(mlp) => FfnVariant::Dense(mlp.clone()),
@@ -1501,11 +1612,11 @@ impl MoeFfn {
     /// the experts and shared expert still copy their weights for the call.
     fn routed_on(&self, card: &Device) -> CandleResult<Self> {
         Ok(Self {
-            gate: self.gate.to_device(card)?,
+            gate: sent_to_card(&self.gate, card)?,
             shared_gate_inp: self
                 .shared_gate_inp
                 .as_ref()
-                .map(|w| w.to_device(card))
+                .map(|w| sent_to_card(w, card))
                 .transpose()?,
             ..self.clone()
         })
@@ -4153,8 +4264,8 @@ impl LayerWeights {
                     kv_reserve,
                 )?;
                 (
-                    k.force_contiguous()?.to_device(x.device())?,
-                    v.force_contiguous()?.to_device(x.device())?,
+                    sent_to_card(&k.force_contiguous()?, x.device())?,
+                    sent_to_card(&v.force_contiguous()?, x.device())?,
                 )
             }
         };

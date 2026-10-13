@@ -1361,6 +1361,27 @@ pub fn load_quantized<T: super::GgmlType + Send + Sync + 'static>(
     }))
 }
 
+/// SwarmLLM patch: [`load_quantized`] from a weight's bytes, copied on the
+/// device's copy stream (`CudaDevice::clone_htod_padded_beside`) and padded as
+/// [`load_quantized`] pads.
+pub fn load_quantized_beside(
+    device: &CudaDevice,
+    data: &[u8],
+    dtype: GgmlDType,
+) -> Result<super::QStorage> {
+    let padding = MATRIX_ROW_PADDING * dtype.type_size() / dtype.block_size();
+    let inner = device.clone_htod_padded_beside(data, padding)?;
+    Ok(QStorage::Cuda(QCudaStorage {
+        data: PaddedCudaSlice {
+            inner,
+            len: data.len(),
+        },
+        device: device.clone(),
+        dtype,
+        accumulate_f32: false,
+    }))
+}
+
 /// SwarmLLM patch: a quantized stack of `entries` slots of `entry_bytes` each
 /// on the card, holding only the slots `parts` names — `(slot, bytes)`, each
 /// copied to `slot * entry_bytes`. Every other slot stays zero and must never be

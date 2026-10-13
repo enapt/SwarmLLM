@@ -2374,6 +2374,33 @@ impl Tensor {
         }
     }
 
+    /// SwarmLLM patch: [`Self::to_device`], except that a host tensor going to
+    /// a card is copied on the card's copy stream
+    /// (`CudaDevice::clone_htod_beside`), so the copy does not wait for the
+    /// work queued on the card. Any other move is `to_device`'s.
+    #[track_caller]
+    pub fn to_device_beside(&self, device: &Device) -> Result<Tensor> {
+        let uploaded = match (&*self.storage(), device) {
+            (Storage::Cpu(storage), Device::Cuda(cuda)) => {
+                Some(Storage::Cuda(cuda.storage_from_cpu_storage_beside(storage)?))
+            }
+            _ => None,
+        };
+        let Some(storage) = uploaded else {
+            return self.to_device(device);
+        };
+        let tensor_ = Tensor_ {
+            id: TensorId::new(),
+            storage: Arc::new(RwLock::new(storage)),
+            layout: self.layout.clone(),
+            op: BackpropOp::new1(self, Op::ToDevice),
+            is_variable: false,
+            dtype: self.dtype,
+            device: device.clone(),
+        };
+        Ok(Tensor(Arc::new(tensor_)))
+    }
+
     /// If the target device is the same as the tensor device, only a shallow copy is performed.
     // SwarmLLM patch: see `cuda_backend::device::count_htod_copy`.
     #[track_caller]

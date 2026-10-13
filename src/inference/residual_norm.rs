@@ -68,11 +68,12 @@ impl RmsNorm {
         Ok(Self { weight, eps })
     }
 
-    /// This norm with its weight copied to `device` — a processor-held layer
-    /// run on the card for one prompt chunk (`layers::LayerOnTheCard`).
-    pub(crate) fn to_device(&self, device: &Device) -> Result<Self> {
+    /// This norm with its weight sent to `card` as a processor-held layer's
+    /// prompt copies are (`layers::sent_to_card`) — that layer run on the card
+    /// for one prompt chunk (`layers::LayerOnTheCard`).
+    pub(crate) fn sent_to_card(&self, card: &Device) -> Result<Self> {
         Ok(Self {
-            weight: self.weight.to_device(device)?,
+            weight: crate::inference::layers::sent_to_card(&self.weight, card)?,
             eps: self.eps,
         })
     }

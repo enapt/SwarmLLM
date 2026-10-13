@@ -31,6 +31,14 @@ impl CudaDevice {
     pub fn id(&self) -> DeviceId {
         DeviceId(0)
     }
+    /// SwarmLLM patch: see the CUDA backend's.
+    pub fn copies_beside(&self) -> bool {
+        false
+    }
+    /// SwarmLLM patch: see the CUDA backend's.
+    pub fn storage_from_cpu_storage_beside(&self, _: &CpuStorage) -> Result<CudaStorage> {
+        Err(Error::NotCompiledWithCudaSupport)
+    }
 }
 
 impl crate::backend::BackendStorage for CudaStorage {

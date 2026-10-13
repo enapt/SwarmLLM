@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate; #257 closed on 2026-10-13 (under WSL2 a card's saved prompts are kept in host RAM) and #258 opened from its measurement; #138 (1), (1b) and (1c) shipped on 2026-10-13 (a card/processor split runs a prompt's processor-held experts, then every processor-held projection, then each processor-held layer whole, on the card); #259 and #260 opened and closed the same day from a tester's report (a kept model bigger than the card was refused; a model sent to the processor while another program held the card never moved back), #261 opened from it.
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate; #257 closed on 2026-10-13 (under WSL2 a card's saved prompts are kept in host RAM) and #258 opened from its measurement; #138 (1), (1b), (1c) and (1d) shipped on 2026-10-13 (a card/processor split runs a prompt's processor-held experts, then every processor-held projection, then each processor-held layer whole, on the card, copying the next weights while the card computes); #259 and #260 opened and closed the same day from a tester's report (a kept model bigger than the card was refused; a model sent to the processor while another program held the card never moved back), #261 opened from it.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -89,7 +89,8 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     accumulation shipped 2026-10-09; its smaller items are P3; #138 (1) on 2026-10-13: a split's
     prompt experts run on the card, 1.4x; (1b) the same day: every processor-held projection,
     a dense 14B split's prompt 5.3-5.7x; (1c) the same day: each processor layer whole on the card,
-    1.6x more — the weight copies themselves are next). *(#137 narrowed to P3 on
+    1.6x more; (1d) the same day: the weight copies beside the products, 3-9% — fewer, bigger
+    prompt chunks are next). *(#137 narrowed to P3 on
     2026-10-11: decode ran outside its thread pool on every default node — fixed: a 14B split
     1.19x, now level with llama.cpp; a 3B processor-only 1.14-1.39x; ~12% behind it remains.)* (`docs/plans/faster_than_local.md`).
 12. **#3**, **#180** — the routing cost model charges a constant where the reply length
@@ -1026,7 +1027,7 @@ between 1755 MHz bursts), and back-to-back runs on this laptop heat it enough to
 step 133 → 185 ms within 40 tokens (gotcha #825). Neither thread count nor placement is the
 lever: calibration already picks the width, and `SWARMLLM_DECODE_THREADS=8` was slower.
 
-#### #138 — A model that does not fit the card: MoE decode level with llama.cpp since 2026-10-11, a split's prompt read on the card since 2026-10-13, still ~2.2x behind llama.cpp's
+#### #138 — A model that does not fit the card: MoE decode level with llama.cpp since 2026-10-11, a split's prompt read on the card since 2026-10-13, a 512-token forward 1.1-1.3x llama.cpp's
 `P2` · perf-local · **PARTIAL** — 2026-09-27 · history: archive row #138; plan: `docs/plans/faster_than_local.md` § 3.2
 
 **Measured 2026-10-11** on the RTX 3070 Laptop 8 GB + Ryzen 7 5800H, Qwen3-30B-A3B-Instruct-2507
@@ -1126,34 +1127,45 @@ prompt 8.18 / 8.24 → **5.21 / 5.17 s** (1.6x; the box read (1b) slower than it
 processor-held layers read a prompt whole on the card"). The 14B's 512-token forward is now
 2.0-2.8 s (the box varies) against llama.cpp's ~1.28.
 
-**Left, in order of what they cost us:** (1d) **the weight copies, in series with the
-products.** Profiled synchronised (`~/swarmllm-138c/sync.sh`, 2026-10-13): the 14B's 28
-processor layers' weights (4.6 GB) take 1.03-1.29 s of a 2.0-2.3 s first forward (~4 GB/s, the
-card's pool growing) and 0.78-0.80 s of the second (~5.8 GB/s); the products of all 48 layers
-~0.62-0.66 s, attention 64 ms. Each copy is from pageable memory on the device's ONE stream, so
-the driver waits for every queued kernel before staging it: copy and product never overlap.
-llama.cpp does not overlap them either — a host weight takes the synchronous
-`ggml_backend_tensor_copy` after `ggml_backend_event_synchronize`, no copy stream, pinned memory
-(`ggml-backend.cpp` 1786-1792, `ggml-cuda.cu` 779-784, `llama-model.cpp` 1075-1105 at 4b1a27f) —
-its ~1.28 s is ~0.75 s of copies plus ~0.5 of products. A copy stream (the copy on its own
-stream, the compute stream waiting only for that copy's event, the weight freed on the compute
-stream after its product) would let each projection's copy run under the previous product:
-a warm forward bound by its ~0.8 s of copies instead of copies plus products, ~1.45 s —
-below llama.cpp's. ⚠ The vendored candle runs one stream per
-device with event tracking OFF (`arch-inference.md`), so every cross-stream order is explicit.
+**Done 2026-10-13, (1d) — a processor-held weight crosses to the card WHILE the card computes:**
+`CudaDevice::clone_htod_beside` (vendored candle) copies on a second stream into a 256 MB
+ring; the device's stream waits for that copy, moves it card-to-card into a buffer of its own
+pool and marks the region read before the ring reuses it. Reached through `layers::sent_to_card`
+and `QMatMul::weight_on` only. Two simpler designs grew the card's pool without bound — this
+driver reuses another stream's free only after a SYNCHRONIZE (gotcha #836: 768 MB for 48 × 16
+MB). One binary (`SWARMLLM_PROMPT_CARD_COPY_STREAM=0` = before), ABBA, Windows up 10.8 h,
+`~/swarmllm-138c/ab1e.sh`: the 14B's 888-token prompt 3.27 / 3.56 → **3.15 / 3.07 s** at 512 a
+forward and 8.71 / 8.71 → **7.91 / 7.90 s** at 128; the 30B level (5.45 / 5.73 → 5.69 / 5.53 s,
+its experts still copy the waiting way); +256 MB of card, replies identical in every pair
+(`docs/invariants/inference.md` § "A split's prompt copies run beside the card's work").
+
+**Left, in order of what they cost us:** (1e) **fewer forwards — the chunk size.** Each forward
+re-copies every processor-held weight (4.6 GB for the 14B), so a 2,664-token prompt (the
+888-token one ×3, copies beside) took 10.05 s at 512 a forward, 6.93 s at 1,024, 5.81 s whole;
+the card pool's peak 4,989 / 5,097 / 5,461 MB (~0.28-0.36 MB a token for the 14B's working set,
+flash attention keeping it ~linear). `prefill_pacer::prompt_chunk_ceiling` takes 512 for any
+split read on the card; it could take the live card room (free − the safety margin − this
+request's KV still to come) over a per-token working set of ~4 × (6H + 3(q + 2kv) + 3I) bytes,
+floor 512 (callers: `executor.rs` `forward_prompt_in_chunks`, `model_worker.rs` `chunk_size_for`;
+`test-split` has its own chunk loop, so a rig needs the node path). ⚠ The 1,024-a-forward
+reply differed from 512's and the whole read's at token 16 — score against llama.cpp before
+shipping a bigger chunk. (1f) the warm forward is not yet bound by its copies: profiled, copies
+833 ms + unattributed 528 (before: 1,215 + 248). This card has ONE async copy engine, so the
+ring's card-to-card move queues behind the next upload — measured not to matter alone
+(`~/swarmllm-138c/reuse.cu` variant 7, the move as a kernel: 296-298 ms against 282-307).
 Then the experts: the MoE stage costs ~57-62 ms a layer whatever the tokens (1.25 s for 22 layers at 355
-tokens, 1.49 s at 512), ~34 ms of it ~226 MB at this card's LINK speed. Measured 2026-10-13
+tokens, 1.49 s at 512), ~34 ms of it ~226 MB at this card's LINK speed, and `QTensor::stack_some`
+still copies on the device's stream, waiting for its queued work. Measured 2026-10-13
 (`~/swarmllm-138b/bench.sh`, a CUDA micro-bench, live node stopped, min of 10): the link tops
 out at 6.7 GB/s even from pinned memory, and one copy per expert from pageable memory already
 moves 6.5 (0.58 MB pieces; 4.7 at 0.15 MB); gathering into a pinned staging buffer first is
 SLOWER, 3.4. So llama.cpp's pinned RAM weights (`llama-model.cpp:1090-1104`) buy nothing
-here — what could: copying the next layer's weights WHILE this one computes (≥ 32 tokens at
-top-8 of 128 touch 87-100% of the experts anyway) and the tensor-core kernel's own speed. (This entry said 2026-10-13
-the copy ran at ~3.5 GB/s from pageable memory and that pinned staging was the likely fix;
-the micro-bench says otherwise.) (1e) one layer's copies (~200 MB here) are a transient
-admission does not charge — a full card falls back to the processor (WARN
-once); under WSL2 a pool grown after an idle trim may be slow at high uptime (#257), measured
-at 3.1 h only. (2) **MoE layers in decode-step capture**: a stacked layer has
+here — what could: the experts' copies through the ring too (≥ 32 tokens at top-8 of 128
+touch 87-100% of the experts anyway) and the tensor-core kernel's own speed. (1g) one
+layer's copies (~200 MB here) and the 256 MB ring are a transient admission does not charge —
+a full card falls back to the processor (WARN once); under WSL2 a pool grown after an idle trim
+may be slow at high uptime (#257), measured at 3.1 h only. (2) **MoE layers in decode-step
+capture**: a stacked layer has
 no host copy, so a MoE model whole on a card could be captured (`executor.rs` still excludes
 MoE as unchecked; a 26/22 split stays uncaptured regardless). (3) **per-tensor placement**
 (experts in RAM, attention on the card) beside `split::hybrid::LayerPlacement` — worth 1.37x

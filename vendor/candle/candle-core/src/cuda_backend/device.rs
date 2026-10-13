@@ -215,6 +215,99 @@ pub struct CudaDevice {
     seed_value: Arc<RwLock<u64>>,
     /// SwarmLLM patch: see [`CudaDevice::layout_params`].
     layout_params: Arc<Mutex<HashMap<Vec<usize>, Arc<cudarc::driver::CudaSlice<usize>>>>>,
+    /// SwarmLLM patch: see [`CudaDevice::clone_htod_beside`]. Made on first
+    /// use; `None` when it could not be.
+    copy_side: Arc<std::sync::OnceLock<Option<CopySide>>>,
+}
+
+/// SwarmLLM patch: the stream copies beside the device's run on, and the ring
+/// they land in — see [`CudaDevice::clone_htod_beside`].
+struct CopySide {
+    stream: Arc<cudarc::driver::CudaStream>,
+    ring: Mutex<CopyRing>,
+}
+
+/// SwarmLLM patch: card memory that copies beside the device's stream land in,
+/// each region reused once the device's stream has read what was copied there
+/// — see [`CudaDevice::clone_htod_beside`].
+#[derive(Default)]
+struct CopyRing {
+    /// [`COPY_RING_BYTES`] of the device's pool, made at the first copy (and
+    /// the first after [`CudaDevice::trim_copies`]).
+    buf: Option<cudarc::driver::CudaSlice<u8>>,
+    /// Where the next region starts.
+    head: usize,
+    /// Regions copied into whose read the copy stream has not yet waited for,
+    /// oldest first: `(start, end, read)`, `read` recorded on the device's
+    /// stream once it has read the region.
+    in_flight: std::collections::VecDeque<(usize, usize, cudarc::driver::CudaEvent)>,
+}
+
+/// SwarmLLM patch: the copy ring's size — about a layer and a half of a 14B
+/// model's processor-held weights (its largest, ~58 MB). A copy of more than
+/// half of it goes on the device's own stream instead.
+const COPY_RING_BYTES: usize = 256 << 20;
+/// SwarmLLM patch: a copy ring region starts on this boundary.
+const COPY_RING_ALIGN: usize = 256;
+
+impl CopyRing {
+    /// Where a copy of `bytes` goes, `(start, end)`, and the read the copy
+    /// stream must wait for before writing there: the newest of the regions it
+    /// overwrites (the device's stream reads them in order, so the newest read
+    /// done means all are). Regions are laid out in the order they are taken,
+    /// wrapping to the start when the rest of the ring is too short, so the
+    /// regions a copy overwrites are always the oldest in flight.
+    fn place(&mut self, bytes: usize) -> (usize, usize, Option<cudarc::driver::CudaEvent>) {
+        let need = bytes.div_ceil(COPY_RING_ALIGN) * COPY_RING_ALIGN;
+        let mut start = self.head;
+        let mut wait = None;
+        if start + need > COPY_RING_BYTES {
+            // The tail left behind holds the oldest regions; they go first.
+            while self.in_flight.front().is_some_and(|r| r.0 >= start) {
+                wait = self.in_flight.pop_front().map(|r| r.2);
+            }
+            start = 0;
+        }
+        let end = start + need;
+        while self
+            .in_flight
+            .front()
+            .is_some_and(|r| r.0 < end && start < r.1)
+        {
+            wait = self.in_flight.pop_front().map(|r| r.2);
+        }
+        self.head = end;
+        (start, end, wait)
+    }
+}
+
+/// SwarmLLM patch: `src` into the front of `buf` on `stream`, the
+/// `zeroed_tail` elements after it zeroed — [`CudaDevice::clone_htod_beside`].
+fn fill<T: cudarc::driver::DeviceRepr>(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    buf: &mut cudarc::driver::CudaSlice<T>,
+    src: &[T],
+    zeroed_tail: usize,
+) -> Result<()> {
+    use cudarc::driver::{result, DevicePtr};
+    if zeroed_tail > 0 {
+        let at = std::mem::size_of_val(src);
+        let (ptr, _record) = buf.device_ptr(stream);
+        // SAFETY: `[at, at + tail bytes)` lies inside `buf`.
+        unsafe {
+            result::memset_d8_async(
+                ptr + at as u64,
+                0,
+                zeroed_tail * std::mem::size_of::<T>(),
+                stream.cu_stream(),
+            )
+        }
+        .w()?;
+    }
+    stream
+        .memcpy_htod(src, &mut buf.slice_mut(..src.len()))
+        .w()?;
+    Ok(())
 }
 
 /// SwarmLLM patch: how many distinct layouts a device keeps — a decode step
@@ -373,6 +466,241 @@ impl CudaDevice {
     ) -> Result<cudarc::driver::CudaSlice<T>> {
         count_htod_copy(std::panic::Location::caller());
         self.stream.clone_htod(src).w()
+    }
+
+    /// SwarmLLM patch: [`Self::clone_htod`] on the device's COPY stream, so the
+    /// copy runs while the device's stream computes (SwarmLLM FUTURE_WORK #138
+    /// (1d)).
+    ///
+    /// A copy from pageable host memory on the device's own stream waits for
+    /// every kernel queued there before the driver stages it, so a card/
+    /// processor split's prompt alternated copying a processor-held weight and
+    /// multiplying by it — 0.8-1.3 s of copies beside ~0.65 s of products in a
+    /// 14B's 512-token forward, never overlapped. llama.cpp does not overlap
+    /// them either (`ggml_backend_sched_compute_splits` copies a host weight
+    /// synchronously); this does.
+    ///
+    /// ⚠ **The one exception to "one stream per device"** (see
+    /// `BackendDevice::new`), and why it needs no per-allocation events: the
+    /// copy stream touches only the copy ring ([`CopyRing`]), never a buffer
+    /// candle holds. The copy lands in a ring region; the device's stream
+    /// waits for it, takes a buffer from its own pool and copies the region
+    /// into it card-to-card (~25 ms for a 14B forward's 4.6 GB, against ~0.8 s
+    /// over the link), then records that it has read the region; the copy
+    /// stream waits for that read before it writes the region again. The
+    /// buffer handed back is the device stream's like any other, allocated and
+    /// freed there.
+    ///
+    /// **Why a ring and a copy, not a buffer the copy stream allocates.** The
+    /// pool reuses a free made on another stream only once a SYNCHRONIZE of
+    /// that stream has observed it. Measured on this card under WSL2
+    /// (SwarmLLM gotcha #836, `reuse.cu`), 48 copies of 16 MB freed on the
+    /// device's stream after their product: from the device's pool, the
+    /// device's own next allocations took every freed buffer (stream order)
+    /// and the copies took fresh memory — 7.8 GB reserved of an 8 GB card for
+    /// a 14B split's 4.6 GB peak, and a forward at 2.6x once the driver backed
+    /// the rest with host memory; from a pool of their own, 768 MB, every copy
+    /// fresh, whether the copy stream waited (on the card) for the event after
+    /// the free, the host did, or the pool was allowed to insert waits. Only a
+    /// free on the ALLOCATING stream is reused in order — PyTorch's
+    /// `cudaMallocAsync` backend frees there for this reason — and candle frees
+    /// a buffer where its tensor drops, on the device's stream. The ring makes
+    /// the copy stream's memory its own and fixed: 32 MB instead of 768 in the
+    /// same bench, the copies still under the kernels.
+    ///
+    /// The host memory may be reused as soon as this returns: a copy from
+    /// pageable memory returns once the driver has staged it, after the copy
+    /// stream's earlier work — which is also what holds the host back when the
+    /// ring is full. Falls back to the device's own stream while that stream
+    /// captures a graph, on the legacy stream, for a copy of more than half the
+    /// ring, and when the copy stream could not be made.
+    #[track_caller]
+    pub fn clone_htod_beside<T: cudarc::driver::DeviceRepr>(
+        &self,
+        src: &[T],
+    ) -> Result<cudarc::driver::CudaSlice<T>> {
+        count_htod_copy(std::panic::Location::caller());
+        self.htod_beside(src, 0)
+    }
+
+    /// SwarmLLM patch: [`Self::clone_htod_beside`] for a quantized weight's
+    /// bytes, followed by `zeroed_tail` zero bytes (its row padding).
+    #[track_caller]
+    pub fn clone_htod_padded_beside(
+        &self,
+        src: &[u8],
+        zeroed_tail: usize,
+    ) -> Result<cudarc::driver::CudaSlice<u8>> {
+        count_htod_copy(std::panic::Location::caller());
+        self.htod_beside(src, zeroed_tail)
+    }
+
+    fn htod_beside<T: cudarc::driver::DeviceRepr>(
+        &self,
+        src: &[T],
+        zeroed_tail: usize,
+    ) -> Result<cudarc::driver::CudaSlice<T>> {
+        use cudarc::driver::{result, sys, DevicePtr};
+        let len = src.len() + zeroed_tail;
+        let bytes = std::mem::size_of_val(src);
+        let capturing = !matches!(
+            self.stream.capture_status(),
+            Ok(sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE)
+        );
+        let side = match self.copy_side() {
+            Some(side) if !capturing && bytes > 0 && bytes <= COPY_RING_BYTES / 2 => side,
+            _ => {
+                // SAFETY: every element is written by `fill` before anything
+                // reads the buffer.
+                let mut buf = unsafe { self.stream.alloc::<T>(len) }.w()?;
+                fill(&self.stream, &mut buf, src, zeroed_tail)?;
+                return Ok(buf);
+            }
+        };
+        let on = &side.stream;
+        let mut ring = side.ring.lock().unwrap_or_else(|p| p.into_inner());
+        if ring.buf.is_none() {
+            // SAFETY: the ring is only ever written by copies into it.
+            ring.buf = Some(unsafe { self.stream.alloc::<u8>(COPY_RING_BYTES) }.w()?);
+            ring.head = 0;
+            ring.in_flight.clear();
+            // Allocated on the device's stream: the copy stream follows it.
+            let made = self.stream.record_event(None).w()?;
+            on.wait(&made).w()?;
+        }
+        let (start, end, overwrites) = ring.place(bytes);
+        if let Some(read) = overwrites {
+            on.wait(&read).w()?;
+        }
+        let region = {
+            let (base, _record) = ring.buf.as_ref().expect("made above").device_ptr(&self.stream);
+            base + start as u64
+        };
+        on.context().bind_to_thread().w()?;
+        // SAFETY: `[start, start + bytes)` lies inside the ring, and every read
+        // of what was copied there before is done: the copy stream waited.
+        unsafe { result::memcpy_htod_async(region, src, on.cu_stream()) }.w()?;
+        let copied = on.record_event(None).w()?;
+        self.stream.wait(&copied).w()?;
+        // SAFETY: the first `bytes` are copied from the region below and the
+        // tail zeroed, before anything the device's stream queues reads it.
+        let buf = unsafe { self.stream.alloc::<T>(len) }.w()?;
+        {
+            let (dst, _record) = buf.device_ptr(&self.stream);
+            // SAFETY: both ranges lie inside their buffers; the device's
+            // stream waited for the copy into the region.
+            unsafe { result::memcpy_dtod_async(dst, region, bytes, self.stream.cu_stream()) }
+                .w()?;
+            if zeroed_tail > 0 {
+                // SAFETY: `[bytes, bytes + tail)` lies inside `buf`.
+                unsafe {
+                    result::memset_d8_async(
+                        dst + bytes as u64,
+                        0,
+                        zeroed_tail * std::mem::size_of::<T>(),
+                        self.stream.cu_stream(),
+                    )
+                }
+                .w()?;
+            }
+        }
+        let read = self.stream.record_event(None).w()?;
+        ring.in_flight.push_back((start, end, read));
+        Ok(buf)
+    }
+
+    /// SwarmLLM patch: the device's copy stream, made on first use — `None` on
+    /// the legacy stream (which a non-blocking stream does not order with) or
+    /// when it could not be made. Its ring is made at the first copy. See
+    /// [`Self::clone_htod_beside`].
+    fn copy_side(&self) -> Option<&CopySide> {
+        self.copy_side
+            .get_or_init(|| {
+                if !own_cuda_stream_requested() {
+                    return None;
+                }
+                let stream = self.context.new_stream().ok()?;
+                Some(CopySide {
+                    stream,
+                    ring: Mutex::new(CopyRing::default()),
+                })
+            })
+            .as_ref()
+    }
+
+    /// SwarmLLM patch: does this device copy beside its stream? See
+    /// [`Self::clone_htod_beside`]. Makes the copy stream if it is not made yet.
+    pub fn copies_beside(&self) -> bool {
+        self.copy_side().is_some()
+    }
+
+    /// SwarmLLM patch: bytes the copy ring holds on the card — 0 before the
+    /// first copy beside and after [`Self::trim_copies`]. Part of the device
+    /// pool's in-use memory.
+    pub fn copy_ring_bytes(&self) -> u64 {
+        self.copy_side
+            .get()
+            .and_then(Option::as_ref)
+            .map_or(0, |side| {
+                let ring = side.ring.lock().unwrap_or_else(|p| p.into_inner());
+                if ring.buf.is_some() {
+                    COPY_RING_BYTES as u64
+                } else {
+                    0
+                }
+            })
+    }
+
+    /// SwarmLLM patch: give the copy ring back to the device's pool once both
+    /// streams have finished with it — the copy side's half of an idle card's
+    /// trim (`cuda_pool::trim`, which trims the pool after). The next copy
+    /// beside makes it again. A no-op when there is no ring.
+    pub fn trim_copies(&self) -> Result<()> {
+        let Some(side) = self.copy_side.get().and_then(Option::as_ref) else {
+            return Ok(());
+        };
+        let mut ring = side.ring.lock().unwrap_or_else(|p| p.into_inner());
+        if ring.buf.is_none() {
+            return Ok(());
+        }
+        side.stream.synchronize().w()?;
+        self.stream.synchronize().w()?;
+        ring.in_flight.clear();
+        ring.head = 0;
+        ring.buf = None;
+        Ok(())
+    }
+
+    /// SwarmLLM patch: `storage_from_cpu_storage` through
+    /// [`Self::clone_htod_beside`].
+    #[track_caller]
+    pub fn storage_from_cpu_storage_beside(&self, storage: &CpuStorage) -> Result<CudaStorage> {
+        let slice = match storage {
+            CpuStorage::U8(s) => CudaStorageSlice::U8(self.clone_htod_beside(s)?),
+            CpuStorage::U32(s) => CudaStorageSlice::U32(self.clone_htod_beside(s)?),
+            CpuStorage::I16(s) => CudaStorageSlice::I16(self.clone_htod_beside(s)?),
+            CpuStorage::I32(s) => CudaStorageSlice::I32(self.clone_htod_beside(s)?),
+            CpuStorage::I64(s) => CudaStorageSlice::I64(self.clone_htod_beside(s)?),
+            CpuStorage::BF16(s) => CudaStorageSlice::BF16(self.clone_htod_beside(s)?),
+            CpuStorage::F16(s) => CudaStorageSlice::F16(self.clone_htod_beside(s)?),
+            CpuStorage::F32(s) => CudaStorageSlice::F32(self.clone_htod_beside(s)?),
+            CpuStorage::F64(s) => CudaStorageSlice::F64(self.clone_htod_beside(s)?),
+            CpuStorage::F8E4M3(s) => CudaStorageSlice::F8E4M3(self.clone_htod_beside(s)?),
+            CpuStorage::F4(_)
+            | CpuStorage::F6E2M3(_)
+            | CpuStorage::F6E3M2(_)
+            | CpuStorage::F8E8M0(_) => {
+                return Err(CudaError::UnsupportedDtype {
+                    dtype: storage.dtype(),
+                    op: "storage_from_cpu_storage_beside",
+                }
+                .into());
+            }
+        };
+        Ok(CudaStorage {
+            slice,
+            device: self.clone(),
+        })
     }
 }
 
@@ -545,6 +873,7 @@ impl CudaDevice {
             custom_modules: Arc::new(std::sync::RwLock::new(HashMap::new())),
             seed_value: Arc::new(RwLock::new(299792458)),
             layout_params: Arc::new(Mutex::new(HashMap::new())),
+            copy_side: Arc::new(std::sync::OnceLock::new()),
         })
     }
 }
@@ -600,7 +929,11 @@ impl BackendDevice for CudaDevice {
         // ⚠⚠ **ANYONE GIVING ONE DEVICE A SECOND STREAM MUST RE-ENABLE THIS.**
         // That device's buffers would have nothing tracking their use, i.e. used
         // across streams unsynchronised, and the failure is a silently wrong
-        // reply rather than an error. `docs/plans/local_decode_submissions.md`
+        // reply rather than an error. The ONE exception is the copy stream of
+        // `CudaDevice::clone_htod_beside` (2026-10-13): only buffers made there
+        // ever touch it, each ordered by its own event and handed to this
+        // stream before anything reads it — read its doc before widening it.
+        // `docs/plans/local_decode_submissions.md`
         // § "Do NOT copy their concurrent streams" records why llama.cpp's
         // Q/K/V stream parallelisation is not wanted here regardless: our
         // bottleneck is the CPU issuing work, not the GPU idling between
@@ -664,6 +997,7 @@ impl BackendDevice for CudaDevice {
             custom_modules: Arc::new(std::sync::RwLock::new(HashMap::new())),
             seed_value: Arc::new(RwLock::new(299792458)),
             layout_params: Arc::new(Mutex::new(HashMap::new())),
+            copy_side: Arc::new(std::sync::OnceLock::new()),
         })
     }
 
