@@ -203,10 +203,15 @@ pub enum SwarmError {
     /// privacy variants: retrying can never help, and nothing is sent out
     /// instead. Its own variant because its advice differs from private
     /// mode's: fetch the model HERE, or turn the per-model setting off.
-    #[error(
-        "{model_id} is kept on this computer, and this computer cannot run this request on its own"
-    )]
-    KeptOnThisComputer { model_id: String },
+    ///
+    /// `missing_shards` names what this computer lacks — the parts
+    /// (`SharedState::parts_missing_here`) or `MMPROJ_SHARD_INDEX` for the
+    /// image encoder — so the refusal says why, not only which setting.
+    #[error("{model_id} is kept on this computer, and this computer cannot run this request on its own{}", kept_here_shortfall(.missing_shards))]
+    KeptOnThisComputer {
+        model_id: String,
+        missing_shards: Vec<u32>,
+    },
 
     /// `missing_shards` may hold `MMPROJ_SHARD_INDEX`: no pool device holds
     /// the model's image encoder, and a request carrying an image may not send
@@ -506,6 +511,16 @@ fn missing_parts(missing: &[u32]) -> String {
         (true, true) => "its image encoder".to_string(),
         (false, true) => format!("shards: {shards:?}, and its image encoder"),
         (_, false) => format!("shards: {shards:?}"),
+    }
+}
+
+/// What [`SwarmError::KeptOnThisComputer`] adds after its sentence: the parts
+/// this computer is missing, or nothing when none are known to be.
+fn kept_here_shortfall(missing: &[u32]) -> String {
+    if missing.is_empty() {
+        String::new()
+    } else {
+        format!(" — it does not hold {}", missing_parts(missing))
     }
 }
 
@@ -1492,6 +1507,7 @@ mod tests {
             },
             SwarmError::KeptOnThisComputer {
                 model_id: "m".into(),
+                missing_shards: vec![],
             },
             SwarmError::PrivateModeUnavailable {
                 model_id: "m".into(),
@@ -1584,6 +1600,7 @@ mod tests {
             },
             SwarmError::KeptOnThisComputer {
                 model_id: "m".to_string(),
+                missing_shards: vec![],
             },
         ] {
             assert_ne!(failure_log_level(&err), FailureLevel::Error, "{err}");
@@ -1876,6 +1893,7 @@ mod tests {
             },
             SwarmError::KeptOnThisComputer {
                 model_id: "m".into(),
+                missing_shards: vec![],
             },
             // Permanent because no amount of waiting frees disk, and its hint
             // names the two actions that do. `LocalOnly` was tried here first

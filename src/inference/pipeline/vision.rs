@@ -81,6 +81,7 @@ impl PipelineExecutor {
             if self.shared_state.kept_on_this_computer(model_id) {
                 return Err(SwarmError::KeptOnThisComputer {
                     model_id: model_id.0.clone(),
+                    missing_shards: vec![crate::types::MMPROJ_SHARD_INDEX],
                 });
             }
             return Err(SwarmError::PrivateModeUnavailable {

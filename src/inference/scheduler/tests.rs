@@ -265,6 +265,70 @@ fn a_model_kept_on_this_computer_is_never_planned_onto_a_peer() {
     }
 }
 
+/// **A model kept on this computer that this computer holds whole runs here,
+/// registered or not** (field report 2026-10-13). A model bigger than the
+/// graphics budget is never registered (`auto_manage::scan`), and the gate
+/// asked for a registration: a 14B with all 16 parts on disk was refused in
+/// 26 ms while it ran here with the setting off. A part gone from disk is
+/// still refused, and the refusal names it.
+#[test]
+fn a_kept_model_held_whole_runs_here_without_a_registration() {
+    let data = tempfile::tempdir().unwrap();
+    let dir = data.path().to_path_buf();
+    let state = make_shared_state_with(|c| c.node.data_dir = dir);
+    let local_id = state.identity.node_id().clone();
+    let model = ModelId("big-14b".into());
+    let shard = |index: u32, layer_range: (u32, u32)| ShardInfo {
+        index,
+        layer_range,
+        size_bytes: 1_000_000_000,
+        hash: [0u8; 32],
+        tensors: vec![],
+    };
+    state.model_registry.register_manifest(make_manifest(
+        "big-14b",
+        40,
+        vec![shard(0, (0, 20)), shard(1, (20, 40))],
+    ));
+    let store = state.shard_store();
+    for index in [0u32, 1] {
+        let id = ShardId {
+            model_id: model.clone(),
+            index,
+        };
+        let path = store.shard_path(&model, index);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"part").unwrap();
+        state
+            .model_registry
+            .record_shard_holder(id, local_id.clone());
+    }
+    assert!(
+        !state.has_complete_split_model(&model),
+        "the reported shape: every part here, no registration"
+    );
+    state.keep_on_this_computer(&model, true).unwrap();
+    let scheduler = PipelineScheduler::new(state.clone());
+
+    let plan = scheduler
+        .assemble_pipeline(&model, &local_id)
+        .expect("every part is here: the kept model must be planned here");
+    assert_eq!(plan.segments.len(), 1);
+    assert_eq!(plan.segments[0].node_id, local_id);
+    assert_eq!(plan.segments[0].layer_range, (0, 40));
+
+    std::fs::remove_file(store.shard_path(&model, 1)).unwrap();
+    match scheduler.assemble_pipeline(&model, &local_id) {
+        Err(e @ SwarmError::KeptOnThisComputer { .. }) => {
+            assert!(
+                e.to_string().contains("[1]"),
+                "the refusal names the part: {e}"
+            );
+        }
+        other => panic!("a part gone from disk must be refused: {other:?}"),
+    }
+}
+
 /// Routing prices a peer by what forwarding to it has actually cost when it
 /// has that figure, and by the health ping only until then. The ping is
 /// taken idle; the acknowledgement latency is taken on real work and sees a

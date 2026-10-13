@@ -739,9 +739,17 @@ pub async fn set_model_keep_on_this_computer(
 
 fn keep_on_this_computer_status(state: &AppState, model_id: String) -> serde_json::Value {
     let mid = crate::types::ModelId(model_id.clone());
+    // The question the request gate asks (`parts_missing_here`), so the card's
+    // warning and a refusal cannot disagree.
+    let whole_model_here = state
+        .shared_state
+        .model_registry
+        .get_manifest(&mid)
+        .is_some()
+        && state.shared_state.parts_missing_here(&mid).is_empty();
     serde_json::json!({
         "model_id": model_id,
         "keep_on_this_computer": state.shared_state.kept_on_this_computer(&mid),
-        "whole_model_here": state.shared_state.has_complete_split_model(&mid),
+        "whole_model_here": whole_model_here,
     })
 }

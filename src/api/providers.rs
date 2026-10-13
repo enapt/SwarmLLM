@@ -445,6 +445,7 @@ fn cloud_refusal(
     {
         return Some(crate::error::SwarmError::KeptOnThisComputer {
             model_id: kept.to_string(),
+            missing_shards: shared.parts_missing_here(&crate::types::ModelId(kept.to_string())),
         });
     }
     if !private_mode {

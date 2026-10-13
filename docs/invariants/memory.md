@@ -2423,6 +2423,21 @@ reading only as a fallback. It was the startup figure, so a program that took pa
 later let the node overcommit it: a drafter admitted that way left both workers with a 0 MB
 conversation budget and every prompt refused. Never cache a live condition at startup.
 
+**The promotion back to the card read the same budget the other way round (2026-10-13,
+#260).** `worker_should_return_to_gpu` weighed the figure in `vram_budget_mb` — which only an
+admission writes — so the reading that REFUSED a model the card was the one its promotion was
+judged against for as long as the worker lived. A tester's Mistral 7B, asked for while Ollama
+held 6.2 GB of a 12 GB card, went to the processor (9-13 tok/s); Ollama stopped, ~8 GB stood
+free, and three more requests reused the processor worker with no `admitting model to GPU`
+line; after an unload it loaded on the card at 55 tok/s. `promotion_weighed` now reads
+`vram_budget_now` like admission, and only once every guard that needs no reading has passed
+(a demoted worker, nothing still holding it there, not in use, idle past
+`vram_make_room_min_idle_secs`, a known estimate) — so the `nvidia-smi` it costs (~0.1 s) is
+paid only where a move could follow. Ollama never moves a loaded runner (it waits for the
+keep-alive to expire), so there was nothing to borrow. Test
+`promotion_reads_the_card_as_it_stands_now` (red with the stored figure; also asserts a busy
+worker causes no reading).
+
 ## "Used recently" has four answers, and one of them is never written locally
 
 `model::auto_manage::prune::effective_idle_secs` combines all of them — a

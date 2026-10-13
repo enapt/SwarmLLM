@@ -2618,13 +2618,18 @@ impl PipelineScheduler {
 
         // A model the owner keeps on this computer runs here whole or not at
         // all (#251). Refused up front when this computer does not hold all of
-        // it: every plan for it would need a peer for the rest.
-        if self.shared_state.kept_on_this_computer(model_id)
-            && !self.shared_state.has_complete_split_model(model_id)
-        {
-            return Err(SwarmError::KeptOnThisComputer {
-                model_id: manifest.name.clone(),
-            });
+        // it: every plan for it would need a peer for the rest. Asked of the
+        // parts held, never of a registration — a model bigger than the card
+        // is not registered, and was refused while it ran here with the
+        // setting off (`SharedState::parts_missing_here`).
+        if self.shared_state.kept_on_this_computer(model_id) {
+            let missing_shards = self.shared_state.parts_missing_here(model_id);
+            if !missing_shards.is_empty() {
+                return Err(SwarmError::KeptOnThisComputer {
+                    model_id: manifest.name.clone(),
+                    missing_shards,
+                });
+            }
         }
 
         // Per-model choice, then explicit global, then on automatically when this
@@ -2672,6 +2677,7 @@ impl PipelineScheduler {
             if self.shared_state.kept_on_this_computer(model_id) {
                 return Err(SwarmError::KeptOnThisComputer {
                     model_id: manifest.name.clone(),
+                    missing_shards: self.shared_state.parts_missing_here(model_id),
                 });
             }
             // In private mode, give a specific error showing which shards are missing

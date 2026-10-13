@@ -3620,6 +3620,41 @@ impl SharedState {
         })
     }
 
+    /// The parts of `model_id` this computer does not hold: empty when every
+    /// part is here, so a model kept on this computer may run (#251), and the
+    /// list a refusal names otherwise. Empty, too, for a model with no manifest
+    /// here (nothing to count against).
+    ///
+    /// **Not [`Self::has_complete_split_model`].** That asks for a
+    /// registration, and `auto_manage::scan` registers nothing past the
+    /// graphics budget — so a model bigger than the card, held whole and run
+    /// here as a card/processor split, read "not here" and was refused (field
+    /// report 2026-10-13: a 14B and a 30B, every part on disk, the 14B
+    /// answering `route=local` with the setting off). Counted from the
+    /// manifest, the registry's own holdings and the files, the way
+    /// `local_generate`'s fallback counts.
+    pub fn parts_missing_here(&self, model_id: &crate::types::ModelId) -> Vec<u32> {
+        let Some(manifest) = self.model_registry.get_manifest(model_id) else {
+            return Vec::new();
+        };
+        let held = self
+            .model_registry
+            .local_shard_indices_in(&manifest, self.identity.node_id());
+        let store = self.shard_store();
+        manifest
+            .shards
+            .iter()
+            .map(|s| s.index)
+            .filter(|&index| {
+                !held.contains(&index)
+                    || !store.shard_file_present(&crate::types::ShardId {
+                        model_id: model_id.clone(),
+                        index,
+                    })
+            })
+            .collect()
+    }
+
     pub fn has_complete_split_model(&self, model_id: &crate::types::ModelId) -> bool {
         let claimed = self
             .split_models

@@ -383,19 +383,25 @@ struct PromotionInputs {
 ///   budget as it stands *now*. An unreadable estimate (0) or an unset budget
 ///   is not evidence, and leaves the model where it is.
 fn should_return_to_gpu(i: &PromotionInputs) -> bool {
-    if !i.cpu_placed || i.permanently_cpu_bound || i.reason_still_holds || i.busy {
-        return false;
-    }
-    if i.idle_secs < vram_make_room_min_idle_secs() {
-        return false;
-    }
-    if i.budget_mb == 0 || i.gpu_estimate_mb == 0 {
+    if !promotion_is_worth_weighing(i) || i.budget_mb == 0 {
         return false;
     }
     let free_after_reclaim = i
         .budget_mb
         .saturating_sub(i.committed_mb.saturating_sub(i.reclaimable_mb));
     i.gpu_estimate_mb <= free_after_reclaim
+}
+
+/// The guards of [`should_return_to_gpu`] that need no reading of the card —
+/// so the card is read only for a worker that could actually move
+/// ([`ModelProcessPool::promotion_weighed`]).
+fn promotion_is_worth_weighing(i: &PromotionInputs) -> bool {
+    i.cpu_placed
+        && !i.permanently_cpu_bound
+        && !i.reason_still_holds
+        && !i.busy
+        && i.idle_secs >= vram_make_room_min_idle_secs()
+        && i.gpu_estimate_mb != 0
 }
 
 static RESPONSE_ATTEMPT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -3757,20 +3763,47 @@ impl ModelProcessPool {
         if handle.placed_on_cpu_because.is_none() {
             return false;
         }
-        let budget_mb = self
-            .vram_budget_mb
-            .load(std::sync::atomic::Ordering::Relaxed);
-        should_return_to_gpu(&PromotionInputs {
-            cpu_placed: true,
-            permanently_cpu_bound: !self.gpu_is_usable(),
+        self.promotion_weighed(model_id, handle, !self.gpu_is_usable())
+    }
+
+    /// [`Self::worker_should_return_to_gpu`] past its device questions, which
+    /// a test cannot answer on a build without CUDA.
+    ///
+    /// **The card is read as it stands now** ([`Self::vram_budget_now`]), the
+    /// same reading admission takes. It read the last stored figure, which only
+    /// an admission writes — so a model refused the card while another program
+    /// held it stored that program's squeeze, and nothing re-read it once the
+    /// program let go: the model stayed on the processor until it was unloaded
+    /// (field report 2026-10-13: Mistral 7B at 12 tok/s with 8 GB free, 55
+    /// tok/s after an unload). Ollama, by comparison, never moves a loaded
+    /// runner; it waits for the keep-alive to expire. The read costs one
+    /// `nvidia-smi` (~0.1 s), so it is taken only once every guard that needs
+    /// no reading has passed: a demoted worker idle past the floor.
+    fn promotion_weighed(
+        &self,
+        model_id: &ModelId,
+        handle: &WorkerHandle,
+        permanently_cpu_bound: bool,
+    ) -> bool {
+        let mut inputs = PromotionInputs {
+            cpu_placed: handle.placed_on_cpu_because.is_some(),
+            permanently_cpu_bound,
             reason_still_holds: self.cpu_reason(model_id).is_some(),
             busy: handle.in_use(self.conversation_window()),
             idle_secs: handle.idle_secs(),
             gpu_estimate_mb: handle.gpu_estimate_mb,
-            budget_mb,
-            committed_mb: self.vram_committed_mb(),
-            reclaimable_mb: self.reclaimable_vram_mb(model_id, handle.gpu_estimate_mb, budget_mb),
-        })
+            budget_mb: 0,
+            committed_mb: 0,
+            reclaimable_mb: 0,
+        };
+        if !promotion_is_worth_weighing(&inputs) {
+            return false;
+        }
+        inputs.budget_mb = self.vram_budget_now();
+        inputs.committed_mb = self.vram_committed_mb();
+        inputs.reclaimable_mb =
+            self.reclaimable_vram_mb(model_id, handle.gpu_estimate_mb, inputs.budget_mb);
+        should_return_to_gpu(&inputs)
     }
 
     /// Can this NODE put models on a graphics card at all, memory aside?
@@ -8174,6 +8207,68 @@ mod tests {
         pool2.set_vram_budget_mb(6314);
         pool2.set_vram_budget_source(Box::new(|| None));
         assert_eq!(pool2.vram_budget_now(), 6314);
+    }
+
+    /// **A model sent to the processor while another program held the card
+    /// moves back once that program lets go** (field report 2026-10-13):
+    /// Mistral 7B was asked for while Ollama held 6.2 GB, refused the card,
+    /// and stayed at 12 tok/s after Ollama stopped — the promotion weighed the
+    /// figure that refusal had stored. It moved only after an unload (55
+    /// tok/s). The card is read only for a worker that could move.
+    #[tokio::test]
+    async fn promotion_reads_the_card_as_it_stands_now() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize};
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-promote-live"));
+        pool.set_gpu_layers(-1);
+        let card = Arc::new(AtomicU64::new(1_700));
+        let reads = Arc::new(AtomicUsize::new(0));
+        {
+            let (card, reads) = (card.clone(), reads.clone());
+            pool.set_vram_budget_source(Box::new(move || {
+                reads.fetch_add(1, Ordering::Relaxed);
+                Some(card.load(Ordering::Relaxed))
+            }));
+        }
+        let mistral = ModelId("mistral-7b".into());
+        assert!(
+            !pool.admit_to_gpu(&mistral, 5_005),
+            "Ollama holds the card: the processor it is"
+        );
+        let a_minute_ago = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .expect("a clock old enough to express the idle time");
+        let mut h =
+            fake_worker_handle_spawned(false, Some(CpuReason::NotEnoughVram), true, a_minute_ago)
+                .await;
+        Arc::get_mut(&mut h).expect("one owner").gpu_estimate_mb = 5_005;
+        assert!(
+            !pool.promotion_weighed(&mistral, &h, false),
+            "the card is still held: stay"
+        );
+
+        card.store(7_958, Ordering::Relaxed); // `ollama stop`
+        assert!(
+            pool.promotion_weighed(&mistral, &h, false),
+            "7,958 MB stand free now: the stored 1,700 MB reading must not keep it on the processor"
+        );
+
+        // A worker answering right now could not move whatever the card says,
+        // so the card is not read for it.
+        let mut busy = fake_worker_handle_spawned(
+            false,
+            Some(CpuReason::NotEnoughVram),
+            true,
+            std::time::Instant::now(),
+        )
+        .await;
+        Arc::get_mut(&mut busy).expect("one owner").gpu_estimate_mb = 5_005;
+        let before = reads.load(Ordering::Relaxed);
+        assert!(!pool.promotion_weighed(&mistral, &busy, false));
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            before,
+            "no reading for a worker that cannot move"
+        );
     }
 
     /// **A worker that cannot grow takes the card back from an idle model** —

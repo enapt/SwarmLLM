@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #258**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #262**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate; #257 closed on 2026-10-13 (under WSL2 a card's saved prompts are kept in host RAM) and #258 opened from its measurement; #138 (1) and (1b) shipped on 2026-10-13 (a card/processor split runs a prompt's processor-held experts, then every processor-held projection, on the card).
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate; #257 closed on 2026-10-13 (under WSL2 a card's saved prompts are kept in host RAM) and #258 opened from its measurement; #138 (1) and (1b) shipped on 2026-10-13 (a card/processor split runs a prompt's processor-held experts, then every processor-held projection, on the card); #259 and #260 opened and closed the same day from a tester's report (a kept model bigger than the card was refused; a model sent to the processor while another program held the card never moved back), #261 opened from it.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -1553,6 +1553,21 @@ Discovery and opt-in routing between pools shipped (R134-R134.7:
 dashboard control or consent banner exists. Add the toggle with its consent wording (i18n ×21).
 Billing between pools waits on credits, which are dormant (`docs/CREDITS_DESIGN.md`).
 
+#### #261 — A model's manifest carries the file's own name and placeholder metadata
+`P3` · ux · **OPEN** — 2026-10-13 · history: none (a tester's report, 2026-10-13)
+
+`model::manifest::build_manifest_from_gguf` takes `name` from the GGUF's `general.name` and
+fills `quantization` (`Q4KM`), `num_params_billions` (0.0) and a coarse `architecture` as
+placeholders. Seen on a tester's node: `qwen3-14b-q4-k-m` is named "Qwen3 14B Awq Compatible
+Instruct" (what its uploader wrote into the file), and that name is what refusals print;
+`qwen3-30b-a3b-instruct-2507-q2-k` reads `Q4KM`; both read `Qwen2` and 0.0 B. The one reader of
+`quantization` (`auto_manage::quant::parse_quant_from_manifest`) already prefers the id's tag
+over the placeholder, so nothing routes on it. ⚠ Every field is inside `compute_hash`: filling
+them changes every model's manifest hash, so check what a new manifest version does across
+the swarm (`manifest_heard`, `model::canonical`) before changing the builder. The cheaper
+half is the display name: derive it from the id or the HF repo where the file's own name
+disagrees with the id's size and quant tags.
+
 ### Packaging, release and operations
 
 #### #255 — `swarmllm status` reads the default data directory, not the running daemon's
@@ -1966,7 +1981,24 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-13, ships in the next release** (#257)
+**Closed 2026-10-13, ships in the next release** (#257, #259, #260)
+- #259 — **"Keep on this computer" no longer refuses a model this computer holds whole and
+  runs.** The request gate and the model's `whole_model_here` asked for a registration in
+  `split_models`, and `auto_manage::scan` registers nothing past the graphics budget, so a model
+  bigger than the card, held whole and run here as a card/processor split, read "not here":
+  a tester's 14B (16/16 parts) and 30B (20/20) were refused in ~30 ms with the setting on,
+  while the 14B answered `route=local segments=1` with it off. Both now ask
+  `SharedState::parts_missing_here` (manifest, the registry's holdings, the files), and the
+  refusal names the parts this computer lacks. Test
+  `a_kept_model_held_whole_runs_here_without_a_registration` (red with the old gate).
+- #260 — **a model sent to the processor while another program held the graphics card moves
+  back to the card once that program lets go.** The promotion check weighed the card budget
+  the last ADMISSION had stored, so a model refused the card while (in the report) Ollama held
+  6.2 GB kept that squeezed figure: Mistral 7B stayed at 12 tok/s with ~8 GB free, and reached
+  55 tok/s only after an unload. `ModelProcessPool::promotion_weighed` now reads the card as it
+  stands (`vram_budget_now`, the reading admission takes), only for a demoted worker idle past
+  the floor, so a busy worker costs no `nvidia-smi`. Test
+  `promotion_reads_the_card_as_it_stands_now` (red reading the stored figure).
 - #257 — **under WSL2, a long prompt after a node's first no longer waits seconds on the graphics
   card before it is read.** With the prefix cache on, each long prompt ended by keeping a copy of
   its conversation memory on the card (264 MB for a ~4,800-token prompt on a 7B). Held between

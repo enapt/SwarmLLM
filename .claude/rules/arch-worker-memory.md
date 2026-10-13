@@ -168,7 +168,7 @@ Prune's soft-unload narrows a loaded model only when our CHARGED graphics memory
 
 ## A model is admitted against the card as it stands NOW (2026-09-29)
 
-**`ModelProcessPool::vram_budget_now`** is what `admit_to_gpu` weighs a model against, re-read at admission. Never cache a live condition at startup.
+**`ModelProcessPool::vram_budget_now`** is what `admit_to_gpu` weighs a model against, re-read at admission — and what the promotion back to the card weighs (`promotion_weighed`, read only once its cheap guards pass; #260: the figure a refusal stored kept Mistral on the processor after Ollama let go). Never cache a live condition, at startup or at the last admission.
 
 → `docs/invariants/memory.md` § "A model is admitted against the card as it stands NOW (2026-09-29)"
 
