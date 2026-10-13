@@ -1680,6 +1680,18 @@ for milliseconds — so only the dump is gated. Implementation in
 `src/inference/prof.rs`; add a stage by extending the `stages!` macro and wrapping
 the call site in `timed!`.
 
+**A decode step captured as CUDA graphs reports its RECORDING** (since 2026-10-14):
+the block's total and its card stages are the host putting kernels into the graph,
+not the card running them, and the `card pool` line is left out (a pool call inside
+a capture breaks it). Before that, the report's pool read ran inside the step's last
+capture group and invalidated EVERY capture: each position printed TWO blocks — the
+refused attempt and the uncaptured rerun — with `DIAG: decode graph capture refused — step
+ran uncaptured` once at INFO (`STREAM_CAPTURE_INVALIDATED`), so no profile showed a captured step
+(gotcha #841). Two blocks per `index_pos` still means a refused capture.
+`SWARMLLM_PROFILE_SYNC=1` synchronizes inside each stage, which no capture survives:
+it profiles the uncaptured step; to time a captured one, use the rig's wall clock
+less the load (`~/swarmllm-138f/steps2.py`).
+
 **This is what found the CPU attention kernel** (2026-08-06): attention was 2.3%
 of the arithmetic but 45% of prompt-processing time, i.e. running 37x slower per
 MAC than the quantized matmul beside it. Reach for it before optimising anything

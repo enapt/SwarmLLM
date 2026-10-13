@@ -376,13 +376,24 @@ mod cuda {
     }
 
     /// The device's CURRENT pool — the one `cuMemAllocAsync` draws from — or
-    /// `None` when cudarc allocates without one.
+    /// `None` when cudarc allocates without one, or while the device's stream
+    /// is being captured: a pool call from the capturing thread invalidates
+    /// the capture. The profile's per-forward report reads the pool at the end
+    /// of a forward, which a captured decode step reaches inside its last
+    /// group — so with `SWARMLLM_PROFILE=1` every captured step was refused
+    /// and ran again uncaptured, two reports a position (gotcha #841).
     fn current_pool(
         dev: &candle_core::CudaDevice,
     ) -> Result<Option<sys::CUmemoryPool>, DriverError> {
         let stream = dev.cuda_stream();
         let ctx = stream.context();
         if !ctx.has_async_alloc() {
+            return Ok(None);
+        }
+        if !matches!(
+            stream.capture_status(),
+            Ok(sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE)
+        ) {
             return Ok(None);
         }
         ctx.bind_to_thread()?;

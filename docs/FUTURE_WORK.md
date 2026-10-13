@@ -1238,9 +1238,20 @@ enqueued one by one, because a step with experts in RAM is never captured
 16.1 / 15.5. llama.cpp 4b1a27f at the same placement, `-t 4`: tg64 32.57 ± 2.58 (30.7 ms); its
 CUDA graphs off vs on (`GGML_CUDA_DISABLE_GRAPHS=1`, 3 interleaved rounds, `graphs.sh`) 26.5 / 30.0
 / 30.4 against 37.0 / 36.0 / 29.7 tok/s, ± up to 16 on a busy host — leaning, not decisive.
-**Next: capture the card's part of such a step in groups cut at each processor section** (the
-copies out, the products, the copy back stay uncaptured; a pageable copy inside a capture is
-garbage), as llama.cpp captures each CUDA split. Seen, not chased: the first 1-2 decode
+**Tried 2026-10-14, not shipped: the card's part of such a step captured in groups cut at
+each processor section** (the router's scores, the input and the residual parked outside the
+capture, the group launched, the experts run on the processor, recording resumed from the
+parked copies — `~/swarmllm-138f/pause_capture.patch`). The ids were the same and every step
+updated in place, but no faster: 43.9 / 44.8 against 43.0 / 46.6 ms a token uncaptured
+(`pausegraph.sh`, 834 tokens, 4 threads, two rounds). Every step is RE-RECORDED, and at each
+pause the recording, the update and the launch run with the card idle — the whole-card capture
+(#138 (2)) wins because recording overlaps the previous group's run. llama.cpp 4b1a27f captures
+once and from then on only relaunches each split's graph while its nodes are unchanged
+(`ggml_cuda_graph_update_required`; positions and KV rows reach it as tensors at fixed
+addresses). **What would close this gap is a decode step replayed without re-recording** —
+every buffer it reads or writes at a fixed address — a change to how a step allocates, not to
+the capture. Smaller, not tried: capture only from the last processor section on (the stacked
+tail; ~0.1 ms a layer by #138 (2)'s rig, ~2.5 ms of a 44 ms step here). Seen, not chased: the first 1-2 decode
 steps after a 681-token single-forward prompt took 2-4x a settled step on both the stacked
 and per-expert paths (not after a one-row prompt) — prompt temporaries pressing card memory
 is the likely reading; a node chunks card prompts at 512 tokens.
