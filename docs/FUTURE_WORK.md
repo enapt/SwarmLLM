@@ -87,7 +87,7 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     memory, and keeps its memory guard under a context override.)*
 11. **#138**, **#129** — MoE placement, and near-fit models sent across continents (#147's f16
     accumulation shipped 2026-10-09; its smaller items are P3; #138 (1) on 2026-10-13: a split's
-    prompt experts run on the card, 1.4x — the copy and the attention projections are next). *(#137 narrowed to P3 on
+    prompt experts run on the card, 1.4x — its attention projections are next). *(#137 narrowed to P3 on
     2026-10-11: decode ran outside its thread pool on every default node — fixed: a 14B split
     1.19x, now level with llama.cpp; a 3B processor-only 1.14-1.39x; ~12% behind it remains.)* (`docs/plans/faster_than_local.md`).
 12. **#3**, **#180** — the routing cost model charges a constant where the reply length
@@ -1094,17 +1094,22 @@ last 64 positions + 4 decode steps, `~/swarmllm-138/probe.sh`): median cosine 0.
 worst 0.9653 vs 0.9683 at the SAME position, top-1 65/68 vs 64/68; the replies part at a
 three-way near-tie (0.105 logits, llama.cpp's own pick being the old path's).
 
-**Left, in order of what they cost us:** (1b) **the copy**: a layer's experts on the card cost
-~57-62 ms a call whatever the tokens (1.25 s for 22 layers at 355 tokens, 1.49 s at 512) —
-~200 MB at ~3.5 GB/s, from pageable memory, one `memcpy_htod` per expert per projection
-(~384 a layer); llama.cpp copies contiguous RUNS of used experts (its 512-padding loop) and
-keeps RAM-held weights in PINNED memory whenever a card is present ("reduces the time spent on
-data transfers", `llama-model.cpp:1090-1104`, `--no-host` opts out). Under WSL2 pinned memory
-is limited (NVIDIA's CUDA-on-WSL guide), so a pinned STAGING buffer the experts are gathered
-into is the likely shape here — measure pageable vs pinned on this box first. (1c)
-**the processor layers' attention projections**: qkv 839 ms + output 538 ms of a 4.46 s
-512-token forward, much of it the 22 processor layers — llama.cpp's offload takes any op with
-RAM-held weights at ≥ 32 tokens, not only the experts. (1d) one layer's stack (~200 MB here)
+**Left, in order of what they cost us:** (1b) **the processor layers' attention projections
+for a prompt**: qkv 839 ms + output 538 ms of a 4.46 s 512-token forward, nearly all of it the
+22 processor layers (~60 ms a layer; the card's 26 are tensor-core work) — llama.cpp's offload
+takes ANY op with RAM-held weights at ≥ 32 tokens, not only the experts, and a layer's
+attention weights are ~10 MB, ~1.5 ms over this link. (1c) **the new stage itself**, ~57-62 ms
+a layer whatever the tokens (1.25 s for 22 layers at 355 tokens, 1.49 s at 512): ~34 ms of it
+is the copy of ~226 MB at this card's LINK speed, the rest the card's expert kernel. Measured
+2026-10-13 (`~/swarmllm-138b/bench.sh`, a CUDA micro-bench, live node stopped, min of 10): the
+link tops out at 6.7 GB/s even from pinned memory, and today's one copy per expert from
+pageable memory already moves 6.5 (0.58 MB pieces; 4.7 at 0.15 MB); gathering into a pinned
+staging buffer first is SLOWER, 3.4. So llama.cpp's pinned RAM weights
+(`llama-model.cpp:1090-1104`) buy nothing here — what could: copying the layer's whole stack
+WHILE the processor computes that layer's attention (≥ 32 tokens at top-8 of 128 touch
+87-100% of the experts anyway), and the tensor-core kernel's own speed, which the card's
+26 layers pay too. (This entry said 2026-10-13 the copy ran at ~3.5 GB/s from pageable
+memory and that pinned staging was the likely fix; the micro-bench says otherwise.) (1d) one layer's stack (~200 MB here)
 is a transient admission does not charge — a full card falls back to the processor (WARN
 once); under WSL2 a pool grown after an idle trim may be slow at high uptime (#257), measured
 at 3.1 h only. (2) **MoE layers in decode-step capture**: a stacked layer has

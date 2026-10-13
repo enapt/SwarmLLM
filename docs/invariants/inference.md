@@ -2144,8 +2144,9 @@ against 128 alone (#138's entry) is why a split without the card path keeps 128.
 old against 12.69 / 12.90 s new; 512 a forward 9.23 / 9.39 s old against
 7.80 / 7.92 s new. A node went from the first figure to the last: 1.4x. The new
 stage costs ~57-62 ms a layer whatever the tokens (1.25 s for 22 layers at 355
-tokens, 1.49 s at 512) — the copy, ~200 MB a layer from pageable memory, one
-copy per expert per projection; it is #138 (1b).
+tokens, 1.49 s at 512): ~34 ms of it the copy of ~226 MB, already at this card's
+6.7 GB/s link (pageable, one copy per expert, moves 6.5 — pinned staging measured
+slower, `~/swarmllm-138b/bench.sh`), the rest the card's expert kernel; #138 (1c).
 
 **Verified** against llama-cpp-python 0.3.16, both arms on one probe binary
 (`logits_reference_probe`, `LOGITS_PROBE_GPU_LAYERS=26`, the same 867 tokens read 512
