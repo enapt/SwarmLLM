@@ -88,7 +88,8 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
 11. **#138**, **#129** — MoE placement, and near-fit models sent across continents (#147's f16
     accumulation shipped 2026-10-09; its smaller items are P3; #138 (1) on 2026-10-13: a split's
     prompt experts run on the card, 1.4x; (1b) the same day: every processor-held projection,
-    a dense 14B split's prompt 5.3-5.7x — the rest of a processor layer's prompt pass is next). *(#137 narrowed to P3 on
+    a dense 14B split's prompt 5.3-5.7x; (1c) the same day: each processor layer whole on the card,
+    1.6x more — the weight copies themselves are next). *(#137 narrowed to P3 on
     2026-10-11: decode ran outside its thread pool on every default node — fixed: a 14B split
     1.19x, now level with llama.cpp; a 3B processor-only 1.14-1.39x; ~12% behind it remains.)* (`docs/plans/faster_than_local.md`).
 12. **#3**, **#180** — the routing cost model charges a constant where the reply length
@@ -1123,18 +1124,31 @@ its cache kept on the processor — new rows down, history up (`LayerWeights::at
 prompt 8.18 / 8.24 → **5.21 / 5.17 s** (1.6x; the box read (1b) slower than its morning's
 6.5-7.0), the 30B's 6.74 / 7.12 → 6.21 / 5.22 s (`docs/invariants/inference.md` § "A split's
 processor-held layers read a prompt whole on the card"). The 14B's 512-token forward is now
-2.83 s against llama.cpp's ~1.28: its quantized products — weight copies included — are 80%,
-attention and the elementwise work 55 ms.
+2.0-2.8 s (the box varies) against llama.cpp's ~1.28.
 
-**Left, in order of what they cost us:** (1d) the copy itself: the experts' stage costs ~57-62 ms a layer whatever the tokens (1.25 s for 22 layers at 355
+**Left, in order of what they cost us:** (1d) **the weight copies, in series with the
+products.** Profiled synchronised (`~/swarmllm-138c/sync.sh`, 2026-10-13): the 14B's 28
+processor layers' weights (4.6 GB) take 1.03-1.29 s of a 2.0-2.3 s first forward (~4 GB/s, the
+card's pool growing) and 0.78-0.80 s of the second (~5.8 GB/s); the products of all 48 layers
+~0.62-0.66 s, attention 64 ms. Each copy is from pageable memory on the device's ONE stream, so
+the driver waits for every queued kernel before staging it: copy and product never overlap.
+llama.cpp does not overlap them either — a host weight takes the synchronous
+`ggml_backend_tensor_copy` after `ggml_backend_event_synchronize`, no copy stream, pinned memory
+(`ggml-backend.cpp` 1786-1792, `ggml-cuda.cu` 779-784, `llama-model.cpp` 1075-1105 at 4b1a27f) —
+its ~1.28 s is ~0.75 s of copies plus ~0.5 of products. A copy stream (the copy on its own
+stream, the compute stream waiting only for that copy's event, the weight freed on the compute
+stream after its product) would let each projection's copy run under the previous product:
+a warm forward bound by its ~0.8 s of copies instead of copies plus products, ~1.45 s —
+below llama.cpp's. ⚠ The vendored candle runs one stream per
+device with event tracking OFF (`arch-inference.md`), so every cross-stream order is explicit.
+Then the experts: the MoE stage costs ~57-62 ms a layer whatever the tokens (1.25 s for 22 layers at 355
 tokens, 1.49 s at 512), ~34 ms of it ~226 MB at this card's LINK speed. Measured 2026-10-13
 (`~/swarmllm-138b/bench.sh`, a CUDA micro-bench, live node stopped, min of 10): the link tops
 out at 6.7 GB/s even from pinned memory, and one copy per expert from pageable memory already
 moves 6.5 (0.58 MB pieces; 4.7 at 0.15 MB); gathering into a pinned staging buffer first is
 SLOWER, 3.4. So llama.cpp's pinned RAM weights (`llama-model.cpp:1090-1104`) buy nothing
 here — what could: copying the next layer's weights WHILE this one computes (≥ 32 tokens at
-top-8 of 128 touch 87-100% of the experts anyway) and the tensor-core kernel's own speed; a
-dense layer's projections are 80% of the 14B's forward now, its weights crossing the same link. (This entry said 2026-10-13
+top-8 of 128 touch 87-100% of the experts anyway) and the tensor-core kernel's own speed. (This entry said 2026-10-13
 the copy ran at ~3.5 GB/s from pageable memory and that pinned staging was the likely fix;
 the micro-bench says otherwise.) (1e) one layer's copies (~200 MB here) are a transient
 admission does not charge — a full card falls back to the processor (WARN

@@ -32,7 +32,11 @@ stages! {
     FfnUpGate  => "ffn up + gate        (quantized matmul)",
     FfnAct     => "activation * gate    (elementwise)",
     FfnDown    => "ffn down             (quantized matmul)",
-    FfnProbe   => "ffn width probe      (per-call, m=1)",
+    // Inside the projection stages above, so left out of their sum: a
+    // processor-held weight copied to the card for a prompt (FUTURE_WORK #138
+    // (1b)). Timed apart from its product only under `SWARMLLM_PROFILE_SYNC=1`;
+    // without it the copy also waits out the card's queued work.
+    WeightsToCard => "  of which: processor-held weights copied to the card (prompt)",
     // A mixture-of-experts feed-forward, routing to combine, by the device its
     // layer sits on: a card/processor split runs both kinds in one token, and
     // the two cost an order of magnitude apart (FUTURE_WORK #138).
@@ -200,7 +204,13 @@ pub(crate) fn dump_kernel_launches(seq_len: usize, index_pos: usize, num_layers:
 /// NOT account for — the gap is as informative as the stages themselves.
 pub(crate) fn dump_and_reset(tag: &str, total_ms: f64) {
     let vals: Vec<u64> = ACC.iter().map(|a| a.swap(0, Ordering::Relaxed)).collect();
-    let summed: u64 = vals.iter().sum();
+    // A nested stage is already inside another one's time.
+    let summed: u64 = vals
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| i != Stage::WeightsToCard as usize)
+        .map(|(_, v)| v)
+        .sum();
     let total_ns = total_ms * 1e6;
     eprintln!("PROF {tag} — total {total_ms:.0} ms");
     let mut order: Vec<usize> = (0..N).collect();

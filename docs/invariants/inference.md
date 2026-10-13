@@ -2265,10 +2265,22 @@ the DIAG line in every new arm, no fallback):
 The box read (1b) slower than its own morning (6.5-7.0 s for the 14B); the
 arms interleave in one binary, so the ratio holds: **1.6x** for the 14B, where
 28 of 48 layers are on the processor, 1.2x for the 30B (22 of 48, its experts
-already on the card). The 14B's first 512-token forward went 5.12 → 2.83 s;
-attention, RoPE, norms and the activation now take 55 ms of it (the processor
-spent ~1.2 s on them), and the quantized products — weight copies included —
-are 80%. ⚠ The cache history crosses up for every chunk: ~8 KB a position a
+already on the card). The 14B's first 512-token forward went 5.12 → 2.83 s.
+
+**Where that forward goes now** (`SWARMLLM_PROFILE_SYNC=1`, `~/swarmllm-138c/sync.sh`,
+two synced runs; read for the big stages only): the 28 processor layers' weights
+copied to the card take 1.03-1.29 s of a 2.0-2.3 s first forward and 0.78-0.80 s
+of the second (4.6 GB: ~4 GB/s cold, ~5.8 warm — the first forward also grows
+the card's memory pool); the products of all 48 layers ~0.62-0.66 s; attention
+64 ms. ⚠ An UNSYNCHRONISED profile charges the card's queued work to the next
+weight copy — a copy from pageable memory waits for the stream first — so it
+read this forward as "attention 34 ms, products 80%" and a one-token width probe
+as 263 ms (its copy back to the processor waited out the card; removing it
+measured level, 3.35 / 3.77 s against 3.65 / 3.37 s). llama.cpp waits the same
+way (`ggml_backend_sched_compute_splits`: a host weight takes the synchronous
+`ggml_backend_tensor_copy` after `ggml_backend_event_synchronize`, no copy
+stream, 4b1a27f) from pinned memory: ~0.75 s of copies + ~0.5 s of products is
+its 1.28 s. What is left is FUTURE_WORK #138 (1d). ⚠ The cache history crosses up for every chunk: ~8 KB a position a
 layer for the 14B at f32, ~2 GB a chunk at 8K tokens of 28 layers, about a
 third of the weights it copies — llama.cpp's pass 5 pays the same, and the
 processor's attention over that history costs more.

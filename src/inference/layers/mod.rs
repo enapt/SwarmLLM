@@ -336,6 +336,18 @@ impl QMatMul {
         xs: &Tensor,
         ws: &[&Self],
     ) -> CandleResult<Vec<Tensor>> {
+        let (copies, x) =
+            crate::inference::prof::timed!(P::WeightsToCard, Self::copied_to(card, xs, ws))?;
+        let refs: Vec<&Self> = copies.iter().collect();
+        Self::forward_shared_here(&x, &refs)?
+            .into_iter()
+            .map(|t| t.to_device(xs.device()))
+            .collect()
+    }
+
+    /// The copies [`Self::on_the_card`] multiplies: each of `ws` on `card` (a
+    /// fused weight once), and `xs` there.
+    fn copied_to(card: &Device, xs: &Tensor, ws: &[&Self]) -> CandleResult<(Vec<Self>, Tensor)> {
         type Fused = std::sync::Arc<candle_core::quantized::QMatMul>;
         let mut fused_copies: Vec<(*const candle_core::quantized::QMatMul, Fused)> = Vec::new();
         let mut copies = Vec::with_capacity(ws.len());
@@ -361,12 +373,7 @@ impl QMatMul {
             };
             copies.push(Self::wrap(inner));
         }
-        let x = xs.to_device(card)?;
-        let refs: Vec<&Self> = copies.iter().collect();
-        Self::forward_shared_here(&x, &refs)?
-            .into_iter()
-            .map(|t| t.to_device(xs.device()))
-            .collect()
+        Ok((copies, xs.to_device(card)?))
     }
 
     /// `m` copied to `card`, keeping the f32 accumulator this projection was
@@ -421,8 +428,8 @@ const MLP_INTERMEDIATE_BUDGET_ELEMS: usize = 16 * 1024 * 1024;
 
 /// Token count below which blocking is skipped entirely.
 ///
-/// Decode passes a single token and must not pay for the width probe below, and
-/// a short prefill already fits — both take exactly the path they always did.
+/// A decoded token and a short prefill already fit — both take exactly the path
+/// they always did.
 const MLP_MIN_TOKENS_TO_BLOCK: usize = 512;
 
 /// Most tokens a card's stacked experts run through `moe_gemm_gguf`'s one-row
@@ -494,18 +501,14 @@ impl Mlp {
             return self.forward_block(xs, lora);
         }
 
-        // Measure the intermediate width instead of assuming an expansion
-        // ratio — it varies from ~2.7x to ~8x of hidden across architectures,
-        // and a guess would either under-bound (defeating the fix) or
-        // over-block (needless launches). One single-token projection against a
-        // prefill of hundreds is negligible, and it is never run for decode.
-        let probe = xs.narrow(token_dim, 0, 1)?;
-        let intermediate =
-            crate::inference::prof::timed!(P::FfnProbe, self.ffn_up.forward(&probe))?
-                .dims()
-                .last()
-                .copied()
-                .unwrap_or(0);
+        // Read the intermediate width off the weight instead of assuming an
+        // expansion ratio — it varies from ~2.7x to ~8x of hidden across
+        // architectures, and a guess would either under-bound (defeating the
+        // fix) or over-block (needless launches). It was measured with a
+        // one-token projection until 2026-10-13: on a split's processor layer
+        // that one row stays on the processor (under the 32 the card takes), a
+        // product per layer per long chunk — 0.26 s of a 14B's 2.8 s forward.
+        let intermediate = self.ffn_up.out_features()?;
         let block = budget_elems
             .checked_div(intermediate)
             .map_or(tokens, |b| b.clamp(1, tokens));

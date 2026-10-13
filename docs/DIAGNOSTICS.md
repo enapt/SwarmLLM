@@ -1694,6 +1694,11 @@ on the one-row kernel), `SWARMLLM_MOE_CPU=per-expert` (FUTURE_WORK #138). A
 card/processor split adds a third, `moe ffn of a processor layer, run on the card
 (prompt)`: a processor layer's experts for a forward of ≥ 32 tokens, copied to
 the card and run there — mostly the copy (`SWARMLLM_MOE_PROMPT_CARD=0` = old).
+Its dense projections show `  of which: processor-held weights copied to the
+card (prompt)` — part of the projection stages' time, left out of their sum.
+⚠ Unsynced, a copy from pageable memory first waits out the card's queued work,
+so the line reads high and the stage after a copy reads low: read the split
+between copy and product from a `SWARMLLM_PROFILE_SYNC=1` run only (#138 (1d)).
 Under every quantized product on the processor, `SWARMLLM_QMATMUL_ROWS=per-row`
 sends the several-row kernels (Q4_K, Q6_K, Q2_K, Q3_K) through the per-row loop —
 bit-identical replies, so any difference is the kernels' time.
