@@ -70,6 +70,7 @@ This answers most questions on its own:
 | a LATER turn of a conversation slow, on a node without a card | was the repeated prompt priced warm? `grep "already holds the start of this prompt"` (the planner's credit, `cached_locally=`) then `prefix-cache HIT` (what the worker matched). No credit line: the worker holds nothing for it — look for `prefix-cache inserted snapshot` / `keeping its opening` on the previous turn. A credit but a chain anyway: a faster route out-priced it, which is allowed |
 | `decode_ms` large, `tpot_ms` high | per-token cost — find the slow hop via `segN_ms` |
 | one `segN_ms` dominates | that peer is the bottleneck; cross-check its row in the peer table |
+| a planned segment has no `segN_ms` | consecutive remote segments ran as one CHAINED run (peer to peer, answering from its tail): their time is the run's first segment's `segN_ms` (`pipeline/distributed.rs`, `run_is_last`). A failed chain re-runs unchained, and then every segment is timed |
 | `route=relayed` | no direct path to a holder; ~1 extra RTT each way, see NAT section |
 | `outcome=error error_type=…` | the variant name points at the subsystem |
 

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #263**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #264**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -626,6 +626,12 @@ for crossings that never happen; the per-visit fixed cost may also be counted on
 observation that already carries it. Next: log each chosen plan's cost terms beside its outcome
 (today only the total is kept), then fit per term. Script: re-run the analysis with
 `grep "request complete" node.log | grep predicted_ms` over the fields above.
+Field point, 2026-10-13 (a tester, v0.3.236): a six-segment boomerang through three countries
+(37-token prompt, 120 tokens) was predicted 8,772 ms and took 59,457 (6.8×), its terms
+`net:0/compute:5441/prompt:2902` — `net:0` is by design where every peer is measured and no
+per-visit split is known (`vertex_cost`: the round trip is inside the per-layer observation), so
+here the hops' cost sits inside a compute term that priced the chain at 5.4 s of the 59.5 s it
+took.
 
 #### #180 — A node holding the whole model takes every request for it; partial ranges stay off by default
 `P2` · routing · **PARTIAL** — 2026-07-28 · history: archive § "A node holding every shard monopolises the model"
@@ -1449,6 +1455,27 @@ against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hy
 StarCoder2, inert while refused).
 
 ### Memory and admission
+
+#### #263 — A split whose local segments cannot hold a long prompt's cache refuses only after the peers have read it, and the retry plans the same shape
+`P1` · memory · **OPEN** — 2026-10-13 · history: a tester's report (test round 3, v0.3.236, RTX 3060 12 GB); the same shape in report #035 (#252)
+
+Qwen2.5-14B, ~6,000-token prompt, "start and finish on this computer" on: the plan gave the
+tester's node 30 of 48 layers in THREE local segments (0..1, 8..20, 32..48) between peers in
+Italy, Belgium and Thailand. Each local segment is admitted on its own when its forward arrives
+(`model_worker::ensure_room_for_prompt`, per `SplitModel` range, against one shared store), so
+the first two fit and the LAST was refused (`KV admission — refusing this prompt before prefill
+… budget_mb=388 short_by_mb=378`) after the peers had read the prompt for 30-277 s. The router
+re-planned (`should_retry_after` → `LocalMemoryUnavailable`) but the refusal recorded no new fact:
+`note_local_memory_refusal` carries only a LOAD refusal's layer count, so the re-plan bars only a
+whole-model plan and built the same shape — two requests, four attempts, ~15 min of peers'
+time, 0 tokens. Two gaps: (a) nothing admits a request's local cache before the pipeline starts
+(vLLM's scheduler asks `can_allocate` for the whole sequence before its prefill and answers a
+prompt that can never fit with `AllocStatus.NEVER`, not a retry); (b) the search charges a
+peer's HELD layers this prompt's cache (`PublishedRoom`, gotcha #447) and the local node's held
+layers nothing (`capacity_charge` → `layers_it_would_add`), so a node holding 30 layers is planned
+30 at any prompt length. Next: admit the request's cache for every local range at once before
+the first forward, and let a refusal carry the layers that fit, which the re-plan holds this
+node's TOTAL to. Then the planner itself could ask: #252 (1)'s worker-reported cache room.
 
 #### #262 — A card/processor split's conversation budget charges the processor's caches to the card
 `P2` · memory · **OPEN** — 2026-10-13 · history: none (#138 (1e)'s rig)
