@@ -3560,6 +3560,43 @@ the peers that disagreed. A rig cannot plant a wrong hash recorded as
 the ORIGIN's without editing a node's database, so change 3 is proven by unit tests
 and by the `InDispute` path it hands the part to (the `spliced` and `disputed` rigs).
 
+**A node that holds nothing of a model must not keep vouching for another upload of it
+(2026-10-14, FUTURE_WORK #270).** Found checking the swarm after v0.3.237: the Proxmox
+node refused all four holders of qwen2.5-coder-7b-instruct-q4-k-m (this node,
+`99aafc41`, `aa3d1e66`, `bf7b3263`) as "a different build", 760 lines against this node
+alone since 10-13, and logged "Ignoring a manifest that describes a different build …
+Ours came from its origin, so it is kept" at every start. It held NO part of the model —
+its directory held only a `manifest.json` dated 2026-09-04, first published by `e561df35`
+(gotcha #785's peer), 608 bytes longer than the upload (4,683,074,144 vs 4,683,073,536).
+The holders were right: part 3, rebuilt tensor by tensor from HuggingFace by the
+manifest's table, hashed identical to this node's file (`part_vs_origin.py`, sha256
+`86e44389…`), and the file on HuggingFace has not changed since 2024-11-12. What kept the
+stale manifest: `register_manifest` refuses a different build whenever the node has
+ANY origin hash of the model (`has_origin_knowledge`), and prune and delete take the
+parts but leave those hashes — so the refusal protected nothing and outlived the copy;
+and the copy repair never visited the model, because `models_to_settle` named only
+models a node holds a part of or may fetch. Every holder's own copy was the upload's on
+both nodes (copy repair: "the canonical upload" for all 18 held here, all 5 on Proxmox).
+
+The fix is in the pass, not in `register_manifest`: the startup load puts origin hashes
+in place BEFORE any manifest so a held copy is protected while the node boots (#384),
+and making the refusal depend on held parts would reopen that window. Each pass
+(`forget_origin_hashes_of_copies_gone_from_here`) forgets the origin hashes of a model
+with no part on disk, no holder record of this node, no download under way and nothing
+queued for repair or verification — in memory and in the database. And every directory
+under `models/` is judged (`models_kept_on_disk`): a metadata-only copy's manifest is
+registered again at every start, so the holds-nothing branch now also requires the
+manifest ON DISK to describe the upload before it leaves the copy alone, and otherwise
+installs the upload's header and manifest (`register_for_fetching`, as for a model the
+node may fetch). Guards: `origin_hashes_of_parts_no_longer_held_stop_refusing_the_swarms_manifest`
+(the reproduction: the refusal, then the swarm's manifest taken),
+`origin_hashes_stay_while_any_part_of_the_copy_is_here_or_on_its_way`,
+`a_metadata_only_directory_is_judged_by_the_copy_repair`.
+
+**What a change must keep:** an origin hash means "bytes this node fetched and still
+holds or is fetching"; a refusal resting on one must be able to end when the bytes do.
+Any directory a node keeps under `models/` describes the upload, parts or not.
+
 **From the rules file (moved 2026-10-02):**
 
 **`model::canonical` is the single answer to "which file IS this model"**: uploads

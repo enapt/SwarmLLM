@@ -337,6 +337,20 @@ impl ModelRegistry {
             .any(|e| &e.key().model_id == model_id)
     }
 
+    /// Every model [`Self::has_origin_knowledge`] answers yes for, in name
+    /// order. The copy repair forgets the hashes of one this node no longer
+    /// holds any part of (`auto_manage::canonical`, FUTURE_WORK #270).
+    pub fn models_with_origin_knowledge(&self) -> Vec<ModelId> {
+        let mut models: Vec<ModelId> = self
+            .origin_verified
+            .iter()
+            .map(|e| e.key().model_id.clone())
+            .collect();
+        models.sort_by(|a, b| a.0.cmp(&b.0));
+        models.dedup();
+        models
+    }
+
     pub fn register_manifest(&self, mut manifest: ModelManifest) {
         // Universal net against copied-folder model names (`<model>.FULLBACKUP`,
         // `<model>.old`). This is the single point every adoption path funnels

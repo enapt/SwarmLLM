@@ -294,6 +294,7 @@ async fn pass_inner(
         Origin::Ask
     };
     let mut origin = origin;
+    forget_origin_hashes_of_copies_gone_from_here(state);
     let models = models_to_settle(state);
     if origin == Origin::Ask {
         let mut asked = 0usize;
@@ -339,8 +340,85 @@ enum Asked {
     NoAnswer,
 }
 
-/// Models this node holds a part of, plus models it may acquire — pinned by
-/// its owner or trusted for auto-manage. Ordered, so passes are repeatable.
+/// Forget the origin hashes of every model this node no longer holds any part
+/// of, and is not fetching or repairing.
+///
+/// An origin hash is this node's word for bytes it fetched from HuggingFace,
+/// and `ModelRegistry::register_manifest` lets that word outrank every peer: a
+/// manifest of another build is refused while one is held ("Ours came from its
+/// origin, so it is kept"). Right while the bytes are here — but prune and
+/// delete take the bytes and leave the hashes, so a node that had once held
+/// ANOTHER upload's parts went on refusing the swarm's manifest of the model
+/// for good, protecting nothing, and refused every holder of the swarm's
+/// upload as "a different build". Seen on the Proxmox node on v0.3.237
+/// (2026-10-14): a manifest of another Q4_K_M build of qwen2.5-coder-7b,
+/// on its disk since at least 2026-09-04 and upheld by origin hashes of parts
+/// it no longer held, against all four holders of the upload (FUTURE_WORK
+/// #270).
+///
+/// The startup load still puts origin hashes in place before any manifest
+/// (#384); this runs from the pass only, and only for a model with no part on
+/// disk, no holder record of this node, no download under way and nothing
+/// queued for repair or verification — a copy being fetched or repaired keeps
+/// the hashes its parts are checked against.
+fn forget_origin_hashes_of_copies_gone_from_here(state: &SharedState) {
+    let me = state.identity.node_id().clone();
+    let held: HashSet<ModelId> = state
+        .model_registry
+        .shards_for_node(&me)
+        .into_iter()
+        .map(|s| s.model_id)
+        .collect();
+    for model in state.model_registry.models_with_origin_knowledge() {
+        let still_here = held.contains(&model)
+            || holds_part_files(&state.model_dir(&model.0))
+            || state.models.model_download_under_way(&model)
+            || state
+                .models
+                .shards_needing_repair
+                .iter()
+                .any(|s| s.model_id == model)
+            || state
+                .models
+                .shards_pending_verification
+                .iter()
+                .any(|s| s.model_id == model);
+        if still_here {
+            continue;
+        }
+        state.forget_origin_verified_for_model(&model);
+        tracing::info!(
+            model = %model,
+            "DIAG: forgot the origin hashes of a copy this node no longer holds — they protected no part, and kept the swarm's manifest of the model out"
+        );
+    }
+}
+
+/// The models this node keeps a directory of under `models/`, by the id
+/// `SharedState::model_dir` names that directory for.
+fn models_kept_on_disk(state: &SharedState) -> Vec<ModelId> {
+    let root = state.config.node.data_dir.join("models");
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| e.file_name().to_str().map(|n| ModelId(n.to_string())))
+        .filter(|id| !crate::model::manifest::is_backup_artifact_id(&id.0))
+        .filter(|id| state.model_dir(&id.0) == root.join(&id.0))
+        .collect()
+}
+
+/// Models this node holds a part of or keeps files of, plus models it may
+/// acquire — pinned by its owner or trusted for auto-manage. Ordered, so
+/// passes are repeatable.
+///
+/// "Keeps files of" is every directory under `models/`, parts or not: a copy's
+/// manifest there is registered again at every start, so it is this node's
+/// description of the model and must describe the swarm's upload. A
+/// metadata-only directory was never judged, and Proxmox's had described
+/// another build since at least 2026-09-04 (FUTURE_WORK #270).
 fn models_to_settle(state: &SharedState) -> Vec<ModelId> {
     let me = state.identity.node_id().clone();
     let mut models: Vec<ModelId> = state
@@ -350,6 +428,7 @@ fn models_to_settle(state: &SharedState) -> Vec<ModelId> {
         .filter(|s| s.index != crate::types::MMPROJ_SHARD_INDEX)
         .map(|s| s.model_id)
         .collect();
+    models.extend(models_kept_on_disk(state));
     let known: Vec<ModelId> = state
         .models
         .hf_sources
@@ -579,7 +658,12 @@ async fn settle(
         set_holding(state, model, Holding::Nothing);
         note_verdict(state, model, "holds no part of it");
         checked.forget(model);
-        if manifest.as_ref().is_some_and(|m| build.describes(m)) {
+        // The manifest a metadata-only directory keeps counts too: it is
+        // registered again at the next start (FUTURE_WORK #270).
+        let on_disk = crate::types::ModelManifest::load_from_dir(&model_dir).ok();
+        if manifest.as_ref().is_some_and(|m| build.describes(m))
+            && on_disk.as_ref().is_none_or(|m| build.describes(m))
+        {
             // Nothing held and nothing to register: the header `verify_upload`
             // staged has no further use. `register_for_fetching` clears it when
             // it runs; on this branch it never did, and four staged headers
@@ -1904,6 +1988,122 @@ mod tests {
         assert!(
             owner_serves_own_file(&dir),
             "nothing beside the marker to judge — an unplugged drive is not a reason to fetch the model"
+        );
+    }
+
+    fn origin_hash_rows(state: &SharedState, model: &ModelId) -> usize {
+        state
+            .db
+            .iter_raw(crate::model::registry::ORIGIN_VERIFIED_TREE)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(k, _)| serde_json::from_slice::<ShardId>(&k).ok())
+            .filter(|s| &s.model_id == model)
+            .count()
+    }
+
+    fn shard(model: &ModelId, index: u32) -> ShardId {
+        ShardId {
+            model_id: model.clone(),
+            index,
+        }
+    }
+
+    /// FUTURE_WORK #270, as seen on the Proxmox node: a node keeps the manifest
+    /// of another build, upheld by origin hashes of parts it no longer holds,
+    /// and refuses the swarm's manifest — for ever, since nothing it holds
+    /// brings the copy repair to the model. The pass forgets those hashes, and
+    /// the swarm's manifest is taken.
+    #[test]
+    fn origin_hashes_of_parts_no_longer_held_stop_refusing_the_swarms_manifest() {
+        use crate::model::auto_manage::test_support::{
+            make_test_manager, register_manifest_with_sized_shards,
+        };
+        let (state, _manager) = make_test_manager();
+        let id = register_manifest_with_sized_shards(&state, "x-q4-k-m", 4, &[(0, 4)], 1_000);
+        state.record_origin_verified_hash(shard(&id, 0), [7; 32]);
+        let mut swarms = state.model_registry.get_manifest(&id).unwrap();
+        swarms.total_size_bytes = 1_608;
+        swarms.shards[0].size_bytes = 1_608;
+        swarms.shards[0].hash = [9; 32];
+
+        state.model_registry.register_manifest(swarms.clone());
+        assert_eq!(
+            state
+                .model_registry
+                .get_manifest(&id)
+                .unwrap()
+                .total_size_bytes,
+            1_000,
+            "the reproduction: the stale build refuses the swarm's while its origin hashes stand"
+        );
+
+        forget_origin_hashes_of_copies_gone_from_here(&state);
+        assert_eq!(origin_hash_rows(&state, &id), 0, "forgotten on disk too");
+        state.model_registry.register_manifest(swarms);
+        assert_eq!(
+            state
+                .model_registry
+                .get_manifest(&id)
+                .unwrap()
+                .total_size_bytes,
+            1_608,
+            "nothing held here any more argues with the swarm's upload"
+        );
+    }
+
+    /// The hashes stay wherever they still protect something: a part on disk,
+    /// a part this node is recorded holding, a download under way, a part
+    /// queued for repair or verification.
+    #[test]
+    fn origin_hashes_stay_while_any_part_of_the_copy_is_here_or_on_its_way() {
+        use crate::model::auto_manage::test_support::{
+            make_test_manager, register_manifest_with_sized_shards, write_sparse_shards,
+        };
+        let (state, _manager) = make_test_manager();
+        let me = state.identity.node_id().clone();
+        let mut ids = Vec::new();
+        for name in ["on-disk", "recorded", "repairing", "verifying", "gone"] {
+            let id = register_manifest_with_sized_shards(&state, name, 4, &[(0, 2), (2, 4)], 10);
+            state.record_origin_verified_hash(shard(&id, 1), [7; 32]);
+            ids.push(id);
+        }
+        write_sparse_shards(&state, &ids[0], [0], 10);
+        state
+            .model_registry
+            .record_shard_holder(shard(&ids[1], 0), me);
+        state.models.shards_needing_repair.insert(shard(&ids[2], 1));
+        state
+            .models
+            .shards_pending_verification
+            .insert(shard(&ids[3], 0));
+
+        forget_origin_hashes_of_copies_gone_from_here(&state);
+        for id in &ids[..4] {
+            assert_eq!(origin_hash_rows(&state, id), 1, "{} keeps its hash", id.0);
+        }
+        assert_eq!(origin_hash_rows(&state, &ids[4]), 0);
+        assert_eq!(
+            state.model_registry.models_with_origin_knowledge(),
+            ids[..4].to_vec(),
+            "in name order"
+        );
+    }
+
+    /// A directory under `models/` is judged whether or not it holds a part:
+    /// its manifest is what the registry is told about the model at the next
+    /// start (FUTURE_WORK #270).
+    #[test]
+    fn a_metadata_only_directory_is_judged_by_the_copy_repair() {
+        let (state, _manager) = crate::model::auto_manage::test_support::make_test_manager();
+        let models = state.config.node.data_dir.join("models");
+        std::fs::create_dir_all(models.join("meta-only")).unwrap();
+        std::fs::create_dir_all(models.join("meta-only.FULLBACKUP")).unwrap();
+        std::fs::write(models.join("stray-file"), b"x").unwrap();
+        assert_eq!(
+            models_to_settle(&state),
+            vec![ModelId("meta-only".into())],
+            "the directory, and not a backup copy's or a file"
         );
     }
 }

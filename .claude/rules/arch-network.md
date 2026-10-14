@@ -87,6 +87,8 @@ The 100-entry `emit_activity` ring is the dashboard replay and the report's rece
 
 **A node with no origin to ask is healed by the holders that checked theirs (#160):** `ShardAnnounce::origin_checked_models` says which copies the sender's heal compared with the upload THIS run — only `Holding::Canonical` (`note_canonical_holding` → `set_model_origin_checked`), never a copy settled by peers; `HolderRecord::checked` changes only on the holder's own announcement. Offline mode or no HuggingFace → `settle_by_checked_holders`: a part goes only when `CHECKED_QUORUM` (2) CONNECTED checked holders agree and none holds ours, fetched against the full hash their tag names (`heard_part_hashes`, recorded before any merge). Where HuggingFace answers, checked holders' disagreement is a dispute the UPLOAD settles. A `source_path` exempts parts only while its file exists.
 
+**An origin hash ends with the bytes it vouched for (2026-10-14, #270):** the heal forgets the origin hashes of a model with no part here and none on its way (`forget_origin_hashes_of_copies_gone_from_here`) — kept, they made `register_manifest` refuse the swarm's manifest for a copy long pruned — and judges every directory under `models/`, metadata-only ones and their DISK manifest included (`models_kept_on_disk`). Never make the refusal itself ask about held parts: origin hashes load before any manifest so a held copy is protected while the node boots (#384).
+
 → `docs/invariants/network.md` § "One upload per model id, on every node"
 
 ## ACK-Timeout Fast-Fail for rr Sends

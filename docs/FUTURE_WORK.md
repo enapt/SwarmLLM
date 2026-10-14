@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #270**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #271**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2189,6 +2189,19 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-14, unreleased** (#270)
+- #270 — **a computer that once held another upload of a model no longer refuses the swarm's
+  copy of it.** Found checking the swarm after v0.3.237: the Proxmox node refused all four
+  holders of qwen2.5-coder-7b-instruct-q4-k-m as "a different build" — it held NO part of the
+  model, only another upload's manifest on disk since at least 2026-09-04, and kept it because
+  `register_manifest` refuses a different build while the node has any origin hash of the model;
+  prune and delete take the parts and leave those hashes, and the copy repair visited only models
+  a node holds a part of or may fetch. The holders were right (part 3 rebuilt from HuggingFace by
+  its tensor table: identical). Now each copy-repair pass forgets the origin hashes of a model
+  with no part here and none on its way, and judges every directory under `models/` — a
+  metadata-only one's manifest on disk included, replaced by the upload's when it is another's
+  (`docs/invariants/network.md` § "One upload per model id", gotcha #846).
 
 **Closed 2026-10-14, released in v0.3.237 (2026-10-14 03:01 UTC)** (#266, #267)
 - #267 — **the node no longer opens a new dashboard tab every time it restarts.** With
