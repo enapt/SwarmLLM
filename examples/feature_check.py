@@ -106,7 +106,7 @@ def check_core(base, a):
 
 
 ADMIN_GETS = [
-    "/api/admin/stats", "/api/admin/diagnostics", "/api/admin/peers", "/api/admin/models",
+    "/api/admin/stats", "/api/admin/peers", "/api/admin/models",
     "/api/admin/network-map", "/api/admin/performance", "/api/admin/swarm/capacity",
     "/api/admin/shard-storage", "/api/admin/storage/breakdown", "/api/admin/downloads",
     "/api/admin/wishlist", "/api/admin/credits", "/api/admin/credits/transactions",
