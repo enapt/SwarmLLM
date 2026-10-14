@@ -202,6 +202,124 @@ plan into an error. And when a struct's own field documentation describes a
 generality — "THIS segment, not the whole model" — check what its callers
 actually pass.
 
+## A split leaves room for the model that guesses for it (2026-10-14, #275)
+
+### What it replaced
+
+The drafter of speculation across computers (`pipeline::engine_drafter`, a
+model this node holds whole) was chosen by size alone and asked for memory
+only at its spawn, as a guest that takes what stands free (`Tenancy::Guest`).
+The planner had already given this node's memory to the target's layers. On a
+node with no card holding Qwen3-30B-A3B shards 0-9 beside a peer holding
+10-19, the plan put 28 layers here (6,967 of a 7,995 MB budget), and Qwen3-1.7B
+(2,899 MB: 1,743 of weights, 896 of cache at 4,096 positions) was refused on
+every request — "DSD: the drafter failed", `proposed=0` — so every reply went
+unguessed, with a refusal in the log each time. A card build put the layers on
+the card, the drafter fitted beside them, and the same split ran twice as fast
+(#273), which is why it showed only without a card.
+
+### Measured (`share.sh`, 2026-10-14, processor-only build of `0c0d0723`, live node stopped, safety kit)
+
+Qwen3-30B-A3B Q2_K split between this node and a peer with an RTX 3060 in
+Australia (~330 ms), three prompts per arm, each arm on a freshly started node,
+in the order H Q X X Q H, replies identical in every arm:
+
+| Arm | Here | Drafter | tok/s (wall, incl. prompt) |
+|---|---|---|---|
+| H | shards 0-9 (28 layers) | refused for memory | 2.79 2.68 2.75 · 2.78 2.77 2.99 |
+| Q | shards 0-4 | beside them: α 0.85-0.88, γ 6-7, 76-85 ms a guess | 6.32 4.51 4.88 · 5.51 3.98 5.82 |
+| X | shards 0-4 | forced off (`SWARMLLM_FAULT_DRAFT_FAIL=1`) | 2.47 2.66 2.78 · 2.45 2.67 2.71 |
+
+X ≈ H: the smaller share here is worth nothing by itself; the room it leaves is
+worth ~1.9×. Without the X arm the gain would have been credited to moving
+layers onto the peer's card.
+
+### The rule
+
+Two halves.
+
+1. **The drafter is chosen only if it would load now**
+   (`ModelProcessPool::guest_would_be_admitted`, asked by
+   `engine_drafter::engine_drafter_for`): the guest's own way through
+   `get_or_spawn_once`, charging nothing, with the same arithmetic
+   (`card_verdict` / `ram_verdict`, which `admit_to_gpu` / `admit_to_cpu` now
+   call) and placement (`guest_charges_ram`). One that would not gives way to a
+   smaller sibling, or to none. A/B `SWARMLLM_DRAFTER_ADMISSION=0`.
+2. **Where this node cannot hold every layer, each planner first plans with
+   room left for the drafter** (`PipelineScheduler::candidates_leaving_room_for_the_drafter`
+   → `ModelProcessPool::max_hostable_layers_beside_guest`): this node's bound
+   cut to the most layers after whose load the drafter's admission still says
+   yes — against `DRAFTER_REQUESTER`'s cap, the one its spawn uses. It is
+   tried ONLY where every peer is held to what it offers: parallax's first
+   rung (`CapacityBound::Everyone`) and greedy's strict pass
+   (`greedy_assign_beside`). No route that way and each plans exactly as
+   before. A/B `SWARMLLM_DRAFTER_ROOM=0`.
+
+**Why only there, measured the hard way** (`room.sh`, 2026-10-14, the live
+swarm, live node stopped). The first version tried the cut where it is now and
+on a run of six arms it never fired — the Australian peer then offered too
+little for any strict plan, every split came from greedy's relaxed pass, and
+all arms ran 2.5-3.3 tok/s alike. Taking that for the cut being too timid, a
+second version tried it on every rung and pass that bounds THIS node, the cut
+holding its bound through greedy's relaxed pass. Its first plan came from
+`PeersAtCeiling`: 14 layers here, 34 on the peer, which offered fewer than 20.
+The peer refused (`gpu-kv-budget-exhausted`, no room for the conversation's
+cache), the re-plan — that peer barred — found no route, and **the reply was
+lost** where the uncut plan would have answered at 2.7 tok/s. A relaxed rung
+holds a peer to what it could EVER hold, not what it offers now; the gamble is
+taken because there is otherwise no plan (§ "The relaxation is scoped to the
+figures that are actually unreliable": a figure "must never make a routable
+request fail"). The cut always has another plan, so it may spend only what is
+offered. Later in that run the peer offered enough (the cut fired at
+`Everyone`, which holds peers to their offers): 6.94 / 4.10 / 5.09 tok/s with the drafter beside 14 layers (α
+0.85-0.89, 85 of 102 guesses kept on the first), against 2.45-2.69 for the
+same arm earlier, uncut.
+
+**Two plan shapes for one model is what the cut adds — and that exposed a gap.**
+After a cut plan the peer holds [14..48); an uncut plan (the cut switched off, or
+not possible that request) asks it for [28..48), which its exact-key worker
+would load as 20 new layers. Every such request was refused (`room.sh` runs 2
+and 3: the `SWARMLLM_DRAFTER_ROOM=0` arms never answered). Fixed where the plan
+is made, not by avoiding the second shape: a rung with no route is retried with
+the parts that meet held ranges, so the held [14..48) is planned — § "Room for
+more layers is not room for the layers already held", the peer half. Live (run
+4, the arm that never answered, first): `parallax routed by meeting the ranges a
+machine already holds rung=Everyone segments=[(0, 14), (14, 48)]`, 6.50 / 4.05 /
+5.69 tok/s, the drafter admitted beside the 14 layers; the cut arm after it
+6.55 / 4.01 / 5.75.
+
+The drafter stays a guest — it still never reclaims anything. vLLM's answer to
+the same conflict is to plan draft and target memory together, up front
+(vllm-project/vllm#14067); the planner's local bound is the only up-front plan a
+swarm node has, so that is where the drafter joins it.
+
+### What a change must keep
+
+- The drafter the planner leaves room for is the one the request then
+  chooses: both come from `engine_drafter::chosen`, which differ only in
+  the admission filter.
+- The cut is a first attempt, never a bound the ladder keeps — a drafter is
+  worth layers, not a request — and only within what every peer OFFERS. Never
+  on a rung or pass that relaxes a peer's bound.
+- Not applied where this node runs the whole model (`local_runs_whole_model`),
+  so a cut can never turn a local generation into a split.
+- Residuals: a target worker that already HOLDS the layers keeps them (held
+  layers cost the plan nothing), so the room appears from the next cold load;
+  card plans are not cut (a guest goes to the processor there); a cold start
+  can still choose a drafter that the target's own load then leaves no room for
+  (seen: chosen beside 14 held layers, refused once the plan grew them to 28;
+  the n-gram loop ran from the next request); a swarm whose peers offer too
+  little for any strict plan gets no room, by design.
+- Tests: `whether_a_drafter_would_load_is_asked_without_loading_it` (the probe
+  and the spawn's guest admission agree, beside 6,967 MB and 3,000 MB),
+  `a_loaded_drafter_is_asked_about_its_own_range`,
+  `room_is_left_beside_the_layers_for_their_drafter` (the bound is exactly the
+  most layers the drafter still fits beside; one more is refused) — the first
+  and third red with the mechanisms off ("30 beside the drafter, 30 alone");
+  `the_drafters_room_is_only_taken_from_what_the_peers_offer` (offered 40, the
+  room is left; offered 5, the relaxed pass plans exactly as uncut — red on the
+  every-rung version, 10 layers here against 48).
+
 ## Room for more layers is not room for the layers already held (2026-09-24, #95)
 
 **`NodeCandidate::held_ranges` + `layers_it_would_add` — the local node is
@@ -331,8 +449,27 @@ and `a_residency_entry_with_or_without_ranges_reads_as_it_was_sent` (types crate
 request 2's per-candidate line read the peer as `held_ranges=[(12, 22)]
 new_layer_room=Some(22)` — published by its worker, gossiped, read by the
 planner; request 1, before anything was loaded, read `[]` / `None`.
-⚠ **Not yet exercised on a split whose plan MOVES between requests** — the rig's
-disjoint shards leave the planner no choice; that needs overlapping holdings.
+**Exercised on a split whose plan MOVES between requests (2026-10-14, #275's
+rig) — and it failed with partial ranges off, the shipped default.** This node
+held layers 0-28 with room for 39; the Australian peer held [14..48) loaded
+(planned by a request that left room for a drafter) with room for 5 new layers.
+A plan that kept 28 layers here asked the peer for [28..48): 20 NEW layers by its
+exact-key worker, refused — for eleven minutes, every request, until the peer let
+the range go. The held endpoints WERE split points, but with partial ranges off a
+candidate is cut at split points only when it cannot take its whole range, so
+this node (room to spare) was only ever its whole (0, 28) and the peer's held
+range could not be reached. The #99 test above passes `partial_ranges = true`,
+which is why it never showed. **Fix: `parallax::route_shortest_path` retries a
+rung that found NO route with `route_over(.., meet_held = true)`** — each
+candidate also offered the parts of its range ending or beginning at a held
+endpoint, and its own held ranges — so 0..14 here + the peer's own [14..48) is
+planned. Only on no route, so no route that exists today is re-cut (partial
+ranges stay off for the hop-pricing reason in `parallax_partial_ranges`'s doc).
+Tests `a_held_range_is_reachable_from_a_neighbour_with_room` (control: no route
+without the retry) and `a_route_that_exists_is_not_recut_at_a_held_range`
+(control: offered unconditionally, the vertices DO re-cut a slow node's whole
+route). Live: see `room.sh`'s confirm runs in § "A split leaves room for the
+model that guesses for it".
 
 **From the rules file (moved 2026-10-02):**
 

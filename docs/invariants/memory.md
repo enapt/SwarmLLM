@@ -1906,6 +1906,13 @@ one run read as "not loaded" and lose only the overlap.
   `a_superseded_draft_leaves_the_worker_for_the_call_that_superseded_it`, red without the check.
 - Residual: a guest placed on the processor stays there until it is unloaded
   idle, even if the card frees up; promoting it would mean taking memory.
+- **A guest is asked before it is chosen, and a split leaves it room**
+  (2026-10-14, #275): `guest_would_be_admitted` walks this ladder charging
+  nothing, and the planner cuts this node's layers to what leaves the drafter
+  room (`max_hostable_layers_beside_guest`). Subordinate still — the room is
+  made by the PLAN, never by a reclaim. Evidence and measurements:
+  `docs/invariants/scheduling.md` § "A split leaves room for the model that
+  guesses for it".
 
 **From the rules file (moved 2026-10-02):**
 

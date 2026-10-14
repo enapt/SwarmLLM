@@ -1463,21 +1463,18 @@ tree attention masks in the worker — absorbs the old survey's Tier 2D); the pi
 pass (Phase 3) is #171. The same-model-at-fewer-bits drafter is decided against as a default
 (#144, § "Decided").
 
-#### #275 — A drafter is chosen before anyone asks whether memory admits it
-`P3` · perf-split · **OPEN** — 2026-10-14 · history: #273 (closed)
+#### #275 — A drafter's room is sized for 4,096 positions and judged before the target's load
+`P3` · perf-split · **PARTIAL** — 2026-10-14 · history: § Closed 2026-10-14 (#275's first half)
 
-`engine_drafter::engine_drafter_for` picks the largest held sibling; whether its worker fits is
-learned only at spawn (`ModelProcessPool::get_or_spawn_once`), on EVERY request. Seen on the
-#273 check, run with a processor-only build: this node held 28 layers of Qwen3-30B-A3B in RAM
-(6967 of a 7995 MB budget) and Qwen3-1.7B Q8_0 needs ~2899 MB, so each request logged "DSD: the
-drafter failed" and decoded without guesses — 2.44-2.50 tok/s against the n-gram loop's
-2.37-2.40, so no loss, and none of the gain: ~353 of each token's ~390 ms is the trip to the
-peer, which guessing exists to share. A card build put those layers on the card, the drafter fit,
-and the same split ran twice as fast (#273) — so this bites a processor-only node, or one whose
-memory a segment has filled. Next: ask admission before choosing (a
-side-effect-free estimate beside `admit_to_cpu` / `admit_to_gpu`), fall to the next candidate
-or the n-gram loop, and admit a drafter's cache at the conversation's length, not 4,096
-tokens (896 of the 2899 MB).
+Shipped: the drafter is asked before it is chosen, and a split leaves it room where the peers
+offer enough (`docs/invariants/scheduling.md` § "A split leaves room for the model that guesses
+for it"). Left: (1) a drafter's cache is admitted at 4,096 positions whatever the conversation —
+896 of Qwen3-1.7B's 2,899 MB — so the room asked for is larger than a short reply needs; size it
+at the conversation's length (the target's own `admit_prompt` does). (2) On a cold start the
+drafter is judged beside the layers loaded SO FAR: seen choosing it beside 14 held layers,
+then refused once the plan grew them to 28 (one reply unguessed, the n-gram loop from the next).
+(3) A target worker already holding more layers keeps them; the room appears from its next cold
+load. (4) Card plans are not cut (a guest goes to the processor there).
 
 #### #145 — One reply uses one row of a ring pass that could carry dozens
 `P3` · perf-split · **OPEN** — 2026-09-28 · history: archive row #145; plan: `docs/plans/wan_parallel.md`
@@ -2247,7 +2244,24 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-14, unreleased** (#273, #274; #137's 8-thread half)
+**Closed 2026-10-14, unreleased** (#273, #274; #137's 8-thread half; #275's first half)
+- #275 (first half) — **a split of a big model guesses ahead on a node without a graphics card,
+  where the peers offer room.** The drafter was chosen by size and asked for memory only at its
+  spawn, after the planner had given this node's memory to the target's layers: 28 layers of
+  Qwen3-30B-A3B here (6,967 of 7,995 MB) left Qwen3-1.7B (2,899 MB) refused on every request.
+  Now (a) a drafter that would not load is not chosen (`guest_would_be_admitted`), so the n-gram
+  loop runs instead — 2.75-3.07 tok/s against 2.51-2.83 for the refused drafter; (b) each
+  planner first tries a plan with this node's bound cut to leave the drafter room
+  (`candidates_leaving_room_for_the_drafter`), ONLY where every peer is held to what it offers.
+  Live split with an Australian card peer: 2.45-2.69 tok/s uncut → 4.10-6.94 with the drafter
+  beside 14 layers (α 0.85-0.89); `share.sh`'s control arm (fewer layers, guessing off) shows the
+  smaller share alone is worth nothing. Tried on relaxed rungs too, the cut handed the peer 34
+  layers it had not offered, the peer refused and a reply was lost — so it never runs there
+  (gotcha #852). The residual stays open as #275. Found verifying it: **a range a peer already
+  holds could not be reached by a neighbour with room** (partial ranges off, the default), so a
+  plan that moved between requests — the peer holding [14..48), this node asking [28..48) — was
+  refused for eleven minutes until the peer let the range go; a rung with no route is now retried
+  with the parts that meet held ranges (`parallax::route_over(.., meet_held)`).
 - #137 (8-thread half) — **processor decode no longer slows down from 4 threads to 8.** Each
   small parallel region of a token (RoPE, attention, the small projections) paid a wake per rayon
   worker, because upstream rayon puts an idle worker to sleep within microseconds; the vendored

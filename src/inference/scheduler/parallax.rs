@@ -695,6 +695,67 @@ pub(super) fn route_shortest_path(
     // model exactly as it stood before prefill was priced.
     prompt_tokens: Option<u32>,
 ) -> Result<Vec<PipelineSegment>, SwarmError> {
+    let routed = route_over(
+        num_layers,
+        candidates,
+        local_node_id,
+        encrypted_pipeline,
+        partial_ranges,
+        capacity,
+        prompt_tokens,
+        false,
+    );
+    // **A range a machine already holds must be reachable by its neighbours,
+    // not only by the machine itself.** Held-range endpoints are split points
+    // (below), but with partial ranges off a candidate is cut at them only when
+    // it cannot take its whole range — so a neighbour with room never gets the
+    // prefix that MEETS a peer's held range. Measured (#275, 2026-10-14): this
+    // node holding layers 0-28 with room for 39, a peer holding [14..48) loaded,
+    // and the peer's worker keys ranges exactly, so [28..48) would be 20 NEW
+    // layers it had no room for. The plan 0..14 here + the peer's own [14..48)
+    // costs it nothing new and was inexpressible: every request was refused for
+    // eleven minutes until the peer let the range go.
+    //
+    // Only where the search found NO route, so every route that exists today is
+    // exactly what it was: partial ranges stay off for the hop-pricing reason
+    // `config.inference.parallax_partial_ranges` gives, and these vertices are
+    // offered only when the alternative is no plan.
+    if routed.is_err() && !partial_ranges && candidates.iter().any(|c| !c.held_ranges.is_empty()) {
+        if let Ok(segments) = route_over(
+            num_layers,
+            candidates,
+            local_node_id,
+            encrypted_pipeline,
+            partial_ranges,
+            capacity,
+            prompt_tokens,
+            true,
+        ) {
+            tracing::info!(
+                rung = ?capacity,
+                segments = ?segments.iter().map(|s| s.layer_range).collect::<Vec<_>>(),
+                "DIAG: parallax routed by meeting the ranges a machine already holds"
+            );
+            return Ok(segments);
+        }
+    }
+    routed
+}
+
+/// [`route_shortest_path`]'s search. `meet_held`: also offer each candidate
+/// the parts of its range that end or begin where some machine's held range
+/// does (and its own held ranges), with partial ranges off.
+#[allow(clippy::too_many_arguments)]
+fn route_over(
+    num_layers: u32,
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+    encrypted_pipeline: bool,
+    partial_ranges: bool,
+    capacity: CapacityBound,
+    prompt_tokens: Option<u32>,
+    meet_held: bool,
+) -> Result<Vec<PipelineSegment>, SwarmError> {
     if num_layers == 0 {
         return Err(SwarmError::PipelineError("num_layers=0".into()));
     }
@@ -755,15 +816,15 @@ pub(super) fn route_shortest_path(
     // split that answered one request could not be planned for the next
     // (FUTURE_WORK #95 here, #99 on a peer). Empty for any peer that
     // published nothing.
-    for c in candidates {
-        for h in &c.held_ranges {
-            for p in [h.range.0, h.range.1] {
-                if p > 0 && p < num_layers {
-                    split_points.push(p);
-                }
-            }
-        }
-    }
+    let mut held_points: Vec<u32> = candidates
+        .iter()
+        .flat_map(|c| c.held_ranges.iter())
+        .flat_map(|h| [h.range.0, h.range.1])
+        .filter(|&p| p > 0 && p < num_layers)
+        .collect();
+    held_points.sort_unstable();
+    held_points.dedup();
+    split_points.extend_from_slice(&held_points);
     split_points.sort_unstable();
     split_points.dedup();
 
@@ -933,6 +994,18 @@ pub(super) fn route_shortest_path(
         // to a node that can only take 20 of them costs a round trip and a
         // refusal.
         if !split_enabled && !over_capacity {
+            if meet_held {
+                for &p in held_points.iter().filter(|&&p| lo < p && p < hi) {
+                    push((lo, p));
+                    push((p, hi));
+                }
+                for h in &c.held_ranges {
+                    let range = (h.range.0, h.range.1.min(num_layers));
+                    if lo <= range.0 && range.1 <= hi && range.0 < range.1 && range != (lo, hi) {
+                        push(range);
+                    }
+                }
+            }
             continue;
         }
         // Partial use of a range. Without these a candidate could only ever
@@ -3729,6 +3802,103 @@ mod tests {
     /// 20 layers of which every one is new — a load it refuses. Holding the
     /// ranges it published, the only shape it can take in full is the one it
     /// already holds.
+    /// **A neighbour with room is offered the part of its range that MEETS a
+    /// peer's held range** (#275's rig, 2026-10-14). This node holds layers
+    /// 0-28 with room for 39; a peer holds [14..48) loaded with room for 5 new
+    /// layers, so [28..48) — 20 new, its worker keys ranges exactly — is
+    /// refused. With partial ranges off this node was only ever its whole
+    /// (0, 28), the held [14..48) was unreachable, and every request was
+    /// refused until the peer let the range go.
+    #[test]
+    fn a_held_range_is_reachable_from_a_neighbour_with_room() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![(0, 28)], 0, 0.0, true, false, 6.0);
+        me.node_id = local.clone();
+        me.max_hostable_layers = Some(39);
+        me.max_hostable_layers_at_face_value = Some(39);
+        let mut peer = cand(2, vec![(14, 48)], 300, 0.0, false, true, 45.0);
+        peer.max_hostable_layers = Some(39);
+        peer.max_hostable_layers_at_face_value = Some(39);
+        peer.held_ranges = vec![held((14, 48), 0)];
+        peer.published_room = Some(crate::inference::scheduler::PublishedRoom {
+            new_layers: Some(5),
+            new_layers_at_face_value: Some(5),
+            reused_share: 0.0,
+        });
+        let both = [me, peer];
+        let search = |meet_held: bool| {
+            route_over(
+                48,
+                &both,
+                &local,
+                false,
+                false,
+                CapacityBound::Everyone,
+                None,
+                meet_held,
+            )
+        };
+
+        // THE CONTROL: the declared vertices alone have no route.
+        assert!(search(false).is_err(), "{:?}", search(false));
+
+        let segs = route_shortest_path(
+            48,
+            &both,
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("the held range is reachable");
+        let ranges: Vec<_> = segs
+            .iter()
+            .map(|s| (s.node_id.0[0], s.layer_range))
+            .collect();
+        assert_eq!(ranges, vec![(1, (0, 14)), (2, (14, 48))]);
+    }
+
+    /// The held-range vertices are offered only where there is otherwise no
+    /// route: a whole route that exists is never re-cut at a peer's held range,
+    /// even where the cut would price cheaper (a slow node, a fast near peer) —
+    /// partial ranges stay off for a hop-pricing reason this does not revisit.
+    #[test]
+    fn a_route_that_exists_is_not_recut_at_a_held_range() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![(0, 48)], 0, 0.0, true, true, 0.5);
+        me.node_id = local.clone();
+        let mut peer = cand(2, vec![(14, 48)], 5, 0.0, false, true, 60.0);
+        peer.held_ranges = vec![held((14, 48), 0)];
+        let both = [me, peer];
+        let segs = route_shortest_path(
+            48,
+            &both,
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("routable whole");
+        assert_eq!(segs.len(), 1, "{segs:?}");
+        assert_eq!(segs[0].layer_range, (0, 48));
+
+        // THE CONTROL: offered unconditionally, the same vertices re-cut it.
+        let recut = route_over(
+            48,
+            &both,
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            None,
+            true,
+        )
+        .expect("routable");
+        assert!(recut.len() > 1, "the control must split: {recut:?}");
+    }
+
     #[test]
     fn a_peer_is_planned_the_range_it_holds_not_one_of_the_same_length() {
         let local = NodeId([1u8; 32]);

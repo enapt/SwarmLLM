@@ -253,6 +253,11 @@ This node holds the whole model and runs it on its processor: <reason>
          faster-looking chain includes a peer whose speed is unknown)
 DIAG: parallax routing unavailable — this node holds the whole model, so it runs here
         err= cheapest_peer= cheapest_peer_cost_ms=
+DIAG: parallax routed by meeting the ranges a machine already holds
+        rung= segments=   (a rung with no route, retried with each candidate also
+         offered the parts of its range that meet a held range — #275's rig: a
+         peer holding [14..48) loaded, this node holding 0-28; without it a peer
+         that keys ranges exactly refuses [28..48) until it lets the range go)
 ```
 
 **`cheapest_peer_cost_ms` is the line to read first** when a local answer took
@@ -585,7 +590,18 @@ the target's vocabulary within a quarter of its size (a mixture-of-experts targe
 counts ALL its experts since 2026-10-14 — before, Qwen3-30B-A3B sized below a dense
 3B and never had a drafter). Of copies of one model (fp16 / Q8_0 / Q4_K_M), the one
 reading the fewest bytes a guess drafts: the example above is the fp16 that name
-order used to pick, at 119.5 ms a guess on the processor.
+order used to pick, at 119.5 ms a guess on the processor. Since 2026-10-14 (#275) a
+drafter this node's memory would not load NOW is not chosen either (debug: `this
+node's memory has no room for the drafter now`), and a split whose layers here
+would leave it no room is planned with fewer layers here first — info: `Planned with
+room left beside this node's layers for the model that guesses ahead for them`
+(`rung=Everyone`, or a `(greedy)` suffix for greedy's strict pass — the cut is tried
+only where every peer is held to what it offers). No such line on a split with a
+drafter-less reply means the cut found no route within the peers' offers, or was never
+made — the debug `Leaving room beside this node's layers for the drafter` says it was;
+`no greedy route fits the peers' advertised memory` beside it says no strict plan
+existed at all, so no room could be left. `SWARMLLM_DRAFTER_ROOM=0` plans without the room, `SWARMLLM_DRAFTER_ADMISSION=0`
+chooses without asking; both together are the behaviour before.
 
 ```bash
 # The guesser was refused the card and runs on the processor — by design, it

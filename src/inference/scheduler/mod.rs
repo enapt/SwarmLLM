@@ -2055,6 +2055,23 @@ fn local_can_hold_every_layer(
                 .is_none_or(|k| k >= local_cand.layers_it_would_add((0, num_layers))))
 }
 
+/// `SWARMLLM_DRAFTER_ROOM=0` plans without leaving room for the drafter
+/// (`PipelineScheduler::candidates_leaving_room_for_the_drafter`) — the plan
+/// before #275, for an A/B inside one binary. Read once.
+/// `candidates` with the one at `local` (this node) allowed `room` new layers —
+/// the cut [`PipelineScheduler::candidates_leaving_room_for_the_drafter`]
+/// makes, built in one place so its tests plan with the cut it ships.
+fn leaving_room_here(candidates: &[NodeCandidate], local: usize, room: u32) -> Vec<NodeCandidate> {
+    let mut cut = candidates.to_vec();
+    cut[local].max_hostable_layers = Some(room);
+    cut
+}
+
+fn drafter_room_planned() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_DRAFTER_ROOM").map_or(true, |v| v.trim() != "0"))
+}
+
 /// How many layers a delegated peer actually RUNS, given the shape the caller
 /// will build.
 ///
@@ -3091,6 +3108,19 @@ impl PipelineScheduler {
             .shared_state
             .route_plan_override(request_id)
             .is_some_and(|o| o.lead_here);
+        // A plan this node takes part in is a split from here on, so each
+        // planner first holds this node to room that leaves its drafter room
+        // to load (#275); with no route that way it plans as it always has.
+        let beside_drafter = if local_runs_whole_model {
+            None
+        } else {
+            self.candidates_leaving_room_for_the_drafter(
+                model_id,
+                local_node_id,
+                request_id,
+                &candidates,
+            )
+        };
         let raw_segments = if self.shared_state.config.inference.parallax_routing {
             // Encryption forces the first and last segments onto this node,
             // so an encrypted distributed pipeline is multi-segment by
@@ -3127,16 +3157,41 @@ impl PipelineScheduler {
             // will use — so dropping it never rescued a request, it only moved
             // the refusal from here, where the plan can still change, to
             // `admit_to_cpu`, where it cannot (report #025).
-            let route_with = |capacity| {
-                parallax::route_shortest_path(
-                    num_layers,
-                    &candidates,
-                    local_node_id,
-                    encrypted,
-                    partial,
-                    capacity,
-                    prompt_tokens,
-                )
+            //
+            // On the first rung, #275's cut is tried first: every node held to
+            // what it offers, this one to the room that leaves its drafter
+            // beside its layers. No route that way, and the rung runs exactly
+            // as before. Never on a later rung: the cut moves layers onto
+            // peers, and a rung that relaxes their bound is a gamble taken
+            // because there is no other plan — tried at `PeersAtCeiling` on the
+            // live swarm, a peer handed 34 layers where it offered fewer than
+            // 20 refused, and the reply was lost.
+            let route_with = |capacity: parallax::CapacityBound| {
+                let route = |c: &[NodeCandidate]| {
+                    parallax::route_shortest_path(
+                        num_layers,
+                        c,
+                        local_node_id,
+                        encrypted,
+                        partial,
+                        capacity,
+                        prompt_tokens,
+                    )
+                };
+                if let Some(Ok(segs)) = beside_drafter
+                    .as_deref()
+                    .filter(|_| matches!(capacity, parallax::CapacityBound::Everyone))
+                    .map(route)
+                {
+                    route_info!(purpose,
+                        model = %model_id,
+                        rung = ?capacity,
+                        "Planned with room left beside this node's layers for the model \
+                         that guesses ahead for them"
+                    );
+                    return Ok(segs);
+                }
+                route(&candidates)
             };
             let routed = match route_with(parallax::CapacityBound::Everyone) {
                 Ok(segs) => Ok(segs),
@@ -3438,7 +3493,8 @@ impl PipelineScheduler {
                         err = %e,
                         "DIAG: parallax routing unavailable — falling back to greedy"
                     );
-                    self.greedy_assign(
+                    self.greedy_assign_beside(
+                        beside_drafter.as_deref(),
                         num_layers,
                         &candidates,
                         prompt_tokens,
@@ -3449,7 +3505,8 @@ impl PipelineScheduler {
                 }
             }
         } else {
-            self.greedy_assign(
+            self.greedy_assign_beside(
+                beside_drafter.as_deref(),
                 num_layers,
                 &candidates,
                 prompt_tokens,
@@ -4742,6 +4799,75 @@ impl PipelineScheduler {
             + prompt_per_layer
     }
 
+    /// `candidates` with this node's room for new layers cut to what leaves
+    /// room beside them for the drafter that will guess for them
+    /// (`ModelProcessPool::max_hostable_layers_beside_guest`), for a plan that
+    /// is a split from here on (#275). `None` when no cut is called for:
+    /// speculation across computers is off, no held model can draft for this
+    /// one, this node is not a candidate, its room already leaves enough, or
+    /// nothing of the model fits beside the drafter — or with
+    /// `SWARMLLM_DRAFTER_ROOM=0`, an A/B inside one binary.
+    ///
+    /// A cut, never a bound every rung keeps: each planner tries it first on
+    /// every rung or pass that holds this node to its bound and, finding no
+    /// route, runs that rung as before — a drafter is worth layers, not a
+    /// request. Only at the strictest, it never fired on the live swarm: a
+    /// peer advertising less than it serves leaves every split to greedy's
+    /// relaxed pass, so the cut carries `memory_refused_this_request` there.
+    /// Measured with a node holding no card, a
+    /// Qwen3-30B-A3B split ran 2.68-2.99 tok/s with 28 layers here and no room
+    /// for Qwen3-1.7B, 3.98-6.32 with fewer layers and the drafter beside them,
+    /// and 2.45-2.78 with fewer layers alone (2026-10-14). The planner prices
+    /// the target only, so the cut is not weighed against what the layers it
+    /// moves cost elsewhere; the γ controller stops guessing where guesses do
+    /// not pay (`dsd_controller::best_gamma_for_check`).
+    fn candidates_leaving_room_for_the_drafter(
+        &self,
+        model_id: &ModelId,
+        local_node_id: &NodeId,
+        request_id: uuid::Uuid,
+        candidates: &[NodeCandidate],
+    ) -> Option<Vec<NodeCandidate>> {
+        if !drafter_room_planned()
+            || !self
+                .shared_state
+                .cfg()
+                .inference
+                .decentralized_spec_decoding
+        {
+            return None;
+        }
+        let local = candidates
+            .iter()
+            .position(|c| c.node_id == *local_node_id)?;
+        let drafter =
+            crate::inference::pipeline::drafter_to_leave_room_for(&self.shared_state, model_id)?;
+        let requester = crate::inference::pipeline::requester_for_override(
+            self.shared_state.route_plan_override(request_id).as_ref(),
+        );
+        let room = self
+            .shared_state
+            .model_process_pool
+            .max_hostable_layers_beside_guest(
+                model_id,
+                requester,
+                &drafter.model_id,
+                drafter.layer_range,
+            )?;
+        let now = candidates[local].max_hostable_layers;
+        if room == 0 || now.is_some_and(|k| k <= room) {
+            return None;
+        }
+        tracing::debug!(
+            model = %model_id,
+            drafter = %drafter.model_id,
+            room_for = room,
+            room_without_it = ?now,
+            "Leaving room beside this node's layers for the drafter"
+        );
+        Some(leaving_room_here(candidates, local, room))
+    }
+
     /// Greedy layer assignment: cover all layers 0..num_layers using sorted candidates.
     ///
     /// Starting from layer 0, find the best candidate that covers at least
@@ -4811,6 +4937,53 @@ impl PipelineScheduler {
                 )
             }
         }
+    }
+
+    /// [`Self::greedy_assign`], first with every node held to its bound under
+    /// [`Self::candidates_leaving_room_for_the_drafter`]'s cut (`beside_drafter`).
+    /// That strict pass only: the cut moves layers onto peers, so it may spend
+    /// only what they OFFER. The relaxed pass holds a peer to what it could
+    /// ever hold — a gamble taken because there is no other plan, and the cut
+    /// always has one. Tried there on the live swarm (#275), it handed a peer
+    /// 34 layers where it offered fewer than 20; the peer refused for its
+    /// conversation memory and the re-plan, that peer barred, lost the reply.
+    #[allow(clippy::too_many_arguments)]
+    fn greedy_assign_beside(
+        &self,
+        beside_drafter: Option<&[NodeCandidate]>,
+        num_layers: u32,
+        candidates: &[NodeCandidate],
+        prompt_tokens: Option<u32>,
+        encrypted_pipeline: bool,
+        lead_here: bool,
+        purpose: Purpose,
+    ) -> Result<Vec<PipelineSegment>, SwarmError> {
+        if let Some(Ok(segments)) = beside_drafter.map(|cut| {
+            self.greedy_assign_inner(
+                num_layers,
+                cut,
+                prompt_tokens,
+                encrypted_pipeline,
+                lead_here,
+                true,
+            )
+        }) {
+            route_info!(
+                purpose,
+                num_layers,
+                "Planned with room left beside this node's layers for the model that \
+                 guesses ahead for them (greedy)"
+            );
+            return Ok(segments);
+        }
+        self.greedy_assign(
+            num_layers,
+            candidates,
+            prompt_tokens,
+            encrypted_pipeline,
+            lead_here,
+            purpose,
+        )
     }
 
     fn greedy_assign_inner(

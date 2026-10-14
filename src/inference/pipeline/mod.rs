@@ -9,6 +9,7 @@ pub(crate) mod distributed;
 mod dsd;
 mod dsd_stream;
 mod engine_drafter;
+pub(crate) use engine_drafter::drafter_to_leave_room_for;
 mod local;
 pub(crate) use local::LoadAllowance;
 mod local_generate;

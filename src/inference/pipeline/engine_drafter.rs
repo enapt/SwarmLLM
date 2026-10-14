@@ -195,12 +195,33 @@ fn spec_for(state: &SharedState, target: &ModelId, drafter: ModelId) -> Option<D
 /// set, else the LARGEST model held whole here that can draft for it
 /// ([`spec_for`]) and is at most a quarter of its size ([`size_proxy`]) — the
 /// best guesser that is still cheap, since across a network the round trip,
-/// not the guessing, is what a round mostly costs. `None` when there is none:
+/// not the guessing, is what a round mostly costs. Either way only one this
+/// node's memory would load now ([`admitted`]). `None` when there is none:
 /// speculation across computers then drafts with llama.cpp where that is
 /// configured, or not at all.
 pub(crate) fn engine_drafter_for(state: &SharedState, target: &ModelId) -> Option<DrafterSpec> {
+    chosen(state, target, |s| admitted(state, target, s))
+}
+
+/// The drafter [`engine_drafter_for`] would choose for `target` were there room
+/// for it — what the planner leaves room for beside this node's layers of
+/// `target` (`scheduler`, #275), so the request then finds it admitted.
+pub(crate) fn drafter_to_leave_room_for(
+    state: &SharedState,
+    target: &ModelId,
+) -> Option<DrafterSpec> {
+    chosen(state, target, |_| true)
+}
+
+/// The one choice behind both: the named drafter, else the largest that can
+/// draft, of those `keep` accepts.
+fn chosen(
+    state: &SharedState,
+    target: &ModelId,
+    keep: impl Fn(&DrafterSpec) -> bool,
+) -> Option<DrafterSpec> {
     if let Some(named) = state.cfg().inference.draft_model.clone() {
-        return spec_for(state, target, ModelId(named));
+        return spec_for(state, target, ModelId(named)).filter(&keep);
     }
     let target_size = size_proxy(state, target)?.size;
     // Collected first: `spec_for` reads the same map, and a read nested inside
@@ -217,7 +238,45 @@ pub(crate) fn engine_drafter_for(state: &SharedState, target: &ModelId) -> Optio
         .into_iter()
         .filter_map(|m| size_proxy(state, &m).map(|size| (size, m)))
         .collect();
-    largest_that_can_draft(target_size, sized, |m| spec_for(state, target, m))
+    largest_that_can_draft(target_size, sized, |m| {
+        spec_for(state, target, m).filter(&keep)
+    })
+}
+
+/// Would the drafter's worker load NOW (`ModelProcessPool::guest_would_be_admitted`)?
+/// Asked before the choice, so a drafter the node has no memory for gives way
+/// to a smaller one, or to none (#275). Measured on a node without a graphics
+/// card holding 28 layers of Qwen3-30B-A3B (6,967 of a 7,995 MB budget): Qwen3-1.7B
+/// was chosen on every request, refused at its spawn (2,899 MB), and each reply
+/// went unguessed after a refusal in the log. On a cold start the target's own
+/// layers are not loaded yet, so this can admit a drafter their load then
+/// leaves no room for — that request goes unguessed as before, and the next is
+/// asked with them loaded.
+fn admitted(state: &SharedState, target: &ModelId, spec: &DrafterSpec) -> bool {
+    if !drafter_admission_asked() {
+        return true;
+    }
+    let fits = state
+        .model_process_pool
+        .guest_would_be_admitted(&spec.model_id, spec.layer_range);
+    if !fits {
+        tracing::debug!(
+            target_model = %target,
+            drafter = %spec.model_id,
+            "this node's memory has no room for the drafter now — not choosing it"
+        );
+    }
+    fits
+}
+
+/// `SWARMLLM_DRAFTER_ADMISSION=0` chooses a drafter without asking whether it
+/// would load ([`admitted`]) — the behaviour before #275, for an A/B inside one
+/// binary. Read once.
+fn drafter_admission_asked() -> bool {
+    static ASK: OnceLock<bool> = OnceLock::new();
+    *ASK.get_or_init(|| {
+        std::env::var("SWARMLLM_DRAFTER_ADMISSION").map_or(true, |v| v.trim() != "0")
+    })
 }
 
 /// Of `candidates`, the largest no bigger than a [`DRAFTER_MAX_FRACTION`] of

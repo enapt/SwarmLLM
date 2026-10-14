@@ -2443,6 +2443,29 @@ enum Tenancy {
     Guest,
 }
 
+/// Whose memory cap a drafter's load is weighed against
+/// ([`ModelProcessPool::draft`], [`ModelProcessPool::guest_would_be_admitted`]):
+/// the swarm's, whoever's reply it guesses for — a guest takes only what
+/// stands free, and the owner's larger cap (#266) is kept for the models the
+/// owner asks for.
+const DRAFTER_REQUESTER: Requester = Requester::Swarm;
+
+/// What an admission's arithmetic says of one estimate, before anything is
+/// charged ([`ModelProcessPool::card_verdict`], [`ModelProcessPool::ram_verdict`]).
+#[derive(Debug, Clone, Copy)]
+enum Verdict<B> {
+    /// No budget to weigh against, or nothing to weigh: admitted unjudged.
+    Unjudged,
+    Fits {
+        budget: B,
+        committed: u64,
+    },
+    Refused {
+        budget: B,
+        committed: u64,
+    },
+}
+
 /// Whose request a [`ModelProcessPool::generate`] — or a forward of a segment
 /// of it, [`ModelProcessPool::forward_for_request`] — serves, which decides
 /// how many cores may read its prompt (`cpu_pools::in_phase_pool`).
@@ -3947,55 +3970,71 @@ impl ModelProcessPool {
     /// rather than a `CUDA_ERROR_OUT_OF_MEMORY` that kills the worker and (until
     /// the pin became recoverable) cost the model its GPU for the whole run.
     fn admit_to_gpu(&self, model_id: &ModelId, estimated_mb: u64) -> bool {
-        let budget = self.vram_budget_now();
-        if budget == 0 || estimated_mb == 0 {
-            // No budget configured, or nothing to weigh: preserve the previous
-            // behaviour rather than inventing a limit.
-            add_reserved(&self.vram_reserved_mb, model_id, estimated_mb);
-            return true;
-        }
-        let committed = self.vram_committed_mb();
-        if committed.saturating_add(estimated_mb) <= budget {
-            // Record what we believed BEFORE the worker allocates anything.
-            //
-            // Admission only ever logged when it refused, so a model that was
-            // admitted and then died with CUDA_ERROR_OUT_OF_MEMORY left no trace
-            // of what this gate had expected it to cost. That is precisely the
-            // case that needs explaining, and without this line it cannot be
-            // told apart from the outside: an estimate that was too low, a
-            // budget already spent by a model still being evicted, and a
-            // genuinely unbounded allocation all look identical in the logs.
-            // Compare `estimated_mb` here against the worker's own
-            // `vram_after_load_mb` — a large gap is an under-estimate, a close
-            // match with an OOM anyway points at the eviction timing instead.
-            tracing::info!(
-                model = %model_id,
-                estimated_mb,
-                committed_mb = committed,
-                budget_mb = budget,
-                headroom_mb = budget.saturating_sub(committed.saturating_add(estimated_mb)),
-                "DIAG: admitting model to GPU"
-            );
-            add_reserved(&self.vram_reserved_mb, model_id, estimated_mb);
-            return true;
-        }
-        // Deliberately DEBUG, and deliberately silent about what happens next.
-        // This used to be a WARN asserting "loading it on the CPU instead" — and
-        // once `free_vram_for_admission` was added that became a statement the
-        // very next line could falsify. Verified on this machine 2026-08-25: the
-        // line was logged, an idle model was reclaimed 0.3 ms later, and the
-        // model loaded on the GPU. An operator reading the log would have
-        // concluded the opposite of what happened. A refusal here is one step in
-        // a decision, not the decision; the outcome is announced by the caller,
-        // where it is known.
-        tracing::debug!(
+        let (budget, committed) = match self.card_verdict(estimated_mb) {
+            Verdict::Unjudged => {
+                add_reserved(&self.vram_reserved_mb, model_id, estimated_mb);
+                return true;
+            }
+            Verdict::Fits { budget, committed } => (budget, committed),
+            Verdict::Refused { budget, committed } => {
+                // Deliberately DEBUG, and deliberately silent about what happens next.
+                // This used to be a WARN asserting "loading it on the CPU instead" — and
+                // once `free_vram_for_admission` was added that became a statement the
+                // very next line could falsify. Verified on this machine 2026-08-25: the
+                // line was logged, an idle model was reclaimed 0.3 ms later, and the
+                // model loaded on the GPU. An operator reading the log would have
+                // concluded the opposite of what happened. A refusal here is one step in
+                // a decision, not the decision; the outcome is announced by the caller,
+                // where it is known.
+                tracing::debug!(
+                    model = %model_id,
+                    estimated_mb,
+                    committed_mb = committed,
+                    budget_mb = budget,
+                    "DIAG: GPU admission refused — not enough budget at this moment"
+                );
+                return false;
+            }
+        };
+        // Record what we believed BEFORE the worker allocates anything.
+        //
+        // Admission only ever logged when it refused, so a model that was
+        // admitted and then died with CUDA_ERROR_OUT_OF_MEMORY left no trace
+        // of what this gate had expected it to cost. That is precisely the
+        // case that needs explaining, and without this line it cannot be
+        // told apart from the outside: an estimate that was too low, a
+        // budget already spent by a model still being evicted, and a
+        // genuinely unbounded allocation all look identical in the logs.
+        // Compare `estimated_mb` here against the worker's own
+        // `vram_after_load_mb` — a large gap is an under-estimate, a close
+        // match with an OOM anyway points at the eviction timing instead.
+        tracing::info!(
             model = %model_id,
             estimated_mb,
             committed_mb = committed,
             budget_mb = budget,
-            "DIAG: GPU admission refused — not enough budget at this moment"
+            headroom_mb = budget.saturating_sub(committed.saturating_add(estimated_mb)),
+            "DIAG: admitting model to GPU"
         );
-        false
+        add_reserved(&self.vram_reserved_mb, model_id, estimated_mb);
+        true
+    }
+
+    /// [`Self::admit_to_gpu`]'s arithmetic, charging nothing: `estimated_mb`
+    /// against the card's budget as it stands NOW (`vram_budget_now`).
+    /// `Unjudged` with no budget or nothing to weigh — preserve the previous
+    /// behaviour rather than invent a limit.
+    fn card_verdict(&self, estimated_mb: u64) -> Verdict<u64> {
+        let budget = self.vram_budget_now();
+        if budget == 0 || estimated_mb == 0 {
+            return Verdict::Unjudged;
+        }
+        let committed = self.vram_committed_mb();
+        if committed.saturating_add(estimated_mb) <= budget {
+            Verdict::Fits { budget, committed }
+        } else {
+            Verdict::Refused { budget, committed }
+        }
     }
 
     /// Wait for a killed worker to actually be reaped, up to `limit`.
@@ -4435,19 +4474,15 @@ impl ModelProcessPool {
     /// but degrades every other request on the machine, and does so without
     /// anything in the API response explaining why.
     fn admit_to_cpu(&self, model_id: &ModelId, estimated_mb: u64, requester: Requester) -> bool {
-        let Some(budget) = self.ram_budget_now(requester) else {
-            // No budget derivable: preserve the previous behaviour rather than
-            // inventing a limit.
-            add_reserved(&self.ram_reserved_mb, model_id, estimated_mb);
-            return true;
+        let (budget, committed, admitted) = match self.ram_verdict(estimated_mb, requester) {
+            Verdict::Unjudged => {
+                add_reserved(&self.ram_reserved_mb, model_id, estimated_mb);
+                return true;
+            }
+            Verdict::Fits { budget, committed } => (budget, committed, true),
+            Verdict::Refused { budget, committed } => (budget, committed, false),
         };
-        if estimated_mb == 0 {
-            // The model's geometry could not be read: nothing to weigh.
-            add_reserved(&self.ram_reserved_mb, model_id, estimated_mb);
-            return true;
-        }
-        let committed = self.ram_committed_mb();
-        if budget.allows(committed, estimated_mb) {
+        if admitted {
             // Record what the gate believed BEFORE the worker allocates
             // anything — the same reason `admit_to_gpu` logs its admissions,
             // and the CPU side never learned it. A model that was admitted and
@@ -4486,6 +4521,116 @@ impl ModelProcessPool {
              on this machine, not just this one"
         );
         false
+    }
+
+    /// [`Self::admit_to_cpu`]'s arithmetic, charging nothing: `estimated_mb`
+    /// against `requester`'s system-memory budget as it stands NOW.
+    /// `Unjudged` with no budget derivable, or an unreadable geometry (nothing
+    /// to weigh) — preserve the previous behaviour rather than invent a limit.
+    fn ram_verdict(
+        &self,
+        estimated_mb: u64,
+        requester: Requester,
+    ) -> Verdict<crate::model::auto_manage::vram::RamBudget> {
+        let Some(budget) = self.ram_budget_now(requester) else {
+            return Verdict::Unjudged;
+        };
+        if estimated_mb == 0 {
+            return Verdict::Unjudged;
+        }
+        let committed = self.ram_committed_mb();
+        if budget.allows(committed, estimated_mb) {
+            Verdict::Fits { budget, committed }
+        } else {
+            Verdict::Refused { budget, committed }
+        }
+    }
+
+    /// Would [`Self::draft`] be given a worker for `segment` of `model_id` NOW?
+    /// The guest's way through [`Self::get_or_spawn_once`], taking nothing: a
+    /// live worker holding the range; none for another range (a guest does not
+    /// grow one); none inside a spawn's crash-loop backoff; else the card as it
+    /// stands, then system memory as it stands — never a reclaim
+    /// ([`Tenancy::Guest`]), with the same arithmetic ([`Self::card_verdict`],
+    /// [`Self::ram_verdict`]) and the same placement rule ([`charges_ram`]).
+    ///
+    /// Asked by `engine_drafter` BEFORE it chooses a drafter (#275). Learned at
+    /// the spawn instead, a refusal came after the choice: a node whose memory
+    /// a segment of the target had filled chose the drafter that could not
+    /// load on every request and guessed for none of them, where a smaller
+    /// sibling might have fitted, and logged a refusal each time.
+    pub(crate) fn guest_would_be_admitted(&self, model_id: &ModelId, segment: (u32, u32)) -> bool {
+        if let Some(handle) = self.live_worker(model_id) {
+            return handle.segment_is_charged(segment);
+        }
+        if self.spawn_failures.get(model_id).is_some_and(|e| {
+            let (at, count) = *e;
+            at.elapsed() < spawn_failure_cooldown(count)
+        }) {
+            return false;
+        }
+        if !self.guest_charges_ram(model_id, segment) {
+            return true;
+        }
+        !matches!(
+            self.ram_verdict(
+                self.estimate_cpu_footprint_mb(model_id, Some(segment)),
+                DRAFTER_REQUESTER
+            ),
+            Verdict::Refused { .. }
+        )
+    }
+
+    /// Would a guest's spawn of `segment` land in system memory — no card for
+    /// it as the card stands, or none at all? `get_or_spawn_once`'s placement
+    /// for a guest, which is offered neither a reclaim nor a card/processor
+    /// split.
+    fn guest_charges_ram(&self, model_id: &ModelId, segment: (u32, u32)) -> bool {
+        let going_to_cpu = self.cpu_reason(model_id).is_some()
+            || matches!(
+                self.card_verdict(self.estimate_gpu_footprint_mb(model_id, Some(segment))),
+                Verdict::Refused { .. }
+            );
+        charges_ram(
+            going_to_cpu,
+            self.gpu_detected.load(std::sync::atomic::Ordering::Relaxed),
+            cfg!(feature = "candle-cuda"),
+        )
+    }
+
+    /// [`Self::max_hostable_layers_for_planning`] with room left beside the
+    /// layers for `guest`'s `guest_range` — the split drafter (#275) — weighed as
+    /// that guest's own spawn will weigh it ([`Self::guest_would_be_admitted`]):
+    /// in system memory, against [`DRAFTER_REQUESTER`]'s cap, after the layers
+    /// are loaded. `None` when nothing need be left, or this cannot say: the
+    /// layers are planned on the card, the guest is already loaded for its range
+    /// (its memory is charged, and so already counted), it would go to the card,
+    /// or a size or budget cannot be read.
+    ///
+    /// Measured with a node holding no card: 28 layers of Qwen3-30B-A3B left no
+    /// room for Qwen3-1.7B and the split ran 2.68-2.99 tok/s; holding fewer
+    /// layers with the drafter beside them it ran 3.98-6.32, and fewer layers
+    /// alone 2.45-2.78 — the room, not the smaller share, is the gain.
+    pub fn max_hostable_layers_beside_guest(
+        &self,
+        model_id: &ModelId,
+        requester: Requester,
+        guest: &ModelId,
+        guest_range: (u32, u32),
+    ) -> Option<u32> {
+        if self.planning_on_card(model_id)
+            || self
+                .live_worker(guest)
+                .is_some_and(|h| h.segment_is_charged(guest_range))
+            || !self.guest_charges_ram(guest, guest_range)
+        {
+            return None;
+        }
+        let guest_mb = self.estimate_cpu_footprint_mb(guest, Some(guest_range));
+        if guest_mb == 0 {
+            return None;
+        }
+        self.local_layers_leaving(model_id, false, requester, Some(guest_mb))
     }
 
     /// Make room in the RAM budget by unloading models nothing is using.
@@ -5033,6 +5178,20 @@ impl ModelProcessPool {
         on_gpu: bool,
         requester: Requester,
     ) -> Option<u32> {
+        self.local_layers_leaving(model_id, on_gpu, requester, None)
+    }
+
+    /// [`Self::max_local_hostable_layers`], leaving `guest_mb` free in system
+    /// memory for a guest weighed against [`DRAFTER_REQUESTER`]'s cap
+    /// ([`Self::max_hostable_layers_beside_guest`]). A guest is never planned on
+    /// the card, so `on_gpu` ignores it.
+    fn local_layers_leaving(
+        &self,
+        model_id: &ModelId,
+        on_gpu: bool,
+        requester: Requester,
+        guest_mb: Option<u64>,
+    ) -> Option<u32> {
         let (fixed_mb, per_layer_mb) = self.segment_cost_curve(model_id, on_gpu)?;
         // A live worker on this device has already paid the fixed terms, and
         // `charge_additional_segment` charges only the LAYERS of a further
@@ -5063,8 +5222,18 @@ impl ModelProcessPool {
                 .saturating_add(self.idle_vram_reclaimable_mb(model_id))
                 .min(budget)
         } else {
-            let budget = self.ram_budget_now(requester)?;
-            budget.headroom_after(self.ram_committed_mb(), 0)
+            let committed = self.ram_committed_mb();
+            let own = self.ram_budget_now(requester)?.headroom_after(committed, 0);
+            match guest_mb {
+                // The guest is admitted after these layers load, against its
+                // own cap and the headroom they leave (`RamBudget::allows`).
+                Some(mb) => own.min(
+                    self.ram_budget_now(DRAFTER_REQUESTER)?
+                        .headroom_after(committed, 0)
+                        .saturating_sub(mb),
+                ),
+                None => own,
+            }
         };
         // The fixed terms are paid once, whatever the segment's length.
         layers_that_fit(free_mb, fixed_mb, per_layer_mb)
@@ -7080,11 +7249,8 @@ impl ModelProcessPool {
         let model_id = d.model_id.clone();
         let request_id = d.request_id;
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
-        // Weighed against the swarm's memory cap whoever's reply it guesses
-        // for: a guest takes only what stands free, and the owner's larger cap
-        // (#266) is kept for the models the owner asks for.
         let handle = self
-            .get_or_spawn(&model_id, d.layer_range, Tenancy::Guest, Requester::Swarm)
+            .get_or_spawn(&model_id, d.layer_range, Tenancy::Guest, DRAFTER_REQUESTER)
             .await?;
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
         if handle.dead.load(Ordering::Acquire) {
@@ -9134,6 +9300,133 @@ mod tests {
                 .await
         );
         assert!(pool.workers.get(&target).is_none());
+    }
+
+    /// Qwen3-1.7B as `footprint_inputs` reads it: ~1.8 GB of Q8_0 weights, 28
+    /// layers, 8 KV heads of 128.
+    fn qwen3_1_7b() -> crate::model::auto_manage::vram::VramFootprintInputs {
+        crate::model::auto_manage::vram::VramFootprintInputs {
+            quantized_weight_bytes: 1_800 * 1024 * 1024,
+            unquantized_bytes_per_element: None,
+            vocab_size: 151_936,
+            embedding_length: 2048,
+            segment_layers: 28,
+            kv_layers: 28,
+            head_count_kv: 8,
+            head_count: 16,
+            head_dim: 128,
+            rope_dim: 128,
+            effective_context: 4096,
+            is_first: true,
+            embedding_gatherable: true,
+            splits_across_devices: false,
+            attention: crate::inference::layers::KvAttention::Standard,
+        }
+    }
+
+    /// **Whether a drafter would load is asked before it is chosen, and asking
+    /// takes nothing** (#275) — with the answer the spawn's own guest admission
+    /// gives. The live node's case: 28 layers of Qwen3-30B-A3B charged 6,967 of
+    /// a 7,995 MB budget left no room for Qwen3-1.7B, which was chosen anyway on
+    /// every request and refused at its spawn.
+    #[tokio::test]
+    async fn whether_a_drafter_would_load_is_asked_without_loading_it() {
+        let drafter = ModelId("qwen3-1.7b-q8-0".into());
+        let range = (0, 28);
+        for (target_mb, room) in [(6_967, false), (3_000, true)] {
+            let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-guest-ask"));
+            pool.set_ram_budget_mb(7_995);
+            pool.test_footprint_inputs
+                .insert(drafter.clone(), qwen3_1_7b());
+            let wants = pool.estimate_cpu_footprint_mb(&drafter, Some(range));
+            assert!(
+                (7_995 - 6_967) < wants && wants <= 7_995 - 3_000,
+                "the planted drafter fits beside the small target only: {wants} MB"
+            );
+            let target = ModelId("qwen3-30b-a3b".into());
+            admit_and_insert_cpu_worker(&pool, &target, target_mb, false).await;
+
+            assert_eq!(
+                pool.guest_would_be_admitted(&drafter, range),
+                room,
+                "beside {target_mb} MB"
+            );
+            assert_eq!(pool.ram_committed_mb(), target_mb, "asking charged nothing");
+            assert_eq!(
+                pool.admit_to_cpu_as(&drafter, wants, Tenancy::Guest, DRAFTER_REQUESTER)
+                    .await,
+                room,
+                "the spawn's guest admission agrees beside {target_mb} MB"
+            );
+        }
+    }
+
+    /// **The planner leaves room beside a target's layers for their drafter**
+    /// (#275): this node's bound is the most layers after whose load the
+    /// drafter's own admission still says yes, and one layer more is refused.
+    /// A drafter already loaded for its range needs nothing left — its memory
+    /// is charged, so the ordinary bound already counts it.
+    #[tokio::test]
+    async fn room_is_left_beside_the_layers_for_their_drafter() {
+        let target = ModelId("qwen3-30b-a3b".into());
+        let drafter = ModelId("qwen3-1.7b-q8-0".into());
+        let range = (0, 28);
+        let pool_with = |name: &str| {
+            let p = ModelProcessPool::new(std::path::PathBuf::from(name));
+            p.set_ram_budget_mb(7_995);
+            p.test_cost_curve.insert(target.clone(), (300, 249));
+            p.test_footprint_inputs
+                .insert(drafter.clone(), qwen3_1_7b());
+            p
+        };
+        let pool = pool_with("/tmp/swarmllm-beside-guest");
+        let alone = pool
+            .max_hostable_layers_for_planning(&target, Requester::Swarm)
+            .expect("a bound");
+        let beside = pool
+            .max_hostable_layers_beside_guest(&target, Requester::Swarm, &drafter, range)
+            .expect("room is left");
+        assert!(beside < alone, "{beside} beside the drafter, {alone} alone");
+
+        for (layers, admitted) in [(beside, true), (beside + 1, false)] {
+            let p = pool_with("/tmp/swarmllm-beside-guest-load");
+            admit_and_insert_cpu_worker(&p, &target, 300 + 249 * layers as u64, false).await;
+            assert_eq!(
+                p.guest_would_be_admitted(&drafter, range),
+                admitted,
+                "the drafter beside {layers} layers"
+            );
+        }
+
+        let loaded = pool_with("/tmp/swarmllm-beside-guest-loaded");
+        let h = admit_and_insert_cpu_worker(&loaded, &drafter, 2_900, false).await;
+        h.record_charged_segment(range, 0);
+        assert_eq!(
+            loaded.max_hostable_layers_beside_guest(&target, Requester::Swarm, &drafter, range),
+            None
+        );
+    }
+
+    /// A drafter already loaded for its range is the answer whatever memory is
+    /// left; one loaded for another range is not — a guest does not grow it
+    /// (`a_guest_does_not_grow_a_worker_it_finds`) — and neither is a model
+    /// inside its spawn's crash-loop backoff.
+    #[tokio::test]
+    async fn a_loaded_drafter_is_asked_about_its_own_range() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-guest-held"));
+        pool.set_ram_budget_mb(4_000);
+        let drafter = ModelId("qwen3-1.7b-q8-0".into());
+        pool.test_footprint_inputs
+            .insert(drafter.clone(), qwen3_1_7b());
+        let h = admit_and_insert_cpu_worker(&pool, &drafter, 3_900, false).await;
+        h.record_charged_segment((0, 28), 0);
+        assert!(pool.guest_would_be_admitted(&drafter, (0, 28)));
+        assert!(!pool.guest_would_be_admitted(&drafter, (0, 14)));
+
+        let crashed = ModelId("crashing-0.5b".into());
+        pool.spawn_failures
+            .insert(crashed.clone(), (std::time::Instant::now(), 1));
+        assert!(!pool.guest_would_be_admitted(&crashed, (0, 24)));
     }
 
     /// **The machine's memory is reclaimed from a model that holds some.** The

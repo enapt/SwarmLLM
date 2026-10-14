@@ -88,7 +88,7 @@ In `handle_forward` the FIRST piece of a `prompt_span` clears, restores and is a
 
 ## A model loaded for ANOTHER model's request is a guest (2026-09-28)
 
-**`process_pool::Tenancy` is a REQUIRED argument of `get_or_spawn`.** A `Guest` (the drafter, `ModelProcessPool::draft`) takes only memory that stands free: no reclaim, split, promotion, growth or notice. `dsd.rs` reads ahead only once `holds_segment`.
+**`process_pool::Tenancy` is a REQUIRED argument of `get_or_spawn`.** A `Guest` (the drafter, `ModelProcessPool::draft`) takes only memory that stands free: no reclaim, split, promotion, growth or notice. `dsd.rs` reads ahead only once `holds_segment`. Whether a guest WOULD load is asked without loading it — **`ModelProcessPool::guest_would_be_admitted`**, the spawn's own arithmetic (`card_verdict` / `ram_verdict`, shared with `admit_to_gpu` / `admit_to_cpu`) — before the drafter is chosen (#275, `arch-scheduling.md`).
 
 → `docs/invariants/memory.md` § "A model loaded for another model's request is a guest (2026-09-28)"
 

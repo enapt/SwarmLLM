@@ -29,6 +29,12 @@ Admission runs at load time, too late to reshape a plan (#452). **`ModelProcessP
 
 → `docs/invariants/scheduling.md` § "The component that will refuse must be asked while the plan can still change"
 
+## A split leaves room for the model that guesses for it (2026-10-14, #275)
+
+Where this node cannot hold every layer, each planner FIRST plans with its bound cut to leave the drafter room (**`PipelineScheduler::candidates_leaving_room_for_the_drafter`** → `ModelProcessPool::max_hostable_layers_beside_guest`) — ONLY where every peer is held to what it offers (parallax at `CapacityBound::Everyone`, greedy's strict pass in `greedy_assign_beside`). ⚠ Never on a rung or pass that relaxes a PEER's bound: the cut moves layers onto peers, and a relaxation is a gamble justified only by there being no other plan (tried at `PeersAtCeiling` live, the peer refused 34 layers and the reply was lost). No route that way, plan as before. The drafter is chosen only if `guest_would_be_admitted`; planner and request choose through ONE `engine_drafter::chosen`. A/B `SWARMLLM_DRAFTER_ROOM=0`, `SWARMLLM_DRAFTER_ADMISSION=0`.
+
+→ `docs/invariants/scheduling.md` § "A split leaves room for the model that guesses for it"
+
 ## A layer is priced as the model it belongs to (2026-10-12, #250)
 
 **`NodeCandidate::prior_ms_per_layer`** is the one prior from a stated speed (`vertex_cost`, greedy): the 7B-reference layer time × `layer_work`, the model's active bytes per layer over the reference's (`scheduler::layer_work_for` ← `GgufTensorMeta::active_bytes_per_layer`, experts at `expert_used_count / expert_count`). `est_tokens_per_sec` stays in 7B units for ratios and sorts. A/B `SWARMLLM_LAYER_PRICE=reference`. **A measured figure is kept per (peer, model)** (`peer_speed::ModelSpeed`): every pricing or deadline read goes through `SharedState::peer_model_speed`, and a model the peer has not run for us is unmeasured — never scaled from another model's figure. Gossip carries `layer_work` beside the raw figure (`LatencyObservation`).
@@ -49,7 +55,7 @@ Admission runs at load time, too late to reshape a plan (#452). **`ModelProcessP
 
 ## Room for more layers is not room for the layers already held
 
-**`NodeCandidate::held_ranges` + `layers_it_would_add`** charge a local segment only the layers it would ADD (`process_pool::layers_added_by`), never its width. Peers publishing `ResidentModelLayers::ranges` go through `NodeCandidate::capacity_charge`. ⚠ `max_hostable_layers` stays TOTAL for peers.
+**`NodeCandidate::held_ranges` + `layers_it_would_add`** charge a local segment only the layers it would ADD (`process_pool::layers_added_by`), never its width. Peers publishing `ResidentModelLayers::ranges` go through `NodeCandidate::capacity_charge`. ⚠ `max_hostable_layers` stays TOTAL for peers. A held range must be REACHABLE by its neighbours: with partial ranges off, a rung with no route is retried with the parts that meet held endpoints (`parallax::route_over(.., meet_held)`, #275's rig) — only then, so no existing route is re-cut.
 
 → `docs/invariants/scheduling.md` § "Room for more layers is not room for the layers already held (2026-09-24, #95)"
 

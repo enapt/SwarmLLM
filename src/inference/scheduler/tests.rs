@@ -7042,6 +7042,64 @@ fn a_relaxed_greedy_pass_keeps_this_nodes_bound_once_its_memory_refused_the_requ
     );
 }
 
+/// **The drafter's room is taken only from what the peers OFFER** (#275). The
+/// cut moves layers onto peers; a relaxed pass holds a peer to what it could
+/// ever hold, not to what it offers now. Tried there on the live swarm, it gave
+/// an Australian card peer 34 layers where it offered fewer than 20, the peer
+/// refused for its conversation memory, and the re-plan — that peer barred —
+/// found no route: a reply lost for a drafter. The relaxed pass is a gamble
+/// taken because there is no other plan; the cut always has one.
+#[test]
+fn the_drafters_room_is_only_taken_from_what_the_peers_offer() {
+    let state = make_shared_state();
+    let local = state.identity.node_id().clone();
+    let scheduler = PipelineScheduler::new(state);
+    // Both hold the whole 48-layer model; this node has room for 28 more
+    // layers, 10 beside its drafter.
+    let mut here = simple_candidate(1, vec![(0, 48)]);
+    here.node_id = local.clone();
+    here.max_hostable_layers = Some(28);
+    let layers_here = |plan: &[PipelineSegment]| -> u32 {
+        plan.iter()
+            .filter(|s| s.node_id == local)
+            .map(|s| s.layer_range.1 - s.layer_range.0)
+            .sum()
+    };
+    let plan_with_peer_offering = |offered: u32, cut_room: Option<u32>| {
+        let mut peer = simple_candidate(2, vec![(0, 48)]);
+        peer.max_hostable_layers = Some(offered);
+        let uncut = [here.clone(), peer];
+        let cut = cut_room.map(|room| super::leaving_room_here(&uncut, 0, room));
+        scheduler
+            .greedy_assign_beside(
+                cut.as_deref(),
+                48,
+                &uncut,
+                None,
+                false,
+                false,
+                super::Purpose::Route,
+            )
+            .expect("a plan exists")
+    };
+
+    // The peer offers 40: the room is left, within what it offers.
+    let beside = plan_with_peer_offering(40, Some(10));
+    assert_eq!(beside.last().map(|s| s.layer_range.1), Some(48));
+    assert!(layers_here(&beside) <= 10, "{beside:?}");
+
+    // The peer offers 5: no plan fits what anyone offers, so the relaxed pass
+    // runs — and runs exactly as it would with no cut at all.
+    let relaxed = plan_with_peer_offering(5, Some(10));
+    let uncut = plan_with_peer_offering(5, None);
+    assert!(layers_here(&uncut) > 10, "the control: {uncut:?}");
+    assert_eq!(
+        layers_here(&relaxed),
+        layers_here(&uncut),
+        "a relaxed pass must not move layers onto a peer for the drafter: {relaxed:?}"
+    );
+}
+
 /// Two card peers holding every part of a 32-layer model (4 GB, so 125 MB a
 /// layer), neither holding a part here. `b` is FASTER than `c`.
 fn two_whole_model_card_peers() -> (Arc<SharedState>, NodeId, NodeId, NodeId, ModelId) {
