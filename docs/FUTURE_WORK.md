@@ -2206,8 +2206,9 @@ grep `^| N |`).
   03:11:02 on 2026-10-14 the live node took a SIGTERM with v0.3.237 still downloading; the
   download finished inside the shutdown grace, and the node installed it and `exec`ed into it
   at 03:11:05 — so the stop restarted it, and the deploy that had sent the signal found the
-  database held. `install_and_restart` now asks the shutdown signal before installing, after
-  the drain and before the restart; the staged download is reused at the next start
+  database held. `update_restart::restart_into`, now the only way to restart into an update
+  (the automatic install and the dashboard's Apply & Restart), refuses once a stop was asked, and
+  `install_and_restart` also asks before installing; the staged download is reused at the next start
   (`docs/invariants/state-and-config.md` § "A node asked to stop does not restart into its
   update").
 - #272 — **the dashboard asks again about cloud models the node told it to wait on.** A 429 from

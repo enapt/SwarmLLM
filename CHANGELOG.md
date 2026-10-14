@@ -17,8 +17,9 @@ upload was in use within a minute of starting this version.
 an update's download could finish the download in the few seconds it is given to shut down, then
 install the update and restart into it. The stop became a restart, and whatever had stopped the
 node found its database still in use. The node now checks whether it has been asked to stop before
-installing, after current requests finish, and just before restarting. The downloaded update is
-kept, and the next start installs it.
+installing, after current requests finish, and just before restarting, for automatic updates and
+for the dashboard's Apply & Restart alike. The downloaded update is kept, and the next start
+installs it.
 
 **Cloud model status badges fill in after the node asks the page to wait.** The node limits how
 often the dashboard may check whether cloud models are reachable, because each check calls the

@@ -122,7 +122,7 @@ The daemon must write **only values that differ from the compiled default**.
 
 ## A node asked to stop does not restart into its update (2026-10-14, #271)
 
-`update::UpdateChecker::install_and_restart` asks the shutdown watch before installing, after the drain and immediately before `exec_into`: a stop that lands while an update downloads, inside the supervisor's 10 s grace, must not become a restart. Guard `a_node_asked_to_stop_does_not_install_and_restart_into_its_update`.
+**`update_restart::restart_into(state, exe)`** is the only way to restart into an update (`exec_into` is private) and refuses once `SharedState::shutdown` has been asked: a stop that lands while an update downloads, drains or installs — inside the supervisor's 10 s grace too — must not become a restart. Both restart paths (the automatic install, the dashboard's Apply & Restart) go through it; `install_and_restart` also asks before installing and after the drain. Guards `a_node_asked_to_stop_is_not_restarted_into_its_update`, `a_node_asked_to_stop_does_not_install_and_restart_into_its_update`.
 
 → `docs/invariants/state-and-config.md` § "A node asked to stop does not restart into its update"
 

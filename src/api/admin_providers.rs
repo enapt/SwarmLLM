@@ -1153,11 +1153,15 @@ pub async fn apply_update(
     tokio::spawn(async move {
         let idle = crate::update_restart::drain(&shared).await;
         tracing::info!(drained_cleanly = idle, version = %version, "Restarting into applied update");
-        let err = crate::update_restart::exec_into(&binary_path);
-        tracing::error!(
-            error = %err,
-            "Update applied but restarting into it failed — restart this node manually"
-        );
+        // A node asked to stop while this drained stops (`restart_into` says so).
+        if let crate::update_restart::NotRestarted::Failed(err) =
+            crate::update_restart::restart_into(&shared, &binary_path)
+        {
+            tracing::error!(
+                error = %err,
+                "Update applied but restarting into it failed — restart this node manually"
+            );
+        }
     });
 
     Ok(Json(serde_json::json!({

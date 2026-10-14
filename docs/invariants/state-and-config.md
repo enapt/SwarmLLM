@@ -793,14 +793,21 @@ kills it mid-start.
 
 ### What a change must keep
 
-`install_and_restart` asks the shutdown watch at three points — before the
-install is announced, after the drain (which can take minutes) and after the
-binary is applied, immediately before `exec_into`. Nothing awaits between the
-last check and the `exec`. Stopping loses nothing: the staged download is
-reused at the next start (`download_update`), and a binary already applied
-is simply what the next start runs. Guard:
-`a_node_asked_to_stop_does_not_install_and_restart_into_its_update` (fails with
-the checks removed: `["installing", "install_failed"]`).
+The last check sits at the choke point: `update_restart::restart_into` asks
+`SharedState`'s shutdown watch (the one `supervisor.rs` signals) and is the
+only way into `exec_into`, which is private. The first fix put the check in
+`install_and_restart` alone; the pre-release review of v0.3.238 found the
+dashboard's Apply & Restart (`admin_providers.rs`) draining and `exec`ing with
+no check — the "one invariant, N paths" shape, closed by moving the check
+where neither path can skip it. Nothing awaits between that check and the
+`exec`. `install_and_restart` still asks before the install is announced and
+after the drain (which can take minutes), so a stopping node does not install
+either. Stopping loses nothing: the staged download is reused at the next
+start (`download_update`), and a binary already applied is simply what the
+next start runs. Guards: `a_node_asked_to_stop_is_not_restarted_into_its_update`
+(a missing binary, so a missing check shows as `Failed(NotFound)` rather than
+an exec) and `a_node_asked_to_stop_does_not_install_and_restart_into_its_update`
+(fails with the checks removed: `["installing", "install_failed"]`).
 
 ## Single-source-of-truth helpers — SharedState, live config and credits
 

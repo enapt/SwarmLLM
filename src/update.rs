@@ -1258,8 +1258,9 @@ impl UpdateChecker {
     /// over. Each failure therefore logs and returns, leaving the dashboard
     /// banner in place so a human can act.
     ///
-    /// **A node asked to stop stops** — `shutdown` is asked before the install,
-    /// after the drain and before the restart. On 2026-10-14 the live node took
+    /// **A node asked to stop stops** — `shutdown` is asked before the install
+    /// and after the drain, and `update_restart::restart_into` asks it again
+    /// before the restart. On 2026-10-14 the live node took
     /// a SIGTERM while its update was still downloading, finished the download
     /// a second later inside the supervisor's 10 s grace, installed it and
     /// `exec`ed into it: the stop restarted the node, and the deploy that had
@@ -1325,18 +1326,19 @@ impl UpdateChecker {
             );
             return;
         }
-        if stop_asked("after installing") {
-            return;
+        // A stop asked by now is honoured inside `restart_into`, which logs it.
+        if let crate::update_restart::NotRestarted::Failed(err) =
+            crate::update_restart::restart_into(shared, &self.binary_path)
+        {
+            // exec only returns on failure. The binary IS updated at this point,
+            // so the node keeps running the old image until something restarts
+            // it — say so loudly rather than leaving it looking healthy (gotcha
+            // #188).
+            tracing::error!(
+                error = %err,
+                "Update installed but restarting into it failed — restart this node manually"
+            );
         }
-
-        let err = crate::update_restart::exec_into(&self.binary_path);
-        // exec only returns on failure. The binary IS updated at this point, so
-        // the node keeps running the old image until something restarts it —
-        // say so loudly rather than leaving it looking healthy (gotcha #188).
-        tracing::error!(
-            error = %err,
-            "Update installed but restarting into it failed — restart this node manually"
-        );
     }
 
     /// Compare the last recorded install against the running image, and say so

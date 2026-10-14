@@ -279,7 +279,40 @@ fn wait_while(
     }
 }
 
+/// Why [`restart_into`] came back: it returns only when this node did NOT
+/// restart.
+#[derive(Debug)]
+pub enum NotRestarted {
+    /// The node has been asked to stop, and a stop must not become a restart
+    /// (2026-10-14, FUTURE_WORK #271). Whatever was staged or installed is what
+    /// the next start runs.
+    StopAsked,
+    /// The exec (on Windows, the replacement's spawn) failed.
+    Failed(std::io::Error),
+}
+
+/// Restart this node into the updated binary at `exe` — unless it has been
+/// asked to stop, which wins.
+///
+/// The only way into [`exec_into`], so no restart path can skip the check. Two
+/// paths restart into an update: the automatic install and the dashboard's
+/// Apply & Restart. Both wait out in-flight work first, for up to
+/// [`DRAIN_TIMEOUT`], and a stop that lands meanwhile — or in the supervisor's
+/// 10 s shutdown grace after it — used to `exec` anyway: the live node did,
+/// three seconds after a SIGTERM, and the deploy that sent it found the
+/// database held (`exec` keeps the pid, gotcha #277).
+pub fn restart_into(state: &SharedState, exe: &std::path::Path) -> NotRestarted {
+    if *state.shutdown_rx().borrow() {
+        tracing::info!(
+            "Stopping as asked rather than restarting into the update — the next start runs it"
+        );
+        return NotRestarted::StopAsked;
+    }
+    NotRestarted::Failed(exec_into(exe))
+}
+
 /// Replace this process with the binary at `exe`, keeping the original argv.
+/// Reached only through [`restart_into`].
 ///
 /// On Unix this is `execv`: same PID, same parent, same file descriptors, so it
 /// works identically under systemd (no `Restart=` policy involved — the service
@@ -289,7 +322,7 @@ fn wait_while(
 /// deliberately does not restart a clean exit.
 ///
 /// Only returns on failure — success never returns.
-pub fn exec_into(exe: &std::path::Path) -> std::io::Error {
+fn exec_into(exe: &std::path::Path) -> std::io::Error {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     tracing::info!(exe = %exe.display(), "Restarting into the updated binary");
 
@@ -595,6 +628,40 @@ mod tests {
         assert!(
             waited.is_none(),
             "the wait must give up rather than hang a node's startup on a stuck predecessor"
+        );
+    }
+
+    /// A node asked to stop is not restarted into its update, on either path
+    /// that restarts one (#271), and one not asked to stop still is. The binary
+    /// does not exist, so a missing check shows as a failed exec — the test
+    /// process is never replaced.
+    #[tokio::test]
+    async fn a_node_asked_to_stop_is_not_restarted_into_its_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = dir.path().to_path_buf();
+        let db = crate::storage::db::Database::open(dir.path()).unwrap();
+        let executor = Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        let missing = dir.path().join("no-such-swarmllm");
+
+        assert!(
+            matches!(restart_into(&state, &missing), NotRestarted::Failed(_)),
+            "a node not asked to stop must still try to restart into its update"
+        );
+        state.shutdown();
+        let outcome = restart_into(&state, &missing);
+        assert!(
+            matches!(outcome, NotRestarted::StopAsked),
+            "a node asked to stop tried to restart into its update: {outcome:?}"
         );
     }
 
