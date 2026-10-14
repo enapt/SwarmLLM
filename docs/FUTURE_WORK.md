@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #269**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #270**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -40,7 +40,7 @@ after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm 
 v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
 reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
 re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate; #257 closed on 2026-10-13 (under WSL2 a card's saved prompts are kept in host RAM) and #258 opened from its measurement; #138 (1), (1b), (1c) and (1d) shipped on 2026-10-13 (a card/processor split runs a prompt's processor-held experts, then every processor-held projection, then each processor-held layer whole, on the card, copying the next weights while the card computes); #259 and #260 opened and closed the same day from a tester's report (a kept model bigger than the card was refused; a model sent to the processor while another program held the card never moved back), #261 opened from it; #138 (1e) the same day (a split reads a prompt in chunks as large as the card has room for), and #262 opened from its rig (a split's conversation budget charges the processor's caches to the card); #263 opened and closed the same day from a tester's report (a split's local segments refused a long prompt only after the peers had read it, and the retry planned the same split), then #262 (each cache charged to the memory it lives in), and #264 opened from it and closed the same day (a split's processor-held weights are charged to the memory limit), #265 opened from that; #138 (3)'s first stage the same day (a mixture-of-experts layer on the card can keep its experts in RAM, measured from `test-split`: 1.2-1.7x decode at the same card bytes); its second on 2026-10-14 (the daemon chooses it for a mixture-of-experts model that does not fit the card), #266 opened from its rig and closed the same day (the owner's own loads are weighed against the owner's memory cap, not the swarm's); #267 opened and closed the same day (a restart no longer opens a dashboard tab beside the one already reconnecting); #138 (2) the same day (a mixture-of-experts model whole on the card has its decode steps captured as CUDA graphs); #252 (1) the same day (`/v1/models` reports the context this node's memory holds while no other computer could take part).
+#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate; #257 closed on 2026-10-13 (under WSL2 a card's saved prompts are kept in host RAM) and #258 opened from its measurement; #138 (1), (1b), (1c) and (1d) shipped on 2026-10-13 (a card/processor split runs a prompt's processor-held experts, then every processor-held projection, then each processor-held layer whole, on the card, copying the next weights while the card computes); #259 and #260 opened and closed the same day from a tester's report (a kept model bigger than the card was refused; a model sent to the processor while another program held the card never moved back), #261 opened from it; #138 (1e) the same day (a split reads a prompt in chunks as large as the card has room for), and #262 opened from its rig (a split's conversation budget charges the processor's caches to the card); #263 opened and closed the same day from a tester's report (a split's local segments refused a long prompt only after the peers had read it, and the retry planned the same split), then #262 (each cache charged to the memory it lives in), and #264 opened from it and closed the same day (a split's processor-held weights are charged to the memory limit), #265 opened from that; #138 (3)'s first stage the same day (a mixture-of-experts layer on the card can keep its experts in RAM, measured from `test-split`: 1.2-1.7x decode at the same card bytes); its second on 2026-10-14 (the daemon chooses it for a mixture-of-experts model that does not fit the card), #266 opened from its rig and closed the same day (the owner's own loads are weighed against the owner's memory cap, not the swarm's); #267 opened and closed the same day (a restart no longer opens a dashboard tab beside the one already reconnecting); #138 (2) the same day (a mixture-of-experts model whole on the card has its decode steps captured as CUDA graphs); #252 (1) the same day (`/v1/models` reports the context this node's memory holds while no other computer could take part). v0.3.237 (released 2026-10-14 03:01 UTC, the first on the one-script release gate) carries #138 (1)-(1e), (2) and (3)'s two stages, #252 (1), #257, #259, #260, #262-#264, #266, #267 and a fix to memory reclaim (an idle model holding only the card was unloaded to make room in RAM); #268 opened from its dependency audit.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
@@ -95,7 +95,9 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     stage B on 2026-10-14: the daemon chooses it, ~10% faster decode and ~0.4-0.7 GB less of
     the card than the whole-layer split). *(#137 narrowed to P3 on
     2026-10-11: decode ran outside its thread pool on every default node — fixed: a 14B split
-    1.19x, now level with llama.cpp; a 3B processor-only 1.14-1.39x; ~12% behind it remains.)* (`docs/plans/faster_than_local.md`).
+    1.19x, now level with llama.cpp; a 3B processor-only 1.14-1.39x. Re-measured 2026-10-14 on a
+    7B: ~5% behind at 4 threads, ~40% SLOWER at 8 where llama.cpp holds level; repack and huge
+    pages refuted.)* (`docs/plans/faster_than_local.md`).
 12. **#3**, **#180** — the routing cost model charges a constant where the reply length
     belongs, which keeps partial ranges (load spreading) off.
 13. **#171** — the prompt pass through a split runs one stage at a time (released in v0.3.234; left:
@@ -1014,27 +1016,56 @@ on the card, in host RAM, and the prefix cache OFF. So it is not #257's pool gro
 line up with the safety kit's 10 s `nvidia-smi` readings. Next: catch one under nsys and see what the stream waits on (a
 Windows-side poller, a clock change, a WDDM residency move).
 
-#### #137 — Our processor decode trails llama.cpp's by ~12% at the same width, and loses where llama.cpp gains from 8 threads
-`P3` · perf-local · **OPEN, narrowed 2026-10-11** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3
+#### #137 — Our processor decode gets ~40% SLOWER from 4 threads to 8, where llama.cpp's holds level; at 4 it trails by ~5%
+`P3` · perf-local · **OPEN, re-measured 2026-10-14** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3
 
-The old title — a split's processor layers read at ~17 GB/s, a third of the memory — was a
-09-27 figure (28 processor layers, 3.35 tok/s) and no longer holds. Measured 2026-10-11 on the
-Ryzen 7 5800H, Qwen2.5-14B Q4_K_M, live node stopped, 60 s cool-down before each arm, arms
-interleaved (`~/swarmllm-137/`): the default node placed 30 of 48 layers on the card and decoded
-at 5.3-5.4 tok/s against llama.cpp's 6.8-7.0 (`llama-bench -ngl 30 -t 4`, CUDA build of
-`4b1a27f`). That gap was decode running OUTSIDE its thread pool on every default node — fixed
-(§ Closed 2026-10-11): the same node now decodes the split at 6.79-6.93 tok/s, level with
-llama.cpp. What is left, forward-only (`SWARMLLM_PROFILE=1` totals, installed):
-- **Split step**: ours 151-160 ms vs llama.cpp's 143-147 ms (5-10%).
-- **Processor only, 4 threads**: ours ~312 ms vs llama.cpp's 278 ms (3.60 tok/s), ~12%.
-- **At 8 threads llama.cpp gains** (3.97 tok/s, 252 ms) **where we lose**: calibration keeps 4,
-  and forcing 8 cost the split ~10% (4.9-5.0 tok/s). The per-core draw that saturates this
-  box's memory at 4 threads for us does not for llama.cpp — its CPU path repacks Q4_K into
-  interleaved rows (`CPU_REPACK`, Q4_K_8x8); compare one Q4_K matvec there before anything else.
-Not ours, and llama.cpp's too: the card clocks down between steps of a split (255-600 MHz
-between 1755 MHz bursts), and back-to-back runs on this laptop heat it enough to slow a split
-step 133 → 185 ms within 40 tokens (gotcha #825). Neither thread count nor placement is the
-lever: calibration already picks the width, and `SWARMLLM_DECODE_THREADS=8` was slower.
+**Measured 2026-10-14** on the Ryzen 7 5800H (8 cores), Qwen2.5-Coder-7B Q4_K_M, processor
+only — ours `swarmllm test-split --gpu-layers 0 --max-tokens 48` at
+`RAYON_NUM_THREADS = SWARMLLM_DECODE_THREADS = t`, the median `SWARMLLM_PROFILE=1` forward
+total; llama.cpp `llama-bench -ngl 0 -p 0 -n 48` (`4b1a27f`). Live node stopped, safety kit,
+60 s cool-down before each arm, arms interleaved (`~/swarmllm-137/{cpu_threads,thp}.sh`):
+
+| ms a token | 4 threads | 8 threads |
+|---|---|---|
+| ours, v0.3.237 (3 runs) | 124 / 127 / 151 | 172 / 185 / 182 |
+| ours, v0.3.236 (2 runs) | 154 / 159 | 201 / 194 |
+| llama.cpp (median of 5 reps, `-o jsonl`) | 118.8 | 110.4 |
+| llama.cpp (2 runs, CSV mean) | 120 / 119 | 123 / 126 |
+
+- **At 4 threads, the width calibration picks on this box, we trail by ~5%** (124-127 against
+  119). The 151-159 runs are this box's slow regime, not a slower release: one .237 run held
+  151 ms for 40 tokens and then 127 to the end (gotcha #845, `docs/DIAGNOSTICS.md` § Benchmarks).
+- **Going 4 → 8 threads costs us ~40%; llama.cpp moves −7% to +5%.** Calibration keeps 4 here,
+  so this box loses nothing today, but a machine with the memory for more threads would stop
+  scaling with us where it keeps going with llama.cpp — a processor-only user's speed.
+
+**Refuted 2026-10-14 — do not chase again:**
+- **llama.cpp's Q4_K repack** (the 10-11 lead). The 10-11 llama.cpp figures were never
+  repacked: a CUDA build ranks the card's pinned host buffer above the repack buffers even at
+  `-ngl 0` (gotcha #843). With it let through (`--no-host 1`, `CPU_REPACK model buffer size =
+  2976.75 MiB`) llama.cpp ran 117-122 ms at 4 threads (no gain) and 137-144 at 8 (a loss).
+- **Huge pages.** Our weights already sit on transparent huge pages (`AnonHugePages` 4.2-4.6 GB
+  in the measured process; THP is `madvise`). `MIMALLOC_ALLOW_LARGE_OS_PAGES=1` changed nothing
+  at 4 threads (150 / 127 / 129) and was no better at 8 (187 / 193 / 206) (gotcha #844).
+
+**Leads for the 8-thread loss, untested:**
+1. **Every parallel op is a rayon region whose workers may have gone to sleep.** rayon-core
+   1.13 parks a worker after 32 idle rounds (`ROUNDS_UNTIL_SLEEPY`); a token runs several
+   regions a layer × 28 layers, each waking the workers it needs, and 8 workers pay more
+   wake-ups. llama.cpp runs the whole graph in ONE parallel region and syncs its ops with a spin
+   barrier (`ggml_barrier`).
+2. **The one-row matvec splits a small projection coarsely**: the vendored `k_quants.rs` matmul
+   (m == 1) uses `with_min_len(128).with_max_len(512)`, so a 512-row K or V projection gets at
+   most 4 tasks at any width.
+3. **First find which stage grows**: `SWARMLLM_PROFILE=1` at 4 and at 8, stage by stage, in runs
+   of ≥ 256 tokens so both regimes show. Change nothing before that.
+
+History: on 2026-10-11 decode ran OUTSIDE its thread pool on every default node — fixed
+(§ Closed 2026-10-11): a 14B split 5.3 → 6.8-6.9 tok/s, level with llama.cpp; a 3B
+processor-only 1.14-1.39x. That day's 14B processor-only gap (~312 against 278 ms at 4 threads)
+was measured against the never-repacked reference above. Not ours, and llama.cpp's too: the card
+clocks down between steps of a split (255-600 MHz between 1755 MHz bursts), and back-to-back
+runs on this laptop heat it enough to slow a split step 133 → 185 ms within 40 tokens (gotcha #825).
 
 #### #138 — A model that does not fit the card: MoE decode level with llama.cpp since 2026-10-11, a split's prompt read on the card since 2026-10-13, a 512-token forward 1.1-1.3x llama.cpp's
 `P2` · perf-local · **PARTIAL** — 2026-09-27 · history: archive row #138; plan: `docs/plans/faster_than_local.md` § 3.2
@@ -1783,6 +1814,18 @@ to verify. Keep `prometheus.yml` correct for bare-metal Prometheus.
 timeouts) first, keep the inactivity-timeout rule, and re-run each path against real
 endpoints. `candle-*` stays on 0.10 deliberately (§ "Decided").
 
+#### #269 — Every shutdown logs `Worker reader exiting — evicting` as a WARN, which reads like a crash
+`P4` · logging · **OPEN** — 2026-10-14 · history: none (the live node's log scan after v0.3.237)
+
+The live node logged it 24 times in 31 h, every one within 0.5 s of `NetworkManager shutting down` /
+`All subsystems shut down cleanly`, never otherwise: a stop signals the whole group (a terminal
+Ctrl-C, systemd's `KillMode=control-group`, our scripts' `kill` of every `swarmllm` process), the
+worker dies with its daemon, and the reader (`process_pool.rs` `reader_actor`'s `Err(e)` arm) sees
+`early eof` before its handle drops (an unload drops the handle first, which aborts the reader —
+no line). A field report's log excerpt shows it as a worker failure. Next: the reader logs the EOF
+at `debug!` once the daemon's shutdown has begun (a pool flag set where `supervisor::run` starts
+the stop), keeping the WARN for a worker that dies while the node runs — the case it exists for.
+
 ### Security, privacy and credits
 
 Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the build if one
@@ -2145,7 +2188,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-14, ships in the next release** (#266, #267)
+**Closed 2026-10-14, released in v0.3.237 (2026-10-14 03:01 UTC)** (#266, #267)
 - #267 — **the node no longer opens a new dashboard tab every time it restarts.** With
   `ui.open_browser_on_start` (the default) every start opened one: each automatic update, each
   restart by a service manager, each restart by hand — beside the tab that was already open and
@@ -2183,7 +2226,7 @@ grep `^| N |`).
   requester ignored), `the_owners_memory_budget_is_the_machines_whole_job_share_at_any_level`
   (`docs/invariants/memory.md` § "The owner's own load is weighed against the owner's memory cap").
 
-**Closed 2026-10-13, ships in the next release** (#257, #259, #260, #262, #263, #264)
+**Closed 2026-10-13, released in v0.3.237 (2026-10-14 03:01 UTC)** (#257, #259, #260, #262, #263, #264)
 - #264 — **a model split between the graphics card and the processor now counts its processor
   side against this computer's memory limit.** Only the card share was charged; the processor-held
   layers' weights (~5 GB of a 14B split), their conversation memory and the worker process sat

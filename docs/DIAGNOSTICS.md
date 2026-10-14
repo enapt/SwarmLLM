@@ -2176,6 +2176,30 @@ Two things that will otherwise be misread:
 - **The box must be idle.** The same unchanged code path measured 0.42 ms and
   0.97 ms here. A run taken while a build or another bench is going is worthless,
   and it will not look wrong — it will look like a result.
+- **A reference figure is only as good as the reference's configuration** (2026-10-14,
+  FUTURE_WORK #137). `llama-bench` from a CUDA build (`~/llama.cpp-ref/build-cuda`)
+  never repacks CPU weights, even at `-ngl 0`: `make_cpu_buft_list` ranks the card's
+  pinned host buffer above the repack buffers. `--no-host 1` lets the repack through,
+  and its log then shows `CPU_REPACK model buffer size` — check for that line before
+  explaining a gap by the repack. Its CSV carries no per-repetition samples, and its
+  mean hides a rep unlike the others — the first rep after a 60 s cool-down ran ~30%
+  FAST at both widths (81.9 against 118-121 ms a token at 4 threads, 71.0 against
+  110-112 at 8). Use `-o jsonl`, read `samples_ns`, take the median.
+- **This laptop decodes on the processor in two regimes ~20% apart, and can switch
+  mid-run** (2026-10-14, gotcha #845). One 4-thread `test-split` held 151 ms a token
+  for 40 tokens, then 127 to the end; the arm before it ran 124 throughout — same
+  binary, the box at 51-62 °C, so not heat. The cause is undetermined (the safety
+  kit's 10 s telemetry cannot see it). A median of one short run reports whichever
+  regime it fell in: print the per-token `PROF seq_len=1` totals in order, compare
+  arms within one regime, and run long enough to see both.
+- **Read a per-process property from the measured process, during the run.** Huge
+  pages read 0 system-wide between arms while ours held 4.4-4.6 GB of them in the
+  run (`AnonHugePages` in `/proc/<pid>/smaps_rollup`, sampled every 2 s, max kept —
+  `~/swarmllm-137/thp.sh`). The same goes for threads, RSS and cgroup limits.
+- **Two releases are compared as two COPIES**, never by swapping the live node: a
+  node started on an older release updates itself within a minute (.236 → .237,
+  2026-10-14). Run each binary as `test-split` or as a scratch daemon with its own
+  data directory.
 - **min-of-N is for BENCHMARKS, not live measurement** (#367). Controlled
   environment, every error adds time → the minimum is the least contaminated.
   Samples taken from live traffic are different tokens at different cache
