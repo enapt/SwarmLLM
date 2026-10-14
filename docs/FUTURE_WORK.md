@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #268**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #269**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1858,6 +1858,18 @@ delivered count only when the stream was truncated); `router` builds the cost fr
 escrow release clamps only at 0. Cheap bound: clamp to the request's `max_tokens`, prefer the
 coordinator's own prompt-token count, and always take the completion count from tokens the
 coordinator received (`stream.emitted()`). Belongs with credits enforcement.
+
+#### #268 — Two DNS advisories wait on the libp2p 0.57 upgrade
+`P3` · security · **OPEN** — 2026-10-14 (the v0.3.237 gate's `cargo audit`) · history: `SECURITY.md` rows RUSTSEC-2026-0118/0119
+
+`hickory-proto 0.25.2` (an NSEC3 proof loop, an O(n²) name-compression cost) reaches the daemon
+only through `libp2p-dns` (bootstrap multiaddrs at startup) and `libp2p-mdns` (link-local), which
+is why `SECURITY.md` accepts them. libp2p 0.57.0 (2026-09-11) ships `libp2p-dns 0.45` on
+`hickory-resolver ^0.26`, the fixed line. The upgrade is not a version bump: the vendored
+`libp2p-request-response` patch must be re-applied to 0.57's crate, the direct `libp2p-gossipsub`
+pin must move with the facade (two copies otherwise, see CLAUDE.md), and a 0.56 node must still
+talk to a 0.57 one. Next: read 0.57's CHANGELOG for wire changes (gossipsub, identify, yamux),
+then upgrade on a branch and run `split_rig.sh` with one node on each version.
 
 ### Parked — waiting on field data, a reporter, hardware or credentials
 

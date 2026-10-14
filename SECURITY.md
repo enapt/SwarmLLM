@@ -59,8 +59,8 @@ following reasons. Re-evaluate when the upstream ecosystem moves.
 |---|---|---|
 | RUSTSEC-2024-0436 | `paste` (unmaintained) | Transitive via `tokenizers → candle`. Compile-time macro only, not in the runtime trust boundary. |
 | RUSTSEC-2026-0097 | `rand 0.8.x / 0.9.x / 0.10.x` (unsound with custom logger) | Triggered only when a consumer installs a custom `rand` logger. We do not. Cryptographic randomness uses `OsRng`, not `thread_rng()`. |
-| RUSTSEC-2026-0118 | `hickory-proto 0.25.2` (NSEC3 unbounded loop) | Transitive via `libp2p-mdns` and `libp2p-dns`. mDNS path is link-local without DNSSEC; DNS resolver only resolves bootstrap multiaddrs at startup. No upstream fix yet (waiting on `libp2p` to bump `hickory ≥ 0.26`). Re-evaluate on next libp2p release. |
-| RUSTSEC-2026-0119 | `hickory-proto 0.25.2` (O(n²) name-compression CPU exhaustion) | Same dep paths as 0118. Attacker would need to inject DNS responses into the daemon's resolver — link-local mDNS or bootstrap-time only. Fix requires `hickory ≥ 0.26.1`, not yet adopted by libp2p 0.56. |
+| RUSTSEC-2026-0118 | `hickory-proto 0.25.2` (NSEC3 unbounded loop) | Transitive via `libp2p-mdns` and `libp2p-dns`. mDNS path is link-local without DNSSEC; DNS resolver only resolves bootstrap multiaddrs at startup. libp2p 0.57.0 (2026-09-11) moves to `hickory ≥ 0.26`; the upgrade is FUTURE_WORK #268. |
+| RUSTSEC-2026-0119 | `hickory-proto 0.25.2` (O(n²) name-compression CPU exhaustion) | Same dep paths as 0118. Attacker would need to inject DNS responses into the daemon's resolver — link-local mDNS or bootstrap-time only. Fix requires `hickory ≥ 0.26.1`, which libp2p 0.57 allows; the upgrade is FUTURE_WORK #268. |
 
 The auto-update integrity finding **C1** (audit_2026-04-29) — a SHA256
 sidecar fetched from the same GitHub release as the binary — was closed on
