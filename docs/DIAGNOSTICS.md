@@ -581,7 +581,11 @@ far it guessed by the end. **γ settling at 1 on a loopback rig is correct** —
 there a check costs less than a guess; across a real link it settled at 3-7.
 `check_ms_per_position` above 0 means the far computer checks on its processor.
 No line at all: grep `DSD: no drafter available` at debug — no held model shares
-the target's vocabulary within a quarter of its size.
+the target's vocabulary within a quarter of its size (a mixture-of-experts target
+counts ALL its experts since 2026-10-14 — before, Qwen3-30B-A3B sized below a dense
+3B and never had a drafter). Of copies of one model (fp16 / Q8_0 / Q4_K_M), the one
+reading the fewest bytes a guess drafts: the example above is the fp16 that name
+order used to pick, at 119.5 ms a guess on the processor.
 
 ```bash
 # The guesser was refused the card and runs on the processor — by design, it
@@ -1735,6 +1739,8 @@ between copy and product from a `SWARMLLM_PROFILE_SYNC=1` run only (#138 (1d)).
 Under every quantized product on the processor, `SWARMLLM_QMATMUL_ROWS=per-row`
 sends the several-row kernels (Q4_K, Q6_K, Q2_K, Q3_K) through the per-row loop —
 bit-identical replies, so any difference is the kernels' time.
+`SWARMLLM_QMATMUL_TAIL=per-row` turns off only the 2-3 row tail's shared pass — the
+whole call of a speculative check of 1-2 guesses (`--prompt-chunk 2` / `3` prices it).
 
 **Qwen 3.5 shows `delta rule`** — its DeltaNet layers' recurrence, three layers in
 four. One op per layer since 2026-10-11 (processor and card);

@@ -254,7 +254,7 @@ replaced refused most agent prompts outright.
 
 Each names the ONE place a decision is made (`.claude/rules/architecture.md` § "One invariant, N paths"). **Read the topic file before changing one.**
 
-- **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`. Several-row AVX2 kernels for Q4_K, Q6_K, Q2_K, Q3_K, bit-identical to the per-row loop; `k_quants::vec_dot_rows_chosen` is the one call (A/B `SWARMLLM_QMATMUL_ROWS=per-row`).
+- **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`. Several-row AVX2 kernels for Q4_K, Q6_K, Q2_K, Q3_K, bit-identical to the per-row loop; `k_quants::vec_dot_rows_chosen` is the one call (A/B `SWARMLLM_QMATMUL_ROWS=per-row`). A 2-3 row tail — a speculative check's whole call — goes through ONE pass (`avx.rs::tail_in_one_pass`; A/B `SWARMLLM_QMATMUL_TAIL=per-row`). → § "A 2-3 row tail shares one pass too"
 - **`inference::decode_attn::gqa_decode_attention_cpu`** — each K/V row read ONCE per group. → § "It read the cache once per QUERY head"
 - **`inference::prefill_attn::gqa_prefill_attention_cpu`** — `q_len >= 2`.
 - **`inference::fast_math`** — `exp_inplace`, `silu_mul`.

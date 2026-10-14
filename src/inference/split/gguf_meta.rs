@@ -458,6 +458,22 @@ impl GgufTensorMeta {
     /// how many experts a token uses: a guess at the active share could be off
     /// by the whole expert count.
     pub fn active_bytes_per_layer(&self) -> Option<f64> {
+        self.bytes_per_layer(true)
+    }
+
+    /// The weight bytes per layer the model HOLDS — every expert of a
+    /// mixture-of-experts layer, not the share a token is routed to — counted
+    /// over the same tensors as [`Self::active_bytes_per_layer`]. Over it, how
+    /// many times more a model holds than one token reads: 1 for a dense model,
+    /// 8.5 for Qwen3-30B-A3B at Q2_K and 9.6 at Q4_K_M (8 of 128 experts; its
+    /// attention and output projection are read whole). `None` where the active figure
+    /// is, so the two are always read as a pair.
+    pub fn stored_bytes_per_layer(&self) -> Option<f64> {
+        self.active_bytes_per_layer()?;
+        self.bytes_per_layer(false)
+    }
+
+    fn bytes_per_layer(&self, routed_share_only: bool) -> Option<f64> {
         if self.block_count == 0 {
             return None;
         }
@@ -466,7 +482,7 @@ impl GgufTensorMeta {
         for (name, loc) in &self.tensors {
             let size = loc.size as f64;
             if name.starts_with("blk.") {
-                if name.contains("_exps") {
+                if name.contains("_exps") && routed_share_only {
                     if self.expert_count == 0 || self.expert_used_count == 0 {
                         return None;
                     }
@@ -1366,6 +1382,20 @@ mod active_bytes_tests {
         );
         // (100 + 1600/16) × 2 layers + 200 output = 600, over 2 layers.
         assert_eq!(m.active_bytes_per_layer(), Some(300.0));
+        // Held, every expert counts: (100 + 1600) × 2 + 200 = 3600, over 2.
+        assert_eq!(m.stored_bytes_per_layer(), Some(1_800.0));
+    }
+
+    /// A dense model holds exactly what a token reads.
+    #[test]
+    fn a_dense_model_holds_what_a_token_reads() {
+        let m = meta(
+            1,
+            (0, 0),
+            &[("output.weight", 50), ("blk.0.attn_q.weight", 100)],
+        );
+        assert_eq!(m.stored_bytes_per_layer(), m.active_bytes_per_layer());
+        assert_eq!(m.stored_bytes_per_layer(), Some(150.0));
     }
 
     /// A tied model reads its embedding as the output projection every token.
@@ -1389,5 +1419,6 @@ mod active_bytes_tests {
             &[("output.weight", 1), ("blk.0.ffn_up_exps.weight", 1_600)],
         );
         assert_eq!(m.active_bytes_per_layer(), None);
+        assert_eq!(m.stored_bytes_per_layer(), None, "read as a pair");
     }
 }

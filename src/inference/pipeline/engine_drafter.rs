@@ -108,13 +108,55 @@ fn drafter_vocabulary(state: &SharedState, target: &ModelId, drafter: &ModelId) 
     answer
 }
 
+/// What choosing a drafter weighs of a model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DrafterSize {
+    /// How much it knows: [`size_counting_experts`].
+    size: u64,
+    /// What one guess costs: the weight bytes a token reads (`u64::MAX` when the
+    /// header cannot say), so of two copies of one model — an fp16 and a Q8_0
+    /// Qwen2.5-0.5B — the cheaper guesses. Name order chose the fp16 here
+    /// (2026-10-14), the copy that reads the most for the same guesses.
+    reads: u64,
+}
+
 /// A model's size for choosing a drafter: layers × width², the part of its
 /// parameter count that differs between siblings (Qwen2.5-0.5B 19 M against
-/// Qwen2.5-Coder-7B's 360 M; Llama-3.2-1B 67 M against Llama-3.1-8B's 537 M).
-/// Bytes on disk would compare an fp16 small model with a 4-bit large one.
-fn size_proxy(state: &SharedState, model: &ModelId) -> Option<u64> {
+/// Qwen2.5-Coder-7B's 360 M; Llama-3.2-1B 67 M against Llama-3.1-8B's 537 M) —
+/// times, for a mixture-of-experts model, how many times more it holds than a
+/// token reads ([`size_counting_experts`]). Bytes on disk alone would compare an
+/// fp16 small model with a 4-bit large one.
+fn size_proxy(state: &SharedState, model: &ModelId) -> Option<DrafterSize> {
     let meta = state.gguf_meta_for(model)?;
-    Some(meta.block_count as u64 * (meta.embedding_length as u64).pow(2))
+    let geometry = meta.block_count as u64 * (meta.embedding_length as u64).pow(2);
+    let active = meta.active_bytes_per_layer();
+    Some(DrafterSize {
+        size: size_counting_experts(geometry, meta.stored_bytes_per_layer(), active),
+        reads: active.map_or(u64::MAX, |a| (a * meta.block_count as f64) as u64),
+    })
+}
+
+/// `geometry` (layers × width²) scaled by what the model holds over what a
+/// token reads — 1 for a dense model, so a dense model's size is unchanged.
+///
+/// Layers × width² leaves the feed-forward out, which is harmless between dense
+/// siblings and wrong for a mixture of experts: it sized Qwen3-30B-A3B (48 ×
+/// 2048²) at 201 M, below Llama-3.2-3B, so no Qwen3 sibling was ever within a
+/// quarter of it and every split of it guessed with n-grams alone (10-13: 9.8%
+/// of rounds hit; 468 ms a token over a 222 ms link). Scaled by its experts it
+/// is 1.7 G (Q2_K, 8.5× what a token reads) to 1.9 G (Q4_K_M, 9.6×), and
+/// Qwen3-1.7B (117 M) drafts for it. What a check of the target
+/// COSTS is not this figure, and on one machine drafting a model that reads only
+/// ~3B a token can gain nothing (a 0.8B drafter on Qwen3.6-35B-A3B decoded 3-12%
+/// slower on one RTX 3090, hackmd.io/@thc1006/SJly6IE6Wx) — but this drafter
+/// only ever runs for a SPLIT, whose check pays the trip across machines, and
+/// the γ controller measures that and can choose zero guesses
+/// (`dsd_controller::best_gamma_for_check`).
+fn size_counting_experts(geometry: u64, stored: Option<f64>, active: Option<f64>) -> u64 {
+    match (stored, active) {
+        (Some(s), Some(a)) if a > 0.0 && s > a => (geometry as f64 * (s / a)) as u64,
+        _ => geometry,
+    }
 }
 
 /// The largest a drafter may be, as a fraction of its target: past a quarter
@@ -160,7 +202,7 @@ pub(crate) fn engine_drafter_for(state: &SharedState, target: &ModelId) -> Optio
     if let Some(named) = state.cfg().inference.draft_model.clone() {
         return spec_for(state, target, ModelId(named));
     }
-    let target_size = size_proxy(state, target)?;
+    let target_size = size_proxy(state, target)?.size;
     // Collected first: `spec_for` reads the same map, and a read nested inside
     // an iteration of a DashMap can wait on a writer queued between the two.
     let mut held: Vec<ModelId> = state
@@ -171,23 +213,29 @@ pub(crate) fn engine_drafter_for(state: &SharedState, target: &ModelId) -> Optio
         .collect();
     held.sort_by(|a, b| a.0.cmp(&b.0));
     held.dedup();
-    let sized: Vec<(u64, ModelId)> = held
+    let sized: Vec<(DrafterSize, ModelId)> = held
         .into_iter()
         .filter_map(|m| size_proxy(state, &m).map(|size| (size, m)))
         .collect();
     largest_that_can_draft(target_size, sized, |m| spec_for(state, target, m))
 }
 
-/// Of `candidates` (size proxy, model), the largest no bigger than a
-/// [`DRAFTER_MAX_FRACTION`] of `target_size` that `can_draft` accepts. Ties go
-/// to the model id, so the choice does not depend on map order.
+/// Of `candidates`, the largest no bigger than a [`DRAFTER_MAX_FRACTION`] of
+/// `target_size` that `can_draft` accepts. Of two the same size — copies of one
+/// model at different precisions — the one reading fewer bytes a guess; then the
+/// model id, so the choice does not depend on map order.
 fn largest_that_can_draft(
     target_size: u64,
-    mut candidates: Vec<(u64, ModelId)>,
+    mut candidates: Vec<(DrafterSize, ModelId)>,
     mut can_draft: impl FnMut(ModelId) -> Option<DrafterSpec>,
 ) -> Option<DrafterSpec> {
-    candidates.retain(|(size, _)| size.saturating_mul(DRAFTER_MAX_FRACTION) <= target_size);
-    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1 .0.cmp(&b.1 .0)));
+    candidates.retain(|(d, _)| d.size.saturating_mul(DRAFTER_MAX_FRACTION) <= target_size);
+    candidates.sort_by(|a, b| {
+        b.0.size
+            .cmp(&a.0.size)
+            .then_with(|| a.0.reads.cmp(&b.0.reads))
+            .then_with(|| a.1 .0.cmp(&b.1 .0))
+    });
     candidates.into_iter().find_map(|(_, m)| can_draft(m))
 }
 
@@ -572,11 +620,12 @@ mod tests {
     /// — and the 0.5B when the 1.5B cannot draft.
     #[test]
     fn the_largest_drafter_within_a_quarter_that_can_draft_is_chosen() {
+        let sized = |size| DrafterSize { size, reads: 1 };
         let held = || {
             vec![
-                (19, ModelId("q-0.5b".into())),
-                (151, ModelId("q-3b".into())),
-                (66, ModelId("q-1.5b".into())),
+                (sized(19), ModelId("q-0.5b".into())),
+                (sized(151), ModelId("q-3b".into())),
+                (sized(66), ModelId("q-1.5b".into())),
             ]
         };
         let chosen = largest_that_can_draft(360, held(), |m| Some(spec(&m.0)));
@@ -587,6 +636,62 @@ mod tests {
         assert!(
             largest_that_can_draft(40, held(), |m| Some(spec(&m.0))).is_none(),
             "nothing a quarter of a tiny target's size"
+        );
+    }
+
+    /// The live node holds Qwen2.5-0.5B as fp16, Q8_0 and Q4_K_M — one model, one
+    /// size — and name order gave the fp16 (2026-10-14): the same guesses for the
+    /// most bytes read. The copy that reads the fewest drafts.
+    #[test]
+    fn of_two_copies_of_one_model_the_one_reading_fewer_bytes_drafts() {
+        let held = vec![
+            (
+                DrafterSize {
+                    size: 19,
+                    reads: 988_000_000,
+                },
+                ModelId("qwen2.5-0.5b-instruct-fp16".into()),
+            ),
+            (
+                DrafterSize {
+                    size: 19,
+                    reads: 531_000_000,
+                },
+                ModelId("qwen2.5-0.5b-instruct-q8-0".into()),
+            ),
+            (
+                DrafterSize {
+                    size: 19,
+                    reads: u64::MAX,
+                },
+                ModelId("qwen2.5-0.5b-a-no-header".into()),
+            ),
+        ];
+        let chosen = largest_that_can_draft(360, held, |m| Some(spec(&m.0)));
+        assert_eq!(chosen.unwrap().model_id.0, "qwen2.5-0.5b-instruct-q8-0");
+    }
+
+    /// Layers × width² sized Qwen3-30B-A3B at 201 M — under a quarter's reach of
+    /// Qwen3-1.7B's 117 M — so no sibling ever drafted for it (2026-10-13). Its
+    /// experts are counted now; a dense model's size does not move.
+    #[test]
+    fn a_mixture_of_experts_is_sized_with_all_its_experts() {
+        // 48 × 2048², holding 8.5× what a token reads at Q2_K (the live node's
+        // header: 232.3 MB a layer stored, 27.3 MB read).
+        let moe = size_counting_experts(201_326_592, Some(232_300_000.0), Some(27_300_000.0));
+        assert!(
+            117_440_512 * DRAFTER_MAX_FRACTION <= moe,
+            "Qwen3-1.7B can draft: {moe}"
+        );
+        assert_eq!(
+            size_counting_experts(360, Some(5.0), Some(5.0)),
+            360,
+            "dense: unchanged"
+        );
+        assert_eq!(
+            size_counting_experts(360, None, None),
+            360,
+            "unknown: unchanged"
         );
     }
 

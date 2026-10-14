@@ -314,6 +314,52 @@ experts' line is the Q2_K/Q3_K change alone):
 
 Replies identical in every arm.
 
+### A 2-3 row tail shares one pass too — it is a speculative check's whole call (2026-10-14)
+
+The several-row kernels take R = 4 rows a pass and used to hand the 1-3 rows left over to
+the single-row kernel one row each. At a prompt's 128 rows that tail is noise; for a
+speculative check it is the WHOLE call — 1-2 guesses are a 2-3 row matmul — so a check
+shared nothing, and **a forward of 3 positions cost more than one of 4** (257 against
+223 ms, below). On a processor tail each extra position cost ~45-60% of a whole forward,
+and the guess-length controller (`dsd_controller::best_gamma_for_check`) rightly chose
+zero guesses against it (Proxmox, xlam-2-3b: 59 / 86 / 115 ms for 1 / 2 / 3 positions).
+llama.cpp pays the same on x86 (the table) — its Q4_K `vec_dot` takes one row there
+(`ggml-cpu.c` type traits: `nrows = 2` only under `__ARM_FEATURE_MATMUL_INT8`;
+`arch/x86/quants.c` asserts `nrc == 1`) — so this was parity, not a regression, and is now
+a lead.
+
+`avx.rs::tail_in_one_pass` sends a tail of 2 or 3 rows through ONE pass of
+`dot_*_q8k_rows::<2|3>` for all four types; a lone row keeps the single-row kernel. The
+`R`-row kernels are generic in `R` and every row keeps its own accumulators, so the
+result is bit-identical (`multi_row_kernels_are_bit_identical_to_the_per_row_ordering`
+covers m = 2, 3, 5, 7, 130; `examples/qmatmul_bench` asserts m = 2, 3, 6, 7 for all four).
+**A/B inside one binary**: `SWARMLLM_QMATMUL_TAIL=per-row` = the old tail.
+
+**Measured** (Ryzen 7 5800H, 4 threads, live node stopped, safety kit, 0 driver events;
+Qwen2.5-Coder-7B Q4_K_M on the processor, `test-split --prompt-chunk N` over a ~250-token
+prompt, the forward's median over every chunk past the third; llama.cpp `llama-bench -t 4
+-p N -n 0 -d 320`; scratchpad `multipos.sh` then `ab_tail.sh`, ABBA):
+
+| positions | tail in one pass | old tail | llama.cpp |
+|---|---|---|---|
+| 1 | 134-139 ms | (same kernel) | 131-168 ms |
+| 2 | **151-156 ms** | 190-191 ms | 191-206 ms |
+| 3 | **173-177 ms** | 248-257 ms | 260-274 ms |
+| 4 | 223-227 ms | (no tail) | 319-329 ms |
+| 8 | 413-415 ms | (no tail) | 591-659 ms |
+
+An extra position now costs ~20 ms where it cost ~60; replies identical in every arm. **From
+three rows the product is compute-bound**, so the 3 → 4 step (+48 ms) is arithmetic, not a
+tail: the profile's FFN up + gate is 62.5 / 72.6 / 80.5 / 104.7 / 218.6 ms at 1 / 2 / 3 / 4 / 8
+positions — memory-bound at one row, ~26 ms a row from three on (AVX2 `maddubs` + `madd`;
+a VNNI `dpbusd` is the next lever, on processors that have it). Two to three positions are
+where a check is nearly free. In
+process (`qmatmul_bench --rows-only`) the gain over the per-row loop at m = 2 / 3 is 1.20 /
+1.38× (attention Q4_K), 1.32 / 1.47× (FFN up Q4_K), 1.28 / 1.33× (FFN down Q6_K). The
+small Q2_K/Q3_K expert shapes (768 × 2048) are dispatch-bound at m = 2-3 either way
+(0.15 ms a call against 0.04 at m = 1) — a mixture-of-experts check goes through
+`matmul_many` instead.
+
 ## `inference::decode_attn::gqa_decode_attention_cpu`
 
 (2026-08-21 night) — single-

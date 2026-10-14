@@ -215,6 +215,29 @@ pub(crate) fn vec_dot_q6k_q8k(n: usize, xs: &[BlockQ6K], ys: &[BlockQ8K]) -> f32
     }
 }
 
+/// SwarmLLM patch (2026-10-14): do the 2 or 3 rows left after the last full
+/// pass of a several-row kernel go through ONE pass sized to them?
+///
+/// The kernels below take rows four at a time and used to hand the rest to the
+/// single-row kernel, one row each — harmless at a prompt's 128 rows, and the
+/// WHOLE call for a speculative check: 1-2 guesses are a 2-3 row matmul, so
+/// every row redid the column-side unpack the several-row kernel exists to
+/// share. On a processor tail (Proxmox, xlam-2-3b, 20 layers) each extra
+/// position cost ~45% of a one-position forward (59 / 86 / 115 ms for 1 / 2 / 3)
+/// and the guess-length controller rightly chose no guesses at all. The `R`-row
+/// kernels are generic in `R` and every row keeps its own accumulators, so the
+/// pass at R = 2 or 3 is bit-identical to R = 4 and to the per-row loop
+/// (`examples/qmatmul_bench` asserts it). `SWARMLLM_QMATMUL_TAIL=per-row` = the
+/// old tail, the A/B inside one binary. Read once.
+#[inline(always)]
+fn tail_in_one_pass(left: usize) -> bool {
+    static PER_ROW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    (left == 2 || left == 3)
+        && !*PER_ROW.get_or_init(|| {
+            std::env::var("SWARMLLM_QMATMUL_TAIL").is_ok_and(|v| v == "per-row")
+        })
+}
+
 /// SwarmLLM patch: one Q6_K column against `rows` Q8_K rows at once — the
 /// Q6_K sibling of `vec_dot_rows_q4k_q8k`, same contract (bit-identical to the
 /// per-row `vec_dot_q6k_q8k`; only the column-side nibble/high-bit assembly and
@@ -243,6 +266,18 @@ pub(crate) fn vec_dot_rows_q6k_q8k(
             dot_q6k_q8k_rows::<R>(xs, &ys[r0 * kb..(r0 + R) * kb], kb, &mut out[r0..r0 + R]);
         }
         r0 += R;
+    }
+    let left = rows - r0;
+    if tail_in_one_pass(left) {
+        let (ys, out) = (&ys[r0 * kb..rows * kb], &mut out[r0..rows]);
+        unsafe {
+            if left == 3 {
+                dot_q6k_q8k_rows::<3>(xs, ys, kb, out)
+            } else {
+                dot_q6k_q8k_rows::<2>(xs, ys, kb, out)
+            }
+        }
+        return;
     }
     for r in r0..rows {
         out[r] = vec_dot_q6k_q8k(n, xs, &ys[r * kb..(r + 1) * kb]);
@@ -606,6 +641,18 @@ pub(crate) fn vec_dot_rows_q2k_q8k(
         }
         r0 += R;
     }
+    let left = rows - r0;
+    if tail_in_one_pass(left) {
+        let (ys, out) = (&ys[r0 * kb..rows * kb], &mut out[r0..rows]);
+        unsafe {
+            if left == 3 {
+                dot_q2k_q8k_rows::<3>(xs, ys, kb, out)
+            } else {
+                dot_q2k_q8k_rows::<2>(xs, ys, kb, out)
+            }
+        }
+        return;
+    }
     for r in r0..rows {
         out[r] = vec_dot_q2k_q8k(n, xs, &ys[r * kb..(r + 1) * kb]);
     }
@@ -712,6 +759,18 @@ pub(crate) fn vec_dot_rows_q3k_q8k(
             dot_q3k_q8k_rows::<R>(xs, &ys[r0 * kb..(r0 + R) * kb], kb, &mut out[r0..r0 + R]);
         }
         r0 += R;
+    }
+    let left = rows - r0;
+    if tail_in_one_pass(left) {
+        let (ys, out) = (&ys[r0 * kb..rows * kb], &mut out[r0..rows]);
+        unsafe {
+            if left == 3 {
+                dot_q3k_q8k_rows::<3>(xs, ys, kb, out)
+            } else {
+                dot_q3k_q8k_rows::<2>(xs, ys, kb, out)
+            }
+        }
+        return;
     }
     for r in r0..rows {
         out[r] = vec_dot_q3k_q8k(n, xs, &ys[r * kb..(r + 1) * kb]);
@@ -905,7 +964,8 @@ pub(crate) fn vec_dot_q4k_q8k(n: usize, xs: &[BlockQ4K], ys: &[BlockQ8K]) -> f32
 /// single-row kernel at prefill sizes (measured: the per-row cost of the tiled
 /// matmul plateaued from m=8 to m=128, so the weight READ was amortised and the
 /// per-row UNPACK was not), which is what makes this worth having. Rows are
-/// taken 8 at a time; the tail reuses the single-row kernel.
+/// taken four at a time (below); a tail of 2-3 rows shares one pass too
+/// ([`tail_in_one_pass`]) and a lone row reuses the single-row kernel.
 #[inline(always)]
 pub(crate) fn vec_dot_rows_q4k_q8k(
     n: usize,
@@ -931,6 +991,18 @@ pub(crate) fn vec_dot_rows_q4k_q8k(
             dot_q4k_q8k_rows::<R>(xs, &ys[r0 * kb..(r0 + R) * kb], kb, &mut out[r0..r0 + R]);
         }
         r0 += R;
+    }
+    let left = rows - r0;
+    if tail_in_one_pass(left) {
+        let (ys, out) = (&ys[r0 * kb..rows * kb], &mut out[r0..rows]);
+        unsafe {
+            if left == 3 {
+                dot_q4k_q8k_rows::<3>(xs, ys, kb, out)
+            } else {
+                dot_q4k_q8k_rows::<2>(xs, ys, kb, out)
+            }
+        }
+        return;
     }
     for r in r0..rows {
         out[r] = vec_dot_q4k_q8k(n, xs, &ys[r * kb..(r + 1) * kb]);

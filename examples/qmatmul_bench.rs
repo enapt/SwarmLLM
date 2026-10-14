@@ -273,15 +273,32 @@ fn dequant_split() {
 fn main() {
     println!("candle quantized matmul (Q4_K)");
     // llama-3.2-3b shapes: attention projection and FFN up.
-    bench::<BlockQ4K>("attn proj Q4_K", 3072, 3072, &[1, 2, 3, 4, 8, 43, 128, 896]);
-    bench::<BlockQ4K>("ffn up Q4_K", 3072, 8192, &[1, 2, 3, 4, 8, 43, 128, 896]);
+    // m = 2..7 are a speculative check's shapes (1-6 guesses): a full pass of
+    // four rows plus a tail of 1-3, each path checked against the reference.
+    bench::<BlockQ4K>(
+        "attn proj Q4_K",
+        3072,
+        3072,
+        &[1, 2, 3, 4, 6, 7, 8, 43, 128, 896],
+    );
+    bench::<BlockQ4K>(
+        "ffn up Q4_K",
+        3072,
+        8192,
+        &[1, 2, 3, 4, 6, 7, 8, 43, 128, 896],
+    );
     // Q4_K_M keeps ffn_down (and some attn_v) in Q6_K; its kernel has its own
     // multi-row path and must be checked and priced separately.
-    bench::<BlockQ6K>("ffn down Q6_K", 8192, 3072, &[1, 4, 8, 43, 128, 896]);
+    bench::<BlockQ6K>(
+        "ffn down Q6_K",
+        8192,
+        3072,
+        &[1, 2, 3, 4, 6, 7, 8, 43, 128, 896],
+    );
     // A Q2_K mixture-of-experts file (Qwen3-30B-A3B): each expert's gate/up
     // in Q2_K, its down in Q3_K; a prompt gives each expert ~8-40 rows (#138).
-    bench::<BlockQ2K>("expert gate Q2_K", 2048, 768, &[1, 4, 8, 32, 128]);
-    bench::<BlockQ3K>("expert down Q3_K", 768, 2048, &[1, 4, 8, 32, 128]);
+    bench::<BlockQ2K>("expert gate Q2_K", 2048, 768, &[1, 2, 3, 4, 7, 8, 32, 128]);
+    bench::<BlockQ3K>("expert down Q3_K", 768, 2048, &[1, 2, 3, 4, 7, 8, 32, 128]);
     if std::env::args().any(|a| a == "--rows-only") {
         return;
     }

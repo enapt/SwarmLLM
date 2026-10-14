@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #273**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #276**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1422,6 +1422,21 @@ tree attention masks in the worker — absorbs the old survey's Tier 2D); the pi
 pass (Phase 3) is #171. The same-model-at-fewer-bits drafter is decided against as a default
 (#144, § "Decided").
 
+#### #275 — A drafter is chosen before anyone asks whether memory admits it
+`P3` · perf-split · **OPEN** — 2026-10-14 · history: #273 (closed)
+
+`engine_drafter::engine_drafter_for` picks the largest held sibling; whether its worker fits is
+learned only at spawn (`ModelProcessPool::get_or_spawn_once`), on EVERY request. Seen on the
+#273 check, run with a processor-only build: this node held 28 layers of Qwen3-30B-A3B in RAM
+(6967 of a 7995 MB budget) and Qwen3-1.7B Q8_0 needs ~2899 MB, so each request logged "DSD: the
+drafter failed" and decoded without guesses — 2.44-2.50 tok/s against the n-gram loop's
+2.37-2.40, so no loss, and none of the gain: ~353 of each token's ~390 ms is the trip to the
+peer, which guessing exists to share. A release (card) build puts those layers on the card, where
+the drafter should fit in RAM — measure that first. Then: ask admission before choosing (a
+side-effect-free estimate beside `admit_to_cpu` / `admit_to_gpu`), fall to the next candidate
+or the n-gram loop, and admit a drafter's cache at the conversation's length, not 4,096
+tokens (896 of the 2899 MB).
+
 #### #145 — One reply uses one row of a ring pass that could carry dozens
 `P3` · perf-split · **OPEN** — 2026-09-28 · history: archive row #145; plan: `docs/plans/wan_parallel.md`
 
@@ -2190,7 +2205,29 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-14, unreleased** (#270, #271, #272)
+**Closed 2026-10-14, unreleased** (#273, #274)
+- #273 — **a split of a mixture-of-experts model guesses ahead with a held small model again,
+  and of two copies of one drafter the lighter one drafts.** A real Thailand↔Belgium split of
+  Qwen3-30B-A3B (2026-10-13) guessed with n-grams only (9.8% of rounds kept, 468 ms a token over
+  a 222 ms link) although the node held Qwen3-1.7B: `engine_drafter::size_proxy` was layers ×
+  width², which counts no experts, so the 30B-A3B measured below Llama-3.2-3B and no MoE model
+  could ever have a drafter. The size is now scaled by stored over active bytes per layer
+  (`GgufTensorMeta::stored_bytes_per_layer`, 8.5× at Q2_K and 9.6× at Q4_K_M from the real
+  headers); dense models are unchanged. Equal sizes were tied by model id, which picked the fp16
+  Qwen2.5-0.5B over its Q8_0/Q4_K_M copies; ties now go to the copy reading the fewest bytes.
+  Checked on a real split (this node layers 0-27, an Australian peer 28-47, 2026-10-14): v0.3.238
+  weighed only the Qwen2.5-0.5B copies (wrong vocabulary) and ran the n-gram loop; this build
+  chose `drafter=qwen3-1.7b-q8-0` and ran DSD. Its speed there is #275. Gotcha #849.
+- #274 — **a speculative check on a processor costs ~20 ms an extra position instead of ~60.**
+  The several-row AVX2 kernels took rows four at a time and ran a 1-3 row tail one row each —
+  the WHOLE call of a check of 1-2 guesses, so a 3-position forward cost more than a 4-position
+  one (7B Q4_K_M, 4 threads: 257 against 223 ms) and the guess-length controller chose zero
+  guesses against processor peers. A 2-3 row tail now shares one pass (`avx.rs::tail_in_one_pass`,
+  bit-identical): 2 / 3 positions 190 / 248 → 151-156 / 173-177 ms, llama.cpp 191-206 / 260-274.
+  A/B `SWARMLLM_QMATMUL_TAIL=per-row`; `docs/invariants/inference.md` § "A 2-3 row tail shares
+  one pass too".
+
+**Closed 2026-10-14, released in v0.3.238 (2026-10-14 07:31 UTC)** (#270, #271, #272)
 - #270 — **a computer that once held another upload of a model no longer refuses the swarm's
   copy of it.** Found checking the swarm after v0.3.237: the Proxmox node refused all four
   holders of qwen2.5-coder-7b-instruct-q4-k-m as "a different build" — it held NO part of the
