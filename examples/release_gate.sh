@@ -170,10 +170,12 @@ PY
   verdict speed "$(tail -1 "$OUT/speed.verdict" | cut -d' ' -f2)" "every sample in $OUT/speed.verdict"
 fi
 
-# Diff-scoped: a rig that covers one subsystem, when the release touched it.
+# Diff-scoped: a rig that covers one subsystem, when the release touched it. The heal pass
+# itself is auto_manage/canonical.rs and the origin hashes it trusts live in registry.rs — the
+# .238 gate skipped this rig on a release that changed both, because the list knew neither.
 step "8 diff-scoped since ${SINCE:-?}"
 CHANGED=$(git -C "$REPO" diff --name-only "${SINCE:-HEAD}"..HEAD 2>/dev/null)
-if grep -qE '^src/model/(canonical|acquisition|manifest|shard)\.rs|^src/storage/' <<< "$CHANGED"; then
+if grep -qE '^src/model/(canonical|acquisition|manifest|shard|registry|auto_manage/canonical)\.rs|^src/storage/' <<< "$CHANGED"; then
   OUT="$OUT/outvoted" "$HERE/outvoted_rig.sh" "$CAND" > "$OUT/outvoted.log" 2>&1
   grep -q ': PASS' "$OUT/outvoted.log" && verdict outvoted PASS || verdict outvoted FAIL "$OUT/outvoted.log"
   settle
