@@ -4524,11 +4524,16 @@ impl ModelProcessPool {
             if budget.allows(committed, needed_mb) {
                 break;
             }
-            // Longest-resident worker that is not serving anything.
+            // Longest-resident worker that is not serving anything and holds some
+            // of the machine's memory — the RAM twin of `plan_vram_reclaim`'s
+            // `vram_reclaim_eligible`. A model wholly on the card is charged none
+            // of it: unloading it gave nothing back, and the loop then stopped
+            // before reaching the idle model that did hold the memory.
             let victim = self
                 .workers
                 .iter()
                 .filter(|e| e.key() != exclude && !e.value().in_use(self.conversation_window()))
+                .filter(|e| self.ram_reserved_mb.get(e.key()).is_some_and(|mb| *mb > 0))
                 .min_by_key(|e| e.value().spawned_at)
                 .map(|e| e.key().clone());
             let Some(victim) = victim else {
@@ -9129,6 +9134,37 @@ mod tests {
                 .await
         );
         assert!(pool.workers.get(&target).is_none());
+    }
+
+    /// **The machine's memory is reclaimed from a model that holds some.** The
+    /// victim was the longest-resident idle worker whatever it held: a model
+    /// wholly on the card, charged nothing to the machine, was unloaded for
+    /// nothing, and the loop stopped there with the idle model that did hold the
+    /// memory still loaded. Since #264 every card/processor split's processor
+    /// share is admitted through this reclaim.
+    #[tokio::test]
+    async fn reclaiming_machine_memory_unloads_a_model_that_holds_some() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-ram-holder"));
+        pool.set_vram_budget_mb(8000);
+        pool.set_ram_budget_mb(8000);
+        let on_card = ModelId("card-3b".into());
+        let on_cpu = ModelId("cpu-7b".into());
+        let incoming = ModelId("split-14b".into());
+        // The card model is the older of the two idle workers, so it was chosen first.
+        admit_and_insert_gpu_worker(&pool, &on_card, 3000, std::time::Duration::from_secs(3600))
+            .await;
+        admit_and_insert_cpu_worker(&pool, &on_cpu, 6000, false).await;
+
+        assert!(
+            pool.admit_to_cpu_as(&incoming, 5000, Tenancy::Tenant, Requester::Swarm)
+                .await,
+            "unloading the idle processor model makes room"
+        );
+        assert!(pool.workers.get(&on_cpu).is_none());
+        assert!(
+            pool.workers.get(&on_card).is_some(),
+            "the card model held none of the machine's memory and stays loaded"
+        );
     }
 
     /// **A call displaced by a later one under the same id does not evict the

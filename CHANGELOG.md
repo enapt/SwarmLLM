@@ -5,7 +5,9 @@
 **A restart no longer opens another dashboard tab.** With "open the dashboard on start" (the
 default), every automatic update and every restart opened a new browser tab beside the one
 already open, which reconnects by itself. One machine collected 25 tabs holding 8.5 GB. A start
-caused by an update now opens nothing. A start after a run with a dashboard connected waits up
+caused by an update now opens nothing. On Linux and macOS the update TO this version can still
+open one, because the version being replaced has to mark the restart; on Windows it already
+does. A start after a run with a dashboard connected waits up
 to 45 s for it to reconnect, and opens a tab only if it does not. A first launch still opens
 one at once. We also watched one open dashboard for over an hour and found it does not grow.
 
@@ -60,6 +62,11 @@ its conversations from the listed context found the real limit only from refused
 14B listed at 8,192 tokens where the card held about 5,100). While a model is loaded here and no
 other computer can take part in it, the list gives the longest prompt plus reply this computer
 accepts. It never lists more than the model declares.
+
+**Making room in memory no longer unloads the wrong model.** When a model on the processor, or
+the processor half of a split, needed memory, the node unloaded the idle model loaded longest.
+That could be one wholly on the graphics card, which frees none of that memory, and the node then
+gave up. It now unloads an idle model that actually holds the memory.
 
 **For contributors.** `SWARMLLM_PROFILE=1` no longer turns a card model's CUDA graphs off. It also
 splits a split prompt's weight copies and a mixture-of-experts layer's expert products into
