@@ -3066,7 +3066,7 @@ The list is split into **open** (will be addressed) and **won't fix unless a con
 
 - **StarCoder2 — recognised, refused** — `docs/FUTURE_WORK.md` #118: a LayerNorm model with biases the loader does not read, and a metadata key (`layer_norm_epsilon`) the shared parser does not accept.
 
-- **Qwen 3.5 — dense and MoE run (card/processor split since v0.3.230; MoE since 2026-10-11)** — `docs/FUTURE_WORK.md` #228: CUDA-graph capture of its layers, the chunked delta rule, and speculation (a snapshot of the recurrent state per draft would allow it).
+- **Qwen 3.5 — dense and MoE run (card/processor split since v0.3.230; MoE, the one-op delta rule and CUDA-graph decode since v0.3.235)** — `docs/FUTURE_WORK.md` #228 (5): no speculation of any kind (a snapshot of the recurrent state per draft would allow it).
 
 - **DeepSeek-2 (V2/V2-Lite/V3, Kimi-K2, GLM-4.7-Flash) — recognised, refused, code kept** — see `docs/FUTURE_WORK.md` #116 for the list of what a real file needs. The loader's MLA branch, `MlaWeights` and `LayerVariant::DeepSeek` stay as its starting point and are unreachable until `ModelArch::is_supported` admits the family again.
 

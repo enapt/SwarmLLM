@@ -5,7 +5,9 @@
 > 4B Q4_K_M to rounding-level near-ties, whole and split), replies on the processor, the card and
 > through an isolated daemon that fetched the 0.8B from HuggingFace. That check also found the chat
 > template failing to PARSE (minijinja without `macros`, gotcha #798), fixed alongside. Reference
-> tools: `~/llama.cpp-ref/{dump_logits,ref_generate}`. What is left is FUTURE_WORK #228.
+> tools: `~/llama.cpp-ref/{dump_logits,ref_generate}`. **2026-10-14:** `qwen35moe`, the card check,
+> the one-op delta rule and CUDA-graph decode have all shipped (v0.3.235); what is left is
+> FUTURE_WORK #228 (5), speculation. The numbered lists below are the plan as written.
 
 Written 2026-09-25 night, when Qwen 3.5 was REFUSED because no real file could
 load: the loader had been written against a guessed layout, and several of its
@@ -64,11 +66,10 @@ the branch does. Next-token-prediction blocks are dropped from the layer count
    attention caches `reset()` there; `forward_deltanet` continues from whatever
    state the entry holds (replay after failover, re-verify). Reset in BOTH
    executor paths (single and batched).
-3. CUDA build check (`test-split` + a `dump_logits`-based scorer; score_ids.py
-   uses llama-cpp-python 0.3.16, which cannot load `qwen35`).
-4. The delta rule runs token by token (~10 small ops per token per DeltaNet
-   layer) — correct, slow for long prompts on a card; llama.cpp's chunked form
-   (`build_delta_net_chunking`) is the follow-up.
+3. ~~CUDA build check~~ — done (#228 (1): on the card whole and split, against llama.cpp master).
+4. ~~The delta rule runs token by token~~ — ONE op per layer since 2026-10-11 (#228 (3),
+   `delta_rule_cpu` / `kernels/delta_rule.cu`, llama.cpp's fused `GATED_DELTA_NET`); the chunked
+   form (`build_delta_net_chunking`) was NOT built — llama.cpp replaced it too.
 5. ~~`qwen35moe` stays refused until checked~~ — checked and admitted 2026-10-11 on
    `Flexan/kshitijthakkar-qwen3.5-moe-0.87B-d0.8B-GGUF` (f16 exact against llama.cpp, whole,
    split and on the card; numbers in FUTURE_WORK #228).
@@ -183,5 +184,4 @@ against llama.cpp (the `cb(…)` names in `qwen35.cpp` are what
 2. Decode steps (the probe's last 4) agree too — the autoregressive path.
 3. `is_supported` flipped, `supported_list` restored, FUTURE_WORK #117 closed,
    and a real Qwen3.5-4B reply scored against llama.cpp on the CUDA build.
-4. Then `qwen35moe` (same attention/DeltaNet, MoE FFN with a sigmoid-gated
-   shared expert — `ffn_gate_inp_shexp`).
+4. ~~Then `qwen35moe`~~ — admitted 2026-10-11 (#228 (1); sigmoid-gated shared expert checked).

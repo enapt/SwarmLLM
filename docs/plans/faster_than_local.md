@@ -88,10 +88,12 @@ active experts. llama.cpp's `-ot exps=CPU` / `--n-cpu-moe` keeps attention, the
 router and shared weights on the card and the experts in system RAM:
 Qwen3-Coder-30B-A3B at **32.5 tok/s** on an 8 GB RTX 3060 Ti, a 35B-A3B at
 **44.4** on an 8 GB RTX 2070S; gpt-oss-20b at 56-64 on a 12 GB card. Our hybrid
-placement is per LAYER (`split::hybrid::LayerPlacement`), so a large MoE today
-goes processor-heavy for everything. **Per-tensor placement — experts on the
-processor, the rest on the card — is the change**, with MoE loading already
-quantized per expert (`split::loader::load_moe_ffn`).
+placement was per LAYER (`split::hybrid::LayerPlacement`), so a large MoE went
+processor-heavy for everything. **Per-tensor placement — experts on the
+processor, the rest on the card — SHIPPED in v0.3.237** (FUTURE_WORK #138 (3)):
+stage A 2026-10-13 (`LayerPlacement::experts_device_for`, decode 1.2-1.7x at equal
+card bytes), stage B 2026-10-14 (`process_pool::card_split` chooses it for a MoE too
+big for the card: ~10% faster decode, ~0.4-0.7 GB less of the card than whole layers).
 
 **Measured on THIS laptop 2026-10-11 (FUTURE_WORK #138):** the figures above are
 8 GB desktop cards. On the RTX 3070 Laptop + Ryzen 7 5800H, Qwen3-30B-A3B Q2_K at
@@ -101,9 +103,9 @@ And at EQUAL placement we ran at ~40% of llama.cpp (10-13 vs 21-25 tok/s), mostl
 the card's expert path (~1.6 ms of host overhead a layer). The processor's decode
 step and then the card's experts (kept stacked, routed on the card, one launch per
 projection) closed that the same day: a 40-45 ms step, ~23 tok/s, level with
-llama.cpp's 21.5-25.4 at the same 26 layers. A PROMPT is now the gap — 681 tokens
-spend ~15.5 s of ~22 s in the processor layers' experts — and placement comes after
-it, because placement moves more expert work to the processor.
+llama.cpp's 21.5-25.4 at the same 26 layers. A PROMPT was then the gap — 681 tokens
+spent ~15.5 s of ~22 s in the processor layers' experts — closed by #138 (1)-(1e)
+(2026-10-13: a split reads its prompt on the card), before placement shipped.
 
 ### 3.3 Make our own card + processor path as fast as the memory allows
 
@@ -112,9 +114,10 @@ figure and no longer holds. On the Ryzen 7 5800H + RTX 3070 laptop, Qwen2.5-14B 
 of 48 layers on the card, cooled before each arm: llama.cpp 6.8-7.0 tok/s (`llama-bench -ngl 30
 -t 4`); a default node 6.79-6.93 once decode runs INSIDE its thread pool — which it did not do
 until 2026-10-11 (5.64-5.93 in the same A/B; § Closed in FUTURE_WORK; a 3B on a processor-only
-node 10.97-13.04 → 14.53-15.29). The thread count was not the lever: calibration
-picks 4 on this box and 8 is slower for us, where llama.cpp gains ~10% at 8 — the residual (#137,
-P3) is our Q4_K matvec against llama.cpp's repacked rows. Two machine effects, shared with
+node 10.97-13.04 → 14.53-15.29). What remains (#137, P3, re-measured 2026-10-14 on a 7B,
+processor only): ~5% behind llama.cpp at the 4 threads calibration picks here, and ~40% SLOWER at
+8 threads where llama.cpp holds level. llama.cpp's Q4_K repack and huge pages are REFUTED as the
+cause (gotchas #843/#844) — FUTURE_WORK #137 holds the open leads. Two machine effects, shared with
 llama.cpp: the card clocks down between split steps, and back-to-back runs heat the laptop
 enough to fake a 30% gap. Rule of thumb from the limit above still holds: at ~50 GB/s one 206 ms
 round trip reads ~10 GB of weights, so **local offload beats a far split whenever less than ~10
@@ -155,9 +158,10 @@ at the temperatures clients actually send. Measurement: `~/swarmllm-ref/spec/`
 
 ## 4. The order of work
 
-Status 2026-10-11: items 1, 2, 3 and 6 have shipped (3 unreleased); 4, 5 and 7 are open (the
-persistent stream is still off by default). `docs/FUTURE_WORK.md` carries them: item 3 is #137,
-item 4 is #138, item 5 is #10, item 7 is #133 (with V1Lazy, request-response is as fast, so
+Status 2026-10-14: items 1, 2, 3, 4 and 6 have shipped (all released, the last in v0.3.237);
+5 is half done and 7's chunked prompt pass shipped (v0.3.234) while the persistent stream stays
+off by default. `docs/FUTURE_WORK.md` carries what is left: item 3's residual is #137, item 5 is
+#10 (the split half shipped in v0.3.234), item 7 is #133 (with V1Lazy, request-response is as fast, so
 there is no speed reason to default the stream on). The shadow of §3.5 is decided against as a
 default (#144, § "Decided"): no design may need a user to hold a whole model, even at low bits.
 
@@ -168,12 +172,13 @@ default (#144, § "Decided"): no design may need a user to hold a whole model, e
    Measure on the real link, never loopback (gotcha #739).
 3. ✅ **Our processor half** (§3.3) — measured 2026-10-11: decode ran outside its thread pool on
    every default node (fixed: a 14B split level with llama.cpp, a 3B processor-only 1.14-1.39x);
-   ~12% behind llama.cpp on the processor alone remains (#137, P3).
-4. **MoE experts on the processor** (§3.2).
-5. **Prefix affinity across peers** (§3.1), then CPU users' prompt hand-off pricing.
+   left: ~5% behind llama.cpp at 4 threads and a ~40% loss at 8 on the processor alone (#137, P3).
+4. ✅ **MoE experts on the processor** (§3.2) — #138 (3), v0.3.237.
+5. **Prefix affinity across peers** (§3.1), then CPU users' prompt hand-off pricing — #10, PARTIAL.
 6. ✅ **Split speculation Phase 1** (accept at the tail — shipped; the stream of checks followed in v0.3.216),
    then the shadow + coupling measurement decides whether Phase 4 is built.
-7. **#133 + chunked prompt pass**, then the persistent stream by default.
+7. **#133** (the chunked prompt pass shipped as #171 in v0.3.234; left: pieces chained between two
+   peers for a pass that does not keep its prompt), then the persistent stream by default.
 
 ## Sources
 

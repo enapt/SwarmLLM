@@ -98,8 +98,9 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     1.19x, now level with llama.cpp; a 3B processor-only 1.14-1.39x. Re-measured 2026-10-14 on a
     7B: ~5% behind at 4 threads, ~40% SLOWER at 8 where llama.cpp holds level; repack and huge
     pages refuted.)* (`docs/plans/faster_than_local.md`).
-12. **#3**, **#180** — the routing cost model charges a constant where the reply length
-    belongs, which keeps partial ranges (load spreading) off.
+12. **#3**, **#180** — the routing cost model over-prices a split by its HOP count (not the reply
+    length — 2026-10-10), which keeps partial ranges (load spreading) off. Its cost terms are
+    logged since v0.3.234: collect, then fit per term.
 13. **#171** — the prompt pass through a split runs one stage at a time (released in v0.3.234; left:
     pieces chained between two peers for a pass that does not keep its prompt).
 14. **#228** — Qwen 3.5's first version leaves out speculation (its card/processor split shipped
@@ -341,7 +342,8 @@ event, `~/swarmllm-gate-common/safety.sh`).
 Known: one illegal access in every log on this machine; FECS events also arrive with no work of
 ours (13:09:31 the same day, 16 s after a laptop power-source change; 13:25:11 idle). Ruled out:
 graph updates ignoring a grown allocation (`docs/invariants/inference.md` § "A graph pays only when
-it is updated"). Unknown: which kernel. Next, in order: (1) run that rig shape under
+it is updated"). Unknown: which kernel. *(The steps below were DONE 2026-10-10 → 10-13 — see
+"Step (1)" and "(c) weighed" further down; the current state is at the end of this entry.)* Next, in order: (1) run that rig shape under
 `compute-sanitizer --tool memcheck --target-processes all` — on WSL2 it first needs the WDDM
 debugger interface: `HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm` `EnableDebugInterface` = 1,
 set as administrator (the forum's second value, `GPUDebugger` `EnableInterface`, proved
@@ -543,7 +545,8 @@ answers in ~5 s. Several contributors (diagnosis rule 6). Each is a hypothesis u
   adds `LatencyObservation::layer_work` (serde default), which a receiver divides by. Red without
   it: `a_peer_measured_on_one_model_is_unmeasured_for_another`.
 - **The prompt is priced on the processor prior** for a hybrid local route even with layers on the
-  card, while #138 made a mixture-of-experts prompt 3.5-4.7× faster on both.
+  card, while #138 made a mixture-of-experts prompt 3.5-4.7× faster on both. (#129 points here:
+  this is the one place it is worked.)
 - **An idle model held the card** (#249, closed): a 14B "idle 20m" still had 9.2 GB, which is what
   left the 30B 18 layers.
 `split_rig.sh softunload` (2026-10-12; Qwen2.5-14B whole here, a peer holding its middle) did NOT
@@ -592,15 +595,14 @@ against it, and price (not bar) prompt + `max_tokens` beyond it, the stale-figur
 Petals makes. #235 removed the way that room most often vanished (finished conversations kept
 for the worker's life), so measure how often a refusal still happens before building this.
 
-#### #3 — The routing cost model's network term overestimates a boomerang: a constant stands where the reply length belongs
+#### #3 — The routing cost model over-prices a split by its number of hops (2.0× two segments, 3.35× three), not by reply length
 `P2` · routing · **OPEN** — 2026-09-08 · history: archive row #3 and § "The routing cost model's network term overestimates a boomerang" (three dated measurements)
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
 decision since v0.3.164, silently. The structural claim is settled; **do not tune the
-constant**. Next: an estimator of the expected reply length (candidate source: the per-session
-response histories in `state.metrics.prefetch_orchestrator`, unused for this) plus a
-per-token hop term. Also: peer speed does not track RTT, and a chain runs at its worst
+constant**. ~~Next: an estimator of the expected reply length~~ — superseded 2026-10-10 by the
+collected data below: the error follows the HOPS, not the reply length, so do not build it. Also: peer speed does not track RTT, and a chain runs at its worst
 segment's pace, so a term linear in layers cannot express it. This gates turning
 `parallax_partial_ranges` on (#180) — on 2026-09-20 the flag on made a 4-segment, 3-peer
 route that did not finish in 580 s. Method: `memory/perf_baseline_0920_post192.md`,
@@ -628,8 +630,9 @@ reply-length estimator would not fix what was collected; the over-charge grows w
 Candidates, unmeasured: every split path here guesses ahead (the n-gram path, the guess-check
 stream), so a reply crosses each hop fewer times than it has tokens and the per-hop term charges
 for crossings that never happen; the per-visit fixed cost may also be counted on top of an
-observation that already carries it. Next: log each chosen plan's cost terms beside its outcome
-(today only the total is kept), then fit per term. Script: re-run the analysis with
+observation that already carries it. ~~Next: log each chosen plan's cost terms beside its
+outcome~~ — **done 2026-10-10** (`b8f0b82b`, released in v0.3.234: `net:/compute:/prompt:` on each
+priced route). Next: once enough split traffic has collected, fit per term — collect, do not tune. Script: re-run the analysis with
 `grep "request complete" node.log | grep predicted_ms` over the fields above.
 Field point, 2026-10-13 (a tester, v0.3.236): a six-segment boomerang through three countries
 (37-token prompt, 120 tokens) was predicted 8,772 ms and took 59,457 (6.8×), its terms
@@ -723,8 +726,8 @@ released in v0.3.231:** `PipelineScheduler::local_speed_off_the_card` blends the
 of the split in (`split_tokens_per_sec`), for the search and the hand-off gate alike —
 `docs/invariants/scheduling.md` § "A node holding every layer that would run the model on its
 processor…", "A split is priced as a split". What #129 still carries: the prompt pass keeps the
-processor's prior for a split, and a remote hop's network is charged per segment rather than per
-crossing (the regional-pipelines plan).
+processor's prior for a split (tracked in #250 — one defect, worked there), and a remote hop's
+network is charged per segment rather than per crossing (the regional-pipelines plan).
 
 **(1) — a cold candidate's load was not priced — fixed 2026-10-07, released in v0.3.230.**
 `PeerResidency` bounded a peer's MEMORY, never its time, so a peer that must first load the
@@ -1090,7 +1093,7 @@ between arms (`~/swarmllm-138/{llama_moe2,ours_moe,moe_prof}.sh`):
 
 **Done 2026-10-11 (released in v0.3.235):** the processor's experts for ≤ 8 tokens run as (token,
 expert) pairs in ONE parallel region per projection (`MoeFfn::experts_in_one_region` →
-vendored `quantized::matvec_many`, llama.cpp's `mul_mat_id` shape), bit-identical to the
+vendored `quantized::matmul_many`, llama.cpp's `mul_mat_id` shape), bit-identical to the
 per-expert path: processor stage 22.1 / 28.3 / 24.9 → 19.2 / 16.5 / 17.8 ms (−29%, ABBA + a
 synced pair, one binary, `SWARMLLM_MOE_CPU=per-expert` = old).
 
@@ -1375,12 +1378,9 @@ sample per piece (none is recorded — a piece's wait includes the one queued be
 measurement on two real machines.
 
 During the prompt pass — 94% of a long request's cost — only one machine of N works at a
-time, so the ceiling is ~2-2.8× on long prompts. The receiver reassembles the whole chunked
-forward (`try_assemble_chunked_forward`) before computing; instead compute each chunk on
-arrival and pass it on (chaining is already the default). Needs a feature bit and a KV
-rewind for a partially streamed prompt pass. Measure first: per-segment times from
-`RequestTrace::record_segment_timing` (largest stage ÷ sum = the achievable ceiling); A/B
-inside one binary with an env switch. This is also step 3 of `split_speculation.md` (pipelined
+time, so the ceiling is ~2-2.8× on long prompts. *(The original design — compute each chunk
+on arrival instead of reassembling the whole forward, behind a feature bit — is what shipped in
+v0.3.234 (`features::PROMPT_CHUNKS`, above); only (a)-(c) remain.)* This is also step 3 of `split_speculation.md` (pipelined
 prompt pass) and an item of `wan_parallel.md`.
 
 #### #149 — Split speculation's continuous stream ships on by default; four refinements remain
@@ -1543,15 +1543,17 @@ default false, `expert_weights_scale`, the `exp_probs_b` bias, expert groups, th
 function. Verify on a tiny GGUF of each layout, then flip `is_supported` and review the MLA
 projections for `arch_supports_hybrid`.
 
-#### #114 — No real mixture-of-experts model has ever run here
+#### #114 — Mixture-of-experts: Llama-4's long-context attention is not implemented (real Qwen3/Qwen3.5 MoE files verified)
 `P2` · model-support · **PARTIAL** — 2026-09-25 · history: archive row #114
 
 Experts stay quantized, one matrix per expert (`loader::load_moe_ffn`, `split_expert_stack`);
 Qwen3-MoE and Qwen2-MoE are verified on tiny random models, Llama-4 routing on tiny GGUFs
-(v0.3.207). Open: (a) download one small real MoE (Qwen3-30B-A3B class) and score it with
-`score_against_reference.py`; (b) Llama-4 NoPE temperature tuning and 8,192-token chunked
-attention are not implemented, so replies past 8,191 tokens differ; (c) the Qwen3.5-MoE
-shared-expert gate is unverified; (d) device-side top-k only if a profile asks. Placement on
+(v0.3.207). **Done:** (a) a real Qwen3-30B-A3B Q2_K file scored against llama.cpp on the
+processor and the card (#138, 2026-10-11/13: median cosine 0.99952 vs llama.cpp's own 0.99955);
+(c) the Qwen3.5-MoE sigmoid-gated shared expert, checked on a real `qwen35moe` file (#228 (1),
+worst cos 0.999999). Open: (b) Llama-4 NoPE temperature tuning and 8,192-token chunked
+attention are not implemented, so replies past 8,191 tokens differ; (d) device-side top-k only
+if a profile asks. Placement on
 a small card is #138.
 
 #### #118 — StarCoder2 is recognised and refused: a LayerNorm model with biases the loader cannot read
@@ -1601,7 +1603,7 @@ Qwen3-14B on a 12 GB card: `/v1/models` says `max_model_len: 8192` (the declared
 prompt was refused (`short_by_mb=259`; usable ≈ 5k). A client (Open WebUI, Home Assistant) learns this only from failed
 requests. **Done (2), 2026-10-12, released in v0.3.236:** the refusal now names the longest prompt that fits
 ("up to about 4608 tokens with this model here", `model_worker::longest_prompt_that_fits`, rounded
-down to the cache's growth step and less the reply reserve). **Done (1), 2026-10-14:** while
+down to the cache's growth step and less the reply reserve). **Done (1), 2026-10-14, released in v0.3.237:** while
 the model is loaded here whole and no connected holder inside the request's scope could take
 part, `/v1/models` reports what this node's memory holds in place of the declared figure — the
 longest prompt + reply admission takes however the two divide it
@@ -2864,8 +2866,8 @@ grep `^| N |`).
   43-token prompt (…)". The distinction came from the user's question: a refusal at a holder's
   BUDGET can never succeed, a busy holder's can — opposite advice, so two variants.
 
-**Closed 2026-10-03, after v0.3.223** (`docs/invariants/network.md` § "A node with no
-origin to ask is healed by the holders that checked theirs")
+**Closed 2026-10-03, after v0.3.223** (`docs/invariants/network.md` § "One upload per model id,
+on every node", paragraph "A node with no origin to ask is healed by the holders that checked theirs")
 - #160 — a node that could not reach HuggingFace never judged or replaced its copy: `9594e1ff`
   replaced no part on .221, .222 or .223 while every other peer's heal acted within the hour
   (its owner could not be asked; every branch that fits is closed). A node whose heal checked
@@ -2897,8 +2899,8 @@ origin to ask is healed by the holders that checked theirs")
   (`ModelPeerCounts`), so the two cannot disagree. Finding the one peer that never healed after
   v0.3.223 took log archaeology the same day (the conflict line is written only on a change).
 
-**Closed 2026-10-03, after v0.3.222** (`docs/invariants/network.md` § "A node vouches only for
-bytes that are the swarm's upload"; gotcha #782)
+**Closed 2026-10-03, after v0.3.222** (`docs/invariants/network.md` § "One upload per model id,
+on every node", paragraph "A node vouches only for bytes that are the swarm's upload"; gotcha #782)
 - #164 — `.deb` installs made 2026-07-28 → 2026-10-02 with batching off: the template was fixed
   for new installs (`aa1f75c8`) and the release note shipped with v0.3.222; the project's Proxmox
   node had no `max_batch_size = 1` line at the .222 and .223 deploys. Not migrated automatically
