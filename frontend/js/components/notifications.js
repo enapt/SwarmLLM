@@ -779,6 +779,8 @@
     // benefits without having to know to do this itself.
     _probeQueue: {},
     _probeTimer: null,
+    // Until when the node asked us not to probe (its 429's Retry-After).
+    _probeHeldUntil: 0,
 
     probe: function(modelIds) {
       var self = this;
@@ -786,10 +788,12 @@
       if (this._probeTimer) return;
       this._probeTimer = setTimeout(function() {
         self._probeTimer = null;
+        // Armed before a 429 arrived: wait out the rest of its hold.
+        if (Date.now() < self._probeHeldUntil) { self.probe([]); return; }
         var queued = Object.keys(self._probeQueue);
         self._probeQueue = {};
         if (queued.length) self._probeNow(queued);
-      }, 400);
+      }, Math.max(400, this._probeHeldUntil - Date.now()));
     },
 
     _probeNow: async function(modelIds) {
@@ -805,12 +809,26 @@
       toProbe = toProbe.slice(0, 20);
       toProbe.forEach(function(id) { S._modelStatusPending[id] = true; });
 
+      var self = this;
       App.authFetch('/api/admin/provider-model-status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ models: toProbe }),
       }).then(function(resp) {
-        if (!resp.ok) return;
+        if (!resp.ok) {
+          // Left pending, these models were never asked about again in this
+          // tab: a refusal is an answer about the request, not the models.
+          toProbe.forEach(function(id) { delete S._modelStatusPending[id]; });
+          if (resp.status === 429) {
+            // The node rations these probes (each one calls the provider).
+            // Ask again once its Retry-After has passed, not on the next
+            // keystroke in the filter box.
+            var secs = parseInt(resp.headers.get('retry-after'), 10);
+            self._probeHeldUntil = Date.now() + (secs > 0 ? secs : 60) * 1000;
+            self.probe(toProbe);
+          }
+          return;
+        }
         return resp.json();
       }).then(function(data) {
         if (!data || !data.models) return;

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #272**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #273**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2190,7 +2190,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-14, unreleased** (#270, #271)
+**Closed 2026-10-14, unreleased** (#270, #271, #272)
 - #270 — **a computer that once held another upload of a model no longer refuses the swarm's
   copy of it.** Found checking the swarm after v0.3.237: the Proxmox node refused all four
   holders of qwen2.5-coder-7b-instruct-q4-k-m as "a different build" — it held NO part of the
@@ -2210,6 +2210,10 @@ grep `^| N |`).
   the drain and before the restart; the staged download is reused at the next start
   (`docs/invariants/state-and-config.md` § "A node asked to stop does not restart into its
   update").
+- #272 — **the dashboard asks again about cloud models the node told it to wait on.** A 429 from
+  `/api/admin/provider-model-status` (20 a minute, each one calls a provider) left every model in
+  that batch marked "being asked" for the life of the tab, so their badges never filled in. A
+  refusal now clears them and re-queues the batch for after the reply's `Retry-After`.
 
 **Closed 2026-10-14, released in v0.3.237 (2026-10-14 03:01 UTC)** (#266, #267)
 - #267 — **the node no longer opens a new dashboard tab every time it restarts.** With
