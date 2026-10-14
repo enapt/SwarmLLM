@@ -1257,7 +1257,31 @@ impl UpdateChecker {
     /// that cannot install must carry on serving on the old version, never fall
     /// over. Each failure therefore logs and returns, leaving the dashboard
     /// banner in place so a human can act.
-    async fn install_and_restart(&self, info: &UpdateInfo) {
+    ///
+    /// **A node asked to stop stops** — `shutdown` is asked before the install,
+    /// after the drain and before the restart. On 2026-10-14 the live node took
+    /// a SIGTERM while its update was still downloading, finished the download
+    /// a second later inside the supervisor's 10 s grace, installed it and
+    /// `exec`ed into it: the stop restarted the node, and the deploy that had
+    /// sent it found the database held by a process it had just stopped. Under
+    /// systemd the same `exec` keeps the stopped unit's process alive until
+    /// `TimeoutStopSec` kills it. A staged download is reused at the next start
+    /// (`download_update`), so nothing is lost by stopping.
+    async fn install_and_restart(&self, info: &UpdateInfo, shutdown: &watch::Receiver<bool>) {
+        let stop_asked = |stage: &str| {
+            let asked = *shutdown.borrow();
+            if asked {
+                tracing::info!(
+                    version = %info.latest_version,
+                    stage,
+                    "Stopping as asked rather than restarting into the update — the next start runs it"
+                );
+            }
+            asked
+        };
+        if stop_asked("before installing") {
+            return;
+        }
         let Some(shared) = self.shared.as_ref() else {
             tracing::warn!("Automatic install skipped — no node state to drain against");
             return;
@@ -1279,6 +1303,9 @@ impl UpdateChecker {
         // under a running request is what made an "updated" node fail every
         // inference until someone restarted it by hand.
         let idle = crate::update_restart::drain(shared).await;
+        if stop_asked("after finishing current work") {
+            return;
+        }
         tracing::info!(
             drained_cleanly = idle,
             version = %info.latest_version,
@@ -1296,6 +1323,9 @@ impl UpdateChecker {
                 )
                 .with_toast("error", 10000),
             );
+            return;
+        }
+        if stop_asked("after installing") {
             return;
         }
 
@@ -1496,7 +1526,7 @@ impl UpdateChecker {
                     // the dashboard shows what is happening before the node
                     // goes away for a few seconds.
                     if mode == UpdateMode::Install && info.downloaded {
-                        self.install_and_restart(&info).await;
+                        self.install_and_restart(&info, &shutdown_rx).await;
                     }
                 }
                 Ok(None) => {
@@ -2516,6 +2546,67 @@ mod tests {
         assert!(state.update_available.is_none());
         assert!(state.last_checked.is_none());
         assert!(state.last_error.is_none());
+    }
+
+    /// A node asked to stop while its update downloaded stops: it neither
+    /// installs the update nor restarts into it (2026-10-14 — the live node
+    /// restarted itself three seconds after a SIGTERM). Never reaches `exec`
+    /// either way: no staged file sits beside the test binary, so without the
+    /// check the install is announced and then fails.
+    #[tokio::test]
+    async fn a_node_asked_to_stop_does_not_install_and_restart_into_its_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = dir.path().to_path_buf();
+        let db = crate::storage::db::Database::open(dir.path()).unwrap();
+        let executor = Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (shared, _, _) = crate::daemon::SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        let (dash_tx, _dash_rx) = tokio::sync::broadcast::channel(4);
+        let checker = UpdateChecker::new(
+            UpdateConfig::default(),
+            SWARMLLM_GITHUB_REPO.to_string(),
+            Arc::new(RwLock::new(UpdateState::default())),
+            dash_tx,
+        )
+        .with_shared_state(shared.clone());
+        let info = UpdateInfo {
+            latest_version: "99.0.0".into(),
+            current_version: env!("CARGO_PKG_VERSION").into(),
+            download_url: String::new(),
+            changelog: String::new(),
+            published_at: String::new(),
+            checksum_sha256: None,
+            sidecar_body: None,
+            signature_minisig: None,
+            asset_name: None,
+            downloaded: true,
+            self_update_supported: true,
+            self_update_blocked: None,
+            install_dir: None,
+        };
+        let (stop_tx, stop_rx) = watch::channel(false);
+        stop_tx.send(true).unwrap();
+
+        checker.install_and_restart(&info, &stop_rx).await;
+        let kinds: Vec<&str> = shared
+            .events
+            .activity_history
+            .lock()
+            .iter()
+            .map(|e| e.kind)
+            .collect();
+        assert!(
+            kinds.is_empty(),
+            "a stopping node announced or attempted an install: {kinds:?}"
+        );
     }
 }
 

@@ -774,6 +774,34 @@ container, a VM, a chroot, an emulator.
 
 → `docs/invariants/state-and-config.md`
 
+## A node asked to stop does not restart into its update
+
+**Rule:** `.claude/rules/arch-state-and-config.md` § "A node asked to stop does not
+restart into its update".
+
+### What happened (2026-10-14, FUTURE_WORK #271)
+
+The release deploy stopped the live node at 03:11:02 while its own update check
+was still downloading v0.3.237. The supervisor gives subsystems a 10 s grace
+after the shutdown signal, so the update task was still running: the download
+finished a second later, `install_and_restart` drained, applied the binary and
+`exec`ed into it at 03:11:05. The stop had become a restart, and the deploy
+script, having waited out the PID it signalled, started a second daemon that
+found the database held (`Database already open`). Under systemd the same
+`exec` keeps the stopped unit's process running until `TimeoutStopSec`
+kills it mid-start.
+
+### What a change must keep
+
+`install_and_restart` asks the shutdown watch at three points — before the
+install is announced, after the drain (which can take minutes) and after the
+binary is applied, immediately before `exec_into`. Nothing awaits between the
+last check and the `exec`. Stopping loses nothing: the staged download is
+reused at the next start (`download_update`), and a binary already applied
+is simply what the next start runs. Guard:
+`a_node_asked_to_stop_does_not_install_and_restart_into_its_update` (fails with
+the checks removed: `["installing", "install_failed"]`).
+
 ## Single-source-of-truth helpers — SharedState, live config and credits
 
 Each names the ONE place a decision is made. A second implementation of any of

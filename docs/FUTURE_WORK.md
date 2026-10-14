@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #271**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #272**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2190,7 +2190,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-14, unreleased** (#270)
+**Closed 2026-10-14, unreleased** (#270, #271)
 - #270 — **a computer that once held another upload of a model no longer refuses the swarm's
   copy of it.** Found checking the swarm after v0.3.237: the Proxmox node refused all four
   holders of qwen2.5-coder-7b-instruct-q4-k-m as "a different build" — it held NO part of the
@@ -2202,6 +2202,14 @@ grep `^| N |`).
   with no part here and none on its way, and judges every directory under `models/` — a
   metadata-only one's manifest on disk included, replaced by the upload's when it is another's
   (`docs/invariants/network.md` § "One upload per model id", gotcha #846).
+- #271 — **a node told to stop stops, even while its update finishes downloading.** At
+  03:11:02 on 2026-10-14 the live node took a SIGTERM with v0.3.237 still downloading; the
+  download finished inside the shutdown grace, and the node installed it and `exec`ed into it
+  at 03:11:05 — so the stop restarted it, and the deploy that had sent the signal found the
+  database held. `install_and_restart` now asks the shutdown signal before installing, after
+  the drain and before the restart; the staged download is reused at the next start
+  (`docs/invariants/state-and-config.md` § "A node asked to stop does not restart into its
+  update").
 
 **Closed 2026-10-14, released in v0.3.237 (2026-10-14 03:01 UTC)** (#266, #267)
 - #267 — **the node no longer opens a new dashboard tab every time it restarts.** With

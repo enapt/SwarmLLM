@@ -14,6 +14,7 @@ paths:
   - "src/daemon/helpers.rs"
   - "src/daemon/manifest.rs"
   - "src/main.rs"
+  - "src/update.rs"
   - "src/update_restart.rs"
   - "src/bin/launcher.rs"
 ---
@@ -118,6 +119,12 @@ The daemon must write **only values that differ from the compiled default**.
 **`config::parse_config_file`** is the only parse of the document — loader, dashboard save, reload and the settings read — because it applies `migrate_superseded_defaults`; guard `the_config_file_is_read_through_one_parser`. **`api::admin::apply_numeric_limits`** keeps a 0 that means automatic / at once and enforces only ceilings (#242: "Unlimited" stored a 1 Mbps cap for six months).
 
 → `docs/invariants/state-and-config.md` § "config.toml has ONE reader, and a setting's meaningful 0 is never floored"
+
+## A node asked to stop does not restart into its update (2026-10-14, #271)
+
+`update::UpdateChecker::install_and_restart` asks the shutdown watch before installing, after the drain and immediately before `exec_into`: a stop that lands while an update downloads, inside the supervisor's 10 s grace, must not become a restart. Guard `a_node_asked_to_stop_does_not_install_and_restart_into_its_update`.
+
+→ `docs/invariants/state-and-config.md` § "A node asked to stop does not restart into its update"
 
 ## Single-source-of-truth helpers — SharedState, live config and credits
 
