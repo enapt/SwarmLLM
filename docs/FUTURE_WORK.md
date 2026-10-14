@@ -1255,6 +1255,16 @@ tail; ~0.1 ms a layer by #138 (2)'s rig, ~2.5 ms of a 44 ms step here). Seen, no
 steps after a 681-token single-forward prompt took 2-4x a settled step on both the stacked
 and per-expert paths (not after a one-row prompt) — prompt temporaries pressing card memory
 is the likely reading; a node chunks card prompts at 512 tokens.
+**Measured 2026-10-14, before building it: KTransformers' design (the processor's part as a
+HOST NODE inside the graph — fixed pinned buffers, D2H → `cudaLaunchHostFunc` → H2D, so a step
+needs no pause) costs too much per host node under WSL2.** `examples/cuda_graph_host_node_probe.cu`,
+RTX 3070 Laptop, live node stopped, three rounds: one host node's round trip is 0.29-0.44 ms
+with no host work around it and 0.81-0.85 ms after a step that spun 0.77 ms per RAM layer. For
+the 30B's 25 RAM layers that is 7-21 ms a token, against the ~15 ms of submission capture would
+save. Its synthetic step did run 2.1x faster captured (52.5 vs 110-115 ms; overhead alone 26-29
+vs 82-84), but the synthetic submits ~4,000 ops a token, far more than the real step, so it
+overstates the gain. KTransformers runs on native Linux, where a host callback costs tens of
+µs. Not built; the fixed-address replay above remains the route.
 
 #### #174 — CPU decode attention sits ~2× above the memory-bandwidth floor
 `P3` · perf-local · **OPEN** — 2026-08-22 · history: archive § "CPU decode attention: the kernel sits 2x above the DRAM floor"
