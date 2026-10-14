@@ -6,9 +6,16 @@ figure the .145 round quoted), decode tok/s ((n-1)/(t_last - t_first), a
 client-side window — see gotcha #312), completion tokens, route headers,
 and the card's memory before/after.
 
-usage: bench.py MODEL [--reps N] [--max-tokens N] [--prompt TEXT] [--port P] [--label L]
+--unique opens every request (warm-ups too) with its own first line, so no rep
+reads its prompt from the prefix cache a previous rep filled: the 2nd and 3rd
+reps of one prompt measure the cache, not the prompt (#257 hid behind a
+best-of-three of exactly that). Prompt tok/s is prompt_tokens / TTFT.
+--json-out appends each recorded rep as one JSON line, with the label.
+
+usage: bench.py MODEL [--reps N] [--max-tokens N] [--prompt TEXT | --prompt-file F] [--unique]
+                [--port P] [--label L] [--json-out F]
 """
-import argparse, json, os, subprocess, sys, time, urllib.request
+import argparse, json, os, subprocess, sys, time, urllib.request, uuid
 
 ap = argparse.ArgumentParser()
 ap.add_argument("model")
@@ -19,7 +26,12 @@ ap.add_argument("--port", type=int, default=8800)
 ap.add_argument("--label", default="")
 ap.add_argument("--warmup", type=int, default=1)
 ap.add_argument("--temperature", type=float, default=0.0)
+ap.add_argument("--prompt-file", default=None)
+ap.add_argument("--unique", action="store_true")
+ap.add_argument("--json-out", default=None)
 args = ap.parse_args()
+if args.prompt_file:
+    args.prompt = open(args.prompt_file).read()
 
 key_path = os.environ.get("SWARMLLM_API_KEY_FILE", os.path.expanduser("~/.local/share/swarmllm/api_key"))
 KEY = open(key_path).read().strip()
@@ -37,10 +49,11 @@ def gpu_mem():
 
 
 def one(rep):
+    content = f"Request {uuid.uuid4().hex}.\n\n{args.prompt}" if args.unique else args.prompt
     body = json.dumps(
         {
             "model": args.model,
-            "messages": [{"role": "user", "content": args.prompt}],
+            "messages": [{"role": "user", "content": content}],
             "max_tokens": args.max_tokens,
             "temperature": args.temperature,
             "stream": True,
@@ -100,6 +113,7 @@ def one(rep):
     if ct and ct > 1 and t_first and t_last and t_last > t_first:
         decode = (ct - 1) / (t_last - t_first)
     whole = (ct / wall) if ct else None
+    prompt_tps = (pt / ttft) if pt and ttft else None
     return {
         "rep": rep,
         "wall_s": round(wall, 2),
@@ -109,6 +123,7 @@ def one(rep):
         "chunks": n_chunks,
         "whole_tps": round(whole, 2) if whole else None,
         "decode_tps": round(decode, 2) if decode else None,
+        "prompt_tps": round(prompt_tps, 1) if prompt_tps else None,
         "finish": finish,
         "error": err,
         "headers": hdrs,
@@ -126,13 +141,16 @@ for i in range(-args.warmup, args.reps):
         print(f"  {tag}: {r['error']}", flush=True)
         continue
     print(
-        f"  {tag}: wall {r['wall_s']}s ttft {r['ttft_s']}s | {r['completion_tokens']} tok | whole {r['whole_tps']} tok/s | decode {r['decode_tps']} tok/s | finish={r['finish']} err={r['error']} | {r['headers']}",
+        f"  {tag}: wall {r['wall_s']}s ttft {r['ttft_s']}s ({r['prompt_tokens']} prompt tok, {r['prompt_tps']} tok/s) | {r['completion_tokens']} tok | whole {r['whole_tps']} tok/s | decode {r['decode_tps']} tok/s | finish={r['finish']} err={r['error']} | {r['headers']}",
         flush=True,
     )
     if i == -1 or i == 0:
         print(f"    text: {r['text']}", flush=True)
     if i >= 0:
         results.append(r)
+        if args.json_out:
+            with open(args.json_out, "a") as f:
+                f.write(json.dumps({"label": args.label or args.model, "model": args.model, **r}) + "\n")
 mem1 = gpu_mem()
 ok = [r for r in results if r.get("decode_tps")]
 if ok:

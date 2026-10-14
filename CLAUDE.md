@@ -103,9 +103,8 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
   `SWARMLLM_TEST_MODEL_DIR=… cargo dev-test --test integration_phase10_11 -- --ignored end_to_end`.
 - CI is **14 jobs, all 14 required** by branch protection. `examples/check_ci_gate.sh`
   reports required-vs-produced drift — run it against a **COMPLETED** run only.
-- **Benches and their traps: `docs/DIAGNOSTICS.md` § Benchmarks.** The gate's three
-  (`smoke_test.sh`, `release_shapes.sh`, `family_conformance.sh`) run on the
-  DOWNLOADED artifact. Pinned models: `docs/REFERENCE_MODELS.md`.
+- **Benches and their traps: `docs/DIAGNOSTICS.md` § Benchmarks.** `examples/release_gate.sh`
+  runs the gate's harnesses on the DOWNLOADED artifact. Pinned models: `docs/REFERENCE_MODELS.md`.
 - **Measurement**: min-of-N on an IDLE box, never live (#367); A/B inside ONE binary via an env
   switch; **verify the mechanism fired**, and check a measuring mechanism against a known answer.
 
@@ -150,11 +149,11 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
 ## Releases, gates and this machine
 
 - **Releases are SIGNED; CI leaves a DRAFT.** Read `memory/release_gate.md`
-  before a release — the recipe and every caution a past gate earned. ⛔ A BUILD
-  gate is not a BEHAVIOUR gate (#683): `reply_ab.sh` + `split_rig.sh` run on the
-  DOWNLOADED artifact, a rig shares the machine with NOTHING (#708), and a reply
-  is judged against llama.cpp (`examples/score_against_reference.py`), never by
-  byte-equality.
+  before a release (~2 h bump → publish since 2026-10-14). ⛔ A BUILD gate is not
+  a BEHAVIOUR gate (#683): `examples/release_gate.sh` runs on the DOWNLOADED
+  artifact, a rig shares the machine with NOTHING (#708), and a reply is judged
+  against llama.cpp (`examples/score_against_reference.py`), never by byte-equality.
+  It checks the build for regressions; a fix is verified when it lands, never by a gate step.
 - ⚠ **Windows code is tested ON Windows before it ships** (MinGW cross-build, run
   natively from WSL — `memory/env_windows_test_node.md`); a reproduction must FAIL
   on the broken build first. std's `Command` hands a Windows child every inheritable

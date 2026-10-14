@@ -136,7 +136,8 @@ swarmllm/
 │                 of every token: the test for a split reply where byte-equality is not;
 │                 `--lora` scores against llama.cpp applying an adapter, which
 │                 peft_lora_to_gguf.py converts from PEFT (with the converter's q/k permute, #110);
-│                 smoke_test.sh, release_shapes.sh, family_conformance.sh — the release gate's three)
+│                 release_gate.sh — the release gate on the downloaded artifact, under an hour: smoke_test.sh,
+│                 release_shapes.sh, family_conformance.sh, reply_ab.sh, split_rig.sh, stream_bench.py)
 ├── kernels/       (SwarmLLM's own CUDA kernels, compiled to PTX by build.rs under
 │                 `candle-cuda` and loaded via candle's `get_or_load_custom_func`.
 │                 fused_decode.cu — fusions that remove a launch + an alloc + a free
