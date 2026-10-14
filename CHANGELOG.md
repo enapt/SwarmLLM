@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.3.237-alpha] — 2026-10-14
+
+**A restart no longer opens another dashboard tab.** With "open the dashboard on start" (the
+default), every automatic update and every restart opened a new browser tab beside the one
+already open, which reconnects by itself. One machine collected 25 tabs holding 8.5 GB. A start
+caused by an update now opens nothing. A start after a run with a dashboard connected waits up
+to 45 s for it to reconnect, and opens a tab only if it does not. A first launch still opens
+one at once. We also watched one open dashboard for over an hour and found it does not grow.
+
+**A model bigger than your graphics card reads long prompts several times faster.** Such a model
+runs its first layers on the card and the rest on the processor. A prompt of 32 tokens or more
+now runs the processor's layers on the card too, the way llama.cpp does. Each one's weights are
+copied over while the card computes, in pieces as large as the card has room for. On an 8 GB
+laptop card, a Qwen2.5-14B with 20 of its 48 layers on the card read an 888-token prompt in
+36.8 s on v0.3.236 and in about 5 s now. A 2,606-token prompt went from 8.8-10.1 s to 5.2-5.9 s
+across the last of these steps. Replies one token at a time are unchanged, and anything the card
+refuses runs on the processor as before.
+
+**A mixture-of-experts model too big for the card keeps every layer on it.** For a model such as
+Qwen3-30B-A3B, the node now keeps the experts of the first few layers in the machine's memory
+and the rest of every layer on the card, as llama.cpp's `--fit` does, instead of moving whole
+layers to the processor. On an 8 GB card it replies at 18.7-22.4 tokens a second against
+17.2-18.8, using less of the card. Its prompts gained from the change above as well: an
+867-token one took 11.0 s on v0.3.236 and 5.2-6.2 s in our last measurement. A mixture-of-experts model held whole on a bigger card now runs its replies as CUDA
+graphs like every other model (64-68 → 79-82 tokens a second on the layers we could fit).
+
+**A model moves back to the graphics card once it has room.** When another program (a game,
+Ollama) held part of the card, a model loaded at that moment was split onto the processor and
+stayed there until it was unloaded. In one report, Mistral 7B ran at 12.7 tokens a second with
+8 GB free, and at 55 once reloaded. The node now reads the card as it is, and moves a split or
+processor-only model back when the room is there.
+
+**"Keep on this computer" no longer refuses a model held whole here.** A model bigger than the
+graphics card was refused even when every part of it was on disk. The check now counts the parts
+this computer holds. A refusal that does find parts missing names them as the activity feed
+numbers them ("part 2").
+
+**Long prompts on a split model are no longer refused early or late.**
+- A model split between card and processor charged the processor side's conversation memory to
+  the card, and refused long prompts with a misleading "other conversations are using…" message
+  when no other conversation existed. Each side is now charged to the memory it lives in. On an
+  8 GB card, a 30B prompt of 2,585 tokens that v0.3.236 refused partway through now replies.
+- The processor side of such a split now counts against your memory limit like any model on the
+  processor. Your own requests are weighed against 80% of RAM (or your `max_ram_mb`), not the
+  smaller share you give the swarm.
+- When a request is split with other computers and this computer's part cannot hold the prompt,
+  it now says so before the others read it. In our test that refusal came in 0.3 s instead of
+  after 261 s of the other computer's work, and it names the longest prompt that fits.
+
+**On Windows (WSL2), a second long prompt no longer waits on the graphics card.** With the prompt
+cache on, each long prompt kept a copy on the card. Taking fresh card memory under WSL2 gets
+slower the longer Windows has been up: at 56 hours, a second and third long prompt read at
+474-640 tokens a second instead of ~1,500. The saved prompts now live in system memory there, as
+llama.cpp's server keeps them. Native Linux is unchanged.
+
+**`/v1/models` lists the context this computer can actually hold.** A chat app or agent sizing
+its conversations from the listed context found the real limit only from refused requests (a
+14B listed at 8,192 tokens where the card held about 5,100). While a model is loaded here and no
+other computer can take part in it, the list gives the longest prompt plus reply this computer
+accepts. It never lists more than the model declares.
+
+**For contributors.** `SWARMLLM_PROFILE=1` no longer turns a card model's CUDA graphs off. It also
+splits a split prompt's weight copies and a mixture-of-experts layer's expert products into
+their own lines. The diagnostics report says when its address or peer list has been cut short.
+
 ## [0.3.236-alpha] — 2026-10-12
 
 **A model can now be kept on this computer.** A new setting on each model's ⚙ panel, "Keep on
