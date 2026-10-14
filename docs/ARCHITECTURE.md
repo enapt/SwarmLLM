@@ -137,7 +137,10 @@ swarmllm/
 │                 `--lora` scores against llama.cpp applying an adapter, which
 │                 peft_lora_to_gguf.py converts from PEFT (with the converter's q/k permute, #110);
 │                 release_gate.sh — the release gate on the downloaded artifact, under an hour: smoke_test.sh,
-│                 release_shapes.sh, family_conformance.sh, reply_ab.sh, split_rig.sh, stream_bench.py)
+│                 release_shapes.sh, family_conformance.sh, reply_ab.sh, split_rig.sh, stream_bench.py;
+│                 feature_check.py — every surface a user reaches (OpenAI, Anthropic, Responses,
+│                 MCP, dashboard + its WebSocket, admin, the error contract, a swarm split)
+│                 asserted against a RUNNING node, one request at a time)
 ├── kernels/       (SwarmLLM's own CUDA kernels, compiled to PTX by build.rs under
 │                 `candle-cuda` and loaded via candle's `get_or_load_custom_func`.
 │                 fused_decode.cu — fusions that remove a launch + an alloc + a free
