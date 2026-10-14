@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.3.238-alpha] — 2026-10-14
+
+**A computer that once held another upload of a model can use the swarm's copy again.** Every
+computer uses the same file for a model, and one that held a different upload (another
+publisher's file under the same name) now replaces it. But a computer whose copy had already been
+removed kept refusing every other computer's copy as "a different build", because it still had
+the hashes that came with its old one. It could not use that model through the swarm at all. The
+test node in our own fleet was in this state for Qwen2.5-Coder-7B. It held no part of the model,
+and it turned away all four computers that hold the right file. A computer now forgets those
+hashes once no part of the model is on it and none is on its way, and it checks every model
+folder on disk, including ones that hold only a model's description. On that node the right
+upload was in use within a minute of starting this version.
+
+**A node told to stop stops, even while an update finishes downloading.** A node stopped during
+an update's download could finish the download in the few seconds it is given to shut down, then
+install the update and restart into it. The stop became a restart, and whatever had stopped the
+node found its database still in use. The node now checks whether it has been asked to stop before
+installing, after current requests finish, and just before restarting. The downloaded update is
+kept, and the next start installs it.
+
+**Cloud model status badges fill in after the node asks the page to wait.** The node limits how
+often the dashboard may check whether cloud models are reachable, because each check calls the
+provider. When it answered "too many requests", the models in that batch stayed marked as "being
+checked" for as long as the tab was open, and their badges never appeared. The page now asks
+again once the wait the node named has passed.
+
 ## [0.3.237-alpha] — 2026-10-14
 
 **A restart no longer opens another dashboard tab.** With "open the dashboard on start" (the
