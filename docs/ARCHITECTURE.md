@@ -85,7 +85,11 @@ swarmllm/
 │   │                          `run_mha` launches on the CALLER's stream, not stream 0 — .199's garbage, #683)
 │   ├── candle-paged-attention/ (kernels only — NOTHING references it; PagedAttention was never wired, #257;
 │   │                          its kernels still hardcode stream 0 — fix before wiring it, see FUTURE_WORK)
-│   └── libp2p-request-response/ (12 tests, `--lib`)
+│   ├── libp2p-request-response/ (12 tests, `--lib`)
+│   └── rayon-core/            (1.13.0 + ONE patch: an idle worker spins 200 µs before it sleeps — `sleep/mod.rs`
+│                              `spin_budget`, `SWARMLLM_RAYON_SPIN_US=0` = upstream; small decode regions stop
+│                              paying a wake per worker, FUTURE_WORK #137; guard
+│                              `rayon_core_is_the_vendored_copy_that_spins_before_sleeping`)
 ├── examples/      (runnable checks + harnesses, NOT `cargo test` targets:
 │                 frontend_load_check.js — loads every module in index.html's order;
 │                 research_gate_probe.py — plants one violation per Bash mutation form

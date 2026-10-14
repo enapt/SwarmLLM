@@ -27,7 +27,7 @@ No stubs. Deferred items go in `docs/ARCHITECTURE.md` § "Deferred Items", never
 
 libp2p 0.56, axum 0.8, candle 0.10 (CUDA, **vendored + patched**, see `vendor/`),
 redb 4, dalek 2, chacha20poly1305, blake3, dashmap 6, tokio, clap 4, tracing.
-Three carry contracts, not just versions:
+Four carry contracts, not just versions:
 
 - **minijinja 2.24 + minijinja-contrib (pycompat)** renders chat templates — the
   engine HF's TGI and SGLang use. Its `trim_blocks` / `lstrip_blocks` /
@@ -38,6 +38,9 @@ Three carry contracts, not just versions:
 - **`libp2p-gossipsub` is a DIRECT dep only to enable its `metrics` feature**
   (the facade's does not). If it drifts from libp2p's pin, cargo builds two
   copies and the traffic split reads as silently absent. Guarded.
+- **`rayon-core` is vendored for ONE patch**: idle workers spin 200 µs before they
+  sleep (8-thread processor decode 172 → 123-127 ms, #137). A `rayon` needing a newer
+  core leaves the `[patch]` unused with only a warning. Guarded.
 
 ## Coding Conventions
 

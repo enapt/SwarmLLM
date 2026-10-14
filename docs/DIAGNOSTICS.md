@@ -1741,6 +1741,10 @@ sends the several-row kernels (Q4_K, Q6_K, Q2_K, Q3_K) through the per-row loop 
 bit-identical replies, so any difference is the kernels' time.
 `SWARMLLM_QMATMUL_TAIL=per-row` turns off only the 2-3 row tail's shared pass — the
 whole call of a speculative check of 1-2 guesses (`--prompt-chunk 2` / `3` prices it).
+`SWARMLLM_RAYON_SPIN_US=0` puts every rayon pool back on upstream's idle loop (workers
+asleep within microseconds); the vendored default spins 200 µs. **A stage that grows
+with the thread count while the big products do not** — RoPE, attention, the small
+projections — is wake-ups, not bandwidth: compare it with this switch before anything else.
 
 **Qwen 3.5 shows `delta rule`** — its DeltaNet layers' recurrence, three layers in
 four. One op per layer since 2026-10-11 (processor and card);

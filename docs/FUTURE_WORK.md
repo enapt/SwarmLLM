@@ -1019,8 +1019,8 @@ on the card, in host RAM, and the prefix cache OFF. So it is not #257's pool gro
 line up with the safety kit's 10 s `nvidia-smi` readings. Next: catch one under nsys and see what the stream waits on (a
 Windows-side poller, a clock change, a WDDM residency move).
 
-#### #137 — Our processor decode gets ~40% SLOWER from 4 threads to 8, where llama.cpp's holds level; at 4 it trails by ~5%
-`P3` · perf-local · **OPEN, stage-profiled 2026-10-14** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3
+#### #137 — Our processor decode holds level from 4 threads to 8 where llama.cpp's gains ~8%; at 4 it trails llama.cpp by ~2%
+`P3` · perf-local · **PARTIAL — the 8-thread loss fixed 2026-10-14 (idle rayon workers spin)** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3
 
 **Measured 2026-10-14** on the Ryzen 7 5800H (8 cores), Qwen2.5-Coder-7B Q4_K_M, processor
 only — ours `swarmllm test-split --gpu-layers 0 --max-tokens 48` at
@@ -1090,9 +1090,19 @@ total; llama.cpp `llama-bench -ngl 0 -p 0 -n 48` (`4b1a27f`). Live node stopped,
    (`taskset -c 0,2,…,14`) 171-172 against 173-177 unpinned, rope and attention still ~9 ms each.
    ⚠ **A decode pool is never wider than the global pool** (`cpu_pools`: "no wider than prompt
    processing's"), so `RAYON_NUM_THREADS=4 SWARMLLM_DECODE_THREADS=8` decodes at 4 (125-127 ms) —
-   read `decode_threads=` in the log before trusting such an arm. **Left: lead 1** — count the
-   parallel regions a token runs and time a wake (8 workers on WSL2's Hyper-V), and find what in
-   the rope stage runs in parallel at all, before building a one-region decode.
+   read `decode_threads=` in the log before trusting such an arm.
+
+   **Lead 1 was it, and is fixed (2026-10-14, unreleased)**: upstream rayon puts an idle worker
+   to sleep within microseconds, so each small region of a token paid a wake per worker — 0.75 µs
+   of RoPE work cost 230-270 µs at 8 workers after a 20-100 µs gap. The vendored `rayon-core` spins
+   200 µs first: **4 threads 126/127 → 121/122 ms, 8 threads 172/171 → 123/127**, replies identical,
+   less processor time in all (`docs/invariants/inference.md` § "Idle rayon workers spin 200 µs
+   before they sleep"; A/B `SWARMLLM_RAYON_SPIN_US=0`).
+
+**Residual**: 8 threads still do not beat 4 here, where llama.cpp's do (110 against 119); at 8 our
+FFN products are 63 + 45 ms against 58 + 39 at 4. Next: the same stage profile at 8 with the spin,
+FFN products only, beside llama.cpp's `GGML_SCHED`-free op timings; leads 2 (the m == 1 split's
+`with_min_len(128).with_max_len(512)`) and a one-region decode remain.
 
 History: on 2026-10-11 decode ran OUTSIDE its thread pool on every default node — fixed
 (§ Closed 2026-10-11): a 14B split 5.3 → 6.8-6.9 tok/s, level with llama.cpp; a 3B
@@ -2237,7 +2247,12 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-14, unreleased** (#273, #274)
+**Closed 2026-10-14, unreleased** (#273, #274; #137's 8-thread half)
+- #137 (8-thread half) — **processor decode no longer slows down from 4 threads to 8.** Each
+  small parallel region of a token (RoPE, attention, the small projections) paid a wake per rayon
+  worker, because upstream rayon puts an idle worker to sleep within microseconds; the vendored
+  `rayon-core` spins 200 µs first. Qwen2.5-Coder-7B Q4_K_M: 8 threads 172 → 123-127 ms a token, 4
+  threads 126 → 121-122, replies identical. The entry stays open for 8 threads still not beating 4.
 - #273 — **a split of a mixture-of-experts model guesses ahead with a held small model again,
   and of two copies of one drafter the lighter one drafts.** A real Thailand↔Belgium split of
   Qwen3-30B-A3B (2026-10-13) guessed with n-grams only (9.8% of rounds kept, 468 ms a token over

@@ -360,6 +360,58 @@ small Q2_K/Q3_K expert shapes (768 × 2048) are dispatch-bound at m = 2-3 either
 (0.15 ms a call against 0.04 at m = 1) — a mixture-of-experts check goes through
 `matmul_many` instead.
 
+## Idle rayon workers spin 200 µs before they sleep — the vendored `rayon-core` (2026-10-14)
+
+**The rule**: every rayon pool in the binary runs on `vendor/rayon-core` (1.13.0 + one patch,
+`sleep/mod.rs::spin_budget`): an idle worker keeps looking for work for `SPIN_US_DEFAULT` = 200 µs
+before it announces itself sleepy. `SWARMLLM_RAYON_SPIN_US=0` is upstream (32 `yield_now` rounds,
+microseconds). Guard: `rayon_core_is_the_vendored_copy_that_spins_before_sleeping` (a `rayon` that
+needs a newer `rayon-core` leaves a `[patch]` unused with only a warning) + its planted-violation
+`the_rayon_core_guard_sees_a_registry_copy`.
+
+**What it replaced.** A decoded token runs several parallel regions a layer — RoPE twice
+(candle-nn's CPU `rope`/`rope_i` are `par_chunks` over heads), attention, the Q/K/V and output
+projections, the FFN — with microseconds of serial work between them. Upstream's idle loop puts a
+worker to sleep within that gap, so the next region pays a condvar wake per worker, and on WSL2's
+Hyper-V a wake is expensive. FUTURE_WORK #137's stage profile (Qwen2.5-Coder-7B Q4_K_M, processor,
+256 tokens) found the small stages growing from 4 threads to 8 — RoPE ×13, attention ×5.7, QKV ×2.2 —
+while the big FFN products grew 9-19%. Refuted on the way: the rig's own CPU cap (an uncapped run
+is no faster, 0 throttled periods) and SMT placement (one thread per core changes nothing).
+
+**The mechanism, measured in isolation** (scratch `wakeprobe`, rayon 1.12 / rayon-core 1.13, live
+node stopped): a region of 28 chunks × 128 floats (one layer's RoPE; 0.75 µs serially) after a
+serial gap —
+
+| pool width | gap 0 | gap 20 µs | gap 100 µs | gap 1000 µs |
+|---|---|---|---|---|
+| 4, upstream | 4.2 | 5.2 (p90 65) | 82 | 62 |
+| 8, upstream | 5.5 | 120-146 (p90 415-434) | 229-232 | 267-272 |
+| 16, upstream | 8.1 | 872-887 | 900-911 | 888-896 |
+| 4, spin 200 µs | 4.1 | 4.4 | 5.3 | 63 |
+| 8, spin 200 µs | 5.4 | 5.6 | 6.2 | 179 |
+
+**End to end** (`test-split --gpu-layers 0 --max-tokens 256`, ABBA, each arm in its own uncapped
+scope, scratch `t48s.sh`): ms a token, median of 251 forwards —
+
+| | upstream | spin 200 µs |
+|---|---|---|
+| 4 threads | 126, 127 | **121, 122** |
+| 8 threads | 172, 171 | **123, 127** |
+
+RoPE at 8 threads 8.9 → 0.6 ms a token, attention 9.1 → 1.7, QKV 21.9 → 8.5. The replies are
+identical in all eight runs. The processor time a run used went DOWN (cgroup `usage_usec`: 4 threads
+155.6 / 145.6 → 146.3 / 146.3 s, 8 threads 297.4 / 292.6 → 264.1 / 270.2 s): a sleeping worker's wake
+costs more than the spin it replaces, and a worker idle past 200 µs still sleeps, so an idle node
+burns nothing. llama.cpp solves the same problem by keeping its workers spinning at a barrier between
+the ops of one graph (`ggml_barrier`); rayon's maintainers describe the small-job overhead in
+rayon-rs/rayon#614.
+
+**What a change must keep**: the spin is a TIME budget measured from when the worker went idle, reset
+on a full wake (`IdleState::wake_fully`), never on a partial one (a spurious wake goes straight back
+to the sleepy protocol, as upstream). Re-measure with `SWARMLLM_RAYON_SPIN_US=0` as the A/B before
+changing the default; 8 threads still do not beat 4 on this box (llama.cpp's 8 do: 110 against 119),
+which is #137's residual.
+
 ## `inference::decode_attn::gqa_decode_attention_cpu`
 
 (2026-08-21 night) — single-

@@ -5,6 +5,7 @@ exclude = [
     "vendor/candle-flash-attn",
     "vendor/candle-paged-attention",
     "vendor/libp2p-request-response",
+    "vendor/rayon-core",
     "vendor/candle",
 ]
 # Note: vendor/libp2p-gossipsub was removed in libp2p 0.55→0.56 upgrade —
@@ -423,6 +424,14 @@ path = "examples/swarm_spec_bench.rs"
 
 [patch.crates-io]
 libp2p-request-response = { path = "vendor/libp2p-request-response" }
+# rayon-core 1.13.0 with ONE change: an idle worker spins 200 µs before it
+# sleeps (vendor/rayon-core/src/sleep/mod.rs, `spin_budget`), so the small
+# parallel regions of a decoded token stop paying a wake per worker — 8-thread
+# processor decode 172 → 123-127 ms a token, 4-thread 126 → 121-122
+# (FUTURE_WORK #137). `SWARMLLM_RAYON_SPIN_US=0` is upstream. A rayon that
+# needs a newer rayon-core would leave this patch unused WITHOUT an error:
+# `rayon_core_is_the_vendored_copy_that_spins_before_sleeping` fails instead.
+rayon-core = { path = "vendor/rayon-core" }
 # Upstream candle 0.10.1 hardcodes `cudarc/dynamic-linking` in its
 # Cargo.toml, preventing downstream consumers from choosing a different
 # linking mode (e.g. `dynamic-loading` so the binary can ship the NVIDIA

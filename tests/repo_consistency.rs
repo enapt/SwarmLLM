@@ -11413,6 +11413,89 @@ fn the_gossip_counters_come_from_the_same_crate_libp2p_uses() {
     );
 }
 
+/// The resolved `rayon-core` packages that are NOT the vendored copy under
+/// `vendor/rayon-core` — `(version, source)` of each. Pure, so the planted
+/// violation below can check it.
+fn rayon_cores_outside_vendor(packages: &[serde_json::Value]) -> Vec<String> {
+    packages
+        .iter()
+        .filter(|p| p["name"].as_str() == Some("rayon-core"))
+        .filter(|p| {
+            !p["source"].is_null()
+                || !p["manifest_path"]
+                    .as_str()
+                    .unwrap_or("")
+                    .replace('\\', "/")
+                    .ends_with("vendor/rayon-core/Cargo.toml")
+        })
+        .map(|p| format!("{} from {}", p["version"], p["source"]))
+        .collect()
+}
+
+/// Every rayon pool in this binary — candle's, the decode pool, the prompt
+/// pool — must run on the vendored `rayon-core`, whose idle workers spin
+/// before they sleep (FUTURE_WORK #137: 8-thread processor decode 172 →
+/// 123-127 ms a token). `[patch.crates-io]` only applies while the vendored
+/// version satisfies what `rayon` asks for; a `rayon` needing a newer
+/// `rayon-core` makes cargo print "patch was not used" and build the registry
+/// copy — the speed goes and nothing fails. This does.
+#[test]
+fn rayon_core_is_the_vendored_copy_that_spins_before_sleeping() {
+    let out = std::process::Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1"])
+        .current_dir(repo_root())
+        .output()
+        .expect("cargo metadata");
+    assert!(out.status.success(), "cargo metadata failed");
+    let meta: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("cargo metadata is not JSON");
+    let packages = meta["packages"].as_array().expect("packages array");
+    let outside = rayon_cores_outside_vendor(packages);
+    assert!(
+        outside.is_empty(),
+        "rayon-core resolves outside vendor/rayon-core: {outside:?}. The vendored copy's \
+         idle-worker spin is what keeps small decode regions from paying a wake per worker \
+         (FUTURE_WORK #137) — re-vendor the rayon-core that `rayon` now requires and carry \
+         the `spin_budget` patch over (vendor/rayon-core/src/sleep/mod.rs)."
+    );
+    assert!(
+        packages
+            .iter()
+            .any(|p| p["name"].as_str() == Some("rayon-core")),
+        "no rayon-core in the resolved tree at all — this guard is reading the wrong tree"
+    );
+    let sleep = std::fs::read_to_string(repo_root().join("vendor/rayon-core/src/sleep/mod.rs"))
+        .expect("vendor/rayon-core/src/sleep/mod.rs");
+    assert!(
+        sleep.contains("fn spin_budget()") && sleep.contains("SWARMLLM_RAYON_SPIN_US"),
+        "the vendored rayon-core no longer carries the idle-worker spin (`spin_budget`)"
+    );
+}
+
+/// The planted violation: a registry `rayon-core` beside (or instead of) the
+/// vendored one is reported, the vendored one alone is not.
+#[test]
+fn the_rayon_core_guard_sees_a_registry_copy() {
+    let vendored = serde_json::json!({
+        "name": "rayon-core", "version": "1.13.0", "source": null,
+        "manifest_path": "/repo/vendor/rayon-core/Cargo.toml"
+    });
+    let registry = serde_json::json!({
+        "name": "rayon-core", "version": "1.14.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "manifest_path": "/home/u/.cargo/registry/src/x/rayon-core-1.14.0/Cargo.toml"
+    });
+    let other = serde_json::json!({
+        "name": "rayon", "version": "1.12.0", "source": "registry+x", "manifest_path": "/x"
+    });
+    assert!(rayon_cores_outside_vendor(&[vendored.clone(), other.clone()]).is_empty());
+    assert_eq!(
+        rayon_cores_outside_vendor(&[vendored, registry.clone(), other]).len(),
+        1
+    );
+    assert_eq!(rayon_cores_outside_vendor(&[registry]).len(), 1);
+}
+
 /// The oldest quinn-proto whose stream receive assembler does not refuse a
 /// stream that has no gaps in it (quinn-rs/quinn#2809, fixed by #2814).
 const QUINN_PROTO_FIXED: (u64, u64, u64) = (0, 11, 18);
