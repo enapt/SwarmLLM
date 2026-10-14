@@ -103,10 +103,14 @@ OUT="$OUT/split" "$HERE/split_rig.sh" split "$CAND" > "$OUT/split.log" 2>&1
 python3 - "$OUT/split/replies.jsonl" <<'PY' > "$OUT/split.verdict" 2>&1
 import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1])]
-# Two nodes really took part: the route left this node and the plan had two segments or more.
-ok = len(rows) == 2 and all(r["status"].endswith("200 ok") and r.get("content") and r.get("route") not in (None, "local")
-                            and int(r.get("segments") or 0) >= 2 for r in rows)
-print("PASS" if ok else "FAIL", "; ".join(f'{r["status"]} route={r.get("route")} segments={r.get("segments")}' for r in rows))
+# split_rig prints each header as the list of its values; status is the lowercased status line.
+first = lambda v: (v[0] if v else None) if isinstance(v, list) else v
+# Two nodes really took part: the route left this node and the plan had two segments or more
+# (a rig that silently stopped splitting reads `x-swarm-segments: 1`, gotcha #651).
+ok = len(rows) == 2 and all(r["status"].endswith("200 ok") and r.get("content") and not str(r["content"]).startswith("ERR ")
+                            and first(r.get("route")) not in (None, "local")
+                            and int(first(r.get("segments")) or 0) >= 2 for r in rows)
+print("PASS" if ok else "FAIL", "; ".join(f'{r["status"]} route={first(r.get("route"))} segments={first(r.get("segments"))}' for r in rows))
 PY
 read -r v rest < "$OUT/split.verdict"; verdict split "${v:-FAIL}" "${rest:-no replies, $OUT/split.log}"
 settle
