@@ -1791,6 +1791,62 @@ every model it registers, partial holdings included: four seconds after a
 restart `auto` named a 14B held 14 of 48 layers here and failed on two peers
 that could not load it (#120).
 
+## A model's context on `/v1/models` is what this node holds, when nobody else can take part (2026-10-14, #252 (1))
+
+**What it replaced.** `max_model_len_for` reported the declared context, capped
+by the owner's override, whatever the card held. Field report #035: Qwen3-14B on
+a 12 GB card, `max_model_len: 8192`, an 860 MB conversation budget once the
+weights were loaded, and a 6,228-token prompt refused. Open WebUI and Home
+Assistant learn the limit only from failed requests; an agent client (OpenClaw)
+sizes its compaction by this figure, so it kept building turns the card refused.
+
+**How the systems with more scars do it.** vLLM's `--max-model-len auto` profiles
+memory after the load and serves the longest context the KV cache holds; without
+it vLLM REFUSES TO START when the declared length does not fit (its error names
+the length that would). llama.cpp's server allocates `n_ctx` up front, so the
+figure it reports is by construction what fits. Both are single machines. Here
+the context is never shortened (`arch-worker-memory.md` § "A card's KV budget is
+kept whatever the context setting") — a prompt too long for this card is
+re-planned across the model's other holders — so the lowered figure is true
+only where no re-plan has anywhere to go.
+
+**Now.** The worker reports the longest conversation the model it holds WHOLE
+admits with nothing else held (`model_worker::whole_model_context_fits`:
+`longest_prompt_that_fits` in each memory the caches are charged to, the least)
+— `WorkerMsg::ContextFits`, gated on `DAEMON_READS_CONTEXT_FITS` like every new
+worker message — read when the loaded ranges change and at most every
+`CONTEXT_FITS_EVERY` (60 s) after, never per message: the read synchronizes the
+device. The daemon keeps it on the worker's handle, so it dies with the worker
+(`ModelProcessPool::context_fits`). `context_served_here` lowers the declared
+figure to it only while `another_holder_could_take_part` is false — a connected
+holder of any part inside `pool::scope::request_scope` — and never raises it (a
+processor's budget can hold more positions than the model was trained for).
+
+**What a change must keep.** The budget as ADMISSION reads it (`kv_budget_now`
+over the caches live in that memory, the promises not yet written and the cached
+prompts beside them): the load-time budget capped by what the device holds for
+caches plus what it has free. That sum does not move with what the
+conversations hold at the moment, so it describes the device. The load-time
+budget alone can promise more than the device grants (#187 measured the two
+bases ~60% apart in the marginal case). The figure is the positions that budget
+holds in whole growth quanta less the DRAFT MARGIN, not less the whole reply
+cap: admission reserves `min(max_tokens + margin, one quantum)`, so every
+request whose prompt and reply fit in it is admitted however they divide it,
+and one position more is refused for a one-token reply (pinned by
+`the_context_a_whole_model_holds_is_its_tightest_memorys`). A refusal names the
+same quanta less ITS reserve ("up to about N tokens"), so for a short reply the
+two agree. First written less the whole cap, the live run read 4,608 for a 14B
+whose card took 5,088 — a list that under-reports makes an agent client compact
+early for nothing. No figure is not 0: a model with no room at all reports the
+declared context and its refusal says why.
+
+**Left open**: with no worker loaded the declared figure stands; a peer's room
+is not gossiped (#252 (b)).
+
+**Tests**: `the_context_a_whole_model_holds_is_its_tightest_memorys`,
+`a_model_only_this_node_can_serve_reports_the_context_its_memory_holds`,
+`only_a_connected_holder_in_scope_could_take_part`.
+
 ## What part of a tool-carrying reply is content is decided in one place
 
 **`tool_parse::leading_content`** is the single answer for both non-streaming

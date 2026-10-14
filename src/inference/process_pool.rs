@@ -599,6 +599,11 @@ struct WorkerHandle {
     /// budget at spawn beside `charged_mb`'s card share (#264); 0 for a worker
     /// on one device. Released with the worker.
     host_share_mb: u64,
+    /// The longest conversation the model this worker holds whole admits, as
+    /// the worker last reported it (`WorkerMsg::ContextFits`); 0 = no figure.
+    /// Written by the reader actor, read by [`ModelProcessPool::context_fits`].
+    /// On the handle, so the figure dies with the worker that measured it.
+    context_fits: Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// Longest path a Unix domain socket may have, INCLUDING its NUL terminator.
@@ -768,6 +773,7 @@ fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
         | WorkerMsg::Progress { .. }
         | WorkerMsg::CardAllocationProbe { .. }
         | WorkerMsg::ModelLoadTimed { .. }
+        | WorkerMsg::ContextFits { .. }
         | WorkerMsg::Ready
         | WorkerMsg::Bye => None,
     }
@@ -832,6 +838,8 @@ struct SideBand {
     progress_tx: Option<mpsc::Sender<ProgressEvent>>,
     slow_card: Arc<crate::inference::cuda_pool::SlowCardNotice>,
     load_rate: Arc<LoadRate>,
+    /// This worker's `WorkerHandle::context_fits`.
+    context_fits: Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// Reader actor: owns the read half of the worker socket, dispatches each
@@ -851,6 +859,7 @@ async fn reader_actor(
         progress_tx,
         slow_card,
         load_rate,
+        context_fits,
     } = side;
     let mut skipped: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
@@ -927,6 +936,16 @@ async fn reader_actor(
                         ms,
                         ms_per_gib = ?load_rate.ms_per_gib(),
                         "DIAG: model load timed"
+                    );
+                    continue;
+                }
+                // The context the whole model in this worker holds (#252 (1)).
+                if let WorkerMsg::ContextFits { tokens } = msg {
+                    context_fits.store(tokens.unwrap_or(0), Ordering::Relaxed);
+                    tracing::debug!(
+                        model = %model_id,
+                        tokens = ?tokens,
+                        "DIAG: the context the loaded model holds here"
                     );
                     continue;
                 }
@@ -6568,6 +6587,8 @@ impl ModelProcessPool {
         command.env(crate::inference::worker_ipc::DAEMON_READS_CARD_PROBE, "1");
         // ...and its load timings (#129), for the same reason.
         command.env(crate::inference::worker_ipc::DAEMON_READS_LOAD_TIMING, "1");
+        // ...and the context its whole model holds (#252 (1)).
+        command.env(crate::inference::worker_ipc::DAEMON_READS_CONTEXT_FITS, "1");
         // With a log file, the worker's output comes through this daemon into
         // the window AND the file — one writer for the file, so it can rotate.
         let piped = crate::logging::pipes_worker_output();
@@ -6685,6 +6706,7 @@ impl ModelProcessPool {
         std::mem::forget(socket_guard);
         let responses: ResponseMap = Arc::new(DashMap::new());
         let dead = Arc::new(AtomicBool::new(false));
+        let context_fits = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let reader_handle = tokio::spawn(reader_actor(
             read_half,
             responses.clone(),
@@ -6696,6 +6718,7 @@ impl ModelProcessPool {
                 progress_tx: self.progress_tx.get().cloned(),
                 slow_card: self.slow_card.clone(),
                 load_rate: self.load_rate.clone(),
+                context_fits: context_fits.clone(),
             },
         ));
         Ok(WorkerHandle {
@@ -6719,6 +6742,7 @@ impl ModelProcessPool {
             // Only a split is worth recording; a worker wholly on the card
             // says so through `placed_on_cpu_because: None` alone.
             card_split: card_split.filter(|_| placed_on_cpu_because.is_none()),
+            context_fits,
         })
     }
 
@@ -8035,6 +8059,19 @@ impl ModelProcessPool {
     /// Check if a worker is running for a model.
     pub fn is_loaded(&self, model_id: &ModelId) -> bool {
         self.workers.contains_key(model_id)
+    }
+
+    /// The longest conversation, prompt and reply together, that `model_id`'s
+    /// worker admits while it holds the whole model, as the worker measured it
+    /// from its KV budget (`WorkerMsg::ContextFits`). `None` with no worker, no
+    /// whole model in it, or a worker that has not said (FUTURE_WORK #252 (1)).
+    pub fn context_fits(&self, model_id: &ModelId) -> Option<usize> {
+        let tokens = self
+            .workers
+            .get(model_id)?
+            .context_fits
+            .load(Ordering::Relaxed);
+        (tokens > 0).then_some(tokens as usize)
     }
 
     /// List all currently loaded model IDs.
@@ -9831,6 +9868,7 @@ mod tests {
             host_share_mb: 0,
             gpu_estimate_mb: 0,
             card_split,
+            context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         })
     }
 

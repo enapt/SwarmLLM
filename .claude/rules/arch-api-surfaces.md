@@ -136,6 +136,7 @@ A failure is `StreamEvent::Error` typed through `classify_error` with no finish 
 A second implementation of any of these is this codebase's most-repeated defect (`architecture.md` § "One invariant, N paths").
 
 - **`api::metrics::network_traffic_json`** — traffic in every status payload (THREE surfaces; `every_stats_surface_carries_the_traffic_figure`).
+- **`api::openai::max_model_len_for`** — a model's context on `/v1/models`: declared, override-capped, lowered to what this node holds (`ModelProcessPool::context_fits`) only while no connected holder in scope could take part (`context_served_here`, #252 (1)); never raised. → § "A model's context on `/v1/models` is what this node holds".
 - **`api::mcp::dispatch::spawn_model_call_task`** — whether a fan-out call **answered**.
 - **`inference::model_worker::resolve_max_new_tokens`** — a reply's token budget.
 - **`crate::error::reclassify_flattened_error`** — an error's CLASS after a boundary.

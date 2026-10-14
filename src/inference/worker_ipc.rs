@@ -135,6 +135,10 @@ pub(crate) fn daemon_reads_card_probe(v: Option<&std::ffi::OsStr>) -> bool {
 /// ([`daemon_reads_card_probe`]).
 pub(crate) const DAEMON_READS_LOAD_TIMING: &str = "SWARMLLM_DAEMON_READS_LOAD_TIMING";
 
+/// Set by the daemon in every worker's environment: this daemon decodes
+/// `WorkerMsg::ContextFits`. Gated and read like [`DAEMON_READS_LOAD_TIMING`].
+pub(crate) const DAEMON_READS_CONTEXT_FITS: &str = "SWARMLLM_DAEMON_READS_CONTEXT_FITS";
+
 /// Message from worker → daemon.
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "t")]
@@ -218,6 +222,18 @@ pub enum WorkerMsg {
     /// ⚠ Sent only when the daemon said it reads it
     /// ([`DAEMON_READS_LOAD_TIMING`]) — see `CardAllocationProbe`.
     ModelLoadTimed { bytes: u64, ms: u32 },
+    /// The longest conversation, prompt and reply together, the model this
+    /// worker holds WHOLE admits with nothing else held
+    /// (`model_worker::whole_model_context_fits`); `None` while it holds no
+    /// whole model, or no budget is known for it. Side-band, sent when it
+    /// changes — read after a message that loaded or dropped a model, and at
+    /// most once a minute after (`model_worker::CONTEXT_FITS_EVERY`). The daemon
+    /// keeps it on the worker's handle, and `/v1/models` reports it in place of
+    /// a longer declared context (FUTURE_WORK #252 (1)).
+    ///
+    /// ⚠ Sent only when the daemon said it reads it
+    /// ([`DAEMON_READS_CONTEXT_FITS`]) — see `CardAllocationProbe`.
+    ContextFits { tokens: Option<u32> },
     /// Error for a specific request.
     ///
     /// `fatal` marks a failure that corrupted or exhausted the worker's device
@@ -665,6 +681,7 @@ enum WorkerMsgTag {
     GenerateDone,
     CardAllocationProbe,
     ModelLoadTimed,
+    ContextFits,
     Error,
     PrefixManifestUpdate,
     PrefixFetchProbe,
@@ -939,6 +956,7 @@ mod tests {
                 WorkerMsg::GenerateDone { .. } => WorkerMsgTag::GenerateDone,
                 WorkerMsg::CardAllocationProbe { .. } => WorkerMsgTag::CardAllocationProbe,
                 WorkerMsg::ModelLoadTimed { .. } => WorkerMsgTag::ModelLoadTimed,
+                WorkerMsg::ContextFits { .. } => WorkerMsgTag::ContextFits,
                 WorkerMsg::Error { .. } => WorkerMsgTag::Error,
                 WorkerMsg::PrefixManifestUpdate { .. } => WorkerMsgTag::PrefixManifestUpdate,
                 WorkerMsg::PrefixFetchProbe { .. } => WorkerMsgTag::PrefixFetchProbe,
@@ -955,6 +973,10 @@ mod tests {
                 bytes: 1 << 30,
                 ms: 2_500,
             },
+            WorkerMsg::ContextFits {
+                tokens: Some(4_608),
+            },
+            WorkerMsg::ContextFits { tokens: None },
             WorkerMsg::Drafted {
                 request_id: Uuid::nil(),
                 tokens: vec![],

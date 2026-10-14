@@ -685,6 +685,60 @@ fn owned_by_for(state: &AppState, model_id: &str) -> String {
     crate::api::model_source_for(&state.shared_state, model_id).to_string()
 }
 
+/// The context a model's manifest says it declares — what a node with no header
+/// for it knows (#189). `None` from a manifest an older node published.
+fn context_from_manifest(shared: &crate::daemon::SharedState, model_id: &str) -> Option<usize> {
+    shared
+        .model_registry
+        .get_manifest(&crate::types::ModelId(model_id.to_string()))
+        .and_then(|m| m.context_length)
+        .map(|c| c as usize)
+}
+
+/// Could another computer take part in a request for `model_id`: is one that
+/// holds any part of it connected and inside the request's scope
+/// (`pool::scope::request_scope` — a model kept on this computer, or private
+/// mode, narrows it)? Without one, a prompt this node's memory refuses has
+/// nowhere to go: the re-plan after that refusal splits the model across
+/// holders only.
+fn another_holder_could_take_part(shared: &crate::daemon::SharedState, model_id: &str) -> bool {
+    let id = crate::types::ModelId(model_id.to_string());
+    let Some(manifest) = shared.model_registry.get_manifest(&id) else {
+        return false;
+    };
+    let scope = crate::pool::scope::request_scope(shared, &id);
+    let local = shared.identity.node_id();
+    manifest.shards.iter().any(|s| {
+        let shard = crate::types::ShardId {
+            model_id: id.clone(),
+            index: s.index,
+        };
+        shared.model_registry.shard_holders(&shard).iter().any(|h| {
+            h != local
+                && shared.connected_node_ids.contains(h)
+                && scope.as_ref().is_none_or(|allowed| allowed.contains(h))
+        })
+    })
+}
+
+/// The context a model has HERE: the declared figure (already capped by the
+/// owner's override), lowered to what this node's memory holds — but only
+/// while no other computer could take part, since a prompt longer than this
+/// node holds is then refused rather than split (FUTURE_WORK #252 (1)). Never
+/// raised: a processor's budget can hold far more positions than the model was
+/// trained for.
+fn context_served_here(
+    declared: Option<usize>,
+    fits_here: Option<usize>,
+    another_holder_could_take_part: bool,
+) -> Option<usize> {
+    let declared = declared?;
+    Some(match fits_here {
+        Some(fits) if !another_holder_could_take_part => declared.min(fits),
+        _ => declared,
+    })
+}
+
 /// Longest conversation this node will serve for `model_id`, or `None` when its
 /// declared context cannot be read.
 ///
@@ -703,16 +757,12 @@ fn owned_by_for(state: &AppState, model_id: &str) -> String {
 /// is set when a worker spawns, so in the daemon it is always 0. Reading it
 /// reported 4096 on a node explicitly configured for 32768 — measured, and
 /// exactly the user who had already hit this problem once.
-/// The context a model's manifest says it declares — what a node with no header
-/// for it knows (#189). `None` from a manifest an older node published.
-fn context_from_manifest(shared: &crate::daemon::SharedState, model_id: &str) -> Option<usize> {
-    shared
-        .model_registry
-        .get_manifest(&crate::types::ModelId(model_id.to_string()))
-        .and_then(|m| m.context_length)
-        .map(|c| c as usize)
-}
-
+///
+/// **While the model is loaded here and nobody else could take part, the
+/// figure is what this node's memory holds** ([`context_served_here`]): a
+/// tester's 12 GB card held about 5,100 positions of Qwen3-14B while this
+/// said 8,192, and a client learned the difference only from refused requests
+/// (field report #035). With no worker loaded, the declared figure stands.
 fn max_model_len_for(state: &AppState, model_id: &str) -> Option<usize> {
     use std::sync::OnceLock;
     static DECLARED: OnceLock<dashmap::DashMap<String, Option<usize>>> = OnceLock::new();
@@ -748,7 +798,16 @@ fn max_model_len_for(state: &AppState, model_id: &str) -> Option<usize> {
         .inference
         .max_seq_len_override
         .map(|v| v as usize);
-    declared.map(|d| crate::inference::split::effective_context_length_with(d, override_cap))
+    let declared =
+        declared.map(|d| crate::inference::split::effective_context_length_with(d, override_cap));
+    // The cheap question first: a peer walk only for a model loaded here.
+    let fits_here = state
+        .shared_state
+        .model_process_pool
+        .context_fits(&crate::types::ModelId(model_id.to_string()));
+    let shared_elsewhere =
+        fits_here.is_some() && another_holder_could_take_part(&state.shared_state, model_id);
+    context_served_here(declared, fits_here, shared_elsewhere)
 }
 
 /// GET /v1/models
@@ -1050,6 +1109,104 @@ mod tests {
         assert_eq!(super::context_from_manifest(&state, "told"), Some(2048));
         assert_eq!(super::context_from_manifest(&state, "older"), None);
         assert_eq!(super::context_from_manifest(&state, "unheard-of"), None);
+    }
+
+    /// Field report #035: a 12 GB card held about 5,100 positions of
+    /// Qwen3-14B while `/v1/models` said 8,192, and a client learned it only
+    /// from refusals. While nobody else could take part, the context reported
+    /// is what this node holds; a peer that could take the rest of a longer
+    /// prompt leaves the declared figure; nothing raises it past the
+    /// declared one (#252 (1)).
+    #[test]
+    fn a_model_only_this_node_can_serve_reports_the_context_its_memory_holds() {
+        assert_eq!(
+            context_served_here(Some(8192), Some(5088), false),
+            Some(5088)
+        );
+        assert_eq!(
+            context_served_here(Some(8192), Some(5088), true),
+            Some(8192)
+        );
+        assert_eq!(
+            context_served_here(Some(8192), Some(200_000), false),
+            Some(8192)
+        );
+        assert_eq!(context_served_here(Some(8192), None, false), Some(8192));
+        assert_eq!(context_served_here(None, Some(5088), false), None);
+    }
+
+    /// "Could anyone else take part" counts a CONNECTED holder of any part
+    /// INSIDE the request's scope: a holder we are not connected to, or one
+    /// outside a model kept on this computer, cannot take a longer prompt.
+    #[test]
+    fn only_a_connected_holder_in_scope_could_take_part() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        let mid = crate::types::ModelId("q14b".into());
+        state
+            .model_registry
+            .register_manifest(crate::types::ModelManifest {
+                id: mid.clone(),
+                name: "q14b".into(),
+                architecture: crate::types::ModelArchitecture::Llama,
+                num_layers: 4,
+                num_params_billions: 14.0,
+                quantization: crate::types::Quantization::Q4KM,
+                total_size_bytes: 2,
+                shard_count: 2,
+                shards: (0..2u32)
+                    .map(|i| swarmllm_types::ShardInfo {
+                        index: i,
+                        layer_range: (i * 2, i * 2 + 2),
+                        size_bytes: 1,
+                        hash: [0u8; 32],
+                        tensors: Vec::new(),
+                    })
+                    .collect(),
+                tokenizer_hash: [0u8; 32],
+                manifest_hash: [0u8; 32],
+                publisher: crate::types::NodeId([0u8; 32]),
+                publish_date: chrono::Utc::now(),
+                license: "MIT".into(),
+                mmproj: None,
+                context_length: Some(8192),
+            });
+        let shard = |i| crate::types::ShardId {
+            model_id: mid.clone(),
+            index: i,
+        };
+        let me = state.identity.node_id().clone();
+        for i in 0..2 {
+            state
+                .model_registry
+                .record_shard_holder(shard(i), me.clone());
+        }
+        // Held only here: nobody else.
+        assert!(!another_holder_could_take_part(&state, "q14b"));
+        // A peer holds one part but is not connected.
+        let peer = crate::types::NodeId([9u8; 32]);
+        state
+            .model_registry
+            .record_shard_holder(shard(1), peer.clone());
+        assert!(!another_holder_could_take_part(&state, "q14b"));
+        // Connected: it could take the rest of a longer prompt.
+        state.connected_node_ids.insert(peer.clone());
+        assert!(another_holder_could_take_part(&state, "q14b"));
+        // The owner keeps the model on this computer: the peer is out of scope.
+        state.keep_on_this_computer(&mid, true).unwrap();
+        assert!(!another_holder_could_take_part(&state, "q14b"));
+        // A model this node has no manifest for has no holders to ask.
+        assert!(!another_holder_could_take_part(&state, "unheard-of"));
     }
 
     /// OpenClaw's self-hosted discovery reads `context_length`; vLLM-style

@@ -2403,7 +2403,12 @@ message rather than the chat page.
   model's manifest (`ModelManifest::context_length`, gossiped by its holders —
   FUTURE_WORK #189), so a model only peers hold has a figure once a holder runs a
   build that sends it. Omitted when neither says, since a wrong figure is worse
-  than an absent one.
+  than an absent one. While the model is loaded here whole and no connected
+  holder inside the request's scope could take part, the figure is lowered to
+  what this node's memory holds (`ModelProcessPool::context_fits`, reported by
+  the worker as `WorkerMsg::ContextFits`: the longest prompt + reply admission
+  takes however the two divide it; FUTURE_WORK #252 (1)), never raised past the
+  declared one.
 - `GET    /v1/providers` — List configured cloud providers and their available models
 - `GET    /v1/status` — SwarmLLM node status. `workers` (2026-09-03): every resident model-worker subprocess — `model`, `pid`, `device` (`graphics card`/`processor`), `cpu_reason`, `in_flight` (requests it is computing now, from the pool's own response map), `idle_secs`, `age_secs`, `dead`, `gpu_estimate_mb`. The answer to "what is my machine computing right now", and how a worker still busy for a client that has gone is found without `ps` (gotcha #445); retire one with `POST /api/admin/models/{id}/unload`. `swarmllm status` renders it. `network_traffic` (2026-09-12): bytes in and out since
   startup plus the current rate, from libp2p's transport counters — every protocol, not

@@ -445,6 +445,14 @@ pub async fn run_worker(
     let daemon_reads_load_timing = crate::inference::worker_ipc::daemon_reads_card_probe(
         std::env::var_os(crate::inference::worker_ipc::DAEMON_READS_LOAD_TIMING).as_deref(),
     );
+    let daemon_reads_context_fits = crate::inference::worker_ipc::daemon_reads_card_probe(
+        std::env::var_os(crate::inference::worker_ipc::DAEMON_READS_CONTEXT_FITS).as_deref(),
+    );
+    // The `WorkerMsg::ContextFits` figure last sent (`None` = never sent), the
+    // loaded ranges it was read for, and when.
+    let mut context_fits_sent: Option<Option<u32>> = None;
+    let mut context_fits_ranges: Vec<(usize, usize, usize, usize)> = Vec::new();
+    let mut context_fits_at = std::time::Instant::now();
 
     // Whether the card's pool may hold memory freed since the last hand-back:
     // set by any message or tick, cleared by `cuda_pool::trim` once the worker
@@ -562,6 +570,35 @@ pub async fn run_worker(
                             .await
                     {
                         tracing::debug!(error = %e, "model-worker: could not report a load timing");
+                    }
+                }
+            }
+            // The context the whole model here holds (#252 (1)): read when a
+            // load or an unload in this batch changed the ranges, and again
+            // now and then while no batched decode is under way.
+            if daemon_reads_context_fits {
+                let mut ranges: Vec<_> = models.keys().copied().collect();
+                ranges.sort_unstable();
+                let due = ranges != context_fits_ranges
+                    || (slot_table.is_empty() && context_fits_at.elapsed() >= CONTEXT_FITS_EVERY);
+                if due {
+                    context_fits_ranges = ranges;
+                    context_fits_at = std::time::Instant::now();
+                    let tokens = whole_model_context_fits(
+                        &models,
+                        &kv_store,
+                        &prefix_cache,
+                        draft_margin_positions(&ngram_cfg, &swift_cfg),
+                    );
+                    if context_fits_sent != Some(tokens) {
+                        let msg = WorkerMsg::ContextFits { tokens };
+                        match send_worker(&mut writer, &msg, &[]).await {
+                            Ok(()) => context_fits_sent = Some(tokens),
+                            Err(e) => tracing::debug!(
+                                error = %e,
+                                "model-worker: could not report the context that fits"
+                            ),
+                        }
                     }
                 }
             }
@@ -3605,6 +3642,85 @@ fn longest_prompt_that_fits(budget: u64, per_token: u64, reply_positions: usize)
     (positions / KV_CACHE_GROWTH_TOKENS * KV_CACHE_GROWTH_TOKENS).saturating_sub(reply_positions)
 }
 
+/// The longest conversation, prompt and reply together, that the model this
+/// worker holds WHOLE admits with nothing else held, in each memory its caches
+/// are charged to (`SplitModel::kv_homes`), the least of them. `None` when no
+/// loaded range covers every layer (the node's limit then depends on its
+/// peers), when no memory's budget is known (an unknown budget admits
+/// everything), or when nothing fits at all (the refusal says so). What
+/// `/v1/models` reports while this worker lives (`WorkerMsg::ContextFits`,
+/// FUTURE_WORK #252 (1)).
+///
+/// The budget as admission reads it (`admit_prompt_in`: `kv_budget_now` over
+/// the caches live in that memory, the promises not yet written, the cached
+/// prompts beside them), which is the load-time budget capped by what the
+/// device holds for caches plus what it has free — invariant under whatever
+/// the conversations hold at the moment, so it describes the device, not the
+/// load. The positions it holds in whole growth quanta, less `draft_margin`
+/// ([`draft_margin_positions`]): admission charges
+/// `kv_cache_reservation(prompt + reserve)` with the reserve
+/// `min(max_tokens + draft_margin, REPLY_RESERVE_POSITIONS)`
+/// ([`reply_reserve_positions`]), so EVERY request whose prompt and reply fit
+/// in the figure is admitted, however they divide it — a reply under the cap
+/// reserves itself plus the margin, one at the cap leaves its prompt shorter
+/// than the reserve — and its reply, a speculative round's drafts included,
+/// grows inside the budget. A refusal names the same quanta less ITS reserve.
+/// (Less the whole cap instead, as first written, it read 4,608 where a
+/// 14B's card admitted 5,088 — measured 2026-10-14.)
+///
+/// ⚠ Reads the device's free memory after a synchronize: asked when the
+/// loaded ranges change and at most every [`CONTEXT_FITS_EVERY`], never per
+/// message.
+fn whole_model_context_fits(
+    models: &HashMap<(usize, usize, usize, usize), SplitModel>,
+    kv_store: &KvCacheStore,
+    prefix_cache: &PrefixCache,
+    draft_margin: usize,
+) -> Option<u32> {
+    let model = models
+        .iter()
+        .find(|((_, _, _, tp_size), m)| {
+            *tp_size == 1
+                && m.total_layers > 0
+                && m.layer_start == 0
+                && m.layer_end >= m.total_layers
+        })
+        .map(|(_, m)| m)?;
+    let occupancy = kv_store.occupancy();
+    let cached = prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64;
+    context_fits_in(
+        model.kv_homes().map(|home| {
+            let live = occupancy
+                .allocated_in(home)
+                .saturating_add(kv_store.outstanding_admission_bytes(home));
+            model.kv_budget_now(home, live, cached)
+        }),
+        draft_margin,
+    )
+}
+
+/// How often an active worker re-reads [`whole_model_context_fits`] while the
+/// loaded ranges stay the same: another program, or another model's worker,
+/// can take the card's room after the load.
+const CONTEXT_FITS_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// [`whole_model_context_fits`] over each memory's `(budget, bytes per
+/// position)`, as `SplitModel::kv_budget` answers it.
+fn context_fits_in(
+    budgets: impl Iterator<Item = (Option<u64>, u64)>,
+    draft_margin: usize,
+) -> Option<u32> {
+    let tokens = budgets
+        .filter_map(|budget| match budget {
+            (Some(budget), per_token) if per_token > 0 => {
+                Some(longest_prompt_that_fits(budget, per_token, draft_margin))
+            }
+            _ => None,
+        })
+        .min()?;
+    (tokens > 0).then(|| u32::try_from(tokens).unwrap_or(u32::MAX))
+}
+
 /// Is this refusal only because OTHER requests hold the memory — would the
 /// prompt fit if the conversations already live had finished?
 ///
@@ -3728,6 +3844,57 @@ mod reply_reserve_tests {
         assert!(over > budget, "{over} <= {budget}");
         assert_eq!(longest_prompt_that_fits(budget, 0, reserve), 0);
         assert_eq!(longest_prompt_that_fits(100, per_token, reserve), 0);
+    }
+
+    /// The context reported for a whole model here (#252 (1)) is the longest
+    /// prompt + reply that admission takes HOWEVER the two divide it, and not
+    /// one position more; in the TIGHTEST memory its caches live in — a split
+    /// keeps its card layers' caches on the card and the rest in RAM. A memory
+    /// whose budget is unknown admits everything and bounds nothing; a model
+    /// with no room at all reports no figure, never a context of 0.
+    #[test]
+    fn the_context_a_whole_model_holds_is_its_tightest_memorys() {
+        let margin = DRAFT_MARGIN_POSITIONS;
+        // Field report #035's card: 860 MB, Qwen3-14B's 160 KiB a position —
+        // 5,120 positions in whole quanta.
+        let per_token: u64 = 40 * 8 * 128 * 2 * 2;
+        let budget = 860u64 * 1024 * 1024;
+        let card = (Some(budget), per_token);
+        let fits = context_fits_in([card].into_iter(), margin).unwrap() as usize;
+        assert_eq!(fits, 5120 - margin);
+        let admitted = |prompt: usize, reply: u32| {
+            kv_cache_reservation(prompt + reply_reserve_positions(reply, margin)) as u64 * per_token
+                <= budget
+        };
+        for reply in [1, 32, 100, 480, 481, 512, 600, 2000, 4000] {
+            assert!(admitted(fits - reply as usize, reply), "reply {reply}");
+        }
+        // A prompt of `fits` and a one-token reply: one position more.
+        assert!(!admitted(fits, 1), "one position more is refused");
+        // Ten of the forty layers' caches in RAM: roomy RAM leaves the card's
+        // figure, tight RAM sets its own (2,560 positions less the margin).
+        let roomy_ram = (Some(16u64 << 30), per_token / 4);
+        assert_eq!(
+            context_fits_in([card, roomy_ram].into_iter(), margin),
+            Some(5088)
+        );
+        let tight_ram = (Some(100u64 << 20), per_token / 4);
+        assert_eq!(
+            context_fits_in([card, tight_ram].into_iter(), margin),
+            Some(2528)
+        );
+        assert_eq!(
+            context_fits_in([card, (None, per_token)].into_iter(), margin),
+            Some(5088)
+        );
+        assert_eq!(
+            context_fits_in([(None, per_token)].into_iter(), margin),
+            None
+        );
+        assert_eq!(
+            context_fits_in([(Some(100), per_token)].into_iter(), margin),
+            None
+        );
     }
 
     /// **A refused prompt says how many of its layers the room holds, and a
