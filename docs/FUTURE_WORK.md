@@ -1431,8 +1431,9 @@ learned only at spawn (`ModelProcessPool::get_or_spawn_once`), on EVERY request.
 (6967 of a 7995 MB budget) and Qwen3-1.7B Q8_0 needs ~2899 MB, so each request logged "DSD: the
 drafter failed" and decoded without guesses — 2.44-2.50 tok/s against the n-gram loop's
 2.37-2.40, so no loss, and none of the gain: ~353 of each token's ~390 ms is the trip to the
-peer, which guessing exists to share. A release (card) build puts those layers on the card, where
-the drafter should fit in RAM — measure that first. Then: ask admission before choosing (a
+peer, which guessing exists to share. A card build put those layers on the card, the drafter fit,
+and the same split ran twice as fast (#273) — so this bites a processor-only node, or one whose
+memory a segment has filled. Next: ask admission before choosing (a
 side-effect-free estimate beside `admit_to_cpu` / `admit_to_gpu`), fall to the next candidate
 or the n-gram loop, and admit a drafter's cache at the conversation's length, not 4,096
 tokens (896 of the 2899 MB).
@@ -2217,7 +2218,9 @@ grep `^| N |`).
   Qwen2.5-0.5B over its Q8_0/Q4_K_M copies; ties now go to the copy reading the fewest bytes.
   Checked on a real split (this node layers 0-27, an Australian peer 28-47, 2026-10-14): v0.3.238
   weighed only the Qwen2.5-0.5B copies (wrong vocabulary) and ran the n-gram loop; this build
-  chose `drafter=qwen3-1.7b-q8-0` and ran DSD. Its speed there is #275. Gotcha #849.
+  chose `drafter=qwen3-1.7b-q8-0` and ran DSD. Same route, prompt and 96 tokens at temperature
+  0, a card build of each: 41.1-41.3 s a reply (2.33 tok/s) → 20.9-21.7 s (4.4-4.6 tok/s), 82 of
+  109 guesses kept (α 0.85), γ settling at 6-7. Gotcha #849.
 - #274 — **a speculative check on a processor costs ~20 ms an extra position instead of ~60.**
   The several-row AVX2 kernels took rows four at a time and ran a 1-3 row tail one row each —
   the WHOLE call of a check of 1-2 guesses, so a 3-position forward cost more than a 4-position
