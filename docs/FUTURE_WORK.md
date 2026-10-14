@@ -1020,7 +1020,7 @@ line up with the safety kit's 10 s `nvidia-smi` readings. Next: catch one under 
 Windows-side poller, a clock change, a WDDM residency move).
 
 #### #137 — Our processor decode gets ~40% SLOWER from 4 threads to 8, where llama.cpp's holds level; at 4 it trails by ~5%
-`P3` · perf-local · **OPEN, re-measured 2026-10-14** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3
+`P3` · perf-local · **OPEN, stage-profiled 2026-10-14** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3
 
 **Measured 2026-10-14** on the Ryzen 7 5800H (8 cores), Qwen2.5-Coder-7B Q4_K_M, processor
 only — ours `swarmllm test-split --gpu-layers 0 --max-tokens 48` at
@@ -1060,8 +1060,39 @@ total; llama.cpp `llama-bench -ngl 0 -p 0 -n 48` (`4b1a27f`). Live node stopped,
 2. **The one-row matvec splits a small projection coarsely**: the vendored `k_quants.rs` matmul
    (m == 1) uses `with_min_len(128).with_max_len(512)`, so a 512-row K or V projection gets at
    most 4 tasks at any width.
-3. **First find which stage grows**: `SWARMLLM_PROFILE=1` at 4 and at 8, stage by stage, in runs
-   of ≥ 256 tokens so both regimes show. Change nothing before that.
+3. ~~**First find which stage grows**~~ — **measured 2026-10-14** (`SWARMLLM_PROFILE=1`, 256
+   tokens a run, t4 / t8 / t8 / t4 interleaved, live node stopped, safety kit, 0 driver events;
+   scratchpad `t48.sh`; median ms a token over each run's 251 one-position forwards, the two runs
+   of each width averaged): **the SMALL ops grow, the big products barely do.**
+
+   | stage | 4 threads | 8 threads | × |
+   |---|---|---|---|
+   | FFN up + gate | 57.8 | 63.2 | 1.09 |
+   | FFN down | 38.9 | 46.4 | 1.19 |
+   | QKV projections | 10.0 | 22.3 | 2.2 |
+   | output projection | 5.7 | 9.8 | 1.7 |
+   | rope / transpose / q-k norm | 0.7 | 9.5 | 13 |
+   | attention scores + softmax + AV | 1.7 | 9.4 | 5.7 |
+   | unattributed | 12.2 | 12.9 | 1.06 |
+   | **total** | **128** (131, 125) | **174** (175, 173) | 1.36 |
+
+   33 of the 46 ms are QKV, rope, attention and the output projection — a per-op cost that grows
+   with the thread count, which a bandwidth limit would not do (the FFN products read 2/3 of the
+   bytes and gained 13 ms). That points at lead 1 (wake-ups / fork-join per op) or at idle
+   workers of the OTHER pool contending for the 8 cores' SMT siblings (`RAYON_NUM_THREADS` and
+   `SWARMLLM_DECODE_THREADS` both 8 → 16 threads on 8 cores, 16 logical), and away from lead 2 alone
+   (QKV doubles, but rope ×13 has no matvec in it).
+
+   **Refuted the same day** (scratchpad `t48b.sh`, `t48c.sh`; each arm in its own scope, its
+   cgroup's `cpu.stat` read): **the rig's CPU cap** — the safety kit's `CPUQuota=1000%` throttled
+   16-26 of ~490 periods (mostly the load), but an uncapped 8-thread run (0 throttled) takes the
+   same 172-177 ms; **SMT placement** — 8 threads pinned one per physical core
+   (`taskset -c 0,2,…,14`) 171-172 against 173-177 unpinned, rope and attention still ~9 ms each.
+   ⚠ **A decode pool is never wider than the global pool** (`cpu_pools`: "no wider than prompt
+   processing's"), so `RAYON_NUM_THREADS=4 SWARMLLM_DECODE_THREADS=8` decodes at 4 (125-127 ms) —
+   read `decode_threads=` in the log before trusting such an arm. **Left: lead 1** — count the
+   parallel regions a token runs and time a wake (8 workers on WSL2's Hyper-V), and find what in
+   the rope stage runs in parallel at all, before building a one-region decode.
 
 History: on 2026-10-11 decode ran OUTSIDE its thread pool on every default node — fixed
 (§ Closed 2026-10-11): a 14B split 5.3 → 6.8-6.9 tok/s, level with llama.cpp; a 3B
