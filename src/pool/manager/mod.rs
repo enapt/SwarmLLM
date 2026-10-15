@@ -116,6 +116,12 @@ fn join_resend_delay(sends: u32) -> std::time::Duration {
     std::time::Duration::from_secs((1u64 << sends.min(5)).min(30))
 }
 
+/// The owner answers a repeat of the claimer's join request at most once per
+/// this gap. A joiner resends at the pace above, so a faster stream is not a
+/// joiner waiting, and each answer is a broadcast to the whole swarm
+/// (pre-release security review, 2026-10-15).
+const REPEAT_JOIN_ANSWER_GAP: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Maximum pending invitations (outbound + inbound blinded) before rejecting new ones.
 const MAX_PENDING_INVITATIONS: usize = 50;
 /// Maximum active invite codes before refusing to generate more.
@@ -2003,7 +2009,19 @@ impl PoolManager {
             let claimed_by = code_entry.claimed_by.clone();
             if let Some((claimer, invitation_id)) = claimed_by {
                 if claimer == requester {
+                    let now = tokio::time::Instant::now();
+                    if code_entry
+                        .repeat_answered_at
+                        .is_some_and(|at| now.duration_since(at) < REPEAT_JOIN_ANSWER_GAP)
+                    {
+                        tracing::debug!(
+                            requester = %requester,
+                            "Repeated join request inside the answer gap — not answered again yet"
+                        );
+                        return;
+                    }
                     if let Some(invitation) = self.pending_invitations.get(&invitation_id) {
+                        code_entry.repeat_answered_at = Some(now);
                         let blinded =
                             BlindedPoolInvitation::from_invitation(invitation, Some(code_hash));
                         let msg = SwarmMessage::PoolMessage(
@@ -3470,6 +3488,25 @@ mod tests {
             .await;
         assert_eq!(invitations(&mut net_rx), first, "the same invitation again");
         assert_eq!(pm.pending_invitations.len(), 1, "and no second one");
+
+        // A stream faster than a joiner resends is answered once per gap:
+        // each answer is a broadcast to the whole swarm.
+        pm.handle_inbound_join_request(hash, requester.clone())
+            .await;
+        assert!(
+            invitations(&mut net_rx).is_empty(),
+            "not again inside the gap"
+        );
+        let answered_at = pm.invite_codes[&hash].repeat_answered_at.unwrap();
+        pm.invite_codes.get_mut(&hash).unwrap().repeat_answered_at =
+            answered_at.checked_sub(REPEAT_JOIN_ANSWER_GAP);
+        pm.handle_inbound_join_request(hash, requester.clone())
+            .await;
+        assert_eq!(
+            invitations(&mut net_rx),
+            first,
+            "and again once it has passed"
+        );
 
         let stranger = Identity::generate().node_id().clone();
         pm.handle_inbound_join_request(hash, stranger).await;

@@ -28,6 +28,10 @@ pub struct PoolInviteCode {
     /// stored copy of a code is deleted when it is used.
     #[serde(skip)]
     pub claimed_by: Option<(crate::types::NodeId, uuid::Uuid)>,
+    /// When a repeat of the claimer's request was last answered — one answer
+    /// per `REPEAT_JOIN_ANSWER_GAP`, since each is a broadcast to the swarm.
+    #[serde(skip)]
+    pub repeat_answered_at: Option<tokio::time::Instant>,
 }
 
 impl PoolInviteCode {
@@ -49,6 +53,7 @@ impl PoolInviteCode {
             code_hash,
             consumed: false,
             claimed_by: None,
+            repeat_answered_at: None,
         }
     }
 

@@ -245,11 +245,27 @@ pub fn any_internet_reachable(multiaddrs: &[String]) -> bool {
 ///
 /// With no `primary` known (no route out: an offline LAN), or nothing left
 /// after the cut, every address stays — a code that works where it did.
+///
+/// When the traffic leaves by an overlay — a Tailscale exit node, whose
+/// address is CGNAT (`100.64.0.0/10`), with no private-LAN address on the
+/// route — the LAN a device beside this one shares is not the route out, so
+/// the private-LAN addresses stay too, less Docker's default bridge
+/// (`172.17.0.0/16`). A full-tunnel VPN that hands out a private address
+/// (WireGuard's `10.x`) cannot be told from a LAN this way; a device beside
+/// it joins by the internet or relay route (pre-release security review,
+/// 2026-10-15).
 pub fn addresses_for_invite(all: &[String], primary: &[std::net::IpAddr]) -> Vec<String> {
     use libp2p::multiaddr::Protocol;
+    use std::net::IpAddr;
     if primary.is_empty() {
         return all.to_vec();
     }
+    let leaves_by_an_overlay = primary
+        .iter()
+        .any(|ip| matches!(ip, IpAddr::V4(v4) if is_cgnat_ipv4(*v4)))
+        && !primary
+            .iter()
+            .any(|ip| matches!(ip, IpAddr::V4(v4) if v4.is_private()));
     let kept: Vec<String> = all
         .iter()
         .filter(|s| {
@@ -258,8 +274,13 @@ pub fn addresses_for_invite(all: &[String], primary: &[std::net::IpAddr]) -> Vec
             };
             multiaddr_is_internet_reachable(&m)
                 || m.iter().any(|p| match p {
-                    Protocol::Ip4(ip) => primary.contains(&std::net::IpAddr::V4(ip)),
-                    Protocol::Ip6(ip) => primary.contains(&std::net::IpAddr::V6(ip)),
+                    Protocol::Ip4(ip) => {
+                        primary.contains(&IpAddr::V4(ip))
+                            || (leaves_by_an_overlay
+                                && ip.is_private()
+                                && !is_docker_default_bridge(ip))
+                    }
+                    Protocol::Ip6(ip) => primary.contains(&IpAddr::V6(ip)),
                     _ => false,
                 })
         })
@@ -336,6 +357,13 @@ fn is_public_ipv4(ip: std::net::Ipv4Addr) -> bool {
 fn is_cgnat_ipv4(ip: std::net::Ipv4Addr) -> bool {
     let o = ip.octets();
     o[0] == 100 && (o[1] & 0xc0) == 0x40
+}
+
+/// Docker's default bridge (`docker0`, 172.17.0.0/16): reachable only from
+/// this machine's containers, and on a joiner's machine its OWN bridge.
+fn is_docker_default_bridge(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    o[0] == 172 && o[1] == 17
 }
 
 fn is_public_ipv6(ip: std::net::Ipv6Addr) -> bool {
@@ -667,6 +695,27 @@ mod tests {
         assert_eq!(
             super::addresses_for_invite(std::slice::from_ref(&relayed), &[lan]),
             vec![relayed]
+        );
+
+        // Traffic out by a Tailscale exit node: the LAN a device beside this
+        // one shares is not the route out, so it stays — Docker's default
+        // bridge still does not.
+        let exit_node: std::net::IpAddr = "100.101.102.103".parse().unwrap();
+        let kept = super::addresses_for_invite(&all, &[exit_node]);
+        assert!(
+            kept.iter().any(|a| a.contains("/192.168.1.20/")),
+            "{kept:#?}"
+        );
+        assert!(
+            !kept.iter().any(|a| a.contains("/172.17.0.1/")),
+            "{kept:#?}"
+        );
+        assert!(kept.iter().any(|a| a.contains("/100.101.102.103/")));
+        // A LAN on the route out keeps the overlay's private addresses out.
+        let kept = super::addresses_for_invite(&all, &[lan, exit_node]);
+        assert!(
+            !kept.iter().any(|a| a.contains("/172.18.0.1/")),
+            "{kept:#?}"
         );
 
         // No route out to tell the LAN by, or nothing left: every address stays.

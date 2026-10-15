@@ -4253,7 +4253,11 @@ The fix is ordinary at-least-once delivery, both halves of it:
   ignored every request after the first; a lost invitation would have left the
   joiner sending into silence. `PoolInviteCode::claimed_by` remembers who used
   it and with which invitation, and a repeat from THAT device gets the same
-  invitation again — never a second invitation, never anyone else.
+  invitation again — never a second invitation, never anyone else — at most
+  once per `REPEAT_JOIN_ANSWER_GAP` (5 s, `repeat_answered_at`): each answer
+  is a broadcast to the whole swarm, and a stream faster than the joiner's own
+  resend pace is not a joiner waiting (pre-release security review,
+  2026-10-15).
 
 And the person is told the outcome, not the attempt: `swarmllm pool join` waits
 up to 60 s for the pool state to show the device in the pool, and exits 1 with
@@ -4300,5 +4304,13 @@ addresses only), and a range rule cannot tell a Docker bridge from a corporate
 owner's overlay still gets in by the internet or relay route and learns every
 address once connected (identify). With no route out (an offline LAN) or
 nothing left after the cut, the code keeps every address, as before.
+
+One overlay CAN be told by the route: when the route out is CGNAT
+(`100.64.0.0/10` — a Tailscale exit node) with no private-LAN address on it,
+the LAN a device beside the owner shares is not the route out, so the
+private-LAN addresses stay too, less Docker's default bridge
+(`172.17.0.0/16`). A full-tunnel VPN that hands out a private address
+(WireGuard's `10.x`) still cannot be told from a LAN; a device beside it joins
+by the internet or relay route (pre-release security review, 2026-10-15).
 `listen_multiaddrs` itself is unchanged — peers, redial and diagnostics still
 see every address. Test `an_invite_code_carries_only_addresses_a_joiner_can_use`.

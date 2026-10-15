@@ -236,7 +236,7 @@ cadence decides how fast.
 
 ## A request someone waits on is sent until answered (2026-10-15)
 
-A gossip publish that succeeded says nothing about who received it. A pool join is resent (`pool::manager::JoinResend`) until accepted or its window ends — said out loud; the owner answers a repeat from the code's claimer with the SAME invitation (`PoolInviteCode::claimed_by`). The CLI reports the outcome, not the send.
+A gossip publish that succeeded says nothing about who received it. A pool join is resent (`pool::manager::JoinResend`) until accepted or its window ends — said out loud; the owner answers a repeat from the code's claimer with the SAME invitation (`PoolInviteCode::claimed_by`), at most once per `REPEAT_JOIN_ANSWER_GAP`. The CLI reports the outcome, not the send.
 
 → `docs/invariants/network.md` § "A request someone is waiting on is sent until it is answered"
 
@@ -255,7 +255,7 @@ Single sources of truth for invariants that silently break at the wire if duplic
 - **`network/manager/connections::try_enqueue_redial`** — dedup + cap + push for `pending_redial`.
 - **`responses::types::raw_tool_kind_or_unknown`**, **`cli::bail_if_no_api_key` / `cli::exit_daemon_unreachable`** — shared error wording.
 - **`model::auto_manage::spawn_check_and_load`** — "shard landed → reload model → refresh dashboard", always the three steps together.
-- **`pool::invite::{encode_invite_code, decode_invite_code}`** — the `swarmpool://` v2 codec; `looks_like_v2` routes v2 from the legacy path. **`pool::invite::addresses_for_invite`** is what a code carries: the outbound route's own address (`outbound_addresses`) + internet-reachable ones — never a Docker bridge or an overlay off the default route (field report 2026-10-15).
+- **`pool::invite::{encode_invite_code, decode_invite_code}`** — the `swarmpool://` v2 codec; `looks_like_v2` routes v2 from the legacy path. **`pool::invite::addresses_for_invite`** is what a code carries: the outbound route's own address (`outbound_addresses`) + internet-reachable ones — never a Docker bridge or an overlay off the default route (field report 2026-10-15); a route out by CGNAT (a Tailscale exit node) keeps the private LAN too.
 
 → `docs/invariants/network.md` § "Centralised Wire-Format Helpers"
 
