@@ -23,6 +23,7 @@ mod events;
 pub(crate) mod forward_streams;
 mod hf;
 pub(crate) mod lifetime;
+mod load_rate;
 mod metrics;
 mod models;
 mod peer_outliers;
@@ -1564,6 +1565,9 @@ impl SharedState {
         state
             .model_process_pool
             .set_activation_compression(state.config.inference.activation_compression);
+        // How fast this node loads a model, as an earlier run measured it, so
+        // its first cold load is not priced at the prior (`state::load_rate`).
+        load_rate::restore(&state.db, state.model_process_pool.load_rate());
         // Admission budget. Same source as the split-model eviction budget, so
         // the two cannot disagree about how much GPU memory this node may use.
         if let Some(budget) = crate::model::auto_manage::compute_vram_budget(&state) {

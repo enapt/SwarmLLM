@@ -2732,6 +2732,24 @@ cold peer on an older build. Like `UNKNOWN_COMPUTE_MS` it sits on the pessimisti
 side of the measured spread, so an unknown never outranks a measured fast
 loader (gotcha #734: know what stands in when the figure is missing).
 
+**A measured rate outlives a restart (2026-10-15).** `LoadRate` lived in memory, so
+every restart — and so every node at every release's auto-update — went back to
+the prior and advertised nothing until its next load: "no load timed yet" was the
+state of every node after every update, not a corner. Fitting #3's logged cost
+terms on this node (2026-10-14, Qwen3-30B-A3B split with an Australian peer, our
+node restarted before each rig arm) found the cold term the largest single error:
+34 completed first requests at 0.52× their price, ~58 s charged for a local load
+that took ~9-20 s. Now `daemon::state::load_rate` stores the rate (tree
+`measured_here`, written on the health monitor's tick when it changed and once at
+shutdown, beside #226's lifetime record) and `SharedState::new` seeds the average
+from it (`LoadRate::seed` — never over a load already timed in this run); the
+next timed load moves it as before. As TCP keeps a measured round trip for the
+next connection (Linux `tcp_metrics`) instead of starting each from RFC 6298's
+conservative 1 s. Tests: `a_restart_keeps_the_measured_load_rate` (red with the
+restore off), `an_unchanged_rate_is_not_rewritten_and_a_newer_one_wins`,
+`a_failed_write_is_retried`. Startup line: "This node loads a model at the speed
+an earlier run measured…".
+
 **What a test must do.** A routing test that plans through `gather_candidates`
 now sees real load charges: pin rates where the subject is something else
 (`the_search_s_boomerang_says_what_privacy_costs` gives every node 1 ms/GiB —

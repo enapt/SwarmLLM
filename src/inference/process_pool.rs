@@ -805,9 +805,18 @@ fn worker_msg_request_id(msg: &WorkerMsg) -> Option<Uuid> {
 /// cold one a real, slow one. Loads under [`Self::MIN_BYTES`] are skipped —
 /// their fixed costs (opening the header, laying out the tensors) would read
 /// as a slow disk.
+///
+/// **Kept across restarts** (`daemon::state::load_rate`): in memory only, every
+/// restart — every node at every release's auto-update — priced its first cold
+/// load at `UNMEASURED_LOAD_MS_PER_GIB` (10 s/GiB) and advertised none, so a
+/// split's first request after one was charged a cold load 3-6× its real cost
+/// (this node's log, 2026-10-14: ~58 s priced for a load that took ~9-20 s). The
+/// stored figure SEEDS the average and the next timed load moves it.
 #[derive(Default)]
 pub(crate) struct LoadRate {
     ms_per_gib: std::sync::Mutex<Option<f64>>,
+    /// The figure storage holds, so an unchanged rate is never written again.
+    written: std::sync::Mutex<Option<u32>>,
 }
 
 impl LoadRate {
@@ -835,6 +844,36 @@ impl LoadRate {
     pub(crate) fn ms_per_gib(&self) -> Option<u32> {
         let v = (*self.ms_per_gib.lock().ok()?)?;
         Some(v.round().clamp(1.0, f64::from(u32::MAX)) as u32)
+    }
+
+    /// Start from what an earlier run measured (and storage holds) — unless a
+    /// load has already been timed in this one, which is newer.
+    pub(crate) fn seed(&self, ms_per_gib: u32) {
+        if ms_per_gib == 0 {
+            return;
+        }
+        if let Ok(mut slot) = self.ms_per_gib.lock() {
+            if slot.is_none() {
+                *slot = Some(f64::from(ms_per_gib));
+            }
+        }
+        if let Ok(mut written) = self.written.lock() {
+            *written = Some(ms_per_gib);
+        }
+    }
+
+    /// The rate, if storage does not hold it yet.
+    pub(crate) fn unwritten(&self) -> Option<u32> {
+        let now = self.ms_per_gib()?;
+        let written = *self.written.lock().ok()?;
+        (written != Some(now)).then_some(now)
+    }
+
+    /// Storage now holds `ms_per_gib`.
+    pub(crate) fn note_written(&self, ms_per_gib: u32) {
+        if let Ok(mut written) = self.written.lock() {
+            *written = Some(ms_per_gib);
+        }
     }
 }
 
@@ -2932,6 +2971,11 @@ impl ModelProcessPool {
     /// its own loads; `None` until a load big enough to say has been timed.
     pub(crate) fn load_ms_per_gib(&self) -> Option<u32> {
         self.load_rate.ms_per_gib()
+    }
+
+    /// This node's load rate as kept across restarts (`daemon::state::load_rate`).
+    pub(crate) fn load_rate(&self) -> &LoadRate {
+        &self.load_rate
     }
 
     /// Feed one load timing in, as a worker report would.

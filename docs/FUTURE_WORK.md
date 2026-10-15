@@ -670,6 +670,16 @@ Field data, report #036 (2026-10-14, v0.3.234-.238): 26 priced requests from one
 after a 0.8-1.1 M ms price), so only the 6 that completed are comparable. New since: a warm 3-segment
 route through Thailand (3,729-token prompt, 29 tokens) predicted 26,792 ms, took 10,603 (0.40×,
 `net:0`); the same route cold 119,766 → 137,448 (1.15×).
+**Fit per term, 2026-10-15** (this node's log, 135 completed splits 10-14 09:15 → 10-15 02:51 —
+all this project's #273/#275 rigs: Qwen3-30B-A3B with one Australian peer, so ONE peer's terms;
+`examples/split_cost_terms.py` over `request complete … predicted_terms=`), actual ÷ predicted for 2+ segments:
+warm with the per-visit term measured (`net` ≈ 64 × 650 ms) **0.78** (n=31, 0.14-0.97) — the
+10-10 "two segments priced 2.00×" does not reappear; warm with `net:0` (the hop inside the
+per-layer figure) **1.53** (n=35, 1.19-1.86 — under-priced); cold **0.52** (n=34: the cold term
+~58 s for a local load of ~9-20 s — fixed the same day, the rate is kept across restarts, § Closed);
+the drafter arms **0.39** (n=25: speculation's gain is not priced). Left: the `net:0` regime's
+under-charge (a peer whose samples never separated the per-visit cost), and pricing a drafter.
+Needs a second peer's traffic before any term is changed.
 
 #### #180 — A node holding the whole model takes every request for it; partial ranges stay off by default
 `P2` · routing · **PARTIAL** — 2026-07-28 · history: archive § "A node holding every shard monopolises the model"
@@ -2306,7 +2316,15 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15, unreleased** (#275's reply-sized charge; #275 (2), judged beside the plan; #250's stale card reading)
+**Closed 2026-10-15, unreleased** (#275's reply-sized charge; #275 (2), judged beside the plan; #250's stale card reading; #3's cold-load share)
+- #3's cold-load share — **a restarted node no longer prices its first cold load as a slow
+  loader.** Each node's measured load speed (#129 (1)) lived in memory, so every restart — every
+  node at every release's auto-update — went back to the 10 s/GiB prior and advertised nothing
+  until it next loaded a model. Fitting #3's logged cost terms (this node, 2026-10-14) found it
+  the largest single error: 34 first requests after a restart at 0.52× their price, ~58 s charged
+  for a load that took ~9-20 s. The rate is now stored and restored (`daemon::state::load_rate`,
+  written on the monitor tick when it changed and at shutdown); the next timed load moves it.
+  `docs/invariants/scheduling.md` § "A candidate that must first load the model is charged for it".
 - #250 (report #036) — **a model the card holds only part of is no longer planned here whole
   after another program has taken the card.** The planner weighed the card reading the last
   admission had stored (~7.5 GB, taken while the card stood free) after Ollama had taken ~10 GB,
