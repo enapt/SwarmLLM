@@ -321,21 +321,22 @@
         if (capacity && stateKey !== 'connecting' && stateKey !== 'offline') {
           var modelsParts = [];
           var serveable = capacity.serveable_models || [];
-          // Combined memory is NOT repeated here. It is the same
-          // `capacity.total_vram_mb` under the same "combined memory" label
-          // that the resources strip renders two lines below, so a reader met
+          // Graphics memory is NOT repeated here. It is the same
+          // `capacity.total_vram_mb` the resources strip renders two lines
+          // below (labelled "graphics memory" since a tester read "combined
+          // memory" as everyone's RAM, field report 2026-10-15), so a reader met
           // one number twice and had to work out they were the same fact —
           // on a live node: "13.7 GB combined memory · Runs …" directly above
           // "7 computers · 2 with GPUs · 13.7 GB combined memory · …".
           // This line answers what the swarm can RUN; the strip answers what
           // hardware it HAS, and memory is a hardware fact.
           if (serveable.length > 0) {
+            // Named from the id, like every other list of models: two
+            // quantisations share the file's own name, and the banner read
+            // "Runs Qwen3-30B-A3B-Instruct-2507, Qwen3-30B-A3B-Instruct-2507"
+            // (field report 2026-10-15).
             var names = serveable.slice(0, 3).map(function(m) {
-              var d = m.display_name || '';
-              var looksRaw = d && d === d.toLowerCase() && /_/.test(d);
-              if (d && !looksRaw) return U.escapeHtml(d);
-              var src = d || m.model_id || '';
-              return U.escapeHtml(U.formatModelDisplayName ? U.formatModelDisplayName(src) : src);
+              return U.escapeHtml(U.formatModelDisplayName(m.model_id || m.display_name || ''));
             }).join(', ');
             var more = serveable.length > 3 ? ' +' + (serveable.length - 3) : '';
             modelsParts.push(U.escapeHtml(I18n.t('netstatus.runs')) + ' ' + names + more);

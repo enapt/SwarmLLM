@@ -566,14 +566,10 @@
       var modelsEl = document.getElementById('map-swarm-models');
       if (!modelsEl) return;
       if (serveable === 0) { modelsEl.style.display = 'none'; return; }
-      // Same display-name cleanup the dashboard banner uses, so a raw id like
-      // `qwen2_5_0_5b` is not shown here after being tidied there.
+      // Named from the id, as the dashboard banner names them: the file's own
+      // name is shared by two quantisations of one model.
       var names = (cap.serveable_models || []).slice(0, 4).map(function (m) {
-        var d = m.display_name || '';
-        var looksRaw = d && d === d.toLowerCase() && /_/.test(d);
-        if (d && !looksRaw) return U.escapeHtml(d);
-        var src = d || m.model_id || '';
-        return U.escapeHtml(U.formatModelDisplayName ? U.formatModelDisplayName(src) : src);
+        return U.escapeHtml(U.formatModelDisplayName(m.model_id || m.display_name || ''));
       }).join(', ');
       var more = serveable > 4 ? ' +' + (serveable - 4) : '';
       modelsEl.innerHTML = U.escapeHtml(I18n.t('netstatus.runs')) + ' ' + names + more;
