@@ -1233,9 +1233,10 @@ mod finalisation_tests {
         }
         CachedDecoder {
             vocab: vocab.iter().map(|s| (*s).to_string()).collect(),
-            byte_decoder,
-            is_sentencepiece: false,
-            has_tokenizer: true,
+            pieces: Some(crate::inference::tokenizer::PieceDecoder {
+                byte_decoder,
+                ..Default::default()
+            }),
         }
     }
 

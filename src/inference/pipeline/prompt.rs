@@ -1,7 +1,8 @@
 //! Prompt construction, token decoding, and GGUF-header-driven tokenizer
 //! helpers used by both the local and distributed execution paths.
 
-use std::collections::HashMap;
+use crate::inference::split::SplitTokenizer;
+use crate::inference::tokenizer::PieceDecoder;
 
 use crate::inference::chat_template;
 use crate::types::LayerResult;
@@ -49,18 +50,28 @@ pub(crate) fn render_prompt_from_header(
 /// without re-acquiring the lock.
 pub(super) struct CachedDecoder {
     pub(super) vocab: Vec<String>,
-    pub(super) byte_decoder: HashMap<char, u8>,
-    pub(super) is_sentencepiece: bool,
-    pub(super) has_tokenizer: bool,
+    /// The tokenizer's decode rule, whole — `None` where this node has no
+    /// tokenizer for the model and falls back to the raw vocabulary.
+    pub(super) pieces: Option<PieceDecoder>,
 }
 
 impl CachedDecoder {
+    /// A decoder over `vocab` by `tokenizer`'s rule, or the raw fallback
+    /// without one. The ONE way a decoder is built outside tests, so none can
+    /// take part of the rule and drop the rest.
+    pub(super) fn new(vocab: Vec<String>, tokenizer: Option<&SplitTokenizer>) -> Self {
+        Self {
+            vocab,
+            pieces: tokenizer.map(|t| t.piece_decoder().clone()),
+        }
+    }
+
     pub(super) fn decode_tokens(&self, token_ids: &[u32]) -> String {
-        if self.has_tokenizer {
+        if let Some(pieces) = &self.pieces {
             let mut bytes = Vec::new();
             for &id in token_ids {
                 if let Some(token_str) = self.vocab.get(id as usize) {
-                    bytes.extend(self.decode_token_bytes(token_str));
+                    bytes.extend(pieces.decode(token_str));
                 }
             }
             String::from_utf8_lossy(&bytes).into_owned()
@@ -92,24 +103,15 @@ impl CachedDecoder {
     /// characters) and the coordinator's own paths kept doing it. Paths without
     /// a tokenizer have no byte-level decode to split, and decode as before.
     pub(super) fn decode_tokens_streaming(&self, token_ids: &[u32], carry: &mut Vec<u8>) -> String {
-        if !self.has_tokenizer {
+        let Some(pieces) = &self.pieces else {
             return self.decode_tokens(token_ids);
-        }
+        };
         for &id in token_ids {
             if let Some(token_str) = self.vocab.get(id as usize) {
-                carry.extend(self.decode_token_bytes(token_str));
+                carry.extend(pieces.decode(token_str));
             }
         }
         crate::inference::tokenizer::take_complete_utf8(carry)
-    }
-
-    fn decode_token_bytes(&self, token_str: &str) -> Vec<u8> {
-        // Delegate to the shared decode logic in BpeTokenizer::decode_token_impl.
-        crate::inference::tokenizer::decode_token_impl(
-            token_str,
-            self.is_sentencepiece,
-            &self.byte_decoder,
-        )
     }
 }
 
@@ -396,21 +398,8 @@ impl PipelineExecutor {
                 // distributed path. Observed 2026-07-29: a Phi-3.5 answer over
                 // the network contained `"a▁"` while the same question answered
                 // locally was clean.
-                let decoder = match self.shared_state.standalone_tokenizer(model_id) {
-                    Some(tok) => CachedDecoder {
-                        vocab,
-                        byte_decoder: tok.byte_decoder(),
-                        is_sentencepiece: tok.is_sentencepiece(),
-                        has_tokenizer: true,
-                    },
-                    None => CachedDecoder {
-                        vocab,
-                        byte_decoder: HashMap::new(),
-                        is_sentencepiece: false,
-                        has_tokenizer: false,
-                    },
-                };
-                return decoder.decode_tokens(token_ids);
+                let tokenizer = self.shared_state.standalone_tokenizer(model_id);
+                return CachedDecoder::new(vocab, tokenizer.as_deref()).decode_tokens(token_ids);
             }
         }
         // Fallback: return token IDs as text
@@ -465,23 +454,10 @@ impl PipelineExecutor {
             // (observed 2026-07-29). Byte-fallback tokens leaked the same way,
             // which is where the stray `<0x0A>` came from.
             let tokenizer = self.shared_state.standalone_tokenizer(model_id);
-            let decoder = match tokenizer {
-                Some(ref tok) => CachedDecoder {
-                    vocab,
-                    byte_decoder: tok.byte_decoder(),
-                    is_sentencepiece: tok.is_sentencepiece(),
-                    has_tokenizer: true,
-                },
-                // Still no tokenizer: the fallback below is the best we can do,
-                // but it must not pretend the vocabulary is GPT-2-encoded when
-                // it is not — see `decode_tokens`.
-                None => CachedDecoder {
-                    vocab,
-                    byte_decoder: HashMap::new(),
-                    is_sentencepiece: false,
-                    has_tokenizer: false,
-                },
-            };
+            // Still no tokenizer: the raw fallback is the best we can do, but
+            // it must not pretend the vocabulary is GPT-2-encoded when it is
+            // not — see `decode_tokens`.
+            let decoder = CachedDecoder::new(vocab, tokenizer.as_deref());
 
             (
                 prompt_positions(prompt, tokenizer.as_deref(), model_id),
@@ -524,16 +500,7 @@ impl PipelineExecutor {
                              sequence. Fetch the model's header to fix this"
                         );
                         let ptc = prompt_positions(prompt, None, model_id);
-                        (
-                            ptc,
-                            Vec::new(),
-                            CachedDecoder {
-                                vocab: Vec::new(),
-                                byte_decoder: HashMap::new(),
-                                is_sentencepiece: false,
-                                has_tokenizer: false,
-                            },
-                        )
+                        (ptc, Vec::new(), CachedDecoder::new(Vec::new(), None))
                     }
                 }
             } else {
@@ -560,16 +527,7 @@ impl PipelineExecutor {
                      its turn, so the reply will run until max_tokens or a stop sequence"
                 );
                 let ptc = prompt_positions(prompt, None, model_id);
-                (
-                    ptc,
-                    Vec::new(),
-                    CachedDecoder {
-                        vocab: Vec::new(),
-                        byte_decoder: HashMap::new(),
-                        is_sentencepiece: false,
-                        has_tokenizer: false,
-                    },
-                )
+                (ptc, Vec::new(), CachedDecoder::new(Vec::new(), None))
             }
         }
     }
@@ -599,21 +557,7 @@ impl PipelineExecutor {
         let eos_tokens = meta.eos_tokens_with_arch_fallback(&arch);
         let tokenizer = meta.build_tokenizer();
 
-        let decoder = if let Some(ref tok) = tokenizer {
-            CachedDecoder {
-                vocab: meta.vocab,
-                byte_decoder: tok.byte_decoder(),
-                is_sentencepiece: tok.is_sentencepiece(),
-                has_tokenizer: true,
-            }
-        } else {
-            CachedDecoder {
-                vocab: meta.vocab,
-                byte_decoder: HashMap::new(),
-                is_sentencepiece: false,
-                has_tokenizer: false,
-            }
-        };
+        let decoder = CachedDecoder::new(meta.vocab, tokenizer.as_ref());
 
         Some((eos_tokens, decoder, tokenizer))
     }
@@ -788,7 +732,8 @@ mod loaded_info_tests {
 #[cfg(test)]
 pub(super) mod decoder_tests {
     use super::CachedDecoder;
-    use std::collections::HashMap;
+    use crate::inference::split::SplitTokenizer;
+    use crate::inference::tokenizer::PieceDecoder;
 
     fn spm_vocab() -> Vec<String> {
         vec![
@@ -806,9 +751,10 @@ pub(super) mod decoder_tests {
     fn sentencepiece_marker_becomes_a_space() {
         let d = CachedDecoder {
             vocab: spm_vocab(),
-            byte_decoder: HashMap::new(),
-            is_sentencepiece: true,
-            has_tokenizer: true,
+            pieces: Some(PieceDecoder {
+                is_sentencepiece: true,
+                ..Default::default()
+            }),
         };
         let out = d.decode_tokens(&[1, 2]);
         assert!(
@@ -816,6 +762,33 @@ pub(super) mod decoder_tests {
             "U+2581 must never reach the reply, got {out:?}"
         );
         assert_eq!(out, " Hello world", "got {out:?}");
+    }
+
+    /// The coordinator decodes a split's reply with the decoder it built from
+    /// the tokenizer, and shows exactly what the worker would: Gemma's
+    /// user-defined `<table>` and normal `<>` (both once hidden on this path
+    /// and the worker's), never its CONTROL `<start_of_turn>`.
+    #[test]
+    fn the_coordinators_decoder_shows_the_markup_the_vocabulary_declares_text() {
+        let vocab: Vec<String> = ["<unk>", "<start_of_turn>", "<table>", "<>", "\u{2581}new"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let tok = SplitTokenizer::from_sentencepiece(
+            &vocab,
+            &[0.0; 5],
+            false,
+            false,
+            None,
+            &[2, 3, 4, 1, 1],
+        );
+        let d = CachedDecoder::new(vocab, Some(&tok));
+        assert_eq!(d.decode_tokens(&[1, 2, 4, 3, 2]), "<table> new<><table>");
+        let mut carry = Vec::new();
+        assert_eq!(
+            d.decode_tokens_streaming(&[1, 2, 3], &mut carry),
+            "<table><>"
+        );
     }
 
     /// A vocabulary with byte-fallback tokens, and "🎉" (F0 9F 8E 89) spelt
@@ -834,9 +807,10 @@ pub(super) mod decoder_tests {
             .iter()
             .map(|s| s.to_string())
             .collect(),
-            byte_decoder: HashMap::new(),
-            is_sentencepiece: true,
-            has_tokenizer: true,
+            pieces: Some(PieceDecoder {
+                is_sentencepiece: true,
+                ..Default::default()
+            }),
         }
     }
 

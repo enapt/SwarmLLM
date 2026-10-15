@@ -1201,9 +1201,9 @@ exclusion correctly does not fire.
 **The symptom differs by vocabulary family from this one cause**, which is why
 two field reports read as unrelated bugs:
 
-| Vocab | `decode_token_impl` does | Symptom |
+| Vocab | `PieceDecoder::decode` does | Symptom |
 |---|---|---|
-| SentencePiece (Phi-3.5 GGUF) | any `<…>` token → empty | marker invisible, silent run-on |
+| SentencePiece (Phi-3.5 GGUF) | a `<…>` token not declared text → empty (`<|end|>` is CONTROL) | marker invisible, silent run-on |
 | GPT-2 byte BPE (Phi-4-mini GGUF) | chars → their own bytes | literal `<|end|>` in content, plus run-on |
 
 That is why the fix is the **token id**, not only a stop string: on the

@@ -799,8 +799,9 @@ pub(crate) fn special_token_spacing_for(architecture: &str) -> SpecialTokenSpaci
 /// The symptom differs by vocabulary family, from this one cause, which is why
 /// it read as two unrelated bugs in the field:
 ///
-/// - **SentencePiece vocab** (Phi-3.5's GGUF): `decode_token_impl` maps any
-///   `<…>` token to empty, so `<|end|>` vanishes and the run-on is INVISIBLE.
+/// - **SentencePiece vocab** (Phi-3.5's GGUF): `PieceDecoder::decode` maps a
+///   `<…>` token the vocabulary does not declare text to empty, so the CONTROL
+///   `<|end|>` vanishes and the run-on is INVISIBLE.
 /// - **GPT-2 byte BPE vocab** (Phi-4-mini's GGUF): the same token decodes to
 ///   its literal characters, so `<|end|>` LEAKS into visible content and the
 ///   reply runs on after it.

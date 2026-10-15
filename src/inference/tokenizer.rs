@@ -1,6 +1,6 @@
 //! BPE and SentencePiece tokenizers from GGUF metadata.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ── BPE Tokenizer from GGUF merges ──
 
@@ -103,8 +103,8 @@ pub struct BpeTokenizer {
     merge_ranks: HashMap<String, usize>,
     /// Byte → GPT-2 unicode character mapping
     byte_encoder: [char; 256],
-    /// GPT-2 unicode char → byte reverse mapping
-    byte_decoder: HashMap<char, u8>,
+    /// How an entry becomes reply bytes — see [`PieceDecoder`].
+    decoder: PieceDecoder,
     /// Pre-tokenization regex patterns, applied in sequence: each pass
     /// re-splits the fragments the previous pass produced.
     pre_tok_res: Vec<fancy_regex::Regex>,
@@ -203,10 +203,14 @@ impl BpeTokenizer {
         special_tokens.sort_by_key(|(t, _)| std::cmp::Reverse(t.len()));
 
         Self {
+            decoder: PieceDecoder {
+                is_sentencepiece,
+                byte_decoder,
+                shown_markup: shown_markup(tokens, token_types),
+            },
             token_to_id,
             merge_ranks,
             byte_encoder,
-            byte_decoder,
             pre_tok_res,
             special_tokens,
             is_sentencepiece,
@@ -538,21 +542,9 @@ impl BpeTokenizer {
         out
     }
 
-    /// Decode a BPE token string back to UTF-8 bytes.
-    /// For GPT-2: reverses the GPT-2 unicode byte encoding.
-    /// For SentencePiece: converts ▁ back to space, handles <0xNN> byte tokens.
+    /// Decode a BPE token string back to UTF-8 bytes — [`PieceDecoder::decode`].
     pub fn decode_token(&self, token_str: &str) -> Vec<u8> {
-        decode_token_impl(token_str, self.is_sentencepiece, &self.byte_decoder)
-    }
-
-    /// Return a reference to the byte decoder mapping (for caching outside the lock).
-    pub fn byte_decoder(&self) -> &HashMap<char, u8> {
-        &self.byte_decoder
-    }
-
-    /// Whether this tokenizer uses SentencePiece encoding (vs GPT-2 byte BPE).
-    pub fn is_sentencepiece(&self) -> bool {
-        self.is_sentencepiece
+        self.decoder.decode(token_str)
     }
 }
 
@@ -571,7 +563,7 @@ pub struct SplitTokenizer {
 
 enum TokenizerKind {
     Bpe(Box<BpeTokenizer>),
-    SentencePiece(SpmTokenizer),
+    SentencePiece(Box<SpmTokenizer>),
 }
 
 /// Emit the longest complete UTF-8 prefix of `carry`, keeping any incomplete
@@ -635,34 +627,101 @@ pub(crate) fn flush_utf8_carry(carry: &mut Vec<u8>) -> String {
     out
 }
 
-/// Decode a BPE token string back to UTF-8 bytes (shared logic for BpeTokenizer and CachedDecoder).
-/// For GPT-2: reverses the GPT-2 unicode byte encoding.
-/// For SentencePiece: converts ▁ back to space, handles <0xNN> byte tokens.
-pub fn decode_token_impl(
-    token_str: &str,
-    is_sentencepiece: bool,
-    byte_decoder: &HashMap<char, u8>,
-) -> Vec<u8> {
-    if is_sentencepiece {
-        // Handle byte fallback tokens like <0x0A> (newline)
-        if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6 {
-            if let Ok(byte) = u8::from_str_radix(&token_str[3..5], 16) {
-                return vec![byte];
+/// How a vocabulary entry becomes reply bytes: the ONE decode rule, built once
+/// with the tokenizer ([`SplitTokenizer::piece_decoder`]) and carried whole by
+/// every decoder — the worker's `SplitTokenizer::decode_token` and the
+/// coordinator's `CachedDecoder` — so no path decodes with half of it.
+#[derive(Debug, Clone, Default)]
+pub struct PieceDecoder {
+    /// SentencePiece-style entries — `▁` for a space, `<0xNN>` for a byte —
+    /// rather than GPT-2's byte-to-character map.
+    pub(crate) is_sentencepiece: bool,
+    /// GPT-2 unicode character → byte.
+    pub(crate) byte_decoder: HashMap<char, u8>,
+    /// The `<…>` entries shown as text — see [`shown_markup`].
+    pub(crate) shown_markup: HashSet<String>,
+}
+
+impl PieceDecoder {
+    /// One vocabulary entry as UTF-8 bytes. GPT-2: the byte encoding reversed.
+    /// SentencePiece: `<0xNN>` is its byte, `▁` a space, and a `<…>` entry is
+    /// shown only when the vocabulary declares it text ([`shown_markup`]) —
+    /// `<s>`, `<start_of_turn>` and `<unused0>` never reach a reply.
+    pub fn decode(&self, token_str: &str) -> Vec<u8> {
+        if self.is_sentencepiece {
+            // Handle byte fallback tokens like <0x0A> (newline)
+            if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6 {
+                if let Ok(byte) = u8::from_str_radix(&token_str[3..5], 16) {
+                    return vec![byte];
+                }
             }
+            if is_markup_shaped(token_str) && !self.shown_markup.contains(token_str) {
+                return vec![];
+            }
+            // SentencePiece: ▁ (U+2581) → space, everything else is raw UTF-8
+            token_str.replace('\u{2581}', " ").into_bytes()
+        } else {
+            // GPT-2: reverse byte encoding
+            token_str
+                .chars()
+                .map(|ch| self.byte_decoder.get(&ch).copied().unwrap_or(b'?'))
+                .collect()
         }
-        // Special tokens like <s>, </s>, <unk> → empty (don't emit)
-        if token_str.starts_with('<') && token_str.ends_with('>') {
-            return vec![];
-        }
-        // SentencePiece: ▁ (U+2581) → space, everything else is raw UTF-8
-        token_str.replace('\u{2581}', " ").into_bytes()
-    } else {
-        // GPT-2: reverse byte encoding
-        token_str
-            .chars()
-            .map(|ch| byte_decoder.get(&ch).copied().unwrap_or(b'?'))
-            .collect()
     }
+}
+
+fn is_markup_shaped(token_str: &str) -> bool {
+    token_str.starts_with('<') && token_str.ends_with('>')
+}
+
+/// llama.cpp's end-of-generation names (`llama_vocab::impl::load`) that are
+/// `<…>`-shaped. It overrides each one's declared type to CONTROL, so none is
+/// ever rendered, whatever the vocabulary declares — Phi-3.5's user-defined
+/// `</s>`, Gemma 4's normal `<eos>`. Its list, not ours: what ENDS a reply here
+/// is the narrower `split::gguf_meta::END_OF_GENERATION_TOKENS`.
+const LLAMA_CPP_END_OF_GENERATION_NAMES: &[&str] = &[
+    "<|eot_id|>",
+    "<|im_end|>",
+    "<|end|>",
+    "<|return|>",
+    "<|call|>",
+    "<|flush|>",
+    "<|calls|>",
+    "<end_of_turn>",
+    "<|endoftext|>",
+    "</s>",
+    "<|eom_id|>",
+    "<EOT>",
+    "<|end_of_text|>",
+    "<end_of_utterance>",
+    "<eos>",
+    "<turn|>",
+    "<|tool_response>",
+    "<\u{ff5c}end\u{2581}of\u{2581}sentence\u{ff5c}>",
+];
+
+/// The `<…>` entries a SentencePiece-style vocabulary shows as text: those it
+/// declares NORMAL (1) or USER_DEFINED (4) in `tokenizer.ggml.token_type`, as
+/// llama.cpp's `token_to_piece` renders them, less its end-of-generation names
+/// ([`LLAMA_CPP_END_OF_GENERATION_NAMES`]).
+///
+/// The decode once hid EVERY `<…>` entry. Gemma 2 and 3 keep HTML tags whole
+/// as user-defined tokens — `<table>`, `<tr>`, `<td>`, `<h1>`, `<blockquote>`,
+/// 48 in Gemma 2's vocabulary and 70 in Gemma 3's — so every reply that wrote
+/// HTML lost its tags, and the normal `<>` of Java's `new ArrayList<>()` went
+/// with them; Gemma 4 has 75 normal ones and its tool-call markers. A
+/// vocabulary with no type array (older converters) shows none, as before.
+fn shown_markup(tokens: &[String], token_types: &[i32]) -> HashSet<String> {
+    tokens
+        .iter()
+        .zip(token_types)
+        .filter(|(t, &ty)| {
+            matches!(ty, 1 | 4)
+                && is_markup_shaped(t)
+                && !LLAMA_CPP_END_OF_GENERATION_NAMES.contains(&t.as_str())
+        })
+        .map(|(t, _)| t.clone())
+        .collect()
 }
 
 /// SentencePiece merge-based tokenizer matching llama.cpp's SPM algorithm.
@@ -688,6 +747,8 @@ pub struct SpmTokenizer {
     /// The special tokens whose following whitespace is removed, resolved from
     /// `spacing` when it is set. Empty unless `spacing` strips.
     rstrip_ids: std::collections::HashSet<u32>,
+    /// How an entry becomes reply bytes — see [`PieceDecoder`].
+    decoder: PieceDecoder,
 }
 
 /// How a SentencePiece vocabulary treats the text around a special token.
@@ -778,6 +839,11 @@ impl SpmTokenizer {
             special_tokens,
             spacing: SpecialTokenSpacing::FirstSegmentOnly,
             rstrip_ids: std::collections::HashSet::new(),
+            decoder: PieceDecoder {
+                is_sentencepiece: true,
+                byte_decoder: HashMap::new(),
+                shown_markup: shown_markup(tokens, token_types),
+            },
         }
     }
 
@@ -1142,12 +1208,12 @@ impl SplitTokenizer {
     ) -> Self {
         let bos_id = Self::resolve_bos(tokens, bos_id);
         Self {
-            kind: TokenizerKind::SentencePiece(SpmTokenizer::new(
+            kind: TokenizerKind::SentencePiece(Box::new(SpmTokenizer::new(
                 tokens,
                 scores,
                 add_space_prefix,
                 token_types,
-            )),
+            ))),
             bos_text: bos_id.and_then(|id| tokens.get(id as usize).cloned()),
             bos_id,
             add_bos_token,
@@ -1201,25 +1267,15 @@ impl SplitTokenizer {
 
     /// Decode a single token string back to UTF-8 bytes.
     pub fn decode_token(&self, token_str: &str) -> Vec<u8> {
-        match &self.kind {
-            TokenizerKind::Bpe(bpe) => bpe.decode_token(token_str),
-            TokenizerKind::SentencePiece(_) => decode_token_impl(token_str, true, &HashMap::new()),
-        }
+        self.piece_decoder().decode(token_str)
     }
 
-    /// Whether this tokenizer uses SentencePiece encoding.
-    pub fn is_sentencepiece(&self) -> bool {
+    /// This vocabulary's decode rule, for a decoder kept outside the model's
+    /// lock (`CachedDecoder`).
+    pub fn piece_decoder(&self) -> &PieceDecoder {
         match &self.kind {
-            TokenizerKind::Bpe(bpe) => bpe.is_sentencepiece(),
-            TokenizerKind::SentencePiece(_) => true,
-        }
-    }
-
-    /// Return a reference to the byte decoder mapping (for BPE caching).
-    pub fn byte_decoder(&self) -> HashMap<char, u8> {
-        match &self.kind {
-            TokenizerKind::Bpe(bpe) => bpe.byte_decoder().clone(),
-            TokenizerKind::SentencePiece(_) => HashMap::new(),
+            TokenizerKind::Bpe(bpe) => &bpe.decoder,
+            TokenizerKind::SentencePiece(spm) => &spm.decoder,
         }
     }
 }
@@ -1509,6 +1565,47 @@ mod declared_special_tests {
         // THE CONTROL — every other family, and what Phi-3 got before.
         let plain = SplitTokenizer::from_sentencepiece(&toks, &scores, true, false, None, &types);
         assert_eq!(plain.encode(text), vec![7, 4, 5, 8, 4, 9, 4]);
+    }
+
+    /// The types read off the real files (2026-10-16): Gemma 2 and 3 keep HTML
+    /// tags whole as USER_DEFINED entries and `<>` as a NORMAL one, Phi-3.5
+    /// declares `</s>` user-defined. A reply shows the tags and the `<>` as
+    /// llama.cpp does; CONTROL entries and llama.cpp's end-of-generation names
+    /// stay hidden whatever their type — on both tokenizer kinds.
+    #[test]
+    fn a_reply_shows_the_markup_its_vocabulary_declares_text() {
+        let toks: Vec<String> = [
+            "<unk>",
+            "<s>",
+            "</s>",
+            "<start_of_turn>",
+            "<unused0>",
+            "<table>",
+            "<>",
+            "\u{2581}new",
+            "<0x0A>",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let scores = vec![0.0; toks.len()];
+        let types = [2, 3, 4, 3, 3, 4, 1, 1, 6];
+        let shown = |tok: &SplitTokenizer| -> Vec<String> {
+            toks.iter()
+                .map(|t| String::from_utf8_lossy(&tok.decode_token(t)).into_owned())
+                .collect()
+        };
+        let want = ["", "", "", "", "", "<table>", "<>", " new", "\n"];
+
+        let spm = SplitTokenizer::from_sentencepiece(&toks, &scores, false, true, None, &types);
+        assert_eq!(shown(&spm), want, "SentencePiece");
+        // TinyLlama's shape: a SentencePiece vocabulary that also ships merges.
+        let bpe = SplitTokenizer::from_bpe(&toks, &[], "default", "llama", true, None, &types);
+        assert_eq!(shown(&bpe), want, "SentencePiece-style BPE");
+
+        // No type array (older converters): every `<…>` entry hidden, as before.
+        let blind = SplitTokenizer::from_sentencepiece(&toks, &scores, false, true, None, &[]);
+        assert_eq!(shown(&blind), ["", "", "", "", "", "", "", " new", "\n"]);
     }
 }
 
