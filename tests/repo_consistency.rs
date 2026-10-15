@@ -13067,10 +13067,10 @@ fn enclosing_fn_names(text: &str, marker: &str) -> Vec<String> {
 /// download on its own must ask it, or be listed here with why it need not.
 #[test]
 fn every_automatic_download_asks_whether_the_connection_is_metered() {
-    const ASKS: &[(&str, &str)] = &[
-        ("src/model/auto_manage/manager.rs", "evaluate_and_download"),
-        ("src/health/rebalancer.rs", "process_pending_departures"),
-    ];
+    // The rebalancer used to start whole-model downloads of its own; it now
+    // wakes the download pass instead (pre-release review, 2026-10-15), so a
+    // start there is in neither list and fails here.
+    const ASKS: &[(&str, &str)] = &[("src/model/auto_manage/manager.rs", "evaluate_and_download")];
     const NEED_NOT: &[(&str, &str)] = &[
         // A part already held being repaired, or a download already under way.
         (
@@ -13124,4 +13124,78 @@ fn every_automatic_download_asks_whether_the_connection_is_metered() {
         }
     }
     assert!(offenders.is_empty(), "{offenders:#?}");
+}
+
+/// The names that read this computer's memory budget — an `nvidia-smi` on a
+/// computer with a graphics card.
+const CARD_READINGS: &[&str] = &[
+    "node_model_budget_mb",
+    "node_ram_model_budget_mb",
+    "compute_vram_budget",
+    "query_gpu_vram_free_mb",
+    "nvidia_smi",
+    "card_budget_for_planning",
+];
+
+fn reads_the_card(body: &str) -> Option<&'static str> {
+    CARD_READINGS.iter().copied().find(|n| body.contains(n))
+}
+
+/// **The capacity snapshot reads nothing from the card** — it is rebuilt ON
+/// the network loop at every peer connect and disconnect, and an `nvidia-smi`
+/// there is 2-6 s on a busy card under WSL (gotcha #831; pre-release review,
+/// 2026-10-15). The model budget it carries is read by the health monitor's
+/// tick, on a blocking thread (`refresh_swarm_capacity_reading_the_budget`),
+/// and passed in.
+#[test]
+fn the_capacity_snapshot_built_on_the_network_loop_reads_nothing_from_the_card() {
+    assert_eq!(
+        reads_the_card("fn x() {\n    let b = crate::model::auto_manage::vram::node_model_budget_mb(state);\n}\n"),
+        Some("node_model_budget_mb"),
+        "the scan sees a budget read"
+    );
+    assert_eq!(
+        reads_the_card("fn x(model_budget_mb: Option<u64>) {}\n"),
+        None
+    );
+
+    let path = repo_root().join("src/daemon/state/capacity.rs");
+    let text = std::fs::read_to_string(&path).unwrap();
+    for name in [
+        "compute_swarm_capacity",
+        "refresh_swarm_capacity",
+        "current_model_budget_mb",
+    ] {
+        let body = fn_body(&text, &format!("pub fn {name}("))
+            .unwrap_or_else(|| panic!("capacity.rs has no `pub fn {name}(`"));
+        assert_eq!(
+            reads_the_card(body),
+            None,
+            "`{name}` runs on the network loop and must not read the card"
+        );
+    }
+    let reader = fn_body(
+        &text,
+        "pub async fn refresh_swarm_capacity_reading_the_budget(",
+    )
+    .expect("the budget is read in one place");
+    assert!(
+        reader.contains("spawn_blocking"),
+        "the budget is read on a blocking thread"
+    );
+
+    let mut callers = Vec::new();
+    for f in walk_rs_files(&repo_root().join("src").to_string_lossy()) {
+        let text = std::fs::read_to_string(&f).unwrap_or_default();
+        if f.ends_with("daemon/state/capacity.rs") || f.ends_with("daemon/state/mod.rs") {
+            continue;
+        }
+        if text.contains("refresh_swarm_capacity_reading_the_budget(") {
+            callers.push(f);
+        }
+    }
+    assert!(
+        callers.len() == 1 && callers[0].ends_with("health/monitor.rs"),
+        "only the health monitor's tick reads the budget for the snapshot: {callers:?}"
+    );
 }

@@ -834,10 +834,14 @@ asked what the connection costs.
 
 **`SharedState::automatic_downloads_wait`** (`daemon::metered`) is the one
 answer to "may a download nobody asked for start now?", asked just before one
-starts by both paths that start one on their own — the download pass
+starts by the one path that starts one on its own — the download pass
 (`evaluate_and_download`, after selection, so the system is asked only when
-there is something to fetch) and the rebalancer's acquisition when a holder
-leaves (`process_pending_departures`). Guard:
+there is something to fetch). The rebalancer used to be a second: at a
+departure it sent `AcquisitionCommand::Acquire` for the WHOLE model, asking
+none of the pass's checks (auto-download on, the storage budget,
+`would_shed_copy`, the swarm's upload, a removed part, the metered
+connection). It now wakes the pass (`auto_manage_notify`), which already ranks
+a part by how few hold it (pre-release review, 2026-10-15). Guard:
 `every_automatic_download_asks_whether_the_connection_is_metered` — a new
 `trigger_download` or `AcquisitionCommand::Acquire` site must ask, or be listed
 with why it need not. Deliberately not paused: a download the owner asked for,

@@ -632,6 +632,15 @@ impl HealthMonitor {
 
                     self.maybe_remeasure_memory_bandwidth(nonce).await;
 
+                    // What this computer may give a model, read here — off the
+                    // network loop — for the capacity snapshot's "Runs locally"
+                    // marks; the loop's refreshes at every peer connect carry it
+                    // over (`refresh_swarm_capacity`). An `nvidia-smi` on a card.
+                    crate::daemon::state::refresh_swarm_capacity_reading_the_budget(
+                        &self.shared_state,
+                    )
+                    .await;
+
                     // Cleanup tasks: run every tick (cheap, local-only)
                     self.cleanup_acquisition_progress();
                     self.cleanup_stale_peer_shard_downloads();

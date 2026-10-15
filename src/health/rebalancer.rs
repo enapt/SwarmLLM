@@ -1,34 +1,26 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use tokio::sync::{mpsc, watch};
 
 use crate::daemon::SharedState;
 use crate::error::SwarmError;
-use crate::model::acquisition::AcquisitionCommand;
 use crate::types::{NetworkCommand, NodeId, RebalanceEvent, ShardId, SwarmMessage};
 
 /// Minimum replication factor for each shard.
 const MIN_REPLICATION: usize = 2;
 
-/// Minimum time between rebalance operations for the same shard (5 minutes).
-/// Prevents thundering herd when multiple peers leave simultaneously.
-const REBALANCE_COOLDOWN_SECS: u64 = 300;
-
 /// Manages shard rebalancing in response to network topology changes.
 ///
-/// When the HealthMonitor detects a peer leaving or joining, it signals
-/// the ShardRebalancer via the `RebalanceEvent` channel. The rebalancer
-/// checks for under-replicated shards and triggers re-downloads.
+/// When the HealthMonitor detects a peer leaving, it signals the
+/// ShardRebalancer via the `RebalanceEvent` channel. The rebalancer
+/// re-announces the under-replicated parts this node holds, and wakes the
+/// download pass for the ones it does not — it never fetches anything itself.
 pub struct ShardRebalancer {
     shared_state: Arc<SharedState>,
     rebalance_rx: mpsc::Receiver<RebalanceEvent>,
     network_tx: mpsc::Sender<NetworkCommand>,
-    acquisition_tx: mpsc::Sender<AcquisitionCommand>,
     shutdown_rx: watch::Receiver<bool>,
-    /// Per-model cooldown tracking (DAE-I10).
-    last_rebalance_per_model: std::collections::HashMap<crate::types::ModelId, Instant>,
-    /// Queued PeerLeft events to batch-process after cooldown.
+    /// Queued PeerLeft events to batch-process.
     pending_peer_left: Vec<NodeId>,
 }
 
@@ -37,16 +29,13 @@ impl ShardRebalancer {
         shared_state: Arc<SharedState>,
         rebalance_rx: mpsc::Receiver<RebalanceEvent>,
         network_tx: mpsc::Sender<NetworkCommand>,
-        acquisition_tx: mpsc::Sender<AcquisitionCommand>,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
         Self {
             shared_state,
             rebalance_rx,
             network_tx,
-            acquisition_tx,
             shutdown_rx,
-            last_rebalance_per_model: std::collections::HashMap::new(),
             pending_peer_left: Vec::new(),
         }
     }
@@ -120,32 +109,26 @@ impl ShardRebalancer {
         }
     }
 
-    /// Batch-process queued PeerLeft events, respecting per-model cooldown.
+    /// Batch-process queued PeerLeft events.
     async fn process_pending_departures(&mut self) {
         let departed: Vec<NodeId> = std::mem::take(&mut self.pending_peer_left);
         if departed.is_empty() {
             return;
         }
 
-        // Prune stale cooldown entries (models not seen in 2x cooldown window)
-        self.last_rebalance_per_model
-            .retain(|_, instant| instant.elapsed().as_secs() < REBALANCE_COOLDOWN_SECS * 2);
-
         let local_node_id = self.shared_state.identity.node_id().clone();
-        let now = Instant::now();
+        let mut not_held_here = 0usize;
 
         for departed_peer in &departed {
             let underreplicated = self.find_underreplicated_shards(departed_peer);
             for (shard_id, holders) in &underreplicated {
                 if holders.contains(&local_node_id) {
                     // We hold this shard — re-announce it so peers know
-                    // it's still available. Re-announces are cheap
-                    // (single GossipSub message, no DB or network fetch),
-                    // so they don't need the per-model cooldown — under
-                    // a thundering-herd departure, suppressing them
-                    // leaves locally-held shards undiscoverable for up
-                    // to REBALANCE_COOLDOWN_SECS while peers retry HF.
-                    // Re-announcing one shard we still hold — incremental.
+                    // it's still available. Re-announces are cheap (a
+                    // single GossipSub message, no DB or network fetch),
+                    // and under a thundering-herd departure suppressing
+                    // them would leave locally-held shards undiscoverable
+                    // while peers retry HF. One shard — incremental.
                     let announce = crate::model::manifest::shard_announce(
                         &self.shared_state.model_registry,
                         local_node_id.clone(),
@@ -157,72 +140,26 @@ impl ShardRebalancer {
                         tracing::warn!(error = %e, "Failed to broadcast shard rebalance announce");
                     }
                 } else {
-                    // We don't hold this shard — request acquisition.
-                    // Acquisition is expensive (HF download or P2P
-                    // fetch); the per-model cooldown gates ONLY this
-                    // path so a multi-peer departure doesn't trigger
-                    // duplicate downloads.
-                    if let Some(last) = self.last_rebalance_per_model.get(&shard_id.model_id) {
-                        if last.elapsed().as_secs() < REBALANCE_COOLDOWN_SECS {
-                            tracing::debug!(
-                                model = %shard_id.model_id,
-                                "Rebalance acquisition cooldown active, skipping"
-                            );
-                            continue;
-                        }
-                    }
-                    // A download nobody asked for, like the download pass's
-                    // (`daemon::metered`, field report 2026-10-15).
-                    if self.shared_state.automatic_downloads_wait().await {
-                        tracing::info!(
-                            model = %shard_id.model_id,
-                            "Rebalance acquisition skipped — this connection is metered"
-                        );
-                        continue;
-                    }
-                    if self
-                        .acquisition_tx
-                        .try_send(AcquisitionCommand::Acquire {
-                            model_id: shard_id.model_id.clone(),
-                        })
-                        .is_err()
-                    {
-                        // Silent until 2026-09-18: a rebalance that never reached
-                        // the acquisition manager looked, in the log, exactly
-                        // like one that did — the INFO line below is printed
-                        // either way.
-                        if let Some(burst) = self
-                            .shared_state
-                            .metrics
-                            .channel_metrics
-                            .acquisition
-                            .note_dropped()
-                        {
-                            tracing::warn!(
-                                model = %shard_id.model_id,
-                                shard = shard_id.index,
-                                dropped_since_last = burst.suppressed,
-                                nothing_accepted_for_secs = burst.stalled_secs(),
-                                total_dropped = burst.total,
-                                "Acquisition channel full — this rebalance was dropped"
-                            );
-                        }
-                    } else {
-                        self.shared_state
-                            .metrics
-                            .channel_metrics
-                            .acquisition
-                            .record_sent();
-                    }
-                    tracing::info!(
-                        model = %shard_id.model_id,
-                        shard = shard_id.index,
-                        "Requesting acquisition of under-replicated shard"
-                    );
-                    self.last_rebalance_per_model
-                        .insert(shard_id.model_id.clone(), now);
+                    not_held_here += 1;
                 }
             }
+        }
+
+        // A part down to one holder that this node does not hold is the
+        // download pass's to fetch, or not: it already ranks a part by how few
+        // hold it, and it alone asks everything a download nobody asked for
+        // must — auto-download on, the storage budget, whether prune would keep
+        // it (`would_shed_copy`: a model that cannot chat, one with its safety
+        // training removed that nobody chose), the swarm's upload, a part the
+        // owner removed, a metered connection. This branch used to send
+        // `AcquisitionCommand::Acquire` for the WHOLE model and asked none of
+        // them (pre-release review, 2026-10-15).
+        if not_held_here > 0 {
+            tracing::info!(
+                parts = not_held_here,
+                "Parts this computer does not hold are down to one copy — asking the download pass"
+            );
+            self.shared_state.models.auto_manage_notify.notify_one();
         }
     }
 
@@ -269,10 +206,5 @@ mod tests {
     #[test]
     fn min_replication_is_2() {
         assert_eq!(MIN_REPLICATION, 2);
-    }
-
-    #[test]
-    fn cooldown_is_5_minutes() {
-        assert_eq!(REBALANCE_COOLDOWN_SECS, 300);
     }
 }

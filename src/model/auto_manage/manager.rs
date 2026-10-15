@@ -203,6 +203,9 @@ pub(super) struct PruneCandidate {
     pub target_replicas: u32,
     /// Score: higher = more prunable.
     pub score: f64,
+    /// Not this node's to host (`SharedState::unchosen_uncensored_model`):
+    /// shed however few hold it, every part in one pass.
+    pub not_ours_to_host: bool,
 }
 
 impl AutoShardManager {
@@ -1528,6 +1531,7 @@ mod tests {
             holder_count: 6,
             target_replicas: 2,
             score: 3.0 + 1.0, // high redundancy + cold bonus
+            not_ours_to_host: false,
         };
         let warm_less_redundant = PruneCandidate {
             model_id: crate::types::ModelId("m2".into()),
@@ -1537,6 +1541,7 @@ mod tests {
             holder_count: 3,
             target_replicas: 2,
             score: 1.5, // low redundancy, first shard penalty
+            not_ours_to_host: false,
         };
         assert!(cold_redundant.score > warm_less_redundant.score);
     }

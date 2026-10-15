@@ -75,6 +75,16 @@ pub struct SwarmCapacity {
     /// count proxied via `total_size_bytes`. Surfaced as the headline
     /// "your swarm runs up to X" claim.
     pub headline_model: Option<HeadlineModel>,
+    /// What this computer may give one model, in MB (`vram::node_model_budget_mb`,
+    /// the figure the HuggingFace search marks "Runs locally" by), as last READ —
+    /// by the health monitor's tick, off the network loop
+    /// ([`refresh_swarm_capacity_reading_the_budget`]). The refreshes on every
+    /// peer connect and disconnect run ON that loop and carry this figure over:
+    /// on a computer with a graphics card the reading is an `nvidia-smi`, 2-6 s
+    /// on a busy card under WSL (gotcha #831). `None` until first read, or when
+    /// it cannot be.
+    #[serde(default)]
+    pub model_budget_mb: Option<u64>,
     /// Last time this snapshot was rebuilt (Unix timestamp).
     pub computed_at: i64,
 }
@@ -116,7 +126,12 @@ pub struct HeadlineModel {
 /// Compute a fresh capacity snapshot from current state. Single pass over
 /// the model + peer registries, no allocations beyond the result vectors.
 /// Safe to call from any context — does not block, does not lock writers.
-pub fn compute_swarm_capacity(state: &SharedState) -> SwarmCapacity {
+///
+/// `model_budget_mb` is REQUIRED, never read here: it is an `nvidia-smi` on a
+/// computer with a graphics card, and this runs on the network loop at every
+/// peer connect (pre-release review, 2026-10-15). Pass the snapshot's own
+/// ([`current_model_budget_mb`]) unless the caller is the one reading it.
+pub fn compute_swarm_capacity(state: &SharedState, model_budget_mb: Option<u64>) -> SwarmCapacity {
     // 1. Headcount + VRAM/disk pool. Local node + connected peers only —
     //    `peer_registry` may include disconnected entries we keep around
     //    for reconnect tracking; `connected_node_ids` is the connectivity
@@ -185,7 +200,6 @@ pub fn compute_swarm_capacity(state: &SharedState) -> SwarmCapacity {
     //    distinct nodes hold at least one shard. This is the core of the
     //    "what can the swarm actually run" answer.
     let local_node_id = state.identity.node_id().clone();
-    let model_budget_mb = crate::model::auto_manage::vram::node_model_budget_mb(state);
 
     struct Coverage {
         total_shards: u32,
@@ -335,15 +349,44 @@ pub fn compute_swarm_capacity(state: &SharedState) -> SwarmCapacity {
         min_redundancy,
         median_redundancy,
         headline_model: headline,
+        model_budget_mb,
         computed_at: chrono::Utc::now().timestamp(),
     }
 }
 
-/// Recompute and publish the capacity snapshot to `MetricsProviders`.
-/// Cheap — single pass; safe to call from gossip-tick handlers.
+/// The model budget the published snapshot carries — the last one read.
+pub fn current_model_budget_mb(state: &SharedState) -> Option<u64> {
+    state.metrics.swarm_capacity.load().model_budget_mb
+}
+
+/// Recompute and publish the capacity snapshot to `MetricsProviders`,
+/// carrying the last model budget read over. Cheap — single pass, reads
+/// nothing from the card; safe to call from the network loop.
 pub fn refresh_swarm_capacity(state: &SharedState) {
-    let snapshot = compute_swarm_capacity(state);
+    let snapshot = compute_swarm_capacity(state, current_model_budget_mb(state));
     state.metrics.swarm_capacity.store(Arc::new(snapshot));
+}
+
+/// [`refresh_swarm_capacity`] with the model budget read afresh — on a
+/// blocking thread (an `nvidia-smi` on a computer with a graphics card), by the
+/// health monitor's tick, never the network loop. The snapshot is computed
+/// AFTER the reading returns: computed before it, a reading of a few seconds
+/// would store peer counts older than a refresh the network loop made
+/// meanwhile.
+pub async fn refresh_swarm_capacity_reading_the_budget(state: &Arc<SharedState>) {
+    let reading = Arc::clone(state);
+    let budget = match tokio::task::spawn_blocking(move || {
+        crate::model::auto_manage::vram::node_model_budget_mb(&reading)
+    })
+    .await
+    {
+        Ok(budget) => budget,
+        Err(_) => current_model_budget_mb(state),
+    };
+    state
+        .metrics
+        .swarm_capacity
+        .store(Arc::new(compute_swarm_capacity(state, budget)));
 }
 
 #[cfg(test)]
@@ -450,7 +493,7 @@ mod tests {
             },
         );
 
-        let cap = compute_swarm_capacity(&state);
+        let cap = compute_swarm_capacity(&state, Some(1024));
         let fits = |id: &str| {
             cap.serveable_models
                 .iter()

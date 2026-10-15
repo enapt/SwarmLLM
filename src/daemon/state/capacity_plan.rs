@@ -73,7 +73,7 @@ pub struct HeadlineTarget {
 /// so a user with a typical home setup can see what their contribution
 /// alone would do.
 pub fn compute_capacity_plan(state: &SharedState) -> CapacityPlan {
-    let current = compute_swarm_capacity(state);
+    let current = compute_swarm_capacity(state, super::capacity::current_model_budget_mb(state));
 
     // Models the manifest registry knows about but that exceed swarm
     // capacity today — these are the headline targets. We compute the

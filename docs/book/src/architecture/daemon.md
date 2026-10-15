@@ -23,7 +23,7 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 | **MessageDispatcher** | `src/daemon/dispatch/mod.rs` | Routes inbound network messages to appropriate subsystems. The only consumer of `network_out`, so a stall here takes the node out of the swarm silently — it writes a liveness marker that HealthMonitor watches from another task, because the supervisor only sees a task that exits or panics, never one that is merely stuck |
 | **CreditLedger** | `src/credit/ledger.rs` | Credit balance tracking, transaction signing, gossip |
 | **HealthMonitor** | `src/health/monitor.rs` | Periodic health pings, rebalancing triggers |
-| **ShardRebalancer** | `src/health/rebalancer.rs` | Shard redistribution on node join/leave |
+| **ShardRebalancer** | `src/health/rebalancer.rs` | After a computer leaves: re-announces held parts that are down to one copy, and wakes the download pass for the rest (it never downloads anything itself) |
 | **AcquisitionManager** | `src/model/acquisition.rs` | BLAKE3-verified model downloads from peers and HuggingFace |
 | **ApiServer** | `src/api/server.rs` | Axum HTTP: OpenAI + Anthropic APIs + MCP server + admin dashboard + WebSocket |
 | **PoolManager** | `src/pool/manager/` | Device pool management, credit forwarding |

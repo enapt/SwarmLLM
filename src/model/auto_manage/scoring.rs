@@ -1460,6 +1460,28 @@ mod fetch_what_prune_keeps {
         assert!(!manager.would_shed_copy(&part0, &[local], 0.0, &[]));
     }
 
+    /// Prune gives such a copy back, not only says it would: its execution
+    /// re-checks the replica count, and kept any part three computers or fewer
+    /// held (pre-release review, 2026-10-15). An ordinary model's only copy
+    /// here is kept.
+    #[tokio::test]
+    async fn prune_gives_back_an_uncensored_copy_nobody_chose_however_few_hold_it() {
+        let (state, manager) = manager_with(Config::default());
+        let unchosen = busy_model(&state, &manager, "coder-7b-abliterated-q4");
+        let ordinary = busy_model(&state, &manager, "coder-7b-q4");
+        manager.evaluate_and_prune().await;
+        let held = |mid: &ModelId| {
+            crate::model::shard::model_dir(&state.config.node.data_dir, &mid.0)
+                .join(crate::model::shard::shard_filename(0))
+                .exists()
+        };
+        assert!(!held(&unchosen), "its only copy here is given back");
+        assert!(
+            held(&ordinary),
+            "control: an ordinary model's only copy here is kept"
+        );
+    }
+
     /// Parts chosen in one cycle are judged at the pressure ALL of them leave:
     /// at 7,000 MB held, the first part lands at 75% (prune keeps three
     /// copies) and the second at 80% (prune keeps two), so only one is taken.

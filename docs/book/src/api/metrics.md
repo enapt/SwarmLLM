@@ -75,7 +75,7 @@ Internal channel health metrics for monitoring backpressure:
 | `swarmllm_channel_dropped_total{channel="..."}` | counter | Messages dropped due to backpressure |
 
 Emitted for the channels whose send paths actually count: `network_out`,
-`acquisition`, `rebalance` and `pool_cmd`. A channel absent from the output is
+`rebalance` and `pool_cmd`. A channel absent from the output is
 one nothing increments, which is deliberate — a perpetual zero cannot be told
 apart from a healthy channel, and an alert on it can never fire.
 

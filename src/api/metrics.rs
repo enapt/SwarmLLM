@@ -648,9 +648,12 @@ fn write_channel_metrics(buf: &mut String, shared: &crate::daemon::SharedState) 
     // fire; `pool_cmd` was instrumented the same day, when its drops were found
     // being charged to `network_out`. The rule the list encodes is unchanged:
     // an entry here is a promise that the channel's send path counts.
+    //
+    // `acquisition` left it on 2026-10-15: its one counting sender, the
+    // rebalancer, no longer sends on it (it wakes the download pass), and the
+    // API's and the network manager's sends never counted.
     let channels: &[(&str, &crate::daemon::ChannelCounters)] = &[
         ("network_out", &shared.metrics.channel_metrics.network_out),
-        ("acquisition", &shared.metrics.channel_metrics.acquisition),
         ("rebalance", &shared.metrics.channel_metrics.rebalance),
         ("pool_cmd", &shared.metrics.channel_metrics.pool_cmd),
     ];

@@ -39,7 +39,8 @@ mod tp_allreduce;
 pub use activity::{ActivityEvent, DashboardSignal, LoadedModelInfo};
 pub use canonical::{PeerManifest, ORIGIN_REFUSED_PERMANENT_SECS, ORIGIN_REFUSED_TRANSIENT_SECS};
 pub use capacity::{
-    compute_swarm_capacity, refresh_swarm_capacity, HeadlineModel, ModelEntry, SwarmCapacity,
+    compute_swarm_capacity, current_model_budget_mb, refresh_swarm_capacity,
+    refresh_swarm_capacity_reading_the_budget, HeadlineModel, ModelEntry, SwarmCapacity,
 };
 pub use capacity_plan::{compute_capacity_plan, CapacityPlan, CapacityScenario, HeadlineTarget};
 pub use credits::CreditPool;

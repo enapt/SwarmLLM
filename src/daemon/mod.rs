@@ -425,7 +425,6 @@ impl Daemon {
             shared_state.clone(),
             rebalance_rx,
             network_tx.clone(),
-            acquisition_tx.clone(),
             shutdown_rx.clone(),
         );
 

@@ -26,8 +26,8 @@
 //!
 //! **`SharedState::automatic_downloads_wait` is the one answer** to "may this
 //! node start a download nobody asked for now?" — asked by every path that
-//! starts one on its own: the download pass (`evaluate_and_download`) and the
-//! rebalancer's acquisition when a holder leaves. Guard:
+//! starts one on its own: the download pass (`evaluate_and_download`), which
+//! the rebalancer wakes when a holder leaves rather than fetching itself. Guard:
 //! `every_automatic_download_asks_whether_the_connection_is_metered`. What it
 //! leaves alone, deliberately: a download the owner asks for, a part already
 //! held being repaired, and a download already under way.
@@ -133,9 +133,9 @@ pub(crate) fn from_windows_cost(out: &str) -> Metered {
     }
 }
 
-/// How long a reading answers for. The download pass runs every few minutes
-/// and the rebalancer at a departure; a minute keeps both from starting a
-/// program each, and is well inside the time a person takes to switch from a
+/// How long a reading answers for. The download pass runs every few minutes,
+/// and again whenever a departure or a setting wakes it; a minute keeps those
+/// from starting a program each, and is well inside the time a person takes to switch from a
 /// hotspot to Wi-Fi and back.
 const READING_ANSWERS_FOR: Duration = Duration::from_secs(60);
 

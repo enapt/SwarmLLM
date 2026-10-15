@@ -398,6 +398,16 @@ impl AutoShardManager {
                     continue;
                 }
 
+                // A copy that is not this node's to host — a model with its
+                // safety training removed that the owner did not choose — is
+                // given back however few hold it. The replica count, busy
+                // holders and a way to fetch it back all guard the swarm's
+                // copies of a model this node SHOULD carry; asked of this one
+                // they kept it wherever three computers or fewer held it, which
+                // in a small swarm is everywhere (pre-release review,
+                // 2026-10-15). A part in use is still waited for, below.
+                let not_ours_to_host = self.shared_state.unchosen_uncensored_model(&manifest.id);
+
                 let holder_count = holders.len();
                 // The effective target behind that answer, for the score and the
                 // execution-time re-check. Severe saturation
@@ -412,11 +422,13 @@ impl AutoShardManager {
                 );
 
                 // Load-aware: block if remaining holders are busy
-                if self.remaining_holders_busy(
-                    &holders,
-                    &local_node_id,
-                    config.max_holder_load_for_prune,
-                ) {
+                if !not_ours_to_host
+                    && self.remaining_holders_busy(
+                        &holders,
+                        &local_node_id,
+                        config.max_holder_load_for_prune,
+                    )
+                {
                     continue;
                 }
 
@@ -426,7 +438,9 @@ impl AutoShardManager {
                 }
 
                 // Re-acquisition check: can we get it back?
-                if !self.can_reacquire(&manifest.id, &shard_id, &holders, &local_node_id) {
+                if !not_ours_to_host
+                    && !self.can_reacquire(&manifest.id, &shard_id, &holders, &local_node_id)
+                {
                     continue;
                 }
 
@@ -603,6 +617,7 @@ impl AutoShardManager {
                     holder_count,
                     target_replicas: effective_target,
                     score,
+                    not_ours_to_host,
                 });
             }
 
@@ -652,6 +667,7 @@ impl AutoShardManager {
                                 holder_count: mmproj_holder_count,
                                 target_replicas: mmproj_min,
                                 score: 0.1, // Very low score -- only prune under extreme pressure
+                                not_ours_to_host: false,
                             });
                         }
                     }
@@ -735,7 +751,8 @@ impl AutoShardManager {
                 .get(&candidate.model_id)
                 .copied()
                 .unwrap_or(0);
-            if count >= max_per_model {
+            // Every part of a copy that is not ours to host goes in one pass.
+            if count >= max_per_model && !candidate.not_ours_to_host {
                 continue;
             }
 
@@ -787,7 +804,7 @@ impl AutoShardManager {
                 );
                 continue;
             }
-            if current_holders <= effective_target as usize {
+            if current_holders <= effective_target as usize && !candidate.not_ours_to_host {
                 tracing::debug!(
                     model = %candidate.model_id,
                     shard = candidate.shard_index,

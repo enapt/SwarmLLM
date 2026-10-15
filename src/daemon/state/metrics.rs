@@ -564,7 +564,6 @@ pub struct ChannelMetricsSet {
     pub network_out: Arc<ChannelCounters>,
     pub router_cmd: Arc<ChannelCounters>,
     pub rebalance: Arc<ChannelCounters>,
-    pub acquisition: Arc<ChannelCounters>,
     pub pool_cmd: Arc<ChannelCounters>,
 }
 
@@ -575,7 +574,6 @@ impl ChannelMetricsSet {
             network_out: Arc::new(ChannelCounters::new(1024)),
             router_cmd: Arc::new(ChannelCounters::new(256)),
             rebalance: Arc::new(ChannelCounters::new(64)),
-            acquisition: Arc::new(ChannelCounters::new(64)),
             pool_cmd: Arc::new(ChannelCounters::new(64)),
         }
     }
