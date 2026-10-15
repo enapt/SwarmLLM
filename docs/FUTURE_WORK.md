@@ -1463,16 +1463,14 @@ tree attention masks in the worker — absorbs the old survey's Tier 2D); the pi
 pass (Phase 3) is #171. The same-model-at-fewer-bits drafter is decided against as a default
 (#144, § "Decided").
 
-#### #275 — A drafter is judged before the target's load, and only processor plans leave it room
-`P3` · perf-split · **PARTIAL** — 2026-10-15 · history: § Closed 2026-10-14 (#275's first half), 2026-10-15 (the reply's charge)
+#### #275 — A target already loaded keeps its layers, and only processor plans leave the drafter room
+`P3` · perf-split · **PARTIAL** — 2026-10-15 · history: § Closed 2026-10-14 (#275's first half), 2026-10-15 (the reply's charge; judged beside the plan)
 
-Shipped: the drafter is asked before it is chosen, a split leaves it room where the peers
-offer enough, and that room is the reply's own cache, not 4,096 positions
-(`docs/invariants/scheduling.md` § "A split leaves room for the model that guesses for it").
-Left: (2) on a cold start the drafter is judged beside the layers loaded SO FAR: seen choosing
-it beside 14 held layers, then refused once the plan grew them to 28 (one reply unguessed, the
-n-gram loop from the next). (3) A target worker already holding more layers keeps them; the
-room appears from its next cold load. (4) Card plans are not cut (a guest goes to the processor
+Shipped: the drafter is asked before it is chosen, beside the layers the plan loads here; a
+split leaves it room where the peers offer enough; that room is the reply's own cache, not
+4,096 positions (`docs/invariants/scheduling.md` § "A split leaves room for the model that
+guesses for it"). Left: (3) a target worker already holding more layers keeps them; the room
+appears from its next cold load. (4) Card plans are not cut (a guest goes to the processor
 there).
 
 #### #145 — One reply uses one row of a ring pass that could carry dozens
@@ -2243,7 +2241,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15, unreleased** (#275's reply-sized charge)
+**Closed 2026-10-15, unreleased** (#275's reply-sized charge; #275 (2), judged beside the plan)
 - #275 (1) — **the room a split leaves for its drafter is the reply's cache, not a typical
   conversation's.** The room, the choice and the drafter's spawn priced its cache at 4,096
   positions whatever the reply — 896 of Qwen3-1.7B's 2,899 MB for a chat that fills 1,024 — so
@@ -2254,6 +2252,14 @@ grep `^| N |`).
   real request 20 → 23 layers (`drafter_cache=Conversation(1024)`); the speed A/B waits for the
   Australian peer to offer room (it refused every arm that hour). A/B
   `SWARMLLM_DRAFTER_KV_CHARGE=typical`. (2)-(4) stay open as #275.
+- #275 (2) — **a drafter is judged beside the layers the plan loads here, not those loaded so
+  far.** It loads after them, so on a cold start "would it load now" said yes beside nothing:
+  seen choosing Qwen3-1.7B beside 14 held layers of Qwen3-30B-A3B, refused at its spawn once the
+  plan grew them to 28, and that reply ran with no guessing at all. The choice now asks the
+  planner's question of the plan it made (`ModelProcessPool::guest_would_be_admitted_beside`:
+  the layers the plan ADDS within `max_hostable_layers_beside_guest`), so such a drafter gives
+  way to a smaller one or to the n-gram loop. vLLM likewise loads the drafter beside the target
+  before it sizes caches. A/B `SWARMLLM_DRAFTER_BESIDE=loaded`. (3)-(4) stay open as #275.
 
 **Closed 2026-10-14, unreleased** (#273, #274; #137's 8-thread half; #275's first half)
 - #275 (first half) — **a split of a big model guesses ahead on a node without a graphics card,

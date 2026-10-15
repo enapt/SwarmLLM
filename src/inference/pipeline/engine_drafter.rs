@@ -196,16 +196,28 @@ fn spec_for(state: &SharedState, target: &ModelId, drafter: ModelId) -> Option<D
 /// ([`spec_for`]) and is at most a quarter of its size ([`size_proxy`]) — the
 /// best guesser that is still cheap, since across a network the round trip,
 /// not the guessing, is what a round mostly costs. Either way only one this
-/// node's memory would load now ([`admitted`]) for a reply of `conversation`
+/// node's memory would load ([`admitted`]) for a reply of `conversation`
 /// positions (`model_worker::drafter_cache_positions`, the charge its load
-/// will take). `None` when there is none: speculation across computers then
-/// drafts with llama.cpp where that is configured, or not at all.
+/// will take) beside the `here` the plan gives this node. `None` when there is
+/// none: speculation across computers then drafts with llama.cpp where that is
+/// configured, or not at all.
 pub(crate) fn engine_drafter_for(
     state: &SharedState,
     target: &ModelId,
     conversation: u64,
+    here: &TargetHere<'_>,
 ) -> Option<DrafterSpec> {
-    chosen(state, target, |s| admitted(state, target, s, conversation))
+    chosen(state, target, |s| {
+        admitted(state, target, s, conversation, here)
+    })
+}
+
+/// The target's layers a plan gives this node — `ranges` — and whose work they
+/// are (`pipeline::worker_requester`): what is loaded here before the drafter
+/// is, and so what it must fit beside ([`admitted`]).
+pub(crate) struct TargetHere<'a> {
+    pub ranges: &'a [(u32, u32)],
+    pub requester: crate::inference::process_pool::Requester,
 }
 
 /// The drafter [`engine_drafter_for`] would choose for `target` were there room
@@ -248,29 +260,45 @@ fn chosen(
     })
 }
 
-/// Would the drafter's worker load NOW (`ModelProcessPool::guest_would_be_admitted`)?
-/// Asked before the choice, so a drafter the node has no memory for gives way
-/// to a smaller one, or to none (#275). Measured on a node without a graphics
-/// card holding 28 layers of Qwen3-30B-A3B (6,967 of a 7,995 MB budget): Qwen3-1.7B
-/// was chosen on every request, refused at its spawn (2,899 MB), and each reply
-/// went unguessed after a refusal in the log. On a cold start the target's own
-/// layers are not loaded yet, so this can admit a drafter their load then
-/// leaves no room for — that request goes unguessed as before, and the next is
-/// asked with them loaded.
-fn admitted(state: &SharedState, target: &ModelId, spec: &DrafterSpec, conversation: u64) -> bool {
+/// Would the drafter's worker load once the target's layers `here` are loaded
+/// (`ModelProcessPool::guest_would_be_admitted_beside`)? Asked before the
+/// choice, so a drafter the node has no memory for gives way to a smaller one,
+/// or to none (#275). Measured on a node without a graphics card holding 28
+/// layers of Qwen3-30B-A3B (6,967 of a 7,995 MB budget): Qwen3-1.7B was chosen
+/// on every request, refused at its spawn (2,899 MB), and each reply went
+/// unguessed after a refusal in the log. Weighed beside the layers the PLAN
+/// loads, not those loaded so far: on a cold start those are fewer, or none,
+/// and the same refusal came after the choice. A/B
+/// `SWARMLLM_DRAFTER_BESIDE=loaded` weighs it beside what is loaded now.
+fn admitted(
+    state: &SharedState,
+    target: &ModelId,
+    spec: &DrafterSpec,
+    conversation: u64,
+    here: &TargetHere<'_>,
+) -> bool {
     if !drafter_admission_asked() {
         return true;
     }
-    let fits = state.model_process_pool.guest_would_be_admitted(
-        &spec.model_id,
-        spec.layer_range,
-        crate::model::auto_manage::vram::KvCharge::Conversation(conversation),
-    );
+    let kv = crate::model::auto_manage::vram::KvCharge::Conversation(conversation);
+    let pool = &state.model_process_pool;
+    let fits = if beside_the_plan() {
+        pool.guest_would_be_admitted_beside(
+            &spec.model_id,
+            spec.layer_range,
+            kv,
+            target,
+            here.ranges,
+            here.requester,
+        )
+    } else {
+        pool.guest_would_be_admitted(&spec.model_id, spec.layer_range, kv)
+    };
     if !fits {
         tracing::debug!(
             target_model = %target,
             drafter = %spec.model_id,
-            "this node's memory has no room for the drafter now — not choosing it"
+            "this node's memory has no room for the drafter beside this plan's layers — not choosing it"
         );
     }
     fits
@@ -283,6 +311,16 @@ fn drafter_admission_asked() -> bool {
     static ASK: OnceLock<bool> = OnceLock::new();
     *ASK.get_or_init(|| {
         std::env::var("SWARMLLM_DRAFTER_ADMISSION").map_or(true, |v| v.trim() != "0")
+    })
+}
+
+/// `SWARMLLM_DRAFTER_BESIDE=loaded` weighs the drafter beside the target's
+/// layers loaded NOW, not those the plan loads here ([`admitted`]) — the
+/// behaviour before, for an A/B inside one binary. Read once.
+fn beside_the_plan() -> bool {
+    static PLAN: OnceLock<bool> = OnceLock::new();
+    *PLAN.get_or_init(|| {
+        std::env::var("SWARMLLM_DRAFTER_BESIDE").map_or(true, |v| v.trim() != "loaded")
     })
 }
 

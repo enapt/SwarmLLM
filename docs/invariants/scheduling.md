@@ -334,6 +334,39 @@ Australian peer refused even the uncut 20-layer share that hour ("0 MB available
 for conversations"), so every arm failed alike. `~/swarmllm-275/charge.sh` (R vs
 T, the peer narrowed to shards 7-19 and 8-19) is the rerun when it offers room.
 
+### The drafter is judged beside the layers its plan loads (2026-10-15)
+
+**What it replaced.** The choice asked "would the drafter load NOW" — but it
+loads after the target's layers here (`dsd.rs` reads ahead only once they are
+held), so on a cold start it was weighed beside the layers loaded so far: none,
+or a smaller range a worker held. Seen live: Qwen3-1.7B chosen beside 14 held
+layers of Qwen3-30B-A3B, the plan grew them to 28, the drafter's spawn was
+refused, and that reply ran with no guessing at all ("the drafter failed —
+finishing this reply without guessing ahead") — the slowest regime, slower than
+the n-gram loop a refused choice falls back to. The planner's cut prevents it
+only where it fires; an uncut plan (no strict route, or `SWARMLLM_DRAFTER_ROOM=0`)
+was the gap.
+
+**Research.** vLLM loads the drafter beside the target before it measures the
+memory left for caches (v1 `GPUModelRunner.load_model` → `drafter.load_model`,
+then `Worker.determine_available_memory`) — it never judges one model's room
+before the other's load. Here the loads are per request and in order, so the
+equivalent is to judge the drafter against the memory the target's load will
+leave.
+
+**The rule.** `engine_drafter_for` takes the plan's ranges for this node and
+their requester (`TargetHere`, built in `dsd.rs` from the assignment and
+`pipeline::worker_requester`) — REQUIRED, so no caller can ask the old question.
+`ModelProcessPool::guest_would_be_admitted_beside` asks the spawn's question
+(`guest_would_be_admitted`) and then the planner's own: do the layers the plan
+ADDS here (`layers_added_by` against `held_layer_ranges_for_planning`) fit within
+`max_hostable_layers_beside_guest`? A plan the planner cut passes by
+construction — its room is priced at the whole reply reserve, never below the
+request's (`a_drafters_charge_covers_its_first_calls_admission`). Where it
+cannot say (card plans, a drafter already loaded) it answers as before. A
+refusal gives way to a smaller drafter, or to the n-gram loop. A/B
+`SWARMLLM_DRAFTER_BESIDE=loaded`.
+
 ### What a change must keep
 
 - The drafter the planner leaves room for is the one the request then
@@ -346,11 +379,9 @@ T, the peer narrowed to shards 7-19 and 8-19) is the rerun when it offers room.
   so a cut can never turn a local generation into a split.
 - Residuals: a target worker that already HOLDS the layers keeps them (held
   layers cost the plan nothing), so the room appears from the next cold load;
-  card plans are not cut (a guest goes to the processor there); a cold start
-  can still choose a drafter that the target's own load then leaves no room for
-  (seen: chosen beside 14 held layers, refused once the plan grew them to 28;
-  the n-gram loop ran from the next request); a swarm whose peers offer too
-  little for any strict plan gets no room, by design.
+  card plans are not cut (a guest goes to the processor there); a swarm whose
+  peers offer too little for any strict plan gets no room, by design (the
+  drafter is then not chosen where the plan leaves it none).
 - Tests: `whether_a_drafter_would_load_is_asked_without_loading_it` (the probe
   and the spawn's guest admission agree, beside 6,967 MB and 3,000 MB),
   `a_loaded_drafter_is_asked_about_its_own_range`,
@@ -369,6 +400,11 @@ T, the peer narrowed to shards 7-19 and 8-19) is the rerun when it offers room.
   `a_drafters_charge_covers_its_first_calls_admission`,
   `a_smaller_drafter_charge_leaves_its_worker_the_same_room` (red with the grant
   priced typical: 2,938 vs 3,610 MB).
+- The drafter is judged beside the layers the PLAN loads here, never only
+  those loaded now. `a_drafter_is_judged_beside_the_layers_its_plan_loads`
+  (cold: yes up to the planner's room, no one layer past it, and the spawn
+  after that load agrees; warm: held layers add nothing) — red with the plan
+  ignored: "a plan loading 22 layers here", true where the spawn says false.
 
 ## Room for more layers is not room for the layers already held (2026-09-24, #95)
 

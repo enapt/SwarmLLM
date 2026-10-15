@@ -4686,6 +4686,53 @@ impl ModelProcessPool {
         self.local_layers_leaving(model_id, false, requester, Some(guest_mb))
     }
 
+    /// [`Self::guest_would_be_admitted`] once the layers a plan gives this node
+    /// of `target` — `ranges`, loaded for `requester` — are loaded too: the
+    /// planner's own question ([`Self::max_hostable_layers_beside_guest`] over
+    /// what those ranges ADD, [`layers_added_by`]), asked of the plan it made.
+    ///
+    /// A drafter loads after the target's layers it guesses for (`dsd.rs` reads
+    /// ahead only once they are held), so on a cold start "would it load now"
+    /// weighed it beside the layers loaded SO FAR (#275): Qwen3-1.7B was chosen
+    /// beside 14 held layers of Qwen3-30B-A3B, the plan grew them to 28, its
+    /// spawn was refused, and the reply ran unguessed. vLLM sizes the same way
+    /// round: the drafter is loaded beside the target before the memory left
+    /// for caches is measured (v1 `GPUModelRunner.load_model` →
+    /// `drafter.load_model`, then `Worker.determine_available_memory`).
+    pub(crate) fn guest_would_be_admitted_beside(
+        &self,
+        guest: &ModelId,
+        guest_range: (u32, u32),
+        kv: KvCharge,
+        target: &ModelId,
+        ranges: &[(u32, u32)],
+        requester: Requester,
+    ) -> bool {
+        if !self.guest_would_be_admitted(guest, guest_range, kv) {
+            return false;
+        }
+        let held = self.held_layer_ranges_for_planning(target);
+        let adds = ranges
+            .iter()
+            .fold(0u32, |n, r| n.saturating_add(layers_added_by(*r, &held)));
+        if adds == 0 {
+            return true;
+        }
+        match self.max_hostable_layers_beside_guest(target, requester, guest, guest_range, kv) {
+            Some(room) if adds > room => {
+                tracing::debug!(
+                    target_model = %target,
+                    drafter = %guest,
+                    layers_to_load = adds,
+                    room_beside_drafter = room,
+                    "the layers this plan loads here leave no room for the drafter"
+                );
+                false
+            }
+            _ => true,
+        }
+    }
+
     /// Make room in the RAM budget by unloading models nothing is using.
     ///
     /// Called when [`Self::admit_to_cpu`] refuses, BEFORE the refusal reaches
@@ -9631,6 +9678,88 @@ mod tests {
                 }
                 assert!(drafter_cache_positions(prompt, None) >= charged);
             }
+        }
+    }
+
+    /// **A drafter is judged beside the layers its plan loads here, not those
+    /// loaded so far** (#275). The drafter loads after the target's layers, so
+    /// on a cold start "would it load now" said yes beside nothing, the plan
+    /// loaded more layers than leave it room, and its spawn was refused — the
+    /// reply ran unguessed. Asked beside the plan, the answer is the one its
+    /// spawn gives after the load: yes up to the planner's room, no one layer
+    /// past it. Layers a worker already holds add nothing.
+    #[tokio::test]
+    async fn a_drafter_is_judged_beside_the_layers_its_plan_loads() {
+        let target = ModelId("qwen3-30b-a3b".into());
+        let drafter = ModelId("qwen3-1.7b-q8-0".into());
+        let range = (0, 28);
+        let kv = KvCharge::Conversation(1_024);
+        let pool_with = |name: &str| {
+            let p = ModelProcessPool::new(std::path::PathBuf::from(name));
+            p.set_ram_budget_mb(7_995);
+            p.test_cost_curve.insert(target.clone(), (300, 249));
+            p.test_footprint_inputs
+                .insert(drafter.clone(), qwen3_1_7b());
+            p
+        };
+
+        // A cold start: nothing of the target is loaded yet.
+        let cold = pool_with("/tmp/swarmllm-guest-plan-cold");
+        let room = cold
+            .max_hostable_layers_beside_guest(&target, Requester::Swarm, &drafter, range, kv)
+            .expect("room is left");
+        assert!(
+            cold.guest_would_be_admitted(&drafter, range, kv),
+            "beside nothing loaded, the drafter would load now"
+        );
+        for (layers, after_the_load) in [(room, true), (room + 1, false)] {
+            assert_eq!(
+                cold.guest_would_be_admitted_beside(
+                    &drafter,
+                    range,
+                    kv,
+                    &target,
+                    &[(0, layers)],
+                    Requester::Swarm
+                ),
+                after_the_load,
+                "a plan loading {layers} layers here"
+            );
+            let loaded = pool_with("/tmp/swarmllm-guest-plan-loaded");
+            admit_and_insert_cpu_worker(&loaded, &target, 300 + 249 * layers as u64, false).await;
+            assert_eq!(
+                loaded.guest_would_be_admitted(&drafter, range, kv),
+                after_the_load,
+                "its spawn after those {layers} layers load agrees"
+            );
+        }
+        assert_eq!(cold.ram_committed_mb(), 0, "asking charged nothing");
+
+        // A worker already holding 14 layers: they add nothing, and the plan's
+        // further range is weighed against the room left beside them.
+        let warm = pool_with("/tmp/swarmllm-guest-plan-warm");
+        let h = admit_and_insert_cpu_worker(&warm, &target, 249 * 14, false).await;
+        h.record_charged_segment((0, 14), 0);
+        let more = warm
+            .max_hostable_layers_beside_guest(&target, Requester::Swarm, &drafter, range, kv)
+            .expect("room is left");
+        for (ranges, fits) in [
+            (vec![(0, 14)], true),
+            (vec![(0, 14), (14, 14 + more)], true),
+            (vec![(0, 14), (14, 15 + more)], false),
+        ] {
+            assert_eq!(
+                warm.guest_would_be_admitted_beside(
+                    &drafter,
+                    range,
+                    kv,
+                    &target,
+                    &ranges,
+                    Requester::Swarm
+                ),
+                fits,
+                "beside 14 held layers, a plan of {ranges:?}"
+            );
         }
     }
 

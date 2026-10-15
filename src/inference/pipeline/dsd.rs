@@ -58,7 +58,7 @@ use crate::error::SwarmError;
 use crate::inference::router::StreamingTokenEvent;
 use crate::inference::router::{InferenceOutput, StreamingTokenTx};
 
-use super::engine_drafter::{engine_drafter_for, EngineDrafter};
+use super::engine_drafter::{engine_drafter_for, EngineDrafter, TargetHere};
 use super::speculative::{
     draft_next_gamma, draft_prefill, draft_sync_after_round, draft_sync_tokens,
     ngram_lookup_drafts, DraftState,
@@ -196,12 +196,26 @@ impl PipelineExecutor {
                 .map(|t| t as u32)
                 .collect();
             // Chosen for THIS reply's cache, the charge its load will take
-            // (#275) — not a typical conversation's.
+            // (#275) — not a typical conversation's — beside the layers this
+            // plan loads here, which on a cold start are not loaded yet.
             let conversation = crate::inference::model_worker::drafter_cache_positions(
                 ids.len(),
                 Some(self.request.sampling_params.max_tokens),
             );
-            let Some(spec) = engine_drafter_for(&self.shared_state, &target, conversation) else {
+            let me = self.shared_state.identity.node_id();
+            let ranges: Vec<(u32, u32)> = self
+                .assignment
+                .segments
+                .iter()
+                .filter(|s| s.node_id == *me)
+                .map(|s| s.layer_range)
+                .collect();
+            let here = TargetHere {
+                ranges: &ranges,
+                requester: super::worker_requester(&self.request),
+            };
+            let Some(spec) = engine_drafter_for(&self.shared_state, &target, conversation, &here)
+            else {
                 tracing::debug!(%request_id, "DSD: no drafter available — falling back");
                 return Ok(None);
             };
