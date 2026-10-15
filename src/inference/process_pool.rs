@@ -5468,10 +5468,22 @@ impl ModelProcessPool {
                 .min(budget)
         } else {
             let committed = self.ram_committed_mb();
-            let own = self.ram_budget_now(requester)?.headroom_after(committed, 0);
+            // Memory an idle model holds counts, as on the card: the spawn
+            // unloads it first (`free_ram_for_admission`, under the same
+            // predicate — `ram_reclaim_eligible`). Counted as spent, a
+            // processor-only node holding one idle model was offered fewer
+            // layers of the next than it would load, and the rest went to
+            // peers (#276, #125's shape).
+            let own = self
+                .ram_budget_now(requester)?
+                .headroom_after_reclaim(committed, self.idle_ram_reclaimable_mb(model_id));
             match guest_mb {
                 // The guest is admitted after these layers load, against its
-                // own cap and the headroom they leave (`RamBudget::allows`).
+                // own cap and the headroom they leave (`RamBudget::allows`) —
+                // with NO reclaim counted: a guest makes none, and the
+                // target's own stops once the target fits, so at worst it
+                // frees nothing for the guest. Within this room the target
+                // fits without one, and the guest beside it.
                 Some(mb) => own.min(
                     self.ram_budget_now(DRAFTER_REQUESTER)?
                         .headroom_after(committed, 0)
@@ -9733,6 +9745,73 @@ mod tests {
                 KvCharge::Typical,
             ),
             None
+        );
+    }
+
+    /// **The processor's bound counts the memory an idle model would give
+    /// back** (#276): the spawn that follows unloads it first
+    /// (`free_ram_for_admission`), so a processor-only node holding one idle
+    /// model was offered fewer layers of the next than it would load, and the
+    /// rest went to peers. A model in a conversation keeps its memory. Beside a
+    /// drafter the room stays what stands free — a guest never reclaims, and
+    /// the target's reclaim stops once the target fits — and the drafter's own
+    /// admission agrees with it at its edge.
+    #[tokio::test]
+    async fn the_processor_bound_counts_the_memory_an_idle_model_would_give_back() {
+        let target = ModelId("qwen3-30b-a3b".into());
+        let drafter = ModelId("qwen3-1.7b-q8-0".into());
+        let idle = ModelId("mistral-7b".into());
+        let range = (0, 28);
+        let pool_with_idle = |name: &str| {
+            let p = ModelProcessPool::new(std::path::PathBuf::from(name));
+            p.set_ram_budget_mb(7_995);
+            p.test_cost_curve.insert(target.clone(), (300, 249));
+            p.test_footprint_inputs
+                .insert(drafter.clone(), qwen3_1_7b());
+            p
+        };
+        let bound = |p: &ModelProcessPool| {
+            p.max_hostable_layers_for_planning(&target, Requester::Swarm)
+                .expect("a bound")
+        };
+        let pool = pool_with_idle("/tmp/swarmllm-idle-ram-bound");
+        let alone = bound(&pool);
+        let h = admit_and_insert_cpu_worker(&pool, &idle, 4_000, false).await;
+        assert_eq!(
+            bound(&pool),
+            alone,
+            "the spawn unloads the idle model, so its 4000 MB are room"
+        );
+
+        let beside = pool
+            .max_hostable_layers_beside_guest(
+                &target,
+                Requester::Swarm,
+                &drafter,
+                range,
+                KvCharge::Typical,
+            )
+            .expect("room is left");
+        assert!(beside < alone, "{beside} beside the drafter, {alone} alone");
+        for (layers, admitted) in [(beside, true), (beside + 1, false)] {
+            let p = pool_with_idle("/tmp/swarmllm-idle-ram-bound-load");
+            admit_and_insert_cpu_worker(&p, &idle, 4_000, false).await;
+            admit_and_insert_cpu_worker(&p, &target, 300 + 249 * layers as u64, false).await;
+            assert_eq!(
+                p.guest_would_be_admitted(&drafter, range, KvCharge::Typical),
+                admitted,
+                "the drafter beside {layers} layers and the idle model"
+            );
+        }
+
+        h.kv_holders
+            .lock()
+            .unwrap()
+            .insert(Uuid::new_v4(), std::time::Instant::now());
+        assert_eq!(
+            bound(&pool),
+            (7_995 - 4_000 - 300) / 249,
+            "a model in a conversation keeps its 4000 MB"
         );
     }
 

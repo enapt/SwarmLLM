@@ -2616,8 +2616,28 @@ first** (`idle_ram_reclaimable_mb` through `RamBudget::allows_after_reclaim`, bo
 victims are `free_ram_for_admission`'s own, `ram_reclaim_eligible`): first written without it,
 an idle model held in RAM sent abroad a model the spawn would have run here after unloading it —
 found by v0.3.239's pre-release review before release. Test
-`a_fresh_split_counts_the_ram_an_idle_model_would_give_back` (red without the count). The
-planner's processor bound (`local_layers_leaving`) still counts no RAM reclaim — FUTURE_WORK #276.
+`a_fresh_split_counts_the_ram_an_idle_model_would_give_back` (red without the count).
+
+**The processor's planning bound counts it too (2026-10-15, #276).** `local_layers_leaving`
+offered a processor-only node the RAM cap less everything charged, an idle model's charge
+included, so a node switching between models that do not fit together was offered fewer layers
+of the one asked for than its spawn would load, and the rest went to peers: #125's shape, fixed
+on the card two weeks earlier. Its RAM room is now `RamBudget::headroom_after_reclaim(committed,
+idle_ram_reclaimable_mb)`, the quantity behind `allows_after_reclaim` (which is now written in
+terms of it, so the yes/no and the size cannot drift apart). Ollama does the same reclaim at load
+time (`server/sched.go`'s `findRunnerToUnload` evicts an idle runner when the new model does not
+fit). We also have to say it at planning time, because our plan is made before the load.
+**Beside a drafter the room is NOT counted after a reclaim.** A guest makes none, and the
+target's reclaim (`free_ram_for_admission`) stops once the TARGET fits, so in the worst case it
+frees nothing for the guest. Counted, the drafter would be chosen beside layers that fit only
+after the reclaim, and refused at its spawn, which is #275's failure again. Within the room as
+it stands, the target fits with no reclaim and the guest fits beside it. Test
+`the_processor_bound_counts_the_memory_an_idle_model_would_give_back`: 30 layers with an idle
+4,000 MB model (14 without the count, red), the drafter's own admission agreeing at the edge of
+the room beside it, and 14 once the idle model is in a conversation. Not fixed here: the memory
+a node ADVERTISES (`node_model_budget_mb`, and `vram_available_mb` on a card) counts an idle
+model as spent on both devices, so a peer plans fewer layers onto it. A relaxed rung plans past
+that figure, up to the ceiling.
 
 **A full card's budget is 1 MB, never 0 (the same day).** The pool reads a 0 card budget as
 "none configured" — `card_verdict` answers `Unjudged` and `admit_to_gpu` admits — while

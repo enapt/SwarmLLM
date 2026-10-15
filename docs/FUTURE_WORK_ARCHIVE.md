@@ -16630,3 +16630,26 @@ setting covers both directions — a person on a tether wants the link quiet, no
 the toast and Settings text say so in 21 languages. Delivery Optimization's LAN exemption was
 considered and declined (a VPN peer reads as LAN). Evidence and probe:
 `docs/invariants/network.md` § "A metered connection holds back what this node uploads for others".
+
+### #276 — closed 2026-10-15 (the entry as it stood when closed, word for word)
+
+`P3` · memory · **OPEN** — 2026-10-15 · history: found by the pre-release review of v0.3.239
+
+`ModelProcessPool::local_layers_leaving` offers this node, on the processor, the layers that fit
+in the RAM cap less everything charged — an idle model's charge included — while the spawn that
+follows unloads idle models first (`free_ram_for_admission`). So a processor-only node holding
+an idle model in RAM is offered fewer layers of the one asked for than it would load, and the
+rest goes to peers: #125's shape, which the card branch fixed by counting
+`idle_vram_reclaimable_mb`. The fresh card/processor split counts it since v0.3.239
+(`idle_ram_reclaimable_mb`, `RamBudget::allows_after_reclaim`, one predicate with the reclaim —
+`ram_reclaim_eligible`). **Done when** the processor branch counts it too, in both terms
+(`headroom_after`'s cap and live headroom) and beside a guest (`guest_mb`), with a test red
+without it; unmeasured how often it bites — a node switching between models that do not fit
+its memory together.
+
+**How it closed.** Both terms: the RAM room is `RamBudget::headroom_after_reclaim(committed,
+idle_ram_reclaimable_mb)`, and `allows_after_reclaim` is now written in terms of it. "Beside a
+guest" was answered NO, deliberately. A guest never reclaims, and the target's reclaim stops once
+the target fits, so counting it there would choose a drafter that its own spawn then refuses
+(#275). Test `the_processor_bound_counts_the_memory_an_idle_model_would_give_back` (red without the
+count: 14 layers for 30).

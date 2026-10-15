@@ -765,11 +765,19 @@ impl RamBudget {
         estimate_mb: u64,
         reclaimable_mb: u64,
     ) -> bool {
-        committed_mb
-            .saturating_sub(reclaimable_mb)
-            .saturating_add(estimate_mb)
-            <= self.cap_mb
-            && estimate_mb <= self.live_headroom_mb.saturating_add(reclaimable_mb)
+        committed_mb.saturating_sub(reclaimable_mb) <= self.cap_mb
+            && estimate_mb <= self.headroom_after_reclaim(committed_mb, reclaimable_mb)
+    }
+
+    /// The most a model may be estimated at and still be loaded once idle
+    /// models charged `reclaimable_mb` are unloaded — the quantity behind
+    /// [`Self::allows_after_reclaim`], for a planner that sizes a share rather
+    /// than asking about one (`ModelProcessPool::max_local_hostable_layers` on
+    /// the processor, #276).
+    pub fn headroom_after_reclaim(&self, committed_mb: u64, reclaimable_mb: u64) -> u64 {
+        self.cap_mb
+            .saturating_sub(committed_mb.saturating_sub(reclaimable_mb))
+            .min(self.live_headroom_mb.saturating_add(reclaimable_mb))
     }
 
     /// Is the `total/4` floor the reason `live_headroom_mb` is what it is?
