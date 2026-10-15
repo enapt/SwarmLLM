@@ -1482,6 +1482,31 @@ mod fetch_what_prune_keeps {
         );
     }
 
+    /// ...but not while it is writing a reply: the checks such a copy skips
+    /// were what kept a model's files while it was in use (pre-release review,
+    /// 2026-10-15).
+    #[tokio::test]
+    async fn prune_waits_for_an_uncensored_copy_nobody_chose_while_it_is_in_use() {
+        let (state, manager) = manager_with(Config::default());
+        let unchosen = busy_model(&state, &manager, "coder-7b-abliterated-q4");
+        let request_id = uuid::Uuid::new_v4();
+        state.active_traces.insert(
+            request_id,
+            Arc::new(crate::inference::trace::RequestTrace::new(
+                request_id,
+                unchosen.0.clone(),
+                "chat",
+            )),
+        );
+        manager.evaluate_and_prune().await;
+        assert!(
+            crate::model::shard::model_dir(&state.config.node.data_dir, &unchosen.0)
+                .join(crate::model::shard::shard_filename(0))
+                .exists(),
+            "kept while a reply is being written"
+        );
+    }
+
     /// Parts chosen in one cycle are judged at the pressure ALL of them leave:
     /// at 7,000 MB held, the first part lands at 75% (prune keeps three
     /// copies) and the second at 80% (prune keeps two), so only one is taken.

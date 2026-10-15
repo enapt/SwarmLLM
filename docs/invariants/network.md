@@ -4254,10 +4254,11 @@ The fix is ordinary at-least-once delivery, both halves of it:
   joiner sending into silence. `PoolInviteCode::claimed_by` remembers who used
   it and with which invitation, and a repeat from THAT device gets the same
   invitation again — never a second invitation, never anyone else — at most
-  once per `REPEAT_JOIN_ANSWER_GAP` (5 s, `repeat_answered_at`): each answer
-  is a broadcast to the whole swarm, and a stream faster than the joiner's own
-  resend pace is not a joiner waiting (pre-release security review,
-  2026-10-15).
+  once per `REPEAT_JOIN_ANSWER_GAP` (1 s, `repeat_answered_at`): each answer
+  is a broadcast to the whole swarm, and a stream faster than the joiner's
+  shortest resend step (2 s) is not a joiner waiting (pre-release security
+  review, 2026-10-15). A first cut of 5 s dropped the joiner's second resend,
+  4 s after its first — the test now asserts a resend at that step is answered.
 
 And the person is told the outcome, not the attempt: `swarmllm pool join` waits
 up to 60 s for the pool state to show the device in the pool, and exits 1 with

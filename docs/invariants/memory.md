@@ -803,8 +803,16 @@ computer, made it the default model, or gave it prompt privacy by hand.
   publisher promotion, requests). It sits BEFORE prompt privacy's exemption:
   the automatic privacy default keeps both ends of any model held whole, which
   would have kept two parts of a model nobody chose. A copy taken up before
-  this change is given back by the same rule, subject to prune's own checks
-  (holders busy, recently used, re-acquirable);
+  this change is given back by the same rule. Prune's checks that guard the
+  swarm's copies — the replica count, busy holders, re-acquirable, the
+  per-model cap — are skipped for it (`PruneCandidate::not_ours_to_host`):
+  they kept it wherever three computers or fewer held it, which in a small
+  swarm is everywhere. What still keeps it is the model being IN USE, asked
+  through `SharedState::model_is_in_use` whatever the disk pressure — the
+  skipped checks had been what kept a model's files while a reply was written
+  (pre-release review, 2026-10-15; tests
+  `prune_gives_back_an_uncensored_copy_nobody_chose_however_few_hold_it`,
+  `prune_waits_for_an_uncensored_copy_nobody_chose_while_it_is_in_use`);
 - by `auto` (`resolver::auto_model_for`), which also skips `refused_model` — an
   embedding model held whole could be `auto` (fd9b9394 missed that path);
 - by the chat picker's default (`never_default` on `/api/admin/models`): still

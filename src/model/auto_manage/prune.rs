@@ -405,8 +405,14 @@ impl AutoShardManager {
                 // copies of a model this node SHOULD carry; asked of this one
                 // they kept it wherever three computers or fewer held it, which
                 // in a small swarm is everywhere (pre-release review,
-                // 2026-10-15). A part in use is still waited for, below.
+                // 2026-10-15). A model in use is still waited for, whatever the
+                // disk pressure: those checks were what kept its files while a
+                // reply was being written (`SharedState::model_is_in_use`, the
+                // answer to "may I delete this model's files?").
                 let not_ours_to_host = self.shared_state.unchosen_uncensored_model(&manifest.id);
+                if not_ours_to_host && self.shared_state.model_is_in_use(&manifest.id) {
+                    continue;
+                }
 
                 let holder_count = holders.len();
                 // The effective target behind that answer, for the score and the

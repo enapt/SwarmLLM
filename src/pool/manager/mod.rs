@@ -117,10 +117,11 @@ fn join_resend_delay(sends: u32) -> std::time::Duration {
 }
 
 /// The owner answers a repeat of the claimer's join request at most once per
-/// this gap. A joiner resends at the pace above, so a faster stream is not a
-/// joiner waiting, and each answer is a broadcast to the whole swarm
-/// (pre-release security review, 2026-10-15).
-const REPEAT_JOIN_ANSWER_GAP: std::time::Duration = std::time::Duration::from_secs(5);
+/// this gap — half the joiner's shortest step above (2 s), so every resend a
+/// joiner makes is answered and a faster stream is not a joiner waiting. Each
+/// answer is a broadcast to the whole swarm (pre-release security review,
+/// 2026-10-15; 5 s dropped the joiner's second resend, 4 s after its first).
+const REPEAT_JOIN_ANSWER_GAP: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Maximum pending invitations (outbound + inbound blinded) before rejecting new ones.
 const MAX_PENDING_INVITATIONS: usize = 50;
@@ -3497,15 +3498,17 @@ mod tests {
             invitations(&mut net_rx).is_empty(),
             "not again inside the gap"
         );
+        // A real joiner's resend, its shortest step after the last answer, is
+        // always answered.
         let answered_at = pm.invite_codes[&hash].repeat_answered_at.unwrap();
         pm.invite_codes.get_mut(&hash).unwrap().repeat_answered_at =
-            answered_at.checked_sub(REPEAT_JOIN_ANSWER_GAP);
+            answered_at.checked_sub(join_resend_delay(1));
         pm.handle_inbound_join_request(hash, requester.clone())
             .await;
         assert_eq!(
             invitations(&mut net_rx),
             first,
-            "and again once it has passed"
+            "a joiner's own resend is answered"
         );
 
         let stranger = Identity::generate().node_id().clone();
