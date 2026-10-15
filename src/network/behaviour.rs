@@ -95,9 +95,9 @@ pub struct SwarmBehaviour {
 
 /// Build the combined network behaviour with all sub-protocols configured.
 ///
-/// `known_peers` is the count of peers from the peer cache, used to auto-scale
-/// GossipSub mesh parameters. Small clusters (< 10 peers) use lower thresholds,
-/// while larger networks scale up for faster message propagation.
+/// `known_peers` is how many PEERS the peer cache and the bootstrap list name
+/// (`discovery::peers_named`), used to auto-scale GossipSub mesh parameters
+/// ([`mesh_parameters`]).
 #[allow(clippy::too_many_arguments)]
 pub fn build_behaviour(
     local_key: &Keypair,
@@ -160,22 +160,7 @@ pub fn build_behaviour(
         let hash = blake3::hash(&input);
         gossipsub::MessageId::from(hex::encode(&hash.as_bytes()[..16]))
     };
-    // Auto-scale GossipSub mesh parameters based on known peer count.
-    // Small clusters need low thresholds to form a mesh; large networks need
-    // higher values for faster message propagation (O(log n) hops).
-    let (mesh_n, mesh_n_low, mesh_n_high, mesh_outbound_min) = if known_peers >= 10_000 {
-        (8, 6, 16, 4) // Very large networks (10k+ nodes)
-    } else if known_peers >= 1_000 {
-        (7, 5, 14, 3) // Large networks (1k+ nodes)
-    } else if known_peers >= 100 {
-        (6, 4, 12, 3) // Full GossipSub defaults — fast propagation
-    } else if known_peers >= 30 {
-        (4, 3, 8, 2) // Medium networks
-    } else if known_peers >= 10 {
-        (3, 2, 6, 1) // Small-medium networks
-    } else {
-        (2, 1, 4, 1) // Tiny clusters (dev/early alpha)
-    };
+    let (mesh_n, mesh_n_low, mesh_n_high, mesh_outbound_min) = mesh_parameters(known_peers);
     tracing::info!(
         known_peers,
         mesh_n,
@@ -403,9 +388,92 @@ pub fn build_behaviour(
     })
 }
 
+/// GossipSub's `(mesh_n, mesh_n_low, mesh_n_high, mesh_outbound_min)` for a
+/// swarm of `known_peers` peers. Small clusters need low thresholds to form a
+/// mesh; large networks need higher values for faster propagation (O(log n)
+/// hops).
+///
+/// Each message reaches a node about once per mesh peer: duplicates grow with
+/// the degree, while latency gains flatten out (Vyzovitis et al., "GossipSub:
+/// Attack-Resilient Message Propagation in the Filecoin and ETH2.0 Networks",
+/// 2020: ~100k duplicates at D=4, ~227k at D=8). Measured on the release node,
+/// 2026-10-15: ~6.3 copies of every message on each topic at `mesh_n` 6
+/// (FUTURE_WORK #91 (1b)).
+pub(crate) fn mesh_parameters(known_peers: usize) -> (usize, usize, usize, usize) {
+    if known_peers >= 10_000 {
+        (8, 6, 16, 4) // Very large networks (10k+ nodes)
+    } else if known_peers >= 1_000 {
+        (7, 5, 14, 3) // Large networks (1k+ nodes)
+    } else if known_peers >= 100 {
+        (6, 4, 12, 3) // Full GossipSub defaults — fast propagation
+    } else if known_peers >= 30 {
+        (4, 3, 8, 2) // Medium networks
+    } else if known_peers >= 10 {
+        (3, 2, 6, 1) // Small-medium networks
+    } else {
+        (2, 1, 4, 1) // Tiny clusters (dev/early alpha)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mesh is sized by the PEERS a node has met, not by the addresses it
+    /// cached for them (#91 (1b)). The release node cached its 200-address
+    /// limit for ~16 peers, read `known_peers=203` and ran the 100+ tier, a
+    /// full mesh on a swarm of ~8, so every message arrived ~6.3 times.
+    #[test]
+    fn a_node_that_cached_many_addresses_of_few_peers_runs_the_small_tier() {
+        let peers: Vec<libp2p::PeerId> = (0..16).map(|_| libp2p::PeerId::random()).collect();
+        let relay = peers[0];
+        let mut cached = Vec::new();
+        for (i, p) in peers.iter().enumerate() {
+            for addr in [
+                format!("/ip4/10.0.0.{i}/tcp/8810/p2p/{p}"),
+                format!("/ip4/10.0.0.{i}/udp/8800/quic-v1/p2p/{p}"),
+                format!("/ip4/81.241.51.{i}/tcp/8810/p2p/{p}"),
+                format!("/ip4/81.241.51.{i}/udp/8800/quic-v1/p2p/{p}"),
+                format!("/ip6/2001:db8::{i:x}/tcp/8810/p2p/{p}"),
+                format!("/ip4/81.241.51.200/tcp/8810/p2p/{relay}/p2p-circuit/p2p/{p}"),
+            ] {
+                cached.push(addr);
+            }
+        }
+        // Three bootstrap entries, two of them peers the cache already names.
+        cached.push(format!("/dns4/anchor.example/tcp/8810/p2p/{}", peers[1]));
+        cached.push(format!(
+            "/dns4/anchor.example/udp/8800/quic-v1/p2p/{}",
+            peers[2]
+        ));
+        cached.push("/dns4/seed.example/tcp/8810".to_string());
+        assert_eq!(cached.len(), 99);
+
+        let known = crate::network::discovery::peers_named(&cached);
+        assert_eq!(
+            known, 17,
+            "16 peers plus one bootstrap address naming nobody"
+        );
+        assert_eq!(mesh_parameters(known), (3, 2, 6, 1));
+        // What the address count chose (99 → the 30-99 tier, 200 → 100+).
+        assert_ne!(mesh_parameters(cached.len()), mesh_parameters(known));
+    }
+
+    /// Every tier is one GossipSub accepts (`mesh_outbound_min <= mesh_n_low
+    /// <= mesh_n <= mesh_n_high`, `mesh_outbound_min * 2 <= mesh_n`).
+    #[test]
+    fn every_mesh_tier_is_a_valid_gossipsub_config() {
+        for known in [0, 9, 10, 29, 30, 99, 100, 999, 1_000, 9_999, 10_000] {
+            let (n, low, high, outbound) = mesh_parameters(known);
+            let built = gossipsub::ConfigBuilder::default()
+                .mesh_n(n)
+                .mesh_n_low(low)
+                .mesh_n_high(high)
+                .mesh_outbound_min(outbound)
+                .build();
+            assert!(built.is_ok(), "tier for {known} peers: {:?}", built.err());
+        }
+    }
 
     #[test]
     fn build_behaviour_succeeds() {

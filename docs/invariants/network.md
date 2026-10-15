@@ -4465,3 +4465,17 @@ default) also sends each origin's message to every peer. IDONTWANT (gossipsub v1
 over 1,000 bytes) only suppresses a copy not yet sent. Sizing the mesh from the peers
 actually reachable is the next lever (FUTURE_WORK #91 (1b)). It is a risky one, because a
 thinner mesh partitions sooner, so it needs a rig first.
+
+**The count was the defect, and it is fixed (2026-10-15).** `known_peers` was documented as
+"the count of peers from the peer cache" and was the length of a list of ADDRESSES: each peer is
+cached at every address it advertised (TCP and QUIC, LAN and public, IPv6, relay circuits). It
+now counts the peers those addresses name, grouped as the startup dial groups them
+(`discovery::peers_named` over `plan_bootstrap_dials`, the last `/p2p/` component). On a copy of
+the release node's database, in a probe with no network: `Loaded cached peers from last session
+count=200 known_peers=26`, `mesh_n=3 mesh_n_low=2 mesh_n_high=6`. That is the 10-29 tier, written
+for a swarm that size. Copies of each message should fall from ~6.3 to ~3 once the fleet updates.
+Duplicates grow with mesh degree while latency gains flatten (Vyzovitis et al. 2020, the
+GossipSub evaluation: ~100k duplicates at D=4, ~227k at D=8). Flood publishing already hands
+each message to every directly connected peer, so in a swarm this small the mesh mostly carries
+copies. Test `a_node_that_cached_many_addresses_of_few_peers_runs_the_small_tier`, red with the
+address count.

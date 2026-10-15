@@ -751,14 +751,19 @@ impl NetworkManager {
         // Load cached peer count to auto-scale GossipSub mesh parameters.
         // This is the one call that genuinely is a restore from the last
         // session, so it is the one that says so — see `load_peer_cache`.
-        let cached_peers = crate::network::peer_cache::load_peer_cache(&shared_state.db).len();
-        if cached_peers > 0 {
+        // Sized by the PEERS the cache and the bootstrap list name, never by
+        // their address count (`discovery::peers_named`, #91 (1b)).
+        let mut named = crate::network::peer_cache::load_peer_cache(&shared_state.db);
+        let cached_addresses = named.len();
+        named.extend(config.network.bootstrap_peers.iter().cloned());
+        let known_peers = crate::network::discovery::peers_named(&named);
+        if cached_addresses > 0 {
             tracing::info!(
-                count = cached_peers,
+                count = cached_addresses,
+                known_peers,
                 "Loaded cached peers from last session"
             );
         }
-        let known_peers = cached_peers + config.network.bootstrap_peers.len();
         // The whole builder runs inside `arm` because `with_bandwidth_metrics`
         // borrows the registry for the call that consumes the builder, and the
         // registry lives behind a lock this node keeps so the totals can be

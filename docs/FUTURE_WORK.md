@@ -1003,8 +1003,13 @@ to demand gossip alone); (1b) the copy factor: the mesh is sized once at startup
 mesh, plus flood publishing). The cache counts ADDRESSES, not peers (`load_peer_cache`, capped at
 `MAX_CACHED_PEERS` = 200: "Loaded cached peers from last session count=200" + 3 bootstrap), so
 every node that has run a while lands on that tier, and a FRESH node (empty cache, bootstrap
-only) runs the smallest (`mesh_n` 2, low 1, high 4) for its whole first session. Size it from peers actually reachable, measured on a rig first (a
-thinner mesh partitions sooner); (2) announce-then-pull for manifests — gossip `(model, hash)`
+only) runs the smallest (`mesh_n` 2, low 1, high 4) for its whole first session. **Counting
+fixed 2026-10-15 (unreleased)**: `known_peers` is the PEERS the cache and bootstrap list name
+(`discovery::peers_named`, the grouping the startup dial already uses). A probe started on a copy
+of the release node's database (no network): `count=200 known_peers=26` → `mesh_n` 3, high 6, the
+tier written for a swarm that size. Left: re-measure the copies of each message once the fleet
+updates (~3 expected, from ~6.3); the mesh is still sized once at startup, from peers ever met
+rather than reachable now (a rig first before going further: a thinner mesh partitions sooner); (2) announce-then-pull for manifests — gossip `(model, hash)`
 and fetch the manifest point to point only for a version one lacks (Bitcoin
 `inv`/`getdata`, Plumtree lazy push), since the copies, not the size, are now the cost; it
 replaces the table-less manifest, which needed `compute_hash`'s verify-before-header order

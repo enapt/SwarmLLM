@@ -67,6 +67,19 @@ pub fn plan_bootstrap_dials(addrs: &[String]) -> Vec<BootstrapDial> {
     plan
 }
 
+/// How many peers `addrs` name, grouped as [`plan_bootstrap_dials`] groups
+/// them: one per peer however many addresses it was cached at, one per
+/// address naming nobody.
+///
+/// What sizes the GossipSub mesh at startup (`behaviour::mesh_parameters`),
+/// over the peer cache and the bootstrap list together. It was the ADDRESS
+/// count, and the cache holds every address a peer advertised (TCP and QUIC,
+/// LAN and public, relay circuits) up to its 200-address limit, so the release
+/// node read 203 for ~16 peers and ran the 100+ tier (FUTURE_WORK #91 (1b)).
+pub fn peers_named(addrs: &[String]) -> usize {
+    plan_bootstrap_dials(addrs).len()
+}
+
 /// Trigger a Kademlia bootstrap query to discover new peers.
 pub fn trigger_bootstrap(swarm: &mut Swarm<SwarmBehaviour>) -> Result<(), SwarmError> {
     match swarm.behaviour_mut().kademlia.bootstrap() {
