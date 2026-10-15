@@ -4,15 +4,23 @@ use std::path::PathBuf;
 
 fn main() -> Result<()> {
     println!("cargo::rerun-if-changed=build.rs");
-    println!("cargo::rerun-if-changed=src/compatibility.cuh");
-    println!("cargo::rerun-if-changed=src/cuda_utils.cuh");
-    println!("cargo::rerun-if-changed=src/binary_op_macros.cuh");
+    // SwarmLLM patch: every header under src/ is WATCHED by the kernel cache
+    // (cudaforge also tells cargo). An object is rebuilt when its `.cu` file,
+    // the nvcc arguments or a watched path changes, and upstream watched no
+    // header — so a fix in one (`moe/gguf.cuh`, say) was reported "up-to-date"
+    // and never reached the binary. Found when the same hole in
+    // vendor/candle-flash-attn/build.rs kept a fixed flash kernel out
+    // (FUTURE_WORK #115 (3)). Upstream's hand list named three of the five.
+    let mut headers = Vec::new();
+    cuda_headers(std::path::Path::new("src"), &mut headers);
+    headers.sort();
 
     // Build for PTX
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let ptx_path = out_dir.join("ptx.rs");
     let bindings = KernelBuilder::new()
         .source_dir("src") // Scan src/ for .cu files
+        .watch(&headers)
         .exclude(&["moe_*.cu"]) // Exclude moe kernels for ptx build
         .arg("--expt-relaxed-constexpr")
         .arg("-std=c++17")
@@ -27,6 +35,7 @@ fn main() -> Result<()> {
             "src/moe/moe_wmma.cu",
             "src/moe/moe_wmma_gguf.cu",
         ])
+        .watch(&headers)
         .arg("--expt-relaxed-constexpr")
         .arg("-std=c++17")
         .arg("-O3");
@@ -60,4 +69,16 @@ fn main() -> Result<()> {
         println!("cargo:rustc-link-lib=stdc++");
     }
     Ok(())
+}
+
+/// SwarmLLM patch: every `.cuh` under `dir`, recursively — see `main`.
+fn cuda_headers(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("read the kernel sources").flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            cuda_headers(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "cuh") {
+            out.push(path);
+        }
+    }
 }

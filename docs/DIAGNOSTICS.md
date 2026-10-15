@@ -1202,6 +1202,18 @@ sends each projection alone):
 | INFO | `DIAG: a split's prompt chunk sized from the card's room` — `tokens`, `room_mb` (card memory free beside what is in use, after a synchronize), `budget_mb` (that less the card's margin), `last_forward_took_mb` (what the last prompt forward took beyond what stayed: copies, activations, the cache it added), `activation_kb_per_token`, `kept_kb_per_token`, `history_kb_per_position`; once per worker, the first chunk a split copying its weights to the card sized past 512 (#138 (1e), `SplitModel::prompt_reader`). Absent: no forward measured yet (the first chunk of a worker's first prompt reads 512), the card's room fits no more than 512, a prompt layer has fallen back to the processor (WARN above — sizing then stays at 512 for the worker's life), standard attention is forced, or `SWARMLLM_PROMPT_CHUNK_ROOM=0`. `SWARMLLM_PROFILE=1`'s `PROF seq_len=` lines show the sizes each forward read | split/model.rs |
 | WARN | `DIAG: a processor-held layer could not read a prompt chunk on the card; the processor ran it` — `error`; once per worker. The card refused the layer (most often out of memory); its cache was cut back to what it held before and the processor reran the layer, the reply unchanged | split/executor.rs |
 
+**Logits right on the processor and wrong (or NaN) on the card** (gotcha #868). Bisect with the kernel
+switches FIRST, in one binary, at the SAME prompt and keep-last settings as the failing run (a "clean"
+arm at other settings is no baseline): `SWARMLLM_FLASH_OFFSET_CAUSAL=0` sends a chunk landing on a
+warm cache to standard attention, `SWARMLLM_PROMPT_CARD_LAYERS=0` / `SWARMLLM_PROMPT_CARD_PROJECTIONS=0`
+keep a split's processor layers there, `SWARMLLM_QMATMUL_CUBLAS=0` / `SWARMLLM_QMATMUL_CUBLAS_ACC=32`
+the projections' kernel, `SWARMLLM_SLIDING_WINDOW=0` the window. A kernel switch that clears it then
+gets a direct check: `examples/flash_reference_check.rs` runs the vendored flash kernel against f32
+softmax attention at every head width a family uses (128, 256, 512) and the query shapes production
+sends — the 512-wide heads read 0.23-3.6 off at EVERY shape before 2026-10-16, the others ~1e-3. A
+patch to a vendored kernel HEADER is only in the binary once the build log says `Compiling N of 19
+kernels` — never trust "up-to-date" after a header edit on a build older than 2026-10-16.
+
 ## Performance Diagnostics
 
 ### Identifying Slow Requests

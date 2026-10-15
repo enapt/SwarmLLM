@@ -84,6 +84,12 @@ Vendored `quantized/cuda.rs::dequantize_matmul` sends ≥ 64 activation rows to 
 
 → `docs/invariants/inference.md` § "A decode step can go to the card as one CUDA graph", § "A graph pays only when it is updated" and § "A rest is weighed on the card's timeline, and a step's ids are one type", § "Qwen 3.5's decode steps are captured too", § "A mixture-of-experts layer stacked on the card is captured too"
 
+## A head width reaches the card only after the flash kernel is checked at it (2026-10-16)
+
+The vendored flash kernel's 512-wide block on sm86 attended WRONGLY at every shape (32 rows on 4 warps; Gemma 4's global layers, gotcha #868). **`examples/flash_reference_check.rs`** checks every head width a family uses against f32 attention — run it before claiming a new width on a card. `kernel_traits.h` refuses a block shorter than its warps (guard `every_vendored_flash_block_is_a_whole_number_of_warps_tall`). Both kernel build scripts `.watch()` every header: cudaforge rebuilt an object only when its `.cu` changed, so a header patch never compiled.
+
+→ `docs/invariants/inference.md` § "The flash kernel is checked at every head width it is handed"
+
 ## A decoded token's attention on a card is ONE kernel, and never keeps the mirror in step (2026-09-29)
 
 **`decode_attn::gqa_decode_attention_cuda`** answers a one-position attention on a card (A/B `SWARMLLM_DECODE_ATTN=standard`). A one-position append leaves the f16 mirror behind (`LayerKv::append`); `flash_operands` declines a lagging mirror (`SWARMLLM_KV_MIRROR_EAGER=1` = old). ⚠ Not bit-identical to the matmul path — judge replies against llama.cpp.

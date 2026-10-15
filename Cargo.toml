@@ -400,6 +400,13 @@ name = "gpu_decode_bench"
 path = "examples/gpu_decode_bench.rs"
 required-features = ["flash-attn"]
 
+# The vendored flash kernel against an f32 reference at every head width and
+# query shape production sends — CI has no card to run it on numbers.
+[[example]]
+name = "flash_reference_check"
+path = "examples/flash_reference_check.rs"
+required-features = ["flash-attn"]
+
 # Needs a card at RUN time and CUDA to compile, like the one above.
 [[example]]
 name = "qmatvec_card_bench"

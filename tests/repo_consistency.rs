@@ -857,6 +857,98 @@ fn the_moe_prompt_kernel_guard_catches_the_pre_fix_loop() {
     assert!(moe_prompt_kernel_barrier_violation("no loop here").is_some());
 }
 
+/// Each `Flash_fwd_kernel_traits<Headdim, kBlockM, kBlockN, kNWarps` in `src`
+/// whose block is shorter than its warps compute (16 query rows a warp), as
+/// `(line, kBlockM, kNWarps)`.
+fn flash_blocks_shorter_than_their_warps(src: &str) -> Vec<(usize, u32, u32)> {
+    let mut short = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        let Some(at) = line.find("Flash_fwd_kernel_traits<Headdim,") else {
+            continue;
+        };
+        let args: Vec<u32> = line[at..]
+            .split(['<', '>'])
+            .nth(1)
+            .unwrap_or("")
+            .split(',')
+            .skip(1)
+            .take(3)
+            .filter_map(|a| a.trim().parse().ok())
+            .collect();
+        if let [block_m, _, warps] = args[..] {
+            if block_m % (16 * warps) != 0 {
+                short.push((i + 1, block_m, warps));
+            }
+        }
+    }
+    short
+}
+
+/// The vendored flash kernel's hdim-512 block on an sm86 card was 32 query
+/// rows on 4 warps — 64 rows of work — and attended WRONGLY at every shape:
+/// Gemma 4's global layers on a card, all-NaN logits past ~1.5K tokens
+/// (FUTURE_WORK #115 (3), measured by `examples/flash_reference_check.rs`).
+/// `kernel_traits.h` now refuses such a block at compile time, but only the
+/// cache-warm and release workflows compile the kernels, so the source is
+/// checked on every push too.
+#[test]
+fn every_vendored_flash_block_is_a_whole_number_of_warps_tall() {
+    let read = |path: &str| {
+        std::fs::read_to_string(repo_root().join(path))
+            .unwrap_or_else(|e| panic!("read {path}: {e}"))
+    };
+    let launch = "vendor/candle-flash-attn/kernels/flash_fwd_launch_template.h";
+    let src = read(launch);
+    assert!(
+        src.matches("Flash_fwd_kernel_traits<Headdim,").count() > 40,
+        "{launch}: the scan no longer sees the kernel configurations"
+    );
+    let short = flash_blocks_shorter_than_their_warps(&src);
+    assert!(
+        short.is_empty(),
+        "{launch}: (line, kBlockM, kNWarps) {short:?} — each warp computes 16 query rows, \
+         so these blocks attend wrongly. Use a taller block or fewer warps."
+    );
+    let traits = "vendor/candle-flash-attn/kernels/kernel_traits.h";
+    assert!(
+        read(traits).contains("static_assert(kBlockM % (16 * kNWarps) == 0"),
+        "{traits}: keep the SwarmLLM static_assert that refuses a block shorter than its warps"
+    );
+}
+
+/// cudaforge rebuilds a kernel object when its `.cu` file, the nvcc arguments
+/// or a WATCHED path changes. Neither vendored kernel build watched a header,
+/// so the hdim-512 fix — two header edits — printed "All library kernels
+/// up-to-date" and linked the broken objects again (gotcha #868). Every warm
+/// kernel cache, CI's included, would have kept them.
+#[test]
+fn the_vendored_kernel_builds_rebuild_when_a_header_changes() {
+    for path in [
+        "vendor/candle-flash-attn/build.rs",
+        "vendor/candle/candle-kernels/build.rs",
+    ] {
+        let src = std::fs::read_to_string(repo_root().join(path))
+            .unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let builders = src.matches("KernelBuilder::").count();
+        let watched = src.matches(".watch(&").count();
+        assert!(
+            builders > 0 && watched >= builders,
+            "{path}: {builders} kernel builder(s), {watched} `.watch(&headers)` — a builder that \
+             watches no header never recompiles for a header patch. Keep the SwarmLLM patch."
+        );
+    }
+}
+
+/// The scan sees the shipped defect (gotcha #413).
+#[test]
+fn the_flash_block_guard_catches_the_old_hdim512_block() {
+    let old = "run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 32, 32, 4, false, false, T>, \
+               Is_dropout, Is_causal>(params, stream);";
+    assert_eq!(flash_blocks_shorter_than_their_warps(old), vec![(1, 32, 4)]);
+    let fixed = old.replace("32, 32, 4", "32, 32, 2");
+    assert!(flash_blocks_shorter_than_their_warps(&fixed).is_empty());
+}
+
 /// Every `[[example]]` in the root manifest must declare an explicit `path`.
 ///
 /// Without one, cargo resolves the example by scanning `examples/` and **fails

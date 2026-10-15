@@ -45,16 +45,27 @@ fn main() -> Result<()> {
     for kernel_file in KERNEL_FILES.iter() {
         println!("cargo::rerun-if-changed={kernel_file}");
     }
-    println!("cargo::rerun-if-changed=kernels/flash_fwd_kernel.h");
-    println!("cargo::rerun-if-changed=kernels/flash_fwd_launch_template.h");
-    println!("cargo::rerun-if-changed=kernels/flash.h");
-    println!("cargo::rerun-if-changed=kernels/philox.cuh");
-    println!("cargo::rerun-if-changed=kernels/softmax.h");
-    println!("cargo::rerun-if-changed=kernels/utils.h");
-    println!("cargo::rerun-if-changed=kernels/kernel_traits.h");
-    println!("cargo::rerun-if-changed=kernels/block_info.h");
-    println!("cargo::rerun-if-changed=kernels/static_switch.h");
-    println!("cargo::rerun-if-changed=kernels/hardware_info.h");
+    // SwarmLLM patch: every header the kernels include is WATCHED by the
+    // kernel cache, not only by cargo. cudaforge rebuilds an object when its
+    // `.cu` file, the nvcc arguments or a watched path changes — and upstream
+    // watched nothing, so a fix in a header (the hdim-512 block shape in
+    // `flash_fwd_launch_template.h` + `kernel_traits.h`, FUTURE_WORK #115 (3))
+    // reran this script and then reported "All library kernels up-to-date":
+    // every warm `CANDLE_FLASH_ATTN_BUILD_DIR`, CI's included, kept linking the
+    // old objects. Read from the directory, so a header added later is
+    // covered too (the hand list here had already missed `mask.h`).
+    let mut kernel_headers: Vec<PathBuf> = std::fs::read_dir("kernels")
+        .expect("read kernels/")
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext == "h" || ext == "cuh")
+        })
+        .collect();
+    kernel_headers.sort();
+    for header in &kernel_headers {
+        println!("cargo::rerun-if-changed={}", header.display());
+    }
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
     // SwarmLLM patch: an EMPTY value means unset.
     //
@@ -155,6 +166,7 @@ fn main() -> Result<()> {
     let kernels: Vec<_> = KERNEL_FILES.iter().collect();
     let mut builder = KernelBuilder::new()
         .source_files(kernels)
+        .watch(&kernel_headers)
         .out_dir(&build_dir)
         .with_cutlass(Some(CUTLASS_COMMIT)) // ✅ Auto-fetch and include CUTLASS from GitHub
         .arg("-std=c++17")

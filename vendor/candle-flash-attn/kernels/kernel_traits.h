@@ -67,6 +67,13 @@ struct Flash_fwd_kernel_traits : public Base {
     static constexpr int kBlockN = kBlockN_;
     static constexpr int kHeadDim = kHeadDim_;
     static_assert(kHeadDim % 32 == 0);
+    // SwarmLLM: each warp of `TiledMma` below computes 16 query rows, so a
+    // block must be a whole number of warps tall. A shorter one leaves the
+    // spare warps computing rows past it, out of shared memory beyond sQ, with
+    // nothing to say so: hdim 512 on sm86 was 32 rows on 4 warps and attended
+    // WRONGLY at every shape — Gemma 4's global layers on a card (FUTURE_WORK
+    // #115 (3), `examples/flash_reference_check.rs`).
+    static_assert(kBlockM % (16 * kNWarps) == 0, "kBlockM must be a multiple of 16 * kNWarps");
     static constexpr int kBlockKSmem = kHeadDim % 64 == 0 ? 64 : 32;
     static constexpr int kBlockKGmem = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32);
     static constexpr int kSwizzle = kBlockKSmem == 32 ? 2 : 3;

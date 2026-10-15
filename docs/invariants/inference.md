@@ -4369,6 +4369,49 @@ refusal is about chat, not a promise that embeddings are served. Tests:
 `a_family_this_build_refuses_is_never_a_candidate`,
 `an_embedding_repo_is_told_apart_from_a_chat_model`.
 
+## The flash kernel is checked at every head width it is handed (2026-10-16, gotcha #868)
+
+**What broke.** The vendored kernel's `run_mha_fwd_hdim512` chose, on a card with under 128 KB
+of shared memory a block (every RTX 30/40-series, sm86/sm89), `Flash_fwd_kernel_traits<512, 32,
+32, 4>`: a 32-query-row block on FOUR warps. `TiledMma` gives each warp 16 rows, so four warps
+compute 64 — two of them rows past the block, read out of shared memory beyond sQ. Every other
+configuration in the file is a whole number of warps tall. No family supported before had 512-wide
+heads (MLA runs standard attention); Gemma 4's global layers do, and its 12B split 24/48 gave
+all-NaN logits once a 48-row chunk landed on 1,484 cached positions. A 28-token prompt read
+identically before and after the fix (worst 0.98778 both times) — its gap is not this.
+
+**How it was found.** A bisect in one CUDA binary at the failing settings (a "clean" arm at KEEP_LAST
+8 had been compared against a failure at 48 — no baseline, and it sent the first hypothesis to the
+f32 marks): the processor layers' card paths off — still NaN; the window off — still NaN;
+`SWARMLLM_FLASH_OFFSET_CAUSAL=0` (standard attention for a chunk on a warm cache) — clean. Then the
+kernel alone, `examples/flash_reference_check.rs`: random f16 Q/K/V, flash on the card against f32
+softmax attention on the processor over the same rounded values, causal bottom-right, windowed where
+asked:
+
+| head width | geometry | shapes | max \|diff\| before | after |
+|---|---|---|---|---|
+| 128 | 24/8 | 15 | 7e-5 - 1.0e-3 | same |
+| 256 | 16/8 | 15 | 7e-5 - 1.1e-3 | same |
+| 512 | 16/1 | 15 | **0.23 - 3.6 (all 15 wrong)** | 7e-5 - 1.2e-3 |
+
+**The fix.** `<512, 32, 32, 2>`: the same 96 KB block on the two warps it needs — the useful work
+the old block did. `64 x 16` on 4 warps fits the same shared memory but fails `dropout.h`'s
+`static_assert` (kBlockN ≥ 32). The 128 KB arm (A100-class) was already `<512, 64, 32, 4>`. Cost,
+min of 10 (16/1 heads, 512 queries on 4,096 keys): 10.9 ms against 2.0 for 256-wide 16/8 — ~2.7x
+less work a millisecond, on one Gemma 4 layer in six. `kernel_traits.h` now has
+`static_assert(kBlockM % (16 * kNWarps) == 0)`; `every_vendored_flash_block_is_a_whole_number_of_warps_tall`
+reads the launch file on every push (CI compiles the kernels only in cache-warm and release).
+
+**The fix did not compile, at first.** cudaforge rebuilds a kernel object when its `.cu` file's hash,
+the nvcc arguments or a WATCHED path changes, and neither vendored build script watched a header:
+after the header edit the build printed `All library kernels up-to-date, skipping compilation` and
+linked the broken objects again. `vendor/candle-flash-attn/build.rs` and
+`vendor/candle/candle-kernels/build.rs` now `.watch()` every header in their kernel directories
+(read from the directory: the hand list had already missed `mask.h`, and candle-kernels' named three
+of five). The first build after this recompiles every kernel once; on this laptop two kernel build
+scripts at 4 nvcc threads each OOM'd the 10 GB build slice — `-j 1` with `CUDAFORGE_THREADS=3`
+took 36 min.
+
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 
 Each names the ONE place a decision is made. A second implementation of any of
