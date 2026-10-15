@@ -177,16 +177,17 @@ impl AutoShardManager {
             if crate::model::manifest::is_backup_artifact_id(&manifest.id.0) {
                 continue;
             }
-            // Never acquire a family this build refuses to load (#116-#118),
-            // once its header has said so — from a peer or from HuggingFace.
-            // The first sighting is refused in `trigger_download`, which
-            // fetches the header to find out; this keeps every later cycle
-            // from trying again.
-            if let Some(arch) = self.shared_state.refused_architecture(&manifest.id) {
+            // Never acquire a model this build refuses to run — a family it has
+            // no loader for (#116-#118) or an embedding model (field report
+            // 2026-10-15) — once its header has said so, from a peer or from
+            // HuggingFace. The first sighting is refused in `trigger_download`,
+            // which fetches the header to find out; this keeps every later
+            // cycle from trying again.
+            if let Some(refusal) = self.shared_state.refused_model(&manifest.id) {
                 tracing::debug!(
                     model = %manifest.id,
-                    arch = %arch,
-                    "Skipping model — this build cannot run its architecture"
+                    refusal = ?refusal,
+                    "Skipping model — this build will not run it"
                 );
                 continue;
             }
@@ -1139,7 +1140,7 @@ mod tests {
                 .iter()
                 .any(|c| c.model_id == s1.model_id && c.shard_index == 1)
         };
-        let header_says = |arch: &str| {
+        let header_says = |arch: &str, pooling: u32| {
             state.gguf_meta.insert(
                 s1.model_id.clone(),
                 crate::inference::split::GgufTensorMeta {
@@ -1158,20 +1159,28 @@ mod tests {
                     expert_used_count: 0,
                     architecture: arch.into(),
                     context_length: 8192,
+                    pooling_type: pooling,
                 },
             );
         };
 
         assert!(wants_s1(&manager), "control: no header, the gap is filled");
         for refused in ["deepseek2", "starcoder2"] {
-            header_says(refused);
+            header_says(refused, 0);
             assert!(
                 !wants_s1(&manager),
                 "{refused}: a family the loader refuses must not be acquired"
             );
         }
-        header_says("llama");
+        header_says("llama", 0);
         assert!(wants_s1(&manager), "a family that loads is still acquired");
+        // Field report 2026-10-15: Qwen3-Embedding-0.6B is a `qwen3` — a
+        // family that loads — whose header names a pooling type.
+        header_says("qwen3", 3);
+        assert!(
+            !wants_s1(&manager),
+            "an embedding model is never acquired, whatever its family"
+        );
     }
 
     #[test]

@@ -1157,3 +1157,89 @@ async fn the_token_channel_records_only_what_reached_the_reader() {
         crate::types::ReplyContinuation::default()
     );
 }
+
+/// Field report 2026-10-15: Qwen3-Embedding-0.6B was offered as a chat model,
+/// streamed one word for 30 s and was logged as an error with no tokens. A
+/// model whose header here names a pooling type is refused before it is
+/// queued, in words that say what it is.
+#[tokio::test]
+async fn an_embedding_model_is_refused_before_it_is_queued() {
+    let (mut router, _cmd_tx, _temp) = make_test_router(crate::config::Config::default());
+    let model = ModelId("qwen3-embedding-0.6b-q8-0".into());
+    router
+        .shared_state
+        .model_registry
+        .register_manifest(crate::types::ModelManifest {
+            id: model.clone(),
+            name: "Qwen3 Embedding 0.6B".into(),
+            architecture: crate::types::ModelArchitecture::Qwen2,
+            num_layers: 28,
+            num_params_billions: 0.6,
+            quantization: crate::types::Quantization::Q8_0,
+            total_size_bytes: 1,
+            shard_count: 0,
+            shards: vec![],
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: crate::types::NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "apache-2.0".into(),
+            mmproj: None,
+            context_length: None,
+        });
+    let state = router.shared_state.clone();
+    let header_says = |pooling_type: u32| {
+        state.gguf_meta.insert(
+            model.clone(),
+            crate::inference::split::GgufTensorMeta {
+                tensors: Default::default(),
+                tensor_data_offset: 0,
+                model_name: None,
+                head_count: 16,
+                head_count_kv: 8,
+                block_count: 28,
+                embedding_length: 1024,
+                head_dim: 128,
+                rope_dim: 128,
+                rope_freq_base: 1_000_000.0,
+                rms_norm_eps: 1e-6,
+                expert_count: 0,
+                expert_used_count: 0,
+                architecture: "qwen3".into(),
+                context_length: 32_768,
+                pooling_type,
+            },
+        );
+    };
+
+    header_says(3);
+    let (tx, mut rx) = oneshot::channel();
+    router.handle_submit(
+        make_request_with_model(PriorityTier::Bronze, &model.0),
+        tx,
+        None,
+    );
+    // Answered at once, or not at all: a queued request answers only once it
+    // runs, which this test never lets it do.
+    let refused = rx
+        .try_recv()
+        .expect("refused at submission, not queued to run");
+    match refused {
+        Err(crate::error::SwarmError::Validation(msg)) => {
+            assert!(msg.contains("embedding model"), "{msg}")
+        }
+        other => panic!("expected a 400 naming an embedding model, got {other:?}"),
+    }
+    assert!(router.queue.is_empty(), "nothing was queued for it");
+
+    // Control: the same model with no pooling type is a chat model and queues.
+    header_says(0);
+    let (tx, _rx) = oneshot::channel();
+    router.handle_submit(
+        make_request_with_model(PriorityTier::Bronze, &model.0),
+        tx,
+        None,
+    );
+    assert_eq!(router.queue.len(), 1, "a chat model is queued as before");
+}
+

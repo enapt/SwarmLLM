@@ -870,10 +870,13 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
             continue;
         }
         // Every request for a family this build refuses is a 400, however many
-        // peers hold its parts (#117).
+        // peers hold its parts (#117) — and so is every request for a model
+        // whose header here says it is an embedding model (field report
+        // 2026-10-15), which a client would otherwise offer as a chat model.
         if crate::inference::split::ModelArch::manifest_architecture_is_refused(
             &manifest.architecture,
-        ) {
+        ) || state.shared_state.refused_model(&manifest.id).is_some()
+        {
             continue;
         }
         if all_shards_available(&state, &id) {

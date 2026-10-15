@@ -215,6 +215,52 @@ pub struct GgufTensorMeta {
     /// half a coordinator can know about a peer from the header alone.
     #[serde(default)]
     pub context_length: usize,
+    /// How the model pools its hidden states into ONE vector
+    /// (`<arch>.pooling_type`: 1 mean, 2 cls, 3 last, 4 rank), 0 when the
+    /// header does not say — every generative model. A non-zero value is an
+    /// embedding model: [`Self::is_embedding_model`].
+    #[serde(default)]
+    pub pooling_type: u32,
+}
+
+/// Why this build will not run a model to write replies, read off its header.
+/// The one answer the loader, the router and auto-manage all act on
+/// ([`GgufTensorMeta::refusal`], `SharedState::refused_model`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelRefusal {
+    /// A family this build has no loader for (`ModelArch::is_supported`).
+    Architecture(String),
+    /// An embedding model: it turns text into one vector for search and has
+    /// no head trained to predict the next token. Run as a chat model it
+    /// repeats a word for as long as it is allowed to (field report
+    /// 2026-10-15: Qwen3-Embedding-0.6B, 30 s of "IP address").
+    EmbeddingModel,
+}
+
+impl ModelRefusal {
+    /// The error a request for this model is refused with — 400, because no
+    /// node and no retry can make this model answer a chat.
+    pub fn into_error(self) -> SwarmError {
+        match self {
+            Self::Architecture(arch) => SwarmError::Validation(format!(
+                "Unsupported model architecture '{arch}'. Supported architectures: {}",
+                super::ModelArch::supported_list().join(", ")
+            )),
+            Self::EmbeddingModel => SwarmError::Validation(
+                "This model is an embedding model: it turns text into numbers for search \
+                 tools and cannot write replies. Choose a chat model instead."
+                    .into(),
+            ),
+        }
+    }
+
+    /// The tag the model list carries (`cannot_chat`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Architecture(_) => "unsupported_architecture",
+            Self::EmbeddingModel => "embedding_model",
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -424,6 +470,16 @@ impl GgufTensorMeta {
             .get(&format!("{arch}.context_length"))
             .and_then(|v| v.to_u32().ok())
             .unwrap_or(0) as usize;
+        // Ollama's rule (`server/images.go`, `ggufCapabilities`): a GGUF that
+        // names a pooling type is an embedding model, not a completion one.
+        // llama.cpp's converter writes the key only for embedding models;
+        // NONE (0) is read as "not said", so a generative file that spells it
+        // out still loads.
+        let pooling_type = ct
+            .metadata
+            .get(&format!("{arch}.pooling_type"))
+            .and_then(|v| v.to_u32().ok())
+            .unwrap_or(0);
 
         Ok(GgufTensorMeta {
             tensors,
@@ -441,7 +497,22 @@ impl GgufTensorMeta {
             expert_used_count,
             architecture: arch,
             context_length,
+            pooling_type,
         })
+    }
+
+    /// An embedding model — see [`Self::pooling_type`].
+    pub fn is_embedding_model(&self) -> bool {
+        self.pooling_type != 0
+    }
+
+    /// Why this build will not run this model to write replies, or `None`.
+    pub fn refusal(&self) -> Option<ModelRefusal> {
+        if !super::ModelArch::from_gguf_arch(&self.architecture).is_supported() {
+            return Some(ModelRefusal::Architecture(self.architecture.clone()));
+        }
+        self.is_embedding_model()
+            .then_some(ModelRefusal::EmbeddingModel)
     }
 
     /// The weight bytes ONE token reads per layer, on average over the model:
@@ -1360,6 +1431,7 @@ mod active_bytes_tests {
             expert_used_count: experts.1,
             architecture: "qwen3moe".into(),
             context_length: 0,
+            pooling_type: 0,
         }
     }
 
@@ -1420,5 +1492,56 @@ mod active_bytes_tests {
         );
         assert_eq!(m.active_bytes_per_layer(), None);
         assert_eq!(m.stored_bytes_per_layer(), None, "read as a pair");
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+    use candle_core::quantized::gguf_file::Value;
+
+    /// A header with the keys `from_content` requires, for `arch`, plus
+    /// `<arch>.pooling_type` when given — written and parsed in memory.
+    fn header(arch: &str, pooling_type: Option<u32>) -> GgufTensorMeta {
+        let key = |k: &str| format!("{arch}.{k}");
+        let mut md: Vec<(String, Value)> = vec![
+            ("general.architecture".into(), Value::String(arch.into())),
+            (key("attention.head_count"), Value::U32(16)),
+            (key("attention.head_count_kv"), Value::U32(8)),
+            (key("block_count"), Value::U32(28)),
+            (key("embedding_length"), Value::U32(1024)),
+            (key("attention.layer_norm_rms_epsilon"), Value::F32(1e-6)),
+        ];
+        if let Some(p) = pooling_type {
+            md.push((key("pooling_type"), Value::U32(p)));
+        }
+        let refs: Vec<(&str, &Value)> = md.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        let mut buf = std::io::Cursor::new(Vec::new());
+        gguf_file::write(&mut buf, &refs, &[]).unwrap();
+        buf.set_position(0);
+        GgufTensorMeta::from_content(&gguf_file::Content::read(&mut buf).unwrap()).unwrap()
+    }
+
+    /// Field report 2026-10-15: Qwen3-Embedding-0.6B's header is a `qwen3`
+    /// with `qwen3.pooling_type = 3` (LAST) — read off the real file. Ollama
+    /// classes any GGUF naming a pooling type as an embedding model; NONE (0)
+    /// or no key is a model that writes replies.
+    #[test]
+    fn a_header_that_names_a_pooling_type_is_an_embedding_model() {
+        let embedding = header("qwen3", Some(3));
+        assert_eq!(embedding.pooling_type, 3);
+        assert_eq!(embedding.refusal(), Some(ModelRefusal::EmbeddingModel));
+        assert!(matches!(
+            ModelRefusal::EmbeddingModel.into_error(),
+            SwarmError::Validation(m) if m.contains("embedding model")
+        ));
+
+        assert_eq!(header("qwen3", None).refusal(), None, "a chat model");
+        assert_eq!(header("qwen3", Some(0)).refusal(), None, "NONE is not said");
+        assert_eq!(
+            header("starcoder2", None).refusal(),
+            Some(ModelRefusal::Architecture("starcoder2".into())),
+            "a family this build has no loader for is still refused for that"
+        );
     }
 }

@@ -897,6 +897,17 @@ impl InferenceRouter {
             }
         }
 
+        // A model this build will not run to write replies — an embedding
+        // model, or a family it has no loader for — is refused before it is
+        // queued, when this node holds its header. Unrefused, an embedding
+        // model streamed one word for 30 s and was then logged as an error
+        // (field report 2026-10-15). Without a header here the loader refuses
+        // it on whichever node is asked to load it.
+        if let Some(refusal) = self.shared_state.refused_model(&adjusted_request.model_id) {
+            let _ = result_tx.send(Err(refusal.into_error()));
+            return;
+        }
+
         // Reject when queue is full to prevent memory exhaustion from request flooding.
         // max_concurrent gates execution slots; this caps the waiting queue depth.
         if self.queue.len() >= MAX_QUEUE_DEPTH {

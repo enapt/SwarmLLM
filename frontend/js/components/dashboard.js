@@ -1478,6 +1478,18 @@
           }
         }
 
+        // An embedding model is left out of the chat picker (`cannot_chat`,
+        // read off its header); this line says why it is missing there, where
+        // the owner sees the files it took (field report 2026-10-15).
+        if (m.cannot_chat === 'embedding_model') {
+          placementSectionHtml =
+            '<div class="mce-line mce-section-state-red">' +
+              '<span class="mce-line-icon">⊘</span>' +
+              '<span class="mce-line-text"><b>' + U.escapeHtml(I18n.t('models.not_a_chat_model')) + '</b> — ' +
+                U.escapeHtml(I18n.t('models.embedding_model_detail')) + '</span>' +
+            '</div>' + placementSectionHtml;
+        }
+
         // YOUR own download progress is rendered exclusively by the global
         // Downloads panel (see frontend/js/components/downloads.js). The model
         // card never duplicates it — peer_downloads dots in the matrix view

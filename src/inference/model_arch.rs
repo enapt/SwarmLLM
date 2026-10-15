@@ -173,7 +173,7 @@ impl ModelArch {
     ///
     /// For `/v1/models`, which used to list a Qwen 3.5 model two peers held
     /// parts of while every request for it was a 400 (FUTURE_WORK #117) —
-    /// `SharedState::refused_architecture` knows only once the model's header
+    /// `SharedState::refused_model` knows only once the model's header
     /// is here, i.e. after someone had tried it. Follows [`Self::is_supported`],
     /// so admitting an architecture lists its models again with no edit here.
     pub fn manifest_architecture_is_refused(arch: &crate::types::ModelArchitecture) -> bool {

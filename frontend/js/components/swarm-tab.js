@@ -461,6 +461,11 @@
   // distinct "★ You host this" pill instead of generic Download CTA).
   var _localHfRepos = new Set();
   function _fitPill(repo) {
+    // An embedding model fits any computer and answers no chat: the daemon
+    // refuses to download one, so the row offers nothing to press.
+    if (repo.swarm_cta_status === 'not_chat') {
+      return { key: 'not-chat', text: I18n.t('browse.fit_not_chat') };
+    }
     if (_localHfRepos.has((repo.repo_id || '').toLowerCase())) {
       return { key: 'already', text: I18n.t('browse.fit_already') };
     }
@@ -701,8 +706,9 @@
     // "+ Wishlist", whose click showed "Added … to the wishlist" and did
     // nothing at all — there is no way to add to the wishlist, which is
     // computed from what the swarm asks for. The row's own pill already says
-    // why nothing can be done here.
-    if (fit.key !== 'too-large') {
+    // why nothing can be done here. The same for a model that is not a chat
+    // model.
+    if (fit.key !== 'too-large' && fit.key !== 'not-chat') {
       var actionBtn = document.createElement('button');
       actionBtn.type = 'button';
       actionBtn.className = 'browse-result-action';

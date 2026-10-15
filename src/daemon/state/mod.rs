@@ -2734,19 +2734,23 @@ impl SharedState {
         filled
     }
 
-    /// The GGUF architecture of `model_id` when this node KNOWS it and this
-    /// build cannot run it (`ModelArch::is_supported`); `None` when it can, or
-    /// when there is no header here to say.
+    /// Why this build will not run `model_id` to write replies, when this node
+    /// KNOWS (`GgufTensorMeta::refusal`): a family it has no loader for, or an
+    /// embedding model. `None` when it runs, or when there is no header here
+    /// to say — the loader still refuses such a model at load.
     ///
     /// Read from the header, never from the manifest: the manifest's
     /// `ModelArchitecture` records DeepSeek-2 and StarCoder2 as `Llama`
     /// (`ModelArch::to_manifest_architecture`), so it cannot tell them apart
-    /// from a model that loads. Auto-manage asks this before acquiring a shard
-    /// from a PEER — an older node may hold parts of a family this build
-    /// refuses (#116-#118) — and while choosing candidates.
-    pub fn refused_architecture(&self, model_id: &crate::types::ModelId) -> Option<String> {
-        let arch = self.gguf_meta_for(model_id)?.architecture.clone();
-        (!crate::inference::split::ModelArch::from_gguf_arch(&arch).is_supported()).then_some(arch)
+    /// from a model that loads, and it says nothing of pooling. Auto-manage
+    /// asks this before acquiring a shard from a PEER — an older node may hold
+    /// parts of a family this build refuses (#116-#118) — and while choosing
+    /// candidates; the router asks it before queueing a request.
+    pub fn refused_model(
+        &self,
+        model_id: &crate::types::ModelId,
+    ) -> Option<crate::inference::split::ModelRefusal> {
+        self.gguf_meta_for(model_id)?.refusal()
     }
 
     /// Make a model's geometry available to the ROUTER, fetching the header
@@ -4288,6 +4292,7 @@ mod manifest_persist_tests {
                 expert_used_count: 0,
                 architecture: "llama".into(),
                 context_length: 2048,
+                pooling_type: 0,
             },
         );
         assert_eq!(state.fill_declared_contexts(), 1);

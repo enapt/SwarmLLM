@@ -115,10 +115,18 @@ pub async fn hf_search(
             // R114: task tags + filter. Tags from the HfWatcher trending
             // cache (authoritative); fall back to a tiny name-based heuristic
             // for non-trending repos so the chips still do something useful.
-            let task_tags: Vec<String> = tags_by_repo
-                .get(&repo_id)
-                .cloned()
-                .unwrap_or_else(|| infer_task_tags_from_repo_name(&repo_id));
+            // An embedding model is tagged as what it is, so a "Chat" filter
+            // drops it and the row offers nothing (`not_chat` below); every
+            // other tag would have called it chat (field report 2026-10-15).
+            let embedding = files.iter().any(|f| f.embedding);
+            let task_tags: Vec<String> = if embedding {
+                vec!["embedding".to_string()]
+            } else {
+                tags_by_repo
+                    .get(&repo_id)
+                    .cloned()
+                    .unwrap_or_else(|| infer_task_tags_from_repo_name(&repo_id))
+            };
             if let Some(ref filter) = task_filter {
                 if !filter.is_empty()
                     && !task_tags.iter().any(|t| filter.contains(&t.to_lowercase()))
@@ -241,7 +249,11 @@ pub async fn hf_search(
             // reachable through remote inference — but only if the swarm holds
             // EVERY part of some variant. Holders of some parts
             // (`network_replicas > 0`) were read as that, and are not.
-            let status = if !fits_full && !fits_boomerang && !fits_shard {
+            let status = if embedding {
+                // Downloading it is refused (`GgufTensorMeta::refusal`), and
+                // nothing on the swarm can chat with it.
+                "not_chat"
+            } else if !fits_full && !fits_boomerang && !fits_shard {
                 if swarm_model_id.is_some() {
                     "swarm_serveable"
                 } else {

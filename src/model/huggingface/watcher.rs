@@ -382,7 +382,13 @@ impl HfWatcher {
                     .iter()
                     .any(|t| t == "text-generation" || t == "conversational"),
             };
-            if !is_text {
+            // An embedding model can carry `text-generation` among its tags
+            // (Qwen3-Embedding-0.6B does), which let it into this list — shown
+            // as "Chat", auto-hosted, and chatted with to 30 s of one word
+            // (field report 2026-10-15).
+            if !is_text
+                || crate::model::huggingface::is_embedding_repo(m.pipeline_tag.as_deref(), &m.tags)
+            {
                 continue;
             }
             // Defense-in-depth: drop malformed repo_ids (path-traversal, bad

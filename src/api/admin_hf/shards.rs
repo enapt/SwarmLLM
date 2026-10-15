@@ -341,16 +341,13 @@ pub async fn hf_download_shards(
         }
     }
 
-    let arch_str = &info.tensor_meta.architecture;
-    let model_arch = crate::inference::split::ModelArch::from_gguf_arch(arch_str);
-    if !model_arch.is_supported() {
-        let msg = format!(
-            "Unsupported architecture '{}'. Supported: {}",
-            arch_str,
-            crate::inference::split::ModelArch::supported_list().join(", ")
-        );
-        tracing::warn!(%arch_str, "Refusing download: unsupported architecture");
-        return Err(ApiError(crate::error::SwarmError::Validation(msg)));
+    // A model this build will not run is refused before a byte moves — a
+    // family it has no loader for, or an embedding model, which a tester
+    // downloaded from the browser and then chatted with to 30 s of one word
+    // repeated (field report 2026-10-15).
+    if let Some(refusal) = info.tensor_meta.refusal() {
+        tracing::warn!(refusal = ?refusal, "Refusing download: this build will not run it");
+        return Err(ApiError(refusal.into_error()));
     }
 
     // all_shards is resolved here, from the probe that has just run, so every

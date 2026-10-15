@@ -61,6 +61,7 @@ pub async fn search_gguf_models(query: &str) -> Result<Vec<HfModelResult>, Strin
 
     // For each repo, look up the file tree to find GGUF files
     for repo in repos.iter().take(10) {
+        let embedding = super::is_embedding_repo(repo.pipeline_tag.as_deref(), &repo.tags);
         match fetch_gguf_files(client, &repo.id).await {
             Ok(files) => {
                 for file in files {
@@ -70,6 +71,7 @@ pub async fn search_gguf_models(query: &str) -> Result<Vec<HfModelResult>, Strin
                         size_bytes: file.size.unwrap_or(0),
                         downloads: repo.downloads.unwrap_or(0),
                         likes: repo.likes.unwrap_or(0),
+                        embedding,
                     });
                 }
             }

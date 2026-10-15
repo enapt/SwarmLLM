@@ -5,13 +5,26 @@ use super::scan::check_and_load_model;
 use super::vram::compute_vram_budget;
 
 /// Say, once per decision, that a model was not acquired because this build
-/// cannot run its architecture. Both acquisition branches end here, so the
-/// refusal reads the same whichever source the shard would have come from.
-fn report_unsupported_architecture(
+/// will not run it. Both acquisition branches end here, so the refusal reads
+/// the same whichever source the shard would have come from.
+///
+/// An embedding model is passed over quietly: nobody asked for it, and the
+/// owner is not helped by hearing that a model they never chose was skipped.
+fn report_refused_model(
     shared: &crate::daemon::state::SharedState,
     model_id: &ModelId,
-    arch: &str,
+    refusal: &crate::inference::split::ModelRefusal,
 ) {
+    let arch = match refusal {
+        crate::inference::split::ModelRefusal::Architecture(arch) => arch,
+        crate::inference::split::ModelRefusal::EmbeddingModel => {
+            tracing::info!(
+                model = %model_id,
+                "AutoShardManager: skipping an embedding model — it cannot write replies"
+            );
+            return;
+        }
+    };
     tracing::warn!(
         model = %model_id,
         arch = %arch,
@@ -485,11 +498,9 @@ impl AutoShardManager {
                             return;
                         }
                     };
-                    // Check architecture support before downloading
-                    let arch_str = &info.tensor_meta.architecture;
-                    let arch = crate::inference::split::ModelArch::from_gguf_arch(arch_str);
-                    if !arch.is_supported() {
-                        report_unsupported_architecture(&shared, &model_id, arch_str);
+                    // Check this build would run it before downloading.
+                    if let Some(refusal) = info.tensor_meta.refusal() {
+                        report_refused_model(&shared, &model_id, &refusal);
                         // SEC: same cleanup as GGUF probe failure — without it
                         // the shard's progress entry sits in `Downloading`
                         // forever, locking it out of future eval cycles.
@@ -497,7 +508,7 @@ impl AutoShardManager {
                             shared.models.acquisition_progress.get_mut(&model_id)
                         {
                             entry.state = crate::model::acquisition::AcquisitionState::Failed {
-                                reason: format!("Unsupported architecture: {}", arch_str),
+                                reason: refusal.into_error().to_string(),
                             };
                             entry.shard_progress.remove(&shard_idx);
                         }
@@ -887,8 +898,8 @@ impl AutoShardManager {
                     .ensure_model_geometry(&candidate.model_id)
                     .await;
             }
-            if let Some(arch) = self.shared_state.refused_architecture(&candidate.model_id) {
-                report_unsupported_architecture(&self.shared_state, &candidate.model_id, &arch);
+            if let Some(refusal) = self.shared_state.refused_model(&candidate.model_id) {
+                report_refused_model(&self.shared_state, &candidate.model_id, &refusal);
                 return;
             }
             // P2P: download from peers who hold this shard.

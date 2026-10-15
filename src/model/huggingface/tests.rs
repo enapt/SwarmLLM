@@ -244,3 +244,42 @@ fn tensors_touching_the_chunk_edges_are_included_whole() {
 fn no_tensors_means_no_writes() {
     assert!(tensor_slices_in_chunk(&[], 0, 4096).is_empty());
 }
+
+/// Field report 2026-10-15. Tags as the HuggingFace API returned them that
+/// day: the safetensors repo is `feature-extraction` AND tagged
+/// `text-generation` (which let it into the trending list as "Chat"), the GGUF
+/// re-upload has no pipeline tag at all, and a drafter that IS a text
+/// generator carries `feature-extraction` among its tags.
+#[test]
+fn an_embedding_repo_is_told_apart_from_a_chat_model() {
+    let tags = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert!(is_embedding_repo(
+        Some("feature-extraction"),
+        &tags(&[
+            "sentence-transformers",
+            "qwen3",
+            "text-generation",
+            "feature-extraction"
+        ])
+    ));
+    assert!(is_embedding_repo(
+        None,
+        &tags(&["gguf", "feature-extraction"])
+    ));
+    assert!(is_embedding_repo(Some("sentence-similarity"), &tags(&[])));
+    assert!(
+        is_embedding_repo(Some("text-classification"), &tags(&[])),
+        "a reranker"
+    );
+
+    assert!(!is_embedding_repo(
+        Some("text-generation"),
+        &tags(&["qwen3", "feature-extraction", "speculative-decoding"])
+    ));
+    assert!(!is_embedding_repo(None, &tags(&["gguf", "conversational"])));
+    assert!(!is_embedding_repo(
+        None,
+        &tags(&["feature-extraction", "text-generation"])
+    ));
+    assert!(!is_embedding_repo(None, &tags(&["gguf"])), "nothing said");
+}

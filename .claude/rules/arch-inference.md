@@ -177,6 +177,12 @@ Qwen 3.5's DeltaNet layers keep a recurrent state per request, and a rejected dr
 
 → `docs/invariants/inference.md` § "Qwen 3.5's delta rule is ONE op per layer"
 
+## A model that cannot write replies is refused off its header (2026-10-15)
+
+**`GgufTensorMeta::refusal`** (→ `ModelRefusal`, one wording via `into_error`) is the one answer: no loader for the family, or an embedding model (`<arch>.pooling_type` non-zero — Ollama's rule). Asked by the loader, the router (`SharedState::refused_model`), auto-manage, the user's download, `/v1/models` and the dashboard list (`cannot_chat`). Before a header exists, `model::huggingface::is_embedding_repo` reads HuggingFace's tags (the pipeline tag first). A new path that runs or fetches a model asks it.
+
+→ `docs/invariants/inference.md` § "A model that cannot write replies is refused off its header"
+
 ## A header and its tensor table describe ONE upload — compared before a tensor is read (2026-10-03)
 
 `split::loader::shards::first_header_disagreement` runs in `load_from_shards_inner`, the one place every load from parts passes: every table entry the parts hold must sit at the header's offset with the header's size (`split::tensor_byte_size`, the size tables are cut by), or the load is refused as `SwarmError::MixedModelCopy`. A mismatch never fails on its own — each read lands shifted inside its entry and the model answers garbage (#156). Compare per entry, never by re-deriving the layout (older tables must load). Rig: `split_rig.sh mixed`; null control `every_real_copy_agrees_with_its_own_header`. Parts whose BYTES are not the table's upload (a splice — header and table both agree) are invisible to it: `auto_manage::canonical`'s byte check deletes and re-fetches them (gotcha #782; rig `split_rig.sh spliced`).

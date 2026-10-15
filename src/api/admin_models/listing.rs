@@ -455,6 +455,16 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                         .get(&crate::types::ModelId(id.to_string()))
                         .map(|h| serde_json::to_value(h.value()).unwrap_or_default()),
                 })),
+            // Why this build will not run the model to write replies, read off
+            // its header here: `embedding_model` or `unsupported_architecture`
+            // (`ModelRefusal::as_str`); null when it runs or no header is here
+            // to say. The chat picker leaves such a model out — an embedding
+            // model was offered and answered with one word repeated (field
+            // report 2026-10-15).
+            "cannot_chat": state
+                .shared_state
+                .refused_model(&crate::types::ModelId(id.to_string()))
+                .map(|r| r.as_str()),
         })
     };
 

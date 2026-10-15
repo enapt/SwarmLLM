@@ -4086,6 +4086,7 @@ fn a_prompt_position_is_priced_like_the_worker_charges_it() {
         expert_used_count: 0,
         architecture: "gemma2".into(),
         context_length: 8192,
+        pooling_type: 0,
     };
     // GQA on a card that keeps the half cache: f16 alone → 2 bytes per element.
     assert_eq!(

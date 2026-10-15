@@ -493,12 +493,10 @@ impl SplitModel {
 
         tracing::info!(arch = %model_arch, "Detected model architecture");
 
+        // Asked before the hyperparameters are read: a family this build has
+        // no loader for may lack the keys `from_content` requires.
         if !model_arch.is_supported() {
-            return Err(SwarmError::Validation(format!(
-                "Unsupported model architecture '{}'. Supported architectures: {}",
-                arch_str,
-                ModelArch::supported_list().join(", ")
-            )));
+            return Err(super::ModelRefusal::Architecture(arch_str).into_error());
         }
 
         // Extract the shared hyperparameters via the unified GgufTensorMeta
@@ -506,6 +504,13 @@ impl SplitModel {
         // parsing. Architecture-specific extras (context_length, Gemma
         // softcaps) stay inline since they're not part of the base metadata.
         let meta = super::GgufTensorMeta::from_content(&ct)?;
+        // Every load of a model's layers passes here — a request served on
+        // this node and a segment served for a peer alike — so a model the
+        // router let through (no header there to ask) is refused before it
+        // repeats one word for half a minute (field report 2026-10-15).
+        if let Some(refusal) = meta.refusal() {
+            return Err(refusal.into_error());
+        }
         let head_count = meta.head_count;
         let head_count_kv = meta.head_count_kv;
         let block_count = meta.block_count;

@@ -92,6 +92,39 @@ pub struct HfModelResult {
     pub size_bytes: u64,
     pub downloads: u64,
     pub likes: u64,
+    /// The repo's own metadata says it holds an embedding or ranking model
+    /// ([`is_embedding_repo`]).
+    pub embedding: bool,
+}
+
+/// HuggingFace tasks a model that cannot write replies is filed under:
+/// embeddings, similarity, reranking and classification.
+const NOT_CHAT_TASKS: &[&str] = &[
+    "feature-extraction",
+    "sentence-similarity",
+    "text-ranking",
+    "text-classification",
+];
+
+/// Does a repo's HuggingFace metadata say it holds an embedding (or ranking)
+/// model rather than one that writes replies?
+///
+/// The pipeline tag decides when there is one: `Qwen/Qwen3-Embedding-0.6B`
+/// is `feature-extraction` while also tagged `text-generation`, and a
+/// speculative drafter is `text-generation` while also tagged
+/// `feature-extraction`. Without one — `Qwen/Qwen3-Embedding-0.6B-GGUF` has
+/// none — an embedding task among the tags decides, unless a generation task
+/// is there too. The header settles it once the file is fetched
+/// (`GgufTensorMeta::refusal`); this keeps such a model out of the lists a
+/// person picks a chat model from before then (field report 2026-10-15).
+pub fn is_embedding_repo(pipeline_tag: Option<&str>, tags: &[String]) -> bool {
+    match pipeline_tag {
+        Some(task) => NOT_CHAT_TASKS.contains(&task),
+        None => {
+            let tagged = |tasks: &[&str]| tags.iter().any(|t| tasks.contains(&t.as_str()));
+            tagged(NOT_CHAT_TASKS) && !tagged(&["text-generation", "conversational"])
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

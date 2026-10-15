@@ -4099,6 +4099,55 @@ capture's decision line lands INSIDE the streamed `Generated:` line — so two i
 hashed differently and "the captured MoE output differs run to run" was briefly believed (gotcha
 #840). Compare the `Token IDs:` line, or strip timestamped lines first.
 
+## A model that cannot write replies is refused off its header (2026-10-15)
+
+A tester's fresh node offered `Qwen/Qwen3-Embedding-0.6B-GGUF` in the HuggingFace
+browser as "Chat", let it be downloaded, and put it in the chat picker. Asked a
+question, it streamed "IP address" for 30 s, and the log recorded `outcome=error
+tokens=0` (field report 2026-10-15). Its header is an ordinary `qwen3` — a family
+that loads — with `qwen3.pooling_type = 3` (LAST, GGUF type UINT32) and no
+`output.weight`: the tied embedding table stands in for a head that was never
+trained to predict a next token.
+
+**The rule is Ollama's** (`server/images.go`, `ggufCapabilities`): a GGUF that
+names a pooling type is an embedding model, not a completion one. llama.cpp's
+converter writes the key only for embedding models. Here NONE (0) reads as "not
+said", so a generative file that spells it out still loads.
+
+`GgufTensorMeta::refusal` is the one answer to "will this build run the model
+to write replies" — a family with no loader (`ModelArch::is_supported`) or an
+embedding model (`pooling_type != 0`) — and `ModelRefusal::into_error` the one
+wording (400 `Validation`: no node and no retry can help, and
+`every_holder_would_refuse` stops a coordinator failing over on a peer's
+refusal). It is asked:
+
+- by the **loader**, after `from_content` — every load of a model's layers, here
+  or for a peer, so a node with no header to ask is still covered;
+- by the **router** (`handle_submit`, through `SharedState::refused_model`)
+  before a request is queued, when this node holds the header;
+- by **auto-manage**: `gather_candidates`, and `trigger_download` on both
+  branches (the HuggingFace probe's header, the header fetched before a peer
+  transfer);
+- by the user's **download** (`/api/admin/hf/download-shards`) before a byte moves;
+- by `/v1/models` and the dashboard list (`cannot_chat`), which leave such a
+  model out of what a client or the chat picker offers.
+
+Before a header exists, HuggingFace's own metadata decides
+(`model::huggingface::is_embedding_repo`): the pipeline tag when there is one —
+`Qwen/Qwen3-Embedding-0.6B` is `feature-extraction` yet tagged `text-generation`,
+which is how it passed the trending list's text filter, while a speculative
+drafter is `text-generation` yet tagged `feature-extraction` — otherwise an
+embedding or ranking task among the tags with no generation task beside it (the
+GGUF re-upload has no pipeline tag). The trending list drops such a repo; a
+search shows it tagged "Embedding", marked "Not a chat model", with no action.
+
+`/v1/embeddings` still answers 501 (`FUTURE_WORK.md` #200's leftover): the
+refusal is about chat, not a promise that embeddings are served. Tests:
+`a_header_that_names_a_pooling_type_is_an_embedding_model`,
+`an_embedding_model_is_refused_before_it_is_queued`,
+`a_family_this_build_refuses_is_never_a_candidate`,
+`an_embedding_repo_is_told_apart_from_a_chat_model`.
+
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 
 Each names the ONE place a decision is made. A second implementation of any of

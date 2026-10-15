@@ -77,7 +77,11 @@
         adminModels.forEach(function(m) {
           var isReady = m.status === 'loaded' || m.status === 'ready' ||
             (m.global_available === m.shard_count && m.shard_count > 0);
-          if (isReady) readySet[m.id] = true;
+          // A model whose header says it cannot write replies (an embedding
+          // model, or a family this build has no loader for) is not offered
+          // for chat: it was, and answered with one word repeated for 30 s
+          // (field report 2026-10-15). The daemon refuses it either way.
+          if (isReady && !m.cannot_chat) readySet[m.id] = true;
         });
 
         var readyModels = adminModels.filter(function(m) { return readySet[m.id]; });
