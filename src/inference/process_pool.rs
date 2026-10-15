@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::error::SwarmError;
 use crate::inference::router::StreamingTokenEvent;
 use crate::inference::worker_ipc::*;
+use crate::model::auto_manage::vram::KvCharge;
 use crate::types::{ModelId, PrefixBlockEntry, SamplingParams};
 
 /// Cross-platform IPC stream halves between daemon and model worker.
@@ -2421,8 +2422,9 @@ impl CpuReason {
     }
 }
 
-/// Whether loading a model may take memory from other models — a REQUIRED
-/// argument of `ModelProcessPool::get_or_spawn`, so no load can leave it out.
+/// Whether loading a model may take memory from other models, and how long a
+/// conversation its cache is charged for — a REQUIRED argument of
+/// `ModelProcessPool::get_or_spawn`, so no load can leave either out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tenancy {
     /// Asked for by a request FOR this model: reclaims idle models' memory
@@ -2440,7 +2442,25 @@ enum Tenancy {
     /// its memory profiler, vllm-project/vllm#14067) and plans the two
     /// together; a swarm node loads models on demand, so the drafter is made
     /// subordinate instead (2026-09-28).
-    Guest,
+    ///
+    /// `conversation` is the positions of the reply it is loaded to guess for
+    /// (`model_worker::drafter_cache_positions`): its load is charged that
+    /// cache, not a typical conversation's (#275, `vram::KvCharge`).
+    Guest { conversation: u64 },
+}
+
+impl Tenancy {
+    fn is_guest(self) -> bool {
+        matches!(self, Tenancy::Guest { .. })
+    }
+
+    /// How long a conversation this load's cache is charged for.
+    fn kv_charge(self) -> KvCharge {
+        match self {
+            Tenancy::Tenant => KvCharge::Typical,
+            Tenancy::Guest { conversation } => KvCharge::Conversation(conversation),
+        }
+    }
 }
 
 /// Whose memory cap a drafter's load is weighed against
@@ -3135,10 +3155,10 @@ impl ModelProcessPool {
                     .0
                     .saturating_add(u32::try_from(on_card).unwrap_or(u32::MAX))
                     .min(segment.1);
-                self.estimate_gpu_footprint_mb(model_id, Some((segment.0, end)))
+                self.estimate_gpu_footprint_mb(model_id, Some((segment.0, end)), KvCharge::Typical)
             }
             CardSplit::ExpertsInRam { in_ram, .. } => self
-                .estimate_gpu_footprint_mb(model_id, Some(segment))
+                .estimate_gpu_footprint_mb(model_id, Some(segment), KvCharge::Typical)
                 .saturating_sub(self.experts_in_ram_mb(model_id, segment, in_ram)),
         };
         share.min(room)
@@ -3352,10 +3372,17 @@ impl ModelProcessPool {
     /// geometry cannot be read, which `admit_to_gpu` treats as "do not judge" —
     /// refusing the GPU because a file was unreadable would be a worse failure
     /// than the one being prevented.
-    fn estimate_gpu_footprint_mb(&self, model_id: &ModelId, segment: Option<(u32, u32)>) -> u64 {
-        use crate::model::auto_manage::vram::estimate_worker_vram_mb;
+    /// `kv` is how long a conversation its cache is charged for — a typical
+    /// one, or the one a guest is loaded for ([`Tenancy::kv_charge`]).
+    fn estimate_gpu_footprint_mb(
+        &self,
+        model_id: &ModelId,
+        segment: Option<(u32, u32)>,
+        kv: KvCharge,
+    ) -> u64 {
+        use crate::model::auto_manage::vram::estimate_worker_vram_mb_for;
         self.footprint_inputs(model_id, segment)
-            .map(|i| estimate_worker_vram_mb(&i))
+            .map(|i| estimate_worker_vram_mb_for(&i, kv))
             .unwrap_or(0)
     }
 
@@ -3365,10 +3392,15 @@ impl ModelProcessPool {
     /// not judge" — refusing to load because a file could not be read would be
     /// a worse failure than the one being prevented, and matches how the GPU
     /// side handles the same gap.
-    fn estimate_cpu_footprint_mb(&self, model_id: &ModelId, segment: Option<(u32, u32)>) -> u64 {
-        use crate::model::auto_manage::vram::estimate_worker_ram_mb;
+    fn estimate_cpu_footprint_mb(
+        &self,
+        model_id: &ModelId,
+        segment: Option<(u32, u32)>,
+        kv: KvCharge,
+    ) -> u64 {
+        use crate::model::auto_manage::vram::estimate_worker_ram_mb_for;
         self.footprint_inputs(model_id, segment)
-            .map(|i| estimate_worker_ram_mb(&i))
+            .map(|i| estimate_worker_ram_mb_for(&i, kv))
             .unwrap_or(0)
     }
 
@@ -3378,12 +3410,13 @@ impl ModelProcessPool {
         &self,
         model_id: &ModelId,
         segment: Option<(u32, u32)>,
+        kv: KvCharge,
     ) -> Option<(
         crate::model::auto_manage::vram::ResidentFootprint,
         u64,
         crate::model::auto_manage::vram::ContextSource,
     )> {
-        use crate::model::auto_manage::vram::{cpu_footprint, ContextSource};
+        use crate::model::auto_manage::vram::{cpu_footprint_for, ContextSource};
         let inputs = self.footprint_inputs(model_id, segment)?;
         let source = if self
             .max_seq_len_override
@@ -3394,7 +3427,11 @@ impl ModelProcessPool {
         } else {
             ContextSource::DeclaredOrDefault
         };
-        Some((cpu_footprint(&inputs), inputs.effective_context, source))
+        Some((
+            cpu_footprint_for(&inputs, kv),
+            inputs.effective_context,
+            source,
+        ))
     }
 
     /// Read a model's real geometry — its weights included — from its GGUF
@@ -3725,7 +3762,7 @@ impl ModelProcessPool {
         let budget = self
             .vram_budget_mb
             .load(std::sync::atomic::Ordering::Relaxed);
-        let estimated = self.estimate_gpu_footprint_mb(model_id, None);
+        let estimated = self.estimate_gpu_footprint_mb(model_id, None, KvCharge::Typical);
         let fits = if resident_on_gpu == Some(true) {
             Some(true)
         } else {
@@ -3798,7 +3835,7 @@ impl ModelProcessPool {
         // this and `gpu_estimate_and_fit` cannot answer differently.
         self.fits_in_budget(
             model_id,
-            self.estimate_gpu_footprint_mb(model_id, None),
+            self.estimate_gpu_footprint_mb(model_id, None, KvCharge::Typical),
             budget,
         )
     }
@@ -3812,7 +3849,7 @@ impl ModelProcessPool {
     /// next to `cpu_placement_reason: not_enough_vram`, so the dashboard showed
     /// a model comfortably fitting a card the daemon had just refused it on.
     pub fn estimated_gpu_mb(&self, model_id: &ModelId) -> Option<u64> {
-        match self.estimate_gpu_footprint_mb(model_id, None) {
+        match self.estimate_gpu_footprint_mb(model_id, None, KvCharge::Typical) {
             0 => None,
             mb => Some(mb),
         }
@@ -4434,12 +4471,16 @@ impl ModelProcessPool {
     /// the RAM budget nothing else has claimed. Handed to the worker at spawn
     /// so its runtime guard refuses a conversation that would outgrow the
     /// room, with a 503 that re-routes, instead of swapping the machine.
-    /// No budget configured → no guard (the pre-2026-08-21 behaviour).
+    /// No budget configured → no guard (the pre-2026-08-21 behaviour). `kv` is
+    /// the conversation the reservation charged ([`Tenancy::kv_charge`]): the
+    /// grant is what the reservation holds plus what nothing has claimed, never
+    /// the rest of a typical conversation a guest's reservation does not hold.
     fn record_cpu_kv_budget(
         &self,
         model_id: &ModelId,
         segment: Option<(u32, u32)>,
         requester: Requester,
+        kv: KvCharge,
     ) {
         let Some(budget) = self.ram_budget_now(requester) else {
             self.cpu_kv_budget_bytes.remove(model_id);
@@ -4449,7 +4490,7 @@ impl ModelProcessPool {
             self.cpu_kv_budget_bytes.remove(model_id);
             return;
         };
-        let typical_kv = crate::model::auto_manage::vram::cpu_footprint(&inputs).kv_bytes;
+        let typical_kv = crate::model::auto_manage::vram::cpu_footprint_for(&inputs, kv).kv_bytes;
         let this_mb = self.ram_reserved_mb.get(model_id).map(|v| *v).unwrap_or(0);
         let headroom_mb = budget.headroom_after(self.ram_committed_mb(), this_mb);
         let kv_budget = typical_kv.saturating_add(headroom_mb.saturating_mul(1024 * 1024));
@@ -4559,7 +4600,14 @@ impl ModelProcessPool {
     /// a segment of the target had filled chose the drafter that could not
     /// load on every request and guessed for none of them, where a smaller
     /// sibling might have fitted, and logged a refusal each time.
-    pub(crate) fn guest_would_be_admitted(&self, model_id: &ModelId, segment: (u32, u32)) -> bool {
+    /// `kv` is the conversation the guest would be charged for — the spawn's
+    /// own charge ([`Tenancy::kv_charge`]) where the reply is known.
+    pub(crate) fn guest_would_be_admitted(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        kv: KvCharge,
+    ) -> bool {
         if let Some(handle) = self.live_worker(model_id) {
             return handle.segment_is_charged(segment);
         }
@@ -4569,12 +4617,12 @@ impl ModelProcessPool {
         }) {
             return false;
         }
-        if !self.guest_charges_ram(model_id, segment) {
+        if !self.guest_charges_ram(model_id, segment, kv) {
             return true;
         }
         !matches!(
             self.ram_verdict(
-                self.estimate_cpu_footprint_mb(model_id, Some(segment)),
+                self.estimate_cpu_footprint_mb(model_id, Some(segment), kv),
                 DRAFTER_REQUESTER
             ),
             Verdict::Refused { .. }
@@ -4585,10 +4633,10 @@ impl ModelProcessPool {
     /// it as the card stands, or none at all? `get_or_spawn_once`'s placement
     /// for a guest, which is offered neither a reclaim nor a card/processor
     /// split.
-    fn guest_charges_ram(&self, model_id: &ModelId, segment: (u32, u32)) -> bool {
+    fn guest_charges_ram(&self, model_id: &ModelId, segment: (u32, u32), kv: KvCharge) -> bool {
         let going_to_cpu = self.cpu_reason(model_id).is_some()
             || matches!(
-                self.card_verdict(self.estimate_gpu_footprint_mb(model_id, Some(segment))),
+                self.card_verdict(self.estimate_gpu_footprint_mb(model_id, Some(segment), kv)),
                 Verdict::Refused { .. }
             );
         charges_ram(
@@ -4611,22 +4659,27 @@ impl ModelProcessPool {
     /// room for Qwen3-1.7B and the split ran 2.68-2.99 tok/s; holding fewer
     /// layers with the drafter beside them it ran 3.98-6.32, and fewer layers
     /// alone 2.45-2.78 — the room, not the smaller share, is the gain.
+    ///
+    /// `kv` is the conversation the guest's cache is left room for: this
+    /// request's, as its spawn will be charged (#275) — at 4,096 positions
+    /// whatever the reply, Qwen3-1.7B's cache was 896 of its 2,899 MB.
     pub fn max_hostable_layers_beside_guest(
         &self,
         model_id: &ModelId,
         requester: Requester,
         guest: &ModelId,
         guest_range: (u32, u32),
+        kv: KvCharge,
     ) -> Option<u32> {
         if self.planning_on_card(model_id)
             || self
                 .live_worker(guest)
                 .is_some_and(|h| h.segment_is_charged(guest_range))
-            || !self.guest_charges_ram(guest, guest_range)
+            || !self.guest_charges_ram(guest, guest_range, kv)
         {
             return None;
         }
-        let guest_mb = self.estimate_cpu_footprint_mb(guest, Some(guest_range));
+        let guest_mb = self.estimate_cpu_footprint_mb(guest, Some(guest_range), kv);
         if guest_mb == 0 {
             return None;
         }
@@ -5853,7 +5906,7 @@ impl ModelProcessPool {
         tenancy: Tenancy,
         requester: Requester,
     ) -> Result<Option<Arc<WorkerHandle>>, SwarmError> {
-        let guest = tenancy == Tenancy::Guest;
+        let guest = tenancy.is_guest();
         // Fast path: worker already exists — and, unless this node demoted it
         // to the processor and the card has since made room, that is the answer.
         let existing = self.workers.get(model_id).map(|h| h.clone());
@@ -6000,7 +6053,8 @@ impl ModelProcessPool {
         // spawn: the admission gate weighs it, the CPU-fallback log reports it,
         // and the worker carries it so a later request can ask whether the
         // model would fit now without re-reading the geometry.
-        let estimated = self.estimate_gpu_footprint_mb(model_id, Some(segment));
+        let estimated =
+            self.estimate_gpu_footprint_mb(model_id, Some(segment), tenancy.kv_charge());
         // What THIS spawn attempt put into each reserved map. Carried onto the
         // handle so the release can subtract exactly this worker's share
         // instead of dropping the model's whole entry — see
@@ -6179,7 +6233,9 @@ impl ModelProcessPool {
         }
         if let Some(ram_share) = ram_charged_share(charge_ram, segment, card_split) {
             let estimated = match ram_share {
-                RamShare::Layers(run) => self.estimate_cpu_footprint_mb(model_id, Some(run)),
+                RamShare::Layers(run) => {
+                    self.estimate_cpu_footprint_mb(model_id, Some(run), tenancy.kv_charge())
+                }
                 // The experts alone: the process is charged to the card beside
                 // them, and their layers' caches live there.
                 RamShare::Experts { layers } => self.experts_in_ram_mb(model_id, segment, layers),
@@ -6224,7 +6280,9 @@ impl ModelProcessPool {
                         )
                     });
                 let detail = match ram_share {
-                    RamShare::Layers(run) => self.cpu_footprint_detail(model_id, Some(run)),
+                    RamShare::Layers(run) => {
+                        self.cpu_footprint_detail(model_id, Some(run), tenancy.kv_charge())
+                    }
                     RamShare::Experts { .. } => None,
                 };
                 let message = match (ram_share, detail) {
@@ -6267,7 +6325,7 @@ impl ModelProcessPool {
             // A conversation cache on the processor needs its grant; experts
             // kept in RAM leave every cache on the card.
             if let RamShare::Layers(run) = ram_share {
-                self.record_cpu_kv_budget(model_id, Some(run), requester);
+                self.record_cpu_kv_budget(model_id, Some(run), requester, tenancy.kv_charge());
             }
         }
 
@@ -7240,7 +7298,9 @@ impl ModelProcessPool {
     /// the load is bracketed by cancel checks, not wrapped, and only the wait
     /// is watched; the worker keeps the attempt's drafting cache until the
     /// attempt releases it (`engine_drafter::release_of`). Loaded as a guest
-    /// (`Tenancy::Guest`).
+    /// (`Tenancy::Guest`), charged the cache of the reply this call reads for:
+    /// what the cache holds already (`keep`), what it appends, and the reply's
+    /// reserve ([`IpcDraft::conversation_positions`]).
     pub async fn draft(
         &self,
         d: IpcDraft,
@@ -7249,8 +7309,11 @@ impl ModelProcessPool {
         let model_id = d.model_id.clone();
         let request_id = d.request_id;
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
+        let tenancy = Tenancy::Guest {
+            conversation: d.conversation_positions(),
+        };
         let handle = self
-            .get_or_spawn(&model_id, d.layer_range, Tenancy::Guest, DRAFTER_REQUESTER)
+            .get_or_spawn(&model_id, d.layer_range, tenancy, DRAFTER_REQUESTER)
             .await?;
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
         if handle.dead.load(Ordering::Acquire) {
@@ -9261,7 +9324,7 @@ mod tests {
         let hour = std::time::Duration::from_secs(3600);
         admit_and_insert_gpu_worker(&pool, &target, 3138, hour).await;
 
-        assert!(!pool.admit_to_gpu_as(&drafter, 3000, Tenancy::Guest).await);
+        assert!(!pool.admit_to_gpu_as(&drafter, 3000, TYPICAL_GUEST).await);
         assert!(
             pool.workers.get(&target).is_some(),
             "the target keeps the card"
@@ -9289,7 +9352,7 @@ mod tests {
 
         assert!(
             !pool
-                .admit_to_cpu_as(&drafter, 3000, Tenancy::Guest, Requester::Swarm)
+                .admit_to_cpu_as(&drafter, 3000, TYPICAL_GUEST, Requester::Swarm)
                 .await
         );
         assert!(pool.workers.get(&target).is_some());
@@ -9301,6 +9364,12 @@ mod tests {
         );
         assert!(pool.workers.get(&target).is_none());
     }
+
+    /// A guest charged a typical conversation — where a test is about the
+    /// tenancy, not the cache.
+    const TYPICAL_GUEST: Tenancy = Tenancy::Guest {
+        conversation: crate::model::auto_manage::vram::ADMISSION_KV_CONTEXT,
+    };
 
     /// Qwen3-1.7B as `footprint_inputs` reads it: ~1.8 GB of Q8_0 weights, 28
     /// layers, 8 KV heads of 128.
@@ -9338,7 +9407,7 @@ mod tests {
             pool.set_ram_budget_mb(7_995);
             pool.test_footprint_inputs
                 .insert(drafter.clone(), qwen3_1_7b());
-            let wants = pool.estimate_cpu_footprint_mb(&drafter, Some(range));
+            let wants = pool.estimate_cpu_footprint_mb(&drafter, Some(range), KvCharge::Typical);
             assert!(
                 (7_995 - 6_967) < wants && wants <= 7_995 - 3_000,
                 "the planted drafter fits beside the small target only: {wants} MB"
@@ -9347,13 +9416,13 @@ mod tests {
             admit_and_insert_cpu_worker(&pool, &target, target_mb, false).await;
 
             assert_eq!(
-                pool.guest_would_be_admitted(&drafter, range),
+                pool.guest_would_be_admitted(&drafter, range, KvCharge::Typical),
                 room,
                 "beside {target_mb} MB"
             );
             assert_eq!(pool.ram_committed_mb(), target_mb, "asking charged nothing");
             assert_eq!(
-                pool.admit_to_cpu_as(&drafter, wants, Tenancy::Guest, DRAFTER_REQUESTER)
+                pool.admit_to_cpu_as(&drafter, wants, TYPICAL_GUEST, DRAFTER_REQUESTER)
                     .await,
                 room,
                 "the spawn's guest admission agrees beside {target_mb} MB"
@@ -9384,7 +9453,13 @@ mod tests {
             .max_hostable_layers_for_planning(&target, Requester::Swarm)
             .expect("a bound");
         let beside = pool
-            .max_hostable_layers_beside_guest(&target, Requester::Swarm, &drafter, range)
+            .max_hostable_layers_beside_guest(
+                &target,
+                Requester::Swarm,
+                &drafter,
+                range,
+                KvCharge::Typical,
+            )
             .expect("room is left");
         assert!(beside < alone, "{beside} beside the drafter, {alone} alone");
 
@@ -9392,7 +9467,7 @@ mod tests {
             let p = pool_with("/tmp/swarmllm-beside-guest-load");
             admit_and_insert_cpu_worker(&p, &target, 300 + 249 * layers as u64, false).await;
             assert_eq!(
-                p.guest_would_be_admitted(&drafter, range),
+                p.guest_would_be_admitted(&drafter, range, KvCharge::Typical),
                 admitted,
                 "the drafter beside {layers} layers"
             );
@@ -9402,7 +9477,13 @@ mod tests {
         let h = admit_and_insert_cpu_worker(&loaded, &drafter, 2_900, false).await;
         h.record_charged_segment(range, 0);
         assert_eq!(
-            loaded.max_hostable_layers_beside_guest(&target, Requester::Swarm, &drafter, range),
+            loaded.max_hostable_layers_beside_guest(
+                &target,
+                Requester::Swarm,
+                &drafter,
+                range,
+                KvCharge::Typical,
+            ),
             None
         );
     }
@@ -9420,13 +9501,137 @@ mod tests {
             .insert(drafter.clone(), qwen3_1_7b());
         let h = admit_and_insert_cpu_worker(&pool, &drafter, 3_900, false).await;
         h.record_charged_segment((0, 28), 0);
-        assert!(pool.guest_would_be_admitted(&drafter, (0, 28)));
-        assert!(!pool.guest_would_be_admitted(&drafter, (0, 14)));
+        assert!(pool.guest_would_be_admitted(&drafter, (0, 28), KvCharge::Typical));
+        assert!(!pool.guest_would_be_admitted(&drafter, (0, 14), KvCharge::Typical));
 
         let crashed = ModelId("crashing-0.5b".into());
         pool.spawn_failures
             .insert(crashed.clone(), (std::time::Instant::now(), 1));
-        assert!(!pool.guest_would_be_admitted(&crashed, (0, 24)));
+        assert!(!pool.guest_would_be_admitted(&crashed, (0, 24), KvCharge::Typical));
+    }
+
+    /// **A drafter is charged the cache of the reply it guesses for, not a
+    /// typical conversation's** (#275). At 4,096 positions Qwen3-1.7B's cache
+    /// was 896 of its 2,899 MB, and a split left that room beside the target's
+    /// layers for a short chat that writes a quarter of it. Charged the reply's
+    /// own positions, the planner leaves room for more of the target's layers
+    /// — and the spawn, charged the same, still agrees with that room at its
+    /// edge: beside one layer more, the drafter is refused.
+    #[tokio::test]
+    async fn a_drafter_is_charged_the_cache_of_its_reply() {
+        let target = ModelId("qwen3-30b-a3b".into());
+        let drafter = ModelId("qwen3-1.7b-q8-0".into());
+        let range = (0, 28);
+        let pool_with = |name: &str| {
+            let p = ModelProcessPool::new(std::path::PathBuf::from(name));
+            p.set_ram_budget_mb(7_995);
+            p.test_cost_curve.insert(target.clone(), (300, 249));
+            p.test_footprint_inputs
+                .insert(drafter.clone(), qwen3_1_7b());
+            p
+        };
+        // A 300-token chat asking for 400: its prompt and a reply quantum.
+        let reply = crate::inference::model_worker::drafter_cache_positions(300, Some(400));
+        assert_eq!(reply, 1_024);
+        let short = KvCharge::Conversation(reply);
+
+        let pool = pool_with("/tmp/swarmllm-guest-reply");
+        let typical_mb = pool.estimate_cpu_footprint_mb(&drafter, Some(range), KvCharge::Typical);
+        let short_mb = pool.estimate_cpu_footprint_mb(&drafter, Some(range), short);
+        // 28 layers × 2 × 8 heads × 128 × 4 bytes = 224 KB a position.
+        assert_eq!(typical_mb - short_mb, (4_096 - 1_024) * 224 / 1024);
+
+        let beside = |kv| {
+            pool.max_hostable_layers_beside_guest(&target, Requester::Swarm, &drafter, range, kv)
+                .expect("room is left")
+        };
+        let (typical, for_the_reply) = (beside(KvCharge::Typical), beside(short));
+        assert!(
+            for_the_reply > typical,
+            "{for_the_reply} layers beside the reply's drafter, {typical} beside a typical one"
+        );
+
+        for (layers, admitted) in [(for_the_reply, true), (for_the_reply + 1, false)] {
+            let p = pool_with("/tmp/swarmllm-guest-reply-load");
+            admit_and_insert_cpu_worker(&p, &target, 300 + 249 * layers as u64, false).await;
+            assert_eq!(
+                p.guest_would_be_admitted(&drafter, range, short),
+                admitted,
+                "the reply's drafter beside {layers} layers"
+            );
+            let spawn = Tenancy::Guest {
+                conversation: reply,
+            };
+            let wants = p.estimate_cpu_footprint_mb(&drafter, Some(range), spawn.kv_charge());
+            assert_eq!(
+                p.admit_to_cpu_as(&drafter, wants, spawn, DRAFTER_REQUESTER)
+                    .await,
+                admitted,
+                "the spawn's own charge agrees beside {layers} layers"
+            );
+        }
+    }
+
+    /// **Charging the reply's cache shrinks the drafter's reservation, never its
+    /// worker's room to grow.** The grant handed to the worker
+    /// (`record_cpu_kv_budget`) is the charged cache plus what nothing has
+    /// claimed, and both headroom terms (`RamBudget::headroom_after`) fall by
+    /// exactly the charge — so a later, longer reply finds the room a typical
+    /// charge would have given it.
+    #[tokio::test]
+    async fn a_smaller_drafter_charge_leaves_its_worker_the_same_room() {
+        let target = ModelId("qwen3-30b-a3b".into());
+        let drafter = ModelId("qwen3-1.7b-q8-0".into());
+        let range = (0, 28);
+        let mut grants = Vec::new();
+        for conversation in [crate::model::auto_manage::vram::ADMISSION_KV_CONTEXT, 1_024] {
+            let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-guest-grant"));
+            pool.set_ram_budget_mb(7_995);
+            pool.test_footprint_inputs
+                .insert(drafter.clone(), qwen3_1_7b());
+            admit_and_insert_cpu_worker(&pool, &target, 3_000, false).await;
+            let spawn = Tenancy::Guest { conversation };
+            let wants = pool.estimate_cpu_footprint_mb(&drafter, Some(range), spawn.kv_charge());
+            assert!(
+                pool.admit_to_cpu_as(&drafter, wants, spawn, DRAFTER_REQUESTER)
+                    .await
+            );
+            pool.record_cpu_kv_budget(&drafter, Some(range), DRAFTER_REQUESTER, spawn.kv_charge());
+            let grant = *pool
+                .cpu_kv_budget_bytes
+                .get(&drafter)
+                .expect("a grant is recorded");
+            grants.push((pool.ram_committed_mb(), grant / (1024 * 1024)));
+        }
+        let ((typical_committed, typical_grant), (reply_committed, reply_grant)) =
+            (grants[0], grants[1]);
+        assert_eq!(typical_committed - reply_committed, 672, "{grants:?}");
+        assert!(
+            typical_grant.abs_diff(reply_grant) <= 1,
+            "the worker may grow its cache as far either way: {grants:?}"
+        );
+    }
+
+    /// The charge never falls below what the drafter's worker admits at the
+    /// reply's first call (`handle_draft`: the prompt and the reply's reserve
+    /// with room for every guess a check can ask), and the planner's — which
+    /// does not know the reply's budget — never below the spawn's.
+    #[test]
+    fn a_drafters_charge_covers_its_first_calls_admission() {
+        use crate::inference::layers::kv_cache_reservation;
+        use crate::inference::model_worker::drafter_cache_positions;
+        for prompt in [1usize, 300, 511, 512, 4_000, 9_000] {
+            for max_tokens in [1u32, 16, 128, 480, 495, 496, 512, 4_096] {
+                let charged = drafter_cache_positions(prompt, Some(max_tokens));
+                for gamma in 0..=crate::config::MAX_GUESSES_PER_CHECK as usize {
+                    let admitted =
+                        kv_cache_reservation(prompt + (max_tokens as usize + gamma + 1).min(512))
+                            as u64;
+                    assert!(charged >= admitted, "{prompt}+{max_tokens} γ{gamma}");
+                }
+                assert!(drafter_cache_positions(prompt, None) >= charged);
+            }
+        }
     }
 
     /// **The machine's memory is reclaimed from a model that holds some.** The
@@ -9529,14 +9734,14 @@ mod tests {
         h.record_charged_segment((0, 1), 0);
 
         let held = pool
-            .get_or_spawn(&m, (0, 1), Tenancy::Guest, Requester::Swarm)
+            .get_or_spawn(&m, (0, 1), TYPICAL_GUEST, Requester::Swarm)
             .await;
         assert!(
             held.is_ok_and(|g| Arc::ptr_eq(&g, &h)),
             "the range it holds is handed back"
         );
         let refused = pool
-            .get_or_spawn(&m, (0, 24), Tenancy::Guest, Requester::Swarm)
+            .get_or_spawn(&m, (0, 24), TYPICAL_GUEST, Requester::Swarm)
             .await;
         assert!(matches!(refused, Err(SwarmError::ServiceUnavailable(_))));
         assert!(
@@ -11606,7 +11811,7 @@ mod admission_tests {
         p.test_footprint_inputs.insert(m.clone(), thirty_b_a3b());
         p.test_expert_bytes.insert(m.clone(), vec![208 * MIB; 48]);
         let segment = (0, 48);
-        let estimated = p.estimate_gpu_footprint_mb(&m, Some(segment));
+        let estimated = p.estimate_gpu_footprint_mb(&m, Some(segment), KvCharge::Typical);
         assert!(
             estimated > 7_000,
             "fixture: does not fit whole ({estimated})"
@@ -11767,7 +11972,7 @@ mod admission_tests {
                 attention: crate::inference::layers::KvAttention::Standard,
             },
         );
-        let estimated = p.estimate_gpu_footprint_mb(&m, Some((0, 28)));
+        let estimated = p.estimate_gpu_footprint_mb(&m, Some((0, 28)), KvCharge::Typical);
         let split = p
             .partial_gpu_layers(&m, Some((0, 28)), estimated)
             .expect("fixture: the model splits");
@@ -11778,7 +11983,7 @@ mod admission_tests {
         assert!(share > 0, "the card share is charged");
         assert_eq!(
             share,
-            p.estimate_gpu_footprint_mb(&m, Some((0, n as u32)))
+            p.estimate_gpu_footprint_mb(&m, Some((0, n as u32)), KvCharge::Typical)
                 .min(3000),
             "as the first {n} layers, by the admission estimator"
         );
@@ -12390,7 +12595,7 @@ mod admission_tests {
     fn estimating_a_missing_model_is_zero() {
         let p = pool();
         assert_eq!(
-            p.estimate_gpu_footprint_mb(&ModelId("nope".into()), None),
+            p.estimate_gpu_footprint_mb(&ModelId("nope".into()), None, KvCharge::Typical),
             0
         );
     }

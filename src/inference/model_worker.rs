@@ -3023,6 +3023,26 @@ fn reply_reserve_positions(max_new_tokens: u32, draft_margin: usize) -> usize {
         .min(REPLY_RESERVE_POSITIONS)
 }
 
+/// The positions a drafter's cache is admitted for when it reads a reply's
+/// prompt ([`handle_draft`]'s first call): the prompt and the reply's reserve
+/// in whole quanta — the target's own per-request figure
+/// ([`admit_prompt_over`]). A drafter's LOAD is charged this, not a typical
+/// conversation (`vram::KvCharge::Conversation`, #275), so the room a split
+/// leaves for it is the room that call takes. `max_new_tokens` is the reply's
+/// granted budget, `None` where it is not known (the planner): the whole
+/// reserve. The margin covers every guess a call can ask for, so the charge is
+/// never below that call's admission (asserted below).
+pub(crate) fn drafter_cache_positions(prompt_tokens: usize, max_new_tokens: Option<u32>) -> u64 {
+    let reply = max_new_tokens.map_or(REPLY_RESERVE_POSITIONS, |m| {
+        reply_reserve_positions(m, DRAFT_MARGIN_POSITIONS)
+    });
+    crate::inference::layers::kv_cache_reservation(prompt_tokens.saturating_add(reply)) as u64
+}
+
+/// [`handle_draft`] admits `gamma + 1` positions past the reply; the charge's
+/// margin must hold the largest.
+const _: () = assert!(DRAFT_MARGIN_POSITIONS > crate::config::MAX_GUESSES_PER_CHECK as usize);
+
 /// `SWARMLLM_KV_PREFIX_CHARGE=0` turns off the whole-prompt admission below,
 /// so the two arms can be compared inside ONE binary. Read once.
 #[cfg(test)]

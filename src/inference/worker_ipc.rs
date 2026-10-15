@@ -592,6 +592,19 @@ pub struct IpcDraft {
     pub stop_below: Option<f32>,
 }
 
+impl IpcDraft {
+    /// The cache this call's reply needs, in positions: what the cache keeps,
+    /// what the call appends and the reply's reserve
+    /// (`model_worker::drafter_cache_positions`) — what a drafter loaded for
+    /// it is charged (`process_pool::Tenancy::Guest`, #275).
+    pub fn conversation_positions(&self) -> u64 {
+        crate::inference::model_worker::drafter_cache_positions(
+            (self.keep as usize).saturating_add(self.append.len()),
+            Some(self.sampling.max_tokens),
+        )
+    }
+}
+
 /// Send a DaemonMsg to the socket. Payload = raw bytes (e.g., activations).
 pub async fn send_daemon<W: AsyncWriteExt + Unpin>(
     w: &mut W,

@@ -88,7 +88,7 @@ In `handle_forward` the FIRST piece of a `prompt_span` clears, restores and is a
 
 ## A model loaded for ANOTHER model's request is a guest (2026-09-28)
 
-**`process_pool::Tenancy` is a REQUIRED argument of `get_or_spawn`.** A `Guest` (the drafter, `ModelProcessPool::draft`) takes only memory that stands free: no reclaim, split, promotion, growth or notice. `dsd.rs` reads ahead only once `holds_segment`. Whether a guest WOULD load is asked without loading it — **`ModelProcessPool::guest_would_be_admitted`**, the spawn's own arithmetic (`card_verdict` / `ram_verdict`, shared with `admit_to_gpu` / `admit_to_cpu`) — before the drafter is chosen (#275, `arch-scheduling.md`).
+**`process_pool::Tenancy` is a REQUIRED argument of `get_or_spawn`.** A `Guest` (the drafter, `ModelProcessPool::draft`) takes only memory that stands free: no reclaim, split, promotion, growth or notice — and is charged the cache of the reply it guesses for (`Guest { conversation }` → `Tenancy::kv_charge`), not `ADMISSION_KV_CONTEXT`; its worker's grant is unchanged (#275). `dsd.rs` reads ahead only once `holds_segment`. Whether a guest WOULD load is asked without loading it — **`ModelProcessPool::guest_would_be_admitted`**, the spawn's own arithmetic (`card_verdict` / `ram_verdict`, shared with `admit_to_gpu` / `admit_to_cpu`) — before the drafter is chosen (#275, `arch-scheduling.md`).
 
 → `docs/invariants/memory.md` § "A model loaded for another model's request is a guest (2026-09-28)"
 
@@ -198,7 +198,7 @@ A second implementation of any of these is this codebase's most-repeated defect 
 - **`inference::worker_ipc::worker_error_is_fatal`** — did the error destroy device state?
 - **`daemon::shard_loader::force_cpu_for`** — `inference.gpu_layers` → `force_cpu`.
 - **`daemon::gpu_support::MIN_COMPUTE_CAP` + `local_gpu_is_supported`** — can this card run OUR kernels?
-- **`model::auto_manage::vram::ADMISSION_KV_CONTEXT`** — the context admission charges KV for.
+- **`model::auto_manage::vram::ADMISSION_KV_CONTEXT`** — the context admission charges KV for; `vram::KvCharge` says which (a guest's is its reply's).
 - **`ModelProcessPool::footprint_inputs` reads a model's WEIGHTS from its header** (`split::tensor_byte_size` over the tensor table), never from the shards on this node's disk — which is the model only on a full holder (a node holding none priced a 9B at 1346 MB; one holding half charged half; gotcha #803). → `docs/invariants/memory.md` § "A model's weights are its header's".
 - **`split::layers_keeping_kv`** (+ `GgufTensorMeta::layers_keeping_kv`, same marker) — the layers charged a KV cache, by admission (`VramFootprintInputs::kv_layers`), the split planner, the loader's KV budget, the scheduler's peer bound (`kv_bytes_per_position_per_layer`) and the cost curve (`process_pool::cost_curve_of` scales `kv_layers` with the segment, or the whole cache lands in its fixed term) alike; a recurrent layer (Qwen 3.5's DeltaNet, `split::layer_is_recurrent`) keeps none (#228).
 - **`ModelProcessPool::free_vram_for_admission` + `plan_vram_reclaim`** — reclaim idle models first; **`fits_in_budget`** (every fit verdict, so `serves_on_cpu`) and the planner's ceiling count that reclaim (`reclaimable_vram_mb` / `idle_vram_reclaimable_mb`), or a model held here goes abroad (#125, #129).

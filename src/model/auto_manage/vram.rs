@@ -181,6 +181,54 @@ const _: () = assert!(CPU_PROCESS_OVERHEAD_BYTES < CUDA_PROCESS_OVERHEAD_BYTES);
 /// there would mean swapping, which degrades every request on the machine.
 pub const ADMISSION_KV_CONTEXT: u64 = 4096;
 
+/// How many positions of conversation a worker's load is charged KV cache for.
+///
+/// A worker loaded for its own model's requests will serve conversations not
+/// yet seen, so its load is charged a typical one ([`ADMISSION_KV_CONTEXT`]).
+/// A drafter is loaded for ONE reply it guesses for
+/// (`process_pool::Tenancy::Guest`), whose prompt is in hand. Charged 4,096
+/// positions whatever that reply, its cache was 896 of Qwen3-1.7B's 2,899 MB,
+/// and a split left room for a cache a short chat never writes — room taken
+/// from the target's own layers (#275). SmartSpec (arXiv 2406.14066) gives the
+/// drafter as many cache slots as the target, and the target is admitted per
+/// request at its prompt plus one reply quantum (`model_worker::admit_prompt_over`),
+/// which is also what the drafter's worker admits at its first call
+/// (`model_worker::drafter_cache_positions`). A later, longer reply is admitted
+/// by that worker as any reply is, against the budget its load was granted
+/// (`ModelProcessPool::record_cpu_kv_budget`); refused, it goes unguessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvCharge {
+    /// A conversation not yet seen: [`ADMISSION_KV_CONTEXT`].
+    Typical,
+    /// The one conversation the load is for, in positions.
+    Conversation(u64),
+}
+
+impl KvCharge {
+    /// The positions charged for a worker of `i`'s shape — never past the
+    /// context its cache is sized to.
+    pub fn positions(self, i: &VramFootprintInputs) -> u64 {
+        match self {
+            KvCharge::Conversation(positions) if !conversation_charged_as_typical() => {
+                positions.min(i.effective_context)
+            }
+            KvCharge::Typical | KvCharge::Conversation(_) => {
+                i.effective_context.min(ADMISSION_KV_CONTEXT)
+            }
+        }
+    }
+}
+
+/// `SWARMLLM_DRAFTER_KV_CHARGE=typical` charges a drafter a typical
+/// conversation's cache, as before #275's second half — for an A/B inside one
+/// binary. Read once.
+fn conversation_charged_as_typical() -> bool {
+    static TYPICAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TYPICAL.get_or_init(|| {
+        std::env::var("SWARMLLM_DRAFTER_KV_CHARGE").is_ok_and(|v| v.trim() == "typical")
+    })
+}
+
 /// Bytes per element of the token-embedding table, when it is held dequantized.
 ///
 /// **This must match what the loader actually allocates.** Where the loader
@@ -367,6 +415,11 @@ fn resident_footprint_on(
 /// model that would have fitted, while under-estimating costs a hard OOM and —
 /// until this release — a permanent fall back to the CPU.
 pub fn estimate_worker_vram_mb(i: &VramFootprintInputs) -> u64 {
+    estimate_worker_vram_mb_for(i, KvCharge::Typical)
+}
+
+/// [`estimate_worker_vram_mb`] with the KV cache charged as `kv` says.
+pub fn estimate_worker_vram_mb_for(i: &VramFootprintInputs, kv: KvCharge) -> u64 {
     // A CUDA worker reads embedding rows on demand too, through an on-device
     // gather, so it no longer materialises the table either — 720 MB on
     // meta-llama-3.1-8b. See `token_embedding`.
@@ -378,7 +431,7 @@ pub fn estimate_worker_vram_mb(i: &VramFootprintInputs) -> u64 {
     resident_footprint_on(
         i,
         i.embedding_gatherable,
-        i.effective_context.min(ADMISSION_KV_CONTEXT),
+        kv.positions(i),
         card_kv_storage(i),
     )
     .total_bytes()
@@ -394,7 +447,12 @@ pub fn estimate_worker_vram_mb(i: &VramFootprintInputs) -> u64 {
 /// instead": the more often that fires, the more weight lands here. KV is
 /// charged at [`ADMISSION_KV_CONTEXT`]; see [`cpu_footprint`].
 pub fn estimate_worker_ram_mb(i: &VramFootprintInputs) -> u64 {
-    cpu_footprint(i)
+    estimate_worker_ram_mb_for(i, KvCharge::Typical)
+}
+
+/// [`estimate_worker_ram_mb`] with the KV cache charged as `kv` says.
+pub fn estimate_worker_ram_mb_for(i: &VramFootprintInputs, kv: KvCharge) -> u64 {
+    cpu_footprint_for(i, kv)
         .total_bytes()
         .saturating_add(CPU_PROCESS_OVERHEAD_BYTES)
         / (1024 * 1024)
@@ -402,6 +460,11 @@ pub fn estimate_worker_ram_mb(i: &VramFootprintInputs) -> u64 {
 
 /// The CPU worker's resident terms, itemised.
 pub fn cpu_footprint(i: &VramFootprintInputs) -> ResidentFootprint {
+    cpu_footprint_for(i, KvCharge::Typical)
+}
+
+/// [`cpu_footprint`] with the KV cache charged as `kv` says.
+pub fn cpu_footprint_for(i: &VramFootprintInputs, kv: KvCharge) -> ResidentFootprint {
     // The SAME admission context the GPU uses, for the same reason: since
     // 2026-08-21 a CPU worker is handed a KV budget (`--kv-budget-bytes`) and
     // refuses at run time to grow past it, so admission no longer has to price
@@ -409,11 +472,7 @@ pub fn cpu_footprint(i: &VramFootprintInputs) -> ResidentFootprint {
     // 27 GB refusal at a 32k override — the model never loaded, where now it
     // loads and only a conversation that outgrows the room is refused (and
     // re-routed to a peer).
-    resident_footprint(
-        i,
-        i.embedding_gatherable,
-        i.effective_context.min(ADMISSION_KV_CONTEXT),
-    )
+    resident_footprint(i, i.embedding_gatherable, kv.positions(i))
 }
 
 /// Where the admission context came from, for the refusal message.

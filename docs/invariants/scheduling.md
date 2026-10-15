@@ -293,6 +293,47 @@ the same conflict is to plan draft and target memory together, up front
 (vllm-project/vllm#14067); the planner's local bound is the only up-front plan a
 swarm node has, so that is where the drafter joins it.
 
+### The room is the reply's cache, not a typical conversation's (2026-10-15)
+
+**What it replaced.** The room left, the choice and the spawn all priced the
+drafter's cache at `ADMISSION_KV_CONTEXT` (4,096 positions) whatever the reply:
+896 of Qwen3-1.7B's 2,899 MB, for a chat whose prompt and first reply quantum
+fill 1,024. A tenant's load is right to charge a typical conversation — it will
+serve ones not seen yet — but a guest is loaded for ONE reply whose prompt is in
+hand. The surplus came out of the target's layers: the cut held this node to 20
+layers of Qwen3-30B-A3B where 23 leave the drafter its reply's room — three
+layers more the peers had to offer before the cut had any route.
+
+**Research.** SmartSpec (arXiv 2406.14066, the source of the γ = 0 rule) gives
+the drafter as many cache slots as the target; vLLM allocates both models'
+blocks per token from one pool. Here the target is admitted per request at its
+prompt plus one reply quantum (`model_worker::admit_prompt_over`) — and the
+drafter's own worker already admitted exactly that at its first call
+(`handle_draft` → `ensure_room_for_prompt`). Only the load charge was 4,096.
+
+**The rule.** `vram::KvCharge` says what a load's cache is charged for:
+`Typical` (a tenant, and a plan with no prompt in hand) or `Conversation(n)`.
+`n` is `model_worker::drafter_cache_positions` — the prompt and the reply's
+reserve in whole quanta, its margin above every γ a check can ask
+(`DRAFT_MARGIN_POSITIONS` > `MAX_GUESSES_PER_CHECK`, asserted at compile time),
+the planner's (no reply budget known) never below the spawn's. It reaches the
+spawn on `Tenancy::Guest { conversation }` (`IpcDraft::conversation_positions`),
+the choice through `engine_drafter_for(.., conversation)` (`dsd.rs` tokenizes
+first) and the planner through `candidates_leaving_room_for_the_drafter(..,
+prompt_tokens)`. **The worker's grant does not shrink**:
+`record_cpu_kv_budget` is the charged cache plus `RamBudget::headroom_after`,
+whose two terms both fall by exactly the charge, so a later, longer reply may
+grow the cache as far as before. A/B `SWARMLLM_DRAFTER_KV_CHARGE=typical`.
+
+**Measured.** Live (`charge.sh`, 2026-10-15, processor-only release build, live
+node stopped, safety kit, Windows up 48.8 h): on the real request the planner's
+debug line read `room_for=23 … drafter_cache=Conversation(1024)` where the same
+model planned without a prompt read `room_for=20 … Typical` — the predicted
+three layers (672 MB at ~227 MB a layer). The speed A/B did not run: the
+Australian peer refused even the uncut 20-layer share that hour ("0 MB available
+for conversations"), so every arm failed alike. `~/swarmllm-275/charge.sh` (R vs
+T, the peer narrowed to shards 7-19 and 8-19) is the rerun when it offers room.
+
 ### What a change must keep
 
 - The drafter the planner leaves room for is the one the request then
@@ -319,6 +360,15 @@ swarm node has, so that is where the drafter joins it.
   `the_drafters_room_is_only_taken_from_what_the_peers_offer` (offered 40, the
   room is left; offered 5, the relaxed pass plans exactly as uncut — red on the
   every-rung version, 10 layers here against 48).
+- The room, the choice and the spawn price ONE figure for the drafter's cache
+  (`drafter_cache_positions`), the spawn's never above the room's.
+  `a_drafter_is_charged_the_cache_of_its_reply` (1,024 positions charge 672 MB
+  less; the room grows; the spawn's own charge agrees at its edge — red with the
+  spawn charged typical: "agrees beside 21 layers", and with the estimator
+  ignoring the conversation: 0 vs 672),
+  `a_drafters_charge_covers_its_first_calls_admission`,
+  `a_smaller_drafter_charge_leaves_its_worker_the_same_room` (red with the grant
+  priced typical: 2,938 vs 3,610 MB).
 
 ## Room for more layers is not room for the layers already held (2026-09-24, #95)
 

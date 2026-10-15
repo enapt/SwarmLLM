@@ -196,11 +196,16 @@ fn spec_for(state: &SharedState, target: &ModelId, drafter: ModelId) -> Option<D
 /// ([`spec_for`]) and is at most a quarter of its size ([`size_proxy`]) — the
 /// best guesser that is still cheap, since across a network the round trip,
 /// not the guessing, is what a round mostly costs. Either way only one this
-/// node's memory would load now ([`admitted`]). `None` when there is none:
-/// speculation across computers then drafts with llama.cpp where that is
-/// configured, or not at all.
-pub(crate) fn engine_drafter_for(state: &SharedState, target: &ModelId) -> Option<DrafterSpec> {
-    chosen(state, target, |s| admitted(state, target, s))
+/// node's memory would load now ([`admitted`]) for a reply of `conversation`
+/// positions (`model_worker::drafter_cache_positions`, the charge its load
+/// will take). `None` when there is none: speculation across computers then
+/// drafts with llama.cpp where that is configured, or not at all.
+pub(crate) fn engine_drafter_for(
+    state: &SharedState,
+    target: &ModelId,
+    conversation: u64,
+) -> Option<DrafterSpec> {
+    chosen(state, target, |s| admitted(state, target, s, conversation))
 }
 
 /// The drafter [`engine_drafter_for`] would choose for `target` were there room
@@ -252,13 +257,15 @@ fn chosen(
 /// layers are not loaded yet, so this can admit a drafter their load then
 /// leaves no room for — that request goes unguessed as before, and the next is
 /// asked with them loaded.
-fn admitted(state: &SharedState, target: &ModelId, spec: &DrafterSpec) -> bool {
+fn admitted(state: &SharedState, target: &ModelId, spec: &DrafterSpec, conversation: u64) -> bool {
     if !drafter_admission_asked() {
         return true;
     }
-    let fits = state
-        .model_process_pool
-        .guest_would_be_admitted(&spec.model_id, spec.layer_range);
+    let fits = state.model_process_pool.guest_would_be_admitted(
+        &spec.model_id,
+        spec.layer_range,
+        crate::model::auto_manage::vram::KvCharge::Conversation(conversation),
+    );
     if !fits {
         tracing::debug!(
             target_model = %target,

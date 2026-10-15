@@ -186,10 +186,6 @@ impl PipelineExecutor {
             None
         } else {
             let target = self.request.model_id.clone();
-            let Some(spec) = engine_drafter_for(&self.shared_state, &target) else {
-                tracing::debug!(%request_id, "DSD: no drafter available — falling back");
-                return Ok(None);
-            };
             let Some(tokenizer) = self.shared_state.standalone_tokenizer(&target) else {
                 tracing::debug!(%request_id, "DSD: no tokenizer for the target — falling back");
                 return Ok(None);
@@ -199,6 +195,16 @@ impl PipelineExecutor {
                 .into_iter()
                 .map(|t| t as u32)
                 .collect();
+            // Chosen for THIS reply's cache, the charge its load will take
+            // (#275) — not a typical conversation's.
+            let conversation = crate::inference::model_worker::drafter_cache_positions(
+                ids.len(),
+                Some(self.request.sampling_params.max_tokens),
+            );
+            let Some(spec) = engine_drafter_for(&self.shared_state, &target, conversation) else {
+                tracing::debug!(%request_id, "DSD: no drafter available — falling back");
+                return Ok(None);
+            };
             Some((spec, ids))
         };
 

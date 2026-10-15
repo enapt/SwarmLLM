@@ -3119,6 +3119,7 @@ impl PipelineScheduler {
                 local_node_id,
                 request_id,
                 &candidates,
+                prompt_tokens,
             )
         };
         let raw_segments = if self.shared_state.config.inference.parallax_routing {
@@ -4827,7 +4828,9 @@ impl PipelineScheduler {
         local_node_id: &NodeId,
         request_id: uuid::Uuid,
         candidates: &[NodeCandidate],
+        prompt_tokens: Option<u32>,
     ) -> Option<Vec<NodeCandidate>> {
+        use crate::model::auto_manage::vram::KvCharge;
         if !drafter_room_planned()
             || !self
                 .shared_state
@@ -4845,6 +4848,15 @@ impl PipelineScheduler {
         let requester = crate::inference::pipeline::requester_for_override(
             self.shared_state.route_plan_override(request_id).as_ref(),
         );
+        // Room for THIS request's drafter cache, as its spawn will be charged
+        // (#275): the prompt and a whole reply quantum — the reply's budget is
+        // not known here, so never less than the spawn takes. A plan with no
+        // prompt in hand leaves a typical conversation's.
+        let kv = prompt_tokens.map_or(KvCharge::Typical, |p| {
+            KvCharge::Conversation(crate::inference::model_worker::drafter_cache_positions(
+                p as usize, None,
+            ))
+        });
         let room = self
             .shared_state
             .model_process_pool
@@ -4853,6 +4865,7 @@ impl PipelineScheduler {
                 requester,
                 &drafter.model_id,
                 drafter.layer_range,
+                kv,
             )?;
         let now = candidates[local].max_hostable_layers;
         if room == 0 || now.is_some_and(|k| k <= room) {
@@ -4863,6 +4876,7 @@ impl PipelineScheduler {
             drafter = %drafter.model_id,
             room_for = room,
             room_without_it = ?now,
+            drafter_cache = ?kv,
             "Leaving room beside this node's layers for the drafter"
         );
         Some(leaving_room_here(candidates, local, room))

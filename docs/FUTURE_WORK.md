@@ -1463,18 +1463,17 @@ tree attention masks in the worker — absorbs the old survey's Tier 2D); the pi
 pass (Phase 3) is #171. The same-model-at-fewer-bits drafter is decided against as a default
 (#144, § "Decided").
 
-#### #275 — A drafter's room is sized for 4,096 positions and judged before the target's load
-`P3` · perf-split · **PARTIAL** — 2026-10-14 · history: § Closed 2026-10-14 (#275's first half)
+#### #275 — A drafter is judged before the target's load, and only processor plans leave it room
+`P3` · perf-split · **PARTIAL** — 2026-10-15 · history: § Closed 2026-10-14 (#275's first half), 2026-10-15 (the reply's charge)
 
-Shipped: the drafter is asked before it is chosen, and a split leaves it room where the peers
-offer enough (`docs/invariants/scheduling.md` § "A split leaves room for the model that guesses
-for it"). Left: (1) a drafter's cache is admitted at 4,096 positions whatever the conversation —
-896 of Qwen3-1.7B's 2,899 MB — so the room asked for is larger than a short reply needs; size it
-at the conversation's length (the target's own `admit_prompt` does). (2) On a cold start the
-drafter is judged beside the layers loaded SO FAR: seen choosing it beside 14 held layers,
-then refused once the plan grew them to 28 (one reply unguessed, the n-gram loop from the next).
-(3) A target worker already holding more layers keeps them; the room appears from its next cold
-load. (4) Card plans are not cut (a guest goes to the processor there).
+Shipped: the drafter is asked before it is chosen, a split leaves it room where the peers
+offer enough, and that room is the reply's own cache, not 4,096 positions
+(`docs/invariants/scheduling.md` § "A split leaves room for the model that guesses for it").
+Left: (2) on a cold start the drafter is judged beside the layers loaded SO FAR: seen choosing
+it beside 14 held layers, then refused once the plan grew them to 28 (one reply unguessed, the
+n-gram loop from the next). (3) A target worker already holding more layers keeps them; the
+room appears from its next cold load. (4) Card plans are not cut (a guest goes to the processor
+there).
 
 #### #145 — One reply uses one row of a ring pass that could carry dozens
 `P3` · perf-split · **OPEN** — 2026-09-28 · history: archive row #145; plan: `docs/plans/wan_parallel.md`
@@ -2243,6 +2242,18 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-15, unreleased** (#275's reply-sized charge)
+- #275 (1) — **the room a split leaves for its drafter is the reply's cache, not a typical
+  conversation's.** The room, the choice and the drafter's spawn priced its cache at 4,096
+  positions whatever the reply — 896 of Qwen3-1.7B's 2,899 MB for a chat that fills 1,024 — so
+  the cut took three more of Qwen3-30B-A3B's layers off this node than the drafter needed. Now all
+  three price the prompt and one reply quantum (`model_worker::drafter_cache_positions`, the
+  figure the drafter's worker already admitted at its first call; `vram::KvCharge`, carried on
+  `Tenancy::Guest`), and the worker's grant to grow is unchanged. Live: the planner's room on a
+  real request 20 → 23 layers (`drafter_cache=Conversation(1024)`); the speed A/B waits for the
+  Australian peer to offer room (it refused every arm that hour). A/B
+  `SWARMLLM_DRAFTER_KV_CHARGE=typical`. (2)-(4) stay open as #275.
 
 **Closed 2026-10-14, unreleased** (#273, #274; #137's 8-thread half; #275's first half)
 - #275 (first half) — **a split of a big model guesses ahead on a node without a graphics card,
