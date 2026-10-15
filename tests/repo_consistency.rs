@@ -1816,6 +1816,11 @@ fn user_settable_config_is_read_live_not_from_the_boot_snapshot() {
         // reload silently ignores is #281 at its worst. The resolver and the
         // per-model status read the boot snapshot until 2026-10-15.
         ".config.inference.encrypted_pipeline",
+        // ...and relay donation (this pattern also matches
+        // `relay_forwarding_auto`, which the Settings panel exposes). The
+        // relay decision read the boot snapshot until 2026-10-15, so turning
+        // donation off showed "off" and changed nothing until a restart.
+        ".config.network.relay_forwarding",
     ];
 
     // Startup-only readers: each builds something that cannot be rebuilt live
@@ -13069,8 +13074,7 @@ fn enclosing_fn_names(text: &str, marker: &str) -> Vec<String> {
     out
 }
 
-/// **Every download nobody asked for asks `SharedState::automatic_downloads_wait`
-/// first** — a fresh laptop took 1.4 GB over a phone's tether in five minutes
+/// **Every download nobody asked for asks `SharedState::metered_hold` first** — a fresh laptop took 1.4 GB over a phone's tether in five minutes
 /// (field report 2026-10-15; `daemon::metered`). A new place that starts a
 /// download on its own must ask it, or be listed here with why it need not.
 #[test]
@@ -13119,19 +13123,135 @@ fn every_automatic_download_asks_whether_the_connection_is_metered() {
                 continue;
             }
             let body = fn_body(&text, &format!("fn {name}(")).unwrap_or("");
-            let asks = body.find("automatic_downloads_wait()");
+            let asks = body.find("metered_hold().await");
             let starts_at = [".trigger_download(", "AcquisitionCommand::Acquire {"]
                 .iter()
                 .filter_map(|m| body.find(m))
                 .min();
             if !matches!((asks, starts_at), (Some(a), Some(s)) if a < s) {
                 offenders.push(format!(
-                    "{rel}: `{name}` starts a download without asking `automatic_downloads_wait()` first"
+                    "{rel}: `{name}` starts a download without asking `metered_hold()` first"
                 ));
             }
         }
     }
     assert!(offenders.is_empty(), "{offenders:#?}");
+}
+
+/// The dispatcher's arms that take a peer's work (a per-peer slot) without
+/// asking the rules for a request that has not started — where the metered
+/// hold (#277) and the reserve for running requests (#123) are answered.
+fn peer_work_arms_without_admission(dispatch: &str) -> Vec<String> {
+    let mut arms: Vec<(String, String)> = Vec::new();
+    for line in dispatch.lines() {
+        let t = line.trim_start();
+        let t = t.strip_prefix("msg @ ").unwrap_or(t);
+        if let Some(rest) = t.strip_prefix("SwarmMessage::") {
+            if t.trim_end().ends_with("=> {") {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                arms.push((name, String::new()));
+                continue;
+            }
+        }
+        if let Some((_, body)) = arms.last_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    arms.into_iter()
+        .filter(|(_, body)| {
+            (body.contains("PeerWorkSlot::try_take(") || body.contains("StreamWorkSlot::try_take("))
+                && !body.contains("admits_a_new_request(")
+                && !body.contains("admit_own_forward(")
+        })
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// **Every upload a peer starts asks whether this node holds back on a
+/// metered connection** (#277, `daemon::metered`): new work for a peer (the
+/// dispatcher's arms that take a peer's work go through
+/// `admits_a_new_request`, whose metered answer is a required argument), the
+/// parts and prompt-cache snapshots a peer asks for (answered as a miss), and
+/// the capability that tells planners to skip this node. Delivery Optimization
+/// stops the same uploads on a metered connection; a tester paid for 9 GB over
+/// a phone's tether (field report 2026-10-15).
+#[test]
+fn every_upload_a_peer_starts_asks_whether_the_connection_is_metered() {
+    assert_eq!(
+        peer_work_arms_without_admission(
+            "    SwarmMessage::Planted(req) => {\n        let s = PeerWorkSlot::try_take(&c, &p, 4);\n    }\n    SwarmMessage::LayerForward(f) => {\n        PeerWorkSlot::try_take(&c, &p, 4);\n        admit_own_forward(&f, s, &sem, 8, hold);\n    }\n"
+        ),
+        ["Planted"],
+        "the scan sees an arm that takes a peer's work without the admission rules"
+    );
+    let dispatch =
+        std::fs::read_to_string("src/daemon/dispatch/mod.rs").expect("read dispatch/mod.rs");
+    let live = dispatch.split("#[cfg(test)]").next().unwrap_or(&dispatch);
+    assert_eq!(
+        peer_work_arms_without_admission(live),
+        Vec::<String>::new(),
+        "an arm takes a peer's work without `admits_a_new_request` — a new request \
+         would be served on a metered connection"
+    );
+    let arms = live.matches("PeerWorkSlot::try_take(").count();
+    assert!(
+        arms >= 3,
+        "the scan found {arms} places that take a peer's work"
+    );
+
+    let requests =
+        std::fs::read_to_string("src/network/manager/requests.rs").expect("read requests.rs");
+    for (arm, next, serves) in [
+        (
+            "SwarmRequest::ShardTransfer(",
+            "SwarmRequest::PrefixKvFetch(",
+            "prepare_shard_read(",
+        ),
+        (
+            "SwarmRequest::PrefixKvFetch(",
+            "SwarmRequest::TensorPayload(",
+            "pending_prefix_kv_inbound.len()",
+        ),
+    ] {
+        let start = requests
+            .find(arm)
+            .unwrap_or_else(|| panic!("{arm} moved — re-point this guard"));
+        let end = requests[start..]
+            .find(next)
+            .map(|e| start + e)
+            .unwrap_or_else(|| panic!("{next} moved — re-point this guard"));
+        let body = &requests[start..end];
+        let asks = body.find("metered_hold_now()");
+        let serves_at = body.find(serves);
+        assert!(
+            matches!((asks, serves_at), (Some(a), Some(s)) if a < s),
+            "{arm} must ask `metered_hold_now()` before it serves ({serves})"
+        );
+    }
+
+    let monitor = std::fs::read_to_string("src/health/monitor.rs").expect("read monitor.rs");
+    let body = method_body(&monitor, "    async fn broadcast_capabilities(")
+        .expect("broadcast_capabilities was renamed — re-point this guard");
+    let setter = statements(body)
+        .into_iter()
+        .find(|(_, s)| s.contains("can_serve_inference:"))
+        .map(|(_, s)| s)
+        .expect("broadcast_capabilities must set `can_serve_inference`");
+    // The field's own expression, not the whole struct literal around it.
+    let field = setter
+        .split("can_serve_inference:")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .unwrap_or("");
+    assert!(
+        field.contains("metered_hold"),
+        "the capability must withdraw inference on a metered connection, or \
+         planners keep choosing a node that refuses: `can_serve_inference:{field}`"
+    );
 }
 
 /// The names that read this computer's memory budget — an `nvidia-smi` on a

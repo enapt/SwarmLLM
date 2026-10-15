@@ -532,7 +532,8 @@ pub async fn diagnostics(
         );
     }
     // What the system says about the connection NOW, beside the setting and
-    // whether automatic downloads wait — so a report from a tethered laptop
+    // whether this node holds back (automatic downloads, work and parts for
+    // other computers) — so a report from a tethered laptop
     // shows what detection saw (`daemon::metered`, field report 2026-10-15).
     {
         let said = tokio::task::spawn_blocking(crate::daemon::metered::read)
@@ -542,8 +543,8 @@ pub async fn diagnostics(
         let setting = format!("{:?}", ss.cfg().auto_manage.on_metered_connection).to_lowercase();
         let _ = writeln!(
             out,
-            "metered connection: {said}  setting: {setting}  automatic downloads waiting: {}",
-            ss.models.metered.waiting()
+            "metered connection: {said}  setting: {setting}  holding back downloads and work for peers: {}",
+            ss.models.metered.holding_back()
         );
     }
 
@@ -1711,8 +1712,9 @@ pub async fn update_config(
         );
     }
     if let Some(metered) = body.auto_manage_on_metered {
-        // Read by `SharedState::automatic_downloads_wait` before the next
-        // automatic download; wake the pass so a pause lifted takes effect now.
+        // Read by `SharedState::metered_hold` before the next automatic
+        // download, and by `metered_hold_now` at once for peers' requests; wake
+        // the pass so a pause lifted takes effect now.
         config.auto_manage.on_metered_connection = metered;
         state.shared_state.models.auto_manage_notify.notify_one();
     }
@@ -2091,7 +2093,7 @@ pub struct ConfigUpdate {
     pub auto_manage_shards: Option<bool>,
     pub auto_manage_max_storage_mb: Option<u64>,
     /// `auto` / `pause` / `allow` — `AutoManageConfig::on_metered_connection`.
-    pub auto_manage_on_metered: Option<crate::config::MeteredDownloads>,
+    pub auto_manage_on_metered: Option<crate::config::MeteredConnection>,
     pub shard_size_mb: Option<u64>,
     pub max_batch_size: Option<u32>,
     pub batch_timeout_ms: Option<u64>,

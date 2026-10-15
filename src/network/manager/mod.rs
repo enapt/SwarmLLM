@@ -740,6 +740,10 @@ impl NetworkManager {
 
         let keypair_for_behaviour = keypair.clone();
         let relay_cfg = relay_server_config;
+        let relay_accepts: crate::network::relay::RelayGate = {
+            let state = shared_state.clone();
+            std::sync::Arc::new(move || state.relay_forwarding_enabled())
+        };
         let enable_mdns = config.network.enable_mdns;
         let enable_autonat = config.network.enable_autonat;
         let enable_dcutr = config.network.enable_dcutr;
@@ -799,6 +803,7 @@ impl NetworkManager {
                         &keypair_for_behaviour,
                         relay_behaviour,
                         relay_cfg.as_ref(),
+                        relay_accepts,
                         enable_mdns,
                         enable_autonat,
                         enable_dcutr,
@@ -1476,9 +1481,15 @@ impl NetworkManager {
                         // has peers), and — when short on relay connections —
                         // query the DHT for more relays to dial, so the relay
                         // role decentralizes past the bootstrap anchor.
-                        if self.is_relay_forwarder() && !self.relay_provider_registered {
+                        // And withdraw it when this node stops relaying, or
+                        // peers keep finding a relay that refuses them.
+                        let relaying = self.is_relay_forwarder();
+                        if relaying && !self.relay_provider_registered {
                             self.relay_provider_registered =
                                 discovery::start_providing_relay_service(&mut self.swarm);
+                        } else if !relaying && self.relay_provider_registered {
+                            discovery::stop_providing_relay_service(&mut self.swarm);
+                            self.relay_provider_registered = false;
                         }
                         if self.count_connected_relays() < MIN_RELAY_CONNECTIONS {
                             self.pending_relay_provider_query =

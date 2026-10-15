@@ -4315,3 +4315,102 @@ private-LAN addresses stay too, less Docker's default bridge
 by the internet or relay route (pre-release security review, 2026-10-15).
 `listen_multiaddrs` itself is unchanged — peers, redial and diagnostics still
 see every address. Test `an_invite_code_carries_only_addresses_a_joiner_can_use`.
+
+## A metered connection holds back what this node uploads for others (2026-10-15, FUTURE_WORK #277)
+
+v0.3.239 paused the downloads nobody asked for on a metered connection
+(`SharedState::metered_hold`, then `automatic_downloads_wait`). Nothing else
+read it: parts served to peers, layer and whole-model work for peers and the
+relay all went on over a phone's tether — the upload half of the same
+person's bill (field report 2026-10-15).
+
+**Prior art.** Windows Delivery Optimization stops uploading to internet
+peers on a metered connection and keeps serving LAN peers; SyncTrayzor pauses
+every device while the network is metered; Microsoft's `ConnectionCost`
+guidance defers optional transfers on `Fixed`/`Variable`. All hold back the
+optional direction and leave what the owner asked for alone — the shape kept
+here. Delivery Optimization's LAN exemption was NOT kept: `PeerInfo::is_lan_peer`
+cannot tell a peer on the same Wi-Fi from one over a VPN (Tailscale's
+`100.64/10`, a WireGuard `10.x`), and a wrong yes spends the metered link.
+
+**One answer, read two ways.** `metered_hold` (async) asks the system —
+NetworkManager, or the connection cost through PowerShell — at most once per
+`READING_ANSWERS_FOR` (60 s). The network and dispatch loops and the
+capability must never wait on a subprocess, so they read
+`metered_hold_now()`: the setting at once (`pause` / `allow`), the last
+reading on `auto`. The health monitor's capability tick refreshes the reading
+off the loop. While it holds:
+
+- **The capability withdraws inference** — `can_serve_inference = false`, so a
+  planner skips this node the way it skips one in an outage. Older builds read
+  that field already: no new wire field, no feature bit.
+- **A request that comes anyway is refused out loud** —
+  `dispatch::admits_a_new_request(available, total, metered_hold)`, the
+  metered answer a REQUIRED argument, so no peer-work path can be added that
+  forgets it. The refusal is `ServiceUnavailable`-worded (`metered_refusal`),
+  which the coordinator's existing path reads as "bar this node for the
+  request and re-plan" with no penalty. It covers the window between the hold
+  starting and the next capability reaching the requester.
+- **Parts and prompt-cache snapshots are answered as a miss** — ShardTransfer
+  with `ShardResponse::empty()`, PrefixKvFetch declined — so the requester
+  fetches from another holder at once.
+- **Relaying stops** — `relay_forwarding_enabled` adds the hold to the
+  automatic donation (below).
+
+Work already running for a peer finishes (a split mid-reply is not broken off);
+the owner's own requests and downloads, repairs and gossip go on (throttling
+gossip can partition a node, #91 (3)). An explicit `relay_forwarding = true`
+or anchor mode is the owner's choice and is not held back.
+
+**Measured** (2026-10-15, two nodes in an `unshare -rn` namespace, TinyLlama
+held only by A, A on `pause`):
+
+- B's chat while A held back: 503 in 7.6 s, A received **0**
+  `RemoteGenerateRequest` — the capability alone kept B away.
+- A switched to `allow`: B's chat 200 in 3.7 s through A, and A's "resumed"
+  toast logged once.
+- A back on `pause`, B's chat sent AT ONCE (before the capability tick): A
+  logged `RemoteGenerateRequest refused — this connection is metered` and B
+  had its answer in 17 ms; after the tick B's chat never reached A (A's
+  request count unchanged, 2 → 2).
+- B asked to add the model while A held back: A answered both part requests
+  `Not serving a part — this connection is metered` (2 of 2), B held 0 parts.
+  Control (A allowing from the start): B received both parts from A at once (109 MB of each within 90 s over loopback). After a refusal B sends that part to the model's origin (`shard_p2p_failed`, the existing path for every empty answer) until it lands, so in the probe's namespace, with no internet, it did not come back to A once A allowed again; on the internet the origin serves it, and offline mode drops the entry back to the peers (`pending_fetch_can_proceed`).
+
+Tests: `a_metered_connection_refuses_new_work_and_lets_running_work_finish`
+(red with the hold removed from `admits_a_new_request`),
+`the_hold_is_read_without_asking_and_the_setting_answers_at_once`,
+`this_node_holds_back_on_a_metered_connection_and_the_owner_is_told_once`.
+Guard `every_upload_a_peer_starts_asks_whether_the_connection_is_metered`:
+every dispatcher arm that takes peer work admits through
+`admits_a_new_request` (planted self-test), ShardTransfer and PrefixKvFetch
+ask before the read, and the capability's `can_serve_inference` expression
+names the hold.
+
+### Relaying: three defects found beside it
+
+Wiring the hold into relaying found the relay switch did less than it said:
+
+1. `relay_forwarding_enabled` read `relay_forwarding` and
+   `relay_forwarding_auto` from the BOOT snapshot (#281's shape), so turning
+   relaying off in Settings changed nothing until a restart. Now `cfg()`;
+   `.config.network.relay_forwarding` joined the live-read guard's list. Test
+   `relay_donation_follows_the_live_setting_and_the_metered_hold` (red with
+   the boot read restored).
+2. The discovery tick registered the DHT relay-service record when relaying
+   began and never withdrew it. Now the falling edge calls
+   `discovery::stop_providing_relay_service`. kad's `stop_providing` is LOCAL:
+   records already stored on other nodes expire on their own (48 h TTL,
+   republished every 12 h only while we still provide).
+3. The circuit server (`relay::Behaviour`, always in the behaviour) accepted
+   every reservation and circuit whatever the predicate said — the predicate
+   only steered what we advertised. libp2p-relay 0.21 asks every
+   `RateLimiter` on each reservation and each circuit request;
+   `network::relay::OnlyWhileRelaying` answers with the live predicate, and a
+   refusal reaches the peer as `RESOURCE_LIMIT_EXCEEDED`, which its relay
+   client treats as "try another relay".
+
+**Left as it is**: a circuit already open runs out its own limits (ours:
+1 h, 1 GB — `network::relay`), and the same for a split already running. A
+network switch drops both with the connection; only a link that turns metered
+in place (Windows "set as metered", or `pause`) leaves one to run out.

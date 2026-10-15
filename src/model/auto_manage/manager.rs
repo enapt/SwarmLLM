@@ -949,7 +949,7 @@ impl AutoShardManager {
         // Asked last, just before the transfer, and only when there is one to
         // start: a tester's laptop took 1.4 GB over a phone's tether in five
         // minutes (field report 2026-10-15; `daemon::metered`).
-        if self.shared_state.automatic_downloads_wait().await {
+        if self.shared_state.metered_hold().await {
             tracing::info!(
                 count = selected.len(),
                 "AutoShardManager: not downloading — this connection is metered"
@@ -1346,7 +1346,7 @@ mod tests {
             hf_watcher_enabled: false,
             wishlist_gossip_publish: false,
             auto_switch_quants: false,
-            on_metered_connection: crate::config::MeteredDownloads::Auto,
+            on_metered_connection: crate::config::MeteredConnection::Auto,
         };
         assert_eq!(config.max_shards, 0); // unlimited
     }

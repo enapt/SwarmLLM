@@ -46,6 +46,32 @@ impl Default for RelayServerConfig {
     }
 }
 
+/// Whether this node relays for others NOW — `SharedState::relay_forwarding_enabled`,
+/// handed to the circuit relay server as [`OnlyWhileRelaying`].
+pub type RelayGate = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// A rate limiter that is a switch: the circuit relay server accepts a new
+/// reservation or circuit only while the gate says this node relays for
+/// others.
+///
+/// libp2p fixes a relay server's config when the swarm is built, while the
+/// answer changes as the node runs — the owner turns donation off in Settings,
+/// the node stops being reachable from the internet, or its connection becomes
+/// metered (#277). Until 2026-10-15 nothing connected them: a node whose owner
+/// had declined relaying stopped ADVERTISING it, but still accepted
+/// reservations and opened circuits of up to an hour and 1 GB for any peer that
+/// already knew it. The server asks every rate limiter at every reservation and
+/// circuit request (`libp2p-relay` 0.21, `Behaviour::on_connection_handler_event`),
+/// and a refusal is `RESOURCE_LIMIT_EXCEEDED`, so the peer goes to another
+/// relay. A circuit already open runs out its own limits.
+pub struct OnlyWhileRelaying(pub RelayGate);
+
+impl libp2p::relay::RateLimiter for OnlyWhileRelaying {
+    fn try_next(&mut self, _peer: PeerId, _addr: &Multiaddr, _now: std::time::Instant) -> bool {
+        (self.0)()
+    }
+}
+
 /// Build a relay server configuration for libp2p.
 ///
 /// Returns `None` if relay serving is disabled.

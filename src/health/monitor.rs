@@ -1019,6 +1019,18 @@ impl HealthMonitor {
         // the whole reason this is a withdrawal of inference and not of the
         // node (docs/FUTURE_WORK.md #89, #90).
         let outage = self.shared_state.inference_outage();
+        // A metered connection (#277, `daemon::metered`): no new work for
+        // other computers, so say so and planners skip this node the way they
+        // skip one that cannot run a request — a peer that asked anyway would
+        // be refused. Read without waiting; the system is asked off this loop,
+        // and a changed answer is news at the next tick (`capability_news`).
+        let metered_hold = self.shared_state.metered_hold_now();
+        {
+            let state = self.shared_state.clone();
+            tokio::spawn(async move {
+                state.metered_hold().await;
+            });
+        }
         if let Some(reason) = outage {
             tracing::warn!(
                 target: "swarmllm::health::monitor",
@@ -1269,11 +1281,13 @@ impl HealthMonitor {
             // nothing and serves nothing by design, which looks identical to a
             // broken node in a peer list.
             anchor_mode: self.shared_state.config.node.anchor_mode,
-            // Whether we can run a request at all, from the one predicate.
-            // Rebuilt every broadcast like the rest of this struct, so the
-            // withdrawal reverses itself the moment the condition clears — a
-            // worker starting again, or the dispatcher resuming.
-            can_serve_inference: outage.is_none(),
+            // Whether we can run a request at all, from the one predicate —
+            // and whether we will, on a metered connection. Rebuilt every
+            // broadcast like the rest of this struct, so the withdrawal
+            // reverses itself the moment the condition clears — a worker
+            // starting again, the dispatcher resuming, the connection no
+            // longer metered.
+            can_serve_inference: outage.is_none() && !metered_hold,
             // What is LOADED, as distinct from what is on disk above. A peer
             // pricing our spare capacity needs to know how much of a model we
             // have already paid for; without it the only signal is "did this

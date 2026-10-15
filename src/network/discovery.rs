@@ -436,6 +436,19 @@ pub fn start_providing_relay_service(swarm: &mut Swarm<SwarmBehaviour>) -> bool 
     }
 }
 
+/// Stop announcing this node as a relay-service provider — it no longer
+/// relays for others (Settings, lost reachability, a metered connection).
+/// Local, as Kademlia's `stop_providing` is: our record is no longer
+/// republished, and the copies other nodes hold expire on their own; until
+/// then the circuit relay server refuses (`relay::OnlyWhileRelaying`).
+pub fn stop_providing_relay_service(swarm: &mut Swarm<SwarmBehaviour>) {
+    swarm
+        .behaviour_mut()
+        .kademlia
+        .stop_providing(&relay_service_key());
+    tracing::info!("No longer registered as a DHT relay-service provider");
+}
+
 /// Query the DHT for relay-service providers. Results arrive as a
 /// `GetProviders` event; the caller tracks the returned `QueryId` to recognize
 /// them and dial the discovered relays.

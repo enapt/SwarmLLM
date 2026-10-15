@@ -1,13 +1,12 @@
 //! Is this computer's internet connection metered — charged by the amount of
 //! data, like a phone's hotspot or a mobile plan?
 //!
-//! Asked by the automatic download pass just before it fetches
-//! (`AutoShardManager::evaluate_and_download`), as Microsoft tells an app to:
-//! re-check the cost just before a sizable transfer, and gate large optional
-//! downloads on a `Fixed` or `Variable` connection
-//! (`Windows.Networking.Connectivity.ConnectionCost`, "adaptive behavior").
-//! A tester's laptop took 1.4 GB over a phone's tether in five minutes, and
-//! 9 GB in its first 44 (field report 2026-10-15).
+//! Asked before this node does anything over the connection on its own, as
+//! Microsoft tells an app to: re-check the cost just before a sizable
+//! transfer, and gate large optional transfers on a `Fixed` or `Variable`
+//! connection (`Windows.Networking.Connectivity.ConnectionCost`, "adaptive
+//! behavior"). A tester's laptop took 1.4 GB over a phone's tether in five
+//! minutes, and 9 GB in its first 44 (field report 2026-10-15).
 //!
 //! - **Linux**: NetworkManager's `Metered` property on its manager object — the
 //!   primary connection's — where `YES` (1) and `GUESS_YES` (3) are metered.
@@ -24,18 +23,43 @@
 //! Both readings run a program through `BoundedCommand`: bounded, never two at
 //! once, and off the runtime worker.
 //!
-//! **`SharedState::automatic_downloads_wait` is the one answer** to "may this
-//! node start a download nobody asked for now?" — asked by every path that
-//! starts one on its own: the download pass (`evaluate_and_download`), which
-//! the rebalancer wakes when a holder leaves rather than fetching itself. Guard:
-//! `every_automatic_download_asks_whether_the_connection_is_metered`. What it
-//! leaves alone, deliberately: a download the owner asks for, a part already
-//! held being repaired, and a download already under way.
+//! **`SharedState::metered_hold` is the one answer** to "does this node hold
+//! back, now, what it does over its connection on its own?" Two directions:
+//!
+//! - **Downloads nobody asked for** — asked just before one starts, by every
+//!   path that starts one on its own: the download pass
+//!   (`evaluate_and_download`), which the rebalancer wakes when a holder leaves
+//!   rather than fetching itself. Guard:
+//!   `every_automatic_download_asks_whether_the_connection_is_metered`.
+//! - **Uploads to other computers** (#277) — new work for a peer and the model
+//!   parts it asks for. The capability says this node takes no inference work
+//!   (`can_serve_inference`), so planners skip it the way they skip a node
+//!   that cannot run one; a request that comes anyway, from a peer still
+//!   holding the last capability, is refused out loud
+//!   (`daemon::dispatch::admits_a_new_request`, whose answer is a REQUIRED
+//!   argument); a part request is answered as if the part were not here, so
+//!   the peer fetches it from another holder. These run on the network and
+//!   dispatch loops, which never wait for a program: they read the last answer
+//!   ([`SharedState::metered_hold_now`]), which the health monitor's
+//!   capability tick keeps fresh. Guard:
+//!   `every_upload_a_peer_starts_asks_whether_the_connection_is_metered`.
+//!   Windows' Delivery Optimization, the nearest peer-to-peer prior art, stops
+//!   sending update pieces to internet peers on a metered connection the same
+//!   way.
+//!
+//! What it leaves alone, deliberately: a download the owner asks for, a part
+//! already held being repaired, a transfer or a peer's request already under
+//! way, the owner's own requests, and gossip (throttling it can partition a
+//! node — FUTURE_WORK #91 (3)). Peers on the local network are NOT exempted,
+//! as Delivery Optimization exempts them: "on our LAN" here
+//! (`PeerInfo::is_lan_peer`) is decided from a private address or a short
+//! round trip, and a peer at a private address over a VPN such as
+//! Tailscale crosses the metered link all the same.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::config::MeteredDownloads;
+use crate::config::MeteredConnection;
 use crate::daemon::state::{ActivityEvent, SharedState};
 #[cfg(any(target_os = "linux", windows))]
 use crate::model::auto_manage::vram::BoundedCommand;
@@ -149,72 +173,85 @@ pub struct MeteredWatch {
     reading: tokio::sync::Mutex<Option<(Instant, Metered)>>,
     /// The last thing the system DID say, yes or no. An unknown reading
     /// answers with it: a check that times out on a hotspot is not a reason to
-    /// start downloading.
+    /// start downloading. Read without asking by
+    /// [`SharedState::metered_hold_now`].
     last_known: AtomicBool,
-    /// Whether automatic downloads wait now — so the owner is told once per
-    /// change, not once per pass.
-    waiting: AtomicBool,
+    /// Whether this node held back when last asked — so the owner is told once
+    /// per change, not once per pass.
+    holding_back: AtomicBool,
 }
 
 impl MeteredWatch {
-    /// Whether automatic downloads were waiting when last asked — for display
-    /// (the diagnostics report); a decision asks
-    /// `SharedState::automatic_downloads_wait`.
-    pub fn waiting(&self) -> bool {
-        self.waiting.load(Ordering::Relaxed)
+    /// Whether this node was holding back when last asked — for display (the
+    /// diagnostics report); a decision asks `SharedState::metered_hold` or
+    /// `SharedState::metered_hold_now`.
+    pub fn holding_back(&self) -> bool {
+        self.holding_back.load(Ordering::Relaxed)
     }
 }
 
 impl SharedState {
-    /// May this node start a download nobody asked for, now? `true` = wait.
-    /// The one answer (see the module); asked just before such a download
-    /// starts, as Microsoft's guidance for a metered connection says.
-    pub async fn automatic_downloads_wait(&self) -> bool {
+    /// Does this node hold back, now, what it does over its connection on its
+    /// own — downloads nobody asked for, and new work and parts for other
+    /// computers? `true` = hold back. The one answer (see the module). Asks the
+    /// system at most once a [`READING_ANSWERS_FOR`]: just before an automatic
+    /// download starts, as Microsoft's guidance for a metered connection says,
+    /// and from the health monitor's capability tick, which keeps
+    /// [`Self::metered_hold_now`] fresh.
+    pub async fn metered_hold(&self) -> bool {
         let policy = self.cfg().auto_manage.on_metered_connection;
-        self.automatic_downloads_wait_asking(policy, read).await
+        self.metered_hold_asking(policy, read).await
     }
 
-    /// [`Self::automatic_downloads_wait`], asking the system with `ask`.
-    pub(crate) async fn automatic_downloads_wait_asking(
+    /// [`Self::metered_hold`] without asking the system: the setting, and on
+    /// `auto` the last thing the system said. For a path that must not wait
+    /// for a program — a peer's request arriving on the network or dispatch
+    /// loop, and the capability this node advertises.
+    pub fn metered_hold_now(&self) -> bool {
+        hold_under(
+            self.cfg().auto_manage.on_metered_connection,
+            &self.models.metered,
+        )
+    }
+
+    /// [`Self::metered_hold`], asking the system with `ask`.
+    pub(crate) async fn metered_hold_asking(
         &self,
-        policy: MeteredDownloads,
+        policy: MeteredConnection,
         ask: fn() -> Metered,
     ) -> bool {
         let watch = &self.models.metered;
-        let wait = match policy {
-            MeteredDownloads::Allow => false,
-            MeteredDownloads::Pause => true,
-            MeteredDownloads::Auto => {
-                let mut reading = watch.reading.lock().await;
-                let metered = match *reading {
-                    Some((at, metered)) if at.elapsed() < READING_ANSWERS_FOR => metered,
-                    _ => {
-                        let metered = tokio::task::spawn_blocking(ask)
-                            .await
-                            .unwrap_or(Metered::Unknown);
-                        *reading = Some((Instant::now(), metered));
-                        metered
-                    }
-                };
-                match metered {
-                    Metered::Yes => watch.last_known.store(true, Ordering::Relaxed),
-                    Metered::No => watch.last_known.store(false, Ordering::Relaxed),
-                    Metered::Unknown => {}
+        if policy == MeteredConnection::Auto {
+            let mut reading = watch.reading.lock().await;
+            let metered = match *reading {
+                Some((at, metered)) if at.elapsed() < READING_ANSWERS_FOR => metered,
+                _ => {
+                    let metered = tokio::task::spawn_blocking(ask)
+                        .await
+                        .unwrap_or(Metered::Unknown);
+                    *reading = Some((Instant::now(), metered));
+                    metered
                 }
-                watch.last_known.load(Ordering::Relaxed)
+            };
+            match metered {
+                Metered::Yes => watch.last_known.store(true, Ordering::Relaxed),
+                Metered::No => watch.last_known.store(false, Ordering::Relaxed),
+                Metered::Unknown => {}
             }
-        };
-        if watch.waiting.swap(wait, Ordering::Relaxed) != wait {
-            let (kind, message) = if wait {
+        }
+        let hold = hold_under(policy, watch);
+        if watch.holding_back.swap(hold, Ordering::Relaxed) != hold {
+            let (kind, message) = if hold {
                 (
                     "metered_paused",
-                    "Automatic downloads paused: this connection is metered. \
-                     Models you download yourself still download.",
+                    "Automatic downloads and work for other computers are paused while \
+                     this connection is metered. Your own chats, and models you download \
+                     yourself, still work.",
                 )
             } else {
                 (
                     "metered_resumed",
-                    "Automatic downloads resumed: this connection is no longer metered.",
+                    "Automatic downloads and work for other computers have resumed.",
                 )
             };
             tracing::info!(?policy, "{message}");
@@ -223,7 +260,16 @@ impl SharedState {
                     .with_toast("info", 8000),
             );
         }
-        wait
+        hold
+    }
+}
+
+/// The hold under `policy`, from what the system last said.
+fn hold_under(policy: MeteredConnection, watch: &MeteredWatch) -> bool {
+    match policy {
+        MeteredConnection::Allow => false,
+        MeteredConnection::Pause => true,
+        MeteredConnection::Auto => watch.last_known.load(Ordering::Relaxed),
     }
 }
 
@@ -255,32 +301,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_downloads_wait_on_a_metered_connection_and_the_owner_is_told_once() {
+    async fn this_node_holds_back_on_a_metered_connection_and_the_owner_is_told_once() {
         let state = state();
         let metered = || Metered::Yes;
         assert!(
             state
-                .automatic_downloads_wait_asking(MeteredDownloads::Auto, metered)
+                .metered_hold_asking(MeteredConnection::Auto, metered)
                 .await
         );
         // The reading answers for a minute: the system is not asked again.
         assert!(
             state
-                .automatic_downloads_wait_asking(MeteredDownloads::Auto, || panic!("asked again"))
+                .metered_hold_asking(MeteredConnection::Auto, || panic!("asked again"))
                 .await
         );
         assert_eq!(told(&state), ["metered_paused"], "told once, not per pass");
         // The owner says downloads may go ahead whatever the connection.
         assert!(
             !state
-                .automatic_downloads_wait_asking(MeteredDownloads::Allow, metered)
+                .metered_hold_asking(MeteredConnection::Allow, metered)
                 .await
         );
         assert_eq!(told(&state), ["metered_paused", "metered_resumed"]);
         *state.models.metered.reading.lock().await = None;
         assert!(
             !state
-                .automatic_downloads_wait_asking(MeteredDownloads::Auto, || Metered::No)
+                .metered_hold_asking(MeteredConnection::Auto, || Metered::No)
                 .await
         );
     }
@@ -291,29 +337,60 @@ mod tests {
         let unknown = || Metered::Unknown;
         assert!(
             !state
-                .automatic_downloads_wait_asking(MeteredDownloads::Auto, unknown)
+                .metered_hold_asking(MeteredConnection::Auto, unknown)
                 .await,
             "macOS, no NetworkManager"
         );
         assert!(
             state
-                .automatic_downloads_wait_asking(MeteredDownloads::Pause, unknown)
+                .metered_hold_asking(MeteredConnection::Pause, unknown)
                 .await,
             "the setting for a system that cannot tell"
         );
         *state.models.metered.reading.lock().await = None;
         assert!(
             state
-                .automatic_downloads_wait_asking(MeteredDownloads::Auto, || Metered::Yes)
+                .metered_hold_asking(MeteredConnection::Auto, || Metered::Yes)
                 .await
         );
         // A hotspot whose next check times out is still a hotspot.
         *state.models.metered.reading.lock().await = None;
         assert!(
             state
-                .automatic_downloads_wait_asking(MeteredDownloads::Auto, unknown)
+                .metered_hold_asking(MeteredConnection::Auto, unknown)
                 .await
         );
+    }
+
+    /// A peer's request and the capability read the last answer without
+    /// asking the system: the network and dispatch loops never wait for a
+    /// program. The owner's setting answers at once.
+    #[tokio::test]
+    async fn the_hold_is_read_without_asking_and_the_setting_answers_at_once() {
+        let state = state();
+        assert!(!state.metered_hold_now(), "nothing said yet: serve");
+        assert!(
+            state
+                .metered_hold_asking(MeteredConnection::Auto, || Metered::Yes)
+                .await
+        );
+        assert!(state.metered_hold_now(), "the system said metered");
+        let mut config = (**state.cfg()).clone();
+        config.auto_manage.on_metered_connection = MeteredConnection::Allow;
+        state.apply_live_config(config.clone());
+        assert!(!state.metered_hold_now(), "the owner allows it");
+        config.auto_manage.on_metered_connection = MeteredConnection::Pause;
+        state.apply_live_config(config.clone());
+        assert!(state.metered_hold_now(), "the owner pauses it");
+        config.auto_manage.on_metered_connection = MeteredConnection::Auto;
+        state.apply_live_config(config);
+        *state.models.metered.reading.lock().await = None;
+        assert!(
+            !state
+                .metered_hold_asking(MeteredConnection::Auto, || Metered::No)
+                .await
+        );
+        assert!(!state.metered_hold_now(), "back on an unmetered connection");
     }
 
     #[test]

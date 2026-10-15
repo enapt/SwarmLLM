@@ -240,6 +240,14 @@ A gossip publish that succeeded says nothing about who received it. A pool join 
 
 → `docs/invariants/network.md` § "A request someone is waiting on is sent until it is answered"
 
+## A metered connection holds back what this node uploads for others (2026-10-15, #277)
+
+**`SharedState::metered_hold`** answers for uploads too; the network and dispatch loops and the capability read **`SharedState::metered_hold_now`** and never ask the system (the health monitor's tick refreshes it off-loop). While it holds: the capability withdraws inference (`can_serve_inference`), a new request that comes anyway is refused out loud through `dispatch::admits_a_new_request` (its metered answer REQUIRED; `ServiceUnavailable`, so the coordinator re-plans without a penalty), parts and prompt-cache snapshots are answered as a miss. Work already running, the owner's requests and gossip go on. No LAN exemption: `is_lan_peer` cannot tell a peer over a VPN. Guard: `every_upload_a_peer_starts_asks_whether_the_connection_is_metered`.
+
+**Relaying**: **`SharedState::relay_forwarding_enabled`** is the one answer (read live; the hold stops the AUTOMATIC donation only). It reaches the server itself — `network::relay::OnlyWhileRelaying`, a required `build_behaviour` argument, refuses every reservation and circuit while it is false — and its DHT record is withdrawn on the falling edge (`discovery::stop_providing_relay_service`). Gotcha #861.
+
+→ `docs/invariants/network.md` § "A metered connection holds back what this node uploads for others"
+
 ## Centralised Wire-Format Helpers
 
 Single sources of truth for invariants that silently break at the wire if duplicated. Read the evidence before changing one.

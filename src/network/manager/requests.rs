@@ -255,6 +255,26 @@ impl NetworkManager {
                     return;
                 }
 
+                // This node holds back on a metered connection (#277,
+                // `daemon::metered`): a part would go up the metered link, so
+                // the peer is answered as if we had none and fetches it from
+                // another holder (`retry_shard_or_fallback` — no penalty). Our
+                // holder claim stays: the copy is still here, and is served
+                // again once the connection is not metered.
+                if self.shared_state.metered_hold_now() {
+                    tracing::debug!(
+                        %peer,
+                        model = %shard_req.shard_id.model_id,
+                        index = shard_req.shard_id.index,
+                        "Not serving a part — this connection is metered"
+                    );
+                    let _ = self.swarm.behaviour_mut().request_response.send_response(
+                        channel,
+                        SwarmResponse::ShardData(crate::types::ShardResponse::empty()),
+                    );
+                    return;
+                }
+
                 // SEC: do the disk read + bandwidth-throttle sleep OFF the
                 // swarm event loop (gotcha #11). Awaiting them inline
                 // suspends ALL network activity for the duration — at a
@@ -381,9 +401,13 @@ impl NetworkManager {
                 // A model kept on this computer shares nothing of its prompts,
                 // whatever the node-wide setting says (#251).
                 let kept = self.shared_state.kept_on_this_computer(&req.model_id);
-                if !is_authenticated || !sharing_enabled || kept {
+                // A snapshot is megabytes up a metered link (#277).
+                let metered = self.shared_state.metered_hold_now();
+                if !is_authenticated || !sharing_enabled || kept || metered {
                     if !is_authenticated {
                         tracing::warn!(%peer, "PrefixKvFetch from unauthenticated peer — rejecting");
+                    } else if metered {
+                        tracing::debug!(%peer, "PrefixKvFetch declined — this connection is metered");
                     } else if kept {
                         tracing::debug!(
                             %peer,

@@ -16604,3 +16604,29 @@ Turning off one path at a time did not stop the stall (watcher off: probe still 
 `SWARMLLM_CANONICAL_UPLOADS=0`: watcher still ran). Next: per-thread syscall sampling of the
 coordinator across the window (`~/swarmllm-gate-0235/thread_sample2.py --spawn`, which must be the
 rig's ancestor to read `/proc/<tid>/syscall`), then move the blocking call off the runtime.
+
+### #277 — closed 2026-10-15 (the entry as it stood when closed, word for word)
+
+`P2` · network · **OPEN** — 2026-10-15 (after field report 2026-10-15) · history: `daemon::metered`, #91
+
+Since v0.3.239 a metered connection pauses the downloads nobody asked for
+(`SharedState::automatic_downloads_wait`, the one answer, guarded). Nothing else reads it: parts
+served to peers (`max_bandwidth_mbps` shapes them, 0 = automatic), layer and whole-model work for
+peers, and the idle gossip (#91, 8.7 KB/s out on 2026-10-11) all go on over a phone's tether.
+The 2026-10-15 tester paid for the download half; the upload half is the same person's bill.
+Prior art pauses both directions: SyncTrayzor (Syncthing's Windows wrapper) pauses every device
+while the network is metered and re-tests at startup; OneDrive's "pause sync on a metered network"
+stops its sync; Microsoft's `ConnectionCost` guidance defers optional transfers on `Fixed`/`Variable`.
+To decide when picked up, research first: (1) a metered node offers no room in its capability, so
+planners skip it the way they skip a full one (no refusal a peer has to wait out); (2) part requests
+refused with the existing busy answer, so a peer fetches from another holder; (3) gossip stays —
+throttling it can partition a node (#91 (3)); (4) whether `auto_manage.on_metered_connection`
+covers serving or a second setting does, and what the dashboard says while it holds back.
+
+**How it closed.** (1) as proposed, through `can_serve_inference` (no new field), plus a refusal
+for a request already on its way; (2) answered as a miss rather than "busy" — a miss sends the
+requester to another holder at once, a busy answer would have it wait; (3) kept; (4) the one
+setting covers both directions — a person on a tether wants the link quiet, not half-quiet — and
+the toast and Settings text say so in 21 languages. Delivery Optimization's LAN exemption was
+considered and declined (a VPN peer reads as LAN). Evidence and probe:
+`docs/invariants/network.md` § "A metered connection holds back what this node uploads for others".

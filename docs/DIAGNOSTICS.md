@@ -523,12 +523,12 @@ node's files into throwaway nodes set it; it is also the A/B control). The
 header-source check (`fetch_model_header`) and the load-time header check stay
 on either way.
 
-## "Why did it download on my phone's hotspot?" / "Why has it stopped downloading?" (2026-10-15)
+## "Why did it download on my phone's hotspot?" / "Why has it stopped downloading — or serving?" (2026-10-15)
 
 The diagnostics report's first block has one line for it:
 
 ```
-metered connection: yes  setting: auto  automatic downloads waiting: true
+metered connection: yes  setting: auto  holding back downloads and work for peers: true
 ```
 
 - `metered connection` is what the system says NOW (asked fresh by the
@@ -540,10 +540,16 @@ metered connection: yes  setting: auto  automatic downloads waiting: true
   `daemon/metered.rs` (`COST_SCRIPT`).
 - `setting` is `auto_manage.on_metered_connection`: `auto` follows the
   system, `pause` always waits, `allow` never does.
-- `automatic downloads waiting` is the last decision, taken just before a
-  download nobody asked for would start. In the log:
-  `grep "this connection is metered" node.log`. A download the owner asked
-  for, a repair and a transfer already running are never paused.
+- `holding back downloads and work for peers` is the last decision, taken
+  just before a download nobody asked for would start and on every
+  capability tick (30 s). While it is `true` the node also tells peers it
+  takes no inference work (#277): planners skip it, a peer that asks anyway
+  is refused (`LayerForward refused — this connection is metered`,
+  `RemoteGenerateRequest refused — …`, info), and a part or prompt-cache
+  request is answered as a miss (`Not serving a part — this connection is
+  metered`, debug). In the log: `grep "this connection is metered"
+  node.log`. A download the owner asked for, a repair, the owner's own
+  requests, work already running and gossip are never paused.
 
 ## "Why is this node talking to a stranger?"
 

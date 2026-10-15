@@ -836,18 +836,20 @@ pub struct AutoManageConfig {
     /// can flip this off.
     #[serde(default = "default_true")]
     pub auto_switch_quants: bool,
-    /// What automatic downloads do while the internet connection is metered —
-    /// a phone's hotspot, a mobile plan (`daemon::metered`). A download the
-    /// user asks for, and the repair of a part already held, are never
-    /// paused by it.
+    /// What this node does on its own while the internet connection is
+    /// metered — a phone's hotspot, a mobile plan (`daemon::metered`): the
+    /// downloads nobody asked for, and new work and model parts for other
+    /// computers (#277). A download the user asks for, the repair of a part
+    /// already held, the owner's own requests and work already running are
+    /// never paused by it.
     #[serde(default)]
-    pub on_metered_connection: MeteredDownloads,
+    pub on_metered_connection: MeteredConnection,
 }
 
-/// What automatic downloads do on a metered connection.
+/// What this node holds back on a metered connection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum MeteredDownloads {
+pub enum MeteredConnection {
     /// Pause while the system says the connection is metered (default). A
     /// system that cannot say — macOS, no NetworkManager — pauses nothing.
     #[default]
@@ -893,7 +895,7 @@ impl Default for AutoManageConfig {
             hf_watcher_enabled: true,
             wishlist_gossip_publish: false,
             auto_switch_quants: true,
-            on_metered_connection: MeteredDownloads::default(),
+            on_metered_connection: MeteredConnection::default(),
         }
     }
 }

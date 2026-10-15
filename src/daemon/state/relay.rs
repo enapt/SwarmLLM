@@ -692,15 +692,23 @@ impl super::SharedState {
     ///
     /// The single source of truth for the relay-forwarder decision — the DHT
     /// relay-service registration, the `relay_capable` capability advertisement,
-    /// and the inbound forward gates must all agree, or peers route through a
-    /// node that then refuses to forward.
+    /// the inbound forward gates and the circuit relay server
+    /// (`network::relay::OnlyWhileRelaying`) must all agree, or peers route
+    /// through a node that then refuses to forward.
     ///
     /// Three ways to qualify:
     ///  - `--anchor` mode (a dedicated bootstrap/relay node),
     ///  - explicit `network.relay_forwarding = true` opt-in, or
     ///  - NETWORKING_PLAN Phase 3 auto-donation: the node is confirmed reachable
     ///    from the open internet AND has not opted out via
-    ///    `network.relay_forwarding_auto = false`.
+    ///    `network.relay_forwarding_auto = false` AND does not hold back on a
+    ///    metered connection (`metered_hold_now`, #277) — donated, not asked
+    ///    for, like a download nobody asked for.
+    ///
+    /// The settings are read LIVE: Settings writes `relay_forwarding_auto`
+    /// into the live config, and until 2026-10-15 this read the boot snapshot,
+    /// so turning donation off in Settings showed "off" and changed nothing
+    /// until a restart (#281's shape).
     ///
     /// The auto path exists because Phase 3's "any public node can opt in as a
     /// relay" was previously only a config flag that nothing ever set, so the
@@ -708,13 +716,15 @@ impl super::SharedState {
     /// single point of failure and a hard throughput ceiling for every NAT'd
     /// pair.
     pub fn relay_forwarding_enabled(&self) -> bool {
-        if self.config.node.anchor_mode || self.config.network.relay_forwarding {
+        let cfg = self.cfg();
+        if self.config.node.anchor_mode || cfg.network.relay_forwarding {
             return true;
         }
-        self.config.network.relay_forwarding_auto
+        cfg.network.relay_forwarding_auto
             && self
                 .publicly_reachable
                 .load(std::sync::atomic::Ordering::Relaxed)
+            && !self.metered_hold_now()
     }
 
     /// Whether inference for `node` can be routed through an application-level
@@ -1283,6 +1293,40 @@ mod tests {
         config.network.relay_forwarding_auto = false;
         let state = test_state(config);
         assert!(state.relay_forwarding_enabled());
+    }
+
+    /// The donation setting is read live — Settings writes the live config —
+    /// and donated relaying stops on a metered connection (#277); an explicit
+    /// opt-in is the owner asking, and stays.
+    #[test]
+    fn relay_donation_follows_the_live_setting_and_the_metered_hold() {
+        use std::sync::atomic::Ordering;
+        let state = test_state(crate::config::Config::default());
+        state.publicly_reachable.store(true, Ordering::Relaxed);
+        assert!(state.relay_forwarding_enabled());
+
+        let mut live = (**state.cfg()).clone();
+        live.network.relay_forwarding_auto = false;
+        state.apply_live_config(live.clone());
+        assert!(
+            !state.relay_forwarding_enabled(),
+            "turning donation off in Settings must stop it without a restart"
+        );
+
+        live.network.relay_forwarding_auto = true;
+        live.auto_manage.on_metered_connection = crate::config::MeteredConnection::Pause;
+        state.apply_live_config(live.clone());
+        assert!(
+            !state.relay_forwarding_enabled(),
+            "donated relaying is held back on a metered connection"
+        );
+
+        live.network.relay_forwarding = true;
+        state.apply_live_config(live);
+        assert!(
+            state.relay_forwarding_enabled(),
+            "an explicit opt-in is the owner asking"
+        );
     }
 
     /// The scheduler's relay tier must only admit peers with a concrete path,

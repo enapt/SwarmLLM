@@ -446,20 +446,24 @@ pub struct NodeCapability {
 
     /// Can this node run inference work **right now**?
     ///
-    /// `false` means the node has detected that it cannot execute a request at
-    /// all, however much memory or how many shards it advertises — so peers
-    /// should route inference elsewhere. It keeps serving SHARDS regardless:
-    /// a byte-range read needs no worker, and a node in this state is still the
-    /// most useful thing it can be.
+    /// `false` means peers should route inference elsewhere, however much
+    /// memory or how many shards it advertises. After an outage it keeps
+    /// serving SHARDS: a byte-range read needs no worker, and a node in this
+    /// state is still the most useful thing it can be.
     ///
-    /// Two conditions set it, and both are outages that report themselves as
-    /// health (see `SharedState::inference_outage`):
+    /// Two outages set it, both reporting themselves as health (see
+    /// `SharedState::inference_outage`):
     ///
     /// - the graphics stack died under a running node, so no worker of any kind
     ///   starts — this binary links `libcuda`, so a processor-only worker fails
     ///   in the loader exactly as a card-bound one does;
     /// - the message dispatcher has stopped consuming, so nothing inbound is
     ///   reaching this node in the first place.
+    ///
+    /// And one that is a choice, not an outage: the node's connection is
+    /// metered (a phone's hotspot, a mobile plan), where it takes no new work
+    /// for other computers and serves no parts (#277). It runs its owner's
+    /// requests as ever.
     ///
     /// **`#[serde(default)]` must answer `true`, not `false`.** A node on an
     /// older build advertises nothing here, and reading that silence as "cannot

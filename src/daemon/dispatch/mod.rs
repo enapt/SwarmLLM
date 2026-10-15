@@ -66,19 +66,38 @@ fn max_forwards_per_peer(contribution: &swarmllm_types::ContributionMode) -> usi
     (max_concurrent_forwards(contribution) / 2).max(4)
 }
 
-/// May a forward that STARTS a request (a prompt pass, `sequence_num == 0`) take
-/// a slot, with `available` of `total` node-wide slots free?
+/// May a request that has not started here — a forward that STARTS one (a
+/// prompt pass, `sequence_num == 0`), a whole-model generation, an image
+/// encode — take a slot, with `available` of `total` node-wide slots free?
 ///
-/// Only while a quarter of the slots (at least one) stays free: that reserve is
-/// for the next steps of requests already running here, which the node-wide cap
-/// used to refuse like any newcomer — so under load a reply that had been
-/// running for minutes could lose its next token to a request that had not
-/// started (#123). vLLM draws the same line: a running sequence is not evicted
-/// to admit a waiting one. A forward that claims to continue a request is
-/// sender-chosen, so claiming it only reaches the reserve; the per-peer cap and
-/// the node-wide cap still bound it.
-fn admits_a_new_request(available: usize, total: usize) -> bool {
-    available > (total / 4).max(1)
+/// Not while this node holds back on a metered connection (`metered_hold`,
+/// from `SharedState::metered_hold_now`; #277). Its capability already tells
+/// peers it takes no inference work, so a request arriving anyway comes from a
+/// peer still holding the last one, and is refused out loud like any other.
+/// Work already running here goes on, as a download already under way does.
+/// REQUIRED, so every path that admits a new request answers it.
+///
+/// And only while a quarter of the slots (at least one) stays free: that
+/// reserve is for the next steps of requests already running here, which the
+/// node-wide cap used to refuse like any newcomer — so under load a reply that
+/// had been running for minutes could lose its next token to a request that
+/// had not started (#123). vLLM draws the same line: a running sequence is not
+/// evicted to admit a waiting one. A forward that claims to continue a request
+/// is sender-chosen, so claiming it only reaches the reserve; the per-peer cap
+/// and the node-wide cap still bound it.
+fn admits_a_new_request(
+    available: usize,
+    total: usize,
+    metered_hold: bool,
+) -> Result<(), ForwardRefused> {
+    if metered_hold {
+        return Err(ForwardRefused::ConnectionMetered);
+    }
+    if available > (total / 4).max(1) {
+        Ok(())
+    } else {
+        Err(ForwardRefused::KeptForRunning)
+    }
 }
 /// Per-peer counts of work in flight here, keyed by the authenticated sender.
 type PeerWorkCounts = Arc<dashmap::DashMap<crate::types::NodeId, std::sync::atomic::AtomicUsize>>;
@@ -149,9 +168,11 @@ struct StreamHold {
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
-/// Why the dispatcher turned a forward away — each cap logs its own line.
+/// Why the dispatcher turned a peer's work away — each cap logs its own line.
 #[derive(Debug, PartialEq, Eq)]
 enum ForwardRefused {
+    /// A new request while this node holds back on a metered connection (#277).
+    ConnectionMetered,
     /// The sender already holds `max_forwards_per_peer` pieces of work here.
     PeerLimit,
     /// A request not yet started would take the slots kept for running ones.
@@ -163,8 +184,20 @@ enum ForwardRefused {
 }
 
 impl ForwardRefused {
+    /// What the peer is told.
+    fn refusal(&self) -> String {
+        match self {
+            Self::ConnectionMetered => metered_refusal(),
+            _ => peer_work_refusal(),
+        }
+    }
+
     fn log(&self, sender: &crate::types::NodeId, per_peer_limit: usize) {
         match self {
+            Self::ConnectionMetered => tracing::info!(
+                sender = %sender,
+                "LayerForward refused — this connection is metered, so no new work is taken for other machines"
+            ),
             Self::PeerLimit => tracing::warn!(
                 sender = %sender,
                 max = per_peer_limit,
@@ -187,25 +220,23 @@ impl ForwardRefused {
 }
 
 /// Admit a forward that is not part of a stream: its own per-peer slot
-/// (`slot`, already taken or refused), the reserve kept for running requests,
-/// and its own node-wide permit — in that order, each refusal giving back what
-/// was taken.
+/// (`slot`, already taken or refused), the rules for a request that has not
+/// started ([`admits_a_new_request`]), and its own node-wide permit — in that
+/// order, each refusal giving back what was taken.
 fn admit_own_forward(
     forward: &crate::types::LayerForward,
     slot: Option<PeerWorkSlot>,
     semaphore: &Arc<tokio::sync::Semaphore>,
     forward_limit: usize,
+    metered_hold: bool,
 ) -> Result<(PeerWork, Option<tokio::sync::OwnedSemaphorePermit>), ForwardRefused> {
     let slot = slot.ok_or(ForwardRefused::PeerLimit)?;
     // A tensor-parallel prompt pass keeps `sequence_num == 0` for EVERY layer,
     // and its coordinator waits on the AllReduce, not on a LayerResult — a
     // refusal here would be unread and cost a 10 s AllReduce timeout per layer.
     // It is one request's layers, not new ones: never held back.
-    if forward.sequence_num == 0
-        && forward.tp_meta.is_none()
-        && !admits_a_new_request(semaphore.available_permits(), forward_limit)
-    {
-        return Err(ForwardRefused::KeptForRunning);
+    if forward.sequence_num == 0 && forward.tp_meta.is_none() {
+        admits_a_new_request(semaphore.available_permits(), forward_limit, metered_hold)?;
     }
     let permit = semaphore
         .clone()
@@ -330,6 +361,20 @@ pub(super) fn peer_work_refusal() -> String {
     crate::error::SwarmError::ServiceUnavailable(
         "this machine is already doing as much work for other machines as its owner \
          allows — try another"
+            .into(),
+    )
+    .to_string()
+}
+
+/// What a peer is told when this node takes no new work because its
+/// connection is metered (#277). `ServiceUnavailable`'s shape for the reason
+/// [`peer_work_refusal`] gives: the coordinator bars this node from the
+/// request's retry and re-plans elsewhere, without a penalty and without
+/// retracting what this node holds.
+fn metered_refusal() -> String {
+    crate::error::SwarmError::ServiceUnavailable(
+        "this machine's internet connection is metered, so it is not taking new work \
+         for other machines — try another"
             .into(),
     )
     .to_string()
@@ -893,6 +938,7 @@ pub(crate) async fn dispatch_network_messages(
                                                 PeerWorkSlot::try_take(&peer_forward_counts, &peer_sender, per_peer_limit),
                                                 &forward_semaphore,
                                                 forward_limit,
+                                                shared_state.metered_hold_now(),
                                             ),
                                         };
                                         let (peer_slot, permit) = match admitted {
@@ -903,7 +949,7 @@ pub(crate) async fn dispatch_network_messages(
                                                     shared_state.clone(),
                                                     network_tx.clone(),
                                                     layer_forward::RefusalAddress::of(&forward),
-                                                    peer_work_refusal(),
+                                                    why.refusal(),
                                                 ));
                                                 continue;
                                             }
@@ -1089,13 +1135,24 @@ pub(crate) async fn dispatch_network_messages(
                                             continue;
                                         };
                                         // A whole-model generation always starts a request.
-                                        if !admits_a_new_request(forward_semaphore.available_permits(), forward_limit) {
+                                        if let Err(why) = admits_a_new_request(
+                                            forward_semaphore.available_permits(),
+                                            forward_limit,
+                                            shared_state.metered_hold_now(),
+                                        ) {
                                             drop(peer_slot);
-                                            tracing::warn!(
-                                                sender = %peer_sender,
-                                                "RemoteGenerateRequest rejected — the rest is kept for requests already running here"
-                                            );
-                                            remote_generate::refuse_request(network_tx.clone(), &req, peer_work_refusal());
+                                            if why == ForwardRefused::ConnectionMetered {
+                                                tracing::info!(
+                                                    sender = %peer_sender,
+                                                    "RemoteGenerateRequest refused — this connection is metered, so no new work is taken for other machines"
+                                                );
+                                            } else {
+                                                tracing::warn!(
+                                                    sender = %peer_sender,
+                                                    "RemoteGenerateRequest rejected — the rest is kept for requests already running here"
+                                                );
+                                            }
+                                            remote_generate::refuse_request(network_tx.clone(), &req, why.refusal());
                                             continue;
                                         }
                                         let permit = match forward_semaphore.clone().try_acquire_owned() {
@@ -1155,12 +1212,23 @@ pub(crate) async fn dispatch_network_messages(
                                             );
                                             continue;
                                         };
-                                        if !admits_a_new_request(forward_semaphore.available_permits(), forward_limit) {
+                                        if let Err(why) = admits_a_new_request(
+                                            forward_semaphore.available_permits(),
+                                            forward_limit,
+                                            shared_state.metered_hold_now(),
+                                        ) {
                                             drop(peer_slot);
-                                            tracing::warn!(
-                                                sender = %peer_sender,
-                                                "VisionEncodeRequest rejected — the rest is kept for requests already running here"
-                                            );
+                                            if why == ForwardRefused::ConnectionMetered {
+                                                tracing::info!(
+                                                    sender = %peer_sender,
+                                                    "VisionEncodeRequest refused — this connection is metered, so no new work is taken for other machines"
+                                                );
+                                            } else {
+                                                tracing::warn!(
+                                                    sender = %peer_sender,
+                                                    "VisionEncodeRequest rejected — the rest is kept for requests already running here"
+                                                );
+                                            }
                                             continue;
                                         }
                                         let permit = match forward_semaphore.clone().try_acquire_owned() {
@@ -3582,23 +3650,102 @@ mod inbound_forward_slot_tests {
     /// one, stays free for them, at every contribution level.
     #[test]
     fn a_new_request_leaves_a_reserve_for_running_ones() {
-        use super::admits_a_new_request;
+        let admits =
+            |available, total| super::admits_a_new_request(available, total, false).is_ok();
         // Minimal: 8 slots, 2 kept.
-        assert!(admits_a_new_request(8, 8));
-        assert!(admits_a_new_request(3, 8));
+        assert!(admits(8, 8));
+        assert!(admits(3, 8));
         assert!(
-            !admits_a_new_request(2, 8),
+            !admits(2, 8),
             "the last two slots are for requests already running"
         );
-        assert!(!admits_a_new_request(0, 8));
+        assert!(!admits(0, 8));
         // Moderate: 24, 6 kept. Maximum: 64, 16 kept.
-        assert!(admits_a_new_request(7, 24));
-        assert!(!admits_a_new_request(6, 24));
-        assert!(admits_a_new_request(17, 64));
-        assert!(!admits_a_new_request(16, 64));
+        assert!(admits(7, 24));
+        assert!(!admits(6, 24));
+        assert!(admits(17, 64));
+        assert!(!admits(16, 64));
         // A tiny node still keeps one.
-        assert!(admits_a_new_request(2, 2));
-        assert!(!admits_a_new_request(1, 2));
+        assert!(admits(2, 2));
+        assert!(!admits(1, 2));
+    }
+
+    fn a_forward(sequence_num: u32) -> crate::types::LayerForward {
+        crate::types::LayerForward {
+            request_id: uuid::Uuid::new_v4(),
+            sequence_num,
+            index_pos: 0,
+            activations: vec![4, 2, 4, 2],
+            format: crate::types::TensorFormat::FP32,
+            model_id: crate::types::ModelId("m".into()),
+            layer_range: (0, 8),
+            tp_meta: None,
+            vision_embeddings: None,
+            chain: Vec::new(),
+            sender_peer_bytes: None,
+            requester_node_id: None,
+            pre_embedded: false,
+            generated_ids: Vec::new(),
+            adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
+            spec_walk_at_tail: false,
+            coupling_seed: None,
+            stream_seq: None,
+            truncate_kv_to: None,
+            prompt_cache: None,
+            chunk_meta: None,
+            sampling: None,
+            prompt_span: None,
+        }
+    }
+
+    /// #277: on a metered connection a peer's NEW request is refused however
+    /// free the node is — told why, in the words the coordinator reads as
+    /// "this peer cannot serve, re-plan elsewhere" — while the next step of a
+    /// request already running here is still served.
+    #[test]
+    fn a_metered_connection_refuses_new_work_and_lets_running_work_finish() {
+        use super::{admit_own_forward, admits_a_new_request, ForwardRefused};
+        assert_eq!(
+            admits_a_new_request(8, 8, true),
+            Err(ForwardRefused::ConnectionMetered),
+            "every slot free, and still no new request"
+        );
+        let counts: super::PeerWorkCounts = Arc::new(dashmap::DashMap::new());
+        let permits = Arc::new(tokio::sync::Semaphore::new(8));
+        let admit = |forward: &crate::types::LayerForward, metered: bool| {
+            admit_own_forward(
+                forward,
+                PeerWorkSlot::try_take(&counts, &peer(), 4),
+                &permits,
+                8,
+                metered,
+            )
+            .map(|_| ())
+        };
+        assert_eq!(
+            admit(&a_forward(0), true),
+            Err(ForwardRefused::ConnectionMetered),
+            "a prompt pass starts a request"
+        );
+        assert_eq!(
+            admit(&a_forward(0), false),
+            Ok(()),
+            "unmetered, it is served"
+        );
+        assert_eq!(
+            admit(&a_forward(7), true),
+            Ok(()),
+            "a request already running here goes on"
+        );
+        assert!(counts.get(&peer()).is_none(), "a refusal holds no slot");
+        let told = ForwardRefused::ConnectionMetered.refusal();
+        assert!(told.contains("metered"), "{told}");
+        assert!(
+            crate::inference::router::message_means_peer_cannot_serve(&told),
+            "the coordinator must bar this node and re-plan, not retract its parts: {told}"
+        );
     }
 
     /// One peer holds at most its limit of work, whatever kind; the limit is its

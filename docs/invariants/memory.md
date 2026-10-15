@@ -840,7 +840,7 @@ minutes with nothing asked of it but the default "Help the network" (field
 report 2026-10-15). `max_bandwidth_mbps` caps serving only; nothing anywhere
 asked what the connection costs.
 
-**`SharedState::automatic_downloads_wait`** (`daemon::metered`) is the one
+**`SharedState::metered_hold`** (`daemon::metered`) is the one
 answer to "may a download nobody asked for start now?", asked just before one
 starts by the one path that starts one on its own — the download pass
 (`evaluate_and_download`, after selection, so the system is asked only when
@@ -890,7 +890,11 @@ Research, and what it changed:
 - **macOS** (`NWPath.isExpensive`) is deferred — `docs/ARCHITECTURE.md` §
   Deferred Items.
 
-Tests: `automatic_downloads_wait_on_a_metered_connection_and_the_owner_is_told_once`,
+Since #277 (2026-10-15) the same answer holds back uploads to peers —
+`docs/invariants/network.md` § "A metered connection holds back what this node
+uploads for others".
+
+Tests: `this_node_holds_back_on_a_metered_connection_and_the_owner_is_told_once`,
 `a_system_that_cannot_say_pauses_nothing_and_a_failed_check_changes_nothing`,
 the two parser tests, and the guard (red with either call site's check
 replaced by `false`).

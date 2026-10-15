@@ -103,6 +103,9 @@ pub fn build_behaviour(
     local_key: &Keypair,
     relay_behaviour: relay::client::Behaviour,
     relay_server_config: Option<&RelayServerConfig>,
+    // Whether this node relays for others NOW; the circuit relay server asks
+    // it before every new reservation and circuit (`OnlyWhileRelaying`).
+    relay_accepts: crate::network::relay::RelayGate,
     enable_mdns: bool,
     enable_autonat: bool,
     enable_dcutr: bool,
@@ -290,9 +293,18 @@ pub fn build_behaviour(
     };
 
     // Relay server: if config provided, use those limits; otherwise use defaults.
-    let relay_config = relay_server_config
+    let mut relay_config = relay_server_config
         .map(crate::network::relay::build_relay_server_config)
         .unwrap_or_default();
+    // Only while this node relays for others — the owner's setting, its
+    // reachability and a metered connection all change while it runs, and
+    // this config does not.
+    relay_config.reservation_rate_limiters.push(Box::new(
+        crate::network::relay::OnlyWhileRelaying(relay_accepts.clone()),
+    ));
+    relay_config.circuit_src_rate_limiters.push(Box::new(
+        crate::network::relay::OnlyWhileRelaying(relay_accepts),
+    ));
     let relay_server = relay::Behaviour::new(local_peer_id, relay_config);
 
     // NET-I5: Connection limits to prevent resource exhaustion.
@@ -405,6 +417,7 @@ mod tests {
             &keypair,
             relay_behaviour,
             None,
+            std::sync::Arc::new(|| true),
             false,
             true,
             true,
@@ -432,6 +445,7 @@ mod tests {
             &keypair,
             relay_behaviour,
             Some(&relay_cfg),
+            std::sync::Arc::new(|| true),
             false,
             true,
             true,
@@ -454,6 +468,7 @@ mod tests {
             &keypair,
             relay_behaviour,
             None,
+            std::sync::Arc::new(|| true),
             true,
             true,
             true,
@@ -483,6 +498,7 @@ mod tests {
             &keypair,
             relay_behaviour,
             None,
+            std::sync::Arc::new(|| true),
             false,
             false,
             true,

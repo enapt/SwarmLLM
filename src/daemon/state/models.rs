@@ -55,9 +55,10 @@ pub struct ModelMgmt {
     /// until `SharedState::keep_on_this_computer` reads it (fails closed).
     pub kept_on_this_computer_unread: std::sync::atomic::AtomicBool,
     /// What this node last learned about whether its connection is metered,
-    /// and whether automatic downloads wait for it now. Written ONLY by
-    /// `SharedState::automatic_downloads_wait` (`daemon::metered`), the one
-    /// answer; `MeteredWatch::waiting` is for display.
+    /// and whether it holds back for it now (automatic downloads, work and
+    /// parts for other computers). Written ONLY by `SharedState::metered_hold`
+    /// (`daemon::metered`), the one answer; read without asking by
+    /// `metered_hold_now`; `MeteredWatch::holding_back` is for display.
     pub metered: crate::daemon::metered::MeteredWatch,
     /// Shards where P2P download has exhausted all peer attempts in this session.
     /// Signals auto_manage to force the HF path even when peer holders are registered.
