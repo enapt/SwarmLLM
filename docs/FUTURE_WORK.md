@@ -679,7 +679,12 @@ per-layer figure) **1.53** (n=35, 1.19-1.86 — under-priced); cold **0.52** (n=
 ~58 s for a local load of ~9-20 s — fixed the same day, the rate is kept across restarts, § Closed);
 the drafter arms **0.39** (n=25: speculation's gain is not priced). Left: the `net:0` regime's
 under-charge (a peer whose samples never separated the per-visit cost), and pricing a drafter.
-Needs a second peer's traffic before any term is changed.
+**Hypothesis, unverified**: every reply in that regime ran 96 tokens against the 64 passes assumed,
+and 96 ÷ 64 = 1.50 against the measured 1.53 — there, the error IS the reply length; the 10-10 "0.00
+correlation" pooled regimes whose errors run in opposite directions. In the `net>0` regime the
+per-visit term (~650 ms) is ~1.7× a real whole token (~400 ms), which a 96 ÷ 64 under-count
+partly cancels. Needs a second peer's traffic, and replies of several lengths, before any term is
+changed.
 
 #### #180 — A node holding the whole model takes every request for it; partial ranges stay off by default
 `P2` · routing · **PARTIAL** — 2026-07-28 · history: archive § "A node holding every shard monopolises the model"
@@ -1741,6 +1746,11 @@ Never shorten the context itself (`arch-worker-memory.md` § "A card's KV budget
 whatever the context setting").
 Field-confirmed, report #036 (2026-10-14, v0.3.238, the reporter's 12 GB card): Qwen3-14B kept on
 that computer lists 8,192 before a load and 5,600 while loaded.
+Considered for (a) and NOT done (2026-10-15): keeping the last worker's figure after it unloads
+(idle unload, #249, flips the list back to the declared figure). It is a cached live condition
+(`arch-worker-memory.md`): once the card frees up it UNDER-reports, and a client that trims
+history to the listed context would then silently drop context the node could hold. (a) needs a
+pre-load figure from the loader's own arithmetic, not a memory of the last one.
 
 #### #187 — Head-room admission prices load and runtime on two different bases
 `P3` · memory · **PARTIAL** — 2026-08-08 · history: archive § "Head-room admission: two things the live test found"
