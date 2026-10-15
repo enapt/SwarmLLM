@@ -413,3 +413,232 @@ fn gemma2_output_projection_qmatmul_vs_deq() {
         "QMatMul and dequantized matmul should agree: corr={corr}"
     );
 }
+
+// ---- Sliding-window attention (#278) ----
+//
+// The reference is independent of the implementation: RoPE makes a query's
+// score with a key depend only on how far apart they are, so on a one-layer
+// model a windowed layer's output at position `p` is the output at the LAST
+// position of a run over just the `window` positions ending at `p`, started
+// from position 0, where no window binds.
+
+/// `model` over `hidden` ([1, n, d]) from position 0, read `chunk` positions a
+/// forward on a fresh cache: one prompt pass, pieces after a cached prefix
+/// (the offset mask), or one position at a time (the decode path, no mask).
+fn run_in_chunks(model: &mut SplitModel, hidden: &Tensor, chunk: usize, id: &str) -> Tensor {
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let n = hidden.dim(1).unwrap();
+    let mut outs = Vec::new();
+    let mut pos = 0;
+    while pos < n {
+        let len = chunk.min(n - pos);
+        let piece = hidden.narrow(1, pos, len).unwrap();
+        outs.push(model.forward(&piece, pos, &kv, id).unwrap());
+        pos += len;
+    }
+    Tensor::cat(&outs, 1).unwrap()
+}
+
+fn set_windows(model: &mut SplitModel, windows: &[Option<usize>]) {
+    assert_eq!(model.layers.len(), windows.len());
+    for (layer, window) in model.layers.iter_mut().zip(windows) {
+        if let LayerVariant::Dense(lw) = layer {
+            lw.sliding_window = *window;
+        }
+    }
+}
+
+fn gemma2_test_model(layers: usize) -> SplitModel {
+    make_gqa_test_model(
+        layers,
+        256,
+        8,
+        4,
+        true,
+        Activation::Gelu,
+        Some(50.0),
+        ModelArch::Gemma2,
+    )
+}
+
+fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
+    (a - b)
+        .unwrap()
+        .abs()
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .max(0)
+        .unwrap()
+        .to_vec0()
+        .unwrap()
+}
+
+/// Each position's output of the one-layer `model`, computed over only the
+/// `window` positions ending at it.
+fn window_by_window(model: &mut SplitModel, hidden: &Tensor, window: usize) -> Vec<Tensor> {
+    let n = hidden.dim(1).unwrap();
+    (0..n)
+        .map(|p| {
+            let start = (p + 1).saturating_sub(window);
+            let tail = hidden.narrow(1, start, p + 1 - start).unwrap();
+            let out = run_in_chunks(model, &tail, tail.dim(1).unwrap(), &format!("ref-{p}"));
+            out.i((.., p - start, ..)).unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn a_windowed_layer_reads_only_its_window_on_every_path() {
+    let (window, n) = (5, 14);
+    let mut model = gemma2_test_model(1);
+    let hidden = Tensor::randn(0f32, 1.0, (1, n, 256), &Device::Cpu).unwrap();
+    set_windows(&mut model, &[Some(window)]);
+    let reference = window_by_window(&mut model, &hidden, window);
+
+    // One prompt pass, pieces after a cached prefix (a piece straddling the
+    // point where the window starts to bind, and pieces wholly past it), and
+    // one position at a time.
+    for chunk in [n, 4, 3, 1] {
+        let out = run_in_chunks(&mut model, &hidden, chunk, &format!("swa-{chunk}"));
+        for (p, want) in reference.iter().enumerate() {
+            let got = out.i((.., p, ..)).unwrap();
+            let diff = max_abs_diff(&got, want);
+            assert!(
+                diff < 1e-4,
+                "{chunk}-position forwards, position {p}: {diff} from the window's own output"
+            );
+        }
+    }
+
+    // The control: the same comparison with no window sees the difference,
+    // so the agreement above is the window's doing.
+    set_windows(&mut model, &[None]);
+    let unwindowed = run_in_chunks(&mut model, &hidden, n, "no-swa");
+    let diff = max_abs_diff(&unwindowed.i((.., n - 1, ..)).unwrap(), &reference[n - 1]);
+    assert!(
+        diff > 1e-3,
+        "with no window the last position must differ from its window's output ({diff})"
+    );
+}
+
+/// A window the conversation has not outgrown keeps nothing out: the same
+/// path and the same numbers as a layer with no window.
+#[test]
+fn a_window_that_keeps_nothing_out_changes_nothing() {
+    let n = 9;
+    let mut model = gemma2_test_model(2);
+    let hidden = Tensor::randn(0f32, 1.0, (1, n, 256), &Device::Cpu).unwrap();
+    for chunk in [n, 4, 1] {
+        set_windows(&mut model, &[None, None]);
+        let plain: Vec<f32> = run_in_chunks(&mut model, &hidden, chunk, "plain")
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        set_windows(&mut model, &[Some(n), None]);
+        let windowed: Vec<f32> = run_in_chunks(&mut model, &hidden, chunk, "wide")
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_eq!(plain, windowed, "{chunk}-position forwards");
+    }
+}
+
+/// A model mixing windowed and global layers (Gemma 2 alternates them):
+/// each layer reads its own mask. The two-layer forward equals the two layers
+/// run as one-layer models in turn, in both orders and on every path.
+#[test]
+fn windowed_and_global_layers_each_read_their_own_mask() {
+    let (window, n) = (4, 11);
+    for windows in [[Some(window), None], [None, Some(window)]] {
+        let mut both = gemma2_test_model(2);
+        set_windows(&mut both, &windows);
+        let hidden = Tensor::randn(0f32, 1.0, (1, n, 256), &Device::Cpu).unwrap();
+        let outs: Vec<(usize, Tensor)> = [n, 3, 1]
+            .into_iter()
+            .map(|chunk| (chunk, run_in_chunks(&mut both, &hidden, chunk, "both")))
+            .collect();
+
+        let second_layer = both.layers.pop().unwrap();
+        let first_layer = both.layers.pop().unwrap();
+        let mut first = gemma2_test_model(1);
+        first.layers = vec![first_layer];
+        let mut second = gemma2_test_model(1);
+        second.layers = vec![second_layer];
+        let h0 = run_in_chunks(&mut first, &hidden, n, "first");
+        let want = run_in_chunks(&mut second, &h0, n, "second");
+        for (chunk, got) in outs {
+            let diff = max_abs_diff(&got, &want);
+            assert!(
+                diff < 1e-4,
+                "{windows:?}, {chunk}-position forwards: {diff}"
+            );
+        }
+    }
+}
+
+/// The batched forward cuts each conversation's keys to the window and reads
+/// the windowed mask, as the single-request forward does.
+#[test]
+fn a_batched_forward_reads_the_window_too() {
+    let (window, n) = (4, 10);
+    let mut model = gemma2_test_model(2);
+    set_windows(&mut model, &[Some(window), None]);
+    let a = Tensor::randn(0f32, 1.0, (1, n, 256), &Device::Cpu).unwrap();
+    let b = Tensor::randn(0f32, 1.0, (1, n, 256), &Device::Cpu).unwrap();
+    let want_a = run_in_chunks(&mut model, &a, n - 1, "alone-a");
+    let want_b = run_in_chunks(&mut model, &b, n - 1, "alone-b");
+
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let (pa, pb) = (
+        a.narrow(1, 0, n - 1).unwrap(),
+        b.narrow(1, 0, n - 1).unwrap(),
+    );
+    let items = [
+        BatchItem {
+            input: &pa,
+            index_pos: 0,
+            request_id: "batch-a",
+        },
+        BatchItem {
+            input: &pb,
+            index_pos: 0,
+            request_id: "batch-b",
+        },
+    ];
+    let prompt = model.forward_batch(&items, &kv).unwrap();
+    let (la, lb) = (
+        a.narrow(1, n - 1, 1).unwrap(),
+        b.narrow(1, n - 1, 1).unwrap(),
+    );
+    let items = [
+        BatchItem {
+            input: &la,
+            index_pos: n - 1,
+            request_id: "batch-a",
+        },
+        BatchItem {
+            input: &lb,
+            index_pos: n - 1,
+            request_id: "batch-b",
+        },
+    ];
+    let step = model.forward_batch(&items, &kv).unwrap();
+    for (name, got, want) in [
+        (
+            "a",
+            Tensor::cat(&[&prompt[0], &step[0]], 1).unwrap(),
+            want_a,
+        ),
+        (
+            "b",
+            Tensor::cat(&[&prompt[1], &step[1]], 1).unwrap(),
+            want_b,
+        ),
+    ] {
+        let diff = max_abs_diff(&got, &want);
+        assert!(diff < 1e-4, "request {name}: batched differs by {diff}");
+    }
+}

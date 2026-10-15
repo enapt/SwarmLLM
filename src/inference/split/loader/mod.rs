@@ -922,6 +922,19 @@ impl SplitModel {
             .and_then(|v| v.to_f32().ok())
             .filter(|&v| v > 0.0);
 
+        // Sliding-window attention (Gemma 2), per layer — `SlidingWindow` is
+        // the one reading.
+        let sliding_window = super::SlidingWindow::read(&ct);
+        if let Some(window) = sliding_window.as_ref() {
+            tracing::debug!(
+                window = window.size,
+                windowed_layers = (layer_start..layer_end)
+                    .filter(|&il| window.for_layer(il).is_some())
+                    .count(),
+                "Sliding-window attention"
+            );
+        }
+
         // Gemma 2 final logit soft-capping (from GGUF metadata)
         let final_logit_softcap = ct
             .metadata
@@ -1395,6 +1408,7 @@ impl SplitModel {
                         rope_dim,
                         skip_rope: false,
                         qk_rms_norm_after_rope: None,
+                        sliding_window: None,
                     }));
                 }
             }
@@ -1534,6 +1548,7 @@ impl SplitModel {
                     // llama.cpp `use_kq_norm`: on for every Llama 4 but the
                     // 128-expert Maverick, and only where RoPE runs.
                     qk_rms_norm_after_rope: (!is_nope && n_experts != 128).then_some(rms_norm_eps),
+                    sliding_window: None,
                 }));
             }
         } else if model_arch.is_hybrid_ssm() {
@@ -1743,6 +1758,8 @@ impl SplitModel {
                                 // there (review of #104, 2026-09-25).
                                 let layer_device = placement.device_for(layer_idx);
                                 let (cos, sin) = placement.rope_for(layer_idx);
+                                let window =
+                                    sliding_window.as_ref().and_then(|w| w.for_layer(layer_idx));
                                 // Borrowed into the thread: a mixture-of-experts
                                 // layer asks it where its experts go.
                                 let placement = &placement;
@@ -2061,6 +2078,7 @@ impl SplitModel {
                                         rope_dim,
                                         skip_rope: false,
                                         qk_rms_norm_after_rope: None,
+                                        sliding_window: window,
                                     }))
                                 })
                             })
@@ -2252,6 +2270,9 @@ impl SplitModel {
                         rope_dim,
                         skip_rope: false,
                         qk_rms_norm_after_rope: None,
+                        sliding_window: sliding_window
+                            .as_ref()
+                            .and_then(|w| w.for_layer(layer_idx)),
                     }));
                 }
             }

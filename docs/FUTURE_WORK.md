@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #278**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #280**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1689,12 +1689,25 @@ path. Adding only `llama-cpp-2/metal` would fix the DISPLAY while inference stay
 processor, which is worse. GitHub's macOS runners compile but cannot run Metal; it needs a Mac
 to test on (the swarm's Italian M4 peer belongs to a tester).
 
+#### #279 — Gemma 2 27B's attention is scaled for the wrong size
+`P2` · model-support · **OPEN** — 2026-10-15 · history: found beside #278
+
+llama.cpp takes a 46-layer Gemma 2 for the 27B and scales its queries by
+1/sqrt(n_embd / n_head) = 1/sqrt(144), as Google's reference does
+(`llama_model_gemma2::load_arch_hparams`, gemma_pytorch `config.py#L173`); every other size,
+and every model here, uses 1/sqrt(head_dim) = 1/sqrt(128). Every 27B attention is therefore 6%
+too flat. A 46-layer tiny file (`examples/make_tiny_gemma2_gguf.py`) sits at worst cosine 0.657
+from llama.cpp, top-1 15/40. Next: scale the queries where llama.cpp does (`ggml_scale(Qcur,
+f_attention_scale)`), only for that shape; Gemma 3's 27B (62 layers) takes the same rule.
+
 #### #115 — Gemma 3 and Gemma 4, and their vision projectors, are unsupported
 `P2` · model-support · **OPEN** — 2026-09-25 · history: archive row #115
 
-Requested for gemma-4-26B-A4B. Order: (1) Gemma 3 text needs sliding-window attention — a
-mask plus a second RoPE base on local layers (5 local : 1 global), while the loader builds one
-cos/sin table per segment; (2) the `gemma3` projector (SigLIP + pool + RMSNorm + linear), after
+Requested for gemma-4-26B-A4B. Order: (1) Gemma 3 text — sliding-window attention exists
+since #278 — `SlidingWindow::read` needs Gemma 3's row (window only when the file names one,
+`load_swa_pattern(ml, 6)`: 5 local : 1 global); still needed: a second RoPE base on local
+layers (`rope.freq_base_swa`, while the loader builds one cos/sin table per segment), the global
+layers' linear RoPE scaling and the 27B's attention scale (#279's rule at 62 layers); (2) the `gemma3` projector (SigLIP + pool + RMSNorm + linear), after
 `vision.rs` gets a projector-type dispatch; (3) Gemma 4 text — cross-layer KV sharing,
 per-layer embeddings, dense FFN + GELU MoE; (4) `gemma4v`. Gemma 3 can be checked against the
 local llama-cpp-python 0.3.16 now; Gemma 4 has no local reference (0.3.16 predates it; sources
@@ -2381,7 +2394,17 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15, not yet released** (#276, #277)
+**Closed 2026-10-15, not yet released** (#276, #277, #278)
+- #278 — **Gemma 2's replies past 4,096 tokens now match llama.cpp's.** Gemma 2 alternates
+  layers that see only the last 4,096 positions with layers that see everything; the loader
+  never read the window, so every layer saw everything. Shorter conversations were unaffected,
+  which is why no check caught it (gotcha #863). At 4,600 tokens the last positions sat at
+  cosine 0.986 from llama.cpp, top-1 10/12; now 0.99939, 11/12. The window is read as llama.cpp
+  reads it (`split::SlidingWindow`) and cut from the attention's keys where it binds
+  (`LayerWeights::keys_in_window`, `ForwardMasks`); a conversation shorter than the window runs
+  exactly the old path. It is also the first half of Gemma 3 (#115). Left as it is: a windowed
+  layer still keeps every position in memory (llama.cpp keeps the window only).
+  `docs/invariants/inference.md` § "A sliding window is cut where it binds".
 - #276 — **a computer with no graphics card that holds an idle model is offered the whole of the
   next one.** The planner weighed its memory with the idle model's share counted as spent, but the
   load that follows unloads that model first, so it offered fewer layers than it would load and

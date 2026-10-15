@@ -116,6 +116,41 @@ impl SplitModel {
         self.causal_mask(query_len, kv_len)
     }
 
+    /// The masks a forward of `seq_len` positions after `kv_offset` cached
+    /// ones reads: none for one position, else the causal mask and — where a
+    /// sliding window keeps keys out (#278) — the windowed one beside it.
+    fn attention_masks(&mut self, seq_len: usize, kv_offset: usize) -> CandleResult<ForwardMasks> {
+        if seq_len == 1 {
+            return Ok(ForwardMasks::default());
+        }
+        let causal = if kv_offset > 0 {
+            // Prefix cache: suffix query attends to (offset + seq_len) key positions
+            self.mask_with_offset(seq_len, kv_offset + seq_len)?
+        } else {
+            self.mask(seq_len)?
+        };
+        let windowed = self
+            .sliding_window()
+            .and_then(|w| {
+                crate::inference::layers::window_start(w, kv_offset, seq_len)
+                    .map(|start| window_mask(seq_len, kv_offset, w, start, &self.device))
+            })
+            .transpose()?;
+        Ok(ForwardMasks {
+            causal: Some(causal),
+            windowed,
+        })
+    }
+
+    /// The sliding window this segment's windowed layers share (#278) — one
+    /// size per model (`split::SlidingWindow`).
+    fn sliding_window(&self) -> Option<usize> {
+        self.layers.iter().find_map(|layer| match layer {
+            LayerVariant::Dense(lw) => lw.sliding_window,
+            _ => None,
+        })
+    }
+
     /// Run the forward pass for this segment's layer range.
     ///
     /// - For the first segment: `input` is token IDs (i64 tensor, shape [1, seq_len]).
@@ -1016,16 +1051,11 @@ impl SplitModel {
 
         // `mut` because a hybrid segment moves it across the device boundary
         // with the activation — see the transition at the head of the loop.
-        let mut mask = if seq_len == 1 || !self.mask_is_read() {
-            None
-        } else if kv_offset > 0 {
-            // Prefix cache: suffix query attends to (offset + seq_len) key positions
-            Some(
-                self.mask_with_offset(seq_len, kv_offset + seq_len)
-                    .map_err(SwarmError::internal)?,
-            )
+        let mut masks = if self.mask_is_read() {
+            self.attention_masks(seq_len, kv_offset)
+                .map_err(SwarmError::internal)?
         } else {
-            Some(self.mask(seq_len).map_err(SwarmError::internal)?)
+            ForwardMasks::default()
         };
 
         let max_seq_len = self.max_seq_len;
@@ -1099,13 +1129,9 @@ impl SplitModel {
                                 ))
                             })?;
                         hidden = Residual::Ready(moved);
-                        if let Some(m) = mask.as_ref() {
-                            mask = Some(m.to_device(target).map_err(|e| {
-                                SwarmError::Internal(format!(
-                                    "layer {abs_layer} mask to device: {e}"
-                                ))
-                            })?);
-                        }
+                        masks = masks.to_device(target).map_err(|e| {
+                            SwarmError::Internal(format!("layer {abs_layer} mask to device: {e}"))
+                        })?;
                     }
                 }
 
@@ -1126,7 +1152,7 @@ impl SplitModel {
                                 lw,
                                 None,
                                 hidden,
-                                mask.as_ref(),
+                                masks.for_layer(lw),
                                 index_pos,
                                 &mut layer_kv_caches[layer_idx],
                                 max_seq_len,
@@ -1138,14 +1164,14 @@ impl SplitModel {
                                     lw,
                                     card,
                                     hidden,
-                                    mask.take(),
+                                    std::mem::take(&mut masks),
                                     index_pos,
                                     seq_len,
                                     &mut layer_kv_caches[layer_idx],
                                     max_seq_len,
                                     kv_reserve,
                                 )?;
-                                mask = m;
+                                masks = m;
                                 h
                             }
                         };
@@ -1162,7 +1188,7 @@ impl SplitModel {
                         let attn = attention
                             .forward_mla(
                                 &x,
-                                mask.as_ref(),
+                                masks.causal.as_ref(),
                                 index_pos,
                                 &mut layer_kv_caches[layer_idx],
                                 max_seq_len,
@@ -1194,7 +1220,7 @@ impl SplitModel {
                         let attn = weights
                             .forward_attn(
                                 &x,
-                                mask.as_ref(),
+                                masks.causal.as_ref(),
                                 index_pos,
                                 &mut layer_kv_caches[layer_idx],
                                 max_seq_len,
@@ -1852,16 +1878,9 @@ impl SplitModel {
         }
         // `mut` for the same reason as the single-request path: a split
         // segment carries the mask across the device boundary with the batch.
-        let mut mask = if seq_len == 1 {
-            None
-        } else if first_kv_offset > 0 {
-            Some(
-                self.mask_with_offset(seq_len, first_kv_offset + seq_len)
-                    .map_err(SwarmError::internal)?,
-            )
-        } else {
-            Some(self.mask(seq_len).map_err(SwarmError::internal)?)
-        };
+        let mut masks = self
+            .attention_masks(seq_len, first_kv_offset)
+            .map_err(SwarmError::internal)?;
 
         // Stack all hidden states into a single batch tensor:
         // [batch, seq_len, hidden_dim] (seq_len is 1 for decode, >1 for prefill chunks).
@@ -1893,11 +1912,9 @@ impl SplitModel {
                             ))
                         })?;
                     hidden = Residual::Ready(moved);
-                    if let Some(m) = mask.as_ref() {
-                        mask = Some(m.to_device(target).map_err(|e| {
-                            SwarmError::Internal(format!("batch mask to device: {e}"))
-                        })?);
-                    }
+                    masks = masks
+                        .to_device(target)
+                        .map_err(|e| SwarmError::Internal(format!("batch mask to device: {e}")))?;
                 }
             }
             match layer {
@@ -1921,7 +1938,7 @@ impl SplitModel {
                     let mut attn_batched = lw
                         .forward_attn_batched(
                             &normed,
-                            mask.as_ref(),
+                            masks.for_layer(lw),
                             &item_positions,
                             &mut layer_caches,
                             max_seq_len,
@@ -1971,7 +1988,7 @@ impl SplitModel {
                         let attn_out = attention
                             .forward_mla(
                                 &x_i,
-                                mask.as_ref(),
+                                masks.causal.as_ref(),
                                 item.index_pos,
                                 &mut all_kv_caches[req_idx][layer_idx],
                                 max_seq_len,
@@ -2016,7 +2033,7 @@ impl SplitModel {
                         let attn_out = weights
                             .forward_attn(
                                 &x_i,
-                                mask.as_ref(),
+                                masks.causal.as_ref(),
                                 item.index_pos,
                                 &mut all_kv_caches[req_idx][layer_idx],
                                 max_seq_len,
@@ -2261,12 +2278,6 @@ impl SplitModel {
 
         let seq_len = input.dim(1).map_err(SwarmError::internal)?;
 
-        let mask = if seq_len == 1 {
-            None
-        } else {
-            Some(self.mask(seq_len).map_err(SwarmError::internal)?)
-        };
-
         let num_layers = self.layers.len();
         let cache_key = KvCacheStore::cache_key(&self.kv_model_key, request_id);
 
@@ -2282,6 +2293,10 @@ impl SplitModel {
                 "TP layer slot {local_layer_idx} out of range (num_layers={num_layers})"
             ))
         })?;
+        let kv_offset = layer_slot.as_ref().map_or(0, |c| c.current_seq_len());
+        let masks = self
+            .attention_masks(seq_len, kv_offset)
+            .map_err(SwarmError::internal)?;
 
         let result = match &self.layers[local_layer_idx] {
             LayerVariant::Dense(lw) => match phase {
@@ -2292,7 +2307,7 @@ impl SplitModel {
                         .map_err(|e| SwarmError::Internal(format!("tp attn_norm: {e}")))?;
                     lw.forward_attn(
                         &x,
-                        mask.as_ref(),
+                        masks.for_layer(lw),
                         index_pos,
                         layer_slot,
                         self.max_seq_len,
@@ -2352,6 +2367,64 @@ fn ffn_capture_ineligibility(ffn: &FfnVariant) -> Option<&'static str> {
             Some("a mixture-of-experts layer routes its experts on the processor")
         }
     }
+}
+
+/// The attention masks one forward's layers read: the causal mask, and — where
+/// a sliding window keeps keys out (#278) — the windowed mask beside it, over
+/// the keys `LayerWeights::keys_in_window` leaves that layer. Built once per
+/// forward ([`SplitModel::attention_masks`]); they cross a device boundary
+/// together, with the activation.
+#[derive(Clone, Default)]
+struct ForwardMasks {
+    causal: Option<Tensor>,
+    windowed: Option<Tensor>,
+}
+
+impl ForwardMasks {
+    /// The mask `lw` reads: the windowed one for a windowed layer while its
+    /// window binds, the causal one otherwise.
+    fn for_layer(&self, lw: &LayerWeights) -> Option<&Tensor> {
+        match (&self.windowed, lw.sliding_window) {
+            (Some(windowed), Some(_)) => Some(windowed),
+            _ => self.causal.as_ref(),
+        }
+    }
+
+    fn to_device(&self, target: &Device) -> CandleResult<Self> {
+        let move_one = |m: &Option<Tensor>| m.as_ref().map(|t| t.to_device(target)).transpose();
+        Ok(Self {
+            causal: move_one(&self.causal)?,
+            windowed: move_one(&self.windowed)?,
+        })
+    }
+}
+
+/// The additive mask of a windowed layer (#278): `query_len` queries after
+/// `offset` cached positions, over the keys from `start`
+/// (`layers::window_start`) to the end. A query at `p` sees a key at `k` when
+/// `k <= p` and `p - k < window` — llama.cpp's `LLAMA_SWA_TYPE_STANDARD`
+/// (`llama_hparams::is_masked_swa`).
+fn window_mask(
+    query_len: usize,
+    offset: usize,
+    window: usize,
+    start: usize,
+    device: &Device,
+) -> CandleResult<Tensor> {
+    let keys = offset + query_len - start;
+    let mask: Vec<f32> = (0..query_len)
+        .flat_map(|i| {
+            let query = offset + i;
+            (start..start + keys).map(move |key| {
+                if key > query || query - key >= window {
+                    f32::NEG_INFINITY
+                } else {
+                    0.0
+                }
+            })
+        })
+        .collect();
+    Tensor::from_slice(&mask, (query_len, keys), device)
 }
 
 /// One dense layer's forward, from the residual stream to the residual stream.
@@ -2432,13 +2505,13 @@ fn dense_layer_on_the_card(
     lw: &LayerWeights,
     card: &Device,
     hidden: Residual,
-    mask: Option<Tensor>,
+    masks: ForwardMasks,
     index_pos: usize,
     seq_len: usize,
     cache: &mut Option<LayerKv>,
     max_seq_len: usize,
     kv_reserve: usize,
-) -> Result<(Residual, Option<Tensor>), SwarmError> {
+) -> Result<(Residual, ForwardMasks), SwarmError> {
     // A forward from position 0 starts the cache over, whatever it held.
     let held = match cache.as_ref() {
         Some(c) if index_pos > 0 => c.current_seq_len(),
@@ -2451,7 +2524,7 @@ fn dense_layer_on_the_card(
                 lw,
                 Some(&on_card),
                 hidden.clone(),
-                mask.as_ref(),
+                masks.for_layer(lw),
                 index_pos,
                 cache,
                 max_seq_len,
@@ -2462,7 +2535,7 @@ fn dense_layer_on_the_card(
     let e = match tried {
         Ok(h) => {
             note_a_layer_ran_on_the_card();
-            return Ok((h, mask));
+            return Ok((h, masks));
         }
         Err(e) => e,
     };
@@ -2475,19 +2548,21 @@ fn dense_layer_on_the_card(
             .map_err(|e| SwarmError::Internal(format!("{what} back to the processor: {e}")))
     };
     let hidden = Residual::Ready(down("activation", hidden.into_tensor())?);
-    let mask = mask.map(|m| down("mask", Ok(m))).transpose()?;
+    let masks = masks
+        .to_device(&Device::Cpu)
+        .map_err(|e| SwarmError::Internal(format!("mask back to the processor: {e}")))?;
     let h = dense_layer(
         lw,
         None,
         hidden,
-        mask.as_ref(),
+        masks.for_layer(lw),
         index_pos,
         cache,
         max_seq_len,
         kv_reserve,
         None,
     )?;
-    Ok((h, mask))
+    Ok((h, masks))
 }
 
 /// Logged once per process: a processor-held layer has read a prompt chunk
@@ -2540,5 +2615,57 @@ mod context_window_tests {
             !window_overflow_is_a_finished_reply(1, 0),
             "a single-token prompt at position 0 has generated nothing"
         );
+    }
+}
+
+#[cfg(test)]
+mod window_mask_tests {
+    use super::window_mask;
+    use crate::inference::layers::window_start;
+    use candle_core::Device;
+
+    /// The windowed mask cell by cell against llama.cpp's rule
+    /// (`LLAMA_SWA_TYPE_STANDARD`: a key at `k` is hidden from a query at `p`
+    /// when `p - k >= window`), and the keys it leaves out are keys no query
+    /// of the forward may see — cutting them off loses nothing, and the first
+    /// query sees the first key kept.
+    #[test]
+    fn the_window_mask_is_llama_cpps_standard_rule() {
+        let window = 3;
+        for (offset, queries) in [(0, 3), (0, 4), (0, 9), (2, 4), (5, 3), (7, 1), (1, 1)] {
+            let last = offset + queries - 1;
+            let Some(start) = window_start(window, offset, queries) else {
+                assert!(last < window, "({offset}, {queries}): the window binds");
+                continue;
+            };
+            assert!(last >= window);
+            assert!(
+                offset - start < window && start + window > offset,
+                "the first query sees the first key kept"
+            );
+            assert!(
+                start == 0 || offset - (start - 1) >= window,
+                "a key cut off is one no query sees"
+            );
+            let mask: Vec<Vec<f32>> = window_mask(queries, offset, window, start, &Device::Cpu)
+                .unwrap()
+                .to_vec2()
+                .unwrap();
+            assert_eq!(mask.len(), queries);
+            for (i, row) in mask.iter().enumerate() {
+                assert_eq!(row.len(), offset + queries - start);
+                let query = offset + i;
+                for (c, &cell) in row.iter().enumerate() {
+                    let key = start + c;
+                    let seen = key <= query && query - key < window;
+                    assert_eq!(
+                        cell == 0.0,
+                        seen,
+                        "({offset}, {queries}) query {query} key {key}: {cell}"
+                    );
+                    assert!(cell == 0.0 || cell == f32::NEG_INFINITY);
+                }
+            }
+        }
     }
 }

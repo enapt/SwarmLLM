@@ -2719,9 +2719,80 @@ pub(crate) struct LayerWeights {
     /// off for the 128-expert Maverick). Not `attn_q_norm`/`attn_k_norm`, which
     /// carry weights and run BEFORE RoPE (Qwen 3, Gemma 3).
     pub(crate) qk_rms_norm_after_rope: Option<f64>,
+    /// A sliding-window layer: a query at position `p` attends only the keys
+    /// at `p - window < k <= p` (llama.cpp `LLAMA_SWA_TYPE_STANDARD`). Gemma 2
+    /// windows every other layer at 4,096 positions; `None` attends the whole
+    /// cache. Set from `split::SlidingWindow`, the one reading of the model's
+    /// window; applied by [`Self::window_start_for`].
+    pub(crate) sliding_window: Option<usize>,
+}
+
+/// Where a sliding window of `window` positions starts for queries at
+/// `index_pos..index_pos + seq_len`: the first key the FIRST of them may see
+/// (`p - window < k`, llama.cpp's `is_masked_swa`), so every query's window
+/// lies inside `start..`. `None` while the LAST query still sees position 0 —
+/// the window keeps nothing out, and the layer reads its cache exactly as a
+/// layer with no window does, the same path and the same numbers.
+pub(crate) fn window_start(window: usize, index_pos: usize, seq_len: usize) -> Option<usize> {
+    let last = index_pos + seq_len.max(1) - 1;
+    (window > 0 && last >= window).then(|| (index_pos + 1).saturating_sub(window))
+}
+
+/// `t` from position `start` of its sequence dimension `dim` to the end: a
+/// view, no copy.
+fn from_position(t: &Tensor, dim: usize, start: usize) -> CandleResult<Tensor> {
+    let len = t.dim(dim)?;
+    t.narrow(dim, start, len.saturating_sub(start))
 }
 
 impl LayerWeights {
+    /// Where this layer's sliding window starts for queries at
+    /// `index_pos..index_pos + seq_len` ([`window_start`]), when it keeps any
+    /// key out: `None` for a layer with no window and for one whose window
+    /// still covers the whole cache.
+    pub(crate) fn window_start_for(&self, index_pos: usize, seq_len: usize) -> Option<usize> {
+        self.sliding_window
+            .and_then(|w| window_start(w, index_pos, seq_len))
+    }
+
+    /// The keys this layer's queries may see, cut to its window where it
+    /// binds — the ONE place a sliding window is applied to the cache, for
+    /// both attention entry points ([`Self::attend`],
+    /// [`Self::forward_attn_batched`]). The cache itself keeps every position:
+    /// truncation, a rollback and the prefix cache read it whole. Answers the
+    /// flash kernel's left window beside: every other path reads the window
+    /// from the mask the forward built for it (`ForwardMasks`), over the same
+    /// keys. The queries are the cache's LAST `seq_len` positions — the
+    /// reading the forward's masks are built on (its `kv_offset`), so the two
+    /// cannot disagree about where the window starts.
+    #[allow(clippy::type_complexity)]
+    fn keys_in_window(
+        &self,
+        seq_len: usize,
+        k: Tensor,
+        v: Tensor,
+        mirror: Option<(Tensor, Tensor)>,
+    ) -> CandleResult<(Tensor, Tensor, Option<(Tensor, Tensor)>, Option<usize>)> {
+        let first_query = k.dim(2)?.saturating_sub(seq_len);
+        let (Some(start), Some(window)) = (
+            self.window_start_for(first_query, seq_len),
+            self.sliding_window,
+        ) else {
+            return Ok((k, v, mirror, None));
+        };
+        // BHSD: positions on dim 2; the f16 mirror is BSHD, positions on dim 1.
+        let mirror = match mirror {
+            Some((mk, mv)) => Some((from_position(&mk, 1, start)?, from_position(&mv, 1, start)?)),
+            None => None,
+        };
+        Ok((
+            from_position(&k, 2, start)?,
+            from_position(&v, 2, start)?,
+            mirror,
+            Some(window - 1),
+        ))
+    }
+
     /// Pre-split weights for tensor parallelism, reducing VRAM per rank.
     ///
     /// Follows the Megatron-LM TP strategy:
@@ -3879,7 +3950,40 @@ pub(crate) fn run_attention(
     attn_logit_softcap: Option<f32>,
     flash_kv: FlashKv<'_>,
 ) -> CandleResult<Tensor> {
+    run_attention_windowed(
+        q,
+        k,
+        v,
+        mask,
+        n_head,
+        n_kv_head,
+        head_dim,
+        attn_logit_softcap,
+        flash_kv,
+        None,
+    )
+}
+
+/// [`run_attention`] for a layer whose sliding window binds: `k` and `v`
+/// already start where the FIRST query's window does
+/// (`LayerWeights::keys_in_window`), and `window_left` (the window less one)
+/// bounds each later query's for the flash kernel, which reads no mask. Every
+/// other path reads it from `mask`, built over the same keys.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_attention_windowed(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    mask: Option<&Tensor>,
+    n_head: usize,
+    n_kv_head: usize,
+    head_dim: usize,
+    attn_logit_softcap: Option<f32>,
+    flash_kv: FlashKv<'_>,
+    window_left: Option<usize>,
+) -> CandleResult<Tensor> {
     let _ = &flash_kv; // consumed only by the CUDA flash arm below
+    let _ = &window_left; // likewise
     let force_standard = crate::inference::attn_kernel::is_force_standard_attn();
     match q.device() {
         Device::Cpu => {
@@ -4125,18 +4229,28 @@ pub(crate) fn run_attention(
             // `window_size_left = None` is exactly how `flash_attn` itself
             // expresses `causal`, so the two arms differ only in the cap.
             let causal_right = if q_len > 1 { Some(0) } else { None };
-            let out = match attn_logit_softcap {
-                Some(cap) => candle_flash_attn::flash_attn_alibi_windowed_softcap(
+            // A sliding window bounds each query on the left too: query `i`,
+            // aligned bottom-right, sees `window_left` keys before its own.
+            let out = match (attn_logit_softcap, window_left) {
+                (Some(cap), _) => candle_flash_attn::flash_attn_alibi_windowed_softcap(
                     &q_f16,
                     &k_f16,
                     &v_f16,
                     None, // no ALiBi — RoPE models only
                     softmax_scale,
-                    None, // unlimited left context
+                    window_left, // unlimited left context without a window
                     causal_right,
                     cap,
                 )?,
-                None => {
+                (None, Some(left)) => candle_flash_attn::flash_attn_windowed(
+                    &q_f16,
+                    &k_f16,
+                    &v_f16,
+                    softmax_scale,
+                    Some(left),
+                    Some(0),
+                )?,
+                (None, None) => {
                     candle_flash_attn::flash_attn(&q_f16, &k_f16, &v_f16, softmax_scale, q_len > 1)?
                 }
             };
@@ -4326,24 +4440,35 @@ impl LayerWeights {
         let k = self.apply_rotary_emb(&k, index_pos)?;
         crate::inference::prof::add(P::AttnShape, __shape_t.elapsed().as_nanos() as u64);
 
-        // KV-cache: use pre-allocated KvCache buffers (avoids Tensor::cat per step)
-        let (k, v) = match cache_home {
-            None => append_to_cache(
-                kv_cache,
-                &k,
-                &v,
-                index_pos,
-                self.kv_storage_on(x.device()),
-                max_seq_len,
-                kv_reserve,
-            )?,
+        // KV-cache: use pre-allocated KvCache buffers (avoids Tensor::cat per
+        // step), cut to the layer's sliding window where it binds.
+        let (k, v, mirror, window_left) = match cache_home {
+            None => {
+                let (k, v) = append_to_cache(
+                    kv_cache,
+                    &k,
+                    &v,
+                    index_pos,
+                    self.kv_storage_on(x.device()),
+                    max_seq_len,
+                    kv_reserve,
+                )?;
+                // The f16 BSHD mirror, if this cache is maintaining one — lets
+                // the CUDA flash arm skip converting the whole history every
+                // token. A half cache has none: flash reads it where it lies
+                // (`run_attention`).
+                let mirror = kv_cache.as_ref().and_then(|c| c.flash_operands());
+                self.keys_in_window(seq_len, k, v, mirror)?
+            }
             // The cache stays on its layer's own device: the new rows go down
             // to it, and the history it then holds comes up for the attention.
             // llama.cpp's scheduler does the same for a processor layer it
             // offloads — its K/V write is pinned to the host cache and the
             // cache views are copied to the card (`ggml_backend_sched` pass 5,
             // read at `4b1a27f`). `force_contiguous` copies only the positions
-            // written: a view's upload carries its whole buffer.
+            // written: a view's upload carries its whole buffer. The window is
+            // cut BEFORE the copy, so only the positions the layer reads come
+            // up. No mirror: the history was just copied.
             Some(home) => {
                 let (k, v) = append_to_cache(
                     kv_cache,
@@ -4354,27 +4479,21 @@ impl LayerWeights {
                     max_seq_len,
                     kv_reserve,
                 )?;
+                let (k, v, _, window_left) = self.keys_in_window(seq_len, k, v, None)?;
                 (
                     sent_to_card(&k.force_contiguous()?, x.device())?,
                     sent_to_card(&v.force_contiguous()?, x.device())?,
+                    None,
+                    window_left,
                 )
             }
-        };
-
-        // The f16 BSHD mirror, if this cache is maintaining one — lets the CUDA
-        // flash arm skip converting the whole history every token. A half
-        // cache has none: flash reads it where it lies (`run_attention`). A
-        // cache kept elsewhere has none either: its history was just copied.
-        let mirror = match cache_home {
-            Some(_) => None,
-            None => kv_cache.as_ref().and_then(|c| c.flash_operands()),
         };
 
         // Unified attention dispatch: flash (CPU/GPU) or standard matmul fallback.
         // All backends return BHSD (b, n_head, seq, head_dim).
         let y = crate::inference::prof::timed!(
             P::AttnCore,
-            run_attention(
+            run_attention_windowed(
                 &q,
                 &k,
                 &v,
@@ -4384,6 +4503,7 @@ impl LayerWeights {
                 self.head_dim,
                 self.attn_logit_softcap,
                 mirror.as_ref().map(|(k, v)| (k, v)),
+                window_left,
             )
         )?;
 
@@ -4569,9 +4689,10 @@ impl LayerWeights {
                 kv_reserves.get(i).copied().unwrap_or(0),
             )?;
             let mirror = cache_slot.as_ref().and_then(|c| c.flash_operands());
+            let (ki, vi, mirror, window_left) = self.keys_in_window(seq_len, ki, vi, mirror)?;
             heads.push(crate::inference::prof::timed!(
                 P::AttnCore,
-                run_attention(
+                run_attention_windowed(
                     &qi,
                     &ki,
                     &vi,
@@ -4581,6 +4702,7 @@ impl LayerWeights {
                     self.head_dim,
                     self.attn_logit_softcap,
                     mirror.as_ref().map(|(k, v)| (k, v)),
+                    window_left,
                 )
             )?);
         }
@@ -4686,6 +4808,7 @@ mod batched_attention_tests {
             rope_dim,
             skip_rope: false,
             qk_rms_norm_after_rope: None,
+            sliding_window: None,
         }
     }
 

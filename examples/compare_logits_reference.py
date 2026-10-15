@@ -38,10 +38,25 @@ first = meta.get("first_position", 0)
 # --n-ctx explains.
 n_ctx = int(os.environ.get("N_CTX", max(64, len(tokens) + 8)))
 
-llm = Llama(model_path=gguf, n_ctx=n_ctx, logits_all=True,
+# A probe that kept only a long prompt's last positions is compared one token at a
+# time past `first`: logits at every position are n_ctx x vocab floats, 4.7 GB for a
+# 4.6K prompt at Gemma's 256K vocabulary, held twice (llama.cpp's buffer and
+# `scores`). The opening is read in one pass, then each kept position is a decode step
+# whose logits are read as llama.cpp leaves them. REF_ALL_POSITIONS=1 keeps the
+# one-pass reading.
+step = first > 0 and os.environ.get("REF_ALL_POSITIONS") != "1"
+llm = Llama(model_path=gguf, n_ctx=n_ctx, logits_all=not step,
             n_gpu_layers=0, n_threads=4, verbose=False)
-llm.eval(tokens)
-ref = np.array(llm.scores[first: len(tokens)], dtype=np.float32)
+if step:
+    llm.eval(tokens[:first])
+    rows = []
+    for t in tokens[first:]:
+        llm.eval([t])
+        rows.append(np.ctypeslib.as_array(llm._ctx.get_logits(), shape=(llm.n_vocab(),)).copy())
+    ref = np.array(rows, dtype=np.float32)
+else:
+    llm.eval(tokens)
+    ref = np.array(llm.scores[first: len(tokens)], dtype=np.float32)
 if ref.shape[1] != ours.shape[1]:
     sys.exit(f"vocab differs: llama.cpp {ref.shape[1]} vs ours {ours.shape[1]}")
 if ref.shape[0] != ours.shape[0]:

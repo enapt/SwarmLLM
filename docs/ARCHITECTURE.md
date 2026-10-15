@@ -136,6 +136,8 @@ swarmllm/
 │                 every position of a GGUF (one segment or split) against llama.cpp's, by
 │                 VALUE: how an architecture is verified on a tiny random model (#114);
 │                 make_tiny_llama4_gguf.py writes one where none exists (Llama 4, gguf-py);
+│                 make_tiny_gemma2_gguf.py — Gemma 2 with an 8-position window (#278) and
+│                 the 27B's 46 layers (#279);
 │                 score_against_reference.py — a reply teacher-forced through llama.cpp, rank
 │                 of every token: the test for a split reply where byte-equality is not;
 │                 `--lora` scores against llama.cpp applying an adapter, which

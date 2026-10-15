@@ -139,6 +139,80 @@ pub(crate) fn layer_is_recurrent(ct: &gguf_file::Content, layer_idx: usize) -> b
         .contains_key(&recurrent_layer_marker(layer_idx))
 }
 
+/// A model's sliding-window attention, read as llama.cpp reads it — the ONE
+/// reading: the loader sets each layer's `LayerWeights::sliding_window` from
+/// [`Self::for_layer`].
+///
+/// Only the families whose window llama.cpp APPLIES and this build runs.
+/// Gemma 2 (`llama_model_gemma2::load_arch_hparams`): every other layer from
+/// layer 0, 4,096 positions unless the file says otherwise. Read without it,
+/// every Gemma 2 layer attended the whole conversation past 4,096 tokens, and
+/// its replies drifted from llama.cpp's there (FUTURE_WORK #278). Phi-3
+/// declares a window that llama.cpp switches OFF (`llama_model_phi3`, "Phi SWA
+/// is currently disabled", ggml-org/llama.cpp#13676), so it is not read here
+/// either: a reply is judged against llama.cpp. Llama 4's chunked attention
+/// is a different rule (`LLAMA_SWA_TYPE_CHUNKED`), not this one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SlidingWindow {
+    /// Positions a windowed layer's query sees, its own included.
+    pub(crate) size: usize,
+    pattern: SwaPattern,
+}
+
+/// Which layers are windowed: llama.cpp's
+/// `{arch}.attention.sliding_window_pattern`, one flag per layer or a period
+/// (`llama_model_base::load_swa_pattern`), else the family's own period.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SwaPattern {
+    /// Layer `il` is windowed when `il % n < n - 1`, every layer when `n` is
+    /// 0 (`llama_hparams::set_swa_pattern`, no dense layer first).
+    Period(usize),
+    Layers(Vec<bool>),
+}
+
+impl SlidingWindow {
+    /// The window `ct` describes, or `None` for a model with none.
+    /// `SWARMLLM_SLIDING_WINDOW=0` reads none — the A/B arm, every layer
+    /// attending the whole conversation as before #278.
+    pub(crate) fn read(ct: &gguf_file::Content) -> Option<Self> {
+        if std::env::var("SWARMLLM_SLIDING_WINDOW").as_deref() == Ok("0") {
+            return None;
+        }
+        let arch = gguf_arch_str(ct);
+        let (default_size, period) = match arch.as_str() {
+            "gemma2" => (4096, 2),
+            _ => return None,
+        };
+        let size = ct
+            .metadata
+            .get(&format!("{arch}.attention.sliding_window"))
+            .and_then(|v| v.to_u32().ok())
+            .map_or(default_size, |v| v as usize);
+        let pattern = match ct
+            .metadata
+            .get(&format!("{arch}.attention.sliding_window_pattern"))
+        {
+            Some(gguf_file::Value::Array(flags)) => {
+                SwaPattern::Layers(flags.iter().map(|f| f.to_bool().unwrap_or(false)).collect())
+            }
+            Some(v) => SwaPattern::Period(v.to_u32().map_or(period, |n| n as usize)),
+            None => SwaPattern::Period(period),
+        };
+        (size > 0).then_some(Self { size, pattern })
+    }
+
+    /// The window of layer `il` (its index in the WHOLE model), or `None`
+    /// for a layer that attends the whole conversation.
+    pub(crate) fn for_layer(&self, il: usize) -> Option<usize> {
+        let windowed = match &self.pattern {
+            SwaPattern::Period(0) => true,
+            SwaPattern::Period(n) => il % n < n - 1,
+            SwaPattern::Layers(flags) => flags.get(il).copied().unwrap_or(false),
+        };
+        windowed.then_some(self.size)
+    }
+}
+
 /// The tensor whose presence marks layer `layer_idx` as recurrent — the ONE
 /// spelling, for the header ([`layer_is_recurrent`]) and the manifest's
 /// tensor table ([`GgufTensorMeta::layers_keeping_kv`]) alike.
@@ -1542,6 +1616,122 @@ mod refusal_tests {
             header("starcoder2", None).refusal(),
             Some(ModelRefusal::Architecture("starcoder2".into())),
             "a family this build has no loader for is still refused for that"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sliding_window_tests {
+    use super::*;
+
+    fn header(arch: &str, extra: Vec<(&str, gguf_file::Value)>) -> gguf_file::Content {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "general.architecture".to_string(),
+            gguf_file::Value::String(arch.to_string()),
+        );
+        for (k, v) in extra {
+            metadata.insert(k.to_string(), v);
+        }
+        gguf_file::Content {
+            magic: gguf_file::VersionedMagic::GgufV3,
+            metadata,
+            tensor_infos: HashMap::new(),
+            tensor_data_offset: 0,
+        }
+    }
+
+    fn windowed_layers(w: &SlidingWindow, layers: usize) -> Vec<usize> {
+        (0..layers)
+            .filter(|&il| w.for_layer(il).is_some())
+            .collect()
+    }
+
+    /// Gemma 2 as llama.cpp reads it: the file's window on every EVEN layer
+    /// (`set_swa_pattern(2)`), 4,096 when the file names none.
+    #[test]
+    fn gemma2_windows_every_other_layer_from_the_first() {
+        let w = SlidingWindow::read(&header(
+            "gemma2",
+            vec![(
+                "gemma2.attention.sliding_window",
+                gguf_file::Value::U32(4096),
+            )],
+        ))
+        .expect("gemma2 has a window");
+        assert_eq!(w.size, 4096);
+        assert_eq!(windowed_layers(&w, 6), vec![0, 2, 4]);
+        assert_eq!(w.for_layer(1), None);
+
+        let unnamed = SlidingWindow::read(&header("gemma2", vec![])).unwrap();
+        assert_eq!(unnamed.size, 4096, "the family default");
+    }
+
+    /// The pattern key wins over the family's period: an integer is a period
+    /// (`il % n < n - 1`, 0 = every layer), an array one flag per layer.
+    #[test]
+    fn a_declared_pattern_overrides_the_family_period() {
+        let period6 = SlidingWindow::read(&header(
+            "gemma2",
+            vec![(
+                "gemma2.attention.sliding_window_pattern",
+                gguf_file::Value::U32(6),
+            )],
+        ))
+        .unwrap();
+        assert_eq!(
+            windowed_layers(&period6, 12),
+            vec![0, 1, 2, 3, 4, 6, 7, 8, 9, 10]
+        );
+
+        let every = SlidingWindow::read(&header(
+            "gemma2",
+            vec![(
+                "gemma2.attention.sliding_window_pattern",
+                gguf_file::Value::U32(0),
+            )],
+        ))
+        .unwrap();
+        assert_eq!(windowed_layers(&every, 3), vec![0, 1, 2]);
+
+        let flags = SlidingWindow::read(&header(
+            "gemma2",
+            vec![(
+                "gemma2.attention.sliding_window_pattern",
+                gguf_file::Value::Array(vec![
+                    gguf_file::Value::Bool(false),
+                    gguf_file::Value::Bool(true),
+                    gguf_file::Value::Bool(true),
+                ]),
+            )],
+        ))
+        .unwrap();
+        assert_eq!(
+            windowed_layers(&flags, 5),
+            vec![1, 2],
+            "past the list: none"
+        );
+    }
+
+    /// Families whose window llama.cpp does not apply read none: Phi-3
+    /// declares one that llama.cpp switches off, and a family with no window
+    /// key is unwindowed. A window of 0 is no window.
+    #[test]
+    fn only_a_window_llama_cpp_applies_is_read() {
+        assert_eq!(
+            SlidingWindow::read(&header(
+                "phi3",
+                vec![("phi3.attention.sliding_window", gguf_file::Value::U32(2047))],
+            )),
+            None
+        );
+        assert_eq!(SlidingWindow::read(&header("llama", vec![])), None);
+        assert_eq!(
+            SlidingWindow::read(&header(
+                "gemma2",
+                vec![("gemma2.attention.sliding_window", gguf_file::Value::U32(0))],
+            )),
+            None
         );
     }
 }

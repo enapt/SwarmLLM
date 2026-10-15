@@ -177,6 +177,12 @@ Qwen 3.5's DeltaNet layers keep a recurrent state per request, and a rejected dr
 
 → `docs/invariants/inference.md` § "Qwen 3.5's delta rule is ONE op per layer"
 
+## A sliding window is cut where it binds; the cache keeps every position (2026-10-15, #278)
+
+**`split::SlidingWindow::read`** is the one reading of a model's window (llama.cpp's `LLAMA_SWA_TYPE_STANDARD`, per family — Gemma 2: even layers, 4096; Phi-3's is off in llama.cpp, so off here). **`LayerWeights::keys_in_window`** is the one place it is applied, for both attention entry points: K/V (and the f16 mirror) are narrowed to the window's start, taken from the cache's LENGTH; the cache itself keeps every position. Several queries read **`ForwardMasks::for_layer`** (causal + windowed, built once per forward, moved together); flash gets `window_size_left = W - 1`. A window that does not bind is the old path, bit for bit. A/B `SWARMLLM_SLIDING_WINDOW=0`.
+
+→ `docs/invariants/inference.md` § "A sliding window is cut where it binds"
+
 ## A model that cannot write replies is refused off its header (2026-10-15)
 
 **`GgufTensorMeta::refusal`** (→ `ModelRefusal`, one wording via `into_error`) is the one answer: no loader for the family, or an embedding model (`<arch>.pooling_type` non-zero — Ollama's rule). Asked by the loader, the router (`SharedState::refused_model`), auto-manage, the user's download, `/v1/models` and the dashboard list (`cannot_chat`). Before a header exists, `model::huggingface::is_embedding_repo` reads HuggingFace's tags (the pipeline tag first). A new path that runs or fetches a model asks it.

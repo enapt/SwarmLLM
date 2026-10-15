@@ -4099,6 +4099,75 @@ capture's decision line lands INSIDE the streamed `Generated:` line — so two i
 hashed differently and "the captured MoE output differs run to run" was briefly believed (gotcha
 #840). Compare the `Token IDs:` line, or strip timestamped lines first.
 
+## A sliding window is cut where it binds, and the cache keeps every position (2026-10-15, FUTURE_WORK #278)
+
+Gemma 2 alternates two kinds of attention layer: the even ones see only the last
+4,096 positions, the odd ones the whole conversation. The loader read Gemma 2's
+softcaps and extra norms but never its window, so every layer attended the whole
+conversation. Under 4,096 tokens the two are the same computation, and every
+reference check ever run on Gemma 2 was shorter than that (gotcha #863). Measured
+on gemma-2-2b-it Q4_K_M, `examples/logits_reference_probe.rs` +
+`compare_logits_reference.py` (`~/swarmllm-swa/probe.sh`: ARCHITECTURE.md tokenized,
+read in 512-token chunks, the prompt's last 8 positions + 4 decode steps):
+
+| prompt | window | worst cosine | median | top-1 |
+|---|---|---|---|---|
+| 4,600 | not read (before) | 0.98587 | 0.99563 | 10/12 — DISAGREES |
+| 4,600 | read | 0.99939 | 0.99963 | 11/12 — agrees |
+| 2,000 | not read (control) | 0.99914 | 0.99974 | agrees |
+
+**The rule is llama.cpp's** `LLAMA_SWA_TYPE_STANDARD` (`llama_hparams::is_masked_swa`):
+a key at `k` is hidden from a query at `p` when `p - k >= n_swa`. Which layers:
+`load_swa_pattern(ml, 2)` → `set_swa_pattern(2)`, layer `il` windowed when
+`il % 2 < 1`, unless the file's `{arch}.attention.sliding_window_pattern` says
+otherwise (an integer period, or one flag per layer). Read at `4b1a27f`,
+`src/models/gemma2.cpp`. Phi-3 declares a window llama.cpp switches off
+(ggml-org/llama.cpp#13676), so it is not read here either; Llama 4's chunked
+attention is a different rule (FUTURE_WORK #114 (b)).
+
+**How it is applied:**
+
+- `split::SlidingWindow::read` is the one reading; the loader sets each layer's
+  `LayerWeights::sliding_window` from `for_layer(il)` (`il` in the WHOLE model,
+  so a segment starting at an odd layer gets the right parity).
+- `LayerWeights::keys_in_window` is the one place a window meets the cache, for
+  both attention entry points (`attend`, `forward_attn_batched`). It narrows the
+  K/V views (BHSD dim 2) and the f16 mirror (BSHD dim 1) to the window's start —
+  a view, no copy. The start comes from the cache's LENGTH (its last `seq_len`
+  positions are the queries), the same reading the forward's masks are built on
+  (`kv_offset`), so the two cannot disagree. The cache itself keeps every
+  position: truncation, a speculative rollback and the prefix cache read it
+  whole.
+- One query (decode) needs no mask: the narrowed view IS the window. Several
+  read `ForwardMasks::for_layer` — the causal mask and the windowed one over the
+  narrowed keys, built once per forward by `SplitModel::attention_masks`,
+  moved between devices together (a card/processor split, a processor layer
+  run on the card).
+- The card's flash arm gets `window_size_left = W - 1`, right 0, over the
+  narrowed keys (the vendored kernel aligns bottom-right). Every kernel honours a
+  view's start offset: `decode_attn` on both devices, `prefill_attn` on the
+  processor, candle-flash-attn.
+- **A window that does not bind is the old path, bit for bit**
+  (`window_start` answers `None` while the last query still sees position 0).
+  Pinned by `a_window_that_keeps_nothing_out_changes_nothing`.
+
+**The reference in the tests is independent of the implementation**: RoPE makes a
+query's score depend only on its distance to the key, so on a one-layer model a
+windowed layer's output at `p` equals the last position of a run over just the
+`W` positions ending at `p`, started from 0 (`a_windowed_layer_reads_only_its_window_on_every_path`,
+one pass, pieces of 4 and 3, one at a time; it fails by 0.045 with the window
+off). `windowed_and_global_layers_each_read_their_own_mask` composes the two
+kinds of layer, `a_batched_forward_reads_the_window_too` covers the batched path,
+`the_window_mask_is_llama_cpps_standard_rule` checks the mask cell by cell.
+Against llama.cpp at a window that binds within a few tokens:
+`examples/make_tiny_gemma2_gguf.py` (window 8, f32 weights) agrees at worst cosine 0.99928
+over 40 positions, whole, in pieces and split at layer 3; 0.334 with the window off.
+
+**Not done**: llama.cpp's iSWA cache keeps only the window plus one batch for a
+windowed layer (`llama_kv_cache_iswa`); here a windowed layer keeps every position,
+so a long Gemma 2 conversation costs the memory it cost before — no more, and no
+wrong answer. A/B `SWARMLLM_SLIDING_WINDOW=0`.
+
 ## A model that cannot write replies is refused off its header (2026-10-15)
 
 A tester's fresh node offered `Qwen/Qwen3-Embedding-0.6B-GGUF` in the HuggingFace

@@ -225,6 +225,7 @@ fn qwen2_forward_with_biases() {
         rope_dim: head_dim,
         skip_rope: false,
         qk_rms_norm_after_rope: None,
+        sliding_window: None,
     };
 
     let mut model = SplitModel {
