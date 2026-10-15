@@ -27,6 +27,11 @@ Verified 2026-10-15 (#278), 40 tokens, window 8, N_LAYER=26: worst cosine 0.9992
 whole, in 5-token pieces (LOGITS_PROBE_CHUNK=5) and split at layer 3; 0.334 with
 SWARMLLM_SLIDING_WINDOW=0. llama.cpp keeps its KV cache in f16, which is the
 remaining gap.
+
+Verified 2026-10-15 (#279), N_LAYER=46: with QK_STD=0.25 worst cosine 0.99987
+(0.727 with SWARMLLM_QUERY_SCALE=0). With the default QK_STD=0.5 only 0.966:
+rounding amplified over 46 decisive layers, not logic (llama.cpp with an f32 KV
+cache: 0.992).
 """
 import os
 import sys
@@ -40,6 +45,10 @@ rng = np.random.default_rng(20261015)
 n_embd, n_head, n_head_kv, head_dim, n_ff, n_ctx = 64, 4, 2, 32, 128, 512
 n_layer = int(os.environ.get("N_LAYER", 46))
 swa = int(os.environ.get("SWA", 8))
+# QK_STD: the spread of the query and key weights. 0.5 makes attention decisive, so a wrong
+# scale shows at once; it also amplifies rounding over 46 layers (llama.cpp keeps its KV
+# cache in f16), so a softer file separates the two.
+qk_std = float(os.environ.get("QK_STD", 0.5))
 Q = gguf.GGMLQuantizationType.Q8_0 if os.environ.get("QUANT", "f32") == "q8" else gguf.GGMLQuantizationType.F32
 F32 = gguf.GGMLQuantizationType.F32
 
@@ -101,8 +110,8 @@ for i in range(n_layer):
     put(f"{p}.attn_norm.weight", 1.0 + t((n_embd,), 0.1), F32)
     # Wide enough that attention is decisive: a wrong scale or a missing window
     # then moves the output well past rounding.
-    put(f"{p}.attn_q.weight", t((n_head * head_dim, n_embd), 0.5), Q)
-    put(f"{p}.attn_k.weight", t((n_head_kv * head_dim, n_embd), 0.5), Q)
+    put(f"{p}.attn_q.weight", t((n_head * head_dim, n_embd), qk_std), Q)
+    put(f"{p}.attn_k.weight", t((n_head_kv * head_dim, n_embd), qk_std), Q)
     put(f"{p}.attn_v.weight", t((n_head_kv * head_dim, n_embd), 0.3), Q)
     put(f"{p}.attn_output.weight", t((n_embd, n_head * head_dim), 0.15), Q)
     put(f"{p}.post_attention_norm.weight", 1.0 + t((n_embd,), 0.1), F32)

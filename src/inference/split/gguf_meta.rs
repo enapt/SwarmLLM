@@ -213,6 +213,40 @@ impl SlidingWindow {
     }
 }
 
+/// What a model's queries are multiplied by so that the attention's own
+/// `1/sqrt(head_dim)` leaves the family's scale (`LayerWeights::query_scale`),
+/// or `None` where the two agree. Read as llama.cpp reads it: Gemma 2's 27B —
+/// the size llama.cpp knows by its 46 layers — scales by
+/// `1/sqrt(n_embd / n_head)` (`llama_model_gemma2::load_arch_hparams`, after
+/// gemma_pytorch `config.py`), every other size by `1/sqrt(head_dim)`. On the
+/// 27B that is 1/sqrt(144) against 1/sqrt(128): read without it, every
+/// attention score was 6% too large (FUTURE_WORK #279).
+/// `SWARMLLM_QUERY_SCALE=0` reads none — the A/B arm.
+pub(crate) fn query_scale(ct: &gguf_file::Content) -> Option<f64> {
+    if std::env::var("SWARMLLM_QUERY_SCALE").as_deref() == Ok("0") {
+        return None;
+    }
+    let arch = gguf_arch_str(ct);
+    let read = |key: &str| {
+        ct.metadata
+            .get(&format!("{arch}.{key}"))
+            .and_then(|v| v.to_u32().ok())
+            .map(|v| v as usize)
+    };
+    let scaled_by_width = match arch.as_str() {
+        "gemma2" => read("block_count") == Some(46),
+        _ => false,
+    };
+    if !scaled_by_width {
+        return None;
+    }
+    let (n_embd, n_head) = (read("embedding_length")?, read("attention.head_count")?);
+    // llama.cpp divides in integers before the square root.
+    let width = n_embd.checked_div(n_head)?;
+    let head_dim = read("attention.key_length").unwrap_or(width);
+    (width != head_dim && width > 0).then(|| (head_dim as f64 / width as f64).sqrt())
+}
+
 /// The tensor whose presence marks layer `layer_idx` as recurrent — the ONE
 /// spelling, for the header ([`layer_is_recurrent`]) and the manifest's
 /// tensor table ([`GgufTensorMeta::layers_keeping_kv`]) alike.
@@ -1710,6 +1744,39 @@ mod sliding_window_tests {
             windowed_layers(&flags, 5),
             vec![1, 2],
             "past the list: none"
+        );
+    }
+
+    fn gemma2_shape(layers: u32, n_embd: u32, n_head: u32, key_length: u32) -> gguf_file::Content {
+        header(
+            "gemma2",
+            vec![
+                ("gemma2.block_count", gguf_file::Value::U32(layers)),
+                ("gemma2.embedding_length", gguf_file::Value::U32(n_embd)),
+                ("gemma2.attention.head_count", gguf_file::Value::U32(n_head)),
+                (
+                    "gemma2.attention.key_length",
+                    gguf_file::Value::U32(key_length),
+                ),
+            ],
+        )
+    }
+
+    /// llama.cpp's sizes: only the 27B (46 layers) scales by `n_embd / n_head`
+    /// — 144 against a head of 128. The 9B's `n_embd / n_head` is 224 against
+    /// a head of 256, and llama.cpp scales it by the HEAD, so it reads none.
+    #[test]
+    fn only_gemma2_27b_scales_its_queries_by_the_model_width() {
+        let scale = query_scale(&gemma2_shape(46, 4608, 32, 128)).expect("the 27B is scaled");
+        assert!((scale - (128f64 / 144f64).sqrt()).abs() < 1e-12, "{scale}");
+        assert_eq!(query_scale(&gemma2_shape(42, 3584, 16, 256)), None, "9B");
+        assert_eq!(query_scale(&gemma2_shape(26, 2304, 8, 256)), None, "2B");
+        assert_eq!(
+            query_scale(&header(
+                "llama",
+                vec![("llama.block_count", gguf_file::Value::U32(46))]
+            )),
+            None
         );
     }
 

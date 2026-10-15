@@ -2725,6 +2725,12 @@ pub(crate) struct LayerWeights {
     /// cache. Set from `split::SlidingWindow`, the one reading of the model's
     /// window; applied by [`Self::window_start_for`].
     pub(crate) sliding_window: Option<usize>,
+    /// Multiplies the queries after RoPE, for a family whose attention scale
+    /// is not `1/sqrt(head_dim)`: the attention's own `1/sqrt(head_dim)` then
+    /// leaves the family's. Gemma 2's 27B scales by `1/sqrt(n_embd / n_head)`
+    /// — llama.cpp's `ggml_scale(Qcur, f_attention_scale)`, after RoPE as
+    /// there. Set from `split::query_scale`; `None` for every other model.
+    pub(crate) query_scale: Option<f64>,
 }
 
 /// Where a sliding window of `window` positions starts for queries at
@@ -2753,6 +2759,15 @@ impl LayerWeights {
     pub(crate) fn window_start_for(&self, index_pos: usize, seq_len: usize) -> Option<usize> {
         self.sliding_window
             .and_then(|w| window_start(w, index_pos, seq_len))
+    }
+
+    /// `q` times [`Self::query_scale`], untouched (no op, no launch) for a
+    /// model without one.
+    fn scaled_queries(&self, q: Tensor) -> CandleResult<Tensor> {
+        match self.query_scale {
+            Some(scale) => q * scale,
+            None => Ok(q),
+        }
     }
 
     /// The keys this layer's queries may see, cut to its window where it
@@ -4436,7 +4451,7 @@ impl LayerWeights {
         let q = q.transpose(1, 2)?.contiguous()?;
         let k = k.transpose(1, 2)?.contiguous()?;
 
-        let q = self.apply_rotary_emb(&q, index_pos)?;
+        let q = self.scaled_queries(self.apply_rotary_emb(&q, index_pos)?)?;
         let k = self.apply_rotary_emb(&k, index_pos)?;
         crate::inference::prof::add(P::AttnShape, __shape_t.elapsed().as_nanos() as u64);
 
@@ -4642,6 +4657,9 @@ impl LayerWeights {
         }
         let q = q.transpose(1, 2)?.contiguous()?;
         let k = k.transpose(1, 2)?.contiguous()?;
+        // A rotation is linear, so the queries' scale is taken before it here:
+        // one call for the stack, whichever way RoPE goes below.
+        let q = self.scaled_queries(q)?;
         // RoPE is the ONE step here that depends on where each request is in
         // its own conversation. When every row happens to sit at the same
         // position — a batch of prefills, or aligned decodes — one call covers
@@ -4809,6 +4827,7 @@ mod batched_attention_tests {
             skip_rope: false,
             qk_rms_norm_after_rope: None,
             sliding_window: None,
+            query_scale: None,
         }
     }
 

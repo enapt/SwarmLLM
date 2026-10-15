@@ -934,6 +934,12 @@ impl SplitModel {
                 "Sliding-window attention"
             );
         }
+        // A query scale other than 1/sqrt(head_dim) (Gemma 2's 27B) — the one
+        // reading is `split::query_scale`.
+        let query_scale = super::query_scale(&ct);
+        if let Some(scale) = query_scale {
+            tracing::debug!(scale, "Queries scaled for the family's attention scale");
+        }
 
         // Gemma 2 final logit soft-capping (from GGUF metadata)
         let final_logit_softcap = ct
@@ -1409,6 +1415,7 @@ impl SplitModel {
                         skip_rope: false,
                         qk_rms_norm_after_rope: None,
                         sliding_window: None,
+                        query_scale: None,
                     }));
                 }
             }
@@ -1549,6 +1556,7 @@ impl SplitModel {
                     // 128-expert Maverick, and only where RoPE runs.
                     qk_rms_norm_after_rope: (!is_nope && n_experts != 128).then_some(rms_norm_eps),
                     sliding_window: None,
+                    query_scale: None,
                 }));
             }
         } else if model_arch.is_hybrid_ssm() {
@@ -2079,6 +2087,7 @@ impl SplitModel {
                                         skip_rope: false,
                                         qk_rms_norm_after_rope: None,
                                         sliding_window: window,
+                                        query_scale,
                                     }))
                                 })
                             })
@@ -2273,6 +2282,7 @@ impl SplitModel {
                         sliding_window: sliding_window
                             .as_ref()
                             .and_then(|w| w.for_layer(layer_idx)),
+                        query_scale,
                     }));
                 }
             }

@@ -70,6 +70,7 @@ fn llama4_normalises_q_and_k_after_rope_where_rope_runs() {
         skip_rope: false,
         qk_rms_norm_after_rope: None,
         sliding_window: None,
+        query_scale: None,
     };
     let eps = 1e-5;
     let normed = LayerWeights {
@@ -163,6 +164,7 @@ fn test_partial_rope_glm4_style() {
         skip_rope: false,
         qk_rms_norm_after_rope: None,
         sliding_window: None,
+        query_scale: None,
     };
 
     // Test that apply_rotary_emb handles partial RoPE
@@ -234,6 +236,7 @@ fn test_nope_skip_rope() {
         skip_rope: true, // NoPE layer
         qk_rms_norm_after_rope: None,
         sliding_window: None,
+        query_scale: None,
     };
 
     let x = Tensor::randn(0f32, 0.1, (1, n_head, seq_len, head_dim), &device).unwrap();
@@ -390,6 +393,7 @@ fn test_llama4_moe_layer_forward() {
             skip_rope: is_nope,
             qk_rms_norm_after_rope: None,
             sliding_window: None,
+            query_scale: None,
         }));
     }
 

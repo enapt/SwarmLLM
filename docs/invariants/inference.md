@@ -4168,6 +4168,37 @@ windowed layer (`llama_kv_cache_iswa`); here a windowed layer keeps every positi
 so a long Gemma 2 conversation costs the memory it cost before — no more, and no
 wrong answer. A/B `SWARMLLM_SLIDING_WINDOW=0`.
 
+## A family's attention scale is read, not assumed (2026-10-15, FUTURE_WORK #279)
+
+Every attention here scaled its scores by `1/sqrt(head_dim)`. llama.cpp does that for most
+families, but Gemma 2's 27B — the size it recognises by 46 layers — scales by
+`1/sqrt(n_embd / n_head)`: 1/sqrt(144) against a head of 128 (`llama_model_gemma2::load_arch_hparams`
+at `4b1a27f`, after gemma_pytorch's `config.py`; Gemma 3 has the same rule at 62 layers). The
+9B is the trap for a reader who generalises: its `n_embd / n_head` (224) also differs from its
+head (256), and llama.cpp scales it by the head.
+
+`split::query_scale` is the one reading; the loader sets `LayerWeights::query_scale` to
+`sqrt(head_dim / (n_embd / n_head))` and `scaled_queries` multiplies the queries by it — after
+RoPE in `attend`, as llama.cpp's `ggml_scale(Qcur, f_attention_scale)`; before it in
+`forward_attn_batched`, where RoPE may run per row (a rotation is linear). Multiplying the
+queries rather than threading a scale through every kernel (standard, grouped, both flash
+arms, the decode kernels) keeps one site: one elementwise launch per layer, against ~27 a
+decode layer already makes (tinyllama's count, § "Projections that share an activation must
+share the work"), on that shape only.
+
+**Measured** with `examples/make_tiny_gemma2_gguf.py` (46 layers, n_embd/n_head 16, head 32):
+
+| file | `SWARMLLM_QUERY_SCALE=0` (old) | scale read |
+|---|---|---|
+| `QK_STD=0.25` | worst 0.727, top-1 19/40 | **0.99987**, 39/40 |
+| default (0.5, decisive) | 0.657, 15/40 | 0.966, 34/40 |
+
+The decisive file's residual is not logic: llama.cpp with `type_k = type_v = f32` moves it to
+0.992 (gotcha #728's test — flip the reference's suspect setting and watch the gap), and the
+softer file agrees to 0.99987. Rounding grows through 46 layers of sharp attention. Tests:
+`only_gemma2_27b_scales_its_queries_by_the_model_width` (the 9B and 2B read none),
+`the_query_scale_reaches_the_batched_path_too` (fails by 0.067 without the batched scale).
+
 ## A model that cannot write replies is refused off its header (2026-10-15)
 
 A tester's fresh node offered `Qwen/Qwen3-Embedding-0.6B-GGUF` in the HuggingFace

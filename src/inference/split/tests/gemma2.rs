@@ -642,3 +642,49 @@ fn a_batched_forward_reads_the_window_too() {
         assert!(diff < 1e-4, "request {name}: batched differs by {diff}");
     }
 }
+
+/// A query scale (#279: Gemma 2's 27B) reaches both attention entry points:
+/// the batched forward agrees with the single one, and the scale moves the
+/// output — so the agreement is not two paths both ignoring it.
+#[test]
+fn the_query_scale_reaches_the_batched_path_too() {
+    let n = 6;
+    let mut model = gemma2_test_model(2);
+    let a = Tensor::randn(0f32, 1.0, (1, n, 256), &Device::Cpu).unwrap();
+    let b = Tensor::randn(0f32, 1.0, (1, n, 256), &Device::Cpu).unwrap();
+    let set_scale = |model: &mut SplitModel, scale: Option<f64>| {
+        for layer in model.layers.iter_mut() {
+            if let LayerVariant::Dense(lw) = layer {
+                lw.query_scale = scale;
+            }
+        }
+    };
+    set_scale(&mut model, None);
+    let plain = run_in_chunks(&mut model, &a, n, "plain");
+    set_scale(&mut model, Some(4.0));
+    let want_a = run_in_chunks(&mut model, &a, n, "alone-a");
+    let want_b = run_in_chunks(&mut model, &b, n, "alone-b");
+    assert!(
+        max_abs_diff(&plain, &want_a) > 1e-3,
+        "the scale must change the output"
+    );
+
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let items = [
+        BatchItem {
+            input: &a,
+            index_pos: 0,
+            request_id: "batch-a",
+        },
+        BatchItem {
+            input: &b,
+            index_pos: 0,
+            request_id: "batch-b",
+        },
+    ];
+    let got = model.forward_batch(&items, &kv).unwrap();
+    for (name, got, want) in [("a", &got[0], &want_a), ("b", &got[1], &want_b)] {
+        let diff = max_abs_diff(got, want);
+        assert!(diff < 1e-4, "request {name}: batched differs by {diff}");
+    }
+}

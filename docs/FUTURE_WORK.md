@@ -1689,17 +1689,6 @@ path. Adding only `llama-cpp-2/metal` would fix the DISPLAY while inference stay
 processor, which is worse. GitHub's macOS runners compile but cannot run Metal; it needs a Mac
 to test on (the swarm's Italian M4 peer belongs to a tester).
 
-#### #279 — Gemma 2 27B's attention is scaled for the wrong size
-`P2` · model-support · **OPEN** — 2026-10-15 · history: found beside #278
-
-llama.cpp takes a 46-layer Gemma 2 for the 27B and scales its queries by
-1/sqrt(n_embd / n_head) = 1/sqrt(144), as Google's reference does
-(`llama_model_gemma2::load_arch_hparams`, gemma_pytorch `config.py#L173`); every other size,
-and every model here, uses 1/sqrt(head_dim) = 1/sqrt(128). Every 27B attention is therefore 6%
-too flat. A 46-layer tiny file (`examples/make_tiny_gemma2_gguf.py`) sits at worst cosine 0.657
-from llama.cpp, top-1 15/40. Next: scale the queries where llama.cpp does (`ggml_scale(Qcur,
-f_attention_scale)`), only for that shape; Gemma 3's 27B (62 layers) takes the same rule.
-
 #### #115 — Gemma 3 and Gemma 4, and their vision projectors, are unsupported
 `P2` · model-support · **OPEN** — 2026-09-25 · history: archive row #115
 
@@ -2394,7 +2383,17 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15, not yet released** (#276, #277, #278)
+**Closed 2026-10-15, not yet released** (#276, #277, #278, #279)
+- #279 — **Gemma 2 27B's attention uses its own scale.** llama.cpp takes a 46-layer Gemma 2 for
+  the 27B and scales its queries by 1/sqrt(n_embd / n_head) = 1/sqrt(144), as Google's reference
+  does; we used 1/sqrt(head_dim) = 1/sqrt(128), so every 27B attention score was 6% too large.
+  The queries are now multiplied where llama.cpp scales them (`split::query_scale`,
+  `LayerWeights::query_scale`, after RoPE) — only on that shape, one elementwise op per layer. On a
+  46-layer tiny file (`examples/make_tiny_gemma2_gguf.py`, `QK_STD=0.25`) worst cosine 0.727 →
+  0.99987 against llama.cpp; same binary, `SWARMLLM_QUERY_SCALE=0` is the old arm. With the file's
+  decisive default weights, 0.657 → 0.966: the rest is rounding (llama.cpp's f16 KV cache alone
+  moves it to 0.992) amplified over 46 sharp layers. Gemma 3's 27B (62 layers) takes the same rule
+  when #115 lands. `docs/invariants/inference.md` § "A family's attention scale is read".
 - #278 — **Gemma 2's replies past 4,096 tokens now match llama.cpp's.** Gemma 2 alternates
   layers that see only the last 4,096 positions with layers that see everything; the loader
   never read the window, so every layer saw everything. Shorter conversations were unaffected,

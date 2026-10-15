@@ -181,7 +181,9 @@ Qwen 3.5's DeltaNet layers keep a recurrent state per request, and a rejected dr
 
 **`split::SlidingWindow::read`** is the one reading of a model's window (llama.cpp's `LLAMA_SWA_TYPE_STANDARD`, per family — Gemma 2: even layers, 4096; Phi-3's is off in llama.cpp, so off here). **`LayerWeights::keys_in_window`** is the one place it is applied, for both attention entry points: K/V (and the f16 mirror) are narrowed to the window's start, taken from the cache's LENGTH; the cache itself keeps every position. Several queries read **`ForwardMasks::for_layer`** (causal + windowed, built once per forward, moved together); flash gets `window_size_left = W - 1`. A window that does not bind is the old path, bit for bit. A/B `SWARMLLM_SLIDING_WINDOW=0`.
 
-→ `docs/invariants/inference.md` § "A sliding window is cut where it binds"
+**A family's attention scale is read, never assumed `1/sqrt(head_dim)`** (#279): **`split::query_scale`** (Gemma 2's 27B = 46 layers: `1/sqrt(n_embd/n_head)`; the 9B is NOT, though its ratio also differs) → `LayerWeights::query_scale`, multiplied into the queries on both entry points. A new family's `f_attention_scale` is read off its llama.cpp `load_arch_hparams`. A/B `SWARMLLM_QUERY_SCALE=0`.
+
+→ `docs/invariants/inference.md` § "A sliding window is cut where it binds", § "A family's attention scale is read"
 
 ## A model that cannot write replies is refused off its header (2026-10-15)
 

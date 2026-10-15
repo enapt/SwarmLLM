@@ -147,6 +147,7 @@ fn make_test_split_model_impl(
             skip_rope: false,
             qk_rms_norm_after_rope: None,
             sliding_window: None,
+            query_scale: None,
         }));
     }
 
@@ -239,6 +240,7 @@ pub(super) fn make_gqa_test_model(
             skip_rope: false,
             qk_rms_norm_after_rope: None,
             sliding_window: None,
+            query_scale: None,
         }));
     }
 
@@ -343,6 +345,7 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         skip_rope: false,
         qk_rms_norm_after_rope: None,
         sliding_window: None,
+        query_scale: None,
     });
 
     // Layer 1: DeepSeek MLA + MoE
