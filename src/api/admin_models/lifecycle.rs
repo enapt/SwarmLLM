@@ -207,13 +207,11 @@ pub async fn unload_model(
         return Err(ApiError(crate::error::SwarmError::ModelNotAvailable(mid)));
     }
 
-    // Get model name and estimated size before removing
+    // What its workers hold, read before they go. The whole file's estimate
+    // reported "~20351MB VRAM freed" for a 30B split across a 12 GB card and
+    // the processor (report #036), and a figure for a model never loaded.
     let model_display_name = shared.model_registry.display_name(&mid);
-    let estimated_mb = shared
-        .model_registry
-        .get_manifest(&mid)
-        .map(|m| crate::model::auto_manage::estimate_model_vram_mb(m.total_size_bytes))
-        .unwrap_or(0);
+    let estimated_mb = shared.model_process_pool.memory_committed_by(&mid);
 
     // Remove split models for this model
     let segments_removed = shared
@@ -249,12 +247,11 @@ pub async fn unload_model(
         crate::daemon::state::ActivityEvent::new(
             "model",
             "model_unloaded",
-            format!(
-                "Unloaded {} — ~{}MB {} freed",
-                model_display_name,
-                estimated_mb,
-                shared.memory_type_label()
-            ),
+            if estimated_mb > 0 {
+                format!("Unloaded {model_display_name} — ~{estimated_mb}MB of memory freed")
+            } else {
+                format!("Unloaded {model_display_name}")
+            },
         )
         .with_model(model_id.clone())
         .with_model_name(model_display_name.clone())

@@ -71,8 +71,9 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
    peers at 0.1 tok/s where the same machine answers locally in ~5 s (report #035). Its
    window-narrowing contributor closed as #248, the idle model holding the card as #249, and a layer
    is priced as its own model's, a measured peer's figure per model too (all released in v0.3.236).
-   The report is NOT reproduced: in every shape this box can build, both prices keep the model
-   local; a far split needs a peer that can hold the middle (see the entry).
+   Report #036 reproduced a detour with another program holding the card: the planner weighed a
+   stale card reading and an unweighed split (closed 2026-10-15). Left: the prompt priced on the
+   processor prior, and a far hop priced at `net:0` (see the entry, and #3).
 
 **P2 — speed and completeness**
 6. *(#152 closed 2026-10-09 — the guess-check stream runs on the boomerang and with a peer
@@ -447,6 +448,9 @@ one worker loop (`dsd.rs` `read_ahead`). That is a redesign of the worker for on
 tying the shutdowns to two contexts (step (a) logged FECS, never a TDR). Revisit if a fault or reset is caught with
 two of our processes on the card and not with one.
 
+Field reading, report #036 (2026-10-14, an RTX 3060 node on Linux, 0.3.229 → 0.3.238, its whole log since
+10-08): 0 `illegal memory access` / CUDA error lines and 0 kernel `NVRM: Xid` events in six days.
+
 #### #193 — A whole-model reply travels as independent messages; only the serving node dying now loses it
 `P3` · reliability · **PARTIAL** — 2026-09-02 · absorbs archive § "The reply stream has no reliability layer…" and § "Intermittent token loss on the remote-generate fast path"; history: archive § "Replies truncated on the remote-generate fast path"
 
@@ -549,6 +553,26 @@ answers in ~5 s. Several contributors (diagnosis rule 6). Each is a hypothesis u
   this is the one place it is worked.)
 - **An idle model held the card** (#249, closed): a 14B "idle 20m" still had 9.2 GB, which is what
   left the 30B 18 layers.
+- **The planner weighed a card reading the last admission had stored, and never weighed a fresh
+  split's processor share** (closed 2026-10-15, report #036 — the detour REPRODUCED on v0.3.238 by the
+  same tester). Qwen3-30B-A3B Q4_K_M, 3,729-token prompt: card free, `route=local` (cold 51.8 s, warm
+  6.7 s); with Ollama holding ~10 GB of the card the planner still planned all 48 layers here, the
+  spawn read a 556 MB budget, put the model on the processor and was refused 18,719 MB of system
+  memory in 247 ms, and the re-plan (`local_memory_refused_the_load`) sent 8 layers to a peer abroad:
+  cold 137.5 s at 0.2 tok/s, warm 10.6 s. Two gaps: every planning reader of the card budget
+  (`would_fit_on_gpu`, `gpu_estimate_and_fit`, `partial_gpu_layers` for a plan,
+  `local_layers_leaving`) read the atomic the card-free spawn had set to ~7.5 GB, so the plan saw a
+  fresh card/processor split (`fresh_run_layers_for_planning` = 48) where the spawn found none; and
+  that allowance never weighed the split's processor share against the RAM cap the spawn would.
+  **Done:** `ModelProcessPool::card_budget_for_planning` reads the card live where a spawn could
+  follow (card in play, no live worker of the model), one reading per 2 s
+  (`PLANNING_CARD_READING_FOR`) — Ollama re-reads GPU and system memory before every placement
+  (`server/sched.go`), and the promotion already did (#260); `fresh_run_layers_for_planning` takes
+  the requester and weighs the split's processor share as the spawn will (`ram_charged_share` →
+  `ram_verdict`). Red without each: `a_plan_weighs_the_card_as_it_stands_where_a_spawn_could_follow`,
+  `a_fresh_split_is_planned_only_if_its_processor_share_would_be_admitted`. The router's line for
+  this re-plan no longer says "transient". Not established: whether the swarm's cap or the live
+  headroom refused the load (the message's budget figure was cut off in the report).
 `split_rig.sh softunload` (2026-10-12; Qwen2.5-14B whole here, a peer holding its middle) did NOT
 reproduce the detour: v0.3.235 narrowed the window, then the next request reloaded the model
 locally and answered here (23.2 s vs 9.6 s on main). By the 7B prior the local hybrid route prices
@@ -640,6 +664,11 @@ Field point, 2026-10-13 (a tester, v0.3.236): a six-segment boomerang through th
 per-visit split is known (`vertex_cost`: the round trip is inside the per-layer observation), so
 here the hops' cost sits inside a compute term that priced the chain at 5.4 s of the 59.5 s it
 took.
+Field data, report #036 (2026-10-14, v0.3.234-.238): 26 priced requests from one node (10-11 →
+10-14), actual over predicted 0.02× to 6.8× — but 20 failed (14 of them local refusals in 2-4 s
+after a 0.8-1.1 M ms price), so only the 6 that completed are comparable. New since: a warm 3-segment
+route through Thailand (3,729-token prompt, 29 tokens) predicted 26,792 ms, took 10,603 (0.40×,
+`net:0`); the same route cold 119,766 → 137,448 (1.15×).
 
 #### #180 — A node holding the whole model takes every request for it; partial ranges stay off by default
 `P2` · routing · **PARTIAL** — 2026-07-28 · history: archive § "A node holding every shard monopolises the model"
@@ -1671,6 +1700,8 @@ split's LOCAL segments are admitted together before any peer reads the prompt, a
 holds this node to what fits, but a peer's segment is still admitted when its forward arrives.
 Never shorten the context itself (`arch-worker-memory.md` § "A card's KV budget is kept
 whatever the context setting").
+Field-confirmed, report #036 (2026-10-14, v0.3.238, the reporter's 12 GB card): Qwen3-14B kept on
+that computer lists 8,192 before a load and 5,600 while loaded.
 
 #### #187 — Head-room admission prices load and runtime on two different bases
 `P3` · memory · **PARTIAL** — 2026-08-08 · history: archive § "Head-room admission: two things the live test found"
@@ -2017,6 +2048,8 @@ whole-PC freeze and a host network loss). Eliminated, so not re-derived: `cancel
 blocking DB calls (fixed in .191, fired 0 times). ⚠ Two arms log below the node's level, so the
 last visible line before a wedge can be unrelated. `release_request_kv` has the same unbounded
 shape but runs in a router task, and the supervisor still cannot see a hung (non-exited) task.
+Field reading, report #036 (2026-10-14): 0 `dispatch_stalled_for` / `DISPATCH_STALL` lines in a
+tester's six days of logs (0.3.229 → 0.3.238).
 
 #### #49 — Auto-prune reportedly evicted parts the swarm held no other copy of
 `P2` · storage · **PARKED: one line from the reporter's log** — 2026-09-11 · history: archive row #49
@@ -2040,7 +2073,7 @@ needs more live holders than a target that never drops below `min_replicas`), an
 loop is the shape of a stale provider record.
 
 #### A disputed shard is kept but the disagreement is never settled (#61)
-`P3` · storage · **PARKED: no field reading yet** — 2026-09-13 · history: archive row #61 and § "A disputed shard is kept but the disagreement is never settled"
+`P3` · storage · **PARKED: one field reading, none disputed** — 2026-09-13 · history: archive row #61 and § "A disputed shard is kept but the disagreement is never settled"; report #036
 
 Fallout of #60 and strictly better than what it replaced (deleting good data): a part that
 disagrees with an unbacked hash is kept, served and recorded (`ModelRegistry::bytes_disputed`
@@ -2056,6 +2089,9 @@ deleting first, under a NEW marker (not `shards_needing_repair`, whose drain cle
 on-disk files), rate-limited, requiring an `hf_source`. A second narrow gap: the startup sweep
 keeps and advertises such a part while the auto-manage rescan skips registration, so the file
 sits unserved with its storage spent.
+**The reading, 2026-10-14 (report #036):** a peer-fed node on v0.3.238 holding 169 parts of 29
+models — `shards kept despite disagreeing (0) — none`. One node, zero disputes: still nothing to
+build; read the line again in the next peer-fed report.
 
 #### #32 — A long prompt on the boomerang path died with a card out-of-memory mid-compute
 `P3` · memory · **PARKED: the reporter's card** — 2026-09-09 · history: archive row #32 and § "A long prompt on the boomerang path dies with a CUDA OOM mid-compute"
@@ -2241,7 +2277,19 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15, unreleased** (#275's reply-sized charge; #275 (2), judged beside the plan)
+**Closed 2026-10-15, unreleased** (#275's reply-sized charge; #275 (2), judged beside the plan; #250's stale card reading)
+- #250 (report #036) — **a model the card holds only part of is no longer planned here whole
+  after another program has taken the card.** The planner weighed the card reading the last
+  admission had stored (~7.5 GB, taken while the card stood free) after Ollama had taken ~10 GB,
+  planned a fresh card/processor split of Qwen3-30B-A3B here, and the spawn — reading 556 MB —
+  was refused 18.7 GB of system memory; the re-plan sent 8 layers abroad (0.2 tok/s cold). Now
+  the plan reads the card live where a spawn could follow (`card_budget_for_planning`, one
+  reading per 2 s) and a fresh split's processor share is weighed against the requester's cap as
+  the spawn weighs it. A manual unload reports what the model's workers held
+  (`memory_committed_by`), not the whole file's estimate ("~20351MB VRAM freed" on a 12 GB card).
+  Found beside it: a card other programs had filled past our reserve gave a 0 MB budget, which
+  admission reads as "none configured" and admits anything against — now 1 MB, admitting nothing.
+  The prompt-pricing and `net:0` halves stay open as #250 and #3.
 - #275 (1) — **the room a split leaves for its drafter is the reply's cache, not a typical
   conversation's.** The room, the choice and the drafter's spawn priced its cache at 4,096
   positions whatever the reply — 896 of Qwen3-1.7B's 2,899 MB for a chat that fills 1,024 — so

@@ -1597,6 +1597,35 @@ max_concurrent_requests = 42
         );
     }
 
+    /// A card another program has filled leaves a budget that admits nothing —
+    /// never 0, which the pool reads as "no budget configured" and admits
+    /// anything against (`ModelProcessPool::card_verdict`), so our model was
+    /// put on a full card unchecked. Found beside FUTURE_WORK #250 (report
+    /// #036's card stood at 556 MB, one program short of this).
+    #[test]
+    fn a_card_another_program_has_filled_admits_nothing_rather_than_anything() {
+        for rc in [
+            ResourceConfig::default(),
+            ResourceConfig {
+                max_gpu_vram_mb: 7000,
+                ..Default::default()
+            },
+        ] {
+            for held_elsewhere in [7_500, 8_000, 9_000] {
+                assert_eq!(
+                    rc.inference_vram_budget_mb(
+                        8000,
+                        Some(held_elsewhere),
+                        swarmllm_types::ContributionMode::Moderate
+                    ),
+                    Some(1),
+                    "{held_elsewhere} MB held elsewhere, max_gpu_vram_mb {}",
+                    rc.max_gpu_vram_mb
+                );
+            }
+        }
+    }
+
     /// An unreadable figure must not invent a restriction — it falls back to
     /// treating the card as otherwise idle, which is the pre-existing behaviour.
     #[test]

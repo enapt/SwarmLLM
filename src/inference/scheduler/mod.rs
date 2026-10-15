@@ -4223,11 +4223,18 @@ impl PipelineScheduler {
                     .unwrap_or_default()
             };
             let mut published_room = None;
+            // Bounded by the memory cap of whoever asked — the owner's, or the
+            // swarm's for a split a peer delegated here — as the spawn will
+            // weigh this request (#266).
+            let requester = crate::inference::pipeline::requester_for_override(
+                self.shared_state.route_plan_override(request_id).as_ref(),
+            );
             // Room, and what loading the model would cost, from ONE residency
             // reading per candidate, so the memory bound and the load price
             // cannot disagree about what is already held.
             // The split a fresh worker would make of a model too big for the
-            // card — ONE run of layers, card and processor together. Not on
+            // card — ONE run of layers, card and processor together, its
+            // processor share weighed against `requester`'s cap (#250). Not on
             // offer once this request's loader has refused: what it refused may
             // have been exactly that spawn.
             let fresh_run_layers = if is_local
@@ -4237,18 +4244,12 @@ impl PipelineScheduler {
             {
                 self.shared_state
                     .model_process_pool
-                    .fresh_run_layers_for_planning(&manifest.id)
+                    .fresh_run_layers_for_planning(&manifest.id, requester)
             } else {
                 None
             };
             let (max_hostable_layers, max_hostable_layers_at_face_value, cold_load_per_layer) =
                 if node_id == *local_node_id {
-                    // Bounded by the memory cap of whoever asked — the owner's,
-                    // or the swarm's for a split a peer delegated here — as the
-                    // spawn will weigh this request (#266).
-                    let requester = crate::inference::pipeline::requester_for_override(
-                        self.shared_state.route_plan_override(request_id).as_ref(),
-                    );
                     let mut ours = self
                         .shared_state
                         .model_process_pool

@@ -298,7 +298,8 @@ fn admitted(
         tracing::debug!(
             target_model = %target,
             drafter = %spec.model_id,
-            "this node's memory has no room for the drafter beside this plan's layers — not choosing it"
+            beside = if beside_the_plan() { "the plan's layers" } else { "the layers loaded now" },
+            "this node's memory has no room for the drafter — not choosing it"
         );
     }
     fits

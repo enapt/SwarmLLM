@@ -292,10 +292,15 @@ impl ResourceConfig {
         let usable = gpu_vram_total_mb
             .saturating_sub(other_process_vram_mb.unwrap_or(0))
             .saturating_sub(reserve);
+        // Never 0: the pool reads a 0 budget as "none configured" and admits
+        // anything (`ModelProcessPool::card_verdict`), so a card another
+        // program had filled past the reserve put our model on it unchecked.
+        // 1 MB admits nothing.
+        let usable = usable.max(1);
         if self.max_gpu_vram_mb > 0 {
             // An explicit ceiling is the user's own decision, but it cannot
             // conjure memory another program is holding.
-            Some(self.max_gpu_vram_mb.min(usable.max(1)))
+            Some(self.max_gpu_vram_mb.min(usable))
         } else {
             Some(usable)
         }

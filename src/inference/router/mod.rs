@@ -1437,7 +1437,21 @@ impl InferenceRouter {
                         );
                         let earned = replans == 0
                             || a_further_replan_is_earned(err, used_remote_segment, attempt_took);
-                        if retryable && earned {
+                        let local_memory = local_memory_refused_the_load(err);
+                        // Not "transient": the re-plan is handed the refusal
+                        // as a fact (`note_local_memory_refusal`), and a
+                        // reader took the old wording for a blind retry
+                        // (report #036).
+                        if retryable && earned && local_memory {
+                            tracing::warn!(
+                                request_id = %request.id,
+                                error = %err,
+                                replan = replans + 1,
+                                attempt_ms = attempt_took.as_millis() as u64,
+                                "DIAG: this node's memory refused the plan — re-planning with \
+                                 fewer layers here"
+                            );
+                        } else if retryable && earned {
                             tracing::warn!(
                                 request_id = %request.id,
                                 error = %err,
@@ -1446,7 +1460,7 @@ impl InferenceRouter {
                                 "DIAG: inference transient failure — retrying with fresh pipeline"
                             );
                         }
-                        (retryable && earned, local_memory_refused_the_load(err))
+                        (retryable && earned, local_memory)
                     }
                     Ok(_) => (false, false),
                 };

@@ -202,6 +202,17 @@ plan into an error. And when a struct's own field documentation describes a
 generality — "THIS segment, not the whole model" — check what its callers
 actually pass.
 
+**The bound must read what the gate reads, when the gate reads it (2026-10-15,
+#250, report #036).** The fresh-worker split (`fresh_run_layers_for_planning`)
+was asked of a card reading the last admission had stored and never of the
+RAM admission its processor share goes through, so with another program
+holding most of the card the plan put a 30B here whole and the spawn refused
+it — the very conversion of a bad plan into an error this section exists to
+prevent. The plan now reads the card live where a spawn could follow and
+weighs the processor share against the same requester's cap. Evidence and
+tests: `docs/invariants/memory.md` § "A model is admitted against the card as
+it stands NOW".
+
 ## A split leaves room for the model that guesses for it (2026-10-14, #275)
 
 ### What it replaced
@@ -333,6 +344,16 @@ three layers (672 MB at ~227 MB a layer). The speed A/B did not run: the
 Australian peer refused even the uncut 20-layer share that hour ("0 MB available
 for conversations"), so every arm failed alike. `~/swarmllm-275/charge.sh` (R vs
 T, the peer narrowed to shards 7-19 and 8-19) is the rerun when it offers room.
+Rerun the same morning against peer `aa3d1e66` (`beside.sh`'s R7/T7 arms, peer
+narrowed to shards 7-19 = layers 20-48): the cut was computed as predicted
+(`room_for=23` R, `room_for=20` T), but neither cut had a route at
+`CapacityBound::Everyone` — the peer held 28-48 loaded (`new_layer_room=16`),
+and its charge for 20-48 (8 new layers, the held layers' cache per #99, our
+margin; not decomposed further) did not fit — so every plan ran uncut (local 0-28),
+the drafter was rightly not chosen beside 28 layers, and R and T ran alike
+(2.75-2.81 tok/s, first request 47.4 vs 48.0 / 47.7 s). The arm pair cannot
+answer until a peer offers the cut's layers past the margin; the remaining arms
+were stopped as unanswerable.
 
 ### The drafter is judged beside the layers its plan loads (2026-10-15)
 
@@ -366,6 +387,19 @@ request's (`a_drafters_charge_covers_its_first_calls_admission`). Where it
 cannot say (card plans, a drafter already loaded) it answers as before. A
 refusal gives way to a smaller drafter, or to the n-gram loop. A/B
 `SWARMLLM_DRAFTER_BESIDE=loaded`.
+
+**Measured** (`~/swarmllm-275/beside.sh`, 2026-10-15, processor-only build of
+`43600800`, live node stopped, safety kit; this node pretends shards 0-9 =
+layers 0-28, peer `aa3d1e66` 9-19 = 26-48, so the cut has no route and the plan
+loads 28 layers here against a room of 23; each arm a cold start, N N O O
+interleaved as N O O N). **Mechanism:** both N arms logged `layers_to_load=28
+room_beside_drafter=23` → "not choosing it" on the first request, which then
+ran the n-gram loop (`ngram-only: complete … payoff_x100=111-112`); both O arms
+chose Qwen3-1.7B, its spawn was refused ("the drafter failed — finishing this
+reply without guessing ahead", `proposed=0`). **First request, 96 tokens:** N
+51.0 / 50.4 s, O 54.9 / 52.9 s (~3 s, or 6%, to the n-gram loop over no
+guessing at all). Later requests are the control — both arms then weigh the
+loaded layers and refuse alike: 2.65-2.93 tok/s in every arm.
 
 ### What a change must keep
 

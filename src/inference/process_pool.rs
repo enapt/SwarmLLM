@@ -118,6 +118,12 @@ const LAYERS_REFUSED_FOR: std::time::Duration = std::time::Duration::from_secs(6
 /// request's forward, which the old per-segment admission never waited for.
 const UP_FRONT_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How long a live card reading stands for a plan
+/// ([`ModelProcessPool::card_budget_for_planning`]): one plan asks the card
+/// budget a dozen times within milliseconds, and one `nvidia-smi` answers them
+/// all (0.1-0.5 s on WSL2).
+const PLANNING_CARD_READING_FOR: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Per-request buffered channel capacity for multiplexed worker responses.
 /// Long decode streams emit one WorkerMsg::Token per generated token; 256 gives
 /// plenty of headroom for a caller that's slow to consume without stalling the
@@ -2560,6 +2566,10 @@ pub struct ModelProcessPool {
     /// `auto_manage::vram_budget_ceiling`, read from the live config without
     /// asking the card. Unset (tests, a node with no card) is no ceiling.
     vram_ceiling_source: std::sync::OnceLock<Box<dyn Fn() -> Option<u64> + Send + Sync>>,
+    /// When [`Self::vram_budget_now`] last read the card live — so a plan,
+    /// which asks a dozen times, pays one `nvidia-smi`
+    /// ([`Self::card_budget_for_planning`]).
+    card_read_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// CPU threads each worker's rayon pool may use. 0 until set at startup,
     /// which the spawn path reads as "not configured" and leaves alone.
     cpu_threads: std::sync::atomic::AtomicUsize,
@@ -2848,6 +2858,7 @@ impl ModelProcessPool {
             vram_budget_mb: std::sync::atomic::AtomicU64::new(0),
             vram_budget_source: std::sync::OnceLock::new(),
             vram_ceiling_source: std::sync::OnceLock::new(),
+            card_read_at: std::sync::Mutex::new(None),
             cpu_threads: std::sync::atomic::AtomicUsize::new(0),
             owner_prefill_threads: std::sync::atomic::AtomicUsize::new(0),
             vram_reserved_mb: dashmap::DashMap::new(),
@@ -3215,19 +3226,19 @@ impl ModelProcessPool {
     /// ([`card_split`]: every layer on the card with the fewest layers' routed
     /// experts in RAM where the model has them, else its first layers on the
     /// card); `None` when it fits, when nothing fits, or when hybrid placement
-    /// is switched off.
+    /// is switched off. `budget` is the card budget it is weighed against: the
+    /// spawn's own reading at admission, or a plan's
+    /// ([`Self::card_budget_for_planning`]).
     fn partial_gpu_layers(
         &self,
         model_id: &ModelId,
         segment: Option<(u32, u32)>,
         estimated_mb: u64,
+        budget: u64,
     ) -> Option<CardSplit> {
         if std::env::var("SWARMLLM_HYBRID_OFFLOAD").as_deref() == Ok("0") {
             return None;
         }
-        let budget = self
-            .vram_budget_mb
-            .load(std::sync::atomic::Ordering::Relaxed);
         let available_mb = budget.saturating_sub(self.vram_committed_mb());
         // Nothing to split if the model would have fitted anyway.
         if available_mb >= estimated_mb {
@@ -3667,8 +3678,44 @@ impl ModelProcessPool {
             if let Some(budget) = source() {
                 self.vram_budget_mb
                     .store(budget, std::sync::atomic::Ordering::Relaxed);
+                if let Ok(mut at) = self.card_read_at.lock() {
+                    *at = Some(std::time::Instant::now());
+                }
                 return budget;
             }
+        }
+        self.vram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The card budget a PLAN weighs `model_id` against: read live
+    /// ([`Self::vram_budget_now`]) where a spawn could follow — a card in play
+    /// and no live worker of the model — and the last reading otherwise.
+    ///
+    /// **The planner weighed the reading the last ADMISSION stored** (#250,
+    /// report #036), the third reader of this budget to (after admission and
+    /// the promotion, #260). A tester's Qwen3-30B-A3B ran here as a card/processor
+    /// split while the card stood free (7,485 MB); Ollama then took ~10 GB and
+    /// the model was unloaded. The next plan still saw 7,485 MB, judged a fresh
+    /// split would hold all 48 layers (`fresh_run_layers_for_planning`) and kept
+    /// the request here; the spawn read 556 MB, put every layer on the processor
+    /// and was refused 18.7 GB of system memory — the request went through a
+    /// re-plan with a peer abroad (0.2 tok/s cold). Ollama re-reads the GPU and
+    /// system memory before every placement (`server/sched.go`).
+    ///
+    /// A worker already live answers from what it holds — a request reuses it,
+    /// and its growth and promotion read the card themselves — so a warm request
+    /// pays no `nvidia-smi`. A live reading stands for
+    /// [`PLANNING_CARD_READING_FOR`]: a plan asks a dozen times.
+    fn card_budget_for_planning(&self, model_id: &ModelId) -> u64 {
+        let recent = self
+            .card_read_at
+            .lock()
+            .ok()
+            .and_then(|at| *at)
+            .is_some_and(|at| at.elapsed() < PLANNING_CARD_READING_FOR);
+        if !recent && self.card_in_play() && self.live_worker(model_id).is_none() {
+            return self.vram_budget_now();
         }
         self.vram_budget_mb
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -3701,6 +3748,14 @@ impl ModelProcessPool {
     /// [`Self::vram_committed_mb`]; for a card/processor split, the card's share.
     pub(crate) fn vram_committed_by(&self, model_id: &ModelId) -> u64 {
         self.vram_reserved_mb.get(model_id).map_or(0, |v| *v)
+    }
+
+    /// What `model_id`'s workers are charged, card and system memory together
+    /// — what unloading it gives back. A card/processor split is charged to
+    /// both, a model not loaded to neither.
+    pub(crate) fn memory_committed_by(&self, model_id: &ModelId) -> u64 {
+        self.vram_committed_by(model_id)
+            .saturating_add(self.ram_reserved_mb.get(model_id).map_or(0, |v| *v))
     }
 
     /// Does a model of this size fit, given the budget and what is already
@@ -3759,14 +3814,11 @@ impl ModelProcessPool {
     /// slower to make this faster.
     pub fn gpu_estimate_and_fit(&self, model_id: &ModelId) -> (Option<u64>, Option<bool>) {
         let resident_on_gpu = self.workers.get(model_id).map(|h| h.holds_gpu_memory());
-        let budget = self
-            .vram_budget_mb
-            .load(std::sync::atomic::Ordering::Relaxed);
         let estimated = self.estimate_gpu_footprint_mb(model_id, None, KvCharge::Typical);
         let fits = if resident_on_gpu == Some(true) {
             Some(true)
         } else {
-            self.fits_in_budget(model_id, estimated, budget)
+            self.fits_in_budget(model_id, estimated, self.card_budget_for_planning(model_id))
         };
         ((estimated != 0).then_some(estimated), fits)
     }
@@ -3824,9 +3876,7 @@ impl ModelProcessPool {
         if resident_on_gpu == Some(true) {
             return Some(true);
         }
-        let budget = self
-            .vram_budget_mb
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let budget = self.card_budget_for_planning(model_id);
         if budget == 0 {
             return None;
         }
@@ -3964,7 +4014,14 @@ impl ModelProcessPool {
             return true;
         }
         self.estimated_gpu_mb(model_id)
-            .and_then(|estimated| self.partial_gpu_layers(model_id, None, estimated))
+            .and_then(|estimated| {
+                self.partial_gpu_layers(
+                    model_id,
+                    None,
+                    estimated,
+                    self.card_budget_for_planning(model_id),
+                )
+            })
             .is_some()
     }
 
@@ -5308,9 +5365,7 @@ impl ModelProcessPool {
         // What is free after everything already charged, on whichever budget
         // this model would be weighed against.
         let free_mb = if on_gpu {
-            let budget = self
-                .vram_budget_mb
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let budget = self.card_budget_for_planning(model_id);
             if budget == 0 {
                 return None;
             }
@@ -5364,7 +5419,20 @@ impl ModelProcessPool {
     /// placed afresh. A worker in use keeps its refusal (#93), and one charged
     /// to system memory is never retired for growth at all, so then there is no
     /// allowance.
-    pub fn fresh_run_layers_for_planning(&self, model_id: &ModelId) -> Option<u32> {
+    ///
+    /// **And only if the spawn's RAM admission would take the processor's
+    /// share** — weighed as the spawn weighs it ([`ram_charged_share`] →
+    /// [`Self::ram_verdict`], against `requester`'s cap; like the planner's
+    /// processor bound, [`Self::local_layers_leaving`], without the reclaim).
+    /// Unweighed (#250, report #036), a 48-layer Qwen3-30B-A3B was planned
+    /// here whole while its processor share — 18.7 GB, the card being nearly
+    /// full — was more than the swarm's cap allowed; the spawn refused it and
+    /// the request reached a reply only through a re-plan with a peer abroad.
+    pub fn fresh_run_layers_for_planning(
+        &self,
+        model_id: &ModelId,
+        requester: Requester,
+    ) -> Option<u32> {
         if !self.planning_on_card(model_id) {
             return None;
         }
@@ -5375,10 +5443,36 @@ impl ModelProcessPool {
             return None;
         }
         let estimated = self.estimated_gpu_mb(model_id)?;
-        let (_, total) = self
-            .partial_gpu_layers(model_id, None, estimated)?
-            .card_share();
-        Some(u32::try_from(total).unwrap_or(u32::MAX))
+        let split = self.partial_gpu_layers(
+            model_id,
+            None,
+            estimated,
+            self.card_budget_for_planning(model_id),
+        )?;
+        let (_, total) = split.card_share();
+        let run = (0, u32::try_from(total).unwrap_or(u32::MAX));
+        if let Some(share) = ram_charged_share(false, run, Some(split)) {
+            let host_mb = match share {
+                RamShare::Layers(rest) => {
+                    self.estimate_cpu_footprint_mb(model_id, Some(rest), KvCharge::Typical)
+                }
+                RamShare::Experts { layers } => self.experts_in_ram_mb(model_id, run, layers),
+            };
+            if matches!(
+                self.ram_verdict(host_mb, requester),
+                Verdict::Refused { .. }
+            ) {
+                tracing::debug!(
+                    model = %model_id,
+                    host_share_mb = host_mb,
+                    ?requester,
+                    "a fresh card/processor split would not be given its processor share — \
+                     not planning it here"
+                );
+                return None;
+            }
+        }
+        Some(run.1)
     }
 
     /// The card's share of this model when THIS node runs it — `(layers on the
@@ -5396,8 +5490,13 @@ impl ModelProcessPool {
             return None;
         }
         let estimated = self.estimated_gpu_mb(model_id)?;
-        self.partial_gpu_layers(model_id, None, estimated)
-            .map(CardSplit::card_share)
+        self.partial_gpu_layers(
+            model_id,
+            None,
+            estimated,
+            self.card_budget_for_planning(model_id),
+        )
+        .map(CardSplit::card_share)
     }
 
     /// Remember what this node's loader just refused a request — the layers the
@@ -6126,7 +6225,13 @@ impl ModelProcessPool {
             // guess is paced by its slowest layer, which would be on the
             // processor anyway.
             if !admitted && !guest {
-                if let Some(split) = self.partial_gpu_layers(model_id, Some(segment), estimated) {
+                // Weighed against the reading admission just took.
+                let budget = self
+                    .vram_budget_mb
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if let Some(split) =
+                    self.partial_gpu_layers(model_id, Some(segment), estimated, budget)
+                {
                     match split {
                         CardSplit::Layers { on_card, total } => tracing::info!(
                             model = %model_id,
@@ -9997,13 +10102,13 @@ mod tests {
         let h =
             admit_and_insert_gpu_worker(&p, &m, 900, std::time::Duration::from_secs(3600)).await;
         assert_eq!(
-            p.fresh_run_layers_for_planning(&m),
+            p.fresh_run_layers_for_planning(&m, Requester::Owner),
             Some(28),
             "an idle worker is replaced by a fresh one, which splits the model"
         );
         h.note_conversation(Uuid::new_v4());
         assert_eq!(
-            p.fresh_run_layers_for_planning(&m),
+            p.fresh_run_layers_for_planning(&m, Requester::Owner),
             None,
             "a worker in use can only grow, on the card"
         );
@@ -11946,7 +12051,7 @@ mod admission_tests {
             "fixture: does not fit whole ({estimated})"
         );
         let split = p
-            .partial_gpu_layers(&m, Some(segment), estimated)
+            .partial_gpu_layers(&m, Some(segment), estimated, 7_000)
             .expect("fixture: it splits");
         let CardSplit::ExpertsInRam { in_ram, total: 48 } = split else {
             panic!("{split:?}");
@@ -12045,7 +12150,7 @@ mod admission_tests {
             "fixture: the card alone holds {on_card_alone}"
         );
         assert_eq!(
-            p.fresh_run_layers_for_planning(&m),
+            p.fresh_run_layers_for_planning(&m, Requester::Owner),
             Some(28),
             "a fresh worker would place all 28 — part on the card, the rest on the processor"
         );
@@ -12062,11 +12167,131 @@ mod admission_tests {
             attention: crate::inference::layers::KvAttention::Standard,
             ..seven_b
         });
-        assert_eq!(q.fresh_run_layers_for_planning(&m), None);
+        assert_eq!(q.fresh_run_layers_for_planning(&m, Requester::Owner), None);
         assert_eq!(
             q.max_local_hostable_layers(&m, true, Requester::Swarm),
             Some(on_card_alone)
         );
+    }
+
+    /// Qwen3-30B-A3B on a card that holds part of it — with its routed experts
+    /// known, or (`experts: false`) split by whole layers.
+    fn thirty_b_a3b_on_a_card(
+        name: &str,
+        card_mb: u64,
+        experts: bool,
+    ) -> (ModelProcessPool, ModelId) {
+        let p = pool();
+        p.test_card_in_play
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        p.set_vram_budget_mb(card_mb);
+        let m = ModelId(name.into());
+        p.test_footprint_inputs.insert(m.clone(), thirty_b_a3b());
+        if experts {
+            p.test_expert_bytes.insert(m.clone(), vec![208 * MIB; 48]);
+        }
+        (p, m)
+    }
+
+    /// **A plan weighs the card as it stands, where a spawn could follow**
+    /// (#250, report #036). The planner weighed the figure the last admission
+    /// had stored — taken while the card stood free — after another program
+    /// had filled the card: it planned a fresh card/processor split of all 48
+    /// layers here, and the spawn, reading the card, found no room and was
+    /// refused in system memory. One reading serves a whole plan, and it
+    /// follows the card back when the other program lets go.
+    #[test]
+    fn a_plan_weighs_the_card_as_it_stands_where_a_spawn_could_follow() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+        let (p, m) = thirty_b_a3b_on_a_card("qwen3-30b-a3b-stale-card", 7_000, true);
+        assert_eq!(
+            p.fresh_run_layers_for_planning(&m, Requester::Owner),
+            Some(48),
+            "fixture: the stored reading splits it across the card and the processor"
+        );
+        let live = Arc::new(AtomicU64::new(7_000));
+        let reads = Arc::new(AtomicUsize::new(0));
+        {
+            let (live, reads) = (live.clone(), reads.clone());
+            p.set_vram_budget_source(Box::new(move || {
+                reads.fetch_add(1, Ordering::Relaxed);
+                Some(live.load(Ordering::Relaxed))
+            }));
+        }
+        // Another program takes the card; nothing here has read it since.
+        live.store(100, Ordering::Relaxed);
+        assert_eq!(
+            p.fresh_run_layers_for_planning(&m, Requester::Owner),
+            None,
+            "the card holds none of it now: no fresh split to plan"
+        );
+        assert!(
+            !p.planning_on_card(&m),
+            "its layers are weighed on the processor"
+        );
+        assert_eq!(p.vram_budget_mb(), Some(100), "and the reading is kept");
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            1,
+            "one reading of the card serves the plan"
+        );
+        // The program lets go, and a later plan reads the card again.
+        live.store(7_000, Ordering::Relaxed);
+        *p.card_read_at.lock().unwrap() = None;
+        assert_eq!(
+            p.fresh_run_layers_for_planning(&m, Requester::Owner),
+            Some(48)
+        );
+        assert_eq!(reads.load(Ordering::Relaxed), 2);
+    }
+
+    /// **A fresh split is planned here only if the spawn would admit its
+    /// processor share** (#250, report #036): the planner offered all 48
+    /// layers of a split whose processor share the spawn then refused, and the
+    /// request reached a reply only through a re-plan with a peer abroad.
+    /// Weighed as the spawn weighs it — the same share, the same verdict.
+    #[test]
+    fn a_fresh_split_is_planned_only_if_its_processor_share_would_be_admitted() {
+        // Experts kept in RAM: the machine holds those experts alone.
+        let (p, m) = thirty_b_a3b_on_a_card("qwen3-30b-a3b-ram-share", 7_000, true);
+        let estimated = p.estimated_gpu_mb(&m).expect("fixture: priced");
+        let Some(CardSplit::ExpertsInRam { in_ram, total: 48 }) =
+            p.partial_gpu_layers(&m, None, estimated, 7_000)
+        else {
+            panic!("fixture: experts kept in RAM");
+        };
+        let host_mb = p.experts_in_ram_mb(&m, (0, 48), in_ram);
+        p.set_ram_budget_mb(host_mb);
+        assert_eq!(
+            p.fresh_run_layers_for_planning(&m, Requester::Owner),
+            Some(48),
+            "room for the {host_mb} MB of experts it keeps in RAM"
+        );
+        p.set_ram_budget_mb(host_mb - 1);
+        assert_eq!(
+            p.fresh_run_layers_for_planning(&m, Requester::Owner),
+            None,
+            "one MB short: the spawn would refuse the split"
+        );
+
+        // Whole layers: the machine holds the run after the card's.
+        let (q, d) = thirty_b_a3b_on_a_card("thirty-b-by-layers", 3_000, false);
+        let estimated = q.estimated_gpu_mb(&d).expect("fixture: priced");
+        let Some(CardSplit::Layers { on_card, total: 48 }) =
+            q.partial_gpu_layers(&d, None, estimated, 3_000)
+        else {
+            panic!("fixture: split by whole layers");
+        };
+        let rest = (u32::try_from(on_card).unwrap(), 48);
+        let host_mb = q.estimate_cpu_footprint_mb(&d, Some(rest), KvCharge::Typical);
+        q.set_ram_budget_mb(host_mb);
+        assert_eq!(
+            q.fresh_run_layers_for_planning(&d, Requester::Swarm),
+            Some(48)
+        );
+        q.set_ram_budget_mb(host_mb - 1);
+        assert_eq!(q.fresh_run_layers_for_planning(&d, Requester::Swarm), None);
     }
 
     /// A card/processor split charges the card for the layers it puts there
@@ -12103,7 +12328,7 @@ mod admission_tests {
         );
         let estimated = p.estimate_gpu_footprint_mb(&m, Some((0, 28)), KvCharge::Typical);
         let split = p
-            .partial_gpu_layers(&m, Some((0, 28)), estimated)
+            .partial_gpu_layers(&m, Some((0, 28)), estimated, 3000)
             .expect("fixture: the model splits");
         let CardSplit::Layers { on_card: n, .. } = split else {
             panic!("a dense model splits by whole layers: {split:?}");

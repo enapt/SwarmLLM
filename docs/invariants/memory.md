@@ -2463,6 +2463,45 @@ config alone) dismisses it before any reading. Tests `a_split_worker_moves_whole
 (red with the old `placed_on_cpu_because` gate), `a_split_worker_counts_its_own_share_of_the_card`,
 `a_model_larger_than_the_card_could_ever_give_is_not_weighed`.
 
+**…and the PLAN weighed the stored figure too (2026-10-15, #250, report #036).** Admission and
+promotion read the card live; the planner's readers — `would_fit_on_gpu`, `gpu_estimate_and_fit`,
+`partial_gpu_layers` for a plan, `local_layers_leaving`'s card branch — read the atomic, which
+only an admission writes. A tester's Qwen3-30B-A3B ran as a card/processor split while the card
+stood free (the spawn stored ~7.5 GB); Ollama then took ~10 GB, and the model was unloaded. The
+next plan still saw 7.5 GB, so it offered a fresh split of all 48 layers here
+(`fresh_run_layers_for_planning`) and `local_can_hold_every_layer` kept the request home. The
+spawn read 556 MB, placed the model on the processor and was refused 18,719 MB of system memory in
+247 ms; the re-plan sent 8 layers to a peer abroad (cold 137.5 s at 0.2 tok/s against 51.8 s
+local with the card free). **The rule:** `ModelProcessPool::card_budget_for_planning` reads the
+card live (`vram_budget_now`) where a spawn could follow — a card in play and no live worker of
+the model (a live one answers from what it holds; its growth and promotion read the card
+themselves) — and one reading stands for `PLANNING_CARD_READING_FOR` (2 s), since a plan asks
+the budget a dozen times. Every planning reader takes it; the spawn's own split weighs the
+reading its admission just stored (`partial_gpu_layers` takes the budget as an argument). Ollama
+does the same before every placement: `server/sched.go` refreshes GPU and system memory and
+fits against both. Test `a_plan_weighs_the_card_as_it_stands_where_a_spawn_could_follow` (red with
+the atomic: the fresh split stays 48; also asserts one reading serves the plan, and the card is
+read again once the reading has aged).
+
+**A fresh split's processor share is weighed as the spawn will weigh it (the same report).**
+Even with the card read right, `fresh_run_layers_for_planning` priced the split's card share
+only; the spawn then charges its processor share to the machine (#264) against the requester's
+cap (#266). The allowance now asks `ram_charged_share` → `ram_verdict` with the same estimators
+(`estimate_cpu_footprint_mb` for a whole-layer split's processor-held run, `experts_in_ram_mb` for
+experts kept in RAM) and the requester the scheduler names (`requester_for_override`), and
+offers no split the spawn would refuse. Like the planner's processor bound
+(`local_layers_leaving`), it does not count a RAM reclaim. Test
+`a_fresh_split_is_planned_only_if_its_processor_share_would_be_admitted` (both split kinds; red
+without the check: one MB short still offered 48).
+
+**A full card's budget is 1 MB, never 0 (the same day).** The pool reads a 0 card budget as
+"none configured" — `card_verdict` answers `Unjudged` and `admit_to_gpu` admits — while
+`inference_vram_budget_mb` saturated to 0 once other programs held the card past our reserve.
+Read live at every admission since 2026-09-29, that 0 put a model on a card another program had
+filled, unchecked. The explicit-ceiling branch already floored it at 1; now both do, at the one
+place the figure is made. Test `a_card_another_program_has_filled_admits_nothing_rather_than_anything`
+(red without the floor: `Some(0)`).
+
 ## "Used recently" has four answers, and one of them is never written locally
 
 `model::auto_manage::prune::effective_idle_secs` combines all of them — a

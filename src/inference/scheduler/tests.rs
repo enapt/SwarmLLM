@@ -6676,8 +6676,8 @@ fn a_peer_failing_a_model_every_time_is_left_out_unless_it_is_the_only_way() {
 /// question, was told RAM alone held 29 of 32 layers, called a pipeline "the
 /// only route" and sent the request through Italy at 47 s. The pool's #129 fix
 /// lived in the card branch, which this call never reached; its own test called
-/// that branch directly. Here the RAM budget holds nothing, so only the split
-/// can answer 32.
+/// that branch directly. Here RAM alone holds fewer than 32 layers, so only the
+/// split can answer 32.
 #[test]
 fn the_planner_weighs_a_local_model_the_loader_would_split_on_the_card() {
     let (state, local, mid) = a_card_holder_of_a_model_it_must_split();
@@ -6686,15 +6686,16 @@ fn the_planner_weighs_a_local_model_the_loader_would_split_on_the_card() {
         pool.serves_on_cpu(&mid),
         "fixture: the speed answer must be 'processor', as in the field"
     );
-    assert_eq!(
-        pool.max_local_hostable_layers(
+    let in_ram_alone = pool
+        .max_local_hostable_layers(
             &mid,
             false,
-            crate::inference::process_pool::Requester::Swarm
+            crate::inference::process_pool::Requester::Swarm,
         )
-        .unwrap_or(0),
-        0,
-        "fixture: RAM alone holds nothing here, so only the split can answer 32"
+        .unwrap_or(0);
+    assert!(
+        in_ram_alone < 32,
+        "fixture: RAM alone holds {in_ram_alone} layers here, so only the split can answer 32"
     );
     let ours = local_candidate_for(&state, &local, &mid, uuid::Uuid::new_v4());
     assert!(!ours.has_gpu, "priced at the processor's speed (#444)");
@@ -6738,7 +6739,9 @@ fn local_candidate_for(
 }
 
 /// A node whose card is in play (3000 MB), holding all of a 32-layer model too
-/// big for it that the loader SPLITS, with RAM for nothing.
+/// big for it that the loader SPLITS, with RAM for the split's processor share
+/// but not for the whole model (since #250 a fresh split is offered only where
+/// the spawn would admit that share — with RAM for nothing, it is not).
 fn a_card_holder_of_a_model_it_must_split() -> (Arc<SharedState>, NodeId, ModelId) {
     a_card_holder_of_a_model_it_must_split_on(None)
 }
@@ -6749,7 +6752,7 @@ fn a_card_holder_of_a_model_it_must_split_on(
 ) -> (Arc<SharedState>, NodeId, ModelId) {
     use crate::inference::model_arch::ModelArch;
     use crate::inference::split::hybrid::arch_supports_hybrid;
-    let state = make_shared_state_on(card, |c| c.resources.max_ram_mb = 40);
+    let state = make_shared_state_on(card, |c| c.resources.max_ram_mb = 4_000);
     let local = state.identity.node_id().clone();
     let mid = ModelId("seven-b-too-big-for-the-card".into());
     state.model_registry.register_manifest(make_manifest(
