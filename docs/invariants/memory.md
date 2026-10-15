@@ -823,6 +823,66 @@ the prune rule off), `auto_never_names_an_uncensored_model_the_owner_did_not_cho
 (red with the predicate answering "never"),
 `an_uncensored_model_is_told_by_its_name_or_its_tag`.
 
+### A download nobody asked for waits while the connection is metered (2026-10-15)
+
+A tester's fresh laptop, left on a phone's USB tether for five minutes, took
+1,434 MB: the download pass started a new part at 03:35, 03:40, 03:43:54,
+03:44:09 and 03:44:24Z, and the node had pulled 9.17 GB in its first 44
+minutes with nothing asked of it but the default "Help the network" (field
+report 2026-10-15). `max_bandwidth_mbps` caps serving only; nothing anywhere
+asked what the connection costs.
+
+**`SharedState::automatic_downloads_wait`** (`daemon::metered`) is the one
+answer to "may a download nobody asked for start now?", asked just before one
+starts by both paths that start one on their own — the download pass
+(`evaluate_and_download`, after selection, so the system is asked only when
+there is something to fetch) and the rebalancer's acquisition when a holder
+leaves (`process_pending_departures`). Guard:
+`every_automatic_download_asks_whether_the_connection_is_metered` — a new
+`trigger_download` or `AcquisitionCommand::Acquire` site must ask, or be listed
+with why it need not. Deliberately not paused: a download the owner asked for,
+a part already held being repaired (`complete_pending_shard_fetches` — the
+repair set, and the origin fallback of a download already under way), and a
+transfer already running.
+
+The setting is `auto_manage.on_metered_connection`: `auto` (default) asks the
+system, `pause` always waits (for a system that cannot tell), `allow` never
+does. The reading answers for 60 s (`READING_ANSWERS_FOR`); a reading the
+system could not give keeps the last one it did (a check that times out on a
+hotspot is still a hotspot), and a system that has never said pauses nothing.
+The owner is told once per change (`activity.metered_paused` / `_resumed`),
+never per pass.
+
+Research, and what it changed:
+
+- **NetworkManager** puts `Metered` (`NMMetered`: 0 unknown, 1 yes, 2 no, 3
+  guess-yes, 4 guess-no) on the manager object — the primary connection's —
+  and guesses yes for an Android hotspot from its `ANDROID_METERED` DHCP
+  option; its documentation says a guess should be treated as the answer. So
+  3 = metered. Read with `busctl get-property` through a `BoundedCommand`
+  (bounded, one copy at a time, off the runtime worker — #244), not a D-Bus
+  crate.
+- **Windows** (`Windows.Networking.Connectivity.ConnectionCost`): Microsoft's
+  guidance is to re-check the cost just before a sizable transfer, and to defer
+  large optional downloads on `Fixed` AND `Variable` — and on `Unrestricted`
+  while roaming or over the data limit. That is why the check sits at the
+  start of each download rather than on a timer. Read through Windows
+  PowerShell 5.1 (`powershell.exe`, whose WinRT type syntax pwsh 7 lacks);
+  0.3 s from WSL2. Checked on native Windows (MinGW build, 2026-10-15): the
+  diagnostics line read `metered connection: no` on this machine's unmetered
+  link, the setting round-tripped through `PUT /api/admin/config` into
+  `config.toml`, an unknown value was refused 400, and no PowerShell was left
+  running.
+- **WSL2** has no NetworkManager but the Windows host knows the cost, so an
+  unknown Linux reading falls back to the Windows one when `is_wsl2()`.
+- **macOS** (`NWPath.isExpensive`) is deferred — `docs/ARCHITECTURE.md` §
+  Deferred Items.
+
+Tests: `automatic_downloads_wait_on_a_metered_connection_and_the_owner_is_told_once`,
+`a_system_that_cannot_say_pauses_nothing_and_a_failed_check_changes_nothing`,
+the two parser tests, and the guard (red with either call site's check
+replaced by `false`).
+
 ## `model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER BOUND on "idle since", and the worker's own `last_used` is the signal that moves
 
 (2026-09-02, gotcha #437). The idle unload used to trust

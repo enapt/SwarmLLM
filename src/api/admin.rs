@@ -531,6 +531,21 @@ pub async fn diagnostics(
             ss.cfg().resources.max_disk_mb
         );
     }
+    // What the system says about the connection NOW, beside the setting and
+    // whether automatic downloads wait — so a report from a tethered laptop
+    // shows what detection saw (`daemon::metered`, field report 2026-10-15).
+    {
+        let said = tokio::task::spawn_blocking(crate::daemon::metered::read)
+            .await
+            .unwrap_or(crate::daemon::metered::Metered::Unknown);
+        let said = format!("{said:?}").to_lowercase();
+        let setting = format!("{:?}", ss.cfg().auto_manage.on_metered_connection).to_lowercase();
+        let _ = writeln!(
+            out,
+            "metered connection: {said}  setting: {setting}  automatic downloads waiting: {}",
+            ss.models.metered.waiting()
+        );
+    }
 
     // What this machine IS. "Nobody ever routes work to my node" and "my node
     // is slow" are both answered by the last line here — the speed this node
@@ -1411,6 +1426,7 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         "session_timeout_seconds": config.inference.session_timeout_seconds,
         "auto_manage_shards": state.shared_state.models.auto_manage_enabled.load(std::sync::atomic::Ordering::Relaxed),
         "auto_manage_max_storage_mb": config.auto_manage.max_storage_mb,
+        "auto_manage_on_metered": config.auto_manage.on_metered_connection,
         "shard_size_mb": config.model.shard_size_mb,
         "max_batch_size": config.inference.max_batch_size,
         "batch_timeout_ms": config.inference.batch_timeout_ms,
@@ -1693,6 +1709,12 @@ pub async fn update_config(
             )
             .with_toast("info", 4000),
         );
+    }
+    if let Some(metered) = body.auto_manage_on_metered {
+        // Read by `SharedState::automatic_downloads_wait` before the next
+        // automatic download; wake the pass so a pause lifted takes effect now.
+        config.auto_manage.on_metered_connection = metered;
+        state.shared_state.models.auto_manage_notify.notify_one();
     }
     if let Some(shard_size) = body.shard_size_mb {
         if !(crate::config::SHARD_SIZE_MIN_MB..=crate::config::SHARD_SIZE_MAX_MB)
@@ -2068,6 +2090,8 @@ pub struct ConfigUpdate {
     pub max_gpu_vram_mb: Option<u64>,
     pub auto_manage_shards: Option<bool>,
     pub auto_manage_max_storage_mb: Option<u64>,
+    /// `auto` / `pause` / `allow` — `AutoManageConfig::on_metered_connection`.
+    pub auto_manage_on_metered: Option<crate::config::MeteredDownloads>,
     pub shard_size_mb: Option<u64>,
     pub max_batch_size: Option<u32>,
     pub batch_timeout_ms: Option<u64>,

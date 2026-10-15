@@ -171,6 +171,15 @@ impl ShardRebalancer {
                             continue;
                         }
                     }
+                    // A download nobody asked for, like the download pass's
+                    // (`daemon::metered`, field report 2026-10-15).
+                    if self.shared_state.automatic_downloads_wait().await {
+                        tracing::info!(
+                            model = %shard_id.model_id,
+                            "Rebalance acquisition skipped — this connection is metered"
+                        );
+                        continue;
+                    }
                     if self
                         .acquisition_tx
                         .try_send(AcquisitionCommand::Acquire {

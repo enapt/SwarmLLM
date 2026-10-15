@@ -54,6 +54,11 @@ pub struct ModelMgmt {
     /// The stored set could not be read at startup: every model counts as kept
     /// until `SharedState::keep_on_this_computer` reads it (fails closed).
     pub kept_on_this_computer_unread: std::sync::atomic::AtomicBool,
+    /// What this node last learned about whether its connection is metered,
+    /// and whether automatic downloads wait for it now. Written ONLY by
+    /// `SharedState::automatic_downloads_wait` (`daemon::metered`), the one
+    /// answer; `MeteredWatch::waiting` is for display.
+    pub metered: crate::daemon::metered::MeteredWatch,
     /// Shards where P2P download has exhausted all peer attempts in this session.
     /// Signals auto_manage to force the HF path even when peer holders are registered.
     /// Cleared when a download for the shard successfully completes.
@@ -1061,6 +1066,7 @@ mod tests {
             removed_by_user: DashMap::new(),
             kept_on_this_computer: dashmap::DashSet::new(),
             kept_on_this_computer_unread: std::sync::atomic::AtomicBool::new(false),
+            metered: Default::default(),
             shard_p2p_failed: dashmap::DashSet::new(),
             uncorroborated_origin_parts: DashMap::new(),
             shards_needing_repair: dashmap::DashSet::new(),

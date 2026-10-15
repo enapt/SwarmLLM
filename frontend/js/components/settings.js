@@ -413,6 +413,7 @@
         max_bandwidth_mbps: parseInt(val('settings-bandwidth'), 10),
         max_disk_mb: parseInt(val('settings-disk'), 10),
         auto_manage_shards: val('settings-auto-shards') === 'on',
+        auto_manage_on_metered: val('settings-metered') || undefined,
         dashboard_trust_lan: !!(document.getElementById('settings-trust-lan') || {}).checked,
         relay_forwarding_auto: !!(document.getElementById('settings-relay-auto') || {}).checked,
         update_mode: val('settings-update-mode') || undefined,
@@ -456,6 +457,8 @@
         if (updModeEl && data.update_mode) updModeEl.value = data.update_mode;
         var autoManage = data.auto_manage_shards ? 'on' : 'off';
         document.getElementById('settings-auto-shards').value = autoManage;
+        var meteredEl = document.getElementById('settings-metered');
+        if (meteredEl) meteredEl.value = data.auto_manage_on_metered || 'auto';
         var isOn = autoManage === 'on';
         document.getElementById('settings-storage-info').classList.toggle('hidden', !isOn);
         if (isOn) App.settings.loadStorageInfo();

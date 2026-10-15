@@ -20,6 +20,7 @@ pub mod gpu_support;
 mod helpers;
 pub mod machine_memory;
 pub mod manifest;
+pub mod metered;
 pub mod shard_loader;
 mod startup;
 pub mod state;

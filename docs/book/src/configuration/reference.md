@@ -248,6 +248,7 @@ a tailnet — devices you authorised — which is why the LAN case stays opt-in.
 | `hf_watcher_enabled` | boolean | `true` | Background poll of HF trending GGUF feed (hourly). Disable for air-gapped / bandwidth-constrained nodes |
 | `wishlist_gossip_publish` | boolean | `false` | Opt-in: publish your wishlist as cross-pool demand gossip (R130) |
 | `auto_switch_quants` | boolean | `true` | **R141 default flip**: auto-acquire the recommended quant variant when the recommender (R133) suggests a better one. Set `false` on metered links to keep the current quant |
+| `on_metered_connection` | string | `"auto"` | What automatic downloads do on a metered connection (a phone's hotspot, a mobile plan): `"auto"` pauses while the system says the connection is metered (NetworkManager on Linux, the connection's cost on Windows and under WSL2; nothing on macOS yet), `"pause"` always pauses, `"allow"` never does. Downloads you ask for and the repair of parts already held are never paused |
 | `parallax_auto_rebalance` | boolean | `true` | Bias scoring toward Parallax allocator recommendations (C.2) |
 | `default_model_shard_cap` | integer | `0` | Max shards auto-manage acquires per model. `0` = unlimited. **Set this if you want to add capacity rather than redundancy** — see below |
 | `idle_unload_secs` | integer | `300` | Free a loaded model's GPU memory after this long with no local requests AND little demand for it elsewhere in the network. Shards stay on disk, so the model reloads on the next request |

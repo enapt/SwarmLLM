@@ -13030,3 +13030,98 @@ fn a_pool_members_liveness_is_never_read_from_its_stored_flag() {
          not its stored flag:\n{offenders:#?}"
     );
 }
+
+/// Where `marker` sits in `text`: the name of the function around each
+/// occurrence (the last `fn` line above it). Comment lines are skipped.
+fn enclosing_fn_names(text: &str, marker: &str) -> Vec<String> {
+    let mut current = String::new();
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if let Some(at) = trimmed.find("fn ") {
+            let before = &trimmed[..at];
+            let is_signature = before.split_whitespace().all(|w| {
+                matches!(w, "pub" | "async" | "const" | "unsafe") || w.starts_with("pub(")
+            });
+            if is_signature {
+                current = trimmed[at + 3..]
+                    .split(['(', '<'])
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+            }
+        }
+        if line.contains(marker) {
+            out.push(current.clone());
+        }
+    }
+    out
+}
+
+/// **Every download nobody asked for asks `SharedState::automatic_downloads_wait`
+/// first** — a fresh laptop took 1.4 GB over a phone's tether in five minutes
+/// (field report 2026-10-15; `daemon::metered`). A new place that starts a
+/// download on its own must ask it, or be listed here with why it need not.
+#[test]
+fn every_automatic_download_asks_whether_the_connection_is_metered() {
+    const ASKS: &[(&str, &str)] = &[
+        ("src/model/auto_manage/manager.rs", "evaluate_and_download"),
+        ("src/health/rebalancer.rs", "process_pending_departures"),
+    ];
+    const NEED_NOT: &[(&str, &str)] = &[
+        // A part already held being repaired, or a download already under way.
+        (
+            "src/model/auto_manage/manager.rs",
+            "complete_pending_shard_fetches",
+        ),
+        // The owner asked for the model.
+        ("src/api/admin_models/listing.rs", "add_model_interest"),
+        // The receiving end.
+        ("src/model/acquisition.rs", "run"),
+    ];
+    assert_eq!(
+        enclosing_fn_names(
+            "    pub(super) async fn pass(&self) {\n        // self.trigger_download(c)\n        self.trigger_download(c).await;\n",
+            ".trigger_download("
+        ),
+        ["pass"],
+        "the scan names the function a start sits in, and skips a comment"
+    );
+    let mut offenders = Vec::new();
+    for f in walk_rs_files(&repo_root().join("src").to_string_lossy()) {
+        let rel = f
+            .strip_prefix(&format!("{}/", repo_root().display()))
+            .unwrap_or(&f)
+            .to_string();
+        let text = std::fs::read_to_string(&f).unwrap_or_default();
+        let mut starts = enclosing_fn_names(&text, ".trigger_download(");
+        starts.extend(enclosing_fn_names(&text, "AcquisitionCommand::Acquire {"));
+        for name in starts {
+            let site = (rel.as_str(), name.as_str());
+            if NEED_NOT.contains(&site) {
+                continue;
+            }
+            if !ASKS.contains(&site) {
+                offenders.push(format!(
+                    "{rel}: `{name}` starts a download and is in neither list"
+                ));
+                continue;
+            }
+            let body = fn_body(&text, &format!("fn {name}(")).unwrap_or("");
+            let asks = body.find("automatic_downloads_wait()");
+            let starts_at = [".trigger_download(", "AcquisitionCommand::Acquire {"]
+                .iter()
+                .filter_map(|m| body.find(m))
+                .min();
+            if !matches!((asks, starts_at), (Some(a), Some(s)) if a < s) {
+                offenders.push(format!(
+                    "{rel}: `{name}` starts a download without asking `automatic_downloads_wait()` first"
+                ));
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "{offenders:#?}");
+}

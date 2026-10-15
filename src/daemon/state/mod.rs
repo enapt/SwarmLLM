@@ -1392,6 +1392,7 @@ impl SharedState {
                 },
                 kept_on_this_computer,
                 kept_on_this_computer_unread: std::sync::atomic::AtomicBool::new(kept_unread),
+                metered: Default::default(),
                 model_request_counts: DashMap::new(),
                 resource_schedule: RwLock::new(config.resources.schedule.clone()),
                 prune_history: RwLock::new(VecDeque::new()),
