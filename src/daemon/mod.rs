@@ -468,11 +468,11 @@ impl Daemon {
 
         // R112: HfWatcher — background task that polls HuggingFace's
         // trending GGUF feed every hour. Non-critical: a HF outage or a
-        // network partition keeps the rest of the daemon running. The
-        // watcher exits cleanly when `auto_manage.hf_watcher_enabled` is
-        // false; the spawned task is still useful as a one-shot "is HF
-        // reachable?" probe in that case (run() returns immediately).
-        if !anchor {
+        // network partition keeps the rest of the daemon running. Not started
+        // when `auto_manage.hf_watcher_enabled` is false (a config-file
+        // setting, read at start): started, it returned at once and the
+        // supervisor logged a deliberate setting as a subsystem failing.
+        if !anchor && shared_state.cfg().auto_manage.hf_watcher_enabled {
             let hf_watcher = crate::model::huggingface::HfWatcher::new(
                 shared_state.clone(),
                 shutdown_rx.clone(),
