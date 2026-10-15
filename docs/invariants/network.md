@@ -4456,8 +4456,11 @@ gossip alone, about a third of the gossip sent.
 **What is left is the copy factor.** Every topic delivers ~6.3 copies of each message.
 `network::behaviour::build_behaviour` sizes the mesh once at startup from `known_peers`, which
 is the peer CACHE: 203 on the release node (`Auto-scaled GossipSub mesh parameters
-known_peers=203`), every peer ever seen. So a swarm of ~8 connected nodes runs the 100+ tier
-(`mesh_n` 6, `mesh_n_high` 12), which is a full mesh, and flood publishing (the crate's
+known_peers=203`). The cache holds ADDRESSES, not peers, capped at 200 (`MAX_CACHED_PEERS`;
+"Loaded cached peers from last session count=200"), plus 3 bootstrap. So every node that has run a
+while reads ~203, and a swarm of ~8 connected nodes runs the 100+ tier (`mesh_n` 6,
+`mesh_n_high` 12), which is a full mesh. A fresh node's cache is empty, so it runs the smallest
+tier (`mesh_n` 2) for its first session. Flood publishing (the crate's
 default) also sends each origin's message to every peer. IDONTWANT (gossipsub v1.2, messages
 over 1,000 bytes) only suppresses a copy not yet sent. Sizing the mesh from the peers
 actually reachable is the next lever (FUTURE_WORK #91 (1b)). It is a risky one, because a

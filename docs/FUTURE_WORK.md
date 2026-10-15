@@ -1000,7 +1000,10 @@ third of the gossip"). Every topic delivers ~6.3 copies of each message: the mes
 Open: (1) re-measure once the fleet stops sending region summaries (`swarm/regions` should fall
 to demand gossip alone); (1b) the copy factor: the mesh is sized once at startup from the peer CACHE
 (`known_peers` 203 on the release node, so the 100+ tier, `mesh_n` 6, on a swarm of ~8: a full
-mesh, plus flood publishing); size it from peers actually reachable, measured on a rig first (a
+mesh, plus flood publishing). The cache counts ADDRESSES, not peers (`load_peer_cache`, capped at
+`MAX_CACHED_PEERS` = 200: "Loaded cached peers from last session count=200" + 3 bootstrap), so
+every node that has run a while lands on that tier, and a FRESH node (empty cache, bootstrap
+only) runs the smallest (`mesh_n` 2, low 1, high 4) for its whole first session. Size it from peers actually reachable, measured on a rig first (a
 thinner mesh partitions sooner); (2) announce-then-pull for manifests — gossip `(model, hash)`
 and fetch the manifest point to point only for a version one lacks (Bitcoin
 `inv`/`getdata`, Plumtree lazy push), since the copies, not the size, are now the cost; it
@@ -1788,6 +1791,16 @@ Considered for (a) and NOT done (2026-10-15): keeping the last worker's figure a
 (`arch-worker-memory.md`): once the card frees up it UNDER-reports, and a client that trims
 history to the listed context would then silently drop context the node could hold. (a) needs a
 pre-load figure from the loader's own arithmetic, not a memory of the last one.
+**(a) parked, 2026-10-15**: the clients the report names do not read the listed context. Open
+WebUI and LibreChat take it from their own settings; Cursor assumes 1M for a custom endpoint and
+detects nothing; Cline's OpenAI-compatible provider is set by hand. Each learns the limit from the
+refusal, which already names it (`longest_prompt_that_fits`). A pre-load figure would be a THIRD
+estimate of the card's room, beside admission's contribution-scaled budget and the loader's 85% of
+free memory (#187's two bases). Its errors fall partly below the truth: the worker's CUDA context
+(~137 MiB), whether admission reclaims an idle model (only when the estimate does not fit
+without it), and the placement (card, card/processor split, processor). A figure below the truth
+makes the few clients that do read it (SDK-style frameworks) drop context silently. Reopen if a
+report names a client that sizes prompts from `/v1/models`.
 
 #### #187 — Head-room admission prices load and runtime on two different bases
 `P3` · memory · **PARTIAL** — 2026-08-08 · history: archive § "Head-room admission: two things the live test found"
