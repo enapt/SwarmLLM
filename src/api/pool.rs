@@ -33,6 +33,11 @@ async fn await_pool_reply<T>(
 /// and showed the owner their own pool as a member (#69).
 pub async fn pool_state(State(state): State<AppState>) -> Json<serde_json::Value> {
     let my_id = state.shared_state.identity.node_id().clone();
+    let now = chrono::Utc::now();
+    // The interval this node's pool manager reports on — fixed at its start.
+    let report_every_secs = state.shared_state.config.pool.gossip_interval_secs;
+    let connected_now =
+        |id: &crate::types::NodeId| state.shared_state.connected_node_ids.contains(id);
     let pool_state = state.shared_state.credits.pool_state.read().await;
     match pool_state.as_ref() {
         Some(ps) => Json(serde_json::json!({
@@ -47,7 +52,9 @@ pub async fn pool_state(State(state): State<AppState>) -> Json<serde_json::Value
                     "node_id": hex::encode(m.node_id.0),
                     "credits_contributed": m.credits_contributed,
                     "joined_at": m.joined_at.to_rfc3339(),
-                    "online": m.online,
+                    "online": crate::pool::types::member_is_online(
+                        m, &my_id, connected_now, now, report_every_secs,
+                    ),
                     "contribution_level": m.contribution_level,
                 });
                 if let Some(ref name) = m.device_name {

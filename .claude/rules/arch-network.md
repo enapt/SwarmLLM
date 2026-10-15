@@ -309,6 +309,7 @@ Each names the ONE place a decision is made; a second implementation is this cod
 - **`SharedState::resolve_connected_peer_id_bytes`** — for messages `network::manager::relay::is_relay_eligible` refuses.
 - **`ModelRegistry::describes_a_different_build`** — same FILE or another build wearing the name; SHAPE, never hashes.
 - **`model::manifest::is_backup_artifact_id`** — copied-folder backup ids, netted at `ModelRegistry::register_manifest`.
+- **`pool::types::member_is_online`** — is a pool member on line: this device, connected now, or reported within 2.5 report intervals; never `PoolMembership::online` (set, never cleared — a device stopped two days showed `[on]`, field report 2026-10-15). Guard: `a_pool_members_liveness_is_never_read_from_its_stored_flag`.
 - **`ModelManifest::context_length`** — the model's declared context, OUTSIDE `manifest_hash` (like `mmproj`; a hashed field would make old and new nodes disagree on every manifest); filled by `SharedState::fill_declared_contexts` before gossip, kept unknown → known by `register_manifest` (#189).
 
 → `docs/invariants/network.md` § "Single-source-of-truth helpers — Network protocol, peers and the model registry"

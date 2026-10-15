@@ -12983,3 +12983,50 @@ fn the_dashboard_reconnect_window_outlasts_the_pages_retry_backoff() {
         Some(1500)
     );
 }
+
+/// Every READ of a `.online` field in `text` — a write (`.online = …`) and a
+/// longer name (`.online_count`) are not reads.
+fn stored_online_reads(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (line, stmt) in statements(text) {
+        for (at, _) in stmt.match_indices(".online") {
+            let rest = &stmt[at + ".online".len()..];
+            if rest.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            let rest = rest.trim_start();
+            if rest.starts_with('=') && !rest.starts_with("==") {
+                continue;
+            }
+            out.push((line, stmt.clone()));
+        }
+    }
+    out
+}
+
+/// **A pool member's liveness is read through `pool::types::member_is_online`,
+/// never its stored `online` flag** — set when a device joins or reports and
+/// never cleared, it showed a device stopped two days earlier as on line in
+/// `swarmllm pool status` (field report 2026-10-15). The flag stays on the
+/// wire for older nodes; nothing may read it.
+#[test]
+fn a_pool_members_liveness_is_never_read_from_its_stored_flag() {
+    // The scan sees a read, wrapped or not, and passes a write.
+    assert_eq!(
+        stored_online_reads("let on = m\n    .online;\nmember.online = true;\n").len(),
+        1
+    );
+    assert!(stored_online_reads("if m.online_count == 0 {}").is_empty());
+    let mut offenders = Vec::new();
+    for f in walk_rs_files(&repo_root().join("src").to_string_lossy()) {
+        let text = std::fs::read_to_string(&f).unwrap_or_default();
+        for (line, stmt) in stored_online_reads(&text) {
+            offenders.push(format!("{f}:{line}: {stmt}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "read a pool member's liveness through `pool::types::member_is_online`, \
+         not its stored flag:\n{offenders:#?}"
+    );
+}

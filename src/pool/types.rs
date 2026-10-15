@@ -57,6 +57,34 @@ impl PoolInviteCode {
     }
 }
 
+/// Is `member` on line now, as this node can tell? The ONE reading of a pool
+/// member's liveness: it is this device, it is connected to this one right
+/// now, or its last report arrived within two and a half report intervals
+/// (`report_every_secs`, the pool's `gossip_interval_secs` — one missed report
+/// is not an absence).
+///
+/// `PoolMembership::online` is not an answer: it is set when a member joins
+/// or reports and nothing ever cleared it, so `swarmllm pool status` showed a
+/// device stopped two days earlier as on line (field report 2026-10-15). It
+/// stays on the wire for older nodes; no reader trusts it.
+pub fn member_is_online(
+    member: &PoolMembership,
+    me: &NodeId,
+    connected_now: impl Fn(&NodeId) -> bool,
+    now: chrono::DateTime<chrono::Utc>,
+    report_every_secs: u64,
+) -> bool {
+    if member.node_id == *me || connected_now(&member.node_id) {
+        return true;
+    }
+    let window = chrono::Duration::seconds(
+        i64::try_from(report_every_secs.saturating_mul(5) / 2).unwrap_or(i64::MAX),
+    );
+    member
+        .last_seen
+        .is_some_and(|seen| now.signed_duration_since(seen) <= window)
+}
+
 /// Commands sent to the PoolManager task.
 #[derive(Debug)]
 pub enum PoolCommand {
@@ -338,6 +366,65 @@ mod tests {
         let bound_hash = [7u8; 32];
         let bound = BlindedPoolInvitation::from_invitation(&inv, Some(bound_hash));
         assert_eq!(bound.code_hash, Some(bound_hash));
+    }
+
+    /// **A member that stopped reporting is off line, whatever its stored
+    /// flag says** (field report 2026-10-15: a device stopped two days earlier
+    /// showed `[on]`). Connected now, or reported within the window, it is on.
+    #[test]
+    fn a_member_that_stopped_reporting_is_off_line() {
+        let now = chrono::Utc::now();
+        let me = NodeId([1u8; 32]);
+        let member = |seen_secs_ago: Option<i64>| PoolMembership {
+            node_id: NodeId([2u8; 32]),
+            credits_contributed: 0,
+            joined_at: now,
+            acceptance_signature: vec![],
+            invitation_id: uuid::Uuid::new_v4(),
+            invitation_expires_at: now,
+            device_name: None,
+            last_seen: seen_secs_ago.map(|s| now - chrono::Duration::seconds(s)),
+            online: true,
+            device_stats: None,
+            contribution_level: 100,
+        };
+        let not_connected = |_: &NodeId| false;
+        let two_days = Some(2 * 24 * 3600);
+        assert!(!member_is_online(
+            &member(two_days),
+            &me,
+            not_connected,
+            now,
+            600
+        ));
+        assert!(!member_is_online(
+            &member(None),
+            &me,
+            not_connected,
+            now,
+            600
+        ));
+        assert!(
+            member_is_online(&member(Some(1_400)), &me, not_connected, now, 600),
+            "one report missed"
+        );
+        assert!(!member_is_online(
+            &member(Some(1_600)),
+            &me,
+            not_connected,
+            now,
+            600
+        ));
+        assert!(
+            member_is_online(&member(two_days), &me, |_| true, now, 600),
+            "connected now"
+        );
+        let mut myself = member(two_days);
+        myself.node_id = me.clone();
+        assert!(
+            member_is_online(&myself, &me, not_connected, now, 600),
+            "this device"
+        );
     }
 
     #[test]

@@ -4261,3 +4261,19 @@ what to do if it does not. Tests: `a_join_request_is_sent_again_until_answered`,
 `an_unanswered_join_request_ends_with_its_window_out_loud`,
 `a_repeated_join_request_is_answered_with_the_same_invitation` (the first and
 third red with the resend / the re-answer removed).
+
+## A pool member's liveness is derived, never stored (2026-10-15)
+
+`PoolMembership::online` was documented as "derived from last_seen < 2 min"
+and was never derived: every writer set it `true` (join, report, the owner's
+own entry) and nothing cleared it, so `swarmllm pool status` and the
+dashboard's pool page showed a device stopped two days earlier as on line
+(field report 2026-10-15). `pool::types::member_is_online` is the one reading —
+this device, connected to this one now (`connected_node_ids`), or its last
+report within 2.5 × the pool's `gossip_interval_secs` (one missed report is not
+an absence; a member far from the viewer is heard through the owner's state
+gossip, at most ~2 intervals stale). `/api/pool/state` returns it as `online`,
+so the CLI and the page read it unchanged. The flag stays on the wire for older
+nodes. Test `a_member_that_stopped_reporting_is_off_line`; guard
+`a_pool_members_liveness_is_never_read_from_its_stored_flag` (red with the
+endpoint reading `m.online`).

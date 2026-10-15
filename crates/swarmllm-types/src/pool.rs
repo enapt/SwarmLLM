@@ -44,10 +44,14 @@ pub struct PoolMembership {
     /// User-chosen device nickname (e.g., "Gaming PC", "Laptop")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_name: Option<String>,
-    /// Last time this device was seen on the network (updated via health pings)
+    /// When the pool owner last heard from this device: its joining, or its
+    /// last device-stats report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<chrono::DateTime<chrono::Utc>>,
-    /// Whether the device is currently online (derived from last_seen < 2 min)
+    /// Set when the device joins or reports, and never cleared — so NOT
+    /// whether it is on line now. That is `pool::types::member_is_online` in
+    /// the daemon, from `last_seen` and the connection. Kept on the wire for
+    /// older nodes.
     #[serde(default)]
     pub online: bool,
     /// Per-device stats reported via pool state gossip
