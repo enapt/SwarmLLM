@@ -4043,3 +4043,29 @@ Full evidence: `docs/invariants/scheduling.md`
 - **`inference::scheduler::delegation_target`** — the single decision to hand a WHOLE model to a peer rather than run it on this node's CPU.
 - **`inference::router::distributed_exec::failure_is_penalty_worthy`** — gates `penalty_serve_failure` on (a) the assignment actually having had a remote segment and (b) the error not being locally attributable.
 - **A peer that went silent is barred from THIS request's retry, and the retry happens** — every producer of `SwarmError::PeerUnresponsive` (the per-segment deadline in `pipeline/local.rs`, both fast-path arms in `remote_generate.rs`) calls `blacklist_holder_for_request` before returning, and `router::peer_went_silent` retries the variant by TYPE under `used_remote_segment`. Envoy's `previous_hosts` rule: a host that just failed is likely to keep failing, so the retry goes elsewhere or nowhere. A producer that bars nobody makes the retry wait the same deadline twice; a retry keyed on prose misses the producer whose words differ. → `docs/invariants/scheduling.md` § "A peer that went silent is barred from the retry"
+
+## A request its reader stopped is cancelled, not failed (2026-10-15)
+
+A tester pressed Stop after 30 s of an embedding model repeating one word. The
+node logged `outcome=error tokens=0` at warn, and its diagnostics listed the
+request among "recent inference failures" as "served peer <its own id>"
+(field report 2026-10-15). Three things were wrong, each in its own place:
+
+- **The outcome.** Three router completion paths (`dispatch_single`, the
+  batched local and distributed paths) each mapped a result to an outcome with
+  `Err(_) => Error(kind), 0, 0`. `Outcome::Cancelled` existed and nothing wrote
+  it. `RequestTrace::finish_from` is now the one mapping: an error that is
+  `cancel::is_request_abandoned` is `Cancelled`, and any failure counts the
+  tokens its reader was shown (`streamed_so_far`, read before `mark_finished`
+  clears it) instead of zero.
+- **The level.** `REQUEST_ABANDONED` is a `ServiceUnavailable` by design (it is
+  penalty-exempt and the router does not retry it), so `failure_log_level`
+  gave it a warning; it now answers `Info` for it.
+- **The list.** `router::failure_worth_listing` decides what the diagnostics
+  keep: never a request whose reader left; and the server it names is the first
+  segment a PEER ran — the plan's first segment, which it used to take, is this
+  node on every local plan.
+
+Tests: `a_request_its_reader_left_is_cancelled_with_what_it_was_shown`,
+`a_request_its_reader_left_is_logged_as_information` — each red with its half
+of the fix removed.

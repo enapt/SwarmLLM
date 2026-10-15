@@ -560,6 +560,33 @@ impl RequestTrace {
             crate::types::ReplyContinuation::default();
     }
 
+    /// Close the trace from a request's result — the one reading of a result
+    /// as an outcome, for every router completion path.
+    ///
+    /// A failed request still counts the tokens its reader was shown
+    /// (`streamed_so_far`, read before `mark_finished` clears it), and a
+    /// request whose reader left (`cancel::is_request_abandoned`) is
+    /// `Cancelled`, not an error: a tester who pressed Stop after 30 s of
+    /// output saw `outcome=error tokens=0` logged for it (field report
+    /// 2026-10-15).
+    pub fn finish_from(
+        &self,
+        output: &Result<crate::inference::router::InferenceOutput, crate::error::SwarmError>,
+    ) {
+        match output {
+            Ok(r) => self.mark_finished(Outcome::Ok, r.prompt_tokens, r.completion_tokens),
+            Err(e) => {
+                let shown = self.streamed_so_far().tokens;
+                let outcome = if crate::inference::cancel::is_request_abandoned(e) {
+                    Outcome::Cancelled
+                } else {
+                    Outcome::Error(error_kind(e).to_string())
+                };
+                self.mark_finished(outcome, 0, shown);
+            }
+        }
+    }
+
     /// Immutable view for rendering. Taken once per surface.
     pub fn snapshot(&self) -> TraceSnapshot {
         let g = self.lock();

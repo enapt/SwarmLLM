@@ -307,6 +307,7 @@ Each names the ONE place a decision is made; a second implementation of any is t
 - **`inference::scheduler::delegation_target`**
 - **`inference::router::distributed_exec::failure_is_penalty_worthy`**
 - **A peer that went silent is barred from THIS request's retry, and the retry happens**
+- **`RequestTrace::finish_from`** — the one reading of a request's result as its outcome, on every router completion path: a reader that left is `Cancelled`, and a failure counts the tokens its reader was shown. **`router::failure_worth_listing`** — what the diagnostics list as a failure (never a reader who left; the first PEER segment as the server, never this node). → § "A request its reader stopped is cancelled, not failed"
 
 → `docs/invariants/scheduling.md` § "Single-source-of-truth helpers — Scheduling, routing and failover"
 

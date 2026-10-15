@@ -74,6 +74,7 @@ This answers most questions on its own:
 | a planned segment has no `segN_ms` | consecutive remote segments ran as one CHAINED run (peer to peer, answering from its tail): their time is the run's first segment's `segN_ms` (`pipeline/distributed.rs`, `run_is_last`). A failed chain re-runs unchained, and then every segment is timed |
 | `route=relayed` | no direct path to a holder; ~1 extra RTT each way, see NAT section |
 | `outcome=error error_type=…` | the variant name points at the subsystem |
+| `outcome=cancelled` | the reader left (Stop, a closed tab) — nothing failed; `tokens=` is what they were shown, and the request is not in `-- recent inference failures --` (`DIAG: request stopped by the client`) |
 
 `sched_ms` is time spent *assembling*, summed across attempts — not
 time-since-dequeue, which would charge a failed attempt's whole execution to

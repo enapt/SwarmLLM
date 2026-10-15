@@ -33,6 +33,47 @@ pub use types::{
     TokenLogProbEntry,
 };
 
+/// What a failed request leaves in the diagnostics' list of recent failures,
+/// or `None` when nothing failed: its reader left
+/// (`cancel::is_request_abandoned`) — pressed Stop, closed the tab. A tester
+/// who stopped a reply after 30 s found it listed as an inference failure
+/// (field report 2026-10-15).
+///
+/// The serving peer is the single most useful field: it is what separates
+/// "this node is broken" from "one peer is broken", a distinction we have
+/// repeatedly had to reconstruct by correlating two machines' logs. Read from
+/// `active_pipelines`, so asked before `finalize_request` clears it: the first
+/// segment a PEER ran, absent when every segment ran here. The plan's first
+/// segment alone named this node as the "peer" of a local request.
+pub(crate) fn failure_worth_listing(
+    shared_state: &crate::daemon::SharedState,
+    request: &crate::types::InferenceRequest,
+    err: &SwarmError,
+    elapsed_ms: u64,
+) -> Option<crate::daemon::state::RequestFailure> {
+    if crate::inference::cancel::is_request_abandoned(err) {
+        return None;
+    }
+    let me = shared_state.identity.node_id();
+    let served_by = shared_state
+        .active_pipelines
+        .get(&request.id)
+        .and_then(|a| {
+            a.segments
+                .iter()
+                .find(|s| &s.node_id != me)
+                .map(|s| s.node_id.to_string())
+        });
+    Some(crate::daemon::state::RequestFailure {
+        at: chrono::Utc::now(),
+        request_id: request.id.to_string(),
+        model: request.model_id.0.clone(),
+        served_by,
+        error: err.to_string(),
+        elapsed_ms,
+    })
+}
+
 /// Classify a router error as a transient remote failure that warrants a
 /// single retry with a fresh pipeline assembly.
 ///
@@ -1599,20 +1640,7 @@ impl InferenceRouter {
             // Close the trace, then emit the one greppable completion line and
             // publish it. Every observability surface renders from this single
             // record — see `inference::trace`.
-            match &output {
-                Ok(ref result) => trace.mark_finished(
-                    crate::inference::trace::Outcome::Ok,
-                    result.prompt_tokens,
-                    result.completion_tokens,
-                ),
-                Err(ref e) => trace.mark_finished(
-                    crate::inference::trace::Outcome::Error(
-                        crate::inference::trace::error_kind(e).to_string(),
-                    ),
-                    0,
-                    0,
-                ),
-            }
+            trace.finish_from(&output);
             shared_state.publish_request_trace(&trace);
             // The finished route reaches the API layer's response headers
             // through `deliver_result`, which every delivery path goes through
@@ -1622,9 +1650,15 @@ impl InferenceRouter {
             // `publish_request_trace` above, at the single choke point every
             // completion path crosses. Recording them here as well would
             // double-count this path.
-            match &output {
-                Ok(_) => {}
-                Err(ref e) => {
+            if let Err(ref e) = output {
+                if crate::inference::cancel::is_request_abandoned(e) {
+                    tracing::info!(
+                        request_id = %request.id,
+                        model = %request.model_id,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        "DIAG: request stopped by the client"
+                    );
+                } else {
                     crate::log_failure!(
                         e,
                         request_id = %request.id,
@@ -1633,30 +1667,15 @@ impl InferenceRouter {
                         error = %e,
                         "DIAG: inference FAILED"
                     );
-                    // Retain it for `GET /api/admin/diagnostics`. A user
-                    // reporting "inference doesn't work" can then paste one
-                    // command instead of being asked to enable -v, reproduce,
-                    // and send logs — by which point the original failure is
-                    // usually gone.
-                    //
-                    // The serving peer is the single most useful field: it is
-                    // what separates "this node is broken" from "one peer is
-                    // broken", a distinction we have repeatedly had to
-                    // reconstruct by correlating two machines' logs. Read from
-                    // `active_pipelines` before `finalize_request` clears it;
-                    // absent means the request ran locally.
-                    let served_by = shared_state
-                        .active_pipelines
-                        .get(&request.id)
-                        .and_then(|a| a.segments.first().map(|s| s.node_id.to_string()));
-                    shared_state.record_request_failure(crate::daemon::state::RequestFailure {
-                        at: chrono::Utc::now(),
-                        request_id: request.id.to_string(),
-                        model: request.model_id.0.clone(),
-                        served_by,
-                        error: e.to_string(),
-                        elapsed_ms: elapsed.as_millis() as u64,
-                    });
+                }
+                // Retain it for `GET /api/admin/diagnostics`. A user reporting
+                // "inference doesn't work" can then paste one command instead
+                // of being asked to enable -v, reproduce, and send logs — by
+                // which point the original failure is usually gone.
+                if let Some(failure) =
+                    failure_worth_listing(&shared_state, &request, e, elapsed.as_millis() as u64)
+                {
+                    shared_state.record_request_failure(failure);
                 }
             }
 

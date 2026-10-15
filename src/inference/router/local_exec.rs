@@ -258,20 +258,7 @@ pub(super) async fn execute_local_batch(
             ),
             0,
         );
-        match &output {
-            Ok(r) => trace.mark_finished(
-                crate::inference::trace::Outcome::Ok,
-                r.prompt_tokens,
-                r.completion_tokens,
-            ),
-            Err(e) => trace.mark_finished(
-                crate::inference::trace::Outcome::Error(
-                    crate::inference::trace::error_kind(e).to_string(),
-                ),
-                0,
-                0,
-            ),
-        }
+        trace.finish_from(&output);
         shared_state.publish_request_trace(&trace);
 
         // The in-process executor: nothing of this request reached a peer.

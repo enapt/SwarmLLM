@@ -344,20 +344,7 @@ pub(super) async fn execute_distributed_batch(
                 // Same point in the sequence as `dispatch_single`, so both
                 // paths salvage before anything interprets the outcome.
                 let output = super::salvaged_reply_if_lost(&shared_state, request.id, output);
-                match &output {
-                    Ok(r) => trace.mark_finished(
-                        crate::inference::trace::Outcome::Ok,
-                        r.prompt_tokens,
-                        r.completion_tokens,
-                    ),
-                    Err(e) => trace.mark_finished(
-                        crate::inference::trace::Outcome::Error(
-                            crate::inference::trace::error_kind(e).to_string(),
-                        ),
-                        0,
-                        0,
-                    ),
-                }
+                trace.finish_from(&output);
                 shared_state.publish_request_trace(&trace);
 
                 finalize_request(&shared_state, Some(&network_tx), &request, &output, None).await;

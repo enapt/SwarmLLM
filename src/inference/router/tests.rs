@@ -1243,3 +1243,92 @@ async fn an_embedding_model_is_refused_before_it_is_queued() {
     assert_eq!(router.queue.len(), 1, "a chat model is queued as before");
 }
 
+/// Field report 2026-10-15: a tester pressed Stop after 30 s of output. The
+/// node logged `outcome=error tokens=0` and listed the request among its
+/// inference failures as "served peer <this node's own id>".
+#[tokio::test]
+async fn a_request_its_reader_left_is_cancelled_with_what_it_was_shown() {
+    use super::types::{StreamingTokenEvent, StreamingTokenTx};
+    use crate::inference::trace::{Outcome, RequestTrace};
+    use crate::types::{NodeId, PipelineAssignment, PipelineSegment, ShardId};
+
+    // A trace whose reader was shown three tokens.
+    let shown_three = || async {
+        let trace = std::sync::Arc::new(RequestTrace::new(uuid::Uuid::new_v4(), "m", "chat"));
+        let (tx, _rx) = StreamingTokenTx::channel(8);
+        let tx = tx.with_trace(trace.clone());
+        for text in ["IP", " address", " IP"] {
+            tx.send(StreamingTokenEvent {
+                text: text.into(),
+                finish_reason: None,
+                matched_stop_sequence: None,
+            })
+            .await
+            .unwrap();
+        }
+        trace
+    };
+
+    let left = shown_three().await;
+    left.finish_from(&Err(crate::inference::cancel::request_abandoned()));
+    let snap = left.snapshot();
+    assert_eq!(
+        snap.outcome,
+        Outcome::Cancelled,
+        "the reader left; nothing failed"
+    );
+    assert_eq!(snap.completion_tokens, 3, "the tokens the reader was shown");
+
+    let failed = shown_three().await;
+    failed.finish_from(&Err(crate::error::SwarmError::Internal("boom".into())));
+    let snap = failed.snapshot();
+    assert!(matches!(snap.outcome, Outcome::Error(_)));
+    assert_eq!(
+        snap.completion_tokens, 3,
+        "a failure still counts what was shown"
+    );
+
+    // The failure list: a request its reader left is not on it.
+    let (shared_state, _temp) = make_test_shared_state(crate::config::Config::default());
+    let request = make_request(PriorityTier::Bronze);
+    let boom = crate::error::SwarmError::Internal("boom".into());
+    assert!(super::failure_worth_listing(
+        &shared_state,
+        &request,
+        &crate::inference::cancel::request_abandoned(),
+        32_821
+    )
+    .is_none());
+
+    // A plan run here names no peer; one a peer took part in names the peer.
+    let me = shared_state.identity.node_id().clone();
+    let peer = NodeId([9u8; 32]);
+    let plan = |nodes: Vec<NodeId>| PipelineAssignment {
+        request_id: request.id,
+        segments: nodes
+            .into_iter()
+            .map(|node_id| PipelineSegment {
+                node_id,
+                shard_id: ShardId {
+                    model_id: request.model_id.clone(),
+                    index: 0,
+                },
+                layer_range: (0, 28),
+            })
+            .collect(),
+        standbys: vec![],
+        tp_groups: vec![],
+        supports_speculative: false,
+    };
+    shared_state
+        .active_pipelines
+        .insert(request.id, plan(vec![me.clone()]));
+    let listed = super::failure_worth_listing(&shared_state, &request, &boom, 1)
+        .expect("a real failure is listed");
+    assert_eq!(listed.served_by, None, "this node is not a peer of its own");
+    shared_state
+        .active_pipelines
+        .insert(request.id, plan(vec![me, peer.clone()]));
+    let listed = super::failure_worth_listing(&shared_state, &request, &boom, 1).unwrap();
+    assert_eq!(listed.served_by, Some(peer.to_string()));
+}

@@ -1078,8 +1078,10 @@ pub enum FailureLevel {
 pub fn failure_log_level(err: &SwarmError) -> FailureLevel {
     let (status, _, _) = classify_error(err);
 
-    // The caller's mistake. Their response said so; this node is fine.
-    if status.is_client_error() {
+    // The caller's mistake. Their response said so; this node is fine. A
+    // caller that left before the reply (`cancel::request_abandoned`) is
+    // nobody's fault either, though its 503 shape reads as one.
+    if status.is_client_error() || crate::inference::cancel::is_request_abandoned(err) {
         return FailureLevel::Info;
     }
 
@@ -1647,6 +1649,17 @@ mod tests {
         ] {
             assert_eq!(failure_log_level(&err), FailureLevel::Warn, "{err}");
         }
+    }
+
+    /// A reader who pressed Stop is no fault of this node's, though the
+    /// abandoned request's error has the 503 shape of one (field report
+    /// 2026-10-15). Any other `ServiceUnavailable` stays a warning, above.
+    #[test]
+    fn a_request_its_reader_left_is_logged_as_information() {
+        assert_eq!(
+            failure_log_level(&crate::inference::cancel::request_abandoned()),
+            FailureLevel::Info
+        );
     }
 
     /// `failure_log_level` consults `classify_error`, so the classifier must be
