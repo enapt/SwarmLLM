@@ -114,10 +114,12 @@ figure and no longer holds. On the Ryzen 7 5800H + RTX 3070 laptop, Qwen2.5-14B 
 of 48 layers on the card, cooled before each arm: llama.cpp 6.8-7.0 tok/s (`llama-bench -ngl 30
 -t 4`); a default node 6.79-6.93 once decode runs INSIDE its thread pool — which it did not do
 until 2026-10-11 (5.64-5.93 in the same A/B; § Closed in FUTURE_WORK; a 3B on a processor-only
-node 10.97-13.04 → 14.53-15.29). What remains (#137, P3, re-measured 2026-10-14 on a 7B,
-processor only): ~5% behind llama.cpp at the 4 threads calibration picks here, and ~40% SLOWER at
-8 threads where llama.cpp holds level. llama.cpp's Q4_K repack and huge pages are REFUTED as the
-cause (gotchas #843/#844) — FUTURE_WORK #137 holds the open leads. Two machine effects, shared with
+node 10.97-13.04 → 14.53-15.29). What remains (#137, P3, measured in ONE session 2026-10-15 on
+a 7B, processor only): 3% behind llama.cpp at 4 threads and 5-8% at 8, both gaining a little from 4
+to 8 (the 8-thread loss was fixed 2026-10-14: idle rayon workers spin). Every product already reads
+its weights at the laptop's memory bandwidth (38-41 GB/s); the gap is what runs between them.
+llama.cpp's Q4_K repack, huge pages and the one-row split are REFUTED (gotchas #843/#844,
+FUTURE_WORK #137). Two machine effects, shared with
 llama.cpp: the card clocks down between split steps, and back-to-back runs heat the laptop
 enough to fake a 30% gap. Rule of thumb from the limit above still holds: at ~50 GB/s one 206 ms
 round trip reads ~10 GB of weights, so **local offload beats a far split whenever less than ~10

@@ -2221,7 +2221,12 @@ Two things that will otherwise be misread:
 - **Read a per-process property from the measured process, during the run.** Huge
   pages read 0 system-wide between arms while ours held 4.4-4.6 GB of them in the
   run (`AnonHugePages` in `/proc/<pid>/smaps_rollup`, sampled every 2 s, max kept —
-  `~/swarmllm-137/thp.sh`). The same goes for threads, RSS and cgroup limits.
+  gotcha #844). The same goes for threads, RSS and cgroup limits.
+- **A reference's figure from another session is not a baseline.** #137's residual
+  ("8 threads no faster than 4, where llama.cpp gains ~8%") set ours against llama.cpp
+  numbers from a different session and dissolved when both ran interleaved in one
+  (2026-10-15: ours +2%, llama.cpp +3-7% from 4 to 8). Run the reference as arms of the
+  same rig (`~/swarmllm-137/ll.sh`: ours and `llama-bench -o jsonl` interleaved).
 - **Two releases are compared as two COPIES**, never by swapping the live node: a
   node started on an older release updates itself within a minute (.236 → .237,
   2026-10-14). Run each binary as `test-split` or as a scratch daemon with its own

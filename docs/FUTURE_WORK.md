@@ -97,8 +97,9 @@ re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), 
     the card than the whole-layer split). *(#137 narrowed to P3 on
     2026-10-11: decode ran outside its thread pool on every default node — fixed: a 14B split
     1.19x, now level with llama.cpp; a 3B processor-only 1.14-1.39x. Re-measured 2026-10-14 on a
-    7B: ~5% behind at 4 threads, ~40% SLOWER at 8 where llama.cpp holds level; repack and huge
-    pages refuted.)* (`docs/plans/faster_than_local.md`).
+    7B; the 8-thread loss fixed 2026-10-14 (idle rayon workers spin); same session 2026-10-15:
+    3% behind llama.cpp at 4 threads, 5-8% at 8, both reading weights at the box's bandwidth;
+    repack, huge pages and the one-row split refuted.)* (`docs/plans/faster_than_local.md`).
 12. **#3**, **#180** — the routing cost model over-prices a split by its HOP count (not the reply
     length — 2026-10-10), which keeps partial ranges (load spreading) off. Its cost terms are
     logged since v0.3.234: collect, then fit per term.
@@ -1048,14 +1049,44 @@ on the card, in host RAM, and the prefix cache OFF. So it is not #257's pool gro
 line up with the safety kit's 10 s `nvidia-smi` readings. Next: catch one under nsys and see what the stream waits on (a
 Windows-side poller, a clock change, a WDDM residency move).
 
-#### #137 — Our processor decode holds level from 4 threads to 8 where llama.cpp's gains ~8%; at 4 it trails llama.cpp by ~2%
-`P3` · perf-local · **PARTIAL — the 8-thread loss fixed 2026-10-14 (idle rayon workers spin)** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3
+#### #137 — Our processor decode trails llama.cpp by 3% at 4 threads and 5-8% at 8, both at the box's memory bandwidth
+`P3` · perf-local · **PARTIAL — the 8-thread loss fixed 2026-10-14 (idle rayon workers spin); thread scaling level with llama.cpp's 2026-10-15** — 2026-09-27 · history: archive row #137; plan: `docs/plans/faster_than_local.md` § 3.3
 
-**Measured 2026-10-14** on the Ryzen 7 5800H (8 cores), Qwen2.5-Coder-7B Q4_K_M, processor
+**Measured 2026-10-15, ONE session** (HEAD `adf77d06` + the spin, Qwen2.5-Coder-7B Q4_K_M, processor
+only, 256 tokens a run, ours and llama.cpp interleaved o4 l4 o8 l8 l8 o8 l4 o4, live node stopped,
+safety kit, 0 driver events; `~/swarmllm-137/ll.sh`): ms a token — ours the mean of 251 one-position
+forwards, llama.cpp `llama-bench -ngl 0 -p 0 -n 256 -r 2` (`build-cuda`, not repacked), per rep.
+
+| ms a token | 4 threads | 8 threads |
+|---|---|---|
+| ours | 118.4 / 117.6 | 116.2 / 115.7 |
+| llama.cpp | 114.3, 114.0 / 114.3, 114.5 | 110.7, 106.3 / 110.2, 106.4 |
+
+**Both gain a little from 4 threads to 8** (ours 2%, llama.cpp 3-7%). The 2026-10-14 residual
+("8 threads no faster than 4 where llama.cpp gains ~8%") set ours against llama.cpp figures from
+another session — the box's two regimes (gotcha #845) — and dissolved once both ran in one. Every
+product reads its weights at 38-41 GB/s at either width (FFN up + gate 50-54 ms for 2.14 GB, the
+output head ~11 ms for 447 MB inside "unattributed"), which is llama.cpp's rate over its whole
+token: this laptop's dual-channel DDR4 is the limit, and more threads cannot add bandwidth.
+
+**Refuted 2026-10-15 — the one-row split (lead 2)**: one binary, `SWARMLLM_MATVEC` choosing how the
+vendored m == 1 product shares its rows (scratchpad `mv.sh`, 12 runs, t4/t8 interleaved): rayon's
+adaptive 128-512 rows (today) 117/116 at 4, 112/116 at 8; llama.cpp's 64-row chunks from a shared
+counter 113/116, 115/113; upstream candle's one range a thread (huggingface/candle#4000) 112/116,
+116/116. Stage times level in every arm, identical tokens in all 12. The switch was not kept.
+Upstream candle replaced rayon with a persistent barrier pool for its quantized products
+(huggingface/candle#3627: Qwen3-0.6B decode 97 → 110 tok/s, on a model small enough to sit in cache).
+
+**Residual (the 3-8%)**: the products match llama.cpp's bandwidth, so the gap is what runs
+between them — ~10 rayon regions a layer (280 a token) with a fork/join each, against llama.cpp's
+one parallel region synced by `ggml_barrier`, plus the small ops (~3 ms). Next lead, only if a
+processor-only user's speed rises in rank: a one-region decode for a layer.
+
+**History — measured 2026-10-14, before the spin** on the Ryzen 7 5800H (8 cores), Qwen2.5-Coder-7B Q4_K_M, processor
 only — ours `swarmllm test-split --gpu-layers 0 --max-tokens 48` at
 `RAYON_NUM_THREADS = SWARMLLM_DECODE_THREADS = t`, the median `SWARMLLM_PROFILE=1` forward
 total; llama.cpp `llama-bench -ngl 0 -p 0 -n 48` (`4b1a27f`). Live node stopped, safety kit,
-60 s cool-down before each arm, arms interleaved (`~/swarmllm-137/{cpu_threads,thp}.sh`):
+60 s cool-down before each arm, arms interleaved (`cpu_threads.sh`, `thp.sh`, removed 2026-10-15 — superseded by `ll.sh`):
 
 | ms a token | 4 threads | 8 threads |
 |---|---|---|
@@ -1080,7 +1111,7 @@ total; llama.cpp `llama-bench -ngl 0 -p 0 -n 48` (`4b1a27f`). Live node stopped,
   in the measured process; THP is `madvise`). `MIMALLOC_ALLOW_LARGE_OS_PAGES=1` changed nothing
   at 4 threads (150 / 127 / 129) and was no better at 8 (187 / 193 / 206) (gotcha #844).
 
-**Leads for the 8-thread loss, untested:**
+**Leads for the 8-thread loss (10-14)** — 1 fixed that day, 2 refuted 2026-10-15 (above), 3 measured:
 1. **Every parallel op is a rayon region whose workers may have gone to sleep.** rayon-core
    1.13 parks a worker after 32 idle rounds (`ROUNDS_UNTIL_SLEEPY`); a token runs several
    regions a layer × 28 layers, each waking the workers it needs, and 8 workers pay more
@@ -1128,10 +1159,8 @@ total; llama.cpp `llama-bench -ngl 0 -p 0 -n 48` (`4b1a27f`). Live node stopped,
    less processor time in all (`docs/invariants/inference.md` § "Idle rayon workers spin 200 µs
    before they sleep"; A/B `SWARMLLM_RAYON_SPIN_US=0`).
 
-**Residual**: 8 threads still do not beat 4 here, where llama.cpp's do (110 against 119); at 8 our
-FFN products are 63 + 45 ms against 58 + 39 at 4. Next: the same stage profile at 8 with the spin,
-FFN products only, beside llama.cpp's `GGML_SCHED`-free op timings; leads 2 (the m == 1 split's
-`with_min_len(128).with_max_len(512)`) and a one-region decode remain.
+*(The 10-14 residual — "8 threads still do not beat 4, where llama.cpp's do (110 against 119)" —
+compared sessions; superseded by the one-session table at the top.)*
 
 History: on 2026-10-11 decode ran OUTSIDE its thread pool on every default node — fixed
 (§ Closed 2026-10-11): a 14B split 5.3 → 6.8-6.9 tok/s, level with llama.cpp; a 3B
