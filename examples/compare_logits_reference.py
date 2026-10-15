@@ -18,13 +18,18 @@ other one for a layer: that position then sits apart while every other one
 agrees to quantization noise (qwen3moe's tiny test model does it at ONE of 100
 positions, 2026-09-25). A systematic error moves every position; an isolated
 one is a tie. The median is printed so the two can be told apart.
+
+REF_BIN=<path> takes the reference from a llama.cpp MASTER logits dumper instead
+(`~/llama.cpp-ref/dump_logits MODEL OUT.f32 id,id,...`, which writes every
+position; `dump_logits_long` writes only the last 12) — for a family 0.3.16
+predates (qwen35, gemma4).
 """
 import json
 import os
+import subprocess
 import sys
 
 import numpy as np
-from llama_cpp import Llama
 
 gguf, prefix = sys.argv[1], sys.argv[2]
 meta = json.load(open(prefix + ".json"))
@@ -49,9 +54,19 @@ step = first > 0 and os.environ.get("REF_ALL_POSITIONS") != "1"
 # f16 — the control for "is the residual llama.cpp's own rounding": on a model whose
 # agreement sits just under COS_MIN, run both and see which side moves (gotcha #864).
 kv = {"type_k": 0, "type_v": 0} if os.environ.get("REF_KV_F32") == "1" else {}
-llm = Llama(model_path=gguf, n_ctx=n_ctx, logits_all=not step,
-            n_gpu_layers=0, n_threads=4, verbose=False, **kv)
-if step:
+ref_bin = os.environ.get("REF_BIN")
+if ref_bin:
+    out = prefix + ".ref.f32"
+    subprocess.run([ref_bin, gguf, out, ",".join(map(str, tokens))], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ref = np.fromfile(out, dtype="<f4").reshape(-1, ours.shape[1])
+    os.remove(out)
+    # Every position, or the dumper's last few: either way the rows end at the last token.
+    ref = ref[-(len(tokens) - first):]
+elif step:
+    from llama_cpp import Llama
+    llm = Llama(model_path=gguf, n_ctx=n_ctx, logits_all=False,
+                n_gpu_layers=0, n_threads=4, verbose=False, **kv)
     llm.eval(tokens[:first])
     rows = []
     for t in tokens[first:]:
@@ -59,6 +74,9 @@ if step:
         rows.append(np.ctypeslib.as_array(llm._ctx.get_logits(), shape=(llm.n_vocab(),)).copy())
     ref = np.array(rows, dtype=np.float32)
 else:
+    from llama_cpp import Llama
+    llm = Llama(model_path=gguf, n_ctx=n_ctx, logits_all=True,
+                n_gpu_layers=0, n_threads=4, verbose=False, **kv)
     llm.eval(tokens)
     ref = np.array(llm.scores[first: len(tokens)], dtype=np.float32)
 if ref.shape[1] != ours.shape[1]:

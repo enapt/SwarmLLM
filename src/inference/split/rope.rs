@@ -117,9 +117,17 @@ use super::SlidingWindow;
 ///   (`llama_model_gemma2`). Which layers are windowed is read from the file
 ///   whatever `SWARMLLM_SLIDING_WINDOW` says, so that A/B arm changes the
 ///   window alone.
+/// - **Gemma 4's windowed layers also turn a width of their own**
+///   (`rope.dimension_count_swa`, `llama_hparams::n_rot(il)`: 256 against the
+///   global layers' 512) **and never read the file's `rope_freqs`**, which the
+///   converter writes for the global layers alone — "proportional" RoPE, the
+///   first quarter of each global head turning and the rest held still by a
+///   factor of 1e30 (`models/gemma4.cpp` passes the factors for `!is_swa(il)`
+///   only).
 ///
 /// A/B arms: `SWARMLLM_ROPE_SCALING=0` reads no scaling,
-/// `SWARMLLM_LAYER_ROPE=0` gives windowed layers the global tables.
+/// `SWARMLLM_LAYER_ROPE=0` gives windowed layers the global base and scaling
+/// (Gemma 4's still keep their own width, which their heads are shaped by).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LayerRope {
     /// How every non-windowed layer's angles are scaled.
@@ -134,6 +142,11 @@ pub(crate) struct WindowedRope {
     pub(crate) window: SlidingWindow,
     pub(crate) base: f32,
     pub(crate) scaling: RopeScaling,
+    /// The rotated width, where it is not the global layers' (Gemma 4).
+    pub(crate) dim: Option<usize>,
+    /// Whether the file's per-pair factors (`rope_freqs`, LongRoPE) apply here
+    /// as on the global layers — every family but Gemma 4.
+    pub(crate) file_factors: bool,
 }
 
 /// How a layer's angles are scaled — llama.cpp's `freq_scale`, alone or with
@@ -254,24 +267,32 @@ impl LayerRope {
                 }
             }
         };
-        let windowed = (std::env::var("SWARMLLM_LAYER_ROPE").as_deref() != Ok("0"))
-            .then(|| SlidingWindow::from_file(ct))
-            .flatten()
-            .and_then(|window| {
-                let named = number("rope.freq_base_swa");
-                // Gemma 3's windowed layers are never scaled (llama.cpp's
-                // `rope_freq_scale_train_swa` = 1, and `rope_yarn` at a scale of
-                // 1 changes no angle and lifts nothing).
-                let (base, windowed_scaling) = match arch.as_str() {
-                    "gemma3" => (named.unwrap_or(10_000.0), RopeScaling::NONE),
-                    _ => (named.unwrap_or(global_base), scaling.clone()),
-                };
-                (base != global_base || windowed_scaling != scaling).then_some(WindowedRope {
+        let own_rotation = std::env::var("SWARMLLM_LAYER_ROPE").as_deref() != Ok("0");
+        let windowed = SlidingWindow::from_file(ct).and_then(|window| {
+            let named = number("rope.freq_base_swa");
+            // Gemma 3's windowed layers are never scaled (llama.cpp's
+            // `rope_freq_scale_train_swa` = 1, and `rope_yarn` at a scale of
+            // 1 changes no angle and lifts nothing).
+            let (base, windowed_scaling) = match arch.as_str() {
+                _ if !own_rotation => (global_base, scaling.clone()),
+                "gemma3" => (named.unwrap_or(10_000.0), RopeScaling::NONE),
+                _ => (named.unwrap_or(global_base), scaling.clone()),
+            };
+            let dim = ct
+                .metadata
+                .get(&format!("{arch}.rope.dimension_count_swa"))
+                .and_then(|v| v.to_u32().ok())
+                .map(|n| n as usize);
+            let file_factors = arch != "gemma4";
+            (base != global_base || windowed_scaling != scaling || dim.is_some() || !file_factors)
+                .then_some(WindowedRope {
                     window,
                     base,
                     scaling: windowed_scaling,
+                    dim,
+                    file_factors,
                 })
-            });
+        });
         Self { scaling, windowed }
     }
 }
@@ -480,6 +501,23 @@ mod tests {
             1_000_000.0,
         );
         assert_eq!((r.scaling, r.windowed), (RopeScaling::Linear(0.125), None));
+    }
+
+    /// Gemma 4's windowed layers turn their own width (256 on the 12B, against
+    /// the global layers' 512) at their own base, and never read the file's
+    /// `rope_freqs`, which belong to the global layers; `SWARMLLM_LAYER_ROPE=0`
+    /// takes their base and nothing else, since their heads are that width.
+    #[test]
+    fn gemma4_windowed_layers_turn_their_own_width_without_the_files_factors() {
+        let ct = crate::inference::split::gguf_meta::sliding_window_tests::gemma4_12b();
+        let r = LayerRope::read(&ct, 1_000_000.0);
+        assert_eq!(r.scaling, RopeScaling::NONE);
+        let w = r.windowed.expect("the windowed layers turn differently");
+        assert_eq!(
+            (w.base, w.dim, w.file_factors),
+            (10_000.0, Some(256), false)
+        );
+        assert!(w.window.for_layer(4).is_some() && w.window.for_layer(5).is_none());
     }
 
     /// Gemma 2's windowed layers rotate as the rest (`llama_model_gemma2`

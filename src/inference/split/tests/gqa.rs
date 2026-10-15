@@ -227,6 +227,8 @@ fn qwen2_forward_with_biases() {
         qk_rms_norm_after_rope: None,
         sliding_window: None,
         query_scale: None,
+        v_rms_norm: None,
+        output_scale: None,
     };
 
     let mut model = SplitModel {

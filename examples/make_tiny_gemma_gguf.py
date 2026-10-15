@@ -15,7 +15,13 @@ logic error. What a real file cannot show quickly:
   1,000,000, and linear scaling ROPE_FACTOR (default 8) on the global layers —
   the real 4B's shape at 40 tokens; ROPE_TYPE=yarn (#280) declares YaRN instead,
   over an original context of ORIG_CTX (default 16), so the ramp turns inside a
-  40-token prompt.
+  40-token prompt;
+- ARCH=gemma4 (#115 (3)): the 12B/31B shape — head width 32 on windowed layers
+  and 64 on global ones, where K doubles as V; an unweighted norm on V; no query
+  scaling; "proportional" RoPE (a `rope_freqs` table turning only the first quarter
+  of each global head); a per-layer output scale; a final softcap. MOE=1 adds the
+  26B-A4B's experts beside the dense MLP: the router's own norm and scale, a fused
+  gate/up table and a per-expert output scale.
 
 Usage:
 
@@ -57,8 +63,13 @@ rng = np.random.default_rng(20261015)
 
 n_embd, n_head, n_head_kv, head_dim, n_ff, n_ctx = 64, 4, 2, 32, 128, 512
 arch = os.environ.get("ARCH", "gemma2")
-assert arch in ("gemma2", "gemma3"), arch
+assert arch in ("gemma2", "gemma3", "gemma4"), arch
 n_layer = int(os.environ.get("N_LAYER", 46 if arch == "gemma2" else 12))
+# Gemma 4: global layers are wider and carry fewer K/V heads, as in every real file.
+head_dim_full, n_head_kv_full = 64, 1
+moe = arch == "gemma4" and os.environ.get("MOE", "0") == "1"
+n_expert, n_expert_used, n_ff_exp = 8, 2, 32
+is_swa = [i % 6 != 5 for i in range(n_layer)]
 rope_factor = float(os.environ.get("ROPE_FACTOR", 8.0))
 rope_type = os.environ.get("ROPE_TYPE", "linear")
 assert rope_type in ("linear", "yarn"), rope_type
@@ -67,6 +78,9 @@ swa = int(os.environ.get("SWA", 8))
 # scale shows at once; it also amplifies rounding over 46 layers (llama.cpp keeps its KV
 # cache in f16), so a softer file separates the two.
 qk_std = float(os.environ.get("QK_STD", 0.5))
+# Gemma 4 norms Q and K and applies no scale, so there QK_STD sets the norm gain: 0.5 is
+# a gain of 1 (scores of order sqrt(head_dim)), 0.25 halves both and quarters the scores.
+qk_gain = 2 * qk_std
 Q = gguf.GGMLQuantizationType.Q8_0 if os.environ.get("QUANT", "f32") == "q8" else gguf.GGMLQuantizationType.F32
 F32 = gguf.GGMLQuantizationType.F32
 
@@ -87,15 +101,35 @@ w.add_context_length(n_ctx)
 w.add_embedding_length(n_embd)
 w.add_feed_forward_length(n_ff)
 w.add_head_count(n_head)
-w.add_head_count_kv(n_head_kv)
-w.add_key_length(head_dim)
-w.add_value_length(head_dim)
+if arch == "gemma4":
+    w.add_head_count_kv([n_head_kv if s else n_head_kv_full for s in is_swa])
+    w.add_key_length(head_dim_full)
+    w.add_value_length(head_dim_full)
+    w.add_key_length_swa(head_dim)
+    w.add_value_length_swa(head_dim)
+    w.add_rope_dimension_count(head_dim_full)
+    w.add_rope_dimension_count_swa(head_dim)
+    w.add_sliding_window_pattern(is_swa)
+    w.add_shared_kv_layers(0)
+    w.add_embedding_length_per_layer_input(0)
+    w.add_final_logit_softcapping(30.0)
+    if moe:
+        w.add_expert_count(n_expert)
+        w.add_expert_used_count(n_expert_used)
+        w.add_expert_feed_forward_length(n_ff_exp)
+else:
+    w.add_head_count_kv(n_head_kv)
+    w.add_key_length(head_dim)
+    w.add_value_length(head_dim)
 w.add_layer_norm_rms_eps(1e-6)
 w.add_sliding_window(swa)
 if arch == "gemma2":
     w.add_rope_freq_base(10000.0)
     w.add_attn_logit_softcapping(50.0)
     w.add_final_logit_softcapping(30.0)
+elif arch == "gemma4":
+    w.add_rope_freq_base(1_000_000.0)
+    w.add_rope_freq_base_swa(10_000.0)
 else:
     w.add_rope_freq_base(1_000_000.0)
     w.add_rope_scaling_type(gguf.RopeScalingType.YARN if rope_type == "yarn" else gguf.RopeScalingType.LINEAR)
@@ -130,9 +164,44 @@ def put(name, arr, q):
 # The output head is the embedding table (tied), as in every Gemma 2 file.
 put("token_embd.weight", t((n_vocab, n_embd), 0.5), Q)
 put("output_norm.weight", 1.0 + t((n_embd,), 0.1), F32)
+if arch == "gemma4":
+    # "Proportional" RoPE, as the converter writes it: the first quarter of each global
+    # head's pairs turn, the rest are held still by a divisor of 1e30.
+    n_rot_pairs = head_dim_full // 2 // 4
+    put("rope_freqs.weight", np.array([1.0] * n_rot_pairs + [1e30] * (head_dim_full // 2 - n_rot_pairs), dtype=np.float32), F32)
 for i in range(n_layer):
     p = f"blk.{i}"
     put(f"{p}.attn_norm.weight", 1.0 + t((n_embd,), 0.1), F32)
+    if arch == "gemma4":
+        hd, kv = (head_dim, n_head_kv) if is_swa[i] else (head_dim_full, n_head_kv_full)
+        put(f"{p}.attn_q.weight", t((n_head * hd, n_embd), qk_std), Q)
+        put(f"{p}.attn_k.weight", t((kv * hd, n_embd), qk_std), Q)
+        if is_swa[i]:
+            # Global layers have no V: their K is used as V too.
+            put(f"{p}.attn_v.weight", t((kv * hd, n_embd), 0.3), Q)
+        put(f"{p}.attn_output.weight", t((n_embd, n_head * hd), 0.15), Q)
+        # Q and K are normed before the product and nothing scales it, so their norm
+        # weights, not QK_STD's projections, set how decisive attention is.
+        put(f"{p}.attn_q_norm.weight", qk_gain * (1.0 + t((hd,), 0.1)), F32)
+        put(f"{p}.attn_k_norm.weight", qk_gain * (1.0 + t((hd,), 0.1)), F32)
+        put(f"{p}.post_attention_norm.weight", 1.0 + t((n_embd,), 0.1), F32)
+        put(f"{p}.ffn_norm.weight", 1.0 + t((n_embd,), 0.1), F32)
+        put(f"{p}.ffn_gate.weight", t((n_ff, n_embd), 0.2), Q)
+        put(f"{p}.ffn_up.weight", t((n_ff, n_embd), 0.2), Q)
+        put(f"{p}.ffn_down.weight", t((n_embd, n_ff), 0.15), Q)
+        put(f"{p}.post_ffw_norm.weight", 1.0 + t((n_embd,), 0.1), F32)
+        put(f"{p}.layer_output_scale.weight", np.array([0.5 + 0.5 * rng.random()], dtype=np.float32), F32)
+        if moe:
+            put(f"{p}.ffn_gate_inp.weight", t((n_expert, n_embd), 0.5), F32)
+            put(f"{p}.ffn_gate_inp.scale", 1.0 + t((n_embd,), 0.1), F32)
+            put(f"{p}.pre_ffw_norm_2.weight", 1.0 + t((n_embd,), 0.1), F32)
+            put(f"{p}.post_ffw_norm_1.weight", 1.0 + t((n_embd,), 0.1), F32)
+            put(f"{p}.post_ffw_norm_2.weight", 1.0 + t((n_embd,), 0.1), F32)
+            # ggml ne {n_embd, 2 * n_ff_exp, n_expert}: gate rows first, then up.
+            put(f"{p}.ffn_gate_up_exps.weight", t((n_expert, 2 * n_ff_exp, n_embd), 0.2), Q)
+            put(f"{p}.ffn_down_exps.weight", t((n_expert, n_embd, n_ff_exp), 0.15), Q)
+            put(f"{p}.ffn_down_exps.scale", (0.5 + rng.random(n_expert)).astype(np.float32), F32)
+        continue
     # Wide enough that attention is decisive: a wrong scale or a missing window
     # then moves the output well past rounding.
     put(f"{p}.attn_q.weight", t((n_head * head_dim, n_embd), qk_std), Q)

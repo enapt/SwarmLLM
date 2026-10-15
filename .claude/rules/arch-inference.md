@@ -191,7 +191,9 @@ Qwen 3.5's DeltaNet layers keep a recurrent state per request, and a rejected dr
 
 **A layer's rotation is read per layer** (Gemma 3, #115 (1)): **`split::rope::LayerRope::read`** is the one reading — `rope.scaling` on every position, linear or YaRN (`RopeScaling`, any family; YaRN's ramp + lift, #280), and windowed layers' own base/scale (Gemma 3: base 10,000, unscaled). **`LayerPlacement::rope_for`** is the one place a layer gets its tables, so no per-arch loop can hand a windowed layer the global ones. Which layers are windowed comes from `SlidingWindow::from_file`, never the A/B-switched `read`. A/B `SWARMLLM_ROPE_SCALING=0`, `SWARMLLM_LAYER_ROPE=0`.
 
-→ `docs/invariants/inference.md` § "A sliding window is cut where it binds", § "A family's attention scale is read", § "Gemma 3: each layer turns at its own rate", § "A file's RoPE scaling is read for every family"
+**A layer's attention SHAPE is read per layer** (Gemma 4, #115 (3)): **`split::attention_shapes`** is the one reading (`head_count_kv` per layer; `key_length_swa` / `rope.dimension_count_swa` on windowed layers); every model-wide estimate charges the WIDEST layer, never layer 0's. Gemma 4: V = K where `attn_v` is absent (`value_is_key`), V RMS-normed with no weight (`LayerWeights::v_rms_norm`, one site), `layer_output_scale` (`executor::scaled_output`), queries × `sqrt(head_dim)` (`query_scale`), windowed layers turn their own width without `rope_freqs` (`rope::WindowedRope`). A size the loader does not build is refused by name (`unbuilt_gemma4_part`). Reference: llama.cpp MASTER (`~/llama.cpp-ref/dump_logits`).
+
+→ `docs/invariants/inference.md` § "A sliding window is cut where it binds", § "A family's attention scale is read", § "Gemma 3: each layer turns at its own rate", § "A file's RoPE scaling is read for every family", § "Gemma 4: each layer's attention has a shape of its own"
 
 ## A model that cannot write replies is refused off its header (2026-10-15)
 
@@ -225,7 +227,7 @@ Byte-identical replies across releases prove no REGRESSION, never correctness.
 
 ## A special token is what the vocabulary says it is, and a prompt gets ONE BOS
 
-**`tokenizer::declared_special`** (CONTROL / USER_DEFINED) decides what is matched whole, on both encoder paths. **`gguf_meta::add_bos_by_llama_cpp_rules`** decides whether a prompt gets a BOS; **`SplitTokenizer::encode`** adds none to a text already opening with one; **`gguf_meta::special_token_spacing_for`** covers what the GGUF omits. Check with `examples/tokenizer_reference.py` + `tokenizer_agrees_with_llama_cpp`. ⚠ For SentencePiece whitespace llama.cpp is no authority: `examples/tokenizer_hf_reference.py`.
+**`tokenizer::declared_special`** (CONTROL / USER_DEFINED) decides what is matched whole, on both encoder paths, with llama.cpp's end-of-generation names (`LLAMA_CPP_END_OF_GENERATION_NAMES`, which it overrides to CONTROL); for Gemma 4 nothing is matched by name SHAPE (its 75 NORMAL `<…>` entries), and the text between goes through `BpeTokenizer::encode_gemma4`. **`tokenizer::PieceDecoder::decode`** is the one piece → bytes answer: a `<…>` piece the vocabulary does not declare text is hidden (gotcha #866). **`gguf_meta::add_bos_by_llama_cpp_rules`** decides whether a prompt gets a BOS; **`SplitTokenizer::encode`** adds none to a text already opening with one; **`gguf_meta::special_token_spacing_for`** covers what the GGUF omits. Check with `examples/tokenizer_reference.py` + `tokenizer_agrees_with_llama_cpp`. ⚠ For SentencePiece whitespace llama.cpp is no authority: `examples/tokenizer_hf_reference.py`.
 
 → `docs/invariants/inference.md` § "A special token is what the vocabulary says it is — and a prompt gets ONE BOS"
 

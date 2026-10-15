@@ -2591,3 +2591,52 @@ fn the_qwen35_template_renders_exactly_as_jinja2_does() {
         expected_multi
     );
 }
+
+/// Gemma 4's template, as its GGUFs ship it (unsloth's 12B and 26B-A4B carry
+/// the same 18,922 characters), renders exactly as jinja2 renders it. With
+/// thinking off it opens the model's turn with an EMPTY thought channel — the
+/// model then answers rather than reasoning — and an earlier turn's thought is
+/// not carried into the next prompt.
+#[test]
+fn the_gemma4_template_renders_exactly_as_jinja2_does() {
+    let tmpl = include_str!("fixtures/gemma4_gguf_shipped.jinja");
+    let render = |msgs: &[ChatMessage]| {
+        apply_chat_template(tmpl, msgs, "<bos>", "<eos>", true, None).expect("renders")
+    };
+    let msg = |role: Role, c: &str| ChatMessage {
+        role,
+        content: c.into(),
+        images: vec![],
+    };
+
+    assert_eq!(
+        render(&[msg(Role::User, "Hi there")]),
+        "<bos><|turn>user\nHi there<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+    );
+    assert_eq!(
+        render(&[
+            msg(Role::System, "You are terse."),
+            msg(Role::User, "Hi there")
+        ]),
+        "<bos><|turn>system\nYou are terse.<turn|>\n<|turn>user\nHi there<turn|>\n\
+         <|turn>model\n<|channel>thought\n<channel|>"
+    );
+    let expected_multi = "<bos><|turn>user\nWhat is 2+2?<turn|>\n<|turn>model\n4<turn|>\n\
+                          <|turn>user\nAnd 3+3?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>";
+    assert_eq!(
+        render(&[
+            msg(Role::User, "What is 2+2?"),
+            msg(Role::Assistant, "4"),
+            msg(Role::User, "And 3+3?")
+        ]),
+        expected_multi
+    );
+    assert_eq!(
+        render(&[
+            msg(Role::User, "What is 2+2?"),
+            msg(Role::Assistant, "<|channel>thought\nadding<channel|>4"),
+            msg(Role::User, "And 3+3?"),
+        ]),
+        expected_multi
+    );
+}

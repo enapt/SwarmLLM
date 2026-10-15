@@ -1689,14 +1689,20 @@ path. Adding only `llama-cpp-2/metal` would fix the DISPLAY while inference stay
 processor, which is worse. GitHub's macOS runners compile but cannot run Metal; it needs a Mac
 to test on (the swarm's Italian M4 peer belongs to a tester).
 
-#### #115 — Gemma 3's and Gemma 4's vision projectors, and Gemma 4 text, are unsupported
+#### #115 — Gemma 3's and Gemma 4's vision projectors, and Gemma 4's mixture-of-experts and small sizes, are unsupported
 `P2` · model-support · **PARTIAL** — 2026-09-25 · history: archive row #115
 
-Requested for gemma-4-26B-A4B. Order: ~~(1) Gemma 3 text~~ (closed 2026-10-16, § Closed); (2) the `gemma3` projector (SigLIP + pool + RMSNorm + linear), after
-`vision.rs` gets a projector-type dispatch; (3) Gemma 4 text — cross-layer KV sharing,
-per-layer embeddings, dense FFN + GELU MoE; (4) `gemma4v`. Gemma 3 can be checked against the
-local llama-cpp-python 0.3.16 now; Gemma 4 has no local reference (0.3.16 predates it; sources
-in `~/swarmllm-ref/gemma4/`).
+Requested for gemma-4-26B-A4B. Order: ~~(1) Gemma 3 text~~ and ~~(3) Gemma 4 dense text~~ (the
+12B and 31B; closed 2026-10-16, § Closed); (2) the `gemma3` projector (SigLIP + pool + RMSNorm +
+linear), after `vision.rs` gets a projector-type dispatch; (3b) the 26B-A4B — every layer runs a
+dense GELU feed-forward BESIDE GELU routed experts (`load_moe_ffn`; `make_tiny_gemma_gguf.py
+ARCH=gemma4 MOE=1` writes the tiny file); (3c) E2B/E4B — per-layer token embeddings
+(`per_layer_token_embd`) and the last layers reading earlier layers' KV
+(`attention.shared_kv_layers`, 0 on the 12B); (4) `gemma4v`; (5) the `-assistant` drafters
+(`gemma4-assistant` in llama.cpp, an unknown family here). The 26B-A4B and E2B/E4B are refused
+by name off their tensor table until built (`GgufTensorMeta::unbuilt_gemma4_part`). The 31B
+has the 12B's layout (60 layers, 16 / 4 key/value heads) and is unchecked. Gemma 4's reference is llama.cpp MASTER
+(`~/llama.cpp-ref/dump_logits`, `tok_cases`); llama-cpp-python 0.3.16 predates it.
 
 #### #116 — The DeepSeek-2 family is recognised and refused: no real file can load
 `P2` · model-support · **OPEN** — 2026-09-25 · history: archive row #116
@@ -1734,6 +1740,21 @@ against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hy
 StarCoder2, inert while refused).
 
 ### Memory and admission
+
+#### #281 — A windowed layer keeps every position in its KV cache; llama.cpp keeps the window
+`P2` · memory · **OPEN** — 2026-10-16
+
+Gemma 2, 3 and 4 attend over a window on most layers (#278, #115), and the cache keeps every
+position: the window is cut from the keys, not from memory. llama.cpp keeps a second cache for
+those layers sized to the window plus a batch (`llama_kv_cache_iswa`; `--swa-full` keeps
+everything, which it needs for prompt-cache reuse past the window). On the Gemma 4 12B a
+position costs 8 KiB on each of 40 windowed layers and 2 KiB on each of 8 global ones (f16 K+V):
+at 32K tokens 10.5 GiB here against ~0.8 GiB in llama.cpp. The model-wide estimates charge the
+widest layer everywhere (48 × 8 KiB), so the context a node offers is cut by the same factor.
+What a change must keep: speculative rollback (`LayerKv::truncate`), the prefix cache and a
+split's held openings (#10) all assume a position once written stays readable — a ring for the
+windowed layers has to answer each of them, or keep the window plus the longest rollback, as
+llama.cpp's `n_swa + n_ubatch` does.
 
 #### #265 — A later range loaded into a card/processor split worker is charged to the card whatever the loader does with it
 `P3` · memory · **OPEN** — 2026-10-13 · history: found closing #264
@@ -1847,6 +1868,19 @@ stall per layer; TP off by default), and `VisionEncodeResponse` has no error fie
 image-encode refusal stays silent.
 
 ### API surface
+
+#### #282 — Gemma 4's tool calls and thinking channel reach the client as text
+`P2` · api · **OPEN** — 2026-10-16
+
+Gemma 4 writes a call as `<|tool_call>call:name{key:<|"|>text<|"|>,n:3}<tool_call|>` — its own
+syntax, strings quoted by the `<|"|>` marker, not JSON — and none of `tool_parse`'s parsers reads
+it, so a client asking for tools gets the call as reply text. With thinking on
+(`enable_thinking`), the reply opens with `<|channel>thought\n…<channel|>`, which
+`take_leading_reasoning_block` does not know (it reads `<think>`). The template's default
+generation prompt closes an empty thought channel, so a plain chat is unaffected. Also open:
+the file's `tokenizer.ggml.suppress_tokens` (`<audio|>`, `<image|>`), which llama.cpp's sampler
+never picks (a −∞ logit bias, `common/sampling.cpp`). Reference: llama.cpp master's
+`common/chat.cpp` (`COMMON_CHAT_FORMAT_PEG_GEMMA4`).
 
 #### #185 — Three API surfaces each implement streaming and non-streaming replies separately
 `P3` · api · **OPEN** — 2026-07-26 · history: archive § "Collapse the parallel response paths behind one core loop"
@@ -2380,7 +2414,29 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280)
+**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3))
+- #115 (3) — **Gemma 4 runs (text, the dense 12B and 31B).** Each layer's attention has its own
+  shape — on the 12B, five layers in six have 8 key/value heads 256 wide over the last 1,024
+  positions, every sixth one head 512 wide over everything, with no V projection (V is K) —
+  read per layer as llama.cpp reads it for every family (`split::attention_shapes`). Q and K are
+  normed with weights and V without, the attention is unscaled, each layer's output has its own
+  scale, and the windowed layers turn their own 256 at base 10,000 without the file's
+  proportional factors. Its tokenizer has its own rules (spaces as `▁` with none in front,
+  newline runs whole, BOS always; only DECLARED markers matched whole — 75 ordinary entries are
+  `<…>`-shaped): 18/18 against llama.cpp master's own tokenizer. The chat template renders as
+  jinja2 does. Measured against llama.cpp MASTER on the processor (no Python binding runs Gemma
+  4): a tiny f32 file with every mechanism agrees at 0.99996, whole, in pieces and split (each
+  mechanism off: 0.23-0.29, the window off −0.05). The real 12B Q4_K_M sits as close to llama.cpp as llama.cpp's own two processor kernels sit to
+  each other: worst 0.99402 against their 0.99380 on 28 tokens, median 0.99815 against 0.99833
+  past the window at 1,536 (window off there: 0.784; windowed layers on the global rotation:
+  0.771; queries scaled as other families: −0.729). On a card (split 24/48) against llama.cpp's
+  own card: median 0.9991, worst 0.988 at the one position every implementation finds hardest
+  (llama.cpp's card vs its processor: 0.992 there); past the window, median 0.9981 against
+  llama.cpp's own card-vs-processor 0.9979. Getting there fixed the vendored flash kernel's
+  512-wide block, wrong at every shape on RTX 30/40 cards (gotcha #868). The 31B has the 12B's layout and is unchecked.
+  The 26B-A4B (experts) and E2B/E4B (per-layer embeddings) are refused by name until built;
+  LoRA refuses the family. `docs/invariants/inference.md` § "Gemma 4: each layer's attention has
+  a shape of its own".
 - #280 — **a model file that declares YaRN context extension is served as llama.cpp serves it.**
   Before, such a file (Qwen2/Qwen3 uploads re-converted for 128K context) loaded with plain RoPE:
   the slow dimensions turned 4x too fast and the attention ran unlifted, at EVERY length. Now

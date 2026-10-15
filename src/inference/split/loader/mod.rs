@@ -379,6 +379,43 @@ fn moe_renormalizes_by_default(arch: &str) -> bool {
     arch != "qwen2moe"
 }
 
+/// A layer's output scale — Gemma 4's `layer_output_scale`, one number the
+/// layer's whole output is multiplied by (llama.cpp's `out_scale`) — or `None`
+/// for a file that carries none.
+fn layer_output_scale<R: std::io::Read + std::io::Seek>(
+    ct: &gguf_file::Content,
+    reader: &mut R,
+    prefix: &str,
+) -> Result<Option<f64>, SwarmError> {
+    let name = format!("{prefix}.layer_output_scale.weight");
+    if !ct.tensor_infos.contains_key(&name) {
+        return Ok(None);
+    }
+    let value = ct
+        .tensor(reader, &name, &Device::Cpu)
+        .and_then(|t| t.dequantize(&Device::Cpu))
+        .and_then(|t| t.flatten_all()?.to_vec1::<f32>())
+        .map_err(|e| SwarmError::Internal(format!("{name}: {e}")))?;
+    match value.as_slice() {
+        [scale] => Ok(Some(f64::from(*scale))),
+        _ => Err(SwarmError::Internal(format!(
+            "{name} holds {} numbers, expected one",
+            value.len()
+        ))),
+    }
+}
+
+/// Whether layer `prefix` uses its K projection's output as V: a Gemma 4
+/// global layer, which carries no `attn_v` (llama.cpp's
+/// `use_alternative_attention`, "if v_proj is not present, use Kcur as Vcur").
+/// Every other family's file carries one, and its absence stays an error.
+fn value_is_key(ct: &gguf_file::Content, gemma4: bool, prefix: &str) -> bool {
+    gemma4
+        && !ct
+            .tensor_infos
+            .contains_key(&format!("{prefix}.attn_v.weight"))
+}
+
 /// The device a split model loads onto: the card when there is one and the
 /// worker was not told to use the processor (`force_cpu`, from
 /// `inference.gpu_layers = 0`), the processor otherwise.
@@ -515,7 +552,10 @@ impl SplitModel {
             return Err(refusal.into_error());
         }
         let head_count = meta.head_count;
+        // The widest layer's — what every model-wide estimate charges each
+        // layer. A layer is built with its own (`attention_shapes`).
         let head_count_kv = meta.head_count_kv;
+        let attention_shapes = super::gguf_meta::attention_shapes(&ct)?;
         let block_count = meta.block_count;
         let embedding_length = meta.embedding_length;
         let head_dim = meta.head_dim;
@@ -937,12 +977,20 @@ impl SplitModel {
                 "Sliding-window attention"
             );
         }
-        // A query scale other than 1/sqrt(head_dim) (Gemma 2's 27B) — the one
-        // reading is `split::query_scale`.
-        let query_scale = super::query_scale(&ct);
-        if let Some(scale) = query_scale {
+        // A query scale other than 1/sqrt(head_dim) (Gemma 2's 27B, Gemma 4) —
+        // the one reading is `split::query_scale`, per layer since a layer's
+        // head width is its own.
+        let shape_of = |layer_idx: usize| attention_shapes[layer_idx];
+        let query_scale_of =
+            |layer_idx: usize| super::query_scale(&ct, shape_of(layer_idx).head_dim);
+        if let Some(scale) = query_scale_of(layer_start) {
             tracing::debug!(scale, "Queries scaled for the family's attention scale");
         }
+        // Gemma 4: V is normalised per head with no weight before it is cached
+        // (`ggml_rms_norm(Vcur)`), and a global layer with no V projection uses
+        // its K projection's output as V (`use_alternative_attention`).
+        let gemma4 = matches!(model_arch, ModelArch::Gemma4);
+        let v_rms_norm = gemma4.then_some(rms_norm_eps);
 
         // Gemma 2 final logit soft-capping (from GGUF metadata)
         let final_logit_softcap = ct
@@ -995,51 +1043,63 @@ impl SplitModel {
         // a scaling on every position (linear or YaRN), and Gemma 3's windowed
         // layers at a base and scaling of their own.
         let layer_rope = super::rope::LayerRope::read(&ct, rope_freq_base);
-        let rope_table = |base: f32, scaling: &super::rope::RopeScaling| {
-            match (&rope_factors, scaling) {
-                // Plain or linearly scaled RoPE keeps its own builder: at a
-                // scale of 1, the tables every release before built, bit for bit.
-                (None, super::rope::RopeScaling::Linear(scale)) => {
-                    precompute_freqs_cis_scaled(rope_dim, base, *scale, context_length, &device)
+        let rope_table =
+            |dim: usize, base: f32, scaling: &super::rope::RopeScaling, file_factors: bool| {
+                let rope_factors = if file_factors { &rope_factors } else { &None };
+                match (rope_factors, scaling) {
+                    // Plain or linearly scaled RoPE keeps its own builder: at a
+                    // scale of 1, the tables every release before built, bit for bit.
+                    (None, super::rope::RopeScaling::Linear(scale)) => {
+                        precompute_freqs_cis_scaled(dim, base, *scale, context_length, &device)
+                    }
+                    // A pair's angle times its multiplier is the same angle as its
+                    // divisor over the multiplier; the lifts on cos/sin multiply.
+                    // With no scaling, every multiplier and lift is 1 and the
+                    // file's divisors are untouched.
+                    _ => {
+                        let (multipliers, lift) = scaling.per_pair(base, dim);
+                        let (divisors, attn_factor) = match rope_factors {
+                            Some((factors, attn_factor)) => (factors.clone(), *attn_factor),
+                            None => (vec![1.0; dim / 2], 1.0),
+                        };
+                        let factors: Vec<f32> = divisors
+                            .iter()
+                            .zip(&multipliers)
+                            .map(|(divisor, multiplier)| divisor / multiplier)
+                            .collect();
+                        precompute_freqs_cis_longrope(
+                            dim,
+                            base,
+                            context_length,
+                            &factors,
+                            attn_factor * lift,
+                            &device,
+                        )
+                    }
                 }
-                // A pair's angle times its multiplier is the same angle as its
-                // divisor over the multiplier; the lifts on cos/sin multiply.
-                // With no scaling, every multiplier and lift is 1 and the
-                // file's divisors are untouched.
-                _ => {
-                    let (multipliers, lift) = scaling.per_pair(base, rope_dim);
-                    let (divisors, attn_factor) = match &rope_factors {
-                        Some((factors, attn_factor)) => (factors.clone(), *attn_factor),
-                        None => (vec![1.0; rope_dim / 2], 1.0),
-                    };
-                    let factors: Vec<f32> = divisors
-                        .iter()
-                        .zip(&multipliers)
-                        .map(|(divisor, multiplier)| divisor / multiplier)
-                        .collect();
-                    precompute_freqs_cis_longrope(
-                        rope_dim,
-                        base,
-                        context_length,
-                        &factors,
-                        attn_factor * lift,
-                        &device,
-                    )
-                }
-            }
-            .map_err(SwarmError::internal)
-        };
-        let (cos, sin) = rope_table(rope_freq_base, &layer_rope.scaling)?;
+                .map_err(SwarmError::internal)
+            };
+        let (cos, sin) = rope_table(rope_dim, rope_freq_base, &layer_rope.scaling, true)?;
         let windowed_rope = match layer_rope.windowed {
             Some(w) => {
                 tracing::info!(
                     windowed_base = w.base,
                     windowed_scaling = ?w.scaling,
+                    windowed_dim = ?w.dim,
+                    windowed_file_factors = w.file_factors,
                     base = rope_freq_base,
                     scaling = ?layer_rope.scaling,
                     "Sliding-window layers rotate at their own base"
                 );
-                Some((w.window, rope_table(w.base, &w.scaling)?))
+                Some((
+                    w.window,
+                    rope_table(
+                        w.dim.unwrap_or(rope_dim),
+                        w.base,
+                        &w.scaling,
+                        w.file_factors,
+                    )?,
+                ))
             }
             None => None,
         };
@@ -1464,6 +1524,8 @@ impl SplitModel {
                         qk_rms_norm_after_rope: None,
                         sliding_window: None,
                         query_scale: None,
+                        v_rms_norm: None,
+                        output_scale: None,
                     }));
                 }
             }
@@ -1605,6 +1667,8 @@ impl SplitModel {
                     qk_rms_norm_after_rope: (!is_nope && n_experts != 128).then_some(rms_norm_eps),
                     sliding_window: None,
                     query_scale: None,
+                    v_rms_norm: None,
+                    output_scale: None,
                 }));
             }
         } else if model_arch.is_hybrid_ssm() {
@@ -1816,6 +1880,8 @@ impl SplitModel {
                                 let (cos, sin) = placement.rope_for(layer_idx);
                                 let window =
                                     sliding_window.as_ref().and_then(|w| w.for_layer(layer_idx));
+                                let shape = shape_of(layer_idx);
+                                let query_scale = query_scale_of(layer_idx);
                                 // Borrowed into the thread: a mixture-of-experts
                                 // layer asks it where its experts go.
                                 let placement = &placement;
@@ -1842,8 +1908,8 @@ impl SplitModel {
                                                     "{prefix}.attn_qkv: {e}"
                                                 ))
                                             })?;
-                                        let q_dim = head_count * head_dim;
-                                        let k_dim = head_count_kv * head_dim;
+                                        let q_dim = head_count * shape.head_dim;
+                                        let k_dim = shape.kv_width();
                                         let fused = QMatMul::make_fused(fused_qt)
                                             .map_err(SwarmError::internal)?;
                                         (
@@ -1874,24 +1940,30 @@ impl SplitModel {
                                                     "Failed to load {prefix}.attn_k: {e}"
                                                 ))
                                             })?;
-                                        let wv = ct_ref
-                                            .tensor(
-                                                &mut cursor,
-                                                &format!("{prefix}.attn_v.weight"),
-                                                device_ref,
-                                            )
-                                            .map_err(|e| {
-                                                SwarmError::Internal(format!(
-                                                    "Failed to load {prefix}.attn_v: {e}"
-                                                ))
-                                            })?;
+                                        let wk = QMatMul::from_qtensor(wk)
+                                            .map_err(SwarmError::internal)?;
+                                        let wv = if value_is_key(ct_ref, gemma4, &prefix) {
+                                            wk.clone()
+                                        } else {
+                                            let wv = ct_ref
+                                                .tensor(
+                                                    &mut cursor,
+                                                    &format!("{prefix}.attn_v.weight"),
+                                                    device_ref,
+                                                )
+                                                .map_err(|e| {
+                                                    SwarmError::Internal(format!(
+                                                        "Failed to load {prefix}.attn_v: {e}"
+                                                    ))
+                                                })?;
+                                            QMatMul::from_qtensor(wv)
+                                                .map_err(SwarmError::internal)?
+                                        };
                                         (
                                             QMatMul::from_qtensor(wq)
                                                 .map_err(SwarmError::internal)?,
-                                            QMatMul::from_qtensor(wk)
-                                                .map_err(SwarmError::internal)?,
-                                            QMatMul::from_qtensor(wv)
-                                                .map_err(SwarmError::internal)?,
+                                            wk,
+                                            wv,
                                         )
                                     };
                                     let attention_wo = ct_ref
@@ -2108,6 +2180,8 @@ impl SplitModel {
                                         .map(|t| make_norm(t, rms_norm_eps))
                                         .transpose()?;
 
+                                    let output_scale =
+                                        layer_output_scale(ct_ref, &mut cursor, &prefix)?;
                                     Ok(LayerVariant::Dense(LayerWeights {
                                         attention_wq: qkv_q,
                                         attention_wk: qkv_k,
@@ -2125,17 +2199,19 @@ impl SplitModel {
                                         post_attention_norm,
                                         post_ffw_norm,
                                         n_head: head_count,
-                                        n_kv_head: head_count_kv,
-                                        head_dim,
+                                        n_kv_head: shape.n_kv_head,
+                                        head_dim: shape.head_dim,
                                         cos: cos.clone(),
                                         sin: sin.clone(),
                                         use_rope_contiguous,
                                         attn_logit_softcap,
-                                        rope_dim,
+                                        rope_dim: shape.rope_dim,
                                         skip_rope: false,
                                         qk_rms_norm_after_rope: None,
                                         sliding_window: window,
                                         query_scale,
+                                        v_rms_norm,
+                                        output_scale,
                                     }))
                                 })
                             })
@@ -2161,6 +2237,7 @@ impl SplitModel {
                     // per-call-site edit — see `hybrid::LayerPlacement`.
                     let device = placement.device_for(layer_idx);
                     let (cos, sin) = placement.rope_for(layer_idx);
+                    let shape = shape_of(layer_idx);
                     let prefix = format!("blk.{layer_idx}");
                     let has_fused_qkv = ct
                         .tensor_infos
@@ -2169,8 +2246,8 @@ impl SplitModel {
                         let fused_qt = ct
                             .tensor(file, &format!("{prefix}.attn_qkv.weight"), &device)
                             .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_qkv: {e}")))?;
-                        let q_dim = head_count * head_dim;
-                        let k_dim = head_count_kv * head_dim;
+                        let q_dim = head_count * shape.head_dim;
+                        let k_dim = shape.kv_width();
                         let fused = QMatMul::make_fused(fused_qt).map_err(SwarmError::internal)?;
                         (
                             QMatMul::from_fused_slice(fused.clone(), 0, q_dim),
@@ -2184,13 +2261,21 @@ impl SplitModel {
                         let wk = ct
                             .tensor(file, &format!("{prefix}.attn_k.weight"), &device)
                             .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_k: {e}")))?;
-                        let wv = ct
-                            .tensor(file, &format!("{prefix}.attn_v.weight"), &device)
-                            .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_v: {e}")))?;
+                        let wk = QMatMul::from_qtensor(wk).map_err(SwarmError::internal)?;
+                        let wv = if value_is_key(&ct, gemma4, &prefix) {
+                            wk.clone()
+                        } else {
+                            let wv = ct
+                                .tensor(file, &format!("{prefix}.attn_v.weight"), &device)
+                                .map_err(|e| {
+                                    SwarmError::Internal(format!("{prefix}.attn_v: {e}"))
+                                })?;
+                            QMatMul::from_qtensor(wv).map_err(SwarmError::internal)?
+                        };
                         (
                             QMatMul::from_qtensor(wq).map_err(SwarmError::internal)?,
-                            QMatMul::from_qtensor(wk).map_err(SwarmError::internal)?,
-                            QMatMul::from_qtensor(wv).map_err(SwarmError::internal)?,
+                            wk,
+                            wv,
                         )
                     };
                     let wo = ct
@@ -2293,6 +2378,7 @@ impl SplitModel {
                     let attn_k_norm = ct
                         .tensor(file, &format!("{prefix}.attn_k_norm.weight"), &device)
                         .ok();
+                    let output_scale = layer_output_scale(&ct, file, &prefix)?;
 
                     layers.push(LayerVariant::Dense(LayerWeights {
                         attention_wq: qkv_q,
@@ -2318,19 +2404,21 @@ impl SplitModel {
                             .map(|t| make_norm(t, rms_norm_eps))
                             .transpose()?,
                         n_head: head_count,
-                        n_kv_head: head_count_kv,
-                        head_dim,
+                        n_kv_head: shape.n_kv_head,
+                        head_dim: shape.head_dim,
                         cos: cos.clone(),
                         sin: sin.clone(),
                         use_rope_contiguous,
                         attn_logit_softcap,
-                        rope_dim,
+                        rope_dim: shape.rope_dim,
                         skip_rope: false,
                         qk_rms_norm_after_rope: None,
                         sliding_window: sliding_window
                             .as_ref()
                             .and_then(|w| w.for_layer(layer_idx)),
-                        query_scale,
+                        query_scale: query_scale_of(layer_idx),
+                        v_rms_norm,
+                        output_scale,
                     }));
                 }
             }

@@ -2731,6 +2731,16 @@ pub(crate) struct LayerWeights {
     /// — llama.cpp's `ggml_scale(Qcur, f_attention_scale)`, after RoPE as
     /// there. Set from `split::query_scale`; `None` for every other model.
     pub(crate) query_scale: Option<f64>,
+    /// Normalise V over each head by its RMS, with NO weight and this
+    /// epsilon, before it is cached — Gemma 4 (`ggml_rms_norm(Vcur)`,
+    /// `models/gemma4.cpp`), whose queries and keys are normalised with
+    /// weights (`attn_q_norm`/`attn_k_norm`). `None` for every other family.
+    pub(crate) v_rms_norm: Option<f64>,
+    /// Multiplies the layer's whole output, residual included — Gemma 4's
+    /// `layer_output_scale` (llama.cpp's `out_scale`). Applied where the
+    /// layer's output is assembled (`split::executor::dense_layer` and the
+    /// batched loop); `None` for every other family.
+    pub(crate) output_scale: Option<f64>,
 }
 
 /// Where a sliding window of `window` positions starts for queries at
@@ -2759,6 +2769,16 @@ impl LayerWeights {
     pub(crate) fn window_start_for(&self, index_pos: usize, seq_len: usize) -> Option<usize> {
         self.sliding_window
             .and_then(|w| window_start(w, index_pos, seq_len))
+    }
+
+    /// `v` (`[b, seq, heads, head_dim]`) normalised per head by
+    /// [`Self::v_rms_norm`] — the ONE place it is applied, for both attention
+    /// entry points; untouched for a model without one.
+    fn normed_values(&self, v: Tensor) -> CandleResult<Tensor> {
+        match self.v_rms_norm {
+            Some(eps) => rms_over_last_dim(&v, eps),
+            None => Ok(v),
+        }
     }
 
     /// `q` times [`Self::query_scale`], untouched (no op, no launch) for a
@@ -4435,8 +4455,8 @@ impl LayerWeights {
         let __shape_t = std::time::Instant::now();
         let mut q = q.reshape((b_sz, seq_len, self.n_head, self.head_dim))?;
         let mut k = k.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?;
-        let v = v
-            .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
+        let v = self
+            .normed_values(v.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?)?
             .transpose(1, 2)?
             .contiguous()?;
 
@@ -4645,8 +4665,8 @@ impl LayerWeights {
         let __shape_t = std::time::Instant::now();
         let mut q = q.reshape((b_sz, seq_len, self.n_head, self.head_dim))?;
         let mut k = k.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?;
-        let v = v
-            .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
+        let v = self
+            .normed_values(v.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?)?
             .transpose(1, 2)?
             .contiguous()?;
         if let Some(ref qn) = self.attn_q_norm {
@@ -4828,6 +4848,8 @@ mod batched_attention_tests {
             qk_rms_norm_after_rope: None,
             sliding_window: None,
             query_scale: None,
+            v_rms_norm: None,
+            output_scale: None,
         }
     }
 

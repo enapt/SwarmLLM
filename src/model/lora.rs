@@ -113,7 +113,9 @@ pub struct AdapterTarget<'a> {
 /// for a caller to show.
 ///
 /// Refused, rather than half-applied: a model whose layers the adapter code
-/// does not reach (DeepSeek-2's MLA, Qwen 3.5's hybrid layers), and
+/// does not reach (DeepSeek-2's MLA, Qwen 3.5's hybrid layers) or whose
+/// layers differ in shape (Gemma 4's windowed and global layers, which this
+/// one-width-per-projection check cannot judge), and
 /// feed-forward changes on a mixture-of-experts model — the split executor
 /// applies an adapter to `LayerVariant::Dense` layers and `FfnVariant::Dense`
 /// feed-forwards only, and anything else answering from the base model is the
@@ -127,7 +129,11 @@ pub fn check_fits(meta: &AdapterMetadata, model: &AdapterTarget<'_>) -> Result<(
     use crate::inference::model_arch::ModelArch;
     if matches!(
         ModelArch::from_gguf_arch(model.architecture),
-        ModelArch::DeepSeek2 | ModelArch::Qwen35 | ModelArch::Qwen35Moe | ModelArch::Unknown(_)
+        ModelArch::DeepSeek2
+            | ModelArch::Gemma4
+            | ModelArch::Qwen35
+            | ModelArch::Qwen35Moe
+            | ModelArch::Unknown(_)
     ) {
         return Err(format!(
             "adapters are not supported for {} models yet",
@@ -1319,8 +1325,9 @@ mod tests {
         let out = meta(22, &[("attn_output", (2048, 4096))]);
         assert!(fits(&out).is_err());
 
-        // Layers the executor never hands an adapter: refused, not ignored.
-        for arch in ["deepseek2", "qwen35", "qwen35moe", "mamba"] {
+        // Layers the executor never hands an adapter, or of shapes this check
+        // cannot judge (Gemma 4's): refused, not ignored.
+        for arch in ["deepseek2", "gemma4", "qwen35", "qwen35moe", "mamba"] {
             let other = AdapterTarget {
                 architecture: arch,
                 ..tiny

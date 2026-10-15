@@ -162,12 +162,14 @@ pub(crate) fn arch_supports_hybrid(arch: &crate::inference::model_arch::ModelArc
     match arch {
         // Dense-family: the per-layer loop loads everything through the
         // shadowed `device`, and takes its RoPE from `rope_for` — which is
-        // also where Gemma 3's windowed layers get their own tables.
+        // also where Gemma 3's and Gemma 4's windowed layers get their own
+        // tables.
         A::Llama
         | A::Qwen2
         | A::Gemma
         | A::Gemma2
         | A::Gemma3
+        | A::Gemma4
         | A::Phi3
         | A::Mistral
         | A::Starcoder2

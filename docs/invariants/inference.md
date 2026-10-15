@@ -4320,6 +4320,128 @@ reading our prompt in one pass instead of 512-token chunks changes nothing. Test
 `linear_and_yarn_scaling_are_read_and_nothing_else`, `yarn_ramps_the_slow_pairs_to_the_factor`
 (Qwen3's 128K setting worked by hand: ramp from pair 23 to 40, lift 1 + 0.1 ln 4).
 
+## Gemma 4: each layer's attention has a shape of its own (2026-10-16, FUTURE_WORK #115 (3))
+
+**What llama.cpp master does** (`src/models/gemma4.cpp`, `llama_model_gemma4::load_arch_hparams`,
+read at master 2026-10-16; no Python binding here runs it, so the reference is
+`~/llama.cpp-ref/dump_logits` built against master):
+
+- **a shape per layer**: `attention.head_count_kv` is a per-layer list and
+  `attention.sliding_window_pattern` a per-layer bool list; a windowed layer reads
+  `attention.key_length_swa` and `rope.dimension_count_swa` (`llama_hparams::n_head_kv(il)`,
+  `n_embd_head_k(il)`, `n_rot(il)`). On the 12B (48 layers, n_embd 3,840, 16 heads) the
+  windowed layers are 8 K/V heads × 256 over the last 1,024 positions, every sixth layer is
+  global: 1 K/V head × 512;
+- **a global layer carries no `attn_v`**: V is K's projection output
+  (`use_alternative_attention`), taken before K's norm and RoPE;
+- **Q and K are RMS-normed per head WITH weights, V per head with none**
+  (`ggml_rms_norm(Vcur)`), and the attention scale is **1.0** (`f_attention_scale`, "no
+  pre-attn scaling");
+- **proportional RoPE**: windowed layers turn their 256 at base 10,000 and never read
+  `rope_freqs`; global layers turn at base 1,000,000 with the file's `rope_freqs` [256] —
+  the first quarter of each pair set turns and the rest is held by a factor of 1e30;
+- `layer_output_scale` multiplies each layer's whole output, residual included (`out_scale`);
+  GELU feed-forward, Gemma's embedding scale, a final soft-cap of 30;
+- the tokenizer is its own pre-type (`LLAMA_VOCAB_PRE_TYPE_GEMMA4`): spaces become `▁`
+  with none in front, the text is cut into newline runs and the rest (`[^\n]+|[\n]+`), a
+  newline run that is an entry is taken whole (PR #21343), BPE over raw UTF-8 with `<0xNN>`
+  fallback, and BOS is forced whatever the file says (PR #21500).
+
+**What we do.** `split::attention_shapes` is the one reading of every layer's shape, as
+llama.cpp reads it for every family: a file naming one count and no `_swa` keys gets one
+shape everywhere, which is what every release before read. Model-wide estimates (the loader's
+KV budget, the planner, admission) charge the widest layer's shape, a safe upper bound: a
+global layer's real cache (1 × 512, f32 mirrored) is at most the 8 × 256 f16 estimate per
+position. `split::query_scale` multiplies Gemma 4's queries by `sqrt(head_dim)` of their own
+layer, which the attention's `1/sqrt(head_dim)` cancels — one elementwise op, the site #279
+built. `LayerWeights::v_rms_norm` is applied in ONE place (`normed_values`) for both
+attention entry points; `LayerWeights::output_scale` where the layer's output is assembled
+(`executor::scaled_output`); `split::rope::LayerRope` gives windowed layers their own width
+and no file factors (`WindowedRope`). A Gemma 4 size whose layers are not built here is
+refused by name, off its tensor table (`unbuilt_gemma4_part`): the 26B-A4B's experts and the
+E2B/E4B's per-layer embeddings would otherwise load as the dense layout and write nonsense.
+LoRA refuses the family (`lora::check_fits` judges one width per projection, and Gemma 4's
+layers differ).
+
+**The tokenizer.** Gemma 4 declares every marker it has (16 CONTROL, 7 USER_DEFINED such as
+`<|tool_call>`, `<|"|>`), and 75 of its NORMAL entries are `<…>`-shaped (`<table>`,
+`<unused5>`, even `<eos>`). llama.cpp matches only the declared ones whole in a prompt — plus
+every name on its end-of-generation list, which it overrides to CONTROL — so for this
+vocabulary the declared types are the whole rule (`BpeTokenizer::gemma4`). On 18 cases
+from llama.cpp master's own tokenizer (`tok_cases` over a vocabulary-only header: the
+template rendered with and without thinking, code, emoji, CJK, 40-newline runs, `\r\n`,
+markup, tool calls), 18/18 agree; `<eos>` as plain text was the one miss before the
+end-of-generation names were added. The GGUF's 18,922-character chat template renders as
+jinja2 does (`the_gemma4_template_renders_exactly_as_jinja2_does`).
+
+**Measured.** A tiny file with every 12B mechanism (`make_tiny_gemma_gguf.py ARCH=gemma4`: 12
+layers, window 8, per-layer K/V heads 2 / 1, widths 32 / 64, proportional factors, V-is-K,
+output scales) against llama.cpp master, 40 positions:
+
+| arm | worst cos | median | top-1 |
+|---|---|---|---|
+| all read, whole / split at 5 and 8 / 5-token pieces | **0.999964** | 0.999990 | 40/40 |
+| `SWARMLLM_QUERY_SCALE=0` | 0.229 | 0.529 | 2/40 |
+| `SWARMLLM_LAYER_ROPE=0` | 0.287 | 0.668 | 9/40 |
+| `SWARMLLM_SLIDING_WINDOW=0` | −0.045 | 0.303 | 8/40 |
+
+The file's first cut, its Q/K norm weights at 1, read 0.944 worst: for a family that norms Q
+and K and then scales by nothing, the WEIGHT spread (`QK_STD`) does not set how sharp the
+attention is — the norm gain does, and 12 layers of near-one-hot attention amplify rounding
+(gotcha #867). With the gain at `2 × QK_STD` it reads 0.99996.
+
+**The real 12B** (unsloth's Q4_K_M, SHA-256 matching HuggingFace) on the processor, our logits
+(`logits_reference_probe`, 512-token chunks) against llama.cpp master's (`dump_logits`). Its
+gap sits below Gemma 3 4B's, so the known answer was measured first: **llama.cpp against
+itself**, its repacked Q4_K kernels (its default on this processor) against its plain ones
+(`DUMP_NO_REPACK=1`), on the same ids:
+
+| prompt (positions compared) | pair | worst cos | median | top-1 |
+|---|---|---|---|---|
+| 28 tokens (all 28) | ours vs llama.cpp | 0.99402 | 0.99937 | 25/28 |
+| | ours vs llama.cpp, plain kernels | 0.99542 | 0.99922 | 25/28 |
+| | **llama.cpp vs itself** | **0.99380** | **0.99939** | **24/28** |
+| 1,536 tokens (last 48 + 4 decode) | ours vs llama.cpp | 0.98950 | 0.99815 | 41/52 |
+| | ours vs llama.cpp, plain kernels | 0.98463 | 0.99830 | 43/52 |
+| | **llama.cpp vs itself** | **0.97629** | **0.99833** | **45/52** |
+
+Each mechanism off, in the same binary, on the real file:
+
+| arm | prompt | worst cos | median | top-1 |
+|---|---|---|---|---|
+| `SWARMLLM_SLIDING_WINDOW=0` | 1,536 | 0.78406 | 0.98146 | 28/52 |
+| `SWARMLLM_LAYER_ROPE=0` (windowed layers on the global rotation) | 28 | 0.77089 | 0.99816 | 23/28 |
+| `SWARMLLM_QUERY_SCALE=0` (queries scaled by 1/sqrt(head_dim)) | 28 | −0.72874 | 0.70521 | 8/28 |
+
+We sit as close to either of llama.cpp's paths as they sit to each other, and the low
+positions are the same ones (the 28-token run's positions 5, 8, 16 and 21; the long run's 1507). llama.cpp's
+f32 KV cache (`DUMP_KV_F32=1`) changes nothing. This model is precision-sensitive at the level
+of a kernel choice; the comparison cannot resolve finer than that.
+
+**On a card** (the CUDA build, split 24/48 — the 7.1 GB file does not fit the 8 GB card whole —
+against llama.cpp master's CUDA build at `n_gpu_layers = 24`, same commit as its processor build):
+
+| prompt | pair | worst cos | median | top-1 |
+|---|---|---|---|---|
+| 28 tokens | ours on the card vs llama.cpp's processor | 0.98778 | 0.99925 | 26/28 |
+| | ours on the card vs llama.cpp's card | 0.98814 | 0.99906 | 26/28 |
+| | **llama.cpp's card vs its processor** | **0.99239** | **0.99893** | **25/28** |
+| 1,536 tokens (last 48 + 4 decode) | ours on the card vs llama.cpp's processor | 0.98534 | 0.99809 | 40/52 |
+| | **llama.cpp's card vs its processor** (last 48) | **0.97928** | **0.99787** | **41/48** |
+
+Every pair's worst short-prompt position is 5; ours sits ~0.004 further off there than
+llama.cpp's own card does, with the median and top-1 at or above it, and `SWARMLLM_KV_F16=0`
+reads the identical 0.98778 (one pass: the cache's precision never enters). The first card run
+gave all-NaN logits past ~1.5K tokens: the vendored flash kernel's 512-wide block was wrong at
+every shape, see § "The flash kernel is checked at every head width it is handed".
+
+Tests: `gemma4_reads_each_layers_attention_shape`, `gemma4_attention_is_not_scaled_on_any_layer`
+(red with `SWARMLLM_QUERY_SCALE=0`),
+`gemma4_windowed_layers_turn_their_own_width_without_the_files_factors`,
+`gemma4_sizes_this_build_cannot_run_are_refused`, the three in `tokenizer::gemma4_tests`
+(`declared_markers_are_matched_whole_and_ordinary_markup_is_merged` is red with the shape rules
+left on).
+
 ## A model that cannot write replies is refused off its header (2026-10-15)
 
 A tester's fresh node offered `Qwen/Qwen3-Embedding-0.6B-GGUF` in the HuggingFace

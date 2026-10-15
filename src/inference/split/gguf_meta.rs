@@ -191,7 +191,7 @@ impl SlidingWindow {
         // (the window when the file names none, the period)
         let (default_size, period) = match arch.as_str() {
             "gemma2" => (4096, 2),
-            "gemma3" => (0, 6),
+            "gemma3" | "gemma4" => (0, 6),
             _ => return None,
         };
         let size = ct
@@ -224,9 +224,99 @@ impl SlidingWindow {
     }
 }
 
-/// What a model's queries are multiplied by so that the attention's own
+/// One layer's attention: its K/V heads, its head width and how much of the
+/// head RoPE turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AttentionShape {
+    pub(crate) n_kv_head: usize,
+    pub(crate) head_dim: usize,
+    pub(crate) rope_dim: usize,
+}
+
+impl AttentionShape {
+    /// K or V elements this layer keeps per position.
+    pub(crate) fn kv_width(&self) -> usize {
+        self.n_kv_head * self.head_dim
+    }
+}
+
+/// Every layer's [`AttentionShape`], read as llama.cpp reads it for every
+/// family (`llama_hparams::n_head_kv(il)`, `n_embd_head_k(il)`, `n_rot(il)`):
+/// `attention.head_count_kv` is one count or one per layer, and a windowed
+/// layer ([`SlidingWindow`]) takes `attention.key_length_swa` and
+/// `rope.dimension_count_swa` where the file names them. Gemma 4 does: 256-wide
+/// heads on its windowed layers against 512 on its global ones, and 8 K/V heads
+/// against 1 on the 12B. A file naming neither gets one shape for every layer —
+/// the model-wide reading every release before took.
+pub(crate) fn attention_shapes(ct: &gguf_file::Content) -> Result<Vec<AttentionShape>, SwarmError> {
+    let arch = gguf_arch_str(ct);
+    let key = |suffix: &str| ct.metadata.get(&format!("{arch}.{suffix}"));
+    let u32_of = |suffix: &str| {
+        key(suffix)
+            .and_then(|v| v.to_u32().ok())
+            .map(|v| v as usize)
+    };
+    let bad = |what: &str| SwarmError::Inference(format!("GGUF metadata error: {arch}.{what}"));
+    let n_layer = u32_of("block_count").ok_or_else(|| bad("block_count is missing"))?;
+    let n_head =
+        u32_of("attention.head_count").ok_or_else(|| bad("attention.head_count is missing"))?;
+    let embd = u32_of("embedding_length").ok_or_else(|| bad("embedding_length is missing"))?;
+    // A count stored as any integer type: llama.cpp's `get_arr` takes signed
+    // and unsigned alike, and gguf-py writes a Python list as INT32.
+    let count = |v: &gguf_file::Value| match *v {
+        gguf_file::Value::U8(n) => Some(n as usize),
+        gguf_file::Value::U16(n) => Some(n as usize),
+        gguf_file::Value::U32(n) => Some(n as usize),
+        gguf_file::Value::U64(n) => usize::try_from(n).ok(),
+        gguf_file::Value::I8(n) => usize::try_from(n).ok(),
+        gguf_file::Value::I16(n) => usize::try_from(n).ok(),
+        gguf_file::Value::I32(n) => usize::try_from(n).ok(),
+        gguf_file::Value::I64(n) => usize::try_from(n).ok(),
+        _ => None,
+    };
+    let n_kv: Vec<usize> = match key("attention.head_count_kv") {
+        Some(gguf_file::Value::Array(per_layer)) => {
+            let counts: Vec<usize> = per_layer
+                .iter()
+                .map(count)
+                .collect::<Option<_>>()
+                .ok_or_else(|| bad("attention.head_count_kv holds a value that is not a count"))?;
+            if counts.len() < n_layer {
+                return Err(bad(
+                    "attention.head_count_kv names fewer layers than block_count",
+                ));
+            }
+            counts
+        }
+        Some(v) => {
+            vec![count(v).ok_or_else(|| bad("attention.head_count_kv is not a count"))?; n_layer]
+        }
+        None => return Err(bad("attention.head_count_kv is missing")),
+    };
+    let head_dim = u32_of("attention.key_length").unwrap_or(embd / n_head.max(1));
+    let rope_dim = u32_of("rope.dimension_count").unwrap_or(head_dim);
+    let head_dim_swa = u32_of("attention.key_length_swa").unwrap_or(head_dim);
+    let rope_dim_swa = u32_of("rope.dimension_count_swa").unwrap_or(rope_dim);
+    let window = SlidingWindow::from_file(ct);
+    Ok((0..n_layer)
+        .map(|il| {
+            let windowed = window.as_ref().is_some_and(|w| w.for_layer(il).is_some());
+            AttentionShape {
+                n_kv_head: n_kv[il],
+                head_dim: if windowed { head_dim_swa } else { head_dim },
+                rope_dim: if windowed { rope_dim_swa } else { rope_dim },
+            }
+        })
+        .collect())
+}
+
+/// What a layer's queries are multiplied by so that the attention's own
 /// `1/sqrt(head_dim)` leaves the family's scale (`LayerWeights::query_scale`),
-/// or `None` where the two agree. Read as llama.cpp reads it: Gemma 2's 27B —
+/// or `None` where the two agree; `head_dim` is the layer's own
+/// ([`AttentionShape`]). Gemma 4 scales by nothing at all — its queries and
+/// keys are already normalised per head (llama.cpp's `f_attention_scale =
+/// 1.0`, "no pre-attn scaling"), so its queries are multiplied by
+/// `sqrt(head_dim)`. Read as llama.cpp reads it: Gemma 2's 27B —
 /// the size llama.cpp knows by its 46 layers — scales by
 /// `1/sqrt(n_embd / n_head)` (`llama_model_gemma2::load_arch_hparams`, after
 /// gemma_pytorch `config.py`), every other size by `1/sqrt(head_dim)`; Gemma
@@ -234,11 +324,14 @@ impl SlidingWindow {
 /// 27B that is 1/sqrt(144) against 1/sqrt(128): read without it, every
 /// attention score was 6% too large (FUTURE_WORK #279).
 /// `SWARMLLM_QUERY_SCALE=0` reads none — the A/B arm.
-pub(crate) fn query_scale(ct: &gguf_file::Content) -> Option<f64> {
+pub(crate) fn query_scale(ct: &gguf_file::Content, head_dim: usize) -> Option<f64> {
     if std::env::var("SWARMLLM_QUERY_SCALE").as_deref() == Ok("0") {
         return None;
     }
     let arch = gguf_arch_str(ct);
+    if arch == "gemma4" {
+        return Some((head_dim as f64).sqrt());
+    }
     let read = |key: &str| {
         ct.metadata
             .get(&format!("{arch}.{key}"))
@@ -519,12 +612,6 @@ impl GgufTensorMeta {
                 "GGUF metadata error: attention.head_count={head_count} exceeds cap {MAX_HEAD_COUNT}"
             )));
         }
-        let head_count_kv = md_u32("attention.head_count_kv")?;
-        if head_count_kv > MAX_HEAD_COUNT {
-            return Err(SwarmError::Inference(format!(
-                "GGUF metadata error: attention.head_count_kv={head_count_kv} exceeds cap {MAX_HEAD_COUNT}"
-            )));
-        }
         let block_count = md_u32("block_count")?;
         if block_count > MAX_BLOCK_COUNT {
             return Err(SwarmError::Inference(format!(
@@ -543,17 +630,31 @@ impl GgufTensorMeta {
                 "GGUF metadata error: embedding_length={embedding_length} out of range (1..={MAX_EMBEDDING_LENGTH})"
             )));
         }
-        // head_dim: prefer attention.key_length (Qwen3 uses 128 vs embed/heads=64)
-        let head_dim = ct
-            .metadata
-            .get(&format!("{arch}.attention.key_length"))
-            .and_then(|v| v.to_u32().ok())
-            .map(|v| v as usize)
-            .unwrap_or(embedding_length / head_count);
-        // rope.dimension_count may not exist for all architectures — derive from head_dim
+        // The KV shape of the WIDEST layer (`attention_shapes`): one shape for
+        // most families; Gemma 4's windowed and global layers differ, and every
+        // estimate that charges each layer this one shape is then an upper
+        // bound (9-14% over on the real files) rather than an undercount.
+        // head_dim: attention.key_length when named (Qwen3 uses 128 vs embed/heads=64).
+        let widest = attention_shapes(ct)?
+            .into_iter()
+            .max_by_key(AttentionShape::kv_width)
+            .ok_or_else(|| SwarmError::Inference("GGUF metadata error: no layers".into()))?;
+        let (head_count_kv, head_dim) = (widest.n_kv_head, widest.head_dim);
+        if head_count_kv > MAX_HEAD_COUNT {
+            return Err(SwarmError::Inference(format!(
+                "GGUF metadata error: attention.head_count_kv={head_count_kv} exceeds cap {MAX_HEAD_COUNT}"
+            )));
+        }
+        // rope.dimension_count may not exist for all architectures — derive from
+        // head_dim. The global layers' (a windowed layer's own is in its shape).
         let rope_dim = md_get("rope.dimension_count")
             .and_then(|v| v.to_u32().map_err(SwarmError::internal))
-            .unwrap_or(head_dim as u32) as usize;
+            .unwrap_or_else(|_| {
+                ct.metadata
+                    .get(&format!("{arch}.attention.key_length"))
+                    .and_then(|v| v.to_u32().ok())
+                    .unwrap_or((embedding_length / head_count) as u32)
+            }) as usize;
         let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")?
             .to_f32()
             .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
@@ -632,8 +733,28 @@ impl GgufTensorMeta {
         if !super::ModelArch::from_gguf_arch(&self.architecture).is_supported() {
             return Some(ModelRefusal::Architecture(self.architecture.clone()));
         }
+        if let Some(part) = self.unbuilt_gemma4_part() {
+            return Some(ModelRefusal::Architecture(format!("gemma4 with {part}")));
+        }
         self.is_embedding_model()
             .then_some(ModelRefusal::EmbeddingModel)
+    }
+
+    /// The part of a Gemma 4 file the loader does not run yet, read off its
+    /// tensor table: the 26B-A4B's experts or the E2B/E4B's per-layer
+    /// embeddings (FUTURE_WORK #115). Loaded as the dense layout, either would
+    /// run with that part missing and write nonsense, so it is refused instead.
+    fn unbuilt_gemma4_part(&self) -> Option<&'static str> {
+        if self.architecture != "gemma4" {
+            return None;
+        }
+        if self.tensors.contains_key("per_layer_token_embd.weight") {
+            return Some("per-layer embeddings (the E2B and E4B sizes)");
+        }
+        self.tensors
+            .keys()
+            .any(|name| name.ends_with(".ffn_gate_inp.weight"))
+            .then_some("mixture-of-experts layers (the 26B-A4B size)")
     }
 
     /// The weight bytes ONE token reads per layer, on average over the model:
@@ -753,9 +874,15 @@ const BPE_PRE_TOKENIZERS_WITHOUT_BOS: &[&str] = &["glm4", "chatglm-bpe"];
 /// The old rule defaulted every vocabulary to true, on a comment saying the
 /// flag "is consumed solely by the SPM path" — it was not: `SplitTokenizer`
 /// prepends BOS for every variant.
+///
+/// Gemma 4's vocabulary takes BOS even where its file says not to: llama.cpp
+/// overrides the key "for Gemma4" (llama.cpp PR #21500).
 fn add_bos_by_llama_cpp_rules(declared: Option<bool>, tokenizer_model: &str, pre: &str) -> bool {
     if BPE_PRE_TOKENIZERS_WITHOUT_BOS.contains(&pre) {
         return false;
+    }
+    if tokenizer_model == "gemma4" {
+        return true;
     }
     declared.unwrap_or(match tokenizer_model {
         "llama" => true,
@@ -838,6 +965,10 @@ const END_OF_GENERATION_TOKENS: &[&str] = &[
     "<end_of_turn>",
     "<|return|>",
     "<|call|>",
+    // Gemma 4 closes a turn with `<turn|>` and hands a tool call back with
+    // `<|tool_response>` — both on llama.cpp's list, both found only there.
+    "<turn|>",
+    "<|tool_response>",
 ];
 
 /// The token whose end-of-generation meaning is CONDITIONAL on its neighbours.
@@ -1101,6 +1232,13 @@ impl GgufTokenizerMeta {
         if (arch == "gemma" || arch == "gemma2") && !ids.contains(&107) && plausible(107) {
             ids.push(107);
         }
+        // Gemma 4 declares `<turn|>` and also ends a plain completion with
+        // `<eos>` (id 1), which llama.cpp stops on: `<eos>` is on its list "for
+        // gemma4" (`llama_vocab::impl::load`). Kept to this family — see
+        // `END_OF_GENERATION_TOKENS` on why `<eos>` is not on that list.
+        if arch == "gemma4" && !ids.contains(&1) && plausible(1) {
+            ids.push(1);
+        }
         ids
     }
 
@@ -1288,6 +1426,9 @@ mod add_bos_rule_tests {
         // A key that is present is the answer.
         assert!(!rule(Some(false), "llama", "default"));
         assert!(rule(Some(true), "gpt2", "qwen2"));
+        // ...except Gemma 4's, which llama.cpp gives a BOS whatever it says.
+        assert!(rule(Some(false), "gemma4", ""));
+        assert!(rule(None, "gemma4", ""));
     }
 }
 
@@ -1666,6 +1807,30 @@ mod refusal_tests {
             "a family this build has no loader for is still refused for that"
         );
     }
+
+    /// A Gemma 4 size whose layers this build does not run yet is refused by
+    /// name, read off its tensor table — loaded as the dense layout it would
+    /// run with its experts or per-layer embeddings missing.
+    #[test]
+    fn gemma4_sizes_this_build_cannot_run_are_refused() {
+        let with = |tensor: &str| {
+            let mut meta = header("gemma4", None);
+            meta.tensors
+                .insert(tensor.into(), TensorLocation { offset: 0, size: 1 });
+            meta.refusal()
+        };
+        assert_eq!(header("gemma4", None).refusal(), None, "12B / 31B");
+        assert_eq!(with("blk.0.attn_q.weight"), None);
+        let refused = |r: Option<ModelRefusal>, part: &str| matches!(r, Some(ModelRefusal::Architecture(a)) if a.starts_with("gemma4 with") && a.contains(part));
+        assert!(refused(
+            with("blk.3.ffn_gate_inp.weight"),
+            "mixture-of-experts"
+        ));
+        assert!(refused(
+            with("per_layer_token_embd.weight"),
+            "per-layer embeddings"
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -1816,18 +1981,104 @@ pub(super) mod sliding_window_tests {
     #[test]
     fn only_gemma3_27b_scales_its_queries_by_the_model_width() {
         let scale =
-            query_scale(&gemma_shape("gemma3", 62, 5376, 32, 128)).expect("the 27B is scaled");
+            query_scale(&gemma_shape("gemma3", 62, 5376, 32, 128), 128).expect("the 27B is scaled");
         assert!((scale - (128f64 / 168f64).sqrt()).abs() < 1e-12, "{scale}");
         assert_eq!(
-            query_scale(&gemma_shape("gemma3", 34, 2560, 8, 256)),
+            query_scale(&gemma_shape("gemma3", 34, 2560, 8, 256), 256),
             None,
             "4B"
         );
         assert_eq!(
-            query_scale(&gemma_shape("gemma3", 26, 1152, 4, 256)),
+            query_scale(&gemma_shape("gemma3", 26, 1152, 4, 256), 256),
             None,
             "1B"
         );
+    }
+
+    /// The real 12B's attention keys (read off unsloth's Q4_K_M, 2026-10-16):
+    /// 48 layers, five in six windowed over 1,024 positions, 256-wide heads and
+    /// 8 K/V heads on those against 512-wide and 1 on every sixth. The counts
+    /// are a per-layer list, written as INT32 by gguf-py.
+    pub(crate) fn gemma4_12b() -> gguf_file::Content {
+        use gguf_file::Value::{Array, Bool, F32, I32, U32};
+        let windowed = |il: u32| il % 6 != 5;
+        header(
+            "gemma4",
+            vec![
+                ("gemma4.block_count", U32(48)),
+                ("gemma4.embedding_length", U32(3840)),
+                ("gemma4.attention.head_count", U32(16)),
+                (
+                    "gemma4.attention.head_count_kv",
+                    Array(
+                        (0..48)
+                            .map(|il| I32(if windowed(il) { 8 } else { 1 }))
+                            .collect(),
+                    ),
+                ),
+                ("gemma4.attention.key_length", U32(512)),
+                ("gemma4.attention.key_length_swa", U32(256)),
+                ("gemma4.rope.dimension_count", U32(512)),
+                ("gemma4.rope.dimension_count_swa", U32(256)),
+                ("gemma4.rope.freq_base", F32(1_000_000.0)),
+                ("gemma4.rope.freq_base_swa", F32(10_000.0)),
+                ("gemma4.attention.sliding_window", U32(1024)),
+                (
+                    "gemma4.attention.sliding_window_pattern",
+                    Array((0..48).map(|il| Bool(windowed(il))).collect()),
+                ),
+            ],
+        )
+    }
+
+    /// Each layer's shape is read from its own keys, as llama.cpp reads
+    /// `n_head_kv(il)`, `n_embd_head_k(il)` and `n_rot(il)`; a file with one
+    /// count and no `_swa` keys gets one shape everywhere.
+    #[test]
+    fn gemma4_reads_each_layers_attention_shape() {
+        let shapes = attention_shapes(&gemma4_12b()).unwrap();
+        assert_eq!(shapes.len(), 48);
+        let windowed = AttentionShape {
+            n_kv_head: 8,
+            head_dim: 256,
+            rope_dim: 256,
+        };
+        let global = AttentionShape {
+            n_kv_head: 1,
+            head_dim: 512,
+            rope_dim: 512,
+        };
+        for (il, shape) in shapes.iter().enumerate() {
+            let want = if il % 6 == 5 { global } else { windowed };
+            assert_eq!(*shape, want, "layer {il}");
+        }
+
+        let one = attention_shapes(&header(
+            "llama",
+            vec![
+                ("llama.block_count", gguf_file::Value::U32(4)),
+                ("llama.embedding_length", gguf_file::Value::U32(4096)),
+                ("llama.attention.head_count", gguf_file::Value::U32(32)),
+                ("llama.attention.head_count_kv", gguf_file::Value::U32(8)),
+            ],
+        ))
+        .unwrap();
+        let shape = AttentionShape {
+            n_kv_head: 8,
+            head_dim: 128,
+            rope_dim: 128,
+        };
+        assert_eq!(one, vec![shape; 4]);
+    }
+
+    /// Gemma 4 normalises Q and K per head and scales by nothing
+    /// (`f_attention_scale = 1.0`): each layer's queries are multiplied by its
+    /// own `sqrt(head_dim)`, which the attention's `1/sqrt(head_dim)` cancels.
+    #[test]
+    fn gemma4_attention_is_not_scaled_on_any_layer() {
+        let ct = gemma4_12b();
+        assert_eq!(query_scale(&ct, 256), Some(16.0));
+        assert_eq!(query_scale(&ct, 512), Some(512f64.sqrt()));
     }
 
     /// llama.cpp's sizes: only the 27B (46 layers) scales by `n_embd / n_head`
@@ -1835,15 +2086,26 @@ pub(super) mod sliding_window_tests {
     /// a head of 256, and llama.cpp scales it by the HEAD, so it reads none.
     #[test]
     fn only_gemma2_27b_scales_its_queries_by_the_model_width() {
-        let scale = query_scale(&gemma2_shape(46, 4608, 32, 128)).expect("the 27B is scaled");
+        let scale = query_scale(&gemma2_shape(46, 4608, 32, 128), 128).expect("the 27B is scaled");
         assert!((scale - (128f64 / 144f64).sqrt()).abs() < 1e-12, "{scale}");
-        assert_eq!(query_scale(&gemma2_shape(42, 3584, 16, 256)), None, "9B");
-        assert_eq!(query_scale(&gemma2_shape(26, 2304, 8, 256)), None, "2B");
         assert_eq!(
-            query_scale(&header(
-                "llama",
-                vec![("llama.block_count", gguf_file::Value::U32(46))]
-            )),
+            query_scale(&gemma2_shape(42, 3584, 16, 256), 256),
+            None,
+            "9B"
+        );
+        assert_eq!(
+            query_scale(&gemma2_shape(26, 2304, 8, 256), 256),
+            None,
+            "2B"
+        );
+        assert_eq!(
+            query_scale(
+                &header(
+                    "llama",
+                    vec![("llama.block_count", gguf_file::Value::U32(46))]
+                ),
+                128
+            ),
             None
         );
     }

@@ -112,6 +112,9 @@ pub struct BpeTokenizer {
     special_tokens: Vec<(String, u32)>,
     /// Whether this is a SentencePiece tokenizer (uses ▁ for spaces, no byte encoding)
     is_sentencepiece: bool,
+    /// Gemma 4's vocabulary (`tokenizer.ggml.model = "gemma4"`) — see
+    /// [`BpeTokenizer::encode_gemma4`].
+    gemma4: bool,
 }
 
 impl BpeTokenizer {
@@ -131,7 +134,8 @@ impl BpeTokenizer {
         // `tokenizer.ggml.token_type`, or empty — see `declared_special`.
         token_types: &[i32],
     ) -> Self {
-        let is_sentencepiece = tokenizer_model == "llama";
+        let gemma4 = tokenizer_model == "gemma4";
+        let is_sentencepiece = tokenizer_model == "llama" || gemma4;
         let mut token_to_id = HashMap::with_capacity(tokens.len());
         for (i, tok) in tokens.iter().enumerate() {
             token_to_id.insert(tok.clone(), i as u32);
@@ -190,12 +194,24 @@ impl BpeTokenizer {
         // the name shapes stay beside it, so no vocabulary that tokenized
         // correctly before this changes. The shapes alone never saw `[gMASK]`,
         // the first token of every GLM-4 prompt (FUTURE_WORK #97).
+        //
+        // Gemma 4 declares every marker it has, and 75 of its ORDINARY entries
+        // are `<…>`-shaped (`<table>`, `<unused5>`), which llama.cpp never
+        // matches whole in a prompt — so there the declared types are the rule,
+        // with llama.cpp's end-of-generation names, whose type it overrides to
+        // CONTROL (Gemma 4's `<eos>` is declared ordinary).
+        let by_shape = !(gemma4 && !token_types.is_empty());
         let mut special_tokens: Vec<(String, u32)> = token_to_id
             .iter()
             .filter(|(t, &id)| {
                 declared_special(token_types, id)
-                    || (t.starts_with("<|") && t.ends_with("|>"))
-                    || (t.starts_with('<') && t.ends_with('>') && !t.contains(' ') && t.len() <= 20)
+                    || LLAMA_CPP_END_OF_GENERATION_NAMES.contains(&t.as_str())
+                    || (by_shape
+                        && ((t.starts_with("<|") && t.ends_with("|>"))
+                            || (t.starts_with('<')
+                                && t.ends_with('>')
+                                && !t.contains(' ')
+                                && t.len() <= 20)))
             })
             .map(|(t, &id)| (t.clone(), id))
             .collect();
@@ -214,6 +230,7 @@ impl BpeTokenizer {
             pre_tok_res,
             special_tokens,
             is_sentencepiece,
+            gemma4,
         }
     }
 
@@ -232,6 +249,8 @@ impl BpeTokenizer {
                 if let Some(&id) = self.token_to_id.get(segment.as_str()) {
                     all_ids.push(id as i64);
                 }
+            } else if self.gemma4 {
+                self.encode_gemma4(segment, &mut all_ids);
             } else if self.is_sentencepiece {
                 // SentencePiece: replace spaces with ▁, then BPE encode
                 // SentencePiece convention: leading space becomes ▁
@@ -247,6 +266,30 @@ impl BpeTokenizer {
         }
 
         all_ids
+    }
+
+    /// Gemma 4's encoding of the text between special tokens, as llama.cpp
+    /// master runs it (`LLAMA_VOCAB_PRE_TYPE_GEMMA4`): every space becomes `▁`
+    /// with no `▁` in front of the text, the text is cut into runs of newlines
+    /// and runs of anything else (`[^\n]+|[\n]+`), a run of newlines that is
+    /// itself an entry is that entry (31 of them are; llama.cpp PR #21343), and
+    /// BPE merges each run over its raw UTF-8 characters, falling back to the
+    /// `<0xNN>` byte entries.
+    fn encode_gemma4(&self, text: &str, out: &mut Vec<i64>) {
+        let escaped = text.replace(' ', "\u{2581}");
+        let mut rest = escaped.as_str();
+        while let Some(first) = rest.chars().next() {
+            let newlines = first == '\n';
+            let end = rest
+                .find(|c: char| (c == '\n') != newlines)
+                .unwrap_or(rest.len());
+            let (run, tail) = rest.split_at(end);
+            rest = tail;
+            match self.token_to_id.get(run) {
+                Some(&id) if newlines => out.push(id as i64),
+                _ => out.extend(self.bpe_encode_word(run)),
+            }
+        }
     }
 
     /// Split text at special token boundaries.
@@ -2111,6 +2154,86 @@ mod bpe_merge_equivalence {
     }
 }
 
+/// Gemma 4's vocabulary (`tokenizer.ggml.model = "gemma4"`) on a vocabulary
+/// small enough to read. The real one agrees with llama.cpp master on all 18
+/// cases of `tokenizer_agrees_with_llama_cpp` (its chat template with thinking
+/// off and on, code, HTML, newline and space runs, emoji; 2026-10-16).
+#[cfg(test)]
+mod gemma4_tests {
+    use super::*;
+
+    fn gemma4(model: &str) -> SplitTokenizer {
+        let entries: [(&str, i32); 19] = [
+            ("<pad>", 3),
+            ("<eos>", 1), // declared ordinary, as in the real vocabulary
+            ("<bos>", 3),
+            ("a", 1),
+            ("b", 1),
+            ("\u{2581}", 1),
+            ("\u{2581}b", 1),
+            ("\n", 1),
+            ("\n\n", 1),
+            ("<|channel>", 4),
+            ("<", 1),
+            (">", 1),
+            ("x", 1),
+            ("<x>", 1),
+            ("<0x0A>", 6),
+            ("<0xC3>", 6),
+            ("<0xA9>", 6),
+            ("y", 1),
+            ("<y>", 1),
+        ];
+        let vocab: Vec<String> = entries.iter().map(|(t, _)| t.to_string()).collect();
+        let types: Vec<i32> = entries.iter().map(|&(_, ty)| ty).collect();
+        let merges: Vec<String> = ["\u{2581} b", "< x", "<x >"]
+            .iter()
+            .map(|m| m.to_string())
+            .collect();
+        SplitTokenizer::from_bpe(&vocab, &merges, "", model, true, Some(2), &types)
+    }
+
+    #[test]
+    fn spaces_become_the_marker_with_none_in_front_and_newline_runs_stay_whole() {
+        let tok = gemma4("gemma4");
+        // No `▁` before the text, a space joins the next word.
+        assert_eq!(tok.encode("a b"), vec![2, 3, 6]);
+        // A run of newlines that is an entry is that entry; one that is not
+        // is merged like any other run (here: no merge, one per newline).
+        assert_eq!(tok.encode("a\n\nb"), vec![2, 3, 8, 4]);
+        assert_eq!(tok.encode("a\n\n\nb"), vec![2, 3, 7, 7, 7, 4]);
+        // A character with no entry falls back to its UTF-8 bytes.
+        assert_eq!(tok.encode("é"), vec![2, 15, 16]);
+        // THE CONTROL: the same vocabulary read as SentencePiece-style BPE
+        // puts a `▁` in front and runs merges across the newlines.
+        assert_ne!(gemma4("llama").encode("a b"), tok.encode("a b"));
+    }
+
+    /// Only what the vocabulary declares is matched whole — `<|channel>` —
+    /// plus `<eos>`, which llama.cpp treats as control whatever it is declared;
+    /// an ordinary `<y>` is merged from its pieces like any other text.
+    #[test]
+    fn declared_markers_are_matched_whole_and_ordinary_markup_is_merged() {
+        let tok = gemma4("gemma4");
+        assert_eq!(tok.encode("<|channel>a"), vec![2, 9, 3]);
+        assert_eq!(tok.encode("<eos>"), vec![2, 1]);
+        assert_eq!(tok.encode("<y>"), vec![2, 10, 17, 11]);
+        assert_eq!(tok.encode("<x>"), vec![2, 13], "reached by its merges");
+    }
+
+    #[test]
+    fn a_reply_decodes_markers_and_markup_as_llama_cpp_renders_them() {
+        let tok = gemma4("gemma4");
+        let text = |piece: &str| String::from_utf8(tok.decode_token(piece)).unwrap();
+        assert_eq!(text("\u{2581}b"), " b");
+        assert_eq!(text("<x>"), "<x>");
+        assert_eq!(text("<|channel>"), "<|channel>");
+        assert_eq!(text("<0x0A>"), "\n");
+        assert_eq!(text("<bos>"), "");
+        assert_eq!(text("<eos>"), "");
+    }
+}
+
 /// Our tokenizer against llama.cpp's, on every model's own chat template.
 ///
 /// **The independent reference this component lacked.** Every other tokenizer
@@ -2193,7 +2316,8 @@ mod llama_cpp_reference {
             let full = ours == reference;
             let special_ok = specials(&ours) == specials(&reference)
                 && starts_with_bos(&ours) == starts_with_bos(&reference);
-            let whole_sequence_required = meta.tokenizer_model == "gpt2";
+            let whole_sequence_required =
+                matches!(meta.tokenizer_model.as_str(), "gpt2" | "gemma4");
             let entry = per_model.entry(model.clone()).or_default();
             entry.0 += 1;
             if full {

@@ -1967,7 +1967,7 @@ impl SplitModel {
                             .forward(&x)
                             .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
                     }
-                    hidden = Residual::pending(x, residual2);
+                    hidden = scaled_output(lw, Residual::pending(x, residual2))?;
                 }
                 LayerVariant::DeepSeek {
                     attention,
@@ -2491,7 +2491,21 @@ fn dense_layer(
     }
     // Not added here: the next norm point takes this sum
     // (`Residual::add_norm`), fused on CUDA.
-    Ok(Residual::pending(x, residual))
+    scaled_output(lw, Residual::pending(x, residual))
+}
+
+/// A layer's output times its [`LayerWeights::output_scale`] (Gemma 4), the
+/// residual included — the sum is taken here for such a layer, and left to the
+/// next norm point for every other.
+fn scaled_output(lw: &LayerWeights, out: Residual) -> Result<Residual, SwarmError> {
+    match lw.output_scale {
+        None => Ok(out),
+        Some(scale) => out
+            .into_tensor()
+            .and_then(|x| x * scale)
+            .map(Residual::Ready)
+            .map_err(|e| SwarmError::Internal(format!("layer output scale: {e}"))),
+    }
 }
 
 /// [`dense_layer`] for a processor layer run whole on `card` for a prompt
