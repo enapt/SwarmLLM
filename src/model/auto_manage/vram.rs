@@ -754,6 +754,24 @@ impl RamBudget {
             && estimate_mb <= self.live_headroom_mb
     }
 
+    /// [`Self::allows`] once idle models charged `reclaimable_mb` have been
+    /// unloaded — what the spawn's reclaim
+    /// (`ModelProcessPool::free_ram_for_admission`) makes of both limits:
+    /// their charge leaves `committed_mb`, and the memory they held becomes
+    /// available. A planner's ceiling, as the card's reclaimable room is.
+    pub fn allows_after_reclaim(
+        &self,
+        committed_mb: u64,
+        estimate_mb: u64,
+        reclaimable_mb: u64,
+    ) -> bool {
+        committed_mb
+            .saturating_sub(reclaimable_mb)
+            .saturating_add(estimate_mb)
+            <= self.cap_mb
+            && estimate_mb <= self.live_headroom_mb.saturating_add(reclaimable_mb)
+    }
+
     /// Is the `total/4` floor the reason `live_headroom_mb` is what it is?
     ///
     /// The live term is `max(70% of available, total/4)`, so whenever the floor

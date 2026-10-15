@@ -117,6 +117,26 @@ mod tests {
         assert_eq!(measured.unwritten(), None);
     }
 
+    /// A figure past any load the fleet has measured — a machine suspended
+    /// mid-load — is not a speed: stored, it is taken in bounded and the
+    /// bounded figure written back; timed in this run, it moves the average
+    /// only as far as the bound.
+    #[test]
+    fn an_absurd_rate_is_bounded_whether_stored_or_timed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        db.put_json(TREE, KEY, &900_000u32).unwrap();
+        let rate = LoadRate::default();
+        restore(&db, &rate);
+        assert_eq!(rate.ms_per_gib(), Some(60_000));
+        persist(&db, &rate);
+        assert_eq!(db.get_json::<u32>(TREE, KEY).unwrap(), Some(60_000));
+
+        let timed = LoadRate::default();
+        timed.observe(1 << 30, 3_600_000);
+        assert_eq!(timed.ms_per_gib(), Some(60_000));
+    }
+
     /// A store that refuses the write leaves the figure unwritten, so the next
     /// tick tries again.
     #[test]

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #276**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #277**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1690,6 +1690,21 @@ against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hy
 StarCoder2, inert while refused).
 
 ### Memory and admission
+
+#### #276 — The planner's processor bound does not count the RAM an idle model would give back
+`P3` · memory · **OPEN** — 2026-10-15 · history: found by the pre-release review of v0.3.239
+
+`ModelProcessPool::local_layers_leaving` offers this node, on the processor, the layers that fit
+in the RAM cap less everything charged — an idle model's charge included — while the spawn that
+follows unloads idle models first (`free_ram_for_admission`). So a processor-only node holding
+an idle model in RAM is offered fewer layers of the one asked for than it would load, and the
+rest goes to peers: #125's shape, which the card branch fixed by counting
+`idle_vram_reclaimable_mb`. The fresh card/processor split counts it since v0.3.239
+(`idle_ram_reclaimable_mb`, `RamBudget::allows_after_reclaim`, one predicate with the reclaim —
+`ram_reclaim_eligible`). **Done when** the processor branch counts it too, in both terms
+(`headroom_after`'s cap and live headroom) and beside a guest (`guest_mb`), with a test red
+without it; unmeasured how often it bites — a node switching between models that do not fit
+its memory together.
 
 #### #265 — A later range loaded into a card/processor split worker is charged to the card whatever the loader does with it
 `P3` · memory · **OPEN** — 2026-10-13 · history: found closing #264

@@ -2489,10 +2489,15 @@ only; the spawn then charges its processor share to the machine (#264) against t
 cap (#266). The allowance now asks `ram_charged_share` → `ram_verdict` with the same estimators
 (`estimate_cpu_footprint_mb` for a whole-layer split's processor-held run, `experts_in_ram_mb` for
 experts kept in RAM) and the requester the scheduler names (`requester_for_override`), and
-offers no split the spawn would refuse. Like the planner's processor bound
-(`local_layers_leaving`), it does not count a RAM reclaim. Test
+offers no split the spawn would refuse. Test
 `a_fresh_split_is_planned_only_if_its_processor_share_would_be_admitted` (both split kinds; red
-without the check: one MB short still offered 48).
+without the check: one MB short still offered 48). **It counts the RAM the spawn would reclaim
+first** (`idle_ram_reclaimable_mb` through `RamBudget::allows_after_reclaim`, both terms; the
+victims are `free_ram_for_admission`'s own, `ram_reclaim_eligible`): first written without it,
+an idle model held in RAM sent abroad a model the spawn would have run here after unloading it —
+found by v0.3.239's pre-release review before release. Test
+`a_fresh_split_counts_the_ram_an_idle_model_would_give_back` (red without the count). The
+planner's processor bound (`local_layers_leaving`) still counts no RAM reclaim — FUTURE_WORK #276.
 
 **A full card's budget is 1 MB, never 0 (the same day).** The pool reads a 0 card budget as
 "none configured" — `card_verdict` answers `Unjudged` and `admit_to_gpu` admits — while

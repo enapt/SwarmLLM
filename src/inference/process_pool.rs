@@ -824,6 +824,13 @@ impl LoadRate {
     const MIN_BYTES: u64 = 256 << 20;
     /// Weight of the newest sample — `peer_speed`'s EMA weight.
     const ALPHA: f64 = 0.3;
+    /// The slowest figure the average takes in: over twice the slowest load
+    /// the fleet has measured (~26 s/GiB, above). Past it is a load the
+    /// machine was suspended through or a disk that stalled, not a speed —
+    /// taken in, it priced this node's cold loads, and was advertised, for
+    /// many loads after, and across restarts once the rate was kept (the
+    /// pre-release review of v0.3.239).
+    const MAX_MS_PER_GIB: u32 = 60_000;
 
     pub(crate) fn observe(&self, bytes: u64, ms: u32) {
         if bytes < Self::MIN_BYTES {
@@ -833,6 +840,7 @@ impl LoadRate {
         if !sample.is_finite() {
             return;
         }
+        let sample = sample.min(f64::from(Self::MAX_MS_PER_GIB));
         if let Ok(mut slot) = self.ms_per_gib.lock() {
             *slot = Some(match *slot {
                 Some(prev) => Self::ALPHA * sample + (1.0 - Self::ALPHA) * prev,
@@ -847,14 +855,16 @@ impl LoadRate {
     }
 
     /// Start from what an earlier run measured (and storage holds) — unless a
-    /// load has already been timed in this one, which is newer.
+    /// load has already been timed in this one, which is newer. A stored
+    /// figure past [`Self::MAX_MS_PER_GIB`] is taken in at it, and storage is
+    /// left holding the old one so the bounded figure is written back.
     pub(crate) fn seed(&self, ms_per_gib: u32) {
         if ms_per_gib == 0 {
             return;
         }
         if let Ok(mut slot) = self.ms_per_gib.lock() {
             if slot.is_none() {
-                *slot = Some(f64::from(ms_per_gib));
+                *slot = Some(f64::from(ms_per_gib.min(Self::MAX_MS_PER_GIB)));
             }
         }
         if let Ok(mut written) = self.written.lock() {
@@ -4463,6 +4473,35 @@ impl ModelProcessPool {
             .sum()
     }
 
+    /// Would [`Self::free_ram_for_admission`] unload `model`'s worker to make
+    /// room for `exclude`? Not serving anything, and charged some of the
+    /// machine's memory — a model wholly on the card gives none back. One
+    /// predicate for the reclaim and for the planner's count of it
+    /// ([`Self::idle_ram_reclaimable_mb`]), as [`vram_reclaim_eligible`] is the
+    /// card's.
+    fn ram_reclaim_eligible(
+        &self,
+        model: &ModelId,
+        worker: &WorkerHandle,
+        exclude: &ModelId,
+    ) -> bool {
+        model != exclude
+            && !worker.in_use(self.conversation_window())
+            && self.ram_reserved_mb.get(model).is_some_and(|mb| *mb > 0)
+    }
+
+    /// The most system memory the pool would take back from idle models for
+    /// `exclude` — every charge [`Self::ram_reclaim_eligible`] admits. The
+    /// planner's half of [`Self::free_ram_for_admission`], as
+    /// [`Self::idle_vram_reclaimable_mb`] is the card's: a ceiling, not a plan.
+    fn idle_ram_reclaimable_mb(&self, exclude: &ModelId) -> u64 {
+        self.workers
+            .iter()
+            .filter(|e| self.ram_reclaim_eligible(e.key(), e.value(), exclude))
+            .filter_map(|e| self.ram_reserved_mb.get(e.key()).map(|mb| *mb))
+            .sum()
+    }
+
     /// A DRY RUN of [`ModelProcessPool::free_vram_for_admission`]: how much the
     /// pool would be willing to take from other models right now.
     ///
@@ -4886,8 +4925,7 @@ impl ModelProcessPool {
             let victim = self
                 .workers
                 .iter()
-                .filter(|e| e.key() != exclude && !e.value().in_use(self.conversation_window()))
-                .filter(|e| self.ram_reserved_mb.get(e.key()).is_some_and(|mb| *mb > 0))
+                .filter(|e| self.ram_reclaim_eligible(e.key(), e.value(), exclude))
                 .min_by_key(|e| e.value().spawned_at)
                 .map(|e| e.key().clone());
             let Some(victim) = victim else {
@@ -5473,13 +5511,16 @@ impl ModelProcessPool {
     /// allowance.
     ///
     /// **And only if the spawn's RAM admission would take the processor's
-    /// share** — weighed as the spawn weighs it ([`ram_charged_share`] →
-    /// [`Self::ram_verdict`], against `requester`'s cap; like the planner's
-    /// processor bound, [`Self::local_layers_leaving`], without the reclaim).
-    /// Unweighed (#250, report #036), a 48-layer Qwen3-30B-A3B was planned
-    /// here whole while its processor share — 18.7 GB, the card being nearly
-    /// full — was more than the swarm's cap allowed; the spawn refused it and
-    /// the request reached a reply only through a re-plan with a peer abroad.
+    /// share** — weighed as the spawn weighs it ([`ram_charged_share`], against
+    /// `requester`'s cap), counting the idle models the spawn would unload for
+    /// it first ([`Self::idle_ram_reclaimable_mb`], as the card's room counts
+    /// `idle_vram_reclaimable_mb`). Unweighed (#250, report #036), a 48-layer
+    /// Qwen3-30B-A3B was planned here whole while its processor share — 18.7
+    /// GB, the card being nearly full — was more than the swarm's cap allowed;
+    /// the spawn refused it and the request reached a reply only through a
+    /// re-plan with a peer abroad. Weighed without the reclaim, an idle model
+    /// held in RAM sent abroad a model the spawn would have run here after
+    /// unloading it (the pre-release review of v0.3.239; #125's shape).
     pub fn fresh_run_layers_for_planning(
         &self,
         model_id: &ModelId,
@@ -5510,13 +5551,16 @@ impl ModelProcessPool {
                 }
                 RamShare::Experts { layers } => self.experts_in_ram_mb(model_id, run, layers),
             };
-            if matches!(
-                self.ram_verdict(host_mb, requester),
-                Verdict::Refused { .. }
-            ) {
+            let reclaimable_mb = self.idle_ram_reclaimable_mb(model_id);
+            if host_mb > 0
+                && self.ram_budget_now(requester).is_some_and(|budget| {
+                    !budget.allows_after_reclaim(self.ram_committed_mb(), host_mb, reclaimable_mb)
+                })
+            {
                 tracing::debug!(
                     model = %model_id,
                     host_share_mb = host_mb,
+                    reclaimable_mb,
                     ?requester,
                     "a fresh card/processor split would not be given its processor share — \
                      not planning it here"
@@ -9065,7 +9109,7 @@ mod tests {
     /// Build a real `WorkerHandle` over a loopback socket pair, so the
     /// retirement path can be exercised without spawning a subprocess.
     /// `child: None` — `Drop` skips the kill and marks `exited` directly.
-    async fn fake_worker_handle(dead_now: bool) -> Arc<WorkerHandle> {
+    pub(super) async fn fake_worker_handle(dead_now: bool) -> Arc<WorkerHandle> {
         fake_worker_handle_on(dead_now, Some(CpuReason::Configured), true).await
     }
 
@@ -12344,6 +12388,44 @@ mod admission_tests {
         );
         q.set_ram_budget_mb(host_mb - 1);
         assert_eq!(q.fresh_run_layers_for_planning(&d, Requester::Swarm), None);
+    }
+
+    /// **The RAM an idle model holds is room for a fresh split**, because the
+    /// spawn unloads that model first (`free_ram_for_admission`). Weighed
+    /// without it, a model another had left idle in memory was sent abroad
+    /// though the spawn would have run it here (the pre-release review of
+    /// v0.3.239; #125's shape on the card). A model still in use keeps its
+    /// memory.
+    #[tokio::test]
+    async fn a_fresh_split_counts_the_ram_an_idle_model_would_give_back() {
+        let (p, m) = thirty_b_a3b_on_a_card("qwen3-30b-a3b-beside-idle", 7_000, true);
+        let estimated = p.estimated_gpu_mb(&m).expect("fixture: priced");
+        let Some(CardSplit::ExpertsInRam { in_ram, total: 48 }) =
+            p.partial_gpu_layers(&m, None, estimated, 7_000)
+        else {
+            panic!("fixture: experts kept in RAM");
+        };
+        let host_mb = p.experts_in_ram_mb(&m, (0, 48), in_ram);
+        p.set_ram_budget_mb(host_mb);
+        let other = ModelId("idle-in-ram".into());
+        assert!(p.admit_to_cpu(&other, 2_000, Requester::Swarm));
+        let h = super::tests::fake_worker_handle(false).await;
+        h.charged_mb.store(2_000, Ordering::Release);
+        p.workers.insert(other, h.clone());
+        assert_eq!(
+            p.fresh_run_layers_for_planning(&m, Requester::Owner),
+            Some(48),
+            "the spawn unloads the idle model and the {host_mb} MB fit"
+        );
+        h.kv_holders
+            .lock()
+            .unwrap()
+            .insert(Uuid::new_v4(), std::time::Instant::now());
+        assert_eq!(
+            p.fresh_run_layers_for_planning(&m, Requester::Owner),
+            None,
+            "a model in a conversation keeps its 2000 MB"
+        );
     }
 
     /// A card/processor split charges the card for the layers it puts there

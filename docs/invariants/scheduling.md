@@ -2749,6 +2749,12 @@ conservative 1 s. Tests: `a_restart_keeps_the_measured_load_rate` (red with the
 restore off), `an_unchanged_rate_is_not_rewritten_and_a_newer_one_wins`,
 `a_failed_write_is_retried`. Startup line: "This node loads a model at the speed
 an earlier run measured…".
+Every figure entering the average — a timed load or the stored seed — is bounded at
+`LoadRate::MAX_MS_PER_GIB` (60 s/GiB, over twice the slowest load the fleet measured):
+kept, one load the machine was suspended through priced and advertised this node's
+cold loads for many loads after, now across restarts too (v0.3.239's pre-release
+review). A stored figure past it is taken in bounded and written back so. Test
+`an_absurd_rate_is_bounded_whether_stored_or_timed`.
 
 **What a test must do.** A routing test that plans through `gather_candidates`
 now sees real load charges: pin rates where the subject is something else
