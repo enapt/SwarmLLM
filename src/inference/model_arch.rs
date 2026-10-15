@@ -137,8 +137,10 @@ impl ModelArch {
     /// down-projection `attn_kv_a_mqa` (the loader asks for `attn_kv_a`); a
     /// V2-Lite layer has `attn_q` and no `attn_q_a` (the loader then asks for
     /// `attn_k`/`attn_v`); files since mid-2025 split `attn_kv_b` into
-    /// `attn_k_b`/`attn_v_b`; and every DeepSeek-V2/V3 file uses YaRN, which the
-    /// engine does not implement. Checked 2026-09-25 against the real header of
+    /// `attn_k_b`/`attn_v_b`; and every DeepSeek-V2/V3 file uses YaRN with a
+    /// `yarn_log_multiplier`, which the MLA branch's own RoPE table does not
+    /// apply (`split::rope::RopeScaling` reads YaRN for the other families,
+    /// #280). Checked 2026-09-25 against the real header of
     /// DeepSeek-Coder-V2-Lite-Instruct. Claiming it let a user, or auto-manage,
     /// fetch gigabytes of a model that then could not load.
     ///

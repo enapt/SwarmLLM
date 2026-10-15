@@ -992,44 +992,59 @@ impl SplitModel {
             None
         };
         // How each layer turns — `split::rope::LayerRope`, the one reading:
-        // a linear scale on every position, and Gemma 3's windowed layers at
-        // a base and scale of their own.
+        // a scaling on every position (linear or YaRN), and Gemma 3's windowed
+        // layers at a base and scaling of their own.
         let layer_rope = super::rope::LayerRope::read(&ct, rope_freq_base);
-        let rope_table = |base: f32, scale: f32| {
-            match &rope_factors {
-                // A position times `scale` is the same angle as each pair's
-                // divisor over `scale`; at 1 the divisors are untouched.
-                Some((factors, attn_factor)) => {
-                    let factors: Vec<f32> = factors.iter().map(|f| f / scale).collect();
+        let rope_table = |base: f32, scaling: &super::rope::RopeScaling| {
+            match (&rope_factors, scaling) {
+                // Plain or linearly scaled RoPE keeps its own builder: at a
+                // scale of 1, the tables every release before built, bit for bit.
+                (None, super::rope::RopeScaling::Linear(scale)) => {
+                    precompute_freqs_cis_scaled(rope_dim, base, *scale, context_length, &device)
+                }
+                // A pair's angle times its multiplier is the same angle as its
+                // divisor over the multiplier; the lifts on cos/sin multiply.
+                // With no scaling, every multiplier and lift is 1 and the
+                // file's divisors are untouched.
+                _ => {
+                    let (multipliers, lift) = scaling.per_pair(base, rope_dim);
+                    let (divisors, attn_factor) = match &rope_factors {
+                        Some((factors, attn_factor)) => (factors.clone(), *attn_factor),
+                        None => (vec![1.0; rope_dim / 2], 1.0),
+                    };
+                    let factors: Vec<f32> = divisors
+                        .iter()
+                        .zip(&multipliers)
+                        .map(|(divisor, multiplier)| divisor / multiplier)
+                        .collect();
                     precompute_freqs_cis_longrope(
                         rope_dim,
                         base,
                         context_length,
                         &factors,
-                        *attn_factor,
+                        attn_factor * lift,
                         &device,
                     )
                 }
-                None => precompute_freqs_cis_scaled(rope_dim, base, scale, context_length, &device),
             }
             .map_err(SwarmError::internal)
         };
-        let (cos, sin) = rope_table(rope_freq_base, layer_rope.scale)?;
+        let (cos, sin) = rope_table(rope_freq_base, &layer_rope.scaling)?;
         let windowed_rope = match layer_rope.windowed {
             Some(w) => {
                 tracing::info!(
                     windowed_base = w.base,
-                    windowed_scale = w.scale,
+                    windowed_scaling = ?w.scaling,
                     base = rope_freq_base,
-                    scale = layer_rope.scale,
+                    scaling = ?layer_rope.scaling,
                     "Sliding-window layers rotate at their own base"
                 );
-                Some((w.window, rope_table(w.base, w.scale)?))
+                Some((w.window, rope_table(w.base, &w.scaling)?))
             }
             None => None,
         };
-        if layer_rope.scale != 1.0 {
-            tracing::info!(scale = layer_rope.scale, "Linear RoPE scaling");
+        if layer_rope.scaling != super::rope::RopeScaling::NONE {
+            tracing::info!(scaling = ?layer_rope.scaling, "RoPE scaling");
         }
         // Where each layer of this segment goes.
         //

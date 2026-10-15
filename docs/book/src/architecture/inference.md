@@ -126,7 +126,7 @@ The RoPE column is llama.cpp's per-architecture choice (`llama_model_rope_type`)
 | **Gemma 3** (text) | Contiguous; windowed layers at their own base, global layers with the file's linear scaling | No | Per-head q/k norm; five layers in six see only the last 512 (1B) or 1,024 (4B and up) positions; no softcapping. Checked against llama.cpp on the 1B and 4B. The vision part is not supported yet |
 | **Phi-3** | Contiguous, Su/YaRN scaling | Yes | Fused QKV/FFN tensors |
 | **Mistral** | Interleaved | No | GQA |
-| **DeepSeek-V2/V3** | Interleaved | No | Not supported yet — recognised and refused (no real file loads; needs YaRN and the current MLA tensor layout) |
+| **DeepSeek-V2/V3** | Interleaved | No | Not supported yet — recognised and refused (no real file loads; needs YaRN on its MLA layers and the current MLA tensor layout) |
 | **GLM-4** | Interleaved | No | Partial RoPE, extreme GQA (16:1) |
 | **Starcoder2** | Contiguous | Yes | Not supported yet — recognised and refused (a LayerNorm model with biases the loader does not read; no real file loads) |
 

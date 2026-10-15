@@ -11,7 +11,7 @@ pub(super) fn precompute_freqs_cis(
 }
 
 /// [`precompute_freqs_cis`] with every position multiplied by `freq_scale`
-/// ([`LayerRope::scale`]) — llama.cpp's `freq_scale` with no YaRN ramp. A scale
+/// ([`RopeScaling::Linear`]) — llama.cpp's `freq_scale` with no YaRN ramp. A scale
 /// of 1 is plain RoPE, bit for bit.
 pub(super) fn precompute_freqs_cis_scaled(
     head_dim: usize,
@@ -100,15 +100,14 @@ use super::SlidingWindow;
 /// How each layer of a model rotates, read as llama.cpp reads it — the ONE
 /// reading the loader builds its RoPE tables from (FUTURE_WORK #115 (1)).
 ///
-/// - **Linear scaling** (`llama-model.cpp`, the shared hparams):
+/// - **Scaling** ([`RopeScaling`], `llama-model.cpp`'s shared hparams):
 ///   `{arch}.rope.scaling.type` defaults to `linear`, and every position is
 ///   multiplied by `1 / rope.scaling.factor` (or the older key
 ///   `rope.scale_linear`). Gemma 3 4B-27B declare a factor of 8. Read without
 ///   it, their global layers turned 8x too fast at every position past the
-///   first. YaRN scales by the factor too but ramps it per dimension
-///   (`rope_yarn`); this build does not implement the ramp, so a file that
-///   declares YaRN is served unscaled and says so at load, rather than
-///   half-applied (FUTURE_WORK #280).
+///   first. `yarn` scales by the same factor but ramps it per dimension and
+///   lifts cos/sin (FUTURE_WORK #280); any other type is served unscaled and
+///   says so at load.
 /// - **Windowed layers' own rotation** (`llama_model::get_rope_freq_base` /
 ///   `get_rope_freq_scale`, chosen by `is_swa(il)`): Gemma 3's local layers
 ///   turn at base 10,000 (`rope.freq_base_swa` when the file names one) and
@@ -123,18 +122,91 @@ use super::SlidingWindow;
 /// `SWARMLLM_LAYER_ROPE=0` gives windowed layers the global tables.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LayerRope {
-    /// What every non-windowed layer multiplies its positions by.
-    pub(crate) scale: f32,
+    /// How every non-windowed layer's angles are scaled.
+    pub(crate) scaling: RopeScaling,
     /// The windowed layers' rotation, where it differs from the rest.
     pub(crate) windowed: Option<WindowedRope>,
 }
 
-/// [`LayerRope::windowed`]: the layers, and the base and scale they turn at.
+/// [`LayerRope::windowed`]: the layers, and the base and scaling they turn at.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WindowedRope {
     pub(crate) window: SlidingWindow,
     pub(crate) base: f32,
-    pub(crate) scale: f32,
+    pub(crate) scaling: RopeScaling,
+}
+
+/// How a layer's angles are scaled — llama.cpp's `freq_scale`, alone or with
+/// YaRN's ramp ([`Self::per_pair`] is what the table builder applies).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RopeScaling {
+    /// Every angle multiplied by this; 1 is plain RoPE.
+    Linear(f32),
+    Yarn(Yarn),
+}
+
+/// YaRN as llama.cpp applies it (`rope_yarn` in `ggml-cpu/ops.cpp`, the
+/// factors in `llama_context`'s constructor at master `4b1a27f`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Yarn {
+    /// `1 / rope.scaling.factor`.
+    pub(crate) freq_scale: f32,
+    /// `rope.scaling.original_context_length`, else the file's context
+    /// length (`n_ctx_orig_yarn`).
+    pub(crate) original_context: f32,
+    /// `rope.scaling.attn_factor` (`hparams.rope_attn_factor`), default 1.
+    pub(crate) attn_factor: f32,
+}
+
+impl RopeScaling {
+    /// No scaling: the table builder's bit-identical plain path.
+    pub(crate) const NONE: Self = Self::Linear(1.0);
+
+    /// What each rotated pair's angle is multiplied by, at `base` over
+    /// `rope_dim` rotated dimensions, and what cos and sin are multiplied by.
+    ///
+    /// YaRN, per `ggml_rope_yarn_corr_dims` and `rope_yarn` with llama.cpp's
+    /// defaults for the families here (`beta_fast` 32, `beta_slow` 1,
+    /// `ext_factor` 1 — the keys that change them are read only by families
+    /// this build does not run): the pairs that turn fast enough to complete
+    /// many turns inside the original context keep their angle, the slow ones
+    /// take `freq_scale`, a linear ramp between. cos/sin are lifted by
+    /// `1 + 0.1 ln(factor)`: master's context sets `yarn_attn_factor` to
+    /// `get_mscale(factor) / (1 + 0.1 ln(factor))` = 1 for a factor above 1 and
+    /// `rope_yarn` multiplies by `1 + 0.1 ln(1 / freq_scale)`; 0.3.16 reaches
+    /// the same product with an attention factor of 1. DeepSeek-2's
+    /// `yarn_log_multiplier`, the one case where the two differ, is not read
+    /// (the family is refused, #116).
+    pub(crate) fn per_pair(&self, base: f32, rope_dim: usize) -> (Vec<f32>, f32) {
+        let pairs = rope_dim / 2;
+        match self {
+            Self::Linear(scale) => (vec![*scale; pairs], 1.0),
+            Self::Yarn(y) => {
+                let dims = rope_dim as f32;
+                let corr_dim = |rotations: f32| {
+                    dims * (y.original_context / (rotations * 2.0 * std::f32::consts::PI)).ln()
+                        / (2.0 * base.ln())
+                };
+                let low = corr_dim(32.0).floor().max(0.0);
+                let high = corr_dim(1.0).ceil().min(dims - 1.0);
+                let multipliers = (0..pairs)
+                    .map(|pair| {
+                        // `rope_yarn_ramp(low, high, i0)` with `i0 / 2` = the pair.
+                        let ramp =
+                            1.0 - ((pair as f32 - low) / (high - low).max(0.001)).clamp(0.0, 1.0);
+                        y.freq_scale * (1.0 - ramp) + ramp
+                    })
+                    .collect();
+                let factor = 1.0 / y.freq_scale;
+                let lift = if factor > 1.0 {
+                    1.0 + 0.1 * factor.ln()
+                } else {
+                    1.0
+                };
+                (multipliers, y.attn_factor * lift)
+            }
+        }
+    }
 }
 
 impl LayerRope {
@@ -147,8 +219,8 @@ impl LayerRope {
                 .get(&format!("{arch}.{key}"))
                 .and_then(|v| v.to_f32().ok())
         };
-        let scale = if std::env::var("SWARMLLM_ROPE_SCALING").as_deref() == Ok("0") {
-            1.0
+        let scaling = if std::env::var("SWARMLLM_ROPE_SCALING").as_deref() == Ok("0") {
+            RopeScaling::NONE
         } else {
             let kind = ct
                 .metadata
@@ -159,8 +231,18 @@ impl LayerRope {
                 .or_else(|| number("rope.scale_linear"))
                 .filter(|f| f.is_finite() && *f > 0.0);
             match (kind, factor) {
-                (_, None) | ("none", _) => 1.0,
-                ("linear", Some(factor)) => 1.0 / factor,
+                (_, None) | ("none", _) => RopeScaling::NONE,
+                ("linear", Some(factor)) => RopeScaling::Linear(1.0 / factor),
+                ("yarn", Some(factor)) => RopeScaling::Yarn(Yarn {
+                    freq_scale: 1.0 / factor,
+                    original_context: ct
+                        .metadata
+                        .get(&format!("{arch}.rope.scaling.original_context_length"))
+                        .or_else(|| ct.metadata.get(&format!("{arch}.context_length")))
+                        .and_then(|v| v.to_u32().ok())
+                        .map_or(4096.0, |n| n as f32),
+                    attn_factor: number("rope.scaling.attn_factor").unwrap_or(1.0),
+                }),
                 (kind, Some(factor)) => {
                     tracing::warn!(
                         scaling = kind,
@@ -168,7 +250,7 @@ impl LayerRope {
                         "This model declares a RoPE scaling this build does not implement — \
                          serving it unscaled, which drifts from the model on long conversations"
                     );
-                    1.0
+                    RopeScaling::NONE
                 }
             }
         };
@@ -177,17 +259,20 @@ impl LayerRope {
             .flatten()
             .and_then(|window| {
                 let named = number("rope.freq_base_swa");
-                let (base, windowed_scale) = match arch.as_str() {
-                    "gemma3" => (named.unwrap_or(10_000.0), 1.0),
-                    _ => (named.unwrap_or(global_base), scale),
+                // Gemma 3's windowed layers are never scaled (llama.cpp's
+                // `rope_freq_scale_train_swa` = 1, and `rope_yarn` at a scale of
+                // 1 changes no angle and lifts nothing).
+                let (base, windowed_scaling) = match arch.as_str() {
+                    "gemma3" => (named.unwrap_or(10_000.0), RopeScaling::NONE),
+                    _ => (named.unwrap_or(global_base), scaling.clone()),
                 };
-                (base != global_base || windowed_scale != scale).then_some(WindowedRope {
+                (base != global_base || windowed_scaling != scaling).then_some(WindowedRope {
                     window,
                     base,
-                    scale: windowed_scale,
+                    scaling: windowed_scaling,
                 })
             });
-        Self { scale, windowed }
+        Self { scaling, windowed }
     }
 }
 
@@ -366,9 +451,9 @@ mod tests {
             ]),
             1_000_000.0,
         );
-        assert_eq!(r.scale, 0.125);
+        assert_eq!(r.scaling, RopeScaling::Linear(0.125));
         let w = r.windowed.expect("the windowed layers turn differently");
-        assert_eq!((w.base, w.scale), (10_000.0, 1.0));
+        assert_eq!((w.base, w.scaling), (10_000.0, RopeScaling::NONE));
         assert!(w.window.for_layer(4).is_some() && w.window.for_layer(5).is_none());
 
         // The 1B: no factor, and still a base of its own on windowed layers.
@@ -376,7 +461,7 @@ mod tests {
             &gemma3(vec![("gemma3.attention.sliding_window", Value::U32(512))]),
             1_000_000.0,
         );
-        assert_eq!(r.scale, 1.0);
+        assert_eq!(r.scaling, RopeScaling::NONE);
         assert_eq!(r.windowed.map(|w| w.base), Some(10_000.0));
 
         // A base the file names wins.
@@ -394,7 +479,7 @@ mod tests {
             &gemma3(vec![("gemma3.rope.scaling.factor", Value::F32(8.0))]),
             1_000_000.0,
         );
-        assert_eq!((r.scale, r.windowed), (0.125, None));
+        assert_eq!((r.scaling, r.windowed), (RopeScaling::Linear(0.125), None));
     }
 
     /// Gemma 2's windowed layers rotate as the rest (`llama_model_gemma2`
@@ -403,7 +488,7 @@ mod tests {
     #[test]
     fn gemma2_windowed_layers_rotate_as_the_rest_unless_the_file_names_a_base() {
         let r = LayerRope::read(&header("gemma2", vec![]), 10_000.0);
-        assert_eq!((r.scale, r.windowed), (1.0, None));
+        assert_eq!((r.scaling, r.windowed), (RopeScaling::NONE, None));
         let r = LayerRope::read(
             &header(
                 "gemma2",
@@ -411,35 +496,90 @@ mod tests {
             ),
             10_000.0,
         );
-        assert_eq!(r.windowed.map(|w| (w.base, w.scale)), Some((5_000.0, 1.0)));
+        assert_eq!(
+            r.windowed.map(|w| (w.base, w.scaling)),
+            Some((5_000.0, RopeScaling::NONE))
+        );
     }
 
     /// llama.cpp's reading for any family: no type means linear, the older
-    /// `rope.scale_linear` key counts, `none` scales nothing — and YaRN, whose
-    /// per-dimension ramp is not implemented, is served unscaled rather than
-    /// half-applied (FUTURE_WORK #280).
+    /// `rope.scale_linear` key counts, `none` scales nothing, `yarn` carries
+    /// its original context (the file's context when it names none), and a
+    /// type this build does not implement is served unscaled.
     #[test]
-    fn only_linear_scaling_is_applied() {
-        let scale =
-            |keys: Vec<(&str, Value)>| LayerRope::read(&header("llama", keys), 10_000.0).scale;
-        assert_eq!(scale(vec![]), 1.0);
+    fn linear_and_yarn_scaling_are_read_and_nothing_else() {
+        let scaling =
+            |keys: Vec<(&str, Value)>| LayerRope::read(&header("llama", keys), 10_000.0).scaling;
+        assert_eq!(scaling(vec![]), RopeScaling::NONE);
         assert_eq!(
-            scale(vec![("llama.rope.scaling.factor", Value::F32(4.0))]),
-            0.25
+            scaling(vec![("llama.rope.scaling.factor", Value::F32(4.0))]),
+            RopeScaling::Linear(0.25)
         );
         assert_eq!(
-            scale(vec![("llama.rope.scale_linear", Value::F32(2.0))]),
-            0.5
+            scaling(vec![("llama.rope.scale_linear", Value::F32(2.0))]),
+            RopeScaling::Linear(0.5)
         );
-        let typed = |kind: &str| {
-            scale(vec![
+        let typed = |kind: &str, extra: Vec<(&str, Value)>| {
+            let mut keys = vec![
                 ("llama.rope.scaling.type", Value::String(kind.into())),
                 ("llama.rope.scaling.factor", Value::F32(4.0)),
-            ])
+                ("llama.context_length", Value::U32(131_072)),
+            ];
+            keys.extend(extra);
+            scaling(keys)
         };
-        assert_eq!(typed("linear"), 0.25);
-        assert_eq!(typed("none"), 1.0);
-        assert_eq!(typed("yarn"), 1.0);
+        assert_eq!(typed("linear", vec![]), RopeScaling::Linear(0.25));
+        assert_eq!(typed("none", vec![]), RopeScaling::NONE);
+        assert_eq!(typed("longrope", vec![]), RopeScaling::NONE);
+        let yarn = |original: f32| {
+            RopeScaling::Yarn(Yarn {
+                freq_scale: 0.25,
+                original_context: original,
+                attn_factor: 1.0,
+            })
+        };
+        assert_eq!(typed("yarn", vec![]), yarn(131_072.0), "the file's context");
+        assert_eq!(
+            typed(
+                "yarn",
+                vec![(
+                    "llama.rope.scaling.original_context_length",
+                    Value::U32(32_768)
+                )]
+            ),
+            yarn(32_768.0)
+        );
+    }
+
+    /// YaRN on Qwen3's documented 128K setting (factor 4, original context
+    /// 32,768, base 1,000,000, 128 rotated dimensions), worked by hand from
+    /// `ggml_rope_yarn_corr_dims`: the ramp runs from pair
+    /// floor(128 ln(32768 / 64π) / 2 ln 1e6) = 23 to
+    /// ceil(128 ln(32768 / 2π) / 2 ln 1e6) = 40. Pairs up to 23 keep their
+    /// angle, pairs from 40 take the factor, pair 31 is 9/17 of the way
+    /// back from it, and cos/sin are lifted by 1 + 0.1 ln 4.
+    #[test]
+    fn yarn_ramps_the_slow_pairs_to_the_factor() {
+        let qwen = RopeScaling::Yarn(Yarn {
+            freq_scale: 0.25,
+            original_context: 32_768.0,
+            attn_factor: 1.0,
+        });
+        let (m, lift) = qwen.per_pair(1_000_000.0, 128);
+        assert_eq!(m.len(), 64);
+        assert!(m[..=23].iter().all(|&x| x == 1.0), "{:?}", &m[..=23]);
+        assert!(m[40..].iter().all(|&x| x == 0.25), "{:?}", &m[40..]);
+        let ramp = 9.0 / 17.0;
+        assert!(
+            (m[31] - (0.25 * (1.0 - ramp) + ramp)).abs() < 1e-6,
+            "{}",
+            m[31]
+        );
+        assert!(m.windows(2).all(|w| w[1] <= w[0]), "monotone");
+        assert!((lift - (1.0 + 0.1 * 4f32.ln())).abs() < 1e-6, "{lift}");
+        // No scaling: every multiplier and the lift are 1.
+        let (m, lift) = RopeScaling::NONE.per_pair(1_000_000.0, 128);
+        assert!(m.iter().all(|&x| x == 1.0) && lift == 1.0);
     }
 
     #[test]

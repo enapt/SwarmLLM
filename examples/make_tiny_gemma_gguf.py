@@ -13,7 +13,9 @@ logic error. What a real file cannot show quickly:
 - ARCH=gemma3 (#115 (1)): per-head Q/K norms, no soft-capping, the window on five
   layers in six, the windowed layers' RoPE at base 10,000 against the file's
   1,000,000, and linear scaling ROPE_FACTOR (default 8) on the global layers —
-  the real 4B's shape at 40 tokens.
+  the real 4B's shape at 40 tokens; ROPE_TYPE=yarn (#280) declares YaRN instead,
+  over an original context of ORIG_CTX (default 16), so the ramp turns inside a
+  40-token prompt.
 
 Usage:
 
@@ -38,6 +40,11 @@ Verified 2026-10-15 (#279), N_LAYER=46: with QK_STD=0.25 worst cosine 0.99987
 (0.727 with SWARMLLM_QUERY_SCALE=0). With the default QK_STD=0.5 only 0.966:
 rounding amplified over 46 decisive layers, not logic (llama.cpp with an f32 KV
 cache: 0.992).
+
+Verified 2026-10-16 (#115 (1), #280), ARCH=gemma3 QK_STD=0.25: worst cosine
+1.000000 whole, in 5-token pieces and split at layer 7 (0.987 with
+SWARMLLM_ROPE_SCALING=0, 0.892 with SWARMLLM_LAYER_ROPE=0, 0.601 with
+SWARMLLM_SLIDING_WINDOW=0); with ROPE_TYPE=yarn 1.000000 at ORIG_CTX 16 and 4096.
 """
 import os
 import sys
@@ -53,6 +60,8 @@ arch = os.environ.get("ARCH", "gemma2")
 assert arch in ("gemma2", "gemma3"), arch
 n_layer = int(os.environ.get("N_LAYER", 46 if arch == "gemma2" else 12))
 rope_factor = float(os.environ.get("ROPE_FACTOR", 8.0))
+rope_type = os.environ.get("ROPE_TYPE", "linear")
+assert rope_type in ("linear", "yarn"), rope_type
 swa = int(os.environ.get("SWA", 8))
 # QK_STD: the spread of the query and key weights. 0.5 makes attention decisive, so a wrong
 # scale shows at once; it also amplifies rounding over 46 layers (llama.cpp keeps its KV
@@ -89,8 +98,10 @@ if arch == "gemma2":
     w.add_final_logit_softcapping(30.0)
 else:
     w.add_rope_freq_base(1_000_000.0)
-    w.add_rope_scaling_type(gguf.RopeScalingType.LINEAR)
+    w.add_rope_scaling_type(gguf.RopeScalingType.YARN if rope_type == "yarn" else gguf.RopeScalingType.LINEAR)
     w.add_rope_scaling_factor(rope_factor)
+    if rope_type == "yarn":
+        w.add_rope_scaling_orig_ctx_len(int(os.environ.get("ORIG_CTX", 16)))
 w.add_vocab_size(n_vocab)
 w.add_tokenizer_model("llama")
 w.add_token_list(pieces)

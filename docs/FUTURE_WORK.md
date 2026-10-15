@@ -1704,8 +1704,9 @@ in `~/swarmllm-ref/gemma4/`).
 DeepSeek-V2/V2-Lite/V3/R1, Kimi-K2, GLM-4.7-Flash. The loader's MLA branch, `MlaWeights` and
 `LayerVariant::DeepSeek` stay as the starting point. A real file needs: (1) the
 `attn_kv_a_mqa` tensor name; (2) per-layer MLA detection when `attn_q_a` is absent
-(V2-Lite); (3) the split `attn_k_b`/`attn_v_b` layout and `key_length_mla` keys; (4) YaRN RoPE
-scaling and attention mscale (the engine has none); (5) routing — `expert_weights_norm`
+(V2-Lite); (3) the split `attn_k_b`/`attn_v_b` layout and `key_length_mla` keys; (4) YaRN on
+the MLA branch, which builds its own RoPE table, with the `yarn_log_multiplier` mscale (YaRN
+itself is read since #280: `split::rope::RopeScaling`); (5) routing — `expert_weights_norm`
 default false, `expert_weights_scale`, the `exp_probs_b` bias, expert groups, the gating
 function. Verify on a tiny GGUF of each layout, then flip `is_supported` and review the MLA
 projections for `arch_supports_hybrid`.
@@ -1731,21 +1732,6 @@ Needs a LayerNorm variant (mean-subtracted, with bias), bias sites on `attn_q/k/
 `layer_norm_rms_epsilon` today), no `ffn_gate` (GELU MLP), tied output. Verify on a tiny GGUF
 against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hybrid` (it lists
 StarCoder2, inert while refused).
-
-#### #280 — A model that declares YaRN RoPE scaling is served unscaled
-`P2` · model-support · **OPEN** — 2026-10-16
-
-llama.cpp reads `{arch}.rope.scaling.type = yarn` with `rope.scaling.factor` and
-`rope.scaling.original_context_length` and turns each pair at a mix of the scaled and the plain
-angle (`rope_yarn` in `ggml-cpu/ops.cpp`: a ramp between `ggml_rope_yarn_corr_dims` at
-beta_fast 32 / beta_slow 1, `ext_factor` 1), with cos/sin multiplied by `1 + 0.1 ln(factor)`.
-`split::rope::LayerRope::read` applies LINEAR scaling only (Gemma 3, #115 (1)) and serves a YaRN
-file unscaled with a load-time warning: applying the factor without the ramp would be wrong at
-every position, unscaled is wrong only on the dimensions YaRN interpolates. Who it reaches: Qwen2 /
-Qwen3 uploads re-converted for long context (the "-128K" GGUFs; Qwen's own GGUFs declare none)
-and DeepSeek-2 (#116 (4)). The tables are precomputed (`precompute_freqs_cis_*`), so it is a table
-builder plus the factor on cos/sin; verify against llama.cpp 0.3.16 on a tiny file carrying the
-keys.
 
 ### Memory and admission
 
@@ -2394,7 +2380,19 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1))
+**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280)
+- #280 — **a model file that declares YaRN context extension is served as llama.cpp serves it.**
+  Before, such a file (Qwen2/Qwen3 uploads re-converted for 128K context) loaded with plain RoPE:
+  the slow dimensions turned 4x too fast and the attention ran unlifted, at EVERY length. Now
+  `split::rope::RopeScaling::Yarn` applies llama.cpp's ramp (`ggml_rope_yarn_corr_dims`, beta 32 /
+  1) and lifts cos/sin by 1 + 0.1 ln(factor), into the same table builder. Qwen3-1.7B Q8_0 with
+  Qwen's documented keys (factor 4, original context 32,768) against llama.cpp 0.3.16: worst
+  cosine 0.99943 at 300 tokens (the plain file: 0.99971), median 0.99988 at 1,500; with
+  `SWARMLLM_ROPE_SCALING=0` (the old behaviour) 0.971 / 0.966. The 1,500 run's one low position
+  (0.99666) moves to 0.99888 with llama.cpp's KV cache in f32, and a tiny f32 file with the ramp
+  across 5 of 16 pairs agrees at 1.000000 (0.997 / 0.987 without). DeepSeek-2's log multiplier
+  stays with #116. `docs/invariants/inference.md` § "A file's RoPE scaling is read for every
+  family".
 - #115 (1) — **Gemma 3 runs (text).** The `gemma3` family loads, splits and is offered for
   download: Gemma 2's layout plus per-head Q/K norms, no soft-capping, a window on five layers in
   six (512 positions on the 1B, 1,024 from the 4B up), and a rotation per layer — the windowed

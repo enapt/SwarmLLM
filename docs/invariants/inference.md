@@ -4288,6 +4288,38 @@ Tests: `gemma3_global_layers_scale_and_windowed_layers_turn_at_their_own_base`,
 tables), `gemma3_windows_five_layers_in_six_only_when_the_file_names_a_window`,
 `only_gemma3_27b_scales_its_queries_by_the_model_width`.
 
+## A file's RoPE scaling is read for every family (2026-10-16, FUTURE_WORK #280)
+
+llama.cpp reads `rope.scaling.type` (default `linear`), `rope.scaling.factor` and
+`rope.scaling.original_context_length` in the hparams EVERY family shares (gotcha #865), so a
+file's scaling applies whatever its family. `split::rope::RopeScaling` is the one reading:
+`Linear(1 / factor)`, or `Yarn` — per `ggml_rope_yarn_corr_dims` and `rope_yarn`, the pairs
+below floor(corr(32)) keep their angle, those from ceil(corr(1)) take `1 / factor`, a linear ramp
+between, and cos/sin are lifted by `1 + 0.1 ln(factor)` (times `rope.scaling.attn_factor`). Master
+gets the lift as `get_mscale(factor) / (1 + 0.1 ln factor)` in `llama_context` times
+`rope_yarn`'s own `1 + 0.1 ln(1 / freq_scale)`; 0.3.16 as 1 times the same — one product. The
+beta / `ext_factor` / `yarn_attn_factor` keys are read only by families this build does not
+run (grok, mistral3), and DeepSeek-2's `yarn_log_multiplier`, where master and 0.3.16 differ,
+stays with #116. `RopeScaling::per_pair` turns either into per-pair multipliers and a lift that
+the existing factor-table builder takes; with no scaling it is the old builder, bit for bit.
+Any other type is served unscaled with a warning at load.
+
+**Measured** against llama.cpp 0.3.16, same binary, `SWARMLLM_ROPE_SCALING=0` = the old path:
+
+| file | tokens | scaling read | `=0` |
+|---|---|---|---|
+| Qwen3-1.7B Q8_0, unchanged (no scaling — the baseline) | 300 / 1,500 | 0.99971 / 0.99946 | — |
+| the same with Qwen's YaRN keys (factor 4, original 32,768) | 300 | **0.99943** (median 0.99985) | 0.97144 |
+| the same | 1,500 | **0.99666** (median 0.99988) | 0.96603 |
+| tiny f32 Gemma 3, YaRN factor 8, original 16 | 40 | **1.000000**, whole and split at 7 | 0.98727 |
+| the same, original 4,096 (ramp across pairs 3-8 of 16) | 40 | **1.000000** | 0.99711 |
+
+The 1,500 run's one low position (1488, the plain file's worst position too) is the
+reference's rounding: with llama.cpp's KV cache in f32 (`REF_KV_F32=1`) it reads 0.99888, and
+reading our prompt in one pass instead of 512-token chunks changes nothing. Tests:
+`linear_and_yarn_scaling_are_read_and_nothing_else`, `yarn_ramps_the_slow_pairs_to_the_factor`
+(Qwen3's 128K setting worked by hand: ramp from pair 23 to 40, lift 1 + 0.1 ln 4).
+
 ## A model that cannot write replies is refused off its header (2026-10-15)
 
 A tester's fresh node offered `Qwen/Qwen3-Embedding-0.6B-GGUF` in the HuggingFace

@@ -701,7 +701,7 @@ The SplitModel loader detects the model architecture from GGUF metadata
 
 | Feature | Llama | Llama 4 | Qwen2 | Qwen 3.5 | Gemma/Gemma2 | Gemma 3 | Phi-3 | Mistral | Starcoder2 | DeepSeek-V2/V3 | GLM-4 |
 |---------|-------|---------|-------|-----------|--------------|---------|-------|---------|------------|----------------|-------|
-| RoPE variant | Interleaved (`rope_i`) | Interleaved (iRoPE) | Contiguous (`rope`) | IMROPE, sections [11,11,10,0] over 64 of 256 dims (text positions only) | Contiguous | Contiguous; per layer (`split::rope::LayerRope`): windowed layers base 10,000 unscaled, global layers base 1,000,000 × linear factor (8 from the 4B up) | Su/YaRN | Interleaved | Contiguous | Interleaved (MLA split; YaRN NOT implemented, #280) | Interleaved (partial) |
+| RoPE variant | Interleaved (`rope_i`) | Interleaved (iRoPE) | Contiguous (`rope`) | IMROPE, sections [11,11,10,0] over 64 of 256 dims (text positions only) | Contiguous | Contiguous; per layer (`split::rope::LayerRope`): windowed layers base 10,000 unscaled, global layers base 1,000,000 × linear factor (8 from the 4B up) | Su/YaRN | Interleaved | Contiguous | Interleaved (MLA split; its own RoPE table, without YaRN — #116) | Interleaved (partial) |
 | QKV biases | None | None | Yes | None | None | None | Yes | None | Yes | None (MLA projections) | Yes |
 | Attention | Standard MHA/GQA | Standard GQA | Standard MHA | Gated: 3 of 4 layers Gated DeltaNet (recurrent state), every 4th softmax attention with a per-head output gate | Standard MHA; Gemma 2: 4,096-position window on even layers | GQA, per-head Q/K RMS norm before RoPE; window (512 / 1,024) on 5 layers in 6 | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) | Extreme GQA (16:1) |
 | FFN | Dense | Dense + MoE (mixed) | Dense | Dense, or MoE (top-k) + sigmoid-gated shared expert (`qwen35moe`) | Dense | Dense (GELU) | Dense | Dense | Dense | MoE (top-k) + shared | Dense |
@@ -718,7 +718,8 @@ shard downloads and auto-manage all refuse it — `docs/FUTURE_WORK.md` #116). N
 file llama.cpp's converter writes loads with the code below: it asks for
 `attn_kv_a` where every file has `attn_kv_a_mqa`, treats a V2-Lite layer (which
 has `attn_q`, no `attn_q_a`) as plain attention, reads neither `attn_k_b`/`attn_v_b`
-(files since mid-2025) nor YaRN, and routes experts without llama.cpp's defaults.
+(files since mid-2025) nor YaRN on its MLA branch, and routes experts without llama.cpp's
+defaults.
 The code is kept as the starting point for #116 (its MLA math is unit-tested); what
 follows describes it, not a working model.
 
