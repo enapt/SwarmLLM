@@ -161,11 +161,13 @@ pub(crate) fn arch_supports_hybrid(arch: &crate::inference::model_arch::ModelArc
     use crate::inference::model_arch::ModelArch as A;
     match arch {
         // Dense-family: the per-layer loop loads everything through the
-        // shadowed `device`, and takes its RoPE from the shared `cos`/`sin`.
+        // shadowed `device`, and takes its RoPE from `rope_for` — which is
+        // also where Gemma 3's windowed layers get their own tables.
         A::Llama
         | A::Qwen2
         | A::Gemma
         | A::Gemma2
+        | A::Gemma3
         | A::Phi3
         | A::Mistral
         | A::Starcoder2
@@ -215,12 +217,23 @@ pub(crate) struct LayerPlacement {
     /// on a plain tensor is a copy, and these are small next to the weights.
     rope_gpu: Option<(Tensor, Tensor)>,
     rope_cpu: (Tensor, Tensor),
+    /// The tables of the sliding-window layers, where those rotate
+    /// differently from the rest (Gemma 3, [`super::rope::LayerRope`]);
+    /// `None` for every other model, whose layers all take the ones above.
+    windowed_rope: Option<WindowedTables>,
     /// How many of the segment's card-held layers, from the start, keep their
     /// routed experts in the machine's memory while everything else of theirs
     /// — attention, its cache, the router, a shared expert — stays on the card
     /// (#138 (3), llama.cpp's `--n-cpu-moe`). 0 for none, and always 0 without
     /// a card. A layer already on the processor holds its experts there anyway.
     experts_on_the_processor: usize,
+}
+
+/// [`LayerPlacement::with_windowed_rope`]'s tables and the layers they are for.
+struct WindowedTables {
+    window: super::SlidingWindow,
+    gpu: Option<(Tensor, Tensor)>,
+    cpu: (Tensor, Tensor),
 }
 
 impl LayerPlacement {
@@ -244,6 +257,7 @@ impl LayerPlacement {
                 None
             },
             rope_cpu: (cos, sin),
+            windowed_rope: None,
             experts_on_the_processor: 0,
         })
     }
@@ -264,8 +278,28 @@ impl LayerPlacement {
             cpu: Device::Cpu,
             rope_gpu: Some((cos, sin)),
             rope_cpu,
+            windowed_rope: None,
             experts_on_the_processor: 0,
         })
+    }
+
+    /// The RoPE tables of the layers `window` names, on each device a layer
+    /// can go to. [`Self::rope_for`] hands them to those layers — the one
+    /// place a layer's tables come from, so no per-architecture loop can
+    /// rotate a windowed layer with the global ones.
+    pub(crate) fn with_windowed_rope(
+        mut self,
+        window: super::SlidingWindow,
+        cos: Tensor,
+        sin: Tensor,
+    ) -> candle_core::Result<Self> {
+        let gpu = match &self.gpu {
+            Some(gpu) => Some((cos.to_device(gpu)?, sin.to_device(gpu)?)),
+            None => None,
+        };
+        let cpu = (cos.to_device(&self.cpu)?, sin.to_device(&self.cpu)?);
+        self.windowed_rope = Some(WindowedTables { window, gpu, cpu });
+        Ok(self)
     }
 
     /// The routed experts of the first `n` card-held layers kept in the
@@ -325,9 +359,13 @@ impl LayerPlacement {
 
     /// The RoPE tables for that layer, already on its device.
     pub(crate) fn rope_for(&self, abs_layer: usize) -> (Tensor, Tensor) {
-        match (&self.rope_gpu, self.on_gpu(abs_layer)) {
+        let (gpu, cpu) = match &self.windowed_rope {
+            Some(w) if w.window.for_layer(abs_layer).is_some() => (&w.gpu, &w.cpu),
+            _ => (&self.rope_gpu, &self.rope_cpu),
+        };
+        match (gpu, self.on_gpu(abs_layer)) {
             (Some((c, s)), true) => (c.clone(), s.clone()),
-            _ => (self.rope_cpu.0.clone(), self.rope_cpu.1.clone()),
+            _ => (cpu.0.clone(), cpu.1.clone()),
         }
     }
 
@@ -528,6 +566,40 @@ mod tests {
             .with_experts_on_the_processor(2);
         assert!(!none.experts_in_ram(0));
         assert!(none.card_beside_the_processor(4).is_none());
+    }
+
+    /// Gemma 3: the windowed layers take their own tables, on whichever
+    /// device each layer went to, and every sixth layer the global ones.
+    #[test]
+    fn windowed_layers_take_their_own_rope_tables() {
+        use crate::inference::split::gguf_meta::sliding_window_tests::header;
+        let global = Tensor::zeros((4, 2), candle_core::DType::F32, &Device::Cpu).unwrap();
+        let windowed = Tensor::ones((4, 2), candle_core::DType::F32, &Device::Cpu).unwrap();
+        let window = super::super::SlidingWindow::from_file(&header(
+            "gemma3",
+            vec![(
+                "gemma3.attention.sliding_window",
+                candle_core::quantized::gguf_file::Value::U32(512),
+            )],
+        ))
+        .unwrap();
+        // `Device::Cpu` stands in for the card, as above: layers 0-2 "on the card".
+        let p = LayerPlacement::split(0, Device::Cpu, 3, global.clone(), global)
+            .unwrap()
+            .with_windowed_rope(window, windowed.clone(), windowed)
+            .unwrap();
+        let first = |layer: usize| {
+            p.rope_for(layer)
+                .0
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()[0]
+        };
+        for layer in 0..12 {
+            let want = if layer % 6 == 5 { 0.0 } else { 1.0 };
+            assert_eq!(first(layer), want, "layer {layer}");
+        }
     }
 
     #[test]

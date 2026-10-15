@@ -45,8 +45,12 @@ n_ctx = int(os.environ.get("N_CTX", max(64, len(tokens) + 8)))
 # whose logits are read as llama.cpp leaves them. REF_ALL_POSITIONS=1 keeps the
 # one-pass reading.
 step = first > 0 and os.environ.get("REF_ALL_POSITIONS") != "1"
+# REF_KV_F32=1 keeps llama.cpp's KV cache in f32 (GGML_TYPE_F32 = 0) instead of its default
+# f16 — the control for "is the residual llama.cpp's own rounding": on a model whose
+# agreement sits just under COS_MIN, run both and see which side moves (gotcha #864).
+kv = {"type_k": 0, "type_v": 0} if os.environ.get("REF_KV_F32") == "1" else {}
 llm = Llama(model_path=gguf, n_ctx=n_ctx, logits_all=not step,
-            n_gpu_layers=0, n_threads=4, verbose=False)
+            n_gpu_layers=0, n_threads=4, verbose=False, **kv)
 if step:
     llm.eval(tokens[:first])
     rows = []

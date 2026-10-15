@@ -13,6 +13,10 @@ pub enum ModelArch {
     Gemma,
     /// Google Gemma 2 — different RmsNorm (+1), Gelu activation, attention logit soft-capping
     Gemma2,
+    /// Google Gemma 3 (text) — Gemma 2's layout with per-head Q/K norms, no
+    /// soft-capping, five sliding-window layers to every global one, and a
+    /// second RoPE on the windowed layers (`split::rope::LayerRope`)
+    Gemma3,
     /// Microsoft Phi-3/3.5 — SuRoPE scaling, partial rotary embedding
     Phi3,
     /// Mistral (when explicitly tagged, most Mistral GGUFs use "llama" arch)
@@ -44,6 +48,7 @@ impl ModelArch {
             "qwen2" | "qwen3" | "qwen2moe" | "qwen3moe" => ModelArch::Qwen2,
             "gemma" => ModelArch::Gemma,
             "gemma2" => ModelArch::Gemma2,
+            "gemma3" => ModelArch::Gemma3,
             "phi3" => ModelArch::Phi3,
             "mistral" => ModelArch::Mistral,
             "starcoder2" => ModelArch::Starcoder2,
@@ -105,14 +110,23 @@ impl ModelArch {
     /// Default activation function for this architecture's MLP.
     pub(crate) fn default_activation(&self) -> Activation {
         match self {
-            ModelArch::Gemma | ModelArch::Gemma2 | ModelArch::Starcoder2 => Activation::Gelu,
+            ModelArch::Gemma | ModelArch::Gemma2 | ModelArch::Gemma3 | ModelArch::Starcoder2 => {
+                Activation::Gelu
+            }
             _ => Activation::SiLU,
         }
     }
 
-    /// Whether this architecture uses the Gemma-style RmsNorm (adds 1 to weights).
+    /// Whether this architecture scales its token embeddings by
+    /// `sqrt(hidden)` on the way in, as every Gemma does (llama.cpp's
+    /// `ggml_scale(inpL, sqrtf(n_embd))`). The name is historical: Gemma's
+    /// `+1` norm offset is already in the file's weights (the converter adds
+    /// it), so no norm reads this.
     pub fn use_gemma_norm(&self) -> bool {
-        matches!(self, ModelArch::Gemma | ModelArch::Gemma2)
+        matches!(
+            self,
+            ModelArch::Gemma | ModelArch::Gemma2 | ModelArch::Gemma3
+        )
     }
 
     /// Whether this architecture is supported for split inference — what the
@@ -150,11 +164,12 @@ impl ModelArch {
     /// Every architecture this build knows by name, `Unknown` aside — what
     /// [`Self::manifest_architecture_is_refused`] reads a manifest's coarse
     /// variant against.
-    const NAMED: [ModelArch; 12] = [
+    const NAMED: [ModelArch; 13] = [
         ModelArch::Llama,
         ModelArch::Qwen2,
         ModelArch::Gemma,
         ModelArch::Gemma2,
+        ModelArch::Gemma3,
         ModelArch::Phi3,
         ModelArch::Mistral,
         ModelArch::Starcoder2,
@@ -205,6 +220,7 @@ impl ModelArch {
             "qwen3moe",
             "gemma",
             "gemma2",
+            "gemma3",
             "phi3",
             "mistral",
             "glm4",
@@ -239,6 +255,7 @@ impl ModelArch {
             Self::Llama
             | Self::Gemma
             | Self::Gemma2
+            | Self::Gemma3
             | Self::Starcoder2
             | Self::DeepSeek2
             | Self::Glm4
@@ -255,6 +272,7 @@ impl std::fmt::Display for ModelArch {
             ModelArch::Qwen2 => write!(f, "qwen2"),
             ModelArch::Gemma => write!(f, "gemma"),
             ModelArch::Gemma2 => write!(f, "gemma2"),
+            ModelArch::Gemma3 => write!(f, "gemma3"),
             ModelArch::Phi3 => write!(f, "phi3"),
             ModelArch::Mistral => write!(f, "mistral"),
             ModelArch::Starcoder2 => write!(f, "starcoder2"),
@@ -273,7 +291,7 @@ impl std::fmt::Display for ModelArch {
 pub(crate) enum Activation {
     /// SiLU / Swish — used by Llama, Qwen2, Mistral, Phi-3
     SiLU,
-    /// Gelu — used by Gemma, Gemma 2
+    /// Gelu — used by Gemma, Gemma 2, Gemma 3
     Gelu,
 }
 
@@ -292,14 +310,15 @@ mod tests {
                 ModelArch::Qwen2 => Some(1),
                 ModelArch::Gemma => Some(2),
                 ModelArch::Gemma2 => Some(3),
-                ModelArch::Phi3 => Some(4),
-                ModelArch::Mistral => Some(5),
-                ModelArch::Starcoder2 => Some(6),
-                ModelArch::DeepSeek2 => Some(7),
-                ModelArch::Glm4 => Some(8),
-                ModelArch::Llama4 => Some(9),
-                ModelArch::Qwen35 => Some(10),
-                ModelArch::Qwen35Moe => Some(11),
+                ModelArch::Gemma3 => Some(4),
+                ModelArch::Phi3 => Some(5),
+                ModelArch::Mistral => Some(6),
+                ModelArch::Starcoder2 => Some(7),
+                ModelArch::DeepSeek2 => Some(8),
+                ModelArch::Glm4 => Some(9),
+                ModelArch::Llama4 => Some(10),
+                ModelArch::Qwen35 => Some(11),
+                ModelArch::Qwen35Moe => Some(12),
                 ModelArch::Unknown(_) => None,
             }
         }

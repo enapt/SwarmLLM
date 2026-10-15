@@ -4115,6 +4115,13 @@ read in 512-token chunks, the prompt's last 8 positions + 4 decode steps):
 | 4,600 | not read (before) | 0.98587 | 0.99563 | 10/12 — DISAGREES |
 | 4,600 | read | 0.99939 | 0.99963 | 11/12 — agrees |
 | 2,000 | not read (control) | 0.99914 | 0.99974 | agrees |
+| 4,600, on the CARD | read | 0.99955 | 0.99973 | 12/12 — agrees |
+| 4,600, on the CARD | `SWARMLLM_SLIDING_WINDOW=0` | 0.98503 | 0.99591 | 10/12 — DISAGREES |
+
+The card rows are one CUDA build (`--features cuda`, flash prefill with `window_size_left` and
+the decode kernel over the narrowed cache), both arms, run under the safety kit
+(`~/swarmllm-swa/card.sh`, 0 driver events). The 2,000-token logits are byte-identical with and
+without the change; the processor's 4,600-token `=0` arm is byte-identical to the build before it.
 
 **The rule is llama.cpp's** `LLAMA_SWA_TYPE_STANDARD` (`llama_hparams::is_masked_swa`):
 a key at `k` is hidden from a query at `p` when `p - k >= n_swa`. Which layers:
@@ -4160,7 +4167,7 @@ off). `windowed_and_global_layers_each_read_their_own_mask` composes the two
 kinds of layer, `a_batched_forward_reads_the_window_too` covers the batched path,
 `the_window_mask_is_llama_cpps_standard_rule` checks the mask cell by cell.
 Against llama.cpp at a window that binds within a few tokens:
-`examples/make_tiny_gemma2_gguf.py` (window 8, f32 weights) agrees at worst cosine 0.99928
+`examples/make_tiny_gemma_gguf.py` (window 8, f32 weights) agrees at worst cosine 0.99928
 over 40 positions, whole, in pieces and split at layer 3; 0.334 with the window off.
 
 **Not done**: llama.cpp's iSWA cache keeps only the window plus one batch for a
@@ -4186,7 +4193,7 @@ arms, the decode kernels) keeps one site: one elementwise launch per layer, agai
 decode layer already makes (tinyllama's count, § "Projections that share an activation must
 share the work"), on that shape only.
 
-**Measured** with `examples/make_tiny_gemma2_gguf.py` (46 layers, n_embd/n_head 16, head 32):
+**Measured** with `examples/make_tiny_gemma_gguf.py` (46 layers, n_embd/n_head 16, head 32):
 
 | file | `SWARMLLM_QUERY_SCALE=0` (old) | scale read |
 |---|---|---|
@@ -4198,6 +4205,88 @@ The decisive file's residual is not logic: llama.cpp with `type_k = type_v = f32
 softer file agrees to 0.99987. Rounding grows through 46 layers of sharp attention. Tests:
 `only_gemma2_27b_scales_its_queries_by_the_model_width` (the 9B and 2B read none),
 `the_query_scale_reaches_the_batched_path_too` (fails by 0.067 without the batched scale).
+
+## Gemma 3: each layer turns at its own rate (2026-10-16, FUTURE_WORK #115 (1))
+
+**What llama.cpp does** (`src/models/gemma3.cpp` and the shared hparams in `llama-model.cpp`
+at master; llama-cpp-python 0.3.16's vendored loader sets the same values):
+
+- a window only when the file names one above 0, on layer `il` when `il % 6 < 5`
+  (`load_swa_pattern(ml, 6)`, `set_swa_pattern`);
+- **a rotation per layer**, `llama_model::get_rope_freq_base/scale(cparams, il)` by
+  `is_swa(il)`: a windowed layer turns at `rope_freq_base_train_swa` (the hparams default
+  10,000; a file's `rope.freq_base_swa` wins) with `rope_freq_scale_train_swa` = 1, a global
+  layer at the file's base with `1 / rope.scaling.factor`;
+- linear scaling for EVERY family: `rope.scaling.type` defaults to `linear`, the factor is
+  `rope.scaling.factor` or the older `rope.scale_linear`, and `freq_scale` multiplies the angle
+  (`rope_yarn` with `ext_factor` 0: `theta = freq_scale * theta_extrap`);
+- `1/sqrt(n_embd / n_head)` queries on the 27B only (62 layers, #279's rule), Q and K
+  RMS-normalised per head before RoPE, norm weights already carrying Gemma's +1 (the
+  converter's `norm_shift`), embeddings times `sqrt(n_embd)`, GELU feed-forward, post-norms,
+  no attention soft-cap.
+
+**The real headers** (gotcha #728's lesson, read before writing a line): gemma-3-1b-it is 26
+layers, n_embd 1152, 4 heads / 1 KV head, key length 256, window 512, base 1,000,000, NO
+scaling keys, context 32,768; gemma-3-4b-it is 34 layers, 2560, 8 / 4, 256, window 1,024,
+base 1,000,000, `rope.scaling.type = linear`, `rope.scaling.factor = 8`, context 131,072.
+Neither names `rope.freq_base_swa`. `<end_of_turn>` (106) ends a turn by name
+(`END_OF_GENERATION_TOKENS`); the file's EOS is `<eos>` (1).
+
+**What we do.** `split::rope::LayerRope::read` is the one reading of how each layer turns;
+`LayerPlacement::rope_for` is the one place a layer's tables come from (the loops shadow
+`cos`/`sin` from it), so no per-architecture loop can hand a windowed layer the global ones.
+The loader builds a second table only where the windowed rotation differs — Gemma 2's copies
+its global one, so it builds none. Which layers are windowed comes from
+`SlidingWindow::from_file`, never the A/B-switched `read`, so `SWARMLLM_SLIDING_WINDOW=0`
+changes the window alone. Before this, no family's `rope.scaling.factor` was read at all; the
+survey of every reference GGUF here found none that carries one except Gemma 3 4B. A scale of 1
+is plain RoPE bit for bit (`a_scale_multiplies_every_position`), so every model that ran
+before runs the same tables. YaRN is read and NOT applied (#280): the factor without its ramp
+would be wrong at every position.
+
+**Measured** against llama.cpp 0.3.16 on the processor, our logits for the last 8 prompt
+positions + 4 decode steps (`logits_reference_probe`, 512-token chunks), same binary per row:
+
+| model, tokens | arm | worst cos | median | top-1 |
+|---|---|---|---|---|
+| 1B Q4_K_M, 300 | all read | **0.99977** | 0.99982 | 11/12 |
+| 1B Q4_K_M, 300 | `SWARMLLM_LAYER_ROPE=0` | 0.97239 | 0.97833 | 4/12 |
+| 1B Q4_K_M, 1,500 | all read | **0.99945** | 0.99985 | 12/12 |
+| 1B Q4_K_M, 1,500 | `SWARMLLM_SLIDING_WINDOW=0` | 0.84652 | 0.94538 | 2/12 |
+| 4B Q4_K_M, 300 | all read | **0.99872** | 0.99941 | 11/12 |
+| 4B Q4_K_M, 300 | `SWARMLLM_ROPE_SCALING=0` | 0.99198 | 0.99733 | 11/12 |
+| 4B Q4_K_M, 300 | `SWARMLLM_LAYER_ROPE=0` | 0.76893 | 0.88542 | 1/12 |
+| 4B Q4_K_M, 2,000 | all read | **0.99862** | 0.99969 | 12/12 |
+| 4B Q4_K_M, 2,000 | `SWARMLLM_SLIDING_WINDOW=0` | 0.74180 | 0.87378 | 2/12 |
+
+The 4B's last 0.1% is not logic. With llama.cpp's KV cache in f32 (`REF_KV_F32=1`, the
+control gotcha #864 names) it reads 0.99888 / 0.99844 — the f16 cache is not it. And a tiny
+f32 file with every 4B mechanism (`make_tiny_gemma_gguf.py` `ARCH=gemma3`: 12 layers, window
+8, factor 8, Q/K norms, n_embd/n_head ≠ head) agrees at **1.000000** on all 40 positions —
+whole, in 5-token pieces and split at layer 7 — and at 0.98698 without scaling, 0.89172 with
+the windowed layers on the global rotation, 0.60138 with no window. A logic error survives an
+f32 file; the 4B's gap is its Q4_K/Q6_K weights (Gemma 2 2B Q4_K_M sits at 0.99939, the
+qwen3moe file at worst 0.99818).
+
+**On the card** (CUDA build, `~/swarmllm-g3/card.sh` under the safety kit, 0 driver events),
+against the same processor reference: 1B at 1,500 worst 0.99916 (median 0.99978, 12/12); 4B at
+2,000 worst 0.99401 (median 0.99962, 12/12) whole, and 0.99439 split card/processor at layer
+17 — the windowed and global tables on both devices. The 4B's two low positions (1993, 1998)
+are the ones that were worst on the processor too, and the most peaked (|ref|max 23 and 27
+against 16-19). The control: llama.cpp master's OWN card run against its own processor run, on
+those ids, reads **0.99690** at 1998 (top-1 11/12); ours on the card against llama.cpp on the
+card reads 0.99856 there (median 0.99984, 12/12). That position is sensitive to precision in
+llama.cpp itself; ours sits closer to llama.cpp's card than llama.cpp's card sits to its
+processor. The tokenizer matched llama.cpp on 8/8 cases
+(`tokenizer_reference.py` over the 1B's header) and the GGUF's chat template renders as
+jinja2 does (`gemma3_actual_template_matches_jinja2`).
+
+Tests: `gemma3_global_layers_scale_and_windowed_layers_turn_at_their_own_base`,
+`gemma2_windowed_layers_rotate_as_the_rest_unless_the_file_names_a_base`,
+`only_linear_scaling_is_applied`, `a_scale_multiplies_every_position`,
+`windowed_layers_take_their_own_rope_tables` (red with `rope_for` ignoring the windowed
+tables), `gemma3_windows_five_layers_in_six_only_when_the_file_names_a_window`,
+`only_gemma3_27b_scales_its_queries_by_the_model_width`.
 
 ## A model that cannot write replies is refused off its header (2026-10-15)
 

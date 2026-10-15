@@ -383,6 +383,79 @@ fn gemma2_user_assistant_alternation() {
     );
 }
 
+/// Gemma 3's template, verbatim from gemma-3-1b-it's GGUF (the 4B's is the
+/// same), renders exactly as jinja2 renders it: the system text opens the
+/// first user turn (the template does that itself, unlike Gemma 2's, which
+/// refuses a system turn), an assistant turn is `model`, content is trimmed.
+/// The expected string is jinja2's output with `trim_blocks`/`lstrip_blocks`.
+#[test]
+fn gemma3_actual_template_matches_jinja2() {
+    let template = r#"{{ bos_token }}
+{%- if messages[0]['role'] == 'system' -%}
+    {%- if messages[0]['content'] is string -%}
+        {%- set first_user_prefix = messages[0]['content'] + '
+
+' -%}
+    {%- else -%}
+        {%- set first_user_prefix = messages[0]['content'][0]['text'] + '
+
+' -%}
+    {%- endif -%}
+    {%- set loop_messages = messages[1:] -%}
+{%- else -%}
+    {%- set first_user_prefix = "" -%}
+    {%- set loop_messages = messages -%}
+{%- endif -%}
+{%- for message in loop_messages -%}
+    {%- if (message['role'] == 'user') != (loop.index0 % 2 == 0) -%}
+        {{ raise_exception("Conversation roles must alternate user/assistant/user/assistant/...") }}
+    {%- endif -%}
+    {%- if (message['role'] == 'assistant') -%}
+        {%- set role = "model" -%}
+    {%- else -%}
+        {%- set role = message['role'] -%}
+    {%- endif -%}
+    {{ '<start_of_turn>' + role + '
+' + (first_user_prefix if loop.first else "") }}
+    {%- if message['content'] is string -%}
+        {{ message['content'] | trim }}
+    {%- elif message['content'] is iterable -%}
+        {%- for item in message['content'] -%}
+            {%- if item['type'] == 'image' -%}
+                {{ '<start_of_image>' }}
+            {%- elif item['type'] == 'text' -%}
+                {{ item['text'] | trim }}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- else -%}
+        {{ raise_exception("Invalid content type") }}
+    {%- endif -%}
+    {{ '<end_of_turn>
+' }}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+    {{'<start_of_turn>model
+'}}
+{%- endif -%}
+"#;
+    let turn = |role, content: &str| ChatMessage {
+        role,
+        content: content.into(),
+        images: vec![],
+    };
+    let msgs = vec![
+        turn(Role::System, "Be brief."),
+        turn(Role::User, "Hi "),
+        turn(Role::Assistant, "Hello!"),
+        turn(Role::User, "What is 2+2?"),
+    ];
+    let result = apply_chat_template(template, &msgs, "<bos>", "<eos>", true, None).unwrap();
+    assert_eq!(
+        result,
+        "<bos><start_of_turn>user\nBe brief.\n\nHi<end_of_turn>\n<start_of_turn>model\nHello!<end_of_turn>\n<start_of_turn>user\nWhat is 2+2?<end_of_turn>\n<start_of_turn>model\n"
+    );
+}
+
 #[test]
 fn qwen25_actual_template_no_tools() {
     // Qwen2.5's template (the non-tools path). Uses {{- -}} trim, messages[0] access,

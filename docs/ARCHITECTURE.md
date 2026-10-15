@@ -136,8 +136,9 @@ swarmllm/
 │                 every position of a GGUF (one segment or split) against llama.cpp's, by
 │                 VALUE: how an architecture is verified on a tiny random model (#114);
 │                 make_tiny_llama4_gguf.py writes one where none exists (Llama 4, gguf-py);
-│                 make_tiny_gemma2_gguf.py — Gemma 2 with an 8-position window (#278) and
-│                 the 27B's 46 layers (#279);
+│                 make_tiny_gemma_gguf.py — Gemma 2 with an 8-position window (#278) and
+│                 the 27B's 46 layers (#279); ARCH=gemma3: Q/K norms, per-layer RoPE,
+│                 linear scaling (#115 (1));
 │                 score_against_reference.py — a reply teacher-forced through llama.cpp, rank
 │                 of every token: the test for a split reply where byte-equality is not;
 │                 `--lora` scores against llama.cpp applying an adapter, which
@@ -698,15 +699,15 @@ Client → API Server → InferenceRouter → Pipeline Assembly
 The SplitModel loader detects the model architecture from GGUF metadata
 (`general.architecture`) and applies architecture-specific behavior:
 
-| Feature | Llama | Llama 4 | Qwen2 | Qwen 3.5 | Gemma/Gemma2 | Phi-3 | Mistral | Starcoder2 | DeepSeek-V2/V3 | GLM-4 |
-|---------|-------|---------|-------|-----------|--------------|-------|---------|------------|----------------|-------|
-| RoPE variant | Interleaved (`rope_i`) | Interleaved (iRoPE) | Contiguous (`rope`) | IMROPE, sections [11,11,10,0] over 64 of 256 dims (text positions only) | Interleaved | Su/YaRN | Interleaved | Contiguous | Interleaved (MLA split; YaRN NOT implemented) | Interleaved (partial) |
-| QKV biases | None | None | Yes | None | None | Yes | None | Yes | None (MLA projections) | Yes |
-| Attention | Standard MHA/GQA | Standard GQA | Standard MHA | Gated: 3 of 4 layers Gated DeltaNet (recurrent state), every 4th softmax attention with a per-head output gate | Standard MHA | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) | Extreme GQA (16:1) |
-| FFN | Dense | Dense + MoE (mixed) | Dense | Dense, or MoE (top-k) + sigmoid-gated shared expert (`qwen35moe`) | Dense | Dense | Dense | Dense | MoE (top-k) + shared | Dense |
-| Context length | 4096 (default) | 131072 | 32768 | 131072 | 8192 | 4096 | 32768 | 16384 | 163840 | 131072 |
-| Special | — | NoPE every 4th layer; Q/K RMS-normalised after RoPE; sigmoid top-k, expert weighted on its INPUT | — | Hybrid SSM+attention | Embedding scaling (sqrt(d)), Gemma RmsNorm (+1), attn + final logit softcap, EOS 107, Gemma chat template | Fused QKV/FFN | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
-| E2E verified | ✅ | tiny random model vs llama.cpp only (#114) | ✅ | ✅ dense vs llama.cpp (0.8B, 4B); `qwen35moe` vs llama.cpp on a 0.87B real file (#228) | ✅ (Gemma2) | ✅ | — | ⛔ not supported (#118) | ⛔ not supported (#116) | ✅ |
+| Feature | Llama | Llama 4 | Qwen2 | Qwen 3.5 | Gemma/Gemma2 | Gemma 3 | Phi-3 | Mistral | Starcoder2 | DeepSeek-V2/V3 | GLM-4 |
+|---------|-------|---------|-------|-----------|--------------|---------|-------|---------|------------|----------------|-------|
+| RoPE variant | Interleaved (`rope_i`) | Interleaved (iRoPE) | Contiguous (`rope`) | IMROPE, sections [11,11,10,0] over 64 of 256 dims (text positions only) | Contiguous | Contiguous; per layer (`split::rope::LayerRope`): windowed layers base 10,000 unscaled, global layers base 1,000,000 × linear factor (8 from the 4B up) | Su/YaRN | Interleaved | Contiguous | Interleaved (MLA split; YaRN NOT implemented, #280) | Interleaved (partial) |
+| QKV biases | None | None | Yes | None | None | None | Yes | None | Yes | None (MLA projections) | Yes |
+| Attention | Standard MHA/GQA | Standard GQA | Standard MHA | Gated: 3 of 4 layers Gated DeltaNet (recurrent state), every 4th softmax attention with a per-head output gate | Standard MHA; Gemma 2: 4,096-position window on even layers | GQA, per-head Q/K RMS norm before RoPE; window (512 / 1,024) on 5 layers in 6 | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) | Extreme GQA (16:1) |
+| FFN | Dense | Dense + MoE (mixed) | Dense | Dense, or MoE (top-k) + sigmoid-gated shared expert (`qwen35moe`) | Dense | Dense (GELU) | Dense | Dense | Dense | MoE (top-k) + shared | Dense |
+| Context length | 4096 (default) | 131072 | 32768 | 131072 | 8192 | 32768 (1B), 131072 (4B+) | 4096 | 32768 | 16384 | 163840 | 131072 |
+| Special | — | NoPE every 4th layer; Q/K RMS-normalised after RoPE; sigmoid top-k, expert weighted on its INPUT | — | Hybrid SSM+attention | Embedding scaling (sqrt(d)), norm weights carry Gemma's +1 in the file, attn + final logit softcap, EOS 107, Gemma chat template | Embedding scaling (sqrt(d)); no softcap; `<end_of_turn>` (106) ends a turn; the 27B's query scale (#279) | Fused QKV/FFN | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
+| E2E verified | ✅ | tiny random model vs llama.cpp only (#114) | ✅ | ✅ dense vs llama.cpp (0.8B, 4B); `qwen35moe` vs llama.cpp on a 0.87B real file (#228) | ✅ (Gemma2) | ✅ 1B and 4B vs llama.cpp on the processor (#115 (1)) | ✅ | — | ⛔ not supported (#118) | ⛔ not supported (#116) | ✅ |
 
 > **Phi-3 fused tensors**: Phi-3 GGUF models store `attn_qkv.weight` (Q+K+V concatenated) and `ffn_up.weight` (gate+up concatenated, no `ffn_gate.weight`). The loader dequantizes on CPU, splits by head dimensions, and re-quantizes to Q4_0 on the target device.
 

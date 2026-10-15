@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #280**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #281**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1689,14 +1689,10 @@ path. Adding only `llama-cpp-2/metal` would fix the DISPLAY while inference stay
 processor, which is worse. GitHub's macOS runners compile but cannot run Metal; it needs a Mac
 to test on (the swarm's Italian M4 peer belongs to a tester).
 
-#### #115 — Gemma 3 and Gemma 4, and their vision projectors, are unsupported
-`P2` · model-support · **OPEN** — 2026-09-25 · history: archive row #115
+#### #115 — Gemma 3's and Gemma 4's vision projectors, and Gemma 4 text, are unsupported
+`P2` · model-support · **PARTIAL** — 2026-09-25 · history: archive row #115
 
-Requested for gemma-4-26B-A4B. Order: (1) Gemma 3 text — sliding-window attention exists
-since #278 — `SlidingWindow::read` needs Gemma 3's row (window only when the file names one,
-`load_swa_pattern(ml, 6)`: 5 local : 1 global); still needed: a second RoPE base on local
-layers (`rope.freq_base_swa`, while the loader builds one cos/sin table per segment), the global
-layers' linear RoPE scaling and the 27B's attention scale (#279's rule at 62 layers); (2) the `gemma3` projector (SigLIP + pool + RMSNorm + linear), after
+Requested for gemma-4-26B-A4B. Order: ~~(1) Gemma 3 text~~ (closed 2026-10-16, § Closed); (2) the `gemma3` projector (SigLIP + pool + RMSNorm + linear), after
 `vision.rs` gets a projector-type dispatch; (3) Gemma 4 text — cross-layer KV sharing,
 per-layer embeddings, dense FFN + GELU MoE; (4) `gemma4v`. Gemma 3 can be checked against the
 local llama-cpp-python 0.3.16 now; Gemma 4 has no local reference (0.3.16 predates it; sources
@@ -1735,6 +1731,21 @@ Needs a LayerNorm variant (mean-subtracted, with bias), bias sites on `attn_q/k/
 `layer_norm_rms_epsilon` today), no `ffn_gate` (GELU MLP), tied output. Verify on a tiny GGUF
 against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hybrid` (it lists
 StarCoder2, inert while refused).
+
+#### #280 — A model that declares YaRN RoPE scaling is served unscaled
+`P2` · model-support · **OPEN** — 2026-10-16
+
+llama.cpp reads `{arch}.rope.scaling.type = yarn` with `rope.scaling.factor` and
+`rope.scaling.original_context_length` and turns each pair at a mix of the scaled and the plain
+angle (`rope_yarn` in `ggml-cpu/ops.cpp`: a ramp between `ggml_rope_yarn_corr_dims` at
+beta_fast 32 / beta_slow 1, `ext_factor` 1), with cos/sin multiplied by `1 + 0.1 ln(factor)`.
+`split::rope::LayerRope::read` applies LINEAR scaling only (Gemma 3, #115 (1)) and serves a YaRN
+file unscaled with a load-time warning: applying the factor without the ramp would be wrong at
+every position, unscaled is wrong only on the dimensions YaRN interpolates. Who it reaches: Qwen2 /
+Qwen3 uploads re-converted for long context (the "-128K" GGUFs; Qwen's own GGUFs declare none)
+and DeepSeek-2 (#116 (4)). The tables are precomputed (`precompute_freqs_cis_*`), so it is a table
+builder plus the factor on cos/sin; verify against llama.cpp 0.3.16 on a tiny file carrying the
+keys.
 
 ### Memory and admission
 
@@ -2383,13 +2394,27 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15, not yet released** (#276, #277, #278, #279)
+**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1))
+- #115 (1) — **Gemma 3 runs (text).** The `gemma3` family loads, splits and is offered for
+  download: Gemma 2's layout plus per-head Q/K norms, no soft-capping, a window on five layers in
+  six (512 positions on the 1B, 1,024 from the 4B up), and a rotation per layer — the windowed
+  layers turn at base 10,000 unscaled, the global ones at 1,000,000 with the file's linear factor
+  (8 from the 4B up). `split::rope::LayerRope` reads both, for any family: no family's
+  `rope.scaling.factor` had been read before (YaRN is #280). The 27B takes #279's query scale.
+  Against llama.cpp 0.3.16 on the processor: gemma-3-1b-it Q4_K_M worst cosine 0.99977 at 300
+  tokens and 0.99945 at 1,500, gemma-3-4b-it Q4_K_M 0.99872 / 0.99862 at 300 / 2,000 (median
+  0.9994 / 0.9997, top-1 11/12 and 12/12); a tiny f32 file with every 4B mechanism agrees at
+  1.000000 whole, in pieces and split. Each mechanism off in the same binary moves it far:
+  windowed layers on the global rotation 0.769 (4B), no scaling 0.992, no window 0.742 at 2,000.
+  The tokenizer matched llama.cpp on 8/8 cases. On the card: 1B 0.99916, 4B 0.99401 whole and
+  0.99439 split, its low position one where llama.cpp's own card and processor differ by 0.9969.
+  `docs/invariants/inference.md` § "Gemma 3: each layer turns at its own rate".
 - #279 — **Gemma 2 27B's attention uses its own scale.** llama.cpp takes a 46-layer Gemma 2 for
   the 27B and scales its queries by 1/sqrt(n_embd / n_head) = 1/sqrt(144), as Google's reference
   does; we used 1/sqrt(head_dim) = 1/sqrt(128), so every 27B attention score was 6% too large.
   The queries are now multiplied where llama.cpp scales them (`split::query_scale`,
   `LayerWeights::query_scale`, after RoPE) — only on that shape, one elementwise op per layer. On a
-  46-layer tiny file (`examples/make_tiny_gemma2_gguf.py`, `QK_STD=0.25`) worst cosine 0.727 →
+  46-layer tiny file (`examples/make_tiny_gemma_gguf.py`, `QK_STD=0.25`) worst cosine 0.727 →
   0.99987 against llama.cpp; same binary, `SWARMLLM_QUERY_SCALE=0` is the old arm. With the file's
   decisive default weights, 0.657 → 0.966: the rest is rounding (llama.cpp's f16 KV cache alone
   moves it to 0.992) amplified over 46 sharp layers. Gemma 3's 27B (62 layers) takes the same rule

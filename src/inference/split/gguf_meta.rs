@@ -147,7 +147,9 @@ pub(crate) fn layer_is_recurrent(ct: &gguf_file::Content, layer_idx: usize) -> b
 /// Gemma 2 (`llama_model_gemma2::load_arch_hparams`): every other layer from
 /// layer 0, 4,096 positions unless the file says otherwise. Read without it,
 /// every Gemma 2 layer attended the whole conversation past 4,096 tokens, and
-/// its replies drifted from llama.cpp's there (FUTURE_WORK #278). Phi-3
+/// its replies drifted from llama.cpp's there (FUTURE_WORK #278). Gemma 3
+/// (`llama_model_gemma3`): five layers in six, only when the file names a
+/// window above 0 — 512 on the 1B, 1,024 from the 4B up. Phi-3
 /// declares a window that llama.cpp switches OFF (`llama_model_phi3`, "Phi SWA
 /// is currently disabled", ggml-org/llama.cpp#13676), so it is not read here
 /// either: a reply is judged against llama.cpp. Llama 4's chunked attention
@@ -178,9 +180,18 @@ impl SlidingWindow {
         if std::env::var("SWARMLLM_SLIDING_WINDOW").as_deref() == Ok("0") {
             return None;
         }
+        Self::from_file(ct)
+    }
+
+    /// The window as the file and family describe it, whatever the A/B arm
+    /// says — for what follows the layer pattern rather than the masking
+    /// (`split::rope::LayerRope`, the windowed layers' own rotation).
+    pub(crate) fn from_file(ct: &gguf_file::Content) -> Option<Self> {
         let arch = gguf_arch_str(ct);
+        // (the window when the file names none, the period)
         let (default_size, period) = match arch.as_str() {
             "gemma2" => (4096, 2),
+            "gemma3" => (0, 6),
             _ => return None,
         };
         let size = ct
@@ -218,7 +229,8 @@ impl SlidingWindow {
 /// or `None` where the two agree. Read as llama.cpp reads it: Gemma 2's 27B —
 /// the size llama.cpp knows by its 46 layers — scales by
 /// `1/sqrt(n_embd / n_head)` (`llama_model_gemma2::load_arch_hparams`, after
-/// gemma_pytorch `config.py`), every other size by `1/sqrt(head_dim)`. On the
+/// gemma_pytorch `config.py`), every other size by `1/sqrt(head_dim)`; Gemma
+/// 3's 27B (62 layers) the same way (`llama_model_gemma3`). On the
 /// 27B that is 1/sqrt(144) against 1/sqrt(128): read without it, every
 /// attention score was 6% too large (FUTURE_WORK #279).
 /// `SWARMLLM_QUERY_SCALE=0` reads none — the A/B arm.
@@ -235,6 +247,7 @@ pub(crate) fn query_scale(ct: &gguf_file::Content) -> Option<f64> {
     };
     let scaled_by_width = match arch.as_str() {
         "gemma2" => read("block_count") == Some(46),
+        "gemma3" => read("block_count") == Some(62),
         _ => false,
     };
     if !scaled_by_width {
@@ -1655,10 +1668,12 @@ mod refusal_tests {
 }
 
 #[cfg(test)]
-mod sliding_window_tests {
+pub(super) mod sliding_window_tests {
     use super::*;
 
-    fn header(arch: &str, extra: Vec<(&str, gguf_file::Value)>) -> gguf_file::Content {
+    /// A header naming `arch` and the keys given — shared with `split::rope`'s
+    /// and `split::hybrid`'s tests, which read the same keys.
+    pub(crate) fn header(arch: &str, extra: Vec<(&str, gguf_file::Value)>) -> gguf_file::Content {
         let mut metadata = HashMap::new();
         metadata.insert(
             "general.architecture".to_string(),
@@ -1747,19 +1762,71 @@ mod sliding_window_tests {
         );
     }
 
-    fn gemma2_shape(layers: u32, n_embd: u32, n_head: u32, key_length: u32) -> gguf_file::Content {
+    /// Gemma 3 as llama.cpp reads it (`llama_model_gemma3`): five layers in
+    /// six — all but every sixth — and only when the file names a window, since
+    /// the family has no default.
+    #[test]
+    fn gemma3_windows_five_layers_in_six_only_when_the_file_names_a_window() {
+        let w = SlidingWindow::read(&header(
+            "gemma3",
+            vec![(
+                "gemma3.attention.sliding_window",
+                gguf_file::Value::U32(512),
+            )],
+        ))
+        .expect("the 1B names 512");
+        assert_eq!(w.size, 512);
+        assert_eq!(windowed_layers(&w, 12), vec![0, 1, 2, 3, 4, 6, 7, 8, 9, 10]);
+        assert_eq!(SlidingWindow::read(&header("gemma3", vec![])), None);
+    }
+
+    fn gemma_shape(
+        arch: &str,
+        layers: u32,
+        n_embd: u32,
+        n_head: u32,
+        key_length: u32,
+    ) -> gguf_file::Content {
+        let key = |k: &str| format!("{arch}.{k}");
+        let (a, b, c, d) = (
+            key("block_count"),
+            key("embedding_length"),
+            key("attention.head_count"),
+            key("attention.key_length"),
+        );
         header(
-            "gemma2",
+            arch,
             vec![
-                ("gemma2.block_count", gguf_file::Value::U32(layers)),
-                ("gemma2.embedding_length", gguf_file::Value::U32(n_embd)),
-                ("gemma2.attention.head_count", gguf_file::Value::U32(n_head)),
-                (
-                    "gemma2.attention.key_length",
-                    gguf_file::Value::U32(key_length),
-                ),
+                (a.as_str(), gguf_file::Value::U32(layers)),
+                (b.as_str(), gguf_file::Value::U32(n_embd)),
+                (c.as_str(), gguf_file::Value::U32(n_head)),
+                (d.as_str(), gguf_file::Value::U32(key_length)),
             ],
         )
+    }
+
+    fn gemma2_shape(layers: u32, n_embd: u32, n_head: u32, key_length: u32) -> gguf_file::Content {
+        gemma_shape("gemma2", layers, n_embd, n_head, key_length)
+    }
+
+    /// Gemma 3's 27B (62 layers, 5376 / 32 = 168 against a head of 128) is
+    /// scaled by the model width; the 1B and 4B, whose width ratios also
+    /// differ from their heads (288 and 320 against 256), by the head.
+    #[test]
+    fn only_gemma3_27b_scales_its_queries_by_the_model_width() {
+        let scale =
+            query_scale(&gemma_shape("gemma3", 62, 5376, 32, 128)).expect("the 27B is scaled");
+        assert!((scale - (128f64 / 168f64).sqrt()).abs() < 1e-12, "{scale}");
+        assert_eq!(
+            query_scale(&gemma_shape("gemma3", 34, 2560, 8, 256)),
+            None,
+            "4B"
+        );
+        assert_eq!(
+            query_scale(&gemma_shape("gemma3", 26, 1152, 4, 256)),
+            None,
+            "1B"
+        );
     }
 
     /// llama.cpp's sizes: only the 27B (46 layers) scales by `n_embd / n_head`

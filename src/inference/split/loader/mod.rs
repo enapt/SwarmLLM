@@ -17,7 +17,10 @@ use candle_nn::Embedding;
 use crate::error::SwarmError;
 
 use super::model::SplitModel;
-use super::rope::{load_longrope_factors, precompute_freqs_cis, precompute_freqs_cis_longrope};
+use super::rope::{
+    load_longrope_factors, precompute_freqs_cis, precompute_freqs_cis_longrope,
+    precompute_freqs_cis_scaled,
+};
 use super::token_embedding::TokenEmbedding;
 use super::{
     Activation, DeepSeekMeta, DeltaNetWeights, FfnVariant, LayerVariant, LayerWeights, MlaWeights,
@@ -953,21 +956,14 @@ impl SplitModel {
 
         // Long RoPE (SuRoPE) for Phi-3.5 and similar extended-context models
         let longrope = load_longrope_factors(&ct, &mut file, arch, context_length);
-        let (cos, sin) = if let Some((ref factors, attn_factor)) = longrope {
+        // Per-pair divisors and the attention factor, when the file carries any.
+        let rope_factors = if let Some((factors, attn_factor)) = longrope {
             tracing::info!(
                 factors_len = factors.len(),
                 attn_factor,
                 "Using Long RoPE (SuRoPE)"
             );
-            precompute_freqs_cis_longrope(
-                rope_dim,
-                rope_freq_base,
-                context_length,
-                factors,
-                attn_factor,
-                &device,
-            )
-            .map_err(SwarmError::internal)?
+            Some((factors, attn_factor))
         } else if let Some(factors) = match super::rope::load_rope_freqs(&ct, &mut file, rope_dim) {
             Ok(f) => f,
             // The factors exist but this node can read neither shard 0 nor the
@@ -991,19 +987,50 @@ impl SplitModel {
                 factors_len = factors.len(),
                 "Using the model's RoPE frequency factors (rope_freqs)"
             );
-            precompute_freqs_cis_longrope(
-                rope_dim,
-                rope_freq_base,
-                context_length,
-                &factors,
-                1.0,
-                &device,
-            )
-            .map_err(SwarmError::internal)?
+            Some((factors, 1.0))
         } else {
-            precompute_freqs_cis(rope_dim, rope_freq_base, context_length, &device)
-                .map_err(SwarmError::internal)?
+            None
         };
+        // How each layer turns — `split::rope::LayerRope`, the one reading:
+        // a linear scale on every position, and Gemma 3's windowed layers at
+        // a base and scale of their own.
+        let layer_rope = super::rope::LayerRope::read(&ct, rope_freq_base);
+        let rope_table = |base: f32, scale: f32| {
+            match &rope_factors {
+                // A position times `scale` is the same angle as each pair's
+                // divisor over `scale`; at 1 the divisors are untouched.
+                Some((factors, attn_factor)) => {
+                    let factors: Vec<f32> = factors.iter().map(|f| f / scale).collect();
+                    precompute_freqs_cis_longrope(
+                        rope_dim,
+                        base,
+                        context_length,
+                        &factors,
+                        *attn_factor,
+                        &device,
+                    )
+                }
+                None => precompute_freqs_cis_scaled(rope_dim, base, scale, context_length, &device),
+            }
+            .map_err(SwarmError::internal)
+        };
+        let (cos, sin) = rope_table(rope_freq_base, layer_rope.scale)?;
+        let windowed_rope = match layer_rope.windowed {
+            Some(w) => {
+                tracing::info!(
+                    windowed_base = w.base,
+                    windowed_scale = w.scale,
+                    base = rope_freq_base,
+                    scale = layer_rope.scale,
+                    "Sliding-window layers rotate at their own base"
+                );
+                Some((w.window, rope_table(w.base, w.scale)?))
+            }
+            None => None,
+        };
+        if layer_rope.scale != 1.0 {
+            tracing::info!(scale = layer_rope.scale, "Linear RoPE scaling");
+        }
         // Where each layer of this segment goes.
         //
         // `gpu_layers` is a decision made by `ModelProcessPool` and passed in;
@@ -1045,6 +1072,12 @@ impl SplitModel {
             .map_err(SwarmError::internal)?,
         }
         .with_experts_on_the_processor(experts_in_ram_layers);
+        let placement = match windowed_rope {
+            Some((window, (cos, sin))) => placement
+                .with_windowed_rope(window, cos, sin)
+                .map_err(SwarmError::internal)?,
+            None => placement,
+        };
         if experts_in_ram_layers > 0 {
             tracing::info!(
                 layers = experts_in_ram_layers,

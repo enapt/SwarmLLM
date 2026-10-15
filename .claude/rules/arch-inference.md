@@ -183,7 +183,9 @@ Qwen 3.5's DeltaNet layers keep a recurrent state per request, and a rejected dr
 
 **A family's attention scale is read, never assumed `1/sqrt(head_dim)`** (#279): **`split::query_scale`** (Gemma 2's 27B = 46 layers: `1/sqrt(n_embd/n_head)`; the 9B is NOT, though its ratio also differs) → `LayerWeights::query_scale`, multiplied into the queries on both entry points. A new family's `f_attention_scale` is read off its llama.cpp `load_arch_hparams`. A/B `SWARMLLM_QUERY_SCALE=0`.
 
-→ `docs/invariants/inference.md` § "A sliding window is cut where it binds", § "A family's attention scale is read"
+**A layer's rotation is read per layer** (Gemma 3, #115 (1)): **`split::rope::LayerRope::read`** is the one reading — linear `rope.scaling.factor` on every position (any family; YaRN is NOT applied, #280), and windowed layers' own base/scale (Gemma 3: base 10,000, unscaled). **`LayerPlacement::rope_for`** is the one place a layer gets its tables, so no per-arch loop can hand a windowed layer the global ones. Which layers are windowed comes from `SlidingWindow::from_file`, never the A/B-switched `read`. A/B `SWARMLLM_ROPE_SCALING=0`, `SWARMLLM_LAYER_ROPE=0`.
+
+→ `docs/invariants/inference.md` § "A sliding window is cut where it binds", § "A family's attention scale is read", § "Gemma 3: each layer turns at its own rate"
 
 ## A model that cannot write replies is refused off its header (2026-10-15)
 
