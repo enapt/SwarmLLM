@@ -4414,3 +4414,51 @@ Wiring the hold into relaying found the relay switch did less than it said:
 1 h, 1 GB — `network::relay`), and the same for a split already running. A
 network switch drops both with the connection; only a link that turns metered
 in place (Windows "set as metered", or `pause`) leaves one to run out.
+
+## Region summaries were a third of the gossip and read by nothing (2026-10-15, FUTURE_WORK #91)
+
+**#91 (1), the re-measure.** Release node, v0.3.239 fleet, 3.3 → 4.3 h up, idle, one hour
+between two `/api/admin/stats` readings: 8.8 KB/s out, 6.5 KB/s of it gossip (5.8 on
+2026-10-11). `ModelManifest` first copies arrived at 0.0031 a second, under the ≤ ~0.004 the
+2 h quiet window predicted (from 0.0123), so that window held. Gossip as a whole did not
+shrink, and the per-topic counters said why:
+
+| topic | sent B/s | published by us /s | copies of each message received |
+|---|---|---|---|
+| `swarm/models` | 3,459 | 0.022 | 6.1 |
+| `swarm/regions` | 2,231 | **0.109** | 6.5 |
+| `swarm/health` | 611 | 0.035 | 6.3 |
+| `swarm/pools` | 107 | 0.002 | 5.9 |
+| `swarm/credits` | 94 | 0.004 | 6.4 |
+
+`RegionShardSummary` was the largest message count on the swarm: 0.68 first copies a second
+received. This node published 0.109 a second, about every 9 s, and 95% of those were the
+anti-entropy round. Every `FULL_REANNOUNCE_EVERY_TICKS` (5 min) it re-sent one summary per
+KNOWN model (31 here, so 372 an hour), and each message reached each node ~6.5 times.
+
+**Nothing read them.** The map they filled (`region_shard_summaries`) had three readers:
+
+- Auto-manage scoring asked only about this node's OWN region, which the monitor rewrote
+  locally every tick. It counted every holder in the region, private mode's allowed set
+  ignored. The fallback beside it, `count_regional_holders` over the holders the pass had
+  already filtered to the allowed set, gives the same count in the open swarm and the right
+  one in private mode.
+- The websocket's `region_coverage_gaps` was read by no frontend code.
+- The dashboard's map builds its coverage from peers' capabilities (`api::admin`).
+
+So the summaries are no longer built or sent. Scoring counts its region from holder records,
+and the map, the change-gate digest and the TTL sweep are gone. Older nodes still send them,
+so the variant still decodes and dispatch drops it (additive evolution). Guard:
+`no_node_builds_a_region_summary_to_gossip`, with a planted self-test, red on a stray file
+that builds one. Expected effect once the fleet updates: `swarm/regions` drops to demand
+gossip alone, about a third of the gossip sent.
+
+**What is left is the copy factor.** Every topic delivers ~6.3 copies of each message.
+`network::behaviour::build_behaviour` sizes the mesh once at startup from `known_peers`, which
+is the peer CACHE: 203 on the release node (`Auto-scaled GossipSub mesh parameters
+known_peers=203`), every peer ever seen. So a swarm of ~8 connected nodes runs the 100+ tier
+(`mesh_n` 6, `mesh_n_high` 12), which is a full mesh, and flood publishing (the crate's
+default) also sends each origin's message to every peer. IDONTWANT (gossipsub v1.2, messages
+over 1,000 bytes) only suppresses a copy not yet sent. Sizing the mesh from the peers
+actually reachable is the next lever (FUTURE_WORK #91 (1b)). It is a risky one, because a
+thinner mesh partitions sooner, so it needs a rig first.

@@ -430,8 +430,6 @@ const GOSSIP_STALENESS_MS: u64 = 15 * 60 * 1000;
 const GOSSIP_SKEW_MS: u64 = 30_000;
 /// Maximum AllReduce partials in flight before dropping new TpAllReduceRequests (DoS guard).
 const MAX_PENDING_TP_PARTIALS: usize = 512;
-/// Maximum cached regional shard summaries (per region+model pair).
-const MAX_REGION_SUMMARIES: usize = 10_000;
 /// Maximum demand rate entries across all (model, region) pairs.
 const MAX_DEMAND_ENTRIES: usize = 10_000;
 /// R130: Cap entries per WishlistAnnouncement. Caps the wire size AND the
@@ -2803,58 +2801,11 @@ pub(crate) async fn dispatch_network_messages(
                                             "Ring AllReduce chunk received"
                                         );
                                     }
-                                    // Regional shard summary gossip (Phase 18)
-                                    SwarmMessage::RegionShardSummary(summary) => {
-                                        // Authenticate sender
-                                        match &authenticated_sender {
-                                            Some(sender) if *sender != summary.publisher => {
-                                                tracing::warn!(sender = %sender, claimed = %summary.publisher, "RegionShardSummary sender mismatch — dropping");
-                                                continue;
-                                            }
-                                            None => {
-                                                tracing::debug!("Dropping unauthenticated RegionShardSummary");
-                                                continue;
-                                            }
-                                            Some(_) => {} // Sender matches publisher — proceed
-                                        }
-                                        if summary.region.len() > 8 || summary.shard_counts.len() > 512
-                                            || summary.model_id.0.len() > 256
-                                        {
-                                            continue;
-                                        }
-                                        // Don't track region availability for a backup-copy model
-                                        // name (`<model>.FULLBACKUP`) — see manifest ingress guard.
-                                        if crate::model::manifest::is_backup_artifact_id(&summary.model_id.0) {
-                                            continue;
-                                        }
-                                        let now_ms = crate::types::unix_now_ms();
-                                        if !gossip_timestamp_fresh(summary.timestamp_ms, now_ms, "RegionShardSummary") {
-                                            continue;
-                                        }
-                                        let key = (summary.region.clone(), summary.model_id.clone());
-                                        // Keep the most recent summary per (region, model)
-                                        let should_update = shared_state
-                                            .region_shard_summaries
-                                            .get(&key)
-                                            .map(|existing| summary.timestamp_ms > existing.timestamp_ms)
-                                            .unwrap_or(true);
-                                        if should_update {
-                                            if shared_state.region_shard_summaries.len() >= MAX_REGION_SUMMARIES
-                                                && !shared_state.region_shard_summaries.contains_key(&key)
-                                            {
-                                                tracing::debug!("region_shard_summaries at cap, dropping new entry");
-                                                continue;
-                                            }
-                                            tracing::debug!(
-                                                region = %summary.region,
-                                                model = %summary.model_id,
-                                                node_count = summary.region_node_count,
-                                                shard_entries = summary.shard_counts.len(),
-                                                "RegionShardSummary updated"
-                                            );
-                                            shared_state.region_shard_summaries.insert(key, summary);
-                                        }
-                                    }
+                                    // Regional shard summaries: no longer sent (2026-10-15,
+                                    // #91) and read by nothing — a node counts its region's
+                                    // holders from the holder records it has. Older nodes
+                                    // still send them, so the variant still decodes.
+                                    SwarmMessage::RegionShardSummary(_) => {}
 
                                     // Model demand gossip (Phase 18)
                                     SwarmMessage::ModelDemandGossip(demand) => {

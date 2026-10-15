@@ -319,8 +319,9 @@ Parallax does this with a global scheduler. **SwarmLLM has none, so the
 swarm-native form is a self-interested acquisition heuristic**: each node scores
 a candidate shard by how much it reduces the expected number of
 cross-neighbourhood hops for the models its neighbourhood wants. The machinery
-exists — `wishlist`, `foreign_wishlist` (cross-pool demand), `region_shard_summaries`,
-`swarm_capacity`. What is new is the objective.
+exists — `wishlist`, `foreign_wishlist` (cross-pool demand), the holder records with
+each peer's region (`count_regional_holders`; the gossiped `region_shard_summaries` were
+removed on 2026-10-15, #91 — nothing read them), `swarm_capacity`. What is new is the objective.
 
 I did not find this published. Centralised region-constrained placement is
 established; a decentralised acquisition rule that converges to it is the part

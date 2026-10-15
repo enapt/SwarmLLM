@@ -106,7 +106,7 @@ Six topics, all subscribed at startup in `discovery::subscribe_topics`:
 | `swarm/credits` | `TOPIC_CREDITS` | `CreditGossip`, `CreditTransaction` |
 | `swarm/identity` | `TOPIC_IDENTITY` | `NicknameGossip` (signed) |
 | `swarm/pools` | `TOPIC_POOLS` | `PoolMessage` (PoolState, PoolInvitation, CreditForward) |
-| `swarm/regions` | `TOPIC_REGIONS` | `RegionShardSummary` (per-region shard availability for routing locality) |
+| `swarm/regions` | `TOPIC_REGIONS` | `ModelDemandGossip` (what each region asks for), `WishlistAnnouncement`, `PoolModelAvailability`. `RegionShardSummary` is no longer sent (2026-10-15): nothing read it, and a node counts its region's holders from the holder records it already has |
 
 The topic match in `NetworkManager::handle_broadcast` is
 contract-not-default: a `SwarmMessage` variant with no topic arm falls

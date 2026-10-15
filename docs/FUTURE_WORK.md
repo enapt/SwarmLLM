@@ -991,9 +991,17 @@ Re-measured 2026-10-11 on the release node with the fleet on .234 (4.1 h up, 7 p
 8.7 KB/s out, 5.8 of it gossip; the capability's first copies 976 → 167 B/s; manifests
 59% of the gossip sent, every one a repeat, each arriving ~4.2 times. So the manifest
 quiet window went 30 min → 2 h (released in v0.3.235, 2026-10-12; RFC 6550's Trickle ceiling is ~2.3 h),
-`docs/invariants/network.md` § "The manifests again, once the capability was gated". Open:
-(1) re-measure once the fleet runs the 2 h window (`ModelManifest` first copies ≤ ~0.004 a
-second expected, from 0.0123); (2) announce-then-pull for manifests — gossip `(model, hash)`
+`docs/invariants/network.md` § "The manifests again, once the capability was gated". Re-measured 2026-10-15
+(.239, 3.3 → 4.3 h up, idle): 8.8 KB/s out, 6.5 gossip; manifests' first copies 0.0031 a second
+(the 2 h window held), but `RegionShardSummary` was a third of the gossip sent, 372 an hour from
+the anti-entropy round alone, and read by nothing. It is no longer sent (unreleased), and scoring
+counts its region from holder records (`docs/invariants/network.md` § "Region summaries were a
+third of the gossip"). Every topic delivers ~6.3 copies of each message: the mesh was sized from the peer cache.
+Open: (1) re-measure once the fleet stops sending region summaries (`swarm/regions` should fall
+to demand gossip alone); (1b) the copy factor: the mesh is sized once at startup from the peer CACHE
+(`known_peers` 203 on the release node, so the 100+ tier, `mesh_n` 6, on a swarm of ~8: a full
+mesh, plus flood publishing); size it from peers actually reachable, measured on a rig first (a
+thinner mesh partitions sooner); (2) announce-then-pull for manifests — gossip `(model, hash)`
 and fetch the manifest point to point only for a version one lacks (Bitcoin
 `inv`/`getdata`, Plumtree lazy push), since the copies, not the size, are now the cost; it
 replaces the table-less manifest, which needed `compute_hash`'s verify-before-header order

@@ -741,37 +741,6 @@ async fn build_stats_message(state: &SharedState) -> String {
         if !region_demand.is_empty() {
             data["region_demand"] = serde_json::to_value(&region_demand).unwrap_or_default();
         }
-
-        // Coverage gaps: per-region list of models with 0 holders
-        let all_model_ids: Vec<String> = state
-            .model_registry
-            .models()
-            .iter()
-            .map(|m| m.id.0.clone())
-            .collect();
-        if !all_model_ids.is_empty() && !region_counts.is_empty() {
-            let mut gaps: HashMap<String, Vec<String>> = HashMap::new();
-            for region_code in region_counts.keys() {
-                let mut region_gaps = Vec::new();
-                for model_id in &all_model_ids {
-                    let key = (region_code.clone(), crate::types::ModelId(model_id.clone()));
-                    let has_holders = state
-                        .region_shard_summaries
-                        .get(&key)
-                        .map(|s| s.shard_counts.iter().any(|(_, c)| *c > 0))
-                        .unwrap_or(false);
-                    if !has_holders {
-                        region_gaps.push(model_id.clone());
-                    }
-                }
-                if !region_gaps.is_empty() {
-                    gaps.insert(region_code.clone(), region_gaps);
-                }
-            }
-            if !gaps.is_empty() {
-                data["region_coverage_gaps"] = serde_json::to_value(&gaps).unwrap_or_default();
-            }
-        }
     }
 
     let msg = serde_json::json!({

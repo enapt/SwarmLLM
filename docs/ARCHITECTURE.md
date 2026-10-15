@@ -449,7 +449,7 @@ libp2p Swarm
 │   ├── swarm/health                  → trust summaries
 │   ├── swarm/identity                → NicknameRecord (signed, timestamp-checked)
 │   ├── swarm/pools                   → PoolState, PoolInvitation
-│   └── swarm/regions                 → RegionShardSummary, ModelDemandGossip, WishlistAnnouncement, PoolModelAvailability
+│   └── swarm/regions                 → ModelDemandGossip, WishlistAnnouncement, PoolModelAvailability (RegionShardSummary: not sent since 2026-10-15, an older node's is dropped)
 │   └── Messages >5 min old are rejected (replay protection)
 │   └── Failed publishes buffered and replayed on mesh formation
 │
@@ -2168,7 +2168,7 @@ described signed capability/shard records under per-node keys
   `CLOCK_SKEW_TOLERANCE_SECS = 30` and `BALANCE_REPORT_MAX_AGE_SECS = 300`
   apply to balance reports AND credit transactions, so a single tuning
   changes the replay window for every signed credit-typed message at once
-- Regional gossip (`RegionShardSummary`, `ModelDemandGossip`) freshness
+- Regional gossip (`ModelDemandGossip`) freshness
   goes through `daemon::dispatch::gossip_timestamp_fresh` — same one-sided
   invariant on `u64` millisecond timestamps. `saturating_sub` returns 0
   when `ts > now`, so the future-rejection branch is required separately

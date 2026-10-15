@@ -44,16 +44,6 @@ pub struct HealthMonitor {
     /// Peers that were connected when manifests last went out. A peer outside
     /// this set has never been sent our picture, and gets a full round.
     peers_told_about_manifests: std::collections::HashSet<crate::types::NodeId>,
-    /// What this node last said about each `(region, model)`, so a regional
-    /// summary is re-broadcast when it CHANGES rather than once per model per
-    /// tick. Measured 2026-09-21: an idle node holding no models published 114
-    /// gossip messages every 30 s, of which 20 were these — about models it
-    /// does not have, to say a number that had not moved.
-    last_announced_region_summaries:
-        std::collections::HashMap<(String, crate::types::ModelId), u64>,
-    /// Counter for the periodic full regional re-announce, the anti-entropy
-    /// half of the same scheme.
-    region_summary_counter: u64,
     /// When the capability last went on the wire and what it said, so it is
     /// published when it says something new or `CAPABILITY_HEARTBEAT` has
     /// passed, not every tick (`capability_needs_broadcast`).
@@ -147,29 +137,6 @@ const MANIFEST_QUIET_WINDOW: Duration = Duration::from_secs(2 * 60 * 60);
 /// cost being removed here; the newcomer now gets a direct catch-up.
 fn manifest_round_is_full(counter: u64) -> bool {
     counter.is_multiple_of(FULL_REANNOUNCE_EVERY_TICKS)
-}
-
-/// What this node is ASSERTING about a `(region, model)`, independent of when
-/// it says it.
-///
-/// `timestamp_ms` is deliberately excluded: it moves every tick by
-/// construction, so folding it in would make every summary look changed and
-/// suppress nothing — the shape of a change-gate that silently does not gate.
-fn region_summary_digest(summary: &crate::types::RegionShardSummary) -> u64 {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(summary.region.as_bytes());
-    hasher.update(summary.model_id.0.as_bytes());
-    hasher.update(&summary.region_node_count.to_le_bytes());
-    for (index, count) in &summary.shard_counts {
-        hasher.update(&index.to_le_bytes());
-        hasher.update(&count.to_le_bytes());
-    }
-    let digest = hasher.finalize();
-    u64::from_le_bytes(
-        digest.as_bytes()[..8]
-            .try_into()
-            .expect("a blake3 digest is 32 bytes, so its first 8 are always there"),
-    )
 }
 
 /// How long an UNCHANGED capability may go without being published again.
@@ -488,8 +455,6 @@ impl HealthMonitor {
             last_announced_manifests: std::collections::HashMap::new(),
             manifest_announce_counter: 0,
             peers_told_about_manifests: std::collections::HashSet::new(),
-            last_announced_region_summaries: std::collections::HashMap::new(),
-            region_summary_counter: 0,
             last_published_capability: None,
             acq_liveness: std::collections::HashMap::new(),
             peer_dl_liveness: std::collections::HashMap::new(),
@@ -622,7 +587,7 @@ impl HealthMonitor {
                     if nonce.is_multiple_of(broadcast_every) {
                         self.broadcast_capabilities().await;
                         self.broadcast_manifests().await;
-                        self.broadcast_region_summary().await;
+                        self.broadcast_region_demand().await;
                         self.broadcast_wishlist_announcement().await;
                         self.broadcast_pool_model_availability().await;
                     }
@@ -1655,126 +1620,29 @@ impl HealthMonitor {
         }
     }
 
-    /// Broadcast per-region shard summaries and demand gossip to `swarm/regions`.
+    /// Broadcast this node's demand to `swarm/regions`.
     ///
-    /// **A summary goes out when it CHANGES**, with a full re-announce every
-    /// `FULL_REANNOUNCE_EVERY_TICKS` rounds — the same anti-entropy
-    /// `broadcast_manifests` uses, and for the same reason. Publishing one
-    /// message per known model per tick made `swarm/regions` the busiest topic
-    /// on the swarm by message count: measured 2026-09-21 on a node holding no
-    /// models at all, 114 published messages every 30 s and 87 arriving per
-    /// SECOND, at 557 bytes each. That is a message-rate problem, not a payload
-    /// one, and the duplicate factor was 1.31 — GossipSub's deduplication was
-    /// working; there was simply that much being said.
+    /// **Per-region shard summaries are no longer sent (2026-10-15, #91).**
+    /// Every node re-announced one `RegionShardSummary` per KNOWN model every 5
+    /// minutes — measured on the release node, 0.11 messages a second from a
+    /// node knowing 31 models, and with each message arriving ~6.5 times, a
+    /// third of the gossip it sent — and nothing used them: auto-manage scoring
+    /// asked only about this node's OWN region, which it counts from the holder
+    /// records it already has (`count_regional_holders`), and the dashboard's
+    /// map builds its coverage from peers' capabilities (`api::admin`). Older
+    /// nodes still send them; dispatch drops them.
     ///
     /// **Demand comes from `local_region_demand`, never `region_demand`** — see
     /// the note on those fields. The merged map holds what every peer told us,
     /// and re-publishing it re-originated the whole swarm's demand table under
     /// this node's id every 30 s.
-    async fn broadcast_region_summary(&mut self) {
-        // Determine our region — skip if unknown. Canonical resolver (configured
-        // region wins, else IP-detected) so this gossip agrees with the capacity
-        // announcement and WS region counts.
-        let our_region = match self.shared_state.effective_region().await {
-            Some(r) => r.to_uppercase(),
-            None => return, // No region — nothing to broadcast
+    async fn broadcast_region_demand(&self) {
+        let Some(our_region) = self.shared_state.effective_region().await else {
+            return; // No region — nothing to file demand under
         };
-
+        let our_region = our_region.to_uppercase();
         let our_id = self.shared_state.identity.node_id().clone();
         let now_ms = crate::types::unix_now_ms();
-
-        self.region_summary_counter += 1;
-        let full_round = self
-            .region_summary_counter
-            .is_multiple_of(FULL_REANNOUNCE_EVERY_TICKS);
-
-        // Count same-region peers (including self)
-        let mut region_node_count: u32 = 1; // self
-        for peer in self.shared_state.peer_registry.iter() {
-            if let Some(ref cap) = peer.value().capability {
-                if let Some(ref r) = cap.region {
-                    if r.to_uppercase() == our_region {
-                        region_node_count = region_node_count.saturating_add(1);
-                    }
-                }
-            }
-        }
-
-        // Build a set of same-region node IDs once to avoid O(holders) peer_registry
-        // lookups per shard (was O(models × shards × holders), now O(models × shards)).
-        let same_region_nodes: std::collections::HashSet<crate::types::NodeId> = {
-            let mut set = std::collections::HashSet::new();
-            set.insert(our_id.clone());
-            for entry in self.shared_state.peer_registry.iter() {
-                if let Some(ref cap) = entry.capability {
-                    if let Some(ref r) = cap.region {
-                        if r.to_uppercase() == our_region {
-                            set.insert(entry.key().clone());
-                        }
-                    }
-                }
-            }
-            set
-        };
-
-        // For each model, count same-region shard holders
-        for manifest in self.shared_state.model_registry.models() {
-            let mut shard_counts: Vec<(u32, u32)> = Vec::new();
-            for shard_info in &manifest.shards {
-                let sid = crate::types::ShardId {
-                    model_id: manifest.id.clone(),
-                    index: shard_info.index,
-                };
-                let holders = self.shared_state.model_registry.shard_holders(&sid);
-                let regional_count = holders
-                    .iter()
-                    .filter(|h| same_region_nodes.contains(h))
-                    .count() as u32;
-                shard_counts.push((shard_info.index, regional_count));
-            }
-
-            if shard_counts.is_empty() {
-                continue;
-            }
-
-            let summary = crate::types::RegionShardSummary {
-                region: our_region.clone(),
-                model_id: manifest.id.clone(),
-                shard_counts,
-                region_node_count,
-                publisher: our_id.clone(),
-                timestamp_ms: now_ms,
-            };
-
-            // Our own shared state is updated every tick regardless: it is a
-            // local map, it costs nothing, and only the BROADCAST is rationed.
-            let key = (our_region.clone(), manifest.id.clone());
-            self.shared_state
-                .region_shard_summaries
-                .insert(key.clone(), summary.clone());
-
-            // Has anything we would be ASSERTING moved? The digest deliberately
-            // excludes `timestamp_ms`, which changes every tick by construction
-            // and would suppress nothing.
-            let digest = region_summary_digest(&summary);
-            if !full_round && self.last_announced_region_summaries.get(&key) == Some(&digest) {
-                continue;
-            }
-
-            let msg = NetworkCommand::Broadcast(SwarmMessage::RegionShardSummary(summary));
-            if let Err(e) = self.network_tx.send(msg).await {
-                tracing::debug!(error = %e, model = %manifest.id, "Failed to broadcast region summary");
-                // A send that failed is not a thing the swarm has been told, so
-                // it must be retried next tick rather than remembered as done.
-                continue;
-            }
-            self.last_announced_region_summaries.insert(key, digest);
-        }
-
-        // Anything we no longer summarise stops being remembered, so a model
-        // that goes away and comes back is announced as the change it is.
-        self.last_announced_region_summaries
-            .retain(|(region, _), _| region == &our_region);
 
         // Demand gossip for models THIS node has served recently.
         //
@@ -2103,29 +1971,6 @@ impl HealthMonitor {
             );
             for key in stale_stream {
                 self.shared_state.streaming_token_txs.remove(&key);
-            }
-        }
-
-        // region_shard_summaries: evict entries older than 10 minutes
-        const REGION_SUMMARY_TTL_MS: u64 = 600_000;
-        let now_ms = crate::types::unix_now_ms();
-        let stale_region: Vec<_> = self
-            .shared_state
-            .region_shard_summaries
-            .iter()
-            .filter(|entry| {
-                now_ms.saturating_sub(entry.value().timestamp_ms) > REGION_SUMMARY_TTL_MS
-            })
-            .map(|entry| entry.key().clone())
-            .collect();
-        if !stale_region.is_empty() {
-            tracing::debug!(
-                count = stale_region.len(),
-                total = self.shared_state.region_shard_summaries.len(),
-                "DIAG: cleaning up stale region_shard_summaries"
-            );
-            for key in stale_region {
-                self.shared_state.region_shard_summaries.remove(&key);
             }
         }
 
@@ -2676,75 +2521,6 @@ mod tests {
             ),
             "heard again after we left it — the swarm has it"
         );
-    }
-
-    fn summary_for_test(
-        model: &str,
-        counts: &[(u32, u32)],
-        nodes: u32,
-        timestamp_ms: u64,
-    ) -> crate::types::RegionShardSummary {
-        crate::types::RegionShardSummary {
-            region: "TH".to_string(),
-            model_id: crate::types::ModelId(model.to_string()),
-            shard_counts: counts.to_vec(),
-            region_node_count: nodes,
-            publisher: crate::types::NodeId([3u8; 32]),
-            timestamp_ms,
-        }
-    }
-
-    /// The sibling regression, measured on the live swarm 2026-09-21: one
-    /// summary per KNOWN model per 30 s tick, from every node, whether or not
-    /// anything had moved. `swarm/regions` was carrying 87 messages a second
-    /// inbound at 557 bytes each — a message-rate problem that no payload
-    /// shrink would have touched.
-    ///
-    /// ⚠ The digest must ignore `timestamp_ms`. Including it is the failure
-    /// this asserts against: every summary would read as changed, the gate
-    /// would suppress nothing, and the bug would look fixed in review.
-    #[test]
-    fn an_unchanged_region_summary_is_not_rebroadcast() {
-        let first = summary_for_test("llama-3.2-3b", &[(0, 2), (1, 2)], 3, 1_000);
-        let later = summary_for_test("llama-3.2-3b", &[(0, 2), (1, 2)], 3, 9_999_999);
-        assert_eq!(
-            region_summary_digest(&first),
-            region_summary_digest(&later),
-            "the same claim made at a later moment is the same claim — if the \
-             clock moves the digest, the change-gate suppresses nothing"
-        );
-    }
-
-    /// Everything the summary actually asserts must move the digest, or a real
-    /// regional change would be silently withheld from the swarm — which is
-    /// worse than the traffic it saves.
-    #[test]
-    fn a_changed_region_summary_still_goes_out() {
-        let base = summary_for_test("llama-3.2-3b", &[(0, 2), (1, 2)], 3, 1_000);
-        for (label, other) in [
-            (
-                "a shard gained a holder",
-                summary_for_test("llama-3.2-3b", &[(0, 2), (1, 3)], 3, 1_000),
-            ),
-            (
-                "a shard lost its last holder",
-                summary_for_test("llama-3.2-3b", &[(0, 2), (1, 0)], 3, 1_000),
-            ),
-            (
-                "the region gained a node",
-                summary_for_test("llama-3.2-3b", &[(0, 2), (1, 2)], 4, 1_000),
-            ),
-            (
-                "a different model entirely",
-                summary_for_test("qwen3-1.7b", &[(0, 2), (1, 2)], 3, 1_000),
-            ),
-        ] {
-            assert_ne!(
-                region_summary_digest(&base),
-                region_summary_digest(&other),
-                "{label} — this is information the swarm needs"
-            );
-        }
     }
 
     /// An idle card node's capability as one round builds it.

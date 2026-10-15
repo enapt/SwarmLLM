@@ -11662,6 +11662,51 @@ fn the_demand_source_guard_catches_the_form_the_defect_took() {
     );
 }
 
+/// Where a `RegionShardSummary` is BUILT in `text` — the only way to send one.
+fn region_summaries_built(path: &str, text: &str) -> Vec<String> {
+    statements(text)
+        .into_iter()
+        .filter(|(_, t)| t.contains("RegionShardSummary {"))
+        .map(|(line, t)| format!("{path}:{line}: {}", t.trim()))
+        .collect()
+}
+
+/// Region summaries are not gossiped (2026-10-15, #91). Every node
+/// re-announced one `RegionShardSummary` per KNOWN model every 5 minutes —
+/// measured on the release node, a third of the gossip it sent once each
+/// message's ~6.5 copies were counted — and nothing used them: auto-manage
+/// scoring counts its own region from the holder records it has
+/// (`count_regional_holders`), the dashboard's map from peers' capabilities.
+/// Older nodes still send them and dispatch drops them, so the variant stays;
+/// building one in `src/` is how the traffic would come back.
+#[test]
+fn no_node_builds_a_region_summary_to_gossip() {
+    let offenders: Vec<String> = walk_rs_files("src")
+        .iter()
+        .flat_map(|path| {
+            let text = std::fs::read_to_string(path).expect("a source file");
+            region_summaries_built(path, &text)
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "a `RegionShardSummary` is built again — nothing reads one (scoring counts \
+         its region from holder records), and sending it cost a third of an idle \
+         node's gossip:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The scan sees a summary built the way the monitor built it, wrapped by
+/// rustfmt, and not the arm that drops an older node's.
+#[test]
+fn the_region_summary_guard_sees_one_being_built() {
+    let built = "fn f() {\n    let summary = crate::types::RegionShardSummary {\n        region: r,\n        model_id: m,\n    };\n}\n";
+    assert_eq!(region_summaries_built("planted.rs", built).len(), 1);
+    let dropped = "fn f() {\n    match msg {\n        SwarmMessage::RegionShardSummary(_) => {}\n        _ => {}\n    }\n}\n";
+    assert!(region_summaries_built("planted.rs", dropped).is_empty());
+}
+
 /// `downloadShards(...)` call sites whose request names no work.
 ///
 /// `/api/admin/hf/download-shards` needs exactly one of a `shards` list,

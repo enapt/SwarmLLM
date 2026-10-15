@@ -965,8 +965,6 @@ pub struct SharedState {
     /// public relay supply economically self-sustaining (incentive-aligned).
     pub relay_inference_bytes: AtomicU64,
     pub active_relay_circuits: DashMap<(libp2p::PeerId, libp2p::PeerId), std::time::Instant>,
-    pub region_shard_summaries:
-        DashMap<(String, crate::types::ModelId), crate::types::RegionShardSummary>,
     /// Demand per `(model, region)` as this node currently believes it — the
     /// MERGED view, our own measurements blended with every peer's gossip.
     /// Read by auto-manage scoring, pruning and the wishlist, all of which want
@@ -1566,7 +1564,6 @@ impl SharedState {
             model_process_pool: Arc::new(crate::inference::process_pool::ModelProcessPool::new(
                 config.node.data_dir.clone(),
             )),
-            region_shard_summaries: DashMap::new(),
             region_demand: DashMap::new(),
             local_region_demand: DashMap::new(),
             dht_query_tx,

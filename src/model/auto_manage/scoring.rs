@@ -525,23 +525,14 @@ impl AutoShardManager {
                     continue;
                 }
 
-                // Regional rarity: prefer shards missing from our region.
-                // Look up regional holder count from gossip summaries, falling back
-                // to counting peers in the registry.
+                // Regional rarity: prefer shards missing from our region,
+                // counted over the holders above — private mode's allowed set
+                // included. It read the gossiped region summary first, which
+                // counted every holder in the region, pool or not; summaries
+                // are no longer sent (#91).
                 let our_region = self.our_region();
                 let regional_holders = if let Some(ref region) = our_region {
-                    let key = (region.clone(), manifest.id.clone());
-                    if let Some(summary) = self.shared_state.region_shard_summaries.get(&key) {
-                        summary
-                            .shard_counts
-                            .iter()
-                            .find(|(idx, _)| *idx == shard.index)
-                            .map(|(_, c)| *c as usize)
-                            .unwrap_or(0)
-                    } else {
-                        // Fallback: count from peer_registry
-                        self.count_regional_holders(&holders, local_node_id, region)
-                    }
+                    self.count_regional_holders(&holders, local_node_id, region)
                 } else {
                     holder_count // No region -- use global count
                 };
