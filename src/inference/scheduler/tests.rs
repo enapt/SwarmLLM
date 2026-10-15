@@ -6778,6 +6778,9 @@ fn a_card_holder_of_a_model_it_must_split_on(
         .store(true, std::sync::atomic::Ordering::Relaxed);
     pool.set_gpu_layers(-1);
     pool.set_vram_budget_mb(3000);
+    // The plan reads the card live (#250); without this it read the machine's
+    // real card — a split here by chance, the whole model on CI's fake 8 GB.
+    pool.set_vram_budget_source(Box::new(|| Some(3000)));
     pool.test_footprint_inputs.insert(
         mid.clone(),
         crate::model::auto_manage::vram::VramFootprintInputs {

@@ -143,6 +143,8 @@ type ResponseTx = mpsc::Sender<(WorkerMsg, Vec<u8>)>;
 /// dropped the original's sender and the original's cleanup then removed the
 /// retry's — killing both. See `WorkerHandle::register_response`.
 type ResponseMap = Arc<DashMap<Uuid, (u64, ResponseTx)>>;
+/// Where the card budget is read from now (`ModelProcessPool::vram_budget_now`).
+type VramBudgetSource = Box<dyn Fn() -> Option<u64> + Send + Sync>;
 
 /// Source of per-attempt tokens for `ResponseMap`. Process-wide; only equality
 /// matters, never ordering.
@@ -2560,8 +2562,9 @@ pub struct ModelProcessPool {
     /// set by `SharedState::new` — `nvidia-smi` minus what this node's own
     /// workers are charged, so another program's use of the card counts at
     /// the moment a model is admitted, not as it stood when the node started.
-    /// See [`Self::vram_budget_now`].
-    vram_budget_source: std::sync::OnceLock<Box<dyn Fn() -> Option<u64> + Send + Sync>>,
+    /// See [`Self::vram_budget_now`]. Replaceable, so a test that builds a
+    /// `SharedState` can name the card it means rather than read the machine's.
+    vram_budget_source: std::sync::RwLock<Option<VramBudgetSource>>,
     /// The most that budget could be with no other program on the card —
     /// `auto_manage::vram_budget_ceiling`, read from the live config without
     /// asking the card. Unset (tests, a node with no card) is no ceiling.
@@ -2856,7 +2859,7 @@ impl ModelProcessPool {
             gpu_layers: std::sync::atomic::AtomicI32::new(-1),
             cpu_pinned_models: dashmap::DashSet::new(),
             vram_budget_mb: std::sync::atomic::AtomicU64::new(0),
-            vram_budget_source: std::sync::OnceLock::new(),
+            vram_budget_source: std::sync::RwLock::new(None),
             vram_ceiling_source: std::sync::OnceLock::new(),
             card_read_at: std::sync::Mutex::new(None),
             cpu_threads: std::sync::atomic::AtomicUsize::new(0),
@@ -3647,10 +3650,12 @@ impl ModelProcessPool {
             .store(budget_mb, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Where admission reads the card budget from NOW (set once, by
-    /// `SharedState::new`). See [`Self::vram_budget_now`].
-    pub fn set_vram_budget_source(&self, source: Box<dyn Fn() -> Option<u64> + Send + Sync>) {
-        let _ = self.vram_budget_source.set(source);
+    /// Where admission reads the card budget from NOW (`SharedState::new`;
+    /// a later call replaces it). See [`Self::vram_budget_now`].
+    pub fn set_vram_budget_source(&self, source: VramBudgetSource) {
+        if let Ok(mut slot) = self.vram_budget_source.write() {
+            *slot = Some(source);
+        }
     }
 
     /// Where the promotion check reads the most the card budget could ever be
@@ -3674,15 +3679,18 @@ impl ModelProcessPool {
     /// browser started after the node. Costs one `nvidia-smi` (~0.1 s) per
     /// admission, beside a worker spawn that takes seconds.
     fn vram_budget_now(&self) -> u64 {
-        if let Some(source) = self.vram_budget_source.get() {
-            if let Some(budget) = source() {
-                self.vram_budget_mb
-                    .store(budget, std::sync::atomic::Ordering::Relaxed);
-                if let Ok(mut at) = self.card_read_at.lock() {
-                    *at = Some(std::time::Instant::now());
-                }
-                return budget;
+        let reading = self
+            .vram_budget_source
+            .read()
+            .ok()
+            .and_then(|source| source.as_ref().and_then(|source| source()));
+        if let Some(budget) = reading {
+            self.vram_budget_mb
+                .store(budget, std::sync::atomic::Ordering::Relaxed);
+            if let Ok(mut at) = self.card_read_at.lock() {
+                *at = Some(std::time::Instant::now());
             }
+            return budget;
         }
         self.vram_budget_mb
             .load(std::sync::atomic::Ordering::Relaxed)
