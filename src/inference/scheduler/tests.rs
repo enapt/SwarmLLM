@@ -1431,8 +1431,8 @@ fn encrypted_pipeline_fails_without_first_shard() {
     assert!(result.is_err());
     let err_msg = format!("{}", result.unwrap_err());
     assert!(
-        err_msg.contains("shard 0"),
-        "Error should mention shard 0: {err_msg}"
+        err_msg.contains("first part"),
+        "Error should name the model's first part (shard 0): {err_msg}"
     );
 }
 

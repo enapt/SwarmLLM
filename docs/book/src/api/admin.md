@@ -113,8 +113,12 @@ Delete a single shard.
 ### GET/PUT /api/admin/models/{id}/auto-manage
 Per-model auto-manage policy (including prune toggle).
 
-### GET/PUT /api/admin/models/{id}/encrypted-pipeline
-Per-model "Start and finish on this computer" toggle (`encrypted_pipeline`). GET returns current status, readiness (whether local node holds first + last shard), and overhead note. PUT enables/disables with body `{"enabled": true}`. Requires the local node to hold shard 0 and the final shard. Returns a warning for 2-shard models (fully local, no distribution benefit). Setting is persisted to the database and survives restarts. Falls back to global `encrypted_pipeline` config if no per-model override is set.
+### GET/PUT/DELETE /api/admin/models/{id}/encrypted-pipeline
+Per-model "Start and finish on this computer" setting (`encrypted_pipeline`). It is decided, first match wins, by: your choice for this model; an explicit global `encrypted_pipeline = true`; otherwise it is on exactly while this node holds both the first and last part of the model (`encrypted_pipeline_auto`, default on).
+
+GET returns `encrypted_pipeline` (in force or not), `decided_by` (`this_model`, `global_setting` or `automatic`), `per_model_override` (your choice, or `null`), `default_for_this_model` (what it would be with no choice), `global_default`, `automatic_when_both_ends_here`, readiness (`ready`, `has_first_shard`, `has_last_shard`) and an overhead note.
+
+PUT `{"enabled": true}` or `{"enabled": false}` stores a choice. Turning it on without both ends is recorded, and requests for the model are then refused until the parts are here (fails closed). A warning is logged for 2-part models (fully local, no distribution benefit). PUT `{"enabled": null}` or DELETE forgets the choice, so the global setting and the automatic rule decide again. A body without `enabled` is a 400. The choice is persisted and survives restarts.
 
 ### PUT /api/admin/models/{id}/shards/{index}/lock
 Lock/unlock a shard to prevent auto-pruning.

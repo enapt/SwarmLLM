@@ -284,10 +284,11 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
     // the dashboard said `encrypted_pipeline: false` while the scheduler said
     // "Encrypted pipeline active" for the same model in the same second, and
     // nothing anywhere connected the failure to the setting causing it.
-    let encrypted_pipeline_info = |model_id: &str| -> (bool, bool, bool, bool) {
+    let encrypted_pipeline_info = |model_id: &str| -> (bool, bool, bool, bool, bool) {
         let mid = crate::types::ModelId(model_id.to_string());
         // Same answer the scheduler acts on, including the automatic-on case.
-        let flag = state.shared_state.encrypted_pipeline_for(&mid);
+        let privacy = state.shared_state.prompt_privacy_status(&mid);
+        let flag = privacy.on;
         let local_node_id = state.shared_state.identity.node_id();
         let has_first = state
             .shared_state
@@ -313,7 +314,13 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         };
         let effective = flag && has_first && has_last;
         let blocked = flag && !(has_first && has_last);
-        (effective, has_first, has_last, blocked)
+        (
+            effective,
+            has_first,
+            has_last,
+            blocked,
+            privacy.without_a_choice,
+        )
     };
 
     // Helper: build the common model JSON object shared by all 3 listing paths.
@@ -418,6 +425,11 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             // every request for it will fail until the first+last shards are
             // present or the setting is turned off.
             "encrypted_pipeline_blocked": enc_info.3,
+            // What this model would get with no per-model choice. A switch
+            // that sets the value this gives FORGETS the choice instead of
+            // storing it, so switching off and on again returns a model to
+            // automatic rather than pinning it (field report 2026-10-15).
+            "encrypted_pipeline_default": enc_info.4,
             // Why this model is not on the GPU, when it is not: one of the
             // `CpuReason::as_str` tags (`configured_cpu_only`,
             // `not_enough_vram`, …), or null when it runs on the GPU. The first three

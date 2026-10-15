@@ -543,11 +543,18 @@
           var isActive = encModelData
             ? (!!encModelData.encrypted_pipeline || !!encModelData.encrypted_pipeline_blocked)
             : (target.classList.contains('active') || target.closest('.active') != null);
-          App.authFetch(U.modelApiUrl(encToggle, 'encrypted-pipeline'), {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled: !isActive }),
-          }).then(function(r) {
+          // Switching to what this computer decides on its own FORGETS the
+          // choice rather than storing it, so off-then-on returns the model to
+          // automatic instead of pinning it on for good (field report
+          // 2026-10-15). Without the model's data, store the choice as before.
+          var encBackToDefault = !!encModelData && (!isActive === !!encModelData.encrypted_pipeline_default);
+          App.authFetch(U.modelApiUrl(encToggle, 'encrypted-pipeline'), encBackToDefault
+            ? { method: 'DELETE' }
+            : {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ enabled: !isActive }),
+            }).then(function(r) {
             if (r.ok) {
               var key = isActive ? 'enc.pipeline_disabled' : 'enc.pipeline_enabled';
               App.ui.showBanner('success', I18n.t(key, { model: encToggle }));

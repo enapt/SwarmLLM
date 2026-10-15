@@ -2920,9 +2920,10 @@ impl PipelineScheduler {
                             peer_free_vram_mb = ?peer.gpu_vram_available_mb,
                             peer_max_hostable_layers = ?peer.max_hostable_layers,
                             search_will_decide,
-                            "This model does not fit our GPU. Prompt privacy is on, so the \
-                             first and last layers stay here and a nearby peer runs the \
-                             middle — it sees encrypted activations, never the prompt"
+                            "This model does not fit our GPU. Start and finish on this \
+                             computer is on, so the first and last layers stay here and a \
+                             nearby peer runs the middle — it never sees the prompt's text, \
+                             but its hidden states are partly invertible back to it"
                         );
                         let assignment = PipelineAssignment {
                             request_id,

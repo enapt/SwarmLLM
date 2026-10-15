@@ -1803,12 +1803,19 @@ fn user_settable_config_is_read_live_not_from_the_boot_snapshot() {
         ".config.node.contribution",
         ".config.model.shard_size_mb",
         // ...and the three `inference` fields the Settings panel exposes. The
-        // rest of that section (gpu_layers, shard_range, encrypted_pipeline) is
-        // config-file/CLI only, so reading the boot value there is CORRECT —
-        // `shard_range` in particular is meant to be fixed for the process.
+        // rest of that section (gpu_layers, shard_range) is config-file/CLI
+        // only, so reading the boot value there is CORRECT — `shard_range` in
+        // particular is meant to be fixed for the process.
         ".config.inference.max_concurrent_requests",
         ".config.inference.max_batch_size",
         ".config.inference.batch_timeout_ms",
+        // ...and the two prompt-privacy switches (this pattern also matches
+        // `encrypted_pipeline_auto`). Config-file only, but a config reload
+        // promises every setting the node consults takes effect at once and
+        // lists neither as needing a restart, and a privacy switch that a
+        // reload silently ignores is #281 at its worst. The resolver and the
+        // per-model status read the boot snapshot until 2026-10-15.
+        ".config.inference.encrypted_pipeline",
     ];
 
     // Startup-only readers: each builds something that cannot be rebuilt live
@@ -7442,10 +7449,11 @@ fn every_apt_command_goes_through_a_retrying_action() {
 #[test]
 fn prompt_privacy_is_never_re_derived_from_the_per_model_map() {
     let allowed = [
-        // Owns the map: the field, the accessors, and the startup load.
+        // Owns the map: the field, the accessors (`prompt_privacy_status` for
+        // the choice itself, `set_prompt_privacy_choice` its one writer), and
+        // the startup load. The admin endpoints read and write through those
+        // since 2026-10-15, so they are no longer exempt.
         "src/daemon/state/mod.rs",
-        // The admin endpoints that read and write the explicit choice itself.
-        "src/api/admin_models/lifecycle.rs",
     ];
     let mut offenders = Vec::new();
     for path in rust_files_under(std::path::Path::new("src")) {

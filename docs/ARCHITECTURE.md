@@ -2680,7 +2680,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   actually passed through, projected from `recent_traces`. The Network view
   draws them as arcs.
 - `GET    /api/admin/models/{id}/metadata` — GGUF metadata (context length, quantization, layers)
-- `GET/PUT /api/admin/models/{id}/encrypted-pipeline` — Per-model encrypted pipeline policy
+- `GET/PUT/DELETE /api/admin/models/{id}/encrypted-pipeline` — Per-model "Start and finish on this computer": `{enabled: true|false|null}` in (null or DELETE forgets the choice); `decided_by` + `default_for_this_model` out
 - `GET/PUT /api/admin/models/{id}/keep-on-this-computer` — Per-model "Keep on this computer": `{enabled}` in; `keep_on_this_computer` + `whole_model_here` out (#251)
 - `POST   /api/admin/rescan-shards` — Hot-reload shard files from disk without restart
 - `GET/PUT /api/admin/pools/{id}/rates` — Get/set credit rate configuration for a pool

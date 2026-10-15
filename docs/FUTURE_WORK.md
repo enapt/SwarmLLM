@@ -579,8 +579,11 @@ answers in ~5 s. Several contributors (diagnosis rule 6). Each is a hypothesis u
   the requester and weighs the split's processor share as the spawn will (`ram_charged_share` →
   `ram_verdict`). Red without each: `a_plan_weighs_the_card_as_it_stands_where_a_spawn_could_follow`,
   `a_fresh_split_is_planned_only_if_its_processor_share_would_be_admitted`. The router's line for
-  this re-plan no longer says "transient". Not established: whether the swarm's cap or the live
-  headroom refused the load (the message's budget figure was cut off in the report).
+  this re-plan no longer says "transient". **Answered by the same tester (2026-10-15): the CAP
+  refused it**, and the cap was their own: "budget allows 16000 MB (resources.max_ram_mb is 16000
+  MB) and 0 MB is already in use", with ~31 GB of the machine available. An explicit `max_ram_mb`
+  binds the owner too (#266), so 40 of 48 layers fit here (`max_hostable_layers=Some(40)` on the
+  re-plan) and the refusal was the setting doing its job.
 `split_rig.sh softunload` (2026-10-12; Qwen2.5-14B whole here, a peer holding its middle) did NOT
 reproduce the detour: v0.3.235 narrowed the window, then the next request reloaded the model
 locally and answered here (23.2 s vs 9.6 s on main). By the 7B prior the local hybrid route prices
@@ -597,8 +600,27 @@ could not be built on this machine (the peer holds 30 of its 48 layers: `SwarmSh
 both arms). The v0.3.236 gate repeated both shapes on the released build (steps 12ax and 12bb),
 with the same plans and the same `layer_work`. Left: the report's own shape (a 12 GB card, peers
 abroad, a 2,728-token prompt) has not been reproduced, and the prompt-pricing bullet above is
-untouched. The next evidence is a `DIAG: pipeline candidate … layer_work=` line from a node that
-detours, or a second machine able to hold the middle.
+untouched.
+**The detour's ROUTE is "start and finish on this computer" (2026-10-15, from report #036's
+`DIAG: pipeline candidate` lines, sent by the tester).** The re-plan offered `7c10ea04` holding all
+48 layers (est 7.27 tok/s, 349 ms) and `96842635` holding `[(19,27),(33,39),(42,43)]` (4.88, 303 ms),
+and took local L0-19 → `96842635` L19-27 → local L27-48: cold 137.5 s at 0.2 tok/s (`968ad99f`), warm
+10.6 s (`b9af8f3e`). Priced by `parallax::vertex_cost`, handing `7c10ea04` the whole model costs
+~0.7 s of network once, and the middle segment ~38.8 s (2 × 303 ms × `ASSUMED_FORWARD_PASSES`), so the
+search did not CHOOSE the split on price: the whole-model vertex was not eligible. The node held
+all 34 parts (its diagnostics), so `encrypted_pipeline_auto` had switched prompt privacy on, which
+keeps the first and last segments here (`parallax.rs` `source_ok`: `encrypted_pipeline &&
+c.node_id != local_node_id` → not a source) and leaves a holder of a middle range as the only way
+to place the 8 layers the owner's cap left over. #035's route `aa3d1e66 → 99aafc41 → 7c10ea04 →
+aa3d1e66` has the same shape on the same node: the soft-unload narrowed the window, and privacy is
+why the rest went to a middle instead of to one peer whole. Not confirmed from the node itself (no
+`decided_by` then; the same node's report 1 shows a model with both ends here reading
+`encrypted_pipeline: true` with no override); the other explanation, `7c10ea04` below the
+plaintext-prompt trust bar (`trusted_with_the_plaintext_prompt`), is not excluded by these lines.
+Dropping privacy because a route is slow was researched and rejected (`privacy_cost_ms`: a
+downgrade an adversary triggers by being slow, RFC 7507); the owner is told the cost instead (#165).
+So this detour is the setting working as designed. What stays open here: the prompt-pricing bullet,
+and whether #165's notice reached this owner (nothing in the report mentions it).
 
 #### #237 — A peer's room for a conversation is not advertised, and the hand-off counts the prompt only
 `P3` · routing · **OPEN** — 2026-10-08 · history: report #005 (a tester, v0.3.230 code); related #194

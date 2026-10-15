@@ -224,7 +224,11 @@ pub enum SwarmError {
 
     /// Prompt privacy (`inference.encrypted_pipeline`) is on for this model, but
     /// this node does not hold shard 0 — the embedding table that has to stay
-    /// local for the prompt to be hidden from every peer.
+    /// local for the prompt's TEXT to stay here. Peers still receive the
+    /// hidden states, which are partly invertible back to text, so the message
+    /// claims no more than that (`docs/ARCHITECTURE.md` § Pipeline Privacy
+    /// Model). It said the part "keeps your prompt away from every peer" until
+    /// a tester quoted it back on 2026-10-15.
     ///
     /// This is a POLICY refusal, not a fault: the setting and the shards on disk
     /// disagree, commonly because privacy was switched on while shard 0 was
@@ -232,7 +236,7 @@ pub enum SwarmError {
     /// which is why it is its own variant rather than a `PipelineError` — as the
     /// latter it inherited a generic "a peer went offline, try again" hint and
     /// sent users round a loop that had no exit.
-    #[error("Prompt privacy is on for {model_id}, but this node does not hold shard 0 (the embedding table) that keeps your prompt away from every peer")]
+    #[error("“Start and finish on this computer” is on for {model_id}, but this computer does not hold the model's first part (the embedding table), where every request for it has to start")]
     PromptPrivacyUnavailable { model_id: String },
 
     /// The OTHER end of the same refusal: prompt privacy is on, and this node
@@ -251,7 +255,7 @@ pub enum SwarmError {
     /// two situations need DIFFERENT next steps: one says fetch the start of
     /// the model, the other the end. A shared variant would have to pick one
     /// hint for both, and half its readers would be sent after the wrong piece.
-    #[error("Prompt privacy is on for {model_id}, but this node does not hold the model's last part (the output head) that keeps your prompt away from every peer")]
+    #[error("“Start and finish on this computer” is on for {model_id}, but this computer does not hold the model's last part (the output head), where every request for it has to finish")]
     PromptPrivacyNeedsFinalShard { model_id: String },
 
     /// No reachable node holds the piece of this model covering `layer` — the

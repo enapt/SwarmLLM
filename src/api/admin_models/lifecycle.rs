@@ -389,26 +389,17 @@ pub async fn enable_model_privacy(
 
     // A previous explicit "off" would keep overriding the automatic behaviour
     // even once the shards land, so asking for privacy clears it.
-    let had_explicit_off = state
-        .shared_state
-        .encrypted_pipeline_models
-        .get(&mid)
-        .map(|r| !*r.value())
-        .unwrap_or(false);
+    let had_explicit_off = state.shared_state.prompt_privacy_status(&mid).choice == Some(false);
     if had_explicit_off {
-        state.shared_state.encrypted_pipeline_models.remove(&mid);
-        let _ = state
-            .shared_state
-            .db
-            .remove("encrypted_pipeline_models", &model_id);
+        state.shared_state.set_prompt_privacy_choice(&mid, None);
     }
 
     let last_index = manifest.shard_count.saturating_sub(1);
     let me = state.shared_state.identity.node_id();
     // Confirm on disk, not just in the registry.
     //
-    // This answer becomes the sentence "Prompt privacy is ON — prompts and
-    // answers stay here", which a user reasonably reads as a guarantee about
+    // This answer becomes the CLI's sentence that starting and finishing on
+    // this computer is ON, which a user reasonably reads as a claim about
     // where their text goes. The registry is a snapshot built at startup and
     // updated by events, so after a model folder was deleted by hand — the only
     // way to free one, there being no remove command — it still listed the
@@ -489,7 +480,7 @@ pub async fn enable_model_privacy(
             "models",
             "privacy_shards_requested",
             format!(
-                "Fetching the pieces needed to keep prompts private for {} ({} of {})",
+                "Fetching the parts {} needs to start and finish on this computer ({} of {})",
                 model_id,
                 needed.len(),
                 manifest.shard_count
@@ -504,7 +495,7 @@ pub async fn enable_model_privacy(
         "status": "downloading",
         "needed_shards": needed,
         "cleared_explicit_off": had_explicit_off,
-        "note": "Prompt privacy turns on by itself once both ends are present.",
+        "note": "Starting and finishing on this computer turns on by itself once both ends are here.",
         "download": resp.0,
     })))
 }
@@ -515,16 +506,13 @@ pub async fn get_model_encrypted_pipeline(
     Path(model_id): Path<String>,
 ) -> Json<serde_json::Value> {
     let mid = crate::types::ModelId(model_id.clone());
-    let global_default = state.shared_state.config.inference.encrypted_pipeline;
-    let per_model = state
-        .shared_state
-        .encrypted_pipeline_models
-        .get(&mid)
-        .map(|r| *r.value());
     // The effective answer the scheduler will act on, so the UI reflects reality
     // rather than only what was explicitly stored — the automatic-on case has no
-    // stored flag at all.
-    let effective = state.shared_state.encrypted_pipeline_for(&mid);
+    // stored flag at all. `decided_by` says which rule gave it: on its own,
+    // `global_default: false` beside an automatic ON read as a contradiction
+    // (field report 2026-10-15).
+    let privacy = state.shared_state.prompt_privacy_status(&mid);
+    let cfg = state.shared_state.cfg();
 
     // Check if the local node has the required shards (first + last)
     let manifest = state.shared_state.model_registry.get_manifest(&mid);
@@ -554,21 +542,40 @@ pub async fn get_model_encrypted_pipeline(
 
     Json(serde_json::json!({
         "model_id": model_id,
-        "encrypted_pipeline": effective,
-        "per_model_override": per_model,
-        "global_default": global_default,
+        "encrypted_pipeline": privacy.on,
+        "decided_by": privacy.decided_by.as_str(),
+        "per_model_override": privacy.choice,
+        // What this model would get with no per-model choice — the value a
+        // DELETE (or `{"enabled": null}`) returns it to.
+        "default_for_this_model": privacy.without_a_choice,
+        "global_default": cfg.inference.encrypted_pipeline,
+        "automatic_when_both_ends_here": cfg.inference.encrypted_pipeline_auto,
         "ready": has_first && has_last,
         "has_first_shard": has_first,
         "has_last_shard": has_last,
         "shard_count": shard_count,
-        "overhead_note": "Encrypted pipeline adds 1 extra network hop per token (activations return to requester for final decoding). Latency increases ~2x RTT to the last remote segment. Only useful for 3+ shard models.",
+        "overhead_note": "Starting and finishing on this computer adds 1 extra network hop per token (the intermediate values return here for the last layers). Latency increases ~2x RTT to the last remote segment. Only useful for 3+ shard models.",
     }))
 }
 
-/// PUT /api/admin/models/:model_id/encrypted-pipeline — Toggle encrypted pipeline for a model.
+/// PUT /api/admin/models/:model_id/encrypted-pipeline — set the owner's
+/// choice for a model: `true`, `false`, or `null` to forget it.
 #[derive(Debug, Deserialize)]
 pub struct EncryptedPipelineUpdate {
-    pub enabled: bool,
+    /// `None`: the field was missing (refused). `Some(None)`: an explicit
+    /// `null`, which forgets the choice — JSON Merge Patch's meaning of null,
+    /// "remove this value" (RFC 7386 § 1), so a body that merely forgot the
+    /// field cannot clear anything.
+    #[serde(default, deserialize_with = "present_even_if_null")]
+    pub enabled: Option<Option<bool>>,
+}
+
+/// Tells a field given as `null` (`Some(None)`) from one left out (`None`,
+/// via `#[serde(default)]`): serde calls this only for a field that is there.
+fn present_even_if_null<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<bool>>, D::Error> {
+    Option::<bool>::deserialize(d).map(Some)
 }
 
 pub async fn set_model_encrypted_pipeline(
@@ -577,6 +584,17 @@ pub async fn set_model_encrypted_pipeline(
     JsonBody(body): JsonBody<EncryptedPipelineUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_model_id(&model_id)?;
+    let enabled = match body.enabled {
+        Some(Some(enabled)) => enabled,
+        Some(None) => return Ok(forget_encrypted_pipeline_choice(&state, model_id)),
+        None => {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "`enabled` is required: true, false, or null to go back to what this \
+                 computer decides on its own"
+                    .into(),
+            )))
+        }
+    };
     let mid = crate::types::ModelId(model_id.clone());
 
     // Set when privacy is switched on for a model whose ends this node does not
@@ -585,7 +603,7 @@ pub async fn set_model_encrypted_pipeline(
     let mut not_ready_note: Option<String> = None;
 
     // Validate: check if the local node has the required shards
-    if body.enabled {
+    if enabled {
         let manifest = state.shared_state.model_registry.get_manifest(&mid);
         if let Some(m) = &manifest {
             let local_node_id = state.shared_state.identity.node_id();
@@ -647,37 +665,35 @@ pub async fn set_model_encrypted_pipeline(
                     m.shard_count,
                 );
             }
+        } else {
+            // No record of the model's parts: GET answers `ready: false` for
+            // it, and this answered `ready: true` with the "runs locally" note.
+            not_ready_note = Some(
+                "Recorded, but not in effect yet: this computer has no record of this \
+                 model's parts. Requests for this model will be refused rather than sent \
+                 out without its first and last parts here."
+                    .to_string(),
+            );
         }
     }
 
-    // Update in-memory
     state
         .shared_state
-        .encrypted_pipeline_models
-        .insert(mid.clone(), body.enabled);
-
-    // Persist to database
-    if let Err(e) =
-        state
-            .shared_state
-            .db
-            .put_json("encrypted_pipeline_models", &model_id, &body.enabled)
-    {
-        tracing::warn!(error = %e, model = %model_id, "Failed to persist encrypted pipeline toggle — may be lost on restart");
-    }
+        .set_prompt_privacy_choice(&mid, Some(enabled));
 
     tracing::info!(
         model = %model_id,
-        enabled = body.enabled,
+        enabled,
         "Per-model encrypted pipeline updated"
     );
 
     Ok(Json(serde_json::json!({
         "status": "ok",
         "model_id": model_id,
-        "encrypted_pipeline": body.enabled,
+        "encrypted_pipeline": enabled,
+        "decided_by": crate::daemon::state::PrivacyDecidedBy::ThisModel.as_str(),
         "ready": not_ready_note.is_none(),
-        "note": match (&not_ready_note, body.enabled) {
+        "note": match (&not_ready_note, enabled) {
             (Some(warning), _) => warning.as_str(),
             (None, true) => {
                 "Start and finish on this computer is on: embedding (first shard) and \
@@ -690,6 +706,44 @@ pub async fn set_model_encrypted_pipeline(
             }
         },
     })))
+}
+
+/// DELETE /api/admin/models/:model_id/encrypted-pipeline — forget the owner's
+/// choice for a model, so the global setting and the automatic rule decide it
+/// again. The same as PUT `{"enabled": null}`.
+pub async fn clear_model_encrypted_pipeline(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
+    Ok(forget_encrypted_pipeline_choice(&state, model_id))
+}
+
+fn forget_encrypted_pipeline_choice(state: &AppState, model_id: String) -> Json<serde_json::Value> {
+    let mid = crate::types::ModelId(model_id.clone());
+    state.shared_state.set_prompt_privacy_choice(&mid, None);
+    let privacy = state.shared_state.prompt_privacy_status(&mid);
+    tracing::info!(
+        model = %model_id,
+        now_on = privacy.on,
+        decided_by = privacy.decided_by.as_str(),
+        "Per-model encrypted pipeline choice cleared"
+    );
+    Json(serde_json::json!({
+        "status": "ok",
+        "model_id": model_id,
+        "encrypted_pipeline": privacy.on,
+        "decided_by": privacy.decided_by.as_str(),
+        "per_model_override": serde_json::Value::Null,
+        "note": if privacy.on {
+            "No choice is stored for this model now. Start and finish on this computer \
+             is on: it holds both ends of the model, or the global setting asks for it."
+        } else {
+            "No choice is stored for this model now. Start and finish on this computer \
+             is off: it turns on by itself while this computer holds both ends of the \
+             model, unless the global setting says otherwise."
+        },
+    }))
 }
 
 /// GET /api/admin/models/:model_id/keep-on-this-computer — whether this
@@ -749,4 +803,27 @@ fn keep_on_this_computer_status(state: &AppState, model_id: String) -> serde_jso
         "keep_on_this_computer": state.shared_state.kept_on_this_computer(&mid),
         "whole_model_here": whole_model_here,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EncryptedPipelineUpdate;
+
+    fn parse(body: &str) -> Option<Option<bool>> {
+        serde_json::from_str::<EncryptedPipelineUpdate>(body)
+            .unwrap()
+            .enabled
+    }
+
+    /// The setting has three states and the body could name two: a tester
+    /// sent `{"enabled": null}` to go back to automatic and got a 400 (field
+    /// report 2026-10-15). `null` now means "forget my choice", as in JSON
+    /// Merge Patch, and a body that only forgot the field is still refused.
+    #[test]
+    fn null_forgets_the_choice_and_a_missing_field_is_not_null() {
+        assert_eq!(parse(r#"{"enabled": true}"#), Some(Some(true)));
+        assert_eq!(parse(r#"{"enabled": false}"#), Some(Some(false)));
+        assert_eq!(parse(r#"{"enabled": null}"#), Some(None));
+        assert_eq!(parse("{}"), None);
+    }
 }

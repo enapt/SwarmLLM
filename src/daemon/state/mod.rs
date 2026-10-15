@@ -434,6 +434,45 @@ pub enum MemoryScope {
     AllResident,
 }
 
+/// Which rule decided "start and finish on this computer" (prompt privacy)
+/// for a model — the precedence of [`SharedState::encrypted_pipeline_for`],
+/// named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivacyDecidedBy {
+    /// The owner's choice for this model, on or off.
+    ThisModel,
+    /// `inference.encrypted_pipeline`: an explicit `true` for every model, or
+    /// off for every model unasked because `encrypted_pipeline_auto` is off.
+    GlobalSetting,
+    /// On exactly while this node holds both ends of the model
+    /// (`encrypted_pipeline_auto`, the default).
+    Automatic,
+}
+
+impl PrivacyDecidedBy {
+    /// The API's name for it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ThisModel => "this_model",
+            Self::GlobalSetting => "global_setting",
+            Self::Automatic => "automatic",
+        }
+    }
+}
+
+/// Prompt privacy for one model, as [`SharedState::prompt_privacy_status`]
+/// reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptPrivacyStatus {
+    /// In force — [`SharedState::encrypted_pipeline_for`]'s answer.
+    pub on: bool,
+    /// The owner's choice for this model, if any.
+    pub choice: Option<bool>,
+    pub decided_by: PrivacyDecidedBy,
+    /// What it would be with no choice for this model.
+    pub without_a_choice: bool,
+}
+
 /// How long the message dispatcher may take nothing off its channel before that
 /// counts as a stall rather than a quiet moment.
 ///
@@ -2298,14 +2337,12 @@ impl SharedState {
         removed
     }
 
-    /// R136 Layer 1 / Layer 3 follow-on: get or lazy-load a standalone
-    /// tokenizer for `model_id` from the local `gguf_header.bin`.
-    /// Returns `None` when the header file isn't on disk (either the
-    /// model hasn't been registered locally OR auto-manage's catalog
-    /// has the manifest but no header yet). Read-side is lock-free
-    /// (DashMap shard); load happens at most once per model.
     /// Pure precedence rule behind [`SharedState::encrypted_pipeline_for`], split
-    /// out so it can be tested without building a whole node.
+    /// out so it can be tested without building a whole node. Answers the
+    /// setting AND which rule decided it, so a status can say why without
+    /// restating the precedence (it once said `global_default: false` beside
+    /// an automatic ON, and read as a contradiction — field report
+    /// 2026-10-15).
     ///
     /// `holds_both_ends` is a closure because it costs a registry lookup and is
     /// only needed when nothing explicit has decided the question.
@@ -2315,14 +2352,14 @@ impl SharedState {
         global_explicit_on: bool,
         auto_enabled: bool,
         holds_both_ends: impl FnOnce() -> bool,
-    ) -> bool {
+    ) -> (bool, PrivacyDecidedBy) {
         if let Some(explicit) = explicit_per_model {
-            return explicit;
+            return (explicit, PrivacyDecidedBy::ThisModel);
         }
-        if global_explicit_on {
-            return true;
+        if global_explicit_on || !auto_enabled {
+            return (global_explicit_on, PrivacyDecidedBy::GlobalSetting);
         }
-        auto_enabled && holds_both_ends()
+        (holds_both_ends(), PrivacyDecidedBy::Automatic)
     }
 
     /// Whether this node holds BOTH the first and last shard of a model — the
@@ -2449,16 +2486,85 @@ impl SharedState {
         model_id: &crate::types::ModelId,
         over: Option<&crate::inference::route_override::RoutePlanOverride>,
     ) -> bool {
+        self.prompt_privacy_resolution(self.prompt_privacy_choice(model_id), model_id, over)
+            .0
+    }
+
+    /// The owner's choice for this model, if they made one.
+    fn prompt_privacy_choice(&self, model_id: &crate::types::ModelId) -> Option<bool> {
+        self.encrypted_pipeline_models
+            .get(model_id)
+            .map(|r| *r.value())
+    }
+
+    /// The precedence applied to `choice`, against the LIVE config: both
+    /// global switches sit in config.toml, which a reload applies while the
+    /// node runs (`apply_live_config`). This read the boot snapshot until
+    /// 2026-10-15, so a reloaded `encrypted_pipeline` changed nothing until a
+    /// restart (#281's shape).
+    fn prompt_privacy_resolution(
+        &self,
+        choice: Option<bool>,
+        model_id: &crate::types::ModelId,
+        over: Option<&crate::inference::route_override::RoutePlanOverride>,
+    ) -> (bool, PrivacyDecidedBy) {
+        let cfg = self.cfg();
         Self::resolve_encrypted_pipeline_inner(
-            self.encrypted_pipeline_models
-                .get(model_id)
-                .map(|r| *r.value()),
-            self.config.inference.encrypted_pipeline,
-            self.config.inference.encrypted_pipeline_auto,
+            choice,
+            cfg.inference.encrypted_pipeline,
+            cfg.inference.encrypted_pipeline_auto,
             // Only consulted when nothing explicit decides it, so the registry
             // lookup is skipped in the common explicit cases.
             || self.holds_both_model_ends_under(model_id, over),
         )
+    }
+
+    /// [`Self::encrypted_pipeline_for`] with the rule that decided it, and what
+    /// it would be with no choice for this model — what a status needs to say
+    /// WHY, and what the dashboard needs to undo a choice rather than pin the
+    /// opposite one (`set_prompt_privacy_choice(.., None)`).
+    pub fn prompt_privacy_status(&self, model_id: &crate::types::ModelId) -> PromptPrivacyStatus {
+        let choice = self.prompt_privacy_choice(model_id);
+        let (without_a_choice, rule) = self.prompt_privacy_resolution(None, model_id, None);
+        let (on, decided_by) = match choice {
+            Some(on) => (on, PrivacyDecidedBy::ThisModel),
+            None => (without_a_choice, rule),
+        };
+        PromptPrivacyStatus {
+            on,
+            choice,
+            decided_by,
+            without_a_choice,
+        }
+    }
+
+    /// The ONE writer of the owner's per-model choice: `Some` records it,
+    /// `None` forgets it, so the model is decided by the global setting and
+    /// the automatic rule again. Kept in memory and in the database together.
+    ///
+    /// `None` exists because the setting has three states and the API could
+    /// write two: once switched either way, a model could never return to
+    /// automatic (field report 2026-10-15: `{"enabled": null}` answered 400,
+    /// DELETE 405).
+    pub fn set_prompt_privacy_choice(
+        &self,
+        model_id: &crate::types::ModelId,
+        choice: Option<bool>,
+    ) {
+        let persisted = match choice {
+            Some(on) => {
+                self.encrypted_pipeline_models.insert(model_id.clone(), on);
+                self.db
+                    .put_json("encrypted_pipeline_models", &model_id.0, &on)
+            }
+            None => {
+                self.encrypted_pipeline_models.remove(model_id);
+                self.db.remove("encrypted_pipeline_models", &model_id.0)
+            }
+        };
+        if let Err(e) = persisted {
+            tracing::warn!(error = %e, model = %model_id, "Could not save the per-model \"start and finish on this computer\" choice — it may be lost on restart");
+        }
     }
 
     /// The shard indices prompt privacy needs this node to keep, or `None` when
@@ -2570,6 +2676,12 @@ impl SharedState {
         Some((0, shard_count.saturating_sub(1)))
     }
 
+    /// R136 Layer 1 / Layer 3 follow-on: get or lazy-load a standalone
+    /// tokenizer for `model_id` from the local `gguf_header.bin`.
+    /// Returns `None` when the header file isn't on disk (either the
+    /// model hasn't been registered locally OR auto-manage's catalog
+    /// has the manifest but no header yet). Read-side is lock-free
+    /// (DashMap shard); load happens at most once per model.
     pub fn standalone_tokenizer(
         &self,
         model_id: &crate::types::ModelId,
@@ -5064,8 +5176,123 @@ mod connected_peer_resolution_tests {
 mod encrypted_pipeline_precedence_tests {
     use super::SharedState;
 
+    use super::PrivacyDecidedBy;
+
     fn resolve(explicit: Option<bool>, global: bool, auto: bool, ends: bool) -> bool {
+        decide(explicit, global, auto, ends).0
+    }
+
+    fn decide(
+        explicit: Option<bool>,
+        global: bool,
+        auto: bool,
+        ends: bool,
+    ) -> (bool, PrivacyDecidedBy) {
         SharedState::resolve_encrypted_pipeline_inner(explicit, global, auto, || ends)
+    }
+
+    fn test_state() -> std::sync::Arc<SharedState> {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.keep();
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = dir.clone();
+        let db = crate::storage::db::Database::open(&dir).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        state
+    }
+
+    /// A status names the rule that decided, so "on" beside
+    /// `global_default: false` is explained rather than contradictory (field
+    /// report 2026-10-15).
+    #[test]
+    fn the_rule_that_decided_is_named() {
+        assert_eq!(
+            decide(Some(false), true, true, true).1,
+            PrivacyDecidedBy::ThisModel
+        );
+        assert_eq!(
+            decide(None, true, true, false),
+            (true, PrivacyDecidedBy::GlobalSetting)
+        );
+        assert_eq!(
+            decide(None, false, false, true),
+            (false, PrivacyDecidedBy::GlobalSetting)
+        );
+        assert_eq!(
+            decide(None, false, true, true),
+            (true, PrivacyDecidedBy::Automatic)
+        );
+        assert_eq!(
+            decide(None, false, true, false),
+            (false, PrivacyDecidedBy::Automatic)
+        );
+    }
+
+    /// Both global switches live in config.toml, which a reload applies while
+    /// the node runs. The resolver read the boot snapshot, so a reloaded
+    /// `encrypted_pipeline = true` changed nothing until a restart.
+    #[test]
+    fn the_global_switch_is_read_from_the_live_config() {
+        let state = test_state();
+        let model = crate::types::ModelId("m".into());
+        assert!(
+            !state.encrypted_pipeline_for(&model),
+            "precondition: off at boot"
+        );
+
+        let mut live = (**state.cfg()).clone();
+        live.inference.encrypted_pipeline = true;
+        state.apply_live_config(live);
+
+        assert!(state.encrypted_pipeline_for(&model));
+        assert_eq!(
+            state.prompt_privacy_status(&model).decided_by,
+            PrivacyDecidedBy::GlobalSetting
+        );
+    }
+
+    /// The setting has three states. Once a model was switched either way it
+    /// could never go back to automatic: the API wrote only true and false.
+    #[test]
+    fn a_models_choice_can_be_forgotten_back_to_automatic() {
+        let state = test_state();
+        let model = crate::types::ModelId("m".into());
+        let stored = |state: &SharedState| {
+            state
+                .db
+                .get_all_json::<bool>("encrypted_pipeline_models")
+                .unwrap()
+                .len()
+        };
+
+        state.set_prompt_privacy_choice(&model, Some(true));
+        let pinned = state.prompt_privacy_status(&model);
+        assert_eq!((pinned.on, pinned.choice), (true, Some(true)));
+        assert_eq!(pinned.decided_by, PrivacyDecidedBy::ThisModel);
+        assert!(
+            !pinned.without_a_choice,
+            "this node holds neither end, so automatic would be off"
+        );
+        assert_eq!(stored(&state), 1);
+
+        state.set_prompt_privacy_choice(&model, None);
+        let automatic = state.prompt_privacy_status(&model);
+        assert_eq!((automatic.on, automatic.choice), (false, None));
+        assert_eq!(automatic.decided_by, PrivacyDecidedBy::Automatic);
+        assert_eq!(
+            stored(&state),
+            0,
+            "forgotten on disk too, or a restart restores it"
+        );
     }
 
     /// Does prompt privacy pin this shard against deletion?

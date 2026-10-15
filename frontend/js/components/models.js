@@ -494,7 +494,10 @@
       var encReadyClass = encStatus.ready ? 'text-success' : 'text-warning';
       var encReadyText = encStatus.ready ? I18n.t('models.enc_ready') :
         (!encStatus.has_first_shard ? I18n.t('models.enc_missing_first') + ' ' : '') + (!encStatus.has_last_shard ? I18n.t('models.enc_missing_last') : '');
-      var encDisabled = !encStatus.ready ? ' disabled' : '';
+      // Without both ends it cannot be switched ON here (the card's "Get the
+      // missing parts" is the way) — but one that is on and cannot be met must
+      // still be switchable OFF, or every request for the model keeps failing.
+      var encDisabled = (!encStatus.ready && !encStatus.encrypted_pipeline) ? ' disabled' : '';
       var encOverheadNote = encStatus.shard_count <= 2
         ? '<span class="text-warning" style="font-size:0.65rem">&#9888; ' + U.escapeHtml(I18n.t('models.enc_overhead_local', { count: encStatus.shard_count })) + '</span>'
         : '<span class="text-muted" style="font-size:0.65rem">' + U.escapeHtml(I18n.t('models.enc_overhead')) + '</span>';
@@ -516,6 +519,8 @@
         '<hr style="margin:0.3rem 0;border-color:var(--border)">' +
         '<div class="am-row" style="flex-direction:column;gap:0.2rem">' +
           '<label><input type="checkbox" id="am-encrypted-' + U.safeId(modelId) + '"' +
+            ' data-initial="' + (encStatus.encrypted_pipeline ? '1' : '0') + '"' +
+            ' data-default="' + (encStatus.default_for_this_model ? '1' : '0') + '"' +
             (encStatus.encrypted_pipeline ? ' checked' : '') + encDisabled +
             '> &#128274; ' + U.escapeHtml(I18n.t('models.encrypted_pipeline')) + '</label>' +
           '<span class="' + encReadyClass + '" style="font-size:0.65rem">' + encReadyText + '</span>' +
@@ -557,12 +562,20 @@
         });
 
         var encErr = null;
-        if (encryptedEl && !encryptedEl.disabled) {
-          var encResp = await App.authFetch(U.modelApiUrl(modelId, 'encrypted-pipeline'), {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled: encryptedEl.checked }),
-          });
+        // Written only when the box CHANGED: Save re-sent it every time, so
+        // saving the part limit pinned the automatic setting as a choice
+        // (field report 2026-10-15). A change back to what this computer
+        // decides on its own forgets the choice instead of storing one.
+        if (encryptedEl && !encryptedEl.disabled &&
+            encryptedEl.checked !== (encryptedEl.getAttribute('data-initial') === '1')) {
+          var encBackToDefault = encryptedEl.checked === (encryptedEl.getAttribute('data-default') === '1');
+          var encResp = await App.authFetch(U.modelApiUrl(modelId, 'encrypted-pipeline'), encBackToDefault
+            ? { method: 'DELETE' }
+            : {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ enabled: encryptedEl.checked }),
+            });
           if (!encResp.ok) {
             var encData = await encResp.json().catch(function() { return {}; });
             encErr = U.extractErrorMessage(encData, I18n.t('models.enc_pipeline_save_failed'));

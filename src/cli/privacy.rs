@@ -1,9 +1,12 @@
 //! `swarmllm privacy <model>` — make prompt privacy possible for a model.
 //!
-//! Prompt privacy (`inference.encrypted_pipeline`) keeps prompts and answers on
-//! this machine: it forces the first and last pipeline segments to run locally,
-//! so no peer ever sees the prompt text or the sampled tokens. It therefore
-//! requires holding the first AND last piece of the model.
+//! Prompt privacy (`inference.encrypted_pipeline`, "Start and finish on this
+//! computer" in the UI) forces the first and last pipeline segments to run
+//! locally, so no peer is handed the prompt text or the sampled tokens. Peers
+//! still see the hidden states between, which are partly invertible back to
+//! text — it is structural, not cryptographic (`docs/ARCHITECTURE.md` §
+//! Pipeline Privacy Model). It requires holding the first AND last piece of
+//! the model.
 //!
 //! This asks the daemon to fetch exactly those pieces. It deliberately does not
 //! set a flag — privacy turns itself on once both ends are present, so there is
@@ -47,10 +50,12 @@ pub async fn enable_privacy(
                 .unwrap_or(false);
             println!("{model}: both ends are already on this machine.");
             if on {
-                println!("Prompt privacy is ON — prompts and answers stay here.");
+                println!("Start and finish on this computer is ON — other computers never");
+                println!("receive your text or the reply, but the numbers they work on can");
+                println!("still reveal much of it.");
             } else {
                 println!(
-                    "Prompt privacy is off for this model because it was turned off explicitly."
+                    "Start and finish on this computer is off for this model because it was turned off for it."
                 );
                 println!("Turn it back on in the dashboard, or via the per-model setting.");
             }
@@ -67,15 +72,15 @@ pub async fn enable_privacy(
                         .join(", ")
                 })
                 .unwrap_or_default();
-            println!("{model}: fetching piece(s) {shards}.");
-            println!("Prompt privacy turns on by itself once they arrive.");
+            println!("{model}: fetching part(s) {shards}.");
+            println!("Start and finish on this computer turns on by itself once they arrive.");
             println!("Progress:  swarmllm status");
         }
         Some("no_download_source") => {
-            println!("{model}: the missing piece(s) cannot be fetched directly —");
+            println!("{model}: the missing part(s) cannot be fetched directly —");
             println!("no HuggingFace source is recorded for this model.");
-            println!("They may still arrive from peers; privacy turns on by itself once");
-            println!("both ends are present.");
+            println!("They may still arrive from other computers; starting and finishing");
+            println!("on this computer turns on by itself once both ends are here.");
         }
         _ => {
             // Unrecognised shape: show it rather than pretending to interpret it.

@@ -252,7 +252,7 @@ No remote node handles the raw prompt tokens or samples the generated output —
 - No bandwidth overhead vs normal distributed inference (activation sizes are the same)
 
 **Per-model configuration:**
-- API: `GET/PUT /api/admin/models/{id}/encrypted-pipeline`
+- API: `GET/PUT/DELETE /api/admin/models/{id}/encrypted-pipeline` (`{"enabled": null}` or DELETE returns the model to the global and automatic rules)
 - Dashboard: gear icon on model card → "Start and finish on this computer" checkbox
 - Global fallback: `encrypted_pipeline = true` in `[inference]` config
 - Automatic: `encrypted_pipeline_auto = true` (default) turns it on for any model whose first and last shard this node holds, unless a per-model setting says otherwise

@@ -354,10 +354,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/models/{id}/auto-manage",
             get(admin::get_model_auto_manage).put(admin::set_model_auto_manage),
         )
-        // Per-model encrypted pipeline toggle
+        // Per-model encrypted pipeline toggle; DELETE forgets the choice
         .route(
             "/api/admin/models/{id}/encrypted-pipeline",
-            get(admin::get_model_encrypted_pipeline).put(admin::set_model_encrypted_pipeline),
+            get(admin::get_model_encrypted_pipeline)
+                .put(admin::set_model_encrypted_pipeline)
+                .delete(admin::clear_model_encrypted_pipeline),
         )
         // Per-model "keep on this computer": requests run only here (#251)
         .route(
