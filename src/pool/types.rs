@@ -22,6 +22,12 @@ pub struct PoolInviteCode {
     pub code_hash: [u8; 32],
     /// Set to true once the code has been used (one-time)
     pub consumed: bool,
+    /// Who used it, and the invitation it was answered with — so a repeat of
+    /// the same device's join request is answered again rather than ignored
+    /// (`PoolManager::handle_inbound_join_request`). In memory only: the
+    /// stored copy of a code is deleted when it is used.
+    #[serde(skip)]
+    pub claimed_by: Option<(crate::types::NodeId, uuid::Uuid)>,
 }
 
 impl PoolInviteCode {
@@ -42,6 +48,7 @@ impl PoolInviteCode {
             expires_at: now + chrono::Duration::hours(ttl_hours as i64),
             code_hash,
             consumed: false,
+            claimed_by: None,
         }
     }
 

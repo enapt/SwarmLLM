@@ -4229,3 +4229,35 @@ machine), a kept pass relayed between B and C: 76.8 / 70.1 s whole, 46.5 / 47.0 
 `a_piece_that_fails_ends_the_pass_with_its_own_error_and_nothing_left_out`,
 `a_prompt_span_survives_the_wire_after_the_prompt_cache_trailer`,
 `a_prompt_span_is_sealed_and_survives_the_encrypted_frame`.
+
+## A request someone is waiting on is sent until it is answered (2026-10-15)
+
+A gossip publish that succeeds says the message left; it says nothing about who
+received it. A pool join sent its `JoinRequest` once, in the same millisecond
+as it dialled the invite code's addresses, and printed "Join request sent!"
+with exit 0. A tester on a phone connection, joining a pool across the
+internet, got exactly that while the owner logged nothing: no path to the owner
+existed at that instant (a network switch had just dropped the joiner's
+connections). The same command a minute later, once connected, joined in a
+second (field report 2026-10-15).
+
+The fix is ordinary at-least-once delivery, both halves of it:
+
+- **The sender repeats until answered** — `pool::manager::JoinResend`: 2, 4, 8,
+  16, then every 30 s, until the invitation is accepted (the auto-accept intent
+  clears) or `AUTO_ACCEPT_TIMEOUT_SECS` runs out, which is SAID
+  (`pool_join_unanswered`, a toast in 21 languages). Each send is a fresh
+  gossip message: the message id hashes the data, and the seal's nonce is
+  random (`crypto::gossip_seal`), so a resend is never dropped as a duplicate.
+- **The receiver answers a repeat** — the code is single-use, so the owner
+  ignored every request after the first; a lost invitation would have left the
+  joiner sending into silence. `PoolInviteCode::claimed_by` remembers who used
+  it and with which invitation, and a repeat from THAT device gets the same
+  invitation again — never a second invitation, never anyone else.
+
+And the person is told the outcome, not the attempt: `swarmllm pool join` waits
+up to 60 s for the pool state to show the device in the pool, and exits 1 with
+what to do if it does not. Tests: `a_join_request_is_sent_again_until_answered`,
+`an_unanswered_join_request_ends_with_its_window_out_loud`,
+`a_repeated_join_request_is_answered_with_the_same_invitation` (the first and
+third red with the resend / the re-answer removed).

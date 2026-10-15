@@ -62,6 +62,7 @@
   "activity.pool_created": "デバイスプールが作成されました",
   "activity.pool_device_joined": "デバイスがプールに参加しました",
   "activity.pool_device_left": "デバイスがプールから離脱しました",
+  "activity.pool_join_unanswered": "メインデバイスがリンクリクエストに応答しませんでした。メインデバイスで新しい招待コードを取得して、もう一度お試しください。",
   "activity.pool_member_removed": "デバイスがプールから削除されました",
   "activity.privacy_cost": "このコンピューターで応答の開始と終了を行っているため、{model} の応答に約 {count} 秒余分にかかっています。遅いのはこのコンピューターです。速度を優先するなら、ダッシュボードのモデルカードでこのモデルについてオフにできます。",
   "activity.rebalance_peer_left": "参加者の1人が離脱しました — モデルのパーツを再配置する必要があるか確認しています",

@@ -62,6 +62,7 @@
   "activity.pool_created": "Gerätegruppe erstellt",
   "activity.pool_device_joined": "Gerät der Gruppe beigetreten",
   "activity.pool_device_left": "Gerät hat Gruppe verlassen",
+  "activity.pool_join_unanswered": "Dein Hauptgerät hat auf die Verknüpfungsanfrage nicht geantwortet. Hol dir dort einen neuen Einladungscode und versuche es erneut.",
   "activity.pool_member_removed": "Gerät aus Gruppe entfernt",
   "activity.privacy_cost": "Antworten auf diesem Computer zu beginnen und zu beenden kostet etwa {count}s zusätzlich bei Antworten von {model}, und dieser Computer ist der langsame Teil. Wenn Ihnen Geschwindigkeit wichtiger ist, können Sie es für dieses Modell auf seiner Karte in der Übersicht ausschalten.",
   "activity.rebalance_peer_left": "Ein anderer Computer hat das Netzwerk verlassen — es wird geprüft, ob Modellteile neu verteilt werden müssen",

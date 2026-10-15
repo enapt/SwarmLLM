@@ -62,6 +62,7 @@
   "activity.pool_created": "Enhetspool skapad",
   "activity.pool_device_joined": "Enhet gick med i pool",
   "activity.pool_device_left": "Enhet lämnade pool",
+  "activity.pool_join_unanswered": "Din huvudenhet svarade inte på länkförfrågan. Hämta en ny inbjudningskod från den och försök igen.",
   "activity.pool_member_removed": "Enhet borttagen från pool",
   "activity.privacy_cost": "Att börja och avsluta svar på den här datorn lägger till ungefär {count}s på svar från {model}, och det är den här datorn som är långsam. Vill du hellre ha fart kan du stänga av det för modellen på dess kort i Översikt.",
   "activity.rebalance_peer_left": "En deltagare lämnade — kollar om några modelldelar behöver omfördelas",

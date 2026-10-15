@@ -62,6 +62,7 @@
   "activity.pool_created": "Cihaz havuzu oluşturuldu",
   "activity.pool_device_joined": "Cihaz havuza katıldı",
   "activity.pool_device_left": "Cihaz havuzdan ayrıldı",
+  "activity.pool_join_unanswered": "Ana cihazınız bağlantı isteğine yanıt vermedi. Ondan yeni bir davet kodu alın ve tekrar deneyin.",
   "activity.pool_member_removed": "Cihaz havuzdan çıkarıldı",
   "activity.privacy_cost": "Yanıtları bu bilgisayarda başlatıp bitirmek {model} yanıtlarına yaklaşık {count} sn ekliyor ve yavaş olan bu bilgisayar. Hız tercih ederseniz bunu bu model için Panel'deki kartından kapatabilirsiniz.",
   "activity.rebalance_peer_left": "Bir katılımcı ayrıldı — bazı model parçalarının yeniden dağıtılması gerekip gerekmediği kontrol ediliyor",

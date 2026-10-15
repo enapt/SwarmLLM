@@ -62,6 +62,7 @@
   "activity.pool_created": "기기 풀이 생성되었습니다",
   "activity.pool_device_joined": "기기가 풀에 참여했습니다",
   "activity.pool_device_left": "기기가 풀에서 떠났습니다",
+  "activity.pool_join_unanswered": "메인 기기가 연결 요청에 응답하지 않았습니다. 메인 기기에서 새 초대 코드를 받아 다시 시도하세요.",
   "activity.pool_member_removed": "기기가 풀에서 제거되었습니다",
   "activity.privacy_cost": "이 컴퓨터에서 답변의 시작과 끝을 처리하느라 {model}의 응답에 약 {count}초가 더 걸리며, 느린 쪽은 이 컴퓨터입니다. 속도를 원하면 대시보드의 모델 카드에서 이 모델에 대해 끌 수 있습니다.",
   "activity.rebalance_peer_left": "한 참여자가 떠났습니다 — 모델 일부를 다시 분배해야 하는지 확인 중입니다",

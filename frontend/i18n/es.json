@@ -62,6 +62,7 @@
   "activity.pool_created": "Grupo de dispositivos creado",
   "activity.pool_device_joined": "Dispositivo unido al grupo",
   "activity.pool_device_left": "Dispositivo abandonó el grupo",
+  "activity.pool_join_unanswered": "Tu dispositivo principal no respondió a la solicitud de vinculación. Obtén en él un nuevo código de invitación e inténtalo de nuevo.",
   "activity.pool_member_removed": "Dispositivo eliminado del grupo",
   "activity.privacy_cost": "Empezar y terminar las respuestas en este ordenador añade unos {count}s a las respuestas de {model}, y este ordenador es la parte lenta. Si prefieres velocidad, puedes desactivarlo para este modelo en su tarjeta del Panel.",
   "activity.rebalance_peer_left": "Se fue un compañero — comprobando si hay que redistribuir alguna parte del modelo",

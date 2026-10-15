@@ -86,6 +86,36 @@ pub(crate) fn restore_node_mode(db: &crate::storage::db::Database, key: &str) ->
 /// Used both by the periodic expiry sweep and the inbound invitation handler.
 const AUTO_ACCEPT_TIMEOUT_SECS: u64 = 300;
 
+/// A join request sent with an invite code and not yet answered: sent again
+/// until the owner's invitation arrives or [`AUTO_ACCEPT_TIMEOUT_SECS`] runs
+/// out (field report 2026-10-15).
+///
+/// Sent once, it was lost whenever no path to the owner existed at that
+/// instant: a v2 join broadcasts in the same millisecond as it dials the
+/// code's addresses, and over a phone connection to a pool across the
+/// internet the owner logged nothing while the joiner said "Join request
+/// sent!". Sent again once the device had connected, it joined in a second.
+/// At-least-once delivery, as any request over a lossy path needs: the
+/// sender repeats until answered, and the owner answers a repeat from the
+/// device that used its code with the same invitation
+/// ([`PoolManager::handle_inbound_join_request`]). Each send is a fresh
+/// gossip message — the seal's nonce is random — so none is dropped as a
+/// duplicate.
+struct JoinResend {
+    msg: SwarmMessage,
+    code_hash: [u8; 32],
+    sends: u32,
+    started: tokio::time::Instant,
+    next_at: tokio::time::Instant,
+}
+
+/// How long after the `sends`-th send of a join request the next goes:
+/// 2, 4, 8, 16, then every 30 s — quick while the code's dials are still
+/// connecting, then a steady check for the rest of the window.
+fn join_resend_delay(sends: u32) -> std::time::Duration {
+    std::time::Duration::from_secs((1u64 << sends.min(5)).min(30))
+}
+
 /// Maximum pending invitations (outbound + inbound blinded) before rejecting new ones.
 const MAX_PENDING_INVITATIONS: usize = 50;
 /// Maximum active invite codes before refusing to generate more.
@@ -136,6 +166,8 @@ pub struct PoolManager {
     /// broadcast is forced full so receivers that missed earlier diffs
     /// recover bounded-time.
     diffs_since_full: u32,
+    /// The join request this device is waiting on an answer to, if any.
+    join_resend: Option<JoinResend>,
 }
 
 const CREDIT_FORWARD_WINDOW_SECS: u64 = 60;
@@ -194,6 +226,7 @@ impl PoolManager {
             pool_gossip_dirty: false,
             last_broadcast_state: None,
             diffs_since_full: 0,
+            join_resend: None,
         }
     }
 
@@ -358,12 +391,21 @@ impl PoolManager {
         tracing::info!(target: "swarmllm::pool::manager", "PoolManager running");
 
         loop {
+            let join_resend_at = self.join_resend.as_ref().map(|j| j.next_at);
             tokio::select! {
                 _ = self.shutdown_rx.changed() => {
                     if *self.shutdown_rx.borrow() {
                         tracing::info!(target: "swarmllm::pool::manager", "PoolManager shutting down");
                         break;
                     }
+                }
+                _ = async {
+                    match join_resend_at {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    self.resend_join_request().await;
                 }
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
@@ -1835,17 +1877,77 @@ impl PoolManager {
         });
         let _ = self
             .network_tx
-            .send(crate::types::NetworkCommand::Broadcast(msg))
+            .send(crate::types::NetworkCommand::Broadcast(msg.clone()))
             .await;
 
         // Set auto-accept with the code hash and a timestamp so it expires after 5 minutes.
         self.auto_accept_code_hash = Some((code_hash, std::time::Instant::now()));
+        let now = tokio::time::Instant::now();
+        self.join_resend = Some(JoinResend {
+            msg,
+            code_hash,
+            sends: 1,
+            started: now,
+            next_at: now + join_resend_delay(1),
+        });
 
         tracing::info!(
             code_hash = %hex::encode(code_hash),
-            "Broadcast pool join request with invite code (auto-accept enabled)"
+            "Broadcast pool join request with invite code (auto-accept enabled) — sent again until the owner answers"
         );
         Ok(())
+    }
+
+    /// Send the waiting join request again ([`JoinResend`]), or stop: the
+    /// device has joined, its auto-accept intent is gone (accepted, or another
+    /// code replaced it), or the window ran out — said out loud, since the
+    /// person who ran the join was told it was on its way.
+    async fn resend_join_request(&mut self) {
+        let Some(pending) = self.join_resend.as_ref() else {
+            return;
+        };
+        let code_hash = pending.code_hash;
+        let joined = self.shared_state.credits.pool_state.read().await.is_some();
+        let still_waiting = self
+            .auto_accept_code_hash
+            .is_some_and(|(hash, _)| hash == code_hash);
+        if joined || !still_waiting {
+            self.join_resend = None;
+            return;
+        }
+        let Some(pending) = self.join_resend.as_mut() else {
+            return;
+        };
+        if pending.started.elapsed() >= std::time::Duration::from_secs(AUTO_ACCEPT_TIMEOUT_SECS) {
+            tracing::warn!(
+                sends = pending.sends,
+                code_hash = %hex::encode(code_hash),
+                "The pool owner's computer did not answer this device's join request in 5 minutes"
+            );
+            self.join_resend = None;
+            self.auto_accept_code_hash = None;
+            self.shared_state.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "pool",
+                    "pool_join_unanswered",
+                    "Your main device did not answer the link request. Get a new invite code from it and try again."
+                        .to_string(),
+                )
+                .with_toast("warning", 10_000),
+            );
+            return;
+        }
+        let msg = pending.msg.clone();
+        pending.sends += 1;
+        pending.next_at = tokio::time::Instant::now() + join_resend_delay(pending.sends);
+        tracing::debug!(
+            sends = pending.sends,
+            "Sending the pool join request again — no answer from the owner yet"
+        );
+        let _ = self
+            .network_tx
+            .send(crate::types::NetworkCommand::Broadcast(msg))
+            .await;
     }
 
     /// Dial each multiaddr from a v2 invite code. Fire-and-forget — the
@@ -1889,9 +1991,34 @@ impl PoolManager {
             None => return, // Not our code or already consumed
         };
 
-        // Validate code is still active
-        if code_entry.consumed || code_entry.is_expired() {
-            tracing::debug!("Join request with expired/consumed invite code — ignoring");
+        // A repeat from the device that used the code is answered again with
+        // the same invitation: the joiner sends until answered (`JoinResend`),
+        // and the first answer may have been lost on the way back.
+        if code_entry.consumed {
+            let claimed_by = code_entry.claimed_by.clone();
+            if let Some((claimer, invitation_id)) = claimed_by {
+                if claimer == requester {
+                    if let Some(invitation) = self.pending_invitations.get(&invitation_id) {
+                        let blinded =
+                            BlindedPoolInvitation::from_invitation(invitation, Some(code_hash));
+                        let msg = SwarmMessage::PoolMessage(
+                            crate::types::PoolMessage::BlindedInvitation(blinded),
+                        );
+                        let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
+                        tracing::debug!(
+                            requester = %requester,
+                            invitation_id = %invitation_id,
+                            "Answered a repeated join request with the same invitation"
+                        );
+                        return;
+                    }
+                }
+            }
+            tracing::debug!("Join request with a consumed invite code — ignoring");
+            return;
+        }
+        if code_entry.is_expired() {
+            tracing::debug!("Join request with an expired invite code — ignoring");
             return;
         }
 
@@ -1923,6 +2050,9 @@ impl PoolManager {
             .await
         {
             Ok(inv) => {
+                if let Some(entry) = self.invite_codes.get_mut(&code_hash) {
+                    entry.claimed_by = Some((requester.clone(), inv.id));
+                }
                 tracing::info!(
                     invitation_id = %inv.id,
                     member = %requester,
@@ -3230,6 +3360,118 @@ mod tests {
         }
         assert_eq!(dialed, 0, "legacy path must not dial");
         assert_eq!(broadcast, 1, "legacy path must broadcast exactly once");
+    }
+
+    fn join_requests_sent(net_rx: &mut mpsc::Receiver<NetworkCommand>) -> usize {
+        let mut sent = 0;
+        while let Ok(cmd) = net_rx.try_recv() {
+            if matches!(
+                cmd,
+                NetworkCommand::Broadcast(SwarmMessage::PoolMessage(
+                    crate::types::PoolMessage::JoinRequest { .. },
+                ))
+            ) {
+                sent += 1;
+            }
+        }
+        sent
+    }
+
+    /// **A join request is sent again until it is answered** (field report
+    /// 2026-10-15): sent once, in the same millisecond as the code's dials,
+    /// it reached no one over a phone connection to a pool across the
+    /// internet, and the device said "Join request sent!" and never joined.
+    /// The resends stop once the invitation is accepted.
+    #[tokio::test]
+    async fn a_join_request_is_sent_again_until_answered() {
+        let (mut pm, _state, _id, mut net_rx) = build_test_pool_manager_with_rx().await;
+        pm.handle_join_with_code("A3F7K2M9".into()).await.unwrap();
+        assert_eq!(join_requests_sent(&mut net_rx), 1);
+        assert_eq!(
+            pm.join_resend.as_ref().map(|j| j.next_at - j.started),
+            Some(std::time::Duration::from_secs(2)),
+            "the first resend follows the code's dials closely"
+        );
+        pm.resend_join_request().await;
+        pm.resend_join_request().await;
+        assert_eq!(
+            join_requests_sent(&mut net_rx),
+            2,
+            "no answer yet: sent again"
+        );
+        assert_eq!(pm.join_resend.as_ref().map(|j| j.sends), Some(3));
+
+        // The owner's invitation is accepted, which clears the intent.
+        pm.auto_accept_code_hash = None;
+        pm.resend_join_request().await;
+        assert_eq!(
+            join_requests_sent(&mut net_rx),
+            0,
+            "answered: not sent again"
+        );
+        assert!(pm.join_resend.is_none());
+    }
+
+    /// A join the owner never answers ends with the window, and says so — the
+    /// person was told the request was on its way.
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswered_join_request_ends_with_its_window_out_loud() {
+        let (mut pm, state, _id, mut net_rx) = build_test_pool_manager_with_rx().await;
+        pm.handle_join_with_code("A3F7K2M9".into()).await.unwrap();
+        assert_eq!(join_requests_sent(&mut net_rx), 1);
+        tokio::time::advance(std::time::Duration::from_secs(AUTO_ACCEPT_TIMEOUT_SECS)).await;
+        pm.resend_join_request().await;
+        assert_eq!(join_requests_sent(&mut net_rx), 0);
+        assert!(pm.join_resend.is_none() && pm.auto_accept_code_hash.is_none());
+        assert!(state
+            .events
+            .activity_history
+            .lock()
+            .iter()
+            .any(|e| e.kind == "pool_join_unanswered"));
+    }
+
+    /// **The owner answers a repeat from the device that used its code** with
+    /// the same invitation — the first may have been lost on its way back —
+    /// and nobody else's request for a used code.
+    #[tokio::test]
+    async fn a_repeated_join_request_is_answered_with_the_same_invitation() {
+        let (mut pm, _state, _owner, mut net_rx) = build_test_pool_manager_with_rx().await;
+        pm.handle_create_pool("test-pool".into()).await.unwrap();
+        let pool_id = pm.shared_state.identity.node_id().clone();
+        let code = PoolInviteCode::generate(&pool_id, 24);
+        let hash = code.code_hash;
+        pm.invite_codes.insert(hash, code);
+        let requester = Identity::generate().node_id().clone();
+        let invitations = |net_rx: &mut mpsc::Receiver<NetworkCommand>| {
+            let mut ids = Vec::new();
+            while let Ok(cmd) = net_rx.try_recv() {
+                if let NetworkCommand::Broadcast(SwarmMessage::PoolMessage(
+                    crate::types::PoolMessage::BlindedInvitation(b),
+                )) = cmd
+                {
+                    ids.push(b.id);
+                }
+            }
+            ids
+        };
+        let _ = invitations(&mut net_rx);
+
+        pm.handle_inbound_join_request(hash, requester.clone())
+            .await;
+        let first = invitations(&mut net_rx);
+        assert_eq!(first.len(), 1);
+        pm.handle_inbound_join_request(hash, requester.clone())
+            .await;
+        assert_eq!(invitations(&mut net_rx), first, "the same invitation again");
+        assert_eq!(pm.pending_invitations.len(), 1, "and no second one");
+
+        let stranger = Identity::generate().node_id().clone();
+        pm.handle_inbound_join_request(hash, stranger).await;
+        assert!(
+            invitations(&mut net_rx).is_empty(),
+            "a used code answers no one else"
+        );
     }
 
     /// Joiner-side: malformed input (not v2, not 8 chars) is rejected

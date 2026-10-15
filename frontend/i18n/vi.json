@@ -62,6 +62,7 @@
   "activity.pool_created": "Đã tạo pool thiết bị",
   "activity.pool_device_joined": "Thiết bị đã tham gia pool",
   "activity.pool_device_left": "Thiết bị đã rời pool",
+  "activity.pool_join_unanswered": "Thiết bị chính không phản hồi yêu cầu liên kết. Hãy lấy mã mời mới từ thiết bị chính và thử lại.",
   "activity.pool_member_removed": "Thiết bị đã bị xóa khỏi pool",
   "activity.privacy_cost": "Việc bắt đầu và kết thúc câu trả lời trên máy tính này khiến câu trả lời từ {model} lâu thêm khoảng {count} giây, và phần chậm chính là máy tính này. Nếu muốn nhanh hơn, bạn có thể tắt tính năng này cho mô hình trên thẻ của nó trong Bảng điều khiển.",
   "activity.rebalance_peer_left": "Một thành viên đã rời đi — đang kiểm tra xem có cần phân phối lại phần nào của mô hình không",

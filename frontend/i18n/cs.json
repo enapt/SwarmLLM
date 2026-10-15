@@ -62,6 +62,7 @@
   "activity.pool_created": "Skupina zařízení vytvořena",
   "activity.pool_device_joined": "Zařízení se připojilo do skupiny",
   "activity.pool_device_left": "Zařízení opustilo skupinu",
+  "activity.pool_join_unanswered": "Vaše hlavní zařízení na žádost o propojení neodpovědělo. Získejte z něj nový zvací kód a zkuste to znovu.",
   "activity.pool_member_removed": "Zařízení odebráno ze skupiny",
   "activity.privacy_cost": "Začínání a dokončování odpovědí na tomto počítači přidává k odpovědím od {model} zhruba {count}s a pomalou částí je tento počítač. Pokud dáváte přednost rychlosti, můžete to pro tento model vypnout na jeho kartě v Přehledu.",
   "activity.rebalance_peer_left": "Jeden z účastníků odešel — kontroluji, jestli je potřeba přerozdělit nějaké části modelu",

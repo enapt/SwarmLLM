@@ -62,6 +62,7 @@
   "activity.pool_created": "Pool perangkat dibuat",
   "activity.pool_device_joined": "Perangkat bergabung ke pool",
   "activity.pool_device_left": "Perangkat meninggalkan pool",
+  "activity.pool_join_unanswered": "Perangkat utama Anda tidak menanggapi permintaan tautan. Ambil kode undangan baru darinya dan coba lagi.",
   "activity.pool_member_removed": "Perangkat dihapus dari pool",
   "activity.privacy_cost": "Memulai dan menyelesaikan jawaban di komputer ini menambah sekitar {count} detik pada jawaban dari {model}, dan bagian yang lambat adalah komputer ini. Jika lebih mementingkan kecepatan, Anda dapat mematikannya untuk model ini di kartunya pada Dasbor.",
   "activity.rebalance_peer_left": "Salah satu peserta keluar — memeriksa apakah ada bagian model yang perlu didistribusikan ulang",

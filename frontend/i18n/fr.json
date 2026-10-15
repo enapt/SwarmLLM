@@ -62,6 +62,7 @@
   "activity.pool_created": "Groupe d'appareils créé",
   "activity.pool_device_joined": "Appareil rejoint le groupe",
   "activity.pool_device_left": "Appareil quitté le groupe",
+  "activity.pool_join_unanswered": "Votre appareil principal n'a pas répondu à la demande de liaison. Obtenez-y un nouveau code d'invitation et réessayez.",
   "activity.pool_member_removed": "Appareil retiré du groupe",
   "activity.privacy_cost": "Commencer et finir les réponses sur cet ordinateur ajoute environ {count}s aux réponses de {model}, et cet ordinateur est l'étape lente. Si vous préférez la vitesse, vous pouvez le désactiver pour ce modèle sur sa carte dans le Tableau de bord.",
   "activity.rebalance_peer_left": "Un ordinateur s'est déconnecté — vérification s'il faut redistribuer des parties de modèle",

@@ -62,6 +62,7 @@
   "activity.pool_created": "Grupa urządzeń utworzona",
   "activity.pool_device_joined": "Urządzenie dołączyło do grupy",
   "activity.pool_device_left": "Urządzenie opuściło grupę",
+  "activity.pool_join_unanswered": "Urządzenie główne nie odpowiedziało na żądanie połączenia. Wygeneruj na nim nowy kod zaproszenia i spróbuj ponownie.",
   "activity.pool_member_removed": "Urządzenie usunięte z grupy",
   "activity.privacy_cost": "Zaczynanie i kończenie odpowiedzi na tym komputerze dodaje około {count}s do odpowiedzi z {model}, a wolnym ogniwem jest ten komputer. Jeśli wolisz szybkość, możesz to wyłączyć dla tego modelu na jego karcie w Panelu.",
   "activity.rebalance_peer_left": "Jeden z uczestników się rozłączył — sprawdzanie, czy trzeba rozdzielić któreś części modelu",

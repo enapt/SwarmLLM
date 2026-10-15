@@ -234,6 +234,12 @@ cadence decides how fast.
 
 → `docs/invariants/network.md` § "A report built to be handed to a stranger is a publishing surface"
 
+## A request someone waits on is sent until answered (2026-10-15)
+
+A gossip publish that succeeded says nothing about who received it. A pool join is resent (`pool::manager::JoinResend`) until accepted or its window ends — said out loud; the owner answers a repeat from the code's claimer with the SAME invitation (`PoolInviteCode::claimed_by`). The CLI reports the outcome, not the send.
+
+→ `docs/invariants/network.md` § "A request someone is waiting on is sent until it is answered"
+
 ## Centralised Wire-Format Helpers
 
 Single sources of truth for invariants that silently break at the wire if duplicated. Read the evidence before changing one.

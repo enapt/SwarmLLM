@@ -16,7 +16,8 @@ pub enum PoolAction {
     InviteCode,
     /// Join a pool using an invite code from your master device
     Join {
-        /// The invite code (e.g., A3F7K2M9)
+        /// The invite code: run `swarmllm pool invite-code` on the pool
+        /// owner's computer and paste what it prints (a swarmpool:// link)
         code: String,
     },
     /// Show pool status and the devices in it
@@ -55,6 +56,37 @@ async fn pool_post(
         std::process::exit(1);
     }
     Ok(parsed)
+}
+
+/// How long `pool join` waits for the owner's answer before handing back.
+/// Over the internet the request went through in about a second once the two
+/// computers had connected; the daemon keeps asking for the rest of its
+/// 5-minute window after this.
+const JOIN_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Poll the pool state until this device is in a pool, for up to
+/// [`JOIN_WAIT`]; the pool's name, or `None` if it is not in one by then.
+async fn wait_until_in_a_pool(client: &reqwest::Client, base: &str, auth: &str) -> Option<String> {
+    let deadline = std::time::Instant::now() + JOIN_WAIT;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let Ok(resp) = client
+            .get(format!("{base}/api/pool/state"))
+            .bearer_auth(auth)
+            .send()
+            .await
+        else {
+            continue;
+        };
+        let Ok(body) = resp.json::<serde_json::Value>().await else {
+            continue;
+        };
+        if body.get("in_pool").and_then(|v| v.as_bool()) == Some(true) {
+            let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            return Some(name.to_string());
+        }
+    }
+    None
 }
 
 pub async fn run_pool_command(
@@ -118,8 +150,21 @@ pub async fn run_pool_command(
                 port,
             )
             .await?;
-            println!("Join request sent! Your device will be added to the pool");
-            println!("once the owner's node processes the request.");
+            // The daemon sends the request again until the owner answers
+            // (`pool::manager::JoinResend`), so "sent" promised nothing — it was
+            // printed, exit 0, for a request the owner never received (field
+            // report 2026-10-15). Wait for the answer the person is waiting for.
+            println!("Join request sent. Waiting for the pool owner's computer to answer...");
+            let Some(pool_name) = wait_until_in_a_pool(&client, &base, auth_header).await else {
+                eprintln!("\nNo answer from the pool owner's computer yet. This computer keeps");
+                eprintln!("asking for 5 minutes from when you ran this; check with:");
+                eprintln!("  swarmllm pool status");
+                eprintln!(
+                    "If it does not join, ask the owner for a new invite code (each works once)."
+                );
+                std::process::exit(1);
+            };
+            println!("Joined pool: {pool_name}");
             // Deliberately says what the pool DOES rather than what it pays.
             // This used to promise "all credits earned by this device will be
             // forwarded to the pool owner" — a claim of value transfer about a

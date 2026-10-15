@@ -62,6 +62,7 @@
   "activity.pool_created": "Device pool created",
   "activity.pool_device_joined": "Device joined pool",
   "activity.pool_device_left": "Device left pool",
+  "activity.pool_join_unanswered": "Your main device did not answer the link request. Get a new invite code from it and try again.",
   "activity.pool_member_removed": "Device removed from pool",
   "activity.privacy_cost": "Starting and finishing replies on this computer is adding about {count}s to replies from {model}, and this computer is the slow part. You can turn it off for this model on its card in the Dashboard if you would rather have speed.",
   "activity.rebalance_peer_left": "A computer left — checking whether any model parts need redistributing",

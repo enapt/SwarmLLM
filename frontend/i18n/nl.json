@@ -62,6 +62,7 @@
   "activity.pool_created": "Apparaatpool aangemaakt",
   "activity.pool_device_joined": "Apparaat aan pool toegevoegd",
   "activity.pool_device_left": "Apparaat heeft pool verlaten",
+  "activity.pool_join_unanswered": "Je hoofdapparaat heeft niet op het koppelverzoek gereageerd. Haal daar een nieuwe uitnodigingscode op en probeer het opnieuw.",
   "activity.pool_member_removed": "Apparaat uit pool verwijderd",
   "activity.privacy_cost": "Antwoorden op deze computer beginnen en afronden kost ongeveer {count}s extra bij antwoorden van {model}, en deze computer is het trage deel. Heb je liever snelheid, zet het dan uit voor dit model op zijn kaart op het Dashboard.",
   "activity.rebalance_peer_left": "Een deelnemer is vertrokken — wordt gecontroleerd of er modeldelen opnieuw verdeeld moeten worden",
