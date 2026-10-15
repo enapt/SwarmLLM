@@ -2,6 +2,60 @@
 
 ## [0.3.239-alpha] — 2026-10-15
 
+**Automatic downloads now pause on a metered connection.** A new computer left on a phone's hotspot
+downloaded 1.4 GB of model parts in five minutes, and 9 GB in its first 44 minutes, with nothing
+asked of it but the default "help the network". Downloads the computer starts on its own now wait
+while Linux (NetworkManager) or Windows says the connection is metered (a phone's hotspot, a
+mobile plan), and resume when it no longer is. The dashboard says so once each way. Settings →
+"On a metered connection" can also pause them always, or never. Models you download yourself, and
+the repair of parts already held, are not paused. macOS cannot tell yet; choose "Always pause
+automatic downloads" there.
+
+**A model with its safety training removed is hosted only if you choose it.** A brand-new
+computer was hosting an "abliterated" model within minutes, and its chat picker pre-selected it.
+A model whose name or HuggingFace tags mark it as having its safety training removed
+("abliterated", "uncensored") or as adult content is no longer downloaded or kept automatically,
+never answers as `auto`, and is never pre-selected. It is still listed, and you can still pick or
+download it.
+
+**Downloads started when another computer leaves follow the download settings.** When another
+computer left the swarm, this one could start downloading a whole model on its own, without
+asking whether automatic downloads are on, the storage limit, the metered-connection pause, or
+whether the model is one with its safety training removed. It now asks the regular download pass,
+which checks all of them and already fetches the parts the fewest computers hold first.
+
+**Embedding models are no longer offered as chat models.** An embedding model turns text into
+numbers for search tools and cannot write replies. One appeared in the trending list tagged
+"Chat", could be downloaded, and answered a question by repeating itself for 30 seconds. Such
+models are now marked "Not a chat model" in search, left out of the trending list and the chat
+picker, never downloaded automatically, and refused at once with a message saying what they are.
+
+**Joining a pool over the internet keeps asking until the owner answers.** A join request was sent
+once, and over a phone connection it could reach no one while the command still said "sent". The
+joining device now resends it until the owner's invitation arrives (up to 5 minutes), and
+`swarmllm pool join` reports whether the device actually joined.
+
+**A device that has stopped no longer shows as online in the pool.** A device switched off for two
+days still showed `[on]`. A device now counts as online when it is connected or has reported in
+the last 25 minutes.
+
+**Invite codes no longer list VPN and Docker addresses.** A code now carries the computer's own
+address on the network its internet traffic uses, plus its internet-reachable ones, instead of
+every address the computer has.
+
+**"Running now" says what would run on this computer, and suggested sizes match the search.**
+Each model the swarm runs now shows "Runs locally" or "Swarm computers only", with Download or
+Chat beside it. A suggested model's size now follows the version its page actually offers and
+reads "about": one model showed 337 MB there and 609.5 MB in the search.
+
+**Dashboard counts and labels agree.** The tile counting other computers now says "Other
+computers", "local computer" now says "computer on your network", "combined memory" now says
+"graphics memory", and two versions of one model are no longer listed under one name.
+
+**A reply you stop is recorded as stopped, not as a failure.**
+
+**After the first-run setup, the address bar leaves /setup.**
+
 **A model is no longer planned onto graphics memory another program has just taken.** When
 another program (Ollama, a game) took most of the graphics card after a model had run here, the
 next request was still planned against the card as it had been. A tester's 30B model was planned
