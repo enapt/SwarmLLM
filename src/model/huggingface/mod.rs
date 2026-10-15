@@ -127,6 +127,35 @@ pub fn is_embedding_repo(pipeline_tag: Option<&str>, tags: &[String]) -> bool {
     }
 }
 
+/// The quantisation a download of a repo offering `filenames` would take,
+/// by the search's rule (`api::admin_hf::search`): Q4_K_M, else a Q4, else —
+/// with no sizes to compare — the lightest offered (`capacity_plan::
+/// bits_per_weight`). A projector file (`mmproj`) is not a quantisation of
+/// the model. The trending list estimated every repo as Q4_K_M, so a repo
+/// offering only Q8_0 read 337 MB there and 609.5 MB in the search (field
+/// report 2026-10-15).
+pub fn offered_quant<'a>(filenames: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let quants: Vec<String> = filenames
+        .into_iter()
+        .filter(|f| f.ends_with(".gguf") && !f.to_ascii_lowercase().contains("mmproj"))
+        .filter_map(extract_quant_tag)
+        .collect();
+    let lightest = || {
+        quants
+            .iter()
+            .filter_map(|q| crate::daemon::state::capacity_plan::bits_per_weight(q).map(|b| (b, q)))
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, q)| q.clone())
+    };
+    quants
+        .iter()
+        .find(|q| *q == "Q4_K_M")
+        .or_else(|| quants.iter().find(|q| q.starts_with("Q4")))
+        .cloned()
+        .or_else(lightest)
+        .or_else(|| quants.first().cloned())
+}
+
 /// What a model's name carries when its safety training was removed —
 /// "abliterated" (the refusal direction ablated out of the weights),
 /// "uncensored" — or when it is marked as adult content.

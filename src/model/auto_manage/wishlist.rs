@@ -540,11 +540,11 @@ pub fn compute_wishlist(state: &SharedState) -> Wishlist {
             // flagged as beyond the swarm. `None` stays 0, which keeps the
             // previous behaviour for a name we cannot parse rather than
             // inventing a number.
-            let cand_size_mb =
-                crate::daemon::state::capacity_plan::estimate_q4_size_mb_from_repo_id_impl(
-                    &entry.repo_id,
-                )
-                .unwrap_or(0);
+            let cand_size_mb = crate::daemon::state::capacity_plan::estimate_size_mb(
+                &entry.repo_id,
+                entry.offered_quant.as_deref(),
+            )
+            .unwrap_or(0);
             // Same 1.25x weights-to-VRAM rule the capacity plan uses.
             let cand_vram_mb = (cand_size_mb as f64 * 1.25) as u64;
             let mut cand_status = WishlistStatus::Candidate;
@@ -709,7 +709,7 @@ mod tests {
     /// wishlist on 2026-08-31.
     #[test]
     fn a_candidate_is_sized_from_its_repo_name() {
-        let est = crate::daemon::state::capacity_plan::estimate_q4_size_mb_from_repo_id_impl;
+        let est = |repo: &str| crate::daemon::state::capacity_plan::estimate_size_mb(repo, None);
 
         let big = est("Qwen/Qwen3-Coder-30B-A3B-Instruct-GGUF").expect("30B is parseable");
         let small = est("Qwen/Qwen3-0.6B").expect("0.6B is parseable");
@@ -734,7 +734,7 @@ mod tests {
     /// which is what keeps the previous behaviour for anything unparseable.
     #[test]
     fn an_unparseable_candidate_name_is_not_guessed_at() {
-        let est = crate::daemon::state::capacity_plan::estimate_q4_size_mb_from_repo_id_impl;
+        let est = |repo: &str| crate::daemon::state::capacity_plan::estimate_size_mb(repo, None);
         assert_eq!(est("some-org/mystery-model"), None);
     }
 

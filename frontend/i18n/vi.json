@@ -1376,6 +1376,7 @@
   "wishlist.meta_replicas_ok_other": "{have} người lưu trữ",
   "wishlist.meta_replicas_partial": "{have} trong {want} người lưu trữ",
   "wishlist.meta_size": "Kích thước: {size}",
+  "wishlist.meta_size_about": "Kích thước: khoảng {size}",
   "wishlist.score_tip": "Điểm ưu tiên: {score}/100",
   "wishlist.shared_prefix": "Tất cả đều là:",
   "wishlist.status.aspirational": "Đang tải xuống",

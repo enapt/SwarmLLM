@@ -1376,6 +1376,7 @@
   "wishlist.meta_replicas_ok_other": "{have}人がホスト中",
   "wishlist.meta_replicas_partial": "{want}人中{have}人がホスト中",
   "wishlist.meta_size": "サイズ：{size}",
+  "wishlist.meta_size_about": "サイズ：約{size}",
   "wishlist.score_tip": "優先スコア：100点中{score}点",
   "wishlist.shared_prefix": "これらはすべて:",
   "wishlist.status.aspirational": "ダウンロード中",

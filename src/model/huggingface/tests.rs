@@ -313,3 +313,27 @@ fn an_uncensored_model_is_told_by_its_name_or_its_tag() {
         &[]
     ));
 }
+
+/// The quantisation a repo's download would take: the search's own
+/// preference (Q4_K_M, then a Q4), else the lightest file it offers; a
+/// projector is not a quantisation of the model (field report 2026-10-15).
+#[test]
+fn a_repo_offers_the_quantisation_its_download_would_take() {
+    assert_eq!(
+        offered_quant(["Qwen3-0.6B-Q8_0.gguf", "README.md"]).as_deref(),
+        Some("Q8_0")
+    );
+    assert_eq!(
+        offered_quant(["m-Q8_0.gguf", "m-Q4_K_S.gguf", "m-Q4_K_M.gguf"]).as_deref(),
+        Some("Q4_K_M")
+    );
+    assert_eq!(
+        offered_quant(["m-Q8_0.gguf", "m-Q4_K_S.gguf"]).as_deref(),
+        Some("Q4_K_S")
+    );
+    assert_eq!(
+        offered_quant(["mmproj-m-f16.gguf", "m-F16.gguf", "m-Q6_K.gguf"]).as_deref(),
+        Some("Q6_K")
+    );
+    assert_eq!(offered_quant(["config.json"]), None);
+}

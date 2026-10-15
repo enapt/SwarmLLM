@@ -1376,6 +1376,7 @@
   "wishlist.meta_replicas_ok_other": "호스트 {have}명",
   "wishlist.meta_replicas_partial": "호스트 {want}명 중 {have}명",
   "wishlist.meta_size": "크기: {size}",
+  "wishlist.meta_size_about": "크기: 약 {size}",
   "wishlist.score_tip": "우선순위 점수: 100점 중 {score}점",
   "wishlist.shared_prefix": "이들은 모두:",
   "wishlist.status.aspirational": "다운로드 중",

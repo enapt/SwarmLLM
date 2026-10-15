@@ -96,6 +96,13 @@ pub struct ModelEntry {
     /// Whether THIS node hosts at least one shard. Drives the "your
     /// contribution" badge.
     pub hosted_by_us: bool,
+    /// Would the whole model fit what this computer may give a model now
+    /// (`vram::node_model_budget_mb`, the figure the HuggingFace search marks
+    /// "Runs locally" by)? `None` when that cannot be read — never a no. The
+    /// "Running now" list said nothing of what runs here (field report
+    /// 2026-10-15).
+    #[serde(default)]
+    pub fits_here: Option<bool>,
 }
 
 /// Headline pick — surfaced as "your swarm runs up to ..." on the dash.
@@ -178,6 +185,7 @@ pub fn compute_swarm_capacity(state: &SharedState) -> SwarmCapacity {
     //    distinct nodes hold at least one shard. This is the core of the
     //    "what can the swarm actually run" answer.
     let local_node_id = state.identity.node_id().clone();
+    let model_budget_mb = crate::model::auto_manage::vram::node_model_budget_mb(state);
 
     struct Coverage {
         total_shards: u32,
@@ -249,6 +257,12 @@ pub fn compute_swarm_capacity(state: &SharedState) -> SwarmCapacity {
     let mut headline: Option<HeadlineModel> = None;
 
     for (mid, cov) in by_model {
+        // What the swarm can RUN: a model this node knows cannot write
+        // replies (an embedding model, a family it has no loader for) is not
+        // among them, however many computers hold it.
+        if state.refused_model(&mid).is_some() {
+            continue;
+        }
         let entry = ModelEntry {
             model_id: mid.0.clone(),
             display_name: cov.display_name.clone(),
@@ -257,6 +271,7 @@ pub fn compute_swarm_capacity(state: &SharedState) -> SwarmCapacity {
             total_shards: cov.total_shards,
             shards_covered: cov.shards_covered,
             hosted_by_us: cov.hosted_by_us,
+            fits_here: model_budget_mb.map(|budget| cov.size_mb < budget),
         };
         let fully_serveable = cov.shards_covered == cov.total_shards && cov.total_shards > 0;
         if fully_serveable {
@@ -345,5 +360,105 @@ mod tests {
         assert_eq!(json["online_nodes"], 0);
         assert!(json["serveable_models"].is_array());
         assert!(json["headline_model"].is_null());
+    }
+
+    fn state() -> Arc<SharedState> {
+        let temp = tempfile::tempdir().unwrap().keep();
+        let db = crate::storage::db::Database::open(&temp).unwrap();
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = temp;
+        let executor = Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        state
+    }
+
+    /// A one-part model of `size_bytes` this node holds, so the swarm can run it.
+    fn held(state: &SharedState, id: &str, size_bytes: u64) -> ModelId {
+        let mid = ModelId(id.into());
+        state
+            .model_registry
+            .register_manifest(crate::types::ModelManifest {
+                id: mid.clone(),
+                name: "Same Name In Every File".into(),
+                architecture: crate::types::ModelArchitecture::Qwen2,
+                num_layers: 28,
+                num_params_billions: 0.6,
+                quantization: crate::types::Quantization::Q8_0,
+                total_size_bytes: size_bytes,
+                shard_count: 1,
+                shards: vec![crate::types::ShardInfo {
+                    index: 0,
+                    layer_range: (0, 28),
+                    size_bytes,
+                    hash: [0u8; 32],
+                    tensors: vec![],
+                }],
+                tokenizer_hash: [0u8; 32],
+                manifest_hash: [0u8; 32],
+                publisher: NodeId([0u8; 32]),
+                publish_date: chrono::Utc::now(),
+                license: "apache-2.0".into(),
+                mmproj: None,
+                context_length: None,
+            });
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: mid.clone(),
+                index: 0,
+            },
+            state.identity.node_id().clone(),
+        );
+        mid
+    }
+
+    /// The "Running now" list says what runs on this computer, by the budget
+    /// the HuggingFace search marks "Runs locally" by, and leaves out a model
+    /// whose header says it cannot write replies (field report 2026-10-15).
+    #[test]
+    fn what_the_swarm_runs_says_what_fits_here_and_omits_what_cannot_chat() {
+        let state = state();
+        held(&state, "small-q8-0", 100 * 1024 * 1024);
+        held(&state, "enormous-q8-0", 1 << 50);
+        let embedding = held(&state, "embedding-q8-0", 100 * 1024 * 1024);
+        state.gguf_meta.insert(
+            embedding,
+            crate::inference::split::GgufTensorMeta {
+                tensors: Default::default(),
+                tensor_data_offset: 0,
+                model_name: None,
+                head_count: 16,
+                head_count_kv: 8,
+                block_count: 28,
+                embedding_length: 1024,
+                head_dim: 128,
+                rope_dim: 128,
+                rope_freq_base: 1_000_000.0,
+                rms_norm_eps: 1e-6,
+                expert_count: 0,
+                expert_used_count: 0,
+                architecture: "qwen3".into(),
+                context_length: 32_768,
+                pooling_type: 3,
+            },
+        );
+
+        let cap = compute_swarm_capacity(&state);
+        let fits = |id: &str| {
+            cap.serveable_models
+                .iter()
+                .find(|m| m.model_id == id)
+                .map(|m| m.fits_here)
+        };
+        assert_eq!(fits("small-q8-0"), Some(Some(true)));
+        assert_eq!(fits("enormous-q8-0"), Some(Some(false)));
+        assert_eq!(fits("embedding-q8-0"), None, "it cannot write replies");
     }
 }

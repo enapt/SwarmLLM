@@ -1376,6 +1376,7 @@
   "wishlist.meta_replicas_ok_other": "{have} hosts",
   "wishlist.meta_replicas_partial": "{have} van {want} hosts",
   "wishlist.meta_size": "Grootte: {size}",
+  "wishlist.meta_size_about": "Grootte: ongeveer {size}",
   "wishlist.score_tip": "Prioriteitsscore: {score} van 100",
   "wishlist.shared_prefix": "Deze zijn allemaal:",
   "wishlist.status.aspirational": "Wordt gedownload",

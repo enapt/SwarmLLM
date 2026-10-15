@@ -155,8 +155,12 @@ pub fn compute_capacity_plan(state: &SharedState) -> CapacityPlan {
     }
 }
 
-/// Estimate Q4_K_M GGUF size in MB from a HF repo_id by parsing the
-/// parameter count (e.g. "Qwen3-70B-Instruct" → ~38 GB).
+/// Estimate a GGUF's size in MB from a HF repo_id by parsing the parameter
+/// count (e.g. "Qwen3-70B-Instruct" → ~38 GB as Q4_K_M), for the
+/// quantisation the repo actually offers (`HfTrendingEntry::offered_quant`),
+/// scaled by its bits per weight; Q4_K_M when that is not known. A
+/// Q8_0-only 0.6B repo was estimated at 337 MB beside a 609.5 MB file
+/// (field report 2026-10-15).
 ///
 /// **The single answer to "roughly how big is this repo" for a model we do
 /// not have on disk**, and there are two callers that need it: the
@@ -166,12 +170,48 @@ pub fn compute_capacity_plan(state: &SharedState) -> CapacityPlan {
 /// identically on fit, `wishlist.why.exceeds_swarm_capacity` could never
 /// fire, and `Unreachable` was unreachable. The estimator was sitting in
 /// the next module the whole time.
-pub(crate) fn estimate_q4_size_mb_from_repo_id_impl(repo_id: &str) -> Option<u64> {
-    estimate_q4_size_mb_from_repo_id(repo_id)
+pub(crate) fn estimate_size_mb(repo_id: &str, quant: Option<&str>) -> Option<u64> {
+    let q4 = estimate_q4_size_mb_from_repo_id(repo_id)?;
+    let Some(bits) = quant.and_then(bits_per_weight) else {
+        return Some(q4);
+    };
+    let q4_bits = bits_per_weight("Q4_K_M").unwrap_or(4.85);
+    Some((q4 as f64 * bits / q4_bits) as u64)
+}
+
+/// Bits per weight of a GGUF quantisation, as llama.cpp's `quantize` lists
+/// them for a 7B model; `None` for one this does not know.
+pub(crate) fn bits_per_weight(quant: &str) -> Option<f64> {
+    let q = quant.to_ascii_uppercase();
+    Some(match q.as_str() {
+        "F32" => 32.0,
+        "F16" | "BF16" => 16.0,
+        "Q8_0" => 8.5,
+        "Q6_K" => 6.56,
+        "Q5_K_M" => 5.67,
+        "Q5_K_S" | "Q5_0" => 5.54,
+        "Q5_1" => 6.0,
+        "Q4_K_M" => 4.85,
+        "Q4_K_S" => 4.58,
+        "Q4_0" => 4.55,
+        "Q4_1" => 5.0,
+        "IQ4_XS" => 4.25,
+        "IQ4_NL" => 4.5,
+        "Q3_K_L" => 4.27,
+        "Q3_K_M" => 3.91,
+        "Q3_K_S" => 3.5,
+        "IQ3_M" => 3.66,
+        "IQ3_XXS" => 3.06,
+        "Q2_K" => 2.63,
+        "IQ2_M" => 2.7,
+        "IQ2_XS" => 2.31,
+        "IQ2_XXS" => 2.06,
+        _ => return None,
+    })
 }
 
 /// Estimate Q4_K_M GGUF size in MB from a HF repo_id by parsing the
-/// parameter count. See [`estimate_q4_size_mb_from_repo_id_impl`].
+/// parameter count. See [`estimate_size_mb`].
 ///
 /// Heuristic: Q4_K_M ≈ 0.55 GB per billion parameters (empirical, holds
 /// reasonably from 0.5B through 405B). MoE expert counts (`Nx7B`) are
@@ -286,7 +326,7 @@ fn scenario(
     // surface 30B class models, and a 400 GB boost surface 70B+ models.
     let trending_snap = state.models.hf_trending_cache.load_full();
     for entry in trending_snap.entries.iter() {
-        let est_size_mb = match estimate_q4_size_mb_from_repo_id(&entry.repo_id) {
+        let est_size_mb = match estimate_size_mb(&entry.repo_id, entry.offered_quant.as_deref()) {
             Some(s) => s,
             None => continue,
         };
@@ -413,5 +453,27 @@ mod estimator_tests {
         // A version number before the parameter token must not win.
         assert_eq!(est("Qwen/Qwen2.5-0.5B-Instruct"), Some(281));
         assert_eq!(est("some-org/mystery-model"), None);
+    }
+
+    /// A repo is sized by the quantisation it offers: Qwen's own 0.6B repo
+    /// holds a 639 MB Q8_0 file and nothing smaller, which the Q4_K_M guess
+    /// put at 337 MB (field report 2026-10-15). With no quantisation known,
+    /// the Q4_K_M guess stands.
+    #[test]
+    fn a_repo_is_sized_by_the_quantisation_it_offers() {
+        let q4 = est("Qwen/Qwen3-0.6B-GGUF").unwrap();
+        assert_eq!(
+            super::estimate_size_mb("Qwen/Qwen3-0.6B-GGUF", None),
+            Some(q4)
+        );
+        let q8 = super::estimate_size_mb("Qwen/Qwen3-0.6B-GGUF", Some("Q8_0")).unwrap();
+        assert!(
+            (550..=700).contains(&q8),
+            "Q8_0 of a 0.6B: {q8} MB, the file is 639"
+        );
+        assert_eq!(
+            super::estimate_size_mb("Qwen/Qwen3-0.6B-GGUF", Some("Q4_K_M")),
+            Some(q4)
+        );
     }
 }

@@ -1376,6 +1376,7 @@
   "wishlist.meta_replicas_ok_other": "{have} anfitriões",
   "wishlist.meta_replicas_partial": "{have} de {want} anfitriões",
   "wishlist.meta_size": "Tamanho: {size}",
+  "wishlist.meta_size_about": "Tamanho: cerca de {size}",
   "wishlist.score_tip": "Pontuação de prioridade: {score} de 100",
   "wishlist.shared_prefix": "Todos estes são:",
   "wishlist.status.aspirational": "Sendo baixado",

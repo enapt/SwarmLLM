@@ -1376,6 +1376,7 @@
   "wishlist.meta_replicas_ok_other": "{have} hébergeur(s)",
   "wishlist.meta_replicas_partial": "{have} sur {want} hébergeur(s)",
   "wishlist.meta_size": "Taille : {size}",
+  "wishlist.meta_size_about": "Taille : environ {size}",
   "wishlist.score_tip": "Score de priorité : {score} sur 100",
   "wishlist.shared_prefix": "Tous ceux-ci sont :",
   "wishlist.status.aspirational": "Téléchargement en cours",

@@ -1676,6 +1676,15 @@ a:hover { color: var(--accent-hover); }
   position: relative;
 }
 .capacity-card-mine { border-color: rgba(46, 160, 67, 0.4); }
+.capacity-card-fit {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.capacity-card-fit .browse-result-action { padding: 3px 10px; font-size: var(--fs-sm); }
 .capacity-card-name {
   font-weight: 600;
   display: flex;

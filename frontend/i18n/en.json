@@ -1376,6 +1376,7 @@
   "wishlist.meta_replicas_ok_other": "{have} hosts",
   "wishlist.meta_replicas_partial": "{have} of {want} hosts",
   "wishlist.meta_size": "Size: {size}",
+  "wishlist.meta_size_about": "Size: about {size}",
   "wishlist.score_tip": "Priority score: {score} of 100",
   "wishlist.shared_prefix": "All of these are:",
   "wishlist.status.aspirational": "Being downloaded",

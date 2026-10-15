@@ -127,7 +127,11 @@
     // Meta row: size + memory required + replication summary
     var meta = document.createElement('div');
     meta.className = 'wishlist-card-meta';
-    var sizeText = _sizeTextOrNull(entry.size_mb);
+    // A candidate has no file here yet: its size is the estimate the daemon
+    // makes from the repo's name and the quantisation it offers, and says
+    // so — it read 337 MB beside the search's 609.5 MB for one model (field
+    // report 2026-10-15).
+    var sizeText = _sizeTextOrNull(entry.size_mb, entry.status === 'candidate');
     if (sizeText) meta.appendChild(_metaSpan(sizeText));
     if (entry.vram_required_mb > 0) {
       meta.appendChild(_metaSpan(I18n.t('wishlist.meta_memory', { size: U.formatSize(entry.vram_required_mb) })));
@@ -224,9 +228,9 @@
   // (`vram_required_mb`) was already guarded with `> 0`; the size was not.
   // Returns null when there is nothing honest to show, so callers omit the row
   // rather than inventing a figure.
-  function _sizeTextOrNull(mb) {
+  function _sizeTextOrNull(mb, estimated) {
     if (!mb || mb <= 0) return null;
-    return I18n.t('wishlist.meta_size', { size: U.formatSize(mb) });
+    return I18n.t(estimated ? 'wishlist.meta_size_about' : 'wishlist.meta_size', { size: U.formatSize(mb) });
   }
 
   function _metaSpan(text) {
@@ -319,8 +323,66 @@
       var sizeMeta = _sizeTextOrNull(m.size_mb);
       meta.textContent = sizeMeta ? sizeMeta + ' · ' + replicaText : replicaText;
       card.appendChild(meta);
+      // What runs on this computer, said as the search says it — the same
+      // pill from the same budget (`fits_here`; null is unknown, which the
+      // search counts as fitting) — with the one thing to do about it. This
+      // tab is the one a new user lands on, and it said nothing of what runs
+      // here (field report 2026-10-15).
+      if (!m.hosted_by_us) card.appendChild(_runningFit(m));
       grid.appendChild(card);
     });
+  }
+
+  function _runningFit(m) {
+    var fitsHere = m.fits_here !== false;
+    var foot = document.createElement('div');
+    foot.className = 'capacity-card-fit';
+    var pill = document.createElement('span');
+    pill.className = 'browse-fit-pill browse-fit-pill-' + (fitsHere ? 'run' : 'swarm');
+    pill.textContent = I18n.t(fitsHere ? 'browse.fit_run_local' : 'browse.fit_swarm_only');
+    foot.appendChild(pill);
+    var src = fitsHere ? _hfSourceOf(m.model_id) : null;
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'browse-result-action browse-result-action-primary';
+    if (src) {
+      // Every part: a model marked "Runs locally" is downloaded to chat with
+      // here, as the search's Download does for one that fits.
+      btn.textContent = I18n.t('browse.action_download');
+      btn.addEventListener('click', function () {
+        btn.disabled = true;
+        App.hf.downloadShards({ repo_id: src.repo_id, filename: src.filename, all_shards: true }).then(function (result) {
+          App.notifications.showToast(result.ok
+            ? I18n.t('browse.download_started', { name: U.formatModelDisplayName(m.model_id) })
+            : (result.errorMsg || I18n.t('browse.download_failed')), result.ok ? 'success' : 'error');
+          if (!result.ok) btn.disabled = false;
+        }).catch(function () {
+          App.notifications.showToast(I18n.t('browse.download_failed'), 'error');
+          btn.disabled = false;
+        });
+      });
+    } else {
+      // The swarm runs it either way: chatting with it is the thing to offer.
+      btn.textContent = I18n.t('browse.action_chat');
+      btn.addEventListener('click', function () {
+        App.models.selectDropdown(m.model_id);
+        App.chat.newSession();
+        App.ui.switchTab('chat');
+      });
+    }
+    foot.appendChild(btn);
+    return foot;
+  }
+
+  // Where a model's file comes from, as the model list reports it — what a
+  // download names. Null when the list has not said.
+  function _hfSourceOf(modelId) {
+    var models = (App.data && App.data.cache && App.data.cache.models) || [];
+    for (var i = 0; i < models.length; i++) {
+      var src = models[i] && models[i].id === modelId && models[i].hf_source;
+      if (src && src.repo_id && src.filename) return src;
+    }
+    return null;
   }
 
   // R134: render quant recommendations. Only renders entries the user can

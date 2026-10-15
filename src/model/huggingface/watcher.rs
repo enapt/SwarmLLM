@@ -214,6 +214,14 @@ struct HfApiModel {
     /// vision / multilingual / reasoning).
     #[serde(default)]
     tags: Vec<String>,
+    /// The repo's files (`full=true`): what quantisations it offers.
+    #[serde(default)]
+    siblings: Vec<HfApiSibling>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct HfApiSibling {
+    rfilename: String,
 }
 
 /// Cached snapshot of the HF trending feed. Stored on `state.models`
@@ -236,6 +244,11 @@ pub struct HfTrendingEntry {
     pub task_tags: Vec<String>,
     /// Created-at parsed as Unix seconds (0 = unknown).
     pub created_at_secs: i64,
+    /// The quantisation a download of this repo would take
+    /// (`huggingface::offered_quant` over its file list), which its size is
+    /// estimated by. `None` when the list named no GGUF file.
+    #[serde(default)]
+    pub offered_quant: Option<String>,
 }
 
 /// HfWatcher background task. Owns its own HTTP client; keeps a
@@ -416,6 +429,9 @@ impl HfWatcher {
                 likes: m.likes,
                 task_tags,
                 created_at_secs,
+                offered_quant: crate::model::huggingface::offered_quant(
+                    m.siblings.iter().map(|s| s.rfilename.as_str()),
+                ),
             });
         }
 

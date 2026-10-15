@@ -1376,6 +1376,7 @@
   "wishlist.meta_replicas_ok_other": "{have} värdar",
   "wishlist.meta_replicas_partial": "{have} av {want} värdar",
   "wishlist.meta_size": "Storlek: {size}",
+  "wishlist.meta_size_about": "Storlek: ungefär {size}",
   "wishlist.score_tip": "Prioritetspoäng: {score} av 100",
   "wishlist.shared_prefix": "Alla dessa är:",
   "wishlist.status.aspirational": "Laddas ner",

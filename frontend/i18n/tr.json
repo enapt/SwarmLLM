@@ -1376,6 +1376,7 @@
   "wishlist.meta_replicas_ok_other": "{have} barındıran",
   "wishlist.meta_replicas_partial": "{want} barındırandan {have} tanesi mevcut",
   "wishlist.meta_size": "Boyut: {size}",
+  "wishlist.meta_size_about": "Boyut: yaklaşık {size}",
   "wishlist.score_tip": "Öncelik puanı: 100 üzerinden {score}",
   "wishlist.shared_prefix": "Bunların tümü:",
   "wishlist.status.aspirational": "İndiriliyor",

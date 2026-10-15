@@ -1376,6 +1376,7 @@
   "wishlist.meta_replicas_ok_other": "{have} host",
   "wishlist.meta_replicas_partial": "{have} dari {want} host",
   "wishlist.meta_size": "Ukuran: {size}",
+  "wishlist.meta_size_about": "Ukuran: sekitar {size}",
   "wishlist.score_tip": "Skor prioritas: {score} dari 100",
   "wishlist.shared_prefix": "Semuanya adalah:",
   "wishlist.status.aspirational": "Sedang diunduh",

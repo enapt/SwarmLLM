@@ -1376,6 +1376,7 @@
   "wishlist.meta_replicas_ok_other": "{have} مستضيفين",
   "wishlist.meta_replicas_partial": "{have} من أصل {want} مستضيفين",
   "wishlist.meta_size": "الحجم: {size}",
+  "wishlist.meta_size_about": "الحجم: حوالي {size}",
   "wishlist.score_tip": "درجة الأولوية: {score} من 100",
   "wishlist.shared_prefix": "جميع هذه النماذج:",
   "wishlist.status.aspirational": "قيد التنزيل",
