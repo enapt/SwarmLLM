@@ -4808,12 +4808,12 @@ impl PipelineScheduler {
     /// nothing of the model fits beside the drafter — or with
     /// `SWARMLLM_DRAFTER_ROOM=0`, an A/B inside one binary.
     ///
-    /// A cut, never a bound every rung keeps: each planner tries it first on
-    /// every rung or pass that holds this node to its bound and, finding no
-    /// route, runs that rung as before — a drafter is worth layers, not a
-    /// request. Only at the strictest, it never fired on the live swarm: a
-    /// peer advertising less than it serves leaves every split to greedy's
-    /// relaxed pass, so the cut carries `memory_refused_this_request` there.
+    /// A cut, never a bound every rung keeps, and tried only where every peer
+    /// is held to what it OFFERS: parallax's `CapacityBound::Everyone` rung and
+    /// greedy's strict pass (`greedy_assign_beside`). Finding no route there,
+    /// the planner runs as before — a drafter is worth layers, not a request.
+    /// A relaxed rung holds a peer to what it could ever hold; the cut tried
+    /// there handed a peer 34 layers it had not offered and lost the reply.
     /// Measured with a node holding no card, a
     /// Qwen3-30B-A3B split ran 2.68-2.99 tok/s with 28 layers here and no room
     /// for Qwen3-1.7B, 3.98-6.32 with fewer layers and the drafter beside them,
