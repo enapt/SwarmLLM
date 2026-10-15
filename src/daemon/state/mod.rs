@@ -2753,6 +2753,39 @@ impl SharedState {
         self.gguf_meta_for(model_id)?.refusal()
     }
 
+    /// Is `model_id` a model with its safety training removed, or marked as
+    /// adult content (`model::huggingface::is_uncensored_model`, by its id,
+    /// its name or the repo it comes from), that this computer's owner has not
+    /// chosen? Such a model is never hosted automatically — prune sheds it and
+    /// the download pass does not fetch it (`AutoShardManager::would_shed_copy`)
+    /// — and never picked for someone who did not pick it (`auto`, the chat
+    /// picker's default). Field report 2026-10-15.
+    ///
+    /// Chosen means downloaded or pinned (`pinned_by_user`), kept on this
+    /// computer, made the default model, or given prompt privacy by hand.
+    pub fn unchosen_uncensored_model(&self, model_id: &crate::types::ModelId) -> bool {
+        let marked = |name: &str| crate::model::huggingface::is_uncensored_model(name, &[]);
+        let is_marked = marked(&model_id.0)
+            || marked(&self.model_registry.display_name(model_id))
+            || self
+                .models
+                .hf_sources
+                .get(model_id)
+                .is_some_and(|source| marked(&source.repo_id));
+        if !is_marked {
+            return false;
+        }
+        let chosen = self
+            .models
+            .model_trust
+            .get(model_id)
+            .is_some_and(|t| t.pinned_by_user)
+            || self.kept_on_this_computer(model_id)
+            || self.cfg().inference.default_model == model_id.0
+            || self.privacy_explicitly_enabled_for(model_id);
+        !chosen
+    }
+
     /// Make a model's geometry available to the ROUTER, fetching the header
     /// if this node holds no part of the model. **Best effort, and silent.**
     ///

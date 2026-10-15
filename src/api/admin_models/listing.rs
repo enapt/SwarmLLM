@@ -465,6 +465,12 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 .shared_state
                 .refused_model(&crate::types::ModelId(id.to_string()))
                 .map(|r| r.as_str()),
+            // A model with its safety training removed that the owner has not
+            // chosen: listed and pickable, never the picker's default — a
+            // fresh node pre-selected one (field report 2026-10-15).
+            "never_default": state
+                .shared_state
+                .unchosen_uncensored_model(&crate::types::ModelId(id.to_string())),
         })
     };
 

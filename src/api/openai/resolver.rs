@@ -153,6 +153,10 @@ pub async fn resolve_model_for_inference(state: &AppState, model: &str) -> Strin
 /// 5. a model the swarm can serve (every shard has a holder);
 /// 6. anything listed.
 ///
+/// Steps 3-6 skip a model that cannot write replies (`refused_model`) and one
+/// with its safety training removed that the owner did not choose
+/// (`unchosen_uncensored_model`): nobody named either.
+///
 /// Ties go by model id, so the answer never depends on a map's iteration order.
 ///
 /// **What it replaced** (#120): `auto` took `loaded_model_info`, which the shard
@@ -186,9 +190,15 @@ pub(crate) async fn auto_model_for(ss: &crate::daemon::SharedState) -> Option<St
 
     let whole_here = |id: &crate::types::ModelId| ss.has_complete_split_model(id);
     let swarm_serves = |id: &crate::types::ModelId| ss.model_registry.model_is_servable(id);
+    // `auto` is a model nobody named, so never one that cannot write replies
+    // (an embedding model) nor one with its safety training removed that the
+    // owner did not choose (field report 2026-10-15).
+    let may_answer = |id: &crate::types::ModelId| {
+        ss.refused_model(id).is_none() && !ss.unchosen_uncensored_model(id)
+    };
     let previous = ss.models.auto_model.lock().clone();
     if let Some(prev) = previous {
-        if whole_here(&prev) || swarm_serves(&prev) {
+        if (whole_here(&prev) || swarm_serves(&prev)) && may_answer(&prev) {
             return Some(prev.0);
         }
     }
@@ -197,6 +207,7 @@ pub(crate) async fn auto_model_for(ss: &crate::daemon::SharedState) -> Option<St
         .models()
         .into_iter()
         .map(|m| m.id)
+        .filter(|id| may_answer(id))
         .collect();
     ids.sort_by(|a, b| a.0.cmp(&b.0));
     let choice = ids
@@ -598,5 +609,31 @@ mod tests {
         add_model(&state, "aaa-unservable", Held::Unservable);
         add_model(&state, "bbb-on-peer", Held::OnPeer);
         assert_eq!(auto_model_for(&state).await.as_deref(), Some("bbb-on-peer"));
+    }
+
+    /// `auto` is a model nobody named, so never one with its safety training
+    /// removed that the owner did not choose — a fresh node held one whole and
+    /// had it pre-selected (field report 2026-10-15) — and the owner choosing
+    /// it makes it a model like any other.
+    #[tokio::test]
+    async fn auto_never_names_an_uncensored_model_the_owner_did_not_choose() {
+        let state = node_with(|_| {});
+        let marked = add_model(&state, "aaa-coder-abliterated-q4", Held::WholeHere);
+        add_model(&state, "bbb-coder-q4", Held::OnPeer);
+        assert_eq!(
+            auto_model_for(&state).await.as_deref(),
+            Some("bbb-coder-q4")
+        );
+
+        *state.models.auto_model.lock() = None;
+        state
+            .models
+            .model_trust
+            .insert(marked, crate::types::ModelTrustInfo::new_pinned());
+        assert_eq!(
+            auto_model_for(&state).await.as_deref(),
+            Some("aaa-coder-abliterated-q4"),
+            "the owner pinned it: held whole, it is the answer like any other"
+        );
     }
 }

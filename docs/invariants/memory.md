@@ -779,6 +779,50 @@ side judges at the pressure AFTER the fetch, cumulatively within a cycle
 (`parts_chosen_together_are_judged_together`); file decisions never read
 graphics memory.
 
+### A model nobody chose that has its safety training removed is not hosted automatically (2026-10-15)
+
+A tester's brand-new laptop held all 8 parts of
+`qwen2.5-coder-7b-instruct-abliterated-q4-k-m` within minutes of starting,
+with nothing chosen, and its chat picker pre-selected it (field report
+2026-10-15). Nothing was wrong in the mechanics: three peers held it, so
+`update_model_trust` promoted it to `NetworkPopular`, which clears
+auto-manage's trust gate, and the picker's default is the first model held
+whole.
+
+The policy now: a model whose id, name or HuggingFace repo marks it as having
+its safety training removed ("abliterated", "uncensored") or as adult content
+("nsfw", HuggingFace's `not-for-all-audiences` tag) —
+`model::huggingface::is_uncensored_model` — is hosted, and picked, only where
+the owner chose it: downloaded or pinned it (`pinned_by_user`), kept it on this
+computer, made it the default model, or gave it prompt privacy by hand.
+`SharedState::unchosen_uncensored_model` is the one answer. It is asked:
+
+- in `copy_kept_because`, so `would_shed_copy` sheds such a copy and both
+  download passes refuse to fetch it — one place, not a gate per adoption
+  path (trust has four writers: `NetworkPopular`, quant siblings, the trusted
+  publisher promotion, requests). It sits BEFORE prompt privacy's exemption:
+  the automatic privacy default keeps both ends of any model held whole, which
+  would have kept two parts of a model nobody chose. A copy taken up before
+  this change is given back by the same rule, subject to prune's own checks
+  (holders busy, recently used, re-acquirable);
+- by `auto` (`resolver::auto_model_for`), which also skips `refused_model` — an
+  embedding model held whole could be `auto` (fd9b9394 missed that path);
+- by the chat picker's default (`never_default` on `/api/admin/models`): still
+  listed, still pickable, never pre-selected; a remembered pick of one is not
+  honoured unless a conversation uses it or the reader picked it on this page;
+- by the HuggingFace trending list, which feeds the wishlist and what a new
+  user is shown. Search still finds such a model.
+
+Research: HuggingFace's `not-for-all-audiences` tag puts a click-through
+warning before the model card, so the Hub treats it as a choice, not a ban.
+That is the model followed here: never a default, always available to an owner
+who picks it.
+
+Tests: `an_uncensored_model_is_hosted_only_by_an_owner_who_chose_it` (red with
+the prune rule off), `auto_never_names_an_uncensored_model_the_owner_did_not_choose`
+(red with the predicate answering "never"),
+`an_uncensored_model_is_told_by_its_name_or_its_tag`.
+
 ## `model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER BOUND on "idle since", and the worker's own `last_used` is the signal that moves
 
 (2026-09-02, gotcha #437). The idle unload used to trust

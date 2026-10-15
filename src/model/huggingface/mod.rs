@@ -127,6 +127,30 @@ pub fn is_embedding_repo(pipeline_tag: Option<&str>, tags: &[String]) -> bool {
     }
 }
 
+/// What a model's name carries when its safety training was removed —
+/// "abliterated" (the refusal direction ablated out of the weights),
+/// "uncensored" — or when it is marked as adult content.
+const UNCENSORED_MARKS: &[&str] = &["abliterat", "uncensored", "nsfw"];
+
+/// HuggingFace's own mark for such a repo. The Hub shows a warning a person
+/// clicks through before the model card: a choice they make, not a ban.
+const NOT_FOR_ALL_AUDIENCES: &str = "not-for-all-audiences";
+
+/// Is this a model with its safety training removed, or one marked as adult
+/// content — by a name (a model id, a display name or a repo id) and, where
+/// known, its HuggingFace tags?
+///
+/// Such a model is hosted or answered with only where its owner chose it
+/// (`SharedState::unchosen_uncensored_model`): a fresh node was found hosting
+/// an abliterated model within minutes, its chat picker pre-selecting it
+/// (field report 2026-10-15). HuggingFace's own handling of the tag is the
+/// model — a click-through, so it is still listed and can still be picked.
+pub fn is_uncensored_model(name: &str, tags: &[String]) -> bool {
+    let name = name.to_ascii_lowercase();
+    UNCENSORED_MARKS.iter().any(|mark| name.contains(mark))
+        || tags.iter().any(|t| t == NOT_FOR_ALL_AUDIENCES)
+}
+
 #[derive(Debug, Clone)]
 pub struct DownloadProgress {
     pub downloaded_bytes: u64,

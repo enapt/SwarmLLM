@@ -386,8 +386,13 @@ impl HfWatcher {
             // (Qwen3-Embedding-0.6B does), which let it into this list — shown
             // as "Chat", auto-hosted, and chatted with to 30 s of one word
             // (field report 2026-10-15).
+            // Nor is a model with its safety training removed, or tagged as
+            // adult content, recommended to every node: this list feeds what
+            // the swarm wants and what a new user is shown. Search still finds
+            // it for someone who looks (field report 2026-10-15).
             if !is_text
                 || crate::model::huggingface::is_embedding_repo(m.pipeline_tag.as_deref(), &m.tags)
+                || crate::model::huggingface::is_uncensored_model(&m.repo_id, &m.tags)
             {
                 continue;
             }

@@ -102,7 +102,7 @@
             // its end is not cut off here.
             var displayName = U.formatModelDisplayName(m.id);
             var isDistributed = m.shard_count > 0 && (m.hosted_shards || 0) < m.shard_count;
-            var item = { id: m.id, name: displayName, group: isDistributed ? 'swarm' : 'local', encrypted: !!m.encrypted_pipeline };
+            var item = { id: m.id, name: displayName, group: isDistributed ? 'swarm' : 'local', encrypted: !!m.encrypted_pipeline, neverDefault: !!m.never_default };
             if (isDistributed) { swarmItems.push(item); } else { localItems.push(item); }
           });
           if (localItems.length > 0) {
@@ -144,9 +144,25 @@
           var sessionModel = S.currentSessionId && S.sessions[S.currentSessionId] ? S.sessions[S.currentSessionId].model : null;
           var savedModel = null;
           try { savedModel = localStorage.getItem(App.CURRENT_MODEL_KEY); } catch (e) {}
+          // With no choice of the reader's own, never a model with its safety
+          // training removed that the owner did not choose — a fresh node
+          // pre-selected one (field report 2026-10-15). It stays in the list.
+          // The remembered pick is not proof of a choice (a silent default is
+          // remembered too); an open conversation on the model is, and so is
+          // a pick made on this page.
+          var neverDefault = {};
+          S._modelDropdownData.forEach(function(m) { if (m.neverDefault) neverDefault[m.id] = true; });
+          if (savedModel && neverDefault[savedModel] && savedModel !== S._readerPickedModel) savedModel = null;
           var preferred = sessionModel || savedModel;
           var found = preferred && allIds.indexOf(preferred) !== -1;
-          App.models.selectDropdown(found ? preferred : allIds[0], { silent: true });
+          var firstDefault = S._modelDropdownData.filter(function(m) { return !m.neverDefault; })[0];
+          var pick = found ? preferred : (firstDefault && firstDefault.id);
+          if (pick) {
+            App.models.selectDropdown(pick, { silent: true });
+          } else {
+            S.currentModel = '';
+            updateModelDropdownLabel(I18n.t('models.select_model'));
+          }
         } else {
           S.currentModel = '';
           updateModelDropdownLabel(I18n.t('models.select_model'));
@@ -256,6 +272,9 @@
       opts = opts || {};
       var prevModel = S.currentModel;
       S.currentModel = modelId;
+      // A pick the reader made, which the model-list refresh keeps even for a
+      // model it would never choose by default.
+      if (!opts.silent) S._readerPickedModel = modelId;
       document.getElementById('model-select').value = modelId;
       // The narrow-screen picker is the same choice, so it is set here, where
       // every selection passes. Only the model-list refresh set it, so after

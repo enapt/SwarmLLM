@@ -127,7 +127,7 @@ A failure is `StreamEvent::Error` typed through `classify_error` with no finish 
 
 ## `auto` names a model that can be SERVED, and keeps naming it (2026-09-26)
 
-**`api::openai::resolver::resolve_auto` is the single answer to "which model is `auto`"**, for both surfaces. Never read `loaded_model_info` for it (#120).
+**`api::openai::resolver::resolve_auto` is the single answer to "which model is `auto`"**, for both surfaces. Never read `loaded_model_info` for it (#120). Past the owner's own choices it never names a model that cannot write replies (`refused_model`) or one with its safety training removed the owner did not choose (`unchosen_uncensored_model`).
 
 → `docs/invariants/api-surfaces.md` § "`auto` names a model that can be served, and keeps naming it (2026-09-26, #120)"
 

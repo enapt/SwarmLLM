@@ -1292,6 +1292,19 @@ impl AutoShardManager {
         {
             return Some("a pool pin");
         }
+        // A model with its safety training removed, or marked as adult
+        // content, is held only by an owner who chose it: automatic hosting
+        // never takes one up, and a copy it took up is given back (field
+        // report 2026-10-15). Here, so the download pass — which asks this —
+        // never fetches what prune sheds. Before the exemptions below: prompt
+        // privacy's automatic ends would otherwise keep two parts of a model
+        // nobody chose, and an explicit privacy choice counts as choosing it.
+        if self
+            .shared_state
+            .unchosen_uncensored_model(&shard_id.model_id)
+        {
+            return None;
+        }
         // Prompt privacy needs BOTH ends of the model on this node, so
         // pruning an end strands the setting: it stays on, nothing can
         // satisfy it, and every request for the model then fails at

@@ -283,3 +283,33 @@ fn an_embedding_repo_is_told_apart_from_a_chat_model() {
     ));
     assert!(!is_embedding_repo(None, &tags(&["gguf"])), "nothing said");
 }
+
+/// A safety-removed or adult model is told by its name or HuggingFace's own
+/// tag; a plain instruct model and a name that merely contains a short word
+/// are not (field report 2026-10-15).
+#[test]
+fn an_uncensored_model_is_told_by_its_name_or_its_tag() {
+    let tags = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert!(is_uncensored_model(
+        "qwen2.5-coder-7b-instruct-abliterated-q4-k-m",
+        &[]
+    ));
+    assert!(is_uncensored_model(
+        "huihui-ai/Qwen2.5-Coder-7B-Instruct-Abliterated-GGUF",
+        &[]
+    ));
+    assert!(is_uncensored_model("Llama-3-8B-Lexi-Uncensored", &[]));
+    assert!(is_uncensored_model("some-model-NSFW-3B", &[]));
+    assert!(is_uncensored_model(
+        "someone/roleplay-12b",
+        &tags(&["gguf", "not-for-all-audiences"])
+    ));
+    assert!(!is_uncensored_model(
+        "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+        &tags(&["gguf", "text-generation"])
+    ));
+    assert!(!is_uncensored_model(
+        "qwen2.5-coder-7b-instruct-q4-k-m",
+        &[]
+    ));
+}

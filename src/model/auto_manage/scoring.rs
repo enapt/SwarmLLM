@@ -1424,6 +1424,42 @@ mod fetch_what_prune_keeps {
         assert_eq!(fetched(&manager, &state, 8_000), vec![(mid, 1)]);
     }
 
+    /// A model with its safety training removed is hosted only by an owner
+    /// who chose it: a fresh node held an abliterated model whole within
+    /// minutes of starting (field report 2026-10-15). The shape the control
+    /// above fetches from fetches nothing once the name carries the mark, and
+    /// the part already held is given back; pinned, it is a model like any
+    /// other.
+    #[test]
+    fn an_uncensored_model_is_hosted_only_by_an_owner_who_chose_it() {
+        let (state, manager) = manager_with(Config::default());
+        let mid = busy_model(&state, &manager, "coder-7b-abliterated-q4");
+        let local = state.identity.node_id().clone();
+        let part0 = ShardId {
+            model_id: mid.clone(),
+            index: 0,
+        };
+        assert!(
+            fetched(&manager, &state, 2_000).is_empty(),
+            "nobody chose it: no part of it is fetched"
+        );
+        assert!(
+            manager.would_shed_copy(&part0, std::slice::from_ref(&local), 0.0, &[]),
+            "the part this node took up is given back, even as its only copy here"
+        );
+
+        state
+            .models
+            .model_trust
+            .insert(mid.clone(), crate::types::ModelTrustInfo::new_pinned());
+        assert_eq!(
+            fetched(&manager, &state, 2_000),
+            vec![(mid, 1)],
+            "the owner pinned it: fetched like any model"
+        );
+        assert!(!manager.would_shed_copy(&part0, &[local], 0.0, &[]));
+    }
+
     /// Parts chosen in one cycle are judged at the pressure ALL of them leave:
     /// at 7,000 MB held, the first part lands at 75% (prune keeps three
     /// copies) and the second at 80% (prune keeps two), so only one is taken.
