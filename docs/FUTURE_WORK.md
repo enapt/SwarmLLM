@@ -2411,7 +2411,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel)
+**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel, #283)
 - #282 (calls, channel) — **Gemma 4's tool calls are tool calls.** It writes
   `<|tool_call>call:name{key:<|"|>text<|"|>,n:2}<tool_call|>` — its own syntax, not JSON — and
   every call reached the client as reply text. `tool_parse::try_gemma4` reads it as llama.cpp
@@ -2422,6 +2422,18 @@ grep `^| N |`).
   12B opens an empty one itself, which led the reply. Fixtures are the 12B's own greedy replies
   under llama.cpp; six tests, all red with the fix off. Residual (the file's `suppress_tokens`)
   stays open as #282.
+- #283 — **A conversation's earlier tool calls and their answers reach the model.** OpenAI's
+  `to_chat_message` dropped `tool_calls` / `tool_call_id` (Responses goes through it too) and
+  Anthropic flattened a call to `[Tool call: name(input)]` text, so the template saw an empty
+  assistant turn where the call was — and Gemma 4's, which renders an answer only beside its
+  call, dropped the ANSWER: the model never saw what its tool returned. `ChatMessage::tool`
+  (`ToolTurn`, flattened, absent from the JSON when empty — additive on the wire) carries the
+  structure from every surface; `chat_template::tool_turns` decides at the one choke point how
+  this template is shown it: as is where a probe render (once per template, minja's
+  `chat_template_caps`) finds calls and answers in the prompt, otherwise as minja's polyfills —
+  the call as the `{"tool_calls": …}` JSON the prose description asks for, the answer as a user
+  turn merged to keep alternation. Gemma 4 and Qwen3 now render a tool conversation exactly as
+  jinja2 does.
 - #115 (3) — **Gemma 4 runs (text, the dense 12B and 31B).** Each layer's attention has its own
   shape — on the 12B, five layers in six have 8 key/value heads 256 wide over the last 1,024
   positions, every sixth one head 512 wide over everything, with no V projection (V is K) —

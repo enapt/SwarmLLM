@@ -129,6 +129,63 @@ pub struct ChatMessage {
     /// by the API layer after parsing OpenAI-format image_url content parts).
     #[serde(skip)]
     pub images: Vec<ImageData>,
+    /// The calls an assistant turn made, or the call a tool turn answers —
+    /// flattened, so a chat template reads `message.tool_calls` /
+    /// `message.tool_call_id` where HuggingFace's chat format puts them.
+    #[serde(flatten)]
+    pub tool: ToolTurn,
+}
+
+/// The tool side of one conversation turn (#283). Empty on every other turn,
+/// and then absent from the JSON: a peer that predates it reads the turn it
+/// always read, and a template sees no key it did not see before.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolTurn {
+    /// An assistant turn's calls, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCallTurn>,
+    /// A tool turn: the id of the call it answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// A tool turn: the tool's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// One call an assistant turn made, in the chat format templates are written
+/// against: `{id, type: "function", function: {name, arguments}}`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallTurn {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ToolCallFunction,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallFunction {
+    pub name: String,
+    /// The arguments as the OBJECT they spell. Templates iterate them
+    /// (`arguments.items()`, Gemma 4's `dictsort`) or `tojson` them, and JSON
+    /// text — OpenAI's wire form — double-encodes under `tojson`; vLLM parses
+    /// them before rendering for the same reason. Text that is not an object
+    /// stays text.
+    pub arguments: serde_json::Value,
+}
+
+impl ToolCallTurn {
+    /// A function call whose arguments arrive as JSON text.
+    pub fn function(id: String, name: String, arguments: &str) -> Self {
+        let arguments = match serde_json::from_str::<serde_json::Value>(arguments) {
+            Ok(object @ serde_json::Value::Object(_)) => object,
+            _ => serde_json::Value::String(arguments.to_string()),
+        };
+        Self {
+            id,
+            kind: "function".to_string(),
+            function: ToolCallFunction { name, arguments },
+        }
+    }
 }
 
 /// Decoded image ready for vision encoder processing.
@@ -1413,6 +1470,7 @@ mod delegated_split_wire_tests {
                 role: Role::User,
                 content: "hello".into(),
                 images: vec![],
+                tool: Default::default(),
             }],
             tools: Some(vec![serde_json::json!({"type": "function"})]),
         }));

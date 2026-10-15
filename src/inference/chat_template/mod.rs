@@ -9,6 +9,9 @@ use crate::types::{ChatMessage, Role};
 
 mod fallbacks;
 mod tojson;
+mod tool_turns;
+
+use tool_turns::ToolTurnSupport;
 
 pub use fallbacks::chatml_fallback;
 
@@ -572,6 +575,7 @@ fn template_writes_its_own_system_turn(
         role: Role::System,
         content: SENTINEL.to_string(),
         images: Vec::new(),
+        tool: Default::default(),
     });
     probe.extend(without.iter().cloned());
     let Some(with_sentinel) =
@@ -650,6 +654,7 @@ fn with_system_message(messages: &[ChatMessage]) -> Option<Vec<ChatMessage>> {
                 role: Role::System,
                 content: DEFAULT_SYSTEM_PROMPT.to_string(),
                 images: Vec::new(),
+                tool: Default::default(),
             });
             v.extend_from_slice(messages);
             Some(v)
@@ -855,6 +860,7 @@ fn describe_tools_in_prose(
         role: Role::System,
         content: crate::api::tool_parse::format_tool_prompt(&specs),
         images: Vec::new(),
+        tool: Default::default(),
     });
     out.extend_from_slice(messages);
     out
@@ -928,6 +934,13 @@ fn build_prompt_attempt(
     tools: Option<&[serde_json::Value]>,
     force_prose: bool,
 ) -> String {
+    // The conversation's earlier calls and answers, as this renderer can show
+    // them (#283) — decided here, where the template is in hand, never at an
+    // API surface.
+    let support = template.map_or(ToolTurnSupport::FALLBACK, tool_turns::support_of);
+    let shown = tool_turns::for_renderer(messages, support);
+    let messages: &[ChatMessage] = shown.as_deref().unwrap_or(messages);
+
     // A model whose template renders tools is told about them the way it was
     // trained to be; every other model is told in prose. This is the ONE place
     // that choice is made — it needs both the tools and the template, and the
@@ -995,6 +1008,11 @@ fn build_prompt_attempt(
         // model-name heuristic the no-template branch uses. Reaching ChatML
         // here would drop LLaVA's `<image>` placeholder, which prepends the
         // vision embeddings instead of inserting them at the right position.
+        //
+        // The fallbacks read no calls: refit the tool turns for them, or a
+        // call left as structure for a template that renders it is lost.
+        let refit = tool_turns::for_renderer(messages, ToolTurnSupport::FALLBACK);
+        let messages: &[ChatMessage] = refit.as_deref().unwrap_or(messages);
         if tmpl.contains("start_of_turn") {
             tracing::warn!(
                 fallback = "gemma",
@@ -1014,6 +1032,7 @@ fn build_prompt_attempt(
             fallback = "chatml",
             "DIAG: chat template failed, using fallback"
         );
+        return chatml_fallback(messages);
     } else {
         // A model we could not read a template for cannot be told about its
         // tools the way it was trained to be — `renders_tools` is false above,

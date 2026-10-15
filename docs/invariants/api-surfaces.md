@@ -1315,6 +1315,76 @@ prompt ends on `<|im_start|>assistant`, which a prompt that dropped every
 message also does, and it was green while every Qwen3 request in the field
 arrived with no question in it.
 
+## A conversation's tool turns reach the template as structure
+
+(2026-10-16, FUTURE_WORK #283.) `ChatMessage` was role and text, so each API
+edge decided alone what an earlier call and its answer became: the OpenAI edge
+dropped `tool_calls` (an empty assistant turn where the call had been), the
+Anthropic edge wrote `[Tool call: …]` prose and folded each `tool_result` into
+the user turn's text. No template was ever handed a call. Gemma 4's reads a tool
+answer ONLY beside the call it answers, so a Gemma 4 agent never saw a tool's
+result at all; strict-alternation templates (Gemma 2, Mistral) raised on the
+`tool` role and fell back.
+
+Now every surface carries them as **`ChatMessage::tool`** (`ToolTurn`:
+HuggingFace's chat format, `#[serde(flatten)]`, so a template reads
+`message.tool_calls`, `tool_call_id`, `name` exactly where it expects them), and
+**`chat_template::tool_turns`** decides, inside `build_prompt_attempt`, how the
+template in hand sees them:
+
+- **Arguments are an OBJECT** (`ToolCallTurn::function` parses the client's JSON
+  string; vLLM does the same before rendering). Templates iterate them
+  (`arguments.items()` in Gemma 4's) or `tojson` them; a string renders as a
+  quoted blob.
+- **Support is found by RENDERING**, once per template (`support_of`, cached by
+  hash) — minja's `chat_template_caps` probe: a call carrying an
+  `argument_needle` key, an answer reading `response_needle`. The needle is
+  matched WITHOUT quotes: Gemma 4 writes keys bare, and minja's quoted check
+  would call its template unable.
+- **Where a template cannot render them, minja's polyfills**: calls become
+  `{"tool_calls":[{name, arguments}]}` text in the turn (the shape the prose tool
+  description asks for), each answer a user turn `{"tool_response":{tool,
+  content}}`, joined to a neighbouring user turn so strict alternation renders.
+- **A tool turn missing its tool's name gets it from the call it answers**
+  (`name_of_call`) — Anthropic results carry none, and Gemma 4's template prints
+  `unknown` without one.
+
+**Measured** (throwaway processor-only node; question → `get_weather` call → its
+answer, temperature 0, both surfaces):
+
+| Model | v0.3.239 prompt tokens (OpenAI / Anthropic) | this build | template failures |
+|---|---|---|---|
+| Llama 3.2 3B | 235 / 250 | 258 / 258 | 0 → 0 |
+| Gemma 2 2B | 201 / 214 | 234 / 234 | 1 → 0 |
+
+258 is the token count of jinja2's render of the 3B's own template (transformers'
+`tojson`) under llama.cpp's tokenizer, and the two surfaces now build ONE prompt.
+**The 3B still calls `get_weather` again — and so does llama.cpp (llama-cpp-python
+0.3.16) given the identical 258-token prompt**: that is the model, not the
+prompt. Gemma 4 12B (no shards here; the bytes are pinned by
+`a_tool_conversation_reaches_gemma_4_as_jinja2_renders_it`): llama.cpp master
+answers our prompt "The current weather in Paris is 17.3°C with light rain and a
+north-west wind of 13 km/h." after an empty thought channel (#282 strips it).
+
+### What a change must keep
+
+- **A new surface fills `tool`** — never prose, never dropped. The edge is where
+  structure is lost for good.
+- **`for_renderer` stays inside `build_prompt_attempt`**, the choke point: the
+  local, remote-prompt and delegated-split paths all render through it.
+- **A new fallback renderer is fed `ToolTurnSupport::FALLBACK`** (reads no calls,
+  maps a tool turn itself); the template-failed branch re-fits the conversation
+  before the fallback chain.
+- **Wire: additive.** The fields are `#[serde(default)]` and skipped when empty;
+  an older peer handed a delegated split ignores them and renders as v0.3.239 did.
+
+Guards: `a_tool_conversation_reaches_gemma_4_as_jinja2_renders_it`,
+`a_tool_conversation_reaches_qwen3_as_jinja2_renders_it` (exact jinja2 bytes),
+`a_template_without_tool_turns_is_shown_them_in_turns_it_accepts`,
+`the_probe_finds_what_each_template_renders`,
+`an_earlier_call_and_its_answer_reach_the_prompt` (OpenAI JSON → prompt),
+`tool_use_and_its_result_become_tool_turns` (Anthropic).
+
 ## A template that refuses a system role is still told what the system turn said
 
 (2026-09-11, gotcha #554, FUTURE_WORK #44.) Gemma and Mistral declare no system

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::types::{ChatMessage, ImageData, SamplingParams};
+use crate::types::{ChatMessage, ImageData, SamplingParams, ToolCallTurn, ToolTurn};
 
 use super::DEFAULT_TOP_K;
 
@@ -272,10 +272,35 @@ impl ApiChatMessage {
             }
         };
 
+        // The conversation's earlier calls and their answers reach the template
+        // as the structure it renders them from (#283). Dropped here, a tool
+        // result vanished from Gemma 4's prompt — its template reads one only
+        // beside the call it answers — and every other template showed the
+        // model an empty assistant turn where its call had been.
+        let tool = ToolTurn {
+            tool_calls: self
+                .tool_calls
+                .iter()
+                .flatten()
+                .map(|call| {
+                    ToolCallTurn::function(
+                        call.id.clone(),
+                        call.function.name.clone(),
+                        &call.function.arguments,
+                    )
+                })
+                .collect(),
+            tool_call_id: self.tool_call_id.clone(),
+            // A participant's `name` on a user turn is not a tool's.
+            name: matches!(self.role, crate::types::Role::Tool)
+                .then(|| self.name.clone())
+                .flatten(),
+        };
         Ok(ChatMessage {
             role: self.role.clone(),
             content: text,
             images,
+            tool,
         })
     }
 }
@@ -318,6 +343,7 @@ impl ChatCompletionRequest {
                         role: crate::types::Role::System,
                         content: inst,
                         images: vec![],
+                        tool: Default::default(),
                     },
                 );
             }

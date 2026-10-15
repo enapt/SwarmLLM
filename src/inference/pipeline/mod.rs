@@ -1433,6 +1433,7 @@ mod tests {
                 role: Role::User,
                 content: "hello".into(),
                 images: vec![],
+                tool: Default::default(),
             }],
             sampling_params: SamplingParams::default(),
             stream: false,

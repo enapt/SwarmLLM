@@ -1018,6 +1018,7 @@ mod tests {
             role: Role::User,
             content: "Hello".into(),
             images: vec![],
+            tool: Default::default(),
         }];
         assert!(!has_images(&text_only));
 
@@ -1029,6 +1030,7 @@ mod tests {
                 width: 4,
                 height: 4,
             }],
+            tool: Default::default(),
         }];
         assert!(has_images(&with_image));
     }
@@ -1046,6 +1048,7 @@ mod tests {
                     width: 4,
                     height: 4,
                 }],
+                tool: Default::default(),
             },
             ChatMessage {
                 role: Role::User,
@@ -1062,6 +1065,7 @@ mod tests {
                         height: 4,
                     },
                 ],
+                tool: Default::default(),
             },
         ];
         let collected = collect_images(&messages);

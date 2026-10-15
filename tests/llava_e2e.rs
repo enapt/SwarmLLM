@@ -89,6 +89,7 @@ fn run_one(
         role: Role::User,
         content: "What color is the shape in this image?".into(),
         images: vec![colour_square(336, rgb)],
+        tool: Default::default(),
     }];
     let prompt = swarmllm::inference::chat_template::build_prompt_with_model(
         &messages,

@@ -967,24 +967,50 @@ mod tests {
         assert_eq!(req.thinking.as_ref().unwrap()["type"], "enabled");
     }
 
+    /// A call and its answer reach the template as structure (#283) — they
+    /// were `[Tool call: Read({…})]` text and an unmarked line in the user's
+    /// turn, which no model was trained to read.
     #[test]
-    fn tool_use_to_internal_text() {
+    fn tool_use_and_its_result_become_tool_turns() {
         let req = MessagesRequest {
             model: "test".into(),
             max_tokens: 100,
-            messages: vec![AnthropicMessage {
-                role: "assistant".into(),
-                content: AnthropicContent::Blocks(vec![
-                    ContentBlock::Text {
-                        text: "I'll read it.".into(),
-                    },
-                    ContentBlock::ToolUse {
-                        id: "t1".into(),
-                        name: "Read".into(),
-                        input: serde_json::json!({"path": "/tmp/x"}),
-                    },
-                ]),
-            }],
+            messages: vec![
+                AnthropicMessage {
+                    role: "assistant".into(),
+                    content: AnthropicContent::Blocks(vec![
+                        ContentBlock::Text {
+                            text: "I'll read it.".into(),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "t1".into(),
+                            name: "Read".into(),
+                            input: serde_json::json!({"path": "/tmp/x"}),
+                        },
+                    ]),
+                },
+                AnthropicMessage {
+                    role: "user".into(),
+                    content: AnthropicContent::Blocks(vec![
+                        ContentBlock::ToolResult {
+                            tool_use_id: "t1".into(),
+                            content: Some(serde_json::json!([{"type": "text", "text": "hello"}])),
+                            is_error: None,
+                        },
+                        ContentBlock::Text {
+                            text: "Now summarise it.".into(),
+                        },
+                    ]),
+                },
+                AnthropicMessage {
+                    role: "user".into(),
+                    content: AnthropicContent::Blocks(vec![ContentBlock::ToolResult {
+                        tool_use_id: "t2".into(),
+                        content: Some(serde_json::json!("done")),
+                        is_error: None,
+                    }]),
+                },
+            ],
             system: None,
             stream: false,
             temperature: None,
@@ -998,9 +1024,30 @@ mod tests {
             extras: std::collections::HashMap::new(),
         };
         let msgs = to_internal_messages(&req);
-        assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].content.contains("I'll read it."));
-        assert!(msgs[0].content.contains("[Tool call: Read("));
+        let shape: Vec<(String, &str)> = msgs
+            .iter()
+            .map(|m| (format!("{:?}", m.role), m.content.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("Assistant".to_string(), "I'll read it."),
+                ("Tool".to_string(), "hello"),
+                ("User".to_string(), "Now summarise it."),
+                ("Tool".to_string(), "done"),
+            ]
+        );
+        let call = &msgs[0].tool.tool_calls[0];
+        assert_eq!(
+            (call.id.as_str(), call.function.name.as_str()),
+            ("t1", "Read")
+        );
+        assert_eq!(
+            call.function.arguments,
+            serde_json::json!({"path": "/tmp/x"})
+        );
+        assert_eq!(msgs[1].tool.tool_call_id.as_deref(), Some("t1"));
+        assert_eq!(msgs[3].tool.tool_call_id.as_deref(), Some("t2"));
     }
 
     #[test]

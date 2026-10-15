@@ -45,7 +45,7 @@ swarmllm/
 │   │   ├── pipeline/     (mod, distributed, dsd, dsd_stream (the continuous stream: the next chunk of guesses goes out while the last is being checked, split_speculation.md § 4b), engine_drafter (speculation across computers guessing with a small model this node holds, run by its own worker — `DaemonMsg::Draft`), local, local_generate (a plan that names this node is run as the local generation it is), prompt, prompt_chunks (a split reads its prompt in pieces, every segment at once — FUTURE_WORK #171), remote_generate, speculative, split_prompt_cache (a split keeps its conversation's prompt between turns: a keyed block chain, vLLM's rule, and an optimistic belief of what each segment holds — FUTURE_WORK #10), tensor_parallel, vision, ngram_only_spec (R136 L1), tests_sampling)
 │   │   ├── split/        (mod, model, loader, executor, draft (`draft_after`: a small model's guesses for a bigger one's request), kv_cache, kv_write (a step's K/V written into a cache of another dtype — the half cache, one launch on a card), kv_budget, entry, gguf_meta, shard_reader, rope, prefix_cache, hybrid (which layers of a segment go on the card — .145, #431), token_embedding, tests/)
 │   │   │   └── tests/    (mod, common, core, drafting, gqa, gemma2, moe_mla, llama4_glm4, kv_refresh)
-│   │   ├── chat_template/ (mod, fallbacks, tojson (the `transformers` signature, not minijinja's), tests, fixtures/{llama3_official,qwen3_official,qwen3_gguf_shipped,glm4_gguf_shipped}.jinja — rendering is `minijinja` + `minijinja-contrib` pycompat, the engine HF's TGI and SGLang use; the hand-rolled parser/eval subset was retired 2026-09-10)
+│   │   ├── chat_template/ (mod, fallbacks, tojson (the `transformers` signature, not minijinja's), tool_turns (how a template is shown a conversation's tool calls and answers, #283), tests, fixtures/{llama3_official,qwen3_official,qwen3_gguf_shipped,qwen35_gguf_shipped,glm4_gguf_shipped,gemma4_gguf_shipped}.jinja — rendering is `minijinja` + `minijinja-contrib` pycompat, the engine HF's TGI and SGLang use; the hand-rolled parser/eval subset was retired 2026-09-10)
 │   │   └── layers/       (mod, qwen35)
 │   ├── credit/    (ledger, transaction, priority, anti_gaming, trust, escrow)
 │   ├── identity/  (keypair, nickname)
@@ -921,6 +921,12 @@ cannot be run; `tojson.rs` is our own `tojson` (key order kept, as
 - `build_prompt_with_model` is the choke point: it checks the render kept the
   last question (`render_kept_the_last_question`) and opens the model's turn when
   a template closed it (`open_the_models_turn_if_the_prompt_closed_it`).
+- **Tool turns arrive as structure** (`ChatMessage::tool`: an assistant turn's
+  `tool_calls`, a tool turn's `tool_call_id` and `name`), and `tool_turns.rs`
+  shows them as the template can take them: as is where a probe render — once
+  per template, llama.cpp minja's `chat_template_caps` — finds calls and
+  answers in the prompt, else minja's polyfills (the call as `{"tool_calls": …}`
+  content, the answer as a user turn).
 
 The integration guards render real shipped templates against the exact text
 jinja2 produces for them —
@@ -2499,6 +2505,9 @@ support is three pieces, shared by the OpenAI and Anthropic layers:
    client matches a result back to a request, so it must be unique across a
    conversation; models do not do that (llama-3.2-3b emits `call_1`, `call_2`,
    `call_3` for every tool-using reply it gives).
+4. **The next request carries the call and its answer back as structure**
+   (`ChatMessage::tool`, every surface), and `chat_template::tool_turns` shows
+   them to the model the way its template renders them (#283).
 
 ### MCP Server (Protocol v2025-11-25)
 - `POST /mcp` — JSON-RPC 2.0 MCP endpoint for AI agent frameworks (Claude Code, VS Code Copilot, Cursor, etc.)

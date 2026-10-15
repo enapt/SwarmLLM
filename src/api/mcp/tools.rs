@@ -97,6 +97,7 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
                 role,
                 content,
                 images: vec![],
+                tool: Default::default(),
             })
         })
         .collect();

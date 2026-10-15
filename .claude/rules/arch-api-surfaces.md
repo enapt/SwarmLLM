@@ -41,6 +41,12 @@ measured at, and what a change must keep — lives in `docs/invariants/`.
 
 → `docs/invariants/api-surfaces.md` § "A model is told about its tools the way it was trained to be"
 
+## A conversation's tool turns reach the template as structure (2026-10-16, #283)
+
+Every surface carries an assistant turn's calls and a tool turn's call id as **`ChatMessage::tool`** (`ToolTurn`, HuggingFace's chat format; arguments as an OBJECT, `ToolCallTurn::function`) — never as made-up text, never dropped. **`chat_template::tool_turns`** is the one place that decides how a template sees them, inside `build_prompt_attempt`: as is where a probe render finds them (`support_of`, cached per template), else minja's polyfills (`for_renderer`). A new surface fills `tool`; a new fallback renderer is fed `ToolTurnSupport::FALLBACK`.
+
+→ `docs/invariants/api-surfaces.md` § "A conversation's tool turns reach the template as structure"
+
 ## A template that refuses a system role is still told what the system turn said
 
 **`chat_template::fold_system_into_first_user`** retries a render a template declined for a system turn (Gemma, Mistral) with the system text moved into the first user turn; a template that renders a system turn is untouched.

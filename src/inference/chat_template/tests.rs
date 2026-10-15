@@ -7,11 +7,13 @@ fn test_messages() -> Vec<ChatMessage> {
             role: Role::System,
             content: "You are helpful.".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "Hello".into(),
             images: vec![],
+            tool: Default::default(),
         },
     ]
 }
@@ -21,6 +23,7 @@ fn user_only_messages() -> Vec<ChatMessage> {
         role: Role::User,
         content: "Hello".into(),
         images: vec![],
+        tool: Default::default(),
     }]
 }
 
@@ -150,11 +153,13 @@ fn compound_and_condition() {
             role: Role::User,
             content: "A".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "B".into(),
             images: vec![],
+            tool: Default::default(),
         },
     ];
     let result = apply_chat_template(template, &msgs, "", "", true, None).unwrap();
@@ -208,11 +213,13 @@ fn set_variable() {
             role: Role::User,
             content: "Hi".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::Assistant,
             content: "Hey".into(),
             images: vec![],
+            tool: Default::default(),
         },
     ];
     let result = apply_chat_template(template, &msgs, "", "", false, None).unwrap();
@@ -227,6 +234,7 @@ fn trim_filter() {
         role: Role::User,
         content: "  Hello  ".into(),
         images: vec![],
+        tool: Default::default(),
     }];
     let result = apply_chat_template(template, &msgs, "", "", false, None).unwrap();
     assert_eq!(result, "Hello");
@@ -326,6 +334,7 @@ fn gemma2_actual_template() {
         role: Role::User,
         content: "What is 2+2?".into(),
         images: vec![],
+        tool: Default::default(),
     }];
     let result = apply_chat_template(template, &msgs, "<bos>", "<eos>", true, None).unwrap();
     assert!(
@@ -353,16 +362,19 @@ fn gemma2_user_assistant_alternation() {
             role: Role::User,
             content: "Hi".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::Assistant,
             content: "Hey".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "How are you?".into(),
             images: vec![],
+            tool: Default::default(),
         },
     ];
     let result = apply_chat_template(template, &msgs, "<bos>", "<eos>", true, None).unwrap();
@@ -442,6 +454,7 @@ fn gemma3_actual_template_matches_jinja2() {
         role,
         content: content.into(),
         images: vec![],
+        tool: Default::default(),
     };
     let msgs = vec![
         turn(Role::System, "Be brief."),
@@ -484,11 +497,13 @@ fn qwen25_actual_template_no_tools() {
             role: Role::System,
             content: "You are helpful.".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "What is 2+2?".into(),
             images: vec![],
+            tool: Default::default(),
         },
     ];
     let result = apply_chat_template(template, &msgs, "", "", true, None).unwrap();
@@ -835,6 +850,7 @@ fn a_template_that_ignores_the_tools_variable_still_gets_them_described() {
         role: Role::User,
         content: "What time is it?".to_string(),
         images: Vec::new(),
+        tool: Default::default(),
     }];
     let prompt = super::build_prompt(&msgs, Some(phi4), "", "", Some("phi-4-mini"), Some(&tools));
     assert!(
@@ -860,6 +876,7 @@ fn a_template_that_renders_tools_is_not_second_guessed() {
         role: Role::User,
         content: "hi".to_string(),
         images: Vec::new(),
+        tool: Default::default(),
     }];
     let prompt = super::build_prompt(
         &msgs,
@@ -1079,16 +1096,19 @@ fn the_official_llama3_template_renders_exactly_as_jinja2_does() {
         role: Role::User,
         content: c.into(),
         images: vec![],
+        tool: Default::default(),
     };
     let assistant = |c: &str| ChatMessage {
         role: Role::Assistant,
         content: c.into(),
         images: vec![],
+        tool: Default::default(),
     };
     let system = |c: &str| ChatMessage {
         role: Role::System,
         content: c.into(),
         images: vec![],
+        tool: Default::default(),
     };
 
     assert_eq!(
@@ -1243,16 +1263,19 @@ fn mistral_fallback_multi_turn_alternates() {
             role: Role::User,
             content: "one".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::Assistant,
             content: "two".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "three".into(),
             images: vec![],
+            tool: Default::default(),
         },
     ];
     let (prompt, _) = super::fallback_by_model_name(&msgs, Some("mistral-7b")).unwrap();
@@ -1302,6 +1325,7 @@ fn bare_user() -> Vec<ChatMessage> {
         role: Role::User,
         content: "Hi".to_string(),
         images: vec![],
+        tool: Default::default(),
     }]
 }
 
@@ -1357,11 +1381,13 @@ fn a_template_that_raises_on_system_renders_with_it_folded_into_the_user_turn() 
             role: Role::System,
             content: "You have a tool called get_time.".to_string(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "What time is it?".to_string(),
             images: vec![],
+            tool: Default::default(),
         },
     ];
     let out = build_prompt_with_model(&msgs, Some(gemma), "<bos>", "<eos>", None, None);
@@ -1394,11 +1420,13 @@ fn a_template_that_accepts_system_still_gets_its_own_system_turn() {
             role: Role::System,
             content: "You are a pirate.".to_string(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "Hi".to_string(),
             images: vec![],
+            tool: Default::default(),
         },
     ];
     let out = build_prompt_with_model(&msgs, Some(TINYLLAMA_TMPL), "<s>", "</s>", None, None);
@@ -1417,6 +1445,7 @@ fn folding_declines_when_there_is_no_user_turn_to_fold_into() {
         role: Role::System,
         content: "You are helpful.".to_string(),
         images: vec![],
+        tool: Default::default(),
     }];
     assert!(super::fold_system_into_first_user(&msgs).is_none());
 }
@@ -1429,11 +1458,13 @@ fn caller_system_message_is_preserved() {
             role: Role::System,
             content: "You are a pirate.".to_string(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "Hi".to_string(),
             images: vec![],
+            tool: Default::default(),
         },
     ];
     let out = build_prompt_with_model(&msgs, Some(TINYLLAMA_TMPL), "<s>", "</s>", None, None);
@@ -1450,11 +1481,13 @@ fn blank_system_message_is_replaced() {
             role: Role::System,
             content: "   ".to_string(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "Hi".to_string(),
             images: vec![],
+            tool: Default::default(),
         },
     ];
     let out = build_prompt_with_model(&msgs, Some(TINYLLAMA_TMPL), "<s>", "</s>", None, None);
@@ -1508,6 +1541,7 @@ fn a_template_that_writes_its_own_system_turn_keeps_it() {
             role: Role::System,
             content: " ".into(),
             images: vec![],
+            tool: Default::default(),
         },
         bare_user().remove(0),
     ];
@@ -1669,6 +1703,7 @@ fn both_prompt_entry_points_go_through_the_same_renderer() {
         role: Role::User,
         content: "hi".into(),
         images: vec![],
+        tool: Default::default(),
     }];
 
     let via_wrapper =
@@ -1709,6 +1744,7 @@ fn the_official_qwen3_template_opens_the_assistants_turn() {
         role: Role::User,
         content: "Say OK".into(),
         images: vec![],
+        tool: Default::default(),
     }];
 
     let rendered = apply_chat_template(tmpl, &msgs, "", "<|im_end|>", true, None);
@@ -1741,6 +1777,7 @@ fn the_official_qwen3_template_keeps_the_users_question_in_the_prompt() {
         role: Role::User,
         content: "BANANE VIOLETTE MYSTERE 42".into(),
         images: vec![],
+        tool: Default::default(),
     }];
 
     // Whatever path the prompt takes — the template rendering, or the fallback
@@ -1768,6 +1805,7 @@ fn a_prompt_left_on_a_closed_turn_gets_the_models_turn_opened() {
         role: Role::User,
         content: "Say OK".into(),
         images: vec![],
+        tool: Default::default(),
     }];
 
     let prompt = build_prompt_with_model(
@@ -1829,6 +1867,7 @@ fn a_correct_prompt_is_not_rewritten() {
         role: Role::User,
         content: "Say OK".into(),
         images: vec![],
+        tool: Default::default(),
     }];
     let prompt =
         build_prompt_with_model(&msgs, Some(good), "", "<|im_end|>", Some("qwen2.5"), None);
@@ -1846,11 +1885,13 @@ fn temp_probe3() {
             role: Role::System,
             content: "SYS".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "MARKER42".into(),
             images: vec![],
+            tool: Default::default(),
         },
     ];
     let t = |src: &str| apply_chat_template(src, &msgs, "", "<|im_end|>", true, None);
@@ -1880,11 +1921,13 @@ fn the_official_qwen3_template_renders_exactly_as_jinja2_does() {
             role: Role::System,
             content: "You are a helpful assistant.".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "MARKER42".into(),
             images: vec![],
+            tool: Default::default(),
         },
     ];
     assert_eq!(
@@ -1905,21 +1948,25 @@ fn the_official_qwen3_template_renders_exactly_as_jinja2_does() {
             role: Role::System,
             content: "SYS".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "first".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::Assistant,
             content: "<think>pondering</think>answer one".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "second".into(),
             images: vec![],
+            tool: Default::default(),
         },
     ];
     // Including the reasoning block being stripped out of HISTORY, which the
@@ -1943,21 +1990,25 @@ fn the_official_qwen3_template_renders_exactly_as_jinja2_does() {
             role: Role::System,
             content: "SYS".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "first".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::Assistant,
             content: "answer one".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "second".into(),
             images: vec![],
+            tool: Default::default(),
         },
     ];
     assert_eq!(
@@ -1984,11 +2035,13 @@ fn an_unimplemented_slice_does_not_swallow_the_rest_of_the_template() {
             role: Role::System,
             content: "A".into(),
             images: vec![],
+            tool: Default::default(),
         },
         ChatMessage {
             role: Role::User,
             content: "B".into(),
             images: vec![],
+            tool: Default::default(),
         },
     ];
     let render = |src: &str| apply_chat_template(src, &msgs, "", "<|im_end|>", true, None);
@@ -2018,6 +2071,7 @@ fn message_content_is_recognised_as_a_string() {
         role: Role::User,
         content: "KEEP".into(),
         images: vec![],
+        tool: Default::default(),
     }];
     assert_eq!(
         apply_chat_template(
@@ -2055,6 +2109,7 @@ fn the_template_a_real_qwen3_gguf_ships_still_reaches_the_model_with_the_questio
         role: Role::User,
         content: "BANANE VIOLETTE MYSTERE 42".into(),
         images: vec![],
+        tool: Default::default(),
     }];
 
     // Whatever the renderer manages, the prompt that would be SENT must carry
@@ -2169,6 +2224,7 @@ fn qwen3_renders_its_own_tool_framing() {
         role: Role::User,
         content: "what time is it?".into(),
         images: vec![],
+        tool: Default::default(),
     }];
     let tools = vec![weather_tool()];
     let prompt = build_prompt(
@@ -2212,6 +2268,7 @@ fn a_template_without_tool_support_still_gets_the_prose_description() {
         role: Role::User,
         content: "what time is it?".into(),
         images: vec![],
+        tool: Default::default(),
     }];
     let tools = vec![weather_tool()];
     // A minimal template with no mention of tools at all.
@@ -2240,6 +2297,7 @@ fn no_tools_means_no_tool_framing_of_either_kind() {
         role: Role::User,
         content: "what time is it?".into(),
         images: vec![],
+        tool: Default::default(),
     }];
     let with_none = build_prompt(
         &msgs,
@@ -2295,6 +2353,7 @@ fn the_tojson_filter_is_available_to_templates() {
         role: Role::User,
         content: "hi".into(),
         images: vec![],
+        tool: Default::default(),
     }];
     let rendered = apply_chat_template(
         "{% for m in messages %}{{ m | tojson }}{% endfor %}",
@@ -2327,6 +2386,7 @@ fn the_glm4_template_renders_its_own_tool_section() {
         role: Role::User,
         content: "what is the weather in Paris?".into(),
         images: vec![],
+        tool: Default::default(),
     }];
     let tools = vec![weather_tool()];
     let prompt = build_prompt(
@@ -2370,6 +2430,7 @@ fn a_tool_schema_reaches_the_model_unescaped() {
         role: Role::User,
         content: "where am I?".into(),
         images: vec![],
+        tool: Default::default(),
     }];
     let tools = vec![serde_json::json!({
         "type": "function",
@@ -2471,6 +2532,7 @@ fn the_glm4_template_renders_exactly_as_transformers_does() {
         role: Role::User,
         content: "what is the weather in Paris?".into(),
         images: vec![],
+        tool: Default::default(),
     }];
     let tools = vec![weather_tool()];
     let rendered =
@@ -2506,6 +2568,7 @@ fn a_tool_schema_reaches_the_model_in_the_order_its_author_wrote_it() {
         role: Role::User,
         content: "what is the weather in Paris?".into(),
         images: vec![],
+        tool: Default::default(),
     }];
     let rendered = apply_chat_template(
         QWEN3_GGUF_SHIPPED,
@@ -2556,6 +2619,7 @@ fn the_qwen35_template_renders_exactly_as_jinja2_does() {
         role,
         content: c.into(),
         images: vec![],
+        tool: Default::default(),
     };
 
     assert_eq!(
@@ -2607,6 +2671,7 @@ fn the_gemma4_template_renders_exactly_as_jinja2_does() {
         role,
         content: c.into(),
         images: vec![],
+        tool: Default::default(),
     };
 
     assert_eq!(
@@ -2638,5 +2703,160 @@ fn the_gemma4_template_renders_exactly_as_jinja2_does() {
             msg(Role::User, "And 3+3?"),
         ]),
         expected_multi
+    );
+}
+
+/// A tool conversation as an OpenAI client sends it (#283): the call's
+/// arguments as JSON text, the answer naming only the call's id.
+fn weather_tool_conversation() -> (Vec<ChatMessage>, Vec<serde_json::Value>) {
+    use crate::types::{ToolCallTurn, ToolTurn};
+    let turn = |role: Role, content: &str, tool: ToolTurn| ChatMessage {
+        role,
+        content: content.into(),
+        images: vec![],
+        tool,
+    };
+    let messages = vec![
+        turn(
+            Role::User,
+            "What's the weather in Paris, in celsius?",
+            ToolTurn::default(),
+        ),
+        turn(
+            Role::Assistant,
+            "",
+            ToolTurn {
+                tool_calls: vec![ToolCallTurn::function(
+                    "c1".into(),
+                    "get_weather".into(),
+                    r#"{"city": "Paris", "unit": "celsius"}"#,
+                )],
+                ..ToolTurn::default()
+            },
+        ),
+        turn(
+            Role::Tool,
+            r#"{"temperature": 14, "conditions": "light rain"}"#,
+            ToolTurn {
+                tool_call_id: Some("c1".into()),
+                ..ToolTurn::default()
+            },
+        ),
+        turn(
+            Role::Assistant,
+            "It is 14 °C with light rain.",
+            ToolTurn::default(),
+        ),
+        turn(Role::User, "And in Rome?", ToolTurn::default()),
+    ];
+    let tools = vec![serde_json::json!({"type": "function", "function": {
+        "name": "get_weather", "description": "Get the current weather for a city.",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}, "unit": {"type": "string"}},
+                       "required": ["city"]}}})];
+    (messages, tools)
+}
+
+/// Gemma 4's template reads a tool's answer ONLY beside the call it answers,
+/// so with the call dropped at the API edge the answer vanished from the
+/// prompt and the model never saw it (#283). Expected: jinja2 on the same
+/// template and conversation (`render_conv.py`, 2026-10-16).
+#[test]
+fn a_tool_conversation_reaches_gemma_4_as_jinja2_renders_it() {
+    let (messages, tools) = weather_tool_conversation();
+    let prompt = build_prompt(
+        &messages,
+        Some(include_str!("fixtures/gemma4_gguf_shipped.jinja")),
+        "<bos>",
+        "<eos>",
+        None,
+        Some(&tools),
+    );
+    assert_eq!(
+        prompt,
+        "<bos><|turn>system\n<|tool>declaration:get_weather{description:<|\"|>Get the current weather for a city.<|\"|>,parameters:{properties:{city:{type:<|\"|>STRING<|\"|>},unit:{type:<|\"|>STRING<|\"|>}},required:[<|\"|>city<|\"|>],type:<|\"|>OBJECT<|\"|>}}<tool|><turn|>\n<|turn>user\nWhat's the weather in Paris, in celsius?<turn|>\n<|turn>model\n<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>,unit:<|\"|>celsius<|\"|>}<tool_call|><|tool_response>response:get_weather{value:<|\"|>{\"temperature\": 14, \"conditions\": \"light rain\"}<|\"|>}<tool_response|>It is 14 °C with light rain.<turn|>\n<|turn>user\nAnd in Rome?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+    );
+}
+
+/// Qwen3's template rendered the answer and an EMPTY assistant turn where
+/// the call had been. Expected: jinja2 with `transformers`' `tojson`
+/// (`render_qwen.py`, 2026-10-16).
+#[test]
+fn a_tool_conversation_reaches_qwen3_as_jinja2_renders_it() {
+    let (messages, tools) = weather_tool_conversation();
+    let prompt = build_prompt(
+        &messages,
+        Some(QWEN3_GGUF_SHIPPED),
+        "",
+        "<|im_end|>",
+        None,
+        Some(&tools),
+    );
+    assert_eq!(
+        prompt,
+        "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"unit\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWhat's the weather in Paris, in celsius?<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\", \"unit\": \"celsius\"}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n{\"temperature\": 14, \"conditions\": \"light rain\"}\n</tool_response><|im_end|>\n<|im_start|>assistant\nIt is 14 °C with light rain.<|im_end|>\n<|im_start|>user\nAnd in Rome?<|im_end|>\n<|im_start|>assistant\n"
+    );
+}
+
+/// A template with no tool turns of its own — Gemma 2's, which also refuses
+/// anything but alternating user and assistant turns — is shown the call as
+/// the JSON the tool description asks for and the answer as a user turn,
+/// merged with the question after it (llama.cpp minja's polyfills).
+#[test]
+fn a_template_without_tool_turns_is_shown_them_in_turns_it_accepts() {
+    let template = "{{ bos_token }}{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if (message['role'] == 'assistant') %}{% set role = 'model' %}{% else %}{% set role = message['role'] %}{% endif %}{{ '<start_of_turn>' + role + '\n' + message['content'] | trim + '<end_of_turn>\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<start_of_turn>model\n' }}{% endif %}";
+    let (mut messages, _) = weather_tool_conversation();
+    // The model's reply and the next question as Anthropic sends them: the
+    // answer then the question, in one user turn.
+    messages.remove(3);
+    let prompt = build_prompt(
+        &messages,
+        Some(template),
+        "<bos>",
+        "<eos>",
+        Some("gemma-2-2b-it"),
+        None,
+    );
+    assert_eq!(
+        prompt,
+        "<bos><start_of_turn>user\nWhat's the weather in Paris, in celsius?<end_of_turn>\n\
+         <start_of_turn>model\n{\"tool_calls\":[{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\",\"unit\":\"celsius\"}}]}<end_of_turn>\n\
+         <start_of_turn>user\n{\"tool_response\":{\"tool\":\"get_weather\",\"content\":\"{\\\"temperature\\\": 14, \\\"conditions\\\": \\\"light rain\\\"}\"}}\n\nAnd in Rome?<end_of_turn>\n\
+         <start_of_turn>model\n"
+    );
+}
+
+/// Which templates render calls and answers is found by rendering, once per
+/// template — never by reading its text.
+#[test]
+fn the_probe_finds_what_each_template_renders() {
+    use super::tool_turns::{support_of, ToolTurnSupport};
+    let both = ToolTurnSupport {
+        calls: true,
+        responses: true,
+    };
+    assert_eq!(
+        support_of(include_str!("fixtures/gemma4_gguf_shipped.jinja")),
+        both
+    );
+    assert_eq!(support_of(QWEN3_GGUF_SHIPPED), both);
+    assert_eq!(
+        support_of(include_str!("fixtures/llama3_official.jinja")),
+        both
+    );
+    let chatml = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}";
+    assert_eq!(
+        support_of(chatml),
+        ToolTurnSupport {
+            calls: false,
+            responses: true
+        }
+    );
+    let gemma2 = "{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('roles must alternate') }}{% endif %}{{ message['content'] }}{% endfor %}";
+    assert_eq!(
+        support_of(gemma2),
+        ToolTurnSupport {
+            calls: false,
+            responses: false
+        }
     );
 }

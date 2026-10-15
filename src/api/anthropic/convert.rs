@@ -1,6 +1,6 @@
 //! Conversion helpers between Anthropic API wire types and internal types.
 
-use crate::types::{ChatMessage, Role, SamplingParams};
+use crate::types::{ChatMessage, Role, SamplingParams, ToolCallFunction, ToolCallTurn, ToolTurn};
 
 use super::types::{AnthropicContent, ContentBlock, MessagesRequest};
 
@@ -36,6 +36,7 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
                 role: Role::System,
                 content: text,
                 images: vec![],
+                tool: Default::default(),
             });
         }
     }
@@ -46,6 +47,14 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
             "assistant" => Role::Assistant,
             _ => Role::User,
         };
+        // A call and its answer travel as the structure a chat template renders
+        // them from (#283), never as made-up text: `tool_use` becomes this
+        // turn's `tool_calls`, and each `tool_result` a tool turn of its own,
+        // ahead of whatever the user wrote beside it (the API puts results
+        // first). The template's own call and response syntax — or, for one
+        // that has none, the shape the tool description asked the model for —
+        // is chosen where the prompt is built (`chat_template::tool_turns`).
+        let mut calls = Vec::new();
         let text = match &msg.content {
             AnthropicContent::Text(s) => s.clone(),
             AnthropicContent::Blocks(blocks) => {
@@ -56,22 +65,46 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
                         ContentBlock::Image { .. } => {
                             // Image handling: VLM images handled via openai.rs path
                         }
-                        ContentBlock::ToolResult { content, .. } => {
-                            // Include tool result text in conversation for local inference
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => {
+                            let mut answer = Vec::new();
                             if let Some(c) = content {
                                 if let Some(s) = c.as_str() {
-                                    texts.push(s.to_string());
+                                    answer.push(s.to_string());
                                 } else if let Some(arr) = c.as_array() {
                                     for item in arr {
                                         if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
-                                            texts.push(t.to_string());
+                                            answer.push(t.to_string());
                                         }
                                     }
                                 }
                             }
+                            messages.push(ChatMessage {
+                                role: Role::Tool,
+                                content: answer.join("\n"),
+                                images: vec![],
+                                tool: ToolTurn {
+                                    tool_call_id: Some(tool_use_id.clone()),
+                                    ..Default::default()
+                                },
+                            });
+                        }
+                        ContentBlock::ToolUse { id, name, input }
+                            if matches!(role, Role::Assistant) =>
+                        {
+                            calls.push(ToolCallTurn {
+                                id: id.clone(),
+                                kind: "function".to_string(),
+                                function: ToolCallFunction {
+                                    name: name.clone(),
+                                    arguments: input.clone(),
+                                },
+                            });
                         }
                         ContentBlock::ToolUse { name, input, .. } => {
-                            // For local inference, represent tool calls as text
                             texts.push(format!("[Tool call: {name}({input})]"));
                         }
                         ContentBlock::Thinking { thinking } => {
@@ -102,10 +135,21 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
                 texts.join("\n")
             }
         };
+        // A user turn that only carried results has said everything already.
+        let only_results = matches!(&msg.content, AnthropicContent::Blocks(blocks)
+            if !blocks.is_empty()
+                && blocks.iter().all(|b| matches!(b, ContentBlock::ToolResult { .. })));
+        if only_results {
+            continue;
+        }
         messages.push(ChatMessage {
             role,
             content: text,
             images: vec![],
+            tool: ToolTurn {
+                tool_calls: calls,
+                ..Default::default()
+            },
         });
     }
 

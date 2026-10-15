@@ -1336,6 +1336,43 @@ mod tests {
         assert_eq!(tc[0].function.name, "get_weather");
     }
 
+    /// The earlier call and its answer reach the PROMPT (#283).
+    /// `to_chat_message` dropped `tool_calls` and `tool_call_id`, and Gemma 4's
+    /// template renders an answer only beside the call it answers — so the
+    /// model was never shown what its tool returned.
+    #[test]
+    fn an_earlier_call_and_its_answer_reach_the_prompt() {
+        let json = r#"{
+            "model": "gemma-4-12b-it",
+            "messages": [
+                {"role": "user", "content": "Weather in NYC?"},
+                {"role": "assistant", "content": null, "tool_calls": [{"id": "call_abc123",
+                    "type": "function", "function": {"name": "get_weather",
+                    "arguments": "{\"location\":\"NYC\"}"}}]},
+                {"role": "tool", "tool_call_id": "call_abc123", "content": "72 and sunny"}
+            ]
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        let messages = req.to_internal_messages().unwrap();
+        let prompt = crate::inference::chat_template::build_prompt(
+            &messages,
+            Some(include_str!(
+                "../../inference/chat_template/fixtures/gemma4_gguf_shipped.jinja"
+            )),
+            "<bos>",
+            "<eos>",
+            None,
+            None,
+        );
+        assert!(
+            prompt.contains(
+                "<|tool_call>call:get_weather{location:<|\"|>NYC<|\"|>}<tool_call|>\
+                 <|tool_response>response:get_weather{value:<|\"|>72 and sunny<|\"|>}<tool_response|>"
+            ),
+            "{prompt}"
+        );
+    }
+
     #[test]
     fn logprobs_request_fields() {
         let json = r#"{

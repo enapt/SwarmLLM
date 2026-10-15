@@ -31,8 +31,8 @@ pub use inference::{
     LayerResult, NetworkFinishReason, PipelineAssignment, PipelineSegment, PromptCacheHint,
     PromptSpan, RemoteGenerateRequest, ReplyContinuation, ResultStep, Role, SamplingParams,
     StreamingToken, TensorFormat, TensorParallelGroup, TensorParallelMeta, TokenLogProbEntry,
-    TpAllReduceRequest, TpAllReduceResponse, TpPhase, TpRingChunk, VisionEncodeRequest,
-    VisionEncodeResponse, DEFAULT_REPLY_BUDGET,
+    ToolCallFunction, ToolCallTurn, ToolTurn, TpAllReduceRequest, TpAllReduceResponse, TpPhase,
+    TpRingChunk, VisionEncodeRequest, VisionEncodeResponse, DEFAULT_REPLY_BUDGET,
 };
 pub use model::{
     MmprojInfo, ModelArchitecture, ModelManifest, ModelTrustInfo, ModelTrustLevel, Quantization,
@@ -86,6 +86,7 @@ mod tests {
             role: Role::User,
             content: "hello".into(),
             images: vec![],
+            tool: Default::default(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ChatMessage = serde_json::from_str(&json).unwrap();

@@ -601,6 +601,7 @@ mod prompt_estimate_tests {
             role: Role::User,
             content: content.to_string(),
             images: vec![],
+            tool: Default::default(),
         }
     }
 
