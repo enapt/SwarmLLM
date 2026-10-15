@@ -505,6 +505,7 @@
       localStorage.removeItem(App.SETUP_SKIPPED_KEY);
       localStorage.removeItem(App.SETUP_CHIP_DISMISSED_KEY);
       document.getElementById('setup-modal').classList.add('hidden');
+      App.setup._leaveSetupAddress();
       App.setup._renderFinishChip();
       App.ui.showBanner('success', I18n.t('setup.complete'));
       if (App.welcome) App.welcome.maybeShow();
@@ -514,9 +515,19 @@
     finish: function() {
       localStorage.setItem(App.SETUP_SKIPPED_KEY, 'true');
       document.getElementById('setup-modal').classList.add('hidden');
+      App.setup._leaveSetupAddress();
       App.setup._renderFinishChip();
       App.ui.showBanner('info', I18n.t('setup.skipped'));
       if (App.welcome) App.welcome.maybeShow();
+    },
+
+    // The first start opens the browser at /setup. Once the wizard closes the
+    // page is the dashboard, so the address says so: it stayed /setup, which
+    // a bookmark or a reload carried on (field report 2026-10-15).
+    _leaveSetupAddress: function() {
+      if (window.location.pathname === '/setup') {
+        history.replaceState({ tab: 'dashboard' }, '', '/admin');
+      }
     },
 
     // Show / hide the dashboard "Finish setup" chip based on storage state.
