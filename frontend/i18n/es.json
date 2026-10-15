@@ -89,6 +89,7 @@
   "activity.shard_verified": "Partes verificadas",
   "activity.shard_write_failed": "Error al escribir la parte en disco",
   "activity.show_all": "Mostrar todo",
+  "activity.storage_disk_full": "El disco de este ordenador está casi lleno y no se puede eliminar nada sin dejar a la red sin copias suficientes de un modelo. Libera espacio en el disco o elimina un modelo tú mismo.",
   "activity.storage_over_budget": "El almacenamiento supera tu límite configurado, pero no se puede eliminar nada sin dejar a la red sin copias suficientes de un modelo. Aumenta el límite o elimina un modelo tú mismo.",
   "activity.upnp_mapped": "Tu router abrió una dirección pública ({detail}); este ordenador ya es accesible desde internet.",
   "activity.vram_soft_unload": "Memoria de GPU baja: se redujo {model} a {count} partes para liberar espacio",

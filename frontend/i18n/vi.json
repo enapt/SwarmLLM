@@ -89,6 +89,7 @@
   "activity.shard_verified": "Đã xác minh các phần",
   "activity.shard_write_failed": "Không ghi được phần xuống đĩa",
   "activity.show_all": "Hiển thị tất cả",
+  "activity.storage_disk_full": "Ổ đĩa của máy tính này gần đầy, nhưng không thể xoá gì mà không khiến mạng lưới thiếu bản sao của một mô hình. Hãy giải phóng dung lượng ổ đĩa hoặc tự xoá một mô hình.",
   "activity.storage_over_budget": "Dung lượng đã vượt giới hạn bạn đặt, nhưng không thể xoá gì mà không khiến mạng lưới thiếu bản sao của một mô hình. Hãy tăng giới hạn hoặc tự xoá một mô hình.",
   "activity.upnp_mapped": "Bộ định tuyến của bạn đã mở một địa chỉ công khai ({detail}) — máy tính này giờ có thể truy cập được từ internet.",
   "activity.vram_soft_unload": "Bộ nhớ GPU thấp: đã giảm {model} xuống {count} phần để giải phóng dung lượng",

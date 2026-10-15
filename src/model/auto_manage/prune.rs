@@ -182,6 +182,46 @@ const RECENT_REQUEST_PENALTY: f64 = 1.5;
 /// barely-saturated shards in selection.
 const SATURATION_FACTOR_SEVERE: f64 = 2.0;
 
+/// What the owner is told when storage is over budget and nothing may go:
+/// the activity kind (its translation key is `activity.<kind>`), the toast's
+/// English, and the log's remedy — all chosen by the rule that SET the budget
+/// ([`super::StorageLimit`]). The one fixed text said "raise the limit" to an
+/// owner whose budget the disk itself had set, where no setting frees a byte,
+/// and the log said "raise max_disk_mb" to one who had set `max_storage_mb`.
+fn over_budget_notice(
+    limited_by: &super::StorageLimit,
+) -> (&'static str, &'static str, &'static str) {
+    use super::StorageLimit::*;
+    if let FreeDisk { .. } = limited_by {
+        return (
+            "storage_disk_full",
+            "This computer's disk is nearly full, and nothing can be removed without leaving \
+             the network short of a model. Free up space on the disk, or remove a model yourself.",
+            "free space on the disk (settings cannot), or delete a model yourself to choose \
+             which one goes",
+        );
+    }
+    let remedy = match limited_by {
+        Explicit { .. } => {
+            "raise auto_manage.max_storage_mb, or delete a model yourself to choose which one goes"
+        }
+        ContributionShare { .. } => {
+            "raise max_disk_mb or the contribution level, or delete a model yourself to choose \
+             which one goes"
+        }
+        MaxDisk { .. } => "raise max_disk_mb, or delete a model yourself to choose which one goes",
+        NothingConfigured | FreeDisk { .. } => {
+            "set a storage limit, or delete a model yourself to choose which one goes"
+        }
+    };
+    (
+        "storage_over_budget",
+        "Storage is over your configured limit, but nothing can be removed without leaving \
+         the network short of a model. Raise the limit or remove a model yourself.",
+        remedy,
+    )
+}
+
 /// Phase 0's decision ([`AutoShardManager::try_vram_soft_unload`]), apart from
 /// the pool: `None` while our models fit the budget as it stands — a card full
 /// of OUR model is not pressure, admission put it there — and when every model
@@ -719,26 +759,19 @@ impl AutoShardManager {
             // fires: over budget they are reclaimed with no grace period
             // (`daemon::background::spawn_failed_download_reclaim`).
             let (budget, held_bytes, _) = super::storage_budget_now(&self.shared_state);
+            let (kind, toast, remedy) = over_budget_notice(&budget.limited_by);
             tracing::warn!(
                 disk_pressure = format!("{disk_pressure:.2}"),
                 held_mb = held_bytes / (1024 * 1024),
                 budget_mb = budget.bytes / (1024 * 1024),
                 limited_by = %budget.limited_by,
-                "Storage is over the configured budget, but nothing can be removed without \
-                 dropping a model below the number of copies the network needs. This node \
-                 will not free the space by itself: raise max_disk_mb, or delete a model \
-                 yourself to choose which one goes."
+                "Storage is over the budget, but nothing can be removed without dropping a \
+                 model below the number of copies the network needs. This node will not free \
+                 the space by itself: {remedy}."
             );
             self.shared_state.emit_activity(
-                crate::daemon::state::ActivityEvent::new(
-                    "model",
-                    "storage_over_budget",
-                    "Storage is over your configured limit, but nothing can be removed \
-                     without leaving the network short of a model. Raise the limit or \
-                     remove a model yourself."
-                        .to_string(),
-                )
-                .with_toast("warning", 10000),
+                crate::daemon::state::ActivityEvent::new("model", kind, toast.to_string())
+                    .with_toast("warning", 10000),
             );
         }
 
@@ -1848,8 +1881,48 @@ pub(crate) fn mmproj_sheds_at(pressure: f64, holder_count: usize, floor: u32) ->
 #[cfg(test)]
 mod tests {
 
-    use super::{card_room_to_give_back, effective_idle_secs, privacy_holds_shard};
+    use super::{
+        card_room_to_give_back, effective_idle_secs, over_budget_notice, privacy_holds_shard,
+    };
     use crate::types::ModelId;
+
+    /// An owner whose budget the DISK set is told to free disk space — no
+    /// setting gives a byte back — and every other owner which setting to
+    /// raise. Each kind must be translated, or the toast shows English.
+    #[test]
+    fn the_over_budget_advice_names_what_set_the_budget() {
+        use crate::model::auto_manage::StorageLimit;
+        let en: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/frontend/i18n/en.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let disk = StorageLimit::FreeDisk {
+            free_mb: 900,
+            reserve_mb: 2_000,
+        };
+        let (kind, toast, remedy) = over_budget_notice(&disk);
+        assert_eq!(kind, "storage_disk_full");
+        assert!(toast.contains("Free up space") && !toast.contains("Raise the limit"));
+        assert!(remedy.starts_with("free space on the disk"));
+        assert_eq!(en[format!("activity.{kind}")].as_str(), Some(toast));
+
+        let explicit = StorageLimit::Explicit {
+            max_storage_mb: 50_000,
+        };
+        let (kind, toast, remedy) = over_budget_notice(&explicit);
+        assert_eq!(kind, "storage_over_budget");
+        assert!(remedy.contains("max_storage_mb") && !remedy.contains("max_disk_mb"));
+        assert_eq!(en[format!("activity.{kind}")].as_str(), Some(toast));
+
+        let (_, _, remedy) = over_budget_notice(&StorageLimit::MaxDisk {
+            max_disk_mb: 20_000,
+        });
+        assert!(remedy.contains("max_disk_mb"));
+    }
 
     /// The field report (2026-10-12, RTX 3060 12 GB): a 14B's first load put
     /// ~8.5 GB on the card — 0.71 of it — and the old trigger narrowed that

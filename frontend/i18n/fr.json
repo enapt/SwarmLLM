@@ -89,6 +89,7 @@
   "activity.shard_verified": "Parties vérifiées",
   "activity.shard_write_failed": "Échec de l'écriture de la partie sur le disque",
   "activity.show_all": "Tout afficher",
+  "activity.storage_disk_full": "Le disque de cet ordinateur est presque plein, et rien ne peut être supprimé sans priver le réseau d'un modèle. Libérez de l'espace sur le disque ou supprimez un modèle vous-même.",
   "activity.storage_over_budget": "Le stockage dépasse la limite que vous avez définie, mais rien ne peut être supprimé sans priver le réseau d'un modèle. Augmentez la limite ou supprimez un modèle vous-même.",
   "activity.upnp_mapped": "Votre routeur a ouvert une adresse publique ({detail}) — cet ordinateur est désormais accessible depuis Internet.",
   "activity.vram_soft_unload": "Mémoire GPU faible : {model} réduit à {count} parties pour libérer de l'espace",

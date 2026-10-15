@@ -68,7 +68,7 @@ Four carry contracts, not just versions:
 ### Frontend
 - Vanilla HTML/CSS/JS, no framework or build step, embedded via `include_dir!` (rules: `arch-frontend.md`).
 - **5** WS message types, **2** broadcast channels. Do not add to either set.
-- i18n: **1412 translation keys** (**1414 entries per locale** incl. `_lang` + `_dir`) × 21,
+- i18n: **1413 translation keys** (**1415 entries per locale** incl. `_lang` + `_dir`) × 21,
   sorted. Counts asserted — **update BOTH CLAUDE.md and `docs/ARCHITECTURE.md`**.
   A new key — from the frontend OR minted in Rust — MUST be translated into all 21; never rely on
   the runtime English fallback.

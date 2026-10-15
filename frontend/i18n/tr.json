@@ -89,6 +89,7 @@
   "activity.shard_verified": "Parçalar doğrulandı",
   "activity.shard_write_failed": "Parça diske yazılamadı",
   "activity.show_all": "Tümünü göster",
+  "activity.storage_disk_full": "Bu bilgisayarın diski neredeyse dolu; ancak hiçbir şey ağdan bir modelin kopyasını eksiltmeden kaldırılamıyor. Diskte yer açın veya bir modeli kendiniz silin.",
   "activity.storage_over_budget": "Depolama, belirlediğiniz sınırı aşıyor; ancak hiçbir şey ağdan bir modelin kopyasını eksiltmeden kaldırılamıyor. Sınırı yükseltin veya bir modeli kendiniz silin.",
   "activity.upnp_mapped": "Yönlendiriciniz genel bir adres açtı ({detail}) — bu bilgisayara artık internet üzerinden erişilebilir.",
   "activity.vram_soft_unload": "GPU belleği az: yer açmak için {model} {count} parçaya düşürüldü",

@@ -89,6 +89,7 @@
   "activity.shard_verified": "パーツを検証しました",
   "activity.shard_write_failed": "パーツをディスクに書き込めませんでした",
   "activity.show_all": "すべて表示",
+  "activity.storage_disk_full": "このコンピューターのディスクがほぼいっぱいですが、ネットワークからモデルの複製が失われるため何も削除できません。ディスクの空き容量を増やすか、ご自身でモデルを削除してください。",
   "activity.storage_over_budget": "ストレージが設定した上限を超えていますが、ネットワークからモデルの複製が失われるため何も削除できません。上限を引き上げるか、ご自身でモデルを削除してください。",
   "activity.upnp_mapped": "ルーターが公開アドレス（{detail}）を開きました。このコンピューターはインターネットから到達可能になりました。",
   "activity.vram_soft_unload": "GPU メモリが不足しています：空きを作るため {model} を {count} パーツに減らしました",

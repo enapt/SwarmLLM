@@ -89,6 +89,7 @@
   "activity.shard_verified": "Bagian terverifikasi",
   "activity.shard_write_failed": "Gagal menulis bagian ke disk",
   "activity.show_all": "Tampilkan semua",
+  "activity.storage_disk_full": "Disk komputer ini hampir penuh, dan tidak ada yang bisa dihapus tanpa membuat jaringan kekurangan salinan sebuah model. Kosongkan ruang di disk atau hapus sendiri sebuah model.",
   "activity.storage_over_budget": "Penyimpanan melebihi batas yang Anda tetapkan, tetapi tidak ada yang bisa dihapus tanpa membuat jaringan kekurangan salinan sebuah model. Naikkan batasnya atau hapus sendiri sebuah model.",
   "activity.upnp_mapped": "Router Anda membuka alamat publik ({detail}) — komputer ini kini dapat dijangkau melalui internet.",
   "activity.vram_soft_unload": "Memori GPU rendah: {model} dikurangi jadi {count} bagian untuk membebaskan ruang",

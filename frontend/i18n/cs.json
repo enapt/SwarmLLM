@@ -89,6 +89,7 @@
   "activity.shard_verified": "Části ověřeny",
   "activity.shard_write_failed": "Část se nepodařilo zapsat na disk",
   "activity.show_all": "Zobrazit vše",
+  "activity.storage_disk_full": "Disk tohoto počítače je téměř plný a nelze nic odstranit, aniž by síť přišla o kopii některého modelu. Uvolněte místo na disku nebo model odstraňte sami.",
   "activity.storage_over_budget": "Úložiště překračuje nastavený limit, ale nelze nic odstranit, aniž by síť přišla o kopii některého modelu. Zvyšte limit nebo model odstraňte sami.",
   "activity.upnp_mapped": "Váš router otevřel veřejnou adresu ({detail}) — tento počítač je nyní dostupný z internetu.",
   "activity.vram_soft_unload": "Málo paměti GPU: model {model} byl zmenšen na {count} částí, aby se uvolnilo místo",

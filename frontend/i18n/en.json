@@ -89,6 +89,7 @@
   "activity.shard_verified": "Verified parts",
   "activity.shard_write_failed": "Failed to write part to disk",
   "activity.show_all": "Show all",
+  "activity.storage_disk_full": "This computer's disk is nearly full, and nothing can be removed without leaving the network short of a model. Free up space on the disk, or remove a model yourself.",
   "activity.storage_over_budget": "Storage is over your configured limit, but nothing can be removed without leaving the network short of a model. Raise the limit or remove a model yourself.",
   "activity.upnp_mapped": "Your router opened a public address ({detail}) — this computer is now reachable across the internet.",
   "activity.vram_soft_unload": "Low GPU memory: reduced {model} to {count} parts to free up space",

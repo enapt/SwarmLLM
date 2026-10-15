@@ -89,6 +89,7 @@
   "activity.shard_verified": "部分已校验",
   "activity.shard_write_failed": "无法将部分写入磁盘",
   "activity.show_all": "显示全部",
+  "activity.storage_disk_full": "这台电脑的磁盘快满了，但删除任何内容都会让网络缺少某个模型的副本。请清理磁盘空间，或自行删除一个模型。",
   "activity.storage_over_budget": "存储已超出你设置的上限，但删除任何内容都会让网络缺少某个模型的副本。请提高上限，或自行删除一个模型。",
   "activity.upnp_mapped": "路由器已开放公网地址（{detail}）——此电脑现在可通过互联网访问。",
   "activity.vram_soft_unload": "GPU 内存不足:已将 {model} 缩减为 {count} 个部分以释放空间",

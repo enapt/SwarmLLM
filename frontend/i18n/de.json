@@ -89,6 +89,7 @@
   "activity.shard_verified": "Teile verifiziert",
   "activity.shard_write_failed": "Teil konnte nicht auf den Datenträger geschrieben werden",
   "activity.show_all": "Alle anzeigen",
+  "activity.storage_disk_full": "Die Festplatte dieses Computers ist fast voll, und es kann nichts entfernt werden, ohne dem Netzwerk ein Modell zu entziehen. Schaffen Sie Platz auf der Festplatte oder entfernen Sie selbst ein Modell.",
   "activity.storage_over_budget": "Der Speicher überschreitet Ihr festgelegtes Limit, aber es kann nichts entfernt werden, ohne dem Netzwerk ein Modell zu entziehen. Erhöhen Sie das Limit oder entfernen Sie selbst ein Modell.",
   "activity.upnp_mapped": "Dein Router hat eine öffentliche Adresse geöffnet ({detail}) – dieser Computer ist jetzt über das Internet erreichbar.",
   "activity.vram_soft_unload": "Wenig GPU-Speicher: {model} auf {count} Teile reduziert, um Platz zu schaffen",
