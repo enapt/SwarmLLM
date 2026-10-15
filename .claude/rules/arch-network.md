@@ -255,7 +255,7 @@ Single sources of truth for invariants that silently break at the wire if duplic
 - **`network/manager/connections::try_enqueue_redial`** — dedup + cap + push for `pending_redial`.
 - **`responses::types::raw_tool_kind_or_unknown`**, **`cli::bail_if_no_api_key` / `cli::exit_daemon_unreachable`** — shared error wording.
 - **`model::auto_manage::spawn_check_and_load`** — "shard landed → reload model → refresh dashboard", always the three steps together.
-- **`pool::invite::{encode_invite_code, decode_invite_code}`** — the `swarmpool://` v2 codec; `looks_like_v2` routes v2 from the legacy path.
+- **`pool::invite::{encode_invite_code, decode_invite_code}`** — the `swarmpool://` v2 codec; `looks_like_v2` routes v2 from the legacy path. **`pool::invite::addresses_for_invite`** is what a code carries: the outbound route's own address (`outbound_addresses`) + internet-reachable ones — never a Docker bridge or an overlay off the default route (field report 2026-10-15).
 
 → `docs/invariants/network.md` § "Centralised Wire-Format Helpers"
 

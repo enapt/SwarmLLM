@@ -229,6 +229,73 @@ pub fn any_internet_reachable(multiaddrs: &[String]) -> bool {
         })
 }
 
+/// The addresses an invite code carries: the ones a joiner can use.
+///
+/// That is this computer's address on the network its traffic leaves by
+/// (`primary`, [`outbound_addresses`]) — the LAN a device beside it shares —
+/// and every address reachable from the internet (public, DNS name, relay
+/// circuit). Every other local address goes: a Docker bridge (`172.17.0.1`,
+/// reachable only from containers on this machine, and on a joiner's machine
+/// its OWN bridge), a VPN overlay such as Tailscale (`100.64.0.0/10`) unless
+/// it carries this computer's traffic, a second network card. Kept, they told
+/// whoever got the code about this computer's VPN and containers, and made a
+/// 1,592-character code of ten addresses where four did anything (field report
+/// 2026-10-15). A device on the overlay still reaches the owner by the
+/// internet or relay route, and learns every address once connected.
+///
+/// With no `primary` known (no route out: an offline LAN), or nothing left
+/// after the cut, every address stays — a code that works where it did.
+pub fn addresses_for_invite(all: &[String], primary: &[std::net::IpAddr]) -> Vec<String> {
+    use libp2p::multiaddr::Protocol;
+    if primary.is_empty() {
+        return all.to_vec();
+    }
+    let kept: Vec<String> = all
+        .iter()
+        .filter(|s| {
+            let Ok(m) = s.parse::<libp2p::Multiaddr>() else {
+                return false;
+            };
+            multiaddr_is_internet_reachable(&m)
+                || m.iter().any(|p| match p {
+                    Protocol::Ip4(ip) => primary.contains(&std::net::IpAddr::V4(ip)),
+                    Protocol::Ip6(ip) => primary.contains(&std::net::IpAddr::V6(ip)),
+                    _ => false,
+                })
+        })
+        .cloned()
+        .collect();
+    if kept.is_empty() {
+        all.to_vec()
+    } else {
+        kept
+    }
+}
+
+/// This computer's own address on the route its traffic to the internet
+/// takes, per address family — the interface holding the default route.
+///
+/// Asked of the routing table, not the network: `connect` on a UDP socket
+/// sends nothing, it only fixes the socket's source address the way the
+/// kernel would route a datagram (the same question `ip route get 1.1.1.1`
+/// answers). Docker bridges and VPN overlays that do not carry the default
+/// route are never the answer. Empty with no route out.
+pub fn outbound_addresses() -> Vec<std::net::IpAddr> {
+    let probe = |bind: &str, target: &str| -> Option<std::net::IpAddr> {
+        let socket = std::net::UdpSocket::bind(bind).ok()?;
+        socket.connect(target).ok()?;
+        let ip = socket.local_addr().ok()?.ip();
+        (!ip.is_unspecified() && !ip.is_loopback()).then_some(ip)
+    };
+    [
+        probe("0.0.0.0:0", "1.1.1.1:53"),
+        probe("[::]:0", "[2606:4700:4700::1111]:53"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// Whether a multiaddr is reachable from the open internet.
 ///
 /// Public IP or DNS name, or a relay circuit. Deliberately EXCLUDES private
@@ -564,5 +631,50 @@ mod tests {
     fn not_internet_reachable_empty_or_garbage() {
         assert!(!any_internet_reachable(&[]));
         assert!(!any_internet_reachable(&["not a multiaddr".into()]));
+    }
+
+    /// **An invite code carries the addresses a joiner can use, and no
+    /// others** (field report 2026-10-15): the owner's code listed its
+    /// Tailscale address and two Docker bridges beside its LAN and public
+    /// ones, on both transports — ten addresses where four did anything.
+    #[test]
+    fn an_invite_code_carries_only_addresses_a_joiner_can_use() {
+        let id = "/p2p/12D3KooWQHiVu2JpLSVrWUCRmbcz1fbNc4tg1kxBRkGNw8kXXeNj";
+        let all: Vec<String> = [
+            "100.101.102.103",
+            "172.17.0.1",
+            "172.18.0.1",
+            "192.168.1.20",
+            "81.2.69.160",
+        ]
+        .iter()
+        .flat_map(|ip| {
+            [
+                format!("/ip4/{ip}/tcp/8810{id}"),
+                format!("/ip4/{ip}/udp/8800/quic-v1{id}"),
+            ]
+        })
+        .collect();
+        let lan: std::net::IpAddr = "192.168.1.20".parse().unwrap();
+        let kept = super::addresses_for_invite(&all, &[lan]);
+        assert_eq!(kept.len(), 4, "{kept:#?}");
+        assert!(kept
+            .iter()
+            .all(|a| a.contains("/192.168.1.20/") || a.contains("/81.2.69.160/")));
+
+        // A relay circuit is a way in from the internet.
+        let relayed = format!("/ip4/81.2.69.160/tcp/8810/p2p/12D3KooWNisnVha2jYj1gqqY5WP82vNQbRhFtBcKzj4XrYmGEn8G/p2p-circuit{id}");
+        assert_eq!(
+            super::addresses_for_invite(std::slice::from_ref(&relayed), &[lan]),
+            vec![relayed]
+        );
+
+        // No route out to tell the LAN by, or nothing left: every address stays.
+        assert_eq!(super::addresses_for_invite(&all, &[]), all);
+        let private_only = all[..6].to_vec();
+        assert_eq!(
+            super::addresses_for_invite(&private_only, &[lan]),
+            private_only
+        );
     }
 }

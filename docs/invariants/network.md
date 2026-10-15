@@ -4277,3 +4277,28 @@ so the CLI and the page read it unchanged. The flag stays on the wire for older
 nodes. Test `a_member_that_stopped_reporting_is_off_line`; guard
 `a_pool_members_liveness_is_never_read_from_its_stored_flag` (red with the
 endpoint reading `m.online`).
+
+## An invite code carries the addresses a joiner can use (2026-10-15)
+
+The code took `listen_multiaddrs` whole — every listener of a node bound to
+`0.0.0.0`, which is every interface. A pool owner's code (1,592 characters, ten
+addresses) carried its Tailscale address and two Docker bridges (`172.17.0.1`,
+`172.18.0.1`) beside the LAN and public ones, on TCP and QUIC each; a tester
+read the VPN and container setup of the machine out of it (field report
+2026-10-15). Four of the ten could ever work: a bridge is reachable only from
+containers on the owner's machine (and on a joiner's machine `172.17.0.1` is
+ITS OWN bridge — the loop-back `peer_cache::filter_dialable` already guards for
+peers), and an overlay only from inside it.
+
+`pool::invite::addresses_for_invite` keeps the owner's address on its outbound
+route — the interface holding the default route, read by a UDP `connect` that
+sends nothing (`outbound_addresses`; the question `ip route get 1.1.1.1`
+answers) — and every internet-reachable address (public, DNS, relay circuit).
+Interface NAMES are not available (no `if-addrs`-style crate; libp2p reports
+addresses only), and a range rule cannot tell a Docker bridge from a corporate
+`172.16/12` LAN or Tailscale from carrier NAT — the route can. A device on the
+owner's overlay still gets in by the internet or relay route and learns every
+address once connected (identify). With no route out (an offline LAN) or
+nothing left after the cut, the code keeps every address, as before.
+`listen_multiaddrs` itself is unchanged — peers, redial and diagnostics still
+see every address. Test `an_invite_code_carries_only_addresses_a_joiner_can_use`.

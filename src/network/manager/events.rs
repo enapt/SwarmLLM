@@ -1164,6 +1164,8 @@ impl NetworkManager {
     /// (100.64.0.0/10) addresses too — those are reachable by a node on the
     /// same overlay. Only loopback / unspecified / link-local / metadata
     /// addresses are dropped: nothing a remote dialer could productively use.
+    /// An invite code, handed to a person rather than a peer, carries less:
+    /// `pool::invite::addresses_for_invite`.
     pub(super) fn refresh_listen_multiaddrs(&self) {
         let local_peer_id = *self.swarm.local_peer_id();
         let candidates = self

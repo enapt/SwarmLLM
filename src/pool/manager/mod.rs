@@ -1753,7 +1753,12 @@ impl PoolManager {
         // for any joiner already on the swarm, but the v2 promise is
         // "bootstrap-before-decentralization": if we can't deliver that, fail
         // loudly rather than silently regress to legacy behavior.
-        let multiaddrs: Vec<String> = self.shared_state.listen_multiaddrs.load().as_ref().clone();
+        // Only the addresses a joiner can use — not this computer's Docker
+        // bridges or VPN overlays (`invite::addresses_for_invite`).
+        let multiaddrs: Vec<String> = crate::pool::invite::addresses_for_invite(
+            self.shared_state.listen_multiaddrs.load().as_ref(),
+            &crate::pool::invite::outbound_addresses(),
+        );
         if multiaddrs.is_empty() {
             return Err(SwarmError::ServiceUnavailable(
                 "No reachable network addresses yet — wait a few seconds after startup and try again".into(),
