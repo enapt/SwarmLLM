@@ -544,6 +544,16 @@ in `finalize_reply_text` (the non-streaming choke point), and
 `tool_parse::StreamingToolText` withholds the same block while streaming — the
 buffer both encoders already share, so all four API paths inherit it.
 
+**Which blocks is ONE list, `inference::REASONING_BLOCKS` (2026-10-16, #282).**
+Gemma 4 thinks in a channel, `<|channel>thought … <channel|>` (llama.cpp
+master's `thinking_start_tag` / `thinking_end_tags`), and after a tool's
+answer its template opens no turn, so the 12B opens an EMPTY channel itself
+(`<|channel>thought\n<channel|>The current weather…`, greedy under llama.cpp)
+— which reached the client as the start of the reply while both helpers knew
+only `<think>`. Both read the list, the streaming buffer remembers which
+block it is inside, and `streamed_and_unstreamed_replies_strip_the_same_scratchpad`'s
+rule holds for the new block in `gemma_4s_thought_channel_is_streamed_as_reasoning_not_reply`.
+
 **Why both.** A reply's content must not depend on whether the caller asked for
 `stream`; a fork on a presentation flag is a fork in policy. Fixing only the
 finaliser would mean the same question answered by a reasoning model returns the

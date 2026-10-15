@@ -423,7 +423,8 @@ const EMPTIED_REPLY_LOG_CHARS: usize = 240;
 /// leakage and editing someone's content — a reply that genuinely discusses
 /// `<|im_end|>` will lose it, which is the accepted cost of not showing control
 /// tokens to every user of a mismatched model file.
-/// Remove a reasoning model's `<think>…</think>` preamble from the reply.
+/// Remove a reasoning model's `<think>…</think>` preamble from the reply (or
+/// any block in [`REASONING_BLOCKS`]).
 ///
 /// A reasoning model — Qwen3, QwQ, DeepSeek-R1 — writes its working out first
 /// and the answer after it, and every serving stack separates the two: vLLM
@@ -450,18 +451,47 @@ const EMPTIED_REPLY_LOG_CHARS: usize = 240;
 /// on Anthropic) and is worth doing; returning it glued to the answer is not a
 /// smaller version of that, it is the bug.
 pub(crate) fn take_leading_reasoning_block(text: &mut String) {
-    const OPEN: &str = "<think>";
-    const CLOSE: &str = "</think>";
     let lead = text.len() - text.trim_start().len();
-    if !text[lead..].starts_with(OPEN) {
-        return;
-    }
-    let Some(rel) = text[lead..].find(CLOSE) else {
+    let Some(block) = opening_reasoning_block(&text[lead..]) else {
         return;
     };
-    let mut end = lead + rel + CLOSE.len();
+    let Some(rel) = text[lead..].find(block.close) else {
+        return;
+    };
+    let mut end = lead + rel + block.close.len();
     end += text[end..].len() - text[end..].trim_start().len();
     text.drain(..end);
+}
+
+/// The markers of one kind of reasoning block.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct ReasoningBlock {
+    pub open: &'static str,
+    pub close: &'static str,
+}
+
+/// Every reasoning block a reply may open with — the ONE list
+/// [`take_leading_reasoning_block`] and `api::tool_parse`'s streaming buffer
+/// both read. `<think>` is Qwen3's, QwQ's and DeepSeek-R1's; Gemma 4 thinks in
+/// a channel, `<|channel>thought` … `<channel|>` (llama.cpp master's
+/// `thinking_start_tag` / `thinking_end_tags`, `common/parsers/gemma4.cpp`).
+pub(crate) const REASONING_BLOCKS: [ReasoningBlock; 2] = [
+    ReasoningBlock {
+        open: "<think>",
+        close: "</think>",
+    },
+    ReasoningBlock {
+        open: "<|channel>thought",
+        close: "<channel|>",
+    },
+];
+
+/// The block `text` opens with, if it opens with one. `text` starts where the
+/// reply's leading whitespace ends.
+pub(crate) fn opening_reasoning_block(text: &str) -> Option<ReasoningBlock> {
+    REASONING_BLOCKS
+        .into_iter()
+        .find(|block| text.starts_with(block.open))
 }
 
 pub(crate) fn strip_control_token_artifacts(text: &mut String) {
@@ -1164,6 +1194,23 @@ mod reasoning_block_tests {
         let before = t.clone();
         take_leading_reasoning_block(&mut t);
         assert_eq!(t, before);
+    }
+
+    /// Gemma 4 thinks in a channel, not a `<think>` block (#282): with thinking
+    /// on, and after a tool's answer, its reply opens with one. An empty
+    /// channel — what its template closes by default — goes the same way.
+    #[test]
+    fn gemma_4s_thought_channel_is_a_reasoning_block() {
+        let mut t = "<|channel>thought\nThe user wants Paris.\n<channel|>It is 14 °C.".to_string();
+        take_leading_reasoning_block(&mut t);
+        assert_eq!(t, "It is 14 °C.");
+        let mut t = "<|channel>thought\n<channel|>Light rain.".to_string();
+        take_leading_reasoning_block(&mut t);
+        assert_eq!(t, "Light rain.");
+        // Unclosed: left alone, as `<think>` is.
+        let mut t = "<|channel>thought\nStill weighing".to_string();
+        take_leading_reasoning_block(&mut t);
+        assert_eq!(t, "<|channel>thought\nStill weighing");
     }
 
     /// The ordinary case must cost nothing and change nothing.

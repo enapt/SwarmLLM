@@ -58,6 +58,8 @@
 
 use serde_json::Value;
 
+use crate::inference::{opening_reasoning_block, ReasoningBlock, REASONING_BLOCKS};
+
 /// Build the system-prompt text that tells a local model how to call a tool.
 ///
 /// Shared by both API layers deliberately. The OpenAI path had its own copy and
@@ -219,7 +221,7 @@ pub struct ParsedToolCall {
 /// is any prose that never opened one.
 pub fn leading_content(text: &str) -> Option<&str> {
     let prefix = text[..content_prefix_len(text)].trim();
-    if prefix.starts_with("<think>") && !prefix.contains("</think>") {
+    if opening_reasoning_block(prefix).is_some_and(|block| !prefix.contains(block.close)) {
         return None;
     }
     (!prefix.is_empty()).then_some(prefix)
@@ -242,7 +244,8 @@ pub fn parse_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
         return None;
     }
 
-    try_generic(trimmed)
+    try_gemma4(trimmed)
+        .or_else(|| try_generic(trimmed))
         .or_else(|| try_hermes(trimmed))
         .or_else(|| try_mistral(trimmed))
         .or_else(|| try_phi(trimmed))
@@ -262,12 +265,13 @@ pub fn parse_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
 /// needs an object, so the brace is reached first or the text cannot parse as
 /// a call at all. Leaving it out lets prose that merely mentions tool calls
 /// keep streaming.
-const CALL_MARKERS: [&str; 6] = [
+const CALL_MARKERS: [&str; 7] = [
     FRAMED_CALL_MARKERS[0],
     FRAMED_CALL_MARKERS[1],
     FRAMED_CALL_MARKERS[2],
     FRAMED_CALL_MARKERS[3],
     FRAMED_CALL_MARKERS[4],
+    FRAMED_CALL_MARKERS[5],
     "{",
 ];
 
@@ -276,7 +280,7 @@ const CALL_MARKERS: [&str; 6] = [
 /// (`StreamingToolText::take_reasoning`): a brace is everywhere in a model
 /// thinking about code, and stopping at it would silence exactly the
 /// scratchpads that run longest.
-const FRAMED_CALL_MARKERS: [&str; 5] = [
+const FRAMED_CALL_MARKERS: [&str; 6] = [
     "<tool_call>",
     "[TOOL_CALLS]",
     "<|python_tag|>",
@@ -285,6 +289,9 @@ const FRAMED_CALL_MARKERS: [&str; 5] = [
     // surfaces emit the literal word `functools` as content and then withhold
     // the call — the same leak the code-fence retraction above exists to stop.
     "functools",
+    // Gemma 4's ([`try_gemma4`]): its call's name sits between the marker and
+    // the brace, so the brace alone let `<|tool_call>call:name` stream.
+    "<|tool_call>",
 ];
 
 /// How many bytes at the END of `text` could be the beginning of `marker`.
@@ -568,11 +575,10 @@ pub struct StreamingToolText {
     /// Where the reply proper begins: past a closed scratchpad and the
     /// whitespace after it, else 0. The tool-call search starts here.
     content_from: usize,
+    /// The markers of the block the reply opened with (`<think>`'s until it
+    /// is known to have opened with one).
+    block: ReasoningBlock,
 }
-
-/// Opening and closing markers of a reasoning preamble.
-const THINK_OPEN: &str = "<think>";
-const THINK_CLOSE: &str = "</think>";
 
 /// A finalised reply that ended INSIDE its reasoning block, split for a
 /// surface with a field for the scratchpad: `(String::new(), Some(reasoning))`.
@@ -588,10 +594,13 @@ const THINK_CLOSE: &str = "</think>";
 /// is trimmed as `take_reasoning` trims what it streams.
 pub fn split_unfinished_reasoning(content: String) -> (String, Option<String>) {
     let lead = content.len() - content.trim_start().len();
-    if !content[lead..].starts_with(THINK_OPEN) || content.contains(THINK_CLOSE) {
+    let Some(block) = opening_reasoning_block(&content[lead..]) else {
+        return (content, None);
+    };
+    if content.contains(block.close) {
         return (content, None);
     }
-    let reasoning = content[lead + THINK_OPEN.len()..].trim();
+    let reasoning = content[lead + block.open.len()..].trim();
     let reasoning = (!reasoning.is_empty()).then(|| reasoning.to_string());
     (String::new(), reasoning)
 }
@@ -629,6 +638,7 @@ impl StreamingToolText {
             reasoning_to: None,
             reasoning_released: 0,
             content_from: 0,
+            block: REASONING_BLOCKS[0],
         }
     }
 
@@ -688,9 +698,10 @@ impl StreamingToolText {
             Reasoning::Undecided => {
                 let lead = self.text.len() - self.text.trim_start().len();
                 let rest = &self.text[lead..];
-                if rest.starts_with(THINK_OPEN) {
+                if let Some(block) = opening_reasoning_block(rest) {
                     self.reasoning = Reasoning::Inside;
-                    let from = lead + THINK_OPEN.len();
+                    self.block = block;
+                    let from = lead + block.open.len();
                     self.reasoning_from = Some(from);
                     self.reasoning_released = from;
                     return self.withholding_reasoning();
@@ -718,7 +729,9 @@ impl StreamingToolText {
                 // both streaming surfaces already call when the stream ends —
                 // the same way a reply that opens with a bare `<` and stops has
                 // always been released.
-                let undecidable = THINK_OPEN.starts_with(rest);
+                let undecidable = REASONING_BLOCKS
+                    .iter()
+                    .any(|block| block.open.starts_with(rest));
                 if undecidable {
                     true
                 } else {
@@ -736,10 +749,10 @@ impl StreamingToolText {
                     false
                 }
             }
-            Reasoning::Inside => match self.text.find(THINK_CLOSE) {
+            Reasoning::Inside => match self.text.find(self.block.close) {
                 Some(at) => {
                     self.reasoning_to = Some(at);
-                    let after = at + THINK_CLOSE.len();
+                    let after = at + self.block.close.len();
                     let tail = &self.text[after..];
                     let ws = tail.len() - tail.trim_start().len();
                     // Keep waiting while everything after the closer is still
@@ -809,7 +822,7 @@ impl StreamingToolText {
         let limit = match (self.reasoning_to, self.reasoning_from) {
             (Some(end), _) => end,
             (None, Some(from)) if self.reasoning == Reasoning::Inside => {
-                let open = self.text.len() - partial_marker_overlap(&self.text, THINK_CLOSE);
+                let open = self.text.len() - partial_marker_overlap(&self.text, self.block.close);
                 // With tools in play an unclosed block can end in a call
                 // instead of `</think>` (Qwen3 does it); its markup is not
                 // thinking. Held at the framed markers only — see
@@ -902,7 +915,7 @@ impl StreamingToolText {
     /// UNCLOSED block is searched whole: the call is what ended it.
     pub fn reply_text(&self) -> &str {
         match self.reasoning_to {
-            Some(at) => &self.text[at + THINK_CLOSE.len()..],
+            Some(at) => &self.text[at + self.block.close.len()..],
             None => &self.text,
         }
     }
@@ -1481,6 +1494,162 @@ fn try_phi(text: &str) -> Option<Vec<ParsedToolCall>> {
     }
 }
 
+/// Gemma 4 — `<|tool_call>call:NAME{key:value,…}<tool_call|>`, one per call.
+///
+/// Not JSON, so nothing else here reads it, and every call Gemma 4 made reached
+/// the client as reply text (#282). The grammar is llama.cpp master's
+/// (`common/parsers/gemma4.cpp`; `gemma4_to_json` in `common/chat-peg-parser.cpp`
+/// rebuilds the JSON): a key is bare (`[^:}]+`), a string is quoted by the
+/// `<|"|>` marker on both sides with nothing escaped inside, and numbers,
+/// `true`, `false` and `null` are JSON's. The arguments are rebuilt as the JSON
+/// object they spell, keys in the order written. A call with no closing marker
+/// was cut off and is skipped, as `try_hermes` skips one.
+fn try_gemma4(text: &str) -> Option<Vec<ParsedToolCall>> {
+    const OPEN: &str = "<|tool_call>call:";
+    const CLOSE: &str = "<tool_call|>";
+    if !text.contains(OPEN) {
+        return None;
+    }
+    let mut calls = Vec::new();
+    for (i, chunk) in text.split(OPEN).skip(1).enumerate() {
+        let Some(end) = chunk.find(CLOSE) else {
+            continue;
+        };
+        let body = &chunk[..end];
+        let Some(brace) = body.find('{') else {
+            continue;
+        };
+        let name = &body[..brace];
+        if name.is_empty() || name.contains(char::is_whitespace) {
+            continue;
+        }
+        let mut args = Gemma4Args(&body[brace..]);
+        let Some(arguments) = args.dict() else {
+            continue;
+        };
+        if !args.0.trim().is_empty() {
+            continue;
+        }
+        calls.push(ParsedToolCall {
+            id: synth_id(i),
+            name: name.to_string(),
+            arguments: Value::Object(arguments).to_string(),
+        });
+    }
+    (!calls.is_empty()).then_some(calls)
+}
+
+/// A reader over Gemma 4's argument syntax ([`try_gemma4`]). Each method
+/// consumes what it read and answers `None` where the text is not that value.
+struct Gemma4Args<'a>(&'a str);
+
+impl Gemma4Args<'_> {
+    const QUOTE: &'static str = "<|\"|>";
+
+    fn skip_space(&mut self) {
+        self.0 = self.0.trim_start();
+    }
+
+    fn eat(&mut self, literal: &str) -> bool {
+        match self.0.strip_prefix(literal) {
+            Some(rest) => {
+                self.0 = rest;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn value(&mut self) -> Option<Value> {
+        if self.eat(Self::QUOTE) {
+            let end = self.0.find(Self::QUOTE)?;
+            let text = self.0[..end].to_string();
+            self.0 = &self.0[end + Self::QUOTE.len()..];
+            return Some(Value::String(text));
+        }
+        if self.0.starts_with('{') {
+            return self.dict().map(Value::Object);
+        }
+        if self.eat("[") {
+            let mut items = Vec::new();
+            self.skip_space();
+            if self.eat("]") {
+                return Some(Value::Array(items));
+            }
+            loop {
+                items.push(self.value()?);
+                self.skip_space();
+                if self.eat("]") {
+                    return Some(Value::Array(items));
+                }
+                if !self.eat(",") {
+                    return None;
+                }
+                self.skip_space();
+            }
+        }
+        // `true`, `false`, `null` or a number — or a bare word the model meant
+        // as text (`unit:celsius`): llama.cpp's grammar forces the quotes, and
+        // nothing constrains generation here, so a word is read as the string
+        // it spells rather than losing the whole call.
+        let len = self.0.find([',', '}', ']']).unwrap_or(self.0.len());
+        let word = self.0[..len].trim_end();
+        if word.is_empty() || word.contains(Self::QUOTE) {
+            return None;
+        }
+        self.0 = &self.0[word.len()..];
+        Some(match word {
+            "true" => Value::Bool(true),
+            "false" => Value::Bool(false),
+            "null" => Value::Null,
+            _ => match word.parse::<serde_json::Number>() {
+                Ok(number) => Value::Number(number),
+                Err(_) => Value::String(word.to_string()),
+            },
+        })
+    }
+
+    fn dict(&mut self) -> Option<serde_json::Map<String, Value>> {
+        if !self.eat("{") {
+            return None;
+        }
+        let mut map = serde_json::Map::new();
+        self.skip_space();
+        if self.eat("}") {
+            return Some(map);
+        }
+        loop {
+            let key_len = self.0.find([':', '}'])?;
+            if !self.0[key_len..].starts_with(':') {
+                return None;
+            }
+            // A key the model quoted anyway (JSON's quotes, or its own marker)
+            // is the same key: quoted, it would reach the client as `"city"`.
+            let key = self.0[..key_len].trim();
+            let key = [Self::QUOTE, "\""]
+                .iter()
+                .find_map(|q| key.strip_prefix(q)?.strip_suffix(q))
+                .unwrap_or(key);
+            if key.is_empty() {
+                return None;
+            }
+            let key = key.to_string();
+            self.0 = &self.0[key_len + 1..];
+            self.skip_space();
+            let value = self.value()?;
+            map.insert(key, value);
+            self.skip_space();
+            if self.eat("}") {
+                return Some(map);
+            }
+            if !self.eat(",") {
+                return None;
+            }
+            self.skip_space();
+        }
+    }
+}
+
 /// Parse one `{"name", "arguments"|"parameters"}` object from a JSON string.
 fn single_object_call(body: &str, index: usize) -> Option<ParsedToolCall> {
     let v: Value = serde_json::from_str(body).ok()?;
@@ -1625,6 +1794,84 @@ mod tests {
         assert!(deltas.is_empty(), "nothing to stream, got {deltas:?}");
         assert!(super::parse_tool_calls(buf.reply_text()).is_some());
         assert_eq!(buf.pending_content(), None, "there is no content in it");
+    }
+
+    /// What Gemma 4 12B (Q4_K_M) writes, greedy, under llama.cpp master for a
+    /// flight search over its shipped template (#282, 2026-10-16) — its own
+    /// syntax, not JSON. It reached the client as reply text.
+    const GEMMA4_CALL: &str = "<|tool_call>call:search_flights{dates:[<|\"|>2026-11-03<|\"|>,<|\"|>2026-11-04<|\"|>],destination:<|\"|>Tokyo<|\"|>,filters:{max_price:900,nonstop:true},passengers:2}<tool_call|>";
+
+    #[test]
+    fn gemma_4s_own_call_syntax_is_read_as_a_call() {
+        let calls = super::parse_tool_calls(GEMMA4_CALL).expect("Gemma 4's call parses");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "search_flights");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+        assert_eq!(
+            args,
+            serde_json::json!({
+                "dates": ["2026-11-03", "2026-11-04"],
+                "destination": "Tokyo",
+                "filters": {"max_price": 900, "nonstop": true},
+                "passengers": 2,
+            })
+        );
+        // Keys in the order the model wrote them, as llama.cpp rebuilds them.
+        assert!(
+            calls[0].arguments.starts_with("{\"dates\":"),
+            "{}",
+            calls[0].arguments
+        );
+    }
+
+    /// A string is quoted by the `<|"|>` marker and nothing inside it is
+    /// special — commas, colons, braces, JSON quotes. Several calls in one
+    /// reply are each read; a last one cut off before its closing marker is
+    /// skipped, never guessed.
+    #[test]
+    fn gemma_4s_strings_keep_everything_between_their_markers() {
+        let reply = concat!(
+            "<|tool_call>call:write{path:<|\"|>/tmp/a.json<|\"|>,text:<|\"|>{\"k\": [1, 2]}, ok: yes<|\"|>,",
+            "mode:null,ratio:-1.5e3,tags:[]}<tool_call|>",
+            "<|tool_call>call:noop{}<tool_call|>",
+            "<|tool_call>call:cut{path:<|\"|>/x",
+        );
+        let calls = super::parse_tool_calls(reply).expect("parses");
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+        assert_eq!(
+            args,
+            serde_json::json!({
+                "path": "/tmp/a.json",
+                "text": "{\"k\": [1, 2]}, ok: yes",
+                "mode": null,
+                "ratio": -1500.0,
+                "tags": [],
+            })
+        );
+        assert_eq!(calls[1].name, "noop");
+        assert_eq!(calls[1].arguments, "{}");
+        // An unquoted word is the text it spells; a quoted key is the key.
+        let calls = super::parse_tool_calls(
+            "<|tool_call>call:get_weather{\"city\":Paris, unit: celsius}<tool_call|>",
+        )
+        .expect("parses");
+        assert_eq!(calls[0].arguments, r#"{"city":"Paris","unit":"celsius"}"#);
+    }
+
+    /// Streamed, the marker holds the reply back: before #282 the brace was
+    /// the first thing that could start a call, so `<|tool_call>call:name`
+    /// went out as content ahead of it.
+    #[test]
+    fn gemma_4s_call_marker_holds_a_streamed_reply_back() {
+        let reply = format!("Searching now.\n{GEMMA4_CALL}");
+        for token_len in [1, 3, 7] {
+            let (deltas, mut buf) = deltas_for(&reply, token_len);
+            let streamed = deltas.concat() + &buf.pending_content().unwrap_or_default();
+            assert_eq!(streamed, "Searching now.\n", "token length {token_len}");
+            let calls = super::parse_tool_calls(buf.reply_text()).expect("still parses");
+            assert_eq!(calls[0].name, "search_flights");
+        }
     }
 
     #[test]
@@ -2717,6 +2964,95 @@ mod streaming_reasoning_tests {
             out + &b.pending_all().unwrap_or_default(),
             reasoning.concat(),
         )
+    }
+
+    /// Gemma 4 thinks in a channel (#282). After a tool's answer its template
+    /// opens no turn, and the 12B opens an EMPTY thought channel itself — this
+    /// is its reply, greedy under llama.cpp master, token by token. Streamed
+    /// before the fix, the channel's markers led the answer.
+    #[test]
+    fn gemma_4s_thought_channel_is_streamed_as_reasoning_not_reply() {
+        let empty = [
+            "<|channel>",
+            "thought",
+            "\n",
+            "<channel|>",
+            "The",
+            " current weather in Paris is 14°C with light rain.",
+        ];
+        let thinking = [
+            "<|channel>",
+            "thought",
+            "\nThe user wants nonstop",
+            " flights.\n",
+            "<channel|>",
+            "Here are the options.",
+        ];
+        for detect_tools in [true, false] {
+            let (reply, reasoning) =
+                streamed_reply_in(&empty, detect_tools, ReasoningOut::Separate);
+            assert_eq!(
+                reply,
+                "The current weather in Paris is 14°C with light rain."
+            );
+            assert_eq!(reasoning, "");
+            let (reply, reasoning) =
+                streamed_reply_in(&thinking, detect_tools, ReasoningOut::Separate);
+            assert_eq!(reply, "Here are the options.");
+            assert_eq!(reasoning, "The user wants nonstop flights.");
+            // The unstreamed finaliser agrees.
+            let mut whole = thinking.concat();
+            crate::inference::take_leading_reasoning_block(&mut whole);
+            assert_eq!(whole, reply);
+        }
+        // Cut off inside the channel: reasoning, never the answer.
+        let (content, unfinished) =
+            split_unfinished_reasoning("<|channel>thought\nStill weighing".into());
+        assert_eq!(
+            (content.as_str(), unfinished.as_deref()),
+            ("", Some("Still weighing"))
+        );
+    }
+
+    /// The same 12B with thinking on: it thinks — braces and all — closes the
+    /// channel and calls straight after. The scratchpad is reasoning, the call
+    /// is the call, and nothing is content, streamed or not.
+    #[test]
+    fn gemma_4_thinking_then_calling_yields_reasoning_and_one_call() {
+        let reply = concat!(
+            "<|channel>thought\nThe user is looking for nonstop flights to Tokyo for 2 adults.\n\n",
+            "- `filters`: `{\"max_price\": 900, \"nonstop\": true}`\n\n",
+            "I will call the `search_flights` tool with these parameters.<channel|>",
+            "<|tool_call>call:search_flights{dates:[<|\"|>2026-11-03<|\"|>,<|\"|>2026-11-04<|\"|>],",
+            "destination:<|\"|>Tokyo<|\"|>,filters:{max_price:900,nonstop:true},passengers:2}<tool_call|>",
+        );
+        let chars: Vec<char> = reply.chars().collect();
+        let tokens: Vec<String> = chars.chunks(5).map(|c| c.iter().collect()).collect();
+        let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let (content, mut reasoning, mut b) = stream_in(&tokens, true, ReasoningOut::Separate);
+        let calls = super::parse_tool_calls(b.reply_text()).expect("the call parses");
+        if let Some(r) = b.finish_reasoning(true) {
+            reasoning.push(r);
+        }
+        let content = content + &b.pending_content().unwrap_or_default();
+        assert_eq!(content, "");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "search_flights");
+        let reasoning = reasoning.concat();
+        assert!(
+            reasoning.starts_with("The user is looking"),
+            "{reasoning:?}"
+        );
+        assert!(
+            reasoning.ends_with("with these parameters."),
+            "{reasoning:?}"
+        );
+        // Unstreamed: the finaliser drops the channel, the call parses, and no
+        // content is left beside it.
+        let mut whole = reply.to_string();
+        crate::inference::finalize_reply_text(&mut whole, &[]);
+        assert_eq!(super::parse_tool_calls(&whole).map(|c| c.len()), Some(1));
+        assert_eq!(super::leading_content(&whole), None);
     }
 
     /// **Report #031: one whitespace-only first chunk disabled the filter for

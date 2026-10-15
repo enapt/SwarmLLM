@@ -1869,18 +1869,15 @@ image-encode refusal stays silent.
 
 ### API surface
 
-#### #282 — Gemma 4's tool calls and thinking channel reach the client as text
-`P2` · api · **OPEN** — 2026-10-16
+#### #282 — A model file's `suppress_tokens` can still be sampled
+`P3` · inference · **PARTIAL** — 2026-10-16 · the call syntax and thought channel closed (§ Closed)
 
-Gemma 4 writes a call as `<|tool_call>call:name{key:<|"|>text<|"|>,n:3}<tool_call|>` — its own
-syntax, strings quoted by the `<|"|>` marker, not JSON — and none of `tool_parse`'s parsers reads
-it, so a client asking for tools gets the call as reply text. With thinking on
-(`enable_thinking`), the reply opens with `<|channel>thought\n…<channel|>`, which
-`take_leading_reasoning_block` does not know (it reads `<think>`). The template's default
-generation prompt closes an empty thought channel, so a plain chat is unaffected. Also open:
-the file's `tokenizer.ggml.suppress_tokens` (`<audio|>`, `<image|>`), which llama.cpp's sampler
-never picks (a −∞ logit bias, `common/sampling.cpp`). Reference: llama.cpp master's
-`common/chat.cpp` (`COMMON_CHAT_FORMAT_PEG_GEMMA4`).
+Gemma 4's files list `tokenizer.ggml.suppress_tokens` (the 12B: `<audio|>`, `<image|>`), which
+llama.cpp's sampler never picks — a −∞ logit bias merged into every request's
+(`common/sampling.cpp`, "model suppress tokens"). Nothing here reads the key, and there is no
+logit-bias path to put it on: it wants one mask applied where every sampler call site
+(local, split, remote, speculative) already passes, not one per path. A text chat practically
+never reaches either token.
 
 #### #185 — Three API surfaces each implement streaming and non-streaming replies separately
 `P3` · api · **OPEN** — 2026-07-26 · history: archive § "Collapse the parallel response paths behind one core loop"
@@ -2414,7 +2411,17 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3))
+**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel)
+- #282 (calls, channel) — **Gemma 4's tool calls are tool calls.** It writes
+  `<|tool_call>call:name{key:<|"|>text<|"|>,n:2}<tool_call|>` — its own syntax, not JSON — and
+  every call reached the client as reply text. `tool_parse::try_gemma4` reads it as llama.cpp
+  master's grammar does (`common/parsers/gemma4.cpp`) and rebuilds the JSON object, keys in the
+  order written; `<|tool_call>` holds a streamed reply back like every other call marker. Its
+  thought channel (`<|channel>thought … <channel|>`) is a reasoning block beside `<think>`
+  (`inference::REASONING_BLOCKS`, the one list both finalisers read) — after a tool's answer the
+  12B opens an empty one itself, which led the reply. Fixtures are the 12B's own greedy replies
+  under llama.cpp; six tests, all red with the fix off. Residual (the file's `suppress_tokens`)
+  stays open as #282.
 - #115 (3) — **Gemma 4 runs (text, the dense 12B and 31B).** Each layer's attention has its own
   shape — on the 12B, five layers in six have 8 key/value heads 256 wide over the last 1,024
   positions, every sixth one head 512 wide over everything, with no V projection (V is K) —

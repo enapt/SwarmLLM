@@ -2490,8 +2490,9 @@ support is three pieces, shared by the OpenAI and Anthropic layers:
    injection entirely; every other value, `"required"` included, still describes
    them, because a local model cannot be compelled and refusing would be worse.
 2. **`tool_parse::parse_tool_calls`** recovers calls from the model's text,
-   trying the generic shape we prompt for, then Hermes/Qwen, Mistral and
-   Llama-3 native formats. It does NOT repair truncated JSON: a generation cut
+   trying Gemma 4's own syntax first (its marker is unambiguous), then the
+   generic shape we prompt for, then Hermes/Qwen, Mistral, Phi-4 and Llama-3
+   native formats. It does NOT repair truncated JSON: a generation cut
    off at `max_tokens` is reported as text rather than as a call carrying
    invented arguments.
 3. **Call ids are assigned here, never taken from the model.** The id is how a
