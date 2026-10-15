@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.3.239-alpha] — 2026-10-15
+
+**A model is no longer planned onto graphics memory another program has just taken.** When
+another program (Ollama, a game) took most of the graphics card after a model had run here, the
+next request was still planned against the card as it had been. A tester's 30B model was planned
+whole on their computer, its load was then refused for want of memory, and the retry sent part of
+it to a computer abroad at 0.2 tokens a second. The planner now reads the card as it stands
+wherever a load could follow, and offers to split a model between the card and the processor only
+if system memory would take the processor's share. A card that other programs have filled now
+admits nothing, where it could read as "no limit". Unloading a model now reports the memory it
+actually held, not the whole file's size.
+
+**Big mixture-of-experts models split across computers now guess ahead with a small model.** A
+split model answers faster when a small model on this computer guesses the next few words and the
+big one checks them in one pass. Mixture-of-experts models such as Qwen3-30B-A3B were never given
+one, because the size check counted no experts. On a split with a computer in Australia, a
+96-token reply went from 41 s to 21-22 s (about 2.3 to 4.5 tokens a second), with 82 of 109
+guesses kept. Of two copies of the same guessing model, the smaller one is now used.
+
+**A computer without a graphics card leaves room for that guessing model.** When this computer
+ran its share of a split on the processor, the plan gave all of its memory to the big model, so
+the guessing model was refused on every request. Where the other computers offer the room, this
+computer now keeps fewer layers so the guessing model fits beside them: the same Qwen3-30B-A3B
+split went from 2.45-2.69 to 4.01-6.94 tokens a second. The room is sized for the reply being
+written rather than a long conversation, it is taken only from what the other computers offer,
+and a guessing model is chosen only if it would still fit beside the layers the plan loads here.
+
+**Processor-only decoding no longer slows down with more threads.** On an 8-core processor,
+Qwen2.5-Coder-7B decoded at 172 ms a token with 8 threads against 126 ms with 4, so a computer
+without a graphics card could not use its extra cores. Idle threads now wait 200 µs for the next
+small step of a token before they sleep: 8 threads 123-127 ms a token, 4 threads 121-122, with
+identical replies and less processor time in total. Checking two or three guessed words on the
+processor also costs less: 190 to 151-156 ms for two, 248 to 173-177 ms for three.
+
+**A restarted computer remembers how fast it loads a model.** The planner charges a computer that
+must first load a model for that load, at the speed the computer measured. That speed was lost at
+every restart, including every automatic update, so the first request afterwards was priced as if
+loading took 10 s per GiB: about 58 s charged for a load that took 9-20 s, which could send it
+somewhere slower. The measured speed is now kept.
+
+**Security libraries.** rustls is updated to 0.23.46 for four advisories published on 2026-10-14.
+None of them applies to how SwarmLLM uses it (only for the encrypted connections between
+computers), but the update clears them.
+
 ## [0.3.238-alpha] — 2026-10-14
 
 **A computer that once held another upload of a model can use the swarm's copy again.** Every
