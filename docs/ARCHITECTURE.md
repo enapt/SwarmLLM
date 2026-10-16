@@ -2622,7 +2622,8 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
   to me?", which appeared on no pasteable surface before), reachable
   addresses, peers, **recent inference failures** (last 20: model, elapsed, and
   *which peer served each* — the field that separates "this node is broken" from
-  "one peer is broken", plus a repeated-peer note; a request its reader stopped
+  "one peer is broken", plus a repeated-peer note counting only failures that peer
+  could have caused, `failure_is_penalty_worthy`; a request its reader stopped
   is not a failure and is not listed, `router::failure_worth_listing`), **NAT traversal**
   (`publicly reachable`, `donating relay capacity`, hole-punch success/failure
   counts with a reading of what zero means in context), peer cache (stored vs

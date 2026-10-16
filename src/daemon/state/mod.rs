@@ -145,6 +145,11 @@ pub struct RequestFailure {
     /// "one peer is broken", which is the distinction we have repeatedly had to
     /// reconstruct by hand from two sides' logs.
     pub served_by: Option<String>,
+    /// Could `served_by` have caused it? False for a failure that names this
+    /// node or nobody — its own memory refusing a segment, a context window
+    /// reached — so the diagnostics do not tell anyone to suspect the peer
+    /// (`router::failure_worth_listing`).
+    pub peer_may_be_at_fault: bool,
     pub error: String,
     pub elapsed_ms: u64,
 }
@@ -3035,20 +3040,22 @@ impl SharedState {
             .and_then(|s| s.latest().and_then(|m| m.decode_terms()))
     }
 
-    /// This peer's MEASURED prefill coefficient on `model_id`, in ms per (layer
-    /// x activation byte). `None` when we have never prefilled that model
-    /// through it, or the figure has gone stale.
+    /// The rate this node — a peer, or this one — reads a prompt of `model_id`
+    /// at, MEASURED, in ms per (layer x activation byte): what a plan prices a
+    /// prompt by (`ModelSpeed::prompt_ms_per_layer_byte` — warm forwards large
+    /// enough to measure a rate). `None` when none has been timed, or the
+    /// figure has gone stale.
     ///
     /// Deliberately not folded into `observed_latency_ms_per_layer`: that one
     /// answers "how fast does this peer decode", which is what ranks a
     /// generated reply, and prefill is a different question that scales with
     /// prompt length instead of token count.
-    pub fn observed_prefill_ms_per_layer_byte(
+    pub fn observed_prompt_ms_per_layer_byte(
         &self,
         node_id: &crate::types::NodeId,
         model_id: &crate::types::ModelId,
     ) -> Option<f32> {
-        self.peer_model_speed(node_id, model_id, |s| s.prefill_ms_per_layer_byte())
+        self.peer_model_speed(node_id, model_id, |s| s.prompt_ms_per_layer_byte())
     }
 
     /// How many inference requests this node is working on **right now** — the

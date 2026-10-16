@@ -95,7 +95,9 @@ pub(crate) async fn plan_prompt_off_thread(
     state: &std::sync::Arc<SharedState>,
     request: &InferenceRequest,
 ) -> Option<PromptPlan> {
-    if !worth_planning(state, request) {
+    if !worth_planning(state, request)
+        && !worth_counting(&request.messages, request.tools.as_deref())
+    {
         return None;
     }
     let (state, request) = (state.clone(), request.clone());
@@ -117,6 +119,27 @@ fn worth_planning(state: &SharedState, request: &InferenceRequest) -> bool {
             || crate::inference::pipeline::believes_any_of(&request.model_id))
 }
 
+/// The estimate past which a prompt is counted exactly, in tokens.
+///
+/// **The estimate under-counts dense text by half.** Four bytes a token is
+/// prose; a tester's 10 KB prompt was estimated at 2,495 tokens and is 3,729
+/// (field report 2026-10-16), and the plan priced its prefill and every
+/// holder's conversation memory for two-thirds of it. Counting costs ~46 ms for
+/// 2,744 tokens, which a short chat should not pay for an error of a few
+/// tokens; a prompt this long takes seconds to read anywhere, and a cache a
+/// third short is a refusal waiting at the holder (#263).
+const COUNT_EXACTLY_FROM_TOKENS: u32 = 1_024;
+
+/// Is the router's estimate of this prompt long enough to be worth counting
+/// exactly? Not for an image, which the text tokenizer never sees.
+fn worth_counting(
+    messages: &[crate::types::ChatMessage],
+    tools: Option<&[serde_json::Value]>,
+) -> bool {
+    !messages.iter().any(|m| !m.images.is_empty())
+        && crate::inference::estimate_prompt_tokens(messages, tools) >= COUNT_EXACTLY_FROM_TOKENS
+}
+
 /// Has our own worker reported a prefix cache for this model?
 fn local_cache_worth_asking(state: &SharedState, request: &InferenceRequest) -> bool {
     state.model_process_pool.prefix_cache_block_tokens() > 0
@@ -128,11 +151,14 @@ fn local_cache_worth_asking(state: &SharedState, request: &InferenceRequest) -> 
 /// opening, when that can be known; `None` otherwise, and the caller falls
 /// back to its estimate.
 ///
-/// Tokenizes ONLY when there is something to match — the common request pays
-/// a map lookup and a pass over the belief table, and nothing else. Blocking:
-/// call it through [`plan_prompt_off_thread`] from async code.
+/// Tokenizes ONLY when there is something to match, or a prompt long enough
+/// that the estimate's error matters ([`worth_counting`]) — the common request
+/// pays a map lookup and a pass over the belief table, and nothing else.
+/// Blocking: call it through [`plan_prompt_off_thread`] from async code.
 pub(crate) fn plan_prompt(state: &SharedState, request: &InferenceRequest) -> Option<PromptPlan> {
-    if !worth_planning(state, request) {
+    if !worth_planning(state, request)
+        && !worth_counting(&request.messages, request.tools.as_deref())
+    {
         return None;
     }
     let our_id = state.identity.node_id();
@@ -230,5 +256,29 @@ mod tests {
         assert_eq!(cached_tokens(4, 64, 256), 255);
         assert_eq!(cached_tokens(0, 64, 9_280), 0);
         assert_eq!(cached_tokens(3, 64, 0), 0);
+    }
+
+    /// **A long prompt is counted, not estimated** (field report 2026-10-16:
+    /// 2,495 estimated, 3,729 read). A short chat keeps the free estimate, and
+    /// an image — embeddings the tokenizer never sees — is never counted.
+    #[test]
+    fn a_long_prompt_is_counted_exactly_and_a_short_one_is_estimated() {
+        let asked = |content: String, images: usize| {
+            vec![crate::types::ChatMessage {
+                role: crate::types::Role::User,
+                content,
+                images: (0..images)
+                    .map(|_| crate::types::ImageData {
+                        rgb_bytes: vec![0; 3],
+                        width: 1,
+                        height: 1,
+                    })
+                    .collect(),
+                tool: Default::default(),
+            }]
+        };
+        assert!(!worth_counting(&asked("Hi".into(), 0), None));
+        assert!(worth_counting(&asked("fn x() {} ".repeat(1_000), 0), None));
+        assert!(!worth_counting(&asked("fn x() {} ".repeat(1_000), 1), None));
     }
 }

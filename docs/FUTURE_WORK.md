@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #287**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #290**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -63,9 +63,9 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    beside routed experts in every layer) and (3c) E2B/E4B (the sizes small computers pick:
    per-layer token embeddings, shared KV layers); then the Gemma 3/4 vision projectors and the
    drafters. All are refused by name today, never loaded wrong.
-7. **#91** — an idle node's gossip upload (8.8 KB/s on .239, the complaint that uninstalls a P2P
-   app). v0.3.240 sends a third less and sizes the mesh by peers: re-measure the copies of each
-   message on the .240 fleet (~3 expected, from ~6.3), then (2) announce-then-pull for manifests.
+7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 6.7 KB/s on the .240
+   fleet (8.8 on .239), ~3 copies of each message (from ~6.3), measured 2026-10-16. The manifests
+   are 84% of the gossip sent: next (2) announce-then-pull for manifests.
 8. **#251** — `owned_by: "local"` reads as "my data stays here": keep-on-this-computer per request
    on every surface, and the route on a streamed `/v1/responses` and in MCP.
 9. **#252** — a peer's measured context is not gossiped, so a planner cannot size a peer's share
@@ -944,7 +944,7 @@ libp2p-connection-limits has no per-protocol exemption). A dial by bare address 
 `PeerCondition::Disconnected`; check no other dialler (loopback probe, redial queue, PEX)
 does the same.
 
-#### #91 — An idle node still uploads ~9 KB/s of gossip (~6 copies of each message before v0.3.240's peer-sized mesh), and a total traffic ceiling does not exist
+#### #91 — An idle node still uploads ~7 KB/s, most of its gossip the model manifests, and a total traffic ceiling does not exist
 `P2` · network · **PARTIAL** — 2026-10-11 · history: archive row #91, `docs/invariants/network.md`
 
 Trickle suppression (`MANIFEST_QUIET_WINDOW`), per-(model, hash) `manifest_heard`,
@@ -971,8 +971,15 @@ only) runs the smallest (`mesh_n` 2, low 1, high 4) for its whole first session.
 fixed 2026-10-15 (released in v0.3.240)**: `known_peers` is the PEERS the cache and bootstrap list name
 (`discovery::peers_named`, the grouping the startup dial already uses). A probe started on a copy
 of the release node's database (no network): `count=200 known_peers=26` → `mesh_n` 3, high 6, the
-tier written for a swarm that size. Left: re-measure the copies of each message once the fleet
-updates (~3 expected, from ~6.3); the mesh is still sized once at startup, from peers ever met
+tier written for a swarm that size. **(1) and (1b) re-measured 2026-10-16 with the fleet on .240**
+(release node, 6 peers all on .240, idle — no inference, no parts — 2.1 → 3.1 h up, a 59-min window,
+`/api/admin/stats` twice): **6.7 KB/s out (8.8 at .239), 3.3 of it gossip (6.5)**; every topic
+delivers **2.7-3.2 copies** of each message (`recv_msgs_unfiltered` ÷ `recv_msgs`, from ~6.3);
+`swarm/regions` carries demand gossip alone (`ModelDemandGossip` 3.0 a minute, 70 B/s forwarded —
+no region summaries); no drops. **`swarm/models` is now 84% of the gossip sent** (2.8 KB/s):
+`ModelManifest` arrives 0.83 a minute at ~35 KB each, and each is forwarded on to the mesh. The
+3.4 KB/s that is not gossip (Kademlia, identify, pings, direct messages) is the next-largest share.
+Left: the mesh is still sized once at startup, from peers ever met
 rather than reachable now (a rig first before going further: a thinner mesh partitions sooner); (2) announce-then-pull for manifests — gossip `(model, hash)`
 and fetch the manifest point to point only for a version one lacks (Bitcoin
 `inv`/`getdata`, Plumtree lazy push), since the copies, not the size, are now the cost; it
@@ -1706,7 +1713,7 @@ StarCoder2, inert while refused).
 ### Memory and admission
 
 #### #265 — A later range loaded into a card/processor split worker is charged to the card whatever the loader does with it
-`P3` · memory · **OPEN** — 2026-10-13 · history: found closing #264
+`P2` · memory · **OPEN** — 2026-10-13, raised P3 → P2 2026-10-16 (seen twice in report #037) · history: found closing #264
 
 A split worker is spawned with `--gpu-layers N` (`GPU_LAYER_LIMIT`), and the loader puts the first
 N layers of EVERY range it loads on the card — so a second range (a failover onto this node, a
@@ -1714,9 +1721,23 @@ re-plan) puts N more there than admission sized the card for. `charge_additional
 the whole range to the worker's one accountant (`holds_gpu_memory` → the card) at the card's
 per-layer rate, which refuses it when the card is full (a `LocalMemoryUnavailable` the router
 re-plans) rather than overcommitting — so the cost seen is a split worker that cannot take a second
-range, not a crash. Not seen in a report. Next: place a later range's layers by the room each
-device has (the card's share against `vram_budget_now`, the rest on the processor) and charge each
-share to its own budget, as the spawn now does (#264).
+range, not a crash. **Seen in report #037 (2026-10-16, a 12 GB card, Qwen3-30B-A3B, v0.3.239 and
+v0.3.240), and a request FAILED each time:** a node holding all but one or two parts (#286's prune
+holes) was planned two or three local runs around a one-layer hop to a peer — the planner holds such
+a chain to the card's room (`parallax::local_fits`), so the plan came from the `LocalUnbounded` rung,
+which asks the loader. The worker took the first run as a split (experts of 26 layers in RAM), and
+the next was refused on the card alone: `8 layers 40..48 … need about 3016 MB more … (its worker is
+already holding 5992 MB)`; on .240, `26 layers 13..39 … 9802 MB more … 3345 MB` with the machine's
+24,000 MB cap far from reached. The re-plan had no other route, and the request failed where a
+whole copy ran locally in 6.7 s. #286 removes the holes that made two runs necessary; a node that
+holds PART of a model still meets this. A second, smaller gap on the same path: with a worker live,
+the planner weighs the card reading the last admission stored (`card_budget_for_planning`), while
+the growth reads the card live — the planner can offer growth into room another program has since
+taken. Next: place a later range's layers by the room each device has (the card's share against
+`vram_budget_now`, the rest on the processor — per-range placement the worker is told with the
+range, in place of the process-wide `GPU_LAYER_LIMIT` / `CPU_EXPERT_LAYERS`) and charge each share
+to its own budget, as the spawn now does (#264); then the planner's bound for a split worker counts
+the processor's room for a further run, read live.
 
 #### #256 — On WSL, `nvidia-smi` waits for a busy card, so a reading taken mid-reply is "unknown"
 `P3` · memory · **OPEN** — 2026-10-12 · history: #244's fix (archive § "Closed after 2026-10-02" → #244)
@@ -2376,7 +2397,37 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-16, not yet released** (#286)
+**Closed 2026-10-16, not yet released** (#286, #287, #288, #289)
+- #287 — **A prompt is no longer priced from a forward that timed a load or a round trip.** Field
+  report #037: a 5-segment route was predicted `predicted_ms=63844516` (17.7 h) with
+  `prompt:63277600`, and took 145 s. The prompt term multiplies a measured ms per (layer × byte) by
+  the prompt's tokens, and that figure was the one the TIMEOUT reads — cold samples kept on purpose
+  (a forward that loaded the model), and forwards of a few tokens whose ~700 ms is the visit, not
+  the bytes, then multiplied by a prompt ninety times longer. A prompt is now priced from its own
+  figure (`ModelSpeed::prompt_ms_per_layer_byte`): warm forwards only, and one carrying less than
+  `PROMPT_RATE_MIN_BYTES` (256 KB, `GOODPUT_SAMPLE_MIN_BYTES`' number) may lower it but never set
+  or raise it — BBR's app-limited rule, inverted for a time per byte. With none, the device-class
+  prior, as for a node never measured. This node's own split segments, timed under its id all
+  along, now price it too (they were ignored behind a comment saying they were never timed). The
+  timeout and ranking figures are unchanged. Test
+  `a_prompt_is_priced_from_warm_forwards_large_enough_to_measure_a_rate`. The same report's
+  privacy notice ("adding about 533 s", the request took 196 s) is priced by the same terms —
+  re-read it on the next report before changing anything there. What remains of the cost model's
+  error is #3's.
+- #288 — **The diagnostics no longer say "suspect that peer" for this node's own refusals.** Report
+  #037's two failures were both this node's memory refusing its own segment of a split; the list
+  named the peer the split ran through, and the repeated-peer note told the tester to suspect it.
+  Each listed failure now carries whether that peer could have caused it — the penalty's answer
+  (`failure_is_penalty_worthy`), not a second reading of the error — shown as "(not that peer's
+  doing)" and left out of the note. Test `a_request_its_reader_left_is_cancelled_with_what_it_was_shown`
+  (router tests), extended.
+- #289 — **A long prompt is planned at its real length.** Report #037: the first plan read
+  `prompt_tokens=Some(2495)` for a prompt of 3,729 — the router's four-bytes-a-token estimate, which
+  under-counts code and dense text, priced the prefill and every holder's conversation memory for
+  two-thirds of it. A prompt the estimate puts at 1,024 tokens or more is now rendered and counted
+  (`cached_prefix::worth_counting`, ~46 ms for 2,744 tokens) wherever this node holds the model's
+  header; a short chat keeps the free estimate. Test
+  `a_long_prompt_is_counted_exactly_and_a_short_one_is_estimated`.
 - #286 — **A part fetched for one request is no longer deleted again when that request's demand
   fades, and a model held whole is no longer holed by the replica count.** Field report #037
   (2026-10-16, an RTX 3060 node holding all 34 parts of Qwen3-30B-A3B): prune deleted part 25

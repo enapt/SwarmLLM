@@ -3582,6 +3582,51 @@ records it (`forward_verify_through_segments` did not, for ours).
 
 → `docs/invariants/scheduling.md` § "A node is ranked on warm work only"
 
+### A prompt is priced from warm forwards that carried enough to measure a rate (2026-10-16, FUTURE_WORK #287)
+
+**`ModelSpeed::prompt_ms_per_layer_byte` is the one figure a prompt's price
+multiplies** (`SharedState::observed_prompt_ms_per_layer_byte` →
+`NodeCandidate::observed_prefill_ms_per_layer_byte` → `parallax::prefill_ms_per_layer`).
+Three figures come from the same prefill samples and want different things:
+
+| figure | reads | keeps |
+|---|---|---|
+| `prefill_ms_per_layer_byte` | the segment TIMEOUT (`predict_ms`) | every sample — cold ones are pessimism, which is safe for a wait |
+| `warm_prefill_ms_per_layer_byte` | RANKING, converted to ONE token (`ranking_ms_per_layer`) | warm samples — a visit's fixed cost belongs in a one-token figure |
+| `prompt_ms_per_layer_byte` | a prompt's PRICE, scaled to its tokens | warm samples of at least `PROMPT_RATE_MIN_BYTES`; a smaller one may only lower it |
+
+**What it replaced.** The price read the timeout's figure. Report #037 (a
+tester, v0.3.240): a 5-segment route through two peers was predicted
+`predicted_ms=63844516` — `prompt:63277600`, 17.6 hours — and took 145 s.
+Two errors multiplied: a cold sample is a model load (the reason ranking was
+moved off it on 2026-09-27, above), and a forward of a few tokens to a peer
+abroad spends its ~700 ms on the round trip and the peer's per-visit costs,
+so ms ÷ (layers × 40 KB) is a "rate" a 3,700-token prompt multiplies by ninety.
+
+**Why the threshold, and why it may still lower.** It is BBR's app-limited rule
+turned over: a throughput sample that did not fill the pipe may RAISE the
+estimate, never lower it; a per-byte TIME is the inverse, so a small forward may
+LOWER the rate, never set or raise it. Same number as
+`GOODPUT_SAMPLE_MIN_BYTES` (256 KB), for the same split — a sample is either
+the round trip or the payload (§ "Latency wants an average; capacity wants a
+maximum"). With no rate, the device-class prior prices the prompt, as for a node
+never measured — pessimistic, never excluding.
+
+**This node too.** A split's local segments have been timed under our own id
+since `forward_through_segments_inner` began measuring itself, but the planner
+gave the local candidate `None` behind a comment saying they never were. It
+reads the same figure now; a model only ever run whole here (the `Generate`
+path, untimed this way) keeps the prior.
+
+**What it does not fix.** The figure is still a ratio through the origin: a
+warm 256 KB forward to a far peer carries some of the visit's fixed cost, and a
+prompt many times its size scales that too. A two-term prefill fit (fixed +
+slope × bytes, as `LinearFit` does for decode) is the next step if a field
+trace shows the price still well above the time on long prompts — collect
+first (FUTURE_WORK #3).
+
+Test: `a_prompt_is_priced_from_warm_forwards_large_enough_to_measure_a_rate`.
+
 ## A split between two machines that could each run the model is measured by restricting BOTH (2026-09-27)
 
 **`swarm_route.pretend_peer_holds` — `{"<prefix>": "4-7"}` — plans as though
@@ -4052,7 +4097,13 @@ Full evidence: `docs/invariants/scheduling.md`
 A tester pressed Stop after 30 s of an embedding model repeating one word. The
 node logged `outcome=error tokens=0` at warn, and its diagnostics listed the
 request among "recent inference failures" as "served peer <its own id>"
-(field report 2026-10-15). Three things were wrong, each in its own place:
+(field report 2026-10-15). A day later the same list told another tester to
+"suspect that peer" for two of their node's OWN memory refusals — each split
+named the peer it ran through (report #037). A listed failure now carries
+`RequestFailure::peer_may_be_at_fault`, the penalty's answer
+(`failure_is_penalty_worthy`, never a second reading of the error); one that is
+not is shown "(not that peer's doing)" and left out of the repeated-peer note
+(FUTURE_WORK #288). Three things were wrong the first time, each in its own place:
 
 - **The outcome.** Three router completion paths (`dispatch_single`, the
   batched local and distributed paths) each mapped a result to an outcome with

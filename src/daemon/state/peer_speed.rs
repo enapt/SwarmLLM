@@ -87,6 +87,22 @@ const RANKING_STALE_AFTER: Duration = Duration::from_secs(600);
 /// peer can ever come back from.
 const MIN_INTACT_DELIVERY_RATIO: f32 = 0.05;
 
+/// The smallest prompt forward, in activation bytes, whose time measures a
+/// per-byte RATE ([`ModelSpeed::prompt_ms_per_layer_byte`]).
+///
+/// **Below it the time is the visit, not the bytes.** A forward of "Hi" to a
+/// peer abroad spends its ~700 ms on the round trip and the peer's per-visit
+/// costs; divided by the 40 KB it carried, that is a rate a 3,700-token prompt
+/// then multiplies by ninety. A tester's 5-segment route was priced at
+/// `prompt:63277600` — 17.6 hours — and took 145 s (field report 2026-10-16).
+/// BBR treats such a sample as app-limited: a throughput sample that did not
+/// fill the pipe may RAISE the estimate, never lower it. A per-byte TIME is the
+/// inverse, so a small forward may LOWER the rate, never raise or set it. The
+/// same number as `network::manager::tensors::GOODPUT_SAMPLE_MIN_BYTES`, where
+/// the same split — a sample is either the round trip or the payload — divides
+/// the goodput estimator from the RTT one.
+pub(crate) const PROMPT_RATE_MIN_BYTES: usize = 256 * 1024;
+
 /// Least samples before a two-term fit is trusted over the proportional EMA.
 ///
 /// Two points define a line, so three is the first count that can disagree with
@@ -210,6 +226,13 @@ pub struct ModelSpeed {
     /// layer — 224x its advertised figure — and it was the node's OWN price,
     /// since this map is keyed by node id, ours included.
     warm_prefill_ms_per_layer_byte: Option<f32>,
+    /// The same coefficient from WARM forwards large enough to measure a rate
+    /// ([`PROMPT_RATE_MIN_BYTES`]) — the one a prompt's PRICE multiplies
+    /// (`parallax::prefill_ms_per_layer`). Kept apart from the two above: the
+    /// timeout wants the pessimism of a cold sample, ranking converts this
+    /// figure to ONE token where a visit's fixed cost belongs, and a prompt's
+    /// price scales it to thousands, where it does not.
+    prompt_ms_per_layer_byte: Option<f32>,
     /// EMA of ms per layer for a single-token decode step.
     decode_ms_per_layer: Option<f32>,
     /// EMA of ms per layer for one decode step of a WHOLE model run on the
@@ -251,6 +274,7 @@ impl ModelSpeed {
         Self {
             prefill_ms_per_layer_byte: None,
             warm_prefill_ms_per_layer_byte: None,
+            prompt_ms_per_layer_byte: None,
             decode_ms_per_layer: gossip_seed.map(|s| s * layer_work),
             delegated_ms_per_layer: None,
             decode_fit: LinearFit::default(),
@@ -315,6 +339,15 @@ impl ModelSpeed {
                 Some(prev) => ALPHA * sample + (1.0 - ALPHA) * prev,
                 None => sample,
             });
+            // A forward too small to measure a rate may only lower it.
+            let rate = &mut self.prompt_ms_per_layer_byte;
+            *rate = match *rate {
+                Some(prev) if activation_bytes >= PROMPT_RATE_MIN_BYTES || sample < prev => {
+                    Some(ALPHA * sample + (1.0 - ALPHA) * prev)
+                }
+                None if activation_bytes >= PROMPT_RATE_MIN_BYTES => Some(sample),
+                kept => kept,
+            };
         }
         // The same sample, unnormalised, for the two-term fit. Fed the RAW
         // wall-clock and layer count rather than the per-layer figure above,
@@ -463,6 +496,23 @@ impl ModelSpeed {
             return None;
         }
         self.prefill_ms_per_layer_byte
+    }
+
+    /// The rate a prompt is PRICED at on this peer, in ms per (layer x
+    /// activation byte): warm forwards only, and only those large enough to
+    /// measure one (`prompt_ms_per_layer_byte`). `None` prices the prompt from
+    /// the device-class prior, as for a peer never measured.
+    ///
+    /// **Why not the coefficient the timeout reads.** That one keeps cold
+    /// samples, and a segment that paid for loading the model then priced every
+    /// prompt sent there for ten minutes; and it keeps small ones, whose time is
+    /// the round trip. A tester's route was priced `prompt:63277600` that way
+    /// (report #037). Expires like the others.
+    pub fn prompt_ms_per_layer_byte(&self) -> Option<f32> {
+        if self.updated_at.elapsed() >= RANKING_STALE_AFTER {
+            return None;
+        }
+        self.prompt_ms_per_layer_byte
     }
 
     /// Per-layer cost of running a **whole model** on this peer, in ms — the
@@ -1079,6 +1129,42 @@ mod ranking_trusts_only_what_it_measured {
         // And a cold sample after a warm one does not move the ranking figure.
         warm.observe(WorkKind::Prefill, 60_000, 1, 204_564, false);
         assert!((warm.ranking_ms_per_layer().unwrap() - 196.066).abs() < 0.01);
+    }
+
+    /// **A prompt is priced from warm forwards that carried enough to measure a
+    /// rate** (report #037: a route priced `prompt:63277600`, 17.6 h, took
+    /// 145 s). A cold forward timed a load; a forward of a few tokens timed the
+    /// visit — ~700 ms over 40 KB is a rate a 3,700-token prompt multiplies by
+    /// ninety. Neither sets the price; a small one may only lower it.
+    #[test]
+    fn a_prompt_is_priced_from_warm_forwards_large_enough_to_measure_a_rate() {
+        let hi = 10 * 4_096;
+        let long = 3_729 * 4_096;
+        assert!(hi < PROMPT_RATE_MIN_BYTES && long >= PROMPT_RATE_MIN_BYTES);
+
+        let mut s = ModelSpeed::default();
+        s.observe(WorkKind::Prefill, 60_000, 2, long, false);
+        s.observe(WorkKind::Prefill, 700, 2, hi, true);
+        assert_eq!(
+            s.prompt_ms_per_layer_byte(),
+            None,
+            "a load and a visit set no price: the prior stands, as for a node never measured"
+        );
+        assert!(
+            s.prefill_ms_per_layer_byte().is_some(),
+            "the timeout keeps both"
+        );
+
+        // A warm prompt of its own size measures the rate.
+        s.observe(WorkKind::Prefill, 1_124, 2, long, true);
+        let rate = s.prompt_ms_per_layer_byte().expect("measured");
+        assert!((rate - 1_124.0 / (2.0 * long as f32)).abs() < 1e-9);
+        // A short one after it is the visit again: it does not raise the price…
+        s.observe(WorkKind::Prefill, 700, 2, hi, true);
+        assert_eq!(s.prompt_ms_per_layer_byte(), Some(rate));
+        // …but one that ran faster still per byte may lower it.
+        s.observe(WorkKind::Prefill, 1, 2, hi, true);
+        assert!(s.prompt_ms_per_layer_byte().unwrap() < rate);
     }
 
     /// The reliability figure must start optimistic, fall with losses, and

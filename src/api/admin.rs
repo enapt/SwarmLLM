@@ -675,7 +675,13 @@ pub async fn diagnostics(
         // Newest first — that is what someone debugging just-now wants.
         for f in failures.iter().rev() {
             let where_ = match &f.served_by {
-                Some(peer) => format!("peer {}", &peer[..peer.len().min(16)]),
+                Some(peer) if f.peer_may_be_at_fault => {
+                    format!("peer {}", &peer[..peer.len().min(16)])
+                }
+                Some(peer) => format!(
+                    "peer {} (not that peer's doing)",
+                    &peer[..peer.len().min(16)]
+                ),
                 None => "locally".to_string(),
             };
             let _ = writeln!(
@@ -690,9 +696,10 @@ pub async fn diagnostics(
             );
         }
         // Repeated failures against one peer is the signature we have
-        // historically taken rounds to spot; count it explicitly.
+        // historically taken rounds to spot; count it explicitly — the
+        // failures that peer could have caused, never this node's own.
         let mut per_peer: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for f in &failures {
+        for f in failures.iter().filter(|f| f.peer_may_be_at_fault) {
             if let Some(p) = &f.served_by {
                 *per_peer.entry(p.as_str()).or_default() += 1;
             }

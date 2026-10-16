@@ -1334,4 +1334,24 @@ async fn a_request_its_reader_left_is_cancelled_with_what_it_was_shown() {
         .insert(request.id, plan(vec![me, peer.clone()]));
     let listed = super::failure_worth_listing(&shared_state, &request, &boom, 1).unwrap();
     assert_eq!(listed.served_by, Some(peer.to_string()));
+    assert!(
+        !listed.peer_may_be_at_fault,
+        "our own bug names nobody else"
+    );
+
+    // This node's memory refusing its own segment of a split still names the
+    // peer it ran through — and is not that peer's doing (field report
+    // 2026-10-16: "suspect that peer" for two of this node's refusals).
+    let refused = crate::error::SwarmError::LocalMemoryUnavailable(
+        "8 layers 40..48 of m need about 3016 MB more than this node has left".into(),
+    );
+    let listed = super::failure_worth_listing(&shared_state, &request, &refused, 1).unwrap();
+    assert_eq!(listed.served_by, Some(peer.to_string()));
+    assert!(!listed.peer_may_be_at_fault);
+    let silent = crate::error::SwarmError::PeerUnresponsive("went silent".into());
+    let listed = super::failure_worth_listing(&shared_state, &request, &silent, 1).unwrap();
+    assert!(
+        listed.peer_may_be_at_fault,
+        "a peer that went silent may be"
+    );
 }

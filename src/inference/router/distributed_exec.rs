@@ -1124,7 +1124,7 @@ pub(super) async fn execute_request(
 /// bugs it did not cause. Being wrong the other way just means a genuinely
 /// bad peer keeps its credits for one more request; trust scoring and
 /// spot-checks still catch it.
-fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool {
+pub(super) fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bool) -> bool {
     // Nobody else was involved — there is no peer to blame.
     if !had_remote_segment {
         return false;

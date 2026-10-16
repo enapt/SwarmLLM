@@ -192,8 +192,9 @@ struct NodeCandidate {
     /// 2026-10-07). `None` for this node, whose loader decides, and for a peer
     /// that advertises no ceiling: unknown, never "no room".
     max_hostable_layers_at_ceiling: Option<u32>,
-    /// MEASURED prefill coefficient for this peer, ms per (layer x activation
-    /// byte). `None` until this node has prefilled through it — see
+    /// MEASURED prompt rate for this candidate, ms per (layer x activation
+    /// byte) — `SharedState::observed_prompt_ms_per_layer_byte`, warm forwards
+    /// large enough to measure one. `None` until one has been timed — see
     /// `parallax::vertex_cost` for what stands in meanwhile.
     observed_prefill_ms_per_layer_byte: Option<f32>,
     /// Whether this peer has told us it has a graphics card. Used ONLY to pick
@@ -4166,15 +4167,15 @@ impl PipelineScheduler {
             } else {
                 self.shared_state.peer_expected_attempts(&node_id)
             };
-            let observed_prefill_ms_per_layer_byte = if &node_id == local_node_id {
-                // Our own prefill cost is not measured through this path (there
-                // is no segment round trip to sample), so the local node prices
-                // prefill from its capability prior like any unmeasured peer.
-                None
-            } else {
-                self.shared_state
-                    .observed_prefill_ms_per_layer_byte(&node_id, &manifest.id)
-            };
+            // This node too: a split's local segments are timed and recorded
+            // under our own id (`forward_through_segments_inner`), yet the
+            // device-class prior went on pricing them — one ratio for a card,
+            // one for a processor, whichever a card/processor split whose
+            // prompt is read on the card resembles. A whole-model run here is
+            // not timed this way, so a model only ever run whole keeps the prior.
+            let observed_prefill_ms_per_layer_byte = self
+                .shared_state
+                .observed_prompt_ms_per_layer_byte(&node_id, &manifest.id);
             // Which prefill prior applies — a card reads a prompt ~40x faster
             // than it writes a reply, a processor ~4.5x. It follows the device
             // the request would use, not the device the node owns.

@@ -4479,3 +4479,10 @@ GossipSub evaluation: ~100k duplicates at D=4, ~227k at D=8). Flood publishing a
 each message to every directly connected peer, so in a swarm this small the mesh mostly carries
 copies. Test `a_node_that_cached_many_addresses_of_few_peers_runs_the_small_tier`, red with the
 address count.
+
+**Measured on the fleet, 2026-10-16** (release node, 6 peers all on v0.3.240, idle, 2.1 → 3.1 h
+up, two `/api/admin/stats` readings 59 min apart): **2.7-3.2 copies** of each message on every
+topic, 6.7 KB/s out (8.8 on .239), 3.3 KB/s of it gossip (6.5). `swarm/regions` now carries
+demand gossip alone (`ModelDemandGossip`, 3.0 a minute). What is left is the manifests:
+`swarm/models` is 84% of the gossip sent (`ModelManifest` 0.83 a minute received, ~35 KB each,
+forwarded on) — the case for announce-then-pull (FUTURE_WORK #91 (2)).

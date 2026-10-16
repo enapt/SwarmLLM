@@ -45,6 +45,12 @@ pub use types::{
 /// `active_pipelines`, so asked before `finalize_request` clears it: the first
 /// segment a PEER ran, absent when every segment ran here. The plan's first
 /// segment alone named this node as the "peer" of a local request.
+///
+/// Whether that peer can have caused it is the penalty's answer
+/// (`failure_is_penalty_worthy`), not a second reading of the error: a split
+/// whose LOCAL segment was refused for memory still names the peer it ran
+/// through, and the diagnostics told a tester to "suspect that peer" for two of
+/// this node's own refusals (field report 2026-10-16).
 pub(crate) fn failure_worth_listing(
     shared_state: &crate::daemon::SharedState,
     request: &crate::types::InferenceRequest,
@@ -64,11 +70,14 @@ pub(crate) fn failure_worth_listing(
                 .find(|s| &s.node_id != me)
                 .map(|s| s.node_id.to_string())
         });
+    let peer_may_be_at_fault =
+        distributed_exec::failure_is_penalty_worthy(err, served_by.is_some());
     Some(crate::daemon::state::RequestFailure {
         at: chrono::Utc::now(),
         request_id: request.id.to_string(),
         model: request.model_id.0.clone(),
         served_by,
+        peer_may_be_at_fault,
         error: err.to_string(),
         elapsed_ms,
     })
