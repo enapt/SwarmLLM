@@ -6026,6 +6026,20 @@ async fn handle_daemon_msg(
             models.retain(|&(ls, le, _, _), _| !(ls == layer_start && le == layer_end));
             tracing::info!(layer_start, layer_end, "model-worker: unloaded shard range");
         }
+        DaemonMsg::PlaceRange {
+            layer_start,
+            layer_end,
+            placement,
+        } => {
+            // Recorded before the range's first forward, which this loop takes
+            // after it (#265); the loader asks `split::placement_of`.
+            crate::inference::split::place_range(layer_start, layer_end, placement);
+            tracing::info!(
+                layers = format!("[{layer_start}..{layer_end})"),
+                ?placement,
+                "model-worker: placing a later range where the daemon found room for it"
+            );
+        }
         DaemonMsg::ExportPrefixSnapshot {
             request_id,
             model_id,

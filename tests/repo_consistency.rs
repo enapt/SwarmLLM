@@ -11062,10 +11062,11 @@ fn an_admission_refusal_is_the_variant_the_router_re_plans() {
         );
     }
     assert_eq!(
-        refusals, 2,
-        "expected both admission refusals — the spawn-time one and the \
-         growth-time one. A change in that count means this guard is looking at \
-         different code than it was written for"
+        refusals, 3,
+        "expected the three admission refusals — the spawn-time one, the \
+         growth-time one, and a split growth's processor share \
+         (`charge_segment_as_split`, #265). A change in that count means this \
+         guard is looking at different code than it was written for"
     );
 }
 

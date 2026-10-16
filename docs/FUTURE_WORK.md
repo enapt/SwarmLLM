@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #291**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #292**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -59,31 +59,27 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
-6. **#265** — a node holding PART of a model on a card/processor split fails the request when the
-   plan gives it a second run of layers: the worker charges every later range to the card alone
-   (field report #037, twice, 2026-10-16 — a whole copy ran locally in 6.7 s). Ranked above new
-   models because the node said it could serve and then did not.
-7. **#115** — Gemma 4's other sizes: (3b) the 26B-A4B (a user's request: a dense feed-forward
+6. **#115** — Gemma 4's other sizes: (3b) the 26B-A4B (a user's request: a dense feed-forward
    beside routed experts in every layer) and (3c) E2B/E4B (the sizes small computers pick:
    per-layer token embeddings, shared KV layers); then the Gemma 3/4 vision projectors and the
    drafters. All are refused by name today, never loaded wrong.
-8. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 6.7 KB/s on the .240
+7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 6.7 KB/s on the .240
    fleet (8.8 on .239), ~3 copies of each message (from ~6.3), measured 2026-10-16. The manifests
    are 84% of the gossip sent: next (2) announce-then-pull for manifests.
-9. **#251** — `owned_by: "local"` reads as "my data stays here": keep-on-this-computer per request
+8. **#251** — `owned_by: "local"` reads as "my data stays here": keep-on-this-computer per request
    on every surface, and the route on a streamed `/v1/responses` and in MCP.
-10. **#252** — a peer's measured context is not gossiped, so a planner cannot size a peer's share
+9. **#252** — a peer's measured context is not gossiped, so a planner cannot size a peer's share
    before asking ((a) parked: no named client reads the listed context).
-11. **#3**, **#180** — the routing cost model mis-prices a split by regime (one peer's fit,
+10. **#3**, **#180** — the routing cost model mis-prices a split by regime (one peer's fit,
     2026-10-15: a measured per-visit hop 0.78, a `net:0` hop 1.53 under-priced, drafter arms 0.39
     unpriced), which keeps partial ranges off; fit per term from a second peer's traffic and
     several reply lengths, never tune the constant.
-12. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
+11. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
-13. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
+12. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
-14. **#228** — Qwen 3.5 without speculation (its state cannot be wound back yet).
-15. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
+13. **#228** — Qwen 3.5 without speculation (its state cannot be wound back yet).
+14. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
     decision, with research, when picked up.
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
@@ -1716,32 +1712,22 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
-#### #265 — A later range loaded into a card/processor split worker is charged to the card whatever the loader does with it
-`P2` · memory · **OPEN** — 2026-10-13, raised P3 → P2 2026-10-16 (seen twice in report #037) · history: found closing #264
+#### #291 — A running split worker's further room is not offered to the planner, nor weighed for promotion
+`P3` · memory · **OPEN** — 2026-10-16 · history: what #265's fix left
 
-A split worker is spawned with `--gpu-layers N` (`GPU_LAYER_LIMIT`), and the loader puts the first
-N layers of EVERY range it loads on the card — so a second range (a failover onto this node, a
-re-plan) puts N more there than admission sized the card for. `charge_additional_segment` charges
-the whole range to the worker's one accountant (`holds_gpu_memory` → the card) at the card's
-per-layer rate, which refuses it when the card is full (a `LocalMemoryUnavailable` the router
-re-plans) rather than overcommitting — so the cost seen is a split worker that cannot take a second
-range, not a crash. **Seen in report #037 (2026-10-16, a 12 GB card, Qwen3-30B-A3B, v0.3.239 and
-v0.3.240), and a request FAILED each time:** a node holding all but one or two parts (#286's prune
-holes) was planned two or three local runs around a one-layer hop to a peer — the planner holds such
-a chain to the card's room (`parallax::local_fits`), so the plan came from the `LocalUnbounded` rung,
-which asks the loader. The worker took the first run as a split (experts of 26 layers in RAM), and
-the next was refused on the card alone: `8 layers 40..48 … need about 3016 MB more … (its worker is
-already holding 5992 MB)`; on .240, `26 layers 13..39 … 9802 MB more … 3345 MB` with the machine's
-24,000 MB cap far from reached. The re-plan had no other route, and the request failed where a
-whole copy ran locally in 6.7 s. #286 removes the holes that made two runs necessary; a node that
-holds PART of a model still meets this. A second, smaller gap on the same path: with a worker live,
-the planner weighs the card reading the last admission stored (`card_budget_for_planning`), while
-the growth reads the card live — the planner can offer growth into room another program has since
-taken. Next: place a later range's layers by the room each device has (the card's share against
-`vram_budget_now`, the rest on the processor — per-range placement the worker is told with the
-range, in place of the process-wide `GPU_LAYER_LIMIT` / `CPU_EXPERT_LAYERS`) and charge each share
-to its own budget, as the spawn now does (#264); then the planner's bound for a split worker counts
-the processor's room for a further run, read live.
+Since #265, a live card worker that cannot take a range whole takes it across the card and the
+processor (`charge_segment_as_split`), so report #037's plans now run. Three narrower things are
+left. (a) The planner still bounds a running worker by the card's room (`parallax::local_fits`),
+so such a plan is found only on the relaxed `LocalUnbounded` rung; a separate allowance for one
+further split run would find it first, but gotcha #806 is the trap (an allowance that holds for
+one loader call handed out for every call). (b) A worker spawned whole on the card that grew a
+split range keeps `card_split: None` on its handle, so `short_of_the_card` and promotion never
+weigh it — the range stays split after the card frees until the worker is retired or unloaded.
+(c) A later range's processor-held caches are bounded inside the worker by the spawn's grant
+(`--kv-budget-bytes`), else by the machine; the pool charges them, the worker's own ceiling is
+not raised. None of these fails a request. Next, if a field report shows (b) or (c): keep each
+range's placement on the handle beside its charge (`RangeCharge`), and have `short_of_the_card`
+read it.
 
 #### #256 — On WSL, `nvidia-smi` waits for a busy card, so a reading taken mid-reply is "unknown"
 `P3` · memory · **OPEN** — 2026-10-12 · history: #244's fix (archive § "Closed after 2026-10-02" → #244)
@@ -2401,7 +2387,24 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-16, not yet released** (#286, #287, #288, #289, #290)
+**Closed 2026-10-16, not yet released** (#265, #286, #287, #288, #289, #290)
+- #265 — **A node holding part of a model across its graphics card and its processor no longer
+  fails a request that gives it a second run of layers.** Field report #037 (RTX 3060 12 GB,
+  Qwen3-30B-A3B, v0.3.239 and v0.3.240): the worker took the first run as a split (26 layers'
+  experts in RAM) and the next was refused on the card alone — `8 layers 40..48 … need about
+  3016 MB more`, `26 layers 13..39 … 9802 MB more` — with the machine's memory cap far from
+  reached; the worker was in use, so it could not be retired, and the request failed where a whole
+  copy ran locally in 6.7 s. Worse, the worker's loader applied the spawn's process-wide
+  `--gpu-layers` / `--cpu-moe-layers` to every range, so the refusal priced a placement it would
+  never have used. Growth now has the spawn's split rung (`charge_segment_as_split`, after the
+  reclaim and before retirement): `card_split` against the card's room, each share charged to its
+  own budget and recorded on the range (`RangeCharge`), the machine's through the requester's cap.
+  The worker is told each range's placement before any forward for it (`DaemonMsg::PlaceRange`,
+  under `spawn_lock`) and the loader asks `split::placement_of` at all three load sites. Tests
+  `a_running_split_worker_grows_a_range_across_the_card_and_the_processor` (red with the rung
+  skipped — report #037's own refusal — and red without the whole-card placement message),
+  `a_range_loads_where_the_daemon_placed_it_and_any_other_as_the_spawn_said` (red with the table
+  ignored). The planner's bound is unchanged (gotcha #806). What is left is #291.
 - #290 — **A connection that has just died no longer reads as a peer that stopped answering.** The
   live node logged "Peer has not answered 20 requests in a row — closing the connection" 16 times
   on 2026-10-16 between 06:51 and 07:20 (1-2 a day before), mostly against field report #037's
@@ -2843,7 +2846,7 @@ grep `^| N |`).
   granted 1,525 MB (`--kv-budget-bytes`, read by the worker in place of the machine's 12 GB), one
   reply in 20 s with the load. Tests `a_split_charges_the_machine_for_the_layers_it_keeps_on_the_processor`,
   `a_departing_split_gives_back_both_of_its_charges` (red without the fix). Left open: a later range
-  loaded into a split worker — #265.
+  loaded into a split worker — #265, closed 2026-10-16.
 - #262 — **a model split between the graphics card and the processor no longer refuses a long
   conversation the card has room for.** The card's conversation budget was charged the caches of
   the layers on the PROCESSOR too, and the processor side had no budget of its own. On an 8 GB card

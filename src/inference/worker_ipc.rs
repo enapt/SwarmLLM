@@ -51,6 +51,16 @@ pub enum DaemonMsg {
         layer_start: usize,
         layer_end: usize,
     },
+    /// Where a range this worker is about to load goes — sent by the daemon's
+    /// growth (`ModelProcessPool::grow_worker`) before the range's first
+    /// forward, so a later range is placed by the room each device has NOW
+    /// rather than by the spawn's `--gpu-layers` / `--cpu-moe-layers`
+    /// (FUTURE_WORK #265). `None` places it as the spawn said. No reply.
+    PlaceRange {
+        layer_start: usize,
+        layer_end: usize,
+        placement: Option<crate::inference::split::RangePlacement>,
+    },
     /// Item 8 Phase 2b: daemon's reply to a `WorkerMsg::PrefixFetchProbe`.
     /// When `present == true`, the BLAKE3-verified `KvSnapshot` bytes are
     /// carried in the IPC binary-payload slot (not inside this JSON header).

@@ -38,7 +38,7 @@ A resource taken before an `.await` is returned by a guard that releases on DROP
 
 **`SharedState::committed_memory_mb`** is the single answer to "how much memory is committed", asked of `ModelProcessPool` (`vram_committed_mb` / `ram_committed_mb`). Never sum `split_models` (headers, no worker). Guard: `a_memory_budget_is_charged_by_the_pool_never_by_the_metadata_map`.
 
-**Every byte a spawn places is charged to the device it lands on** — a card/processor split's card share to the card (`card_share_of_split_mb`) AND its processor share to the machine (`process_pool::ram_charged_share`, through the same `admit_to_cpu_as` / `record_cpu_kv_budget` as a processor placement; #264) — for experts kept in RAM (`CardSplit::ExpertsInRam`), the card less those experts and the machine those experts alone (`experts_in_ram_mb`). `SpawnCharge` carries both onto the worker (`WorkerHandle::host_share_mb`) and a departure releases both.
+**Every byte a spawn places is charged to the device it lands on** — a card/processor split's card share to the card (`card_share_of_split_mb`) AND its processor share to the machine (`process_pool::ram_charged_share`, through the same `admit_to_cpu_as` / `record_cpu_kv_budget` as a processor placement; #264) — for experts kept in RAM (`CardSplit::ExpertsInRam`), the card less those experts and the machine those experts alone (`experts_in_ram_mb`). `SpawnCharge` carries both onto the worker (`WorkerHandle::host_share_mb`) and a departure releases both. A later range grown as a split is charged the same way, each share recorded on the range (`RangeCharge`, #265).
 
 → `docs/invariants/memory.md` § "A budget is charged by whatever owns the resource"
 
@@ -64,7 +64,7 @@ Whenever code waits for a subprocess, handle it dying instead (`spawn_worker` ra
 
 ## A worker that cannot grow gets the spawn's ladder, not a refusal (2026-09-27)
 
-**`ModelProcessPool::grow_worker` is the one place a live worker takes on a new range**: reclaim idle models' graphics memory (`free_vram_for_admission`), then — only if `WorkerHandle::in_use` is false — retire the worker so `get_or_spawn` places the range afresh. Never retire one mid-conversation (#93).
+**`ModelProcessPool::grow_worker` is the one place a live worker takes on a new range**: reclaim idle models' graphics memory (`free_vram_for_admission`), then the range across the card and the processor (`charge_segment_as_split`, #265: the spawn's `card_split`, each share charged to its own budget and recorded on the range), then — only if `WorkerHandle::in_use` is false — retire the worker so `get_or_spawn` places the range afresh. Never retire one mid-conversation (#93). **A range is loaded where it was charged**: the worker is told (`DaemonMsg::PlaceRange`, under `spawn_lock`, before any forward for it) and the loader asks `split::placement_of` — never the process-wide `--gpu-layers` / `--cpu-moe-layers` alone, which a split spawn would apply to every later range.
 
 → `docs/invariants/memory.md` § "A worker that cannot grow gets the spawn's ladder (2026-09-27)"
 

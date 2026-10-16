@@ -190,6 +190,72 @@ pub(crate) fn cpu_expert_layers() -> Option<usize> {
     }
 }
 
+/// Where ONE range's layers go — the two numbers the loader obeys
+/// (`SplitLoadOptions::gpu_layers` / `cpu_expert_layers`), for a range the
+/// daemon placed on its own (FUTURE_WORK #265).
+///
+/// `--gpu-layers` and `--cpu-moe-layers` were sized at spawn for the FIRST
+/// range against the room the card had then, and the loader applied them to
+/// every range the worker loaded after it, while the daemon charged each later
+/// range to the card whole: a range the loader would have put mostly in RAM
+/// was refused for card memory it never needed (report #037: "8 layers 40..48
+/// … need about 3016 MB more"), and one the card could take whole was split
+/// anyway. A later range is now placed by the daemon from the room each device
+/// has, and the worker is told before its first forward
+/// (`DaemonMsg::PlaceRange`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RangePlacement {
+    /// The range's first N layers on the card and the rest on the processor;
+    /// `None` puts every one on the card.
+    pub gpu_layers: Option<usize>,
+    /// Of the card-held layers, the first N keep their routed experts in the
+    /// machine's memory; `None` keeps none there.
+    pub cpu_expert_layers: Option<usize>,
+}
+
+impl RangePlacement {
+    /// Every layer of the range on the card, its experts with it.
+    pub const ON_THE_CARD: Self = Self {
+        gpu_layers: None,
+        cpu_expert_layers: None,
+    };
+}
+
+/// The placements the daemon sent for ranges after the spawn's, by
+/// `[layer_start, layer_end)`. A range with none is placed as the spawn said.
+static RANGE_PLACEMENTS: std::sync::Mutex<Vec<((usize, usize), RangePlacement)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Record where `[layer_start, layer_end)` goes, or with `None` forget it so
+/// the range is placed as the spawn said. Called from the worker's message
+/// loop, which handles messages in order, so it lands before the forward that
+/// loads the range.
+pub fn place_range(layer_start: usize, layer_end: usize, placement: Option<RangePlacement>) {
+    let mut placements = RANGE_PLACEMENTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    placements.retain(|(range, _)| *range != (layer_start, layer_end));
+    if let Some(placement) = placement {
+        placements.push(((layer_start, layer_end), placement));
+    }
+}
+
+/// Where the loader puts `[layer_start, layer_end)`: the daemon's placement
+/// for that range when it sent one, else the spawn's (`--gpu-layers`,
+/// `--cpu-moe-layers`). The ONE answer every load path asks.
+pub(crate) fn placement_of(layer_start: usize, layer_end: usize) -> RangePlacement {
+    RANGE_PLACEMENTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(range, _)| *range == (layer_start, layer_end))
+        .map(|&(_, placement)| placement)
+        .unwrap_or(RangePlacement {
+            gpu_layers: gpu_layer_limit(),
+            cpu_expert_layers: cpu_expert_layers(),
+        })
+}
+
 pub fn cpu_kv_budget_bytes() -> Option<u64> {
     match CPU_KV_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed) {
         0 => None,
@@ -203,6 +269,42 @@ pub fn max_seq_len_override() -> Option<usize> {
         None
     } else {
         Some(v)
+    }
+}
+
+#[cfg(test)]
+mod range_placement_tests {
+    use super::{cpu_expert_layers, gpu_layer_limit, place_range, placement_of, RangePlacement};
+
+    /// A range the daemon placed loads as it was told; any other range — and
+    /// one whose placement was withdrawn — loads as the spawn said (#265).
+    /// Ranges far past any real model's, so no other test's can collide in
+    /// this process-wide table.
+    #[test]
+    fn a_range_loads_where_the_daemon_placed_it_and_any_other_as_the_spawn_said() {
+        let as_spawned = || RangePlacement {
+            gpu_layers: gpu_layer_limit(),
+            cpu_expert_layers: cpu_expert_layers(),
+        };
+        let split = RangePlacement {
+            gpu_layers: None,
+            cpu_expert_layers: Some(7),
+        };
+        place_range(9_000, 9_020, Some(split));
+        assert_eq!(placement_of(9_000, 9_020), split);
+        assert_eq!(
+            placement_of(9_000, 9_019),
+            as_spawned(),
+            "only that exact range"
+        );
+        place_range(9_000, 9_020, Some(RangePlacement::ON_THE_CARD));
+        assert_eq!(
+            placement_of(9_000, 9_020),
+            RangePlacement::ON_THE_CARD,
+            "a later word replaces the first"
+        );
+        place_range(9_000, 9_020, None);
+        assert_eq!(placement_of(9_000, 9_020), as_spawned());
     }
 }
 

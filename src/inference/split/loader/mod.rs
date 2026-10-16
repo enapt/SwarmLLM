@@ -543,6 +543,9 @@ impl SplitModel {
             tracing::info!(layers = %(layer_start..=layer_end).count(), layer_start, layer_end, "Split model using CPU (no CUDA available)");
         }
 
+        // This range's own placement where the daemon sent one
+        // (`split::placement_of`, #265), else the spawn's.
+        let placement = crate::inference::split::placement_of(layer_start, layer_end);
         Self::load_model_from_content(
             ct,
             &mut file,
@@ -553,8 +556,8 @@ impl SplitModel {
                 is_first,
                 is_last,
                 parallel_data: Some(mmap.as_ref()),
-                gpu_layers: crate::inference::split::gpu_layer_limit(),
-                cpu_expert_layers: crate::inference::split::cpu_expert_layers(),
+                gpu_layers: placement.gpu_layers,
+                cpu_expert_layers: placement.cpu_expert_layers,
             },
         )
     }

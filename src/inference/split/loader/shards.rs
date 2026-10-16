@@ -118,6 +118,9 @@ impl SplitModel {
                 ))
             })?;
             let device = super::load_device(force_cpu);
+            // This range's own placement where the daemon sent one
+            // (`split::placement_of`, #265), else the spawn's.
+            let placement = crate::inference::split::placement_of(layer_start, layer_end);
             return Self::load_model_from_content(
                 ct,
                 &mut cursor,
@@ -128,8 +131,8 @@ impl SplitModel {
                     is_first,
                     is_last,
                     parallel_data: Some(mmap.as_ref()),
-                    gpu_layers: crate::inference::split::gpu_layer_limit(),
-                    cpu_expert_layers: crate::inference::split::cpu_expert_layers(),
+                    gpu_layers: placement.gpu_layers,
+                    cpu_expert_layers: placement.cpu_expert_layers,
                 },
             );
         }
@@ -283,6 +286,9 @@ impl SplitModel {
             );
         }
 
+        // This range's own placement where the daemon sent one
+        // (`split::placement_of`, #265), else the spawn's.
+        let placement = crate::inference::split::placement_of(layer_start, layer_end);
         Self::load_model_from_content(
             ct,
             &mut reader,
@@ -294,8 +300,8 @@ impl SplitModel {
                 is_last,
                 // ShardReader can't be shared across threads for parallel loading
                 parallel_data: None,
-                gpu_layers: crate::inference::split::gpu_layer_limit(),
-                cpu_expert_layers: crate::inference::split::cpu_expert_layers(),
+                gpu_layers: placement.gpu_layers,
+                cpu_expert_layers: placement.cpu_expert_layers,
             },
         )
     }

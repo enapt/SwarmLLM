@@ -1939,8 +1939,9 @@ RTX 3070 Laptop, graphics budget 6019-6162 MB (Windows and a browser hold
    because it sees a conversation between two forwards — retiring one of those
    is #93's garbage-reply defect.
 3. **A worker in use keeps its refusal** (`LocalMemoryUnavailable`, which the
-   router re-plans). A worker charged against system memory also keeps it: both
-   extra rungs are about the card.
+   router re-plans) — once the split rung below has also said no. A worker
+   charged against system memory also keeps it: every extra rung is about the
+   card.
 4. **Retire the handle this call was given, never whichever the map holds** —
    a concurrent spawn may already have replaced it (`Arc::ptr_eq`).
 
@@ -1952,6 +1953,60 @@ guard (`an_admission_refusal_is_the_variant_the_router_re_plans`) was
 re-pointed: the growth refusal now carries its variant inside `GrowthRefused`,
 and the guard's needle `return Err(SwarmError::` counted one refusal where there
 are two. Its self-test now plants the wrapped spelling too.
+
+### The split rung, and a range loaded where it was charged (2026-10-16, FUTURE_WORK #265)
+
+Growth still lacked the spawn's third rung — part of the range on the card, the rest on the
+processor — and the loader did not do what growth charged anyway. **Field report #037** (RTX 3060
+12 GB, Qwen3-30B-A3B, v0.3.239 and v0.3.240): a node holding all but one or two parts was planned
+two or three local runs around a one-layer hop; the worker took the first as a split (26 layers'
+experts in RAM), and the next run was refused on the card alone — `8 layers 40..48 … need about
+3016 MB more … (its worker is already holding 5992 MB)`, `26 layers 13..39 … 9802 MB more … 3345
+MB` — with the machine's 24,000 MB cap far from reached. The worker was in use, so the retirement
+rung could not help, and the request failed where a whole copy ran locally in 6.7 s. Underneath:
+the worker's loader applied the spawn's process-wide `--gpu-layers` / `--cpu-moe-layers`
+(`GPU_LAYER_LIMIT` / `CPU_EXPERT_LAYERS`) to EVERY range it loaded, so a growth charged to the
+card whole was loaded with the spawn's split, and a refused range was priced as a placement the
+loader would never have used.
+
+**The rule.** A live card worker that cannot take a range whole is offered it as a split
+(`ModelProcessPool::charge_segment_as_split`), after the reclaim and BEFORE retirement — a worker
+in use, report #037's case, can never be retired:
+
+- **Placed by the spawn's own decision** — `card_split` against the card's room as the refused
+  admission read it (budget − committed + what the replaced ranges hold), every layer on the card
+  with the fewest layers' experts in RAM, else the range's first layers on the card. The worker's
+  forward buffers are already held, so they are not kept back a second time.
+- **Each share charged to its own budget** (`split_growth_cost`: the card share at the card's
+  per-layer rate, capped at the room; the machine's at the processor's rate, or the experts kept in
+  RAM alone) — the card through `admit_to_gpu`, the machine through `admit_to_cpu` under the
+  requester's cap (#266). A machine that cannot take its share is the refusal
+  (`LocalMemoryUnavailable`, the third `if !admitted` block the admission guard counts).
+- **Recorded on the range** — `RangeCharge { range, cost: RangeCost { mb, host_mb } }` — so a
+  departure or a range that later replaces it releases BOTH shares (`release_subsumed_segments`,
+  `after_worker_gone_charge` → `host_share_mb`).
+- **The worker is told where the range goes** — `DaemonMsg::PlaceRange`, sent under `spawn_lock`
+  right after the charge, so it precedes every forward for the range (a worker reads its socket in
+  order). The loader asks **`split::placement_of(layer_start, layer_end)`** at all three load
+  sites — the daemon's placement for that range, else the spawn's. A range a split worker takes
+  whole on the card is told `RangePlacement::ON_THE_CARD`, or the loader would split it by the
+  spawn's numbers after it was charged as whole.
+
+The planner's bound for a running worker stays the card's room (gotcha #806: an allowance that
+holds for one loader call must not be handed out for every call). This rung serves the plans that
+already ask for more — the relaxed `LocalUnbounded` rung, a failover onto this node.
+
+Tests: `a_running_split_worker_grows_a_range_across_the_card_and_the_processor` (a worker in use
+with 26 layers' experts in RAM on a 7,000 MB card grows 26..28 whole on the card, then 28..48 with
+some experts in RAM: the machine charged exactly those experts, the card never past its budget,
+both released on departure) — red with the rung skipped (report #037's own refusal, "20 layers
+28..48 … need about 4800 MB more"), and red with the whole-card placement message removed;
+`a_range_loads_where_the_daemon_placed_it_and_any_other_as_the_spawn_said` — red with the
+daemon's table ignored. Left (FUTURE_WORK #291): the planner does not yet offer a running split
+worker's further room, a worker that grew a split is not weighed for promotion back to the card
+(its handle's `card_split` stays the spawn's), and a later range's processor-held caches are
+bounded inside the worker by the spawn's grant (`--kv-budget-bytes`), else by the machine — the
+pool charges them, the worker's own ceiling is not raised.
 
 ### The planner's half (added the same day)
 
@@ -3020,8 +3075,8 @@ cache is on the card. The card is charged the whole segment by the admission est
 those experts (`card_share_of_split_mb`), capped at the room the split was sized against.
 Test: `a_split_keeping_experts_in_ram_charges_each_device_for_its_share`.
 
-**Residual.** A LATER segment loaded into a split worker (`charge_additional_segment`) is charged to
-the worker's one accountant (`holds_gpu_memory` → the card), wherever the loader puts its layers.
+**A later range** loaded into a split worker is placed and charged the same way, share by share
+(2026-10-16, #265) — § "A worker that cannot grow gets the spawn's ladder" → "The split rung".
 
 ## The owner's own load is weighed against the owner's memory cap (2026-10-14, FUTURE_WORK #266)
 

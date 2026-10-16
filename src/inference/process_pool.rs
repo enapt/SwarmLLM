@@ -248,9 +248,9 @@ enum Retirement {
 enum Growth {
     /// The worker now holds it — use this handle.
     Grown(Arc<WorkerHandle>),
-    /// The worker was idle and could not grow on the card, so it was retired:
-    /// spawn afresh for the range, where admission can place it part on the
-    /// card and part on the processor — a rung growth does not have.
+    /// The worker was idle and no part of the range fit its card, so it was
+    /// retired: spawn afresh for the range, where admission weighs it with the
+    /// worker's card memory given back — and can put it on the processor.
     Respawn,
 }
 
@@ -594,7 +594,7 @@ struct WorkerHandle {
     /// The cost is recorded per range so a range that is later SUBSUMED can be
     /// released for exactly what it was charged — see
     /// [`WorkerHandle::release_subsumed_segments`].
-    charged_segments: std::sync::Mutex<Vec<((u32, u32), u64)>>,
+    charged_segments: std::sync::Mutex<Vec<RangeCharge>>,
     /// Is this worker's memory charged against the system-RAM budget?
     ///
     /// Decided ONCE at spawn by `charges_ram` and recorded, because a later
@@ -605,9 +605,10 @@ struct WorkerHandle {
     /// to avoid.
     charged_against_ram: bool,
     /// A card/processor split's processor share, in MB, charged to the RAM
-    /// budget at spawn beside `charged_mb`'s card share (#264); 0 for a worker
+    /// budget beside `charged_mb`'s card share — at spawn (#264), and by every
+    /// later range growth placed partly on the processor (#265); 0 for a worker
     /// on one device. Released with the worker.
-    host_share_mb: u64,
+    host_share_mb: AtomicU64,
     /// The longest conversation the model this worker holds whole admits, as
     /// the worker last reported it (`WorkerMsg::ContextFits`); 0 = no figure.
     /// Written by the reader actor, read by [`ModelProcessPool::context_fits`].
@@ -1430,7 +1431,7 @@ impl WorkerHandle {
     fn segment_is_charged(&self, segment: (u32, u32)) -> bool {
         self.charged_segments
             .lock()
-            .map(|v| v.iter().any(|(r, _)| *r == segment))
+            .map(|v| v.iter().any(|c| c.range == segment))
             .unwrap_or(false)
     }
 
@@ -1459,25 +1460,31 @@ impl WorkerHandle {
     /// and in the same direction as the daemon's existing single-charge
     /// simplification; giving the daemon a rank-aware model is the real fix and
     /// is recorded in `docs/FUTURE_WORK.md`.
-    fn release_subsumed_segments(&self, incoming: (u32, u32)) -> u64 {
+    ///
+    /// Returns what the dropped ranges held of `charged_mb` and, separately, of
+    /// `host_share_mb` — a range grown partly onto the processor holds both
+    /// (#265).
+    fn release_subsumed_segments(&self, incoming: (u32, u32)) -> RangeCost {
         let Ok(mut v) = self.charged_segments.lock() else {
-            return 0;
+            return RangeCost::default();
         };
-        let mut freed = 0u64;
-        v.retain(|&(r, mb)| {
-            let subsumed = strictly_subsumes(incoming, r);
+        let mut freed = RangeCost::default();
+        v.retain(|c| {
+            let subsumed = strictly_subsumes(incoming, c.range);
             if subsumed {
-                freed = freed.saturating_add(mb);
+                freed = freed.plus(c.cost);
             }
             !subsumed
         });
         // Saturating, always: an under-run wraps the budget to 18 exabytes and
         // admits everything for ever (the rule `release_reserved` already
         // follows).
-        self.charged_mb.fetch_sub(
-            freed.min(self.charged_mb.load(Ordering::Acquire)),
-            Ordering::AcqRel,
-        );
+        for (held, mb) in [
+            (&self.charged_mb, freed.mb),
+            (&self.host_share_mb, freed.host_mb),
+        ] {
+            held.fetch_sub(mb.min(held.load(Ordering::Acquire)), Ordering::AcqRel);
+        }
         freed
     }
 
@@ -1490,27 +1497,38 @@ impl WorkerHandle {
     /// range less what those held, and that peak is what admission must weigh.
     /// One predicate for both, so the admitted discount and the later release
     /// cannot disagree about which ranges it covers.
-    fn subsumed_charge_mb(&self, incoming: (u32, u32)) -> u64 {
+    fn subsumed_charge(&self, incoming: (u32, u32)) -> RangeCost {
         self.charged_segments
             .lock()
             .map(|v| {
                 v.iter()
-                    .filter(|&&(r, _)| strictly_subsumes(incoming, r))
-                    .fold(0u64, |acc, &(_, mb)| acc.saturating_add(mb))
+                    .filter(|c| strictly_subsumes(incoming, c.range))
+                    .fold(RangeCost::default(), |acc, c| acc.plus(c.cost))
             })
-            .unwrap_or(0)
+            .unwrap_or_default()
     }
 
     /// Record that this worker has been charged for `segment`, and add `mb` to
     /// what it owes. Idempotent on the range.
     fn record_charged_segment(&self, segment: (u32, u32), mb: u64) {
+        self.record_charged_range(segment, RangeCost { mb, host_mb: 0 });
+    }
+
+    /// [`Self::record_charged_segment`] for a range placed on both devices:
+    /// `cost.mb` joins `charged_mb` (the card's), `cost.host_mb` joins
+    /// `host_share_mb` (the machine's), so a departure releases both (#265).
+    fn record_charged_range(&self, segment: (u32, u32), cost: RangeCost) {
         if let Ok(mut v) = self.charged_segments.lock() {
-            if v.iter().any(|(r, _)| *r == segment) {
+            if v.iter().any(|c| c.range == segment) {
                 return;
             }
-            v.push((segment, mb));
+            v.push(RangeCharge {
+                range: segment,
+                cost,
+            });
         }
-        self.charged_mb.fetch_add(mb, Ordering::AcqRel);
+        self.charged_mb.fetch_add(cost.mb, Ordering::AcqRel);
+        self.host_share_mb.fetch_add(cost.host_mb, Ordering::AcqRel);
     }
 
     /// Register `tx` as the response channel for `request_id` and return the
@@ -1909,6 +1927,32 @@ pub(crate) fn charges_ram(going_to_cpu: bool, gpu_detected: bool, build_has_cuda
     going_to_cpu || !gpu_detected || !build_has_cuda
 }
 
+/// What one range a worker holds was charged: `mb` to the worker's own
+/// accountant (`WorkerHandle::charged_mb` — the card, or RAM for a processor
+/// worker) and `host_mb` to the machine beside a card (`host_share_mb`), for
+/// a range grown partly onto the processor (#265).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RangeCost {
+    mb: u64,
+    host_mb: u64,
+}
+
+impl RangeCost {
+    fn plus(self, other: Self) -> Self {
+        Self {
+            mb: self.mb.saturating_add(other.mb),
+            host_mb: self.host_mb.saturating_add(other.host_mb),
+        }
+    }
+}
+
+/// A range a worker has been charged for, and what it cost.
+#[derive(Debug, Clone, Copy)]
+struct RangeCharge {
+    range: (u32, u32),
+    cost: RangeCost,
+}
+
 /// What a spawn's admission charged, carried onto its worker so the release
 /// subtracts exactly this worker's share (`WorkerHandle::charged_mb`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2057,7 +2101,7 @@ impl From<&WorkerHandle> for DepartedWorker {
             freed_gpu_memory: h.holds_gpu_memory(),
             charged_mb: h.charged_mb.load(Ordering::Acquire),
             charged_against_ram: h.charged_against_ram,
-            host_share_mb: h.host_share_mb,
+            host_share_mb: h.host_share_mb.load(Ordering::Acquire),
         }
     }
 }
@@ -2347,6 +2391,23 @@ impl CardSplit {
         let (on_card, total) = self.card_share();
         on_card < total
     }
+
+    /// What a live worker is told for a range split this way
+    /// (`DaemonMsg::PlaceRange`, #265) — the per-range form of what
+    /// `worker_placement_args` puts on a spawn's command line.
+    fn placement(self) -> crate::inference::split::RangePlacement {
+        use crate::inference::split::RangePlacement;
+        match self {
+            Self::Layers { on_card, .. } => RangePlacement {
+                gpu_layers: Some(on_card),
+                cpu_expert_layers: None,
+            },
+            Self::ExpertsInRam { in_ram, .. } => RangePlacement {
+                gpu_layers: None,
+                cpu_expert_layers: Some(in_ram),
+            },
+        }
+    }
 }
 
 /// The fewest of a segment's first layers whose routed experts must stay in
@@ -2412,6 +2473,45 @@ fn card_split(
     }
     split_for_card(inputs, available_bytes)
         .map(|(on_card, total)| CardSplit::Layers { on_card, total })
+}
+
+/// What a range grown onto a live card worker as `split` costs each device
+/// (#265), at the per-layer rates growth charges (`segment_cost_curve`, with
+/// no fixed term — the worker paid that once): the card its card-held layers,
+/// less any experts kept in RAM, never more than `room_mb` (as a spawn's
+/// share is capped, `card_share_of_split_mb`); the machine its processor-held
+/// layers, or those experts (`experts_in_ram_mb`, the loader's own count).
+fn split_growth_cost(
+    split: CardSplit,
+    segment: (u32, u32),
+    card_per_layer_mb: u64,
+    host_per_layer_mb: u64,
+    experts_in_ram_mb: impl FnOnce(usize) -> u64,
+    room_mb: u64,
+) -> RangeCost {
+    let layers = u64::from(segment.1.saturating_sub(segment.0));
+    let (card_mb, host_mb) = match split {
+        CardSplit::Layers { on_card, .. } => {
+            let on_card = u64::try_from(on_card).unwrap_or(u64::MAX).min(layers);
+            (
+                card_per_layer_mb.saturating_mul(on_card),
+                host_per_layer_mb.saturating_mul(layers - on_card),
+            )
+        }
+        CardSplit::ExpertsInRam { in_ram, .. } => {
+            let experts = experts_in_ram_mb(in_ram);
+            (
+                card_per_layer_mb
+                    .saturating_mul(layers)
+                    .saturating_sub(experts),
+                experts,
+            )
+        }
+    };
+    RangeCost {
+        mb: card_mb.min(room_mb),
+        host_mb,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5002,6 +5102,10 @@ impl ModelProcessPool {
             // could not read would be a worse failure than the one prevented —
             // the same treatment `admit_to_gpu` and `admit_to_cpu` give it.
             handle.record_charged_segment(segment, 0);
+            // Nothing judged, so the range goes where the spawn said (#265).
+            if on_gpu {
+                Self::tell_worker_where(handle, model_id, segment, None).await;
+            }
             return Ok(());
         };
         let delta_mb = per_layer_mb.saturating_mul(layers);
@@ -5018,7 +5122,8 @@ impl ModelProcessPool {
         // standing for memory the worker still holds. The discount is read
         // under `spawn_lock`, the same lock the release below runs under, so
         // the two see the same ranges.
-        let subsumed_mb = handle.subsumed_charge_mb(segment);
+        let subsumed = handle.subsumed_charge(segment);
+        let subsumed_mb = subsumed.mb;
         let net_mb = delta_mb.saturating_sub(subsumed_mb);
         let admitted = if on_gpu {
             self.admit_to_gpu(model_id, net_mb)
@@ -5073,7 +5178,8 @@ impl ModelProcessPool {
         // refuses, the forward is never sent and the worker never drops
         // anything — releasing first would free a charge for memory the worker
         // still holds.
-        let released_mb = handle.release_subsumed_segments(segment);
+        let released = handle.release_subsumed_segments(segment);
+        let released_mb = released.mb;
         // The POOL was charged the net figure above, so what the dropped ranges
         // held is already off it — releasing it again would free it twice.
         // Only a difference between what was discounted and what was actually
@@ -5086,6 +5192,12 @@ impl ModelProcessPool {
                 self.release_ram_charge(model_id, unaccounted_mb);
             }
         }
+        // A dropped range grown partly onto the processor (#265) held the
+        // machine's memory too, and this range takes none of it back: the
+        // whole range goes on the card.
+        if released.host_mb > 0 {
+            self.release_ram_charge(model_id, released.host_mb);
+        }
         tracing::info!(
             model = %model_id,
             layers = format!("[{}..{})", segment.0, segment.1),
@@ -5095,7 +5207,190 @@ impl ModelProcessPool {
             on_gpu,
             "Charging an additional segment to a live worker"
         );
+        // Charged as wholly on the card, so it is placed there — overriding a
+        // split spawn's `--gpu-layers` / `--cpu-moe-layers`, which the loader
+        // would otherwise apply to this range too (#265). A worker spawned
+        // wholly on the card keeps whatever its spawn said.
+        if on_gpu {
+            let placement = handle
+                .card_split
+                .map(|_| crate::inference::split::RangePlacement::ON_THE_CARD);
+            Self::tell_worker_where(handle, model_id, segment, placement).await;
+        }
         Ok(())
+    }
+
+    /// Tell a live worker where `segment` goes, before the range's first
+    /// forward (`DaemonMsg::PlaceRange`, FUTURE_WORK #265); `None` places it as
+    /// the spawn said, clearing a placement an earlier, since-dropped copy of
+    /// the range was given.
+    ///
+    /// Called under `spawn_lock`, right after the range is charged, so no
+    /// forward for it reaches the worker first — not this request's, nor
+    /// another's that finds the range charged and goes straight to its forward.
+    /// A send that fails leaves the worker to the forward's own send, which
+    /// fails the same way and evicts it, releasing the charge with it.
+    async fn tell_worker_where(
+        handle: &WorkerHandle,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        placement: Option<crate::inference::split::RangePlacement>,
+    ) {
+        let msg = DaemonMsg::PlaceRange {
+            layer_start: segment.0 as usize,
+            layer_end: segment.1 as usize,
+            placement,
+        };
+        let mut writer = handle.writer.lock().await;
+        if let Err(e) = send_daemon(&mut *writer, &msg, &[]).await {
+            tracing::warn!(
+                model = %model_id,
+                layers = format!("[{}..{})", segment.0, segment.1),
+                error = %e,
+                "Could not tell the model's worker where a range goes — the range's \
+                 own forward will find the worker gone"
+            );
+        }
+    }
+
+    /// Charge `segment` to a live card worker as a card/processor split, when
+    /// the card will not take it whole — the rung a spawn has
+    /// (`partial_gpu_layers`) and growth lacked (FUTURE_WORK #265).
+    ///
+    /// Report #037 (RTX 3060 12 GB, Qwen3-30B-A3B, v0.3.239 and .240): a worker
+    /// spawned with 26 layers' experts in RAM was asked for a second run, and
+    /// growth weighed it as whole layers on the card — "8 layers 40..48 … need
+    /// about 3016 MB more", "26 layers 13..39 … 9802 MB more" — with the
+    /// machine's memory far from full. Both requests failed where a whole copy
+    /// ran locally in 6.7 s. The loader would not even have done what it was
+    /// charged for: it applied the spawn's numbers to every range.
+    ///
+    /// Placed by the spawn's own decision ([`card_split`]: every layer on the
+    /// card with the fewest layers' experts in RAM where the model has routed
+    /// experts, else the range's first layers on the card) against the card's
+    /// room as the refused admission read it, plus what the ranges this one
+    /// replaces hold there. The worker's forward buffers are already held, so
+    /// they are not kept back a second time. Each device is charged its own
+    /// share at growth's per-layer rates ([`split_growth_cost`]), the machine
+    /// through the same admission a processor worker's growth meets — and
+    /// both shares are recorded on the range, so a departure or a range that
+    /// later replaces it releases both.
+    ///
+    /// `Ok(false)`: no part of the range fits the card, its geometry is
+    /// unreadable, or hybrid placement is switched off — the caller goes on
+    /// down the ladder. The planner's bound for a running worker stays the
+    /// card's room (gotcha #806): this rung serves the plans that already
+    /// asked for more — the relaxed `LocalUnbounded` rung, a failover onto this
+    /// node — instead of refusing them.
+    async fn charge_segment_as_split(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        handle: &Arc<WorkerHandle>,
+        requester: Requester,
+    ) -> Result<bool, GrowthRefused> {
+        let _guard = self.spawn_lock.lock().await;
+        if handle.segment_is_charged(segment) {
+            return Ok(true);
+        }
+        if !handle.holds_gpu_memory()
+            || std::env::var("SWARMLLM_HYBRID_OFFLOAD").as_deref() == Ok("0")
+        {
+            return Ok(false);
+        }
+        let Some((inputs, mut expert_bytes)) = self.segment_geometry(model_id, Some(segment))
+        else {
+            return Ok(false);
+        };
+        // The same A/B as a spawn's (`partial_gpu_layers`).
+        if std::env::var("SWARMLLM_EXPERTS_IN_RAM").as_deref() == Ok("0") {
+            expert_bytes.clear();
+        }
+        let (Some((_, card_per_layer_mb)), Some((_, host_per_layer_mb))) = (
+            self.segment_cost_curve(model_id, true),
+            self.segment_cost_curve(model_id, false),
+        ) else {
+            return Ok(false);
+        };
+        let subsumed = handle.subsumed_charge(segment);
+        let room_mb = self
+            .vram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(self.vram_committed_mb())
+            .saturating_add(subsumed.mb);
+        let Some(split) = card_split(
+            &inputs,
+            &expert_bytes,
+            room_mb
+                .saturating_mul(1024 * 1024)
+                .saturating_add(crate::inference::split::hybrid::FORWARD_BUFFER_RESERVE_BYTES),
+        ) else {
+            return Ok(false);
+        };
+        let cost = split_growth_cost(
+            split,
+            segment,
+            card_per_layer_mb,
+            host_per_layer_mb,
+            |in_ram| self.experts_in_ram_mb(model_id, segment, in_ram),
+            room_mb,
+        );
+        let net = RangeCost {
+            mb: cost.mb.saturating_sub(subsumed.mb),
+            host_mb: cost.host_mb.saturating_sub(subsumed.host_mb),
+        };
+        // Sized to the room just read, so this refuses only when the card has
+        // shrunk since: no split, and the caller's refusal stands.
+        if !self.admit_to_gpu(model_id, net.mb) {
+            return Ok(false);
+        }
+        let admitted = self.admit_to_cpu(model_id, net.host_mb, requester);
+        if !admitted {
+            self.release_vram_charge(model_id, net.mb);
+            let held_mb = self.ram_reserved_mb.get(model_id).map(|v| *v).unwrap_or(0);
+            return Err(GrowthRefused {
+                needed_mb: net.host_mb,
+                on_gpu: false,
+                worker_charged_mb: handle.charged_mb.load(Ordering::Acquire),
+                error: SwarmError::LocalMemoryUnavailable(format!(
+                    "{} layers {}..{} of {} need about {} MB more of this computer's memory \
+                     than it has left, beside what the graphics card can take (this model \
+                     already holds {} MB of it) — another holder will have to take that part",
+                    segment.1.saturating_sub(segment.0),
+                    segment.0,
+                    segment.1,
+                    model_id.0,
+                    net.host_mb,
+                    held_mb,
+                )),
+            });
+        }
+        handle.record_charged_range(segment, cost);
+        // As `charge_additional_segment`: the net was admitted, so only what
+        // the dropped ranges held beyond the discount goes back.
+        let released = handle.release_subsumed_segments(segment);
+        let unaccounted = RangeCost {
+            mb: released.mb.saturating_sub(subsumed.mb),
+            host_mb: released.host_mb.saturating_sub(subsumed.host_mb),
+        };
+        if unaccounted.mb > 0 {
+            self.release_vram_charge(model_id, unaccounted.mb);
+        }
+        if unaccounted.host_mb > 0 {
+            self.release_ram_charge(model_id, unaccounted.host_mb);
+        }
+        let placement = split.placement();
+        tracing::info!(
+            model = %model_id,
+            layers = format!("[{}..{})", segment.0, segment.1),
+            card_mb = cost.mb,
+            host_mb = cost.host_mb,
+            ?placement,
+            "The graphics card cannot take this range whole — placing it across the card \
+             and the processor, as a fresh worker would be"
+        );
+        Self::tell_worker_where(handle, model_id, segment, Some(placement)).await;
+        Ok(true)
     }
 
     /// Give a live worker a range it has not held before — and when the card
@@ -5120,9 +5415,12 @@ impl ModelProcessPool {
     ///   and growth cannot place part of a range on the processor.
     ///
     /// So: reclaim first (same guards as the spawn's — idle floor, never a busy
-    /// worker), and if the card still will not take the range and NOTHING is
-    /// using this worker ([`WorkerHandle::in_use`], the single answer), retire it
-    /// and let [`Self::get_or_spawn`]'s slow path place the range afresh. A
+    /// worker); then place the range across the card and the processor, as a
+    /// spawn would ([`Self::charge_segment_as_split`], #265 — the rung that
+    /// serves a worker in use); and if no part of the range fits the card and
+    /// NOTHING is using this worker ([`WorkerHandle::in_use`], the single
+    /// answer), retire it and let [`Self::get_or_spawn`]'s slow path place the
+    /// range afresh. A
     /// worker in use keeps the refusal it always got — retiring it would kill a
     /// conversation mid-reply (#93) — and the router re-plans on it as before.
     /// A worker charged against system memory also keeps it: both extra rungs
@@ -5164,6 +5462,17 @@ impl ModelProcessPool {
                 Ok(()) => return Ok(Growth::Grown(handle)),
                 Err(r) => r,
             };
+        }
+        // Then the spawn's next rung (#265): the range across the card and the
+        // processor. Before retiring, because a worker in use — the case of
+        // report #037, a request's second local run — can never be retired.
+        match self
+            .charge_segment_as_split(model_id, segment, &handle, requester)
+            .await
+        {
+            Ok(true) => return Ok(Growth::Grown(handle)),
+            Ok(false) => {}
+            Err(r) => refused = r,
         }
         // Decide under the spawn lock — the one every charge takes — so a
         // request that grew this same worker between our refusal and here is
@@ -5310,7 +5619,7 @@ impl ModelProcessPool {
         self.live_worker(model_id).is_some_and(|h| {
             h.charged_segments
                 .lock()
-                .map(|v| v.iter().any(|&((s, e), _)| s == 0 && e >= num_layers))
+                .map(|v| v.iter().any(|c| c.range.0 == 0 && c.range.1 >= num_layers))
                 .unwrap_or(false)
         })
     }
@@ -5359,7 +5668,7 @@ impl ModelProcessPool {
         // off disk. A worker holding only the range it was spawned with — the
         // common case — records zero and so costs no read at all, which
         // matters because this also runs on every capability broadcast.
-        let per_layer_mb = if segments.iter().any(|&(_, mb)| mb > 0) {
+        let per_layer_mb = if segments.iter().any(|c| c.cost.mb > 0) {
             self.segment_cost_curve(model_id, handle.holds_gpu_memory())
                 .map(|(_, per_layer)| per_layer)
                 .unwrap_or(0)
@@ -5368,12 +5677,13 @@ impl ModelProcessPool {
         };
         segments
             .iter()
-            .map(|&(range, mb)| HeldRange {
+            .map(|&RangeCharge { range, cost }| HeldRange {
                 range,
                 // What `charge_additional_segment` will actually take off its
                 // admission for this range, in layers — zero for the spawn's
                 // own segment, which is recorded at zero MB.
-                releasable_layers: mb
+                releasable_layers: cost
+                    .mb
                     .checked_div(per_layer_mb)
                     .map_or(0, |layers| u32::try_from(layers).unwrap_or(u32::MAX)),
             })
@@ -7223,7 +7533,7 @@ impl ModelProcessPool {
             charged_mb: AtomicU64::new(charge.mb),
             charged_segments: std::sync::Mutex::new(Vec::new()),
             charged_against_ram: charge.against_ram,
-            host_share_mb: charge.host_share_mb,
+            host_share_mb: AtomicU64::new(charge.host_share_mb),
             gpu_estimate_mb,
             // Only a split is worth recording; a worker wholly on the card
             // says so through `placed_on_cpu_because: None` alone.
@@ -9203,7 +9513,7 @@ mod tests {
 
         // ...and only then do the ranges it covers go.
         let freed = h.release_subsumed_segments((0, 48));
-        assert_eq!(freed, 480, "exactly what those two ranges were charged");
+        assert_eq!(freed.mb, 480, "exactly what those two ranges were charged");
         assert_eq!(
             h.charged_mb.load(Ordering::Acquire),
             480,
@@ -9226,7 +9536,7 @@ mod tests {
         let h = admit_and_insert_cpu_worker(&pool, &model, 0, false).await;
 
         h.record_charged_segment((16, 48), 320);
-        assert_eq!(h.release_subsumed_segments((0, 20)), 0);
+        assert_eq!(h.release_subsumed_segments((0, 20)).mb, 0);
         assert_eq!(h.charged_mb.load(Ordering::Acquire), 320);
         assert!(h.segment_is_charged((16, 48)));
     }
@@ -10764,6 +11074,28 @@ mod tests {
         spawned_at: std::time::Instant,
         card_split: Option<CardSplit>,
     ) -> Arc<WorkerHandle> {
+        let (handle, client) = fake_worker_handle_split_with_its_end(
+            dead_now,
+            placed_on_cpu_because,
+            charged_against_ram,
+            spawned_at,
+            card_split,
+        )
+        .await;
+        // Keep the client end alive for the handle's lifetime.
+        std::mem::forget(client);
+        handle
+    }
+
+    /// [`fake_worker_handle_split`], handing back the WORKER's end of the
+    /// socket, so a test can read what the daemon told the worker.
+    pub(super) async fn fake_worker_handle_split_with_its_end(
+        dead_now: bool,
+        placed_on_cpu_because: Option<CpuReason>,
+        charged_against_ram: bool,
+        spawned_at: std::time::Instant,
+        card_split: Option<CardSplit>,
+    ) -> (Arc<WorkerHandle>, interprocess::local_socket::tokio::Stream) {
         use interprocess::local_socket::{tokio::prelude::*, ListenerOptions};
         let name = format!(
             "/tmp/swarmllm-retire-test-{}.sock",
@@ -10783,8 +11115,6 @@ mod tests {
         });
         let server = listener.accept().await.expect("accept");
         let client = connect.await.expect("join").expect("connect");
-        // Keep the client end alive for the handle's lifetime.
-        std::mem::forget(client);
         let (read_half, write_half) = server.split();
         let responses: ResponseMap = Arc::new(DashMap::new());
         let dead = Arc::new(AtomicBool::new(dead_now));
@@ -10792,7 +11122,7 @@ mod tests {
             let _ = read_half;
             std::future::pending::<()>().await;
         });
-        Arc::new(WorkerHandle {
+        let handle = Arc::new(WorkerHandle {
             child: None,
             exited: Arc::new(AtomicBool::new(true)),
             writer: Mutex::new(write_half),
@@ -10808,11 +11138,12 @@ mod tests {
             charged_segments: std::sync::Mutex::new(Vec::new()),
             placed_on_cpu_because,
             charged_against_ram,
-            host_share_mb: 0,
+            host_share_mb: AtomicU64::new(0),
             gpu_estimate_mb: 0,
             card_split,
             context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        })
+        });
+        (handle, client)
     }
 
     /// The split a RESIDENT worker runs is what the planner prices (#129): such
@@ -12460,6 +12791,118 @@ mod admission_tests {
             p.test_expert_bytes.insert(m.clone(), vec![208 * MIB; 48]);
         }
         (p, m)
+    }
+
+    /// **A running split worker asked for another run places it as a fresh
+    /// worker would, charges each device its share, and tells the worker
+    /// before the range's forward** (#265, report #037). The tester's shape: a
+    /// 30B-A3B worker holding its first run with experts in RAM, mid-request
+    /// (so it can never be retired), asked for more layers. Growth weighed
+    /// every later range as whole layers on the card — "26 layers 13..39 …
+    /// 9802 MB more" — and the request failed with the machine's memory far
+    /// from full, while the loader would have applied the spawn's numbers to
+    /// the range whatever it was charged.
+    #[tokio::test]
+    async fn a_running_split_worker_grows_a_range_across_the_card_and_the_processor() {
+        use crate::inference::split::RangePlacement;
+        use crate::inference::worker_ipc::recv_daemon;
+        let (p, m) = thirty_b_a3b_on_a_card("qwen3-30b-a3b-grows-split", 7_000, true);
+        p.set_ram_budget_mb(100_000);
+        let (h, mut worker_end) = super::tests::fake_worker_handle_split_with_its_end(
+            false,
+            None,
+            false,
+            std::time::Instant::now(),
+            Some(CardSplit::ExpertsInRam {
+                in_ram: 26,
+                total: 26,
+            }),
+        )
+        .await;
+        // The spawn's charge as `get_or_spawn` leaves it: on the card and the
+        // worker, its own range recorded at zero.
+        assert!(p.admit_to_gpu(&m, 3_345));
+        h.charged_mb.store(3_345, Ordering::Release);
+        h.record_charged_segment((0, 26), 0);
+        p.workers.insert(m.clone(), h.clone());
+        h.note_conversation(Uuid::new_v4());
+        /// The next thing the worker was told, which must be a placement.
+        async fn told(
+            worker_end: &mut interprocess::local_socket::tokio::Stream,
+        ) -> ((usize, usize), Option<RangePlacement>) {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), recv_daemon(worker_end))
+                .await
+            {
+                Ok(Ok((
+                    DaemonMsg::PlaceRange {
+                        layer_start,
+                        layer_end,
+                        placement,
+                    },
+                    _,
+                ))) => ((layer_start, layer_end), placement),
+                other => panic!("the worker must be told where the range goes: {other:?}"),
+            }
+        }
+
+        // A range the card takes whole goes there whole — not by the spawn's
+        // experts-in-RAM count, which the loader would otherwise apply.
+        let grown = p
+            .grow_worker(&m, (26, 28), h.clone(), Requester::Owner)
+            .await;
+        assert!(matches!(grown, Ok(Growth::Grown(_))), "{:?}", grown.err());
+        assert_eq!(
+            told(&mut worker_end).await,
+            ((26, 28), Some(RangePlacement::ON_THE_CARD))
+        );
+        assert_eq!(h.host_share_mb.load(Ordering::Acquire), 0);
+        let card_before = h.charged_mb.load(Ordering::Acquire);
+
+        // Twenty more layers do not fit the card whole: every layer goes there
+        // with the fewest layers' experts in the machine's memory.
+        let grown = p
+            .grow_worker(&m, (28, 48), h.clone(), Requester::Owner)
+            .await;
+        assert!(
+            matches!(grown, Ok(Growth::Grown(_))),
+            "a worker in use must take the run across both devices, not refuse it: {:?}",
+            grown.err()
+        );
+        let (range, placement) = told(&mut worker_end).await;
+        assert_eq!(range, (28, 48));
+        let Some(RangePlacement {
+            gpu_layers: None,
+            cpu_expert_layers: Some(in_ram),
+        }) = placement
+        else {
+            panic!("every layer on the card, some experts in RAM: {placement:?}");
+        };
+        assert!((1..20).contains(&in_ram), "{in_ram}");
+        let host_mb = h.host_share_mb.load(Ordering::Acquire);
+        assert_eq!(
+            host_mb,
+            in_ram as u64 * 208,
+            "the machine is charged the experts it keeps"
+        );
+        assert_eq!(
+            p.ram_reserved_mb.get(&m).map(|v| *v),
+            Some(host_mb),
+            "…on the pool's RAM budget too"
+        );
+        assert!(
+            h.charged_mb.load(Ordering::Acquire) > card_before,
+            "the card is charged the rest of the range"
+        );
+        assert!(
+            p.vram_committed_mb() <= 7_000,
+            "and the card is never charged past its budget: {}",
+            p.vram_committed_mb()
+        );
+
+        // A departure gives back both shares.
+        p.after_worker_gone_charge(&m, DepartedWorker::from(&*h), "test");
+        assert_eq!(p.ram_reserved_mb.get(&m).map(|v| *v).unwrap_or(0), 0);
+        assert_eq!(p.vram_reserved_mb.get(&m).map(|v| *v).unwrap_or(0), 0);
     }
 
     /// **A plan weighs the card as it stands, where a spawn could follow**
