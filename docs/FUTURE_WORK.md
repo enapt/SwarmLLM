@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #286**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #287**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2375,6 +2375,27 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-16, not yet released** (#286)
+- #286 — **A part fetched for one request is no longer deleted again when that request's demand
+  fades, and a model held whole is no longer holed by the replica count.** Field report #037
+  (2026-10-16, an RTX 3060 node holding all 34 parts of Qwen3-30B-A3B): prune deleted part 25
+  (`holders=3 target=2`), the download pass fetched it back, prune deleted it 28 s later — three
+  times in 13 h — and a request 0.3.238 answered locally failed on the hole. Our own log showed the
+  same churn across the swarm for a week: `e561df35` dropped 53 parts of a 14B in a day and a half,
+  `d7054949` was at it on v0.3.240. Cause: both passes ask the one predicate (`would_shed_copy`,
+  gotcha #795), but its target moves while the part does not — one request lifts the demand
+  factor to 1.5 (2 → 3 copies) for ~30 min, a ninth peer lifts the floor 2 → 3, and a restart (every
+  update) forgets the demand. Three changes: prune sheds against the highest target of the last
+  24 h (`auto_manage::target_hold`, Kubernetes HPA's scale-down stabilization, kept in redb
+  `measured_here` across restarts) while the download pass reads it as it is; a part of a model
+  this node holds whole (counting the part, so both passes agree) is kept below urgent disk
+  pressure (`holds_whole_model_counting`); a part that arrived within 30 min is not pruned below
+  eager pressure (it only lowered the score). Disk pressure still lowers the held target, so a
+  filling disk frees space as before. Tests `a_part_fetched_on_demand_is_kept_once_the_demand_decays`,
+  `a_part_of_a_model_held_whole_here_is_not_shed_by_the_count`,
+  `prune_waits_for_a_part_that_has_just_arrived` (each red with its change off) and
+  `target_hold::tests::*`. `docs/invariants/memory.md` § "A target that moves is held for a day".
 
 **Closed 2026-10-16 by the doc sweep — shipped earlier, found still listed open** (#172)
 - #172 — **The greedy fallback assigner prices a long prompt.** `scheduler::estimated_cost_per_layer`

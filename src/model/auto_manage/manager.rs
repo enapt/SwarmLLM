@@ -178,6 +178,9 @@ pub struct AutoShardManager {
     /// Carriers passed over for a model after their lease lapsed, and when.
     pub(super) carriers_passed_over:
         dashmap::DashMap<(ModelId, crate::types::NodeId), std::time::Instant>,
+    /// Each model's replica targets over the last day, kept across restarts:
+    /// prune sheds against the highest (`target_hold`, FUTURE_WORK #286).
+    pub(super) targets_seen: super::target_hold::TargetsSeen,
 }
 
 /// A candidate shard identified for auto-download.
@@ -221,6 +224,7 @@ impl AutoShardManager {
             .max_concurrent_downloads
             .max(1);
         let download_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+        let targets_seen = super::target_hold::TargetsSeen::restore(&shared_state.db);
         Self {
             shared_state,
             network_tx,
@@ -231,6 +235,7 @@ impl AutoShardManager {
             carry_curves: dashmap::DashMap::new(),
             carrier_leases: dashmap::DashMap::new(),
             carriers_passed_over: dashmap::DashMap::new(),
+            targets_seen,
         }
     }
 
@@ -787,6 +792,9 @@ impl AutoShardManager {
         if self.shared_state.cfg().auto_manage.prune_enabled {
             self.evaluate_and_prune().await;
         }
+        // Both passes read the targets they act on; keep what they saw.
+        self.targets_seen
+            .persist(&self.shared_state.db, chrono::Utc::now().timestamp());
 
         // R111: refresh the user-visible wishlist at the end of every
         // tick so the dashboard reflects the latest swarm state even

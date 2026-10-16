@@ -7,7 +7,8 @@ use crate::types::{ModelId, NodeId, ShardId};
 use super::manager::{AutoShardManager, PruneCandidate};
 
 /// Protection window — a shard acquired within the last `SHARD_RECENTLY_ACQUIRED_SECS`
-/// gets a scoring penalty so it's not pruned immediately after download.
+/// is not pruned below eager disk pressure, and is scored down above it, so it
+/// is not pruned immediately after download whatever fetched it.
 const SHARD_RECENTLY_ACQUIRED_SECS: u64 = 1800;
 
 /// Does this shard still deserve its anti-thrash protection, given what its
@@ -391,8 +392,9 @@ impl AutoShardManager {
             // loop via `effective_prune_target`, which handles both the
             // pressure-adjusted nudge and the contribution-auto saturation
             // override — at swarm scale an idle node sheds slack without
-            // waiting for local pressure to build.
-            let target = self.geo_target_replicas(&manifest.id, config.min_replicas, pool_size);
+            // waiting for local pressure to build. The HELD target — the highest
+            // of the last day — never the one this instant reads (`target_hold`).
+            let target = self.shed_target_replicas(&manifest.id, config.min_replicas, pool_size);
             let contribution_auto = live.node.contribution_auto;
 
             for shard in &manifest.shards {
@@ -580,6 +582,14 @@ impl AutoShardManager {
                 .await
                 // The task itself failing tells us nothing about the shard.
                 .unwrap_or(true);
+                // Below eager disk pressure a part that has just arrived is
+                // not shed at all: the penalty alone only reordered the
+                // candidates, and a node whose ONLY candidate was a part that
+                // landed 28 s earlier deleted it (field report 2026-10-16). A
+                // copy that is not ours to host is still given back at once.
+                if recently_acquired && !not_ours_to_host && disk_pressure < PRESSURE_NORMAL {
+                    continue;
+                }
                 if recently_acquired {
                     score -= 0.2;
                 }
@@ -823,7 +833,7 @@ impl AutoShardManager {
             // file delete frees disk, never graphics memory (gotcha #795).
             let fresh_pressure = self.disk_pressure();
             let target_now = self.pressure_adjusted_target(
-                self.geo_target_replicas(&candidate.model_id, config.min_replicas, pool_size),
+                self.shed_target_replicas(&candidate.model_id, config.min_replicas, pool_size),
                 fresh_pressure,
                 config.min_replicas,
             );
@@ -1406,8 +1416,11 @@ impl AutoShardManager {
             return Some("this copy carries the model");
         }
         let pool_size = crate::pool::scope::effective_pool_size(&self.shared_state);
+        // The highest target of the last day, not this instant's: demand and
+        // the peer count move it while nothing about the part changes, and the
+        // download pass fetched on the reading of ITS moment (`target_hold`).
         let target =
-            self.geo_target_replicas(&shard_id.model_id, live.auto_manage.min_replicas, pool_size);
+            self.shed_target_replicas(&shard_id.model_id, live.auto_manage.min_replicas, pool_size);
         // In auto mode, a shard over-replicated by ≥SATURATION_FACTOR_AUTO×
         // target bypasses the RELAXED nudge and uses the raw target — so a
         // node with zero local pressure still sheds once the swarm has plenty.
@@ -1419,6 +1432,18 @@ impl AutoShardManager {
             live.auto_manage.min_replicas,
         ) {
             return Some("not more copies than the target");
+        }
+        // A part of a model this node holds WHOLE — counting this part, so the
+        // download pass asking before the part is here gets the same answer —
+        // is not surplus by the count: shedding it frees one part and turns the
+        // one computer that answers with no hop into a split, the hole a
+        // request then fails on (field report 2026-10-16: a 30B's part 25,
+        // pruned beside two other holders, failed a request 0.3.238 answered
+        // locally). Copies of partial holders go first; only an urgent disk
+        // takes one. After the count, so the files are read only for a part
+        // the count would shed (`parts_missing_here` stats each part).
+        if pressure < PRESSURE_URGENT && self.holds_whole_model_counting(shard_id) {
+            return Some("this computer holds the whole model");
         }
         // Region-aware: never the last holder in our region.
         self.would_eliminate_region(shard_id, local_node_id, holders)

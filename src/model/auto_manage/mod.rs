@@ -11,6 +11,7 @@ mod parallax;
 mod prune;
 pub mod quant;
 mod scoring;
+mod target_hold;
 #[cfg(test)]
 mod test_support;
 pub mod vram;

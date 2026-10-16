@@ -414,6 +414,17 @@ routing candidate, so the scheduler can hand a segment to a peer that does not
 hold those weights — which is one way a request comes to spend its first-token
 deadline waiting on a peer that was never going to answer.
 
+**A peer deleting and re-fetching its own parts** shows the same lines with a
+different shape: many drops for one (peer, model), the `retained=` count
+climbing back between them. `examples/peer_prune_churn.py node.log.1 node.log`
+prints each peer's timeline. On 2026-10-16 it showed one peer dropping 53 parts
+of a 14B in a day and a half — the replica target moving with demand, the peer
+count and every restart (FUTURE_WORK #286). From the release after v0.3.240 a
+node sheds against the highest target of the last day, so a row that still
+shows drops every few minutes from a peer on that release is a new cause: grep
+that peer's own log for `Pruning over-replicated shard` and the
+`AutoShardManager: requesting shard download` lines between them.
+
 ## "Why hasn't this node fixed its copy?" — the copy repair's own account (#217)
 
 From v0.3.225, `swarmllm diagnostics` has a `-- copy repair --` section:

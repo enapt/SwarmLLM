@@ -779,6 +779,71 @@ side judges at the pressure AFTER the fetch, cumulatively within a cycle
 (`parts_chosen_together_are_judged_together`); file decisions never read
 graphics memory.
 
+### A target that moves is held for a day — and a model held whole is not holed by the count (2026-10-16, FUTURE_WORK #286)
+
+**One predicate, one input read at two moments.** After #795 both passes ask
+`copy_kept_because`, but its replica target (`geo_target_replicas`) is a
+function of things that move while the part does not: the demand factor (one
+request puts the 10-minute EMA at 0.15, over the 0.1 threshold — ×1.5, so 2 → 3
+copies on a swarm of up to eight — and three decays later it is back under),
+the pool size (`peer_registry.len() + 1`: a ninth peer lifts the floor from
+`pool/3 = 2` to 3, and peers reconnect ~7 times an hour), and a restart, which
+starts demand at zero (it is in memory only, and every release's auto-update
+restarts every node). The download pass fetched below the target as it read at
+its moment; prune shed above it as it read at its own.
+
+Field evidence. Report #037 (2026-10-16): `aa3d1e66`, all 34 parts of
+Qwen3-30B-A3B-Q4, part 25 pruned at `holders=3 target=2` 10:53, fetched back
+11:07-11:09, pruned again at 11:09:31 (28 s after it landed), then again
+13:42 and 02:34 — and a card-free request that 0.3.238 answered locally failed
+on the hole (two local segments around a one-layer hop, the second refused).
+From the live node's log of peer announcements (`examples/peer_prune_churn.py`,
+which groups `Peer retracted shards it no longer hosts` and `withdrawn was
+reinstated` by peer and model): `e561df35` 53 drops of a 14B over 10-09/10, its kept count
+climbing back between them (~27 GB of re-fetch for one model); `e561df35` 52
+events on a 30B Q2-K 10-12/13; `d7054949` dropping Q2-K parts from 05:39
+10-16, three minutes after its v0.3.240 restart, fetching eight back from
+06:53 and dropping again at 07:27.
+
+**The rule, from Kubernetes' Horizontal Pod Autoscaler** (KEP-853,
+`behavior.scaleDown.stabilizationWindowSeconds`, default 300 s against a 15 s
+sync — ~20 samples): scale up at once; scale DOWN only to the HIGHEST
+recommendation within the window. Here: the download pass reads the target as
+it is; prune reads `shed_target_replicas` — the highest `geo_target_replicas`
+has returned in the last 24 h (`target_hold::TargetsSeen`, every reading
+recorded whichever pass took it). A day, not five minutes: demand follows the
+day, and an hour's window sheds a model used each evening every night. Kept in
+redb (`measured_here` / `replica_targets_seen`, as the load rate is), written
+after each evaluation when it changed, each target re-recorded at most every
+10 min — so an update does not read as "nobody needs the extra copies". Disk
+pressure still lowers the held figure (`effective_prune_target`), so a filling
+disk frees space as before; the fetch side's own judgment at the pressure
+after the fetch is unchanged.
+
+**A model held whole is not holed by the count.** Below urgent disk pressure,
+a part is not surplus when this node holds every part of its model counting
+that part (`holds_whole_model_counting`, through `parts_missing_here`).
+Shedding it frees one part and turns the one computer answering the model with
+no hop into a split. Counting the part makes the download pass's question
+("would prune shed it once landed?") the same as prune's, so a part that
+completes a model is fetched at the pressure prune keeps it at
+(`a_part_of_a_model_held_whole_here_is_not_shed_by_the_count`, a MIDDLE part:
+a whole model's ends are already held by prompt privacy, which passed the first
+draft of that test without the rule). It is asked after the count says shed,
+so the files are read only for the few parts the count would delete. It adds no
+fetch: the download pass still offers a part only below the raw target.
+
+**And a part that has just arrived waits.** `SHARD_RECENTLY_ACQUIRED_SECS`
+(30 min) lowered the score by 0.2 and nothing else — the tester's 28 s prune
+was a node whose only candidate was that part. Below eager pressure it now
+skips the part (a copy that is not ours to host is still given back at once);
+above, it is scored down as before. It covers fetches the target does not
+drive — a carrier, a repair.
+
+What a change must keep: the download pass never reads the held target (it
+would stop fetching what demand asks for); every target reading goes through
+`geo_target_replicas`, so both passes' readings are recorded.
+
 ### A model nobody chose that has its safety training removed is not hosted automatically (2026-10-15)
 
 A tester's brand-new laptop held all 8 parts of

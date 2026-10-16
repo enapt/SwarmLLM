@@ -1002,7 +1002,28 @@ impl AutoShardManager {
         };
 
         let global_target = (global_floor as f64 * demand_factor).ceil() as u32;
-        global_target.clamp(min_replicas, (pool_size as u32).max(min_replicas))
+        let target = global_target.clamp(min_replicas, (pool_size as u32).max(min_replicas));
+        // Every reading is remembered, whichever pass took it: the one the
+        // download pass fetched on is what prune must not shed below.
+        self.targets_seen
+            .observe(model_id, target, chrono::Utc::now().timestamp());
+        target
+    }
+
+    /// The target PRUNE sheds against: the highest [`Self::geo_target_replicas`]
+    /// has read within `target_hold::HOLD_SECS` — the download pass fetches on
+    /// the target as it reads now, so a part one request fetched is not surplus
+    /// once that request's demand decays (`target_hold`, FUTURE_WORK #286).
+    pub(super) fn shed_target_replicas(
+        &self,
+        model_id: &ModelId,
+        min_replicas: u32,
+        pool_size: usize,
+    ) -> u32 {
+        let now_target = self.geo_target_replicas(model_id, min_replicas, pool_size);
+        self.targets_seen
+            .held(model_id, chrono::Utc::now().timestamp())
+            .map_or(now_target, |held| held.max(now_target))
     }
 }
 
@@ -1276,10 +1297,10 @@ mod fetch_what_prune_keeps {
     const MIB: u64 = 1024 * 1024;
     const PART: u64 = 500 * MIB;
 
-    /// A connected peer 10 ms away holding shard 1 of `mid`. Close, so the
-    /// region guard's no-region fallback (two holders under 200 ms) lets prune
-    /// shed this node's copy, as it did on the tester's node.
-    fn close_peer_holding_shard_1(state: &Arc<SharedState>, byte: u8, mid: &ModelId) {
+    /// A connected peer 10 ms away holding shard `index` of `mid`. Close, so
+    /// the region guard's no-region fallback (two holders under 200 ms) lets
+    /// prune shed this node's copy, as it did on the tester's node.
+    fn close_peer_holding(state: &Arc<SharedState>, byte: u8, mid: &ModelId, index: u32) {
         let peer = NodeId([byte; 32]);
         state.peer_registry.insert(
             peer.clone(),
@@ -1304,16 +1325,25 @@ mod fetch_what_prune_keeps {
         state.model_registry.record_shard_holder(
             ShardId {
                 model_id: mid.clone(),
-                index: 1,
+                index,
             },
             peer,
         );
     }
 
-    /// A two-part model: this node holds part 0, two close peers hold part 1,
-    /// and enough demand that the swarm wants THREE copies of each part.
+    /// A three-part model: this node holds part 0, two close peers hold part
+    /// 1, three hold part 2, and enough demand that the swarm wants THREE
+    /// copies of each part. Part 2 keeps the model short of whole here once
+    /// part 1 lands, so these tests judge the replica count, not the
+    /// whole-model rule.
     fn busy_model(state: &Arc<SharedState>, manager: &AutoShardManager, name: &str) -> ModelId {
-        let mid = register_manifest_with_sized_shards(state, name, 16, &[(0, 8), (8, 16)], PART);
+        let mid = register_manifest_with_sized_shards(
+            state,
+            name,
+            24,
+            &[(0, 8), (8, 16), (16, 24)],
+            PART,
+        );
         state.model_registry.record_shard_holder(
             ShardId {
                 model_id: mid.clone(),
@@ -1323,8 +1353,11 @@ mod fetch_what_prune_keeps {
         );
         // On disk too, or the download pass offers part 0 as a gap to refill.
         write_sparse_shards(state, &mid, [0], PART);
-        close_peer_holding_shard_1(state, 7, &mid);
-        close_peer_holding_shard_1(state, 8, &mid);
+        close_peer_holding(state, 7, &mid, 1);
+        close_peer_holding(state, 8, &mid, 1);
+        for byte in [7, 8, 9] {
+            close_peer_holding(state, byte, &mid, 2);
+        }
         state
             .models
             .model_request_counts
@@ -1400,6 +1433,150 @@ mod fetch_what_prune_keeps {
         assert!(
             fetched(&manager, &state, 8_000).is_empty(),
             "at 85% after it lands, prune keeps two copies: a third is not fetched"
+        );
+    }
+
+    /// **The loop the target's own movement drove** (field report 2026-10-16,
+    /// FUTURE_WORK #286). Demand put the target at three copies, so the
+    /// download pass fetched a third; the demand decayed — one request's
+    /// average falls under its threshold half an hour on — and the target read
+    /// two, so prune, asking the same predicate, called the copy just fetched
+    /// surplus. Peers did this for days. Prune sheds against the highest target
+    /// of the last day (`target_hold`).
+    #[test]
+    fn a_part_fetched_on_demand_is_kept_once_the_demand_decays() {
+        let (state, manager) = manager_with(Config::default());
+        let mid = busy_model(&state, &manager, "busy-model");
+        assert_eq!(fetched(&manager, &state, 2_000), vec![(mid.clone(), 1)]);
+
+        // It landed: this node is its third holder…
+        let local = state.identity.node_id().clone();
+        let part1 = ShardId {
+            model_id: mid.clone(),
+            index: 1,
+        };
+        state
+            .model_registry
+            .record_shard_holder(part1.clone(), local.clone());
+        write_sparse_shards(&state, &mid, [1], PART);
+        // …and the demand that wanted it has gone.
+        state.models.model_request_counts.remove(&mid);
+        state.region_demand.clear();
+        let pool = crate::pool::scope::effective_pool_size(&state);
+        assert_eq!(
+            manager.geo_target_replicas(&mid, 2, pool),
+            2,
+            "fixture: the target now reads two copies"
+        );
+
+        let holders = [local, NodeId([7; 32]), NodeId([8; 32])];
+        assert!(
+            !manager.would_shed_copy(&part1, &holders, 0.6, &[]),
+            "the copy demand fetched is not surplus the moment the demand decays"
+        );
+    }
+
+    /// A surplus part that has just arrived is not pruned below eager disk
+    /// pressure, whatever fetched it: the 30-minute protection used to lower its
+    /// score only, and a node whose only candidate was a part that landed 28 s
+    /// earlier deleted it (field report 2026-10-16). Five holders against a
+    /// target of three: surplus by any count. Aged two hours, it goes.
+    #[tokio::test]
+    async fn prune_waits_for_a_part_that_has_just_arrived() {
+        let (state, manager) = manager_with(Config::default());
+        let mid = busy_model(&state, &manager, "busy-model");
+        for byte in [9, 10] {
+            close_peer_holding(&state, byte, &mid, 1);
+        }
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: mid.clone(),
+                index: 1,
+            },
+            state.identity.node_id().clone(),
+        );
+        write_sparse_shards(&state, &mid, [1], PART);
+        let path = crate::model::shard::model_dir(&state.config.node.data_dir, &mid.0)
+            .join(crate::model::shard::shard_filename(1));
+
+        manager.evaluate_and_prune().await;
+        assert!(path.exists(), "it arrived a moment ago: kept");
+
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7_200))
+            .unwrap();
+        manager.evaluate_and_prune().await;
+        assert!(
+            !path.exists(),
+            "control: two hours on, the surplus copy goes"
+        );
+    }
+
+    /// **A part of a model this node holds whole** (field report 2026-10-16).
+    /// Three computers held part 25 of a 30B, the target was two, and prune
+    /// took it from the one holding all 34 parts — the hole turned a reply
+    /// it gave locally into a split that failed. Both passes agree: a part that
+    /// completes the model here is fetched at the pressure prune keeps it at.
+    /// An urgent disk may still take it, and a partial holder sheds as before.
+    /// A MIDDLE part, as part 25 of 34 was: the ends of a model held whole are
+    /// kept by prompt privacy already, which would pass this test without the
+    /// rule.
+    #[test]
+    fn a_part_of_a_model_held_whole_here_is_not_shed_by_the_count() {
+        let (state, manager) = manager_with(Config::default());
+        let mid = register_manifest_with_sized_shards(
+            &state,
+            "whole-model",
+            24,
+            &[(0, 8), (8, 16), (16, 24)],
+            PART,
+        );
+        let local = state.identity.node_id().clone();
+        let part = |index| ShardId {
+            model_id: mid.clone(),
+            index,
+        };
+        for index in [0, 2] {
+            state
+                .model_registry
+                .record_shard_holder(part(index), local.clone());
+        }
+        write_sparse_shards(&state, &mid, [0, 2], PART);
+        close_peer_holding(&state, 7, &mid, 1);
+        close_peer_holding(&state, 8, &mid, 1);
+        state
+            .models
+            .model_request_counts
+            .insert(mid.clone(), AtomicU64::new(3));
+        assert_eq!(
+            fetched(&manager, &state, 8_000),
+            vec![(mid.clone(), 1)],
+            "at 85% after it lands, the part that completes the model is fetched"
+        );
+
+        state
+            .model_registry
+            .record_shard_holder(part(1), local.clone());
+        write_sparse_shards(&state, &mid, [1], PART);
+        state.models.model_request_counts.remove(&mid);
+        state.region_demand.clear();
+        let holders = [local.clone(), NodeId([7; 32]), NodeId([8; 32])];
+        assert!(
+            !manager.would_shed_copy(&part(1), &holders, 0.85, &[]),
+            "…and prune keeps it there: this computer answers the model with no hop"
+        );
+        assert!(
+            manager.would_shed_copy(&part(1), &holders, 0.97, &[]),
+            "an urgent disk may still take it"
+        );
+
+        state.model_registry.remove_shard_holder(&part(0), &local);
+        assert!(
+            manager.would_shed_copy(&part(1), &holders, 0.85, &[]),
+            "control: holding part of the model, the copy is surplus as before"
         );
     }
 

@@ -439,6 +439,30 @@ impl AutoShardManager {
         };
         without < manifest.num_layers && with > without
     }
+
+    /// Does this node hold every part of `shard_id`'s model once `shard_id`
+    /// itself is counted as held? Prune keeps such a part below urgent disk
+    /// pressure (`copy_kept_because`, #286): it is the one computer answering
+    /// the model with no hop. Asked of a part held (prune) and of one about to
+    /// be fetched (the download pass) alike — the state after the fetch, as
+    /// gotcha #795 requires. Read through `parts_missing_here`, the one count
+    /// of what this computer holds (registry and files); a model with no
+    /// manifest here is not held whole.
+    pub(super) fn holds_whole_model_counting(&self, shard_id: &ShardId) -> bool {
+        if shard_id.index == MMPROJ_SHARD_INDEX
+            || self
+                .shared_state
+                .model_registry
+                .get_manifest(&shard_id.model_id)
+                .is_none_or(|m| m.shards.is_empty())
+        {
+            return false;
+        }
+        self.shared_state
+            .parts_missing_here(&shard_id.model_id)
+            .iter()
+            .all(|&index| index == shard_id.index)
+    }
 }
 
 /// The layer ranges of `parts` of `manifest`.
