@@ -2857,8 +2857,8 @@ the loader's own test, `split::layer_is_recurrent`).
 
 `PrefixCache::positions_ceiling` is the most positions one snapshot keeps: the
 explicit `prefix_cache_max_prompt_tokens` when set, never more than
-`prefix_cache_max_mb / bytes_per_position` — the latter read off the live KV's
-views (`bytes_per_position`, no copy). **A longer prompt keeps its OPENING** —
+`prefix_cache_max_mb` over what a position weighs — read off the live KV's
+views (`SnapshotCost`, no copy). **A longer prompt keeps its OPENING** —
 the system prompt and tools every later turn repeats — rather than nothing.
 
 It replaced a fixed 8,192-token ceiling that REFUSED every longer prompt
@@ -2876,6 +2876,26 @@ because the whole prompt had already been copied, and discarding it wasted the
 copy. Tests: `a_prompt_over_the_token_ceiling_keeps_its_opening`,
 `with_no_token_ceiling_the_byte_budget_sizes_the_snapshot`,
 `a_budget_smaller_than_one_prompt_keeps_the_opening_that_fits`.
+
+**A slid windowed layer is charged the positions it holds** (2026-10-16, FUTURE_WORK #281 (5)).
+"Keeps the opening" has an exception the sliding window made: a snapshot of a slid conversation
+cannot stop short of `serves_from` (one window past where a windowed layer's cache starts — the
+keys before it are gone), so a ceiling below that keeps NOTHING. Dividing the budget by every
+position on every layer put it there for any long Gemma prompt: Gemma 4 12B on a processor,
+786 KB a position, 2 GiB → 2,730 positions, while `serves_from` sits within a growth quantum of
+the prompt's end. `snapshot_at` copies each layer from its own `held_from`, so a snapshot at
+`pos` weighs `Σ bytes_l × (pos − held_from_l)` = `per_position × pos − slid_away`, valid for
+every `pos` it can be taken at (≥ `serves_from` ≥ each `held_from`); `prefix_cache::SnapshotCost`
+reads both off the live views and `positions_ceiling` is `(max_bytes + slid_away) / per_position`
+— exact, not an estimate. The room bound beside it (`model_worker::snapshot_room` →
+`kv_budget::plan_snapshot`) already priced the window through `KvGrowth` (#281 (2)). Test, red
+with `slid_away` ignored (nothing kept): `a_byte_budget_charges_a_slid_layer_only_the_positions_it_holds`.
+**Measured** (2026-10-16, Gemma 2 2B — 213 KB a position, 13 of 26 layers windowed at 4,096 —
+on a processor, dev build, an isolated node with `prefix_cache_max_mb = 1200`;
+`~/swarmllm-g3/pc281.sh` + `pc281cold.sh`): a 6,943-token prompt was kept whole, 1,153 MB, where
+the old ceiling (1,200 MiB / 213 KB = 5,907) fell short of `serves_from` and kept nothing; the
+next turn hit 6,943 of its 6,974 tokens and answered in 36.8 s against 357.9 s cold, with the
+same 16 greedy tokens as the cold run (a slid snapshot restores to the same reply).
 
 ## A blocked GQA attention call is grouped per block, never expanded (2026-09-26)
 

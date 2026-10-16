@@ -1741,18 +1741,6 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
-#### #281 — A prefix-cache snapshot's budget counts every position of a windowed layer
-`P3` · memory · **OPEN** — 2026-10-16 · narrowed 2026-10-16: (1) the cache keeps its window, (2) the worker charges it as its window, (3) this node's estimates do too, (4) so does a coordinator's bound on a peer (§ Closed)
-
-Since (1) a windowed layer's cache holds its window, a rewind and one growth quantum
-(`LayerKv::slide_beyond`), and since (2)-(4) every price of it — the worker's
-(`kv_budget::KvGrowth`), this node's estimates before a load (`KvLayout` → `KvPrice`) and a
-coordinator's bound on a peer (`KvLayout::growth_on_peer`, `features::KV_WINDOW_SLIDES`) — reads
-the per-layer layout. Left: `PrefixCache::positions_ceiling` divides its byte budget by every
-position on every layer — exact for a snapshot taken before a slide (it copies them all), heavy
-for one taken after, so a long Gemma conversation's snapshot is kept shorter than its bytes
-allow. Safe in direction.
-
 #### #265 — A later range loaded into a card/processor split worker is charged to the card whatever the loader does with it
 `P3` · memory · **OPEN** — 2026-10-13 · history: found closing #264
 
@@ -2420,7 +2408,20 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel, #283, #281 (1), #281 (2), #281 (3), #281 (4))
+**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel, #283, #281 (1), #281 (2), #281 (3), #281 (4), #281 (5) — #281 closed)
+- #281 (5) — **A long Gemma conversation is kept for the next turn again.** The prefix cache sized
+  a snapshot by its byte budget over what a position weighs on EVERY layer
+  (`PrefixCache::positions_ceiling`), but a snapshot copies a slid windowed layer only from where
+  it starts (`snapshot_at`) — and can never stop short of where that layer still answers
+  (`serves_from`, near the prompt's end). Gemma 4 12B on a processor weighs 786 KB a position:
+  the default 2 GiB held a snapshot to 2,730 positions, so no Gemma 4 prompt past about 3,000
+  was kept at all, and every turn of an agent conversation (4-14K tokens) re-read it whole. Now
+  the ceiling is `(budget + slid_away) / per_position` (`prefix_cache::SnapshotCost`): each slid
+  layer is charged the positions it holds — exact, since that is what the copy takes.
+  Measured (Gemma 2 2B on a processor, an isolated node, `prefix_cache_max_mb = 1200`,
+  `~/swarmllm-g3/pc281.sh`): a 6,943-token prompt kept whole (1,153 MB, where the old ceiling of
+  5,907 fell short of its window and kept nothing); the next turn read 6,943 of its 6,974 tokens
+  from it — 36.8 s against 357.9 s cold, the same 16 greedy tokens.
 - #281 (4) — **A computer is offered a long Gemma prompt by the memory it will really use.** A
   coordinator weighing whether a peer has room for a prompt charged every layer the widest
   layer's cache at every position (`scheduler::kv_bytes_per_position_per_layer`): Gemma 4 12B at

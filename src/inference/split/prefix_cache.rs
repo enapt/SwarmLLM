@@ -81,31 +81,45 @@ pub fn compute_block_hashes(tokens: &[u32], block_size: usize) -> Vec<PrefixBloc
     out
 }
 
-/// Bytes one position of `layers`' KV occupies, summed over layers — what a
-/// snapshot costs per token of prompt it keeps. 0 when nothing is populated.
-///
-/// Read off the live cache's views, so it is exact for this model on this
-/// device and copies nothing. A slid layer's views hold only its positions from
-/// `held_from` (FUTURE_WORK #281), so they are divided by that count — by the
-/// conversation's length they read lighter than they are. Charged on every
-/// position, a windowed layer is over-counted for a snapshot that copies only
-/// the positions it holds: the safe direction for a ceiling.
-fn bytes_per_position(layers: &[Option<LayerKv>]) -> usize {
-    layers
-        .iter()
-        .flatten()
-        .map(|kv| {
+/// What a snapshot of `layers` costs: `per_position × pos − slid_away` bytes
+/// for one taken at `pos`. Read off the live cache's views, so it is exact for
+/// this model on this device and copies nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SnapshotCost {
+    /// Bytes one position of `layers`' KV occupies, summed over layers. 0 when
+    /// nothing is populated. A slid layer's views hold only its positions from
+    /// `held_from` (FUTURE_WORK #281), so they are divided by that count — by
+    /// the conversation's length they read lighter than they are.
+    per_position: usize,
+    /// The bytes of the positions slid layers no longer hold: each layer's
+    /// per-position bytes × its `held_from`. A snapshot copies each layer from
+    /// there (`snapshot_at`), and is never taken short of `serves_from`, which
+    /// no layer's `held_from` passes — so a windowed layer costs a snapshot
+    /// the positions it holds, never the conversation's length.
+    slid_away: usize,
+}
+
+impl SnapshotCost {
+    fn of(layers: &[Option<LayerKv>]) -> Self {
+        let (mut per_position, mut slid_away) = (0usize, 0usize);
+        for kv in layers.iter().flatten() {
             let positions = kv.current_seq_len() - kv.held_from();
             if positions == 0 {
-                return 0;
+                continue;
             }
-            [kv.k(), kv.v()]
+            let bytes = [kv.k(), kv.v()]
                 .into_iter()
                 .filter_map(|t| t.ok().flatten())
                 .map(|t| t.elem_count() * t.dtype().size_in_bytes() / positions)
-                .sum::<usize>()
-        })
-        .sum()
+                .sum::<usize>();
+            per_position = per_position.saturating_add(bytes);
+            slid_away = slid_away.saturating_add(bytes.saturating_mul(kv.held_from()));
+        }
+        Self {
+            per_position,
+            slid_away,
+        }
+    }
 }
 
 /// Magic bytes identifying a serialized `KvSnapshot` on the wire.
@@ -426,9 +440,16 @@ impl PrefixCache {
         self.enabled
     }
 
-    /// The most positions one snapshot may keep, given what a position of this
-    /// model's KV weighs: the explicit token ceiling when one is set, and
+    /// The most positions one snapshot may keep, given what it costs
+    /// (`SnapshotCost`): the explicit token ceiling when one is set, and
     /// never more than the per-model byte budget holds.
+    ///
+    /// **A slid windowed layer is charged the positions it holds** (#281):
+    /// charged every position, Gemma 4 12B's 786 KB a position on a processor
+    /// held the default 2 GiB budget to 2,730 positions, and a snapshot never
+    /// stops short of where its windowed layers still answer (`serves_from`,
+    /// within a growth quantum of the prompt's end) — so no Gemma 4 prompt
+    /// past about 3,000 positions was kept at all.
     ///
     /// **Derived rather than a constant, because what a position costs varies
     /// ~3x between models of one size** — 73.7 KB for qwen2.5-3b's two KV
@@ -439,16 +460,16 @@ impl PrefixCache {
     /// the constant protected: the snapshot is also held to the room beside
     /// the live cache (`max_positions`, gotcha #440), and admission evicts
     /// cached prompts before refusing a request.
-    fn positions_ceiling(&self, bytes_per_position: usize) -> usize {
+    fn positions_ceiling(&self, cost: SnapshotCost) -> usize {
         let by_tokens = if self.max_prompt_tokens == 0 {
             usize::MAX
         } else {
             self.max_prompt_tokens
         };
-        let by_bytes = if self.max_bytes == 0 || bytes_per_position == 0 {
+        let by_bytes = if self.max_bytes == 0 || cost.per_position == 0 {
             usize::MAX
         } else {
-            self.max_bytes / bytes_per_position
+            self.max_bytes.saturating_add(cost.slid_away) / cost.per_position
         };
         by_tokens.min(by_bytes)
     }
@@ -623,7 +644,7 @@ impl PrefixCache {
         // Bound insertion points by what the KV actually holds, by the room on
         // the device, and by the ceiling — which keeps the opening of a longer
         // prompt instead of refusing it.
-        let ceiling = self.positions_ceiling(bytes_per_position(&entry.layers));
+        let ceiling = self.positions_ceiling(SnapshotCost::of(&entry.layers));
         if ceiling < prompt_tokens.len() {
             tracing::info!(
                 model_key,
@@ -873,7 +894,7 @@ impl PrefixCache {
         };
         let dim = first_kv.k_cache().dim();
         let max_seq_len = first_kv.k_cache().max_seq_len();
-        let ceiling = self.positions_ceiling(bytes_per_position(&entry.layers));
+        let ceiling = self.positions_ceiling(SnapshotCost::of(&entry.layers));
         let available = first_kv
             .current_seq_len()
             .min(keys.len() * bt)
@@ -2957,18 +2978,60 @@ mod tests {
         );
     }
 
-    /// A slid layer weighs per position what it weighed before it slid: the
-    /// snapshot ceiling is bytes over this figure, so a lighter reading would
-    /// let a snapshot past its byte budget.
+    /// A slid layer weighs per position what it weighed before it slid, and
+    /// the positions it no longer holds are counted apart: the snapshot
+    /// ceiling is bytes over this figure, so a lighter reading would let a
+    /// snapshot past its byte budget.
     #[test]
     fn a_slid_layer_weighs_the_same_per_position() {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_windowed_kv(&kv_store, "r", 400);
         let key = KvCacheStore::cache_key("m", "r");
         let entry = kv_store.get_entry(&key).unwrap();
-        assert!(entry.layers[0].as_ref().unwrap().held_from() > 0);
+        let held_from = entry.layers[0].as_ref().unwrap().held_from();
+        assert!(held_from > 0);
         // Two layers, K and V of [1, 1, ·, 4] f32: 32 bytes a position each.
-        assert_eq!(bytes_per_position(&entry.layers), 64);
+        assert_eq!(
+            SnapshotCost::of(&entry.layers),
+            SnapshotCost {
+                per_position: 64,
+                slid_away: 32 * held_from,
+            }
+        );
+    }
+
+    /// A snapshot copies a slid layer from where it starts (`snapshot_at`), so
+    /// the byte budget is spent on those positions alone: a budget of exactly
+    /// what the snapshot weighs keeps it whole. Charged every position, the
+    /// windowed layer kept a shorter opening — or, where that fell short of
+    /// where its window answers, nothing (#281).
+    #[test]
+    fn a_byte_budget_charges_a_slid_layer_only_the_positions_it_holds() {
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_windowed_kv(&kv_store, "r", 400);
+        let held_from = {
+            let key = KvCacheStore::cache_key("m", "r");
+            let entry = kv_store.get_entry(&key).unwrap();
+            entry.layers[0].as_ref().unwrap().held_from()
+        };
+        // The whole layer holds 400 positions, the windowed one 400 - held_from.
+        let weighs = 32 * 400 + 32 * (400 - held_from);
+        let prompt: Vec<u32> = (0..400).collect();
+        let mut next_turn = prompt.clone();
+        next_turn.push(9999);
+
+        let pc = PrefixCache::new(true, 8, 0, 4, 0, weighs);
+        pc.insert_from_kv("m", "r", &kv_store, &prompt, ANYWHERE);
+        let hit = pc.lookup("m", &next_turn).expect("kept within its budget");
+        assert_eq!(hit.token_count, 400);
+
+        // The budget still binds: a byte less keeps a shorter opening.
+        let tight = PrefixCache::new(true, 8, 0, 4, 0, weighs - 1);
+        tight.insert_from_kv("m", "r", &kv_store, &prompt, ANYWHERE);
+        let hit = tight
+            .lookup("m", &next_turn)
+            .expect("its window answers 399");
+        assert_eq!(hit.token_count, 399);
     }
 
     /// An earlier turn the slid snapshot cannot serve is kept beside it, and a
