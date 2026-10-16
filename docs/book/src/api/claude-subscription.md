@@ -93,6 +93,17 @@ Multi-turn conversations work by serializing the full message history into the p
 
 This is the same stateless approach used by OpenAI-compatible APIs — the client sends the full conversation every time, and the server doesn't maintain session state.
 
+### Long-lived sessions
+
+For interactive use, where re-sending the whole conversation every turn would be wasteful, the same build also offers sessions backed by one persistent `claude` subprocess (`--input-format stream-json`). Like everything on this page, they exist only in a build with `--features claude-subscription`:
+
+- `GET /api/claude-code/sessions` — list live sessions
+- `POST /api/claude-code/session` — start one (spawns the subprocess)
+- `GET /api/claude-code/session/{id}` — its state
+- `DELETE /api/claude-code/session/{id}` — close it and reap the subprocess
+- `POST /api/claude-code/session/{id}/message` — send a turn
+- `POST /api/claude-code/session/{id}/permission` — answer a tool-permission prompt the CLI raised
+
 ## Configuration
 
 All configuration is in the `providers.claude_subscription` section, manageable via the admin API or dashboard:

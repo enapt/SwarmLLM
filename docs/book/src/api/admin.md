@@ -13,6 +13,9 @@ Connected peers with latency, trust scores, and hosted models.
 ### GET /api/admin/credits
 The internal ledger figures (balance, lifetime earned and spent, escrow) and the tier name. Credits are dormant: the balance is self-minted, gates nothing, and the tier is the same for everyone.
 
+### GET /api/admin/credits/transactions
+A bounded log of recent balance movements (delta, kind, reason, resulting balance), oldest first. `lifetime_refunded` is partly synthetic: unexplained gaps are attributed to refunds so the books close.
+
 ### GET /api/admin/diagnostics
 Plain-text health report, meant to be read in a terminal or pasted into a bug
 report. Covers internet reachability and NAT status, hole-punching counts, the
@@ -91,6 +94,9 @@ The response separates what took effect from what did not:
 ### POST /api/admin/shutdown
 Gracefully shut down the node. Localhost only, Bearer auth required.
 
+### POST /api/admin/api-key/rotate
+Issue a new API key and invalidate the old one. It takes effect when the node next starts — the running server keeps the key it started with, and logs that a restart is needed.
+
 ## Model Management
 
 ### GET /api/admin/models
@@ -122,6 +128,12 @@ PUT `{"enabled": true}` or `{"enabled": false}` stores a choice. Turning it on w
 
 ### PUT /api/admin/models/{id}/shards/{index}/lock
 Lock/unlock a shard to prevent auto-pruning.
+
+### GET /api/admin/models/{id}/pipeline-plan
+A preview of how a request for this model would be routed now: the ordered segments and the candidate holders of each range. "No route right now" is an answer, not a failure — 200 with `routable: false` and a `reason` carrying the same `message` / `hint` a real request would get. Only a model id this node has never heard of is a 404.
+
+### GET /api/admin/reference-models
+The pinned reference models (`docs/REFERENCE_MODELS.md`) offered as opt-in downloads, so a speed figure from one machine means the same as one from another.
 
 ## Storage & Shards
 
@@ -186,6 +198,9 @@ Per-model storage breakdown, disk and VRAM usage.
 
 ### GET /api/admin/prune-history
 Recent auto-prune events.
+
+### GET /api/admin/storage/breakdown
+The figures behind the storage bar, in MB: `total_mb`, `used_mb`, `free_mb`, `auto_target_mb` (the cap on what auto-manage may hold in total, not head-room on top of `used_mb`), `auto_remaining_mb`, `auto_limited_by`, plus `held_shards`, `auto_manage_enabled` and the contribution level.
 
 ### GET/PUT /api/admin/schedule
 Resource schedule management.
@@ -366,6 +381,9 @@ Get an encrypted shareable invite code and network phase. The code embeds the no
 ### POST /api/admin/join-network
 Join the network via encrypted invite code (`swarm://...`) or raw multiaddr. Immediately dials the peer and saves the address to the peer cache.
 
+### GET /api/admin/foreign-pool-catalog
+Models other pools advertise — discovery only, and only when `pool.share_model_catalog` is on. Using them is a separate opt-in, `pool.allow_cross_pool_inference` (settable live through `PUT /api/admin/config`).
+
 ## Responses API listing
 
 ### GET /api/admin/responses
@@ -376,6 +394,12 @@ max 500) and `?status=...` (filter by `completed` / `in_progress` /
 for the user-facing surface.
 
 ## Auto-Manage Surfaces
+
+### GET /api/admin/swarm/capacity
+A snapshot of the swarm's collective capacity: online nodes, total graphics memory and disk, GPU nodes, regions represented, which models it can serve, which it could with more holders, which this node hosts, and their redundancy.
+
+### GET /api/admin/swarm/capacity-plan
+What-if scenarios over that snapshot, with a headline target naming how many more contributors a model needs.
 
 ### GET /api/admin/wishlist
 R111 — ranked list of models the swarm wants. Triggers a wishlist

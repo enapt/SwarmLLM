@@ -1877,7 +1877,7 @@ impl NetworkManager {
                         // The connection task may be stuck (handler not polled, SubstreamRequested
                         // timeout not firing). Disconnecting kills the stale TCP+yamux session.
                         // The peer will be reconnected on the next send_request() or Kademlia
-                        // bootstrap (60s interval).
+                        // re-bootstrap (`discovery::DISCOVERY_INTERVAL`, 5 min).
                         for peer in &stale_peers {
                             if self.swarm.is_connected(peer) {
                                 tracing::warn!(

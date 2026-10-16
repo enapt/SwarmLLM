@@ -16654,6 +16654,21 @@ the target fits, so counting it there would choose a drafter that its own spawn 
 (#275). Test `the_processor_bound_counts_the_memory_an_idle_model_would_give_back` (red without the
 count: 14 layers for 30).
 
+### #172 — closed 2026-10-16 by the doc sweep (the entry as it stood when closed, word for word)
+
+#### #172 — The greedy fallback assigner prices a long prompt like a short one
+`P4` · routing · **PARTIAL** — 2026-07-24 · history: archive § "Two cost models are still prompt-blind"
+
+The delegation half is fixed (`DelegationInput` carries `prompt_tokens`).
+`scheduler::estimated_cost_per_layer` still takes no prompt length; it runs only when the
+priced search finds no path (rare). Thread `prompt_tokens` into it (the prefill term as in
+`vertex_cost`), and add a comment at `distributed_exec.rs`'s reuse-previous-assignment branch
+saying later turns keep the first turn's route on purpose (KV affinity).
+
+**How it closed.** Both halves shipped in `af5159cb` (2026-10-11, released in v0.3.235) without the
+entry being moved: the fallback now prices the prompt at `parallax::prefill_ms_per_layer`, less
+`NodeCandidate::prompt_tokens_held`, and the reuse branch carries the KV-affinity comment.
+
 ## PRIORITIES re-rank log (moved from FUTURE_WORK.md on 2026-10-16)
 
 The paragraph that opened `docs/FUTURE_WORK.md` § "▶ PRIORITIES" from 2026-10-02 to the

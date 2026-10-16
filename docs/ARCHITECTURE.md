@@ -270,7 +270,7 @@ Single Rust binary, three simultaneous functions:
 | AcquisitionManager | NetworkManager | `network_tx` | ShardAnnounce (shard requests) |
 | CreditLedger | NetworkManager | `network_tx` | CreditGossip, CreditTransaction |
 | PoolManager | NetworkManager | `network_tx` | PoolInvitation, PoolState gossip |
-| AutoShardManager | AcquisitionManager | `acquisition_tx` | AcquisitionCommand (auto downloads) |
+| NetworkManager | AcquisitionManager | `acquisition_tx` | AcquisitionCommand::ShardDataReceived (P2P chunks for a download the API started; automatic ones are written by NetworkManager) |
 
 The **MessageDispatcher** is a dedicated task in `daemon/dispatch/mod.rs` that routes inbound network messages to the appropriate subsystem. Inference messages go to InferenceRouter, CreditGossip updates peer balance distributions, and pool messages go to PoolManager.
 
@@ -379,10 +379,11 @@ SwarmLLM uses a 5-layer zero-config discovery stack. Each layer is independent �
 │    On each ConnectionEstablished, exchange up to 20 known   │
 │    peer addresses. Uses request_response channel.           │
 │    RTT measured on PEX request/response round-trip.         │
-│    RTT < 5ms → auto-detect as LAN peer (enables TP).       │
+│    physical RTT < 2.5ms → auto-detect as LAN peer (TP).    │
 │                                                             │
 │  Layer 5: Kademlia DHT + Bootstrap                           │
-│    Existing: --bootstrap flag, Kademlia re-bootstrap 60s    │
+│    Existing: --bootstrap flag, Kademlia re-bootstrap 5 min  │
+│    (10/30/60/120 s retries while no peer is connected)      │
 │                                                             │
 │  Anti-Gaming: Subnet Clustering Detection                    │
 │    Tracks /24 IPv4 prefixes. >5 nodes per /24 → 25%        │
@@ -464,7 +465,7 @@ libp2p Swarm
 ├── request_response (unified protocol, /swarmllm/1.0.0, 600s timeout — slow CPU inference)
 │   ├── JSON control messages — SwarmMessage, ShardRequest/ShardResponse (type-tag 0x00=WIRE_TAG_JSON)
 │   ├── Binary tensor payloads — LayerForward, LayerResult (type-tag 0x01=WIRE_TAG_TENSOR, or 0x02=WIRE_TAG_TENSOR_COMPRESSED for zstd, flag-gated; inner ChaCha20-Poly1305 encryption marked by TENSOR_TAG_ENCRYPTED=0x10)
-│   ├── Binary shard data — ShardResponse payload (type-tag 0x03=WIRE_TAG_SHARD, 32MB chunks as raw bytes, bypasses 4MB JSON limit)
+│   ├── Binary shard data — ShardResponse payload (type-tag 0x03=WIRE_TAG_SHARD, 8 MiB chunks (`SHARD_CHUNK_SIZE`) as raw bytes, bypasses 4MB JSON limit)
 │   ├── Cross-node prefix-KV snapshots — (type-tag 0x04=WIRE_TAG_PREFIX_KV, Item 8 Phase 2 fetched path)
 │   ├── Refusal reason (2026-09-24, FUTURE_WORK #92) — `LayerResult` trailer `0x06` (`marker + one reason byte`, LAST in the frame), carrying `ForwardRefusal::Undecryptable`: the serving node could not open the forward's seal and has armed the repair. The coordinator's `wait_for_result` then sends the SAME forward to the SAME node once `SessionManager::rekeyed_since` says the link was re-keyed — safe mid-reply because the worker never saw it. A result's seal does not depend on its trailers, so an older decoder skips it; still sent only to a coordinator advertising `features::FORWARD_REFUSAL_REASON`.
 │   ├── Walk at the tail (2026-09-27, FUTURE_WORK #134) — `LayerForward` `0x03` flags bit 1 (`spec_walk_at_tail`, one writer `layer_forward::spec_trailer_flags` for plaintext/encrypted/AAD), gated on `features::SPEC_WALK_AT_TAIL`: the last segment walks a verify's drafts with the caller's sampler and answers with token ids (43-59 bytes) instead of a full vocabulary per position (513 KB each at 128K). `pipeline::VerifyReply::accept` is the one place either reply shape becomes accepted tokens
@@ -1729,10 +1730,10 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
   (both at startup and in `generate_and_register_local_manifest`)
 - **VRAM estimation**: `model_size × 1.15` (quantized weights + ~15% KV-cache overhead)
 - **nvidia-smi fallback**: If `gpu_info` is None, falls back to `nvidia-smi` for local VRAM
-- **Budget limits**: ONE storage budget (`auto_manage::storage_budget` — `max_storage_mb` as written, else 25/50/75% of `max_disk_mb` by contribution level, capped at `max_disk_mb` and at held + what is free beyond 10% of the filesystem, which this node never takes — `FREE_DISK_RESERVE_PCT`, gotcha #795) shared by the download pass, prune pressure, the settings bar, the pool page and the diagnostics report (gotcha #448); max_shards_per_cycle (2); skips in-progress acquisitions
+- **Budget limits**: ONE storage budget (`auto_manage::storage_budget` — `max_storage_mb` as written, else 25/50/75% of `max_disk_mb` by contribution level, capped at `max_disk_mb` and at held + what is free beyond 10% of the filesystem, which this node never takes — `FREE_DISK_RESERVE_PCT`, gotcha #795) shared by the download pass, prune pressure, the settings bar, the pool page and the diagnostics report (gotcha #448); at most 1 / 1-2 / 2-4 new parts per cycle by contribution level (more once 5+ peers are connected, `scoring.rs`); skips in-progress acquisitions
 - **mmproj support**: Vision encoder (mmproj.gguf) treated as download candidate with 5x priority bonus; full-file HF download (not byte-range); higher pruning floor (min 3 replicas), only pruned under extreme pressure (>0.95)
-- **Download priority**: HuggingFace CDN first (fast, doesn't burden peers). If no HF source available but peers hold the shard, falls back to P2P `ShardRequest` to a random holder. P2P is single-source per shard (future: multi-source parallel download)
-- **Upload bandwidth cap**: `max_bandwidth_mbps` config enforced on shard serving via proportional delay after chunk reads. Tensor forwards exempt (latency-critical). Default 0 = unlimited
+- **Download priority**: peers first — a P2P `ShardRequest` to the best allowed holder (`select_best_allowed_peer`); HuggingFace only when no peer holds the part, the peer copy cannot be checked, or P2P has been exhausted for it this session. P2P is single-source per shard (future: multi-source parallel download)
+- **Upload bandwidth cap**: `max_bandwidth_mbps` config enforced on shard serving via proportional delay after chunk reads. Tensor forwards exempt (latency-critical). Default 0 = automatic by contribution level: 10 Mbps Minimal, 50 Moderate, unlimited Maximum (`NodeConfig::shard_upload_mbps`)
 - **Config**: `[auto_manage]` section — `enabled`, `max_storage_mb`, `interval_minutes`, `max_shards`, `prune_enabled`, `min_replicas`, `prune_cooldown_secs`, `max_holder_load_for_prune`, `auto_switch_quants` (R134.6, **default true since R141**), `hf_watcher_enabled`, `wishlist_gossip_publish`, `on_metered_connection` (`auto` / `pause` / `allow` — automatic downloads, and new work and parts for peers, wait on a metered connection; `daemon::metered`, `SharedState::metered_hold`)
 - **R141 — P2P stall timeout** = 180s (was 600s). A silently-dropped libp2p send now fails over to the HF fallback path in ~3 minutes instead of 10. The original ceiling was sized for worst-case slow peers + pessimistic retries; the new value still covers an honest 32 MiB chunk over a slow link (~150 KiB/s sustained). Constant: `P2P_PERMIT_STALL_SECS` in `model/auto_manage/manager.rs`.
 
@@ -1942,7 +1943,7 @@ Models are loaded into VRAM only when needed, not eagerly at startup.
 
 **Loading coordination**: `ModelProcessPool::spawn_lock` (a `Mutex<()>`) serializes worker spawning — if two requests arrive simultaneously for an unloaded model, the second waits for the first spawn instead of starting a second subprocess.
 
-**VRAM Budget**: Configured via `resources.max_gpu_vram_mb` or auto-detected (80% of GPU VRAM). LRU eviction protects active pipeline models from eviction.
+**VRAM Budget**: Configured via `resources.max_gpu_vram_mb` or auto-detected (the card's total, minus what other programs hold, minus a 10% / 7% / 5% reserve by contribution level clamped to 512-2048 MB — `inference_vram_budget_mb`). LRU eviction protects active pipeline models from eviction.
 
 **Startup behavior**: Models are still auto-loaded at startup (in popularity order), but this is best-effort — if VRAM fills up, remaining models stay on disk and are loaded on first request.
 
@@ -2060,7 +2061,7 @@ Pool-only inference restriction that guarantees your prompts never leave your de
 
 **Three scopes:**
 - **Private (pool only)** — inference restricted to device pool members. Works over WAN or LAN.
-- **Private + LAN** — pool members plus any mDNS-discovered LAN peer (`private_mode_allow_lan: true`, default).
+- **Private + LAN** — pool members plus any LAN peer, mDNS-discovered or answering under a 2.5 ms physical round trip (`private_mode_allow_lan: true`, default).
 - **Offline** — air-gapped operation. No bootstrap peers, no HF downloads, mDNS-only discovery.
 
 **What Private Mode restricts (your outbound requests):**
@@ -3176,7 +3177,7 @@ Workers load only a subset of on-disk shards into GPU memory. Shards stay on dis
 
 ### Bandwidth-Based Speed Estimation
 - `gpu_memory_bandwidth_gbps()`: name-matched lookup table (RTX 20/30/40, A100, H100, Apple M-series, AMD)
-- `estimate_tokens_per_sec_7b()`: `bandwidth / 4.4GB * efficiency` (0.35 GPU, 0.75 CPU — a card is LESS efficient per byte than a processor at batch 1, one query row cannot fill it)
+- `estimate_tokens_per_sec_7b()`: `bandwidth / 4.4GB * efficiency` (0.55 GPU, 0.75 CPU — a card is LESS efficient per byte than a processor at batch 1, one query row cannot fill it)
 - Gossiped via `NodeCapability.est_tokens_per_sec_7b`
 - Used as scheduler tie-breaker (after latency, region, load, trust)
 

@@ -70,9 +70,10 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    on every surface, and the route on a streamed `/v1/responses` and in MCP.
 9. **#252** — a peer's measured context is not gossiped, so a planner cannot size a peer's share
    before asking ((a) parked: no named client reads the listed context).
-10. **#3**, **#180** — the routing cost model over-prices a split by its HOP count (2.0× two
-    segments, 3.35× three), which keeps partial ranges off; fit per term from the logged terms,
-    never tune the constant.
+10. **#3**, **#180** — the routing cost model mis-prices a split by regime (one peer's fit,
+    2026-10-15: a measured per-visit hop 0.78, a `net:0` hop 1.53 under-priced, drafter arms 0.39
+    unpriced), which keeps partial ranges off; fit per term from a second peer's traffic and
+    several reply lengths, never tune the constant.
 11. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
 12. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
@@ -621,7 +622,7 @@ against it, and price (not bar) prompt + `max_tokens` beyond it, the stale-figur
 Petals makes. #235 removed the way that room most often vanished (finished conversations kept
 for the worker's life), so measure how often a refusal still happens before building this.
 
-#### #3 — The routing cost model over-prices a split by its number of hops (2.0× two segments, 3.35× three), not by reply length
+#### #3 — The routing cost model mis-prices a split by regime: a measured hop over-priced, a `net:0` hop under-priced, speculation unpriced
 `P2` · routing · **OPEN** — 2026-09-08 · history: archive row #3 and § "The routing cost model's network term overestimates a boomerang" (three dated measurements)
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
@@ -898,15 +899,6 @@ the field, plus a failure class that separates "unreachable / no worker"
 (`message_means_peer_cannot_serve`). Smallest defensible version: a decayed per-(part,
 holder-set) counter of the first class only, with hysteresis — never a continuous multiplier.
 
-#### #172 — The greedy fallback assigner prices a long prompt like a short one
-`P4` · routing · **PARTIAL** — 2026-07-24 · history: archive § "Two cost models are still prompt-blind"
-
-The delegation half is fixed (`DelegationInput` carries `prompt_tokens`).
-`scheduler::estimated_cost_per_layer` still takes no prompt length; it runs only when the
-priced search finds no path (rare). Thread `prompt_tokens` into it (the prefill term as in
-`vertex_cost`), and add a comment at `distributed_exec.rs`'s reuse-previous-assignment branch
-saying later turns keep the first turn's route on purpose (KV affinity).
-
 #### #198 — A node that appears twice in one chain is capped per segment, not in total
 `P4` · routing · **OPEN** — 2026-09-04 · history: archive § "A node that appears twice in one chain is bounded per segment, not in total"
 
@@ -952,7 +944,7 @@ libp2p-connection-limits has no per-protocol exemption). A dial by bare address 
 `PeerCondition::Disconnected`; check no other dialler (loopback probe, redial queue, PEX)
 does the same.
 
-#### #91 — An idle node still uploads ~20 KB/s of gossip, and a total traffic ceiling does not exist
+#### #91 — An idle node still uploads ~9 KB/s of gossip (~6 copies of each message before v0.3.240's peer-sized mesh), and a total traffic ceiling does not exist
 `P2` · network · **PARTIAL** — 2026-10-11 · history: archive row #91, `docs/invariants/network.md`
 
 Trickle suppression (`MANIFEST_QUIET_WINDOW`), per-(model, hash) `manifest_heard`,
@@ -1542,7 +1534,7 @@ measure unbatched aggregate against forced batching before changing anything. A 
 segment still ends the chain when the requester holds the tail (the delegated split #143
 covers only requesters holding nothing).
 
-#### #134 — Split decode: draft trees, a drafter the node does not hold, and the pipelined prompt pass are unbuilt
+#### #134 — Split decode: draft trees and a drafter the node does not hold are unbuilt (the pipelined prompt pass is #171)
 `P3` · perf-split · **PARTIAL** — 2026-09-27 · history: archive row #134; plan: `split_speculation.md`
 
 Shipped: guessing ahead on by default (v0.3.213), the continuous stream (v0.3.216, #149), walk
@@ -1568,9 +1560,9 @@ there).
 
 Every machine in a split idles ~99% of each pass. The plan — "parallelise the reply, not the
 token", within the rule that nobody holds a whole model — has its first step done (the
-continuous stream, v0.3.216) and #143 done (v0.3.221; the plan's § 8 still lists it as
-pending). Next in its order: multi-token-prediction heads at the last stage (needs Qwen 3.5/3.6
-or GLM-4.5+ support first, #117), a stage batching forwards of several streams into one
+continuous stream, v0.3.216) and #143 done (v0.3.221). Next in its order: multi-token-prediction
+heads at the last stage (Qwen 3.5 runs since v0.3.229 but without speculation, #228 (5); GLM-4.5+ is
+unsupported), a stage batching forwards of several streams into one
 visit, multi-block attention for workers sharing a cache, outline-then-expand with a
 classifier router. Research-grade; the largest multiplier on the list
 (`wan_parallel.md` § 6 has the projection).
@@ -1589,8 +1581,8 @@ deleting.)
 
 ### Model families and platforms
 
-#### #228 — Qwen 3.5: what the first version leaves out
-`P2` · model-support · **OPEN** — 2026-10-06 · history: #117 (closed); plan: `docs/plans/qwen35_support.md`
+#### #228 — Qwen 3.5: what the first version leaves out (speculation, and the 4B's decode speed)
+`P2` · model-support · **PARTIAL** — 2026-10-06 · history: #117 (closed); plan: `docs/plans/qwen35_support.md`
 
 Dense Qwen 3.5 runs since #117. Still out: (1) ~~`qwen35moe` refused~~ — **runs since 2026-10-11,
 released in v0.3.235**: the loader already read its layout (the dense loop with `load_moe_ffn`; the
@@ -1893,11 +1885,12 @@ sees pins and no traffic. Seeding from the swarm's traffic needs a new gossiped 
 (an additive message and a feature bit) AND a privacy decision, since it would publish who
 served whom. Never fake it with sample data.
 
-#### #176 — Cross-pool inference can only be switched on by editing the config file
+#### #176 — Cross-pool inference has an admin-API switch but no dashboard control
 `P3` · ux · **PARTIAL** — 2026-07 (R134) · history: archive § "Inter-pool model sharing policy"
 
 Discovery and opt-in routing between pools shipped (R134-R134.7:
-`PoolModelAvailability`, `foreign_pool_catalog`, `pool.allow_cross_pool_inference`); no
+`PoolModelAvailability`, `foreign_pool_catalog`, `pool.allow_cross_pool_inference`), and R137
+made the setting live through `PUT /api/admin/config` (`allow_cross_pool_inference`); no
 dashboard control or consent banner exists. Add the toggle with its consent wording (i18n ×21).
 Billing between pools waits on credits, which are dormant (`docs/CREDITS_DESIGN.md`).
 
@@ -1957,15 +1950,17 @@ only. Safe while the Windows toolkit stays pinned to 12.x (`gpu-build-env`), and
 failure for every auto-updated Windows GPU node the day the CUDA major is bumped. Before
 touching that pin: teach the updater to fetch and unpack the zip's DLLs (multi-file apply with
 rollback), or put the CUDA major in the asset name and refuse a cross-major auto-update. Add a
-pointer beside the "bump both together" comment in `release.yml`.
+pointer to this entry beside the `cuda-windows-version` default in
+`.github/actions/gpu-build-env/action.yml` (the single definition of both toolkit pins).
 
 #### #109 — The bundled Prometheus/Grafana stack scrapes nothing
 `P3` · observability · **OPEN** — 2026-09-24 · history: archive row #109
 
 `monitoring/prometheus.yml` targets `localhost:8800`, which inside the container is the
 container; `docker-compose.yml` maps `host.docker.internal` but nothing uses it; and `/metrics`
-is exempt from the API key only for loopback, so a bridge-network scrape gets 401. The file's
-"no auth required" comment is misleading. Pick one: a compose-only scrape config targeting
+is exempt from the API key only for loopback, so a bridge-network scrape gets 401 (the file's
+comment now says so, and the book documents `credentials_file`, but the compose stack never
+mounts one). Pick one: a compose-only scrape config targeting
 `host.docker.internal:8800` with a bearer `credentials_file` mounted from the node's api_key
 (its path differs per OS), or `network_mode: host` for Prometheus (Linux-first). Needs Docker
 to verify. Keep `prometheus.yml` correct for bare-metal Prometheus.
@@ -2003,9 +1998,9 @@ preconditions for ever switching enforcement on, not work for now.
 `api::model_source_for` answers `local` when this node holds every part, which says nothing about
 where a request runs. A model the card cannot hold whole may be split with peers (#250). The default boomerang starts and
 ends that route here, so peers never see the prompt TEXT. They do see hidden states, ~81% invertible
-to text (`docs/ARCHITECTURE.md` § Pipeline Privacy Model). Today a user can keep requests on their own
+to text (`docs/ARCHITECTURE.md` § Pipeline Privacy Model). Before (2), a user could keep requests on their own
 computer only node-wide (a pool with `private_mode = true` and `private_mode_allow_lan = false`).
-`x-swarm-route` reports the route on the OpenAI and Anthropic surfaces. **Done (1), 2026-10-12:**
+`x-swarm-route` reports the route on the OpenAI and Anthropic surfaces and a non-streamed `/v1/responses`. **Done (1), 2026-10-12:**
 the book's OpenAI page says what `owned_by` means, what a peer sees, how to keep requests here and
 where the route is reported. **Done (2) per model, 2026-10-12:** "Keep on this computer" on the
 model's ⚙ panel (`PUT /api/admin/models/{id}/keep-on-this-computer`). `pool::scope::request_scope`
@@ -2204,8 +2199,9 @@ keyboard up; only if not, try `interactive-widget=resizes-content` in the viewpo
 `integrations/openclaw/` (tests and its own CI workflow) shipped in v0.3.148; the config-only
 path works today. Publish with `npm exec clawhub -- package publish .` (trusted/OIDC publishing
 would need the plugin in its own repo via `git subtree split`), then ask upstream about
-bundling. Independent leftovers: `/v1/embeddings` still answers 501 (wire
-`inference::local_embedder` to it), and the 8192 default context wants a decision (#189 helps).
+bundling. Independent leftovers: `/v1/embeddings` answers 501 by design until this node runs an
+embedding model (`LocalEmbedder` holds only the token table and is NOT one — the doc comment on
+`openai::embeddings` says why), and the 8192 default context wants a decision (#189 helps).
 
 ### Ideas — researched, not scheduled
 
@@ -2232,8 +2228,8 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
 - **#209 — Stream layers through the card for a model too big for it** (archive § "Rolling
   shard load — stream layers through the card"). Weeks of work: a layer-major streamed prompt
   pass reusing per-layer placement (`hybrid.rs`), measured at 14k tokens with
-  `examples/prefill_bench.rs`; decode streaming pays only with wide speculation, and #194's f16
-  cache comes first.
+  `examples/prefill_bench.rs`; decode streaming pays only with wide speculation (#194's f16
+  card cache, its prerequisite, shipped in v0.3.232).
 - **#210 — A quantized matrix-matrix kernel (tinyBLAS-style)** (archive § "Why the quantized
   matmul plateaus at ~1.5x…"). Batching plateaus at ~1.5× because there is no quantized GEMM;
   dequantize-once measured 11.8× worse. A hand-written SIMD kernel per format and instruction
@@ -2357,6 +2353,14 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-16 by the doc sweep — shipped earlier, found still listed open** (#172)
+- #172 — **The greedy fallback assigner prices a long prompt.** `scheduler::estimated_cost_per_layer`
+  takes `prompt_tokens` and charges the prefill term at the search's rate
+  (`parallax::prefill_ms_per_layer`), less what the candidate already holds
+  (`NodeCandidate::prompt_tokens_held`), and `distributed_exec.rs`'s reuse branch says why later
+  turns keep the first turn's route (KV affinity). Shipped in `af5159cb` (2026-10-11), released in
+  v0.3.235.
 
 **Closed 2026-10-15/16, released in v0.3.240 (2026-10-16)** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel, #283, #281 (1), #281 (2), #281 (3), #281 (4), #281 (5) — #281 closed, #284, #282 closed)
 - #282 (residual) — **A token the model file says is never to be sampled is never sampled.**

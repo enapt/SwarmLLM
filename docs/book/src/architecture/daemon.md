@@ -41,7 +41,7 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 | HealthMonitor | ShardRebalancer | RebalanceEvent |
 | ApiServer | InferenceRouter | RouterCommand (from HTTP) |
 | ApiServer | AcquisitionManager | AcquisitionCommand |
-| AutoShardManager | AcquisitionManager | AcquisitionCommand |
+| NetworkManager | AcquisitionManager | AcquisitionCommand::ShardDataReceived (P2P chunks for a download the API started; automatic ones are written by NetworkManager) |
 | CreditLedger | NetworkManager | CreditGossip, CreditTransaction |
 | MessageDispatcher | (spawned task) | VisionEncodeRequest → handler → VisionEncodeResponse |
 

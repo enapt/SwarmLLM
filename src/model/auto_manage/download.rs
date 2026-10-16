@@ -902,9 +902,10 @@ impl AutoShardManager {
                 report_refused_model(&self.shared_state, &candidate.model_id, &refusal);
                 return;
             }
-            // P2P: download from peers who hold this shard.
-            // Send AcquisitionCommand::Acquire to trigger P2P chunk-based transfer
-            // via the AcquisitionManager, which handles retry logic and verification.
+            // P2P: download from peers who hold this shard. The request goes
+            // straight to the network manager (`NetworkCommand::SendShardRequest`),
+            // which writes the chunks that come back and verifies the finished
+            // shard (`requests.rs::finish_p2p_shard`) — no AcquisitionManager job.
             let sid = ShardId {
                 model_id: candidate.model_id.clone(),
                 index: candidate.shard_index,
