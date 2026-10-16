@@ -144,6 +144,10 @@ this engine and are refused with a message naming the type; choose a K-quant.
 - Multi-turn reuse: `session_id` tracks conversations, prefix matching skips redundant prefill
 - Configurable TTL (default 10 min)
 - VRAM-aware LRU eviction for split model cache
+- Sliding-window layers (Gemma 2, 3 and 4) keep only the positions their window still reads, as
+  llama.cpp does — a Gemma 4 12B conversation at 32,000 tokens holds about 1 GB of cache instead of
+  10.5 GB — and every memory estimate (this computer's admission and placement, and the planner's
+  bound on a peer that advertises it) charges them that
 
 ## Prefix-Cache KV Sharing (Cross-Node)
 

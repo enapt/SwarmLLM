@@ -135,6 +135,10 @@ swarmllm/
 │                 logits_reference_probe.rs + compare_logits_reference.py — our logits at
 │                 every position of a GGUF (one segment or split) against llama.cpp's, by
 │                 VALUE: how an architecture is verified on a tiny random model (#114);
+│                 the compare checks a file's `suppress_tokens` are out of reach (#282);
+│                 flash_reference_check.rs — the card's flash kernel against plain f32
+│                 attention at every head width and prompt shape (`--features cuda`; run
+│                 before claiming a new width on a card, gotcha #868);
 │                 make_tiny_llama4_gguf.py writes one where none exists (Llama 4, gguf-py);
 │                 make_tiny_gemma_gguf.py — Gemma 2 with an 8-position window (#278) and
 │                 the 27B's 46 layers (#279); ARCH=gemma3: Q/K norms, per-layer RoPE,
@@ -447,7 +451,7 @@ libp2p Swarm
 │   └── /swarm/relay-service/v1        → "I relay" (`start_providing_relay_service`)
 │   (a signed `/swarm/node/…` record found by a query is still verified and read — see § DHT Records)
 │
-├── GossipSub (pub/sub, mesh_n/mesh_n_low/mesh_n_high/mesh_outbound_min auto-scale with known_peers: 2/1/4/1 at <10 peers up to 8/6/16/4 at 10k+)
+├── GossipSub (pub/sub, mesh_n/mesh_n_low/mesh_n_high/mesh_outbound_min auto-scale with the PEERS the node has met — distinct peers in its cache, not their addresses (#91): 2/1/4/1 at <10 peers up to 8/6/16/4 at 10k+)
 │   ├── swarm/models                  → ShardAnnounce, capacity, manifests (ONE topic for every model; a custom `gossip_network_id` appends `/<id>`)
 │   ├── swarm/credits                 → CreditGossip
 │   ├── swarm/health                  → trust summaries
@@ -2473,7 +2477,7 @@ OpenAI-compatible Responses endpoint — the 2026 default API for o-series / gpt
 Full Anthropic Messages API compatibility for use as a Claude Code backend:
 - **Request fields:** `tools`, `tool_choice`, `metadata`, `thinking` (extended thinking), `cache_control` on system blocks
 - **Content blocks:** `text`, `image`, `tool_use`, `tool_result`, `thinking`, `redacted_thinking`
-- **Routing:** Claude models → Anthropic cloud (full pass-through); non-Claude models → Anthropic→OpenAI translation proxy (supports streaming — SSE events translated in real time); local GGUF models → tool calls/thinking converted to text for inference
+- **Routing:** Claude models → Anthropic cloud (full pass-through); non-Claude models → Anthropic→OpenAI translation proxy (supports streaming — SSE events translated in real time); local GGUF models → earlier `tool_use` / `tool_result` blocks reach the template as tool turns (`ChatMessage::tool`, `chat_template::tool_turns`, #283), `thinking` as text
 - **Total prompt cap:** 4MB (raised from 64KB for Claude Code compatibility — tool results and long-context prompts can exceed the old limit)
 - **Claude Code usage:** `ANTHROPIC_BASE_URL=http://localhost:8800 claude --model qwen2.5-coder-7b`
 - **Failure reporting (2026-08-12):** a failure is an `event: error` SSE frame —
@@ -3102,6 +3106,8 @@ The list is split into **open** (will be addressed) and **won't fix unless a con
 
 - **DeepSeek-2 (V2/V2-Lite/V3, Kimi-K2, GLM-4.7-Flash) — recognised, refused, code kept** — see `docs/FUTURE_WORK.md` #116 for the list of what a real file needs. The loader's MLA branch, `MlaWeights` and `LayerVariant::DeepSeek` stay as its starting point and are unreachable until `ModelArch::is_supported` admits the family again.
 
+- **Gemma 4's mixture-of-experts and small sizes, and Gemma 3's and 4's images — recognised, refused by name** — `docs/FUTURE_WORK.md` #115: the 26B-A4B (mixture of experts), E2B and E4B (per-layer token embeddings, shared KV layers), `gemma4v` / Gemma 3's vision projector, and the `-assistant` drafters. `GgufTensorMeta::unbuilt_gemma4_part` refuses the Gemma 4 sizes off their tensor table; Gemma 3 and Gemma 4 12B/31B text run.
+
 - **Metered-connection detection on macOS** — `daemon::metered::read` answers unknown there, so automatic downloads and serving peers are held back on a metered connection only with `auto_manage.on_metered_connection = "pause"`. macOS exposes the cost through `NWPath.isExpensive` / `isConstrained` (Network framework), which needs Objective-C/Swift bindings this crate does not carry.
 
 ### Won't fix unless a concrete caller appears
@@ -3148,8 +3154,7 @@ Tested up to 5 nodes on real hardware (Proxmox). Estimated capacity: ~10K nodes.
 | Peer registry cap (S3) | Max 200 peers, evicts highest-latency non-LAN | Memory bounded O(1) not O(N) |
 | Target replicas | `ceil(log2(pool_size))` × demand_factor | 10 replicas at 1K, 14 at 10K |
 | Consistent hash ring | 10 virtual slots per node for shard assignment | Prevents thundering herd |
-| Regional gossip summaries | O(regions × models) not O(nodes × shards) | Scales with regions not nodes |
-| GossipSub mesh auto-scale | mesh_n/mesh_n_high scale with known_peers | Handles 1K+ peers |
+| GossipSub mesh auto-scale | mesh_n/mesh_n_high scale with the peers met (not their addresses, #91) | Handles 1K+ peers |
 
 ### Bottlenecks beyond 10K nodes
 - GossipSub message volume (linear with models × publishers)

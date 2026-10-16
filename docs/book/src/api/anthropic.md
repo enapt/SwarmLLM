@@ -91,7 +91,7 @@ neither goes to a cloud provider, chosen by its name:
 
 | Model Pattern | Route | Details |
 |---|---|---|
-| A model on this node or in the swarm | Local or swarm inference | Tool calls the model makes come back as `tool_use` blocks; earlier `tool_use`, `tool_result` and `thinking` blocks in the conversation are given to the model as text |
+| A model on this node or in the swarm | Local or swarm inference | Tool calls the model makes come back as `tool_use` blocks; earlier `tool_use` and `tool_result` blocks reach the model's own chat template as tool turns, the way it was trained to see them; `thinking` blocks are given to it as text |
 | `claude-*` | Anthropic API | Full pass-through (all fields preserved including tools and thinking) |
 | `gpt-*`, `o1-*`, `o3-*`, `o4-*`, `o1`, `o3`, `o4` | OpenAI | Anthropic→OpenAI format translation |
 | `deepseek*` | DeepSeek | Anthropic→OpenAI format translation |

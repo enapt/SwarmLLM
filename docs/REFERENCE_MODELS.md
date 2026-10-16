@@ -37,7 +37,7 @@ can also hold it whole, so local-only and distributed runs are comparable on
 identical weights.
 
 It is a `llama`-architecture model on purpose. This codebase has separate paths
-for `phi3` (fused QKV/FFN), `gemma2`, `qwen35`, and MoE/MLA; a test model on one
+for `phi3` (fused QKV/FFN), `gemma2`, `gemma3` and `gemma4` (per-layer attention shapes and RoPE), `qwen35`, and MoE/MLA; a test model on one
 of those means every anomaly has to be ruled out as an architecture bug before
 it can be blamed on the network. `llama` with GQA is the best-covered path,
 which is what a control should be.
