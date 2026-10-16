@@ -78,6 +78,7 @@ impl Qwen35AttnWeights {
             ),
             max_seq_len,
             kv_reserve,
+            None,
         )?;
 
         let mirror = kv_cache.as_ref().and_then(|c| c.flash_operands());

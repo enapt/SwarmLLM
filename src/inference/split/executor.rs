@@ -1016,6 +1016,7 @@ impl SplitModel {
         // #32). Process-wide, so only meaningful on a worker serving one
         // request, which is what a mechanism check runs.
         let growth_before = super::kv_cache::kv_growth_steps();
+        let slides_before = super::kv_cache::kv_slides();
 
         // Get or create the per-request cache entry, extract the layer caches,
         // then drop the DashMap guard before running the (potentially slow) forward pass.
@@ -1345,7 +1346,10 @@ impl SplitModel {
         // not only the first: without a reservation the first chunk fits its
         // quantum and the growth lands on the ones after it. A decode step
         // grows at most once per quantum and is not worth a line.
-        if seq_len > 1 {
+        // Windowed caches that slid instead of growing (FUTURE_WORK #281) —
+        // the one thing a decode step reports here, once per ~512 steps.
+        let slid = super::kv_cache::kv_slides().saturating_sub(slides_before);
+        if seq_len > 1 || slid > 0 {
             let grew = super::kv_cache::kv_growth_steps().saturating_sub(growth_before);
             tracing::debug!(
                 request_id,
@@ -1353,6 +1357,7 @@ impl SplitModel {
                 index_pos,
                 reserved_positions = kv_reserve,
                 growth_steps = grew,
+                windowed_slides = slid,
                 "DIAG: KV cache growth during a prompt chunk"
             );
         }
@@ -1772,6 +1777,7 @@ impl SplitModel {
         // See the same snapshot in `forward_inner_impl`: how many times a
         // cache grew by concatenation during THIS batch forward.
         let growth_before = super::kv_cache::kv_growth_steps();
+        let slides_before = super::kv_cache::kv_slides();
 
         // Context window check: reject any item whose index_pos + seq_len
         // exceeds max_seq_len (same guard as forward_inner_impl, prevents RoPE
@@ -2119,7 +2125,10 @@ impl SplitModel {
             entry.last_accessed = std::time::Instant::now();
         }
         // Same DIAG as the single-request path, for a fused prefill batch.
-        if seq_len > 1 {
+        // Windowed caches that slid instead of growing (FUTURE_WORK #281) —
+        // the one thing a decode step reports here, once per ~512 steps.
+        let slid = super::kv_cache::kv_slides().saturating_sub(slides_before);
+        if seq_len > 1 || slid > 0 {
             let grew = super::kv_cache::kv_growth_steps().saturating_sub(growth_before);
             tracing::debug!(
                 batch_size,
@@ -2127,6 +2136,7 @@ impl SplitModel {
                 index_pos = items.first().map(|i| i.index_pos).unwrap_or(0),
                 reserved_positions = ?kv_reserves,
                 growth_steps = grew,
+                windowed_slides = slid,
                 "DIAG: KV cache growth during a prompt chunk"
             );
         }

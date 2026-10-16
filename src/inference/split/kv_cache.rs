@@ -45,6 +45,14 @@ use super::SsmState;
 /// answer in f32, so every append converts as it writes
 /// (`split::kv_write::write_into`); `store_dtype` is what a fresh buffer is
 /// allocated as, and `None` means whatever the first source is.
+///
+/// **A sliding-window layer's cache can drop its oldest positions** (`keep`,
+/// FUTURE_WORK #281): when its buffer is full it moves its newest `keep`
+/// positions to the front instead of growing, as llama.cpp's windowed cache
+/// holds the window plus one batch (`llama_kv_cache_iswa`). `current_seq_len`
+/// still counts from the conversation's start — every reader of "how far has
+/// this request got" reads it unchanged — and `start` is the position the
+/// buffer's first row holds.
 #[derive(Debug, Clone)]
 pub(crate) struct SeqCache {
     /// `None` until the first append, when the batch/head shape is known.
@@ -52,8 +60,15 @@ pub(crate) struct SeqCache {
     dim: usize,
     current_seq_len: usize,
     grow_by: usize,
+    /// Positions the BUFFER holds.
     max_seq_len: usize,
     store_dtype: Option<DType>,
+    /// The position the buffer's first row holds: 0 until the cache slides.
+    start: usize,
+    /// How many of its newest positions a full buffer keeps instead of
+    /// growing — a windowed layer's ([`positions_kept_for_window`]). `None`
+    /// keeps every position.
+    keep: Option<usize>,
 }
 
 impl SeqCache {
@@ -68,6 +83,50 @@ impl SeqCache {
             grow_by: grow_by.max(1),
             max_seq_len: initial.max(1),
             store_dtype: None,
+            start: 0,
+            keep: None,
+        }
+    }
+
+    /// The position the buffer's first row holds — 0 unless the cache has
+    /// slid ([`Self::keep`]).
+    pub(crate) fn held_from(&self) -> usize {
+        self.start
+    }
+
+    /// Positions the buffer holds now: `current_seq_len - held_from`.
+    pub(crate) fn held(&self) -> usize {
+        self.current_seq_len - self.start
+    }
+
+    /// The highest position this buffer reaches without sliding or growing —
+    /// what a CUDA graph capture and the head-room guard compare a forward
+    /// against. `max_seq_len` for a cache that never slid.
+    pub(crate) fn reach(&self) -> usize {
+        self.start + self.max_seq_len
+    }
+
+    /// Keep only the newest `keep` positions when the buffer fills, or every
+    /// position (`None`).
+    pub(crate) fn slide_beyond(&mut self, keep: Option<usize>) {
+        self.keep = keep;
+    }
+
+    /// Start an EMPTY cache at `position`: its first append is that position.
+    /// How a snapshot of a slid cache is restored. Ignored once anything is
+    /// held.
+    pub(crate) fn begin_at(&mut self, position: usize) {
+        if self.current_seq_len == self.start {
+            self.start = position;
+            self.current_seq_len = position;
+        }
+    }
+
+    /// Make the first allocation no larger than `positions`. Ignored once the
+    /// buffer exists.
+    fn cap_first_allocation(&mut self, positions: usize) {
+        if self.all_data.is_none() {
+            self.max_seq_len = self.max_seq_len.min(positions).max(1);
         }
     }
 
@@ -97,16 +156,18 @@ impl SeqCache {
         &self.all_data
     }
 
-    /// The positions written so far, as a view over the buffer.
+    /// The positions held, as a view over the buffer: from [`Self::held_from`]
+    /// to the current length.
     pub(crate) fn current_data(&self) -> candle_core::Result<Option<Tensor>> {
         match self.all_data.as_ref() {
             None => Ok(None),
-            Some(d) => Ok(Some(d.narrow(self.dim, 0, self.current_seq_len)?)),
+            Some(d) => Ok(Some(d.narrow(self.dim, 0, self.held())?)),
         }
     }
 
     pub(crate) fn reset(&mut self) {
         self.current_seq_len = 0;
+        self.start = 0;
         self.all_data = None;
     }
 
@@ -120,14 +181,18 @@ impl SeqCache {
             grow_by: self.grow_by,
             max_seq_len: self.max_seq_len,
             store_dtype: self.store_dtype,
+            start: self.start,
+            keep: self.keep,
         })
     }
 
     /// Keep the first `len` positions and forget the rest. O(1): no copy, no
     /// allocation, the buffer is untouched. A `len` at or past the current
-    /// length is a no-op.
+    /// length is a no-op. Never below [`Self::held_from`]: positions a slid
+    /// cache no longer holds cannot be handed back, and
+    /// `KvCacheEntry::truncate_to` refuses before asking (`LayerKv::can_truncate_to`).
     pub(crate) fn truncate(&mut self, len: usize) {
-        self.current_seq_len = self.current_seq_len.min(len);
+        self.current_seq_len = self.current_seq_len.min(len).max(self.start);
     }
 
     pub(crate) fn append(&mut self, src: &Tensor) -> candle_core::Result<()> {
@@ -142,12 +207,37 @@ impl SeqCache {
             .all_data
             .as_mut()
             .expect("all_data was just initialised");
-        while self.current_seq_len + seq_len > self.max_seq_len {
+        // A windowed layer's full buffer moves its newest `keep` positions to
+        // the front rather than growing. The copy is made first: one op
+        // reading and writing the same buffer would hold its storage twice.
+        // Amortised, a position is copied `keep / grow_by` times — ~2 for a
+        // 1,024 window — against the window's worth of keys every query reads.
+        if let Some(keep) = self.keep {
+            let held = self.current_seq_len - self.start;
+            if held + seq_len > self.max_seq_len && held > keep {
+                let newest = ad.narrow(self.dim, held - keep, keep)?.force_contiguous()?;
+                super::kv_write::write_into(ad, &newest, self.dim, 0)?;
+                self.start = self.current_seq_len - keep;
+                KV_SLIDES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let needed = self.current_seq_len - self.start + seq_len;
+        while needed > self.max_seq_len {
+            // A windowed cache grows no further than its window and one
+            // quantum — the size whose slide always leaves a whole quantum
+            // free — or it settles a quantum wider than it ever reads.
+            let ceiling = self.keep.map(|keep| keep + self.grow_by);
+            let step = match ceiling {
+                Some(c) if self.max_seq_len < c && needed <= c => {
+                    self.grow_by.min(c - self.max_seq_len)
+                }
+                _ => self.grow_by,
+            };
             let mut shape = src.dims().to_vec();
-            shape[self.dim] = self.grow_by;
+            shape[self.dim] = step;
             let next_ad = Tensor::zeros(shape, dtype, src.device())?;
             *ad = Tensor::cat(&[&*ad, &next_ad], self.dim)?;
-            self.max_seq_len += self.grow_by;
+            self.max_seq_len += step;
             KV_GROWTH_STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         // `slice_set` refuses a non-contiguous source, and a cache is in no
@@ -161,7 +251,7 @@ impl SeqCache {
         // Converting as it writes when the buffer keeps another dtype — the
         // half cache, fed f32 — in one launch on a card (`kv_write`).
         let src = src.contiguous()?;
-        super::kv_write::write_into(ad, &src, self.dim, self.current_seq_len)?;
+        super::kv_write::write_into(ad, &src, self.dim, self.current_seq_len - self.start)?;
         self.current_seq_len += seq_len;
         Ok(())
     }
@@ -173,6 +263,49 @@ impl SeqCache {
 /// for FUTURE_WORK #32 reads.
 pub(crate) static KV_GROWTH_STEPS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+
+/// Slides taken by every windowed [`SeqCache`] in this process — the
+/// mechanism check for FUTURE_WORK #281: a long conversation on a windowed
+/// model that leaves it at 0 kept every position.
+pub(crate) static KV_SLIDES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// See [`KV_SLIDES`].
+pub(crate) fn kv_slides() -> u64 {
+    KV_SLIDES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Positions past a layer's window its cache keeps behind the next write, for
+/// a rewind: a rejected draft (`cuda_graph::MAX_POSITIONS`, SWIFT's drafts) or a
+/// split's stored prompt, cut at a whole 64-token block
+/// (`split_prompt_cache::BLOCK_TOKENS`). A rewind past it is refused, never
+/// served from keys the window lost ([`LayerKv::can_truncate_to`]).
+pub(crate) const WINDOW_REWIND_POSITIONS: usize = 64;
+
+/// How many of its newest positions a full sliding-window layer's cache keeps:
+/// the `window - 1` keys before the next query, and room to rewind
+/// ([`WINDOW_REWIND_POSITIONS`]). llama.cpp keeps `n_swa + n_ubatch`
+/// (`llama_kv_cache_iswa`); the batch here is the room the buffer has past
+/// this (`layers::new_kv_cache`).
+pub(crate) fn positions_kept_for_window(window: usize) -> usize {
+    window.saturating_sub(1) + WINDOW_REWIND_POSITIONS
+}
+
+/// `SWARMLLM_KV_WINDOW_SLIDE=0` keeps every position of a windowed layer, as
+/// before FUTURE_WORK #281 — the A/B inside one binary. Read once.
+pub(crate) fn windowed_caches_slide() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    #[cfg(test)]
+    if NO_SLIDE_IN_TEST.with(std::cell::Cell::get) {
+        return false;
+    }
+    *ON.get_or_init(|| std::env::var("SWARMLLM_KV_WINDOW_SLIDE").as_deref() != Ok("0"))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own `SWARMLLM_KV_WINDOW_SLIDE=0`, on its thread only.
+    pub(crate) static NO_SLIDE_IN_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// See [`KV_GROWTH_STEPS`].
 pub(crate) fn kv_growth_steps() -> u64 {
@@ -275,6 +408,24 @@ impl KvPair {
         self.k.truncate(len);
         self.v.truncate(len);
     }
+
+    /// See [`SeqCache::slide_beyond`].
+    fn slide_beyond(&mut self, keep: Option<usize>) {
+        self.k.slide_beyond(keep);
+        self.v.slide_beyond(keep);
+    }
+
+    /// See [`SeqCache::begin_at`].
+    fn begin_at(&mut self, position: usize) {
+        self.k.begin_at(position);
+        self.v.begin_at(position);
+    }
+
+    /// See [`SeqCache::cap_first_allocation`].
+    fn cap_first_allocation(&mut self, positions: usize) {
+        self.k.cap_first_allocation(positions);
+        self.v.cap_first_allocation(positions);
+    }
 }
 
 /// How one layer keeps its KV cache — `layers::kv_storage` is the one place
@@ -357,6 +508,10 @@ pub(crate) struct LayerKv {
     /// False when `main`'s sequence axis is not dim 2, which the mirror's
     /// transpose assumes. Such a cache never gets a mirror.
     mirrorable: bool,
+    /// The layer's sliding window, when its cache keeps only that much
+    /// ([`Self::slide_beyond`]); `None` for a layer that reads its whole
+    /// history.
+    window: Option<usize>,
 }
 
 impl LayerKv {
@@ -370,7 +525,65 @@ impl LayerKv {
             growth: self.growth,
             initial: self.initial,
             mirrorable: self.mirrorable,
+            window: self.window,
         })
+    }
+
+    /// Let a sliding-window layer's cache keep only what its queries can
+    /// still read ([`positions_kept_for_window`], FUTURE_WORK #281), or every
+    /// position (`None`). Asked by every forward (`layers::append_to_cache`),
+    /// as [`Self::conform_to`] is: a cache restored from a snapshot cannot know
+    /// its layer's window.
+    ///
+    /// **A cache with an f16 mirror never slides**: the mirror is kept in step
+    /// by absolute positions against the cache's whole history. That layout is
+    /// a card where the half cache does not apply ([`KvStorage::F32Mirrored`]);
+    /// the processor and the half cache slide.
+    pub(crate) fn slide_beyond(&mut self, window: Option<usize>) {
+        let window = window.filter(|_| windowed_caches_slide() && !self.mirrorable);
+        self.window = window;
+        let keep = window.map(positions_kept_for_window);
+        self.main.slide_beyond(keep);
+        // Not yet allocated, a sliding cache is born the window and one growth
+        // quantum wide — never the whole admitted prompt, which is where a long
+        // prompt's memory goes.
+        if let Some(keep) = keep {
+            let born = keep + self.growth;
+            self.main.cap_first_allocation(born);
+            self.initial = self.initial.min(born);
+        }
+    }
+
+    /// The first position this cache still holds: 0 unless it slid.
+    pub(crate) fn held_from(&self) -> usize {
+        self.main.k_cache().held_from()
+    }
+
+    /// The shortest history this cache can be cut back to and still answer
+    /// the next query: one window past [`Self::held_from`] (vLLM's rule for a
+    /// sliding-window prefix hit, `SlidingWindowManager`), 0 for a cache that
+    /// holds its whole history. A rewind or a snapshot shorter than this
+    /// would read keys the window has lost.
+    pub(crate) fn serves_from(&self) -> usize {
+        match (self.held_from(), self.window) {
+            (0, _) => 0,
+            (from, Some(window)) => from + window - 1,
+            // Slid without a window: only a snapshot restored onto a cache
+            // built without one — its own start is all it can promise.
+            (from, None) => from,
+        }
+    }
+
+    /// Can this cache be cut back to `len` positions? Always for a cache that
+    /// holds its whole history, or a `len` it has not passed.
+    pub(crate) fn can_truncate_to(&self, len: usize) -> bool {
+        len >= self.current_seq_len() || len >= self.serves_from()
+    }
+
+    /// Start an EMPTY cache at `position` — restoring a snapshot of a slid
+    /// cache ([`SeqCache::begin_at`]).
+    pub(crate) fn begin_at(&mut self, position: usize) {
+        self.main.begin_at(position);
     }
 
     /// Build with the first allocation sized to `initial` positions and
@@ -386,6 +599,7 @@ impl LayerKv {
             growth,
             initial,
             mirrorable: dim == 2,
+            window: None,
         }
     }
 
@@ -408,6 +622,7 @@ impl LayerKv {
             growth,
             initial,
             mirrorable,
+            window: None,
         }
     }
 
@@ -486,6 +701,9 @@ impl LayerKv {
         }
         let (k, v) = (self.main.k()?, self.main.v()?);
         let mut converted = KvPair::with_capacity_in(dim, capacity, self.growth, Some(dtype));
+        // A slid cache stays slid: what it holds starts where it did.
+        converted.begin_at(self.held_from());
+        converted.slide_beyond(self.window.map(positions_kept_for_window));
         if let (Some(k), Some(v)) = (k, v) {
             if k.dim(dim)? > 0 {
                 converted.append(&k, &v)?;
@@ -519,7 +737,13 @@ impl LayerKv {
         if self.main.current_seq_len() == before + 1 && mirror_is_lazy() {
             return Ok(out);
         }
-        if self.shadow.is_none() && self.mirrorable && Self::wants_shadow(k) {
+        // Never for a cache that has dropped positions: the mirror is kept in
+        // step by absolute positions against the whole history.
+        if self.shadow.is_none()
+            && self.mirrorable
+            && self.held_from() == 0
+            && Self::wants_shadow(k)
+        {
             self.shadow = Some(KvPair::with_capacity(1, self.initial, self.growth));
         }
         if let Some(shadow) = self.shadow.as_mut() {
@@ -1000,10 +1224,10 @@ impl KvCacheEntry {
                     host += total;
                 }
                 let cap = cache.max_seq_len().max(1);
-                let live = cache.current_seq_len();
+                let live = cache.held();
                 used += total / cap as u64 * live as u64;
             }
-            tokens += kv.current_seq_len();
+            tokens += kv.k_cache().held();
         }
         // SSM state is per-layer and fixed-size, so it does not scale with the
         // conversation, but it is real memory and belongs in the total.
@@ -1080,6 +1304,23 @@ impl KvCacheEntry {
                     .into(),
             ));
         }
+        // A sliding-window layer keeps its window and a rewind's worth
+        // (`WINDOW_REWIND_POSITIONS`); a rewind further back would answer from
+        // keys it no longer holds. Every rewind in this codebase is shorter —
+        // a refused capture, a rejected draft, a stored split prompt's last
+        // block — so this makes a new, longer one loud (FUTURE_WORK #281).
+        if let Some(kv) = self
+            .layers
+            .iter()
+            .flatten()
+            .find(|kv| !kv.can_truncate_to(target_len))
+        {
+            return Err(crate::error::SwarmError::Internal(format!(
+                "cannot take this conversation back to position {target_len}: a \
+                 sliding-window layer holds it only from position {} (FUTURE_WORK #281)",
+                kv.held_from()
+            )));
+        }
         for s in self.ssm_states.iter_mut().flatten() {
             s.rewind_to(target_len);
         }
@@ -1108,6 +1349,7 @@ impl KvCacheEntry {
                 continue;
             }
             let dim = kv.k_cache().dim();
+            let from = kv.held_from();
             let (k_snap, v_snap) = {
                 let k = kv
                     .k()
@@ -1118,16 +1360,17 @@ impl KvCacheEntry {
                 let k = k.ok_or_else(|| SwarmError::Internal("kv cache: k empty".into()))?;
                 let v = v.ok_or_else(|| SwarmError::Internal("kv cache: v empty".into()))?;
                 let k_trunc = k
-                    .narrow(dim, 0, target_len)
+                    .narrow(dim, 0, target_len - from)
                     .and_then(|t| t.contiguous())
                     .map_err(|e| SwarmError::Internal(format!("kv narrow/contiguous k: {e}")))?;
                 let v_trunc = v
-                    .narrow(dim, 0, target_len)
+                    .narrow(dim, 0, target_len - from)
                     .and_then(|t| t.contiguous())
                     .map_err(|e| SwarmError::Internal(format!("kv narrow/contiguous v: {e}")))?;
                 (k_trunc, v_trunc)
             };
             kv.reset();
+            kv.begin_at(from);
             kv.append(&k_snap, &v_snap)
                 .map_err(|e| SwarmError::Internal(format!("kv truncate re-append: {e}")))?;
         }
@@ -1239,7 +1482,7 @@ impl KvCacheStore {
                         Some(kv) => kv
                             .all_caches()
                             .iter()
-                            .all(|c| c.all_data().is_some() && c.max_seq_len() >= positions),
+                            .all(|c| c.all_data().is_some() && c.reach() >= positions),
                         None => entry
                             .ssm_states
                             .get(i)
@@ -1258,6 +1501,11 @@ impl KvCacheStore {
     /// re-allocates its previous size on the next append; the guard then
     /// charges the forward's own need, which is at most that size and is
     /// memory the budget had already seen this request hold.
+    ///
+    /// The LEAST any layer reaches ([`SeqCache::reach`]): a sliding-window
+    /// layer's buffer reaches further than its size once it slides, and the
+    /// first layer of a Gemma is one — read alone, it would say a forward fits
+    /// that the whole-history layers must grow for (FUTURE_WORK #281).
     pub(crate) fn allocated_positions(&self, key: &str) -> usize {
         self.caches
             .get(key)
@@ -1266,8 +1514,9 @@ impl KvCacheStore {
                     .layers
                     .iter()
                     .flatten()
-                    .find(|kv| kv.k_cache().all_data().is_some())
-                    .map(|kv| kv.k_cache().max_seq_len())
+                    .filter(|kv| kv.k_cache().all_data().is_some())
+                    .map(|kv| kv.k_cache().reach())
+                    .min()
             })
             .unwrap_or(0)
     }
@@ -1739,7 +1988,7 @@ mod tests {
         for req in ["req-a", "req-b"] {
             let mut entry = store.get_or_create("m", req, 1);
             let k = Tensor::zeros((1usize, 2, 8, 4), DType::F32, &Device::Cpu).unwrap();
-            let mut kv = new_kv_cache(64, KvStorage::F32Mirrored, 0);
+            let mut kv = new_kv_cache(64, KvStorage::F32Mirrored, 0, None);
             kv.append(&k, &k.clone()).unwrap();
             entry.layers[0] = Some(kv);
         }
@@ -1783,7 +2032,7 @@ mod tests {
         let prompt = Tensor::zeros((1usize, 2, 2000, 4), DType::F32, &dev).unwrap();
         let more = Tensor::zeros((1usize, 2, 100, 4), DType::F32, &dev).unwrap();
 
-        let mut reserved = new_kv_cache(4096, KvStorage::F32, 2048);
+        let mut reserved = new_kv_cache(4096, KvStorage::F32, 2048, None);
         reserved.append(&prompt, &prompt).unwrap();
         assert_eq!(
             reserved.k_cache().max_seq_len(),
@@ -1798,7 +2047,7 @@ mod tests {
         );
 
         // The control: no reservation, the same prompt, grown into place.
-        let mut plain = new_kv_cache(4096, KvStorage::F32, 0);
+        let mut plain = new_kv_cache(4096, KvStorage::F32, 0, None);
         plain.append(&prompt, &prompt).unwrap();
         assert_eq!(
             plain.k_cache().max_seq_len(),
@@ -1812,26 +2061,28 @@ mod tests {
     #[test]
     fn a_reservation_is_clamped_to_the_context_window() {
         assert_eq!(
-            new_kv_cache(4096, KvStorage::F32, 10_000)
+            new_kv_cache(4096, KvStorage::F32, 10_000, None)
                 .k_cache()
                 .max_seq_len(),
             4096
         );
         assert_eq!(
-            new_kv_cache(4096, KvStorage::F32, 0)
+            new_kv_cache(4096, KvStorage::F32, 0, None)
                 .k_cache()
                 .max_seq_len(),
             KV_CACHE_GROWTH_TOKENS
         );
         assert_eq!(
-            new_kv_cache(4096, KvStorage::F32, 100)
+            new_kv_cache(4096, KvStorage::F32, 100, None)
                 .k_cache()
                 .max_seq_len(),
             KV_CACHE_GROWTH_TOKENS
         );
         // A model whose whole window is under one quantum reserves the window.
         assert_eq!(
-            new_kv_cache(64, KvStorage::F32, 0).k_cache().max_seq_len(),
+            new_kv_cache(64, KvStorage::F32, 0, None)
+                .k_cache()
+                .max_seq_len(),
             64
         );
     }
@@ -1941,7 +2192,7 @@ mod tests {
         assert_eq!(store.allocated_positions(&key), 0, "no entry");
         {
             let mut entry = store.get_or_create_keyed(&key, 2);
-            entry.layers[1] = Some(new_kv_cache(4096, KvStorage::F32, 2048));
+            entry.layers[1] = Some(new_kv_cache(4096, KvStorage::F32, 2048, None));
         }
         assert_eq!(
             store.allocated_positions(&key),
@@ -1975,7 +2226,7 @@ mod tests {
         let fill = |layer: usize| {
             let mut entry = store.get_or_create("m", "r", 2);
             let k = Tensor::zeros((1usize, 2, 5, 4), DType::F32, &Device::Cpu).unwrap();
-            let mut kv = new_kv_cache(4096, KvStorage::F32, 0);
+            let mut kv = new_kv_cache(4096, KvStorage::F32, 0, None);
             kv.append(&k, &k.clone()).unwrap();
             entry.layers[layer] = Some(kv);
         };
@@ -2002,7 +2253,7 @@ mod tests {
     fn append_for(store: &KvCacheStore, request_id: &str, n: usize, max_seq_len: usize) {
         let mut entry = store.get_or_create("m", request_id, 1);
         let k = Tensor::zeros((1usize, 2, n, 4), DType::F32, &Device::Cpu).unwrap();
-        let mut kv = new_kv_cache(max_seq_len, KvStorage::F32Mirrored, 0);
+        let mut kv = new_kv_cache(max_seq_len, KvStorage::F32Mirrored, 0, None);
         kv.append(&k, &k.clone()).unwrap();
         entry.layers[0] = Some(kv);
     }
@@ -2091,7 +2342,7 @@ mod tests {
     fn append(store: &KvCacheStore, n: usize, max_seq_len: usize) {
         let mut entry = store.get_or_create("m", "r", 1);
         let k = Tensor::zeros((1usize, 2, n, 4), DType::F32, &Device::Cpu).unwrap();
-        let mut kv = new_kv_cache(max_seq_len, KvStorage::F32Mirrored, 0);
+        let mut kv = new_kv_cache(max_seq_len, KvStorage::F32Mirrored, 0, None);
         kv.append(&k, &k.clone()).unwrap();
         entry.layers[0] = Some(kv);
     }
@@ -2234,7 +2485,7 @@ mod tests {
     fn conversation(store: &KvCacheStore, request: &str, n: usize, idle: std::time::Duration) {
         let mut entry = store.get_or_create("m", request, 1);
         let k = Tensor::zeros((1usize, 2, n, 4), DType::F32, &Device::Cpu).unwrap();
-        let mut kv = new_kv_cache(4096, KvStorage::F32Mirrored, 0);
+        let mut kv = new_kv_cache(4096, KvStorage::F32Mirrored, 0, None);
         kv.append(&k, &k.clone()).unwrap();
         entry.layers[0] = Some(kv);
         entry.last_accessed = std::time::Instant::now()
@@ -3088,7 +3339,8 @@ mod tests {
         let (k1, v1) = (noisy(1, 2, 5, 4), noisy(1, 2, 5, 4));
 
         let mut fresh: Option<LayerKv> = None;
-        let (k, _) = append_to_cache(&mut fresh, &k1, &v1, 0, KvStorage::F16, 4096, 0).unwrap();
+        let (k, _) =
+            append_to_cache(&mut fresh, &k1, &v1, 0, KvStorage::F16, 4096, 0, None).unwrap();
         assert_eq!(k.dtype(), DType::F16);
 
         // What hydration leaves: an f32 history in a cache that follows its
@@ -3097,13 +3349,15 @@ mod tests {
         hydrated.append(&k1, &v1).unwrap();
         let mut slot = Some(hydrated);
         let k2 = noisy(1, 2, 1, 4);
-        let (k, _) = append_to_cache(&mut slot, &k2, &k2, 5, KvStorage::F16, 4096, 0).unwrap();
+        let (k, _) =
+            append_to_cache(&mut slot, &k2, &k2, 5, KvStorage::F16, 4096, 0, None).unwrap();
         assert_eq!(k.dtype(), DType::F16);
         assert_eq!(k.dim(2).unwrap(), 6);
         assert_eq!(flat32(&k.narrow(2, 0, 5).unwrap()), rounded(&k1));
 
         // Position 0 is a new conversation in the same slot.
-        let (k, _) = append_to_cache(&mut slot, &k2, &k2, 0, KvStorage::F16, 4096, 0).unwrap();
+        let (k, _) =
+            append_to_cache(&mut slot, &k2, &k2, 0, KvStorage::F16, 4096, 0, None).unwrap();
         assert_eq!(k.dim(2).unwrap(), 1);
     }
 
@@ -3129,5 +3383,197 @@ mod tests {
             standard_attention(&q, &k_wide, &v_wide, None, d, n_head, n_kv_head, None).unwrap();
         assert_eq!(got.dtype(), DType::F32);
         assert_eq!(flat32(&got), flat32(&want));
+    }
+
+    // ---- A sliding-window layer keeps its window (FUTURE_WORK #281) ----
+
+    use crate::inference::layers::append_to_cache;
+    use candle_core::IndexOp;
+
+    /// Positions `from..from + len` as K rows ([1, 2, len, 4]) whose every
+    /// value is the position, so a read-back says which positions it holds.
+    fn rows_at(from: usize, len: usize) -> Tensor {
+        Tensor::arange(from as f32, (from + len) as f32, &Device::Cpu)
+            .unwrap()
+            .reshape((1, 1, len, 1))
+            .unwrap()
+            .broadcast_as((1, 2, len, 4))
+            .unwrap()
+            .contiguous()
+            .unwrap()
+    }
+
+    /// The positions a cache reads back, from its first row of head 0.
+    fn positions_held(kv: &LayerKv) -> Vec<usize> {
+        let k = kv.k().unwrap().unwrap();
+        let held = k.dim(2).unwrap();
+        k.narrow(1, 0, 1)
+            .unwrap()
+            .narrow(3, 0, 1)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .into_iter()
+            .take(held)
+            .map(|p| p as usize)
+            .collect()
+    }
+
+    /// A windowed cache of a 128-position context, fed `positions` in chunks
+    /// of `chunk` — the slide on unless `no_slide`.
+    fn windowed_cache(window: usize, positions: usize, chunk: usize, no_slide: bool) -> LayerKv {
+        NO_SLIDE_IN_TEST.with(|c| c.set(no_slide));
+        let mut slot = None;
+        let mut pos = 0;
+        while pos < positions {
+            let len = chunk.min(positions - pos);
+            let k = rows_at(pos, len);
+            append_to_cache(&mut slot, &k, &k, pos, KvStorage::F32, 128, 0, Some(window)).unwrap();
+            pos += len;
+        }
+        NO_SLIDE_IN_TEST.with(|c| c.set(false));
+        slot.unwrap()
+    }
+
+    /// A windowed layer's cache never grows past its window and one quantum:
+    /// when full it moves its newest positions to the front, keeping at least
+    /// the window and a rewind's worth, and reads back exactly the newest
+    /// positions in order. Pieces of 64 are the case that grew a quantum too
+    /// far before the growth was capped.
+    #[test]
+    fn a_windowed_cache_keeps_its_newest_positions_in_one_buffer() {
+        let (window, n) = (4, 400);
+        let keep = positions_kept_for_window(window);
+        for chunk in [1, 7, 64] {
+            let kv = windowed_cache(window, n, chunk, false);
+            assert_eq!(kv.current_seq_len(), n, "{chunk}: the length is absolute");
+            assert!(kv.held_from() > 0, "{chunk}: 400 positions in a 128 buffer");
+            assert!(
+                kv.k_cache().max_seq_len() <= keep + 128,
+                "{chunk}: the buffer grew to {}, past the window and one quantum",
+                kv.k_cache().max_seq_len()
+            );
+            let held = positions_held(&kv);
+            assert!(held.len() >= keep, "{chunk}: kept {} < {keep}", held.len());
+            let want: Vec<usize> = (kv.held_from()..n).collect();
+            assert_eq!(held, want, "{chunk}: the newest positions, in order");
+            assert_eq!(kv.serves_from(), kv.held_from() + window - 1);
+        }
+
+        // The control: with the slide off, every position is kept and the
+        // buffer grows to hold them.
+        let kv = windowed_cache(window, n, 7, true);
+        assert_eq!(kv.held_from(), 0);
+        assert_eq!(positions_held(&kv), (0..n).collect::<Vec<_>>());
+        assert!(kv.k_cache().max_seq_len() >= n);
+    }
+
+    /// A layer with no window keeps every position, slide or no slide.
+    #[test]
+    fn a_layer_without_a_window_keeps_every_position() {
+        let mut slot = None;
+        for pos in (0..300).step_by(10) {
+            let k = rows_at(pos, 10);
+            append_to_cache(&mut slot, &k, &k, pos, KvStorage::F32, 128, 0, None).unwrap();
+        }
+        let kv = slot.unwrap();
+        assert_eq!(kv.held_from(), 0);
+        assert_eq!(positions_held(&kv), (0..300).collect::<Vec<_>>());
+    }
+
+    /// A rewind the window still answers is taken — and the next write lands
+    /// right after it; one past it is refused rather than served from keys
+    /// the cache no longer holds. Both truncation modes agree.
+    #[test]
+    fn a_slid_cache_takes_a_rewind_its_window_still_answers_and_refuses_one_past_it() {
+        let window = 4;
+        for mode in [TruncateMode::InPlace, TruncateMode::Copy] {
+            let kv = windowed_cache(window, 400, 7, false);
+            let (from, serves) = (kv.held_from(), kv.serves_from());
+            let mut entry = KvCacheEntry {
+                layers: vec![Some(kv)],
+                ssm_states: vec![None],
+                last_accessed: std::time::Instant::now(),
+            };
+            let err = entry.truncate_to_with(mode, serves - 1).unwrap_err();
+            assert!(
+                err.to_string().contains("sliding-window"),
+                "{mode:?}: {err}"
+            );
+            assert_eq!(entry.layers[0].as_ref().unwrap().current_seq_len(), 400);
+
+            entry.truncate_to_with(mode, serves).unwrap();
+            let kv = entry.layers[0].as_mut().unwrap();
+            assert_eq!(kv.current_seq_len(), serves, "{mode:?}");
+            assert_eq!(kv.held_from(), from, "{mode:?}: the start is kept");
+            assert_eq!(positions_held(kv), (from..serves).collect::<Vec<_>>());
+            let k = rows_at(serves, 3);
+            kv.append(&k, &k).unwrap();
+            assert_eq!(
+                positions_held(kv),
+                (from..serves + 3).collect::<Vec<_>>(),
+                "{mode:?}: the next write continues from the rewind"
+            );
+        }
+    }
+
+    /// A slid cache reaches past its buffer's length by where it starts: a
+    /// step inside that allocates nothing (a CUDA graph may capture it) and the
+    /// head-room guard charges nothing for it.
+    #[test]
+    fn a_slid_cache_reaches_from_where_it_starts() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(60));
+        let key = KvCacheStore::cache_key("m", "r");
+        let kv = windowed_cache(4, 400, 1, false);
+        let reach = kv.held_from() + kv.k_cache().max_seq_len();
+        assert!(reach > 400);
+        store.get_or_create_keyed(&key, 1).layers[0] = Some(kv);
+        assert_eq!(store.allocated_positions(&key), reach);
+        assert!(store.every_cache_holds(&key, 401));
+        assert!(!store.every_cache_holds(&key, reach + 1));
+    }
+
+    /// The slide copies the newest positions, so it never runs on a cache
+    /// that keeps an f16 mirror in step by absolute position.
+    #[test]
+    fn a_mirrored_cache_never_slides() {
+        let mut slot = None;
+        for pos in (0..300).step_by(10) {
+            let k = rows_at(pos, 10);
+            append_to_cache(
+                &mut slot,
+                &k,
+                &k,
+                pos,
+                KvStorage::F32Mirrored,
+                128,
+                0,
+                Some(4),
+            )
+            .unwrap();
+        }
+        let kv = slot.unwrap();
+        assert_eq!(kv.held_from(), 0);
+        assert_eq!(positions_held(&kv), (0..300).collect::<Vec<_>>());
+    }
+
+    /// Converted to the half cache mid-conversation (a hydrated cache meeting a
+    /// card layer), a slid cache keeps where it starts and goes on sliding.
+    #[test]
+    fn a_slid_cache_converted_to_half_stays_slid() {
+        let mut slot = Some(windowed_cache(4, 400, 7, false));
+        let from = slot.as_ref().unwrap().held_from();
+        let k = rows_at(400, 1);
+        append_to_cache(&mut slot, &k, &k, 400, KvStorage::F16, 128, 0, Some(4)).unwrap();
+        let kv = slot.as_ref().unwrap();
+        assert!(kv.holds_half());
+        assert!(kv.held_from() >= from);
+        let k = kv.k().unwrap().unwrap().to_dtype(DType::F32).unwrap();
+        let held = k.dim(2).unwrap();
+        assert_eq!(kv.held_from() + held, 401);
+        let last: f32 = k.i((0, 0, held - 1, 0)).unwrap().to_scalar().unwrap();
+        assert_eq!(last, 400.0);
     }
 }

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #281**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #285**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1741,20 +1741,24 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
-#### #281 — A windowed layer keeps every position in its KV cache; llama.cpp keeps the window
-`P2` · memory · **OPEN** — 2026-10-16
+#### #281 — A windowed layer's cache is still CHARGED for every position it no longer keeps
+`P2` · memory · **OPEN** — 2026-10-16 · narrowed 2026-10-16: (1) the cache keeps its window (§ Closed)
 
-Gemma 2, 3 and 4 attend over a window on most layers (#278, #115), and the cache keeps every
-position: the window is cut from the keys, not from memory. llama.cpp keeps a second cache for
-those layers sized to the window plus a batch (`llama_kv_cache_iswa`; `--swa-full` keeps
-everything, which it needs for prompt-cache reuse past the window). On the Gemma 4 12B a
-position costs 8 KiB on each of 40 windowed layers and 2 KiB on each of 8 global ones (f16 K+V):
-at 32K tokens 10.5 GiB here against ~0.8 GiB in llama.cpp. The model-wide estimates charge the
-widest layer everywhere (48 × 8 KiB), so the context a node offers is cut by the same factor.
-What a change must keep: speculative rollback (`LayerKv::truncate`), the prefix cache and a
-split's held openings (#10) all assume a position once written stays readable — a ring for the
-windowed layers has to answer each of them, or keep the window plus the longest rollback, as
-llama.cpp's `n_swa + n_ubatch` does.
+Since (1) a windowed layer's cache holds its window, a rewind and one growth quantum
+(`LayerKv::slide_beyond`): on the Gemma 4 12B at 32K tokens ~1.0 GiB by the layout's
+arithmetic (f16 K+V: 40 windowed layers × 1,599 positions × 8 KiB + 8 global × 32K × 2 KiB),
+from 10.5.
+Every ESTIMATE of a conversation's cost still charges each position on every layer at the
+widest layer's rate (48 × 8 KiB on that 12B: 12 GiB at 32K) — the loader's KV budget
+(`loader` `kv_per_token_over`), admission (`VramFootprintInputs`, `vram.rs`), the split
+planner (`hybrid::plan_gpu_layers`), a peer's bound (`kv_bytes_per_position_per_layer`,
+advertised — a change there is a wire question), the process pool's card geometry and the
+prefix cache's `positions_ceiling`. Safe in direction — a node holds less than it charges —
+but the context it offers and the prompts it admits are still cut by the old factor. Next:
+one function answering "bytes for N positions of this model" (global layers × N, windowed ×
+min(N, kept + quantum)) beside `split::layers_keeping_kv`, read by every estimate. Also:
+hydration reserves the whole prompt for a windowed layer, before the first forward tells it
+its window (`hydrate_request_from_snapshot`).
 
 #### #265 — A later range loaded into a card/processor split worker is charged to the card whatever the loader does with it
 `P3` · memory · **OPEN** — 2026-10-13 · history: found closing #264
@@ -1878,6 +1882,18 @@ llama.cpp's sampler never picks — a −∞ logit bias merged into every reques
 logit-bias path to put it on: it wants one mask applied where every sampler call site
 (local, split, remote, speculative) already passes, not one per path. A text chat practically
 never reaches either token.
+
+#### #284 — Newer templates with no system turn of their own are given ours; llama.cpp gives none
+`P3` · api · **OPEN** — 2026-10-16 · history: #100 (archive) chose the rule
+
+`chat_template::system_turn_for_template` supplies `DEFAULT_SYSTEM_PROMPT` ("You are a helpful
+assistant.") when the caller sends no system message and the template writes none of its own —
+#100's rule, kept for TinyLlama, which answers a bare question with nothing, and Phi-3.5. Gemma 4
+with no tools falls under it, so every plain Gemma 4 chat opens with a system turn llama.cpp
+(and HF's `apply_chat_template`) never add; Qwen3 likely does too, unchecked. Next: measure the
+reply to a bare question on Gemma 4 and Qwen3, with and without the turn, against llama.cpp, and
+narrow the rescue to the templates that need it (a model that answers nothing without one),
+never by family name.
 
 #### #185 — Three API surfaces each implement streaming and non-streaming replies separately
 `P3` · api · **OPEN** — 2026-07-26 · history: archive § "Collapse the parallel response paths behind one core loop"
@@ -2411,7 +2427,19 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel, #283)
+**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel, #283, #281 (1))
+- #281 (1) — **A windowed layer's cache keeps its window, not the whole conversation.** Gemma
+  2, 3 and 4 attend over a window on most layers, and those layers' caches kept every position
+  (a Gemma 4 12B conversation at 32K tokens: 10.5 GiB of cache, now ~1.0 by the layout's
+  arithmetic; llama.cpp ~0.8). A full buffer moves its newest W − 1 + 64 positions to the
+  front instead of growing (llama.cpp's `n_swa + n_ubatch`); a rewind past what the window
+  still answers is refused, never served from lost keys; a prefix-cache snapshot records where
+  each layer starts, is found only for a prefix its window answers (vLLM's sliding-window rule)
+  and never leaves the node. Gemma 3 1B at 1,500 tokens and 4B at 2,000, past their windows:
+  logits bit-identical with the slide on and off, and as close to llama.cpp as before
+  (worst 0.999451 / 0.998622, top-1 12/12 both); on the card the half cache slides as well —
+  mid-decode, past the CUDA graphs — bit-identical on and off, the 4B whole and split 17/34
+  equal to the card run before it. Residual — the estimates — stays open as #281.
 - #282 (calls, channel) — **Gemma 4's tool calls are tool calls.** It writes
   `<|tool_call>call:name{key:<|"|>text<|"|>,n:2}<tool_call|>` — its own syntax, not JSON — and
   every call reached the client as reply text. `tool_parse::try_gemma4` reads it as llama.cpp

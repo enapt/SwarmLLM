@@ -643,6 +643,140 @@ fn a_batched_forward_reads_the_window_too() {
     }
 }
 
+// ---- A windowed layer's cache keeps its window (FUTURE_WORK #281) ----
+
+/// A [`gemma2_test_model`] whose context is `context` positions, so a
+/// conversation can outgrow a windowed cache's first buffer (one 512-position
+/// growth quantum) and make it slide.
+fn gemma2_model_of_context(layers: usize, context: usize) -> SplitModel {
+    use super::super::rope::precompute_freqs_cis;
+    let mut model = gemma2_test_model(layers);
+    model.max_seq_len = context;
+    for layer in model.layers.iter_mut() {
+        if let LayerVariant::Dense(lw) = layer {
+            let (cos, sin) =
+                precompute_freqs_cis(lw.rope_dim, 10000.0, context, &Device::Cpu).unwrap();
+            (lw.cos, lw.sin) = (cos, sin);
+        }
+    }
+    model
+}
+
+/// `hidden` from position 0 in `chunk`-position forwards into `kv`, then one
+/// position at a time for the last `steps`.
+fn read_then_decode(
+    model: &mut SplitModel,
+    kv: &KvCacheStore,
+    hidden: &Tensor,
+    chunk: usize,
+    steps: usize,
+    id: &str,
+) -> Tensor {
+    let n = hidden.dim(1).unwrap();
+    let mut outs = Vec::new();
+    let mut pos = 0;
+    while pos < n {
+        let len = if pos < n - steps {
+            chunk.min(n - steps - pos)
+        } else {
+            1
+        };
+        let piece = hidden.narrow(1, pos, len).unwrap();
+        outs.push(model.forward(&piece, pos, kv, id).unwrap());
+        pos += len;
+    }
+    Tensor::cat(&outs, 1).unwrap()
+}
+
+/// Where each layer's cache for `id` starts.
+fn held_from(model: &SplitModel, kv: &KvCacheStore, id: &str) -> Vec<usize> {
+    let key = KvCacheStore::cache_key(&model.kv_model_key, id);
+    let entry = kv.get_entry(&key).unwrap();
+    entry
+        .layers
+        .iter()
+        .map(|l| l.as_ref().unwrap().held_from())
+        .collect()
+}
+
+/// A windowed layer whose cache has dropped every position its window no
+/// longer reads gives the same output as one that kept them all — on the
+/// prompt pass, the decode steps after it, and a batched step — and only the
+/// windowed layer's cache drops anything.
+#[test]
+fn a_windowed_cache_that_slid_answers_as_one_that_kept_everything() {
+    use crate::inference::split::kv_cache::NO_SLIDE_IN_TEST;
+    let (window, n, steps) = (5, 640, 6);
+    let mut model = gemma2_model_of_context(2, 1024);
+    set_windows(&mut model, &[Some(window), None]);
+    let a = Tensor::randn(0f32, 1.0, (1, n, 256), &Device::Cpu).unwrap();
+    let b = Tensor::randn(0f32, 1.0, (1, n, 256), &Device::Cpu).unwrap();
+
+    let run = |model: &mut SplitModel, no_slide: bool| {
+        NO_SLIDE_IN_TEST.with(|c| c.set(no_slide));
+        let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let out = read_then_decode(model, &kv, &a, 64, steps, "a");
+        let held = held_from(model, &kv, "a");
+        NO_SLIDE_IN_TEST.with(|c| c.set(false));
+        (out, held)
+    };
+    let (kept, kept_from) = run(&mut model, true);
+    let (slid, slid_from) = run(&mut model, false);
+    assert_eq!(kept_from, [0, 0], "the control kept every position");
+    assert!(slid_from[0] > 0, "the windowed layer's cache slid");
+    assert_eq!(slid_from[1], 0, "the global layer's cache never slides");
+    let diff = max_abs_diff(&slid, &kept);
+    assert!(diff < 1e-5, "slid and kept differ by {diff}");
+    // And both are the window's own answer, not two paths agreeing on a
+    // wrong one: the last position against a run over only its window.
+    let mut one = gemma2_model_of_context(1, 1024);
+    one.layers = vec![model.layers.remove(0)];
+    let tail = a.narrow(1, n - window, window).unwrap();
+    let alone = run_in_chunks(&mut one, &tail, window, "tail");
+    let last = run_in_chunks(&mut one, &a, 64, "whole");
+    let diff = max_abs_diff(
+        &last.i((.., n - 1, ..)).unwrap(),
+        &alone.i((.., window - 1, ..)).unwrap(),
+    );
+    assert!(diff < 1e-4, "the slid layer's last position: {diff}");
+    model.layers.insert(0, one.layers.remove(0));
+
+    // A batched step reads each conversation's slid cache from where it starts.
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let want_a = read_then_decode(&mut model, &kv, &a, 64, 1, "single-a");
+    let want_b = read_then_decode(&mut model, &kv, &b, 64, 1, "single-b");
+    for (x, id) in [(&a, "batch-a"), (&b, "batch-b")] {
+        let prompt = x.narrow(1, 0, n - 1).unwrap();
+        read_then_decode(&mut model, &kv, &prompt, 64, 0, id);
+        assert!(held_from(&model, &kv, id)[0] > 0);
+    }
+    let (la, lb) = (
+        a.narrow(1, n - 1, 1).unwrap(),
+        b.narrow(1, n - 1, 1).unwrap(),
+    );
+    let items = [
+        BatchItem {
+            input: &la,
+            index_pos: n - 1,
+            request_id: "batch-a",
+        },
+        BatchItem {
+            input: &lb,
+            index_pos: n - 1,
+            request_id: "batch-b",
+        },
+    ];
+    let step = model.forward_batch(&items, &kv).unwrap();
+    for (name, got, want) in [("a", &step[0], &want_a), ("b", &step[1], &want_b)] {
+        let want = want.i((.., n - 1..n, ..)).unwrap();
+        let diff = max_abs_diff(got, &want);
+        assert!(
+            diff < 1e-4,
+            "request {name}: batched step differs by {diff}"
+        );
+    }
+}
+
 /// A query scale (#279: Gemma 2's 27B) reaches both attention entry points:
 /// the batched forward agrees with the single one, and the scale moves the
 /// output — so the agreement is not two paths both ignoring it.

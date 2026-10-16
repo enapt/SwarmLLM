@@ -1634,6 +1634,8 @@ mod tests {
             dim: 2,
             max_seq_len: 4096,
             restore_to: Vec::new(),
+            held_from: Vec::new(),
+            serves_from: 0,
         }
     }
 
@@ -1705,6 +1707,8 @@ mod tests {
             dim: 2,
             max_seq_len: 4096,
             restore_to: Vec::new(),
+            held_from: Vec::new(),
+            serves_from: 0,
         };
         let bytes = serialize_snapshot_with_block_size(&snap, &tokens, Some(4)).unwrap();
         let last_hash = hashes.last().unwrap().block_hash;

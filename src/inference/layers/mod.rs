@@ -777,6 +777,7 @@ impl MlaWeights {
             ),
             max_seq_len,
             kv_reserve,
+            None,
         )?;
         crate::inference::prof::add(P::KvCache, __kv_t.elapsed().as_nanos() as u64);
 
@@ -2793,13 +2794,18 @@ impl LayerWeights {
     /// The keys this layer's queries may see, cut to its window where it
     /// binds — the ONE place a sliding window is applied to the cache, for
     /// both attention entry points ([`Self::attend`],
-    /// [`Self::forward_attn_batched`]). The cache itself keeps every position:
-    /// truncation, a rollback and the prefix cache read it whole. Answers the
-    /// flash kernel's left window beside: every other path reads the window
-    /// from the mask the forward built for it (`ForwardMasks`), over the same
-    /// keys. The queries are the cache's LAST `seq_len` positions — the
-    /// reading the forward's masks are built on (its `kv_offset`), so the two
-    /// cannot disagree about where the window starts.
+    /// [`Self::forward_attn_batched`]). Answers the flash kernel's left window
+    /// beside: every other path reads the window from the mask the forward
+    /// built for it (`ForwardMasks`), over the same keys. The queries are the
+    /// cache's LAST `seq_len` positions — the reading the forward's masks are
+    /// built on (its `kv_offset`), so the two cannot disagree about where the
+    /// window starts.
+    ///
+    /// `k`/`v` hold the history from position `held_from` (`LayerKv::held_from`):
+    /// 0, or where a windowed layer's slid cache now starts (FUTURE_WORK #281).
+    /// The window is found in POSITIONS and cut in the buffer, so a slid cache
+    /// hands the kernels the very keys a whole one would — and a window
+    /// reaching before what is held is an error, never a shorter window.
     #[allow(clippy::type_complexity)]
     fn keys_in_window(
         &self,
@@ -2807,14 +2813,28 @@ impl LayerWeights {
         k: Tensor,
         v: Tensor,
         mirror: Option<(Tensor, Tensor)>,
+        held_from: usize,
     ) -> CandleResult<(Tensor, Tensor, Option<(Tensor, Tensor)>, Option<usize>)> {
-        let first_query = k.dim(2)?.saturating_sub(seq_len);
+        let first_query = held_from + k.dim(2)?.saturating_sub(seq_len);
         let (Some(start), Some(window)) = (
             self.window_start_for(first_query, seq_len),
             self.sliding_window,
         ) else {
+            if held_from > 0 {
+                candle_core::bail!(
+                    "a cache holding positions from {held_from} on reached a layer that reads \
+                     its whole history (FUTURE_WORK #281)"
+                );
+            }
             return Ok((k, v, mirror, None));
         };
+        if start < held_from {
+            candle_core::bail!(
+                "this layer's window starts at position {start}, before the {held_from} its \
+                 cache still holds (FUTURE_WORK #281)"
+            );
+        }
+        let start = start - held_from;
         // BHSD: positions on dim 2; the f16 mirror is BSHD, positions on dim 1.
         let mirror = match mirror {
             Some((mk, mv)) => Some((from_position(&mk, 1, start)?, from_position(&mv, 1, start)?)),
@@ -3026,15 +3046,22 @@ pub(crate) fn kv_growth_quantum(max_seq_len: usize) -> usize {
 ///
 /// `storage` is how the layer keeps it — [`kv_storage`]'s answer for the device
 /// the layer runs on.
+///
+/// `sliding_window` is the layer's window, when it has one: its cache keeps the
+/// window and one growth quantum past it rather than the whole prompt
+/// (`LayerKv::slide_beyond`, FUTURE_WORK #281) — llama.cpp's `n_swa + n_ubatch`.
 pub(crate) fn new_kv_cache(
     max_seq_len: usize,
     storage: KvStorage,
     reserve_positions: usize,
+    sliding_window: Option<usize>,
 ) -> LayerKv {
-    let window = max_seq_len.max(1);
-    let growth = kv_growth_quantum(window);
-    let initial = reserve_positions.clamp(growth, window);
-    LayerKv::with_storage(2, initial, growth, storage)
+    let context = max_seq_len.max(1);
+    let growth = kv_growth_quantum(context);
+    let initial = reserve_positions.clamp(growth, context);
+    let mut cache = LayerKv::with_storage(2, initial, growth, storage);
+    cache.slide_beyond(sliding_window);
+    cache
 }
 
 /// Append a step's K and V to a layer's cache — creating it on the first step,
@@ -3047,7 +3074,12 @@ pub(crate) fn new_kv_cache(
 /// prefix-cache hydration — which builds it from a snapshot and cannot know
 /// how this layer stores its cache (the snapshot carries `n_kv_head` but not
 /// `n_head`, nor the device's choice). [`LayerKv::conform_to`] does that here,
-/// once, for all of them.
+/// once, for all of them — and [`LayerKv::slide_beyond`] tells it the layer's
+/// sliding window, which a snapshot cannot carry either.
+///
+/// The history comes back from [`LayerKv::held_from`] on: the whole of it,
+/// unless a windowed layer's cache has slid (FUTURE_WORK #281).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn append_to_cache(
     slot: &mut Option<LayerKv>,
     k: &Tensor,
@@ -3056,10 +3088,11 @@ pub(crate) fn append_to_cache(
     storage: KvStorage,
     max_seq_len: usize,
     reserve_positions: usize,
+    sliding_window: Option<usize>,
 ) -> CandleResult<(Tensor, Tensor)> {
     match slot {
         None => {
-            let mut cache = new_kv_cache(max_seq_len, storage, reserve_positions);
+            let mut cache = new_kv_cache(max_seq_len, storage, reserve_positions, sliding_window);
             let kv = cache.append(k, v)?;
             *slot = Some(cache);
             Ok(kv)
@@ -3069,6 +3102,7 @@ pub(crate) fn append_to_cache(
                 cache.reset();
             }
             cache.conform_to(storage)?;
+            cache.slide_beyond(sliding_window);
             cache.append(k, v)
         }
     }
@@ -4487,13 +4521,15 @@ impl LayerWeights {
                     self.kv_storage_on(x.device()),
                     max_seq_len,
                     kv_reserve,
+                    self.sliding_window,
                 )?;
                 // The f16 BSHD mirror, if this cache is maintaining one — lets
                 // the CUDA flash arm skip converting the whole history every
                 // token. A half cache has none: flash reads it where it lies
                 // (`run_attention`).
                 let mirror = kv_cache.as_ref().and_then(|c| c.flash_operands());
-                self.keys_in_window(seq_len, k, v, mirror)?
+                let held_from = kv_cache.as_ref().map_or(0, LayerKv::held_from);
+                self.keys_in_window(seq_len, k, v, mirror, held_from)?
             }
             // The cache stays on its layer's own device: the new rows go down
             // to it, and the history it then holds comes up for the attention.
@@ -4513,8 +4549,10 @@ impl LayerWeights {
                     self.kv_storage_on(home),
                     max_seq_len,
                     kv_reserve,
+                    self.sliding_window,
                 )?;
-                let (k, v, _, window_left) = self.keys_in_window(seq_len, k, v, None)?;
+                let held_from = kv_cache.as_ref().map_or(0, LayerKv::held_from);
+                let (k, v, _, window_left) = self.keys_in_window(seq_len, k, v, None, held_from)?;
                 (
                     sent_to_card(&k.force_contiguous()?, x.device())?,
                     sent_to_card(&v.force_contiguous()?, x.device())?,
@@ -4725,9 +4763,12 @@ impl LayerWeights {
                 self.kv_storage_on(x.device()),
                 max_seq_len,
                 kv_reserves.get(i).copied().unwrap_or(0),
+                self.sliding_window,
             )?;
             let mirror = cache_slot.as_ref().and_then(|c| c.flash_operands());
-            let (ki, vi, mirror, window_left) = self.keys_in_window(seq_len, ki, vi, mirror)?;
+            let held_from = cache_slot.as_ref().map_or(0, LayerKv::held_from);
+            let (ki, vi, mirror, window_left) =
+                self.keys_in_window(seq_len, ki, vi, mirror, held_from)?;
             heads.push(crate::inference::prof::timed!(
                 P::AttnCore,
                 run_attention_windowed(

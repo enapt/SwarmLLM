@@ -4099,7 +4099,7 @@ capture's decision line lands INSIDE the streamed `Generated:` line — so two i
 hashed differently and "the captured MoE output differs run to run" was briefly believed (gotcha
 #840). Compare the `Token IDs:` line, or strip timestamped lines first.
 
-## A sliding window is cut where it binds, and the cache keeps every position (2026-10-15, FUTURE_WORK #278)
+## A sliding window is cut where it binds (2026-10-15, FUTURE_WORK #278)
 
 Gemma 2 alternates two kinds of attention layer: the even ones see only the last
 4,096 positions, the odd ones the whole conversation. The loader read Gemma 2's
@@ -4142,9 +4142,9 @@ attention is a different rule (FUTURE_WORK #114 (b)).
   K/V views (BHSD dim 2) and the f16 mirror (BSHD dim 1) to the window's start —
   a view, no copy. The start comes from the cache's LENGTH (its last `seq_len`
   positions are the queries), the same reading the forward's masks are built on
-  (`kv_offset`), so the two cannot disagree. The cache itself keeps every
-  position: truncation, a speculative rollback and the prefix cache read it
-  whole.
+  (`kv_offset`), so the two cannot disagree. Since #281 the cache itself drops
+  what the window no longer reads (`held_from` is where it starts) — next
+  section.
 - One query (decode) needs no mask: the narrowed view IS the window. Several
   read `ForwardMasks::for_layer` — the causal mask and the windowed one over the
   narrowed keys, built once per forward by `SplitModel::attention_masks`,
@@ -4170,10 +4170,93 @@ Against llama.cpp at a window that binds within a few tokens:
 `examples/make_tiny_gemma_gguf.py` (window 8, f32 weights) agrees at worst cosine 0.99928
 over 40 positions, whole, in pieces and split at layer 3; 0.334 with the window off.
 
-**Not done**: llama.cpp's iSWA cache keeps only the window plus one batch for a
-windowed layer (`llama_kv_cache_iswa`); here a windowed layer keeps every position,
-so a long Gemma 2 conversation costs the memory it cost before — no more, and no
-wrong answer. A/B `SWARMLLM_SLIDING_WINDOW=0`.
+The cache keeping only the window came after (#281, next section).
+
+## A windowed layer's cache keeps its window (2026-10-16, FUTURE_WORK #281)
+
+Until #281 the window was cut from the KEYS a query read, not from memory: every
+windowed layer kept every position. On Gemma 4's 12B (40 windowed layers at 8 KiB a
+position, 8 global at 2 KiB, f16 K+V) a 32K-token conversation held 10.5 GiB of cache;
+llama.cpp holds ~0.8.
+
+**What llama.cpp and vLLM do.** llama.cpp gives windowed layers a second cache
+(`llama_kv_cache_iswa`) of `GGML_PAD(min(size_base, n_swa * n_seq + n_ubatch), 256)` cells
+— the window plus one batch; `--swa-full` keeps everything, and without it a prompt the
+server cannot reuse is read again (its checkpoints, `--ctx-checkpoints`, exist to soften
+that). vLLM's `SlidingWindowManager` frees blocks that fall out of the window and accepts a
+prefix hit of length L only when positions [L − W + 1, L) are still cached. Both rules are
+taken whole.
+
+**How it is done here:**
+
+- `SeqCache` keeps `start` — the position its buffer's first row holds — and `keep`. A full
+  buffer holding more than `keep` moves its newest `keep` positions to the front
+  (`kv_write::write_into`, one copy) instead of growing. `current_seq_len` stays the
+  conversation's length, so every reader of "how far has this request got" is unchanged;
+  `k()` / `v()` return the rows from `held_from` on.
+- `keep = positions_kept_for_window(W)` = W − 1 + `WINDOW_REWIND_POSITIONS` (64): the keys the
+  next query reads, plus room for every rewind this codebase makes — a refused capture, a
+  rejected draft (≤ 8), a split's stored prompt cut at a whole 64-token block. The buffer
+  grows no wider than `keep` + one quantum (512): the size whose slide always leaves a whole
+  quantum free. Quantized growth without that cap settled one quantum wider (512 → 1,024 →
+  1,536 for Gemma 3's 512 window, where 1,087 suffices).
+- `LayerKv::slide_beyond` is told the window by EVERY forward (`layers::append_to_cache`,
+  beside `conform_to`): a cache restored from a snapshot cannot know its layer's window. A
+  cache with an f16 mirror (`F32Mirrored`) never slides — the mirror is kept in step by
+  absolute position against the whole history.
+- `keys_in_window` takes `held_from` and narrows at `start − held_from`; it `bail!`s if the
+  window would start before the cache does — a loud error, never a read of the wrong rows.
+- **A rewind is refused past `LayerKv::serves_from`** (`held_from + W − 1`):
+  `KvCacheEntry::truncate_to_with` checks every layer first. Callers that can recover do
+  (`reconcile_hydrated_prefix` → a full prompt pass).
+- **The prefix cache**: a snapshot records `held_from` per layer and `serves_from`;
+  `snapshot_at` copies [held_from, pos), `narrow_snapshot` refuses below `serves_from`,
+  `lookup` / `lookup_chain` skip an entry whose `serves_from` passes the usable length, and
+  an earlier turn shorter than the new snapshot's `serves_from` is KEPT beside it (it serves a
+  branch the new one cannot — llama.cpp's checkpoints, for the same reason). Hydration
+  starts the cache at `held_from` (`begin_at`). **A slid snapshot never leaves the node**:
+  the wire format (SKVX v1) means "every layer from position 0", and a peer on an older build
+  would read a partial layer as the opening — `Entry::manifest` is empty for it (not
+  announced, not exported) and `serialize_snapshot_with_block_size` refuses it.
+- `every_cache_holds` and `allocated_positions` read `SeqCache::reach` (`start` + buffer):
+  a step inside it allocates nothing, so a CUDA graph may capture it; the step that slides
+  is beyond it and runs uncaptured.
+
+**Tests, each red with its part of the fix off** (2026-10-16, a mutation per part):
+`a_windowed_cache_keeps_its_newest_positions_in_one_buffer` (the growth cap),
+`a_slid_cache_takes_a_rewind_its_window_still_answers_and_refuses_one_past_it`,
+`a_slid_snapshot_is_restored_where_its_window_starts_and_stays_on_this_node` (hydration),
+`an_earlier_turn_a_slid_snapshot_cannot_serve_is_kept_and_found` (both the lookup skip and the
+retention). `a_windowed_cache_that_slid_answers_as_one_that_kept_everything` runs a two-layer
+Gemma 2 test model 640 positions past a 5-position window — prompt pieces, decode steps and a
+batched step — with the slide on and off (its control asserts the off arm slid nothing).
+
+**Against llama.cpp, on the real files** (`~/swarmllm-g3/slide281.sh`: Gemma 3 Q4_K_M on the
+processor, the prompt read in 512-token chunks, the last 8 prompt positions + 4 decode steps,
+`examples/compare_logits_reference.py`), the slide on and `SWARMLLM_KV_WINDOW_SLIDE=0`:
+
+| model, prompt | windowed layers | slides (DIAG) | on vs off | vs llama.cpp (both arms) |
+|---|---|---|---|---|
+| 1B, 1,500 (window 512) | 22 of 26 | 44 / 0 | bit-identical | worst 0.999451, top-1 12/12 |
+| 4B, 2,000 (window 1,024) | 29 of 34 | 58 / 0 | bit-identical | worst 0.998622 at 1,998, top-1 12/12 |
+
+Both rows equal the runs from before #281, to the digit (the 4B's one position under 0.999 is
+#115 (1)'s, unchanged). The slide count is the DIAG line's `windowed_slides`, one per K and
+per V: 22 and 29 layers each slid once in the last prompt chunk.
+
+**On the card** (`~/swarmllm-g3/card281.sh`, the CUDA build, under the safety kit, 0 driver
+events): the half cache slides too. The 1B whole on the card with 64 decode steps slid 44 in its
+last prompt chunk and 44 more on the decode step at position 1,473 — the one step CUDA graphs
+leave uncaptured (`every_cache_holds` reads `reach`) — and its 72 logits are bit-identical with
+the slide on and off. The 4B whole on the card (worst 0.994008) and split 17/34 card/processor
+(0.994389), 58 slides each, equal the card run from before #281 to the digit. The 1B's 64-step
+run sits at worst 0.997727 against llama.cpp on the processor with 5 top-1 flips in 72, every
+one at a cosine ≥ 0.9996 with the top 5 agreeing — near-ties, in both arms alike.
+
+**Not done** (FUTURE_WORK #281): every estimate — the loader's KV budget, admission, the
+split planner, a peer's bound, the prefix cache's bytes per position — still charges every
+position on every layer, so a node now holds less than it charges. A/B
+`SWARMLLM_KV_WINDOW_SLIDE=0`.
 
 ## A family's attention scale is read, not assumed (2026-10-15, FUTURE_WORK #279)
 

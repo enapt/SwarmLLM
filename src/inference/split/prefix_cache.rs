@@ -159,9 +159,29 @@ pub struct KvSnapshot {
     /// was moved OFF it into host RAM (`SnapshotHome::HostRam`, #257); `None`
     /// — or an empty list — restores a layer where its tensors already are.
     pub restore_to: Vec<Option<Device>>,
+    /// The position each layer's copy starts at: 0, or where a sliding-window
+    /// layer's slid cache started (`LayerKv::held_from`, FUTURE_WORK #281).
+    /// Empty — every layer from 0 — for a snapshot of caches that never slid,
+    /// and for every one read off the wire, which carries only those
+    /// (`export_snapshot_bytes`).
+    pub held_from: Vec<usize>,
+    /// The shortest prefix this snapshot can be restored at: past its
+    /// windowed layers' starts by a window (`LayerKv::serves_from`, vLLM's
+    /// sliding-window prefix-hit rule). 0 for any prefix.
+    pub serves_from: usize,
 }
 
 impl KvSnapshot {
+    /// Where layer `i`'s copy starts — see [`Self::held_from`].
+    pub fn layer_held_from(&self, i: usize) -> usize {
+        self.held_from.get(i).copied().unwrap_or(0)
+    }
+
+    /// Does every layer's copy start at position 0 — the only kind the wire
+    /// format describes?
+    pub fn holds_every_position(&self) -> bool {
+        self.held_from.iter().all(|&from| from == 0)
+    }
     /// Bytes this snapshot holds, wherever it holds them.
     ///
     /// The number the retention bound actually needs. An entry's size scales
@@ -304,7 +324,15 @@ impl Entry {
     /// configured block size. Only complete blocks contribute; the entry's
     /// trailing partial block (if any, when `tokens.len() % block_size != 0`)
     /// is omitted so cross-peer block boundaries align deterministically.
+    ///
+    /// Empty for a snapshot of a slid cache (FUTURE_WORK #281): the wire
+    /// format carries every position from 0, and a peer reading a partial
+    /// layer as whole would answer from the wrong keys — so it is neither
+    /// announced nor exported.
     fn manifest(&self, block_size: usize) -> Vec<PrefixBlockEntry> {
+        if !self.snapshot.holds_every_position() {
+            return Vec::new();
+        }
         compute_block_hashes(&self.tokens, block_size)
     }
 }
@@ -462,7 +490,9 @@ impl PrefixCache {
                 .take_while(|(a, b)| a == b)
                 .count();
             let usable = lcp.min(usable_max);
-            if usable < self.min_tokens {
+            // A snapshot of a slid cache cannot be cut back past where its
+            // windowed layers still answer (FUTURE_WORK #281).
+            if usable < self.min_tokens || usable < e.snapshot.serves_from {
                 continue;
             }
             match best {
@@ -613,6 +643,20 @@ impl PrefixCache {
             );
             return Vec::new();
         }
+        // A sliding-window layer that has dropped the prompt's opening cannot
+        // be saved at a length its window no longer reaches — the opening the
+        // ceiling or the room would keep (FUTURE_WORK #281).
+        let serves = serves_from(&entry.layers);
+        if available < serves {
+            tracing::info!(
+                model_key,
+                available,
+                serves_from = serves,
+                "prefix-cache: not snapshotting — the sliding-window layers no longer hold \
+                 the opening that fits"
+            );
+            return Vec::new();
+        }
 
         let snap_tokens = &prompt_tokens[..available];
 
@@ -627,7 +671,9 @@ impl PrefixCache {
                 return Vec::new();
             };
             if let Some(bucket) = inner.per_model.get(model_key) {
-                if let Some(covering) = bucket.iter().find(|e| e.tokens.starts_with(snap_tokens)) {
+                if let Some(covering) = bucket.iter().find(|e| {
+                    e.tokens.starts_with(snap_tokens) && e.snapshot.serves_from <= available
+                }) {
                     covering.last_hit.store(self.next_tick(), Ordering::Relaxed);
                     let manifest = enumerate_manifest_locked(bucket, self.block_tokens);
                     tracing::debug!(
@@ -674,8 +720,14 @@ impl PrefixCache {
         // would only burn `max_entries` slots and their KV bytes. A growing
         // conversation therefore keeps ONE entry, not one per turn.
         // A chain-keyed entry has empty `tokens`, which every prompt "starts
-        // with" — it is never covered by a token entry.
-        bucket.retain(|e| !e.chain.is_empty() || !tokens.starts_with(&e.tokens));
+        // with" — it is never covered by a token entry. Nor is one shorter
+        // than where a slid snapshot answers from: it serves an earlier branch
+        // of the conversation ours cannot — llama.cpp keeps checkpoints of a
+        // windowed cache for the same reason (FUTURE_WORK #281).
+        let serves = snap.serves_from;
+        bucket.retain(|e| {
+            !e.chain.is_empty() || !tokens.starts_with(&e.tokens) || e.tokens.len() < serves
+        });
         bucket.push(Entry {
             tokens,
             chain: Vec::new(),
@@ -759,6 +811,7 @@ impl PrefixCache {
             e.chain_block == block_tokens
                 && e.chain.starts_with(wanted)
                 && e.snapshot.token_count >= want
+                && e.snapshot.serves_from <= want
         })?;
         winner.last_hit.store(self.next_tick(), Ordering::Relaxed);
         let full = winner.snapshot.clone();
@@ -827,6 +880,19 @@ impl PrefixCache {
         if blocks == 0 || positions < self.min_tokens {
             return 0;
         }
+        // As on the token path: a slid window cannot be saved short of where
+        // it still answers (FUTURE_WORK #281).
+        let serves = serves_from(&entry.layers);
+        if positions < serves {
+            tracing::info!(
+                model_key,
+                positions,
+                serves_from = serves,
+                "prefix-cache: not storing a split's prompt — the sliding-window layers no \
+                 longer hold the opening that fits"
+            );
+            return 0;
+        }
         let chain = &keys[..blocks];
         // Already held, whole: nothing to copy.
         {
@@ -838,6 +904,7 @@ impl PrefixCache {
                     e.chain_block == block_tokens
                         && e.chain.starts_with(chain)
                         && e.snapshot.token_count >= positions
+                        && e.snapshot.serves_from <= positions
                 })
             }) {
                 covering.last_hit.store(self.next_tick(), Ordering::Relaxed);
@@ -858,9 +925,14 @@ impl PrefixCache {
         };
         let bucket = inner.per_model.entry(model_key.to_string()).or_default();
         // An entry of this split whose chain ours extends is covered by ours —
-        // a growing conversation keeps ONE entry, as on the token path.
+        // a growing conversation keeps ONE entry, as on the token path, unless
+        // it is shorter than where ours answers from.
+        let serves = snap.serves_from;
         bucket.retain(|e| {
-            e.chain.is_empty() || e.chain_block != block_tokens || !chain.starts_with(&e.chain)
+            e.chain.is_empty()
+                || e.chain_block != block_tokens
+                || !chain.starts_with(&e.chain)
+                || e.snapshot.token_count < serves
         });
         let tick = self.next_tick();
         bucket.push(Entry {
@@ -1014,6 +1086,9 @@ impl PrefixCache {
                 None => (k_src, v_src),
             };
             let kv_slot = &mut entry.layers[i];
+            // A slid layer's copy starts past 0, and so does its cache — never
+            // more positions than it would have held unslid (FUTURE_WORK #281).
+            let from = snapshot.layer_held_from(i);
             // Reserve from the snapshot's TOKEN COUNT, not its recorded
             // `max_seq_len`. Snapshots cross the network between peers
             // (`export_snapshot_bytes`), so that field may have been written by
@@ -1028,9 +1103,12 @@ impl PrefixCache {
             let mut kv = LayerKv::with_capacity(
                 snapshot.dim,
                 crate::inference::layers::kv_cache_reservation(snapshot.token_count)
-                    .max(kv_store.reserved_positions(request_id)),
+                    .max(kv_store.reserved_positions(request_id))
+                    .saturating_sub(from)
+                    .max(1),
                 crate::inference::layers::KV_CACHE_GROWTH_TOKENS,
             );
+            kv.begin_at(from);
             kv.append(k_src, v_src).map_err(|e| {
                 SwarmError::Internal(format!(
                     "prefix-cache hydrate layer {i}: append failed: {e}"
@@ -1197,6 +1275,13 @@ fn narrow_snapshot(snap: &KvSnapshot, target_tokens: usize) -> Result<KvSnapshot
             target_tokens, snap.token_count
         )));
     }
+    if target_tokens < snap.serves_from {
+        return Err(SwarmError::Internal(format!(
+            "narrow_snapshot: target {target_tokens} is before the {} a sliding-window layer \
+             can continue from (FUTURE_WORK #281)",
+            snap.serves_from
+        )));
+    }
     if target_tokens == snap.token_count {
         // Shallow clone — candle Tensors are ref-counted.
         let layers: Vec<Option<(Tensor, Tensor)>> = snap
@@ -1210,6 +1295,8 @@ fn narrow_snapshot(snap: &KvSnapshot, target_tokens: usize) -> Result<KvSnapshot
             dim: snap.dim,
             max_seq_len: snap.max_seq_len,
             restore_to: snap.restore_to.clone(),
+            held_from: snap.held_from.clone(),
+            serves_from: snap.serves_from,
         });
     }
     let mut out: Vec<Option<(Tensor, Tensor)>> = Vec::with_capacity(snap.layers.len());
@@ -1226,15 +1313,18 @@ fn narrow_snapshot(snap: &KvSnapshot, target_tokens: usize) -> Result<KvSnapshot
         // narrowed snapshot (`serialize_snapshot_*`, `snapshot_is_finite`)
         // makes its own contiguous copy.
         let stays_a_view = snap.restore_to.get(i).is_some_and(Option::is_some);
-        let narrow = |t: &Tensor| {
-            t.narrow(snap.dim, 0, target_tokens).and_then(|n| {
-                if stays_a_view {
-                    Ok(n)
-                } else {
-                    n.contiguous()
-                }
-            })
-        };
+        // A slid layer's copy starts past 0; `serves_from` kept the target past it.
+        let held = target_tokens - snap.layer_held_from(i);
+        let narrow =
+            |t: &Tensor| {
+                t.narrow(snap.dim, 0, held).and_then(|n| {
+                    if stays_a_view {
+                        Ok(n)
+                    } else {
+                        n.contiguous()
+                    }
+                })
+            };
         let k_narrow =
             narrow(k).map_err(|e| SwarmError::Internal(format!("narrow_snapshot k: {e}")))?;
         let v_narrow =
@@ -1247,13 +1337,28 @@ fn narrow_snapshot(snap: &KvSnapshot, target_tokens: usize) -> Result<KvSnapshot
         dim: snap.dim,
         max_seq_len: snap.max_seq_len,
         restore_to: snap.restore_to.clone(),
+        held_from: snap.held_from.clone(),
+        serves_from: snap.serves_from,
     })
 }
 
+/// The shortest prefix a snapshot of `layers` could be restored at —
+/// [`LayerKv::serves_from`] over every layer, 0 when none has slid.
+fn serves_from(layers: &[Option<LayerKv>]) -> usize {
+    layers
+        .iter()
+        .flatten()
+        .map(LayerKv::serves_from)
+        .max()
+        .unwrap_or(0)
+}
+
 /// Copy positions `0..pos` of every layer's cache into a snapshot kept in
-/// `home`. For `HostRam` each card layer is narrowed on the card, copied to
-/// host memory and its card copy dropped before the next layer's, so the card
-/// never holds more than one layer's transient (~4 MB on a 7B at 4K tokens).
+/// `home` — from where a sliding-window layer's slid cache starts, for that
+/// layer (FUTURE_WORK #281). For `HostRam` each card layer is narrowed on the
+/// card, copied to host memory and its card copy dropped before the next
+/// layer's, so the card never holds more than one layer's transient (~4 MB on
+/// a 7B at 4K tokens).
 fn snapshot_at(
     layers: &[Option<LayerKv>],
     pos: usize,
@@ -1261,12 +1366,21 @@ fn snapshot_at(
     max_seq_len: usize,
     home: SnapshotHome,
 ) -> Result<KvSnapshot, SwarmError> {
+    let serves_from = serves_from(layers);
+    if pos < serves_from {
+        return Err(SwarmError::Internal(format!(
+            "snapshot_at: position {pos} is before the {serves_from} a sliding-window layer \
+             can continue from (FUTURE_WORK #281)"
+        )));
+    }
     let mut out: Vec<Option<(Tensor, Tensor)>> = Vec::with_capacity(layers.len());
     let mut restore_to: Vec<Option<Device>> = Vec::with_capacity(layers.len());
+    let mut held_from: Vec<usize> = Vec::with_capacity(layers.len());
     for kv_opt in layers.iter() {
         let Some(kv) = kv_opt else {
             out.push(None);
             restore_to.push(None);
+            held_from.push(0);
             continue;
         };
         let cur = kv.current_seq_len();
@@ -1275,6 +1389,8 @@ fn snapshot_at(
                 "snapshot_at: layer seq_len {cur} < requested pos {pos}"
             )));
         }
+        let from = kv.held_from();
+        held_from.push(from);
         let k_src = kv
             .k()
             .map_err(|e| SwarmError::Internal(format!("snapshot_at: k() failed: {e}")))?
@@ -1283,14 +1399,14 @@ fn snapshot_at(
             .v()
             .map_err(|e| SwarmError::Internal(format!("snapshot_at: v() failed: {e}")))?
             .ok_or_else(|| SwarmError::Internal("snapshot_at: v() returned None".into()))?;
-        // Narrow to [0..pos] on seq dim and force contiguous so the snapshot
+        // Narrow to [from..pos] on seq dim and force contiguous so the snapshot
         // doesn't alias the live KvCache buffer.
         let k_snap = k_src
-            .narrow(dim, 0, pos)
+            .narrow(dim, 0, pos - from)
             .and_then(|t| t.contiguous())
             .map_err(|e| SwarmError::Internal(format!("snapshot k narrow: {e}")))?;
         let v_snap = v_src
-            .narrow(dim, 0, pos)
+            .narrow(dim, 0, pos - from)
             .and_then(|t| t.contiguous())
             .map_err(|e| SwarmError::Internal(format!("snapshot v narrow: {e}")))?;
         let card = k_snap.device().clone();
@@ -1314,6 +1430,8 @@ fn snapshot_at(
         dim,
         max_seq_len,
         restore_to,
+        held_from,
+        serves_from,
     })
 }
 
@@ -1387,6 +1505,16 @@ pub fn serialize_snapshot_with_block_size(
             tokens.len(),
             snap.token_count
         )));
+    }
+    // The format describes every layer from position 0; a reader would take a
+    // slid layer's copy as the opening (FUTURE_WORK #281). `Entry::manifest`
+    // never offers one — this keeps a new caller from sending it anyway.
+    if !snap.holds_every_position() {
+        return Err(SwarmError::Internal(
+            "serialize_snapshot: a sliding-window layer of this snapshot no longer holds \
+             the prompt's opening"
+                .into(),
+        ));
     }
     let mut layer_meta: Vec<Option<SnapshotLayerMeta>> = Vec::with_capacity(snap.layers.len());
     let mut body: Vec<u8> = Vec::new();
@@ -1553,6 +1681,8 @@ pub fn deserialize_snapshot_full(
         dim: header.dim,
         max_seq_len: header.max_seq_len,
         restore_to: Vec::new(),
+        held_from: Vec::new(),
+        serves_from: 0,
     };
     Ok((snap, header.tokens, header.block_size))
 }
@@ -1651,6 +1781,8 @@ mod tests {
             dim: s.dim,
             max_seq_len: s.max_seq_len,
             restore_to: vec![Some(Device::Cpu); s.layers.len()],
+            held_from: s.held_from.clone(),
+            serves_from: s.serves_from,
         });
     }
 
@@ -1737,6 +1869,8 @@ mod tests {
             dim: 2,
             max_seq_len: 4096,
             restore_to,
+            held_from: Vec::new(),
+            serves_from: 0,
         };
         let host = narrow_snapshot(&snap(vec![Some(Device::Cpu)]), 4).unwrap();
         let (hk, hv) = host.layers[0].as_ref().unwrap();
@@ -2260,6 +2394,8 @@ mod tests {
             dim: 2,
             max_seq_len: 4096,
             restore_to: Vec::new(),
+            held_from: Vec::new(),
+            serves_from: 0,
         };
         let tokens: Vec<u32> = vec![7, 8, 9, 10];
         let bytes = serialize_snapshot_with_block_size(&snap, &tokens, None).expect("serialize");
@@ -2351,6 +2487,8 @@ mod tests {
             dim: 2,
             max_seq_len: 128,
             restore_to: Vec::new(),
+            held_from: Vec::new(),
+            serves_from: 0,
         };
         assert!(snapshot_is_finite(&snap));
     }
@@ -2368,6 +2506,8 @@ mod tests {
             dim: 2,
             max_seq_len: 128,
             restore_to: Vec::new(),
+            held_from: Vec::new(),
+            serves_from: 0,
         };
         assert!(!snapshot_is_finite(&snap));
     }
@@ -2389,6 +2529,8 @@ mod tests {
             dim: 2,
             max_seq_len: 128,
             restore_to: Vec::new(),
+            held_from: Vec::new(),
+            serves_from: 0,
         };
         assert!(!snapshot_is_finite(&snap));
     }
@@ -2401,6 +2543,8 @@ mod tests {
             dim: 2,
             max_seq_len: 128,
             restore_to: Vec::new(),
+            held_from: Vec::new(),
+            serves_from: 0,
         };
         assert!(snapshot_is_finite(&snap));
     }
@@ -2431,6 +2575,8 @@ mod tests {
             dim: 2,
             max_seq_len: 128,
             restore_to: Vec::new(),
+            held_from: Vec::new(),
+            serves_from: 0,
         };
         let tokens: Vec<u32> = vec![11, 12];
         let bytes = serialize_snapshot_with_block_size(&snap, &tokens, None).unwrap();
@@ -2579,5 +2725,145 @@ mod tests {
             pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE);
         }
         assert_eq!(pc.entry_count("m"), 4);
+    }
+
+    // ---- A sliding-window layer's cache keeps its window (FUTURE_WORK #281) ----
+
+    /// A two-layer conversation of `positions`, written as a forward would in
+    /// 7-position pieces of a 128-position context: layer 0 windowed (4), so its
+    /// cache slides past 128, layer 1 global. Every value is its position.
+    fn make_windowed_kv(kv_store: &KvCacheStore, request_id: &str, positions: usize) {
+        use crate::inference::layers::append_to_cache;
+        use crate::inference::split::kv_cache::KvStorage;
+        let mut entry = kv_store.get_or_create("m", request_id, 2);
+        let mut pos = 0;
+        while pos < positions {
+            let len = 7.min(positions - pos);
+            let k = Tensor::arange(pos as f32, (pos + len) as f32, &Device::Cpu)
+                .unwrap()
+                .reshape((1, 1, len, 1))
+                .unwrap()
+                .broadcast_as((1, 1, len, 4))
+                .unwrap()
+                .contiguous()
+                .unwrap();
+            for (slot, window) in entry.layers.iter_mut().zip([Some(4), None]) {
+                append_to_cache(slot, &k, &k, pos, KvStorage::F32, 128, 0, window).unwrap();
+            }
+            pos += len;
+        }
+    }
+
+    /// The positions layer `i` of a request's cache holds, read back.
+    fn positions_in(kv_store: &KvCacheStore, request_id: &str, i: usize) -> Vec<usize> {
+        let key = KvCacheStore::cache_key("m", request_id);
+        let entry = kv_store.get_entry(&key).unwrap();
+        let k = entry.layers[i].as_ref().unwrap().k().unwrap().unwrap();
+        k.narrow(3, 0, 1)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .into_iter()
+            .map(|p| p as usize)
+            .collect()
+    }
+
+    /// A slid conversation's snapshot carries where each layer starts, is
+    /// restored there, and is found only for a prefix its window still
+    /// answers; it is never announced to peers or written to the wire.
+    #[test]
+    fn a_slid_snapshot_is_restored_where_its_window_starts_and_stays_on_this_node() {
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let pc = PrefixCache::new(true, 8, 16, 4, 0, 0);
+        make_windowed_kv(&kv_store, "r", 400);
+        let held = positions_in(&kv_store, "r", 0);
+        let from = held[0];
+        assert!(from > 0, "the windowed layer slid");
+        let tokens: Vec<u32> = (0..400).collect();
+        let manifest = pc.insert_from_kv("m", "r", &kv_store, &tokens, ANYWHERE);
+        assert!(manifest.is_empty(), "a slid snapshot is not announced");
+        assert!(pc.enumerate_manifest("m").is_empty());
+
+        let mut probe = tokens.clone();
+        probe.push(9999);
+        let snap = pc.lookup("m", &probe).expect("the whole prompt hits");
+        assert_eq!(snap.token_count, 400);
+        assert_eq!(snap.held_from, [from, 0]);
+        assert_eq!(snap.serves_from, from + 3);
+        assert!(serialize_snapshot_with_block_size(&snap, &tokens, Some(16)).is_err());
+
+        pc.hydrate_request_from_snapshot(&kv_store, "m", "restored", &snap)
+            .unwrap();
+        assert_eq!(positions_in(&kv_store, "restored", 0), held);
+        assert_eq!(
+            positions_in(&kv_store, "restored", 1),
+            (0..400).collect::<Vec<_>>()
+        );
+        let key = KvCacheStore::cache_key("m", "restored");
+        let entry = kv_store.get_entry(&key).unwrap();
+        let restored = entry.layers[0].as_ref().unwrap();
+        assert_eq!(restored.held_from(), from);
+        assert_eq!(restored.current_seq_len(), 400);
+        drop(entry);
+
+        // A prompt sharing less than the window still answers misses — the
+        // windowed layer no longer holds that prefix's keys.
+        let mut short: Vec<u32> = (0..200).collect();
+        short.push(9999);
+        assert!(pc.lookup("m", &short).is_none());
+
+        // The control: an unslid conversation's snapshot is announced.
+        let unslid = PrefixCache::new(true, 8, 16, 4, 0, 0);
+        make_windowed_kv(&kv_store, "short", 100);
+        let tokens: Vec<u32> = (0..100).collect();
+        assert!(!unslid
+            .insert_from_kv("m", "short", &kv_store, &tokens, ANYWHERE)
+            .is_empty());
+    }
+
+    /// An earlier turn the slid snapshot cannot serve is kept beside it, and a
+    /// prompt branching between the two is served from the earlier one.
+    #[test]
+    fn an_earlier_turn_a_slid_snapshot_cannot_serve_is_kept_and_found() {
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let pc = PrefixCache::new(true, 8, 0, 4, 0, 0);
+        make_windowed_kv(&kv_store, "turn-1", 100);
+        let turn_1: Vec<u32> = (0..100).collect();
+        pc.insert_from_kv("m", "turn-1", &kv_store, &turn_1, ANYWHERE);
+        make_windowed_kv(&kv_store, "turn-2", 400);
+        let turn_2: Vec<u32> = (0..400).collect();
+        pc.insert_from_kv("m", "turn-2", &kv_store, &turn_2, ANYWHERE);
+        assert_eq!(pc.entry_count("m"), 2, "turn 1 is not covered by turn 2");
+
+        let mut branch: Vec<u32> = (0..200).collect();
+        branch.push(9999);
+        let hit = pc.lookup("m", &branch).expect("turn 1 serves the branch");
+        assert_eq!(hit.token_count, 100);
+        assert!(hit.held_from.iter().all(|&f| f == 0));
+    }
+
+    /// A split's stored prompt: kept only at a length its window answers, and
+    /// found only for one.
+    #[test]
+    fn a_slid_split_prompt_is_stored_and_found_only_where_its_window_answers() {
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let pc = PrefixCache::new(true, 8, 0, 4, 0, 0);
+        make_windowed_kv(&kv_store, "r", 400);
+        let keys: Vec<[u8; 32]> = (0..7u8).map(|i| [i; 32]).collect();
+        assert_eq!(
+            pc.insert_chain_from_kv("m", "r", &kv_store, 64, &keys[..2], ANYWHERE),
+            0,
+            "128 positions are short of where the window answers"
+        );
+        assert_eq!(
+            pc.insert_chain_from_kv("m", "r", &kv_store, 64, &keys, ANYWHERE),
+            6
+        );
+        assert!(pc.lookup_chain("m", 64, &keys, 128).is_none());
+        let hit = pc.lookup_chain("m", 64, &keys, 384).unwrap();
+        assert_eq!(hit.token_count, 384);
+        assert!(hit.held_from[0] > 0);
     }
 }
