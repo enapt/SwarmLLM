@@ -58,13 +58,24 @@ rec = {
     # silently zeroing a field, which is how the bug above survived.
     "keys": sorted(d.keys()),
 }
-with open(log, "a") as f:
+# Several files load at once at a session start, so several copies of this hook
+# run concurrently. Unlocked, a copy trimming the log (read all, rewrite) wiped
+# lines its siblings had just appended — at the 2000-line cap EVERY write
+# trimmed, and 3 of 6 session starts lost diagnosis.md / completeness.md
+# (2026-10-16). One lock around append + trim, and trim only well past the cap.
+import fcntl
+with open(log, "a+") as f:
+    fcntl.flock(f, fcntl.LOCK_EX)
     f.write(json.dumps(rec) + "\n")
-try:                              # keep the log bounded
-    lines_ = open(log).readlines()
-    if len(lines_) > 2000:
-        open(log, "w").writelines(lines_[-2000:])
-except OSError:
-    pass
+    f.flush()
+    try:                          # keep the log bounded
+        f.seek(0)
+        lines_ = f.readlines()
+        if len(lines_) > 2500:
+            f.seek(0)
+            f.truncate()
+            f.writelines(lines_[-2000:])
+    except OSError:
+        pass
 PY
 exit 0

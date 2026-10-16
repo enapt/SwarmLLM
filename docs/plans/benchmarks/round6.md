@@ -147,8 +147,8 @@ curl -X POST http://localhost:8900/api/admin/models/rescan -H "Authorization: Be
 
 Replace `<model-id>` with the slug under your models directory
 (`tinyllama-1.1b-chat-v1.0.q4-k-m` or
-`qwen2.5-coder-7b-instruct-q4-k-m`). Check
-`memory/local_model_shards.md` for the canonical paths.
+`qwen2.5-coder-7b-instruct-q4-k-m`). Each lives under
+`~/.local/share/swarmllm/models/<model>/` (the memory note this pointed to was deleted 2026-10-02).
 
 ### 3. Warm up node A with a long system-prompt request
 
@@ -267,7 +267,7 @@ from the 2026-04-20 RTX 3070 run. Key caveats when re-running:
 ## Deferred for a future bench
 
 - **GPU-mixed asymmetry** (Qwen-7B on GPU-A, CPU-B). The original
-  plan in `docs/plans/next_steps.md` called for A on the RTX 3070 and
+  plan in `docs/plans/archive/next_steps.md` called for A on the RTX 3070 and
   B on CPU so the fetch-vs-prefill ratio favored fetch even harder.
   Qwen-7B Q4 doesn't fit in 8 GB VRAM with headroom for
   prefill scratch on this host — the card OOM'd during the batched

@@ -282,7 +282,7 @@ own setting, and the swarm routes around one that is set too short.
 - **[API reference](https://enapt.github.io/SwarmLLM/api/openai.html)** — OpenAI, Anthropic, Responses and MCP
 - **[OpenClaw setup](integrations/openclaw/)** — a plugin that adds SwarmLLM to OpenClaw's setup wizard
 - **[Configuration](https://enapt.github.io/SwarmLLM/configuration/reference.html)** and **[command line](https://enapt.github.io/SwarmLLM/configuration/cli-env.html)**
-- **[Architecture](docs/ARCHITECTURE.md)**, **[performance](https://enapt.github.io/SwarmLLM/operations/performance.html)** and **[how it compares](https://enapt.github.io/SwarmLLM/comparison.html)**
+- **[Architecture](docs/ARCHITECTURE.md)** ([every document, one page](docs/README.md)), **[performance](https://enapt.github.io/SwarmLLM/operations/performance.html)** and **[how it compares](https://enapt.github.io/SwarmLLM/comparison.html)**
 
 To build it yourself:
 
@@ -297,7 +297,7 @@ GPU builds — the build command for each release variant — are in [CONTRIBUTI
 ## Get involved
 
 - **[Discord](https://discord.gg/nq9be3u828)** — find people to team up with, ask questions, get help
-- **[Issues](https://github.com/enapt/SwarmLLM/issues)** — bugs and feature requests (`swarmllm diagnostics` prints a report that's safe to paste)
+- **[Issues](https://github.com/enapt/SwarmLLM/issues)** — bugs and feature requests (`swarmllm diagnostics` prints a report that's safe to paste; [what else helps](docs/TESTING.md))
 - **[Discussions](https://github.com/enapt/SwarmLLM/discussions)** — ideas and questions
 - **[Changelog](CHANGELOG.md)** — what changed recently
 - **[Security](SECURITY.md)** — please report vulnerabilities privately

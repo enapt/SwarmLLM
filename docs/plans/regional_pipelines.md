@@ -1,7 +1,7 @@
 # Making split inference fast: regional pipelines
 
 **Written 2026-09-20 against v0.3.192-alpha, from measurements on the live
-swarm.** Numbers and traps: `memory/perf_baseline_0920_post192.md`, gotchas
+swarm.** Numbers and traps: `memory/archive/perf_baseline_0920_post192.md`, gotchas
 #656-#661.
 
 > **Status 2026-10-02:** Stages 0, 0b and 1 are done (Stage 1 in v0.3.193). Stage 2's coordinates are

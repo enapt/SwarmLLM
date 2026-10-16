@@ -71,10 +71,10 @@ MUST_ALLOW = [
 ]
 
 
-def run(cmd, transcript):
+def run(cmd, transcript, tool="Bash", tool_input=None):
     payload = json.dumps({
-        "tool_name": "Bash",
-        "tool_input": {"command": cmd},
+        "tool_name": tool,
+        "tool_input": tool_input or {"command": cmd},
         "session_id": "PROBE-SESSION-NOT-IN-LOG",
         "prompt_id": "PROBE-PROMPT",
         "transcript_path": transcript,
@@ -84,6 +84,41 @@ def run(cmd, transcript):
         env={**os.environ, "CLAUDE_PROJECT_DIR": ROOT},
     )
     return bool(r.stdout.strip())
+
+
+def transcript_with(records):
+    tf = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
+    tf.write(json.dumps({"promptId": "PROBE-PROMPT",
+                         "message": {"role": "user", "content": []}}) + "\n")
+    for r in records:
+        tf.write(json.dumps(r) + "\n")
+    tf.close()
+    return tf.name
+
+
+# Check 2 (look before you cut) reads the transcript: a file this session WROTE
+# counts as seen, but only when the write succeeded — a write the gate denied is
+# in the transcript too, flagged `is_error`. An existing file no arch-*.md
+# governs, so check 1 cannot be what answers.
+SEEN_TARGET = "/".join(["docs", "TESTING.md"])
+
+
+def write_then_result(is_error):
+    use = {"type": "tool_use", "id": "probe-w1", "name": "Write",
+           "input": {"file_path": os.path.join(ROOT, SEEN_TARGET), "content": "x"}}
+    res = {"type": "tool_result", "tool_use_id": "probe-w1", "content": "probe"}
+    if is_error:
+        res["is_error"] = True
+    return [{"promptId": "PROBE-PROMPT", "message": {"role": "assistant", "content": [use]}},
+            {"promptId": "PROBE-PROMPT", "message": {"role": "user", "content": [res]}}]
+
+
+SEEN_CASES = [
+    # (description, transcript records, must be denied)
+    ("unseen file, empty transcript", [], True),
+    ("a successful Write opens it", write_then_result(False), False),
+    ("a DENIED Write does not", write_then_result(True), True),
+]
 
 
 def main():
@@ -107,6 +142,20 @@ def main():
             print(f"  {'DENIED' if caught else 'allowed':<12} {desc}")
             if caught:
                 failures.append(f"wrongly denied: {desc}")
+
+        print("\nlook before you cut (Edit of an existing file, by what the transcript shows):")
+        for desc, records, must_deny in SEEN_CASES:
+            t = transcript_with(records)
+            try:
+                denied = run(None, t, tool="Edit",
+                             tool_input={"file_path": os.path.join(ROOT, SEEN_TARGET),
+                                         "old_string": "a", "new_string": "b"})
+            finally:
+                os.unlink(t)
+            ok = denied == must_deny
+            print(f"  {('denied' if denied else 'allowed') if ok else ('DENIED' if denied else 'ALLOWED'):<12} {desc}")
+            if not ok:
+                failures.append(f"look-before-you-cut: {desc}")
 
         # A probe that cannot fire proves nothing (gotcha #502/#525). If the
         # gate were inert every line above would read "allowed", which the

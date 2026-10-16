@@ -34,9 +34,13 @@ The checkable parts of the research rule run as `PreToolUse` hooks. **They gate
 MUTATIONS only** — reading is never blocked, so every denial is resolved by
 reading something. `research-gate.sh` refuses a change to a file when:
 
-1. **its subsystem rules never loaded** — `arch-*.md` load on the **Read tool
-   only**; `cat`/`sed`/`grep` through Bash do not trigger them (measured
-   2026-09-16, gotcha #617). Read the file, or its rules file, first. A rules
+1. **its subsystem rules never loaded** — `arch-*.md` load when a governed file
+   is Read, Written or Edited, or shown by a single-file Bash read (`cat`, `head`,
+   `sed -n`, `grep` on ONE file, no pipe or redirect — Claude Code's documented
+   rule, re-measured on 2.1.301 on 2026-10-16). A piped or multi-file Bash read
+   still loads nothing (on 2026-09-16 no Bash read did, gotcha #617). The gate
+   reads the InstructionsLoaded log, so it follows whatever actually loaded.
+   Read the file, or its rules file, first. A rules
    file created mid-session is not auto-loaded until the next session — Read it
    directly (#778). `i18n.md` is not gated (only `arch-*.md`).
 2. **the file exists and this session never looked at it** — read-before-edit
@@ -71,7 +75,7 @@ tag?" is not a question — tagging is my job, and asking it hands back work the
 user cannot do and has never done.
 
 **Theirs is only what physically requires them**: a password or private key
-(`sign_release.sh`), credentials I do not hold, a machine I cannot reach, or a
+(`examples/sign_release.sh`), credentials I do not hold, a machine I cannot reach, or a
 physical act (un-maximising a browser window). **Everything else is mine**,
 including every step of the release gate up to signing, and the deploy after it
 (`feedback_deploy_without_asking.md`, said in 2026-08-31's words: *"stop waiting
@@ -138,8 +142,9 @@ Write for that audience without dumbing anything down:
 **Nothing may block compaction, so commit as you go — it is the only
 protection** (#687). A PreCompact hook that refused to compact while work was
 uncommitted killed a whole session on 2026-09-23: the context filled, `/compact`
-was refused, and the commit it demanded no longer fit. Compaction never touches
-the disk; `post-compact-status.sh` (SessionStart, matcher `compact`) lists what
+was refused, and the commit it demanded no longer fit. (The user-level
+`~/.claude/scripts/pre-compact.sh` only saves a snapshot and always exits 0.)
+Compaction never touches the disk; `post-compact-status.sh` (SessionStart, matcher `compact`) lists what
 is still uncommitted afterwards. CLAUDE.md § "Compact instructions" says what a
 summary must keep.
 

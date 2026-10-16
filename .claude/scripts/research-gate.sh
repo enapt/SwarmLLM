@@ -7,8 +7,12 @@
 # WHY THIS EXISTS, measured 2026-09-16
 # ------------------------------------
 # .claude/rules/arch-*.md carry `paths:` frontmatter and load automatically when
-# you open a file they govern. That mechanism fires on the **Read tool only**.
-# `cat`, `sed -n`, `head` and `grep` through Bash do NOT trigger it — confirmed
+# you open a file they govern. Since 2026-10 (re-measured 10-16 on 2.1.301, and
+# documented) that is the Read, Write and Edit tools AND a single-file Bash read
+# (`cat`/`head`/`sed -n`/`grep` on one file, no pipe or redirect); a piped or
+# multi-file Bash read still loads nothing. Check 1 reads the InstructionsLoaded
+# log, so it follows whatever actually loaded. On 2026-09-16 NO Bash read loaded
+# anything (gotcha #617) — confirmed
 # against .claude/logs/instructions-loaded.jsonl: a session that had read
 # tests/repo_consistency.rs, CLAUDE.md and several src/ files entirely through
 # Bash had logged zero `path_glob_match` events, and one Read of
@@ -157,6 +161,7 @@ if not watched:
 #               a grep of arch-network.md for a single needle satisfied "the
 #               network rules have loaded", and check 1 never fired.
 read_tool, seen, searched_web, knowledge = set(), set(), False, False
+wrote = {}   # tool_use id -> (path, in this task) of a Write/Edit awaiting its result
 # "docs/FUTURE_WORK" covers the live list AND its frozen history
 # (FUTURE_WORK_ARCHIVE.md, split off 2026-10-02) — both are what the repo knows.
 KNOWLEDGE = ("docs/invariants/", "docs/FUTURE_WORK", "gotchas.md",
@@ -194,9 +199,25 @@ try:
             if not isinstance(content, list):
                 continue
             for b in content:
+                # A file this session WROTE is one it has seen — Claude Code treats
+                # it so ("file state is current in your context"); without this an
+                # Edit right after creating a file was refused (2026-10-16). Counted
+                # only when the write SUCCEEDED: a call this gate denied is in the
+                # transcript too, with `is_error`, and must not open the file.
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    wp = wrote.pop(b.get("tool_use_id"), None)
+                    if wp and not b.get("is_error"):
+                        seen.add(wp[0])
+                        if wp[1]:
+                            this_task_seen.add(wp[0])
+                    continue
                 if not isinstance(b, dict) or b.get("type") != "tool_use":
                     continue
                 name, inp = b.get("name", ""), b.get("input", {}) or {}
+                if name in ("Write", "Edit", "NotebookEdit"):
+                    p = rel(inp.get("file_path") or inp.get("notebook_path"))
+                    if p:
+                        wrote[b.get("id")] = (p, whole_file_in_task or (cur_prompt == prompt_id))
                 blob = json.dumps(inp)
                 in_task = whole_file_in_task or (cur_prompt == prompt_id)
                 if name in ("WebSearch", "WebFetch"):
@@ -264,9 +285,9 @@ for t in watched:
                 continue
             deny(
                 f"{t} is governed by {rf}, which has NOT loaded in this session.\n\n"
-                f"Those rules auto-load on the **Read tool only** — cat/sed/grep "
-                f"through Bash do not trigger them, so working this file through "
-                f"Bash means its subsystem rules were never in context.\n\n"
+                f"Those rules load on Read/Write/Edit of a governed file, or a "
+                f"single-file cat/head/sed -n/grep with no pipe or redirect; "
+                f"none of that happened for this subsystem in this session.\n\n"
                 f"Fix: Read({rf}) — or Read the file you are about to change, "
                 f"which loads the same rules via the supported mechanism. Then retry."
             )

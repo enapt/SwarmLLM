@@ -6,7 +6,7 @@
 > `split_speculation.md`), and Item 12 (DSD) has been on by default since v0.3.213. Read the text
 > below as the April 2026 assessment.
 
-> Companion to `archive/distributed_inference_speedup.md` "Deferred" and
+> Companion to `distributed_inference_speedup.md` "Deferred" and
 > `next_steps.md` § 3 (both historical). Written 2026-04-26 to give the user a concrete
 > decision basis after the per-item details were trimmed out of the
 > main plan in commit `1ea95be` (2026-04-20). Restores the full

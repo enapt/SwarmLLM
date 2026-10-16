@@ -2,9 +2,9 @@
 
 > **Start here**: `docs/ARCHITECTURE.md` — subsystems, source tree, protocols,
 > security model. Per-subsystem rules (`.claude/rules/arch-*.md`, indexed by
-> `architecture.md`) load when you open a file they govern — **on the Read tool
-> ONLY**, never through `cat`/`sed`/`grep`. Hooks enforce it
-> (`.claude/rules/workflow.md` § "What the hooks enforce").
+> `architecture.md`) load when a file they govern is Read, Written or Edited — or shown by a
+> single-file `cat`/`head`/`sed -n`/`grep` (no pipe, no redirect; re-measured 2026-10-16). Hooks
+> check it (`.claude/rules/workflow.md` § "What the hooks enforce").
 
 ## Project Overview
 
@@ -115,12 +115,8 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
 
 - Config priority: CLI flags > seven named `SWARMLLM_*` env vars (no generic `<SECTION>_<KEY>` rule, #722) > config.toml > defaults. Provider API keys also loaded from `.env` file in data dir (standard names: `OPENAI_API_KEY`, etc.)
 - Data dir: `~/.local/share/swarmllm/` (Linux), `~/Library/Application Support/swarmllm/` (macOS), `%APPDATA%\swarmllm\` (Windows)
-- Port layout: HTTP API on TCP:port, P2P TCP on port+10 (Noise+Yamux), P2P QUIC on UDP:port
-- Credit transactions require dual Ed25519 signatures (serving node + requesting node)
 - **Credits are DORMANT — they gate nothing**, and `credits_stay_dormant` fails
   the build if one starts. **Read `docs/CREDITS_DESIGN.md` before touching them.**
-- KV-cache sessions expire after 10 min idle; shards are BLAKE3-verified on every
-  load; pipeline failover uses per-segment hot standbys.
 - **Encryption is two layers**: `network.enable_encryption` (DEFAULT TRUE) and
   `inference.encrypted_pipeline` ("boomerang", DEFAULT FALSE). ⚠ **Boomerang is
   STRUCTURAL, not cryptographic** — peers still see hidden states in plaintext,
@@ -175,7 +171,7 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
   that only read or search; 14 days to 10-10). Give bulky reading to a cheap agent with ONE question, keep the
   answer: `digest` (Haiku: logs, gate/CI output, diffs, run-and-report), `Explore` (code search). Read yourself
   only what you will edit; never poll from here. `/clear` at task boundaries; auto-compact is at 400K.
-- **The cheapest model that holds, named on every call** (`Explore`/`Plan` inherit Opus xhigh, bare → sonnet):
+- **The cheapest model that holds, named on every call** (`Explore`/`Plan` inherit Opus xhigh and skip CLAUDE.md, bare → sonnet):
   lookup, digest, run-and-report → haiku; search, web research, review, `root-cause`, architect, `Plan` →
   sonnet (`effort: high` where a miss costs a commit); i18n review (#793), cross-cutting design → opus; a
   stuck P0/P1 cause or the release's riskiest diff → fable; crypto, wire protocol, pool/private mode, auth,
@@ -191,10 +187,11 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
 - `docs/ARCHITECTURE.md` — **primary reference**: subsystems, source tree, protocols, security model
 - `docs/invariants/` — the evidence behind each rule (7 topics). **Read the topic file before changing code a rule names.**
 - `docs/FUTURE_WORK.md` — open work, ranked (history: `FUTURE_WORK_ARCHIVE.md`). **A fix moves its item to § "Closed" in the SAME commit.** ⚠ Its SCOPE is a hypothesis (#654), line numbers drift (#645).
-- `docs/DIAGNOSTICS.md` (`DIAG:`, bench traps) · `docs/CREDITS_DESIGN.md` · `docs/book/` ·
+- `docs/DIAGNOSTICS.md` (`DIAG:`, bench traps) · `docs/README.md` (every document, one page) · `docs/book/` ·
   `.claude/sweep-log.jsonl` (every `/sweep` finding — **grep before re-reporting**)
 - `memory/` = `~/.claude/projects/-home-user-SwarmLLM/memory/` (not in the repo); `MEMORY.md` indexes it and
-  holds the live status — **read `open_cautions.md` and `next_up.md` at session start.**
+  holds the live status — **read `open_cautions.md` and `next_up.md` at session start.** Dated notes
+  (round logs, audits, sweeps, old gates) are in `memory/archive/` — grep there, never read it whole.
 
 ## Compact instructions
 

@@ -54,4 +54,8 @@ Paste here — remove anything private first
 
 </details>
 
+The whole log is also kept in a file, so a problem that came and went is still
+there — where to find it, and how to capture one you can reproduce:
+[docs/TESTING.md](https://github.com/enapt/SwarmLLM/blob/main/docs/TESTING.md).
+
 If you built from source, add `rustc --version` and the `--features` you used.

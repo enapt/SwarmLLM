@@ -15,7 +15,7 @@ Execute every item; fix what fails, then report PASS/FAIL per item.
 2. **Stale references**: for every symbol, field, endpoint, channel or file this change removed or renamed,
    `grep -rn` across `src/ tests/ crates/ frontend/ docs/ examples/ python/ .claude/` — not just `src/`.
    Read any `// NOTE:` near the change for claims it made false.
-3. **Frontend** (if `frontend/js/` changed): `for f in frontend/js/**/*.js; do node -c "$f"; done` and
+3. **Frontend** (if `frontend/js/` changed): `find frontend/js -name '*.js' -exec node -c {} \;` (a bare `**` glob skips the top-level files) and
    `node examples/frontend_load_check.js` (a syntax check alone misses an IIFE that throws — gotcha #568).
    A new user-visible string is translated into all 21 locales.
 4. **Docs**: `docs/ARCHITECTURE.md` (source tree, endpoints, channels, WS types) matches the code; a changed

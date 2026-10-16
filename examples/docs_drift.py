@@ -265,8 +265,10 @@ def check_sections(files, with_memory):
 
     def resolve(name):
         name = name.strip('`')
+        # Dated memory files live in memory/archive/ (2026-10-16); a bare name still resolves there.
         candidates = [name, 'docs/' + name, 'docs/invariants/' + name, 'docs/plans/' + name,
-                      '.claude/rules/' + name, '.claude/' + name, MEMORY + os.path.basename(name)]
+                      '.claude/rules/' + name, '.claude/' + name, MEMORY + os.path.basename(name),
+                      MEMORY + 'archive/' + os.path.basename(name)]
         for c in candidates:
             if os.path.isfile(c if os.path.isabs(c) else os.path.join(ROOT, c)):
                 return c

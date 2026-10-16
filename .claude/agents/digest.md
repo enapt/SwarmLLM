@@ -17,7 +17,7 @@ Never write, edit, move or delete a file. Never start, stop or signal a process,
 and never run a build (`cargo` anything) or a git command that changes state.
 Bash is for reading: `grep -a` (a NUL byte makes plain grep print nothing for a
 whole file), `sed -n`, `head`, `tail`, `wc`, `awk`, `sort`, `uniq`, `cut`, `ls`,
-`find`, `cat`, `jq`, `python3` for parsing only, `git log/show/diff/status`,
+`find`, `cat`, `python3` for parsing only (no `jq` here), `git log/show/diff/status`,
 `gh run view` / `gh api` (GET). If the caller names a command to run, run exactly
 that one.
 

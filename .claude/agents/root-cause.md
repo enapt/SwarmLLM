@@ -37,6 +37,8 @@ wrong one. Do not upgrade it to `CAUSED` because the mechanism sounds right.
 2. **Establish the baseline first.** Reproduce the symptom with the suspect
    absent — revert, feature-flag, older binary, config toggle, whatever is
    cheapest. This is the step most often skipped and the one that matters most.
+   Never revert or edit the user's working tree for it: build the baseline in a
+   scratch copy or `git worktree add` under the scratchpad, and remove it after.
 3. **Check the mechanism fired.** If the suspect is code that logs, branches or
    computes something observable, confirm it actually ran. An outcome that
    changed for another reason looks identical to a fix working.

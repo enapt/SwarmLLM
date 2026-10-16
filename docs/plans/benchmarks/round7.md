@@ -101,7 +101,7 @@ wire cost, so shrinking the wire 3× shrinks wall-clock significantly.
 The 3.15× wire reduction is exactly what the codec promised; the
 localhost tok/s regression is exactly what the doc warned about.
 Defaulting on is a decision to make once WAN numbers land — see
-`next_steps.md` Item 2 and `round6.md` Deferred § WAN bench.
+`archive/next_steps.md` Item 2 and `round6.md` Deferred § WAN bench.
 
 ## Item 12 — multi-segment DSD
 
@@ -130,7 +130,7 @@ That's a correctness test, not a speedup bench.
    — two config toggles, easy.
 2. **Draft model loaded** — `draft_model_path` points to a GGUF that
    shares TinyLlama's vocabulary but is much smaller. No such model is
-   pre-staged in `memory/local_model_shards.md`. TinyLlama itself is
+   pre-staged here (a memory note listing them was deleted 2026-10-02). TinyLlama itself is
    already the smallest Llama-arch variant that shares Llama's SPM
    tokenizer; a true draft would need a 50M-parameter Llama distillation
    or a heavily-pruned TinyLlama. Qwen2.5-0.5B + Qwen2.5-7B is a

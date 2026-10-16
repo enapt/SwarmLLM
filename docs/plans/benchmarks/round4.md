@@ -23,7 +23,8 @@ cargo build --release --no-default-features --features dev,claude-subscription
 # or, if you have CUDA:
 # cargo build --release --features candle-cuda
 
-# 2. Verify TinyLlama is staged. If not, see memory/local_model_shards.md.
+# 2. Verify TinyLlama is staged (the memory note this pointed to was deleted 2026-10-02;
+#    a model's parts are under ~/.local/share/swarmllm/models/<model>/).
 ls ~/.local/share/swarmllm/models/
 
 # 3. Start the daemon. Defaults already enable continuous_batching = true,

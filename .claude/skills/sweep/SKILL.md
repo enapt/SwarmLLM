@@ -12,7 +12,7 @@ isolation (every subagent already starts with a fresh context; a worktree only i
 
 ## Prior findings — by grep, never pasted
 
-`.claude/sweep-log.jsonl` holds every finding ever made (~440 KB). **Never paste it into a prompt** — that is
+`.claude/sweep-log.jsonl` holds every finding ever made (~470 KB, 1.5k lines). **Never paste it into a prompt** — that is
 ~110K tokens per agent. Tell each agent: *before reporting a finding, search `.claude/sweep-log.jsonl` for the
 file or symbol with the Grep tool; drop it if a `fixed` or `wontfix` entry covers it.* (The reviewer agents
 have Grep, Glob and Read, but no Bash.)

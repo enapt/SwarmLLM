@@ -123,7 +123,7 @@ measurable wins.
   (`tests/integration/end_to_end.rs`, `#[ignore]`'d) all landed
   2026-04-29.
 - 🔓 **C1 binary signing** still open — three-option write-up in
-  `memory/signing_options.md` (recommendation: **minisign**). Needs
+  `memory/archive/signing_options.md` (recommendation: **minisign**). Needs
   a key-custody decision (hardware token / encrypted file / GitHub
   Actions secret) from the maintainer before the next-tag cut.
   Tracked in `docs/ARCHITECTURE.md` § Deferred Items.

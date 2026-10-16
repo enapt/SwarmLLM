@@ -632,7 +632,7 @@ constant**. ~~Next: an estimator of the expected reply length~~ — superseded 2
 collected data below: the error follows the HOPS, not the reply length, so do not build it. Also: peer speed does not track RTT, and a chain runs at its worst
 segment's pace, so a term linear in layers cannot express it. This gates turning
 `parallax_partial_ranges` on (#180) — on 2026-09-20 the flag on made a 4-segment, 3-peer
-route that did not finish in 580 s. Method: `memory/perf_baseline_0920_post192.md`,
+route that did not finish in 580 s. Method: `memory/archive/perf_baseline_0920_post192.md`,
 gotchas #658-#660.
 
 **Field evidence, 2026-10-06 (a tester, two nodes, 0.3.173 and 0.3.228):** the flat 64 passes
@@ -2575,7 +2575,8 @@ grep `^| N |`).
   would free (`RamBudget::headroom_after_reclaim`). Room left for a drafter is still weighed as it
   stands, because a drafter never frees memory and the target frees only what it needs. Left as it
   is: the memory a node advertises to peers counts an idle model as spent on both devices.
-  `docs/invariants/memory.md` § "The processor's planning bound counts it too".
+  `docs/invariants/memory.md` § "A model is admitted against the card as it stands NOW (2026-09-29)"
+  ("The processor's planning bound counts it too").
 - #277 — **a computer on a metered connection no longer uploads for other computers.** Since
   v0.3.239 the downloads nobody asked for waited; parts served to peers, new work for peers and
   relaying still went over the metered link. Now `SharedState::metered_hold` holds back all three:

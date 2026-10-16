@@ -61,11 +61,12 @@ swarmllm/
 ├── deploy/anchor/ (R143 — hardened bootstrap/relay anchor kit: setup-anchor.sh, systemd unit, config.toml, runbook)
 ├── deploy/docker/select-cpu-build.sh (the CPU image's `swarmllm`: execs its x86-64-v3 build or its baseline build by asking glibc-hwcaps, which reads CPUID and so answers correctly under emulation; guard `every_docker_image_builds_the_release_cpu_target`)
 ├── packaging/     (swarmllm.service + aur/, homebrew/ + deb/{postinst,prerm} maintainer scripts; the .rpm is built by release.yml from Cargo.toml's `[package.metadata.generate-rpm]` — prerm acts on $1: an upgrade must never `systemctl disable`, gotcha #313)
-├── docs/          (ARCHITECTURE, CREDITS_DESIGN, FUTURE_WORK (the live list) + FUTURE_WORK_ARCHIVE
-│                 (its frozen history to 2026-10-02), DIAGNOSTICS, REFERENCE_MODELS, NETWORKING,
-│                 NETWORKING_PLAN, RELEASE_SIGNING, TESTING)
+├── docs/          (README — one page listing every document by reader; ARCHITECTURE, CREDITS_DESIGN,
+│                 FUTURE_WORK (the live list) + FUTURE_WORK_ARCHIVE (the list as of 2026-10-02, plus
+│                 every entry closed since), DIAGNOSTICS, REFERENCE_MODELS, NETWORKING,
+│                 NETWORKING_PLAN, RELEASE_SIGNING, TESTING; bench_results/ — 2026-04-25 measurements)
 ├── docs/invariants/  (the evidence behind the .claude/rules/ statements — 7 topic files)
-├── docs/plans/    (design notes + benchmarks/, archive/)
+├── docs/plans/    (design notes for work in progress; benchmarks/ = April-May 2026 rounds, archive/ = finished plans)
 ├── docs/book/     (mdBook documentation site)
 ├── vendor/        (patched upstream crates, all workspace-`exclude`d; every patch marked `SwarmLLM patch:`)
 │   ├── candle/                (k_quants::matmul tiled + row-blocked + `vec_dot_rows` multi-row AVX2 Q4_K/Q6_K/Q2_K/Q3_K kernels (`SWARMLLM_QMATMUL_ROWS=per-row` = the per-row loop), bit-identical, exactness-asserted by qmatmul_bench; cudarc dynamic-linking hardcode removed;
