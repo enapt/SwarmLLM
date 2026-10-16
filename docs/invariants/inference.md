@@ -2897,6 +2897,17 @@ the old ceiling (1,200 MiB / 213 KB = 5,907) fell short of `serves_from` and kep
 next turn hit 6,943 of its 6,974 tokens and answered in 36.8 s against 357.9 s cold, with the
 same 16 greedy tokens as the cold run (a slid snapshot restores to the same reply).
 
+**A snapshot owns its positions — `force_contiguous`, never `contiguous`** (2026-10-16, the
+v0.3.240 pre-release review; gotcha #874). `snapshot_at` narrowed each layer and called
+`contiguous()` "so the snapshot doesn't alias the live buffer" — but candle's `contiguous()` is an
+`Arc` clone for any view it already counts as contiguous, and `Shape::is_contiguous` skips size-1
+dims: a ONE-key/value-head cache (`[1, 1, n, D]`, Gemma 3 1B and 270M) narrowed along its
+positions is contiguous, and so is any cache whose snapshot covers its whole buffer. Before the
+window slid in place (#281 (1)) nothing rewrote `[0, pos)` of a live buffer, so the shared storage
+was harmless; from then on, the next slide rewrote the saved prompt the next turn would restore —
+no error, a wrong context. Hydration was never affected (it appends into a fresh `LayerKv`).
+Test, red with `contiguous()`: `a_snapshot_of_a_one_head_cache_does_not_share_the_live_buffer`.
+
 ## A blocked GQA attention call is grouped per block, never expanded (2026-09-26)
 
 `standard_attention` groups a GQA call's query heads against the unexpanded

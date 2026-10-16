@@ -1469,15 +1469,19 @@ fn snapshot_at(
             .v()
             .map_err(|e| SwarmError::Internal(format!("snapshot_at: v() failed: {e}")))?
             .ok_or_else(|| SwarmError::Internal("snapshot_at: v() returned None".into()))?;
-        // Narrow to [from..pos] on seq dim and force contiguous so the snapshot
-        // doesn't alias the live KvCache buffer.
+        // Narrow to [from..pos] on seq dim and COPY, so the snapshot never
+        // aliases the live buffer. `contiguous()` is not a copy: it hands back
+        // the same storage for a view candle already counts as contiguous, and
+        // a one-key/value-head cache narrowed along its positions is one
+        // (`is_contiguous` skips size-1 dims) — Gemma 3 1B's snapshot shared
+        // its live cache, and a window's in-place slide rewrote it.
         let k_snap = k_src
             .narrow(dim, 0, pos - from)
-            .and_then(|t| t.contiguous())
+            .and_then(|t| t.force_contiguous())
             .map_err(|e| SwarmError::Internal(format!("snapshot k narrow: {e}")))?;
         let v_snap = v_src
             .narrow(dim, 0, pos - from)
-            .and_then(|t| t.contiguous())
+            .and_then(|t| t.force_contiguous())
             .map_err(|e| SwarmError::Internal(format!("snapshot v narrow: {e}")))?;
         let card = k_snap.device().clone();
         if home == SnapshotHome::HostRam && !card.is_cpu() {
@@ -1979,6 +1983,37 @@ mod tests {
         assert_eq!(SnapshotHome::choose(true, false, Some(HostRam)), HostRam);
         assert_eq!(SnapshotHome::choose(false, true, Some(HostRam)), BesideLive);
         assert_eq!(SnapshotHome::choose(false, true, None), BesideLive);
+    }
+
+    /// A snapshot OWNS its positions. Narrowed along its positions, a cache
+    /// with ONE key/value head is still contiguous to candle, whose
+    /// `contiguous()` then hands back the live buffer itself — so the next
+    /// in-place write (a window's slide, a rewind and rewrite) changed the
+    /// saved prompt under the next turn that read it.
+    #[test]
+    fn a_snapshot_of_a_one_head_cache_does_not_share_the_live_buffer() {
+        let dev = Device::Cpu;
+        let k = Tensor::arange(0f32, 32.0, &dev)
+            .unwrap()
+            .reshape((1usize, 1, 8, 4))
+            .unwrap();
+        let v = (&k + 1000.0).unwrap();
+        let mut kv = LayerKv::with_capacity(2, 64, 64);
+        kv.append(&k, &v).unwrap();
+        let mut layers = vec![Some(kv)];
+        let snap = snapshot_at(&layers, 8, 2, 4096, SnapshotHome::BesideLive).unwrap();
+
+        // The live cache rewinds and writes other positions where the saved
+        // ones were.
+        let live = layers[0].as_mut().unwrap();
+        live.truncate(0);
+        let other = Tensor::zeros((1usize, 1, 8, 4), candle_core::DType::F32, &dev).unwrap();
+        live.append(&other, &other).unwrap();
+
+        let flat = |t: &Tensor| t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let (sk, sv) = snap.layers[0].as_ref().unwrap();
+        assert_eq!(flat(sk), flat(&k));
+        assert_eq!(flat(sv), flat(&v));
     }
 
     /// On the processor the live cache already is host RAM: a snapshot asked

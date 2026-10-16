@@ -275,7 +275,9 @@ prompt and tools every turn repeats — never nothing. The fixed 8,192 it
 replaced refused most agent prompts outright. **A slid windowed layer is charged
 only the positions it holds** (`prefix_cache::SnapshotCost`: `(budget +
 slid_away) / per_position`, #281 (5)) — a slid snapshot cannot keep an opening
-short of `serves_from`, so charging every position kept nothing.
+short of `serves_from`, so charging every position kept nothing. **A snapshot
+COPIES (`force_contiguous`)**: `contiguous()` hands back the live buffer for a
+one-KV-head view, which a window's in-place slide then rewrites (gotcha #874).
 
 → `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes"
 
