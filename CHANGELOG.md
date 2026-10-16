@@ -1,5 +1,60 @@
 # Changelog
 
+## [0.3.240-alpha] — 2026-10-16
+
+**Gemma 3 and Gemma 4 run.** Gemma 3 (text) and Gemma 4's 12B and 31B (text) can now be
+downloaded, loaded and split across computers. Their replies were checked against llama.cpp:
+gemma-3-1b-it and gemma-3-4b-it agree at cosine 0.9986 or better up to 1,500 tokens, and Gemma 4
+12B's replies sit as close to llama.cpp's, on the processor and on a graphics card, as
+llama.cpp's own code paths sit to each other. Gemma 4's tool calls arrive as tool calls, its thinking stays out of the reply,
+and the image and audio markers its file rules out are never written. Not yet: Gemma 4's
+26B-A4B (mixture of experts), E2B and E4B, and images for either family.
+
+**Long Gemma conversations take a fraction of the memory.** Most of a Gemma model's layers only
+look at the last few thousand tokens, but every token was kept for all of them: a Gemma 4 12B
+conversation at 32,000 tokens held about 10.5 GB of cache, and now holds about 1 GB. Every
+estimate counts it the same way — a Gemma 3 4B on a graphics card now has room for 190,957 tokens
+of conversation where it had 29,445 — so a model that fits is no longer sent elsewhere or refused.
+A long Gemma conversation is also kept between turns again: on a processor, the next turn of a
+6,943-token Gemma 2 2B conversation answered in 36.8 s instead of 357.9 s, with the same reply.
+
+**Gemma 2 replies past 4,096 tokens match llama.cpp's**, and Gemma 2 27B scores attention at its
+own scale (agreement with llama.cpp from cosine 0.727 to 0.99987). Gemma 2 and 3 replies keep
+their HTML tags and `<>`: a table or Java's `new ArrayList<>()` came back with the tags missing.
+
+**A conversation's earlier tool calls and their answers reach the model.** Tools that called a
+function and sent back its result had both flattened to text or dropped before the model saw
+them; they now reach each model's own template as it expects them (Llama 3.2 3B: 258 prompt
+tokens, as Hugging Face renders it, where it got 235).
+
+**A plain chat reaches Qwen3, Gemma 4, Phi, GLM-4 and TinyLlama as llama.cpp shows it.** A
+request with no system message was given "You are a helpful assistant." when the model's own
+template wrote no system turn; llama.cpp, Hugging Face, vLLM and Ollama add nothing, and now
+neither does this node. A system message you send is unchanged.
+
+**A model that declares YaRN context extension runs as llama.cpp runs it** (Qwen3's long-context
+copies turned 4x too fast before; cosine 0.99943 against llama.cpp at 300 tokens).
+
+**On a metered connection, uploads for other computers pause too.** v0.3.239 paused the
+downloads nobody asked for; this computer still sent model parts and did work for others. Now it
+stops offering them while the connection is metered, and turns away requests that still arrive.
+
+**"Start and finish on this computer" can go back to automatic.** Once chosen for a model there
+was no way back, and saving a model's other settings pinned it. Both are fixed.
+
+**A computer without a graphics card keeps the next model here when an idle one is loaded.** An
+idle 4 GB model cut what this computer offered to run from 30 layers to 14; it now stays at 30.
+
+**When storage is over budget because the disk is nearly full, the dashboard says so** ("Free up
+space on the disk, or remove a model yourself"), in all 21 languages.
+
+**Less background traffic.** A computer no longer re-sends a summary of every model's parts every
+5 minutes (a third of an idle computer's gossip, read by nothing), and each remaining message
+reaches it about half as often as before.
+
+**Flash attention over 512-wide heads computed the wrong answer on RTX 30/40-series cards.** No
+model family supported before Gemma 4 has heads that wide, so no earlier reply was affected.
+
 ## [0.3.239-alpha] — 2026-10-15
 
 **Automatic downloads now pause on a metered connection.** A new computer left on a phone's hotspot
