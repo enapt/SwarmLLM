@@ -50,8 +50,7 @@ pub use self::gguf_meta::{
     ROPE_FREQS_FILENAME, TIED_OUTPUT_FILENAME,
 };
 pub(crate) use self::gguf_meta::{
-    kv_layers, layer_is_recurrent, layers_keeping_kv, query_scale, routed_expert_bytes,
-    SlidingWindow,
+    kv_layers, layer_is_recurrent, query_scale, routed_expert_bytes, SlidingWindow,
 };
 pub use self::kv_cache::{KvCacheStore, KvOccupancy};
 pub use self::model::SplitModel;

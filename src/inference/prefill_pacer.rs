@@ -99,6 +99,19 @@ pub fn prompt_chunk_ceiling(configured: usize, reader: PromptReader) -> usize {
     }
 }
 
+/// The widest forward a worker reading prompts as `reader` takes, with
+/// `configured` as `inference.prefill_chunk_tokens` (0: a prompt in ONE
+/// forward, as long as `context`) — what a sliding-window layer's cache must
+/// hold beside its window (`kv_budget::KvGrowth::widened_to`, FUTURE_WORK #281).
+/// The ONE answer for the worker's budget (`SplitModel::widest_prompt_forward`)
+/// and every estimate before a load (`kv_budget::KvPrice::reading`).
+pub fn widest_prompt_forward(configured: usize, reader: PromptReader, context: usize) -> usize {
+    match configured {
+        0 => context,
+        configured => prompt_chunk_ceiling(configured, reader),
+    }
+}
+
 /// Weight of each new observation in the ms-per-token EWMA. Deliberately
 /// sluggish: prompt-token cost climbs with `index_pos` (attention is quadratic
 /// in context), so a single late chunk should nudge the estimate rather than

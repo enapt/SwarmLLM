@@ -2115,14 +2115,13 @@ pub(crate) fn segment_shape(
 /// so two points determine it, and taking them from the estimator itself means
 /// nothing here restates its arithmetic.
 ///
-/// **The layers that keep a KV cache scale with the segment too.** The
-/// estimator charges KV by `kv_layers` (#228: three in four of Qwen 3.5's
-/// layers carry a fixed state instead); left at the whole model's count, every
-/// point charged the WHOLE cache, so the curve put all of it in the fixed term
-/// and a partial segment was charged the model's entire cache. And the two
-/// points are the whole model and half of it, not one layer and two: a
-/// proportion of `kv_layers` rounds to zero at one layer of Qwen 3.5, and MB
-/// rounding bends a slope taken over a single layer.
+/// **The KV cache scales with the segment too.** The estimator charges the
+/// segment's own caches (`VramFootprintInputs::kv`; #228: three in four of
+/// Qwen 3.5's layers carry a fixed state instead); left at the whole model's,
+/// every point charged the WHOLE cache, so the curve put all of it in the
+/// fixed term and a partial segment was charged the model's entire cache. And
+/// the two points are the whole model and half of it, not one layer and two:
+/// MB rounding bends a slope taken over a single layer.
 fn cost_curve_of(
     base: &crate::model::auto_manage::vram::VramFootprintInputs,
     estimate: fn(&crate::model::auto_manage::vram::VramFootprintInputs) -> u64,
@@ -2136,7 +2135,7 @@ fn cost_curve_of(
         i.segment_layers = layers;
         i.is_first = false;
         i.quantized_weight_bytes = base.quantized_weight_bytes / total * layers;
-        i.kv_layers = base.kv_layers * layers / total;
+        i.kv = base.kv.share(layers, total);
         estimate(&i)
     };
     let half = total / 2;
@@ -2153,9 +2152,9 @@ fn cost_curve_of(
     // (`max_local_hostable_layers`), which may offer a segment up to a MB a
     // layer more than admission then grants — a refusal the router re-plans
     // around (`note_local_memory_refusal`); the one-and-two-layer points this
-    // replaced erred by as much in either direction. The proportional
-    // `kv_layers` is a floor too: a recurrent model's real segment can keep
-    // one more cache than its share.
+    // replaced erred by as much in either direction. The proportional cache
+    // is a floor too: a recurrent model's real segment can keep one more
+    // cache than its share.
     let per_layer = at_whole.saturating_sub(at_half).div_ceil(total - half);
     Some((at_whole.saturating_sub(per_layer * total), per_layer))
 }
@@ -2278,46 +2277,41 @@ fn split_for_card(
     if layers == 0 {
         return None;
     }
-    let (kv_elems, storage) = card_kv_geometry(inputs);
     let n = crate::inference::split::hybrid::plan_gpu_layers(
         available_bytes,
         inputs.quantized_weight_bytes,
+        card_kv_bytes_of_split(inputs),
         layers,
-        kv_elems,
-        kv_elems,
-        storage,
-        inputs.effective_context,
     );
     (n > 0).then_some((n, layers))
 }
 
-/// A segment's KV geometry per layer as a card keeps it: the elements a token
-/// stores per layer, in the units `kv_bytes_per_token` takes, and the storage.
+/// What a segment's caches take on the card at its full context, as a
+/// card/processor split keeps them — the KV term both placements below charge,
+/// so they promise a conversation the same room.
 ///
-/// Averaged over the segment's layers, because only `kv_layers` of them keep a
-/// cache (a recurrent layer holds a fixed state; Qwen 3.5, #228). The card's
-/// layers keep their cache the way the loader will build it — the half cache,
-/// or f32 plus the flash mirror for a grouped-query model where that does not
-/// apply — and a split must charge what the loader charges (`split::loader`,
-/// its KV budget), or it leaves the card less room for a conversation than the
-/// model serves: GLM-4-9B split 36/40 on an 8 GB card covered ~5,300 of its
-/// 8,192 tokens (#104's follow-up). The same rule the loader asks
-/// (`layers::kv_storage`); a split is always on a card. The loader's one other
-/// condition — MLA (DeepSeek-2) is always f32 — cannot arise: that
-/// architecture is never split.
-fn card_kv_geometry(
-    inputs: &crate::model::auto_manage::vram::VramFootprintInputs,
-) -> (usize, crate::inference::split::kv_cache::KvStorage) {
-    let kv_elems = ((inputs.head_count_kv * inputs.head_dim).saturating_mul(inputs.kv_layers))
-        .div_ceil(inputs.segment_layers.max(1)) as usize;
-    let storage = crate::inference::layers::kv_storage(
-        true,
-        inputs.attention,
-        inputs.head_count as usize,
-        inputs.head_count_kv as usize,
-        inputs.head_dim as usize,
-    );
-    (kv_elems, storage)
+/// Priced as the loader prices its own budget (`kv_budget::KvPrice`, from the
+/// same layout): only the layers that keep a cache (a recurrent layer holds a
+/// fixed state; Qwen 3.5, #228), each by its own shape, kept the way the card
+/// will keep it — the half cache, or f32 plus the flash mirror for a
+/// grouped-query model where that does not apply — and a sliding-window layer
+/// charged its window (#281), handed forwards as wide as such a split reads a
+/// prompt (`PromptReader::CardCopyingWeights` at its widest). A split must
+/// charge what the loader charges, or it leaves the card less room for a
+/// conversation than the model serves: GLM-4-9B split 36/40 on an 8 GB card
+/// covered ~5,300 of its 8,192 tokens (#104's follow-up).
+fn card_kv_bytes_of_split(inputs: &crate::model::auto_manage::vram::VramFootprintInputs) -> u64 {
+    use crate::inference::prefill_pacer::{PromptReader, COPIED_CHUNK_MAX_TOKENS};
+    let context = inputs.effective_context as usize;
+    inputs
+        .kv
+        .reading(
+            PromptReader::CardCopyingWeights {
+                room_tokens: COPIED_CHUNK_MAX_TOKENS,
+            },
+            context,
+        )
+        .bytes_for(context)
 }
 
 /// Where a segment that does not fit the card whole goes instead.
@@ -2387,10 +2381,7 @@ fn experts_in_ram_for_card(
     {
         return None;
     }
-    let (kv_elems, storage) = card_kv_geometry(inputs);
-    let kv = crate::inference::split::kv_budget::kv_bytes_per_token(1, kv_elems, kv_elems, storage)
-        .saturating_mul(inputs.effective_context)
-        .saturating_mul(inputs.segment_layers);
+    let kv = card_kv_bytes_of_split(inputs);
     let usable = available_bytes
         .saturating_sub(crate::inference::split::hybrid::FORWARD_BUFFER_RESERVE_BYTES);
     let mut on_card = inputs.quantized_weight_bytes.saturating_add(kv);
@@ -3545,7 +3536,7 @@ impl ModelProcessPool {
                 i.quantized_weight_bytes =
                     whole.quantized_weight_bytes / whole.segment_layers.max(1) * layers;
                 i.segment_layers = layers;
-                i.kv_layers = whole.kv_layers * layers / whole.segment_layers.max(1);
+                i.kv = whole.kv.share(layers, whole.segment_layers.max(1));
                 i.is_first = start == 0;
             }
             let experts = self
@@ -3661,15 +3652,24 @@ impl ModelProcessPool {
         // back whenever `is_first`.
         let (segment_layers, is_first, segment_weight_bytes) =
             segment_shape(tensor_meta.block_count as u64, shard_bytes, segment);
-        // The same segment's layers that keep a KV cache — the loader's own
-        // count (`split::layers_keeping_kv`), so admission and the KV budget
-        // charge the same layers.
+        // What the same segment's caches cost, read off the header by the
+        // loader's own layout (`kv_budget::KvLayout`): the layers that keep
+        // one, each by its own shape, a sliding-window layer charged its
+        // window — so admission and the worker's KV budget price one model
+        // alike (FUTURE_WORK #281).
         let first_layer = segment.map_or(0, |(start, _)| start as usize);
-        let kv_layers = crate::inference::split::layers_keeping_kv(
+        let kv = crate::inference::split::kv_budget::KvLayout::read(
             &ct,
+            &tensor_meta,
+            effective_ctx as usize,
+        )
+        .ok()?
+        .price(
             first_layer,
             first_layer + segment_layers as usize,
-        ) as u64;
+            self.prefill_chunk_tokens
+                .load(std::sync::atomic::Ordering::Relaxed) as usize,
+        );
         let expert_bytes = (first_layer..first_layer + segment_layers as usize)
             .map(|layer| crate::inference::split::routed_expert_bytes(&ct, layer, layer + 1))
             .collect();
@@ -3681,17 +3681,11 @@ impl ModelProcessPool {
             vocab_size: vocab,
             embedding_length: tensor_meta.embedding_length as u64,
             segment_layers,
-            kv_layers,
-            head_count_kv: tensor_meta.head_count_kv as u64,
-            head_count: tensor_meta.head_count as u64,
-            head_dim: tensor_meta.head_dim as u64,
+            kv,
             rope_dim: tensor_meta.rope_dim as u64,
             effective_context: effective_ctx,
             is_first,
             splits_across_devices: crate::inference::split::hybrid::arch_supports_hybrid(
-                &crate::inference::model_arch::ModelArch::from_gguf_arch(&arch),
-            ),
-            attention: crate::inference::layers::KvAttention::of(
                 &crate::inference::model_arch::ModelArch::from_gguf_arch(&arch),
             ),
         };
@@ -9640,16 +9634,18 @@ mod tests {
             vocab_size: 151_936,
             embedding_length: 2048,
             segment_layers: 28,
-            kv_layers: 28,
-            head_count_kv: 8,
-            head_count: 16,
-            head_dim: 128,
+            kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                28,
+                8,
+                16,
+                128,
+                crate::inference::layers::KvAttention::Standard,
+            ),
             rope_dim: 128,
             effective_context: 4096,
             is_first: true,
             embedding_gatherable: true,
             splits_across_devices: false,
-            attention: crate::inference::layers::KvAttention::Standard,
         }
     }
 
@@ -10262,16 +10258,18 @@ mod tests {
                 vocab_size: 152_064,
                 embedding_length: 3584,
                 segment_layers: 28,
-                kv_layers: 28,
-                head_count_kv: 4,
-                head_count: 28,
-                head_dim: 128,
+                kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                    28,
+                    4,
+                    28,
+                    128,
+                    crate::inference::layers::KvAttention::Standard,
+                ),
                 rope_dim: 128,
                 effective_context: 8192,
                 is_first: true,
                 embedding_gatherable: true,
                 splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
-                attention: crate::inference::layers::KvAttention::Standard,
             },
         );
         let h =
@@ -10317,16 +10315,18 @@ mod tests {
                     vocab_size: 152_064,
                     embedding_length: 3584,
                     segment_layers: 28,
-                    kv_layers: 28,
-                    head_count_kv: 4,
-                    head_count: 28,
-                    head_dim: 128,
+                    kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                        28,
+                        4,
+                        28,
+                        128,
+                        crate::inference::layers::KvAttention::Standard,
+                    ),
                     rope_dim: 128,
                     effective_context: 8192,
                     is_first: true,
                     embedding_gatherable: true,
                     splits_across_devices: true,
-                    attention: crate::inference::layers::KvAttention::Standard,
                 },
             );
             let estimate = p
@@ -11577,11 +11577,98 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
+    /// **Admission prices a sliding-window layer's cache as its window**, read
+    /// off the header by the loader's own layout (#281 (II)) — for the whole
+    /// model and for a segment, each by its own layers. Gemma 2's even layers
+    /// keep a 32-position window here; its odd ones every position. Charged
+    /// flat, all four layers paid for all 4,096 admission positions.
+    #[test]
+    fn admission_charges_a_windowed_layer_its_window() {
+        use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
+        let dev = candle_core::Device::Cpu;
+        let q8 = |rows: usize, cols: usize| {
+            QTensor::quantize(
+                &candle_core::Tensor::zeros((rows, cols), candle_core::DType::F32, &dev).unwrap(),
+                GgmlDType::Q8_0,
+            )
+            .unwrap()
+        };
+        let (embd, attn) = (q8(256, 64), q8(64, 64));
+        let u32v = gguf_file::Value::U32;
+        let metadata = [
+            (
+                "general.architecture",
+                gguf_file::Value::String("gemma2".into()),
+            ),
+            ("gemma2.block_count", u32v(4)),
+            ("gemma2.context_length", u32v(8192)),
+            ("gemma2.embedding_length", u32v(64)),
+            ("gemma2.attention.head_count", u32v(4)),
+            ("gemma2.attention.head_count_kv", u32v(2)),
+            ("gemma2.attention.key_length", u32v(16)),
+            ("gemma2.attention.sliding_window", u32v(32)),
+            (
+                "gemma2.attention.layer_norm_rms_epsilon",
+                gguf_file::Value::F32(1e-6),
+            ),
+        ];
+        let names: Vec<String> = (0..4).map(|il| format!("blk.{il}.attn_q.weight")).collect();
+        let mut tensors = vec![("token_embd.weight", &embd)];
+        tensors.extend(names.iter().map(|n| (n.as_str(), &attn)));
+        let mut header = std::io::Cursor::new(Vec::new());
+        gguf_file::write(
+            &mut header,
+            &metadata.iter().map(|(k, v)| (*k, v)).collect::<Vec<_>>(),
+            &tensors,
+        )
+        .unwrap();
+        let data_dir =
+            std::env::temp_dir().join(format!("swarmllm-windowed-kv-{}", std::process::id()));
+        let model = ModelId("windowed-kv".into());
+        let dir = crate::model::shard::model_dir(&data_dir, &model.0);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(crate::model::shard::HEADER_FILENAME),
+            header.into_inner(),
+        )
+        .unwrap();
+        let pool = ModelProcessPool::new(data_dir.clone());
+        let kv_bytes = |segment| {
+            let inputs = pool
+                .footprint_inputs(&model, segment)
+                .expect("the header alone is enough");
+            let charged = crate::model::auto_manage::vram::cpu_footprint(&inputs);
+            (
+                charged.kv_bytes,
+                charged.kv_context,
+                inputs.effective_context,
+            )
+        };
+
+        let (whole, positions, context) = kv_bytes(None);
+        assert_eq!(positions, 4096, "admission's context");
+        // f32 K and V of 2 heads of 16, a position, per layer.
+        let per_layer = 2 * 2 * 16 * 4;
+        let held = crate::inference::split::kv_cache::most_positions_a_window_holds(
+            32,
+            crate::inference::layers::kv_growth_quantum(context as usize),
+            128,
+        ) as u64;
+        assert!(held < positions, "{held}");
+        assert_eq!(whole, 2 * per_layer * positions + 2 * per_layer * held);
+        // Layers 1..3: one global, one windowed.
+        assert_eq!(
+            kv_bytes(Some((1, 3))).0,
+            per_layer * positions + per_layer * held
+        );
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
     /// The curve the planner and the incremental charge both read is taken from
     /// the estimator, not restated — and its PER-LAYER term carries the KV
-    /// cache. Once the estimator charged KV by `kv_layers` (#228), a curve that
-    /// scaled the layers but not `kv_layers` put the whole model's cache in the
-    /// fixed term, so a partial segment paid all of it.
+    /// cache. Once the estimator charged KV only for the layers that keep one
+    /// (#228), a curve that scaled the layers but not the cache put the whole
+    /// model's cache in the fixed term, so a partial segment paid all of it.
     #[test]
     fn the_segment_cost_curve_recovers_the_fixed_and_per_layer_terms() {
         use crate::model::auto_manage::vram::{estimate_worker_ram_mb, VramFootprintInputs};
@@ -11591,23 +11678,25 @@ mod tests {
             vocab_size: 152_064,
             embedding_length: 3584,
             segment_layers: 28,
-            kv_layers: 28,
-            head_count_kv: 4,
-            head_count: 28,
-            head_dim: 128,
+            kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                28,
+                4,
+                28,
+                128,
+                crate::inference::layers::KvAttention::Standard,
+            ),
             rope_dim: 128,
             effective_context: 8192,
             is_first: true,
             embedding_gatherable: true,
             splits_across_devices: true,
-            attention: crate::inference::layers::KvAttention::Standard,
         };
         let segment = |inputs: &VramFootprintInputs, layers: u64| {
             let mut i = *inputs;
             i.segment_layers = layers;
             i.is_first = false;
             i.quantized_weight_bytes = inputs.quantized_weight_bytes / 28 * layers;
-            i.kv_layers = inputs.kv_layers * layers / 28;
+            i.kv = inputs.kv.share(layers, 28);
             estimate_worker_ram_mb(&i)
         };
         let (fixed, per_layer) = super::cost_curve_of(&whole, estimate_worker_ram_mb).unwrap();
@@ -11624,7 +11713,7 @@ mod tests {
         // One layer in four keeping a cache (Qwen 3.5's shape): the per-layer
         // term carries a quarter of it, and the fixed term none of it.
         let quarter = VramFootprintInputs {
-            kv_layers: 7,
+            kv: whole.kv.share(7, 28),
             ..whole
         };
         let (fixed_q, per_layer_q) =
@@ -12068,16 +12157,18 @@ mod admission_tests {
             vocab_size: 152_064,
             embedding_length: 3584,
             segment_layers: 28,
-            kv_layers: 28,
-            head_count_kv: 4,
-            head_count: 28,
-            head_dim: 128,
+            kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                28,
+                4,
+                28,
+                128,
+                crate::inference::layers::KvAttention::Standard,
+            ),
             rope_dim: 128,
             effective_context: 8192,
             is_first: true,
             embedding_gatherable: true,
             splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
-            attention: crate::inference::layers::KvAttention::Standard,
         };
         let three_gb = 3 * 1024 * 1024 * 1024;
         let (n, total) = split_for_card(&splittable, three_gb).expect("Qwen2 splits");
@@ -12085,7 +12176,6 @@ mod admission_tests {
 
         let unsplittable = crate::model::auto_manage::vram::VramFootprintInputs {
             splits_across_devices: arch_supports_hybrid(&ModelArch::DeepSeek2),
-            attention: crate::inference::layers::KvAttention::of(&ModelArch::DeepSeek2),
             ..splittable
         };
         assert_eq!(split_for_card(&unsplittable, three_gb), None);
@@ -12094,20 +12184,20 @@ mod admission_tests {
         for arch in [ModelArch::Qwen35, ModelArch::Qwen35Moe] {
             let splits = crate::model::auto_manage::vram::VramFootprintInputs {
                 splits_across_devices: arch_supports_hybrid(&arch),
-                attention: crate::inference::layers::KvAttention::of(&arch),
                 ..splittable
             };
             assert!(split_for_card(&splits, three_gb).is_some(), "{arch}");
         }
         let qwen35 = crate::model::auto_manage::vram::VramFootprintInputs {
             splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen35),
-            attention: crate::inference::layers::KvAttention::Standard,
             ..splittable
         };
         // ...and only the layers that keep a KV cache are charged one: a
         // quarter of them for Qwen 3.5, so more of its layers fit the card.
         let quarter_kv = crate::model::auto_manage::vram::VramFootprintInputs {
-            kv_layers: qwen35.segment_layers / 4,
+            kv: qwen35
+                .kv
+                .share(qwen35.segment_layers / 4, qwen35.segment_layers),
             ..qwen35
         };
         let (all_kv, _) = split_for_card(&qwen35, three_gb).unwrap();
@@ -12128,17 +12218,19 @@ mod admission_tests {
             vocab_size: 151_936,
             embedding_length: 2048,
             segment_layers: 48,
-            kv_layers: 48,
-            head_count_kv: 4,
-            head_count: 32,
-            head_dim: 128,
+            kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                48,
+                4,
+                32,
+                128,
+                crate::inference::layers::KvAttention::Standard,
+            ),
             rope_dim: 128,
             effective_context: 8192,
             is_first: true,
             embedding_gatherable: true,
             // `qwen3moe` loads as the Qwen2 family.
             splits_across_devices: arch_supports_hybrid(&ModelArch::from_gguf_arch("qwen3moe")),
-            attention: crate::inference::layers::KvAttention::Standard,
         }
     }
 
@@ -12293,16 +12385,18 @@ mod admission_tests {
             vocab_size: 152_064,
             embedding_length: 3584,
             segment_layers: 28,
-            kv_layers: 28,
-            head_count_kv: 4,
-            head_count: 28,
-            head_dim: 128,
+            kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                28,
+                4,
+                28,
+                128,
+                crate::inference::layers::KvAttention::Standard,
+            ),
             rope_dim: 128,
             effective_context: 8192,
             is_first: true,
             embedding_gatherable: true,
             splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
-            attention: crate::inference::layers::KvAttention::Standard,
         };
         let pool_with = |inputs| {
             let p = pool();
@@ -12339,7 +12433,6 @@ mod admission_tests {
         // what the card alone takes, as before.
         let (q, m) = pool_with(crate::model::auto_manage::vram::VramFootprintInputs {
             splits_across_devices: false,
-            attention: crate::inference::layers::KvAttention::Standard,
             ..seven_b
         });
         assert_eq!(q.fresh_run_layers_for_planning(&m, Requester::Owner), None);
@@ -12527,16 +12620,18 @@ mod admission_tests {
                 vocab_size: 152_064,
                 embedding_length: 3584,
                 segment_layers: 28,
-                kv_layers: 28,
-                head_count_kv: 4,
-                head_count: 28,
-                head_dim: 128,
+                kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                    28,
+                    4,
+                    28,
+                    128,
+                    crate::inference::layers::KvAttention::Standard,
+                ),
                 rope_dim: 128,
                 effective_context: 8192,
                 is_first: true,
                 embedding_gatherable: true,
                 splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
-                attention: crate::inference::layers::KvAttention::Standard,
             },
         );
         let estimated = p.estimate_gpu_footprint_mb(&m, Some((0, 28)), KvCharge::Typical);

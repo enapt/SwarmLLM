@@ -3430,12 +3430,14 @@ decode step with a mask) is widened per call — correct, O(history), and never 
 Mla}`, from `ModelArch` via `KvAttention::of`): its first version took head geometry only, and the
 review before it shipped found admission and the coordinator's peer bound pricing DeepSeek-2's
 cache as the half cache (a V2-Lite shape — 16 heads, key width 192 — passes the decode kernel's
-geometry) while the loader and `forward_mla` kept it f32. Admission's inputs now carry it
-(`VramFootprintInputs::attention`), the scheduler reads it off the header's architecture.
+geometry) while the loader and `forward_mla` kept it f32. Admission's inputs carried it
+(`VramFootprintInputs::attention`; since #281 (3) it is read once into `kv_budget::KvLayout`,
+which asks the rule per layer for the loader and every estimate before a load), the scheduler
+reads it off the header's architecture.
 
 **Every estimate asks the same rule**: the loader's KV budget, the card/processor split planner
 (`process_pool`), admission (`vram::card_kv_storage` — the GPU estimator's KV term at the storage's
-width), and the coordinator's bound on a PEER (`scheduler::KvDevice` →
+width; since #281 (3) all three through `kv_budget::KvLayout`, per layer), and the coordinator's bound on a PEER (`scheduler::KvDevice` →
 `layers::kv_storage_as_advertised`, which reads `features::KV_HALF_ON_CARD` — bit 19, NOT in
 `features::ALL`, ORed in by the health monitor when `kv_half_on_card_enabled()`; a peer without it
 is priced as f32 + mirror, as before).
@@ -4281,15 +4283,16 @@ reach `keep + seq_len`), so a bound built from the window alone is wrong for a o
   what `SeqCache::append` can ever leave a windowed buffer at. `positions_within` is its
   inverse (pinned by `the_positions_a_budget_holds_invert_what_they_cost`). `plus` / `share`
   combine ranges (a merged window takes the widest).
-- The loader builds it PER LAYER (`kv_growth_over`): `split::kv_layers` (recurrent layers keep
+- It is built PER LAYER by `kv_budget::KvLayout` (read once off the header; the loader's
+  `kv_growth_over` is `KvLayout::growth`): `split::kv_layers` (recurrent layers keep
   none), each layer's own shape (`attention_shapes`; MLA's elements), its storage
   (`kv_storage`), and whether its cache slides — `kv_cache::window_kept(window, storage)`, the
   same predicate (`caches_slide`) `LayerKv::slide_beyond` asks, so the estimate and the cache
   cannot disagree about a mirrored cache (which never slides).
 - The widest forward a model is handed is `SplitModel::widest_prompt_forward`: the worker's
   `prefill_chunk_tokens` (`split::PROMPT_CHUNK_TOKENS`, set once in `run_worker`) through
-  `prompt_chunk_ceiling` — 512 on a card, up to `COPIED_CHUNK_MAX_TOKENS` on a split copying
-  its weights, the context for 0 (one forward). `SplitModel::kv_budget` widens the growth to
+  `prefill_pacer::widest_prompt_forward` — 512 on a card, up to `COPIED_CHUNK_MAX_TOKENS` on a
+  split copying its weights, the context for 0 (one forward). `SplitModel::kv_budget` widens the growth to
   it. A forward this node does not size — a coordinator's piece of a prompt — is admitted at
   its own width (`ensure_room_for_prompt`'s `forward_width`).
 - Readers: the loader's affordable tokens (its log lines' `kv_bytes_per_position` is the
@@ -4339,6 +4342,28 @@ tokens of conversation against **29,445** with `SWARMLLM_KV_WINDOW_SLIDE=0` — 
 1,599 positions (window 1,024: keep 1,087 + one 512 quantum), the 5 global layers growing:
 (1,001,130 − 29 × 1,599) / 5 = 190,952 positions, where 1,001,130 = 34 × 29,445 is the budget in
 one layer's positions — within 5 of the figure logged (rounding to whole positions).
+
+**This node's estimates read the same layout** (#281 (3), 2026-10-16). Before a load the daemon
+weighed each model with `VramFootprintInputs`' five model-wide fields — `kv_layers × 2 ×
+head_count_kv × head_dim × positions × storage` at the WIDEST layer's shape, no window: Gemma 4
+12B's admission (4,096 positions, processor) at 3 GiB where the worker holds 1.1. Three readers
+priced it so — admission's footprint (`vram::resident_footprint_on`), the cost curve
+(`process_pool::cost_curve_of`, which the planner's local bound and a peer's ceiling read) and
+the card/processor split (`split_for_card`, `experts_in_ram_for_card` → `hybrid::plan_gpu_layers`)
+— each restating the arithmetic. Now `segment_geometry` reads `KvLayout` off the header and
+carries `kv_budget::KvPrice` (the growth on each device plus the pool's prompt chunk) in
+`VramFootprintInputs::kv`; each reader asks `KvPrice::reading(reader, context)` — the card's
+reader for admission on a card, the processor's for RAM, `CardCopyingWeights` at its widest for
+a split — so a windowed layer holds what `prefill_pacer::widest_prompt_forward` says that
+worker's forwards are, the loader's own rule. `cost_curve_of` shares the price by layers
+(`KvPrice::share`, bytes rather than a rounded layer count). MLA (DeepSeek-2) had been priced at
+its grouped `head_count_kv × head_dim`; it is now its decompressed cache, as the loader keeps it.
+Tests, red with `KvLayout::growth`'s window split off: `a_layout_prices_each_layer_by_its_own_shape_and_window`
+(Gemma 4 12B's real per-layer keys: 1,182,138,368 bytes at 4,096 positions against the old 3 GiB;
+a range is its own layers; a one-forward prompt keeps every position) and
+`admission_charges_a_windowed_layer_its_window` (a Gemma 2 header written to a pool's data dir,
+read through `footprint_inputs` → `cpu_footprint`: 4 MiB flat before, the window's arithmetic
+after, for the whole model and for layers 1..3).
 
 ## A family's attention scale is read, not assumed (2026-10-15, FUTURE_WORK #279)
 

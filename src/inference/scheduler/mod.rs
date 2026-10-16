@@ -648,8 +648,8 @@ fn kv_bytes_per_position_per_layer(
     let attention_layer = crate::inference::split::kv_budget::kv_bytes_per_token(1, k, v, storage);
     // An AVERAGE over the model's layers, because the bound it feeds counts
     // layers: only `layers_keeping_kv` of them keep a cache — one in four for
-    // Qwen 3.5, whose others carry a fixed state (#228; the same count
-    // admission and the loader charge, `split::layers_keeping_kv`).
+    // Qwen 3.5, whose others carry a fixed state (#228; the same layers
+    // admission and the loader charge, `split::kv_layers`).
     let layers = meta.block_count.max(1) as u64;
     let keeping = meta.layers_keeping_kv(0, meta.block_count) as u64;
     attention_layer.saturating_mul(keeping).div_ceil(layers)

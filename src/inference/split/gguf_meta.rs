@@ -360,20 +360,14 @@ fn recurrent_layer_marker(layer_idx: usize) -> String {
     format!("blk.{layer_idx}.ssm_alpha.weight")
 }
 
-/// How many of layers `[start, end)` keep a KV cache: all of them for a
+/// Which of layers `[start, end)` keep a KV cache: all of them for a
 /// transformer, the full-attention ones only for a model that interleaves
 /// recurrent layers ([`layer_is_recurrent`]). The ONE answer for everything
-/// that charges a card for conversation memory — admission
-/// (`VramFootprintInputs::kv_layers`), the split planner (`split_for_card`) and
-/// the loader's KV budget. Charging every layer of Qwen 3.5 3B-9B as attention
-/// overstated it fourfold: ~805 MB at the admission context for the 9B, the
-/// margin by which it missed an 8 GB card (FUTURE_WORK #228).
-pub(crate) fn layers_keeping_kv(ct: &gguf_file::Content, start: usize, end: usize) -> usize {
-    kv_layers(ct, start, end).count()
-}
-
-/// The layers [`layers_keeping_kv`] counts, for an estimate that prices each
-/// one by its own shape and window (the loader's `KvGrowth`).
+/// that charges a memory for conversations — the loader's KV budget and every
+/// estimate before a load, through `kv_budget::KvLayout`. Charging every layer
+/// of Qwen 3.5 3B-9B as attention overstated it fourfold: ~805 MB at the
+/// admission context for the 9B, the margin by which it missed an 8 GB card
+/// (FUTURE_WORK #228).
 pub(crate) fn kv_layers(
     ct: &gguf_file::Content,
     start: usize,
@@ -516,7 +510,7 @@ pub(crate) fn tensor_byte_size(info: &candle_core::quantized::gguf_file::TensorI
 }
 
 impl GgufTensorMeta {
-    /// [`layers_keeping_kv`], read off the manifest's tensor table — for a
+    /// How many of [`kv_layers`] there are, read off the manifest's tensor table — for a
     /// node that prices a model from its manifest rather than its header (the
     /// scheduler's peer bound, `kv_bytes_per_position_per_layer`).
     pub(crate) fn layers_keeping_kv(&self, start: usize, end: usize) -> usize {
@@ -1655,17 +1649,17 @@ mod kv_layer_tests {
         let ct = header(&names);
         assert!(layer_is_recurrent(&ct, 0));
         assert!(!layer_is_recurrent(&ct, 3));
-        assert_eq!(layers_keeping_kv(&ct, 0, 8), 2);
-        assert_eq!(layers_keeping_kv(&ct, 0, 4), 1);
-        assert_eq!(layers_keeping_kv(&ct, 4, 7), 0);
+        assert_eq!(kv_layers(&ct, 0, 8).collect::<Vec<_>>(), [3, 7]);
+        assert_eq!(kv_layers(&ct, 0, 4).count(), 1);
+        assert_eq!(kv_layers(&ct, 4, 7).count(), 0);
     }
 
     /// A transformer: every layer keeps one.
     #[test]
     fn every_layer_of_a_transformer_keeps_a_kv_cache() {
         let names: Vec<String> = (0..6).map(|il| format!("blk.{il}.attn_k.weight")).collect();
-        assert_eq!(layers_keeping_kv(&header(&names), 0, 6), 6);
-        assert_eq!(layers_keeping_kv(&header(&names), 2, 5), 3);
+        assert_eq!(kv_layers(&header(&names), 0, 6).count(), 6);
+        assert_eq!(kv_layers(&header(&names), 2, 5).count(), 3);
     }
 }
 
@@ -1845,8 +1839,8 @@ mod refusal_tests {
 pub(super) mod sliding_window_tests {
     use super::*;
 
-    /// A header naming `arch` and the keys given — shared with `split::rope`'s
-    /// and `split::hybrid`'s tests, which read the same keys.
+    /// A header naming `arch` and the keys given — shared with `split::rope`'s,
+    /// `split::hybrid`'s and `split::kv_budget`'s tests, which read the same keys.
     pub(crate) fn header(arch: &str, extra: Vec<(&str, gguf_file::Value)>) -> gguf_file::Content {
         let mut metadata = HashMap::new();
         metadata.insert(

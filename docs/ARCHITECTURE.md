@@ -778,8 +778,8 @@ references: `docs/plans/qwen35_support.md`.
 - **Card/processor split since v0.3.230** (`hybrid::arch_supports_hybrid`): every tensor the loop
   loads goes through the shadowed `device`/`cos`/`sin`, and a DeltaNet layer makes its state on its
   input's device. Memory is charged only to the layers that keep a KV cache
-  (`split::layers_keeping_kv`, one in four) — admission, the split planner, the loader's KV budget
-  and the scheduler's peer bound alike.
+  (`split::kv_layers`, one in four, through `kv_budget::KvLayout`) — admission, the split planner,
+  the loader's KV budget and the scheduler's peer bound alike.
 - **Not yet**: CUDA-graph capture of its layers, the chunked delta rule for long prompts on a card —
   #228.
 

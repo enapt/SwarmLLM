@@ -233,6 +233,194 @@ impl KvGrowth {
     }
 }
 
+/// One layer's cache as [`KvLayout`] reads it.
+#[derive(Debug, Clone, Copy)]
+struct LayerKvShape {
+    k_elems: usize,
+    v_elems: usize,
+    n_kv_head: usize,
+    head_dim: usize,
+    window: Option<usize>,
+}
+
+/// How each layer of a model keeps a conversation's cache, read once off its
+/// header: which layers keep one (`split::kv_layers` — never a recurrent
+/// layer's fixed state), each one's own shape (`attention_shapes`; MLA's
+/// elements), how either device stores it (`layers::kv_storage`) and whether
+/// that cache slides (`kv_cache::window_kept`). The loader's KV budget and
+/// every estimate made before a load ([`KvPrice`]) build their [`KvGrowth`]
+/// here, so the two cannot price one model differently (FUTURE_WORK #281).
+#[derive(Debug, Clone)]
+pub(crate) struct KvLayout {
+    /// Per layer of the whole model; `None` where it keeps no cache.
+    layers: Vec<Option<LayerKvShape>>,
+    attention: crate::inference::layers::KvAttention,
+    head_count: usize,
+    /// The model's window (`SlidingWindow::size`), 0 for none.
+    window: usize,
+    /// The caches' growth quantum at this context (`layers::kv_growth_quantum`).
+    quantum: usize,
+}
+
+impl KvLayout {
+    /// The layout `ct` describes, for caches sized to `context_length`.
+    pub(crate) fn read(
+        ct: &candle_core::quantized::gguf_file::Content,
+        meta: &super::GgufTensorMeta,
+        context_length: usize,
+    ) -> Result<Self, crate::error::SwarmError> {
+        use crate::inference::model_arch::ModelArch;
+        let arch = super::gguf_arch_str(ct);
+        let model_arch = ModelArch::from_gguf_arch(&arch);
+        let shapes = super::gguf_meta::attention_shapes(ct)?;
+        // DeepSeek-2's MLA caches the decompressed K and V at full head count
+        // (`mla_kv_elems`), whatever the layer's grouped shape says.
+        let mla = matches!(model_arch, ModelArch::DeepSeek2).then(|| {
+            let length = |suffix: &str| {
+                ct.metadata
+                    .get(&format!("{arch}.attention.{suffix}"))
+                    .and_then(|v| v.to_u32().ok())
+                    .map_or(meta.head_dim, |v| v as usize)
+            };
+            mla_kv_elems(
+                meta.head_count,
+                length("key_length"),
+                length("value_length"),
+            )
+        });
+        let window = super::SlidingWindow::read(ct);
+        let mut layers = vec![None; shapes.len()];
+        for layer in super::kv_layers(ct, 0, shapes.len()) {
+            let shape = shapes[layer];
+            let (k_elems, v_elems) =
+                mla.unwrap_or_else(|| standard_kv_elems(shape.n_kv_head, shape.head_dim));
+            layers[layer] = Some(LayerKvShape {
+                k_elems,
+                v_elems,
+                n_kv_head: shape.n_kv_head,
+                head_dim: shape.head_dim,
+                window: window.as_ref().and_then(|w| w.for_layer(layer)),
+            });
+        }
+        Ok(Self {
+            layers,
+            attention: crate::inference::layers::KvAttention::of(&model_arch),
+            head_count: meta.head_count,
+            window: window.map_or(0, |w| w.size),
+            quantum: crate::inference::layers::kv_growth_quantum(context_length),
+        })
+    }
+
+    /// What a conversation's cache costs as it grows over layers `from..to`
+    /// kept on a card or on the processor: each layer priced by its own
+    /// shape, stored as the ONE rule the cache itself is built by says (the
+    /// half cache on a card, f32 plus the flash mirror for a grouped-query
+    /// model where it does not apply, f32 for MLA), and a sliding-window
+    /// layer whose cache keeps only its window charged as one.
+    pub(crate) fn growth(&self, from: usize, to: usize, on_card: bool) -> KvGrowth {
+        let (mut every_position, mut windowed) = (0u64, 0u64);
+        let to = to.min(self.layers.len());
+        for shape in self.layers[from.min(to)..to].iter().flatten() {
+            let storage = crate::inference::layers::kv_storage(
+                on_card,
+                self.attention,
+                self.head_count,
+                shape.n_kv_head,
+                shape.head_dim,
+            );
+            let bytes = kv_bytes_per_token(1, shape.k_elems, shape.v_elems, storage);
+            if super::kv_cache::window_kept(shape.window, storage).is_some() {
+                windowed = windowed.saturating_add(bytes);
+            } else {
+                every_position = every_position.saturating_add(bytes);
+            }
+        }
+        KvGrowth::with_window(every_position, windowed, self.window, self.quantum)
+    }
+
+    /// [`Self::growth`] on both devices, for a pool reading prompts in
+    /// `prompt_chunk`-position forwards.
+    pub(crate) fn price(&self, from: usize, to: usize, prompt_chunk: usize) -> KvPrice {
+        KvPrice {
+            card: self.growth(from, to, true),
+            processor: self.growth(from, to, false),
+            prompt_chunk,
+        }
+    }
+}
+
+/// What a conversation's caches cost a segment on either device its layers
+/// may be kept on, and the prompt chunk its worker reads with — the ONE
+/// figure every estimate made before a load prices KV by: admission's
+/// footprint (`vram::VramFootprintInputs`), the cost curve, the card/processor
+/// split. Built from the header as the loader builds its own budget
+/// ([`KvLayout`]), so a placement is weighed by what the worker will hold: a
+/// sliding-window layer charged its window, each layer its own width
+/// (FUTURE_WORK #281).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct KvPrice {
+    pub(crate) card: KvGrowth,
+    pub(crate) processor: KvGrowth,
+    /// `inference.prefill_chunk_tokens`; 0 reads a prompt in one forward.
+    pub(crate) prompt_chunk: usize,
+}
+
+impl KvPrice {
+    /// `kv_layers` layers keeping caches of one shape and no window — what
+    /// every estimate charged each layer before #281. In the order
+    /// `VramFootprintInputs` carried these fields.
+    #[cfg(test)]
+    pub(crate) fn uniform(
+        kv_layers: u64,
+        head_count_kv: u64,
+        head_count: u64,
+        head_dim: u64,
+        attention: crate::inference::layers::KvAttention,
+    ) -> Self {
+        let elems = head_count_kv.saturating_mul(head_dim) as usize;
+        let on = |card: bool| {
+            let storage = crate::inference::layers::kv_storage(
+                card,
+                attention,
+                head_count as usize,
+                head_count_kv as usize,
+                head_dim as usize,
+            );
+            KvGrowth::flat(kv_bytes_per_token(1, elems, elems, storage).saturating_mul(kv_layers))
+        };
+        Self {
+            card: on(true),
+            processor: on(false),
+            prompt_chunk: 128,
+        }
+    }
+
+    /// The cache a worker reading prompts as `reader` keeps, handed forwards
+    /// as wide as it reads them (`prefill_pacer::widest_prompt_forward`, the
+    /// worker's own rule): a windowed cache holds its window AND that forward.
+    pub(crate) fn reading(
+        self,
+        reader: crate::inference::prefill_pacer::PromptReader,
+        context: usize,
+    ) -> KvGrowth {
+        use crate::inference::prefill_pacer::{widest_prompt_forward, PromptReader};
+        let growth = match reader {
+            PromptReader::Processor => self.processor,
+            PromptReader::Card | PromptReader::CardCopyingWeights { .. } => self.card,
+        };
+        growth.widened_to(widest_prompt_forward(self.prompt_chunk, reader, context))
+    }
+
+    /// `part` of every `whole` of the segment's layers.
+    pub(crate) fn share(self, part: u64, whole: u64) -> Self {
+        Self {
+            card: self.card.share(part, whole),
+            processor: self.processor.share(part, whole),
+            ..self
+        }
+    }
+}
+
 /// Per-token K and V element counts for the standard (MHA/GQA) attention path.
 pub(crate) fn standard_kv_elems(head_count_kv: usize, head_dim: usize) -> (usize, usize) {
     let per = head_count_kv.saturating_mul(head_dim);
@@ -1308,5 +1496,65 @@ mod tests {
         assert_eq!(plan_snapshot(budget, 0, 0, growth, 8192).positions, 8192);
         let flat = plan_snapshot(budget, 0, 0, KvGrowth::flat(600), 8192);
         assert!(flat.positions < 8192 / 2, "control: {flat:?}");
+    }
+
+    /// **Every estimate before a load prices a model's caches as the loader
+    /// does** (#281 (II)): each layer by its own shape, a sliding-window layer
+    /// by its window. Gemma 4 12B on the processor at admission's 4,096
+    /// positions: its 40 windowed layers (8 × 256) hold their window and a
+    /// chunk, its 8 global ones (1 × 512) every position — 1.1 GiB, where
+    /// charging every layer the widest shape at every position cost 3 GiB.
+    #[test]
+    fn a_layout_prices_each_layer_by_its_own_shape_and_window() {
+        use crate::inference::prefill_pacer::PromptReader;
+        let mut ct = super::super::gguf_meta::sliding_window_tests::gemma4_12b();
+        ct.metadata.insert(
+            "gemma4.attention.layer_norm_rms_epsilon".into(),
+            candle_core::quantized::gguf_file::Value::F32(1e-6),
+        );
+        let meta = super::super::GgufTensorMeta::from_content(&ct).unwrap();
+        let context = 32_768;
+        let layout = KvLayout::read(&ct, &meta, context).unwrap();
+        // f32 K and V, a position, per layer.
+        let (windowed, global) = (2 * 8 * 256 * 4u64, 2 * 512 * 4u64);
+        let growth = layout.growth(0, 48, false);
+        assert_eq!(growth.per_position(), 40 * windowed + 8 * global);
+        // A range is its own layers: 6..12 holds five windowed and one global.
+        assert_eq!(
+            layout.growth(6, 12, false).per_position(),
+            5 * windowed + global
+        );
+
+        let read_in = |chunk| {
+            layout
+                .price(0, 48, chunk)
+                .reading(PromptReader::Processor, context)
+        };
+        let held = crate::inference::split::kv_cache::most_positions_a_window_holds(
+            1024,
+            crate::inference::layers::kv_growth_quantum(context),
+            128,
+        );
+        assert!(held < 4096, "{held}");
+        assert_eq!(
+            read_in(128).bytes_for(4096),
+            8 * global * 4096 + 40 * windowed * held as u64
+        );
+        // A prompt read in ONE forward hands a windowed cache the whole
+        // context: nothing slides out from under it.
+        assert_eq!(read_in(0).bytes_for(4096), growth.per_position() * 4096);
+        // What every estimate charged before: the widest layer's shape on
+        // every layer, at every position.
+        let flat = KvPrice::uniform(
+            48,
+            meta.head_count_kv as u64,
+            meta.head_count as u64,
+            meta.head_dim as u64,
+            crate::inference::layers::KvAttention::Standard,
+        );
+        let before = flat.processor.bytes_for(4096);
+        assert_eq!(before, 48 * windowed * 4096);
+        assert_eq!(read_in(128).bytes_for(4096), 1_182_138_368);
+        assert_eq!(before, 3 << 30);
     }
 }

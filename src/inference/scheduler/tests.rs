@@ -6790,16 +6790,18 @@ fn a_card_holder_of_a_model_it_must_split_on(
             vocab_size: 32_768,
             embedding_length: 4096,
             segment_layers: 32,
-            kv_layers: 32,
-            head_count_kv: 8,
-            head_count: 32,
-            head_dim: 128,
+            kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                32,
+                8,
+                32,
+                128,
+                crate::inference::layers::KvAttention::Standard,
+            ),
             rope_dim: 128,
             effective_context: 8192,
             is_first: true,
             embedding_gatherable: true,
             splits_across_devices: arch_supports_hybrid(&ModelArch::Llama),
-            attention: crate::inference::layers::KvAttention::Standard,
         },
     );
     (state, local, mid)
@@ -7173,16 +7175,18 @@ fn a_model_no_holder_could_ever_hold_is_refused_by_the_planner() {
         vocab_size: 32_000,
         embedding_length: 4096,
         segment_layers: 32,
-        kv_layers: 32,
-        head_count_kv: 8,
-        head_count: 32,
-        head_dim: 128,
+        kv: crate::inference::split::kv_budget::KvPrice::uniform(
+            32,
+            8,
+            32,
+            128,
+            crate::inference::layers::KvAttention::Standard,
+        ),
         rope_dim: 128,
         effective_context: 4096,
         is_first: true,
         embedding_gatherable: true,
         splits_across_devices: true,
-        attention: crate::inference::layers::KvAttention::Standard,
     };
     state
         .model_process_pool

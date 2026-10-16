@@ -730,62 +730,13 @@ impl SplitModel {
             layer_start + experts_in_ram_layers,
         );
         // What a conversation's cache costs as it grows over layers `from..to`
-        // kept on a card or on the processor (`kv_budget::KvGrowth`): every
-        // layer that keeps one (`split::kv_layers` — not a recurrent layer's
-        // fixed state) priced by its own shape, and a sliding-window layer
-        // whose cache keeps only its window (`kv_cache::window_kept`) charged
-        // no further than that window (FUTURE_WORK #281).
-        let kv_growth_over = {
-            let mla_elems = matches!(model_arch, ModelArch::DeepSeek2).then(|| {
-                let key_length = md_get("attention.key_length")
-                    .and_then(|v| v.to_u32().map_err(SwarmError::internal))
-                    .map(|v| v as usize)
-                    .unwrap_or(head_dim);
-                let value_length = md_get("attention.value_length")
-                    .and_then(|v| v.to_u32().map_err(SwarmError::internal))
-                    .map(|v| v as usize)
-                    .unwrap_or(head_dim);
-                super::kv_budget::mla_kv_elems(head_count, key_length, value_length)
-            });
-            let attention = crate::inference::layers::KvAttention::of(&model_arch);
-            let window = super::SlidingWindow::read(&ct);
-            let quantum = crate::inference::layers::kv_growth_quantum(context_length);
-            let (ct, shapes) = (&ct, &attention_shapes);
-            move |from: usize, to: usize, on_card: bool| {
-                let (mut every_position, mut windowed) = (0u64, 0u64);
-                for layer in super::kv_layers(ct, from, to) {
-                    let shape = shapes[layer];
-                    let (k_elems, v_elems) = mla_elems.unwrap_or_else(|| {
-                        super::kv_budget::standard_kv_elems(shape.n_kv_head, shape.head_dim)
-                    });
-                    // How the cache is kept — the half cache on a card, f32
-                    // (plus the flash mirror for a grouped-query model where
-                    // the half cache does not apply) otherwise, f32 for MLA —
-                    // asked of the ONE rule the cache itself is built by
-                    // (`layers::kv_storage`).
-                    let storage = crate::inference::layers::kv_storage(
-                        on_card,
-                        attention,
-                        head_count,
-                        shape.n_kv_head,
-                        shape.head_dim,
-                    );
-                    let bytes = super::kv_budget::kv_bytes_per_token(1, k_elems, v_elems, storage);
-                    let layer_window = window.as_ref().and_then(|w| w.for_layer(layer));
-                    if super::kv_cache::window_kept(layer_window, storage).is_some() {
-                        windowed += bytes;
-                    } else {
-                        every_position += bytes;
-                    }
-                }
-                KvGrowth::with_window(
-                    every_position,
-                    windowed,
-                    window.as_ref().map_or(0, |w| w.size),
-                    quantum,
-                )
-            }
-        };
+        // kept on a card or on the processor (`kv_budget::KvGrowth`), read off
+        // the header by the ONE layout every estimate before a load reads too
+        // (`kv_budget::KvLayout`): each layer by its own shape, a
+        // sliding-window layer charged its window (FUTURE_WORK #281).
+        let kv_layout = super::kv_budget::KvLayout::read(&ct, &meta, context_length)?;
+        let kv_growth_over =
+            |from: usize, to: usize, on_card: bool| kv_layout.growth(from, to, on_card);
         // The positions a budget holds, as the logs below state it: the whole
         // context where the cost stops growing inside the budget.
         let affordable = |growth: &KvGrowth, budget: u64| match growth.positions_within(budget) {

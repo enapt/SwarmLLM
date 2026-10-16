@@ -566,14 +566,14 @@ impl SplitModel {
     }
 
     /// The most positions one prompt forward of this segment reads: the chunk
-    /// every prompt pass is cut to (`prefill_pacer::prompt_chunk_ceiling`,
+    /// every prompt pass is cut to (`prefill_pacer::widest_prompt_forward`,
     /// from this worker's `inference.prefill_chunk_tokens`), at the most a
     /// split copying its weights to the card reads — or the whole context
     /// where prompts are read in one forward. A sliding window's cache holds
     /// its window AND this (`kv_cache::most_positions_a_window_holds`).
     pub(crate) fn widest_prompt_forward(&self) -> usize {
         use crate::inference::prefill_pacer::{
-            prompt_chunk_ceiling, PromptReader, COPIED_CHUNK_MAX_TOKENS,
+            widest_prompt_forward, PromptReader, COPIED_CHUNK_MAX_TOKENS,
         };
         let reader = if self.runs_entirely_on_card() {
             PromptReader::Card
@@ -584,10 +584,11 @@ impl SplitModel {
         } else {
             PromptReader::Processor
         };
-        match super::PROMPT_CHUNK_TOKENS.load(std::sync::atomic::Ordering::Relaxed) {
-            0 => self.max_seq_len,
-            configured => prompt_chunk_ceiling(configured, reader),
-        }
+        widest_prompt_forward(
+            super::PROMPT_CHUNK_TOKENS.load(std::sync::atomic::Ordering::Relaxed),
+            reader,
+            self.max_seq_len,
+        )
     }
 
     /// How each of this segment's layers keeps its cache — what a cache
