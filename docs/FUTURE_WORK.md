@@ -1854,16 +1854,6 @@ image-encode refusal stays silent.
 
 ### API surface
 
-#### #282 — A model file's `suppress_tokens` can still be sampled
-`P3` · inference · **PARTIAL** — 2026-10-16 · the call syntax and thought channel closed (§ Closed)
-
-Gemma 4's files list `tokenizer.ggml.suppress_tokens` (the 12B: `<audio|>`, `<image|>`), which
-llama.cpp's sampler never picks — a −∞ logit bias merged into every request's
-(`common/sampling.cpp`, "model suppress tokens"). Nothing here reads the key, and there is no
-logit-bias path to put it on: it wants one mask applied where every sampler call site
-(local, split, remote, speculative) already passes, not one per path. A text chat practically
-never reaches either token.
-
 #### #185 — Three API surfaces each implement streaming and non-streaming replies separately
 `P3` · api · **OPEN** — 2026-07-26 · history: archive § "Collapse the parallel response paths behind one core loop"
 
@@ -2396,7 +2386,21 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel, #283, #281 (1), #281 (2), #281 (3), #281 (4), #281 (5) — #281 closed, #284)
+**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel, #283, #281 (1), #281 (2), #281 (3), #281 (4), #281 (5) — #281 closed, #284, #282 closed)
+- #282 (residual) — **A token the model file says is never to be sampled is never sampled.**
+  Gemma 4's files list `tokenizer.ggml.suppress_tokens` (the 12B: `<audio|>`, `<image|>`), which
+  llama.cpp merges into every request as a −∞ logit bias (`common/sampling.cpp`); nothing here
+  read the key. Now the output HEAD adds a row built once at load (`split::loader::
+  suppressed_logits_row`) inside `SplitModel::logits_from` — the one place a forward makes logits,
+  single, batched and captured alike, so the 67 argmax and sampler sites never need to know (the
+  batched loop's own copy of Gemma 2's soft cap went with it). The value is
+  `SUPPRESSED_LOGIT` (−1e30), not −∞: a speculative check's rows from a peer must be finite
+  (`verify_rows_are_finite`); probability 0 after softmax either way.
+  `compare_logits_reference.py` compares those columns at llama.cpp's raw values, after
+  checking ours are out of reach. Test `a_suppressed_token_is_out_of_reach_on_every_forward_path`
+  (single, every position of a check, a batch of two; red with the row off). Not covered: a whole
+  file named in `inference.model_path` runs through llama.cpp's own sampler chain (the `llama`
+  feature's legacy executor), which is built without them.
 - #284 — **A plain chat reaches Qwen3, Gemma 4, Phi-3.5, Phi-4-mini, GLM-4 and TinyLlama the way
   llama.cpp shows it.** A request with no system message was given "You are a helpful assistant."
   whenever the model's template wrote no system turn of its own (#100's rule, kept for a TinyLlama
@@ -2484,8 +2488,8 @@ grep `^| N |`).
   thought channel (`<|channel>thought … <channel|>`) is a reasoning block beside `<think>`
   (`inference::REASONING_BLOCKS`, the one list both finalisers read) — after a tool's answer the
   12B opens an empty one itself, which led the reply. Fixtures are the 12B's own greedy replies
-  under llama.cpp; six tests, all red with the fix off. Residual (the file's `suppress_tokens`)
-  stays open as #282.
+  under llama.cpp; six tests, all red with the fix off. The file's `suppress_tokens` closed
+  the next day (#282 (residual), above).
 - #283 — **A conversation's earlier tool calls and their answers reach the model.** OpenAI's
   `to_chat_message` dropped `tool_calls` / `tool_call_id` (Responses goes through it too) and
   Anthropic flattened a call to `[Tool call: name(input)]` text, so the template saw an empty

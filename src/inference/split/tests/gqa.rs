@@ -258,6 +258,7 @@ fn qwen2_forward_with_biases() {
         max_seq_len,
         kv_model_key: String::from("0-1-3"),
         final_logit_softcap: None,
+        suppressed_logits: None,
         batch_calls: 0,
         batch_fellback: 0,
         batch_stats_reported_at: None,

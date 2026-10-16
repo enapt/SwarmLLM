@@ -21,6 +21,14 @@ use crate::inference::layers::{LayerOnTheCard, LayerWeights};
 use crate::inference::residual_norm::Residual;
 use candle_core::Device;
 
+/// The logit a suppressed token is given (#282). llama.cpp merges a model's
+/// `suppress_tokens` as a -INFINITY bias (`common/sampling.cpp`); this is
+/// FINITE because logits cross trust boundaries that refuse a non-finite value
+/// — a speculative check's rows from a peer (`verify_rows_are_finite`) — and
+/// far enough down that no temperature, penalty or caller bias brings the
+/// token back: its probability is exactly 0 after softmax, as with -inf.
+pub(crate) const SUPPRESSED_LOGIT: f32 = -1.0e30;
+
 /// Did this forward run into the context window because the REPLY grew into it,
 /// rather than because the prompt was too long to start?
 ///
@@ -462,6 +470,36 @@ impl SplitModel {
             .and_then(|t| t.to_device(&self.device))
             .map(Residual::Ready)
             .map_err(|e| SwarmError::Internal(format!("segment output to primary device: {e}")))
+    }
+
+    /// The output head: a normed hidden state → logits. The ONE place a
+    /// forward makes them — single, batched and captured alike — so what the
+    /// head owes every row (Gemma 2's soft cap; the file's suppressed tokens,
+    /// #282) cannot be skipped by a path. The batched loop used to carry its
+    /// own copy of the soft cap.
+    fn logits_from(&self, x: &Tensor) -> Result<Tensor, SwarmError> {
+        let output = self
+            .output
+            .as_ref()
+            .ok_or_else(|| SwarmError::Internal("Missing output head".into()))?;
+        let mut logits = output
+            .forward(x)
+            .map_err(|e| SwarmError::Internal(format!("output_proj: {e}")))?;
+        // Gemma 2 final logit soft-capping: tanh(logits / cap) * cap
+        if let Some(cap) = self.final_logit_softcap {
+            logits = logits
+                .affine(1.0 / cap as f64, 0.0)
+                .and_then(|t| t.tanh())
+                .and_then(|t| t.affine(cap as f64, 0.0))
+                .map_err(|e| SwarmError::Internal(format!("final_logit_softcap: {e}")))?;
+        }
+        if let Some(suppressed) = &self.suppressed_logits {
+            logits = suppressed
+                .to_dtype(logits.dtype())
+                .and_then(|row| logits.broadcast_add(&row))
+                .map_err(|e| SwarmError::Internal(format!("suppressed_tokens: {e}")))?;
+        }
+        Ok(logits)
     }
 
     /// Core forward pass. When `skip_embedding` is true, the input is treated as
@@ -1380,10 +1418,6 @@ impl SplitModel {
                 .norm
                 .as_ref()
                 .ok_or_else(|| SwarmError::Internal("Missing final norm".into()))?;
-            let output = self
-                .output
-                .as_ref()
-                .ok_or_else(|| SwarmError::Internal("Missing output head".into()))?;
 
             // The last layer's closing add, fused into the final norm.
             let (_, x) = hidden
@@ -1395,18 +1429,7 @@ impl SplitModel {
                 x.i((.., seq_len - 1, ..))
                     .map_err(|e| SwarmError::Internal(format!("last_token_select: {e}")))?
             };
-            let mut logits = output
-                .forward(&x)
-                .map_err(|e| SwarmError::Internal(format!("output_proj: {e}")))?;
-            // Gemma 2 final logit soft-capping: tanh(logits / cap) * cap
-            if let Some(cap) = self.final_logit_softcap {
-                logits = logits
-                    .affine(1.0 / cap as f64, 0.0)
-                    .and_then(|t| t.tanh())
-                    .and_then(|t| t.affine(cap as f64, 0.0))
-                    .map_err(|e| SwarmError::Internal(format!("final_logit_softcap: {e}")))?;
-            }
-            Ok(logits)
+            self.logits_from(&x)
         } else {
             // Intermediate segment: return hidden states for next segment —
             // a plain tensor of its own, since this is what gets serialised
@@ -2165,10 +2188,6 @@ impl SplitModel {
                     .norm
                     .as_ref()
                     .ok_or_else(|| SwarmError::Internal("Missing final norm".into()))?;
-                let output = self
-                    .output
-                    .as_ref()
-                    .ok_or_else(|| SwarmError::Internal("Missing output head".into()))?;
                 let x = norm
                     .forward(&per_req)
                     .map_err(|e| SwarmError::Internal(format!("final_norm: {e}")))?;
@@ -2178,18 +2197,7 @@ impl SplitModel {
                 let x = x
                     .i((.., seq_len - 1, ..))
                     .map_err(|e| SwarmError::Internal(format!("last_token: {e}")))?;
-                let mut logits = output
-                    .forward(&x)
-                    .map_err(|e| SwarmError::Internal(format!("output_proj: {e}")))?;
-                // Apply final logit softcap for Gemma 2 (must match forward_inner_impl)
-                if let Some(cap) = self.final_logit_softcap {
-                    logits = logits
-                        .affine(1.0 / cap as f64, 0.0)
-                        .and_then(|t| t.tanh())
-                        .and_then(|t| t.affine(cap as f64, 0.0))
-                        .map_err(|e| SwarmError::Internal(format!("final_logit_softcap: {e}")))?;
-                }
-                results.push(logits);
+                results.push(self.logits_from(&x)?);
             } else {
                 results.push(per_req);
             }

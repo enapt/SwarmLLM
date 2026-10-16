@@ -95,6 +95,14 @@ pub struct SplitModel {
     pub(super) kv_model_key: String,
     /// Gemma 2 final logit soft-capping value (e.g. 30.0).
     pub(super) final_logit_softcap: Option<f32>,
+    /// What the head adds to every row of logits so the tokens the model file
+    /// lists in `tokenizer.ggml.suppress_tokens` are never chosen (#282) — a
+    /// vocabulary-wide row on the head's device, [`SUPPRESSED_LOGIT`] at each
+    /// listed id, 0 elsewhere. `None` without the key (every family but Gemma 4
+    /// today), and off the last segment.
+    ///
+    /// [`SUPPRESSED_LOGIT`]: super::executor::SUPPRESSED_LOGIT
+    pub(super) suppressed_logits: Option<Tensor>,
     /// How often `forward_batch` actually batched, versus fell back to running
     /// its items one at a time.
     ///

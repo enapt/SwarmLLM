@@ -683,6 +683,75 @@ fn forward_batch_empty_returns_empty() {
     assert!(out.is_empty());
 }
 
+/// #282: a token the model file lists in `tokenizer.ggml.suppress_tokens` is
+/// pushed out of reach by the HEAD, so every path that makes logits — one
+/// request, a speculative check's every position, a batch of two — hands the
+/// sampler a row that never picks it, and every other logit unchanged.
+#[test]
+fn a_suppressed_token_is_out_of_reach_on_every_forward_path() {
+    let (hidden_dim, vocab) = (128, 40);
+    let mut model = make_test_split_model(1, hidden_dim);
+    model.norm = Some(make_rms_norm_dim(hidden_dim, &Device::Cpu));
+    model.output = Some(make_qmatmul(hidden_dim, vocab, &Device::Cpu));
+    let a = Tensor::randn(0f32, 1.0, (1, 3, hidden_dim), &Device::Cpu).unwrap();
+    let b = Tensor::randn(0f32, 1.0, (1, 3, hidden_dim), &Device::Cpu).unwrap();
+    let rows = |t: &Tensor| t.reshape(((), vocab)).unwrap().to_vec2::<f32>().unwrap();
+    let argmax = |row: &[f32]| {
+        (0..row.len())
+            .max_by(|&i, &j| row[i].total_cmp(&row[j]))
+            .unwrap()
+    };
+
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let free = rows(&model.forward(&a, 0, &kv, "free").unwrap());
+    let favourite = argmax(&free[0]);
+    let mut row = vec![0f32; vocab];
+    row[favourite] = executor::SUPPRESSED_LOGIT;
+    model.suppressed_logits = Some(Tensor::from_vec(row, vocab, &Device::Cpu).unwrap());
+
+    let single = rows(&model.forward(&a, 0, &kv, "single").unwrap());
+    let checks = rows(
+        &model
+            .forward_verify_all_positions(&a, 0, &kv, "checks")
+            .unwrap(),
+    );
+    let items = [
+        BatchItem {
+            input: &a,
+            index_pos: 0,
+            request_id: "batch-a",
+        },
+        BatchItem {
+            input: &b,
+            index_pos: 0,
+            request_id: "batch-b",
+        },
+    ];
+    let batched: Vec<Vec<f32>> = model
+        .forward_batch(&items, &kv)
+        .unwrap()
+        .iter()
+        .flat_map(rows)
+        .collect();
+    assert_eq!((checks.len(), batched.len()), (3, 2));
+
+    for (path, got) in [
+        ("single", &single),
+        ("checks", &checks),
+        ("batched", &batched),
+    ] {
+        for row in got.iter() {
+            assert!(row[favourite] < -1.0e29, "{path}: {}", row[favourite]);
+            assert_ne!(argmax(row), favourite, "{path}");
+        }
+    }
+    for (i, (s, f)) in single[0].iter().zip(&free[0]).enumerate() {
+        if i != favourite {
+            assert_eq!(s, f, "logit {i} moved");
+        }
+    }
+}
+
 #[test]
 fn forward_batch_prefill_chunks_match_sequential() {
     // Item 7 Phase 4: when all items share (seq_len > 1, index_pos), the

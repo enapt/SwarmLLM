@@ -84,6 +84,26 @@ if ref.shape[1] != ours.shape[1]:
 if ref.shape[0] != ours.shape[0]:
     sys.exit(f"positions differ: llama.cpp {ref.shape[0]} from {first} vs ours {ours.shape[0]}")
 
+
+def suppressed_ids(path):
+    """`tokenizer.ggml.suppress_tokens`: our HEAD pushes them out of reach
+    (`SUPPRESSED_LOGIT`, FUTURE_WORK #282); llama.cpp does it in its sampler, so
+    its dump holds their raw values. Empty without the key."""
+    try:
+        from gguf import GGUFReader
+        field = GGUFReader(path).fields.get("tokenizer.ggml.suppress_tokens")
+    except Exception:
+        return []
+    return [] if field is None else [int(field.parts[i][0]) for i in field.data]
+
+
+suppressed = [i for i in suppressed_ids(gguf) if i < ours.shape[1]]
+if suppressed:
+    if not (ours[:, suppressed] < -1e29).all():
+        sys.exit(f"suppressed tokens {suppressed} were not pushed out of reach by the head")
+    ours[:, suppressed] = ref[:, suppressed]
+    print(f"suppressed tokens {suppressed}: out of reach in ours, compared at llama.cpp's raw values")
+
 cos_min = float(os.environ.get("COS_MIN", "0.999"))
 cosines, top1 = [], 0
 for i in range(len(ours)):

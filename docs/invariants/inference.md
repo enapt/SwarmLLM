@@ -4776,6 +4776,35 @@ of five). The first build after this recompiles every kernel once; on this lapto
 scripts at 4 nvcc threads each OOM'd the 10 GB build slice — `-j 1` with `CUDAFORGE_THREADS=3`
 took 36 min.
 
+## The output head is one place, and owes every row what the file says (2026-10-16, #282)
+
+A model file can list tokens never to be sampled — `tokenizer.ggml.suppress_tokens`; Gemma 4's 12B
+lists `<audio|>` (258883) and `<image|>` (258882), the only one of 96 local headers that does.
+llama.cpp merges them into every request's logit bias as −∞ (`common/sampling.cpp`, "model suppress
+tokens"). Here 67 argmax and sampler sites across 12 files consume logits — local, split, remote,
+speculative, on the card inside a captured step — so a per-sampler fix was the N-paths shape.
+Logits are MADE in two places, and both now call **`SplitModel::logits_from`**: `forward_inner_body`
+(every single-request path and the CUDA graph) and `forward_batch_body`, which had carried its own
+copy of Gemma 2's soft cap ("must match forward_inner_impl").
+
+**The row**: built once at load on the head's device (`split::loader::suppressed_logits_row`, from
+the i32 array the file holds), so a captured decode step adds it with no host copy; one
+`broadcast_add` per forward, and only for a file that lists any. **Finite on purpose**
+(`SUPPRESSED_LOGIT = -1e30`): a speculative check's rows from a peer are refused when non-finite
+(`verify_rows_are_finite`); the token's probability is 0 after softmax all the same, and no
+temperature, penalty or caller bias brings it back.
+
+**Measured** (Gemma 4 12B Q4_K_M, processor, `logits_reference_probe` + `compare_logits_reference.py`
+vs llama.cpp master, `~/swarmllm-g4/g4_short.json`): both columns < −1e29 at all 28 positions; every
+other logit as before the change — worst cosine 0.994017, median 0.999368, top-1 25/28, the same six
+digits as #115 (3)'s accepted run (`real_cmp_short.log`). The compare script now checks those
+columns are out of reach and compares them at llama.cpp's raw values (its dump carries no sampler
+bias). Not covered: the `llama` feature's legacy executor (a whole file named in
+`inference.model_path`), whose llama.cpp sampler chain is built without them.
+
+Guards: `a_suppressed_token_is_out_of_reach_on_every_forward_path` (single, every position of a
+check, a batch of two; red with the row off), `a_files_suppressed_tokens_become_one_row_of_the_heads_width`.
+
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 
 Each names the ONE place a decision is made. A second implementation of any of

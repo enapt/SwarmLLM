@@ -417,6 +417,56 @@ fn value_is_key(ct: &gguf_file::Content, gemma4: bool, prefix: &str) -> bool {
             .contains_key(&format!("{prefix}.attn_v.weight"))
 }
 
+/// The token ids a model file says are never to be sampled —
+/// `tokenizer.ggml.suppress_tokens`, which llama.cpp merges into every
+/// request's logit bias (`common/sampling.cpp`, "model suppress tokens"; Gemma
+/// 4's 12B lists `<audio|>` and `<image|>`). Ids past the head's `vocab` are
+/// dropped: they name no logit. Empty without the key.
+fn suppressed_token_ids(
+    metadata: &std::collections::HashMap<String, gguf_file::Value>,
+    vocab: usize,
+) -> Vec<usize> {
+    let Some(Ok(listed)) = metadata
+        .get("tokenizer.ggml.suppress_tokens")
+        .map(gguf_file::Value::to_vec)
+    else {
+        return Vec::new();
+    };
+    listed
+        .iter()
+        .filter_map(|v| match v {
+            gguf_file::Value::I32(id) => usize::try_from(*id).ok(),
+            gguf_file::Value::U32(id) => Some(*id as usize),
+            _ => None,
+        })
+        .filter(|&id| id < vocab)
+        .collect()
+}
+
+/// The row the output head adds to every row of logits so the file's
+/// suppressed tokens are never chosen (`SplitModel::suppressed_logits`, #282):
+/// [`SUPPRESSED_LOGIT`](super::executor::SUPPRESSED_LOGIT) at each listed id, 0
+/// elsewhere, built once on the head's device — so a captured decode step adds
+/// it without a copy from the host. `None` when the file lists none.
+fn suppressed_logits_row(
+    metadata: &std::collections::HashMap<String, gguf_file::Value>,
+    vocab: usize,
+    device: &Device,
+) -> Result<Option<candle_core::Tensor>, SwarmError> {
+    let ids = suppressed_token_ids(metadata, vocab);
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    let mut row = vec![0f32; vocab];
+    for &id in &ids {
+        row[id] = super::executor::SUPPRESSED_LOGIT;
+    }
+    tracing::debug!(tokens = ?ids, "The model file's suppressed tokens are never sampled");
+    candle_core::Tensor::from_vec(row, vocab, device)
+        .map(Some)
+        .map_err(|e| SwarmError::Internal(format!("suppressed_tokens row: {e}")))
+}
+
 /// The device a split model loads onto: the card when there is one and the
 /// worker was not told to use the processor (`force_cpu`, from
 /// `inference.gpu_layers = 0`), the processor otherwise.
@@ -1236,6 +1286,13 @@ impl SplitModel {
             }
         } else {
             None
+        };
+        let suppressed_logits = match &output {
+            Some(head) => {
+                let vocab = head.out_features().map_err(SwarmError::internal)?;
+                suppressed_logits_row(&ct.metadata, vocab, &device)?
+            }
+            None => None,
         };
 
         // Load only the specified layer range (capped at actual block count)
@@ -2543,6 +2600,7 @@ impl SplitModel {
             max_seq_len: context_length,
             kv_model_key: format!("{layer_start}-{layer_end}-{block_count}"),
             final_logit_softcap,
+            suppressed_logits,
             batch_calls: 0,
             batch_fellback: 0,
             batch_stats_reported_at: None,
@@ -2813,5 +2871,45 @@ mod expert_stack_tests {
         assert!(moe.shared_gate.is_none() && moe.shared_gate_inp.is_none());
         let x = Tensor::ones((1, 5, hidden), candle_core::DType::F32, &Device::Cpu).unwrap();
         assert_eq!(moe.forward(&x).unwrap().dims(), &[1, 5, hidden]);
+    }
+}
+
+#[cfg(test)]
+mod suppressed_token_tests {
+    use super::{suppressed_logits_row, suppressed_token_ids};
+    use candle_core::quantized::gguf_file::Value;
+    use candle_core::Device;
+    use std::collections::HashMap;
+
+    /// The ids are read as llama.cpp writes them (an `i32` array; Gemma 4 12B:
+    /// 258883 `<audio|>`, 258882 `<image|>`), and an id naming no logit — past
+    /// the head, or negative — is dropped rather than indexing out of the row.
+    #[test]
+    fn a_files_suppressed_tokens_become_one_row_of_the_heads_width() {
+        let key = "tokenizer.ggml.suppress_tokens".to_string();
+        let mut md = HashMap::new();
+        assert!(suppressed_token_ids(&md, 10).is_empty());
+        md.insert(
+            key,
+            Value::Array(vec![
+                Value::I32(7),
+                Value::I32(2),
+                Value::I32(-1),
+                Value::I32(10),
+                Value::U32(4),
+            ]),
+        );
+        assert_eq!(suppressed_token_ids(&md, 10), vec![7, 2, 4]);
+
+        let row = suppressed_logits_row(&md, 10, &Device::Cpu)
+            .unwrap()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let low = super::super::executor::SUPPRESSED_LOGIT;
+        assert_eq!(row, [0., 0., low, 0., low, 0., 0., low, 0., 0.]);
+        assert!(suppressed_logits_row(&HashMap::new(), 10, &Device::Cpu)
+            .unwrap()
+            .is_none());
     }
 }

@@ -301,6 +301,7 @@ Each names the ONE place a decision is made (`.claude/rules/architecture.md` § 
 - **`KvCacheStore::set_cancel_oracle`** — `forward_was_cancelled` is the one reader.
 - **`split::token_embedding::rows_on_demand_eligible`**
 - **`inference::split::read_gguf_header`** — the single way to parse a GGUF header off a PATH.
+- **`SplitModel::logits_from`** — the output head, the ONE place a forward makes logits (single, batched, captured): Gemma 2's soft cap and the file's `suppress_tokens` (`SUPPRESSED_LOGIT`, finite: a peer's check rows must be, #282). → § "The output head is one place"
 - **`GgufTensorMeta::tied_output_location`**
 
 → `docs/invariants/inference.md` § "Single-source-of-truth helpers — Inference kernels, caches and the tokenizer"
