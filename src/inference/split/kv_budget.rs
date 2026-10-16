@@ -256,8 +256,11 @@ pub(crate) struct KvLayout {
     layers: Vec<Option<LayerKvShape>>,
     attention: crate::inference::layers::KvAttention,
     head_count: usize,
-    /// The model's window (`SlidingWindow::size`), 0 for none.
+    /// The model's window (`SlidingWindow::size`, the file's), 0 for none.
     window: usize,
+    /// Does THIS node attend the windows (`gguf_meta::windows_attended`, the
+    /// A/B arm)? A peer's are asked of what it advertises.
+    windows_here: bool,
     /// The caches' growth quantum at this context (`layers::kv_growth_quantum`).
     quantum: usize,
 }
@@ -288,7 +291,10 @@ impl KvLayout {
                 length("value_length"),
             )
         });
-        let window = super::SlidingWindow::read(ct);
+        // The file's windows, whatever this node's A/B arm says: a PEER keeps
+        // them where it advertises it does (`growth_on_peer`), this node
+        // where it attends them (`windows_here`).
+        let window = super::SlidingWindow::from_file(ct);
         let mut layers = vec![None; shapes.len()];
         for layer in super::kv_layers(ct, 0, shapes.len()) {
             let shape = shapes[layer];
@@ -307,6 +313,7 @@ impl KvLayout {
             attention: crate::inference::layers::KvAttention::of(&model_arch),
             head_count: meta.head_count,
             window: window.map_or(0, |w| w.size),
+            windows_here: super::gguf_meta::windows_attended(),
             quantum: crate::inference::layers::kv_growth_quantum(context_length),
         })
     }
@@ -318,18 +325,62 @@ impl KvLayout {
     /// model where it does not apply, f32 for MLA), and a sliding-window
     /// layer whose cache keeps only its window charged as one.
     pub(crate) fn growth(&self, from: usize, to: usize, on_card: bool) -> KvGrowth {
+        let (attention, head_count) = (self.attention, self.head_count);
+        let slides = self.windows_here && super::kv_cache::windowed_caches_slide();
+        self.growth_by(from, to, slides, |shape| {
+            crate::inference::layers::kv_storage(
+                on_card,
+                attention,
+                head_count,
+                shape.n_kv_head,
+                shape.head_dim,
+            )
+        })
+    }
+
+    /// What a conversation's cache costs a PEER over the model's first
+    /// `layers`, kept as it advertises it keeps one
+    /// (`layers::kv_storage_as_advertised`: on its card or not, the half cache
+    /// or not) — a windowed layer charged its window only where the peer says
+    /// its caches slide (`features::KV_WINDOW_SLIDES`), handed forwards as
+    /// wide as such a peer reads a prompt ([`windows_advertised`]'s promise).
+    /// What a coordinator's bound on that peer charges (#281 (4)).
+    pub(crate) fn growth_on_peer(
+        &self,
+        layers: usize,
+        on_card: bool,
+        keeps_half: bool,
+        slides: bool,
+    ) -> KvGrowth {
+        let (attention, head_count) = (self.attention, self.head_count);
+        self.growth_by(0, layers, slides, |shape| {
+            crate::inference::layers::kv_storage_as_advertised(
+                on_card,
+                keeps_half,
+                attention,
+                head_count,
+                shape.n_kv_head,
+                shape.head_dim,
+            )
+        })
+        .widened_to(crate::inference::prefill_pacer::COPIED_CHUNK_MAX_TOKENS)
+    }
+
+    /// Layers `from..to` with each stored as `storage_of` says, a windowed
+    /// one charged its window where `slides` (`kv_cache::window_kept_where`).
+    fn growth_by(
+        &self,
+        from: usize,
+        to: usize,
+        slides: bool,
+        storage_of: impl Fn(&LayerKvShape) -> super::kv_cache::KvStorage,
+    ) -> KvGrowth {
         let (mut every_position, mut windowed) = (0u64, 0u64);
         let to = to.min(self.layers.len());
         for shape in self.layers[from.min(to)..to].iter().flatten() {
-            let storage = crate::inference::layers::kv_storage(
-                on_card,
-                self.attention,
-                self.head_count,
-                shape.n_kv_head,
-                shape.head_dim,
-            );
+            let storage = storage_of(shape);
             let bytes = kv_bytes_per_token(1, shape.k_elems, shape.v_elems, storage);
-            if super::kv_cache::window_kept(shape.window, storage).is_some() {
+            if super::kv_cache::window_kept_where(shape.window, storage, slides).is_some() {
                 windowed = windowed.saturating_add(bytes);
             } else {
                 every_position = every_position.saturating_add(bytes);
@@ -347,6 +398,21 @@ impl KvLayout {
             prompt_chunk,
         }
     }
+}
+
+/// May this node tell a coordinator that its sliding-window layers' caches keep
+/// only their window (`features::KV_WINDOW_SLIDES`)? Where it attends windows
+/// (`gguf_meta::windows_attended`), its caches slide
+/// (`kv_cache::windowed_caches_slide`) and it reads a prompt in chunks no
+/// wider than `COPIED_CHUNK_MAX_TOKENS` — `prompt_chunk_ceiling` never cuts
+/// one wider from a `prefill_chunk_tokens` at or below it, while 0 reads a
+/// prompt in ONE forward that a window must hold whole. The width a
+/// coordinator charges such a peer ([`KvLayout::growth_on_peer`]).
+pub(crate) fn windows_advertised(prefill_chunk_tokens: usize) -> bool {
+    super::gguf_meta::windows_attended()
+        && super::kv_cache::windowed_caches_slide()
+        && (1..=crate::inference::prefill_pacer::COPIED_CHUNK_MAX_TOKENS)
+            .contains(&prefill_chunk_tokens)
 }
 
 /// What a conversation's caches cost a segment on either device its layers
@@ -1496,6 +1562,23 @@ mod tests {
         assert_eq!(plan_snapshot(budget, 0, 0, growth, 8192).positions, 8192);
         let flat = plan_snapshot(budget, 0, 0, KvGrowth::flat(600), 8192);
         assert!(flat.positions < 8192 / 2, "control: {flat:?}");
+    }
+
+    /// A node says its windows slide only where a prompt reaches its caches in
+    /// forwards no wider than a coordinator will charge it for: never with
+    /// one-forward prompts (0) or chunks past `COPIED_CHUNK_MAX_TOKENS`, and
+    /// never where its own caches keep every position.
+    #[test]
+    fn windows_are_advertised_only_where_the_charge_holds() {
+        use crate::inference::prefill_pacer::COPIED_CHUNK_MAX_TOKENS;
+        assert!(windows_advertised(512));
+        assert!(windows_advertised(COPIED_CHUNK_MAX_TOKENS));
+        assert!(!windows_advertised(0), "a prompt read in one forward");
+        assert!(!windows_advertised(COPIED_CHUNK_MAX_TOKENS + 1));
+        super::super::kv_cache::NO_SLIDE_IN_TEST.with(|c| c.set(true));
+        let without_sliding = windows_advertised(512);
+        super::super::kv_cache::NO_SLIDE_IN_TEST.with(|c| c.set(false));
+        assert!(!without_sliding, "caches that keep every position");
     }
 
     /// **Every estimate before a load prices a model's caches as the loader

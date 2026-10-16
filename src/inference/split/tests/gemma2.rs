@@ -678,6 +678,18 @@ pub(crate) fn windowed_model_with_budget(
     model
 }
 
+/// The geometry a coordinator learns from Gemma 4 12B's header
+/// (`gguf_meta`'s `gemma4_12b`, the real file's attention keys), its cache
+/// layout included — for a pricing test outside `split`.
+pub(crate) fn gemma4_12b_geometry() -> GgufTensorMeta {
+    let mut ct = super::super::gguf_meta::sliding_window_tests::gemma4_12b();
+    ct.metadata.insert(
+        "gemma4.attention.layer_norm_rms_epsilon".into(),
+        candle_core::quantized::gguf_file::Value::F32(1e-6),
+    );
+    GgufTensorMeta::from_content(&ct).unwrap()
+}
+
 /// `hidden` from position 0 in `chunk`-position forwards into `kv`, then one
 /// position at a time for the last `steps`.
 fn read_then_decode(

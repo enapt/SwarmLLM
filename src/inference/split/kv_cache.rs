@@ -354,6 +354,18 @@ pub(crate) fn window_kept(window: Option<usize>, storage: KvStorage) -> Option<u
     window.filter(|_| caches_slide(storage == KvStorage::F32Mirrored))
 }
 
+/// [`window_kept`] on a node whose windowed caches slide where `slides` says —
+/// a PEER's, from what it advertises (`features::KV_WINDOW_SLIDES`); this
+/// node's own is [`window_kept`]. A cache kept with the f16 mirror never
+/// slides on any node.
+pub(crate) fn window_kept_where(
+    window: Option<usize>,
+    storage: KvStorage,
+    slides: bool,
+) -> Option<usize> {
+    window.filter(|_| slides && storage != KvStorage::F32Mirrored)
+}
+
 /// How one layer keeps its cache: its storage (`layers::kv_storage`) and the
 /// window it keeps ([`window_kept`]) — what a forward builds it as
 /// (`layers::append_to_cache`), and what a cache restored from a snapshot is

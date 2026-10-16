@@ -2942,7 +2942,10 @@ end for exactly this reason.
 takes `prompt_kv_bytes_per_layer` — `kv_bytes_per_position_per_layer(gguf_meta,
 on_gpu) × prompt_tokens`, the same arithmetic the worker charges at admission,
 mirror included for a GQA model on a card — on top of the weights for a cold
-peer and ALONE for a warm one. A warm peer used to be uncapped ("it has already
+peer and ALONE for a warm one (since #281 (4) through the header's per-layer
+layout, a windowed layer at its window where the peer advertises
+`features::KV_WINDOW_SLIDES` — `docs/invariants/inference.md` § "A windowed layer
+is charged as its window"). A warm peer used to be uncapped ("it has already
 paid for the weights"), which is true and was the whole story until the prompt
 was 8,000 tokens: the #447 card was warm. Unknown prompt or geometry → 0, and
 unknown never excludes. **The peer's own admission is the backstop**:

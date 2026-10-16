@@ -1151,6 +1151,7 @@ mod tests {
                     architecture: arch.into(),
                     context_length: 8192,
                     pooling_type: pooling,
+                    kv_layout: None,
                 },
             );
         };

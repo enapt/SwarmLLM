@@ -655,28 +655,62 @@ fn kv_bytes_per_position_per_layer(
     attention_layer.saturating_mul(keeping).div_ceil(layers)
 }
 
+/// KV-cache bytes a prompt of `positions` costs ONE layer of `meta`'s model,
+/// on average over its layers, on a node keeping its cache as `device` says —
+/// what the bound on that node's room for this prompt charges per layer.
+///
+/// Each layer priced by its own shape off the header (`GgufTensorMeta::kv_layout`
+/// → `KvLayout::growth_on_peer`), a sliding-window layer at most its window
+/// where the node says its caches slide (`features::KV_WINDOW_SLIDES`) —
+/// Gemma 4 12B on a processor at 32,768 positions is 4.2 GiB that way and was
+/// 24 GiB charged flat, enough to bar a peer that would have admitted it
+/// (#281 (4)). Without the layout (a serialized copy of the geometry), every
+/// layer at every position, as [`kv_bytes_per_position_per_layer`] prices it.
+fn prompt_kv_bytes_per_layer(
+    meta: &crate::inference::split::GgufTensorMeta,
+    device: KvDevice,
+    positions: u32,
+) -> u64 {
+    let Some(layout) = meta.kv_layout.as_ref() else {
+        return kv_bytes_per_position_per_layer(meta, device).saturating_mul(u64::from(positions));
+    };
+    layout
+        .growth_on_peer(
+            meta.block_count,
+            device.on_card,
+            device.keeps_half,
+            device.slides_windows,
+        )
+        .bytes_for(positions as usize)
+        .div_ceil(meta.block_count.max(1) as u64)
+}
+
 /// Where a node keeps a model's KV cache, as far as pricing it goes: on its
-/// card or not, and whether that card keeps the half cache.
+/// card or not, whether that card keeps the half cache, and whether its
+/// sliding-window layers keep only their window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct KvDevice {
     on_card: bool,
     keeps_half: bool,
+    slides_windows: bool,
 }
 
 impl KvDevice {
+    /// A node that says nothing: every layer keeps every position, the
+    /// widest it could be charged.
     const PROCESSOR: Self = Self {
         on_card: false,
         keeps_half: false,
+        slides_windows: false,
     };
 
     /// What `capability` says — the processor when it says nothing.
     fn advertised(capability: Option<&swarmllm_types::NodeCapability>) -> Self {
+        use swarmllm_types::features::{supports, KV_HALF_ON_CARD, KV_WINDOW_SLIDES};
         capability.map_or(Self::PROCESSOR, |c| Self {
             on_card: c.models_run_on_card(),
-            keeps_half: swarmllm_types::features::supports(
-                c.features,
-                swarmllm_types::features::KV_HALF_ON_CARD,
-            ),
+            keeps_half: supports(c.features, KV_HALF_ON_CARD),
+            slides_windows: supports(c.features, KV_WINDOW_SLIDES),
         })
     }
 }
@@ -3685,9 +3719,7 @@ impl PipelineScheduler {
                     KvDevice::advertised(p.capability.as_ref())
                 });
             let kv_per_layer = match (prompt_tokens, meta.as_ref()) {
-                (Some(tokens), Some(m)) => {
-                    kv_bytes_per_position_per_layer(m, kv_device).saturating_mul(u64::from(tokens))
-                }
+                (Some(tokens), Some(m)) => prompt_kv_bytes_per_layer(m, kv_device, tokens),
                 _ => 0,
             };
             let warm = self.shared_state.peer_model_is_warm(
@@ -3778,7 +3810,7 @@ impl PipelineScheduler {
         let prompt_meta = prompt_tokens.zip(self.shared_state.gguf_meta_for(&manifest.id));
         let prompt_kv_per_layer_on = |device: KvDevice| -> u64 {
             prompt_meta.as_ref().map_or(0, |(tokens, meta)| {
-                kv_bytes_per_position_per_layer(meta, device).saturating_mul(u64::from(*tokens))
+                prompt_kv_bytes_per_layer(meta, device, *tokens)
             })
         };
 

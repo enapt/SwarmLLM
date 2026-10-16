@@ -587,7 +587,11 @@ without ever being able to read them.
   advertised beside `ALL` only where the build and settings keep it; bit 20,
   `SPLIT_PROMPT_CACHE`, is in `ALL`: the node reads the `0x0D` forward trailer and
   answers `0x09`; bit 21, `PROMPT_CHUNKS`, is in `ALL`: the node reads the `0x0E`
-  forward trailer and continues a prompt pass across its pieces); a node only attempts a relayed send when
+  forward trailer and continues a prompt pass across its pieces; bit 22,
+  `KV_WINDOW_SLIDES`, is a statement like bit 19: the node's sliding-window
+  layers keep only their window and it reads a prompt in chunks no wider than
+  `COPIED_CHUNK_MAX_TOKENS` (`kv_budget::windows_advertised`), so a coordinator
+  charges such a layer its window for a prompt, #281 (4)); a node only attempts a relayed send when
   the *recipient* advertises the matching bit, so the protocol evolves additively
   with no flag-day. The relay is chosen only when there is no usable direct
   connection (`has_direct_connection` false — the circuit-only case); a real

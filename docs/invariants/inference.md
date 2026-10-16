@@ -3437,7 +3437,7 @@ reads it off the header's architecture.
 
 **Every estimate asks the same rule**: the loader's KV budget, the card/processor split planner
 (`process_pool`), admission (`vram::card_kv_storage` — the GPU estimator's KV term at the storage's
-width; since #281 (3) all three through `kv_budget::KvLayout`, per layer), and the coordinator's bound on a PEER (`scheduler::KvDevice` →
+width; since #281 (3) all three through `kv_budget::KvLayout`, per layer), and the coordinator's bound on a PEER (`scheduler::KvDevice` → since #281 (4) `KvLayout::growth_on_peer` →
 `layers::kv_storage_as_advertised`, which reads `features::KV_HALF_ON_CARD` — bit 19, NOT in
 `features::ALL`, ORed in by the health monitor when `kv_half_on_card_enabled()`; a peer without it
 is priced as f32 + mirror, as before).
@@ -4370,6 +4370,32 @@ a range is its own layers; a one-forward prompt keeps every position) and
 `admission_charges_a_windowed_layer_its_window` (a Gemma 2 header written to a pool's data dir,
 read through `footprint_inputs` → `cpu_footprint`: 4 MiB flat before, the window's arithmetic
 after, for the whole model and for layers 1..3).
+
+**A coordinator's bound on a PEER reads it too** (#281 (4), 2026-10-16). The bound on a peer's
+room for a prompt (`scheduler::max_hostable_layers`' `prompt_kv_bytes_per_layer`, and the
+commitments recorded per peer) charged `kv_bytes_per_position_per_layer` × positions — every
+layer at the first layer's shape, every position: Gemma 4 12B at 32,768 positions on a
+processor 24 GiB, where the peer keeps ~4.2. The geometry a coordinator learns from the header
+(`GgufTensorMeta`, always built by `from_content`) now carries the layout
+(`GgufTensorMeta::kv_layout`, `#[serde(skip)]`), and `scheduler::prompt_kv_bytes_per_layer`
+asks `KvLayout::growth_on_peer(block_count, on_card, keeps_half, slides)` — each layer stored
+as `layers::kv_storage_as_advertised` says, a windowed one at its window only where `slides`
+(`kv_cache::window_kept_where`, so the f16 mirror never slides), the growth widened to
+`COPIED_CHUNK_MAX_TOKENS`. `slides` is the peer's own statement, `features::KV_WINDOW_SLIDES`
+(bit 22, NOT in `ALL`, like bit 19): the health monitor ORs it in where
+`kv_budget::windows_advertised(prefill_chunk_tokens)` — windows attended, caches slide, and a
+prompt chunk of 1..=`COPIED_CHUNK_MAX_TOKENS`, since `prompt_chunk_ceiling` never cuts a forward
+wider from those while 0 reads a prompt in ONE forward a window must hold whole. One bit cannot
+say the peer's real chunk, so it is charged the widest it may read: at or below that width
+(5,183 positions for a 1,024 window) the window saves nothing over each layer's own shape, and
+the peer's admission at its own (narrower) chunk stays the backstop. The layout is read off the
+FILE's windows (`SlidingWindow::from_file`) — a coordinator on the `SWARMLLM_SLIDING_WINDOW=0`
+arm still prices a peer by what the peer does; this node's own `growth` asks `windows_here`.
+Test, red with the bit ignored: `a_peers_room_for_a_prompt_charges_a_windowed_layer_its_window`
+(Gemma 4 12B's real keys: a processor peer with the bit at the window's arithmetic, without it at
+each layer's shape — 5x more at 32K; under 5,183 positions the two agree; a mirrored card the
+same either way; no layout = the old flat figure) and
+`windows_are_advertised_only_where_the_charge_holds`.
 
 ## A family's attention scale is read, not assumed (2026-10-15, FUTURE_WORK #279)
 

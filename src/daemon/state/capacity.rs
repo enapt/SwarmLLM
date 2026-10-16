@@ -490,6 +490,7 @@ mod tests {
                 architecture: "qwen3".into(),
                 context_length: 32_768,
                 pooling_type: 3,
+                kv_layout: None,
             },
         );
 

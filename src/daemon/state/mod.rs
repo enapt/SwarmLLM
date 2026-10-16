@@ -4437,6 +4437,7 @@ mod manifest_persist_tests {
                 architecture: "llama".into(),
                 context_length: 2048,
                 pooling_type: 0,
+                kv_layout: None,
             },
         );
         assert_eq!(state.fill_declared_contexts(), 1);

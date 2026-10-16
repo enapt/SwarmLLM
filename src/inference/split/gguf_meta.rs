@@ -161,6 +161,13 @@ pub(crate) struct SlidingWindow {
     pattern: SwaPattern,
 }
 
+/// Does this node attend a sliding window where a model has one —
+/// `SWARMLLM_SLIDING_WINDOW=0` is the A/B arm that does not
+/// ([`SlidingWindow::read`]).
+pub(crate) fn windows_attended() -> bool {
+    std::env::var("SWARMLLM_SLIDING_WINDOW").as_deref() != Ok("0")
+}
+
 /// Which layers are windowed: llama.cpp's
 /// `{arch}.attention.sliding_window_pattern`, one flag per layer or a period
 /// (`llama_model_base::load_swa_pattern`), else the family's own period.
@@ -177,7 +184,7 @@ impl SlidingWindow {
     /// `SWARMLLM_SLIDING_WINDOW=0` reads none — the A/B arm, every layer
     /// attending the whole conversation as before #278.
     pub(crate) fn read(ct: &gguf_file::Content) -> Option<Self> {
-        if std::env::var("SWARMLLM_SLIDING_WINDOW").as_deref() == Ok("0") {
+        if !windows_attended() {
             return None;
         }
         Self::from_file(ct)
@@ -437,6 +444,14 @@ pub struct GgufTensorMeta {
     /// embedding model: [`Self::is_embedding_model`].
     #[serde(default)]
     pub pooling_type: u32,
+    /// How each layer keeps a conversation's cache (`kv_budget::KvLayout`),
+    /// read off the header with the rest — what a coordinator prices a
+    /// peer's room for a prompt by (`scheduler::prompt_kv_bytes_per_layer`):
+    /// each layer by its own shape, a windowed one by its window where the
+    /// peer's caches slide (#281 (4)). Never carried in a serialized copy;
+    /// `None` there, and the bound charges the widest layer at every position.
+    #[serde(skip)]
+    pub(crate) kv_layout: Option<super::kv_budget::KvLayout>,
 }
 
 /// Why this build will not run a model to write replies, read off its header.
@@ -705,7 +720,7 @@ impl GgufTensorMeta {
             .and_then(|v| v.to_u32().ok())
             .unwrap_or(0);
 
-        Ok(GgufTensorMeta {
+        let mut meta = GgufTensorMeta {
             tensors,
             tensor_data_offset: ct.tensor_data_offset,
             model_name,
@@ -722,7 +737,11 @@ impl GgufTensorMeta {
             architecture: arch,
             context_length,
             pooling_type,
-        })
+            kv_layout: None,
+        };
+        meta.kv_layout =
+            super::kv_budget::KvLayout::read(ct, &meta, meta.context_length.max(1)).ok();
+        Ok(meta)
     }
 
     /// An embedding model — see [`Self::pooling_type`].
@@ -1697,6 +1716,7 @@ mod active_bytes_tests {
             architecture: "qwen3moe".into(),
             context_length: 0,
             pooling_type: 0,
+            kv_layout: None,
         }
     }
 

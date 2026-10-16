@@ -274,8 +274,18 @@ pub mod features {
     /// piece and read each as a whole prompt.
     pub const PROMPT_CHUNKS: u64 = 1 << 21;
 
+    /// Keeps only its window in a sliding-window layer's KV cache, reading a
+    /// prompt in chunks no wider than 4,096 positions (FUTURE_WORK #281). Not a
+    /// message, and NOT in [`ALL`] — like [`KV_HALF_ON_CARD`], a statement a
+    /// node makes only where its settings make it true. A coordinator charges
+    /// such a peer's windowed layers their window and one chunk for a prompt,
+    /// as the peer's own admission does; a peer without it (every build before
+    /// it, or one reading a prompt in one forward) is charged every position.
+    pub const KV_WINDOW_SLIDES: u64 = 1 << 22;
+
     /// The full feature set THIS build implements. Advertised by every node,
-    /// with [`KV_HALF_ON_CARD`] beside it where that applies.
+    /// with [`KV_HALF_ON_CARD`] and [`KV_WINDOW_SLIDES`] beside it where they
+    /// apply.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
         | PIPELINE_CHAIN

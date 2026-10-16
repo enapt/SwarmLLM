@@ -1277,12 +1277,20 @@ impl HealthMonitor {
             ),
             // Advertise the protocol epoch + the optional features this build
             // implements, so peers negotiate new message types additively —
-            // and whether this node keeps the half KV cache on its card, so a
+            // and whether this node keeps the half KV cache on its card and
+            // only a window in a sliding-window layer's cache, so a
             // coordinator prices its room for a prompt as it will be held.
             protocol_version: swarmllm_types::PROTOCOL_VERSION,
             features: swarmllm_types::features::ALL
                 | if crate::inference::layers::kv_half_on_card_enabled() {
                     swarmllm_types::features::KV_HALF_ON_CARD
+                } else {
+                    0
+                }
+                | if crate::inference::split::kv_budget::windows_advertised(
+                    self.shared_state.cfg().inference.prefill_chunk_tokens as usize,
+                ) {
+                    swarmllm_types::features::KV_WINDOW_SLIDES
                 } else {
                     0
                 },

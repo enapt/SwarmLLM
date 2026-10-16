@@ -4057,6 +4057,65 @@ fn memory_already_booked_on_a_peer_is_not_offered_twice() {
     );
 }
 
+/// A peer's room for a prompt is charged each layer of a Gemma model by its
+/// own shape, and a windowed layer at most its window only where the peer
+/// says its caches slide — read as wide as such a peer reads a prompt
+/// (`COPIED_CHUNK_MAX_TOKENS`). Gemma 4 12B on a processor at 32,768
+/// positions: 4.2 GiB, where the bound charged 24 GiB (#281 (4)).
+#[test]
+fn a_peers_room_for_a_prompt_charges_a_windowed_layer_its_window() {
+    let meta = crate::inference::split::tests::gemma2::gemma4_12b_geometry();
+    assert!(meta.kv_layout.is_some(), "the header's layout is read");
+    let positions = 32_768u32;
+    let processor = |slides_windows| super::KvDevice {
+        slides_windows,
+        ..super::KvDevice::PROCESSOR
+    };
+    // f32 K and V a position: 40 windowed layers of 8 x 256, 8 global of 1 x 512.
+    let (windowed, global) = (40 * 2 * 8 * 256 * 4u64, 8 * 2 * 512 * 4u64);
+    let held = crate::inference::split::kv_cache::most_positions_a_window_holds(
+        1024,
+        crate::inference::layers::kv_growth_quantum(meta.context_length.max(1)),
+        crate::inference::prefill_pacer::COPIED_CHUNK_MAX_TOKENS,
+    ) as u64;
+    let p = u64::from(positions);
+    let slides = super::prompt_kv_bytes_per_layer(&meta, processor(true), positions);
+    assert_eq!(slides, (global * p + windowed * held).div_ceil(48));
+    // A peer that does not say so keeps every position — each layer still
+    // at its own shape.
+    let keeps_all = super::prompt_kv_bytes_per_layer(&meta, processor(false), positions);
+    assert_eq!(keeps_all, ((global + windowed) * p).div_ceil(48));
+    assert!(
+        keeps_all > 5 * slides,
+        "{keeps_all} per layer flat against {slides} windowed"
+    );
+    // Shorter than what a window holds, the window saves nothing.
+    assert_eq!(
+        super::prompt_kv_bytes_per_layer(&meta, processor(true), 1000),
+        super::prompt_kv_bytes_per_layer(&meta, processor(false), 1000)
+    );
+    // A card keeping f32 plus the f16 mirror never slides it, whatever it says.
+    let mirrored = |slides_windows| super::KvDevice {
+        on_card: true,
+        keeps_half: false,
+        slides_windows,
+    };
+    assert_eq!(
+        super::prompt_kv_bytes_per_layer(&meta, mirrored(true), positions),
+        super::prompt_kv_bytes_per_layer(&meta, mirrored(false), positions)
+    );
+    // Geometry without the layout (a serialized copy) is charged flat: every
+    // layer at the first layer's shape, every position.
+    let unread = crate::inference::split::GgufTensorMeta {
+        kv_layout: None,
+        ..meta.clone()
+    };
+    assert_eq!(
+        super::prompt_kv_bytes_per_layer(&unread, processor(true), positions),
+        super::kv_bytes_per_position_per_layer(&unread, processor(true)) * p
+    );
+}
+
 /// The coordinator prices a position the way the worker charges it: the half
 /// cache on a card that keeps one, f32 plus the mirror on one that does not,
 /// f32 alone on a processor.
@@ -4065,10 +4124,12 @@ fn a_prompt_position_is_priced_like_the_worker_charges_it() {
     let card_f32 = super::KvDevice {
         on_card: true,
         keeps_half: false,
+        slides_windows: false,
     };
     let card_half = super::KvDevice {
         on_card: true,
         keeps_half: true,
+        slides_windows: false,
     };
     let meta = crate::inference::split::GgufTensorMeta {
         tensors: Default::default(),
@@ -4087,6 +4148,7 @@ fn a_prompt_position_is_priced_like_the_worker_charges_it() {
         architecture: "gemma2".into(),
         context_length: 8192,
         pooling_type: 0,
+        kv_layout: None,
     };
     // GQA on a card that keeps the half cache: f16 alone → 2 bytes per element.
     assert_eq!(

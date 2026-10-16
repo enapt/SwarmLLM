@@ -1741,22 +1741,17 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
-#### #281 — A windowed layer's cache is still CHARGED for every position by a coordinator's peer bound
-`P2` · memory · **OPEN** — 2026-10-16 · narrowed 2026-10-16: (1) the cache keeps its window, (2) the worker charges it as its window, (3) this node's estimates do too (§ Closed)
+#### #281 — A prefix-cache snapshot's budget counts every position of a windowed layer
+`P3` · memory · **OPEN** — 2026-10-16 · narrowed 2026-10-16: (1) the cache keeps its window, (2) the worker charges it as its window, (3) this node's estimates do too, (4) so does a coordinator's bound on a peer (§ Closed)
 
 Since (1) a windowed layer's cache holds its window, a rewind and one growth quantum
-(`LayerKv::slide_beyond`); since (2) the WORKER prices it so (`kv_budget::KvGrowth`); since (3)
-every estimate this node makes before a load reads the same per-layer layout
-(`kv_budget::KvLayout` → `KvPrice`: admission's footprint, the cost curve, the card/processor
-split). Left: a PEER's bound (`scheduler::kv_bytes_per_position_per_layer`) still charges each
-position on every layer at the widest layer's rate (48 × 8 KiB on Gemma 4's 12B: 12 GiB at
-32K, against ~1.0 held) — it reads `GgufTensorMeta`, which carries no window; the window must
-reach a coordinator on the wire (a `GgufTensorMeta` field with `#[serde(default)]` and a
-`features` bit, or the header the coordinator already fetches to route). Safe in direction — a
-peer holds less than it is charged — but a split is planned as if it held every position.
-Also: `PrefixCache::positions_ceiling` divides its byte budget by every position on every
-layer — exact for a snapshot taken before a slide (it copies them all), heavy for one taken
-after.
+(`LayerKv::slide_beyond`), and since (2)-(4) every price of it — the worker's
+(`kv_budget::KvGrowth`), this node's estimates before a load (`KvLayout` → `KvPrice`) and a
+coordinator's bound on a peer (`KvLayout::growth_on_peer`, `features::KV_WINDOW_SLIDES`) — reads
+the per-layer layout. Left: `PrefixCache::positions_ceiling` divides its byte budget by every
+position on every layer — exact for a snapshot taken before a slide (it copies them all), heavy
+for one taken after, so a long Gemma conversation's snapshot is kept shorter than its bytes
+allow. Safe in direction.
 
 #### #265 — A later range loaded into a card/processor split worker is charged to the card whatever the loader does with it
 `P3` · memory · **OPEN** — 2026-10-13 · history: found closing #264
@@ -2425,7 +2420,22 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel, #283, #281 (1), #281 (2), #281 (3))
+**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel, #283, #281 (1), #281 (2), #281 (3), #281 (4))
+- #281 (4) — **A computer is offered a long Gemma prompt by the memory it will really use.** A
+  coordinator weighing whether a peer has room for a prompt charged every layer the widest
+  layer's cache at every position (`scheduler::kv_bytes_per_position_per_layer`): Gemma 4 12B at
+  32,768 positions on a processor at 24 GiB, where the peer keeps ~4.2 — enough to leave a peer
+  out of a plan it would have admitted. Now the geometry a coordinator learns from the header
+  carries the loader's layout (`GgufTensorMeta::kv_layout`), and the bound
+  (`scheduler::prompt_kv_bytes_per_layer` → `KvLayout::growth_on_peer`) prices each layer by its
+  own shape and storage, a windowed one at its window only where the peer says its caches slide:
+  `features::KV_WINDOW_SLIDES`, bit 22, a statement like bit 19, advertised where the node
+  attends windows, its caches slide and it reads a prompt in chunks no wider than
+  `COPIED_CHUNK_MAX_TOKENS` (`kv_budget::windows_advertised`) — the width it is charged at. An
+  older peer says nothing and is charged every position, as before; a card keeping the f16
+  mirror never slides. And a peer's own admission no longer charges a forward it reads in its
+  own chunks at the forward's whole width (`model_worker::width_handed_to_the_caches`). Residual
+  — the prefix cache's budget — stays open as #281.
 - #281 (1) — **A windowed layer's cache keeps its window, not the whole conversation.** Gemma
   2, 3 and 4 attend over a window on most layers, and those layers' caches kept every position
   (a Gemma 4 12B conversation at 32K tokens: 10.5 GiB of cache, now ~1.0 by the layout's
