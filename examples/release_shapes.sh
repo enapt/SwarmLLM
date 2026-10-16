@@ -35,8 +35,10 @@ trap cleanup EXIT
 # would otherwise prune the shards of the node you actually run. And off the
 # public swarm: every shape here is local, and a throwaway node on the real
 # network is a second identity advertising the live node's shards for as long
-# as it runs (see smoke_test.sh for why the private gossip id, not the absent
-# bootstrap, is what isolates it).
+# as it runs — and, since a processor node routes a long prompt to a faster
+# peer, a "cold start" check would read a PEER's reply. Neither the absent
+# bootstrap nor the private gossip id isolates it; the `[pool]` block does
+# (see smoke_test.sh, gotcha #536).
 cat > "$D/config.toml" <<'TOML'
 [auto_manage]
 enabled = false
@@ -47,6 +49,11 @@ bootstrap_peers = []
 disable_default_bootstrap = true
 enable_mdns = false
 gossip_network_id = "swarmllm-shapes"
+
+[pool]
+private_mode = true
+private_mode_allow_lan = false
+offline_mode = true
 
 # A fresh data dir is a first run, and a first run opens the dashboard in the
 # browser: one stray tab per harness run, pointing at a port that dies with it.

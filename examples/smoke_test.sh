@@ -60,13 +60,22 @@ prune_enabled = false
 # the minutes it exists, which is a "weird test node" to everyone else (a
 # tester was running their own on 2026-09-01). No bootstrap and no mDNS is not
 # isolation on a machine with a live node (loopback discovery is
-# unconditional); the private gossip id is what keeps the two apart. Same
-# recipe as soak_test.sh and two_node_test.sh.
+# unconditional), and neither is a private gossip id: it separates gossip
+# topics, not routes. A rig set up exactly like this on 2026-10-16 reached six
+# peers in two seconds and sent the middle layers of its prompt to two of them
+# (gotcha #536). What the planner reads is the pool scope
+# (`pool::scope::allowed_node_set`) — the `[pool]` block below, as in
+# family_conformance.sh.
 [network]
 bootstrap_peers = []
 disable_default_bootstrap = true
 enable_mdns = false
 gossip_network_id = "swarmllm-smoke"
+
+[pool]
+private_mode = true
+private_mode_allow_lan = false
+offline_mode = true
 
 # A fresh data dir is a first run, and a first run opens the dashboard in the
 # browser: one stray tab per harness run, pointing at a port that dies with it.
