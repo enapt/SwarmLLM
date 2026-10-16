@@ -303,7 +303,7 @@ Each names the ONE place a decision is made; a second implementation of any is t
 - **`PipelineScheduler::local_speed_off_the_card` is this node's speed for a model its card cannot hold whole** — the processor's, blended with the card's for the layers a card/processor split puts there, fresh or resident (`ModelProcessPool::card_share_for_planning` → `split_tokens_per_sec`, harmonic by layer share). The search's local candidate AND the hand-off gate's baseline (`DelegationInput::local_cpu_tokens_per_sec`) read it (#129).
 - **`ModelProcessPool::serves_on_cpu` is the whole-model delegation precondition**
 - **A node holding every layer that would run the model on its processor lets the priced search compete with its fast path**
-- **A peer's capacity for a prompt is weights PLUS that prompt's KV cache**
+- **A peer's capacity for a prompt is weights PLUS that prompt's KV cache** — the weights at **`scheduler::weight_bytes_per_layer`**: the file over its layers, less the tensors its loader keeps in host memory where the peer's layers run on its card (`GgufTensorMeta::host_resident_bytes`, #296), in the bound, the published room, the booking and `allocate_offline`; a load's price keeps the file's figure.
 - **`inference::scheduler::delegation_target`**
 - **`inference::router::distributed_exec::failure_is_penalty_worthy`**
 - **A peer that went silent is barred from THIS request's retry, and the retry happens**

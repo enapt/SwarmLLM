@@ -52,6 +52,15 @@ pub fn estimate_model_vram_mb(total_size_bytes: u64) -> u64 {
 pub struct VramFootprintInputs {
     /// Sum of the shard bytes this worker will map. On-disk size.
     pub quantized_weight_bytes: u64,
+    /// Of `quantized_weight_bytes`, what the loader keeps in the machine's
+    /// memory whatever device the segment runs on (`split::host_resident`:
+    /// Gemma 4 E2B/E4B's per-layer token table, 1,837 MiB of the E2B's 3,287
+    /// at Q4_K_M; 0 for every other model). A card holds the rest
+    /// ([`Self::card_weight_bytes`]); the processor holds all of it. Charged
+    /// to the card, the E2B was priced 1.9 GB too heavy there and a 4 GB card
+    /// sent it to the processor (FUTURE_WORK #296); a spawn on the card charges
+    /// it to the machine instead (`process_pool::ModelProcessPool::machine_charge`).
+    pub host_resident_bytes: u64,
     /// Bytes per element of the weight tensors when the checkpoint is NOT
     /// quantized (F16/BF16 → 2, F32 → 4); `None` for a quantized checkpoint.
     ///
@@ -102,6 +111,15 @@ pub struct VramFootprintInputs {
     /// split offered for one puts a model that does not fit onto the card
     /// anyway.
     pub splits_across_devices: bool,
+}
+
+impl VramFootprintInputs {
+    /// The weights a card holding this segment holds: all of them but what
+    /// the loader keeps in the machine's memory ([`Self::host_resident_bytes`]).
+    pub fn card_weight_bytes(&self) -> u64 {
+        self.quantized_weight_bytes
+            .saturating_sub(self.host_resident_bytes)
+    }
 }
 
 /// Bytes a CUDA worker process costs beyond its tensors: driver context, cuBLAS
@@ -303,8 +321,9 @@ fn resident_footprint(
     )
 }
 
-/// The same, with the KV cache kept as a worker reading prompts as `reader`
-/// keeps it.
+/// The same, with the KV cache kept — and the weights held — as a worker
+/// reading prompts as `reader` keeps them: a card holds all but the
+/// host-resident weights ([`VramFootprintInputs::card_weight_bytes`]).
 fn resident_footprint_on(
     i: &VramFootprintInputs,
     rows_on_demand: bool,
@@ -317,12 +336,19 @@ fn resident_footprint_on(
     // `QMatMul::from_arc` dequantizes F16 / BF16 / F32 to a dense f32 tensor
     // eagerly, so an F16 file costs twice its bytes. See
     // `unquantized_bytes_per_element`.
+    //
+    // On a card, only the weights the card holds: the loader keeps the
+    // host-resident ones in the machine's memory (#296).
+    let held = match reader {
+        crate::inference::prefill_pacer::PromptReader::Processor => i.quantized_weight_bytes,
+        crate::inference::prefill_pacer::PromptReader::Card
+        | crate::inference::prefill_pacer::PromptReader::CardCopyingWeights { .. } => {
+            i.card_weight_bytes()
+        }
+    };
     let weights_bytes = match i.unquantized_bytes_per_element {
-        Some(bpe) if bpe > 0 && bpe < F32 => i
-            .quantized_weight_bytes
-            .saturating_mul(F32)
-            .saturating_div(bpe),
-        _ => i.quantized_weight_bytes,
+        Some(bpe) if bpe > 0 && bpe < F32 => held.saturating_mul(F32).saturating_div(bpe),
+        _ => held,
     };
 
     // Embedding table. First segment only.
@@ -2015,6 +2041,7 @@ mod footprint_tests {
     fn tinyllama() -> VramFootprintInputs {
         VramFootprintInputs {
             quantized_weight_bytes: 667_078_656,
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 32_000,
             embedding_length: 2048,
@@ -2039,6 +2066,7 @@ mod footprint_tests {
     fn llama32_1b() -> VramFootprintInputs {
         VramFootprintInputs {
             quantized_weight_bytes: 860_807_296,
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 128_256,
             embedding_length: 2048,
@@ -2063,6 +2091,7 @@ mod footprint_tests {
     fn phi35() -> VramFootprintInputs {
         VramFootprintInputs {
             quantized_weight_bytes: 2_392_493_952,
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 32_064,
             embedding_length: 3072,
@@ -2151,6 +2180,39 @@ mod footprint_tests {
         assert!(
             dense - old > 500,
             "the embedding term alone should dominate: {old} -> {dense}"
+        );
+    }
+
+    /// **A card is not charged what the loader keeps in the machine's memory**
+    /// (#296): Gemma 4 E2B's per-layer table (its file's 1,927 of 3,447 MB, as
+    /// MiB), comes off
+    /// the card's estimate whole, and the processor's — which holds it — is
+    /// unchanged.
+    #[test]
+    fn a_card_is_not_charged_the_weights_the_machine_keeps() {
+        const MIB: u64 = 1024 * 1024;
+        let e2b = VramFootprintInputs {
+            quantized_weight_bytes: 3_447 * MIB,
+            host_resident_bytes: 1_927 * MIB,
+            ..gemma2_2b(4096)
+        };
+        let unsplit = VramFootprintInputs {
+            host_resident_bytes: 0,
+            ..e2b
+        };
+        assert_eq!(e2b.card_weight_bytes(), 1_520 * MIB);
+        assert_eq!(
+            estimate_worker_vram_mb(&unsplit) - estimate_worker_vram_mb(&e2b),
+            1_927
+        );
+        assert_eq!(
+            estimate_worker_ram_mb(&e2b),
+            estimate_worker_ram_mb(&unsplit)
+        );
+        assert_eq!(
+            cpu_footprint(&e2b).weights_bytes,
+            3_447 * MIB,
+            "the processor holds every weight"
         );
     }
 
@@ -2297,6 +2359,7 @@ mod footprint_tests {
     fn gemma2_2b(effective_context: u64) -> VramFootprintInputs {
         VramFootprintInputs {
             quantized_weight_bytes: 1629 * 1024 * 1024,
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 256_000,
             embedding_length: 2304,
@@ -2356,6 +2419,7 @@ mod footprint_tests {
     fn degenerate_inputs_are_safe() {
         let z = VramFootprintInputs {
             quantized_weight_bytes: 0,
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 0,
             embedding_length: 0,
@@ -2380,6 +2444,7 @@ mod footprint_tests {
         );
         let huge = VramFootprintInputs {
             quantized_weight_bytes: u64::MAX,
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: u64::MAX,
             embedding_length: u64::MAX,
@@ -2466,6 +2531,7 @@ mod footprint_tests {
     fn qwen05b_f16() -> VramFootprintInputs {
         VramFootprintInputs {
             quantized_weight_bytes: 994_156_864,
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: Some(2),
             vocab_size: 151_936,
             embedding_length: 896,
@@ -2500,6 +2566,7 @@ mod footprint_tests {
     fn an_unquantized_checkpoint_is_charged_twice_its_file_size() {
         let f16 = qwen05b_f16();
         let as_if_quantized = VramFootprintInputs {
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: None,
             ..f16
         };
@@ -2526,10 +2593,12 @@ mod footprint_tests {
     #[test]
     fn an_f32_checkpoint_is_not_charged_twice() {
         let f32_ckpt = VramFootprintInputs {
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: Some(4),
             ..qwen05b_f16()
         };
         let quantized = VramFootprintInputs {
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: None,
             ..qwen05b_f16()
         };
@@ -2594,6 +2663,7 @@ mod footprint_tests {
     fn a_cpu_refusal_itemises_weights_kv_and_context() {
         let i = VramFootprintInputs {
             quantized_weight_bytes: 2284 * 1024 * 1024,
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 32064,
             embedding_length: 3072,

@@ -716,6 +716,30 @@ impl KvDevice {
     }
 }
 
+/// What one layer of `manifest`'s model costs a node's memory in weights, on
+/// average — the file over its layers, less, where the node's layers run on
+/// its card (`KvDevice::on_card`, `NodeCapability::models_run_on_card`), the
+/// `host_resident_bytes` its loader keeps in the machine's memory whatever the
+/// device (`GgufTensorMeta::host_resident_bytes`). What [`max_hostable_layers`]
+/// divides a node's room by, and what a commitment to it books: charged Gemma
+/// 4 E2B's 1.9 GB per-layer table, a 4 GB card could not hold the 3.4 GB model
+/// whole (FUTURE_WORK #296). Loading still reads the whole file, so a load's
+/// price keeps the file's figure.
+fn weight_bytes_per_layer(
+    manifest: &ModelManifest,
+    host_resident_bytes: u64,
+    on_card: bool,
+) -> u64 {
+    let held = if on_card {
+        manifest
+            .total_size_bytes
+            .saturating_sub(host_resident_bytes)
+    } else {
+        manifest.total_size_bytes
+    };
+    held / u64::from(manifest.num_layers.max(1))
+}
+
 /// How far away a peer may be and still be handed a whole model, in ms.
 ///
 /// The number that matters most here. A previous attempt at this (2026-08-03,
@@ -3787,8 +3811,8 @@ impl PipelineScheduler {
         let Some(manifest) = self.shared_state.model_registry.get_manifest(model_id) else {
             return;
         };
-        let bytes_per_layer = manifest.total_size_bytes / manifest.num_layers.max(1) as u64;
         let meta = self.shared_state.gguf_meta_for(model_id);
+        let host_resident_bytes = meta.as_ref().map_or(0, |m| m.host_resident_bytes());
         let mut charges: Vec<(NodeId, u64)> = Vec::new();
         for seg in &assignment.segments {
             if seg.node_id == *local_node_id {
@@ -3817,7 +3841,8 @@ impl PipelineScheduler {
             let per_layer = if warm {
                 kv_per_layer
             } else {
-                bytes_per_layer.saturating_add(kv_per_layer)
+                weight_bytes_per_layer(&manifest, host_resident_bytes, kv_device.on_card)
+                    .saturating_add(kv_per_layer)
             };
             let mb = layers.saturating_mul(per_layer) / 1_048_576;
             if mb > 0 {
@@ -3881,11 +3906,16 @@ impl PipelineScheduler {
         // set with any cross-pool extras the owner opted into (R134.7).
         let allowed_set = crate::pool::scope::request_scope(&self.shared_state, &manifest.id);
 
-        // Average bytes a layer occupies, for the per-peer capacity bound
-        // below. The manifest is the only size the coordinator has; it is the
-        // on-disk quantized figure, which is what the peer's loader charges
-        // against its budget too.
+        // Average bytes a layer occupies, for a load's price below. The
+        // manifest is the only size the coordinator has; it is the on-disk
+        // quantized figure. The per-peer capacity bound charges what the
+        // peer's loader keeps where its layers run (`weight_bytes_per_layer`):
+        // the same, less the host-resident tensors on a card (#296).
         let bytes_per_layer = manifest.total_size_bytes / manifest.num_layers.max(1) as u64;
+        let host_resident_bytes = self
+            .shared_state
+            .gguf_meta_for(&manifest.id)
+            .map_or(0, |m| m.host_resident_bytes());
         // What THIS prompt's KV cache costs per layer, on a card and on a
         // processor, from the model's geometry when this node holds its header.
         // `gguf_meta_for` is the only way to ask — it reads the header on a
@@ -4435,20 +4465,22 @@ impl PipelineScheduler {
                         }
                         None => PeerResidency::Cold,
                     };
-                    let prompt_kv_per_layer = prompt_kv_per_layer_on(
-                        self.shared_state
-                            .peer_registry
-                            .get(&node_id)
-                            .map_or(KvDevice::PROCESSOR, |p| {
-                                KvDevice::advertised(p.capability.as_ref())
-                            }),
-                    );
+                    let device = self
+                        .shared_state
+                        .peer_registry
+                        .get(&node_id)
+                        .map_or(KvDevice::PROCESSOR, |p| {
+                            KvDevice::advertised(p.capability.as_ref())
+                        });
+                    let prompt_kv_per_layer = prompt_kv_per_layer_on(device);
+                    let held_bytes_per_layer =
+                        weight_bytes_per_layer(manifest, host_resident_bytes, device.on_card);
                     let bound = |residency: PeerResidency, margin: f64| {
                         self.shared_state.peer_registry.get(&node_id).and_then(|p| {
                             max_hostable_layers(
                                 manifest.num_layers,
                                 p.capability.as_ref(),
-                                bytes_per_layer,
+                                held_bytes_per_layer,
                                 residency,
                                 margin,
                                 prompt_kv_per_layer,
@@ -4461,7 +4493,7 @@ impl PipelineScheduler {
                     // excludes what is resident — from the same function and
                     // inputs as the totals below, so the two cannot drift.
                     if !held_ranges.is_empty() {
-                        let full_price = bytes_per_layer.saturating_add(prompt_kv_per_layer);
+                        let full_price = held_bytes_per_layer.saturating_add(prompt_kv_per_layer);
                         published_room = Some(PublishedRoom {
                             new_layers: bound(PeerResidency::Cold, DELEGATE_VRAM_MARGIN),
                             new_layers_at_face_value: bound(PeerResidency::Cold, 1.0),
@@ -5687,7 +5719,10 @@ impl PipelineScheduler {
             return None;
         }
         let local_node_id = self.shared_state.identity.node_id();
-        let bytes_per_layer = manifest.total_size_bytes / manifest.num_layers.max(1) as u64;
+        let host_resident_bytes = self
+            .shared_state
+            .gguf_meta_for(model_id)
+            .map_or(0, |m| m.host_resident_bytes());
 
         let mut peers: Vec<parallax_allocator::PeerCapacity> = Vec::new();
         // Local node. If we have on-disk shards for this model, treat our
@@ -5737,6 +5772,11 @@ impl PipelineScheduler {
                 .map(|c| c.memory_for_model_layers_mb())
                 .unwrap_or(0);
             let available_bytes = available_mb.saturating_mul(1_048_576);
+            let bytes_per_layer = weight_bytes_per_layer(
+                &manifest,
+                host_resident_bytes,
+                KvDevice::advertised(peer.capability.as_ref()).on_card,
+            );
             let layer_capacity = available_bytes.checked_div(bytes_per_layer).unwrap_or(0) as u32;
             let tps = peer
                 .capability

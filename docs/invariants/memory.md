@@ -3078,6 +3078,67 @@ Test: `a_split_keeping_experts_in_ram_charges_each_device_for_its_share`.
 **A later range** loaded into a split worker is placed and charged the same way, share by share
 (2026-10-16, #265) — § "A worker that cannot grow gets the spawn's ladder" → "The split rung".
 
+**Tensors the loader keeps in the machine's memory whatever the device (2026-10-17, #296).**
+Gemma 4 E2B/E4B carry a per-layer token table (`per_layer_token_embd`, 1,837 MiB of the E2B's
+3,287 at Q4_K_M, 2,205 MiB of the E4B's 5,139) that the loader keeps in host memory on every device
+(`split::host_resident`), as llama.cpp keeps its whole input layer on the processor
+(`pimpl->dev_input = { cpu_dev, … }`, `src/llama-model.cpp`); a token gathers one row of it. The
+pool summed every tensor in the header as weights, so a card spawn of the E2B was priced the
+table too — on a 4 GB card, the size these models are for, that sent it to the processor or into a
+split it did not need — and the machine holding the table was charged nothing for it. Ollama
+weighs exactly this share (`TotalSize − VRAMSize`) against the machine's memory (§ #264 above).
+
+The rule: `VramFootprintInputs::host_resident_bytes` names those bytes apart (the first
+segment's; `segment_geometry` spreads the rest over the layers as before). A card's estimate —
+`estimate_worker_vram_mb`, the card/processor split's sizing (`split_for_card`,
+`experts_in_ram_for_card`) — holds `card_weight_bytes`; the processor's holds everything. The
+planning curve scales the bytes with the layers, as it scales the weights they are part of
+(`cost_curve_of`), so the card's curve prices what a card holds and the processor's all of it.
+**`ModelProcessPool::machine_charge`** is the ONE figure a spawn charges the machine: the share
+`ram_charged_share` names, priced, plus — for any placement reaching the card — the
+host-resident tensors (`MachineCharge::beside_card_mb`), carried onto the worker as its
+`host_share_mb` and released with it. The spawn's RAM admission, `fresh_run_layers_for_planning`
+and the card's bound in `max_local_hostable_layers` (a spawn there is refused the table where the
+machine has no room for it — `Some(0)`, asked while the plan can still change; the model's own
+processor worker is room there, since the promotion retires it before the card's spawn is
+admitted, `unload_model` in `get_or_spawn`) all ask it. A
+coordinator prices a PEER the same way (`scheduler::weight_bytes_per_layer`: the file over its
+layers, less the header's `GgufTensorMeta::host_resident_bytes` where the peer's layers run on
+its card) in the bound, the published room, the commitment it books and `allocate_offline`; a
+load's price keeps the file's figure (loading reads every byte), and the peer's ceiling is the
+machine's cap plus its card — a model held across both — so it keeps the processor's curve.
+Decode's per-layer read (`GgufTensorMeta::active_bytes_per_layer`, the speed prior and the
+drafter's size) no longer counts the table, a row per token like an untied embedding: it had
+priced the E2B's layers at over twice their work.
+
+Measured through the pool on the real headers (bartowski Q4_K_M, a scratch test reading
+`segment_geometry` off each file, at the 4,096-position admission context):
+
+| | E2B | E4B |
+|---|---|---|
+| host-resident (the table) | 1,837 MiB of 3,287 | 2,205 MiB of 5,139 |
+| card estimate, whole | **1,859 MB** (was 3,696) | **3,483 MB** (was 5,688) |
+| charged to the machine beside it | 1,838 MB | 2,205 MB |
+| processor estimate, whole | 3,632 MB (unchanged) | 5,624 MB (unchanged) |
+| card curve (fixed, per layer) | (319, 44) (was (336, 96)) | (333, 75) (was (312, 128)) |
+
+So the E2B now runs whole on a 4 GB card and the E4B on a 6 GB one, where both went to the
+processor. Not taken from the plan: cutting a card/processor split at or before the first shared
+source — it moves up to 21 more layers to the processor to save a history copy, a trade to
+measure first (FUTURE_WORK #295).
+
+Tests: `an_e2b_on_a_small_card_keeps_its_per_layer_table_in_the_machine` (the E2B's shape fits a
+3,000 MB card budget whole, the control charged the table does not; the machine charge beside the
+card, beside a split's processor run and in a processor placement's own estimate; the card bound
+`Some(0)` when the machine cannot take the table; a fresh split planned only where the machine
+takes its run and the table), `a_models_own_processor_worker_is_room_for_its_table_beside_the_card`
+(found in review: weighed as still spent, an E2B on the processor with the machine near its cap
+was offered no card room, and the plan sent abroad a model this node runs; another model's worker
+in use is not room), `a_card_is_not_charged_the_weights_the_machine_keeps`,
+`a_cards_room_is_charged_only_the_weights_the_card_holds` (a 3,000 MiB card peer holds all 35
+layers, a processor peer with the same room and the control card do not; the booking is the
+card's share), `the_per_layer_token_table_is_a_row_per_token_held_off_the_card`.
+
 ## The owner's own load is weighed against the owner's memory cap (2026-10-14, FUTURE_WORK #266)
 
 Found by #138 (3) stage B's first rig. #264 charged a split's processor share to the RAM budget,

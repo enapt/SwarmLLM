@@ -2063,6 +2063,26 @@ fn ram_charged_share(
     }
 }
 
+/// What a spawn charges the machine's memory
+/// (`ModelProcessPool::machine_charge`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MachineCharge {
+    /// The layers or experts the placement keeps there ([`ram_charged_share`]).
+    share: Option<RamShare>,
+    /// What that share costs, in MB.
+    share_mb: u64,
+    /// The host-resident tensors a placement reaching the card keeps there
+    /// (`VramFootprintInputs::host_resident_bytes`), in MB.
+    beside_card_mb: u64,
+}
+
+impl MachineCharge {
+    /// The whole charge, in MB.
+    fn mb(self) -> u64 {
+        self.share_mb.saturating_add(self.beside_card_mb)
+    }
+}
+
 /// Add `mb` to a model's recorded charge.
 ///
 /// Segments of one model share a worker, so a second segment ADDS to what the
@@ -2179,6 +2199,9 @@ fn cost_curve_of(
         i.segment_layers = layers;
         i.is_first = false;
         i.quantized_weight_bytes = base.quantized_weight_bytes / total * layers;
+        // In proportion too, as the weights it is part of: the card's curve
+        // then prices the card-held weights, the processor's all of them (#296).
+        i.host_resident_bytes = base.host_resident_bytes / total * layers;
         i.kv = base.kv.share(layers, total);
         estimate(&i)
     };
@@ -2323,7 +2346,7 @@ fn split_for_card(
     }
     let n = crate::inference::split::hybrid::plan_gpu_layers(
         available_bytes,
-        inputs.quantized_weight_bytes,
+        inputs.card_weight_bytes(),
         card_kv_bytes_of_split(inputs),
         layers,
     );
@@ -2445,7 +2468,7 @@ fn experts_in_ram_for_card(
     let kv = card_kv_bytes_of_split(inputs);
     let usable = available_bytes
         .saturating_sub(crate::inference::split::hybrid::FORWARD_BUFFER_RESERVE_BYTES);
-    let mut on_card = inputs.quantized_weight_bytes.saturating_add(kv);
+    let mut on_card = inputs.card_weight_bytes().saturating_add(kv);
     // At least one: this is asked only of a segment admission found too large
     // for the card whole.
     for (layer, &bytes) in expert_bytes.iter().enumerate() {
@@ -3339,6 +3362,48 @@ impl ModelProcessPool {
             .unwrap_or(0)
     }
 
+    /// What `segment`'s host-resident tensors take of the machine's memory, in
+    /// MB rounded up (`VramFootprintInputs::host_resident_bytes`) — 0 for every
+    /// model but Gemma 4 E2B/E4B, and when the header cannot be read.
+    fn host_resident_mb(&self, model_id: &ModelId, segment: Option<(u32, u32)>) -> u64 {
+        self.footprint_inputs(model_id, segment)
+            .map_or(0, |i| i.host_resident_bytes.div_ceil(1024 * 1024))
+    }
+
+    /// What a spawn of `segment` placed as `charge_ram` / `split` charges the
+    /// machine's memory — the ONE figure its RAM admission weighs, and the
+    /// planner's mirrors of it ask ([`Self::fresh_run_layers_for_planning`],
+    /// the card's bound in [`Self::max_local_hostable_layers`]): the share
+    /// [`ram_charged_share`] names, priced, and — for any placement that
+    /// reaches the card — the tensors the loader keeps in the machine's memory
+    /// whatever the device. Charged nothing there, the E2B's 1.9 GB per-layer
+    /// table sat outside every budget while the card was priced it (#296).
+    fn machine_charge(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        charge_ram: bool,
+        split: Option<CardSplit>,
+        kv: KvCharge,
+    ) -> MachineCharge {
+        let share = ram_charged_share(charge_ram, segment, split);
+        let share_mb = match share {
+            Some(RamShare::Layers(run)) => self.estimate_cpu_footprint_mb(model_id, Some(run), kv),
+            Some(RamShare::Experts { layers }) => self.experts_in_ram_mb(model_id, segment, layers),
+            None => 0,
+        };
+        MachineCharge {
+            share,
+            share_mb,
+            // A processor placement's estimate already holds every weight.
+            beside_card_mb: if charge_ram {
+                0
+            } else {
+                self.host_resident_mb(model_id, Some(segment))
+            },
+        }
+    }
+
     /// How many layers of this model would fit on the card, when the whole
     /// thing does not.
     ///
@@ -3633,8 +3698,16 @@ impl ModelProcessPool {
             let (first, end) = segment.map_or((0, all_layers), |(s, e)| (s as usize, e as usize));
             if let Some((start, end)) = segment {
                 let layers = u64::from(end.saturating_sub(start));
+                // As the header's path below: the host-resident bytes belong
+                // to the first segment, the rest in proportion.
+                let host = if start == 0 {
+                    whole.host_resident_bytes
+                } else {
+                    0
+                };
                 i.quantized_weight_bytes =
-                    whole.quantized_weight_bytes / whole.segment_layers.max(1) * layers;
+                    whole.card_weight_bytes() / whole.segment_layers.max(1) * layers + host;
+                i.host_resident_bytes = host;
                 i.segment_layers = layers;
                 i.kv = whole.kv.share(layers, whole.segment_layers.max(1));
                 i.is_first = start == 0;
@@ -3750,8 +3823,24 @@ impl ModelProcessPool {
         // Proportional weights slightly under-charge a first segment (shard 0
         // also carries the embedding table) and the estimator adds that table
         // back whenever `is_first`.
-        let (segment_layers, is_first, segment_weight_bytes) =
-            segment_shape(tensor_meta.block_count as u64, shard_bytes, segment);
+        //
+        // What the loader keeps in the machine's memory whatever the device
+        // (`split::host_resident`, Gemma 4 E2B/E4B's per-layer table) is the
+        // first segment's, and named apart, so a card is not priced it (#296);
+        // the rest of the weights are spread over the layers as before.
+        let host_bytes: u64 = ct
+            .tensor_infos
+            .iter()
+            .filter(|(name, _)| crate::inference::split::host_resident(name))
+            .map(|(_, info)| crate::inference::split::tensor_byte_size(info))
+            .sum();
+        let (segment_layers, is_first, layer_weight_bytes) = segment_shape(
+            tensor_meta.block_count as u64,
+            shard_bytes.saturating_sub(host_bytes),
+            segment,
+        );
+        let host_resident_bytes = if is_first { host_bytes } else { 0 };
+        let segment_weight_bytes = layer_weight_bytes.saturating_add(host_resident_bytes);
         // What the same segment's caches cost, read off the header by the
         // loader's own layout (`kv_budget::KvLayout`): the layers that keep
         // one, each by its own shape, a sliding-window layer charged its
@@ -3776,6 +3865,7 @@ impl ModelProcessPool {
 
         let inputs = VramFootprintInputs {
             quantized_weight_bytes: segment_weight_bytes,
+            host_resident_bytes,
             unquantized_bytes_per_element,
             embedding_gatherable,
             vocab_size: vocab,
@@ -5763,6 +5853,27 @@ impl ModelProcessPool {
             if budget == 0 {
                 return None;
             }
+            // A spawn on the card keeps the host-resident tensors in the
+            // machine's memory, refused there if it has no room (#296) — the
+            // spawn's own charge, asked while the plan can still change. A
+            // live card worker already holds them. A live processor worker
+            // holds them too, and its charge is room: the promotion retires it
+            // (`unload_model`, before the card's spawn is admitted —
+            // `get_or_spawn`), or it serves the request itself.
+            // (What `machine_charge` charges a spawn wholly on the card.)
+            let own_mb = self.live_worker(model_id).map_or(0, |_| {
+                self.ram_reserved_mb.get(model_id).map_or(0, |mb| *mb)
+            });
+            if fixed_mb > 0
+                && !self.machine_would_take(
+                    model_id,
+                    self.host_resident_mb(model_id, None),
+                    requester,
+                    own_mb,
+                )
+            {
+                return Some(0);
+            }
             // Room an idle model is holding counts: admission takes it back
             // (`idle_vram_reclaimable_mb`), so a plan that stays within it is
             // one the loader will accept.
@@ -5860,31 +5971,47 @@ impl ModelProcessPool {
         )?;
         let (_, total) = split.card_share();
         let run = (0, u32::try_from(total).unwrap_or(u32::MAX));
-        if let Some(share) = ram_charged_share(false, run, Some(split)) {
-            let host_mb = match share {
-                RamShare::Layers(rest) => {
-                    self.estimate_cpu_footprint_mb(model_id, Some(rest), KvCharge::Typical)
-                }
-                RamShare::Experts { layers } => self.experts_in_ram_mb(model_id, run, layers),
-            };
-            let reclaimable_mb = self.idle_ram_reclaimable_mb(model_id);
-            if host_mb > 0
-                && self.ram_budget_now(requester).is_some_and(|budget| {
-                    !budget.allows_after_reclaim(self.ram_committed_mb(), host_mb, reclaimable_mb)
-                })
-            {
-                tracing::debug!(
-                    model = %model_id,
-                    host_share_mb = host_mb,
-                    reclaimable_mb,
-                    ?requester,
-                    "a fresh card/processor split would not be given its processor share — \
-                     not planning it here"
-                );
-                return None;
-            }
+        let host_mb = self
+            .machine_charge(model_id, run, false, Some(split), KvCharge::Typical)
+            .mb();
+        // A live card worker of this model is not counted as released: it may
+        // be grown in place across the processor (`charge_segment_as_split`)
+        // rather than retired, its charge kept.
+        if !self.machine_would_take(model_id, host_mb, requester, 0) {
+            tracing::debug!(
+                model = %model_id,
+                host_share_mb = host_mb,
+                ?requester,
+                "a fresh card/processor split would not be given its processor share — \
+                 not planning it here"
+            );
+            return None;
         }
         Some(run.1)
+    }
+
+    /// Would a spawn's RAM admission take `host_mb` for `requester` — counting
+    /// the idle models it would unload for it first
+    /// ([`Self::idle_ram_reclaimable_mb`]) and `released_first_mb` this model's
+    /// own worker gives back before it is admitted? Nothing to charge, or no
+    /// budget to judge by, is yes. The planner's reading of what
+    /// [`Self::admit_to_cpu_as`] will decide.
+    fn machine_would_take(
+        &self,
+        model_id: &ModelId,
+        host_mb: u64,
+        requester: Requester,
+        released_first_mb: u64,
+    ) -> bool {
+        host_mb == 0
+            || self.ram_budget_now(requester).is_none_or(|budget| {
+                budget.allows_after_reclaim(
+                    self.ram_committed_mb(),
+                    host_mb,
+                    self.idle_ram_reclaimable_mb(model_id)
+                        .saturating_add(released_first_mb),
+                )
+            })
     }
 
     /// The card's share of this model when THIS node runs it — `(layers on the
@@ -6795,15 +6922,20 @@ impl ModelProcessPool {
             self.release_vram_charge(model_id, charged_vram_mb);
             charged_vram_mb = 0;
         }
-        if let Some(ram_share) = ram_charged_share(charge_ram, segment, card_split) {
-            let estimated = match ram_share {
-                RamShare::Layers(run) => {
-                    self.estimate_cpu_footprint_mb(model_id, Some(run), tenancy.kv_charge())
-                }
-                // The experts alone: the process is charged to the card beside
-                // them, and their layers' caches live there.
-                RamShare::Experts { layers } => self.experts_in_ram_mb(model_id, segment, layers),
-            };
+        // Experts kept in RAM are charged alone: the process is charged to the
+        // card beside them, and their layers' caches live there. Beside a
+        // card, what the loader keeps in host memory whatever the device is
+        // charged too (#296).
+        let machine = self.machine_charge(
+            model_id,
+            segment,
+            charge_ram,
+            card_split,
+            tenancy.kv_charge(),
+        );
+        if machine.share.is_some() || machine.mb() > 0 {
+            let ram_share = machine.share;
+            let estimated = machine.mb();
             // Refusing is the last resort: first reclaim memory from models
             // nothing is using, then ask again (`admit_to_cpu_as`, a tenant's
             // only). Only then does the user see an error.
@@ -6843,14 +6975,15 @@ impl ModelProcessPool {
                             self.ram_budget_note(),
                         )
                     });
+                // Itemised only where the items are the whole charge.
                 let detail = match ram_share {
-                    RamShare::Layers(run) => {
+                    Some(RamShare::Layers(run)) if machine.beside_card_mb == 0 => {
                         self.cpu_footprint_detail(model_id, Some(run), tenancy.kv_charge())
                     }
-                    RamShare::Experts { .. } => None,
+                    _ => None,
                 };
                 let message = match (ram_share, detail) {
-                    (RamShare::Experts { layers }, _) => {
+                    (Some(RamShare::Experts { layers }), _) if machine.beside_card_mb == 0 => {
                         crate::model::auto_manage::vram::describe_experts_refusal(
                             &model_id.0,
                             estimated,
@@ -6888,7 +7021,7 @@ impl ModelProcessPool {
             }
             // A conversation cache on the processor needs its grant; experts
             // kept in RAM leave every cache on the card.
-            if let RamShare::Layers(run) = ram_share {
+            if let Some(RamShare::Layers(run)) = ram_share {
                 self.record_cpu_kv_budget(model_id, Some(run), requester, tenancy.kv_charge());
             }
         }
@@ -9940,6 +10073,7 @@ mod tests {
     fn qwen3_1_7b() -> crate::model::auto_manage::vram::VramFootprintInputs {
         crate::model::auto_manage::vram::VramFootprintInputs {
             quantized_weight_bytes: 1_800 * 1024 * 1024,
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 151_936,
             embedding_length: 2048,
@@ -10564,6 +10698,7 @@ mod tests {
             m.clone(),
             crate::model::auto_manage::vram::VramFootprintInputs {
                 quantized_weight_bytes: 4_400 * 1024 * 1024,
+                host_resident_bytes: 0,
                 unquantized_bytes_per_element: None,
                 vocab_size: 152_064,
                 embedding_length: 3584,
@@ -10621,6 +10756,7 @@ mod tests {
                 wanted.clone(),
                 crate::model::auto_manage::vram::VramFootprintInputs {
                     quantized_weight_bytes: 4_400 * 1024 * 1024,
+                    host_resident_bytes: 0,
                     unquantized_bytes_per_element: None,
                     vocab_size: 152_064,
                     embedding_length: 3584,
@@ -12005,6 +12141,7 @@ mod tests {
         use crate::model::auto_manage::vram::{estimate_worker_ram_mb, VramFootprintInputs};
         let whole = VramFootprintInputs {
             quantized_weight_bytes: 4_400 * 1024 * 1024,
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 152_064,
             embedding_length: 3584,
@@ -12484,6 +12621,7 @@ mod admission_tests {
         // A 7B-shaped segment: 28 layers, ~4.4 GB of weights, GQA 28/4.
         let splittable = crate::model::auto_manage::vram::VramFootprintInputs {
             quantized_weight_bytes: 4_400 * 1024 * 1024,
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 152_064,
             embedding_length: 3584,
@@ -12545,6 +12683,7 @@ mod admission_tests {
         use crate::inference::split::hybrid::arch_supports_hybrid;
         crate::model::auto_manage::vram::VramFootprintInputs {
             quantized_weight_bytes: (48 * (208 + 8) + 340) * MIB,
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 151_936,
             embedding_length: 2048,
@@ -12698,6 +12837,202 @@ mod admission_tests {
         assert_eq!(p.card_share_for_planning(&m), Some((48 - in_ram, 48)));
     }
 
+    /// Gemma 4 E2B Q4_K_M's shape (its file's MB figures, as MiB): 35 layers, 3,447, 1,927 of it the
+    /// per-layer table the loader keeps in the machine's memory (#296).
+    fn e2b(host_resident_mib: u64) -> crate::model::auto_manage::vram::VramFootprintInputs {
+        use crate::inference::model_arch::ModelArch;
+        use crate::inference::split::hybrid::arch_supports_hybrid;
+        crate::model::auto_manage::vram::VramFootprintInputs {
+            quantized_weight_bytes: 3_447 * MIB,
+            host_resident_bytes: host_resident_mib * MIB,
+            unquantized_bytes_per_element: None,
+            vocab_size: 262_144,
+            embedding_length: 1536,
+            segment_layers: 35,
+            kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                35,
+                1,
+                8,
+                256,
+                crate::inference::layers::KvAttention::Standard,
+            ),
+            rope_dim: 256,
+            effective_context: 8192,
+            is_first: true,
+            embedding_gatherable: true,
+            splits_across_devices: arch_supports_hybrid(&ModelArch::from_gguf_arch("gemma4")),
+        }
+    }
+
+    /// **Gemma 4 E2B on a 4 GB card runs there whole, its per-layer table
+    /// charged to the machine** (#296). The table — over half the file — stays
+    /// in host memory whatever the device, so a card is priced the rest: the
+    /// E2B fits a 3,000 MB card budget whole, where charged the table it did
+    /// not (the control) and went to the processor or a split. The machine is
+    /// charged the table beside the card, beside a split's processor run too,
+    /// and once — in its own estimate — for a processor placement; the planner
+    /// offers the card only where the machine would take the table.
+    #[test]
+    fn an_e2b_on_a_small_card_keeps_its_per_layer_table_in_the_machine() {
+        let on_a_card = |host_resident_mib: u64| {
+            let p = pool();
+            p.test_card_in_play
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            p.set_gpu_layers(-1);
+            p.set_vram_budget_mb(3_000);
+            p.set_ram_budget_mb(100_000);
+            let m = ModelId("gemma-4-e2b".into());
+            p.test_footprint_inputs
+                .insert(m.clone(), e2b(host_resident_mib));
+            (p, m)
+        };
+        let whole = (0, 35);
+        let (p, m) = on_a_card(1_927);
+        let card = p.estimate_gpu_footprint_mb(&m, Some(whole), KvCharge::Typical);
+        assert!(card < 3_000, "fits the card whole: {card} MB");
+        assert_eq!(p.partial_gpu_layers(&m, Some(whole), card, 3_000), None);
+        let (control, cm) = on_a_card(0);
+        let charged_the_table =
+            control.estimate_gpu_footprint_mb(&cm, Some(whole), KvCharge::Typical);
+        assert_eq!(charged_the_table - card, 1_927);
+        assert!(
+            charged_the_table > 3_000,
+            "the control: {charged_the_table} MB"
+        );
+
+        // Beside the card, the machine holds the table and nothing else.
+        assert_eq!(
+            p.machine_charge(&m, whole, false, None, KvCharge::Typical),
+            MachineCharge {
+                share: None,
+                share_mb: 0,
+                beside_card_mb: 1_927,
+            }
+        );
+        assert_eq!(
+            control.machine_charge(&cm, whole, false, None, KvCharge::Typical),
+            MachineCharge {
+                share: None,
+                share_mb: 0,
+                beside_card_mb: 0,
+            },
+            "every other model: a card placement charges the machine nothing"
+        );
+        // On the processor, once: its estimate holds every weight.
+        let on_processor = p.machine_charge(&m, whole, true, None, KvCharge::Typical);
+        assert_eq!(on_processor.beside_card_mb, 0);
+        assert_eq!(
+            on_processor.mb(),
+            p.estimate_cpu_footprint_mb(&m, Some(whole), KvCharge::Typical)
+        );
+        assert!(on_processor.mb() > 3_447);
+        // A split keeps it beside the processor run, which does not hold it.
+        let split = p.machine_charge(
+            &m,
+            whole,
+            false,
+            Some(CardSplit::Layers {
+                on_card: 20,
+                total: 35,
+            }),
+            KvCharge::Typical,
+        );
+        assert_eq!(split.share, Some(RamShare::Layers((20, 35))));
+        assert_eq!(split.beside_card_mb, 1_927);
+        // The table is the first segment's; a later one holds none of it.
+        let later = p.footprint_inputs(&m, Some((20, 35))).unwrap();
+        assert_eq!(later.host_resident_bytes, 0);
+        assert_eq!(later.quantized_weight_bytes, 1_520 * MIB / 35 * 15);
+
+        // The planner: the card holds every layer — while the machine would
+        // take the table.
+        assert!(p
+            .max_local_hostable_layers(&m, true, Requester::Swarm)
+            .is_some_and(|layers| layers >= 35));
+        p.set_ram_budget_mb(1_000);
+        assert_eq!(
+            p.max_local_hostable_layers(&m, true, Requester::Swarm),
+            Some(0),
+            "a spawn there would be refused the table"
+        );
+        control.set_ram_budget_mb(1_000);
+        assert!(
+            control
+                .max_local_hostable_layers(&cm, true, Requester::Swarm)
+                .is_some_and(|layers| layers > 0),
+            "a model with nothing to keep in the machine is not held to its memory"
+        );
+
+        // A card too small for it whole: a fresh split is planned only where
+        // the machine takes its processor run AND the table.
+        let (p, m) = on_a_card(1_927);
+        p.set_vram_budget_mb(1_200);
+        let estimated = p.estimate_gpu_footprint_mb(&m, None, KvCharge::Typical);
+        let split = p
+            .partial_gpu_layers(&m, None, estimated, 1_200)
+            .expect("fixture: it splits");
+        let charge = p.machine_charge(&m, whole, false, Some(split), KvCharge::Typical);
+        assert_eq!(charge.beside_card_mb, 1_927);
+        p.set_ram_budget_mb(charge.share_mb + 1_000);
+        assert_eq!(
+            p.fresh_run_layers_for_planning(&m, Requester::Swarm),
+            None,
+            "room for the run but not the table"
+        );
+        p.set_ram_budget_mb(charge.mb());
+        assert_eq!(
+            p.fresh_run_layers_for_planning(&m, Requester::Swarm),
+            Some(35)
+        );
+    }
+
+    /// **An E2B running on the processor is still planned onto a card that has
+    /// freed up while the machine is nearly full of it** (#296's review). The
+    /// card bound weighs the per-layer table against the machine's memory, and
+    /// the model's own processor worker — which holds the table and every other
+    /// weight — is retired before the card's spawn is admitted (`get_or_spawn`'s
+    /// promotion), so its charge is room. Weighed as still spent, the bound
+    /// answered 0 and the plan sent abroad a model this node runs. The control:
+    /// another model's worker, charged the same and in use, is not room.
+    #[tokio::test]
+    async fn a_models_own_processor_worker_is_room_for_its_table_beside_the_card() {
+        let on_a_card = || {
+            let p = pool();
+            p.test_card_in_play
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            p.set_gpu_layers(-1);
+            p.set_vram_budget_mb(3_000);
+            p.set_ram_budget_mb(4_000);
+            let m = ModelId("gemma-4-e2b".into());
+            p.test_footprint_inputs.insert(m.clone(), e2b(1_927));
+            (p, m)
+        };
+
+        let (p, m) = on_a_card();
+        assert!(p.admit_to_cpu(&m, 3_600, Requester::Swarm));
+        let h = super::tests::fake_worker_handle(false).await;
+        h.charged_mb.store(3_600, Ordering::Release);
+        p.workers.insert(m.clone(), h);
+        assert!(
+            p.max_local_hostable_layers(&m, true, Requester::Swarm)
+                .is_some_and(|layers| layers >= 35),
+            "its own worker gives back more than the table needs"
+        );
+
+        let (q, m) = on_a_card();
+        let other = ModelId("another-model".into());
+        assert!(q.admit_to_cpu(&other, 3_600, Requester::Swarm));
+        let h = super::tests::fake_worker_handle(false).await;
+        h.charged_mb.store(3_600, Ordering::Release);
+        h.note_conversation(Uuid::new_v4());
+        q.workers.insert(other, h);
+        assert_eq!(
+            q.max_local_hostable_layers(&m, true, Requester::Swarm),
+            Some(0),
+            "another model's worker is not room"
+        );
+    }
+
     /// The planner is told this node can hold a model the loader would SPLIT
     /// across the card and the processor (FUTURE_WORK #129). The bound counted
     /// the card alone, so a cold Mistral-7B — 17 of 32 layers on an 8 GB card —
@@ -12712,6 +13047,7 @@ mod admission_tests {
         use crate::inference::split::hybrid::arch_supports_hybrid;
         let seven_b = crate::model::auto_manage::vram::VramFootprintInputs {
             quantized_weight_bytes: 4_400 * 1024 * 1024,
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 152_064,
             embedding_length: 3584,
@@ -13059,6 +13395,7 @@ mod admission_tests {
             m.clone(),
             crate::model::auto_manage::vram::VramFootprintInputs {
                 quantized_weight_bytes: 4_400 * 1024 * 1024,
+                host_resident_bytes: 0,
                 unquantized_bytes_per_element: None,
                 vocab_size: 152_064,
                 embedding_length: 3584,

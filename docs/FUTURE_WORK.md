@@ -59,11 +59,9 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
-6. **#296** — Gemma 4's E2B/E4B (run since 2026-10-17, the sizes small computers pick) are priced
-   1.9 GB too heavy for a card: their per-layer table is charged as card weights though it lives
-   in the machine's memory, which on a 4 GB card sends them to the processor. Then **#115**'s
-   rest — the Gemma 3/4 vision projectors and the drafters, refused by name today, never loaded
-   wrong.
+6. **#115** — the rest of Gemma 3/4: the vision projectors and the drafters, refused by name
+   today, never loaded wrong. (Its E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole
+   since #296.)
 7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 6.7 KB/s on the .240
    fleet (8.8 on .239), ~3 copies of each message (from ~6.3), measured 2026-10-16. The manifests
    are 84% of the gossip sent: next (2) announce-then-pull for manifests.
@@ -1213,7 +1211,11 @@ would replay from a stale address (`htod_copies_so_far`), so every layer's launc
 How much of the gap that is, is not measured. Next: count launches (`SWARMLLM_COUNT_KERNELS=1`);
 copy the step's rows into a fixed card buffer BEFORE the capture, the graph reading the buffer;
 teach `KvCacheStore::every_cache_holds` that a shared layer's empty slot holds (today it reads as
-a layer with no state and would refuse the capture); A/B against `SWARMLLM_CUDA_GRAPH=0`.
+a layer with no state and would refuse the capture); A/B against `SWARMLLM_CUDA_GRAPH=0`. A card/processor split of one (a card under ~3 GB since #296)
+also copies each shared layer's source history to the processor every step where the cut parts
+them (`layers::history_beside_queries`; unmeasured, ~50 MB a step at 4K positions by the shapes):
+cutting at the first source (the E2B's 13) would trade it for up to 21 more processor layers, so
+measure both before choosing.
 
 #### #293 — A split's first prompt chunk after load spends 1-6 s in its first attention, once its experts go to the card
 `P3` · speed · **OPEN** — 2026-10-16 · history: found measuring #292
@@ -1755,21 +1757,28 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
-#### #296 — Gemma 4's E2B/E4B are priced 1.9 GB too heavy for a card
-`P2` · memory · **OPEN** — 2026-10-17 · history: #115 (3c)
+#### #297 — Auto-manage prices a card by the file's size, so Gemma 4's E2B/E4B read heavier than they run
+`P3` · memory · **OPEN** — 2026-10-17 · history: #296's review
 
-`ModelProcessPool::segment_geometry` charges every tensor in the header as weights, so a card
-spawn of the E2B is priced its per-layer table too — `per_layer_token_embd`, 1,927 MB of the
-Q4_K_M's 3,447 MB — which stays in the machine's memory (`gguf_meta::host_resident`; the loader's
-own count, `segment_weight_bytes`, already leaves it out), and the machine is charged nothing for
-it. On a 4 GB card, the E2B's natural home, that sends it to the processor or into a
-card/processor split it does not need. Next: count the host-resident bytes apart in
-`VramFootprintInputs` (the first segment only), leave them off the card estimate and charge them
-to the machine as a card spawn's host share (`SpawnCharge` → `WorkerHandle::host_share_mb`, as a
-split's processor share is); the processor estimate already counts them. Where a card/processor
-split is still needed, cut it at or before the first shared layer's source (the E2B's 13): a cut
-between them works (`layers::history_beside_queries`) but copies the source's history across
-every decode step.
+`auto_manage::vram::estimate_model_vram_mb` (the file × 1.15) charges a card the whole file,
+including the per-layer table the loader keeps in the machine's memory (#296). It reads the
+E2B Q4_K_M at ~3,780 MB, where the loader's card estimate is 1,859, and the E4B at ~5,910 against
+3,483. Five places decide with it, none of them on the request path:
+
+- `quant.rs` picks which quant of a family to recommend for this node's card (or a third of the
+  pool's), so a 4 GB card can be pointed at a lower quant of the E2B than it runs.
+- `scoring.rs` sets the pool-fitness factor in the download score.
+- `wishlist.rs` shows the "Memory" figure and the "fits your memory" tag.
+- `capacity_plan.rs` decides "too large for the swarm today" and what a new node would unlock.
+- `scan.rs` (`estimate_segment_vram_mb`) decides whether a segment is registered in
+  `split_models`. Nothing that serves a request has asked for that registration since #259.
+
+The model listing asks the loader (`gpu_estimate_and_fit`); it uses the file's size only for a
+model that peers alone hold. The file-size figure is rough for every model: its own doc puts it
+56% low on phi-3.5-mini, and it knows nothing of card/processor splits or experts kept in RAM.
+So the fix is to price from the header where one is present (the pool's estimator, or at least
+`GgufTensorMeta::host_resident_bytes`), not a special case for Gemma. Not yet measured: what each
+of the five reads for the E2B on a 4 GB card.
 
 #### #291 — A running split worker's further room is not offered to the planner, nor weighed for promotion
 `P3` · memory · **OPEN** — 2026-10-16 · history: what #265's fix left
@@ -2446,7 +2455,25 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-16/17, not yet released** (#265, #286, #287, #288, #289, #290, #115 (3b), #292, #115 (3c))
+**Closed 2026-10-16/17, not yet released** (#265, #286, #287, #288, #289, #290, #115 (3b), #292, #115 (3c), #296)
+- #296 — **Gemma 4's E2B and E4B are priced as a card holds them.** Their per-layer table (1,837 MiB
+  of the E2B Q4_K_M, 2,205 of the E4B's) stays in the machine's memory on every device, as
+  llama.cpp keeps its input layer on the processor, and was charged to the card as weights while
+  the machine was charged nothing. `VramFootprintInputs::host_resident_bytes` names it apart; a
+  card's estimate and split sizing hold `card_weight_bytes`; `ModelProcessPool::machine_charge`
+  charges it to the machine beside any card placement — the spawn, `fresh_run_layers_for_planning`
+  and the card bound ask it — and a coordinator prices a card peer the same way
+  (`scheduler::weight_bytes_per_layer`). The real headers through the pool, at the 4,096-position
+  admission context: the E2B's card estimate 1,859 MB (was 3,696) with 1,838 MB charged to the
+  machine, the E4B's 3,483 MB (was 5,688) with 2,205 — the E2B now whole on a 4 GB card, the E4B on
+  a 6 GB one; the processor's unchanged (3,632 / 5,624). Decode's per-layer read no longer counts
+  the table (a row per token): the E2B's layers had been priced at over twice their work. The
+  review found one more: weighed against memory that still counted the model's own processor
+  worker, which the promotion retires first, an E2B on the processor with the machine near its
+  cap was offered no card room. Five tests, each red with its part off. Auto-manage's file-size
+  estimate is #297. Not taken: cutting a card/processor split at the first shared
+  source — it would cost more processor layers than the copy it saves; measured question in #295.
+  `docs/invariants/memory.md` § "Tensors the loader keeps in the machine's memory".
 - #115 (3c) — **Gemma 4's E2B and E4B run (text), whole on one computer.** Their last layers (the
   E2B's 20 of 35) keep no cache and attend the last earlier layer of their kind's
   (`split::kv_sources`; `LayerWeights::kv_source` / `kv_slot` on every executor path), and every

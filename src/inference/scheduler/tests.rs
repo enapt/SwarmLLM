@@ -301,6 +301,150 @@ fn a_model_that_runs_only_whole_is_never_split_across_computers() {
     assert!(whole.tp_groups.is_empty());
 }
 
+/// **A card's room is charged only the weights the card holds** (#296).
+/// Gemma 4 E2B's shape (its file's MB figures, as MiB): 3,447 over 35 layers, 1,927 of it the
+/// per-layer table its loader keeps in the machine's memory. A card peer with
+/// 3,000 MiB free holds all 35 layers; a processor peer with the same room
+/// does not (it holds the table too), nor does the card once the header names
+/// no such table (the control) — and a plan handed to the card books it the
+/// card's share, not the file.
+#[test]
+fn a_cards_room_is_charged_only_the_weights_the_card_holds() {
+    const MIB: u64 = 1024 * 1024;
+    let run = |table_mib: u64| {
+        let state = make_shared_state();
+        let local_id = state.identity.node_id().clone();
+        let model = ModelId("e2b".into());
+        let mut manifest = make_manifest(
+            "e2b",
+            35,
+            vec![ShardInfo {
+                index: 0,
+                layer_range: (0, 35),
+                size_bytes: 3_447 * MIB,
+                hash: [0u8; 32],
+                tensors: vec![],
+            }],
+        );
+        manifest.total_size_bytes = 3_447 * MIB;
+        state.model_registry.register_manifest(manifest);
+        let mut tensors = std::collections::HashMap::new();
+        if table_mib > 0 {
+            tensors.insert(
+                "per_layer_token_embd.weight".to_string(),
+                crate::inference::split::TensorLocation {
+                    offset: 0,
+                    size: table_mib * MIB,
+                },
+            );
+        }
+        state.gguf_meta.insert(
+            model.clone(),
+            crate::inference::split::GgufTensorMeta {
+                tensors,
+                tensor_data_offset: 0,
+                model_name: None,
+                head_count: 8,
+                head_count_kv: 1,
+                block_count: 35,
+                embedding_length: 1536,
+                head_dim: 256,
+                rope_dim: 256,
+                rope_freq_base: 10_000.0,
+                rms_norm_eps: 1e-6,
+                expert_count: 0,
+                expert_used_count: 0,
+                architecture: "gemma4".into(),
+                context_length: 8192,
+                pooling_type: 0,
+                kv_layout: None,
+                shared_kv_layers: 20,
+            },
+        );
+        let card = NodeId([2u8; 32]);
+        let processor = NodeId([3u8; 32]);
+        for node in [&card, &processor] {
+            state.model_registry.record_shard_holder(
+                ShardId {
+                    model_id: model.clone(),
+                    index: 0,
+                },
+                node.clone(),
+            );
+            let mut cap = if *node == card {
+                capability_with_gpu(Some(3_000))
+            } else {
+                let mut cap = capability_with_gpu(None);
+                cap.ram_available_mb = 3_000;
+                cap
+            };
+            cap.node_id = node.clone();
+            state.peer_registry.insert(
+                node.clone(),
+                PeerInfo {
+                    node_id: node.clone(),
+                    addresses: vec![],
+                    capability: Some(cap),
+                    last_seen: chrono::Utc::now(),
+                    latency_ms: Some(10),
+                    trust_score: 0.8,
+                    peer_id_bytes: None,
+                    ack_srtt_ms: None,
+                    active_request_count: 0,
+                    first_seen: 0,
+                    verified_transaction_count: 0,
+                    is_lan_peer: false,
+                    goodput_bytes_per_sec: None,
+                    goodput_samples: 0,
+                },
+            );
+            state.connected_node_ids.insert(node.clone());
+        }
+        let manifest = state.model_registry.get_manifest(&model).unwrap();
+        let scheduler = PipelineScheduler::new(state.clone());
+        let cands = scheduler.gather_candidates(
+            &manifest,
+            &local_id,
+            uuid::Uuid::new_v4(),
+            None.into(),
+            super::Purpose::Route,
+            &|| false,
+        );
+        let bound = |n: &NodeId| {
+            cands
+                .iter()
+                .find(|c| &c.node_id == n)
+                .unwrap()
+                .max_hostable_layers
+        };
+        let (on_card, on_processor) = (bound(&card), bound(&processor));
+        // The card's booking for a plan handed to it whole.
+        let booked = scheduler
+            .assemble_pipeline(&model, &local_id)
+            .ok()
+            .filter(|a| a.segments.len() == 1 && a.segments[0].node_id == card)
+            .map(|a| {
+                scheduler.record_peer_commitments(&a, &local_id, None);
+                state.committed_peer_vram_mb(&card, uuid::Uuid::new_v4())
+            });
+        (on_card, on_processor, booked)
+    };
+
+    let (on_card, on_processor, booked) = run(1_927);
+    assert_eq!(on_card, Some(35), "a 4 GB card holds the E2B whole");
+    assert!(
+        on_processor.is_some_and(|l| l < 35),
+        "the processor holds the table too: {on_processor:?}"
+    );
+    assert_eq!(booked, Some((3_447 - 1_927) * MIB / 35 * 35 / MIB));
+
+    let (control, _, _) = run(0);
+    assert!(
+        control.is_some_and(|l| l < 35),
+        "the control: a file the card holds whole does not fit: {control:?}"
+    );
+}
+
 /// **A model kept on this computer is never planned onto a peer** (#251).
 /// Two peers hold all of it; this node holds none. Unkept, the plan uses them
 /// (the control); kept, the request is refused as `KeptOnThisComputer` — a
@@ -6949,6 +7093,7 @@ fn a_card_holder_of_a_model_it_must_split_on(
         mid.clone(),
         crate::model::auto_manage::vram::VramFootprintInputs {
             quantized_weight_bytes: 4_400 * 1024 * 1024,
+            host_resident_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 32_768,
             embedding_length: 4096,
@@ -7334,6 +7479,7 @@ fn a_model_no_holder_could_ever_hold_is_refused_by_the_planner() {
     let (state, local, b, c, model) = two_whole_model_card_peers();
     let geometry = crate::model::auto_manage::vram::VramFootprintInputs {
         quantized_weight_bytes: 4_000_000_000,
+        host_resident_bytes: 0,
         unquantized_bytes_per_element: None,
         vocab_size: 32_000,
         embedding_length: 4096,

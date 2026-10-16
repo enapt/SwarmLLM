@@ -625,6 +625,18 @@ impl GgufTensorMeta {
         self.shared_kv_layers > 0 || self.tensors.contains_key(PER_LAYER_TOKEN_TABLE)
     }
 
+    /// Bytes of the tensors the loader keeps in the machine's memory whatever
+    /// device the model runs on ([`host_resident`]) — 1.9 GB of Gemma 4 E2B's
+    /// 3.4 GB at Q4_K_M, 0 for every other model. What a card holding the
+    /// model does NOT hold, so a coordinator's bound on a card's room leaves it
+    /// out (FUTURE_WORK #296).
+    pub fn host_resident_bytes(&self) -> u64 {
+        self.tensors
+            .iter()
+            .filter(|(name, _)| host_resident(name))
+            .fold(0u64, |sum, (_, loc)| sum.saturating_add(loc.size))
+    }
+
     /// Location of the tensor doubling as the output head on a weight-tied
     /// model, or `None` when the model ships a separate `output.weight`.
     ///
@@ -880,7 +892,9 @@ impl GgufTensorMeta {
     /// (`_exps`) only for the share a token is routed to (`expert_used_count /
     /// expert_count`), and the output projection, which every token reads whole
     /// (the token embedding is one row, so it counts only where it IS the
-    /// output projection — a tied model). Decode reads these bytes once per token,
+    /// output projection — a tied model; Gemma 4 E2B/E4B's per-layer table,
+    /// [`host_resident`], is a row per token too and never counts — it is over
+    /// half the E2B's file). Decode reads these bytes once per token,
     /// so time per layer scales with them — the quantity the route planner's
     /// per-layer prior is a fraction of (FUTURE_WORK #250; Petals measures each
     /// model's own blocks for the same reason).
@@ -922,7 +936,7 @@ impl GgufTensorMeta {
                 } else {
                     bytes += size;
                 }
-            } else if name != "token_embd.weight" || tied {
+            } else if (name != "token_embd.weight" || tied) && !host_resident(name) {
                 bytes += size;
             }
         }
@@ -1862,6 +1876,27 @@ mod active_bytes_tests {
             &[("token_embd.weight", 500), ("blk.0.attn_q.weight", 100)],
         );
         assert_eq!(m.active_bytes_per_layer(), Some(600.0));
+    }
+
+    /// Gemma 4 E2B/E4B's per-layer table is gathered a row per token, like an
+    /// untied embedding, and lives in the machine's memory (#296): counted in
+    /// neither figure, though it is over half the file, and named apart.
+    #[test]
+    fn the_per_layer_token_table_is_a_row_per_token_held_off_the_card() {
+        let m = meta(
+            1,
+            (0, 0),
+            &[
+                ("token_embd.weight", 500),
+                ("per_layer_token_embd.weight", 4_000),
+                ("blk.0.attn_q.weight", 100),
+            ],
+        );
+        assert_eq!(m.active_bytes_per_layer(), Some(600.0));
+        assert_eq!(m.stored_bytes_per_layer(), Some(600.0));
+        assert_eq!(m.host_resident_bytes(), 4_000);
+        let without = meta(1, (0, 0), &[("blk.0.attn_q.weight", 100)]);
+        assert_eq!(without.host_resident_bytes(), 0);
     }
 
     /// Experts listed with no count of how many a token uses: unknown, never a
