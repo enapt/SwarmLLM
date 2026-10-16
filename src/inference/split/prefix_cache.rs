@@ -85,13 +85,17 @@ pub fn compute_block_hashes(tokens: &[u32], block_size: usize) -> Vec<PrefixBloc
 /// snapshot costs per token of prompt it keeps. 0 when nothing is populated.
 ///
 /// Read off the live cache's views, so it is exact for this model on this
-/// device and copies nothing.
+/// device and copies nothing. A slid layer's views hold only its positions from
+/// `held_from` (FUTURE_WORK #281), so they are divided by that count — by the
+/// conversation's length they read lighter than they are. Charged on every
+/// position, a windowed layer is over-counted for a snapshot that copies only
+/// the positions it holds: the safe direction for a ceiling.
 fn bytes_per_position(layers: &[Option<LayerKv>]) -> usize {
     layers
         .iter()
         .flatten()
         .map(|kv| {
-            let positions = kv.current_seq_len();
+            let positions = kv.current_seq_len() - kv.held_from();
             if positions == 0 {
                 return 0;
             }
@@ -2821,6 +2825,20 @@ mod tests {
         assert!(!unslid
             .insert_from_kv("m", "short", &kv_store, &tokens, ANYWHERE)
             .is_empty());
+    }
+
+    /// A slid layer weighs per position what it weighed before it slid: the
+    /// snapshot ceiling is bytes over this figure, so a lighter reading would
+    /// let a snapshot past its byte budget.
+    #[test]
+    fn a_slid_layer_weighs_the_same_per_position() {
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_windowed_kv(&kv_store, "r", 400);
+        let key = KvCacheStore::cache_key("m", "r");
+        let entry = kv_store.get_entry(&key).unwrap();
+        assert!(entry.layers[0].as_ref().unwrap().held_from() > 0);
+        // Two layers, K and V of [1, 1, ·, 4] f32: 32 bytes a position each.
+        assert_eq!(bytes_per_position(&entry.layers), 64);
     }
 
     /// An earlier turn the slid snapshot cannot serve is kept beside it, and a

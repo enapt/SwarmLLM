@@ -4214,7 +4214,11 @@ taken whole.
   `lookup` / `lookup_chain` skip an entry whose `serves_from` passes the usable length, and
   an earlier turn shorter than the new snapshot's `serves_from` is KEPT beside it (it serves a
   branch the new one cannot — llama.cpp's checkpoints, for the same reason). Hydration
-  starts the cache at `held_from` (`begin_at`). **A slid snapshot never leaves the node**:
+  starts the cache at `held_from` (`begin_at`). `bytes_per_position` — what the snapshot
+  ceiling divides the byte budget by — divides a layer's views by the positions it HOLDS: by
+  the conversation's length a slid layer read at a quarter of its weight
+  (`a_slid_layer_weighs_the_same_per_position`, 40 bytes against 64 with that off).
+  **A slid snapshot never leaves the node**:
   the wire format (SKVX v1) means "every layer from position 0", and a peer on an older build
   would read a partial layer as the opening — `Entry::manifest` is empty for it (not
   announced, not exported) and `serialize_snapshot_with_block_size` refuses it.
