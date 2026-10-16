@@ -33,81 +33,53 @@ residual).
 
 ## ▶ PRIORITIES — read this first
 
-Re-ranked 2026-10-02 after the verification, and 2026-10-03 when #156, #158 and #213 closed,
-then again after v0.3.223 (#157 and #164 closed, #160 raised to P1 on the swarm reading), and
-after v0.3.224 (#160, #215 and #216 closed; #217 and #218 opened from the swarm reading and the inference test after it). #150, #153,
-#165, #189, #214, #218 and #219 closed in v0.3.225 (released 2026-10-05); #221 closed and #129's second half shipped in
-v0.3.226 (released 2026-10-05), #220 opened from the .225 gate's unrecorded driver resets; #129's fit verdict (idle-model
-reclaim) shipped in v0.3.227 (released 2026-10-05 23:45 UTC); #222 (a node near its storage limit deleting and
-re-fetching parts) and #223 closed in v0.3.228 (released 2026-10-06 09:42 UTC), #224 opened from its gate;
-#225, #226 and #227 opened from a tester's two reports the same day; #117 (Qwen 3.5, dense), #225 and #226 closed in v0.3.229 (released 2026-10-07 00:00 UTC), #228 opened for what Qwen 3.5 leaves out; #129's cold loads (waited for and priced), #228 (2) and (2b), #220 (2), #229, #230 and #231 shipped in v0.3.230 (released 2026-10-07 16:38 UTC), #232 parked from their report; #234, #235, #239 and #240 closed on 2026-10-08 from two tester reports and the card check after them, #236-#238 opened from the second (#236 and #238 closed the same day); #242 and #243 opened and closed the same day from reports #006 (a 1 Mbps cap stored for "Unlimited") and #007 (the narrow-screen model picker); #194 closed on 2026-10-09 (a card keeps its conversation memory as f16, and its memory guard under a context override), #237 re-ranked to P3 from what could be measured; #152 closed the same day (the guess-check stream on the boomerang), and #147 narrowed to P3 (f16 accumulation in a card's prompt pass shipped). v0.3.233 was built and never released (its gate found #247 counting active file cache as used); v0.3.234 (released 2026-10-11 00:37 UTC) carries #69, #247 and its fix, #162, #10's split half, #171's pieces, #91's capability change-gate and #3's terms DIAG; #224's trigger was caught at its gate. v0.3.235 (released 2026-10-12 01:58 UTC) carries #224, #137's main half, #138's decode, card and prompt steps and #228 (1), (3) and (4); v0.3.236 (released 2026-10-12 14:31 UTC) carries #244, #248, #249, #250's two halves, #251 (1), (2) and (4), #252 (2), #253 and #254, and #257 opened from its gate; #257 closed on 2026-10-13 (under WSL2 a card's saved prompts are kept in host RAM) and #258 opened from its measurement; #138 (1), (1b), (1c) and (1d) shipped on 2026-10-13 (a card/processor split runs a prompt's processor-held experts, then every processor-held projection, then each processor-held layer whole, on the card, copying the next weights while the card computes); #259 and #260 opened and closed the same day from a tester's report (a kept model bigger than the card was refused; a model sent to the processor while another program held the card never moved back), #261 opened from it; #138 (1e) the same day (a split reads a prompt in chunks as large as the card has room for), and #262 opened from its rig (a split's conversation budget charges the processor's caches to the card); #263 opened and closed the same day from a tester's report (a split's local segments refused a long prompt only after the peers had read it, and the retry planned the same split), then #262 (each cache charged to the memory it lives in), and #264 opened from it and closed the same day (a split's processor-held weights are charged to the memory limit), #265 opened from that; #138 (3)'s first stage the same day (a mixture-of-experts layer on the card can keep its experts in RAM, measured from `test-split`: 1.2-1.7x decode at the same card bytes); its second on 2026-10-14 (the daemon chooses it for a mixture-of-experts model that does not fit the card), #266 opened from its rig and closed the same day (the owner's own loads are weighed against the owner's memory cap, not the swarm's); #267 opened and closed the same day (a restart no longer opens a dashboard tab beside the one already reconnecting); #138 (2) the same day (a mixture-of-experts model whole on the card has its decode steps captured as CUDA graphs); #252 (1) the same day (`/v1/models` reports the context this node's memory holds while no other computer could take part). v0.3.237 (released 2026-10-14 03:01 UTC, the first on the one-script release gate) carries #138 (1)-(1e), (2) and (3)'s two stages, #252 (1), #257, #259, #260, #262-#264, #266, #267 and a fix to memory reclaim (an idle model holding only the card was unloaded to make room in RAM); #268 opened from its dependency audit. v0.3.238 (released 2026-10-14 07:31 UTC) carries #270, #271 and #272; v0.3.239 (released 2026-10-15 10:46 UTC) carries #273, #274, #137's 8-thread half, #275's first half, its reply-sized charge and its drafter judged beside the plan, #250's stale card reading (report #036), #3's cold-load share and the fixes from field report 2026-10-15; #276 and #277 opened the same day and closed the same day (a processor-only node holding an idle model is offered every layer its spawn would load; a computer on a metered connection no longer uploads model parts or takes new work for other computers, and turning relaying off takes effect without a restart). v0.3.240 (released 2026-10-16) carries #276, #277, #278, #279, #280, #281 (all five parts), #282, #283, #284, #115 (1) Gemma 3 and (3) Gemma 4 dense text, and #91's region summaries and peer-sized mesh.
+Re-ranked 2026-10-16 after v0.3.240 (released 2026-10-16), which closed #276-#284, #115's Gemma 3
+and Gemma 4 dense text, and #91's region summaries and peer-sized mesh. What each release carried
+is in § "Closed" and `CHANGELOG.md`; the running log of re-rankings from 2026-10-02 to this one
+moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed here.
 `docs/plans/` holds the multi-step designs; the entries point at them.
 
 **P0 — wrong answers, silently**
-1. *(none open: #156 closed 2026-10-03 — a mixed copy is refused at load. Its last doors
-   closed after v0.3.222 the same day: a part in dispute is announced as the bytes it is, a
-   part that is not the upload's bytes is DELETED and re-fetched (from peers or HuggingFace),
-   a copy waiting for that is withheld from the swarm, and every part entering from a peer is
-   byte-checked against the upload — `docs/invariants/network.md` § "One upload per model id". Rigs
-   `split_rig.sh disputed` and `spliced`: v0.3.222 answered garbage through such a peer, and
-   from such a copy on its own node (`给给给…`); the fix deletes and re-fetches.)*
-2. **#217** — a node kept three parts that are not the upload's bytes for ~3 h on v0.3.224,
-   with two checked holders disagreeing, and replaced them within minutes of a restart. It
-   recurred at that node's next restart (09:01 UTC 10-04) as replacements that ARRIVED wrong
-   from HuggingFace, twice, and were kept — that mechanism is closed in v0.3.225 (a download is
-   kept only when corroborated; the downloader syncs and reads back). The
-   swarm itself converged: `peers_other_build` 0 on every model at 06:19 UTC 2026-10-04 (all
-   six nodes on .224; the watch this slot held is closed — its readings are in the archive,
-   § "Closed after 2026-10-02" → "P0-2").
+1. *(none open since #156 closed on 2026-10-03: a mixed copy is refused at load, a part that is
+   not the upload's bytes is deleted and re-fetched, and every part entering from a peer is
+   byte-checked — `docs/invariants/network.md` § "One upload per model id".)*
+2. **#217** — WATCH: a node kept parts the checked holders disagreed with until it restarted
+   (v0.3.224); the mechanism that kept wrong HuggingFace replacements closed in v0.3.225 and it
+   has not recurred since 2026-10-04. Nothing to build until it does.
 
 **P1 — silent, or broken for a whole class of users**
-3. *(#159 decided 2026-10-11 — what is left needs a v0.3.222 holder of a same-layout copy; §
-   "Decided — not doing".)*
-4. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon.
-5. **#220** — a worker's card faulted once (illegal memory access) and the driver took 14 minutes
-   to reset; the kernel is still unknown — ~27 min of its shape under memcheck (10-10, 10-13, the tool proven in
-   the card workers) found nothing; (c) one process per card weighed and declined on that evidence (see the entry).
-5a. **#250** — a model held whole here, which the card holds only part of, was routed through two
-   peers at 0.1 tok/s where the same machine answers locally in ~5 s (report #035). Its
-   window-narrowing contributor closed as #248, the idle model holding the card as #249, and a layer
-   is priced as its own model's, a measured peer's figure per model too (all released in v0.3.236).
-   Report #036 reproduced a detour with another program holding the card: the planner weighed a
-   stale card reading and an unweighed split (closed 2026-10-15). Left: the prompt priced on the
-   processor prior, and a far hop priced at `net:0` (see the entry, and #3).
+3. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon (needs a
+   Mac to verify on).
+4. **#220** — a worker's card faulted once (illegal memory access) and the driver took 14 minutes
+   to reset; the kernel is still unknown. Its next step runs only on a FRESH boot, under the safety
+   kit and memcheck.
+5. **#250** — a model held whole here, which the card holds only part of, can be routed through
+   far peers instead of answering locally. Its causes closed in v0.3.236 and v0.3.239; left: the
+   prompt priced on the processor prior for a card/processor split, and a far hop priced at
+   `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 
-**P2 — speed and completeness**
-6. *(#152 closed 2026-10-09 — the guess-check stream runs on the boomerang and with a peer
-    holding the first layers, not only with a peer holding the last.)*
-7. **#10** — conversation prefixes across computers: a peer's cache this node did not fill is
-    invisible (no digests gossiped) and caches end at the 10-minute idle expiry (the split half
-    released in v0.3.234; routing to the holder this node knows of released in v0.3.235).
-8. *(#162 closed 2026-10-09 — cloned gates refuse a missing helper; 12e's failover arms moved to a
-    shape this box holds, and `split_rig.sh failover` keeps no prompt since #10.)*
-9. *(#155 narrowed to P3 on 2026-10-07 — not seen on the swarm, see its entry.)*
-10. *(#194 closed 2026-10-09 — a card keeps its conversation memory as f16, a third of the
-    memory, and keeps its memory guard under a context override.)*
-11. **#138**, **#129** — MoE placement, and near-fit models sent across continents (#147's f16
-    accumulation shipped 2026-10-09; its smaller items are P3; #138 (1) on 2026-10-13: a split's
-    prompt experts run on the card, 1.4x; (1b) the same day: every processor-held projection,
-    a dense 14B split's prompt 5.3-5.7x; (1c) the same day: each processor layer whole on the card,
-    1.6x more; (1d) the same day: the weight copies beside the products, 3-9%; (1e) the same
-    day: prompt chunks as large as the card has room for, 1.5-1.7x; (3) stage A the same day:
-    a MoE layer on the card keeps its experts in RAM, decode 1.2-1.7x at equal card bytes;
-    stage B on 2026-10-14: the daemon chooses it, ~10% faster decode and ~0.4-0.7 GB less of
-    the card than the whole-layer split). *(#137 narrowed to P3 on
-    2026-10-11: decode ran outside its thread pool on every default node — fixed: a 14B split
-    1.19x, now level with llama.cpp; a 3B processor-only 1.14-1.39x. Re-measured 2026-10-14 on a
-    7B; the 8-thread loss fixed 2026-10-14 (idle rayon workers spin); same session 2026-10-15:
-    3% behind llama.cpp at 4 threads, 5-8% at 8, both reading weights at the box's bandwidth;
-    repack, huge pages and the one-row split refuted.)* (`docs/plans/faster_than_local.md`).
-12. **#3**, **#180** — the routing cost model over-prices a split by its HOP count (not the reply
-    length — 2026-10-10), which keeps partial ranges (load spreading) off. Its cost terms are
-    logged since v0.3.234: collect, then fit per term.
-13. **#171** — the prompt pass through a split runs one stage at a time (released in v0.3.234; left:
-    pieces chained between two peers for a pass that does not keep its prompt).
-14. **#228** — Qwen 3.5's first version leaves out speculation (its card/processor split shipped
-    in v0.3.230; its MoE models run, its delta rule is one op per layer and its decode steps are
-    captured as CUDA graphs since v0.3.235).
+**P2 — speed and completeness**, ranked by how many users meet it in their first hour
+6. **#115** — Gemma 4's other sizes: (3b) the 26B-A4B (a user's request: a dense feed-forward
+   beside routed experts in every layer) and (3c) E2B/E4B (the sizes small computers pick:
+   per-layer token embeddings, shared KV layers); then the Gemma 3/4 vision projectors and the
+   drafters. All are refused by name today, never loaded wrong.
+7. **#91** — an idle node's gossip upload (8.8 KB/s on .239, the complaint that uninstalls a P2P
+   app). v0.3.240 sends a third less and sizes the mesh by peers: re-measure the copies of each
+   message on the .240 fleet (~3 expected, from ~6.3), then (2) announce-then-pull for manifests.
+8. **#251** — `owned_by: "local"` reads as "my data stays here": keep-on-this-computer per request
+   on every surface, and the route on a streamed `/v1/responses` and in MCP.
+9. **#252** — a peer's measured context is not gossiped, so a planner cannot size a peer's share
+   before asking ((a) parked: no named client reads the listed context).
+10. **#3**, **#180** — the routing cost model over-prices a split by its HOP count (2.0× two
+    segments, 3.35× three), which keeps partial ranges off; fit per term from the logged terms,
+    never tune the constant.
+11. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
+    the 10-minute expiry), and a split's prompt pieces chained between two peers.
+12. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
+    shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
+13. **#228** — Qwen 3.5 without speculation (its state cannot be wound back yet).
+14. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
+    decision, with research, when picked up.
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -994,7 +966,7 @@ quiet window went 30 min → 2 h (released in v0.3.235, 2026-10-12; RFC 6550's T
 `docs/invariants/network.md` § "The manifests again, once the capability was gated". Re-measured 2026-10-15
 (.239, 3.3 → 4.3 h up, idle): 8.8 KB/s out, 6.5 gossip; manifests' first copies 0.0031 a second
 (the 2 h window held), but `RegionShardSummary` was a third of the gossip sent, 372 an hour from
-the anti-entropy round alone, and read by nothing. It is no longer sent (unreleased), and scoring
+the anti-entropy round alone, and read by nothing. It is no longer sent (released in v0.3.240), and scoring
 counts its region from holder records (`docs/invariants/network.md` § "Region summaries were a
 third of the gossip"). Every topic delivers ~6.3 copies of each message: the mesh was sized from the peer cache.
 Open: (1) re-measure once the fleet stops sending region summaries (`swarm/regions` should fall
@@ -1004,7 +976,7 @@ mesh, plus flood publishing). The cache counts ADDRESSES, not peers (`load_peer_
 `MAX_CACHED_PEERS` = 200: "Loaded cached peers from last session count=200" + 3 bootstrap), so
 every node that has run a while lands on that tier, and a FRESH node (empty cache, bootstrap
 only) runs the smallest (`mesh_n` 2, low 1, high 4) for its whole first session. **Counting
-fixed 2026-10-15 (unreleased)**: `known_peers` is the PEERS the cache and bootstrap list name
+fixed 2026-10-15 (released in v0.3.240)**: `known_peers` is the PEERS the cache and bootstrap list name
 (`discovery::peers_named`, the grouping the startup dial already uses). A probe started on a copy
 of the release node's database (no network): `count=200 known_peers=26` → `mesh_n` 3, high 6, the
 tier written for a swarm that size. Left: re-measure the copies of each message once the fleet
