@@ -1249,14 +1249,9 @@ impl SplitModel {
                         let (residual, normed) = Residual::pending(attn, residual)
                             .add_norm(ffn_norm)
                             .map_err(|e| SwarmError::Internal(format!("ds_ffn_norm: {e}")))?;
-                        let ffn_out = match ffn {
-                            FfnVariant::Dense(mlp) => mlp
-                                .forward(&normed, None)
-                                .map_err(|e| SwarmError::Internal(format!("ds_mlp: {e}")))?,
-                            FfnVariant::MoE(moe) => moe
-                                .forward(&normed)
-                                .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
-                        };
+                        let ffn_out = ffn
+                            .forward(&normed, &residual, None)
+                            .map_err(|e| SwarmError::Internal(format!("ds_ffn: {e}")))?;
                         hidden = Residual::pending(ffn_out, residual);
                     }
                     LayerVariant::Qwen35Attn {
@@ -1283,14 +1278,9 @@ impl SplitModel {
                             .map_err(|e| {
                                 SwarmError::Internal(format!("q35_post_attn_norm: {e}"))
                             })?;
-                        let ffn_out = match ffn {
-                            FfnVariant::Dense(mlp) => mlp
-                                .forward(&normed, None)
-                                .map_err(|e| SwarmError::Internal(format!("q35_mlp: {e}")))?,
-                            FfnVariant::MoE(moe) => moe
-                                .forward(&normed)
-                                .map_err(|e| SwarmError::Internal(format!("q35_moe: {e}")))?,
-                        };
+                        let ffn_out = ffn
+                            .forward(&normed, &residual, None)
+                            .map_err(|e| SwarmError::Internal(format!("q35_ffn: {e}")))?;
                         hidden = Residual::pending(ffn_out, residual);
                     }
                     LayerVariant::Qwen35Ssm {
@@ -1308,14 +1298,9 @@ impl SplitModel {
                         let (residual, normed) = Residual::pending(ssm_out, residual)
                             .add_norm(post_attention_norm)
                             .map_err(|e| SwarmError::Internal(format!("q35_post_ssm_norm: {e}")))?;
-                        let ffn_out = match ffn {
-                            FfnVariant::Dense(mlp) => mlp
-                                .forward(&normed, None)
-                                .map_err(|e| SwarmError::Internal(format!("q35_ssm_mlp: {e}")))?,
-                            FfnVariant::MoE(moe) => moe
-                                .forward(&normed)
-                                .map_err(|e| SwarmError::Internal(format!("q35_ssm_moe: {e}")))?,
-                        };
+                        let ffn_out = ffn
+                            .forward(&normed, &residual, None)
+                            .map_err(|e| SwarmError::Internal(format!("q35_ssm_ffn: {e}")))?;
                         hidden = Residual::pending(ffn_out, residual);
                     }
                 }
@@ -1995,14 +1980,10 @@ impl SplitModel {
                     let (residual2, x) = Residual::pending(attn_batched, residual)
                         .add_norm(&lw.ffn_norm)
                         .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
-                    let mut x = match &lw.ffn {
-                        FfnVariant::Dense(mlp) => mlp
-                            .forward(&x, None)
-                            .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?,
-                        FfnVariant::MoE(moe) => moe
-                            .forward(&x)
-                            .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
-                    };
+                    let mut x = lw
+                        .ffn
+                        .forward(&x, &residual2, None)
+                        .map_err(|e| SwarmError::Internal(format!("ffn: {e}")))?;
                     if let Some(ref post_norm) = lw.post_ffw_norm {
                         x = post_norm
                             .forward(&x)
@@ -2045,14 +2026,9 @@ impl SplitModel {
                     let (residual, normed) = Residual::pending(attn_batched, residual)
                         .add_norm(ffn_norm)
                         .map_err(|e| SwarmError::Internal(format!("ds_ffn_norm: {e}")))?;
-                    let ffn_out = match ffn {
-                        FfnVariant::Dense(mlp) => mlp
-                            .forward(&normed, None)
-                            .map_err(|e| SwarmError::Internal(format!("ds_mlp: {e}")))?,
-                        FfnVariant::MoE(moe) => moe
-                            .forward(&normed)
-                            .map_err(|e| SwarmError::Internal(format!("moe_batch: {e}")))?,
-                    };
+                    let ffn_out = ffn
+                        .forward(&normed, &residual, None)
+                        .map_err(|e| SwarmError::Internal(format!("ds_ffn: {e}")))?;
                     hidden = Residual::pending(ffn_out, residual);
                 }
                 LayerVariant::Qwen35Attn {
@@ -2089,14 +2065,9 @@ impl SplitModel {
                     let (residual2, normed2) = Residual::pending(attn_batched, residual)
                         .add_norm(post_attention_norm)
                         .map_err(|e| SwarmError::Internal(format!("q35b_post_attn_norm: {e}")))?;
-                    let ffn_out = match ffn {
-                        FfnVariant::Dense(mlp) => mlp
-                            .forward(&normed2, None)
-                            .map_err(|e| SwarmError::Internal(format!("q35b_mlp: {e}")))?,
-                        FfnVariant::MoE(moe) => moe
-                            .forward(&normed2)
-                            .map_err(|e| SwarmError::Internal(format!("q35b_moe: {e}")))?,
-                    };
+                    let ffn_out = ffn
+                        .forward(&normed2, &residual2, None)
+                        .map_err(|e| SwarmError::Internal(format!("q35b_ffn: {e}")))?;
                     hidden = Residual::pending(ffn_out, residual2);
                 }
                 LayerVariant::Qwen35Ssm {
@@ -2131,14 +2102,9 @@ impl SplitModel {
                     let (residual2, normed2) = Residual::pending(ssm_batched, residual)
                         .add_norm(post_attention_norm)
                         .map_err(|e| SwarmError::Internal(format!("q35b_post_ssm_norm: {e}")))?;
-                    let ffn_out = match ffn {
-                        FfnVariant::Dense(mlp) => mlp
-                            .forward(&normed2, None)
-                            .map_err(|e| SwarmError::Internal(format!("q35b_ssm_mlp: {e}")))?,
-                        FfnVariant::MoE(moe) => moe
-                            .forward(&normed2)
-                            .map_err(|e| SwarmError::Internal(format!("q35b_ssm_moe: {e}")))?,
-                    };
+                    let ffn_out = ffn
+                        .forward(&normed2, &residual2, None)
+                        .map_err(|e| SwarmError::Internal(format!("q35b_ssm_ffn: {e}")))?;
                     hidden = Residual::pending(ffn_out, residual2);
                 }
             }
@@ -2348,19 +2314,24 @@ impl SplitModel {
                     )
                     .map_err(|e| SwarmError::Internal(format!("tp attn: {e}")))
                 }
+                // A column slice of a branch that is normed whole (Gemma 4's
+                // dense and expert branches, `DenseBeside`) cannot be summed
+                // across ranks: refused, never answered wrong.
+                crate::types::TpPhase::FfnOnly if matches!(&lw.ffn, FfnVariant::MoE(m) if m.beside.is_some()) => {
+                    Err(SwarmError::Internal(
+                        "tensor parallelism cannot split a layer whose dense and expert \
+                         branches are each normed whole"
+                            .into(),
+                    ))
+                }
                 crate::types::TpPhase::FfnOnly => {
                     let x = lw
                         .ffn_norm
                         .forward(&input)
                         .map_err(|e| SwarmError::Internal(format!("tp ffn_norm: {e}")))?;
-                    match &lw.ffn {
-                        FfnVariant::Dense(mlp) => mlp
-                            .forward(&x, None)
-                            .map_err(|e| SwarmError::Internal(format!("tp mlp: {e}"))),
-                        FfnVariant::MoE(moe) => moe
-                            .forward(&x)
-                            .map_err(|e| SwarmError::Internal(format!("tp moe: {e}"))),
-                    }
+                    lw.ffn
+                        .forward(&x, &input, None)
+                        .map_err(|e| SwarmError::Internal(format!("tp ffn: {e}")))
                 }
                 crate::types::TpPhase::Full | crate::types::TpPhase::EmbedOnly => {
                     Err(SwarmError::Internal(
@@ -2505,14 +2476,10 @@ fn dense_layer(
         Residual::pending(attn, residual).add_norm(&lw.ffn_norm)
     )
     .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
-    let mut x = match &lw.ffn {
-        FfnVariant::Dense(mlp) => mlp
-            .forward(&x, lora_param)
-            .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?,
-        FfnVariant::MoE(moe) => moe
-            .forward(&x)
-            .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
-    };
+    let mut x = lw
+        .ffn
+        .forward(&x, &residual, lora_param)
+        .map_err(|e| SwarmError::Internal(format!("ffn: {e}")))?;
     // Gemma 2 post-FFN norm: normalize before residual add
     if let Some(ref post_norm) = lw.post_ffw_norm {
         x = post_norm

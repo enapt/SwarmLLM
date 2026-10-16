@@ -384,15 +384,21 @@ pub(crate) fn kv_layers(
 }
 
 /// The bytes of layers `[start, end)`'s routed expert stacks
-/// (`ffn_{gate,up,down}_exps`), 0 for a dense layer — what keeping their
+/// (`ffn_{gate,up,down}_exps`, or Gemma 4's fused `ffn_gate_up_exps`), 0 for
+/// a dense layer — what keeping their
 /// experts in the machine's memory takes off the card (#138 (3)). The ONE
 /// answer for the loader, which places them, and the pool, which chooses how
 /// many and charges each device for them.
 pub(crate) fn routed_expert_bytes(ct: &gguf_file::Content, start: usize, end: usize) -> u64 {
     (start..end)
         .flat_map(|layer| {
-            ["ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"]
-                .map(|t| format!("blk.{layer}.{t}.weight"))
+            [
+                "ffn_gate_exps",
+                "ffn_up_exps",
+                "ffn_gate_up_exps",
+                "ffn_down_exps",
+            ]
+            .map(|t| format!("blk.{layer}.{t}.weight"))
         })
         .filter_map(|name| ct.tensor_infos.get(&name))
         .map(tensor_byte_size)
@@ -762,9 +768,11 @@ impl GgufTensorMeta {
     }
 
     /// The part of a Gemma 4 file the loader does not run yet, read off its
-    /// tensor table: the 26B-A4B's experts or the E2B/E4B's per-layer
-    /// embeddings (FUTURE_WORK #115). Loaded as the dense layout, either would
-    /// run with that part missing and write nonsense, so it is refused instead.
+    /// tensor table: the E2B/E4B's per-layer embeddings (FUTURE_WORK #115), or
+    /// a scale on its experts' gate or up projection, which llama.cpp reads
+    /// and no file met so far carries. Loaded without it, either would run
+    /// with that part missing and write nonsense, so it is refused instead.
+    /// The 26B-A4B's experts run (#115 (3b)).
     fn unbuilt_gemma4_part(&self) -> Option<&'static str> {
         if self.architecture != "gemma4" {
             return None;
@@ -772,10 +780,15 @@ impl GgufTensorMeta {
         if self.tensors.contains_key("per_layer_token_embd.weight") {
             return Some("per-layer embeddings (the E2B and E4B sizes)");
         }
+        const UNREAD_SCALES: [&str; 3] = [
+            ".ffn_gate_exps.scale",
+            ".ffn_up_exps.scale",
+            ".ffn_gate_up_exps.scale",
+        ];
         self.tensors
             .keys()
-            .any(|name| name.ends_with(".ffn_gate_inp.weight"))
-            .then_some("mixture-of-experts layers (the 26B-A4B size)")
+            .any(|name| UNREAD_SCALES.iter().any(|s| name.ends_with(s)))
+            .then_some("a scale on its experts' gate or up projection")
     }
 
     /// The weight bytes ONE token reads per layer, on average over the model:
@@ -1844,10 +1857,17 @@ mod refusal_tests {
         assert_eq!(header("gemma4", None).refusal(), None, "12B / 31B");
         assert_eq!(with("blk.0.attn_q.weight"), None);
         let refused = |r: Option<ModelRefusal>, part: &str| matches!(r, Some(ModelRefusal::Architecture(a)) if a.starts_with("gemma4 with") && a.contains(part));
-        assert!(refused(
-            with("blk.3.ffn_gate_inp.weight"),
-            "mixture-of-experts"
-        ));
+        // The 26B-A4B's experts run (#115 (3b)); a scale on their gate or up
+        // projection is not read, so a file carrying one is refused.
+        assert_eq!(with("blk.3.ffn_gate_inp.weight"), None, "26B-A4B");
+        assert_eq!(with("blk.3.ffn_down_exps.scale"), None);
+        for scale in [
+            "blk.3.ffn_gate_exps.scale",
+            "blk.3.ffn_up_exps.scale",
+            "blk.3.ffn_gate_up_exps.scale",
+        ] {
+            assert!(refused(with(scale), "gate or up projection"), "{scale}");
+        }
         assert!(refused(
             with("per_layer_token_embd.weight"),
             "per-layer embeddings"

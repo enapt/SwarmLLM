@@ -25,7 +25,9 @@
 //!
 //! `LOGITS_PROBE_IDS` (a JSON array of token ids) instead of the synthetic sequence;
 //! `LOGITS_PROBE_DEVICE=cuda` to run on the card instead of the processor, and
-//! `LOGITS_PROBE_GPU_LAYERS=n` to keep only the first n layers there;
+//! `LOGITS_PROBE_GPU_LAYERS=n` to keep only the first n layers there, and
+//! `LOGITS_PROBE_CPU_MOE_LAYERS=m` to keep the routed experts of the first m of
+//! those in the machine's memory (`test-split --cpu-moe-layers`);
 //! `LOGITS_PROBE_N` (default 24) tokens, `LOGITS_PROBE_DECODE` (default 4) of
 //! them as decode steps, `LOGITS_PROBE_SPLIT` the first layer of the second
 //! segment (default: one segment). Writes `<OUT>.f32` (`[N, vocab]`, little
@@ -100,6 +102,15 @@ fn main() -> anyhow::Result<()> {
         .and_then(|v| v.parse::<usize>().ok())
     {
         swarmllm::inference::split::GPU_LAYER_LIMIT.store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+    // `LOGITS_PROBE_CPU_MOE_LAYERS=<m>`: the placement the pool gives a
+    // mixture-of-experts model too big for the card (`process_pool::card_split`).
+    if let Some(m) = std::env::var("LOGITS_PROBE_CPU_MOE_LAYERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        swarmllm::inference::split::CPU_EXPERT_LAYERS
+            .store(m, std::sync::atomic::Ordering::Relaxed);
     }
 
     // Arbitrary ids well inside any vocabulary and away from the specials,

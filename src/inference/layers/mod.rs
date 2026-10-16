@@ -858,7 +858,8 @@ impl Default for MoeRoutingConfig {
     }
 }
 
-/// One routed expert's SiLU-gated feed-forward, held as the model stores it.
+/// One routed expert's gated feed-forward ([`MoeFfn::activation`]), held as the
+/// model stores it.
 ///
 /// **Quantized, never dequantized at load.** The experts ARE a mixture-of-
 /// experts model's size: Qwen3-30B-A3B is ~29B parameters of experts against
@@ -897,9 +898,10 @@ impl ExpertFfn {
     }
 }
 
-/// Mixture-of-Experts FFN (DeepSeek-V2/V3, Llama 4, Qwen2/Qwen3-MoE, Qwen 3.5).
+/// Mixture-of-Experts FFN (DeepSeek-V2/V3, Llama 4, Qwen2/Qwen3-MoE, Qwen 3.5,
+/// Gemma 4).
 ///
-/// Router selects top-k experts per token, runs SiLU-gated FFN for each,
+/// Router selects top-k experts per token, runs its gated FFN for each,
 /// and sums the weighted outputs. Shared experts (always active) are added.
 #[derive(Debug, Clone)]
 pub(crate) struct MoeFfn {
@@ -931,6 +933,76 @@ pub(crate) struct MoeFfn {
     /// default. Differentiates DeepSeek-V2 strict (no renorm) and
     /// DeepSeek-V3 sigmoid gating.
     pub(crate) routing: MoeRoutingConfig,
+    /// The routed experts' gated activation: SiLU everywhere but Gemma 4,
+    /// whose experts are GELU-gated as its dense layers are (llama.cpp
+    /// `gemma4.cpp`, `LLM_FFN_GELU`). A shared expert stays SiLU.
+    pub(crate) activation: Activation,
+    /// Each expert's output scale (`ffn_down_exps.scale`, Gemma 4), folded
+    /// into a token's routing weight for that expert — llama.cpp multiplies
+    /// the expert's down projection by it before the routing weight
+    /// (`build_moe_ffn`'s `down_exps_s`), the same product. `None`: unscaled.
+    pub(crate) expert_scales: Option<ExpertScales>,
+    /// A dense feed-forward run beside the experts, each branch normed on its
+    /// own (Gemma 4's MoE layer). `None` for every other family.
+    pub(crate) beside: Option<Box<DenseBeside>>,
+}
+
+/// [`MoeFfn::expert_scales`]: one factor per expert, on the host for routing
+/// on the processor and on the layer's device for routing there.
+#[derive(Debug, Clone)]
+pub(crate) struct ExpertScales {
+    pub(crate) host: Vec<f32>,
+    pub(crate) device: Tensor, // [n_experts] f32
+}
+
+impl ExpertScales {
+    /// `host` as a tensor on `device`.
+    pub(crate) fn new(host: Vec<f32>, device: &Device) -> CandleResult<Self> {
+        let n = host.len();
+        Ok(Self {
+            device: Tensor::from_vec(host.clone(), (n,), device)?,
+            host,
+        })
+    }
+}
+
+/// Gemma 4's MoE layer (llama.cpp `gemma4.cpp`, read 2026-10-16): with `h`
+/// the residual stream after attention, its feed-forward is
+///
+/// `post_ffw_norm_1(mlp(ffn_norm(h))) + post_ffw_norm_2(experts(pre_ffw_norm_2(h)))`
+///
+/// where the experts are routed on `rms_norm(h) · ffn_gate_inp.scale / √n_embd`
+/// rather than on their own input. The layer's `post_ffw_norm` then norms the
+/// sum, as on a dense layer. [`FfnVariant::forward`] is the one place this is
+/// put together.
+#[derive(Debug, Clone)]
+pub(crate) struct DenseBeside {
+    /// The dense branch (`ffn_gate`/`ffn_up`/`ffn_down`), reading the layer's
+    /// `ffn_norm` of `h` as a dense layer does.
+    pub(crate) mlp: Mlp,
+    /// `post_ffw_norm_1`, on the dense branch's output.
+    pub(crate) mlp_post_norm: RmsNorm,
+    /// `pre_ffw_norm_2`: the experts' input.
+    pub(crate) experts_norm: RmsNorm,
+    /// `post_ffw_norm_2`, on the experts' weighted sum.
+    pub(crate) experts_post_norm: RmsNorm,
+    /// The router's input: `ffn_gate_inp.scale / √n_embd` as an RMS norm's
+    /// weight.
+    pub(crate) router_norm: RmsNorm,
+}
+
+impl DenseBeside {
+    /// This layer's norms sent to `card` ([`MoeFfn::routed_on`]); the dense
+    /// branch's projections copy their own weights for the call.
+    fn norms_on(&self, card: &Device) -> CandleResult<Self> {
+        Ok(Self {
+            mlp: self.mlp.clone(),
+            mlp_post_norm: self.mlp_post_norm.sent_to_card(card)?,
+            experts_norm: self.experts_norm.sent_to_card(card)?,
+            experts_post_norm: self.experts_post_norm.sent_to_card(card)?,
+            router_norm: self.router_norm.sent_to_card(card)?,
+        })
+    }
 }
 
 /// A layer's routed experts kept as the file stacks them — `[n_experts, rows,
@@ -1564,6 +1636,15 @@ fn softmax_like_candle(xs: &[f32]) -> Vec<f32> {
     num.iter().map(|&v| v / den).collect()
 }
 
+/// `act(gate) * up` for a mixture-of-experts layer's [`MoeFfn::activation`] —
+/// the products [`Mlp::forward`] takes for a gated dense layer, op for op.
+fn gated(activation: Activation, gate: &Tensor, up: &Tensor) -> CandleResult<Tensor> {
+    match activation {
+        Activation::SiLU => crate::inference::fast_math::silu_mul(gate, up),
+        Activation::Gelu => gate.gelu()? * up,
+    }
+}
+
 /// One expert's gated feed-forward over the tokens routed to it, blocked on the
 /// token axis exactly as [`Mlp::forward`] is.
 ///
@@ -1576,7 +1657,11 @@ fn softmax_like_candle(xs: &[f32]) -> Vec<f32> {
 ///
 /// Exact for the same reason: every step here treats each token independently,
 /// so splitting rows changes only how many are materialised at once.
-fn expert_ffn(batch_input: &Tensor, expert: &ExpertFfn) -> CandleResult<Tensor> {
+fn expert_ffn(
+    batch_input: &Tensor,
+    expert: &ExpertFfn,
+    activation: Activation,
+) -> CandleResult<Tensor> {
     let tokens = batch_input.dim(0)?;
     // The gate is [intermediate, hidden]; the projection widens to its dim 0.
     let intermediate = expert.gate.out_features()?;
@@ -1590,7 +1675,7 @@ fn expert_ffn(batch_input: &Tensor, expert: &ExpertFfn) -> CandleResult<Tensor> 
         // Gate and up read the same activation: quantize it once, as the
         // dense `Mlp` does (`QMatMul::forward_shared`).
         let gate_up = QMatMul::forward_shared(input, &[&expert.gate, &expert.up])?;
-        let combined = crate::inference::fast_math::silu_mul(&gate_up[0], &gate_up[1])?;
+        let combined = gated(activation, &gate_up[0], &gate_up[1])?;
         expert.down.forward(&combined)
     };
 
@@ -1614,10 +1699,27 @@ impl MoeFfn {
     ///
     /// 1. Router: x.matmul(gate.t()) → softmax scores → topk per token
     /// 2. Group tokens by assigned expert
-    /// 3. For each expert: batched SiLU-gated FFN on all assigned tokens at once
+    /// 3. For each expert: batched gated FFN on all assigned tokens at once
     /// 4. Scatter weighted results back to token positions
     /// 5. Add shared expert output (if present)
+    ///
+    /// A layer with a dense branch beside its experts ([`Self::beside`]) is
+    /// refused: it reads the residual stream as well, which only
+    /// [`FfnVariant::forward`] is handed.
     pub(crate) fn forward(&self, x: &Tensor) -> CandleResult<Tensor> {
+        if self.beside.is_some() {
+            candle_core::bail!(
+                "a mixture-of-experts layer with a dense branch beside it reads the \
+                 residual stream too: FfnVariant::forward runs it"
+            );
+        }
+        self.forward_routed_by(x, None)
+    }
+
+    /// The routed experts (and any shared expert) over `x`, routed on
+    /// `router_x` where it is given — Gemma 4 routes on its own norm of the
+    /// residual stream ([`DenseBeside::router_norm`]) — and on `x` otherwise.
+    fn forward_routed_by(&self, x: &Tensor, router_x: Option<&Tensor>) -> CandleResult<Tensor> {
         // Named by where the EXPERTS run, wherever the activation is: a
         // card-held layer whose experts stay in RAM (#138 (3)) is processor
         // time for a decode step.
@@ -1628,7 +1730,7 @@ impl MoeFfn {
         } else {
             P::MoeCard
         };
-        crate::inference::prof::timed!(stage, self.forward_untimed(x))
+        crate::inference::prof::timed!(stage, self.forward_untimed(x, router_x))
     }
 
     /// Are this layer's routed experts held in the machine's memory — a
@@ -1641,17 +1743,20 @@ impl MoeFfn {
                 .is_some_and(|e| e.gate.weight_is_on_the_processor())
     }
 
-    fn forward_untimed(&self, x: &Tensor) -> CandleResult<Tensor> {
+    fn forward_untimed(&self, x: &Tensor, router_x: Option<&Tensor>) -> CandleResult<Tensor> {
         let (b_sz, seq_len, hidden) = x.dims3()?;
         let num_tokens = b_sz * seq_len;
         let x_flat = x.reshape((num_tokens, hidden))?;
+        let router_flat = router_x
+            .map(|r| r.reshape((num_tokens, hidden)))
+            .transpose()?;
         if let Some(stacked) = &self.stacked {
-            let routed = self.experts_stacked(&x_flat, stacked)?;
+            let routed = self.experts_stacked(&x_flat, router_flat.as_ref(), stacked)?;
             return self
                 .add_shared_expert(&x_flat, routed)?
                 .reshape((b_sz, seq_len, hidden));
         }
-        let expert_batches = self.route(&x_flat)?;
+        let expert_batches = self.route(router_flat.as_ref().unwrap_or(&x_flat))?;
         if let Some(card) = self.card_for_prompt(x) {
             match self.processor_experts_on_the_card(card, &x_flat, &expert_batches) {
                 Ok(routed) => {
@@ -1702,6 +1807,21 @@ impl MoeFfn {
                 .shared_gate_inp
                 .as_ref()
                 .map(|w| sent_to_card(w, card))
+                .transpose()?,
+            expert_scales: self
+                .expert_scales
+                .as_ref()
+                .map(|s| {
+                    CandleResult::Ok(ExpertScales {
+                        host: s.host.clone(),
+                        device: sent_to_card(&s.device, card)?,
+                    })
+                })
+                .transpose()?,
+            beside: self
+                .beside
+                .as_ref()
+                .map(|b| b.norms_on(card).map(Box::new))
                 .transpose()?,
             ..self.clone()
         })
@@ -1823,9 +1943,17 @@ impl MoeFfn {
             .flatten_all()?
             .to_vec1()?;
         let mut expert_batches: Vec<Vec<(usize, f32)>> = vec![vec![]; n_experts];
+        let scale = self.expert_scales.as_ref().map(|s| &s.host[..]);
+        if scale.is_some_and(|s| s.len() != n_experts) {
+            candle_core::bail!(
+                "{} expert scales for {n_experts} experts",
+                scale.map_or(0, <[f32]>::len)
+            );
+        }
         for (pos, token_scores) in scores_host.chunks_exact(n_experts).enumerate() {
             let (indices, weights) = topk_host(token_scores, self.n_experts_used, self.routing);
             for (expert_idx, w) in indices.into_iter().zip(weights) {
+                let w = scale.map_or(w, |s| w * s[expert_idx]);
                 expert_batches[expert_idx].push((pos, w));
             }
         }
@@ -2030,21 +2158,24 @@ impl MoeFfn {
         matmul_many(jobs)?;
         drop(inputs);
 
-        // silu(gate) * up elementwise, then each expert's rows made row-major
-        // for the down projection's quantization.
+        // act(gate) * up elementwise ([`gated`]'s kernels on host slices),
+        // then each expert's rows made row-major for the down projection's
+        // quantization.
         let mut act_cols = vec![0f32; n_pairs * intermediate];
-        const SILU_CHUNK: usize = 8 * 1024; // a multiple of the 8 vector lanes
-        let silu = |((a, g), u): ((&mut [f32], &[f32]), &[f32])| {
-            crate::inference::fast_math::silu_mul_into(g, u, a)
+        const ACT_CHUNK: usize = 8 * 1024; // a multiple of the 8 vector lanes
+        let activation = self.activation;
+        let act_mul = |((a, g), u): ((&mut [f32], &[f32]), &[f32])| match activation {
+            Activation::SiLU => crate::inference::fast_math::silu_mul_into(g, u, a),
+            Activation::Gelu => crate::inference::fast_math::gelu_mul_into(g, u, a),
         };
         if split {
             act_cols
-                .par_chunks_mut(SILU_CHUNK)
-                .zip(gate_out.par_chunks(SILU_CHUNK))
-                .zip(up_out.par_chunks(SILU_CHUNK))
-                .for_each(silu);
+                .par_chunks_mut(ACT_CHUNK)
+                .zip(gate_out.par_chunks(ACT_CHUNK))
+                .zip(up_out.par_chunks(ACT_CHUNK))
+                .for_each(act_mul);
         } else {
-            silu(((&mut act_cols[..], &gate_out[..]), &up_out[..]));
+            act_mul(((&mut act_cols[..], &gate_out[..]), &up_out[..]));
         }
         drop((gate_out, up_out));
         let mut act = vec![0f32; n_pairs * intermediate];
@@ -2155,14 +2286,36 @@ impl MoeFfn {
     /// The ids are grouped by candle's arg-sort, which holds a row in 48 KB of
     /// shared memory — 8,192 ids — so a long prompt runs in token chunks of
     /// `STACKED_IDS_PER_CALL / k`.
-    pub(crate) fn experts_stacked(
+    ///
+    /// Routed on `router_flat` where it is given ([`Self::forward_routed_by`]),
+    /// each pick's weight times its expert's scale ([`Self::expert_scales`]) as
+    /// [`Self::route`] folds it.
+    fn experts_stacked(
         &self,
         x_flat: &Tensor,
+        router_flat: Option<&Tensor>,
         stacked: &StackedExperts,
     ) -> CandleResult<Tensor> {
         let k = self.n_experts_used.clamp(1, self.gate.dim(0)?);
-        self.stacked_products(x_flat, stacked, k, |x, _, _| {
-            topk_on_device(&x.matmul(&self.gate.t()?)?, k, self.routing)
+        self.stacked_products(x_flat, stacked, k, |x, start, len| {
+            let scores = match router_flat {
+                Some(r) => r
+                    .narrow(0, start, len)?
+                    .to_dtype(candle_core::DType::F32)?
+                    .matmul(&self.gate.t()?)?,
+                None => x.matmul(&self.gate.t()?)?,
+            };
+            let (ids, weights) = topk_on_device(&scores, k, self.routing)?;
+            let weights = match &self.expert_scales {
+                Some(s) => {
+                    (weights
+                        * s.device
+                            .index_select(&ids.flatten_all()?, 0)?
+                            .reshape(ids.dims())?)?
+                }
+                None => weights,
+            };
+            Ok((ids, weights))
         })
     }
 
@@ -2208,7 +2361,7 @@ impl MoeFfn {
             };
             let gate = gemm(&x, &stacked.gate, None)?; // [len * k, intermediate]
             let up = gemm(&x, &stacked.up, None)?;
-            let act = own_storage(crate::inference::fast_math::silu_mul(&gate, &up)?)?;
+            let act = own_storage(gated(self.activation, &gate, &up)?)?;
             let weights = own_storage(weights.flatten_all()?)?;
             let down = gemm(&act, &stacked.down, Some(weights))?; // [len * k, hidden]
             parts.push(down.reshape((len, k, hidden))?.sum(1)?);
@@ -2256,7 +2409,7 @@ impl MoeFfn {
             let idx_tensor = Tensor::from_vec(idx_vec, (batch.len(),), device)?;
             let batch_input = x_flat.index_select(&idx_tensor, 0)?; // [batch_tokens, hidden]
 
-            // Batched SiLU-gated FFN: silu(x @ gate.t) * (x @ up.t) @ down.t
+            // Batched gated FFN: act(x @ gate.t) * (x @ up.t) @ down.t
             let expert = self.experts.get(eidx).ok_or_else(|| {
                 candle_core::Error::Msg(format!(
                     "router chose expert {eidx} of a layer holding {}",
@@ -2268,10 +2421,11 @@ impl MoeFfn {
             let weight_vec: Vec<f32> = batch.iter().map(|&(_, w)| w).collect();
             let weight_tensor =
                 Tensor::from_vec(weight_vec, (batch.len(), 1), device)?.to_dtype(dtype)?;
+            let act = self.activation;
             let weighted = if self.routing.weight_before_ffn {
-                expert_ffn(&batch_input.broadcast_mul(&weight_tensor)?, expert)?
+                expert_ffn(&batch_input.broadcast_mul(&weight_tensor)?, expert, act)?
             } else {
-                expert_ffn(&batch_input, expert)?.broadcast_mul(&weight_tensor)?
+                expert_ffn(&batch_input, expert, act)?.broadcast_mul(&weight_tensor)?
             }; // [batch_tokens, hidden]
             weighted_parts.push(weighted);
             routed_rows.extend(batch.iter().map(|&(pos, _)| pos as i64));
@@ -2366,7 +2520,8 @@ impl LayerVariant {
 
     /// Every weight projection of this layer that goes through [`QMatMul`]:
     /// attention, a dense feed-forward, a mixture-of-experts layer's shared
-    /// expert — not its routed experts (`MoeFfn::prompt_card`) or router.
+    /// expert and its dense branch ([`MoeFfn::beside`]) — not its routed experts
+    /// (`MoeFfn::prompt_card`) or router.
     pub(crate) fn projections_mut(&mut self) -> Vec<&mut QMatMul> {
         let (mut out, ffn): (Vec<&mut QMatMul>, &mut FfnVariant) = match self {
             LayerVariant::Dense(w) => (
@@ -2416,6 +2571,11 @@ impl LayerVariant {
                 out.extend(m.shared_gate.as_mut());
                 out.extend(m.shared_up.as_mut());
                 out.extend(m.shared_down.as_mut());
+                if let Some(b) = m.beside.as_deref_mut() {
+                    out.extend(b.mlp.ffn_gate.as_mut());
+                    out.push(&mut b.mlp.ffn_up);
+                    out.push(&mut b.mlp.ffn_down);
+                }
             }
         }
         out
@@ -2630,11 +2790,40 @@ impl SsmState {
     }
 }
 
-/// FFN variant for DeepSeek layers — either dense or MoE.
+/// A layer's feed-forward — either dense or MoE.
 #[derive(Debug, Clone)]
 pub(crate) enum FfnVariant {
     Dense(Mlp),
     MoE(MoeFfn),
+}
+
+impl FfnVariant {
+    /// The feed-forward of one layer. `normed` is the layer's `ffn_norm` of
+    /// `attn_out`, the residual stream after attention; every family reads
+    /// `normed`, and Gemma 4's MoE layer reads `attn_out` as well
+    /// ([`DenseBeside`]). Every executor path runs a layer's feed-forward
+    /// through here, so none can drop that layer's dense branch.
+    pub(crate) fn forward(
+        &self,
+        normed: &Tensor,
+        attn_out: &Tensor,
+        lora: Option<(&LoraAdapter, usize)>,
+    ) -> CandleResult<Tensor> {
+        match self {
+            FfnVariant::Dense(mlp) => mlp.forward(normed, lora),
+            FfnVariant::MoE(moe) => match &moe.beside {
+                None => moe.forward(normed),
+                Some(b) => {
+                    let dense = b.mlp_post_norm.forward(&b.mlp.forward(normed, lora)?)?;
+                    let experts = moe.forward_routed_by(
+                        &b.experts_norm.forward(attn_out)?,
+                        Some(&b.router_norm.forward(attn_out)?),
+                    )?;
+                    dense + b.experts_post_norm.forward(&experts)?
+                }
+            },
+        }
+    }
 }
 
 /// Mark every dense layer's attention output and feed-forward down
@@ -5981,7 +6170,7 @@ mod blocked_expert_ffn_tests {
             up: QMatMul::from_dense(u.clone()),
             down: QMatMul::from_dense(d.clone()),
         };
-        let blocked = expert_ffn(&input, &expert).unwrap();
+        let blocked = expert_ffn(&input, &expert, Activation::SiLU).unwrap();
         let whole = {
             let gate_out = input.matmul(&g.t().unwrap()).unwrap();
             let up_out = input.matmul(&u.t().unwrap()).unwrap();
@@ -6020,7 +6209,7 @@ mod blocked_expert_ffn_tests {
             up: QMatMul::from_dense(u),
             down: QMatMul::from_dense(d),
         };
-        let out = expert_ffn(&input, &expert).unwrap();
+        let out = expert_ffn(&input, &expert, Activation::SiLU).unwrap();
         assert_eq!(out.dims(), &[tokens, hidden]);
     }
 }

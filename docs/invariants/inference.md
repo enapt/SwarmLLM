@@ -4611,8 +4611,9 @@ built. `LayerWeights::v_rms_norm` is applied in ONE place (`normed_values`) for 
 attention entry points; `LayerWeights::output_scale` where the layer's output is assembled
 (`executor::scaled_output`); `split::rope::LayerRope` gives windowed layers their own width
 and no file factors (`WindowedRope`). A Gemma 4 size whose layers are not built here is
-refused by name, off its tensor table (`unbuilt_gemma4_part`): the 26B-A4B's experts and the
-E2B/E4B's per-layer embeddings would otherwise load as the dense layout and write nonsense.
+refused by name, off its tensor table (`unbuilt_gemma4_part`): the E2B/E4B's per-layer
+embeddings would otherwise load as the dense layout and write nonsense (the 26B-A4B's experts
+run since #115 (3b), § "Gemma 4's 26B-A4B").
 LoRA refuses the family (`lora::check_fits` judges one width per projection, and Gemma 4's
 layers differ).
 
@@ -4694,6 +4695,115 @@ Tests: `gemma4_reads_each_layers_attention_shape`, `gemma4_attention_is_not_scal
 `gemma4_sizes_this_build_cannot_run_are_refused`, the three in `tokenizer::gemma4_tests`
 (`declared_markers_are_matched_whole_and_ordinary_markup_is_merged` is red with the shape rules
 left on).
+
+## Gemma 4's 26B-A4B: a dense feed-forward beside GELU experts (2026-10-16, FUTURE_WORK #115 (3b))
+
+**What llama.cpp master does** (`src/models/gemma4.cpp`, `build_moe_ffn` in
+`llama-graph.cpp`, read at master 2026-10-16). Every layer of the 26B-A4B (30 layers, n_embd
+2,816, 128 experts with 8 used, 704 wide; the dense branch 2,112) runs two branches off the
+attention's output `h`, and both are normed whole:
+
+- the dense branch: `post_ffw_norm_1(GEGLU(ffn_norm(h)))`;
+- the experts: `post_ffw_norm_2(Σ w·s_e·expert_e(pre_ffw_norm_2(h)))`, GELU-gated;
+- the router reads its OWN input: `rms_norm(h) · (1/√n_embd) · ffn_gate_inp.scale`, softmax
+  over every expert, the top k, renormalised (`norm_w = true`), applied AFTER each expert;
+- `s_e` is `ffn_down_exps.scale` [n_expert], one number per expert on its down projection
+  (`build_lora_mm_id`'s `w_s`); llama.cpp also reads gate/up scales, which no file met carries;
+- the experts' gate and up are ONE stack, `ffn_gate_up_exps` [n_embd, 2·n_ff, n_expert]: a
+  view of the first n_ff rows is the gate, the next n_ff the up;
+- then `post_ffw_norm(dense + experts)`, the residual, and `layer_output_scale`, as in the 12B.
+
+**What we do.** `FfnVariant::forward(normed, attn_out, lora)` is the one way a layer's
+feed-forward runs (nine executor sites, the tensor-parallel one included). A MoE layer with a
+`layers::DenseBeside` runs the dense `Mlp` beside the experts and norms each branch;
+`MoeFfn::forward` alone refuses such a layer, so no path can run the experts without their
+dense half. The router's norm folds `1/√n_embd` into its weight (`scale · 1/√n_embd`).
+`ExpertScales` multiplies the scale into each picked expert's weight on every path (host
+routing, `topk_on_device`'s weights, the stacked kernels), so the experts' products are
+untouched. `split_expert_stack_rows` cuts the fused stack into a gate and an up stack once,
+at load, so every expert path (`experts_in_one_region`, the stacked card kernels, one expert
+at a time) sees what a separate file holds. Activation is per layer (`MoeFfn::activation`,
+`gelu_mul_into` beside `silu_mul_into`). A gate/up scale is refused by name
+(`unbuilt_gemma4_part`), never ignored. Tensor parallelism refuses a beside layer: each branch
+is normed whole, so neither splits by rows.
+
+**Judging a tiny MoE file needs llama.cpp against ITSELF.** `make_tiny_gemma_gguf.py
+ARCH=gemma4 MOE=1` (12 layers, 8 experts) read worst 0.921 against llama.cpp's processor
+build, and with every expert used (`N_EXPERT_USED=8`, no top-k to flip) still 0.918. A bug, it
+looked like, until llama.cpp's card build (every layer, `dump_logits_cuda2`) was set against its
+own processor build on the same files:
+
+| file | ours vs llama.cpp processor | ours vs llama.cpp card | **llama.cpp processor vs card** |
+|---|---|---|---|
+| `QK_STD=0.25`, every expert | **0.999981** | **0.999989** | 0.999975 |
+| `QK_STD=0.25`, top 2 | 0.825 (from position 10) | 0.865 (from 18) | **0.825 (from 10)** |
+| `QK_STD=0.5`, every expert | 0.918 | 0.938 | **0.883** |
+| `QK_STD=0.5`, top 2 | 0.921 | 0.883 | **0.902** |
+| dense control (`g4_soft2`) | 0.999964 | — | 0.999964 |
+
+At decisive attention (Q/K norm gain 1) twelve MoE layers amplify any rounding past
+recognition, and llama.cpp's two builds disagree with each other as much as with us (one
+difference between them: the processor's GEGLU reads an f16 table, `GGML_GELU_FP16` in
+`ggml-cpu/vec.h`, where the card computes it in f32). With soft
+attention and every expert used the comparison is decisive (all three pairs ≥ 0.99997). Top 2
+then flips ONE router near-tie at position 10 in llama.cpp's processor build, where its card
+build and ours agree, and the damage carries forward through attention. So the arithmetic is
+judged on the every-expert soft file; whole, in 5-token pieces and split at layer 5 it reads
+0.999981. Each mechanism switched off in a COPY of that file (the reference's switch, gotcha
+#715) moves llama.cpp away from our unchanged logits, and our run on the copy follows:
+
+| copy | our original vs llama.cpp on the copy | ours on the copy vs llama.cpp on the copy |
+|---|---|---|
+| `ffn_down_exps.scale` = 1 | 0.627 | 0.999977 |
+| `ffn_gate_inp.scale` = 1 | 0.983 | 0.999989 |
+| `post_ffw_norm_2` = 1 | 0.916 | 0.999985 |
+
+Q8_0 weights read 0.993 / 0.996 (worst / median) on the MoE file, and the dense Q8_0 control
+0.956 / 0.993: activation rounding of the tiny file, not the experts (judge MoE unquantized,
+#715).
+
+**The real 26B-A4B** (bartowski's Q2_K, 10.9 GB: experts' gate/up Q2_K, down Q4_0, the router
+F32) on the processor, against llama.cpp master's repacked (default) and plain
+(`DUMP_NO_REPACK=1`) kernels:
+
+| prompt (positions) | pair | worst cos | median | top-1 |
+|---|---|---|---|---|
+| 28 tokens (all) | ours vs llama.cpp | 0.93727 | 0.99911 | 23/28 |
+| | ours vs llama.cpp, plain kernels | 0.93417 | 0.99917 | 24/28 |
+| | **llama.cpp vs itself** | **0.96541** | **0.99895** | **25/28** |
+| 1,536 tokens (last 48 + 4 decode) | ours vs llama.cpp | 0.98998 | 0.99917 | 37/52 |
+| | ours vs llama.cpp, plain kernels | 0.99090 | 0.99923 | 41/52 |
+| | **llama.cpp vs itself** | **0.98461** | **0.99907** | **35/52** |
+
+Q2_K is coarse, and llama.cpp's own spread is ten times the 12B's. The medians sit at or above
+llama.cpp's against itself; the short prompt's worst position (0, `<bos>`, ours 0.937 against
+the repacked kernels, 0.960 against the plain ones) is a single position, and on the long
+prompt every figure is inside llama.cpp's own.
+
+**On the card** (the CUDA build; the file does not fit the 8 GB card, so every layer's attention
+and dense branch there with experts in RAM — the pool's `card_split` placement,
+`LOGITS_PROBE_CPU_MOE_LAYERS` — against llama.cpp master's processor build, 512-token chunks):
+
+| placement | prompt | worst cos | median | top-1 |
+|---|---|---|---|---|
+| 30 on the card, every expert in RAM | 28 | 0.75212 (pos 0) | 0.99856 | 20/28 |
+| 30 on the card, the last 6 layers' experts there too | 28 | 0.71190 (pos 0) | 0.99896 | 21/28 |
+| | 1,536 (last 48 + 4) | 0.98865 | 0.99908 | 40/52 |
+| 20 on the card (experts in RAM), 10 on the processor | 1,536 (last 48 + 4) | 0.98878 | 0.99914 | 40/52 |
+| **llama.cpp's card (12 layers) vs its processor** | 28 | **0.70051 (pos 0)** | **0.99903** | **20/28** |
+
+`<bos>` is where every pair is worst, llama.cpp against itself included. Each placement was
+proved by the profile (`SWARMLLM_PROFILE=1`): with every expert in RAM only "moe ffn on the
+processor" runs and the card pool holds 1.76 GB; with six layers' experts on the card "moe ffn
+on the card" appears (9.8 ms of an 80 ms step) and the pool holds 3.51 GB. Those six run one
+expert at a time and the RAM-held experts read a prompt on the processor: the down experts are
+Q4_0, which the card's expert kernels do not read (#292).
+
+Tests: `a_fused_gate_up_stack_is_cut_into_the_gate_and_up_a_separate_file_holds`,
+`an_experts_output_scale_multiplies_its_answer`,
+`a_dense_branch_beside_the_experts_runs_and_each_branch_is_normed` (it also asserts
+`MoeFfn::forward` refuses the layer), `one_region_experts_are_bit_identical_to_one_at_a_time`
+(for SiLU and GELU), `gemma4_sizes_this_build_cannot_run_are_refused`.
 
 ## A model that cannot write replies is refused off its header (2026-10-15)
 

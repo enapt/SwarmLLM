@@ -60,6 +60,22 @@ pub fn silu_mul_into(gate: &[f32], up: &[f32], out: &mut [f32]) {
     }
 }
 
+/// `out[i] = gelu(gate[i]) * up[i]`, GELU in its tanh form — candle's f32
+/// `gelu` (`candle_core::op::Gelu::f32`) operation for operation, so that a
+/// gated product built here holds the bits `(gate.gelu()? * up)?` gives on
+/// the processor. Gemma 4's experts (llama.cpp `LLM_FFN_GELU`, which is
+/// `ggml_gelu`, the same tanh form).
+#[inline]
+pub fn gelu_mul_into(gate: &[f32], up: &[f32], out: &mut [f32]) {
+    const SQRT_TWO_OVER_PI_F32: f32 = 0.797_884_6; // candle's `0.79788456080286535587989211986876373`
+    debug_assert_eq!(gate.len(), up.len());
+    debug_assert_eq!(gate.len(), out.len());
+    for ((&v, &u), o) in gate.iter().zip(up).zip(out.iter_mut()) {
+        let g = 0.5 * v * (1.0 + f32::tanh(SQRT_TWO_OVER_PI_F32 * v * (1.0 + 0.044715 * v * v)));
+        *o = g * u;
+    }
+}
+
 #[cfg(target_feature = "avx2")]
 mod avx2 {
     use std::arch::x86_64::*;

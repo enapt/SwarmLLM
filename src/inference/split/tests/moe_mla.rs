@@ -195,6 +195,9 @@ fn test_moe_forward_single_expert() {
         shared_gate_inp: None,
         n_experts_used: 1,
         routing: MoeRoutingConfig::default(),
+        activation: crate::inference::model_arch::Activation::SiLU,
+        expert_scales: None,
+        beside: None,
     };
 
     let x = Tensor::randn(0f32, 1.0, (1, 4, hidden), &device).unwrap();
@@ -233,6 +236,9 @@ fn test_moe_forward_multi_expert() {
         shared_gate_inp: None,
         n_experts_used: 2,
         routing: MoeRoutingConfig::default(),
+        activation: crate::inference::model_arch::Activation::SiLU,
+        expert_scales: None,
+        beside: None,
     };
 
     let x = Tensor::randn(0f32, 1.0, (1, 3, hidden), &device).unwrap();
@@ -281,6 +287,9 @@ fn test_shared_expert_integration() {
         shared_gate_inp: None,
         n_experts_used: 1,
         routing: MoeRoutingConfig::default(),
+        activation: crate::inference::model_arch::Activation::SiLU,
+        expert_scales: None,
+        beside: None,
     };
 
     // MoE with shared experts
@@ -300,6 +309,9 @@ fn test_shared_expert_integration() {
         shared_gate_inp: None,
         n_experts_used: 1,
         routing: MoeRoutingConfig::default(),
+        activation: crate::inference::model_arch::Activation::SiLU,
+        expert_scales: None,
+        beside: None,
     };
 
     let x = Tensor::randn(0f32, 1.0, (1, 2, hidden), &device).unwrap();
@@ -711,6 +723,9 @@ fn the_batched_moe_forward_is_bit_identical_to_routing_token_by_token() {
                         .then(|| Tensor::randn(0f32, 0.3, (hidden,), &device).unwrap()),
                     n_experts_used: k,
                     routing,
+                    activation: crate::inference::model_arch::Activation::SiLU,
+                    expert_scales: None,
+                    beside: None,
                 };
                 // A prompt-sized batch, a single decode token, and two sequences.
                 for (batch, tokens) in [(1usize, 37usize), (1, 1), (2, 5)] {
@@ -778,7 +793,12 @@ fn one_region_experts_are_bit_identical_to_one_at_a_time() {
             weight_before_ffn: true,
         },
     ];
-    for (gate_t, up_t, down_t) in mixes {
+    // SiLU-gated experts, and Gemma 4's GELU-gated ones (`fast_math::gelu_mul_into`
+    // against candle's `gelu` then `*`).
+    let activations = [Activation::SiLU, Activation::Gelu];
+    for (activation, (gate_t, up_t, down_t)) in
+        activations.into_iter().flat_map(|a| mixes.map(|m| (a, m)))
+    {
         for routing in policies {
             for k in [2usize, 8] {
                 let moe = MoeFfn {
@@ -798,6 +818,9 @@ fn one_region_experts_are_bit_identical_to_one_at_a_time() {
                     shared_gate_inp: None,
                     n_experts_used: k,
                     routing,
+                    activation,
+                    expert_scales: None,
+                    beside: None,
                 };
                 for tokens in [1usize, 3, 8, 37, 100] {
                     let x = Tensor::randn(0f32, 1.0, (1, tokens, hidden), &device).unwrap();
@@ -837,7 +860,7 @@ fn one_region_experts_are_bit_identical_to_one_at_a_time() {
                         assert_eq!(
                             differing,
                             0,
-                            "{gate_t:?}/{up_t:?}/{down_t:?} {routing:?} k={k} tokens={tokens} \
+                            "{activation:?} {gate_t:?}/{up_t:?}/{down_t:?} {routing:?} k={k} tokens={tokens} \
                              {how}: {differing} of {} values differ",
                             got.len()
                         );
@@ -1084,6 +1107,9 @@ fn a_llama4_expert_is_weighted_on_its_input() {
             shared_gate_inp: None,
             n_experts_used: 1,
             routing,
+            activation: crate::inference::model_arch::Activation::SiLU,
+            expert_scales: None,
+            beside: None,
         };
         let llama4 = moe(MoeRoutingConfig {
             gating_func: MoeGatingFunc::Sigmoid,
@@ -1204,6 +1230,9 @@ fn a_prompts_processor_experts_go_to_the_card_only_where_it_can_take_them() {
         shared_gate_inp: None,
         n_experts_used: 2,
         routing,
+        activation: crate::inference::model_arch::Activation::SiLU,
+        expert_scales: None,
+        beside: None,
     };
     let llama4 = MoeRoutingConfig {
         gating_func: MoeGatingFunc::Sigmoid,
@@ -1315,6 +1344,9 @@ fn a_card_segment_keeping_its_experts_in_ram_works_on_the_processor_for_them() {
         shared_gate_inp: None,
         n_experts_used: 2,
         routing: MoeRoutingConfig::default(),
+        activation: crate::inference::model_arch::Activation::SiLU,
+        expert_scales: None,
+        beside: None,
     };
     let mut model = make_test_split_model(2, hidden);
     let LayerVariant::Dense(w) = &mut model.layers[0] else {
@@ -1347,4 +1379,174 @@ fn a_card_segment_keeping_its_experts_in_ram_works_on_the_processor_for_them() {
         model.prompt_reader(0),
         PromptReader::CardCopyingWeights { .. }
     ));
+}
+
+/// The largest absolute difference between two tensors of one shape.
+fn largest_gap(a: &Tensor, b: &Tensor) -> f32 {
+    (a - b)
+        .unwrap()
+        .abs()
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .max(0)
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap()
+}
+
+/// A tensor of `shape` filled from a sine of `seed`, times `scale`.
+fn sines(shape: &[usize], seed: f32, scale: f32) -> Tensor {
+    let n: usize = shape.iter().product();
+    let v: Vec<f32> = (0..n).map(|i| (i as f32 * seed).sin() * scale).collect();
+    Tensor::from_vec(v, shape, &Device::Cpu).unwrap()
+}
+
+/// A mixture-of-experts layer of GELU-gated f32 experts over `down`, with no
+/// shared expert.
+fn gelu_moe(
+    router: &Tensor,
+    gate: &Tensor,
+    up: &Tensor,
+    down: &Tensor,
+    expert_scales: Option<crate::inference::layers::ExpertScales>,
+) -> MoeFfn {
+    MoeFfn {
+        gate: router.clone(),
+        experts: crate::inference::layers::ExpertFfn::from_stacked(gate, up, down).unwrap(),
+        stacked: None,
+        prompt_card: None,
+        shared_gate: None,
+        shared_down: None,
+        shared_up: None,
+        shared_gate_inp: None,
+        n_experts_used: 2,
+        routing: MoeRoutingConfig::default(),
+        activation: Activation::Gelu,
+        expert_scales,
+        beside: None,
+    }
+}
+
+/// Gemma 4's per-expert output scale (`ffn_down_exps.scale`) multiplies each
+/// expert's answer before its routing weight (llama.cpp `build_moe_ffn`'s
+/// `down_exps_s`). Folded into the routing weights (`MoeFfn::route`), the
+/// layer answers as one whose down projections hold the scale in their
+/// weights — and not as the unscaled layer, so the check is not vacuous.
+#[test]
+fn an_experts_output_scale_multiplies_its_answer() {
+    use crate::inference::layers::ExpertScales;
+    let (hidden, inter, n) = (32, 48, 6);
+    let router = sines(&[n, hidden], 0.37, 1.0);
+    let gate = sines(&[n, inter, hidden], 0.013, 0.2);
+    let up = sines(&[n, inter, hidden], 0.029, 0.2);
+    let down = sines(&[n, hidden, inter], 0.041, 0.2);
+    let scales = vec![0.5f32, 1.5, 2.0, 0.25, 3.0, 1.0];
+    let in_the_weights = down
+        .broadcast_mul(&Tensor::from_vec(scales.clone(), (n, 1, 1), &Device::Cpu).unwrap())
+        .unwrap();
+    let scaled = gelu_moe(
+        &router,
+        &gate,
+        &up,
+        &down,
+        Some(ExpertScales::new(scales, &Device::Cpu).unwrap()),
+    );
+    let folded = gelu_moe(&router, &gate, &up, &in_the_weights, None);
+    let unscaled = gelu_moe(&router, &gate, &up, &down, None);
+    for tokens in [1usize, 7] {
+        let x = sines(&[1, tokens, hidden], 0.19 + tokens as f32, 1.0);
+        let got = scaled.forward(&x).unwrap();
+        let want = folded.forward(&x).unwrap();
+        // Judged against the answer's own size: these experts answer ~1e-3.
+        let peak = largest_gap(&want, &want.zeros_like().unwrap());
+        let gap = largest_gap(&got, &want);
+        assert!(
+            gap < 1e-4 * peak,
+            "{tokens} tokens: {gap} off the scaled weights' answer (peak {peak})"
+        );
+        let unscaled_gap = largest_gap(&unscaled.forward(&x).unwrap(), &want);
+        assert!(
+            unscaled_gap > 0.05 * peak,
+            "{tokens} tokens: the scales changed nothing ({unscaled_gap} of peak {peak})"
+        );
+    }
+}
+
+/// Gemma 4's MoE layer (`DenseBeside`, llama.cpp `gemma4.cpp`): the dense
+/// branch reads the layer's `ffn_norm` of the residual stream, the experts
+/// their own norm of it and are routed on a third, and each branch is normed
+/// before the two are added. `FfnVariant::forward` is that sum, built here by
+/// hand from the parts; and `MoeFfn::forward`, handed only one input, refuses
+/// the layer rather than answer without its dense branch.
+#[test]
+fn a_dense_branch_beside_the_experts_runs_and_each_branch_is_normed() {
+    use crate::inference::layers::{DenseBeside, FfnVariant, Mlp};
+    use candle_core::Module;
+    let (hidden, inter, n, dense_inter, tokens) = (32, 48, 8, 64, 9);
+    let norm = |seed: f32| RmsNorm::new((sines(&[hidden], seed, 0.5) + 1.0).unwrap(), 1e-6);
+    let mlp = Mlp {
+        ffn_gate: Some(QMatMul::from_dense(sines(&[dense_inter, hidden], 0.7, 0.1))),
+        ffn_up: QMatMul::from_dense(sines(&[dense_inter, hidden], 0.9, 0.1)),
+        ffn_down: QMatMul::from_dense(sines(&[hidden, dense_inter], 1.1, 0.1)),
+        activation: Activation::Gelu,
+    };
+    let plain = gelu_moe(
+        &sines(&[n, hidden], 0.37, 1.0),
+        &sines(&[n, inter, hidden], 0.013, 0.2),
+        &sines(&[n, inter, hidden], 0.029, 0.2),
+        &sines(&[n, hidden, inter], 0.041, 0.2),
+        None,
+    );
+    let beside = DenseBeside {
+        mlp: mlp.clone(),
+        mlp_post_norm: norm(0.11),
+        experts_norm: norm(0.23),
+        experts_post_norm: norm(0.31),
+        router_norm: RmsNorm::new(sines(&[hidden], 0.53, 2.0), 1e-6),
+    };
+    let layer = FfnVariant::MoE(MoeFfn {
+        beside: Some(Box::new(beside.clone())),
+        ..plain.clone()
+    });
+    let h = sines(&[1, tokens, hidden], 0.19, 1.0);
+    let normed = norm(0.41).forward(&h).unwrap();
+    let got = layer.forward(&normed, &h, None).unwrap();
+
+    let flat = |x: Tensor| x.reshape((tokens, hidden)).unwrap();
+    let experts_in = flat(beside.experts_norm.forward(&h).unwrap());
+    let router_in = flat(beside.router_norm.forward(&h).unwrap());
+    let picks = |routes: Vec<Vec<(usize, f32)>>| -> Vec<Vec<usize>> {
+        routes
+            .into_iter()
+            .map(|r| r.into_iter().map(|(t, _)| t).collect())
+            .collect()
+    };
+    let routes = plain.route(&router_in).unwrap();
+    assert_ne!(
+        picks(routes.clone()),
+        picks(plain.route(&experts_in).unwrap()),
+        "vacuous: the router's norm picks what the experts' own input would"
+    );
+    let experts = plain
+        .experts_one_at_a_time(&experts_in, &routes, tokens, hidden)
+        .unwrap()
+        .reshape((1, tokens, hidden))
+        .unwrap();
+    let want = (beside
+        .mlp_post_norm
+        .forward(&mlp.forward(&normed, None).unwrap())
+        .unwrap()
+        + beside.experts_post_norm.forward(&experts).unwrap())
+    .unwrap();
+    let gap = largest_gap(&got, &want);
+    assert!(gap < 1e-5, "{gap} off the two branches summed by hand");
+
+    let FfnVariant::MoE(moe) = &layer else {
+        unreachable!()
+    };
+    assert!(
+        moe.forward(&normed).is_err(),
+        "a layer with a dense branch answered without it"
+    );
 }

@@ -68,7 +68,9 @@ n_layer = int(os.environ.get("N_LAYER", 46 if arch == "gemma2" else 12))
 # Gemma 4: global layers are wider and carry fewer K/V heads, as in every real file.
 head_dim_full, n_head_kv_full = 64, 1
 moe = arch == "gemma4" and os.environ.get("MOE", "0") == "1"
-n_expert, n_expert_used, n_ff_exp = 8, 2, 32
+# N_EXPERT_USED=8 routes every token through every expert: no top-k pick, so no
+# router near-tie can flip, and what is left of a gap is the arithmetic.
+n_expert, n_expert_used, n_ff_exp = 8, int(os.environ.get("N_EXPERT_USED", 2)), 32
 is_swa = [i % 6 != 5 for i in range(n_layer)]
 rope_factor = float(os.environ.get("ROPE_FACTOR", 8.0))
 rope_type = os.environ.get("ROPE_TYPE", "linear")

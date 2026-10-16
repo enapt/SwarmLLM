@@ -294,6 +294,9 @@ fn test_ffn_variant_moe_forward() {
         shared_gate_inp: None,
         n_experts_used,
         routing: MoeRoutingConfig::default(),
+        activation: crate::inference::model_arch::Activation::SiLU,
+        expert_scales: None,
+        beside: None,
     };
 
     let ffn = FfnVariant::MoE(moe);
@@ -362,6 +365,9 @@ fn test_llama4_moe_layer_forward() {
                 shared_gate_inp: None,
                 n_experts_used,
                 routing: MoeRoutingConfig::default(),
+                activation: crate::inference::model_arch::Activation::SiLU,
+                expert_scales: None,
+                beside: None,
             })
         } else {
             // Dense FFN on even indices

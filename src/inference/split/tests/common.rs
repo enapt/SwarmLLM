@@ -390,6 +390,9 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         shared_gate_inp: None,
         n_experts_used,
         routing: MoeRoutingConfig::default(),
+        activation: crate::inference::model_arch::Activation::SiLU,
+        expert_scales: None,
+        beside: None,
     };
 
     let deepseek_layer = LayerVariant::DeepSeek {

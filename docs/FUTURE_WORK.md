@@ -59,10 +59,10 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
-6. **#115** — Gemma 4's other sizes: (3b) the 26B-A4B (a user's request: a dense feed-forward
-   beside routed experts in every layer) and (3c) E2B/E4B (the sizes small computers pick:
+6. **#115**, **#292** — Gemma 4's small sizes: (3c) E2B/E4B (the sizes small computers pick:
    per-layer token embeddings, shared KV layers); then the Gemma 3/4 vision projectors and the
-   drafters. All are refused by name today, never loaded wrong.
+   drafters. All are refused by name today, never loaded wrong. The 26B-A4B runs since
+   2026-10-16, but its experts are slow on a card: their 32-block types (#292).
 7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 6.7 KB/s on the .240
    fleet (8.8 on .239), ~3 copies of each message (from ~6.3), measured 2026-10-16. The manifests
    are 84% of the gossip sent: next (2) announce-then-pull for manifests.
@@ -1200,6 +1200,28 @@ was measured against the never-repacked reference above. Not ours, and llama.cpp
 clocks down between steps of a split (255-600 MHz between 1755 MHz bursts), and back-to-back
 runs on this laptop heat it enough to slow a split step 133 → 185 ms within 40 tokens (gotcha #825).
 
+#### #292 — The card's expert kernels read no 32-block type but Q8_0, so a Gemma 4 26B-A4B's experts run one at a time on the card and read a prompt on the processor
+`P2` · speed · **OPEN** — 2026-10-16 · history: found checking #115 (3b)
+
+The 26B-A4B's down experts are 704 wide, not a multiple of 256, so llama.cpp's quantizer stores
+them in a 32-block type (`tensor_type_fallback` in `llama-quant.cpp`, master 2026-10-16): a
+Q2_K or Q3_K upload's become Q4_0, Q4_K's (Q4_K_M, the usual pick) Q5_0, Q5_K's Q5_1, the IQ
+types' IQ4_NL; only Q6_K's become Q8_0. `moe_gemm_gguf` (vendored
+`candle-kernels/src/moe/moe_gguf.cu`, and the prompt kernel `moe_wmma_gguf.cu`) reads Q8_0 and
+Q2_K-Q6_K only, so `StackedExperts::fit` refuses every such layer: (a) card-held experts run one
+expert at a time, and their layer stays out of the decode graph; (b) RAM-held experts are never
+given the prompt card (`let_processor_layers_read_prompts_on` asks
+`experts_could_stack_on_a_card`), so a prompt's experts run on the processor. Measured on this
+RTX 3070 Laptop with bartowski's Q2_K (`SWARMLLM_PROFILE=1`, 2026-10-16): a 512-token chunk
+took 10.4 s, 7.9 s of it "moe ffn on the processor" (20 card-held layers with their experts in
+RAM, 10 on the processor); a decode step 75-80 ms with 24-30 layers' experts in RAM, six layers'
+experts on the card 9.8 ms of it. Replies are right (#115 (3b)); this is speed. Next: Q4_0,
+Q4_1, Q5_0 and Q5_1 in the one-row kernel (a template over `block_q_t` + `vec_dot_*_q8_1`, all
+four already in `moe/gguf.cuh`) and a dequantize for each in the prompt kernel, IQ4_NL after; the
+type ids are mapped in the registry's `candle-nn` `moe::moe_gemm_gguf` (not vendored: vendor it,
+or call `candle_kernels::ffi` from `layers`); then judge against llama.cpp's card
+(`--n-cpu-moe`) on the Q2_K file and a Q4_K_M upload.
+
 #### #138 — A model that does not fit the card: MoE decode level with llama.cpp since 2026-10-11, a split's prompt read on the card since 2026-10-13, a 512-token forward 1.1-1.3x llama.cpp's
 `P2` · perf-local · **PARTIAL** — 2026-09-27 · history: archive row #138; plan: `docs/plans/faster_than_local.md` § 3.2
 
@@ -1663,15 +1685,14 @@ to test on (the swarm's Italian M4 peer belongs to a tester).
 #### #115 — Gemma 3's and Gemma 4's vision projectors, and Gemma 4's mixture-of-experts and small sizes, are unsupported
 `P2` · model-support · **PARTIAL** — 2026-09-25 · history: archive row #115
 
-Requested for gemma-4-26B-A4B. Order: ~~(1) Gemma 3 text~~ and ~~(3) Gemma 4 dense text~~ (the
-12B and 31B; closed 2026-10-16, § Closed); (2) the `gemma3` projector (SigLIP + pool + RMSNorm +
-linear), after `vision.rs` gets a projector-type dispatch; (3b) the 26B-A4B — every layer runs a
-dense GELU feed-forward BESIDE GELU routed experts (`load_moe_ffn`; `make_tiny_gemma_gguf.py
-ARCH=gemma4 MOE=1` writes the tiny file); (3c) E2B/E4B — per-layer token embeddings
-(`per_layer_token_embd`) and the last layers reading earlier layers' KV
-(`attention.shared_kv_layers`, 0 on the 12B); (4) `gemma4v`; (5) the `-assistant` drafters
-(`gemma4-assistant` in llama.cpp, an unknown family here). The 26B-A4B and E2B/E4B are refused
-by name off their tensor table until built (`GgufTensorMeta::unbuilt_gemma4_part`). The 31B
+Requested for gemma-4-26B-A4B. Order: ~~(1) Gemma 3 text~~, ~~(3) Gemma 4 dense text~~ (the
+12B and 31B) and ~~(3b) the 26B-A4B~~ (closed 2026-10-16, § Closed); (2) the `gemma3` projector
+(SigLIP + pool + RMSNorm + linear), after `vision.rs` gets a projector-type dispatch; (3c)
+E2B/E4B — per-layer token embeddings (`per_layer_token_embd`) and the last layers reading
+earlier layers' KV (`attention.shared_kv_layers`, 0 on the 12B); (4) `gemma4v`; (5) the
+`-assistant` drafters (`gemma4-assistant` in llama.cpp, an unknown family here). E2B/E4B are
+refused by name off their tensor table until built (`GgufTensorMeta::unbuilt_gemma4_part`), and
+so are experts carrying a gate/up scale (llama.cpp reads them; no file met so far has one). The 31B
 has the 12B's layout (60 layers, 16 / 4 key/value heads) and is unchecked. Gemma 4's reference is llama.cpp MASTER
 (`~/llama.cpp-ref/dump_logits`, `tok_cases`); llama-cpp-python 0.3.16 predates it.
 
@@ -2387,7 +2408,23 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-16, not yet released** (#265, #286, #287, #288, #289, #290)
+**Closed 2026-10-16, not yet released** (#265, #286, #287, #288, #289, #290, #115 (3b))
+- #115 (3b) — **Gemma 4's 26B-A4B runs (text).** Every layer runs a dense GELU feed-forward
+  BESIDE 128 GELU experts (8 per token), each branch with its own norms; the router reads its own
+  norm of the layer's input with its own scale, and each expert's answer has its own scale; the
+  experts' gate and up come as one stack, cut in two at load (`layers::DenseBeside`,
+  `ExpertScales`, `split_expert_stack_rows`; every executor path runs a layer's feed-forward
+  through `FfnVariant::forward`). Against llama.cpp master: a tiny f32 file with every expert used
+  agrees at 0.99998 on the processor and against llama.cpp's card, whole, in pieces and split, and
+  each mechanism set to identity in a copy moves llama.cpp off our unchanged logits (0.63-0.98)
+  while our run on the copy follows. The tiny top-2 files' gaps are llama.cpp's own: its card and
+  processor builds part there by as much as either parts from us. The real Q2_K file (bartowski,
+  10.9 GB) on the processor: median 0.99911 / 0.99917 on 28 / 1,536 tokens against llama.cpp's
+  own repacked-vs-plain 0.99895 / 0.99907. On the card with every layer's attention there and the
+  experts in RAM, some on the card, or 10 layers on the processor: median 0.99856-0.99914, worst
+  0.71-0.75 at `<bos>` where llama.cpp's own card reads 0.70 against its processor. Its experts
+  are slow on a card (32-block types the card kernel does not read): #292.
+  `docs/invariants/inference.md` § "Gemma 4's 26B-A4B".
 - #265 — **A node holding part of a model across its graphics card and its processor no longer
   fails a request that gives it a second run of layers.** Field report #037 (RTX 3060 12 GB,
   Qwen3-30B-A3B, v0.3.239 and v0.3.240): the worker took the first run as a split (26 layers'
@@ -2404,7 +2441,10 @@ grep `^| N |`).
   `a_running_split_worker_grows_a_range_across_the_card_and_the_processor` (red with the rung
   skipped — report #037's own refusal — and red without the whole-card placement message),
   `a_range_loads_where_the_daemon_placed_it_and_any_other_as_the_spawn_said` (red with the table
-  ignored). The planner's bound is unchanged (gotcha #806). What is left is #291.
+  ignored). Checked on this RTX card the same day in report #037's shape (one part held by a second
+  node, so the worker takes a second run): v0.3.240 refused it ("need about 8584 MB more"), the fix
+  placed it across the card and the processor (4,205 / 4,379 MB) and answered. The planner's bound
+  is unchanged (gotcha #806). What is left is #291.
 - #290 — **A connection that has just died no longer reads as a peer that stopped answering.** The
   live node logged "Peer has not answered 20 requests in a row — closing the connection" 16 times
   on 2026-10-16 between 06:51 and 07:20 (1-2 a day before), mostly against field report #037's

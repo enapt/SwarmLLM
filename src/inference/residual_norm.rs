@@ -68,6 +68,12 @@ impl RmsNorm {
         Ok(Self { weight, eps })
     }
 
+    /// A norm over a weight already built — Gemma 4's router norm, whose
+    /// weight is the file's `ffn_gate_inp.scale` folded with `1/√n_embd`.
+    pub(crate) fn new(weight: Tensor, eps: f64) -> Self {
+        Self { weight, eps }
+    }
+
     /// This norm with its weight sent to `card` as a processor-held layer's
     /// prompt copies are (`layers::sent_to_card`) — that layer run on the card
     /// for one prompt chunk (`layers::LayerOnTheCard`).
