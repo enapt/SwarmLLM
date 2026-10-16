@@ -4053,6 +4053,39 @@ clean up on those two events as well as on a close.
 
 → `docs/invariants/network.md` § "A connection the swarm denied is forgotten"
 
+## A connection that just died is not a peer that stopped answering (2026-10-16, FUTURE_WORK #290)
+
+`NetworkManager::note_rr_failure` closes a connection after a run of request
+failures (20, or 8 after 90 s with no answer at all). It exists for ONE
+condition: libp2p keeps a TCP+yamux connection up indefinitely while every
+request on it times out, and the scheduler reads "connected" as "alive". The
+thresholds were measured on runs of such failures (the anchor's worst healthy
+run 5, departed peers 34-121).
+
+It counted every `OutboundFailure`, and a connection the TRANSPORT loses fails
+every request in flight on it at once — QUIC (quinn) reports `ConnectionLost` as
+`io::ErrorKind::NotConnected`, yamux a write on a closed connection as
+`WriteZero` and a read as EOF — and request-response delivers those failures
+BEFORE the swarm's `ConnectionClosed`, the event that resets the count. Twenty
+requests in flight were therefore "twenty unanswered". The live node's log on
+2026-10-16: 16 warnings in half an hour, 14 sharing their microsecond with an
+`io_error` close, 11 of the 14 logged failures "connection lost". One close
+(`reason=clean_close`, `remaining=0` after an `io_error` with `remaining=1`) was
+the guard taking down the peer's OTHER, healthy connection: `disconnect_peer_id`
+closes all of them.
+
+**`failure_counts_as_silence`** now decides, inside `note_rr_failure` so no
+caller can skip it: `Timeout` counts, and `UnsupportedProtocols` as before
+(permanent — nothing to wait for); a closed connection, a failed dial and every
+I/O failure do not. Lighthouse's peer manager makes the same cut
+(`handle_rpc_error`: "No penalty for a graceful disconnection"; an I/O error is
+tolerated because "this could their fault or ours"). A dead TCP return path
+still times out, so the condition the guard was built for is still caught.
+What is not shown: that a false close ever cost a request. The fleet's warning
+count after the release is the check.
+
+→ `.claude/rules/arch-network.md` § "A request failure closes a connection only when it means silence"
+
 ## A split token crosses on the pipeline stream, keyed by (request, peer) (2026-09-27)
 
 `inference.persistent_pipeline_stream` is 2.4x per token on a 412 ms link (1.19 →

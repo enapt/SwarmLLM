@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #290**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #291**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -59,27 +59,31 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
-6. **#115** — Gemma 4's other sizes: (3b) the 26B-A4B (a user's request: a dense feed-forward
+6. **#265** — a node holding PART of a model on a card/processor split fails the request when the
+   plan gives it a second run of layers: the worker charges every later range to the card alone
+   (field report #037, twice, 2026-10-16 — a whole copy ran locally in 6.7 s). Ranked above new
+   models because the node said it could serve and then did not.
+7. **#115** — Gemma 4's other sizes: (3b) the 26B-A4B (a user's request: a dense feed-forward
    beside routed experts in every layer) and (3c) E2B/E4B (the sizes small computers pick:
    per-layer token embeddings, shared KV layers); then the Gemma 3/4 vision projectors and the
    drafters. All are refused by name today, never loaded wrong.
-7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 6.7 KB/s on the .240
+8. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 6.7 KB/s on the .240
    fleet (8.8 on .239), ~3 copies of each message (from ~6.3), measured 2026-10-16. The manifests
    are 84% of the gossip sent: next (2) announce-then-pull for manifests.
-8. **#251** — `owned_by: "local"` reads as "my data stays here": keep-on-this-computer per request
+9. **#251** — `owned_by: "local"` reads as "my data stays here": keep-on-this-computer per request
    on every surface, and the route on a streamed `/v1/responses` and in MCP.
-9. **#252** — a peer's measured context is not gossiped, so a planner cannot size a peer's share
+10. **#252** — a peer's measured context is not gossiped, so a planner cannot size a peer's share
    before asking ((a) parked: no named client reads the listed context).
-10. **#3**, **#180** — the routing cost model mis-prices a split by regime (one peer's fit,
+11. **#3**, **#180** — the routing cost model mis-prices a split by regime (one peer's fit,
     2026-10-15: a measured per-visit hop 0.78, a `net:0` hop 1.53 under-priced, drafter arms 0.39
     unpriced), which keeps partial ranges off; fit per term from a second peer's traffic and
     several reply lengths, never tune the constant.
-11. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
+12. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
-12. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
+13. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
-13. **#228** — Qwen 3.5 without speculation (its state cannot be wound back yet).
-14. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
+14. **#228** — Qwen 3.5 without speculation (its state cannot be wound back yet).
+15. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
     decision, with research, when picked up.
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
@@ -2397,7 +2401,23 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-16, not yet released** (#286, #287, #288, #289)
+**Closed 2026-10-16, not yet released** (#286, #287, #288, #289, #290)
+- #290 — **A connection that has just died no longer reads as a peer that stopped answering.** The
+  live node logged "Peer has not answered 20 requests in a row — closing the connection" 16 times
+  on 2026-10-16 between 06:51 and 07:20 (1-2 a day before), mostly against field report #037's
+  node. In 14 of them the warning and an `io_error` close share the same microsecond: the transport
+  had lost the connection, every request in flight on it failed at once (QUIC's `Io(NotConnected)`
+  "connection lost" — 11 of the 14 logged failure lines; 3 were timeouts), and those failures
+  reach the guard BEFORE the close event that resets its count. Once (07:19:40) the peer had a
+  second connection, and the guard's `disconnect_peer_id` closed that live one too
+  (`reason=clean_close`). The guard is for a connection that stays up while nothing comes back, so
+  it now counts only `Timeout` (and `UnsupportedProtocols`, as before) — decided inside
+  `note_rr_failure` (`failure_counts_as_silence`), the one entry point. Lighthouse's peer manager
+  draws the same line (`handle_rpc_error`: no penalty for a disconnection). The thresholds (20, 8
+  after 90 s) were measured on runs of timeouts and are unchanged. Test
+  `a_connection_the_transport_lost_is_not_counted_as_a_silent_peer`. Not shown: whether the warning
+  ever closed a connection that would otherwise have recovered — the fleet's warning count after
+  the release is the check.
 - #287 — **A prompt is no longer priced from a forward that timed a load or a round trip.** Field
   report #037: a 5-segment route was predicted `predicted_ms=63844516` (17.7 h) with
   `prompt:63277600`, and took 145 s. The prompt term multiplies a measured ms per (layer × byte) by

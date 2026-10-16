@@ -358,7 +358,7 @@ impl NetworkManager {
                         "DIAG: OutboundFailure"
                     );
                 }
-                self.note_rr_failure(peer);
+                self.note_rr_failure(peer, &error);
                 // Check if this was a pending tensor forward — notify the pipeline
                 if let Some((inference_uuid, sent_at, _target, _, _)) =
                     self.pending_tensor_outbound.remove(&request_id)

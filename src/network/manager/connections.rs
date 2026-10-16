@@ -53,6 +53,33 @@ fn redial_addresses(
     out
 }
 
+/// Does this request failure count towards closing the peer's connection?
+///
+/// The counter exists for ONE condition: a connection that stays up while
+/// nothing comes back on it. Only a `Timeout` says that — the request went out
+/// and no answer arrived. `UnsupportedProtocols` keeps counting as it always
+/// has: it is permanent, so there is nothing to wait for.
+///
+/// Everything else is the transport reporting that the connection or the
+/// stream already broke, and closing it again fixes nothing. A connection the
+/// transport lost fails every request still in flight on it at once — QUIC as
+/// `Io(NotConnected)` ("connection lost"), yamux as `Io(WriteZero)`
+/// ("connection is closed") or an EOF, the rest as `ConnectionClosed` — and
+/// they reach us BEFORE the close event that resets the count. On 2026-10-16
+/// that was 14 of the live node's 16 "has not answered 20 requests in a row"
+/// warnings: twenty requests in flight on a connection that had just died, not
+/// a silent peer. In one, the peer had a second connection, and the close
+/// took that healthy one down too. Lighthouse's peer manager draws the same
+/// line (`handle_rpc_error`): no penalty for a disconnection, a tolerated one
+/// for an I/O error.
+fn failure_counts_as_silence(error: &libp2p::request_response::OutboundFailure) -> bool {
+    use libp2p::request_response::OutboundFailure;
+    matches!(
+        error,
+        OutboundFailure::Timeout | OutboundFailure::UnsupportedProtocols
+    )
+}
+
 /// Should a peer with this failure run, silent for this long, be disconnected?
 ///
 /// Two ways in, because the two signals fail differently. A long run alone
@@ -776,7 +803,18 @@ impl NetworkManager {
     /// forward legitimately keeps a node busy for minutes, and tearing down the
     /// connection mid-pipeline would fail a request that was about to succeed —
     /// the same exemption `check_peer_health` already makes for staleness.
-    pub(super) fn note_rr_failure(&mut self, peer: libp2p::PeerId) {
+    ///
+    /// Only a failure that means silence is counted (`failure_counts_as_silence`)
+    /// — the decision is made here, so a caller cannot count a connection the
+    /// transport already lost.
+    pub(super) fn note_rr_failure(
+        &mut self,
+        peer: libp2p::PeerId,
+        error: &libp2p::request_response::OutboundFailure,
+    ) {
+        if !failure_counts_as_silence(error) {
+            return;
+        }
         let now = std::time::Instant::now();
         let entry = self.rr_failures.entry(peer).or_insert((0, now));
         entry.0 += 1;
@@ -934,10 +972,45 @@ mod redial_address_tests {
     use libp2p::Multiaddr;
 
     use super::{
-        should_close_unresponsive, MAX_CONSECUTIVE_RR_FAILURES, RR_FAILURES_AFTER_SILENCE,
-        RR_SILENCE_BEFORE_SHORT_RUN_COUNTS,
+        failure_counts_as_silence, should_close_unresponsive, MAX_CONSECUTIVE_RR_FAILURES,
+        RR_FAILURES_AFTER_SILENCE, RR_SILENCE_BEFORE_SHORT_RUN_COUNTS,
     };
     use std::time::Duration;
+
+    /// A connection the transport has lost fails every request in flight on it
+    /// at once; those failures must not read as a peer that stopped answering
+    /// (14 of 16 warnings on 2026-10-16), or the close takes down the peer's
+    /// other, healthy connection.
+    #[test]
+    fn a_connection_the_transport_lost_is_not_counted_as_a_silent_peer() {
+        use libp2p::request_response::OutboundFailure;
+        use std::io::{Error, ErrorKind};
+        assert!(failure_counts_as_silence(&OutboundFailure::Timeout));
+        assert!(failure_counts_as_silence(
+            &OutboundFailure::UnsupportedProtocols
+        ));
+        for (what, failure) in [
+            ("closed", OutboundFailure::ConnectionClosed),
+            ("never dialled", OutboundFailure::DialFailure),
+            (
+                "QUIC connection lost",
+                OutboundFailure::Io(Error::new(ErrorKind::NotConnected, "connection lost")),
+            ),
+            (
+                "yamux connection closed",
+                OutboundFailure::Io(Error::new(ErrorKind::WriteZero, "connection is closed")),
+            ),
+            (
+                "stream ended",
+                OutboundFailure::Io(Error::from(ErrorKind::UnexpectedEof)),
+            ),
+        ] {
+            assert!(
+                !failure_counts_as_silence(&failure),
+                "a {what} failure is the transport's report, not the peer's silence"
+            );
+        }
+    }
 
     /// The anchor — a healthy, critical relay — was measured reaching 5
     /// consecutive failures in normal operation. Neither route to closing may

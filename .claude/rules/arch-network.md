@@ -103,6 +103,12 @@ Streaming rr sends MUST set `SendDirectMessage.delivery_request_id = Some(uuid)`
 
 → `docs/invariants/network.md` § "A connection the swarm DENIED is forgotten by request-response"
 
+## A request failure closes a connection only when it means silence (2026-10-16, #290)
+
+**`connections::failure_counts_as_silence`**, asked inside `note_rr_failure`: only `Timeout` (and `UnsupportedProtocols`) count. A connection the transport lost fails every in-flight request at once, BEFORE `ConnectionClosed` resets the count, and `disconnect_peer_id` then closes the peer's other connections too.
+
+→ `docs/invariants/network.md` § "A connection that just died is not a peer that stopped answering"
+
 ## A split keeps its conversation's prompt between turns (2026-10-09, #10)
 
 **`pipeline::split_prompt_cache`** decides: a prompt pass carries a `PromptCacheHint` (keyed block chain, vLLM's rule; `resume_at` from an optimistic belief table) when EVERY remote segment advertises `features::SPLIT_PROMPT_CACHE`; wire trailers `0x0D` (forward, bound in the AAD) and `0x09` (blocks stored). The head gets TOKEN IDS from `resume_at`, never text. A miss is one retry from 0, never a penalty. A/B `SWARMLLM_SPLIT_PROMPT_CACHE=0`; rig `split_rig.sh splitcache`.
