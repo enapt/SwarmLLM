@@ -20,13 +20,12 @@ same-topology control.
 usage: score_against_reference.py [--lora adapter.gguf] [--system TEXT] [--n-ctx N] <model.gguf> <replies.jsonl> <prompt-file> [label ...]
   --lora         score against the model WITH this adapter applied by llama.cpp
                  (`peft_lora_to_gguf.py` makes one from a PEFT adapter).
-  --system       render a system turn first. The node supplies
-                 `chat_template::DEFAULT_SYSTEM_PROMPT` ("You are a helpful
-                 assistant.") to a template that expects a system turn and writes
-                 none of its own — TinyLlama, Phi-3.5 — so scoring their replies
-                 without it scores them against a prompt they were never given.
+  --system       render a system turn first — only when the replies were asked
+                 with one. The node adds none of its own (FUTURE_WORK #284; until
+                 2026-10-16 it gave TinyLlama, Phi-3.5, Phi-4-mini, GLM-4, Qwen3 and
+                 Gemma 4 "You are a helpful assistant.", so score a reply from an
+                 older build with `--system "You are a helpful assistant."`).
                  Check: "prompt tokens" must equal the node's `usage.prompt_tokens`.
-                 Phi-4-mini and GLM-4 get it too (their prompt count is 8 short without).
   --n-ctx        llama.cpp's context size, default 8192 — the node's default
                  served window. NOT only a capacity: for a LongRoPE model (Phi-3.5,
                  Phi-4-mini — `phi3` arch) llama.cpp picks the SHORT rotary factors

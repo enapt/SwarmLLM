@@ -1403,11 +1403,12 @@ on the failure path**, after `apply_chat_template` has already declined. That
 placement is the point: the template has answered the question for itself, so a
 model that renders a system turn today cannot have its prompt changed by this.
 
-**It is deliberately not keyed on `template_expects_system`.** That predicate
-answers false for ANY template containing `raise_exception`, including ones that
-raise only on role alternation. Conservative is right when deciding whether to
-ADD a default system prompt — the question it was written for — and wrong as
-grounds for rewriting a prompt that already renders.
+**It was deliberately not keyed on `template_expects_system`** (deleted with the
+default system prompt it gated, #284). That predicate answered false for ANY
+template containing `raise_exception`, including ones that raise only on role
+alternation — conservative for deciding whether to ADD a system turn, wrong as
+grounds for rewriting a prompt that already renders. Key a retry on the render's
+own failure, never on a guess about the template's text.
 
 A conversation with no user turn answers `None` and takes the fallback, which
 does render a system turn: losing what the system message said is worse than
@@ -1427,6 +1428,48 @@ rendered through a FALLBACK instead of the model's own template.
 **`chat_template::fold_system_into_first_user`** moves the system text into the
 first user turn, as a RETRY after the render has already declined, so a template
 that renders a system turn today is untouched.
+
+## A model is shown no system turn the caller did not send
+
+(2026-10-16, FUTURE_WORK #284; history #100.) Hugging Face's
+`apply_chat_template`, llama.cpp, vLLM and Ollama render exactly the messages
+they are given; a template's OWN default (Qwen2.5's "You are Qwen, created by
+Alibaba Cloud…", Llama-3.x's knowledge-date header) is the template's decision.
+This node used to add "You are a helpful assistant." whenever the template wrote
+no default of its own — a rescue for TinyLlama answering a bare question with
+nothing — and that rule reached Qwen3, Gemma 4, Phi-3.5, Phi-4-mini, GLM-4 and
+TinyLlama: six families asked every plain question with a turn no other runtime
+shows them, so a reply here could not be compared with theirs.
+
+**What replaced it**: `chat_template::without_blank_system_turns` — the only
+system-message rewrite left. A BLANK caller system message is dropped so a
+template's own default applies instead of an empty turn; nothing is ever added.
+
+**Evidence** (isolated node, `examples/reply_ab.sh`, processor, greedy, vs
+llama.cpp on the real files, `~/swarmllm-ref/ref_all.jsonl`):
+- The rescue's reason is gone: TinyLlama answers "What is the capital of
+  France?" with "The capital of France is Paris." — identical to llama.cpp, as
+  are Phi-3.5, Phi-4-mini and GLM-4.
+- Phi-4-mini's code reply moved TO llama.cpp's: with the turn it differed from
+  the first word; without it, 232 characters in common and 94 of 95 tokens
+  llama.cpp's top choice (`examples/score_against_reference.py`, worst a
+  0.075-logit rank 2). GLM-4's: every token past the first within 0.71 logits of
+  llama.cpp's pick (the first, 17.8 for Phi-3.5 and GLM-4 alike, is llama.cpp's
+  leading "\n", which a reply never opens with — `REPLY_LEADING_WHITESPACE`).
+- TinyLlama's code reply parts from llama.cpp's at token 7, " returns" vs
+  " calculates" — llama.cpp scores them 14.160 / 14.148, a near-tie any
+  arithmetic difference flips. The scorer cannot show this one: it re-tokenizes
+  the reply text, and SentencePiece splits " calculates" as " calculate" + "s",
+  ranking pieces the model never generated (rank 103 and 35). Read the logits at
+  the step instead.
+
+⚠ **Score a reply with the prompt it was asked**: a reply from a build before
+2026-10-16 on those six families needs `--system "You are a helpful assistant."`;
+"prompt tokens" must equal the node's `usage.prompt_tokens`.
+
+Guard: `a_template_with_no_system_turn_of_its_own_is_given_none` (TinyLlama, plus
+Gemma 4's, GLM-4's and Qwen3's shipped templates byte-exact against jinja2; red
+with the old injection restored); `a_template_that_writes_its_own_system_turn_keeps_it`.
 
 ## Chat templates render on minijinja, not on a subset of our own
 

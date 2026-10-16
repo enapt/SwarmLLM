@@ -1864,18 +1864,6 @@ logit-bias path to put it on: it wants one mask applied where every sampler call
 (local, split, remote, speculative) already passes, not one per path. A text chat practically
 never reaches either token.
 
-#### #284 — Newer templates with no system turn of their own are given ours; llama.cpp gives none
-`P3` · api · **OPEN** — 2026-10-16 · history: #100 (archive) chose the rule
-
-`chat_template::system_turn_for_template` supplies `DEFAULT_SYSTEM_PROMPT` ("You are a helpful
-assistant.") when the caller sends no system message and the template writes none of its own —
-#100's rule, kept for TinyLlama, which answers a bare question with nothing, and Phi-3.5. Gemma 4
-with no tools falls under it, so every plain Gemma 4 chat opens with a system turn llama.cpp
-(and HF's `apply_chat_template`) never add; Qwen3 likely does too, unchecked. Next: measure the
-reply to a bare question on Gemma 4 and Qwen3, with and without the turn, against llama.cpp, and
-narrow the rescue to the templates that need it (a model that answers nothing without one),
-never by family name.
-
 #### #185 — Three API surfaces each implement streaming and non-streaming replies separately
 `P3` · api · **OPEN** — 2026-07-26 · history: archive § "Collapse the parallel response paths behind one core loop"
 
@@ -2408,7 +2396,22 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel, #283, #281 (1), #281 (2), #281 (3), #281 (4), #281 (5) — #281 closed)
+**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel, #283, #281 (1), #281 (2), #281 (3), #281 (4), #281 (5) — #281 closed, #284)
+- #284 — **A plain chat reaches Qwen3, Gemma 4, Phi-3.5, Phi-4-mini, GLM-4 and TinyLlama the way
+  llama.cpp shows it.** A request with no system message was given "You are a helpful assistant."
+  whenever the model's template wrote no system turn of its own (#100's rule, kept for a TinyLlama
+  failure); Hugging Face's `apply_chat_template`, llama.cpp, vLLM and Ollama add none, so those six
+  families were asked every plain question with a turn they are never shown elsewhere. Now
+  nothing is added (`chat_template::without_blank_system_turns` only drops a BLANK caller system
+  message, so a template's own default — Qwen2.5's, Llama-3.x's — still applies). TinyLlama's old
+  failure no longer reproduces. Measured on an isolated node (`examples/reply_ab.sh`, processor,
+  greedy) against llama.cpp on the real files: "What is the capital of France?" identical on
+  TinyLlama, Phi-3.5, Phi-4-mini and GLM-4; Phi-4-mini's code reply now agrees with llama.cpp's
+  for 232 characters, 94 of 95 tokens its top pick, worst a 0.075-logit rank 2 (with the turn:
+  differed from the first word); TinyLlama's code reply parts from llama.cpp's at "returns" /
+  "calculates", which llama.cpp itself scores 14.160 / 14.148. Byte-exact renders of Gemma 4's,
+  GLM-4's and Qwen3's shipped templates against jinja2 pin it
+  (`a_template_with_no_system_turn_of_its_own_is_given_none`, red with the turn restored).
 - #281 (5) — **A long Gemma conversation is kept for the next turn again.** The prefix cache sized
   a snapshot by its byte budget over what a position weighs on EVERY layer
   (`PrefixCache::positions_ceiling`), but a snapshot copies a slid windowed layer only from where

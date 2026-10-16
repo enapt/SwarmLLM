@@ -156,15 +156,10 @@ pub(super) fn vicuna_fallback(messages: &[ChatMessage]) -> String {
 /// one-word question with a `<|user|>` marker and an unrelated question of its
 /// own. A model answers in whatever format it was asked in (gotcha #169).
 ///
-/// These models are trained with a system turn present, so one is always
-/// emitted — matching `build_prompt_with_model`, which supplies a neutral
-/// default when the caller sends none.
+/// No system turn unless the caller sent one — what TinyLlama's own template
+/// renders, and what llama.cpp gives it (FUTURE_WORK #284).
 pub(super) fn zephyr_fallback(messages: &[ChatMessage]) -> String {
     let mut prompt = String::new();
-    let has_system = messages.iter().any(|m| matches!(m.role, Role::System));
-    if !has_system {
-        prompt.push_str("<|system|>\nYou are a helpful assistant.</s>\n");
-    }
     for msg in messages {
         let role = match msg.role {
             Role::System => "system",

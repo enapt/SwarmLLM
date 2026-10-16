@@ -1331,24 +1331,6 @@ fn bare_user() -> Vec<ChatMessage> {
 
 const TINYLLAMA_TMPL: &str = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}";
 
-/// TinyLlama answers a bare user question with nothing but a `<|user|>` turn
-/// marker; the same question with a system message is answered normally.
-#[test]
-fn system_message_injected_for_zephyr_template() {
-    let out = build_prompt_with_model(
-        &bare_user(),
-        Some(TINYLLAMA_TMPL),
-        "<s>",
-        "</s>",
-        None,
-        None,
-    );
-    assert!(
-        out.contains("<|system|>"),
-        "expected an injected system turn, got: {out:?}"
-    );
-}
-
 /// Gemma and Mistral declare no system role via `raise_exception`. Our
 /// evaluator treats that as a silent skip, so injecting would quietly render a
 /// turn the model was never trained on rather than failing loudly.
@@ -1469,13 +1451,13 @@ fn caller_system_message_is_preserved() {
     ];
     let out = build_prompt_with_model(&msgs, Some(TINYLLAMA_TMPL), "<s>", "</s>", None, None);
     assert!(out.contains("You are a pirate."), "got: {out:?}");
-    assert!(!out.contains(DEFAULT_SYSTEM_PROMPT), "got: {out:?}");
+    assert_eq!(out.matches("<|system|>").count(), 1, "got: {out:?}");
 }
 
-/// A blank system message renders an empty system turn, which reproduces the
-/// original failure — treat it as absent.
+/// A blank system message is treated as absent: no empty system turn, and
+/// nothing put in its place.
 #[test]
-fn blank_system_message_is_replaced() {
+fn a_blank_system_message_is_left_out() {
     let msgs = vec![
         ChatMessage {
             role: Role::System,
@@ -1491,7 +1473,8 @@ fn blank_system_message_is_replaced() {
         },
     ];
     let out = build_prompt_with_model(&msgs, Some(TINYLLAMA_TMPL), "<s>", "</s>", None, None);
-    assert!(out.contains(DEFAULT_SYSTEM_PROMPT), "got: {out:?}");
+    assert!(!out.contains("<|system|>"), "got: {out:?}");
+    assert!(out.contains("<|user|>\nHi"), "got: {out:?}");
 }
 
 /// Qwen2.5's real template, no-tools path: it writes its OWN system turn when
@@ -1562,10 +1545,16 @@ fn a_template_that_writes_its_own_system_turn_keeps_it() {
         None,
     );
     assert!(llama.contains("Cutting Knowledge Date"), "{llama:?}");
-    assert!(!llama.contains(DEFAULT_SYSTEM_PROMPT), "{llama:?}");
+    assert!(!llama.contains("You are a helpful assistant."), "{llama:?}");
+}
 
-    // THE CONTROL — a template with no default of its own still gets ours,
-    // which is what stops TinyLlama answering a bare question with nothing.
+/// **FUTURE_WORK #284: a template with no system turn of its own is given
+/// none.** HF's `apply_chat_template` and llama.cpp render TinyLlama's, Qwen3's
+/// and Gemma 4's bare question with no system turn; ours added "You are a
+/// helpful assistant." to every one, for a TinyLlama failure that no longer
+/// reproduces (it answers as llama.cpp does without one).
+#[test]
+fn a_template_with_no_system_turn_of_its_own_is_given_none() {
     let tiny = build_prompt_with_model(
         &bare_user(),
         Some(TINYLLAMA_TMPL),
@@ -1574,7 +1563,31 @@ fn a_template_that_writes_its_own_system_turn_keeps_it() {
         None,
         None,
     );
-    assert!(tiny.contains(DEFAULT_SYSTEM_PROMPT), "{tiny:?}");
+    assert!(!tiny.contains("<|system|>"), "{tiny:?}");
+    assert!(tiny.starts_with("<|user|>\n"), "{tiny:?}");
+
+    // The real files' templates, against jinja2's render of the same bare
+    // question (HF's engine, 2026-10-16) — byte for byte.
+    for (template, bos, expected) in [
+        (
+            include_str!("fixtures/gemma4_gguf_shipped.jinja"),
+            "<bos>",
+            "<bos><|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+        ),
+        (
+            include_str!("fixtures/glm4_gguf_shipped.jinja"),
+            "[gMASK]<sop>",
+            "[gMASK]<sop><|user|>\nHi<|assistant|>",
+        ),
+        (
+            include_str!("fixtures/qwen3_gguf_shipped.jinja"),
+            "",
+            "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n",
+        ),
+    ] {
+        let ours = build_prompt_with_model(&bare_user(), Some(template), bos, "", None, None);
+        assert_eq!(ours, expected);
+    }
 }
 
 /// TinyLlama's name matches none of the other families, so without a Zephyr
@@ -1603,8 +1616,8 @@ fn tinyllama_without_a_template_gets_zephyr_not_chatml() {
         "must NOT fall through to ChatML: {out:?}"
     );
     assert!(
-        out.contains("<|system|>"),
-        "Zephyr models are trained with a system turn: {out:?}"
+        !out.contains("<|system|>"),
+        "no system turn the caller did not send, as the real template: {out:?}"
     );
 }
 
