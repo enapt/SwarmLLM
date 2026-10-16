@@ -2103,7 +2103,12 @@ async fn handle_forward(
                     &req_id_str,
                     restoring + positions,
                     REPLY_RESERVE_POSITIONS,
-                    input_positions,
+                    width_handed_to_the_caches(
+                        tp_meta.is_some(),
+                        pre_embedded,
+                        vision_tensor.is_some(),
+                        input_positions,
+                    ),
                 )?;
             }
         }
@@ -3297,10 +3302,36 @@ pub(crate) fn first_segment_input_is_text(
     index_pos == 0 && !resumes_a_kept_prompt && !is_a_piece
 }
 
-/// `forward_width` is how many positions the forward asking reads at once,
-/// where that is not this node's own choice (a coordinator's piece of a
-/// prompt, which a windowed layer's cache must hold beside its window,
-/// FUTURE_WORK #281); 0 where it is (`SplitModel::widest_prompt_forward`).
+/// How many positions a coordinator's forward of `input_positions` hands a
+/// windowed layer's cache at once — what that cache must hold beside its
+/// window (FUTURE_WORK #281) — where that is wider than this worker's own
+/// prompt chunk; 0 where it is not (`SplitModel::widest_prompt_forward`,
+/// which the model's budget already allows for).
+///
+/// `handle_forward` runs a prompt in the worker's own chunks
+/// (`forward_prompt_in_chunks`, cut at `prompt_chunk_ceiling` — the rule
+/// `widest_prompt_forward` reads) unless it is a tensor-parallel phase or an
+/// image's prompt (`forward_multimodal`), which run the whole input in ONE
+/// pass — the same three facts, in the same order, its run branches on.
+/// Widened to every forward's width, as it was, a peer handed a long prompt
+/// was admitted as if its windowed layers kept every position of it.
+fn width_handed_to_the_caches(
+    tensor_parallel: bool,
+    pre_embedded: bool,
+    has_image: bool,
+    input_positions: usize,
+) -> usize {
+    let one_pass = tensor_parallel || (!pre_embedded && has_image);
+    if one_pass {
+        input_positions
+    } else {
+        0
+    }
+}
+
+/// `forward_width` is how many positions the forward asking hands a windowed
+/// layer's cache at once where that is wider than this worker's own chunk
+/// ([`width_handed_to_the_caches`]); 0 where it is not.
 fn ensure_room_for_prompt(
     model: &SplitModel,
     kv_store: &KvCacheStore,
@@ -6834,5 +6865,57 @@ mod cancel_release_tests {
         conversation(&store, &ended);
         release_caches_of_cancelled(&cancelled, &mut released, &store);
         assert!(store.request_holds_state("m", &ended.to_string()));
+    }
+}
+
+#[cfg(test)]
+mod forward_width_tests {
+    use super::*;
+    use crate::inference::split::kv_budget::KvGrowth;
+    use crate::inference::split::tests::gemma2::windowed_model_with_budget;
+
+    /// **A coordinator's long forward is read in this worker's own chunks**,
+    /// so a windowed layer is admitted at its window and one chunk, never the
+    /// whole forward (#281 (4)): a peer handed a 4,096-position prompt in one
+    /// forward was admitted as if its windowed layers kept every position.
+    /// An image's prompt and a tensor-parallel phase run in ONE pass, and are
+    /// charged their whole width.
+    #[test]
+    fn a_long_forward_read_in_chunks_is_admitted_at_its_window() {
+        let prompt = 4096;
+        assert_eq!(width_handed_to_the_caches(false, false, false, prompt), 0);
+        assert_eq!(width_handed_to_the_caches(false, true, true, prompt), 0);
+        assert_eq!(
+            width_handed_to_the_caches(false, false, true, prompt),
+            prompt
+        );
+        assert_eq!(
+            width_handed_to_the_caches(true, false, false, prompt),
+            prompt
+        );
+
+        let admitted = |width: usize| {
+            let quantum = crate::inference::layers::kv_growth_quantum(8192);
+            // Room for the global layer's every position and the windowed
+            // one's window and a chunk — not for both keeping every position.
+            let model = windowed_model_with_budget(
+                8192,
+                &[Some(64), None],
+                KvGrowth::with_window(1000, 1000, 64, quantum),
+                7_000_000,
+            );
+            let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+            let pc = PrefixCache::new(true, 8, 0, 4, 8192, 0);
+            ensure_room_for_prompt(&model, &kv, &pc, "r", prompt, 0, width).is_ok()
+        };
+        let read_in_chunks = width_handed_to_the_caches(false, false, false, prompt);
+        assert!(
+            admitted(read_in_chunks),
+            "a text prompt read in chunks fits"
+        );
+        assert!(
+            !admitted(prompt),
+            "control: charged the whole forward, the same prompt does not"
+        );
     }
 }

@@ -19,7 +19,7 @@ mod prefix_cache;
 mod rope;
 mod shard_reader;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod token_embedding;
 
 // Re-export types from extracted modules so external `crate::inference::split::X` paths still work.

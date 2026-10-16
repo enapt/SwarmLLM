@@ -662,6 +662,22 @@ fn gemma2_model_of_context(layers: usize, context: usize) -> SplitModel {
     model
 }
 
+/// [`gemma2_model_of_context`] with `windows`, its caches priced at `growth`
+/// against a KV budget of `budget` bytes — for an admission test outside
+/// `split`, which cannot reach those fields.
+pub(crate) fn windowed_model_with_budget(
+    context: usize,
+    windows: &[Option<usize>],
+    growth: crate::inference::split::kv_budget::KvGrowth,
+    budget: u64,
+) -> SplitModel {
+    let mut model = gemma2_model_of_context(windows.len(), context);
+    set_windows(&mut model, windows);
+    model.kv_growth = growth;
+    model.kv_budget_bytes = Some(budget);
+    model
+}
+
 /// `hidden` from position 0 in `chunk`-position forwards into `kv`, then one
 /// position at a time for the last `steps`.
 fn read_then_decode(

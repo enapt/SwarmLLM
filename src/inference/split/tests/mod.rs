@@ -14,7 +14,7 @@
 mod common;
 mod core;
 mod drafting;
-mod gemma2;
+pub(crate) mod gemma2;
 mod gqa;
 mod kv_refresh;
 mod llama4_glm4;

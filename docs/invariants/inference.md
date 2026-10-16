@@ -4293,8 +4293,14 @@ reach `keep + seq_len`), so a bound built from the window alone is wrong for a o
   `prefill_chunk_tokens` (`split::PROMPT_CHUNK_TOKENS`, set once in `run_worker`) through
   `prefill_pacer::widest_prompt_forward` — 512 on a card, up to `COPIED_CHUNK_MAX_TOKENS` on a
   split copying its weights, the context for 0 (one forward). `SplitModel::kv_budget` widens the growth to
-  it. A forward this node does not size — a coordinator's piece of a prompt — is admitted at
-  its own width (`ensure_room_for_prompt`'s `forward_width`).
+  it. A coordinator's forward is read in this worker's OWN chunks (`forward_prompt_in_chunks`,
+  the same ceiling), so it adds nothing; only a forward run in ONE pass — an image's prompt
+  (`forward_multimodal`) or a tensor-parallel phase — is admitted at its own width
+  (`model_worker::width_handed_to_the_caches` → `ensure_room_for_prompt`'s `forward_width`).
+  Until #281 (4) every coordinator's forward was widened to its whole width, so a peer handed a
+  4,096-position prompt in one forward was admitted as if its windowed layers kept every
+  position of it (`a_long_forward_read_in_chunks_is_admitted_at_its_window`, whose control is
+  that width refused).
 - Readers: the loader's affordable tokens (its log lines' `kv_bytes_per_position` is the
   figure while no window is full), admission (`admit_prompt_over` → `admit_prompt_in`
   promises `bytes_for(positions)`), the snapshot plan (`plan_snapshot`), the context reported
