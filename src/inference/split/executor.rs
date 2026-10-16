@@ -851,10 +851,26 @@ impl SplitModel {
             || crate::inference::prof::enabled()
             || crate::inference::prof::counting_kernels())
         .then(std::time::Instant::now);
+        // Build the cache key once — reused for the measure, the guard, take
+        // and writeback (zero alloc on hot path).
+        let cache_key = KvCacheStore::cache_key(&self.kv_model_key, request_id);
+        // What the first allocation of each layer's cache should cover: the
+        // admitted prompt plus its reply reserve, recorded by the worker in
+        // `ensure_room_for_prompt`; 0 — a cache built before the worker saw
+        // the prompt — means one quantum, grown from there as before.
+        let kv_reserve = kv_cache_store
+            .reserved_positions(request_id)
+            .min(self.max_seq_len);
         // What the card takes for a prompt forward of a split copying its
         // weights there sizes the next one (#138 (1e)); read before the
         // profile's report below resets the pool's high-water mark.
-        let prompt_measure = self.begin_prompt_measure(input.dim(1).unwrap_or(1));
+        let prompt_measure = self.begin_prompt_measure(
+            kv_cache_store,
+            &cache_key,
+            kv_reserve,
+            input.dim(1).unwrap_or(1),
+            index_pos,
+        );
         // Use component presence rather than layer indices for shard-aware is_first/is_last
         let is_first = self.tok_embeddings.is_some();
         let is_last = self.output.is_some();
@@ -924,47 +940,32 @@ impl SplitModel {
         // and THIS server cannot serve it right now. That is a 503, which is
         // what lets a coordinator route it to a peer that can — the reason a
         // swarm can refuse where vLLM has to preempt and recompute.
-        // Build the cache key once — reused for the guard, take and writeback
-        // (zero alloc on hot path).
-        let cache_key = KvCacheStore::cache_key(&self.kv_model_key, request_id);
-        // What the first allocation of each layer's cache should cover: the
-        // admitted prompt plus its reply reserve, recorded by the worker in
-        // `ensure_room_for_prompt`; 0 — a cache built before the worker saw
-        // the prompt — means one quantum, grown from there as before.
-        let kv_reserve = kv_cache_store
-            .reserved_positions(request_id)
-            .min(self.max_seq_len);
+        //
         // Every memory this segment's caches live in is asked — the card's,
         // and a card/processor split's machine memory too, each with its own
         // layers' bytes (#262).
         let mut claiming_once: Option<usize> = None;
         for home in self.kv_homes() {
-            let (Some(load_time_budget), growth) = self.kv_budget(home) else {
+            let (Some(load_time_budget), _) = self.kv_budget(home) else {
                 continue;
             };
             // Positions this forward newly ALLOCATES — zero for almost every
-            // decode step, and a whole prompt's worth on a prefill. Read off
-            // the buffer the request already holds, not derived from
-            // `index_pos`: a reserved cache is larger than the rounded
-            // position from its first append, and the old arithmetic charged
-            // a reply at every quantum boundary inside memory it already had.
+            // decode step, and a whole prompt's worth on a prefill; the old
+            // arithmetic, from `index_pos`, charged a reply at every quantum
+            // boundary inside memory it already had.
             let claiming = *claiming_once.get_or_insert_with(|| {
-                super::kv_budget::positions_to_allocate(
-                    kv_cache_store.allocated_positions(&cache_key),
-                    kv_reserve,
-                    total_seq,
-                    crate::inference::layers::kv_growth_quantum(self.max_seq_len),
-                )
+                self.kv_positions_a_forward_adds(kv_cache_store, &cache_key, kv_reserve, total_seq)
             });
             if claiming > 0 {
-                // What this forward's caches newly allocate here, read off
-                // their buffers — a sliding window's slide included, which no
-                // per-position rate sees (FUTURE_WORK #281). Before the first
-                // append there are no buffers: the model's estimate, for a
-                // forward this wide, prices the first allocation.
-                let claim = kv_cache_store
-                    .bytes_a_forward_adds(&cache_key, index_pos, seq_len, home)
-                    .unwrap_or_else(|| growth.widened_to(seq_len).bytes_for(claiming));
+                // What this forward's caches newly allocate here.
+                let claim = self.kv_bytes_a_forward_adds(
+                    kv_cache_store,
+                    &cache_key,
+                    index_pos,
+                    seq_len,
+                    claiming,
+                    home,
+                );
                 // A forward that allocates nothing here needs no room — a
                 // windowed cache reaching the end of its buffer slides in
                 // place — so it is never refused, nor its conversation cleared,
@@ -1423,7 +1424,13 @@ impl SplitModel {
         };
 
         if result.is_ok() {
-            self.end_prompt_measure(prompt_measure, seq_len, index_pos);
+            self.end_prompt_measure(
+                prompt_measure,
+                kv_cache_store,
+                &cache_key,
+                seq_len,
+                index_pos,
+            );
         }
         if let Some(start) = forward_start {
             let forward_ms = start.elapsed().as_millis() as u64;

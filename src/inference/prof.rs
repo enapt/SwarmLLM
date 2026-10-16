@@ -52,6 +52,10 @@ stages! {
     // in RAM — sent to the card and run there (FUTURE_WORK #138 (1)): routing,
     // the copies and the products.
     MoeSentToCard => "moe ffn of a processor layer, run on the card (prompt)",
+    // Inside `MoeSentToCard`, so left out of the sum: stacking the chosen
+    // experts on the card (`QTensor::stack_some`). Apart from the products
+    // only under `SWARMLLM_PROFILE_SYNC=1`, as `WeightsToCard` (#292).
+    ExpertsToCard => "  of which: the chosen experts copied to the card (prompt)",
     // Qwen 3.5's gated delta rule — the recurrence of three layers in four,
     // token by token until 2026-10-11 (FUTURE_WORK #228 (3)).
     DeltaRule  => "delta rule           (qwen 3.5 recurrent state)",
@@ -225,6 +229,7 @@ pub(crate) fn dump_and_reset(tag: &str, total_ms: f64, card: Option<&candle_core
     let nested = [
         Stage::WeightsToCard as usize,
         Stage::MoeCpuProducts as usize,
+        Stage::ExpertsToCard as usize,
     ];
     let summed: u64 = vals
         .iter()

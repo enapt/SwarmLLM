@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #292**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #294**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -59,10 +59,10 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
-6. **#115**, **#292** — Gemma 4's small sizes: (3c) E2B/E4B (the sizes small computers pick:
+6. **#115** — Gemma 4's small sizes: (3c) E2B/E4B (the sizes small computers pick:
    per-layer token embeddings, shared KV layers); then the Gemma 3/4 vision projectors and the
    drafters. All are refused by name today, never loaded wrong. The 26B-A4B runs since
-   2026-10-16, but its experts are slow on a card: their 32-block types (#292).
+   2026-10-16, its experts on the card since #292.
 7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 6.7 KB/s on the .240
    fleet (8.8 on .239), ~3 copies of each message (from ~6.3), measured 2026-10-16. The manifests
    are 84% of the gossip sent: next (2) announce-then-pull for manifests.
@@ -1200,27 +1200,19 @@ was measured against the never-repacked reference above. Not ours, and llama.cpp
 clocks down between steps of a split (255-600 MHz between 1755 MHz bursts), and back-to-back
 runs on this laptop heat it enough to slow a split step 133 → 185 ms within 40 tokens (gotcha #825).
 
-#### #292 — The card's expert kernels read no 32-block type but Q8_0, so a Gemma 4 26B-A4B's experts run one at a time on the card and read a prompt on the processor
-`P2` · speed · **OPEN** — 2026-10-16 · history: found checking #115 (3b)
+#### #293 — A split's first prompt chunk after load spends 1-6 s in its first attention, once its experts go to the card
+`P3` · speed · **OPEN** — 2026-10-16 · history: found measuring #292
 
-The 26B-A4B's down experts are 704 wide, not a multiple of 256, so llama.cpp's quantizer stores
-them in a 32-block type (`tensor_type_fallback` in `llama-quant.cpp`, master 2026-10-16): a
-Q2_K or Q3_K upload's become Q4_0, Q4_K's (Q4_K_M, the usual pick) Q5_0, Q5_K's Q5_1, the IQ
-types' IQ4_NL; only Q6_K's become Q8_0. `moe_gemm_gguf` (vendored
-`candle-kernels/src/moe/moe_gguf.cu`, and the prompt kernel `moe_wmma_gguf.cu`) reads Q8_0 and
-Q2_K-Q6_K only, so `StackedExperts::fit` refuses every such layer: (a) card-held experts run one
-expert at a time, and their layer stays out of the decode graph; (b) RAM-held experts are never
-given the prompt card (`let_processor_layers_read_prompts_on` asks
-`experts_could_stack_on_a_card`), so a prompt's experts run on the processor. Measured on this
-RTX 3070 Laptop with bartowski's Q2_K (`SWARMLLM_PROFILE=1`, 2026-10-16): a 512-token chunk
-took 10.4 s, 7.9 s of it "moe ffn on the processor" (20 card-held layers with their experts in
-RAM, 10 on the processor); a decode step 75-80 ms with 24-30 layers' experts in RAM, six layers'
-experts on the card 9.8 ms of it. Replies are right (#115 (3b)); this is speed. Next: Q4_0,
-Q4_1, Q5_0 and Q5_1 in the one-row kernel (a template over `block_q_t` + `vec_dot_*_q8_1`, all
-four already in `moe/gguf.cuh`) and a dequantize for each in the prompt kernel, IQ4_NL after; the
-type ids are mapped in the registry's `candle-nn` `moe::moe_gemm_gguf` (not vendored: vendor it,
-or call `candle_kernels::ffi` from `layers`); then judge against llama.cpp's card
-(`--n-cpu-moe`) on the Q2_K file and a Q4_K_M upload.
+Gemma 4 26B-A4B Q2_K, 30 layers on the card, a 1,527-token prompt in 512-token chunks (Windows up
+87 h, `~/swarmllm-g4/s292b/p_*.log`, `SWARMLLM_PROFILE=1`): the first chunk's "attention scores +
+softmax + AV" took 1.2-6.0 s in 11 of 12 runs whose RAM-held experts were read on the card (once
+38 ms), 41-196 ms in all 4 runs whose processor read them, and ~3 ms in every later chunk. A nsys
+trace of one card run showed `cudaLaunchKernel` taking 2,972 ms over its first launches. Not
+established: the cause. The guess is a first-use allocation outside the pool (cuBLAS workspace,
+a lazily loaded module — `CUDA_MODULE_LOADING=LAZY` is the default) meeting #292's WSL2 stall after
+pageable copies, which would make it a once-a-worker cost on any card model under WSL2. Next:
+nsys a card run and name the call; try `CUDA_MODULE_LOADING=EAGER` (and its memory) or one warm
+prompt-shaped forward at load; check a dense model on the card.
 
 #### #138 — A model that does not fit the card: MoE decode level with llama.cpp since 2026-10-11, a split's prompt read on the card since 2026-10-13, a 512-token forward 1.1-1.3x llama.cpp's
 `P2` · perf-local · **PARTIAL** — 2026-09-27 · history: archive row #138; plan: `docs/plans/faster_than_local.md` § 3.2
@@ -2408,7 +2400,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-16, not yet released** (#265, #286, #287, #288, #289, #290, #115 (3b))
+**Closed 2026-10-16, not yet released** (#265, #286, #287, #288, #289, #290, #115 (3b), #292)
 - #115 (3b) — **Gemma 4's 26B-A4B runs (text).** Every layer runs a dense GELU feed-forward
   BESIDE 128 GELU experts (8 per token), each branch with its own norms; the router reads its own
   norm of the layer's input with its own scale, and each expert's answer has its own scale; the
@@ -2423,8 +2415,26 @@ grep `^| N |`).
   own repacked-vs-plain 0.99895 / 0.99907. On the card with every layer's attention there and the
   experts in RAM, some on the card, or 10 layers on the processor: median 0.99856-0.99914, worst
   0.71-0.75 at `<bos>` where llama.cpp's own card reads 0.70 against its processor. Its experts
-  are slow on a card (32-block types the card kernel does not read): #292.
+  run on a card since #292 (below).
   `docs/invariants/inference.md` § "Gemma 4's 26B-A4B".
+- #292 — **Gemma 4's 26B-A4B reads a prompt with its experts in RAM twice as fast (each chunk
+  after the first 3x), and its card-held experts run as one launch.** Its down experts are stored in a 32-block type (Q4_0 in a
+  Q2_K or Q3_K upload, Q5_0 in Q4_K_M, Q5_1 in Q5_K) that the card's expert kernels did not read,
+  so a card ran them one expert at a time and RAM-held ones read a prompt on the processor
+  (~10 s a 512-token chunk). The vendored kernels read Q4_0, Q4_1, Q5_0 and Q5_1 now
+  (`layers::moe_card::kernel_type`, the one list; guard
+  `every_type_the_card_moe_kernels_are_handed_is_launched`); against llama.cpp the card reads every
+  worst and median inside llama.cpp's own card-vs-processor spread. Reading a prompt on the card
+  first came out SLOWER (23.6-24.8 s for the first chunk): under WSL2 the card's memory pool
+  stalls seconds whenever it grows after pageable copies. A prompt forward that copies weights to
+  the card now grows the pool once, beforehand, by what it will take — the cache it allocates
+  included (`SplitModel::prime_pool_for_prompt`, `SWARMLLM_PROMPT_POOL_PRIME=0`) — and the take it
+  is measured at no longer counts that cache, which charged a reserved request's whole cache to
+  every later chunk. With every expert in RAM a chunk now reads in 3.1-3.2 s after the first
+  (llama.cpp: 1.5 s), the first in 4.0-10.3 s — its spread is #293. IQ uploads (IQ4_NL down experts) do not load in this build
+  at all: the header probe refuses one before a byte moves. `docs/invariants/inference.md` § "The
+  card's expert kernels read the 32-block types" and § "A prompt forward that copies weights to
+  the card grows the card's pool once"; gotcha #883.
 - #265 — **A node holding part of a model across its graphics card and its processor no longer
   fails a request that gives it a second run of layers.** Field report #037 (RTX 3060 12 GB,
   Qwen3-30B-A3B, v0.3.239 and v0.3.240): the worker took the first run as a split (26 layers'

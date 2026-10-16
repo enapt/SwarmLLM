@@ -857,6 +857,146 @@ fn the_moe_prompt_kernel_guard_catches_the_pre_fix_loop() {
     assert!(moe_prompt_kernel_barrier_violation("no loop here").is_some());
 }
 
+/// The numbers `pattern` (`"case "`, `"gguf_type == "`) is followed by in the
+/// live code of `region` — `//` comments dropped.
+fn kernel_ids_after(region: &str, pattern: &str) -> std::collections::BTreeSet<i32> {
+    region
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .flat_map(|code| {
+            code.match_indices(pattern)
+                .map(|(at, _)| &code[at + pattern.len()..])
+        })
+        .filter_map(|rest| {
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            digits.parse().ok()
+        })
+        .collect()
+}
+
+/// Each id `kernel_type` (`src/inference/layers/moe_card.rs`) hands the card's
+/// grouped MoE kernels that some part of them does not launch, as
+/// `"<part>: <id>"`. The prompt kernel needs three: a dequantize case, a launch
+/// branch, and a block size (Q6_K's, 5, is the size it starts from).
+fn card_moe_ids_unlaunched(rust: &str, one_row_cu: &str, prompt_cu: &str) -> Vec<String> {
+    let region =
+        |src: &str, start: &str| -> String { fn_body(src, start).unwrap_or_default().to_string() };
+    let handed: Vec<i32> = region(rust, "pub(crate) fn kernel_type(")
+        .split("=> Some(")
+        .skip(1)
+        .filter_map(|rest| rest.split(')').next()?.trim().parse().ok())
+        .collect();
+    let macro_text = prompt_cu
+        .find("#define LAUNCH_MOE_GGUF_PREFILL(DTYPE)")
+        .map(|at| {
+            let rest = &prompt_cu[at..];
+            rest[..rest.find("\n\n").unwrap_or(rest.len())].to_string()
+        })
+        .unwrap_or_default();
+    let mut sized = kernel_ids_after(
+        &region(prompt_cu, "extern \"C\" void moe_gemm_gguf_prefill("),
+        "gguf_type == ",
+    );
+    sized.insert(5);
+    let parts = [
+        (
+            "one-row kernel `case`",
+            kernel_ids_after(
+                &region(one_row_cu, "extern \"C\" void moe_gemm_gguf("),
+                "case ",
+            ),
+        ),
+        (
+            "prompt kernel dequantize `case`",
+            kernel_ids_after(
+                &region(
+                    prompt_cu,
+                    "__forceinline__ __device__ void dequantize_block_warp(",
+                ),
+                "case ",
+            ),
+        ),
+        (
+            "prompt kernel launch branch",
+            kernel_ids_after(&macro_text, "gguf_type == "),
+        ),
+        ("prompt kernel block size", sized),
+    ];
+    let mut missing = Vec::new();
+    if handed.is_empty() {
+        missing.push("kernel_type maps no type — its shape changed, re-read it".to_string());
+    }
+    for id in &handed {
+        for (part, ids) in &parts {
+            if !ids.contains(id) {
+                missing.push(format!("{part}: {id}"));
+            }
+        }
+    }
+    missing
+}
+
+/// A type id the card's grouped mixture-of-experts kernels do not know falls
+/// to their `default: break` — no launch, no error — and the layer answers
+/// with whatever memory its output was given (it is not zeroed). Every id
+/// `moe_card::kernel_type` hands them must be launched by the one-row kernel
+/// and by the prompt kernel's three parts; the 32-block types are a SwarmLLM
+/// patch (FUTURE_WORK #292), so a re-vendor that drops it goes red here.
+#[test]
+fn every_type_the_card_moe_kernels_are_handed_is_launched() {
+    let read = |path: &str| {
+        std::fs::read_to_string(repo_root().join(path))
+            .unwrap_or_else(|e| panic!("read {path}: {e}"))
+    };
+    let missing = card_moe_ids_unlaunched(
+        &read("src/inference/layers/moe_card.rs"),
+        &read("vendor/candle/candle-kernels/src/moe/moe_gguf.cu"),
+        &read("vendor/candle/candle-kernels/src/moe/moe_wmma_gguf.cu"),
+    );
+    assert!(
+        missing.is_empty(),
+        "types `kernel_type` hands the card's MoE kernels that they never launch \
+         (the output would be uninitialised memory): {missing:?}"
+    );
+}
+
+/// The launch guard sees a dropped case, a commented-out one, and a block size
+/// the prompt kernel lost (gotcha #413).
+#[test]
+fn the_card_moe_launch_guard_catches_a_dropped_type() {
+    let rust = "pub(crate) fn kernel_type(d: G) -> Option<i32> {\n    match d {\n        \
+                G::Q8_0 => Some(0),\n        G::Q4_0 => Some(15),\n        _ => None,\n    }\n}\n";
+    let one_row =
+        "extern \"C\" void moe_gemm_gguf(int quant_type) {\n    switch (quant_type) {\n        \
+                   case 0: { L(); break; }\n        case 15: { L(); break; }\n    }\n}\n";
+    let prompt = "__forceinline__ __device__ void dequantize_block_warp(int t) {\n    switch (t) {\n        \
+                  case 0: { D(); break; }\n        case 15: { D(); break; }\n    }\n}\n\
+                  #define LAUNCH_MOE_GGUF_PREFILL(DTYPE) \\\n    if (gguf_type == 0) {\\\n    \
+                  } else if (gguf_type == 15) {\\\n    }\n\n\
+                  extern \"C\" void moe_gemm_gguf_prefill(int gguf_type) {\n    \
+                  if (gguf_type == 0) { s = 34; } else if (gguf_type == 15) { s = 18; }\n}\n";
+    assert_eq!(
+        card_moe_ids_unlaunched(rust, one_row, prompt),
+        Vec::<String>::new()
+    );
+    let dropped = one_row.replace("case 15: { L(); break; }", "");
+    assert_eq!(
+        card_moe_ids_unlaunched(rust, &dropped, prompt),
+        vec!["one-row kernel `case`: 15".to_string()]
+    );
+    let commented = prompt.replace("case 15:", "// case 15:");
+    assert_eq!(
+        card_moe_ids_unlaunched(rust, one_row, &commented),
+        vec!["prompt kernel dequantize `case`: 15".to_string()]
+    );
+    let no_size = prompt.replace("else if (gguf_type == 15) { s = 18; }", "");
+    assert_eq!(
+        card_moe_ids_unlaunched(rust, one_row, &no_size),
+        vec!["prompt kernel block size: 15".to_string()]
+    );
+    assert!(!card_moe_ids_unlaunched("no map", one_row, prompt).is_empty());
+}
+
 /// Each `Flash_fwd_kernel_traits<Headdim, kBlockM, kBlockN, kNWarps` in `src`
 /// whose block is shorter than its warps compute (16 query rows a warp), as
 /// `(line, kBlockM, kNWarps)`.

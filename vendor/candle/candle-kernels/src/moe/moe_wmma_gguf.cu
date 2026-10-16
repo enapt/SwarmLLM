@@ -95,6 +95,60 @@ __forceinline__ __device__ void dequantize_block_warp(
             dequantize_block_q6_K<T>(quant_in, dequant_out);
             break;
         }
+        // SwarmLLM patch: the 32-block types (FUTURE_WORK #292; see
+        // moe_gguf.cu), 32 lanes, value i from lane i as ggml's
+        // `dequantize_row_q{4,5}_{0,1}` lays a block out: the low nibbles are
+        // values 0-15 and the high ones 16-31; a 5-bit type's fifth bit for
+        // value i is bit i of `qh`. `_0` types are centred (-8 / -16), `_1`
+        // types add their minimum.
+        case 15: { // q4_0
+            const int i = threadIdx.x;
+            const block_q4_0* b = (const block_q4_0*)quant_in;
+            if (i < QK4_0) {
+                const uint8_t q = b->qs[i % (QK4_0 / 2)];
+                const int v = (i < QK4_0 / 2 ? (q & 0x0F) : (q >> 4)) - 8;
+                dequant_out[i] = T((float)v * __half2float(b->d));
+            }
+            break;
+        }
+        case 16: { // q4_1
+            const int i = threadIdx.x;
+            const block_q4_1* b = (const block_q4_1*)quant_in;
+            if (i < QK4_1) {
+                const uint8_t q = b->qs[i % (QK4_1 / 2)];
+                const int v = i < QK4_1 / 2 ? (q & 0x0F) : (q >> 4);
+                const float2 dm = __half22float2(b->dm);
+                dequant_out[i] = T((float)v * dm.x + dm.y);
+            }
+            break;
+        }
+        case 17: { // q5_0
+            const int i = threadIdx.x;
+            const block_q5_0* b = (const block_q5_0*)quant_in;
+            if (i < QK5_0) {
+                const uint32_t qh = (uint32_t)b->qh[0] | ((uint32_t)b->qh[1] << 8)
+                    | ((uint32_t)b->qh[2] << 16) | ((uint32_t)b->qh[3] << 24);
+                const uint8_t q = b->qs[i % (QK5_0 / 2)];
+                const int low = i < QK5_0 / 2 ? (q & 0x0F) : (q >> 4);
+                const int v = (low | (int)(((qh >> i) & 1u) << 4)) - 16;
+                dequant_out[i] = T((float)v * __half2float(b->d));
+            }
+            break;
+        }
+        case 18: { // q5_1
+            const int i = threadIdx.x;
+            const block_q5_1* b = (const block_q5_1*)quant_in;
+            if (i < QK5_1) {
+                const uint32_t qh = (uint32_t)b->qh[0] | ((uint32_t)b->qh[1] << 8)
+                    | ((uint32_t)b->qh[2] << 16) | ((uint32_t)b->qh[3] << 24);
+                const uint8_t q = b->qs[i % (QK5_1 / 2)];
+                const int low = i < QK5_1 / 2 ? (q & 0x0F) : (q >> 4);
+                const int v = low | (int)(((qh >> i) & 1u) << 4);
+                const float2 dm = __half22float2(b->dm);
+                dequant_out[i] = T((float)v * dm.x + dm.y);
+            }
+            break;
+        }
         default:
             break;
     }
@@ -306,6 +360,19 @@ __global__ void moe_gemm_gguf_prefill_kernel(
     } // end m_base loop
 }
 
+// SwarmLLM patch: a 32-block type (FUTURE_WORK #292) launches as Q8_0 does —
+// one warp of 32 lanes per block row, each lane one value.
+#define LAUNCH_MOE_GGUF_PREFILL_32(DTYPE, QK, BLOCK) \
+    {\
+        dim3 block(32, WARPS_PER_BLOCK, 1);\
+        moe_gemm_gguf_prefill_kernel<DTYPE, QK, BLOCK, 32><<<grid, block, smem_bytes, stream>>>(\
+            reinterpret_cast<const DTYPE*>(input),\
+            reinterpret_cast<const uint8_t*>(weights),\
+            sorted_token_ids, expert_offsets, topk_weights,\
+            output, num_experts, topk, size_m, size_n, size_k, gguf_type\
+        );\
+    }
+
 #define LAUNCH_MOE_GGUF_PREFILL(DTYPE) \
     if (gguf_type == 0) {\
         dim3 block(32, WARPS_PER_BLOCK, 1);\
@@ -355,6 +422,14 @@ __global__ void moe_gemm_gguf_prefill_kernel(
             sorted_token_ids, expert_offsets, topk_weights,\
             output, num_experts, topk, size_m, size_n, size_k, gguf_type\
         );\
+    } else if (gguf_type == 15) {\
+        LAUNCH_MOE_GGUF_PREFILL_32(DTYPE, QK4_0, block_q4_0);\
+    } else if (gguf_type == 16) {\
+        LAUNCH_MOE_GGUF_PREFILL_32(DTYPE, QK4_1, block_q4_1);\
+    } else if (gguf_type == 17) {\
+        LAUNCH_MOE_GGUF_PREFILL_32(DTYPE, QK5_0, block_q5_0);\
+    } else if (gguf_type == 18) {\
+        LAUNCH_MOE_GGUF_PREFILL_32(DTYPE, QK5_1, block_q5_1);\
     }
 
 
@@ -397,6 +472,19 @@ extern "C" void moe_gemm_gguf_prefill(
         block_size_bytes = sizeof(block_q3_K);
     } else if (gguf_type == 4) {//Q5K: 4,
         block_size_bytes = sizeof(block_q5_K);
+    // SwarmLLM patch: the 32-block types (FUTURE_WORK #292).
+    } else if (gguf_type == 15) {//Q4_0: 15,
+        block_size_bytes = sizeof(block_q4_0);
+        qk = QK4_0;
+    } else if (gguf_type == 16) {//Q4_1: 16,
+        block_size_bytes = sizeof(block_q4_1);
+        qk = QK4_1;
+    } else if (gguf_type == 17) {//Q5_0: 17,
+        block_size_bytes = sizeof(block_q5_0);
+        qk = QK5_0;
+    } else if (gguf_type == 18) {//Q5_1: 18,
+        block_size_bytes = sizeof(block_q5_1);
+        qk = QK5_1;
     }
 
     // 1. A tile: [M_BLK, qk] (dequantized)

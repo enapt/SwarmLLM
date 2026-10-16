@@ -181,6 +181,49 @@ pub(crate) fn reusable_bytes(device: &Device) -> u64 {
     usage(device).map_or(0, PoolUsage::reusable)
 }
 
+/// Make `device`'s pool hold one free block of `bytes` — one growth at most,
+/// none when it already holds one — so the forward that follows allocates from
+/// memory the pool has. Called before a prompt forward that sends RAM-held
+/// weights to the card (`SplitModel::begin_prompt_measure`, FUTURE_WORK #292).
+///
+/// **Why.** Under WSL2, once a process has sent pageable copies to the card,
+/// growing the pool stalls the calling thread for 0.2-9 s at a time, the card
+/// idle: a probe whose growths took 0.5-7 ms stalled 0.16-2.2 s at 11 of 30
+/// once it had copied 1.2 GB (`growprobe.py`, Windows up 87 h), and a Gemma 4
+/// 26B-A4B prompt with its experts in RAM read its first 512-token chunk in
+/// 23.6-24.8 s, and in 8.6-8.7 s primed (gotcha #883).
+/// A pool that holds the forward's memory first grows nowhere in it (the same
+/// probe primed with 1.2 GB: every allocation inside it 0.0 ms, after the
+/// copies too). NVIDIA's sample of the stream-ordered allocator raises the
+/// release threshold so that "the application is no longer allocating/freeing
+/// memory from the OS" at steady state (`streamOrderedAllocation.cu`); RAPIDS
+/// RMM's pool takes its initial size up front. The pool keeps the block
+/// ([`keep_freed_memory`]) and counts it as this process's room
+/// ([`reusable_bytes`]), so no budget reading moves. Returns how long it took,
+/// `None` when nothing was done: the processor, no pool, a capture under way,
+/// `SWARMLLM_PROMPT_POOL_PRIME=0` (the A/B), or the driver refused.
+pub(crate) fn prime(device: &Device, bytes: u64) -> Option<Duration> {
+    static ON: OnceLock<bool> = OnceLock::new();
+    let on = *ON.get_or_init(|| std::env::var("SWARMLLM_PROMPT_POOL_PRIME").as_deref() != Ok("0"));
+    if !on || bytes == 0 {
+        return None;
+    }
+    #[cfg(feature = "candle-cuda")]
+    if let Device::Cuda(dev) = device {
+        let started = Instant::now();
+        return match cuda::prime(dev, bytes as usize) {
+            Ok(true) => Some(started.elapsed()),
+            Ok(false) => None,
+            Err(e) => {
+                tracing::debug!(error = %e, bytes, "card pool: could not be primed");
+                None
+            }
+        };
+    }
+    let _ = device;
+    None
+}
+
 /// Hand what the pool holds unused back to the driver, after synchronizing so
 /// buffers freed on the stream count as unused. Returns the figures before
 /// and after, or `None` where there is nothing to trim or it could not be read.
@@ -464,6 +507,24 @@ mod cuda {
             )?;
         }
         Ok(Some(peak))
+    }
+
+    /// One block of `bytes` from the device's pool, freed at once on its
+    /// stream, then synchronized: the pool keeps it. `Ok(false)` without a
+    /// pool, or while the stream is captured ([`current_pool`]).
+    pub(super) fn prime(dev: &candle_core::CudaDevice, bytes: usize) -> Result<bool, DriverError> {
+        if current_pool(dev)?.is_none() {
+            return Ok(false);
+        }
+        let stream = dev.cuda_stream();
+        // SAFETY: a bound context (`current_pool`); the block is never read or
+        // written, and freed exactly once, on the stream it came from.
+        unsafe {
+            let block = result::malloc_async(stream.cu_stream(), bytes)?;
+            result::free_async(block, stream.cu_stream())?;
+        }
+        stream.synchronize()?;
+        Ok(true)
     }
 
     /// `Ok(false)` when the card has no pool to configure.

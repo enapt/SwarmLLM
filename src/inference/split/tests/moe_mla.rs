@@ -1008,10 +1008,22 @@ fn only_a_card_with_types_the_grouped_kernel_reads_keeps_experts_stacked() {
         [2048, 768],
         default
     ));
+    // The 32-block types (#292): a Gemma 4 26B-A4B's down experts are 704
+    // wide, so every upload stores them in one — Q2_K's as Q4_0, Q4_K's as
+    // Q5_0, Q5_K's as Q5_1.
+    assert!(fits(true, [G::Q2K, G::Q2K, G::Q4_0], [2816, 704], default));
+    assert!(fits(true, [G::Q4K, G::Q4K, G::Q5_0], [2816, 704], default));
+    assert!(fits(true, [G::Q5K, G::Q5K, G::Q5_1], [2816, 704], default));
+    assert!(fits(
+        true,
+        [G::Q4_1, G::Q4_1, G::Q4_1],
+        [2816, 704],
+        default
+    ));
     // The processor keeps one matrix per expert (`experts_in_one_region`).
     assert!(!fits(false, [G::Q4K, G::Q4K, G::Q6K], [2048, 768], default));
     // A type the kernel does not read, anywhere in the three.
-    assert!(!fits(true, [G::Q4_0, G::Q4K, G::Q6K], [2048, 768], default));
+    assert!(!fits(true, [G::Q8_1, G::Q4K, G::Q6K], [2048, 768], default));
     assert!(!fits(true, [G::Q4K, G::Q4K, G::F16], [2048, 768], default));
     // Llama 4 weighs the expert's input; the kernel scales outputs.
     assert!(!fits(true, [G::Q4K, G::Q4K, G::Q6K], [2048, 768], llama4));

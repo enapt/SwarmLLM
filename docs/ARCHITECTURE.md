@@ -46,7 +46,7 @@ swarmllm/
 │   │   ├── split/        (mod, model, loader, executor, draft (`draft_after`: a small model's guesses for a bigger one's request), kv_cache, kv_write (a step's K/V written into a cache of another dtype — the half cache, one launch on a card), kv_budget, entry, gguf_meta, shard_reader, rope, prefix_cache, hybrid (which layers of a segment go on the card — .145, #431), token_embedding, tests/)
 │   │   │   └── tests/    (mod, common, core, drafting, gqa, gemma2, moe_mla, llama4_glm4, kv_refresh)
 │   │   ├── chat_template/ (mod, fallbacks, tojson (the `transformers` signature, not minijinja's), tool_turns (how a template is shown a conversation's tool calls and answers, #283), tests, fixtures/{llama3_official,qwen3_official,qwen3_gguf_shipped,qwen35_gguf_shipped,glm4_gguf_shipped,gemma4_gguf_shipped}.jinja — rendering is `minijinja` + `minijinja-contrib` pycompat, the engine HF's TGI and SGLang use; the hand-rolled parser/eval subset was retired 2026-09-10)
-│   │   └── layers/       (mod, qwen35)
+│   │   └── layers/       (mod, qwen35, moe_card — the card's grouped mixture-of-experts products and `kernel_type`, the one list of what its kernels read, #292)
 │   ├── credit/    (ledger, transaction, priority, anti_gaming, trust, escrow)
 │   ├── identity/  (keypair, nickname)
 │   ├── crypto/    (session, pipeline_seal, gossip_seal, relay_seal, key_rotation, provider_keys)
@@ -78,9 +78,11 @@ swarmllm/
 │   │                          without it a GPU node loaded such a model then failed every
 │   │                          request, gotcha #288; a card-to-card `transfer_to_device` ordered on
 │   │                          BOTH streams — each device has its own and nothing else orders it, #138)
-│   │   └── candle-kernels/    (ONE patch: the barrier the GGUF MoE prompt kernel `moe_wmma_gguf.cu`
+│   │   └── candle-kernels/    (TWO patches: the barrier the GGUF MoE prompt kernel `moe_wmma_gguf.cu`
 │   │                          lacked — a mixture-of-experts reply on a card changed run to run, #138;
-│   │                          guard `the_vendored_moe_prompt_kernel_keeps_its_barrier`)
+│   │                          guard `the_vendored_moe_prompt_kernel_keeps_its_barrier`; and Q4_0, Q4_1,
+│   │                          Q5_0, Q5_1 in both GGUF MoE kernels — a row too narrow for a K-quant is
+│   │                          stored in one, #292; guard `every_type_the_card_moe_kernels_are_handed_is_launched`)
 │   ├── candle-flash-attn/     (cudart linked STATICALLY so the binary needs only the display driver;
 │   │                          18 bf16 kernels + the FP16_SWITCH bf16 branch dropped — unreachable, 37→19;
 │   │                          `run_mha` launches on the CALLER's stream, not stream 0 — .199's garbage, #683)
@@ -163,7 +165,7 @@ swarmllm/
 │                 kv_append.cu — a step's f32 K or V written into the half cache in ONE
 │                 launch (cast + copy); delta_rule.cu — Qwen 3.5's gated delta rule,
 │                 every token of a layer in one launch, NOT bit-identical. A NEW kernel goes here, not into
-│                 vendor/candle/candle-kernels — that copy exists for one upstream fix)
+│                 vendor/candle/candle-kernels — that copy exists for two patches to upstream kernels)
 └── tests/         (integration tests)
 ```
 

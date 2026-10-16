@@ -158,7 +158,7 @@ extern "C" void moe_gemm_gguf(
     int size_m,         // M (num tokens to process)
     int size_n,         // N (output dim)
     int size_k,         // K (input dim)
-    int quant_type,     // Q8_0: 0, Q4K: 1, Q2K: 2, Q3k: 3,  Q5K: 4, Q6K: 5,
+    int quant_type,     // Q8_0: 0, Q4K: 1, Q2K: 2, Q3k: 3,  Q5K: 4, Q6K: 5, Q4_0: 15, Q4_1: 16, Q5_0: 17, Q5_1: 18
     cudaStream_t stream
 ) {
     const int QUANTIZE_BLOCK_SIZE = CUDA_QUANTIZE_BLOCK_SIZE;
@@ -207,6 +207,36 @@ extern "C" void moe_gemm_gguf(
         case 5: // Q6K
         {
             LAUNCH_MOE_GGUF(QK_K, QI6_K, block_q6_K, VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1);
+            break;
+        }
+        // SwarmLLM patch: the 32-block types. A row whose width is not a
+        // multiple of 256 cannot hold a K-quant, so llama.cpp's quantizer
+        // stores it in one of these (`tensor_type_fallback`: Q2_K/Q3_K -> Q4_0,
+        // Q4_K -> Q5_0, Q5_K -> Q5_1) — every Gemma 4 26B-A4B upload's down
+        // experts (704 wide), FUTURE_WORK #292. Each launches as llama.cpp's
+        // `mul_mat_vec_q` does for its type: the same vec_dot, qi and vdr.
+        // Ids from 15: attention.rs, where this kernel comes from, numbers its
+        // IQ types 6-14, so a port of those never meets these. The ids are
+        // `layers::moe_card::kernel_type`'s (guard
+        // `every_type_the_card_moe_kernels_are_handed_is_launched`).
+        case 15: // Q4_0
+        {
+            LAUNCH_MOE_GGUF(QK4_0, QI4_0, block_q4_0, VDR_Q4_0_Q8_1_MMVQ, vec_dot_q4_0_q8_1);
+            break;
+        }
+        case 16: // Q4_1
+        {
+            LAUNCH_MOE_GGUF(QK4_1, QI4_1, block_q4_1, VDR_Q4_1_Q8_1_MMVQ, vec_dot_q4_1_q8_1);
+            break;
+        }
+        case 17: // Q5_0
+        {
+            LAUNCH_MOE_GGUF(QK5_0, QI5_0, block_q5_0, VDR_Q5_0_Q8_1_MMVQ, vec_dot_q5_0_q8_1);
+            break;
+        }
+        case 18: // Q5_1
+        {
+            LAUNCH_MOE_GGUF(QK5_1, QI5_1, block_q5_1, VDR_Q5_1_Q8_1_MMVQ, vec_dot_q5_1_q8_1);
             break;
         }
         default:

@@ -2725,7 +2725,7 @@ impl SplitModel {
         // `SWARMLLM_PROMPT_CARD_PROJECTIONS=0`, `SWARMLLM_MOE_PROMPT_CARD=0`.
         // What each prompt token costs those layers on the card sizes their
         // chunks (#138 (1e), `SplitModel::prompt_reader`); 0 when none copies.
-        let mut prompt_bytes_per_token = 0;
+        let (mut prompt_bytes_per_token, mut prompt_stack_bytes) = (0, 0);
         if let Some(card) = placement.card_beside_the_processor(layers.len()) {
             let given = crate::inference::layers::let_processor_layers_read_prompts_on(
                 &mut layers,
@@ -2734,11 +2734,13 @@ impl SplitModel {
                 std::env::var("SWARMLLM_MOE_PROMPT_CARD").as_deref() != Ok("0"),
             );
             prompt_bytes_per_token = crate::inference::layers::prompt_bytes_per_token(&mut layers);
+            prompt_stack_bytes = crate::inference::layers::prompt_stack_bytes(&layers);
             tracing::info!(
                 projection_layers = given.projection_layers,
                 expert_layers = given.expert_layers,
                 min_tokens = crate::inference::layers::PROMPT_ON_CARD_MIN_TOKENS,
                 activation_kb_per_token = prompt_bytes_per_token >> 10,
+                expert_stacks_mb = prompt_stack_bytes >> 20,
                 "DIAG: processor-held layers read a prompt on the card"
             );
         }
@@ -2806,6 +2808,7 @@ impl SplitModel {
             decode_graph: Default::default(),
             prompt_room: super::model::PromptRoom {
                 bytes_per_token: prompt_bytes_per_token,
+                stack_bytes: prompt_stack_bytes,
                 last: None,
             },
         })
@@ -3084,6 +3087,214 @@ mod expert_stack_tests {
                 "{tokens} tokens: {gap} off the processor layer's answer"
             );
         }
+    }
+
+    /// #292: the card's grouped kernels read the 32-block types a row too
+    /// narrow for a K-quant is stored in — llama.cpp's quantizer puts a Q2_K
+    /// file's 704-wide down experts in Q4_0, a Q4_K one's in Q5_0, a Q5_K one's
+    /// in Q5_1 — so such a layer stays STACKED on the card. A decode step's
+    /// one-row kernel is the arithmetic of candle's own card product (llama.cpp's
+    /// MMVQ: the same `vec_dot`, the activation in q8_1), so the layer answers as
+    /// it does holding one matrix per expert on the card, within float
+    /// rounding (~1e-7 of its largest output). A prompt's tensor-core kernel
+    /// multiplies in f16, and lands nearer the exact answer (the same experts
+    /// in f32) than the processor's product, which rounds the activation to 8
+    /// bits: 2.8-7.7e-4 of the largest output against 6.4-9.4e-3. A misread
+    /// block (a nibble, a fifth bit, a scale) is off by the answer's own size —
+    /// a Q5_0 fifth bit read from the wrong lane was 0.55 off, Q4_0 read as
+    /// Q4_1 NaN. The weights are hashed, not smooth: smooth ones cancel in the
+    /// sum, and every type was then ~5% off the processor, Q4_K's and Q2_K's
+    /// (read since #138) as much as the new ones.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn a_card_layer_keeps_32_block_experts_stacked_and_reads_them_right() {
+        use super::MoeFfn;
+        use crate::inference::layers::{ExpertFfn, QMatMul, MOE_CARD_ONE_ROW_MAX_TOKENS};
+        use GgmlDType as G;
+        let card = super::load_device(false);
+        if !card.is_cuda() {
+            return;
+        }
+        // Gate and up 256 wide (a K-quant fits), down 96 (only a 32-block
+        // type does), as a 26B-A4B's 2816 and 704.
+        let (n, hidden, inter) = (8, 256, 96);
+        // splitmix64 into [-0.5, 0.5).
+        let hashed = |count: usize, salt: u64| -> Vec<f32> {
+            (0..count as u64)
+                .map(|i| {
+                    let mut z = (i ^ (salt << 32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                    ((z ^ (z >> 31)) >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+                })
+                .collect()
+        };
+        let file = |dtypes: [G; 3]| {
+            let q = |shape: (usize, usize, usize), salt: u64, dtype: G| {
+                let v = hashed(shape.0 * shape.1 * shape.2, salt);
+                QTensor::quantize(&Tensor::from_vec(v, shape, &Device::Cpu).unwrap(), dtype)
+                    .unwrap()
+            };
+            let router = Tensor::from_vec(hashed(n * hidden, 1), (n, hidden), &Device::Cpu);
+            let router = QTensor::quantize(&router.unwrap(), G::F32).unwrap();
+            written(&[
+                ("blk.0.ffn_gate_inp.weight", &router),
+                (
+                    "blk.0.ffn_gate_exps.weight",
+                    &q((n, inter, hidden), 2, dtypes[0]),
+                ),
+                (
+                    "blk.0.ffn_up_exps.weight",
+                    &q((n, inter, hidden), 3, dtypes[1]),
+                ),
+                (
+                    "blk.0.ffn_down_exps.weight",
+                    &q((n, hidden, inter), 4, dtypes[2]),
+                ),
+            ])
+        };
+        let load = |dtypes: [G; 3], device: &Device| -> MoeFfn {
+            let (ct, mut reader) = file(dtypes);
+            load_moe_ffn(
+                &ct,
+                &mut reader,
+                "blk.0",
+                &placed_on(device.clone(), 0),
+                0,
+                2,
+                MoeRoutingConfig::default(),
+                Activation::Gelu,
+            )
+            .unwrap()
+        };
+        // The same layer holding one quantized matrix per expert on the card.
+        let per_expert = |dtypes: [G; 3], stacked: &MoeFfn| -> MoeFfn {
+            let (ct, mut reader) = file(dtypes);
+            let mut stack = |name: &str| {
+                split_expert_stack(&ct, &mut reader, &format!("blk.0.{name}.weight"), &card)
+                    .unwrap()
+                    .into_iter()
+                    .map(|q| QMatMul::from_qtensor(q).unwrap())
+            };
+            let (gate, up, down) = (
+                stack("ffn_gate_exps"),
+                stack("ffn_up_exps").collect::<Vec<_>>(),
+                stack("ffn_down_exps").collect::<Vec<_>>(),
+            );
+            MoeFfn {
+                experts: gate
+                    .zip(up)
+                    .zip(down)
+                    .map(|((gate, up), down)| ExpertFfn { gate, up, down })
+                    .collect(),
+                stacked: None,
+                ..stacked.clone()
+            }
+        };
+        // The largest gap from `want`, over want's largest value.
+        let relative_gap = |got: &Tensor, want: &Tensor| {
+            let largest = |t: Tensor| {
+                t.abs()
+                    .unwrap()
+                    .max_all()
+                    .unwrap()
+                    .to_scalar::<f32>()
+                    .unwrap()
+            };
+            let want = want.to_device(&Device::Cpu).unwrap();
+            let gap = largest((got.to_device(&Device::Cpu).unwrap() - &want).unwrap());
+            gap / largest(want)
+        };
+        // (tokens, gap, ceiling): 1 and 5 tokens against one matrix per expert
+        // on the card; 40 against the exact answer, no further off than the
+        // processor's own product is.
+        let gaps = |dtypes: [G; 3]| -> Vec<(usize, f32, f32)> {
+            let processor = load(dtypes, &Device::Cpu);
+            let on_card = load(dtypes, &card);
+            assert!(
+                on_card.stacked.is_some(),
+                "{dtypes:?}: not stacked on the card"
+            );
+            let unstacked = per_expert(dtypes, &on_card);
+            // The same layer with every expert dequantized to f32.
+            let exact = MoeFfn {
+                experts: processor
+                    .experts
+                    .iter()
+                    .map(|e| {
+                        let f = |w: &QMatMul| {
+                            let d = w
+                                .quantized_weight()
+                                .unwrap()
+                                .dequantize(&Device::Cpu)
+                                .unwrap();
+                            QMatMul::from_qtensor(QTensor::quantize(&d, G::F32).unwrap()).unwrap()
+                        };
+                        ExpertFfn {
+                            gate: f(&e.gate),
+                            up: f(&e.up),
+                            down: f(&e.down),
+                        }
+                    })
+                    .collect(),
+                ..processor.clone()
+            };
+            [1usize, 5, 40]
+                .into_iter()
+                .map(|tokens| {
+                    let x = Tensor::from_vec(
+                        hashed(tokens * hidden, 5),
+                        (1, tokens, hidden),
+                        &Device::Cpu,
+                    )
+                    .unwrap();
+                    let flat = x.reshape((tokens, hidden)).unwrap();
+                    let picks = |routes: Vec<Vec<(usize, f32)>>| -> Vec<Vec<usize>> {
+                        routes
+                            .into_iter()
+                            .map(|r| r.into_iter().map(|p| p.0).collect())
+                            .collect()
+                    };
+                    assert_eq!(
+                        picks(on_card.route(&flat.to_device(&card).unwrap()).unwrap()),
+                        picks(processor.route(&flat).unwrap()),
+                        "{dtypes:?}, {tokens} tokens: the card picked other experts"
+                    );
+                    let on = x.to_device(&card).unwrap();
+                    let got = on_card.forward(&on).unwrap();
+                    if tokens > MOE_CARD_ONE_ROW_MAX_TOKENS {
+                        let truth = exact.forward(&x).unwrap();
+                        let processor_gap = relative_gap(&processor.forward(&x).unwrap(), &truth);
+                        (tokens, relative_gap(&got, &truth), processor_gap)
+                    } else {
+                        let want = unstacked.forward(&on).unwrap();
+                        (tokens, relative_gap(&got, &want), 1e-4)
+                    }
+                })
+                .collect()
+        };
+        let mut failures = Vec::new();
+        for dtypes in [
+            [G::Q8_0, G::Q8_0, G::Q4_0],
+            [G::Q8_0, G::Q8_0, G::Q4_1],
+            [G::Q8_0, G::Q8_0, G::Q5_0],
+            [G::Q8_0, G::Q8_0, G::Q5_1],
+            [G::Q4_1, G::Q4_0, G::Q5_1],
+            [G::Q2K, G::Q2K, G::Q4_0],
+            [G::Q4K, G::Q4K, G::Q5_0],
+            [G::Q5K, G::Q5K, G::Q5_1],
+        ] {
+            for (tokens, gap, ceiling) in gaps(dtypes) {
+                eprintln!("{dtypes:?} {tokens} tokens: {gap:.2e} off (ceiling {ceiling:.2e})");
+                // A misread scale can be NaN, which no ceiling compares above.
+                if gap.is_nan() || gap >= ceiling {
+                    failures.push(format!(
+                        "{dtypes:?}, {tokens} tokens: {gap} (ceiling {ceiling})"
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "off the reference: {failures:#?}");
     }
 
     /// Each expert is its own slice of the stack, still QUANTIZED, and holds

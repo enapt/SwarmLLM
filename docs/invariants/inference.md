@@ -2131,7 +2131,8 @@ device (`argsort_top_k`), the experts kept as the file stacks them, and one
 
 **What replaced it.** `StackedExperts::fit` keeps a layer's three
 `[n_experts, rows, cols]` stacks whole on a card when `moe_gemm_gguf` reads
-their types (Q8_0, Q2_K-Q6_K), each input width is a multiple of 8 and the
+their types (`layers::moe_card::kernel_type`: Q8_0, Q2_K-Q6_K, and since
+2026-10-16 the 32-block Q4_0-Q5_1, § "Gemma 4's 26B-A4B"), each input width is a multiple of 8 and the
 weight applies to the expert's output (not Llama 4); everything else keeps one
 matrix per expert. `MoeFfn::experts_stacked`: the router product, then
 `topk_on_device` — `arg_sort` and the policy's softmax/sigmoid on the card, the
@@ -2260,6 +2261,78 @@ the old one's its first; at 128 a forward the old path parts from llama.cpp at t
 `a_prompts_processor_experts_go_to_the_card_only_where_it_can_take_them` (the marking,
 `reads_prompts_on_card`, and a refused card leaving the processor's answer bit for bit
 — red when the fallback returns the error instead).
+
+### A prompt forward that copies weights to the card grows the card's pool once (2026-10-16, #292)
+
+**What it replaced.** A card/processor split's prompt forward allocated as it went: each copying
+layer's expert stacks (83 + 83 + 143 MB a layer for Gemma 4's 26B-A4B), activations, and — at a
+reserved request's first chunk — the cache of every admitted position, all from the card's
+memory pool, which grew to meet them. Under WSL2, once a process has sent pageable copies to the
+card, growing the pool stalls the calling thread, the card idle (gotcha #755's slowdown with
+uptime, and #883): with every expert of that model in RAM, a 1,527-token prompt read 23.6 / 3.2 /
+3.1 s and 24.8 / 3.1 / 3.1 s a chunk at 87 h, and in a probe that grew its cache a quantum at a
+time 24.6 / 25.4 / 20.6 s; nsys put 56.7 s of one 70.7 s prompt in 28 `cuMemAllocAsync` calls of
+0.3-5.7 s (CUPTI's kernel and copy clock runs ~35.8 s off its API clock under WSL2 — correlate
+by `correlationId`, never by time). A probe (`growprobe.py`, the driver API) whose growths took
+0.5-7 ms stalled 0.16-2.2 s at 11 of 30 once it had copied 1.2 GB from fresh host memory; primed
+with 1.2 GB first, every allocation after the copies took 0.0 ms. NVIDIA's sample of the
+stream-ordered allocator raises the release threshold so that at steady state "the application is
+no longer allocating/freeing memory from the OS" (`streamOrderedAllocation.cu`); RAPIDS RMM takes
+its pool size up front; llama.cpp plans its compute buffer once (`ggml_gallocr`). No API sizes the
+pool in advance: an allocation and a free do.
+
+**What replaced it.** `SplitModel::begin_prompt_measure` primes the pool before every forward of
+≥ `PROMPT_ON_CARD_MIN_TOKENS` on a copying split (`prime_pool_for_prompt` → `cuda_pool::prime`:
+one `cuMemAllocAsync` + free + synchronize, which the pool keeps — `keep_freed_memory` — and
+counts as this process's room, so no budget reading moves). The figure: the forward's copies and
+activations predicted from the last one measured (`MeasuredPrompt::predicted_bytes`, else the
+largest copying layer's stacks, `layers::prompt_stack_bytes`, and each token's activations), plus
+what its caches newly allocate on the card (`SplitModel::kv_bytes_a_forward_adds`, the figure the
+forward's own head-room claim reads), a quarter over, capped at the card's room less its margin.
+**A pool whose free memory covers it is left alone**: asked for as ONE block, free memory lying in
+pieces around the cache the last forward kept is answered by remapping or growth (the CUDA
+Programming Guide, § "Stream-Ordered Memory Allocator") — a 595 MB prime with 790 MB free stalled
+11.2 s. Short of it, the pool grows by the whole figure where the card has that much outside the
+pool, else by the shortfall. A/B `SWARMLLM_PROMPT_POOL_PRIME=0`.
+
+**The take a forward is measured at leaves out the cache it added** (`end_prompt_measure` reads the
+request's card cache before and after), and the prediction prices the cache for every token the
+forward reads. Before, a reserved request's first chunk counted its whole reservation, and every
+later chunk — the prime and #138 (1e)'s chunk sizing alike — was charged it again, against a room
+that already excluded it: the first prime's estimate missed it the other way and the first chunk
+grew 8.6 s mid-forward. `a_prompt_forward_is_predicted_from_the_last_one_measured` pins the new
+arithmetic.
+
+**A stage was tried and taken out.** Keeping each projection's stack for the whole forward and
+rewriting it per layer (one allocation a projection, not one a layer) measured no gain once the
+pool was primed — a layer's freed stacks are the next one's, from memory the pool holds (#755:
+reused memory never slowed) — and in one of four runs it stalled where the per-layer stacks did
+not. Unprimed, it was worse than per-layer stacks.
+
+**A probe must hold its cache as a worker does.** `logits_reference_probe` grew its caches a quantum
+at a time until 2026-10-16; it now reserves every position (`KvCacheStore::set_reserved_positions`,
+`LOGITS_PROBE_RESERVE=0` the old way), since each growth is a fresh allocation, which on this host
+is what a long prompt would measure.
+
+**Measured** (one binary, ABBA, each arm twice, Windows up 87.1-87.8 h, live node stopped, safety
+kit, `~/swarmllm-g4/speed292{b,c}.sh`; seconds per chunk, 512 / 512 / 503 tokens):
+
+| Gemma 4 26B-A4B Q2_K, 30 layers on the card | every expert in RAM | the last 6 layers' experts on the card |
+|---|---|---|
+| a stack per layer, unprimed (before) | 23.6 / 3.2 / 3.1, 24.8 / 3.1 / 3.1 | 21.2 / 8.4 / 2.8, 20.6 / 3.9 / 2.8 |
+| **a stack per layer, primed (now)** | **8.7 / 3.1 / 3.1, 8.6 / 3.1 / 3.1; the committed binary 4.0 / 3.2 / 3.1, 10.3 / 3.2 / 3.1** | **7.2 / 2.8 / 2.8, 8.8 / 2.8 / 2.8** |
+| the stage, primed | 9.4 / 3.2 / 3.1, 9.3 / 3.2 / 3.1, 9.9 / 3.2 / 3.1, 8.3 / 3.2 / 3.1 | 8.7 / 2.8 / 2.6, 9.7 / 2.8 / 2.8, 7.3 / **16.0 / 10.2**, 8.8 / 3.1 / 3.2 |
+| the stage, unprimed | 28.5 / 3.2 / 16.3, 32.0 / 3.2 / 18.3 | 30.1 / 8.9 / 2.6, 26.4 / 10.1 / 18.5 |
+| the processor reads the experts | 10.6 / 10.3 / 9.7, 10.4 / 10.1 / 10.4 | 8.7 / 7.9 / 7.7, 8.6 / 7.8 / 7.8 |
+| llama.cpp `-ngl 99 -ncmoe N`, pp512 | 331 tok/s (1.5 s) | 363 tok/s (1.4 s) |
+
+Primed, the later chunks never grew the pool (`card pool already holds a prompt forward's memory`,
+820 MB free against 515-595 needed); the first chunk's prime, 1,180 MB with 390 MB of cache, took
+14-198 ms; a traced primed run had no allocation over 100 ms after the load. Qwen3-30B-A3B Q2_K
+26/22 (the #138 placement, 867 tokens read 512 + 291): the stage primed 12.9 / 1.9 and 13.0 /
+1.9 s, per-layer stacks unprimed 11.9 / 1.9 and 13.0 / 1.9 s — this model's pool did not stall
+unprimed at this uptime; the committed binary 10.8 / 1.9 s. Every arm's logits are byte-identical,
+the committed binary's included, on both models.
 
 ### A split's processor-held projections read a prompt on the card (2026-10-13, #138 (1b))
 
@@ -2507,7 +2580,9 @@ keeps; the forward it must hold is PREDICTED from the last one MEASURED
 (`MeasuredPrompt::predicted_bytes`): every prompt forward of such a split
 records what the pool took beyond what stayed (`begin_prompt_measure`
 synchronizes and restarts `USED_MEM_HIGH`, `end_prompt_measure` reads it before
-the profile's report resets it), and the next adds a slope per token — the
+the profile's report resets it; since #292 less the cache the forward added, §
+"A prompt forward that copies weights to the card grows the card's pool once"),
+and the next adds a slope per token — the
 largest copying layer's activations, each projection's input and output rows at
 f32 (`layers::prompt_bytes_per_token`, 0.36 MB a token for the 14B against
 the 0.22-0.28 its pool grew by), and what the card-held caches keep — plus the
@@ -4795,15 +4870,67 @@ and dense branch there with experts in RAM — the pool's `card_split` placement
 `<bos>` is where every pair is worst, llama.cpp against itself included. Each placement was
 proved by the profile (`SWARMLLM_PROFILE=1`): with every expert in RAM only "moe ffn on the
 processor" runs and the card pool holds 1.76 GB; with six layers' experts on the card "moe ffn
-on the card" appears (9.8 ms of an 80 ms step) and the pool holds 3.51 GB. Those six run one
-expert at a time and the RAM-held experts read a prompt on the processor: the down experts are
-Q4_0, which the card's expert kernels do not read (#292).
+on the card" appears (9.8 ms of an 80 ms step) and the pool holds 3.51 GB. Those six ran one
+expert at a time and the RAM-held experts read a prompt on the processor — the down experts are
+Q4_0, which the card's expert kernels did not read — until #292, below.
 
 Tests: `a_fused_gate_up_stack_is_cut_into_the_gate_and_up_a_separate_file_holds`,
 `an_experts_output_scale_multiplies_its_answer`,
 `a_dense_branch_beside_the_experts_runs_and_each_branch_is_normed` (it also asserts
 `MoeFfn::forward` refuses the layer), `one_region_experts_are_bit_identical_to_one_at_a_time`
 (for SiLU and GELU), `gemma4_sizes_this_build_cannot_run_are_refused`.
+
+### The card's expert kernels read the 32-block types (2026-10-16, FUTURE_WORK #292)
+
+**What it replaced.** The 26B-A4B's down experts are 704 wide, not a multiple of 256, so
+llama.cpp's quantizer stores them in a 32-block type (`tensor_type_fallback`, `llama-quant.cpp`
+at master 2026-10-16): a Q2_K or Q3_K upload's become Q4_0, Q4_K's Q5_0, Q5_K's Q5_1, Q6_K's
+Q8_0 (an IQ upload's IQ4_NL — but no IQ type loads in this build at all: the header probe refuses
+one before a byte moves, naming a K-quant build instead). `moe_gemm_gguf` read Q8_0 and
+Q2_K-Q6_K only, so `StackedExperts::fit` refused every such layer: card-held experts ran one at a
+time, outside the decode graph, and RAM-held experts never got the prompt card — a 512-token chunk
+took 10.4 s, 7.9 s of it "moe ffn on the processor".
+
+**What replaced it.** The vendored kernels read Q4_0, Q4_1, Q5_0 and Q5_1 (type ids 15-18): the
+one-row kernel (`moe_gguf.cu`) through llama.cpp's `vec_dot_q4_0_q8_1` family, already in
+`moe/gguf.cuh`; the prompt kernel (`moe_wmma_gguf.cu`) through a dequantize per type into its f16
+tiles, launched with a 32-wide block (`LAUNCH_MOE_GGUF_PREFILL_32`). **`layers::moe_card::kernel_type`
+is the one list of types handed to the kernels** — `StackedExperts::fit` asks it, `moe_gemm_gguf`
+maps through it — and `every_type_the_card_moe_kernels_are_handed_is_launched` reads both `.cu`
+files for a `case` per id it returns (its self-test plants a dropped one): an id a kernel's switch
+does not launch is not an error, it is output never written.
+
+**Verified.** `a_card_layer_keeps_32_block_experts_stacked_and_reads_them_right` (every 32-block
+type and Q8_0, hashed weights — smooth ones cancel, gotcha #882): the one-row kernel against one
+matrix per expert on the card, 1.2e-7; the prompt kernel against the exact f32 answer 2.8-7.7e-4,
+closer than the processor's own product (6.4-9.4e-3); red with Q4_0 read as Q4_1 (NaN, which a
+bare `>=` had passed). The real file against llama.cpp master's processor build, 30 layers on the
+card:
+
+| placement | prompt (positions) | worst cos | median | top-1 |
+|---|---|---|---|---|
+| every expert in RAM | 28 (all) | 0.75212 (pos 0) | 0.99856 | 20/28 |
+| the last 6 layers' experts on the card (now stacked) | 28 (all) | 0.78725 (pos 0) | 0.99864 | 21/28 |
+| | 1,536 (last 48 + 4) | 0.99075 | 0.99898 | 34/52 |
+| 20 on the card, experts in RAM, 10 on the processor | 1,536 (last 48 + 4) | 0.99030 | 0.99901 | 36/52 |
+| 6 on the card, the prompt kernel off (`SWARMLLM_MOE_CARD_PROMPT=rows`) | 1,536 | 0.99138 | 0.99892 | 40/52 |
+| 6 on the card, no prompt card (`SWARMLLM_MOE_PROMPT_CARD=0`) | 1,536 | 0.98885 | 0.99911 | 40/52 |
+| **llama.cpp's card (12 / 20 layers) vs its processor** | 1,536 | **0.98845 / 0.99091** | **0.99872 / 0.99880** | **38 / 42 of 52** |
+
+Every worst and median is inside llama.cpp's own card-vs-processor spread. Top-1 is the weak
+witness on a Q2_K file: the reference's top-two margin has a median of 2.70 logits with 8 of 52
+positions under 0.5, and the prompt kernel's six flips beyond the rows path's sit at margins
+0.20-2.94 — the largest, position 41, flips in llama.cpp's own card too. The same arm twice gives
+the same logits, and the pool's prime (§ "A prompt forward that copies weights to the card grows
+the card's pool once") gives the same logits byte for byte.
+
+**Speed** (1,527 tokens in three 512-token chunks, Windows up 87 h; the table is in § "A prompt
+forward that copies weights to the card grows the card's pool once"): with every expert in RAM
+the processor read ~10 s a chunk; the card reads the first chunk in 4.0-10.3 s — the spread is its
+first attention launches (FUTURE_WORK #293) — and each after it in 3.1-3.2 s. llama.cpp `-ngl 99 -ncmoe 30` reads pp512 at
+331 tok/s, 1.5 s a chunk; of our 3.1 s, 1.6-2.0 s is the chosen experts' copy to the card. A
+decode step's six card-held layers run stacked at 1.5 ms where one expert at a time
+took 8.1-9.4 ms.
 
 ## A model that cannot write replies is refused off its header (2026-10-15)
 

@@ -33,7 +33,7 @@ extern "C" {
         size_m: i32,
         size_n: i32,
         size_k: i32,
-        gguf_dtype: i32, // Q8_0: 0, Q4K: 1, Q2K: 2, Q3k: 3,  Q5K: 4, Q6K: 5  (for weights)
+        gguf_dtype: i32, // Q8_0: 0, Q4K: 1, Q2K: 2, Q3k: 3,  Q5K: 4, Q6K: 5, and (SwarmLLM patch) Q4_0: 15, Q4_1: 16, Q5_0: 17, Q5_1: 18  (for weights)
         stream: i64,
     );
 
@@ -50,7 +50,7 @@ extern "C" {
         size_n: i32,
         size_k: i32,
         input_dtype: i32, // 0=f16, 1=bf16 (for inputs)
-        gguf_dtype: i32,  //Q8_0: 0, Q4K: 1, Q2K: 2, Q3k: 3,  Q5K: 4, Q6K: 5  (for weights)
+        gguf_dtype: i32,  //Q8_0: 0, Q4K: 1, Q2K: 2, Q3k: 3,  Q5K: 4, Q6K: 5, and (SwarmLLM patch) Q4_0: 15, Q4_1: 16, Q5_0: 17, Q5_1: 18  (for weights)
         stream: i64,
     );
 }

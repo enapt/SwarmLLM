@@ -135,6 +135,15 @@ fn main() -> anyhow::Result<()> {
     );
     let store = KvCacheStore::new(std::time::Duration::from_secs(600));
     let req = "logits-probe";
+    // Held as a worker holds an admitted prompt: every layer's cache born at
+    // its full size (`KvCacheStore::set_reserved_positions`, FUTURE_WORK #32),
+    // not grown a quantum at a time — each growth is a fresh card allocation,
+    // and on a host whose fresh allocations have slowed with uptime (#146,
+    // #292) the growth is what a long prompt would measure.
+    // `LOGITS_PROBE_RESERVE=0` measures the growth on purpose.
+    if std::env::var("LOGITS_PROBE_RESERVE").as_deref() != Ok("0") {
+        store.set_reserved_positions(req, n);
+    }
 
     // Run `input` (token ids) through every segment; the LAST one answers with
     // logits at every position when `all_positions`, else at the last one.

@@ -6,7 +6,7 @@ use candle_core::{Device, Tensor};
 use crate::error::SwarmError;
 
 use super::kv_budget::KvGrowth;
-use super::kv_cache::{CacheLayout, KvHome};
+use super::kv_cache::{CacheLayout, KvCacheStore, KvHome};
 use super::token_embedding::TokenEmbedding;
 use super::{LayerVariant, ModelArch, QMatMul, SplitTokenizer};
 
@@ -137,6 +137,9 @@ pub(crate) struct PromptRoom {
     /// activations a token. 0 where no processor-held layer copies its
     /// weights — nothing is then measured or sized.
     pub(crate) bytes_per_token: u64,
+    /// `layers::prompt_stack_bytes`: what the forward's expert stacks hold —
+    /// what a first forward is predicted to take before its tokens.
+    pub(crate) stack_bytes: u64,
     /// The last prompt forward measured on the card.
     pub(crate) last: Option<MeasuredPrompt>,
 }
@@ -148,9 +151,22 @@ pub(crate) struct MeasuredPrompt {
     pub(crate) tokens: usize,
     pub(crate) index_pos: usize,
     /// The most the pool held during it beyond what was in use as it began
-    /// (`USED_MEM_HIGH` less `USED_MEM_CURRENT`): the weights it copied over,
-    /// its activations, the cache it added — everything but what stays.
+    /// (`USED_MEM_HIGH` less `USED_MEM_CURRENT`), less the cache it added:
+    /// the weights it copied over and its activations. The cache is left out
+    /// because what a forward adds depends on what the request already holds,
+    /// not on the forward — a reserved request's first chunk allocates every
+    /// position it was admitted for and its later chunks none (#292), so a
+    /// take counting it charged each later chunk the whole reservation again.
     pub(crate) took_bytes: u64,
+}
+
+/// What [`SplitModel::begin_prompt_measure`] hands
+/// [`SplitModel::end_prompt_measure`]: the pool's use as the forward began and
+/// the request's cache on the card then.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct PromptMeasure {
+    in_use: u64,
+    cache_bytes: u64,
 }
 
 /// What each further prompt token costs a forward on the card.
@@ -169,21 +185,22 @@ pub(crate) struct PromptTokenBytes {
 impl MeasuredPrompt {
     /// The card memory a prompt forward of `tokens` starting at `index_pos`
     /// will take beyond what is in use as it begins, predicted from this one:
-    /// its measured take, plus or minus `per` for each token and each position
-    /// of history it differs by, and the difference in causal masks — f32
-    /// `[tokens, index_pos + tokens]`, counted twice for the copy a card-run
-    /// processor layer takes of it (`SplitModel::causal_mask`), the one term
-    /// that grows faster than the chunk.
+    /// its measured take, plus or minus `per`'s activations for each token and
+    /// its history for each position of history it differs by, the
+    /// difference in causal masks — f32 `[tokens, index_pos + tokens]`,
+    /// counted twice for the copy a card-run processor layer takes of it
+    /// (`SplitModel::causal_mask`), the one term that grows faster than the
+    /// chunk — and what the caches keep of every token it reads.
     pub(crate) fn predicted_bytes(
         &self,
         per: PromptTokenBytes,
         tokens: usize,
         index_pos: usize,
     ) -> u64 {
-        let slope = i128::from(per.activations) + i128::from(per.kept);
         let mask = |t: usize, at: usize| 8 * t as i128 * (at + t) as i128;
         let took = i128::from(self.took_bytes)
-            + (tokens as i128 - self.tokens as i128) * slope
+            + (tokens as i128 - self.tokens as i128) * i128::from(per.activations)
+            + tokens as i128 * i128::from(per.kept)
             + ((index_pos + tokens) as i128 - (self.index_pos + self.tokens) as i128)
                 * i128::from(per.history)
             + mask(tokens, index_pos)
@@ -389,11 +406,21 @@ impl SplitModel {
         }
     }
 
-    /// Measure a prompt forward of `seq_len` tokens, when this segment copies
-    /// its weights to the card for one: synchronize, so what is in use is
-    /// what stays, then start the pool's high-water mark again. `None` when
-    /// it is not measured.
-    pub(super) fn begin_prompt_measure(&self, seq_len: usize) -> Option<u64> {
+    /// Measure a prompt forward of `seq_len` tokens at `index_pos`, when this
+    /// segment copies its weights to the card for one: synchronize, so what
+    /// is in use is what stays, prime the pool for it
+    /// ([`Self::prime_pool_for_prompt`]), then start the pool's high-water
+    /// mark again — after the prime, which is no part of the forward. `None`
+    /// when it is not measured. `cache_key` and `kv_reserve` are the
+    /// request's, as the forward's own head-room claim reads them.
+    pub(super) fn begin_prompt_measure(
+        &self,
+        store: &KvCacheStore,
+        cache_key: &str,
+        kv_reserve: usize,
+        seq_len: usize,
+        index_pos: usize,
+    ) -> Option<PromptMeasure> {
         if self.prompt_room.bytes_per_token == 0
             || seq_len < crate::inference::layers::PROMPT_ON_CARD_MIN_TOKENS
         {
@@ -401,28 +428,172 @@ impl SplitModel {
         }
         let card = self.card()?;
         card.synchronize().ok()?;
+        let claiming =
+            self.kv_positions_a_forward_adds(store, cache_key, kv_reserve, index_pos + seq_len);
+        let cache_adds = self.kv_bytes_a_forward_adds(
+            store,
+            cache_key,
+            index_pos,
+            seq_len,
+            claiming,
+            KvHome::Card,
+        );
+        self.prime_pool_for_prompt(card, seq_len, index_pos, cache_adds);
         crate::inference::cuda_pool::take_peak_use(card)?;
-        crate::inference::cuda_pool::usage(card).map(|u| u.used)
+        Some(PromptMeasure {
+            in_use: crate::inference::cuda_pool::usage(card)?.used,
+            cache_bytes: store.allocated_bytes_of(cache_key, KvHome::Card),
+        })
     }
 
-    /// Record what the forward begun by [`Self::begin_prompt_measure`] took.
+    /// Grow the card's pool once, before the forward copies anything, by what
+    /// it will take (`cuda_pool::prime`, #292): its copies and activations
+    /// predicted from the last forward measured, else from the expert stacks
+    /// and each token's activations alone, plus the `cache_adds` bytes its
+    /// caches newly allocate on the card — all a reserved request's positions
+    /// at its first chunk, which a per-token figure for the chunk missed by
+    /// 8.6 s of growth at its first allocation on Gemma 4's 26B — a quarter
+    /// over for the pool's fragments, and never past the card's room less the
+    /// margin every budget on it keeps. A prediction short of the truth leaves
+    /// the rest to grow as before.
+    ///
+    /// A pool whose free memory already covers it is left alone: asked for as
+    /// ONE block, that memory is in pieces around what the last forward kept,
+    /// and the driver answers a request no piece fits by remapping the pieces
+    /// together or growing (the CUDA Programming Guide, § "Stream-Ordered
+    /// Memory Allocator") — a 595 MB prime with ~790 MB free stalled 11.2 s
+    /// (#292). Short of it, the pool grows by the whole figure where the card
+    /// has that much outside the pool, so the forward finds it in one piece,
+    /// and by the shortfall where it has not.
+    fn prime_pool_for_prompt(
+        &self,
+        card: &Device,
+        seq_len: usize,
+        index_pos: usize,
+        cache_adds: u64,
+    ) {
+        let baseline = self.prompt_room.last.unwrap_or(MeasuredPrompt {
+            tokens: 0,
+            index_pos,
+            took_bytes: self.prompt_room.stack_bytes,
+        });
+        let per = PromptTokenBytes {
+            kept: 0,
+            ..self.prompt_bytes_per_token_on_card()
+        };
+        let want = baseline
+            .predicted_bytes(per, seq_len, index_pos)
+            .saturating_add(cache_adds);
+        let Some((room, total)) = super::kv_budget::device_free_and_total_bytes(card) else {
+            return;
+        };
+        let budget = room.saturating_sub(super::kv_budget::device_free_margin_bytes(total));
+        let bytes = (want + want / 4).min(budget);
+        let pool_free = crate::inference::cuda_pool::reusable_bytes(card);
+        if pool_free >= bytes {
+            tracing::debug!(
+                mb = bytes >> 20,
+                pool_free_mb = pool_free >> 20,
+                seq_len,
+                index_pos,
+                "card pool already holds a prompt forward's memory"
+            );
+            return;
+        }
+        let grow = if bytes <= budget.saturating_sub(pool_free) {
+            bytes
+        } else {
+            bytes - pool_free
+        };
+        if let Some(took) = crate::inference::cuda_pool::prime(card, grow) {
+            tracing::debug!(
+                mb = grow >> 20,
+                cache_mb = cache_adds >> 20,
+                pool_free_mb = pool_free >> 20,
+                took_ms = took.as_millis() as u64,
+                seq_len,
+                index_pos,
+                "card pool primed for a prompt forward"
+            );
+        }
+    }
+
+    /// Record what the forward begun by [`Self::begin_prompt_measure`] took,
+    /// less the cache it added to the card ([`MeasuredPrompt::took_bytes`]).
     pub(super) fn end_prompt_measure(
         &mut self,
-        in_use_before: Option<u64>,
+        began: Option<PromptMeasure>,
+        store: &KvCacheStore,
+        cache_key: &str,
         seq_len: usize,
         index_pos: usize,
     ) {
-        let Some(before) = in_use_before else {
+        let Some(began) = began else {
             return;
         };
         let Some(peak) = self.card().and_then(crate::inference::cuda_pool::peak_use) else {
             return;
         };
+        let cache_added = store
+            .allocated_bytes_of(cache_key, KvHome::Card)
+            .saturating_sub(began.cache_bytes);
         self.prompt_room.last = Some(MeasuredPrompt {
             tokens: seq_len,
             index_pos,
-            took_bytes: peak.saturating_sub(before),
+            took_bytes: peak
+                .saturating_sub(began.in_use)
+                .saturating_sub(cache_added),
         });
+    }
+
+    /// The cache positions a forward reaching `total_seq` newly allocates for
+    /// the request under `cache_key`: its admitted reservation (`kv_reserve`)
+    /// at the first append, a quantum at a time past what it holds, none
+    /// inside it (`kv_budget::positions_to_allocate`). Read off the buffer the
+    /// request holds, not derived from `index_pos`: a reserved cache is larger
+    /// than the rounded position from its first append.
+    pub(super) fn kv_positions_a_forward_adds(
+        &self,
+        store: &KvCacheStore,
+        cache_key: &str,
+        kv_reserve: usize,
+        total_seq: usize,
+    ) -> usize {
+        super::kv_budget::positions_to_allocate(
+            store.allocated_positions(cache_key),
+            kv_reserve,
+            total_seq,
+            crate::inference::layers::kv_growth_quantum(self.max_seq_len),
+        )
+    }
+
+    /// The bytes those `claiming` positions take in `home` for a forward of
+    /// `seq_len` tokens at `index_pos`, read off the request's buffers — a
+    /// sliding window's slide included, which no per-position rate sees
+    /// (FUTURE_WORK #281). Before the first append there are no buffers, and
+    /// the model's estimate for a forward this wide prices the first
+    /// allocation. The one figure the forward's head-room claim and the
+    /// pool's prime (#292) are given.
+    pub(super) fn kv_bytes_a_forward_adds(
+        &self,
+        store: &KvCacheStore,
+        cache_key: &str,
+        index_pos: usize,
+        seq_len: usize,
+        claiming: usize,
+        home: KvHome,
+    ) -> u64 {
+        if claiming == 0 {
+            return 0;
+        }
+        store
+            .bytes_a_forward_adds(cache_key, index_pos, seq_len, home)
+            .unwrap_or_else(|| {
+                self.kv_budget(home)
+                    .1
+                    .widened_to(seq_len)
+                    .bytes_for(claiming)
+            })
     }
 
     /// The model's context window in tokens.

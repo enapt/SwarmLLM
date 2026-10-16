@@ -1891,7 +1891,10 @@ fn a_prompts_processor_projections_read_on_the_card_give_the_processors_answer()
 /// #138 (1e): a split's next prompt forward is predicted from the last one the
 /// card's pool measured — its take again at the same shape, each token and
 /// position of history it differs by priced, and the causal mask's growth,
-/// the one term faster than the chunk, counted in full.
+/// the one term faster than the chunk, counted in full. The take is measured
+/// without the cache the forward added (#292: a reserved request's first
+/// chunk adds all of it), so what the caches keep is priced for every token
+/// the forward reads, not for the difference.
 #[test]
 fn a_prompt_forward_is_predicted_from_the_last_one_measured() {
     use crate::inference::split::model::{MeasuredPrompt, PromptTokenBytes};
@@ -1906,25 +1909,31 @@ fn a_prompt_forward_is_predicted_from_the_last_one_measured() {
         history: 24 << 10,
     };
     let mask = |t: u64, at: u64| 8 * t * (at + t);
+    let kept = |t: u64| t * (80 << 10);
     assert_eq!(
         last.predicted_bytes(per, 512, 0),
-        900 << 20,
-        "the same shape"
+        (900 << 20) + kept(512),
+        "the same shape, and the cache it keeps"
     );
-    // Twice the tokens from the start: 512 more of each per-token cost, 512
-    // more positions of history, and the larger mask.
+    // Twice the tokens from the start: 512 more activations, 512 more
+    // positions of history, the larger mask and the cache of all 1024.
     assert_eq!(
         last.predicted_bytes(per, 1024, 0),
-        (900 << 20) + 512 * (380 << 10) + 512 * (24 << 10) + mask(1024, 0) - mask(512, 0)
+        (900 << 20) + 512 * (300 << 10) + kept(1024) + 512 * (24 << 10) + mask(1024, 0)
+            - mask(512, 0)
     );
-    // The next chunk of the same prompt, as long again: only its history and
-    // mask differ.
+    // The next chunk of the same prompt, as long again: its history, its
+    // mask and its own cache.
     assert_eq!(
         last.predicted_bytes(per, 512, 512),
-        (900 << 20) + 512 * (24 << 10) + mask(512, 512) - mask(512, 0)
+        (900 << 20) + kept(512) + 512 * (24 << 10) + mask(512, 512) - mask(512, 0)
     );
+    // Without a cache to keep, the same shape is the take alone — the prime's
+    // figure, which is given the cache's real bytes instead.
+    let uncached = PromptTokenBytes { kept: 0, ..per };
+    assert_eq!(last.predicted_bytes(uncached, 512, 0), 900 << 20);
     // Fewer tokens predict less, and never below nothing.
-    assert!(last.predicted_bytes(per, 256, 0) < 900 << 20);
+    assert!(last.predicted_bytes(per, 256, 0) < last.predicted_bytes(per, 512, 0));
     let small = MeasuredPrompt {
         took_bytes: 1,
         ..last

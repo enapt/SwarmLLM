@@ -457,7 +457,7 @@ const MLP_MIN_TOKENS_TO_BLOCK: usize = 512;
 /// Most tokens a card's stacked experts run through `moe_gemm_gguf`'s one-row
 /// kernel (`MoeFfn::experts_stacked`): a decoded token or a speculative check.
 /// A prompt chunk takes its tensor-core kernel.
-const MOE_CARD_ONE_ROW_MAX_TOKENS: usize = 8;
+pub(crate) const MOE_CARD_ONE_ROW_MAX_TOKENS: usize = 8;
 
 /// (token, expert) pairs the processor's experts run per region
 /// (`MoeFfn::experts_in_one_region`), in whole tokens: 512 tokens of a top-8
@@ -1007,7 +1007,7 @@ impl DenseBeside {
 
 /// A layer's routed experts kept as the file stacks them — `[n_experts, rows,
 /// cols]` per projection — on a card, so that one launch runs every chosen
-/// expert of a projection for every token (`candle_nn::moe::moe_gemm_gguf`,
+/// expert of a projection for every token (`moe_card::moe_gemm_gguf`,
 /// llama.cpp's `mul_mat_vec_q` with ids). Routing stays on the card too.
 ///
 /// One quantized matrix per expert cost ~1.6 ms of host work per layer on a
@@ -1023,7 +1023,8 @@ pub(crate) struct StackedExperts {
 
 impl StackedExperts {
     /// May a layer keep its experts stacked? On a card, when the kernel reads
-    /// every stack's type (Q8_0, Q2_K-Q6_K), each product's input width is a
+    /// every stack's type ([`moe_card::kernel_type`]: Q8_0, Q2_K-Q6_K and the
+    /// 32-block Q4_0-Q5_1, #292), each product's input width is a
     /// multiple of 8 (the kernel asserts it), and each expert's weight applies
     /// to its OUTPUT — the kernel scales outputs; Llama 4 scales inputs
     /// (`weight_before_ffn`) and keeps one matrix per expert.
@@ -1035,16 +1036,13 @@ impl StackedExperts {
         input_widths: [usize; 2],
         routing: MoeRoutingConfig,
     ) -> bool {
-        use candle_core::quantized::GgmlDType as G;
         static PER_EXPERT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let per_expert = *PER_EXPERT
             .get_or_init(|| std::env::var("SWARMLLM_MOE_CARD").as_deref() == Ok("per-expert"));
         on_a_card
             && !per_expert
             && !routing.weight_before_ffn
-            && dtypes
-                .iter()
-                .all(|t| matches!(t, G::Q8_0 | G::Q2K | G::Q3K | G::Q4K | G::Q5K | G::Q6K))
+            && dtypes.iter().all(|&t| moe_card::kernel_type(t).is_some())
             && input_widths.iter().all(|w| w % 8 == 0)
     }
 }
@@ -1155,6 +1153,31 @@ pub(crate) fn prompt_bytes_per_token(layers: &mut [LayerVariant]) -> u64 {
         most = most.max(elems);
     }
     (most as u64) * 4
+}
+
+/// Card bytes a prompt's expert stacks hold for the largest processor-held
+/// layer copying its experts — one stack a projection, a slot for every expert
+/// (`MoeFfn::processor_experts_on_the_card`) — or 0 when none does. What a forward takes before its first token's activations, so the
+/// pool can be primed for it before anything is measured (`cuda_pool::prime`).
+pub(crate) fn prompt_stack_bytes(layers: &[LayerVariant]) -> u64 {
+    let stack = |moe: &MoeFfn| -> usize {
+        let Some(e) = moe.experts.first() else {
+            return 0;
+        };
+        let bytes = |w: &QMatMul| {
+            w.quantized_weight()
+                .map_or(0, |q| q.storage_size_in_bytes())
+        };
+        moe.experts.len() * (bytes(&e.gate) + bytes(&e.up) + bytes(&e.down))
+    };
+    layers
+        .iter()
+        .filter_map(|l| match l.ffn() {
+            FfnVariant::MoE(moe) if moe.prompt_card.is_some() => Some(stack(moe)),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0) as u64
 }
 
 /// How many times a processor-held layer's prompt work has fallen back from
@@ -1872,7 +1895,8 @@ impl MoeFfn {
     /// to a stack on the card ([`QTensor::stack_some`] — llama.cpp copies only
     /// the used experts too), then [`Self::stacked_products`] as a card layer
     /// runs them; the answer comes back to the processor. The stacks live for
-    /// this call only, from the card's memory pool.
+    /// this call only, from the card's memory pool — which the forward primed
+    /// for them (`SplitModel::prime_pool_for_prompt`, #292).
     fn processor_experts_on_the_card(
         &self,
         card: &Device,
@@ -1911,11 +1935,14 @@ impl MoeFfn {
                 card, n_experts, &parts,
             )?))
         };
-        let stacked = StackedExperts {
-            gate: stack(|e| &e.gate)?,
-            up: stack(|e| &e.up)?,
-            down: stack(|e| &e.down)?,
-        };
+        let stacked = crate::inference::prof::timed!(
+            P::ExpertsToCard,
+            StackedExperts {
+                gate: stack(|e| &e.gate)?,
+                up: stack(|e| &e.up)?,
+                down: stack(|e| &e.down)?,
+            }
+        );
         let x = x_flat.to_device(card)?;
         let ids = Tensor::from_vec(ids, (num_tokens, k), card)?;
         let weights = Tensor::from_vec(weights, (num_tokens, k), card)?;
@@ -2276,7 +2303,7 @@ impl MoeFfn {
 
     /// The routed experts of a layer holding them [`StackedExperts`]: routed on
     /// the device ([`topk_on_device`]) and run as ONE launch per projection for
-    /// every token (`candle_nn::moe::moe_gemm_gguf` — its one-row kernel, a row
+    /// every token (`moe_card::moe_gemm_gguf` — its one-row kernel, a row
     /// per (token, pick) on the input quantized to q8_1, for up to
     /// `MOE_CARD_ONE_ROW_MAX_TOKENS` tokens; its tensor-core kernel in f16 for a
     /// prompt, [`prompt_on_tensor_cores`]), the down projection scaled by each
@@ -2348,16 +2375,7 @@ impl MoeFfn {
             let (expert_ids, token_ids) = (own_storage(expert_ids)?, own_storage(token_ids)?);
             let prompt = len > MOE_CARD_ONE_ROW_MAX_TOKENS && prompt_on_tensor_cores();
             let gemm = |input: &Tensor, w: &QTensor, scale: Option<Tensor>| {
-                candle_nn::moe::moe_gemm_gguf(
-                    input,
-                    w,
-                    &scale,
-                    &token_ids,
-                    &expert_ids,
-                    k,
-                    prompt,
-                    candle_core::DType::F16,
-                )
+                moe_card::moe_gemm_gguf(input, w, &scale, &token_ids, &expert_ids, k, prompt)
             };
             let gate = gemm(&x, &stacked.gate, None)?; // [len * k, intermediate]
             let up = gemm(&x, &stacked.up, None)?;
@@ -5010,6 +5028,7 @@ impl LayerWeights {
     }
 }
 
+pub(crate) mod moe_card;
 mod qwen35;
 
 #[cfg(test)]
