@@ -150,11 +150,14 @@ fn make_test_split_model_impl(
             query_scale: None,
             v_rms_norm: None,
             output_scale: None,
+            per_layer_embedding: None,
+            kv_source: None,
         }));
     }
 
     SplitModel {
         tok_embeddings: None,
+        per_layer_inputs: None,
         layers,
         norm: None,
         output: None,
@@ -246,11 +249,14 @@ pub(super) fn make_gqa_test_model(
             query_scale: None,
             v_rms_norm: None,
             output_scale: None,
+            per_layer_embedding: None,
+            kv_source: None,
         }));
     }
 
     SplitModel {
         tok_embeddings: None,
+        per_layer_inputs: None,
         layers,
         norm: None,
         output: None,
@@ -354,6 +360,8 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         query_scale: None,
         v_rms_norm: None,
         output_scale: None,
+        per_layer_embedding: None,
+        kv_source: None,
     });
 
     // Layer 1: DeepSeek MLA + MoE
@@ -404,6 +412,7 @@ pub(super) fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
 
     SplitModel {
         tok_embeddings: None,
+        per_layer_inputs: None,
         layers: vec![dense_layer, deepseek_layer],
         norm: None,
         output: None,

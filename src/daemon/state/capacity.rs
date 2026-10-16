@@ -491,6 +491,7 @@ mod tests {
                 context_length: 32_768,
                 pooling_type: 3,
                 kv_layout: None,
+                shared_kv_layers: 0,
             },
         );
 

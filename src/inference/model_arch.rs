@@ -22,8 +22,10 @@ pub enum ModelArch {
     /// unweighted norm on V, no query scaling, "proportional" RoPE on the
     /// global layers and a scale on each layer's output. The
     /// mixture-of-experts 26B-A4B runs a dense feed-forward beside its GELU
-    /// experts (`layers::DenseBeside`); the per-layer-embedding E2B/E4B are
-    /// refused until their layers run (`GgufTensorMeta::refusal`).
+    /// experts (`layers::DenseBeside`); the E2B/E4B add a per-layer
+    /// embedding to every layer (`split::per_layer`) and their last layers
+    /// attend an earlier layer's cache (`split::kv_sources`), so they run only
+    /// whole on one computer (`GgufTensorMeta::runs_only_whole`).
     Gemma4,
     /// Microsoft Phi-3/3.5 — SuRoPE scaling, partial rotary embedding
     Phi3,

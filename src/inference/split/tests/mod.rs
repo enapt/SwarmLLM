@@ -8,6 +8,7 @@
 //! - `gemma2` — Gemma-2 specific behavior (gelu, attn softcap) and real-GGUF cross-checks
 //! - `moe_mla` — MoE / shared-expert / MLA / DeepSeek mixed-layer + meta parsing
 //! - `llama4_glm4` — Llama 4 + GLM4 specifics: partial RoPE, NoPE skip, iRoPE, MoE
+//! - `per_layer_and_shared_kv` — Gemma 4 E2B/E4B: shared-KV layers, per-layer inputs
 //!
 //! All test files share the `common` module which exposes `pub(super)` builders.
 
@@ -19,3 +20,4 @@ mod gqa;
 mod kv_refresh;
 mod llama4_glm4;
 mod moe_mla;
+mod per_layer_and_shared_kv;

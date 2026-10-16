@@ -229,12 +229,15 @@ fn qwen2_forward_with_biases() {
         query_scale: None,
         v_rms_norm: None,
         output_scale: None,
+        per_layer_embedding: None,
+        kv_source: None,
     };
 
     let mut model = SplitModel {
         // Single-device test model: empty means "not split".
         layer_devices: Vec::new(),
         tok_embeddings: None,
+        per_layer_inputs: None,
         layers: vec![LayerVariant::Dense(layer)],
         norm: None,
         output: None,

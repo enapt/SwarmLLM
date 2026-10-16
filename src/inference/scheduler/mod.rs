@@ -2653,7 +2653,57 @@ impl PipelineScheduler {
         );
     }
 
+    /// [`Self::assemble_any_pipeline_for`], held to what the model can run as.
+    /// A model whose layers read an earlier layer's cache or a per-layer input
+    /// built from the prompt's tokens (Gemma 4 E2B/E4B,
+    /// `GgufTensorMeta::runs_only_whole`) runs only on ONE computer holding
+    /// every layer — this node, or a peer it is handed to whole. The search is
+    /// kept to such plans where it is built (`runs_only_whole`); this is the
+    /// one check every return passes, so a plan shape added later cannot hand
+    /// such a model a split.
     pub fn assemble_pipeline_for(
+        &self,
+        model_id: &ModelId,
+        local_node_id: &NodeId,
+        request_id: uuid::Uuid,
+        purpose: Purpose,
+        prompt: impl Into<cached_prefix::PromptPlan>,
+    ) -> Result<PipelineAssignment, SwarmError> {
+        let plan =
+            self.assemble_any_pipeline_for(model_id, local_node_id, request_id, purpose, prompt)?;
+        if self.runs_only_whole(model_id) {
+            let num_layers = self
+                .shared_state
+                .model_registry
+                .get_manifest(model_id)
+                .map_or(0, |m| m.num_layers);
+            let whole_on_one = plan.tp_groups.is_empty()
+                && matches!(plan.segments.as_slice(),
+                    [only] if only.layer_range.0 == 0 && only.layer_range.1 >= num_layers);
+            if !whole_on_one {
+                route_info!(purpose,
+                    model = %model_id,
+                    segments = plan.segments.len(),
+                    tp_groups = plan.tp_groups.len(),
+                    "This model runs only whole on one computer, and no computer holding all \
+                     of it has the room"
+                );
+                return Err(SwarmError::InsufficientCapacity(model_id.clone()));
+            }
+        }
+        Ok(plan)
+    }
+
+    /// Does this model run only whole on one computer
+    /// (`GgufTensorMeta::runs_only_whole`)? `false` while its header is
+    /// unknown — the loader refuses a partial range of one regardless.
+    fn runs_only_whole(&self, model_id: &ModelId) -> bool {
+        self.shared_state
+            .gguf_meta_for(model_id)
+            .is_some_and(|m| m.runs_only_whole())
+    }
+
+    fn assemble_any_pipeline_for(
         &self,
         model_id: &ModelId,
         local_node_id: &NodeId,
@@ -2744,6 +2794,21 @@ impl PipelineScheduler {
             purpose,
             &local_on_processor,
         );
+        // A model that runs only whole (Gemma 4 E2B/E4B) is a candidate only
+        // where one computer holds every layer: a part of it is no use alone.
+        let whole_only = self.runs_only_whole(model_id);
+        let candidates: Vec<NodeCandidate> = if whole_only {
+            candidates
+                .into_iter()
+                .filter(|c| {
+                    c.available_ranges
+                        .iter()
+                        .any(|r| r.0 == 0 && r.1 >= num_layers)
+                })
+                .collect()
+        } else {
+            candidates
+        };
         if candidates.is_empty() {
             if self.shared_state.kept_on_this_computer(model_id) {
                 return Err(SwarmError::KeptOnThisComputer {
@@ -2799,6 +2864,25 @@ impl PipelineScheduler {
                     .iter()
                     .any(|r| r.0 == 0 && r.1 >= num_layers)
         });
+        // "Start and finish on this computer" for a model that runs only whole
+        // is the whole model here: there is no boomerang to cut from it.
+        if whole_only && encrypted {
+            let Some(local_cand) = candidates.iter().find(|c| c.node_id == *local_node_id) else {
+                return Err(SwarmError::PromptPrivacyUnavailable {
+                    model_id: manifest.name.clone(),
+                });
+            };
+            route_info!(purpose,
+                model = %model_id,
+                "Runs only whole, and starts and finishes on this computer — single local segment"
+            );
+            return Ok(Self::local_only_assignment(
+                request_id,
+                local_node_id,
+                local_cand,
+                num_layers,
+            ));
+        }
         // Set below when this node holds every layer but would run the model on
         // its processor: then the routing search is allowed to compete with the
         // local fast path, on the strength of the local candidate now being
@@ -3168,7 +3252,8 @@ impl PipelineScheduler {
             // model) offers only one indivisible range, which can be neither
             // a middle segment nor a remote encrypted end. That produced a
             // hard "No node available" for a perfectly valid boomerang.
-            let partial = self.shared_state.config.inference.parallax_partial_ranges || encrypted;
+            let partial = (self.shared_state.config.inference.parallax_partial_ranges || encrypted)
+                && !whole_only;
             // Route up to three times, relaxing one bound at a time, because
             // the two kinds of memory figure in the graph are not equally
             // trustworthy — see `parallax::CapacityBound`.
@@ -3643,11 +3728,12 @@ impl PipelineScheduler {
         // anything but a large model on a very fast LAN.
         // Skip TP when encrypted pipeline is active — no remote node should process
         // tensor data in encrypted mode (defeats the purpose of local-only embedding/sampling).
-        let tp_groups = if encrypted || !self.shared_state.config.inference.tensor_parallel {
-            vec![]
-        } else {
-            self.detect_tp_groups(&segments, &candidates)
-        };
+        let tp_groups =
+            if encrypted || whole_only || !self.shared_state.config.inference.tensor_parallel {
+                vec![]
+            } else {
+                self.detect_tp_groups(&segments, &candidates)
+            };
 
         let uncovered = segments_without_standby(&segments, &standbys);
         route_info!(purpose,

@@ -201,6 +201,106 @@ fn assemble_multi_node_pipeline() {
     assert_eq!(assignment.segments[1].layer_range, (16, 32));
 }
 
+/// **A model whose layers share caches and read per-layer inputs is never
+/// split** (Gemma 4 E2B/E4B, `GgufTensorMeta::runs_only_whole`, #115 (3c)).
+/// Two peers each hold half of it: an ordinary model of the same shape is
+/// planned across them (the control), this one is refused — and once a third
+/// peer holds all of it, that peer is given the whole model, alone.
+#[test]
+fn a_model_that_runs_only_whole_is_never_split_across_computers() {
+    let plan = |shared_kv_layers: usize, whole_holder: bool| {
+        let state = make_shared_state();
+        let local_id = state.identity.node_id().clone();
+        let model = ModelId("whole-only".into());
+        let shard = |index: u32, layer_range: (u32, u32)| ShardInfo {
+            index,
+            layer_range,
+            size_bytes: 1_000_000_000,
+            hash: [0u8; 32],
+            tensors: vec![],
+        };
+        state.model_registry.register_manifest(make_manifest(
+            "whole-only",
+            32,
+            vec![shard(0, (0, 16)), shard(1, (16, 32))],
+        ));
+        state.gguf_meta.insert(
+            model.clone(),
+            crate::inference::split::GgufTensorMeta {
+                tensors: Default::default(),
+                tensor_data_offset: 0,
+                model_name: None,
+                head_count: 8,
+                head_count_kv: 1,
+                block_count: 32,
+                embedding_length: 1536,
+                head_dim: 256,
+                rope_dim: 256,
+                rope_freq_base: 10_000.0,
+                rms_norm_eps: 1e-6,
+                expert_count: 0,
+                expert_used_count: 0,
+                architecture: "gemma4".into(),
+                context_length: 8192,
+                pooling_type: 0,
+                kv_layout: None,
+                shared_kv_layers,
+            },
+        );
+        let mut holders = vec![(NodeId([2u8; 32]), vec![0]), (NodeId([3u8; 32]), vec![1])];
+        if whole_holder {
+            holders.push((NodeId([4u8; 32]), vec![0, 1]));
+        }
+        for (node, shards) in &holders {
+            for &index in shards {
+                state.model_registry.record_shard_holder(
+                    ShardId {
+                        model_id: model.clone(),
+                        index,
+                    },
+                    node.clone(),
+                );
+            }
+            state.peer_registry.insert(
+                node.clone(),
+                PeerInfo {
+                    node_id: node.clone(),
+                    addresses: vec![],
+                    capability: None,
+                    last_seen: chrono::Utc::now(),
+                    latency_ms: Some(10),
+                    trust_score: 0.8,
+                    peer_id_bytes: None,
+                    ack_srtt_ms: None,
+                    active_request_count: 0,
+                    first_seen: 0,
+                    verified_transaction_count: 0,
+                    is_lan_peer: false,
+                    goodput_bytes_per_sec: None,
+                    goodput_samples: 0,
+                },
+            );
+            state.connected_node_ids.insert(node.clone());
+        }
+        PipelineScheduler::new(state).assemble_pipeline(&model, &local_id)
+    };
+
+    let ordinary = plan(0, false).expect("the control splits across the two halves");
+    assert_eq!(ordinary.segments.len(), 2);
+
+    let err = plan(8, false).expect_err("a model that runs only whole was split");
+    assert!(
+        matches!(err, SwarmError::InsufficientCapacity(_)),
+        "refused as {err:?}"
+    );
+
+    let whole = plan(8, true).expect("the whole holder serves it");
+    assert_eq!(whole.segments.len(), 1, "{:?}", whole.segments);
+    assert_eq!(whole.segments[0].node_id, NodeId([4u8; 32]));
+    assert_eq!(whole.segments[0].layer_range, (0, 32));
+    assert!(whole.tp_groups.is_empty());
+}
+
 /// **A model kept on this computer is never planned onto a peer** (#251).
 /// Two peers hold all of it; this node holds none. Unkept, the plan uses them
 /// (the control); kept, the request is refused as `KeptOnThisComputer` — a
@@ -4149,6 +4249,7 @@ fn a_prompt_position_is_priced_like_the_worker_charges_it() {
         context_length: 8192,
         pooling_type: 0,
         kv_layout: None,
+        shared_kv_layers: 0,
     };
     // GQA on a card that keeps the half cache: f16 alone → 2 bytes per element.
     assert_eq!(

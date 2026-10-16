@@ -124,6 +124,13 @@ fn segment_weight_bytes(
             false
         } else if name == "output.weight" || name == "output_norm.weight" {
             is_last
+        } else if super::host_resident(name) {
+            // Gemma 4 E2B/E4B's per-layer table stays in the machine's
+            // memory, rows gathered there (`split::per_layer`).
+            false
+        } else if name.starts_with("per_layer_") {
+            // Its projection and norm: beside the embedding.
+            is_first
         } else {
             // Small odds and ends (rope factors, per-model extras).
             true
@@ -716,6 +723,112 @@ fn layer_output_scale<R: std::io::Read + std::io::Seek>(
     }
 }
 
+/// A layer's per-layer embedding — Gemma 4 E2B/E4B's `inp_gate`, `proj` and
+/// `post_norm` (llama.cpp `per_layer_inp_gate` / `per_layer_proj` /
+/// `per_layer_post_norm`) — on `device`, or `None` for a file without one. A
+/// layer carrying part of it is refused: run without the rest it would write
+/// nonsense.
+fn per_layer_embedding<R: std::io::Read + std::io::Seek>(
+    ct: &gguf_file::Content,
+    reader: &mut R,
+    prefix: &str,
+    device: &Device,
+    eps: f64,
+) -> Result<Option<Box<super::PerLayerEmbedding>>, SwarmError> {
+    let names = ["inp_gate", "proj", "post_norm"].map(|n| format!("{prefix}.{n}.weight"));
+    let present = names
+        .iter()
+        .filter(|n| ct.tensor_infos.contains_key(n.as_str()))
+        .count();
+    if present == 0 {
+        return Ok(None);
+    }
+    if present < names.len() {
+        return Err(SwarmError::Internal(format!(
+            "{prefix} carries only part of a per-layer embedding ({present} of inp_gate, proj, \
+             post_norm)"
+        )));
+    }
+    let [inp_gate, proj, post_norm] = names.map(|name| {
+        ct.tensor(reader, &name, device)
+            .map_err(|e| SwarmError::Internal(format!("{name}: {e}")))
+    });
+    Ok(Some(Box::new(super::PerLayerEmbedding {
+        inp_gate: QMatMul::from_qtensor(inp_gate?).map_err(SwarmError::internal)?,
+        proj: QMatMul::from_qtensor(proj?).map_err(SwarmError::internal)?,
+        post_norm: RmsNorm::from_qtensor(post_norm?, eps).map_err(SwarmError::internal)?,
+    })))
+}
+
+/// What builds a forward's per-layer inputs (Gemma 4 E2B/E4B,
+/// `split::per_layer`), for the first segment of a file carrying
+/// `per_layer_token_embd` — the table on the processor
+/// (`gguf_meta::host_resident`), its projection and norm on `device` — or
+/// `None` for every other file.
+fn per_layer_inputs<R: std::io::Read + std::io::Seek>(
+    ct: &gguf_file::Content,
+    reader: &mut R,
+    arch: &str,
+    block_count: usize,
+    device: &Device,
+    eps: f64,
+) -> Result<Option<super::PerLayerInputs>, SwarmError> {
+    if !ct.tensor_infos.contains_key(super::PER_LAYER_TOKEN_TABLE) {
+        return Ok(None);
+    }
+    let width_key = format!("{arch}.embedding_length_per_layer_input");
+    let width = ct
+        .metadata
+        .get(&width_key)
+        .and_then(|v| v.to_u32().ok())
+        .ok_or_else(|| SwarmError::Internal(format!("missing GGUF metadata: {width_key}")))?
+        as usize;
+    let table = ct
+        .tensor(reader, super::PER_LAYER_TOKEN_TABLE, &Device::Cpu)
+        .map_err(|e| SwarmError::Internal(format!("{}: {e}", super::PER_LAYER_TOKEN_TABLE)))?;
+    let model_proj = ct
+        .tensor(reader, "per_layer_model_proj.weight", device)
+        .map_err(|e| SwarmError::Internal(format!("per_layer_model_proj: {e}")))?;
+    let proj_norm = ct
+        .tensor(reader, "per_layer_proj_norm.weight", device)
+        .map_err(|e| SwarmError::Internal(format!("per_layer_proj_norm: {e}")))?;
+    let inputs = super::PerLayerInputs::new(
+        table,
+        QMatMul::from_qtensor(model_proj).map_err(SwarmError::internal)?,
+        RmsNorm::from_qtensor(proj_norm, eps).map_err(SwarmError::internal)?,
+        block_count,
+        width,
+    )
+    .map_err(SwarmError::internal)?;
+    tracing::info!(
+        layers = block_count,
+        width,
+        table_mb = inputs.table_bytes() >> 20,
+        "Loaded per-layer inputs: the table stays in the machine's memory, a row a token"
+    );
+    Ok(Some(inputs))
+}
+
+/// Layer `layer_idx`'s KV source as an index into this segment's layers —
+/// Gemma 4's shared-KV layers read an earlier layer's cache
+/// (`gguf_meta::kv_sources`), `None` for a layer keeping its own. A source
+/// outside the segment, or a shared layer with no earlier layer of its kind,
+/// is refused: either would answer from a cache nothing wrote.
+fn segment_kv_source(
+    sources: &[Option<usize>],
+    layer_idx: usize,
+    layer_start: usize,
+) -> Result<Option<usize>, SwarmError> {
+    match sources.get(layer_idx).copied().flatten() {
+        None => Ok(None),
+        Some(src) if src < layer_idx && src >= layer_start => Ok(Some(src - layer_start)),
+        Some(src) => Err(SwarmError::Internal(format!(
+            "layer {layer_idx} reads layer {src}'s cache, which this segment (from layer \
+             {layer_start}) does not hold before it"
+        ))),
+    }
+}
+
 /// Whether layer `prefix` uses its K projection's output as V: a Gemma 4
 /// global layer, which carries no `attn_v` (llama.cpp's
 /// `use_alternative_attention`, "if v_proj is not present, use Kcur as Vcur").
@@ -914,6 +1027,23 @@ impl SplitModel {
         // repeats one word for half a minute (field report 2026-10-15).
         if let Some(refusal) = meta.refusal() {
             return Err(refusal.into_error());
+        }
+        // Gemma 4 E2B/E4B: a layer reading an earlier layer's cache, or a
+        // per-layer input only the embedding step builds, runs only where one
+        // process holds every layer (`GgufTensorMeta::runs_only_whole`). The
+        // planner offers no other placement once it has read the header; a
+        // range planned before that is refused rather than run without what
+        // its layers read — as `Validation`, which every holder would answer
+        // alike (no failover, no penalty for the peer).
+        if meta.runs_only_whole()
+            && !(is_first && is_last && layer_start == 0 && layer_end >= meta.block_count)
+        {
+            return Err(SwarmError::Validation(format!(
+                "This model runs only whole on one computer — its layers share what they \
+                 remember and read inputs built from the prompt's words — and this computer \
+                 was asked for layers {layer_start}..{layer_end} of {}",
+                meta.block_count
+            )));
         }
         let head_count = meta.head_count;
         // The widest layer's — what every model-wide estimate charges each
@@ -1332,6 +1462,9 @@ impl SplitModel {
         // its K projection's output as V (`use_alternative_attention`).
         let gemma4 = matches!(model_arch, ModelArch::Gemma4);
         let v_rms_norm = gemma4.then_some(rms_norm_eps);
+        // Gemma 4 E2B/E4B: the layers that read an earlier layer's cache
+        // instead of keeping their own (`gguf_meta::kv_sources`).
+        let kv_sources = super::kv_sources(&ct);
 
         // Gemma 2 final logit soft-capping (from GGUF metadata)
         let final_logit_softcap = ct
@@ -1574,6 +1707,12 @@ impl SplitModel {
                 "Loaded token embedding table"
             );
         }
+        // Gemma 4 E2B/E4B's per-layer inputs, built beside the embedding.
+        let per_layer_inputs = if is_first {
+            per_layer_inputs(&ct, &mut file, arch, block_count, &device, rms_norm_eps)?
+        } else {
+            None
+        };
 
         // Load output norm and LM head only for last segment
         let norm = if is_last {
@@ -1875,6 +2014,8 @@ impl SplitModel {
                         query_scale: None,
                         v_rms_norm: None,
                         output_scale: None,
+                        per_layer_embedding: None,
+                        kv_source: None,
                     }));
                 }
             }
@@ -2019,6 +2160,8 @@ impl SplitModel {
                     query_scale: None,
                     v_rms_norm: None,
                     output_scale: None,
+                    per_layer_embedding: None,
+                    kv_source: None,
                 }));
             }
         } else if model_arch.is_hybrid_ssm() {
@@ -2241,6 +2384,7 @@ impl SplitModel {
                                 // Borrowed into the thread: a mixture-of-experts
                                 // layer asks it where its experts go.
                                 let placement = &placement;
+                                let kv_sources = kv_sources.as_slice();
                                 s.spawn(move || -> Result<LayerVariant, SwarmError> {
                                     let device_ref = &layer_device;
                                     let mut cursor = std::io::Cursor::new(mmap_ref);
@@ -2456,6 +2600,15 @@ impl SplitModel {
 
                                     let output_scale =
                                         layer_output_scale(ct_ref, &mut cursor, &prefix)?;
+                                    let per_layer_embedding = per_layer_embedding(
+                                        ct_ref,
+                                        &mut cursor,
+                                        &prefix,
+                                        device_ref,
+                                        rms_norm_eps,
+                                    )?;
+                                    let kv_source =
+                                        segment_kv_source(kv_sources, layer_idx, layer_start)?;
                                     Ok(LayerVariant::Dense(LayerWeights {
                                         attention_wq: qkv_q,
                                         attention_wk: qkv_k,
@@ -2486,6 +2639,8 @@ impl SplitModel {
                                         query_scale,
                                         v_rms_norm,
                                         output_scale,
+                                        per_layer_embedding,
+                                        kv_source,
                                     }))
                                 })
                             })
@@ -2603,6 +2758,9 @@ impl SplitModel {
                         .tensor(file, &format!("{prefix}.attn_k_norm.weight"), &device)
                         .ok();
                     let output_scale = layer_output_scale(&ct, file, &prefix)?;
+                    let per_layer_embedding =
+                        per_layer_embedding(&ct, file, &prefix, &device, rms_norm_eps)?;
+                    let kv_source = segment_kv_source(&kv_sources, layer_idx, layer_start)?;
 
                     layers.push(LayerVariant::Dense(LayerWeights {
                         attention_wq: qkv_q,
@@ -2643,6 +2801,8 @@ impl SplitModel {
                         query_scale: query_scale_of(layer_idx),
                         v_rms_norm,
                         output_scale,
+                        per_layer_embedding,
+                        kv_source,
                     }));
                 }
             }
@@ -2763,6 +2923,7 @@ impl SplitModel {
 
         Ok(Self {
             tok_embeddings,
+            per_layer_inputs,
             // Where each layer actually went. Empty when the segment is on one
             // device, which is what the forward loop checks before it does any
             // per-layer device work at all — an unsplit model pays nothing.

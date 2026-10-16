@@ -679,7 +679,9 @@ model — see `docs/invariants/inference.md`), `kv_write.rs` (writing a step's K
 into a cache of another dtype),
 `entry.rs` (model entry + LRU eviction),
 `gguf_meta.rs` (GGUF header parsing), `shard_reader.rs` (multi-shard virtual reader),
-`rope.rs` (RoPE precomputation), `prefix_cache.rs` (cross-request prefix-KV reuse).
+`rope.rs` (RoPE precomputation), `prefix_cache.rs` (cross-request prefix-KV reuse),
+`per_layer.rs` (Gemma 4 E2B/E4B's per-layer inputs, built beside the token
+embedding from a table kept in the machine's memory).
 
 ```
 Client → API Server → InferenceRouter → Pipeline Assembly
@@ -719,7 +721,7 @@ The SplitModel loader detects the model architecture from GGUF metadata
 | Attention | Standard MHA/GQA | Standard GQA | Standard MHA | Gated: 3 of 4 layers Gated DeltaNet (recurrent state), every 4th softmax attention with a per-head output gate | Standard MHA; Gemma 2: 4,096-position window on even layers | GQA, per-head Q/K RMS norm before RoPE; window (512 / 1,024) on 5 layers in 6 | A shape per layer (`split::attention_shapes`): 12B windowed 8 KV heads × 256 over 1,024, every 6th global 1 × 512 with V = K; Q/K normed with weights, V without; scale 1 (`split::query_scale`) | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) | Extreme GQA (16:1) |
 | FFN | Dense | Dense + MoE (mixed) | Dense | Dense, or MoE (top-k) + sigmoid-gated shared expert (`qwen35moe`) | Dense | Dense (GELU) | Dense (GELU); 26B-A4B: a dense GELU feed-forward beside GELU top-k experts, each branch normed, per-expert output scale (`layers::DenseBeside`) | Dense | Dense | Dense | MoE (top-k) + shared | Dense |
 | Context length | 4096 (default) | 131072 | 32768 | 131072 | 8192 | 32768 (1B), 131072 (4B+) | 262144 | 4096 | 32768 | 16384 | 163840 | 131072 |
-| Special | — | NoPE every 4th layer; Q/K RMS-normalised after RoPE; sigmoid top-k, expert weighted on its INPUT | — | Hybrid SSM+attention | Embedding scaling (sqrt(d)), norm weights carry Gemma's +1 in the file, attn + final logit softcap, EOS 107, Gemma chat template | Embedding scaling (sqrt(d)); no softcap; `<end_of_turn>` (106) ends a turn; the 27B's query scale (#279) | Per-layer `layer_output_scale`; final softcap 30; `<turn\|>` (106) ends a turn; gemma4 tokenizer (`BpeTokenizer::encode_gemma4`), BOS always; E2B/E4B refused (#115) | Fused QKV/FFN | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
+| Special | — | NoPE every 4th layer; Q/K RMS-normalised after RoPE; sigmoid top-k, expert weighted on its INPUT | — | Hybrid SSM+attention | Embedding scaling (sqrt(d)), norm weights carry Gemma's +1 in the file, attn + final logit softcap, EOS 107, Gemma chat template | Embedding scaling (sqrt(d)); no softcap; `<end_of_turn>` (106) ends a turn; the 27B's query scale (#279) | Per-layer `layer_output_scale`; final softcap 30; `<turn\|>` (106) ends a turn; gemma4 tokenizer (`BpeTokenizer::encode_gemma4`), BOS always; E2B/E4B: per-layer inputs + shared-KV layers, whole on one computer only (#115 (3c)) | Fused QKV/FFN | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
 | E2E verified | ✅ | tiny random model vs llama.cpp only (#114) | ✅ | ✅ dense vs llama.cpp (0.8B, 4B); `qwen35moe` vs llama.cpp on a 0.87B real file (#228) | ✅ (Gemma2) | ✅ 1B and 4B vs llama.cpp on the processor (#115 (1)) | ✅ 12B vs llama.cpp master, processor and card (#115 (3)) | ✅ | — | ⛔ not supported (#118) | ⛔ not supported (#116) | ✅ |
 
 > **Phi-3 fused tensors**: Phi-3 GGUF models store `attn_qkv.weight` (Q+K+V concatenated) and `ffn_up.weight` (gate+up concatenated, no `ffn_gate.weight`). The loader dequantizes on CPU, splits by head dimensions, and re-quantizes to Q4_0 on the target device.
@@ -3116,7 +3118,7 @@ The list is split into **open** (will be addressed) and **won't fix unless a con
 
 - **DeepSeek-2 (V2/V2-Lite/V3, Kimi-K2, GLM-4.7-Flash) — recognised, refused, code kept** — see `docs/FUTURE_WORK.md` #116 for the list of what a real file needs. The loader's MLA branch, `MlaWeights` and `LayerVariant::DeepSeek` stay as its starting point and are unreachable until `ModelArch::is_supported` admits the family again.
 
-- **Gemma 4's small sizes, and Gemma 3's and 4's images — recognised, refused by name** — `docs/FUTURE_WORK.md` #115: E2B and E4B (per-layer token embeddings, shared KV layers), `gemma4v` / Gemma 3's vision projector, and the `-assistant` drafters. `GgufTensorMeta::unbuilt_gemma4_part` refuses those Gemma 4 sizes off their tensor table (and experts carrying a gate/up scale); Gemma 3 and Gemma 4 12B/31B/26B-A4B text run.
+- **Gemma 3's and 4's images and Gemma 4's drafters — recognised, refused by name; the E2B/E4B run only whole** — `docs/FUTURE_WORK.md` #115: `gemma4v` / Gemma 3's vision projector and the `-assistant` drafters are refused; `GgufTensorMeta::unbuilt_gemma4_part` refuses experts carrying a gate/up scale. Gemma 3 and Gemma 4 12B/31B/26B-A4B/E2B/E4B text run; the E2B/E4B only on one computer holding every layer (`GgufTensorMeta::runs_only_whole`) — splitting them across computers would need the per-layer inputs sent between segments, as vLLM's Gemma 3n sends them (`docs/FUTURE_WORK.md` #294).
 
 - **Metered-connection detection on macOS** — `daemon::metered::read` answers unknown there, so automatic downloads and serving peers are held back on a metered connection only with `auto_manage.on_metered_connection = "pause"`. macOS exposes the cost through `NWPath.isExpensive` / `isConstrained` (Network framework), which needs Objective-C/Swift bindings this crate does not carry.
 

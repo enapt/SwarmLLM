@@ -1389,6 +1389,11 @@ impl LayerOnTheCard {
                 post_ffw_norm: some_norm(&layer.post_ffw_norm)?,
                 cos: rows(&layer.cos)?,
                 sin: rows(&layer.sin)?,
+                per_layer_embedding: layer
+                    .per_layer_embedding
+                    .as_ref()
+                    .map(|e| e.sent_to_card(card).map(Box::new))
+                    .transpose()?,
                 ..layer.clone()
             },
             cache_home: Device::Cpu,
@@ -2542,15 +2547,19 @@ impl LayerVariant {
     /// (`MoeFfn::prompt_card`) or router.
     pub(crate) fn projections_mut(&mut self) -> Vec<&mut QMatMul> {
         let (mut out, ffn): (Vec<&mut QMatMul>, &mut FfnVariant) = match self {
-            LayerVariant::Dense(w) => (
-                vec![
+            LayerVariant::Dense(w) => {
+                let mut held = vec![
                     &mut w.attention_wq,
                     &mut w.attention_wk,
                     &mut w.attention_wv,
                     &mut w.attention_wo,
-                ],
-                &mut w.ffn,
-            ),
+                ];
+                if let Some(e) = w.per_layer_embedding.as_mut() {
+                    held.push(&mut e.inp_gate);
+                    held.push(&mut e.proj);
+                }
+                (held, &mut w.ffn)
+            }
             LayerVariant::DeepSeek {
                 attention: a, ffn, ..
             } => (
@@ -2949,6 +2958,55 @@ pub(crate) struct LayerWeights {
     /// layer's output is assembled (`split::executor::dense_layer` and the
     /// batched loop); `None` for every other family.
     pub(crate) output_scale: Option<f64>,
+    /// Gemma 4 E2B/E4B's per-layer embedding ([`PerLayerEmbedding`]), added
+    /// where the layer's output is assembled; `None` for every other layer.
+    /// Boxed: every other layer carries only the pointer.
+    pub(crate) per_layer_embedding: Option<Box<PerLayerEmbedding>>,
+    /// A layer that keeps no KV cache and attends another layer's instead —
+    /// the SEGMENT-LOCAL index of that layer (`split::kv_sources`, the E2B/E4B's
+    /// shared layers). Its K and V weights are never read ([`Self::projected`]);
+    /// the executor hands its attention the source's slot ([`Self::kv_slot`]),
+    /// which the source filled earlier in the same forward ([`shared_history`]).
+    /// `None` for every layer that keeps its own.
+    pub(crate) kv_source: Option<usize>,
+}
+
+/// Gemma 4 E2B/E4B's per-layer embedding (llama.cpp `models/gemma4.cpp`,
+/// "per-layer embedding"; HF `Gemma4TextDecoderLayer`): after the layer's
+/// feed-forward residual, `x + post_norm(proj(gelu(inp_gate(x)) * input))`,
+/// `input` this layer's slice of what the embedding step builds from the
+/// prompt's tokens (`split::PerLayerInputs`). Applied in ONE place,
+/// `split::executor::scaled_output`, which every layer path assembles its
+/// output through — before the layer's output scale, as llama.cpp does.
+#[derive(Debug, Clone)]
+pub(crate) struct PerLayerEmbedding {
+    /// `blk.N.inp_gate`: `n_embd → n_embd_per_layer`.
+    pub(crate) inp_gate: QMatMul,
+    /// `blk.N.proj`: `n_embd_per_layer → n_embd`.
+    pub(crate) proj: QMatMul,
+    /// `blk.N.post_norm`.
+    pub(crate) post_norm: RmsNorm,
+}
+
+impl PerLayerEmbedding {
+    /// `x` (`[b, seq, n_embd]`, the layer's output with its residual) with the
+    /// layer's embedding added; `input` is `[b, seq, n_embd_per_layer]`. GELU
+    /// is the tanh form (`ggml_gelu`, HF `gelu_pytorch_tanh`), as the
+    /// family's feed-forward.
+    pub(crate) fn forward(&self, x: &Tensor, input: &Tensor) -> CandleResult<Tensor> {
+        let gated = (self.inp_gate.forward(x)?.gelu()? * input)?;
+        x + self.post_norm.forward(&self.proj.forward(&gated)?)?
+    }
+
+    /// For a processor layer readied on the card ([`LayerOnTheCard`]): the
+    /// norm copied over; the projections copy their weights per call
+    /// ([`LayerVariant::projections_mut`] lists them).
+    fn sent_to_card(&self, card: &Device) -> CandleResult<Self> {
+        Ok(Self {
+            post_norm: self.post_norm.sent_to_card(card)?,
+            ..self.clone()
+        })
+    }
 }
 
 /// Where a sliding window of `window` positions starts for queries at
@@ -3313,6 +3371,63 @@ pub(crate) fn append_to_cache(
             cache.append(k, v)
         }
     }
+}
+
+/// What a layer that keeps no cache attends ([`LayerWeights::kv_source`]): the
+/// whole history its source layer's cache holds, as [`append_to_cache`] answers
+/// it — the positions this forward added included, since the source runs
+/// earlier in the same forward and so must reach exactly `index_pos + seq_len`.
+/// Anything else — no cache, one behind (a source a draft skipped) or ahead (a
+/// slot that is not the source's) — is refused, never attended: queries over
+/// the wrong keys answer plausibly and wrongly.
+pub(crate) fn shared_history(
+    slot: &Option<LayerKv>,
+    index_pos: usize,
+    seq_len: usize,
+) -> CandleResult<(Tensor, Tensor)> {
+    let Some(cache) = slot.as_ref() else {
+        candle_core::bail!("a layer reading another layer's cache found it empty");
+    };
+    let reach = cache.current_seq_len();
+    if reach != index_pos + seq_len {
+        candle_core::bail!(
+            "a layer reading another layer's cache found it at {reach} positions, not the {} \
+             this forward reaches",
+            index_pos + seq_len
+        );
+    }
+    match (cache.k()?, cache.v()?) {
+        (Some(k), Some(v)) => Ok((k, v)),
+        _ => candle_core::bail!("a layer reading another layer's cache found no keys in it"),
+    }
+}
+
+/// A layer's history, cut to its window, where its queries are. A card /
+/// processor split places layers card-first and a shared layer's source comes
+/// before it ([`shared_history`]), so the split can leave a shared layer on
+/// the processor reading a cache held on the card: that history crosses each
+/// forward — as llama.cpp's scheduler copies an input held by another backend
+/// — and arrives at f32, the storage a processor cache keeps ([`kv_storage`]).
+/// A view is copied out first (`to_device` on a view moves its whole buffer);
+/// the source's f16 mirror stays on the source's device. History already
+/// beside its queries — every layer's own — is handed back as it is.
+#[allow(clippy::type_complexity)]
+fn history_beside_queries(
+    (k, v, mirror): (Tensor, Tensor, Option<(Tensor, Tensor)>),
+    queries: &Device,
+) -> CandleResult<(Tensor, Tensor, Option<(Tensor, Tensor)>)> {
+    if k.device().same_device(queries) {
+        return Ok((k, v, mirror));
+    }
+    let moved = |t: &Tensor| -> CandleResult<Tensor> {
+        let t = t.force_contiguous()?.to_device(queries)?;
+        if queries.is_cpu() && t.dtype() != DType::F32 {
+            t.to_dtype(DType::F32)
+        } else {
+            Ok(t)
+        }
+    };
+    Ok((moved(&k)?, moved(&v)?, None))
 }
 
 /// Is the half KV cache on for this binary and process — a card build with
@@ -4602,6 +4717,113 @@ impl LayerWeights {
 
     // Eight arguments, like `forward_attn_batched`: the cache's shape,
     // reservation and window travel together with the tensors they size.
+    /// The layer's Q, K and V projections of `x`, with any adapter's deltas
+    /// and the biases added — for both attention entry points. K and V only
+    /// for a layer that keeps its own cache: one that reads another's
+    /// ([`Self::kv_source`]) never reads its K and V weights, as llama.cpp
+    /// skips them (`hparams.has_kv(il)`, `models/gemma4.cpp`).
+    ///
+    /// Q, K and V are three matmuls against the SAME `x`, so the activation is
+    /// quantized once for all three rather than once each — 2 fewer GPU
+    /// launches per layer on the quantized CUDA path. Identical results and a
+    /// plain loop everywhere else.
+    #[allow(clippy::type_complexity)]
+    fn projected(
+        &self,
+        x: &Tensor,
+        lora: Option<(&LoraAdapter, usize)>,
+    ) -> CandleResult<(Tensor, Option<(Tensor, Tensor)>)> {
+        let (mut q, mut kv) = crate::inference::prof::timed!(P::QkvProj, {
+            if self.kv_source.is_some() {
+                CandleResult::Ok((self.attention_wq.forward(x)?, None))
+            } else {
+                let mut out = QMatMul::forward_shared(
+                    x,
+                    &[&self.attention_wq, &self.attention_wk, &self.attention_wv],
+                )?;
+                let v = out.pop().expect("forward_shared returns one per weight");
+                let k = out.pop().expect("forward_shared returns one per weight");
+                let q = out.pop().expect("forward_shared returns one per weight");
+                CandleResult::Ok((q, Some((k, v))))
+            }
+        })?;
+
+        // Apply LoRA deltas to Q/K/V projections if adapter is active
+        if let Some((adapter, abs_layer)) = lora {
+            let delta = |name: &str, t: &Tensor| -> CandleResult<Option<Tensor>> {
+                adapter
+                    .weights
+                    .get(&format!("blk.{abs_layer}.{name}"))
+                    .map(|lw| {
+                        crate::model::lora::apply_lora(
+                            t,
+                            x,
+                            lw,
+                            adapter.metadata.alpha,
+                            adapter.metadata.rank,
+                        )
+                        .map_err(|e| candle_core::Error::Msg(format!("LoRA {name}: {e}")))
+                    })
+                    .transpose()
+            };
+            if let Some(t) = delta("attn_q", &q)? {
+                q = t;
+            }
+            if let Some((k, v)) = kv.as_mut() {
+                if let Some(t) = delta("attn_k", k)? {
+                    *k = t;
+                }
+                if let Some(t) = delta("attn_v", v)? {
+                    *v = t;
+                }
+            }
+        }
+
+        // Apply QKV biases if present (Qwen2 has biases)
+        if let Some(ref bq) = self.attention_bq {
+            q = q.broadcast_add(bq)?;
+        }
+        if let Some((k, v)) = kv.as_mut() {
+            if let Some(ref bk) = self.attention_bk {
+                *k = k.broadcast_add(bk)?;
+            }
+            if let Some(ref bv) = self.attention_bv {
+                *v = v.broadcast_add(bv)?;
+            }
+        }
+        Ok((q, kv))
+    }
+
+    /// K and V for `b_sz × seq_len` positions shaped as the cache keeps them
+    /// (BHSD): K normalised by `attn_k_norm` (Qwen3, per head, before RoPE),
+    /// V by [`Self::v_rms_norm`]. Not yet turned: each entry point applies
+    /// RoPE to K itself.
+    fn keys_and_values(
+        &self,
+        k: Tensor,
+        v: Tensor,
+        b_sz: usize,
+        seq_len: usize,
+    ) -> CandleResult<(Tensor, Tensor)> {
+        let mut k = k.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?;
+        let v = self
+            .normed_values(v.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?)?
+            .transpose(1, 2)?
+            .contiguous()?;
+        if let Some(ref kn) = self.attn_k_norm {
+            k = kn.forward(&k)?;
+        }
+        Ok((k.transpose(1, 2)?.contiguous()?, v))
+    }
+
+    /// Where this layer's attention reads and writes its cache, among a
+    /// forward's per-layer slots: its own (`layer_idx`, segment-local) or, for
+    /// a layer that keeps none, its source's ([`Self::kv_source`]). The ONE
+    /// answer for every executor path that hands a layer its slot.
+    pub(crate) fn kv_slot(&self, layer_idx: usize) -> usize {
+        self.kv_source.unwrap_or(layer_idx)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn forward_attn(
         &self,
@@ -4641,113 +4863,56 @@ impl LayerWeights {
         lora: Option<(&LoraAdapter, usize)>,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, _n_embd) = x.dims3()?;
-        // Q, K and V are three matmuls against the SAME `x`, so the activation
-        // is quantized once for all three rather than once each — 2 fewer GPU
-        // launches per layer on the quantized CUDA path. Identical results and
-        // a plain loop everywhere else.
-        let (mut q, mut k, mut v) = crate::inference::prof::timed!(P::QkvProj, {
-            let mut out = QMatMul::forward_shared(
-                x,
-                &[&self.attention_wq, &self.attention_wk, &self.attention_wv],
-            )?;
-            let v = out.pop().expect("forward_shared returns one per weight");
-            let k = out.pop().expect("forward_shared returns one per weight");
-            let q = out.pop().expect("forward_shared returns one per weight");
-            CandleResult::Ok((q, k, v))
-        })?;
-
-        // Apply LoRA deltas to Q/K/V projections if adapter is active
-        if let Some((adapter, abs_layer)) = lora {
-            let key_q = format!("blk.{abs_layer}.attn_q");
-            if let Some(lw) = adapter.weights.get(&key_q) {
-                q = crate::model::lora::apply_lora(
-                    &q,
-                    x,
-                    lw,
-                    adapter.metadata.alpha,
-                    adapter.metadata.rank,
-                )
-                .map_err(|e| candle_core::Error::Msg(format!("LoRA attn_q: {e}")))?;
-            }
-            let key_k = format!("blk.{abs_layer}.attn_k");
-            if let Some(lw) = adapter.weights.get(&key_k) {
-                k = crate::model::lora::apply_lora(
-                    &k,
-                    x,
-                    lw,
-                    adapter.metadata.alpha,
-                    adapter.metadata.rank,
-                )
-                .map_err(|e| candle_core::Error::Msg(format!("LoRA attn_k: {e}")))?;
-            }
-            let key_v = format!("blk.{abs_layer}.attn_v");
-            if let Some(lw) = adapter.weights.get(&key_v) {
-                v = crate::model::lora::apply_lora(
-                    &v,
-                    x,
-                    lw,
-                    adapter.metadata.alpha,
-                    adapter.metadata.rank,
-                )
-                .map_err(|e| candle_core::Error::Msg(format!("LoRA attn_v: {e}")))?;
-            }
-        }
-
-        // Apply QKV biases if present (Qwen2 has biases)
-        if let Some(ref bq) = self.attention_bq {
-            q = q.broadcast_add(bq)?;
-        }
-        if let Some(ref bk) = self.attention_bk {
-            k = k.broadcast_add(bk)?;
-        }
-        if let Some(ref bv) = self.attention_bv {
-            v = v.broadcast_add(bv)?;
-        }
+        let (q, kv) = self.projected(x, lora)?;
 
         let __shape_t = std::time::Instant::now();
         let mut q = q.reshape((b_sz, seq_len, self.n_head, self.head_dim))?;
-        let mut k = k.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?;
-        let v = self
-            .normed_values(v.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?)?
-            .transpose(1, 2)?
-            .contiguous()?;
+        let kv = kv
+            .map(|(k, v)| self.keys_and_values(k, v, b_sz, seq_len))
+            .transpose()?;
 
         // Qwen3 QK normalization: RmsNorm applied per-head before RoPE
         if let Some(ref qn) = self.attn_q_norm {
             q = qn.forward(&q)?;
         }
-        if let Some(ref kn) = self.attn_k_norm {
-            k = kn.forward(&k)?;
-        }
 
         let q = q.transpose(1, 2)?.contiguous()?;
-        let k = k.transpose(1, 2)?.contiguous()?;
 
         let q = self.scaled_queries(self.apply_rotary_emb(&q, index_pos)?)?;
-        let k = self.apply_rotary_emb(&k, index_pos)?;
+        let kv = kv
+            .map(|(k, v)| CandleResult::Ok((self.apply_rotary_emb(&k, index_pos)?, v)))
+            .transpose()?;
         crate::inference::prof::add(P::AttnShape, __shape_t.elapsed().as_nanos() as u64);
 
         // KV-cache: use pre-allocated KvCache buffers (avoids Tensor::cat per
-        // step), cut to the layer's sliding window where it binds.
+        // step), cut to the layer's sliding window where it binds. A layer that
+        // keeps no cache reads its source's ([`Self::kv_source`]), whose slot
+        // the executor handed over as `kv_cache`.
         let (k, v, mirror, window_left) = match cache_home {
             None => {
-                let (k, v) = append_to_cache(
-                    kv_cache,
-                    &k,
-                    &v,
-                    index_pos,
-                    self.kv_storage_on(x.device()),
-                    max_seq_len,
-                    kv_reserve,
-                    self.sliding_window,
-                )?;
+                let (k, v) = match kv {
+                    Some((k, v)) => append_to_cache(
+                        kv_cache,
+                        &k,
+                        &v,
+                        index_pos,
+                        self.kv_storage_on(x.device()),
+                        max_seq_len,
+                        kv_reserve,
+                        self.sliding_window,
+                    )?,
+                    None => shared_history(kv_cache, index_pos, seq_len)?,
+                };
                 // The f16 BSHD mirror, if this cache is maintaining one — lets
                 // the CUDA flash arm skip converting the whole history every
                 // token. A half cache has none: flash reads it where it lies
                 // (`run_attention`).
                 let mirror = kv_cache.as_ref().and_then(|c| c.flash_operands());
                 let held_from = kv_cache.as_ref().map_or(0, LayerKv::held_from);
-                self.keys_in_window(seq_len, k, v, mirror, held_from)?
+                let (k, v, mirror, window_left) =
+                    self.keys_in_window(seq_len, k, v, mirror, held_from)?;
+                let (k, v, mirror) = history_beside_queries((k, v, mirror), x.device())?;
+                (k, v, mirror, window_left)
             }
             // The cache stays on its layer's own device: the new rows go down
             // to it, and the history it then holds comes up for the attention.
@@ -4759,16 +4924,19 @@ impl LayerWeights {
             // cut BEFORE the copy, so only the positions the layer reads come
             // up. No mirror: the history was just copied.
             Some(home) => {
-                let (k, v) = append_to_cache(
-                    kv_cache,
-                    &k.to_device(home)?,
-                    &v.to_device(home)?,
-                    index_pos,
-                    self.kv_storage_on(home),
-                    max_seq_len,
-                    kv_reserve,
-                    self.sliding_window,
-                )?;
+                let (k, v) = match kv {
+                    Some((k, v)) => append_to_cache(
+                        kv_cache,
+                        &k.to_device(home)?,
+                        &v.to_device(home)?,
+                        index_pos,
+                        self.kv_storage_on(home),
+                        max_seq_len,
+                        kv_reserve,
+                        self.sliding_window,
+                    )?,
+                    None => shared_history(kv_cache, index_pos, seq_len)?,
+                };
                 let held_from = kv_cache.as_ref().map_or(0, LayerKv::held_from);
                 let (k, v, _, window_left) = self.keys_in_window(seq_len, k, v, None, held_from)?;
                 (
@@ -4882,57 +5050,17 @@ impl LayerWeights {
         // ── Batched: projections, biases, norms, RoPE ──
         // One quantization of `x` for all three projections — see the note on
         // the single-position path above.
-        let (mut q, mut k, mut v) = crate::inference::prof::timed!(P::QkvProj, {
-            let mut out = QMatMul::forward_shared(
-                x,
-                &[&self.attention_wq, &self.attention_wk, &self.attention_wv],
-            )?;
-            let v = out.pop().expect("forward_shared returns one per weight");
-            let k = out.pop().expect("forward_shared returns one per weight");
-            let q = out.pop().expect("forward_shared returns one per weight");
-            CandleResult::Ok((q, k, v))
-        })?;
-
-        if let Some((adapter, abs_layer)) = lora {
-            for (name, t) in [("attn_q", &mut q), ("attn_k", &mut k), ("attn_v", &mut v)] {
-                if let Some(lw) = adapter.weights.get(&format!("blk.{abs_layer}.{name}")) {
-                    *t = crate::model::lora::apply_lora(
-                        t,
-                        x,
-                        lw,
-                        adapter.metadata.alpha,
-                        adapter.metadata.rank,
-                    )
-                    .map_err(|e| candle_core::Error::Msg(format!("LoRA {name}: {e}")))?;
-                }
-            }
-        }
-
-        if let Some(ref bq) = self.attention_bq {
-            q = q.broadcast_add(bq)?;
-        }
-        if let Some(ref bk) = self.attention_bk {
-            k = k.broadcast_add(bk)?;
-        }
-        if let Some(ref bv) = self.attention_bv {
-            v = v.broadcast_add(bv)?;
-        }
+        let (q, kv) = self.projected(x, lora)?;
 
         let __shape_t = std::time::Instant::now();
         let mut q = q.reshape((b_sz, seq_len, self.n_head, self.head_dim))?;
-        let mut k = k.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?;
-        let v = self
-            .normed_values(v.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?)?
-            .transpose(1, 2)?
-            .contiguous()?;
+        let kv = kv
+            .map(|(k, v)| self.keys_and_values(k, v, b_sz, seq_len))
+            .transpose()?;
         if let Some(ref qn) = self.attn_q_norm {
             q = qn.forward(&q)?;
         }
-        if let Some(ref kn) = self.attn_k_norm {
-            k = kn.forward(&k)?;
-        }
         let q = q.transpose(1, 2)?.contiguous()?;
-        let k = k.transpose(1, 2)?.contiguous()?;
         // A rotation is linear, so the queries' scale is taken before it here:
         // one call for the stack, whichever way RoPE goes below.
         let q = self.scaled_queries(q)?;
@@ -4944,13 +5072,16 @@ impl LayerWeights {
         // the loop below. Everything else in this function is position-
         // independent and stays batched either way.
         let uniform_pos = index_positions.iter().all(|p| *p == index_positions[0]);
-        let (q, k) = if uniform_pos {
+        let (q, kv) = if uniform_pos {
             (
                 self.apply_rotary_emb(&q, index_positions[0])?,
-                self.apply_rotary_emb(&k, index_positions[0])?,
+                kv.map(|(k, v)| {
+                    CandleResult::Ok((self.apply_rotary_emb(&k, index_positions[0])?, v))
+                })
+                .transpose()?,
             )
         } else {
-            (q, k)
+            (q, kv)
         };
         crate::inference::prof::add(P::AttnShape, __shape_t.elapsed().as_nanos() as u64);
 
@@ -4959,34 +5090,48 @@ impl LayerWeights {
         for (i, cache_slot) in caches.iter_mut().enumerate() {
             let cache_slot: &mut Option<LayerKv> = cache_slot;
             let qi = q.narrow(0, i, 1)?.contiguous()?;
-            let ki = k.narrow(0, i, 1)?.contiguous()?;
-            let vi = v.narrow(0, i, 1)?.contiguous()?;
+            let kvi = kv
+                .as_ref()
+                .map(|(k, v)| {
+                    CandleResult::Ok((
+                        k.narrow(0, i, 1)?.contiguous()?,
+                        v.narrow(0, i, 1)?.contiguous()?,
+                    ))
+                })
+                .transpose()?;
             let index_pos = index_positions[i];
-            let (qi, ki) = if uniform_pos {
-                (qi, ki)
+            let (qi, kvi) = if uniform_pos {
+                (qi, kvi)
             } else {
                 let __t = std::time::Instant::now();
                 let r = (
                     self.apply_rotary_emb(&qi, index_pos)?,
-                    self.apply_rotary_emb(&ki, index_pos)?,
+                    kvi.map(|(ki, vi)| {
+                        CandleResult::Ok((self.apply_rotary_emb(&ki, index_pos)?, vi))
+                    })
+                    .transpose()?,
                 );
                 crate::inference::prof::add(P::AttnShape, __t.elapsed().as_nanos() as u64);
                 r
             };
-            let (ki, vi) = append_to_cache(
-                cache_slot,
-                &ki,
-                &vi,
-                index_pos,
-                self.kv_storage_on(x.device()),
-                max_seq_len,
-                kv_reserves.get(i).copied().unwrap_or(0),
-                self.sliding_window,
-            )?;
+            let (ki, vi) = match kvi {
+                Some((ki, vi)) => append_to_cache(
+                    cache_slot,
+                    &ki,
+                    &vi,
+                    index_pos,
+                    self.kv_storage_on(x.device()),
+                    max_seq_len,
+                    kv_reserves.get(i).copied().unwrap_or(0),
+                    self.sliding_window,
+                )?,
+                None => shared_history(cache_slot, index_pos, seq_len)?,
+            };
             let mirror = cache_slot.as_ref().and_then(|c| c.flash_operands());
             let held_from = cache_slot.as_ref().map_or(0, LayerKv::held_from);
             let (ki, vi, mirror, window_left) =
                 self.keys_in_window(seq_len, ki, vi, mirror, held_from)?;
+            let (ki, vi, mirror) = history_beside_queries((ki, vi, mirror), qi.device())?;
             heads.push(crate::inference::prof::timed!(
                 P::AttnCore,
                 run_attention_windowed(
@@ -5110,6 +5255,8 @@ mod batched_attention_tests {
             query_scale: None,
             v_rms_norm: None,
             output_scale: None,
+            per_layer_embedding: None,
+            kv_source: None,
         }
     }
 

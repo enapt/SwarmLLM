@@ -20,6 +20,11 @@ pub struct SplitModel {
     /// otherwise — see [`TokenEmbedding`]. Both answer `forward` identically,
     /// so nothing below this field needs to know which it got.
     pub(super) tok_embeddings: Option<TokenEmbedding>,
+    /// What builds each forward's per-layer inputs beside the embedding —
+    /// Gemma 4 E2B/E4B ([`super::PerLayerInputs`]); `None` for every other
+    /// model. Such a model loads only whole (`GgufTensorMeta::runs_only_whole`),
+    /// so this is present exactly where its layers are.
+    pub(super) per_layer_inputs: Option<super::PerLayerInputs>,
     /// Transformer layers for this segment's range.
     pub(super) layers: Vec<LayerVariant>,
     /// Final RMSNorm (only loaded by the last segment).

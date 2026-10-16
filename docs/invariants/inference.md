@@ -4685,10 +4685,11 @@ layer, which the attention's `1/sqrt(head_dim)` cancels — one elementwise op, 
 built. `LayerWeights::v_rms_norm` is applied in ONE place (`normed_values`) for both
 attention entry points; `LayerWeights::output_scale` where the layer's output is assembled
 (`executor::scaled_output`); `split::rope::LayerRope` gives windowed layers their own width
-and no file factors (`WindowedRope`). A Gemma 4 size whose layers are not built here is
-refused by name, off its tensor table (`unbuilt_gemma4_part`): the E2B/E4B's per-layer
-embeddings would otherwise load as the dense layout and write nonsense (the 26B-A4B's experts
-run since #115 (3b), § "Gemma 4's 26B-A4B").
+and no file factors (`WindowedRope`). A Gemma 4 part not built here is refused by name, off
+its tensor table (`unbuilt_gemma4_part`) — today only experts carrying a gate/up scale. Until
+2026-10-17 it refused the E2B/E4B's per-layer embeddings, which would otherwise have loaded as
+the dense layout and written nonsense; they run since #115 (3c), § "Gemma 4's E2B and E4B" (the
+26B-A4B's experts since #115 (3b), § "Gemma 4's 26B-A4B").
 LoRA refuses the family (`lora::check_fits` judges one width per projection, and Gemma 4's
 layers differ).
 
@@ -4931,6 +4932,162 @@ first attention launches (FUTURE_WORK #293) — and each after it in 3.1-3.2 s. 
 331 tok/s, 1.5 s a chunk; of our 3.1 s, 1.6-2.0 s is the chosen experts' copy to the card. A
 decode step's six card-held layers run stacked at 1.5 ms where one expert at a time
 took 8.1-9.4 ms.
+
+## Gemma 4's E2B and E4B: shared caches and per-layer inputs (2026-10-17, FUTURE_WORK #115 (3c))
+
+**What they add.** The two small sizes carry two mechanisms the 12B, 31B and 26B-A4B do not
+(llama.cpp master `models/gemma4.cpp`, HF `modeling_gemma4.py`, read 2026-10-16; the E2B's
+header: 35 layers, `attention.shared_kv_layers` 20, `embedding_length_per_layer_input` 256,
+a `feed_forward_length` per layer — 6,144 to layer 14, 12,288 after):
+
+1. **Shared caches.** The last `shared_kv_layers` layers keep no KV cache. Each attends the
+   cache of the last layer BEFORE them of its own kind, windowed or global — the E2B's 13 and
+   14 — and never reads its own `attn_k` / `attn_v`, which the file still carries. llama.cpp
+   skips their projections (`hparams.has_kv(il)`); it does not search for the source but takes
+   `n_layer_kv_from_start - (is_swa ? 2 : 1)` and asserts that layer has a cache (gotcha #884).
+   HF searches (`kv_shared_layer_index`: the last non-shared layer of the same type), and so
+   does **`split::kv_sources`** — the same answer as llama.cpp's on every real file.
+2. **Per-layer inputs.** After the feed-forward's residual, every layer adds an embedding of its
+   own, gated by an input built from the prompt's TOKENS:
+   `pe = cur; cur = gelu(inp_gate·cur) ⊙ input[l]; cur = post_norm(proj·cur); cur = pe + cur`,
+   then `layer_output_scale`. The inputs are, per layer slice,
+   `(rms_norm(per_layer_model_proj·x₀ / √n_embd)·per_layer_proj_norm + per_layer_token_embd[token]·√width) / √2`
+   (`build_inp_per_layer`, `project_per_layer_inputs`). The table is [35 × 256, 262,144] —
+   1,927 MB of the E2B Q4_K_M's 3,447 MB.
+
+**What was built.**
+
+- **`LayerWeights::kv_source`** (from `split::kv_sources`, segment-local) and **`kv_slot`**, the
+  one answer to which cache slot a layer's attention is handed — on the single forward, the
+  batched decode step and a processor layer run whole on the card (`dense_layer_on_the_card`,
+  which cuts back only a cache the layer holds). `projected` computes only Q for a shared
+  layer, and `shared_history` reads its source's cache as the source left it this forward.
+  A shared layer's slot stays empty: `split::kv_layers` and `GgufTensorMeta::layers_keeping_kv`
+  charge it nothing, a prefix-cache snapshot carries it empty and hydrates it empty. SWIFT's
+  layer skip never skips a layer another reads (`lends_its_kv`). **A card/processor split can
+  part a shared layer from its source**: placement is card-first and the sources come first, so
+  a split at 20 leaves layers 20-34 on the processor reading caches on the card. Found by review
+  before the commit — every decode step would have failed on mismatched devices — and closed at
+  the read: `layers::history_beside_queries`, at both attention entry points, copies the
+  history (cut to its window first) to the queries' device each forward, at f32 on the
+  processor, as llama.cpp's scheduler copies an input another backend holds. A processor layer
+  run whole on the card for a prompt chunk already brought its history up (`cache_home`).
+- **`split::per_layer::PerLayerInputs`**, built once per forward beside the token embedding on
+  the first segment. **The table stays in host memory** (`gguf_meta::host_resident`), as
+  llama.cpp keeps its input layer on the processor: a quantized table's rows are gathered and
+  dequantized straight to f32, as `ggml_get_rows` does; an unquantized upload's is held at f16
+  like a dense token table. The projection and its norm sit on the model's device; each layer's
+  slice reaches its layer's device through `per_layer::beside`, which copies a view out first
+  (`to_device` on a view moves the whole storage). **`executor::scaled_output`** is the one
+  place a layer's embedding is added, on every dense path, and it refuses a layer that carries
+  an embedding but was handed no input.
+- **Whole on one computer only** — **`GgufTensorMeta::runs_only_whole`**: the table is in the
+  file, or any layer is shared. The inputs are built from tokens only the first segment sees,
+  and a shared layer's source must be in its segment; splitting would need both sent between
+  segments (FUTURE_WORK #294). So the scheduler offers such a model only as one whole holder's
+  plan (`assemble_pipeline_for`, `InsufficientCapacity` otherwise — whole holders only, no
+  partial ranges, no tensor-parallel group); "Start and finish on this computer" runs it here or
+  refuses with `PromptPrivacyUnavailable`; the loader refuses a partial range; the local
+  embedder refuses it; a forward handed hidden states (`forward_pre_embedded`, a later segment)
+  is refused; tensor parallelism refuses such a layer.
+- **A decode step on a card is not captured** (`decode_graph_ineligibility`: "per-layer inputs
+  gathered on the processor") — each step's rows are a host-to-card copy, which a capture would
+  replay from a stale address (FUTURE_WORK #295).
+
+**Verified.** Tiny files (`examples/make_tiny_gemma_gguf.py` ARCH=gemma4 QK_STD=0.25, 12 layers
+at period 6; `SHARED=6` so the last kept layer is global, as llama.cpp requires), ours against
+llama.cpp master's processor build:
+
+| file | worst cos |
+|---|---|
+| `SHARED=6` | 0.99989 |
+| `PLE=16` | 0.99983 |
+| `PLE=32` | 0.99998 |
+| both (`PLE=16 SHARED=6`), whole / in 5-token / in 1-token pieces | 0.99998 / 0.99998 / 0.99998 |
+| both at Q8_0 (`PLE=32 SHARED=6`) | 0.96818 |
+| the Q8_0 file without either mechanism | 0.95614 |
+
+Switching either mechanism off on the same weights drops the worst position by 0.198 (shared
+caches) and 0.146 (per-layer inputs). No Q8_0 file is worse than its plain Q8_0 base, whose gap is
+the quantization's.
+
+The real E2B (bartowski Q4_K_M), on the processor, against llama.cpp master's processor build with
+and without its weight repacking, and that pair against itself (gotcha #867):
+
+| prompt | pair | worst cos | median | top-1 |
+|---|---|---|---|---|
+| 28 tokens (24 + 4 decode) | ours vs llama.cpp plain | 0.99624 | 0.99983 | 27/28 |
+| | ours vs llama.cpp repacked | 0.99520 | 0.99977 | 24/28 |
+| | **llama.cpp repacked vs plain** | **0.99415** | **0.99987** | **25/28** |
+| 1,536 tokens (last 48 + 4 decode), past the 512-position window | ours vs llama.cpp plain | 0.98471 | 0.99974 | 47/52 |
+| | ours vs llama.cpp repacked | 0.98688 | 0.99973 | 46/52 |
+| | **llama.cpp repacked vs plain** | **0.99358** | **0.99971** | **47/52** |
+
+On the long prompt our worst positions (1484, 1493, 1494, 1501) are the four where llama.cpp's
+two builds part most (0.9936-0.9963): the logits there are sharp enough that a rounding moves
+them. A wrong window would sink every position past 512, not four.
+
+The real E4B (bartowski Q4_K_M, 42 layers, 18 shared) the same way:
+
+| prompt | pair | worst cos | median | top-1 |
+|---|---|---|---|---|
+| 28 tokens | ours vs llama.cpp plain | 0.98569 | 0.99897 | 24/28 |
+| | ours vs llama.cpp repacked | 0.98019 | 0.99892 | 26/28 |
+| | **llama.cpp repacked vs plain** | **0.97490** | **0.99885** | **22/28** |
+| 1,536 tokens (last 48 + 4) | ours vs llama.cpp plain | 0.92964 | 0.99937 | 51/52 |
+| | ours vs llama.cpp repacked | 0.94325 | 0.99937 | 52/52 |
+| | **llama.cpp repacked vs plain** | **0.98591** | **0.99936** | **51/52** |
+
+The E4B is a softer file than the E2B — llama.cpp's own two builds part at a median of 0.9989 —
+and on 28 tokens we sit closer to each of them than they sit to each other. On 1,536 tokens the
+worst position, 1513, is one that moves wherever the backend changes: our processor against our
+card reads 0.95486 there, and llama.cpp's card against its own processor 0.94276 (median 0.99866,
+top-1 49 of 52) — its two processor builds agree there (0.99627) because they differ only in their
+matmul kernels. (`DUMP_KV_F32` makes llama.cpp report an f32 cache yet leaves this family's logits
+byte-identical on a tiny file, so it cannot say whether the cache's precision is the lever.)
+
+Whole on the card (the CUDA build, RTX 3070 Laptop, Windows up 93 h, live node stopped,
+`~/swarmllm-g4/carde2b.sh`), against llama.cpp master's processor build, with llama.cpp's own card
+(`-ngl 99`) against its processor as the yardstick. Each arm ran twice and gave identical logits
+both times. Worst cos / median / top-1:
+
+| model, prompt | ours on the card | **llama.cpp's card** |
+|---|---|---|
+| E2B, 28 tokens | 0.98488 / 0.99978 / 24 of 28 | **0.96775 / 0.99981 / 26 of 28** |
+| E2B, 1,536 tokens (last 48 + 4) | 0.99449 / 0.99971 / 49 of 52 | **0.99119 / 0.99966 / 49 of 52** |
+| E4B, 28 tokens | 0.94146 / 0.99750 / 23 of 28 | **0.90202 / 0.99798 / 21 of 28** |
+| E4B, 1,536 tokens (last 48 + 4) | 0.97790 / 0.99869 / 51 of 52 | **0.94276 / 0.99866 / 49 of 52** |
+
+Split between the card and the processor (`LOGITS_PROBE_GPU_LAYERS`,
+`~/swarmllm-g4/carde2b_split.sh`): the build before `history_beside_queries` FAILED at 20 card
+layers ("attn: device mismatch in matmul, lhs: Cpu, rhs: Cuda"); after it:
+
+| E2B placement, prompt | ours | **llama.cpp's card, same layers** |
+|---|---|---|
+| 20 on the card (both sources there), 28 tokens | 0.99070 / 0.99980 / 23 of 28 | **0.97499 / 0.99980 / 24 of 28** |
+| 14 on the card (only the windowed source), 28 tokens | 0.98864 / 0.99985 / 25 of 28 | — |
+| 20 on the card, 1,536 tokens (last 48 + 4) | 0.99449 / 0.99971 / 49 of 52 | — |
+
+On the long prompt the 48 prompt rows are bit-identical to the whole-card run (a ≥ 32-token chunk
+runs each processor layer whole on the card, § "A split's processor-held layers read a prompt
+whole on the card"); the four decode rows, whose shared layers read the card's caches from the
+processor, are within cosine 0.99992 of it.
+
+A decode step stays uncaptured (the probe logs `DIAG: decode steps on this model stay uncaptured
+reason="per-layer inputs gathered on the processor"`): 15-17 ms on the E2B and 19-20 ms on the
+E4B, against llama.cpp `4b1a27f` `llama-bench -ngl 99` at 103.1 and 65.8 tok/s (FUTURE_WORK #295).
+The table the loader keeps in host memory reads 1,837 MiB (E2B) and 2,205 MiB (E4B).
+
+Tests (`split::tests::per_layer_and_shared_kv`, `gguf_meta::shared_kv_tests`):
+`a_shared_kv_layer_attends_its_source_layers_cache_and_never_its_own` (red with `kv_slot`
+handing every layer its own slot, and with a shared layer computing K/V),
+`a_batched_decode_step_reads_each_requests_source_cache` (red with both),
+`a_layers_per_layer_input_gates_its_embedding` (red with `scaled_output` skipping the
+embedding), `per_layer_inputs_are_built_as_llama_cpp_builds_them`,
+`hidden_states_without_their_tokens_are_refused`,
+`the_e2bs_shared_layers_read_the_last_kept_layer_of_their_kind`,
+`a_shared_layer_with_nothing_before_it_names_itself`, and
+`gemma4_sizes_this_build_cannot_run_are_refused` (which now asserts the E2B shape runs whole only).
 
 ## A model that cannot write replies is refused off its header (2026-10-15)
 

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #294**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #297**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -59,10 +59,11 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
-6. **#115** — Gemma 4's small sizes: (3c) E2B/E4B (the sizes small computers pick:
-   per-layer token embeddings, shared KV layers); then the Gemma 3/4 vision projectors and the
-   drafters. All are refused by name today, never loaded wrong. The 26B-A4B runs since
-   2026-10-16, its experts on the card since #292.
+6. **#296** — Gemma 4's E2B/E4B (run since 2026-10-17, the sizes small computers pick) are priced
+   1.9 GB too heavy for a card: their per-layer table is charged as card weights though it lives
+   in the machine's memory, which on a 4 GB card sends them to the processor. Then **#115**'s
+   rest — the Gemma 3/4 vision projectors and the drafters, refused by name today, never loaded
+   wrong.
 7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 6.7 KB/s on the .240
    fleet (8.8 on .239), ~3 copies of each message (from ~6.3), measured 2026-10-16. The manifests
    are 84% of the gossip sent: next (2) announce-then-pull for manifests.
@@ -1200,6 +1201,20 @@ was measured against the never-repacked reference above. Not ours, and llama.cpp
 clocks down between steps of a split (255-600 MHz between 1755 MHz bursts), and back-to-back
 runs on this laptop heat it enough to slow a split step 133 → 185 ms within 40 tokens (gotcha #825).
 
+#### #295 — Gemma 4's E2B/E4B decode on a card is not captured as a CUDA graph
+`P3` · perf-local · **OPEN** — 2026-10-17 · history: #115 (3c)
+
+Whole on the RTX 3070 Laptop (Windows up 93 h, live node stopped), an E2B Q4_K_M decode step takes
+15-17 ms (`SWARMLLM_PROFILE`, the probe's steps after the first, `~/swarmllm-g4/carde2b.sh`) where
+llama.cpp `4b1a27f` `llama-bench -ngl 99` decodes 103 tok/s (samples 78-116, ~8.7 ms at best).
+The E4B: 19-20 ms against 65.8 tok/s (samples 58.7-69.4, ~14.4 ms at best). `decode_graph_ineligibility` declines the capture for a model with per-layer inputs: each
+step's table rows are gathered on the processor and copied to the card, a pageable copy a capture
+would replay from a stale address (`htod_copies_so_far`), so every layer's launches go one by one.
+How much of the gap that is, is not measured. Next: count launches (`SWARMLLM_COUNT_KERNELS=1`);
+copy the step's rows into a fixed card buffer BEFORE the capture, the graph reading the buffer;
+teach `KvCacheStore::every_cache_holds` that a shared layer's empty slot holds (today it reads as
+a layer with no state and would refuse the capture); A/B against `SWARMLLM_CUDA_GRAPH=0`.
+
 #### #293 — A split's first prompt chunk after load spends 1-6 s in its first attention, once its experts go to the card
 `P3` · speed · **OPEN** — 2026-10-16 · history: found measuring #292
 
@@ -1674,19 +1689,34 @@ path. Adding only `llama-cpp-2/metal` would fix the DISPLAY while inference stay
 processor, which is worse. GitHub's macOS runners compile but cannot run Metal; it needs a Mac
 to test on (the swarm's Italian M4 peer belongs to a tester).
 
-#### #115 — Gemma 3's and Gemma 4's vision projectors, and Gemma 4's mixture-of-experts and small sizes, are unsupported
+#### #115 — Gemma 3's and Gemma 4's vision projectors, and Gemma 4's drafters, are unsupported
 `P2` · model-support · **PARTIAL** — 2026-09-25 · history: archive row #115
 
 Requested for gemma-4-26B-A4B. Order: ~~(1) Gemma 3 text~~, ~~(3) Gemma 4 dense text~~ (the
-12B and 31B) and ~~(3b) the 26B-A4B~~ (closed 2026-10-16, § Closed); (2) the `gemma3` projector
-(SigLIP + pool + RMSNorm + linear), after `vision.rs` gets a projector-type dispatch; (3c)
-E2B/E4B — per-layer token embeddings (`per_layer_token_embd`) and the last layers reading
-earlier layers' KV (`attention.shared_kv_layers`, 0 on the 12B); (4) `gemma4v`; (5) the
-`-assistant` drafters (`gemma4-assistant` in llama.cpp, an unknown family here). E2B/E4B are
-refused by name off their tensor table until built (`GgufTensorMeta::unbuilt_gemma4_part`), and
-so are experts carrying a gate/up scale (llama.cpp reads them; no file met so far has one). The 31B
+12B and 31B), ~~(3b) the 26B-A4B~~ and ~~(3c) the E2B/E4B~~ (closed 2026-10-16/17, § Closed;
+what (3c) left is #294-#296); (2) the `gemma3` projector (SigLIP + pool + RMSNorm + linear),
+after `vision.rs` gets a projector-type dispatch; (4) `gemma4v`; (5) the `-assistant` drafters
+(`gemma4-assistant` in llama.cpp, an unknown family here). Experts carrying a gate/up scale are
+refused by name (`GgufTensorMeta::unbuilt_gemma4_part`; llama.cpp reads them, no file met so far
+has one). The 31B
 has the 12B's layout (60 layers, 16 / 4 key/value heads) and is unchecked. Gemma 4's reference is llama.cpp MASTER
 (`~/llama.cpp-ref/dump_logits`, `tok_cases`); llama-cpp-python 0.3.16 predates it.
+
+#### #294 — Gemma 4's E2B and E4B run only whole on one computer
+`P3` · model-support · **OPEN** — 2026-10-17 · history: #115 (3c)
+
+Every layer reads a per-layer input built from the prompt's TOKENS (`split::per_layer`), which
+only the first segment sees, and the last layers (the E2B's 20 of 35) attend caches that two
+earlier layers keep (`split::kv_sources`: the E2B's 13 and 14). So `GgufTensorMeta::runs_only_whole`
+keeps them to one computer holding every layer: the scheduler offers only a whole holder's plan
+(`assemble_pipeline_for` → `InsufficientCapacity`), no partial range or tensor-parallel group;
+the loader refuses a partial range; "Start and finish on this computer" runs locally or refuses
+(`PromptPrivacyUnavailable`); hidden states without their tokens are refused. At Q4_K_M the E2B
+is 3.4 GB and the E4B 5.4 GB, so a computer that cannot hold one is rare; what it costs is that a
+node holding PART of one cannot serve it. To split: send each forward's per-layer inputs beside
+the hidden states (vLLM's Gemma 3n carries `per_layer_inputs` in its `IntermediateTensors`
+between pipeline stages), behind a feature bit, and cut only where every shared layer's source
+is in its segment — at or before the first source layer.
 
 #### #116 — The DeepSeek-2 family is recognised and refused: no real file can load
 `P2` · model-support · **OPEN** — 2026-09-25 · history: archive row #116
@@ -1724,6 +1754,22 @@ against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hy
 StarCoder2, inert while refused).
 
 ### Memory and admission
+
+#### #296 — Gemma 4's E2B/E4B are priced 1.9 GB too heavy for a card
+`P2` · memory · **OPEN** — 2026-10-17 · history: #115 (3c)
+
+`ModelProcessPool::segment_geometry` charges every tensor in the header as weights, so a card
+spawn of the E2B is priced its per-layer table too — `per_layer_token_embd`, 1,927 MB of the
+Q4_K_M's 3,447 MB — which stays in the machine's memory (`gguf_meta::host_resident`; the loader's
+own count, `segment_weight_bytes`, already leaves it out), and the machine is charged nothing for
+it. On a 4 GB card, the E2B's natural home, that sends it to the processor or into a
+card/processor split it does not need. Next: count the host-resident bytes apart in
+`VramFootprintInputs` (the first segment only), leave them off the card estimate and charge them
+to the machine as a card spawn's host share (`SpawnCharge` → `WorkerHandle::host_share_mb`, as a
+split's processor share is); the processor estimate already counts them. Where a card/processor
+split is still needed, cut it at or before the first shared layer's source (the E2B's 13): a cut
+between them works (`layers::history_beside_queries`) but copies the source's history across
+every decode step.
 
 #### #291 — A running split worker's further room is not offered to the planner, nor weighed for promotion
 `P3` · memory · **OPEN** — 2026-10-16 · history: what #265's fix left
@@ -2400,7 +2446,26 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-16, not yet released** (#265, #286, #287, #288, #289, #290, #115 (3b), #292)
+**Closed 2026-10-16/17, not yet released** (#265, #286, #287, #288, #289, #290, #115 (3b), #292, #115 (3c))
+- #115 (3c) — **Gemma 4's E2B and E4B run (text), whole on one computer.** Their last layers (the
+  E2B's 20 of 35) keep no cache and attend the last earlier layer of their kind's
+  (`split::kv_sources`; `LayerWeights::kv_source` / `kv_slot` on every executor path), and every
+  layer adds an embedding of its own gated by an input built from the tokens (`split::per_layer`,
+  `executor::scaled_output`), its 1.9 GB table kept in the machine's memory. Against llama.cpp
+  master: tiny f32 files with either mechanism or both agree at worst 0.99983-0.99998, whole and
+  in 5- and 1-token pieces, and either mechanism off drops the worst position by 0.15-0.20; the
+  real E2B Q4_K_M on the processor reads 28 tokens at worst 0.99624 / median 0.99983 (llama.cpp's
+  own repacked-vs-plain: 0.99415 / 0.99987) and 1,536 tokens, past its 512-position window, at
+  median 0.99974 (its own 0.99971), the worst positions the ones its own two builds part at.
+  On the card, whole and split with the processor (20 or 14 layers on the card), every worst and
+  median sits inside llama.cpp's own card-vs-processor spread. The E4B is a softer file — llama.cpp's
+  two builds part at a median of 0.9989 on 28 tokens — and we sit closer to each of them than they
+  sit to each other. On 1,536 tokens its worst position (0.930 on the processor) is one where llama.cpp's own card parts from its processor nearly as far (0.943). A review before the commit found that a split
+  leaving a shared layer on the processor and its source on the card failed every decode step (a
+  device mismatch); fixed where the history is read (`layers::history_beside_queries`), checked
+  failing on the build before and agreeing after.
+  Splitting them across computers is #294, their card decode graph #295, the table's memory
+  charge #296. `docs/invariants/inference.md` § "Gemma 4's E2B and E4B"; gotcha #884.
 - #115 (3b) — **Gemma 4's 26B-A4B runs (text).** Every layer runs a dense GELU feed-forward
   BESIDE 128 GELU experts (8 per token), each branch with its own norms; the router reads its own
   norm of the layer's input with its own scale, and each expert's answer has its own scale; the

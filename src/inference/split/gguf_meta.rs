@@ -367,6 +367,20 @@ fn recurrent_layer_marker(layer_idx: usize) -> String {
     format!("blk.{layer_idx}.ssm_alpha.weight")
 }
 
+/// Gemma 4 E2B/E4B's per-layer token embeddings: `[n_layer × n_embd_per_layer,
+/// n_vocab]`, each token's row holding every layer's input — over half the
+/// E2B's file (1.9 of 3.5 GB at Q4_K_M). The loader keeps it in the machine's
+/// memory, as llama.cpp does (`TENSOR_READ_LAZY`, its input layer on the
+/// processor), so no estimate charges it to a card ([`host_resident`]).
+pub(crate) const PER_LAYER_TOKEN_TABLE: &str = "per_layer_token_embd.weight";
+
+/// Is tensor `name` held in the machine's memory whatever card the segment
+/// runs on? The ONE answer for the loader, which places it, and every estimate
+/// of a card's weights (`segment_weight_bytes`, the pool's footprint).
+pub(crate) fn host_resident(name: &str) -> bool {
+    name == PER_LAYER_TOKEN_TABLE
+}
+
 /// Which of layers `[start, end)` keep a KV cache: all of them for a
 /// transformer, the full-attention ones only for a model that interleaves
 /// recurrent layers ([`layer_is_recurrent`]). The ONE answer for everything
@@ -380,7 +394,57 @@ pub(crate) fn kv_layers(
     start: usize,
     end: usize,
 ) -> impl Iterator<Item = usize> + '_ {
-    (start..end).filter(move |&layer| !layer_is_recurrent(ct, layer))
+    let sources = kv_sources(ct);
+    (start..end).filter(move |&layer| {
+        !layer_is_recurrent(ct, layer) && sources.get(layer).is_none_or(Option::is_none)
+    })
+}
+
+/// The layers that keep no KV cache of their own and attend an earlier layer's
+/// instead — Gemma 4's E2B/E4B, whose last `{arch}.attention.shared_kv_layers`
+/// layers compute only their queries. One entry per layer: the layer whose
+/// cache it reads, `None` for a layer that keeps its own. Empty for a model
+/// with no shared layers.
+///
+/// The source is HF's rule (`Gemma4TextAttention`, as `Gemma3n`'s before it):
+/// the LAST layer before the shared ones with the same attention — windowed or
+/// global ([`SlidingWindow::from_file`]). llama.cpp's reuse callback
+/// (`llama_model::create_memory`, read at `4b1a27f`) hard-codes the two layers
+/// before the boundary, `n_layer_kv_from_start - (is_swa ? 2 : 1)`, which is
+/// the same pair on every file whose last kept layer is global — the E2B's 13
+/// and 14. A shared layer with no earlier layer of its kind answers its own
+/// index, which the loader refuses rather than run with no cache to read.
+///
+/// The ONE reading: the loader points each shared layer at its source
+/// (`LayerWeights::kv_source`) and [`kv_layers`] charges no cache for it.
+pub(crate) fn kv_sources(ct: &gguf_file::Content) -> Vec<Option<usize>> {
+    let arch = gguf_arch_str(ct);
+    let shared = ct
+        .metadata
+        .get(&format!("{arch}.attention.shared_kv_layers"))
+        .and_then(|v| v.to_u32().ok())
+        .unwrap_or(0) as usize;
+    let layers = ct
+        .metadata
+        .get(&format!("{arch}.block_count"))
+        .and_then(|v| v.to_u32().ok())
+        .unwrap_or(0) as usize;
+    if shared == 0 {
+        return Vec::new();
+    }
+    let first_shared = layers.saturating_sub(shared);
+    let window = SlidingWindow::from_file(ct);
+    let windowed = |il: usize| window.as_ref().is_some_and(|w| w.for_layer(il).is_some());
+    (0..layers)
+        .map(|il| {
+            (il >= first_shared).then(|| {
+                (0..first_shared)
+                    .rev()
+                    .find(|&j| windowed(j) == windowed(il))
+                    .unwrap_or(il)
+            })
+        })
+        .collect()
 }
 
 /// The bytes of layers `[start, end)`'s routed expert stacks
@@ -450,6 +514,12 @@ pub struct GgufTensorMeta {
     /// embedding model: [`Self::is_embedding_model`].
     #[serde(default)]
     pub pooling_type: u32,
+    /// The last layers that attend an earlier layer's cache instead of keeping
+    /// their own (`<arch>.attention.shared_kv_layers`, Gemma 4's E2B/E4B —
+    /// [`kv_sources`]), 0 for every other model. A manifest from a build that
+    /// predates it reads 0, which charges those layers a cache: the safe side.
+    #[serde(default)]
+    pub shared_kv_layers: usize,
     /// How each layer keeps a conversation's cache (`kv_budget::KvLayout`),
     /// read off the header with the rest — what a coordinator prices a
     /// peer's room for a prompt by (`scheduler::prompt_kv_bytes_per_layer`):
@@ -535,9 +605,24 @@ impl GgufTensorMeta {
     /// node that prices a model from its manifest rather than its header (the
     /// scheduler's peer bound, `kv_bytes_per_position_per_layer`).
     pub(crate) fn layers_keeping_kv(&self, start: usize, end: usize) -> usize {
-        (start..end)
+        let first_shared = self.block_count.saturating_sub(self.shared_kv_layers);
+        (start..end.min(first_shared))
             .filter(|&layer| !self.tensors.contains_key(&recurrent_layer_marker(layer)))
             .count()
+    }
+
+    /// Does this model run only where ONE computer holds every layer? Gemma 4's
+    /// E2B/E4B: each layer adds an input looked up from the prompt's TOKENS
+    /// (`per_layer_token_embd`), which only the embedding step has — a later
+    /// segment receives hidden states — and the shared layers attend the cache
+    /// of a layer that may sit on another computer ([`kv_sources`]). vLLM
+    /// forwards the per-layer inputs with the hidden states between pipeline
+    /// stages (`Gemma4Model.forward`, `IntermediateTensors["per_layer_inputs"]`);
+    /// this build does not, so the planner keeps such a model whole — on this
+    /// computer or handed whole to one peer — and the loader refuses a part of
+    /// it. A card/processor split inside one worker is whole here.
+    pub fn runs_only_whole(&self) -> bool {
+        self.shared_kv_layers > 0 || self.tensors.contains_key(PER_LAYER_TOKEN_TABLE)
     }
 
     /// Location of the tensor doubling as the output head on a weight-tied
@@ -725,6 +810,7 @@ impl GgufTensorMeta {
             .get(&format!("{arch}.pooling_type"))
             .and_then(|v| v.to_u32().ok())
             .unwrap_or(0);
+        let shared_kv_layers = kv_sources(ct).iter().filter(|s| s.is_some()).count();
 
         let mut meta = GgufTensorMeta {
             tensors,
@@ -743,6 +829,7 @@ impl GgufTensorMeta {
             architecture: arch,
             context_length,
             pooling_type,
+            shared_kv_layers,
             kv_layout: None,
         };
         meta.kv_layout =
@@ -768,17 +855,14 @@ impl GgufTensorMeta {
     }
 
     /// The part of a Gemma 4 file the loader does not run yet, read off its
-    /// tensor table: the E2B/E4B's per-layer embeddings (FUTURE_WORK #115), or
-    /// a scale on its experts' gate or up projection, which llama.cpp reads
-    /// and no file met so far carries. Loaded without it, either would run
-    /// with that part missing and write nonsense, so it is refused instead.
-    /// The 26B-A4B's experts run (#115 (3b)).
+    /// tensor table: a scale on its experts' gate or up projection, which
+    /// llama.cpp reads and no file met so far carries. Loaded without it, the
+    /// model would run with that part missing and write nonsense, so it is
+    /// refused instead. The 26B-A4B's experts run (#115 (3b)), and the
+    /// E2B/E4B's per-layer embeddings and shared caches (#115 (3c)).
     fn unbuilt_gemma4_part(&self) -> Option<&'static str> {
         if self.architecture != "gemma4" {
             return None;
-        }
-        if self.tensors.contains_key("per_layer_token_embd.weight") {
-            return Some("per-layer embeddings (the E2B and E4B sizes)");
         }
         const UNREAD_SCALES: [&str; 3] = [
             ".ffn_gate_exps.scale",
@@ -1730,6 +1814,7 @@ mod active_bytes_tests {
             context_length: 0,
             pooling_type: 0,
             kv_layout: None,
+            shared_kv_layers: 0,
         }
     }
 
@@ -1868,10 +1953,18 @@ mod refusal_tests {
         ] {
             assert!(refused(with(scale), "gate or up projection"), "{scale}");
         }
-        assert!(refused(
-            with("per_layer_token_embd.weight"),
-            "per-layer embeddings"
-        ));
+        // The E2B/E4B run (#115 (3c)) — only whole on one computer.
+        assert_eq!(with("per_layer_token_embd.weight"), None, "E2B/E4B");
+        let mut e2b = header("gemma4", None);
+        e2b.tensors.insert(
+            PER_LAYER_TOKEN_TABLE.into(),
+            TensorLocation { offset: 0, size: 1 },
+        );
+        assert!(e2b.runs_only_whole());
+        let mut shared = header("gemma4", None);
+        shared.shared_kv_layers = 20;
+        assert!(shared.runs_only_whole());
+        assert!(!header("gemma4", None).runs_only_whole(), "12B / 31B split");
     }
 }
 
@@ -2172,5 +2265,66 @@ pub(super) mod sliding_window_tests {
             )),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod shared_kv_tests {
+    use super::sliding_window_tests::header;
+    use super::*;
+    use gguf_file::Value::{Array, Bool, U32};
+
+    /// The E2B's header (#115 (3c)): 35 layers, the last 20 shared, four
+    /// windowed layers to one global.
+    fn e2b() -> gguf_file::Content {
+        header(
+            "gemma4",
+            vec![
+                ("gemma4.block_count", U32(35)),
+                ("gemma4.attention.shared_kv_layers", U32(20)),
+                ("gemma4.attention.sliding_window", U32(512)),
+                (
+                    "gemma4.attention.sliding_window_pattern",
+                    Array((0..35).map(|il| Bool(il % 5 != 4)).collect()),
+                ),
+            ],
+        )
+    }
+
+    /// Each shared layer reads the last kept layer of its own kind — the E2B's
+    /// 13 (windowed) and 14 (global), llama.cpp's `n_layer_kv_from_start - 2`
+    /// and `- 1` — and only the 15 kept layers are charged a cache.
+    #[test]
+    fn the_e2bs_shared_layers_read_the_last_kept_layer_of_their_kind() {
+        let ct = e2b();
+        let sources = kv_sources(&ct);
+        assert_eq!(sources.len(), 35);
+        assert!(sources[..15].iter().all(Option::is_none), "{sources:?}");
+        for (il, source) in sources.iter().enumerate().skip(15) {
+            let want = if il % 5 == 4 { 14 } else { 13 };
+            assert_eq!(*source, Some(want), "layer {il}");
+        }
+        assert_eq!(
+            kv_layers(&ct, 0, 35).collect::<Vec<_>>(),
+            (0..15).collect::<Vec<_>>()
+        );
+        assert_eq!(kv_layers(&ct, 10, 20).count(), 5);
+    }
+
+    /// A model with no shared layers shares nothing; one whose every layer is
+    /// "shared" has no layer to read, and each answers itself — which the
+    /// loader refuses rather than run a layer on a cache nothing wrote.
+    #[test]
+    fn a_shared_layer_with_nothing_before_it_names_itself() {
+        let none = header("gemma4", vec![("gemma4.block_count", U32(12))]);
+        assert!(kv_sources(&none).is_empty());
+        let all = header(
+            "gemma4",
+            vec![
+                ("gemma4.block_count", U32(3)),
+                ("gemma4.attention.shared_kv_layers", U32(3)),
+            ],
+        );
+        assert_eq!(kv_sources(&all), vec![Some(0), Some(1), Some(2)]);
     }
 }

@@ -15,6 +15,7 @@ pub(crate) mod kv_cache;
 mod kv_write;
 mod loader;
 mod model;
+mod per_layer;
 mod prefix_cache;
 mod rope;
 mod shard_reader;
@@ -25,8 +26,8 @@ mod token_embedding;
 // Re-export types from extracted modules so external `crate::inference::split::X` paths still work.
 pub(crate) use super::layers::{
     DeepSeekMeta, DeltaNetWeights, DenseBeside, ExpertFfn, ExpertScales, FfnVariant, LayerVariant,
-    LayerWeights, MlaWeights, Mlp, MoeFfn, MoeGatingFunc, MoeRoutingConfig, QMatMul,
-    Qwen35AttnWeights, SsmState, StackedExperts,
+    LayerWeights, MlaWeights, Mlp, MoeFfn, MoeGatingFunc, MoeRoutingConfig, PerLayerEmbedding,
+    QMatMul, Qwen35AttnWeights, SsmState, StackedExperts,
 };
 pub(crate) use super::model_arch::Activation;
 pub use super::model_arch::ModelArch;
@@ -50,10 +51,12 @@ pub use self::gguf_meta::{
     ROPE_FREQS_FILENAME, TIED_OUTPUT_FILENAME,
 };
 pub(crate) use self::gguf_meta::{
-    kv_layers, layer_is_recurrent, query_scale, routed_expert_bytes, SlidingWindow,
+    host_resident, kv_layers, kv_sources, layer_is_recurrent, query_scale, routed_expert_bytes,
+    SlidingWindow, PER_LAYER_TOKEN_TABLE,
 };
 pub use self::kv_cache::{KvCacheStore, KvOccupancy};
 pub use self::model::SplitModel;
+pub(crate) use self::per_layer::PerLayerInputs;
 pub use self::prefix_cache::{
     compute_block_hashes, deserialize_snapshot, deserialize_snapshot_full,
     serialize_snapshot_with_block_size, snapshot_is_finite, verify_token_hash_chain, KvSnapshot,

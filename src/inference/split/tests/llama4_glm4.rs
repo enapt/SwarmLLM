@@ -73,6 +73,8 @@ fn llama4_normalises_q_and_k_after_rope_where_rope_runs() {
         query_scale: None,
         v_rms_norm: None,
         output_scale: None,
+        per_layer_embedding: None,
+        kv_source: None,
     };
     let eps = 1e-5;
     let normed = LayerWeights {
@@ -169,6 +171,8 @@ fn test_partial_rope_glm4_style() {
         query_scale: None,
         v_rms_norm: None,
         output_scale: None,
+        per_layer_embedding: None,
+        kv_source: None,
     };
 
     // Test that apply_rotary_emb handles partial RoPE
@@ -243,6 +247,8 @@ fn test_nope_skip_rope() {
         query_scale: None,
         v_rms_norm: None,
         output_scale: None,
+        per_layer_embedding: None,
+        kv_source: None,
     };
 
     let x = Tensor::randn(0f32, 0.1, (1, n_head, seq_len, head_dim), &device).unwrap();
@@ -408,6 +414,8 @@ fn test_llama4_moe_layer_forward() {
             query_scale: None,
             v_rms_norm: None,
             output_scale: None,
+            per_layer_embedding: None,
+            kv_source: None,
         }));
     }
 
@@ -415,6 +423,7 @@ fn test_llama4_moe_layer_forward() {
         // Single-device test model: empty means "not split".
         layer_devices: Vec::new(),
         tok_embeddings: None,
+        per_layer_inputs: None,
         layers,
         norm: None,
         output: None,

@@ -619,6 +619,12 @@ impl SplitModel {
         if !self.layer_devices.is_empty() {
             return Some("the model is split between the card and the processor");
         }
+        // Each step's per-layer rows are gathered on the processor and copied
+        // to the card — a host copy a capture would replay from a stale
+        // address (`htod_copies_so_far`).
+        if self.per_layer_inputs.is_some() {
+            return Some("per-layer inputs gathered on the processor (Gemma 4 E2B/E4B)");
+        }
         for layer in &self.layers {
             let ffn = match layer {
                 LayerVariant::Dense(lw) => &lw.ffn,
@@ -880,13 +886,17 @@ impl SplitModel {
             .to_device(&self.device)
             .map_err(|e| SwarmError::Internal(format!("Device transfer failed: {e}")))?;
 
-        // Determine the hidden state to start from
-        let layer_in = if is_first && !skip_embedding {
+        // Determine the hidden state to start from, and — for Gemma 4 E2B/E4B —
+        // every layer's per-layer input, built from the same tokens.
+        let (layer_in, per_layer_inputs) = if is_first && !skip_embedding {
             // First segment: input is token IDs → apply embedding
-            self.embed_tokens(&input)?
+            let embedded = self.embed_tokens(&input)?;
+            let per_layer = self.per_layer_inputs_for(&input, &embedded)?;
+            (embedded, per_layer)
         } else {
             // Non-first segment or pre-embedded: input is already hidden states
-            input
+            self.refuse_hidden_states_without_their_tokens()?;
+            (input, None)
         };
 
         // Get seq_len for mask
@@ -1136,8 +1146,11 @@ impl SplitModel {
                 let lora_param = lora_adapter.map(|a| (a, abs_layer));
 
                 // SWIFT skip: identity pass-through, no attention, no MLP, no KV write.
+                // Never a layer another reads its keys from (`lends_its_kv`).
                 if let Some(mask) = skip_mask {
-                    if mask.get(abs_layer).copied().unwrap_or(false) {
+                    if mask.get(abs_layer).copied().unwrap_or(false)
+                        && !self.lends_its_kv(layer_idx)
+                    {
                         continue;
                     }
                 }
@@ -1199,6 +1212,10 @@ impl SplitModel {
                 };
                 match layer {
                     LayerVariant::Dense(lw) => {
+                        let input = per_layer_input(per_layer_inputs.as_ref(), abs_layer)?;
+                        // A shared-KV layer reads its source layer's cache,
+                        // written earlier in this same forward.
+                        let cache = &mut layer_kv_caches[lw.kv_slot(layer_idx)];
                         hidden = match card_layer {
                             None => dense_layer(
                                 lw,
@@ -1206,10 +1223,11 @@ impl SplitModel {
                                 hidden,
                                 masks.for_layer(lw),
                                 index_pos,
-                                &mut layer_kv_caches[layer_idx],
+                                cache,
                                 max_seq_len,
                                 kv_reserve,
                                 lora_param,
+                                input.as_ref(),
                             )?,
                             Some(card) => {
                                 let (h, m) = dense_layer_on_the_card(
@@ -1219,9 +1237,10 @@ impl SplitModel {
                                     std::mem::take(&mut masks),
                                     index_pos,
                                     seq_len,
-                                    &mut layer_kv_caches[layer_idx],
+                                    cache,
                                     max_seq_len,
                                     kv_reserve,
+                                    input.as_ref(),
                                 )?;
                                 masks = m;
                                 h
@@ -1672,6 +1691,48 @@ impl SplitModel {
         Ok(emb)
     }
 
+    /// Every layer's per-layer input for this forward (`[b, seq, layers,
+    /// width]`), built from the tokens `input` and their embedding — `None`
+    /// for a model without them.
+    fn per_layer_inputs_for(
+        &self,
+        input: &Tensor,
+        embedded: &Tensor,
+    ) -> Result<Option<Tensor>, SwarmError> {
+        self.per_layer_inputs
+            .as_ref()
+            .map(|p| p.forward(input, embedded))
+            .transpose()
+            .map_err(|e| SwarmError::Internal(format!("per-layer inputs: {e}")))
+    }
+
+    /// A model whose layers read per-layer inputs is handed hidden states
+    /// with no tokens to build them from — a pre-embedded forward or a later
+    /// segment. The loader keeps such a model whole and the planner sends it
+    /// nowhere else, so this is a path that forgot to ask
+    /// (`GgufTensorMeta::runs_only_whole`); it fails here rather than running
+    /// every layer without its input.
+    fn refuse_hidden_states_without_their_tokens(&self) -> Result<(), SwarmError> {
+        if self.per_layer_inputs.is_some() {
+            return Err(SwarmError::Internal(
+                "this model's layers read per-layer inputs built from the prompt's tokens; \
+                 it runs only from its tokens, whole on one computer"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Does another layer of this segment read layer `layer_idx`'s KV cache
+    /// (Gemma 4's shared-KV layers)? Such a layer is never skipped — the
+    /// layers reading it would find its cache short.
+    fn lends_its_kv(&self, layer_idx: usize) -> bool {
+        self.layers.iter().any(|l| match l {
+            LayerVariant::Dense(lw) => lw.kv_source == Some(layer_idx),
+            _ => false,
+        })
+    }
+
     pub fn forward_batch(
         &mut self,
         items: &[BatchItem<'_>],
@@ -1728,14 +1789,21 @@ impl SplitModel {
 
         // Convert each input to its hidden state (apply embedding if first segment)
         let mut per_request: Vec<Tensor> = Vec::with_capacity(items.len());
+        // Each item's per-layer inputs, where the model has them.
+        let mut per_layer_per_request: Vec<Tensor> = Vec::new();
         for item in items {
             let input = item
                 .input
                 .to_device(&self.device)
                 .map_err(|e| SwarmError::Internal(format!("Device transfer: {e}")))?;
             let hidden = if is_first {
-                self.embed_tokens(&input)?
+                let embedded = self.embed_tokens(&input)?;
+                if let Some(inputs) = self.per_layer_inputs_for(&input, &embedded)? {
+                    per_layer_per_request.push(inputs);
+                }
+                embedded
             } else {
+                self.refuse_hidden_states_without_their_tokens()?;
                 input
             };
             per_request.push(hidden);
@@ -1920,6 +1988,11 @@ impl SplitModel {
         let batch_refs: Vec<&Tensor> = per_request.iter().collect();
         let batched = Tensor::cat(&batch_refs, 0)
             .map_err(|e| SwarmError::Internal(format!("Batch stack: {e}")))?;
+        // The items' per-layer inputs stacked the same way, row for row.
+        let per_layer_inputs = (!per_layer_per_request.is_empty())
+            .then(|| Tensor::cat(&per_layer_per_request, 0))
+            .transpose()
+            .map_err(|e| SwarmError::Internal(format!("Batch per-layer stack: {e}")))?;
         // Carried between norm points exactly as in `forward_inner_impl`, so
         // the batched path fuses the same add+norm pairs.
         let mut hidden = Residual::Ready(batched);
@@ -1963,9 +2036,10 @@ impl SplitModel {
                     // shares `index_pos` (checked above — a mixed batch fell
                     // back to sequential `forward` before reaching this loop),
                     // which is what makes a single RoPE call correct.
+                    let slot = lw.kv_slot(layer_idx);
                     let mut layer_caches: Vec<&mut Option<LayerKv>> = all_kv_caches
                         .iter_mut()
-                        .map(|per_req| &mut per_req[layer_idx])
+                        .map(|per_req| &mut per_req[slot])
                         .collect();
                     let item_positions: Vec<usize> = items.iter().map(|i| i.index_pos).collect();
                     let mut attn_batched = lw
@@ -1996,7 +2070,9 @@ impl SplitModel {
                             .forward(&x)
                             .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
                     }
-                    hidden = scaled_output(lw, Residual::pending(x, residual2))?;
+                    let input =
+                        per_layer_input(per_layer_inputs.as_ref(), self.layer_start + layer_idx)?;
+                    hidden = scaled_output(lw, Residual::pending(x, residual2), input.as_ref())?;
                 }
                 LayerVariant::DeepSeek {
                     attention,
@@ -2302,6 +2378,19 @@ impl SplitModel {
             .map_err(SwarmError::internal)?;
 
         let result = match &self.layers[local_layer_idx] {
+            // Gemma 4 E2B/E4B: a layer reading another's cache, or a per-layer
+            // input only the embedding step builds, runs only in a whole
+            // forward (`GgufTensorMeta::runs_only_whole`) — refused, never
+            // answered from its own cache or without its input.
+            LayerVariant::Dense(lw)
+                if lw.kv_source.is_some() || lw.per_layer_embedding.is_some() =>
+            {
+                Err(SwarmError::Internal(
+                    "tensor parallelism cannot run a layer that reads another layer's \
+                     cache or a per-layer input"
+                        .into(),
+                ))
+            }
             LayerVariant::Dense(lw) => match phase {
                 crate::types::TpPhase::AttnOnly => {
                     let x = lw
@@ -2450,6 +2539,7 @@ fn dense_layer(
     max_seq_len: usize,
     kv_reserve: usize,
     lora_param: Option<(&LoraAdapter, usize)>,
+    per_layer_input: Option<&Tensor>,
 ) -> Result<Residual, SwarmError> {
     let lw = on_card.map_or(lw, |c| &c.weights);
     // The previous layer's closing residual add is resolved
@@ -2495,13 +2585,46 @@ fn dense_layer(
     }
     // Not added here: the next norm point takes this sum
     // (`Residual::add_norm`), fused on CUDA.
-    scaled_output(lw, Residual::pending(x, residual))
+    scaled_output(lw, Residual::pending(x, residual), per_layer_input)
 }
 
-/// A layer's output times its [`LayerWeights::output_scale`] (Gemma 4), the
-/// residual included — the sum is taken here for such a layer, and left to the
-/// next norm point for every other.
-fn scaled_output(lw: &LayerWeights, out: Residual) -> Result<Residual, SwarmError> {
+/// Layer `layer`'s slice of this forward's per-layer inputs — `None` for a
+/// model without them.
+fn per_layer_input(inputs: Option<&Tensor>, layer: usize) -> Result<Option<Tensor>, SwarmError> {
+    inputs
+        .map(|t| super::per_layer::layer_input(t, layer))
+        .transpose()
+        .map_err(|e| SwarmError::Internal(format!("layer {layer}'s per-layer input: {e}")))
+}
+
+/// A layer's output with its per-layer embedding added
+/// ([`LayerWeights::per_layer_embedding`], Gemma 4 E2B/E4B, from this
+/// forward's `per_layer_input` for the layer), then times its
+/// [`LayerWeights::output_scale`] (Gemma 4) — llama.cpp `models/gemma4.cpp`'s
+/// order, both after the feed-forward's residual add. The sum is taken here
+/// for such a layer, and left to the next norm point for every other. Every
+/// dense layer's path ends here, so none can skip the embedding.
+fn scaled_output(
+    lw: &LayerWeights,
+    out: Residual,
+    per_layer_input: Option<&Tensor>,
+) -> Result<Residual, SwarmError> {
+    let out = match (&lw.per_layer_embedding, per_layer_input) {
+        (None, _) => out,
+        (Some(embedding), Some(input)) => out
+            .into_tensor()
+            .and_then(|sum| {
+                let input = super::per_layer::beside(input, &sum)?;
+                embedding.forward(&sum, &input)
+            })
+            .map(Residual::Ready)
+            .map_err(|e| SwarmError::Internal(format!("per-layer embedding: {e}")))?,
+        (Some(_), None) => {
+            return Err(SwarmError::Internal(
+                "a layer reads a per-layer input this forward did not build".into(),
+            ))
+        }
+    };
     match lw.output_scale {
         None => Ok(out),
         Some(scale) => out
@@ -2529,11 +2652,15 @@ fn dense_layer_on_the_card(
     cache: &mut Option<LayerKv>,
     max_seq_len: usize,
     kv_reserve: usize,
+    per_layer_input: Option<&Tensor>,
 ) -> Result<(Residual, ForwardMasks), SwarmError> {
-    // A forward from position 0 starts the cache over, whatever it held.
+    // A forward from position 0 starts the cache over, whatever it held. A
+    // layer reading another's cache (`kv_source`) wrote nothing to cut back —
+    // the cache it was handed is that layer's, already this forward's.
     let held = match cache.as_ref() {
-        Some(c) if index_pos > 0 => c.current_seq_len(),
-        _ => 0,
+        _ if lw.kv_source.is_some() => None,
+        Some(c) if index_pos > 0 => Some(c.current_seq_len()),
+        _ => Some(0),
     };
     let tried = LayerOnTheCard::of(lw, card, index_pos, seq_len)
         .map_err(|e| SwarmError::Internal(format!("layer to the card: {e}")))
@@ -2548,6 +2675,7 @@ fn dense_layer_on_the_card(
                 max_seq_len,
                 kv_reserve,
                 None,
+                per_layer_input,
             )
         });
     let e = match tried {
@@ -2558,7 +2686,7 @@ fn dense_layer_on_the_card(
         Err(e) => e,
     };
     note_a_layer_stayed_on_the_processor(&e);
-    if let Some(c) = cache.as_mut() {
+    if let (Some(c), Some(held)) = (cache.as_mut(), held) {
         c.truncate(held);
     }
     let down = |what: &str, t: candle_core::Result<Tensor>| {
@@ -2579,6 +2707,7 @@ fn dense_layer_on_the_card(
         max_seq_len,
         kv_reserve,
         None,
+        per_layer_input,
     )?;
     Ok((h, masks))
 }

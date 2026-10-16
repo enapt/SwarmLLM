@@ -1211,6 +1211,7 @@ async fn an_embedding_model_is_refused_before_it_is_queued() {
                 context_length: 32_768,
                 pooling_type,
                 kv_layout: None,
+                shared_kv_layers: 0,
             },
         );
     };

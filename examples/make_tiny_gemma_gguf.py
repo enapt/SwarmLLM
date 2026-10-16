@@ -21,7 +21,12 @@ logic error. What a real file cannot show quickly:
   scaling; "proportional" RoPE (a `rope_freqs` table turning only the first quarter
   of each global head); a per-layer output scale; a final softcap. MOE=1 adds the
   26B-A4B's experts beside the dense MLP: the router's own norm and scale, a fused
-  gate/up table and a per-expert output scale.
+  gate/up table and a per-expert output scale. PLE=W (#115 (3c)) gives every layer
+  the E2B/E4B's per-layer embedding, W wide — a table of W per layer per token, its
+  projection from the embedding and norm, and each layer's gate, projection and
+  norm; SHARED=N makes the last N layers read the cache of the last earlier layer
+  of their kind (`shared_kv_layers`) — they still carry K and V weights, as the real
+  files do, so a layer computing its own answers differently.
 
 Usage:
 
@@ -46,6 +51,12 @@ Verified 2026-10-15 (#279), N_LAYER=46: with QK_STD=0.25 worst cosine 0.99987
 (0.727 with SWARMLLM_QUERY_SCALE=0). With the default QK_STD=0.5 only 0.966:
 rounding amplified over 46 decisive layers, not logic (llama.cpp with an f32 KV
 cache: 0.992).
+
+Verified 2026-10-17 (#115 (3c)), ARCH=gemma4 QK_STD=0.25, 12 layers: worst cosine
+0.99989 with SHARED=6, 0.99983 with PLE=16, 0.99998 with both — whole and in 5-
+and 1-token pieces; either mechanism off drops it by 0.15-0.20. SHARED=6, not 4:
+llama.cpp takes a shared layer's source as the last kept layer (global) or the one
+before it (windowed) and aborts when the file disagrees (gotcha #884).
 
 Verified 2026-10-16 (#115 (1), #280), ARCH=gemma3 QK_STD=0.25: worst cosine
 1.000000 whole, in 5-token pieces and split at layer 7 (0.987 with
@@ -72,6 +83,11 @@ moe = arch == "gemma4" and os.environ.get("MOE", "0") == "1"
 # router near-tie can flip, and what is left of a gap is the arithmetic.
 n_expert, n_expert_used, n_ff_exp = 8, int(os.environ.get("N_EXPERT_USED", 2)), 32
 is_swa = [i % 6 != 5 for i in range(n_layer)]
+# The E2B/E4B's parts, drawn from a stream of their own so a file without them is
+# unchanged byte for byte.
+ple = int(os.environ.get("PLE", 0)) if arch == "gemma4" else 0
+shared = int(os.environ.get("SHARED", 0)) if arch == "gemma4" else 0
+rng_ple = np.random.default_rng(20261017)
 rope_factor = float(os.environ.get("ROPE_FACTOR", 8.0))
 rope_type = os.environ.get("ROPE_TYPE", "linear")
 assert rope_type in ("linear", "yarn"), rope_type
@@ -112,8 +128,8 @@ if arch == "gemma4":
     w.add_rope_dimension_count(head_dim_full)
     w.add_rope_dimension_count_swa(head_dim)
     w.add_sliding_window_pattern(is_swa)
-    w.add_shared_kv_layers(0)
-    w.add_embedding_length_per_layer_input(0)
+    w.add_shared_kv_layers(shared)
+    w.add_embedding_length_per_layer_input(ple)
     w.add_final_logit_softcapping(30.0)
     if moe:
         w.add_expert_count(n_expert)
@@ -171,6 +187,11 @@ if arch == "gemma4":
     # head's pairs turn, the rest are held still by a divisor of 1e30.
     n_rot_pairs = head_dim_full // 2 // 4
     put("rope_freqs.weight", np.array([1.0] * n_rot_pairs + [1e30] * (head_dim_full // 2 - n_rot_pairs), dtype=np.float32), F32)
+if ple:
+    # ggml ne {ple * n_layer, n_vocab}, {n_embd, ple * n_layer}, {ple}.
+    put("per_layer_token_embd.weight", (rng_ple.standard_normal((n_vocab, ple * n_layer)) * 0.5).astype(np.float32), Q)
+    put("per_layer_model_proj.weight", (rng_ple.standard_normal((ple * n_layer, n_embd)) * 0.3).astype(np.float32), Q)
+    put("per_layer_proj_norm.weight", (1.0 + rng_ple.standard_normal((ple,)) * 0.1).astype(np.float32), F32)
 for i in range(n_layer):
     p = f"blk.{i}"
     put(f"{p}.attn_norm.weight", 1.0 + t((n_embd,), 0.1), F32)
@@ -193,6 +214,10 @@ for i in range(n_layer):
         put(f"{p}.ffn_down.weight", t((n_embd, n_ff), 0.15), Q)
         put(f"{p}.post_ffw_norm.weight", 1.0 + t((n_embd,), 0.1), F32)
         put(f"{p}.layer_output_scale.weight", np.array([0.5 + 0.5 * rng.random()], dtype=np.float32), F32)
+        if ple:
+            put(f"{p}.inp_gate.weight", (rng_ple.standard_normal((ple, n_embd)) * 0.3).astype(np.float32), Q)
+            put(f"{p}.proj.weight", (rng_ple.standard_normal((n_embd, ple)) * 0.3).astype(np.float32), Q)
+            put(f"{p}.post_norm.weight", (1.0 + rng_ple.standard_normal((n_embd,)) * 0.1).astype(np.float32), F32)
         if moe:
             put(f"{p}.ffn_gate_inp.weight", t((n_expert, n_embd), 0.5), F32)
             put(f"{p}.ffn_gate_inp.scale", 1.0 + t((n_embd,), 0.1), F32)
@@ -224,4 +249,4 @@ w.write_header_to_file()
 w.write_kv_data_to_file()
 w.write_tensors_to_file()
 w.close()
-print("wrote", out, arch, "layers", n_layer, "window", swa, "vocab", n_vocab)
+print("wrote", out, arch, "layers", n_layer, "window", swa, "vocab", n_vocab, "ple", ple, "shared", shared)

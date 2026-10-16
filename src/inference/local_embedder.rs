@@ -51,6 +51,29 @@ impl LocalEmbedder {
         let arch_str = crate::inference::split::gguf_arch_str(&ct);
         let arch = ModelArch::from_gguf_arch(&arch_str);
 
+        // Gemma 4 E2B/E4B: every layer reads an input built from the TOKENS
+        // beside their embedding (`split::per_layer`), so a forward handed
+        // hidden states is refused — embedding here would only break the
+        // request. Such a model runs whole on one computer
+        // (`GgufTensorMeta::runs_only_whole`), which never sends the tokens
+        // to a first segment elsewhere.
+        let per_layer_width = ct
+            .metadata
+            .get(&format!("{arch_str}.embedding_length_per_layer_input"))
+            .and_then(|v| v.to_u32().ok())
+            .unwrap_or(0);
+        if per_layer_width > 0
+            || ct
+                .tensor_infos
+                .contains_key(crate::inference::split::PER_LAYER_TOKEN_TABLE)
+        {
+            return Err(SwarmError::Inference(
+                "this model's layers read per-layer inputs built from the tokens; it is not \
+                 embedded ahead of its first layer"
+                    .into(),
+            ));
+        }
+
         // Get hidden dim
         let hidden_dim = ct
             .metadata

@@ -4445,6 +4445,7 @@ mod manifest_persist_tests {
                 context_length: 2048,
                 pooling_type: 0,
                 kv_layout: None,
+                shared_kv_layers: 0,
             },
         );
         assert_eq!(state.fill_declared_contexts(), 1);
