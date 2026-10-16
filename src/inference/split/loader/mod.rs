@@ -16,6 +16,7 @@ use candle_nn::Embedding;
 
 use crate::error::SwarmError;
 
+use super::kv_budget::KvGrowth;
 use super::model::SplitModel;
 use super::rope::{
     load_longrope_factors, precompute_freqs_cis, precompute_freqs_cis_longrope,
@@ -699,7 +700,7 @@ impl SplitModel {
         //    load-time fallback it claimed as a backstop runs before the
         //    cache grows, so it never saw the overflow.
         let mut kv_budget_bytes: Option<u64> = None;
-        let mut kv_bytes_per_token: u64 = 0;
+        let mut kv_growth = KvGrowth::default();
         // How many of this segment's layers `device` holds — every one, unless
         // the pool placed part of the segment on the processor (hybrid). The
         // SAME answer the placement below acts on (`hybrid::layers_on_device`):
@@ -728,11 +729,14 @@ impl SplitModel {
             layer_start,
             layer_start + experts_in_ram_layers,
         );
-        // KV bytes per position over layers `from..to` kept on a card or on
-        // the processor — not a recurrent layer's fixed state
-        // (`split::layers_keeping_kv`).
-        let kv_per_token_over = {
-            let (k_elems, v_elems) = if matches!(model_arch, ModelArch::DeepSeek2) {
+        // What a conversation's cache costs as it grows over layers `from..to`
+        // kept on a card or on the processor (`kv_budget::KvGrowth`): every
+        // layer that keeps one (`split::kv_layers` — not a recurrent layer's
+        // fixed state) priced by its own shape, and a sliding-window layer
+        // whose cache keeps only its window (`kv_cache::window_kept`) charged
+        // no further than that window (FUTURE_WORK #281).
+        let kv_growth_over = {
+            let mla_elems = matches!(model_arch, ModelArch::DeepSeek2).then(|| {
                 let key_length = md_get("attention.key_length")
                     .and_then(|v| v.to_u32().map_err(SwarmError::internal))
                     .map(|v| v as usize)
@@ -742,36 +746,55 @@ impl SplitModel {
                     .map(|v| v as usize)
                     .unwrap_or(head_dim);
                 super::kv_budget::mla_kv_elems(head_count, key_length, value_length)
-            } else {
-                super::kv_budget::standard_kv_elems(head_count_kv, head_dim)
-            };
+            });
             let attention = crate::inference::layers::KvAttention::of(&model_arch);
-            let ct = &ct;
+            let window = super::SlidingWindow::read(&ct);
+            let quantum = crate::inference::layers::kv_growth_quantum(context_length);
+            let (ct, shapes) = (&ct, &attention_shapes);
             move |from: usize, to: usize, on_card: bool| {
-                // How the cache is kept — the half cache on a card, f32 (plus
-                // the flash mirror for a grouped-query model where the half
-                // cache does not apply) otherwise, f32 for MLA — asked of the
-                // ONE rule the cache itself is built by (`layers::kv_storage`).
-                let storage = crate::inference::layers::kv_storage(
-                    on_card,
-                    attention,
-                    head_count,
-                    head_count_kv,
-                    head_dim,
-                );
-                super::kv_budget::kv_bytes_per_token(
-                    super::layers_keeping_kv(ct, from, to),
-                    k_elems,
-                    v_elems,
-                    storage,
+                let (mut every_position, mut windowed) = (0u64, 0u64);
+                for layer in super::kv_layers(ct, from, to) {
+                    let shape = shapes[layer];
+                    let (k_elems, v_elems) = mla_elems.unwrap_or_else(|| {
+                        super::kv_budget::standard_kv_elems(shape.n_kv_head, shape.head_dim)
+                    });
+                    // How the cache is kept — the half cache on a card, f32
+                    // (plus the flash mirror for a grouped-query model where
+                    // the half cache does not apply) otherwise, f32 for MLA —
+                    // asked of the ONE rule the cache itself is built by
+                    // (`layers::kv_storage`).
+                    let storage = crate::inference::layers::kv_storage(
+                        on_card,
+                        attention,
+                        head_count,
+                        shape.n_kv_head,
+                        shape.head_dim,
+                    );
+                    let bytes = super::kv_budget::kv_bytes_per_token(1, k_elems, v_elems, storage);
+                    let layer_window = window.as_ref().and_then(|w| w.for_layer(layer));
+                    if super::kv_cache::window_kept(layer_window, storage).is_some() {
+                        windowed += bytes;
+                    } else {
+                        every_position += bytes;
+                    }
+                }
+                KvGrowth::with_window(
+                    every_position,
+                    windowed,
+                    window.as_ref().map_or(0, |w| w.size),
+                    quantum,
                 )
             }
         };
-        // KV bytes per position ON `device`, needed by both devices' guards
-        // below — a card's guard must not count the cache of layers it
-        // does not hold.
-        let per_token =
-            kv_per_token_over(layer_start, layer_start + device_layers, device.is_cuda());
+        // The positions a budget holds, as the logs below state it: the whole
+        // context where the cost stops growing inside the budget.
+        let affordable = |growth: &KvGrowth, budget: u64| match growth.positions_within(budget) {
+            usize::MAX => context_length,
+            positions => positions,
+        };
+        // The cache ON `device`, needed by both devices' guards below — a
+        // card's guard must not count the cache of layers it does not hold.
+        let growth = kv_growth_over(layer_start, layer_start + device_layers, device.is_cuda());
         // A card/processor split's OTHER memory (#262): the processor-held
         // layers keep their caches in the machine's, which the card's budget
         // neither covers nor may be charged with. The daemon's figure when it
@@ -781,9 +804,9 @@ impl SplitModel {
         // claim). Ollama weighs a split's processor share against the
         // machine's memory the same way (`llm/server.go`).
         let mut host_kv_budget_bytes: Option<u64> = None;
-        let mut host_kv_bytes_per_token: u64 = 0;
+        let mut host_kv_growth = KvGrowth::default();
         if device.is_cuda() && device_layers < segment_layer_count {
-            host_kv_bytes_per_token = kv_per_token_over(
+            host_kv_growth = kv_growth_over(
                 layer_start + device_layers,
                 layer_start + segment_layer_count,
                 false,
@@ -797,10 +820,8 @@ impl SplitModel {
                 tracing::info!(
                     processor_layers = segment_layer_count - device_layers,
                     budget_mb = budget / (1024 * 1024),
-                    kv_bytes_per_token = host_kv_bytes_per_token,
-                    affordable_tokens = budget
-                        .checked_div(host_kv_bytes_per_token)
-                        .map_or(context_length, |t| t as usize),
+                    kv_bytes_per_position = host_kv_growth.per_position(),
+                    affordable_tokens = affordable(&host_kv_growth, budget),
                     "Card/processor split: the processor-held layers' conversation cache is \
                      charged to this machine's memory, the card-held layers' to the card"
                 );
@@ -842,14 +863,12 @@ impl SplitModel {
                     .saturating_add(crate::inference::cuda_pool::reusable_bytes(&device));
                 let budget = super::kv_budget::kv_headroom_bytes(weight_bytes, free_bytes);
                 kv_budget_bytes = Some(budget);
-                kv_bytes_per_token = per_token;
+                kv_growth = growth;
                 // How far the budget stretches, stated in the units a user
                 // thinks in. Logged at INFO when the whole declared context
                 // fits and WARN when it does not, because the second case is
                 // one where a long conversation can be refused mid-way.
-                let affordable = budget
-                    .checked_div(per_token)
-                    .map_or(context_length, |t| t as usize);
+                let affordable = affordable(&growth, budget);
                 if affordable >= context_length {
                     tracing::info!(
                         context = context_length,
@@ -882,7 +901,7 @@ impl SplitModel {
                         context = context_length,
                         free_vram_mb = free_mb,
                         weight_mb = weight_bytes / (1024 * 1024),
-                        kv_bytes_per_token = per_token,
+                        kv_bytes_per_position = growth.per_position(),
                         "There is no free graphics memory left for this model's conversation \
                          cache, so it cannot serve from the card — moving it to the processor, \
                          which is slower but answers. Close other GPU programs, or unload \
@@ -915,7 +934,7 @@ impl SplitModel {
                          and the card has none left after its {} MB of weights; running it on \
                          the processor instead, which is slower but answers",
                         crate::inference::worker_ipc::NO_KV_CACHE_ROOM_MARKER,
-                        per_token.saturating_mul(context_length as u64) / (1024 * 1024),
+                        growth.bytes_for(context_length) / (1024 * 1024),
                         context_length,
                         weight_bytes / (1024 * 1024),
                     )));
@@ -925,7 +944,7 @@ impl SplitModel {
                         affordable_tokens = affordable,
                         free_vram_mb = free_mb,
                         weight_mb = weight_bytes / (1024 * 1024),
-                        kv_bytes_per_token = per_token,
+                        kv_bytes_per_position = growth.per_position(),
                         "Free GPU memory covers about {affordable} tokens of conversation, \
                          short of this model's {context_length}-token context. Shorter \
                          conversations are unaffected; a long one may be refused once memory \
@@ -943,15 +962,13 @@ impl SplitModel {
             // the machine or, before 2026-08-21, never loading at all.
             if let Some(budget) = super::cpu_kv_budget_bytes() {
                 kv_budget_bytes = Some(budget);
-                kv_bytes_per_token = per_token;
-                let affordable = budget
-                    .checked_div(per_token)
-                    .map_or(context_length, |t| t as usize);
+                kv_growth = growth;
+                let affordable = affordable(&growth, budget);
                 tracing::info!(
                     context = context_length,
                     affordable_tokens = affordable,
                     budget_mb = budget / (1024 * 1024),
-                    kv_bytes_per_token = per_token,
+                    kv_bytes_per_position = growth.per_position(),
                     "CPU KV-cache budget: conversations up to about {affordable} tokens fit \
                      in this node's memory budget; longer ones are refused and re-routed"
                 );
@@ -2550,9 +2567,9 @@ impl SplitModel {
             output,
             masks: None,
             kv_budget_bytes,
-            kv_bytes_per_token,
+            kv_growth,
             host_kv_budget_bytes,
-            host_kv_bytes_per_token,
+            host_kv_growth,
             layer_start,
             layer_end,
             total_layers: block_count,

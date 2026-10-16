@@ -52,6 +52,7 @@ const CANCEL_RETENTION_SECS: u64 = 60;
 const KV_OCCUPANCY_REPORT_SECS: u64 = 30;
 use crate::error::SwarmError;
 use crate::inference::slot_table::{Slot, SlotTable};
+use crate::inference::split::kv_budget::KvGrowth;
 use crate::inference::split::kv_cache::KvHome;
 use crate::inference::split::{
     self, BatchItem, KvCacheStore, PrefixCache, SnapshotHome, SnapshotRoom, SplitModel,
@@ -194,6 +195,10 @@ pub async fn run_worker(
     } = options;
     set_worker_force_cpu(gpu_layers);
     set_worker_cpu_moe_layers(cpu_moe_layers);
+    crate::inference::split::PROMPT_CHUNK_TOKENS.store(
+        prefill_chunk_tokens as usize,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     // The local draft-free speculator's shape, built once. `num_pred_tokens ==
     // 0` is how `inference.ngram_lookup_enabled = false` arrives, so there is
     // no separate switch to disagree with the width.
@@ -2098,13 +2103,20 @@ async fn handle_forward(
                     &req_id_str,
                     restoring + positions,
                     REPLY_RESERVE_POSITIONS,
+                    input_positions,
                 )?;
             }
         }
     }
     if let Some(snapshot) = &restored {
         let held = prefix_cache
-            .hydrate_request_from_snapshot(kv_store, &model_key, &req_id_str, snapshot)
+            .hydrate_request_from_snapshot(
+                kv_store,
+                &model_key,
+                &req_id_str,
+                snapshot,
+                &model.cache_layouts(),
+            )
             .map_err(|e| {
                 // The detail stays here: this message crosses to the
                 // coordinator through `sanitize_peer_facing_error`, which reads
@@ -2633,6 +2645,7 @@ async fn try_remote_prefix_hydrate(
         req_id_str,
         &bytes,
         model.device(),
+        &model.cache_layouts(),
     ) {
         Ok(n) => {
             // Same reconciliation as the local-hit path: the clamp must move
@@ -3145,19 +3158,22 @@ fn host_ram_positions(
     prompt_tokens: usize,
 ) -> usize {
     use crate::inference::split::kv_budget::{
-        host_free_and_total_bytes, host_snapshot_budget, plan_snapshot,
+        host_free_and_total_bytes, host_snapshot_budget, plan_snapshot, KvGrowth,
     };
     // A snapshot copies every layer's cache, card-held and processor-held.
-    let per_token: u64 = model.kv_homes().map(|home| model.kv_budget(home).1).sum();
+    let growth = model
+        .kv_homes()
+        .map(|home| model.kv_budget(home).1)
+        .fold(KvGrowth::default(), KvGrowth::plus);
     let Some((available, total)) = host_free_and_total_bytes() else {
         return usize::MAX;
     };
-    if per_token == 0 {
+    if growth.per_position() == 0 {
         return usize::MAX;
     }
     let held = prefix_cache.bytes_in(SnapshotHome::HostRam) as u64;
     let budget = host_snapshot_budget(available, total, held);
-    let plan = plan_snapshot(budget, 0, held, per_token, prompt_tokens);
+    let plan = plan_snapshot(budget, 0, held, growth, prompt_tokens);
     if plan.evict_bytes > 0 {
         prefix_cache.release(plan.evict_bytes as usize, SnapshotHome::HostRam);
     }
@@ -3193,22 +3209,24 @@ fn positions_beside_live(
     // Against the card as it stands, not the budget predicted at load: a
     // snapshot is a device allocation the size of the prompt, taken on a card
     // that may hold tenants the load-time figure never saw.
-    let (Some(budget), per_token) = model.kv_budget_now(home, allocated, cached) else {
+    let (Some(budget), growth) = model.kv_budget_now(home, allocated, cached) else {
         return usize::MAX;
     };
-    if per_token == 0 {
+    if growth.per_position() == 0 {
         return usize::MAX;
     }
     // The live figure carries one growth quantum of reserve for the reply
     // about to be decoded: a snapshot sized to the last byte left this
     // request unable to claim its next quantum mid-reply (measured: the
     // reply cut at token 32, the quantum boundary after a 7649-token prompt).
-    let live = allocated.saturating_add(per_token.saturating_mul(REPLY_RESERVE_POSITIONS as u64));
+    let live = allocated.saturating_add(
+        growth.bytes_between(prompt_tokens, prompt_tokens + REPLY_RESERVE_POSITIONS),
+    );
     let plan = crate::inference::split::kv_budget::plan_snapshot(
         budget,
         live,
         cached,
-        per_token,
+        growth,
         prompt_tokens,
     );
     if plan.evict_bytes > 0 {
@@ -3279,6 +3297,10 @@ pub(crate) fn first_segment_input_is_text(
     index_pos == 0 && !resumes_a_kept_prompt && !is_a_piece
 }
 
+/// `forward_width` is how many positions the forward asking reads at once,
+/// where that is not this node's own choice (a coordinator's piece of a
+/// prompt, which a windowed layer's cache must hold beside its window,
+/// FUTURE_WORK #281); 0 where it is (`SplitModel::widest_prompt_forward`).
 fn ensure_room_for_prompt(
     model: &SplitModel,
     kv_store: &KvCacheStore,
@@ -3286,16 +3308,18 @@ fn ensure_room_for_prompt(
     request_id: &str,
     prompt_tokens: usize,
     reply_positions: usize,
+    forward_width: usize,
 ) -> Result<(), SwarmError> {
     let width = model.layer_end.saturating_sub(model.layer_start) as u32;
     admit_prompt_over(
         &[(model, width)],
-        0,
+        KvGrowth::default(),
         kv_store,
         prefix_cache,
         request_id,
         prompt_tokens,
         reply_positions,
+        forward_width,
     )
     .map_err(|refused| refused.error)
 }
@@ -3325,8 +3349,8 @@ fn layers_that_fit(layers: u32, needed: u64, short_by: u64) -> u32 {
 /// The ONE admission decision for a prompt's cache, over every range of this
 /// worker the prompt will run through: `ranges` pairs each loaded model with
 /// the layers of it the prompt uses (its width, or fewer where a plan's range
-/// sits inside a loaded one), and `unloaded_per_token` charges ranges not
-/// loaded yet. One range is a segment's forward or a `Generate`, exactly as
+/// sits inside a loaded one), and `unloaded` charges ranges not loaded
+/// yet. One range is a segment's forward or a `Generate`, exactly as
 /// before; several are an up-front admission (`DaemonMsg::AdmitPrompt`). The
 /// ranges share one card and one store, so the tightest of their budgets binds.
 ///
@@ -3334,14 +3358,16 @@ fn layers_that_fit(layers: u32, needed: u64, short_by: u64) -> u32 {
 /// #262): a card/processor split's card-held layers against the card, its
 /// processor-held layers against the machine, and what it promises is recorded
 /// only once every one has room.
+#[allow(clippy::too_many_arguments)]
 fn admit_prompt_over(
     ranges: &[(&SplitModel, u32)],
-    unloaded_per_token: u64,
+    unloaded: KvGrowth,
     kv_store: &KvCacheStore,
     prefix_cache: &PrefixCache,
     request_id: &str,
     prompt_tokens: usize,
     reply_positions: usize,
+    forward_width: usize,
 ) -> Result<(), PromptRefusal> {
     let Some(context_window) = ranges.iter().map(|(m, _)| m.context_window()).min() else {
         return Ok(());
@@ -3378,7 +3404,11 @@ fn admit_prompt_over(
     for (i, &home) in homes.iter().enumerate() {
         // A range not loaded yet is charged where the loaded ones keep their
         // primary caches — the first memory asked.
-        let unloaded = if i == 0 { unloaded_per_token } else { 0 };
+        let unloaded = if i == 0 {
+            unloaded
+        } else {
+            KvGrowth::default()
+        };
         let promise = admit_prompt_in(
             home,
             ranges,
@@ -3389,6 +3419,7 @@ fn admit_prompt_over(
             prompt_tokens,
             reply_positions,
             positions,
+            forward_width,
         )?;
         promises.extend(promise.map(|bytes| (home, bytes)));
     }
@@ -3408,13 +3439,14 @@ fn admit_prompt_over(
 fn admit_prompt_in(
     home: KvHome,
     ranges: &[(&SplitModel, u32)],
-    unloaded_per_token: u64,
+    unloaded: KvGrowth,
     kv_store: &KvCacheStore,
     prefix_cache: &PrefixCache,
     request_id: &str,
     prompt_tokens: usize,
     reply_positions: usize,
     positions: usize,
+    forward_width: usize,
 ) -> Result<Option<u64>, PromptRefusal> {
     let occupancy = kv_store.occupancy();
     let in_home = occupancy.allocated_in(home);
@@ -3449,12 +3481,12 @@ fn admit_prompt_in(
     // WSL2 served from host memory at 1.95 tok/s rather than refusing.
     let mut budget: Option<u64> = None;
     let mut load_time_budget: Option<u64> = None;
-    let mut per_token = unloaded_per_token;
+    let mut growth = unloaded;
     for &(model, used) in ranges {
-        let (now, model_per_token) = model.kv_budget_now(home, live, cached);
+        let (now, model_growth) = model.kv_budget_now(home, live, cached);
         // A range of which the prompt uses part pays for that part.
         let width = model.layer_end.saturating_sub(model.layer_start).max(1) as u64;
-        per_token = per_token.saturating_add(model_per_token * u64::from(used).min(width) / width);
+        growth = growth.plus(model_growth.share(u64::from(used).min(width), width));
         if let Some(b) = now {
             budget = Some(budget.map_or(b, |kept| kept.min(b)));
         }
@@ -3462,16 +3494,20 @@ fn admit_prompt_in(
             load_time_budget = Some(load_time_budget.map_or(b, |kept| kept.min(b)));
         }
     }
+    let growth = growth.widened_to(forward_width);
     let Some(budget) = budget else {
         return Ok(None);
     };
-    if per_token == 0 {
+    if growth.per_position() == 0 {
         return Ok(None);
     }
     let load_time_budget = load_time_budget.unwrap_or(budget);
     let mb = |b: u64| b / (1024 * 1024);
     use crate::inference::split::kv_budget::{admit_prompt, PromptAdmission};
-    let mut verdict = admit_prompt(budget, live, cached, per_token, positions);
+    // What the prompt's caches will hold — a sliding window's no more than its
+    // window (FUTURE_WORK #281).
+    let claim = growth.bytes_for(positions);
+    let mut verdict = admit_prompt(budget, live, cached, claim);
     // Conversations that are over give their room up before a cached prompt
     // does, and before this one is refused: a node serving segments for other
     // computers is never told their replies ended (report #005).
@@ -3486,12 +3522,12 @@ fn admit_prompt_in(
                 .occupancy()
                 .allocated_in(home)
                 .saturating_add(kv_store.outstanding_admission_bytes(home));
-            verdict = admit_prompt(budget, live, cached, per_token, positions);
+            verdict = admit_prompt(budget, live, cached, claim);
         }
     }
     // What this prompt is promised here, recorded by the caller once every
     // memory has room.
-    let promise = positions as u64 * per_token;
+    let promise = claim;
     let short_by = match verdict {
         PromptAdmission::Fits => {
             return Ok(Some(promise));
@@ -3556,7 +3592,7 @@ fn admit_prompt_in(
         mb(budget),
         mb(short_by),
         other_conversations_hold_the_room(live, budget, needed),
-        longest_prompt_that_fits(budget, per_token, reply_positions),
+        longest_prompt_that_fits(budget, growth, reply_positions),
     ));
     Err(PromptRefusal {
         error,
@@ -3600,30 +3636,31 @@ fn admit_prompt_up_front(
     }
     // A range not loaded yet costs what the loaded ones cost a layer: the same
     // model's layers on the same device.
-    let (loaded_per_token, loaded_layers) =
-        loaded
-            .iter()
-            .fold((0u64, 0u64), |(bytes, layers), &(model, used)| {
-                let width = model.layer_end.saturating_sub(model.layer_start).max(1) as u64;
-                let used = u64::from(used).min(width);
-                (
-                    bytes.saturating_add(model.kv_budget(model.kv_home()).1 * used / width),
-                    layers + used,
-                )
-            });
-    let unloaded_per_token = loaded_per_token * u64::from(unloaded_layers) / loaded_layers.max(1);
+    let (loaded_growth, loaded_layers) = loaded.iter().fold(
+        (KvGrowth::default(), 0u64),
+        |(growth, layers), &(model, used)| {
+            let width = model.layer_end.saturating_sub(model.layer_start).max(1) as u64;
+            let used = u64::from(used).min(width);
+            (
+                growth.plus(model.kv_budget(model.kv_home()).1.share(used, width)),
+                layers + used,
+            )
+        },
+    );
+    let unloaded = loaded_growth.share(u64::from(unloaded_layers), loaded_layers.max(1));
     // The pass starts every range's cache afresh, so an earlier attempt's
     // caches for this request (a re-plan keeps the request's id) are not
     // weighed against it; the forwards would clear them anyway.
     kv_store.cleanup_request_id(&request_id);
     match admit_prompt_over(
         &loaded,
-        unloaded_per_token,
+        unloaded,
         kv_store,
         prefix_cache,
         &request_id,
         admit.prompt_tokens as usize,
         REPLY_RESERVE_POSITIONS,
+        0,
     ) {
         Ok(()) => {
             kv_store.record_ranges_admitted(&request_id, admit.layer_ranges.clone());
@@ -3653,12 +3690,12 @@ fn admit_prompt_up_front(
 /// multiple of the quantum. A figure the owner can act on: told only "short by
 /// 259 MB", nobody learns that this card takes about 4,600 tokens of this model
 /// while `/v1/models` says 8,192 (field report #035, FUTURE_WORK #252).
-fn longest_prompt_that_fits(budget: u64, per_token: u64, reply_positions: usize) -> usize {
+fn longest_prompt_that_fits(budget: u64, growth: KvGrowth, reply_positions: usize) -> usize {
     use crate::inference::layers::KV_CACHE_GROWTH_TOKENS;
-    if per_token == 0 {
+    if growth.per_position() == 0 {
         return 0;
     }
-    let positions = usize::try_from(budget / per_token).unwrap_or(usize::MAX);
+    let positions = growth.positions_within(budget);
     (positions / KV_CACHE_GROWTH_TOKENS * KV_CACHE_GROWTH_TOKENS).saturating_sub(reply_positions)
 }
 
@@ -3724,16 +3761,16 @@ fn whole_model_context_fits(
 /// can take the card's room after the load.
 const CONTEXT_FITS_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// [`whole_model_context_fits`] over each memory's `(budget, bytes per
-/// position)`, as `SplitModel::kv_budget` answers it.
+/// [`whole_model_context_fits`] over each memory's `(budget, growth)`, as
+/// `SplitModel::kv_budget` answers it.
 fn context_fits_in(
-    budgets: impl Iterator<Item = (Option<u64>, u64)>,
+    budgets: impl Iterator<Item = (Option<u64>, KvGrowth)>,
     draft_margin: usize,
 ) -> Option<u32> {
     let tokens = budgets
         .filter_map(|budget| match budget {
-            (Some(budget), per_token) if per_token > 0 => {
-                Some(longest_prompt_that_fits(budget, per_token, draft_margin))
+            (Some(budget), growth) if growth.per_position() > 0 => {
+                Some(longest_prompt_that_fits(budget, growth, draft_margin))
             }
             _ => None,
         })
@@ -3854,7 +3891,7 @@ mod reply_reserve_tests {
         let per_token = 40 * 8 * 128 * 2 * 2;
         let budget = 860 * 1024 * 1024;
         let reserve = REPLY_RESERVE_POSITIONS;
-        let fits = longest_prompt_that_fits(budget, per_token, reserve);
+        let fits = longest_prompt_that_fits(budget, KvGrowth::flat(per_token), reserve);
         assert_eq!(fits, 5120 - reserve);
         // A prompt that long is admitted: its reservation is within budget.
         let charged = kv_cache_reservation(fits + reserve) as u64 * per_token;
@@ -3862,8 +3899,33 @@ mod reply_reserve_tests {
         // One token more is not.
         let over = kv_cache_reservation(fits + 1 + reserve) as u64 * per_token;
         assert!(over > budget, "{over} <= {budget}");
-        assert_eq!(longest_prompt_that_fits(budget, 0, reserve), 0);
-        assert_eq!(longest_prompt_that_fits(100, per_token, reserve), 0);
+        assert_eq!(
+            longest_prompt_that_fits(budget, KvGrowth::default(), reserve),
+            0
+        );
+        assert_eq!(
+            longest_prompt_that_fits(100, KvGrowth::flat(per_token), reserve),
+            0
+        );
+    }
+
+    /// A model whose sliding-window layers keep only their window (#281)
+    /// holds a far longer conversation in the same budget — Gemma 3's shape,
+    /// one global layer in six — and every prompt inside the figure is
+    /// admitted: the figure is the inverse of what admission charges.
+    #[test]
+    fn a_windowed_model_fits_the_conversation_its_windows_leave_room_for() {
+        let per_layer: u64 = 8 * 256 * 2 * 2;
+        let flat = KvGrowth::flat(per_layer * 6);
+        let windowed = KvGrowth::with_window(per_layer, per_layer * 5, 1024, 512).widened_to(512);
+        let budget = 860u64 * 1024 * 1024;
+        let reserve = REPLY_RESERVE_POSITIONS;
+        let flat_fits = longest_prompt_that_fits(budget, flat, reserve);
+        let fits = longest_prompt_that_fits(budget, windowed, reserve);
+        assert!(fits > 4 * flat_fits, "{fits} vs {flat_fits}");
+        let charged = |prompt: usize| windowed.bytes_for(kv_cache_reservation(prompt + reserve));
+        assert!(charged(fits) <= budget);
+        assert!(charged(fits + REPLY_RESERVE_POSITIONS) > budget);
     }
 
     /// The context reported for a whole model here (#252 (1)) is the longest
@@ -3879,7 +3941,7 @@ mod reply_reserve_tests {
         // 5,120 positions in whole quanta.
         let per_token: u64 = 40 * 8 * 128 * 2 * 2;
         let budget = 860u64 * 1024 * 1024;
-        let card = (Some(budget), per_token);
+        let card = (Some(budget), KvGrowth::flat(per_token));
         let fits = context_fits_in([card].into_iter(), margin).unwrap() as usize;
         assert_eq!(fits, 5120 - margin);
         let admitted = |prompt: usize, reply: u32| {
@@ -3893,26 +3955,29 @@ mod reply_reserve_tests {
         assert!(!admitted(fits, 1), "one position more is refused");
         // Ten of the forty layers' caches in RAM: roomy RAM leaves the card's
         // figure, tight RAM sets its own (2,560 positions less the margin).
-        let roomy_ram = (Some(16u64 << 30), per_token / 4);
+        let roomy_ram = (Some(16u64 << 30), KvGrowth::flat(per_token / 4));
         assert_eq!(
             context_fits_in([card, roomy_ram].into_iter(), margin),
             Some(5088)
         );
-        let tight_ram = (Some(100u64 << 20), per_token / 4);
+        let tight_ram = (Some(100u64 << 20), KvGrowth::flat(per_token / 4));
         assert_eq!(
             context_fits_in([card, tight_ram].into_iter(), margin),
             Some(2528)
         );
         assert_eq!(
-            context_fits_in([card, (None, per_token)].into_iter(), margin),
+            context_fits_in(
+                [card, (None, KvGrowth::flat(per_token))].into_iter(),
+                margin
+            ),
             Some(5088)
         );
         assert_eq!(
-            context_fits_in([(None, per_token)].into_iter(), margin),
+            context_fits_in([(None, KvGrowth::flat(per_token))].into_iter(), margin),
             None
         );
         assert_eq!(
-            context_fits_in([(Some(100), per_token)].into_iter(), margin),
+            context_fits_in([(Some(100), KvGrowth::flat(per_token))].into_iter(), margin),
             None
         );
     }
@@ -4059,10 +4124,17 @@ async fn handle_generate(
             gen.sampling.max_tokens,
             draft_margin_positions(ngram_cfg, swift_cfg),
         ),
+        0,
     )?;
     let mut prefix_len = match matched.as_ref() {
         Some(snap) => prefix_cache
-            .hydrate_request_from_snapshot(kv_store, &model_key_string, &req_id_str, snap)
+            .hydrate_request_from_snapshot(
+                kv_store,
+                &model_key_string,
+                &req_id_str,
+                snap,
+                &model.cache_layouts(),
+            )
             .unwrap_or(0),
         None => 0,
     };
@@ -4512,6 +4584,7 @@ async fn handle_draft(
             &req,
             d.append.len(),
             reply_reserve_positions(d.sampling.max_tokens, gamma.saturating_add(1)),
+            0,
         )?;
     }
     let noise = d
@@ -5013,6 +5086,7 @@ async fn try_register_generate_slot(
         &req_id_str,
         prompt_ids.len(),
         reply_reserve_positions(gen.sampling.max_tokens, draft_margin),
+        0,
     );
     // A refusal is timed too: the stall can be in the synchronize before it.
     let admission_done = |card_pace: &mut crate::inference::card_pace::CardPace| {
@@ -5031,7 +5105,13 @@ async fn try_register_generate_slot(
     }
     let mut prefix_len = match matched.as_ref() {
         Some(snap) => prefix_cache
-            .hydrate_request_from_snapshot(kv_store, &model_key_string, &req_id_str, snap)
+            .hydrate_request_from_snapshot(
+                kv_store,
+                &model_key_string,
+                &req_id_str,
+                snap,
+                &model.cache_layouts(),
+            )
             .unwrap_or(0),
         None => 0,
     };

@@ -1434,7 +1434,7 @@ fn a_forward_is_refused_when_the_kv_budget_is_exhausted() {
     let hidden_dim = 128;
     let mut model = make_test_split_model(1, hidden_dim);
     model.kv_budget_bytes = Some(0);
-    model.kv_bytes_per_token = 1_000_000;
+    model.kv_growth = crate::inference::split::kv_budget::KvGrowth::flat(1_000_000);
 
     let store = KvCacheStore::new(std::time::Duration::from_secs(60));
     let input = Tensor::randn(0f32, 1.0, (1, 3, hidden_dim), &Device::Cpu).unwrap();
@@ -1470,7 +1470,7 @@ fn no_recorded_budget_means_no_refusal() {
     let hidden_dim = 128;
     let mut model = make_test_split_model(1, hidden_dim);
     model.kv_budget_bytes = None;
-    model.kv_bytes_per_token = u64::MAX;
+    model.kv_growth = crate::inference::split::kv_budget::KvGrowth::flat(u64::MAX);
 
     let store = KvCacheStore::new(std::time::Duration::from_secs(60));
     let input = Tensor::randn(0f32, 1.0, (1, 3, hidden_dim), &Device::Cpu).unwrap();
@@ -1505,7 +1505,7 @@ fn a_refused_request_gives_back_the_cache_it_had_taken() {
     let store = KvCacheStore::new(std::time::Duration::from_secs(600));
     let dev = candle_core::Device::Cpu;
 
-    model.kv_bytes_per_token = 1024;
+    model.kv_growth = crate::inference::split::kv_budget::KvGrowth::flat(1024);
     // Room for one 512-position quantum and very little else, so the first
     // chunk is admitted and the growth the second one needs is not.
     model.kv_budget_bytes = Some(1024 * 600);

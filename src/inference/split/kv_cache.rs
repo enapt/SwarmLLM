@@ -223,16 +223,7 @@ impl SeqCache {
         }
         let needed = self.current_seq_len - self.start + seq_len;
         while needed > self.max_seq_len {
-            // A windowed cache grows no further than its window and one
-            // quantum — the size whose slide always leaves a whole quantum
-            // free — or it settles a quantum wider than it ever reads.
-            let ceiling = self.keep.map(|keep| keep + self.grow_by);
-            let step = match ceiling {
-                Some(c) if self.max_seq_len < c && needed <= c => {
-                    self.grow_by.min(c - self.max_seq_len)
-                }
-                _ => self.grow_by,
-            };
+            let step = growth_step(self.keep, self.grow_by, self.max_seq_len, needed);
             let mut shape = src.dims().to_vec();
             shape[self.dim] = step;
             let next_ad = Tensor::zeros(shape, dtype, src.device())?;
@@ -254,6 +245,57 @@ impl SeqCache {
         super::kv_write::write_into(ad, &src, self.dim, self.current_seq_len - self.start)?;
         self.current_seq_len += seq_len;
         Ok(())
+    }
+
+    /// Positions an append of `seq_len` at `index_pos` allocates — what
+    /// [`Self::append`] grows the buffer by, without growing it: 0 when the
+    /// forward fits, or fits once the cache slides; the whole first buffer
+    /// when nothing is allocated yet. `index_pos == 0` starts the cache over
+    /// (`layers::append_to_cache` resets it), keeping its size.
+    pub(crate) fn positions_added_by(&self, index_pos: usize, seq_len: usize) -> usize {
+        let held = if index_pos == 0 {
+            0
+        } else {
+            self.current_seq_len - self.start
+        };
+        self.positions_added_holding(held, seq_len)
+    }
+
+    /// [`Self::positions_added_by`] for a cache that holds `held` positions
+    /// when the `seq_len` arrive — a mirror is caught up to its f32 cache
+    /// first ([`LayerKv::append`]), whatever it held before.
+    fn positions_added_holding(&self, held: usize, seq_len: usize) -> usize {
+        let needed = match self.keep {
+            Some(keep) if held + seq_len > self.max_seq_len && held > keep => keep + seq_len,
+            _ => held + seq_len,
+        };
+        let mut buffer = self.max_seq_len;
+        while needed > buffer {
+            buffer += growth_step(self.keep, self.grow_by, buffer, needed);
+        }
+        let first = if self.all_data.is_none() {
+            self.max_seq_len
+        } else {
+            0
+        };
+        first + buffer - self.max_seq_len
+    }
+}
+
+/// How far a [`SeqCache`] buffer of `buffer` positions grows in one step
+/// toward holding `needed`. A cache that keeps every position (`keep: None`)
+/// grows by whole quanta (`grow_by`). A windowed cache grows no further than
+/// its `keep` and one quantum — the size whose slide always leaves a whole
+/// quantum free, or it settles a quantum wider than it ever reads — and past
+/// that, for a forward wider than a quantum, to exactly what the forward
+/// needs: never wider than a cache that keeps every position, and never past
+/// [`most_positions_a_window_holds`], which every estimate of its cost
+/// charges. One rule for the growth and for the guard's reading of it
+/// (`SeqCache::positions_added_by`).
+fn growth_step(keep: Option<usize>, grow_by: usize, buffer: usize, needed: usize) -> usize {
+    match keep {
+        Some(keep) => grow_by.min((keep + grow_by).max(needed) - buffer),
+        None => grow_by,
     }
 }
 
@@ -288,6 +330,46 @@ pub(crate) const WINDOW_REWIND_POSITIONS: usize = 64;
 /// this (`layers::new_kv_cache`).
 pub(crate) fn positions_kept_for_window(window: usize) -> usize {
     window.saturating_sub(1) + WINDOW_REWIND_POSITIONS
+}
+
+/// The most positions a sliding-window layer's cache is ever allocated:
+/// [`positions_kept_for_window`] and the widest forward it is handed, at least
+/// one growth `quantum` (`SeqCache::growth_step`). llama.cpp sizes its windowed
+/// cache the same way, `n_swa + n_ubatch` (`llama_kv_cache_iswa`). What every
+/// estimate of a windowed cache's cost charges it (`kv_budget::KvGrowth`).
+pub(crate) fn most_positions_a_window_holds(
+    window: usize,
+    quantum: usize,
+    widest_forward: usize,
+) -> usize {
+    positions_kept_for_window(window) + quantum.max(widest_forward).max(1)
+}
+
+/// The window a layer's cache keeps: the layer's own `window`, where a cache
+/// stored as `storage` slides — never one kept with the f16 mirror
+/// ([`LayerKv::slide_beyond`]) — else `None`. The ONE answer for the cache, its
+/// restoring from a snapshot (`PrefixCache::hydrate_request_from_snapshot`) and
+/// every estimate of what it costs (`kv_budget::KvGrowth`).
+pub(crate) fn window_kept(window: Option<usize>, storage: KvStorage) -> Option<usize> {
+    window.filter(|_| caches_slide(storage == KvStorage::F32Mirrored))
+}
+
+/// How one layer keeps its cache: its storage (`layers::kv_storage`) and the
+/// window it keeps ([`window_kept`]) — what a forward builds it as
+/// (`layers::append_to_cache`), and what a cache restored from a snapshot is
+/// built as (`PrefixCache::hydrate_request_from_snapshot`), which the snapshot
+/// cannot carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CacheLayout {
+    pub(crate) storage: KvStorage,
+    pub(crate) window: Option<usize>,
+}
+
+/// Does a windowed cache slide — [`windowed_caches_slide`], and not one kept
+/// with the f16 mirror, which is kept in step by absolute positions against the
+/// whole history?
+fn caches_slide(mirrored: bool) -> bool {
+    windowed_caches_slide() && !mirrored
 }
 
 /// `SWARMLLM_KV_WINDOW_SLIDE=0` keeps every position of a windowed layer, as
@@ -540,7 +622,7 @@ impl LayerKv {
     /// a card where the half cache does not apply ([`KvStorage::F32Mirrored`]);
     /// the processor and the half cache slide.
     pub(crate) fn slide_beyond(&mut self, window: Option<usize>) {
-        let window = window.filter(|_| windowed_caches_slide() && !self.mirrorable);
+        let window = window.filter(|_| caches_slide(self.mirrorable));
         self.window = window;
         let keep = window.map(positions_kept_for_window);
         self.main.slide_beyond(keep);
@@ -873,6 +955,58 @@ impl LayerKv {
             out.push(shadow.v_cache());
         }
         out
+    }
+
+    /// Bytes an append of `seq_len` at `index_pos` newly allocates, read off
+    /// the buffers (`SeqCache::positions_added_by`) at the dtype they hold,
+    /// and the memory it lands in; `None` before the first append. The f16
+    /// mirror is priced as [`Self::append`] treats it, never by the layer's
+    /// storage: a decode step leaves it behind, and it is built only where
+    /// [`Self::wants_shadow`] says so.
+    fn bytes_added_by(&self, index_pos: usize, seq_len: usize) -> Option<(u64, KvHome)> {
+        let (k, v) = (self.main.k_cache(), self.main.v_cache());
+        let (Some(k_data), Some(v_data)) = (k.all_data(), v.all_data()) else {
+            return None;
+        };
+        let per_position = |cache: &SeqCache, data: &Tensor| {
+            (data.elem_count() / cache.max_seq_len().max(1)) as u64
+        };
+        let elems = per_position(k, k_data) + per_position(v, v_data);
+        let added = k.positions_added_by(index_pos, seq_len) as u64;
+        let mirrored = self.mirror_positions_added_by(index_pos, seq_len, k_data) as u64;
+        let bytes = added
+            .saturating_mul(elems)
+            .saturating_mul(k_data.dtype().size_in_bytes() as u64)
+            .saturating_add(
+                mirrored
+                    .saturating_mul(elems)
+                    .saturating_mul(DType::F16.size_in_bytes() as u64),
+            );
+        Some((bytes, KvHome::of(k_data.device())))
+    }
+
+    /// Positions the f16 mirror allocates for an append of `seq_len` at
+    /// `index_pos` — step for step what [`Self::append`] does to it: nothing
+    /// for a half cache or a lazy decode step; else the mirror, caught up to
+    /// the f32 cache, takes the new positions — built first, `initial` wide,
+    /// where a cache that never slid [`Self::wants_shadow`].
+    fn mirror_positions_added_by(&self, index_pos: usize, seq_len: usize, k: &Tensor) -> usize {
+        if self.holds_half() || (seq_len == 1 && mirror_is_lazy()) {
+            return 0;
+        }
+        let held = if index_pos == 0 {
+            0
+        } else {
+            self.main.current_seq_len()
+        };
+        match self.shadow.as_ref() {
+            Some(shadow) => shadow.k_cache().positions_added_holding(held, seq_len),
+            None if self.mirrorable && self.held_from() == 0 && Self::wants_shadow(k) => {
+                SeqCache::with_capacity(1, self.initial, self.growth)
+                    .positions_added_holding(held, seq_len)
+            }
+            None => 0,
+        }
     }
 
     /// The mirrored (K, V) for the flash kernel: f16, BSHD, full length.
@@ -1251,6 +1385,24 @@ impl KvCacheEntry {
         }
     }
 
+    /// Bytes a forward of `seq_len` positions at `index_pos` newly allocates
+    /// in `home`, read off every layer's buffer — a sliding-window layer's
+    /// slide included, which no per-position rate can see (FUTURE_WORK #281).
+    /// `None` while no layer has allocated: the first forward is priced by the
+    /// model's estimate (`kv_budget::KvGrowth`).
+    fn bytes_a_forward_adds(&self, index_pos: usize, seq_len: usize, home: KvHome) -> Option<u64> {
+        let mut added = None;
+        for kv in self.layers.iter().flatten() {
+            if let Some((bytes, layer_home)) = kv.bytes_added_by(index_pos, seq_len) {
+                let total = added.get_or_insert(0u64);
+                if layer_home == home {
+                    *total = total.saturating_add(bytes);
+                }
+            }
+        }
+        added
+    }
+
     /// Truncate every layer's KV cache to exactly `target_len` sequence
     /// positions. No-op for layers whose current length is already ≤ target.
     /// Used by speculative decoding after partial acceptance — the forward
@@ -1521,6 +1673,28 @@ impl KvCacheStore {
             .unwrap_or(0)
     }
 
+    /// Bytes a forward of `seq_len` positions at `index_pos` newly allocates
+    /// in `home` for the caches under `key` — what the head-room guard claims
+    /// once they exist. `None` before the first append.
+    pub(crate) fn bytes_a_forward_adds(
+        &self,
+        key: &str,
+        index_pos: usize,
+        seq_len: usize,
+        home: KvHome,
+    ) -> Option<u64> {
+        self.caches
+            .get(key)
+            .and_then(|entry| entry.bytes_a_forward_adds(index_pos, seq_len, home))
+    }
+
+    /// Bytes the caches under `key` hold in `home`.
+    pub(crate) fn allocated_bytes_of(&self, key: &str, home: KvHome) -> u64 {
+        self.caches
+            .get(key)
+            .map_or(0, |entry| entry.occupancy().allocated_in(home))
+    }
+
     /// Record that a prompt has been admitted for `bytes` it has not yet
     /// allocated. Replaces any earlier claim for the same request — a retry
     /// re-admits rather than stacking.
@@ -1616,7 +1790,7 @@ impl KvCacheStore {
         }
     }
 
-    /// May a forward reserve `positions` more KV positions on this device?
+    /// May a forward allocate `claim` more bytes of KV cache in `home`?
     ///
     /// Live caches plus the prefix cache's snapshots plus the claim, against
     /// the budget. When over, **cached prompts are evicted before the request
@@ -1635,22 +1809,20 @@ impl KvCacheStore {
         &self,
         home: KvHome,
         budget_bytes: u64,
-        kv_bytes_per_token: u64,
-        positions: usize,
+        claim: u64,
         claimant: &str,
     ) -> Result<(), ClaimRefused> {
         use super::kv_budget::claim_exceeds_headroom;
-        let claim = kv_bytes_per_token.saturating_mul(positions as u64);
         // The prefix cache's snapshots are charged where they are kept beside
         // the live cache — a processor worker's, so `Host` — and nowhere else.
         let in_use = |occ: &KvOccupancy| occ.allocated_in(home).saturating_add(occ.external_bytes);
         let occ = self.occupancy();
-        if !claim_exceeds_headroom(budget_bytes, in_use(&occ), kv_bytes_per_token, positions) {
+        if !claim_exceeds_headroom(budget_bytes, in_use(&occ), claim) {
             return Ok(());
         }
         if self.release_finished_conversations(FINISHED_CONVERSATION_AFTER, claimant) > 0 {
             let occ = self.occupancy();
-            if !claim_exceeds_headroom(budget_bytes, in_use(&occ), kv_bytes_per_token, positions) {
+            if !claim_exceeds_headroom(budget_bytes, in_use(&occ), claim) {
                 return Ok(());
             }
         }
@@ -1663,12 +1835,7 @@ impl KvCacheStore {
             };
             if freed > 0 {
                 let occ = self.occupancy();
-                if !claim_exceeds_headroom(
-                    budget_bytes,
-                    in_use(&occ),
-                    kv_bytes_per_token,
-                    positions,
-                ) {
+                if !claim_exceeds_headroom(budget_bytes, in_use(&occ), claim) {
                     return Ok(());
                 }
                 return Err(ClaimRefused {
@@ -1996,7 +2163,7 @@ mod tests {
 
         // A budget of zero refuses anything, which is all this needs.
         let refused = store
-            .claim_room(KvHome::Host, 0, 1024, 1, "r")
+            .claim_room(KvHome::Host, 0, 1024, "r")
             .expect_err("a zero budget must refuse");
         assert_eq!(
             refused.in_use_bytes,
@@ -2460,25 +2627,25 @@ mod tests {
         }
         // Budget covers live + cached + a claim of 10 at 1 byte: fits, no eviction.
         assert!(store
-            .claim_room(KvHome::Host, live + 1000 + 10, 1, 10, "r")
+            .claim_room(KvHome::Host, live + 1000 + 10, 10, "r")
             .is_ok());
         assert_eq!(evictor_calls.load(Ordering::Relaxed), 0);
         // 300 over: the evictor gives back 300 and the claim is admitted.
         assert!(store
-            .claim_room(KvHome::Host, live + 1000 + 10 - 300, 1, 10, "r")
+            .claim_room(KvHome::Host, live + 1000 + 10 - 300, 10, "r")
             .is_ok());
         assert_eq!(store.occupancy().external_bytes, 700);
         // Now 800 over what remains: only 300 more can go; refused, naming
         // what the device still holds after the eviction.
         let refused = store
-            .claim_room(KvHome::Host, live + 700 + 10 - 800, 1, 10, "r")
+            .claim_room(KvHome::Host, live + 700 + 10 - 800, 10, "r")
             .expect_err("cannot fit even with every evictable byte gone");
         assert_eq!(store.occupancy().external_bytes, 400);
         assert_eq!(refused.in_use_bytes, live + 400);
         // With no evictor installed a store refuses as it always did.
         let bare = KvCacheStore::new(std::time::Duration::from_secs(60));
         bare.set_external_reserved(1000);
-        assert!(bare.claim_room(KvHome::Host, 500, 1, 10, "r").is_err());
+        assert!(bare.claim_room(KvHome::Host, 500, 10, "r").is_err());
     }
 
     /// A cache for `request`, last touched `idle` ago, holding `n` positions.
@@ -2512,13 +2679,11 @@ mod tests {
         // A budget the live cache already fills.
         let budget = host;
         assert!(
-            store
-                .claim_room(KvHome::Card, budget, 1, 10, "split")
-                .is_ok(),
+            store.claim_room(KvHome::Card, budget, 10, "split").is_ok(),
             "the card holds none of these caches"
         );
         let refused = store
-            .claim_room(KvHome::Host, budget, 1, 10, "split")
+            .claim_room(KvHome::Host, budget, 10, "split")
             .expect_err("the machine holds all of them");
         assert_eq!(refused.live_bytes, host);
     }
@@ -2568,9 +2733,7 @@ mod tests {
         store.set_reserved_positions("ended", 1024);
         // Room for both caches only: a claim of 10 more bytes does not fit
         // until the ended conversation goes.
-        assert!(store
-            .claim_room(KvHome::Host, 2 * one, 1, 10, "live")
-            .is_ok());
+        assert!(store.claim_room(KvHome::Host, 2 * one, 10, "live").is_ok());
         let occ = store.occupancy();
         assert_eq!(
             occ.entries, 1,
@@ -2588,9 +2751,7 @@ mod tests {
         let busy = KvCacheStore::new(std::time::Duration::from_secs(600));
         conversation(&busy, "other", 4, gap / 2);
         conversation(&busy, "live", 4, std::time::Duration::ZERO);
-        assert!(busy
-            .claim_room(KvHome::Host, 2 * one, 1, 10, "live")
-            .is_err());
+        assert!(busy.claim_room(KvHome::Host, 2 * one, 10, "live").is_err());
         assert_eq!(busy.occupancy().entries, 2);
 
         // The claimant's own cache stays, however long it was silent.
@@ -3468,6 +3629,80 @@ mod tests {
         assert_eq!(kv.held_from(), 0);
         assert_eq!(positions_held(&kv), (0..n).collect::<Vec<_>>());
         assert!(kv.k_cache().max_seq_len() >= n);
+    }
+
+    /// The head-room guard's claim is what the forward's append allocates —
+    /// read off every layer's buffer before it, a windowed layer's slide
+    /// included (FUTURE_WORK #281) — and a windowed buffer never passes
+    /// [`most_positions_a_window_holds`] for the widest forward it was handed,
+    /// nor the buffer of a layer that keeps every position. Prompt chunks of
+    /// several widths, decode steps, forwards wider than a quantum, and
+    /// reservations that start the buffers below and above the window's size.
+    /// The third layer keeps an f16 mirror (forced: this runs on the
+    /// processor), which decode steps leave behind and a chunk catches up —
+    /// claimed as that, never as its storage's 6 bytes a position.
+    #[test]
+    fn a_forwards_claim_is_what_its_append_allocates() {
+        let (window, context, quantum) = (100, 8192, 512);
+        let forwards = [300, 1, 1, 64, 700, 1, 1, 1, 128, 1300, 1, 2, 8, 512, 1];
+        for reserve in [0, 1024, 4096] {
+            let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+            let key = KvCacheStore::cache_key("m", "r");
+            let (mut pos, mut widest) = (0, 0);
+            for (step, &len) in forwards.iter().cycle().take(40).enumerate() {
+                if pos + len > context {
+                    break;
+                }
+                let predicted = store.bytes_a_forward_adds(&key, pos, len, KvHome::Host);
+                let before = store.allocated_bytes_of(&key, KvHome::Host);
+                {
+                    let mut entry = store.get_or_create("m", "r", 3);
+                    let k = rows_at(pos, len);
+                    let layouts = [
+                        (KvStorage::F32, Some(window)),
+                        (KvStorage::F32, None),
+                        (KvStorage::F32Mirrored, None),
+                    ];
+                    for (slot, (storage, w)) in entry.layers.iter_mut().zip(layouts) {
+                        append_to_cache(slot, &k, &k, pos, storage, context, reserve, w).unwrap();
+                    }
+                    if step == 0 {
+                        entry.layers[2].as_mut().unwrap().force_shadow_for_test();
+                    }
+                }
+                let after = store.allocated_bytes_of(&key, KvHome::Host);
+                match predicted {
+                    Some(claim) => assert_eq!(
+                        after - before,
+                        claim,
+                        "reserve {reserve}, step {step}: {len} at {pos}"
+                    ),
+                    None => assert_eq!(step, 0, "only the first forward has no buffers"),
+                }
+                pos += len;
+                widest = widest.max(len);
+                let entry = store.get_entry(&key).unwrap();
+                let windowed = entry.layers[0].as_ref().unwrap().k_cache().max_seq_len();
+                let global = entry.layers[1].as_ref().unwrap().k_cache().max_seq_len();
+                let bound = most_positions_a_window_holds(window, quantum, widest);
+                assert!(
+                    windowed <= bound,
+                    "reserve {reserve}, step {step}: {windowed} past {bound}"
+                );
+                assert!(
+                    windowed <= global,
+                    "reserve {reserve}, step {step}: {windowed} past {global}"
+                );
+            }
+            let entry = store.get_entry(&key).unwrap();
+            assert!(entry.layers[0].as_ref().unwrap().held_from() > 0, "it slid");
+            assert!(pos > 4000, "a long conversation: {pos}");
+            let mirrored = entry.layers[2].as_ref().unwrap();
+            assert!(
+                mirrored.shadow_len_for_test().unwrap() > 0,
+                "the mirror took chunks"
+            );
+        }
     }
 
     /// A layer with no window keeps every position, slide or no slide.

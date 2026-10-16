@@ -4257,10 +4257,88 @@ the slide on and off. The 4B whole on the card (worst 0.994008) and split 17/34 
 run sits at worst 0.997727 against llama.cpp on the processor with 5 top-1 flips in 72, every
 one at a cosine ≥ 0.9996 with the top 5 agreeing — near-ties, in both arms alike.
 
-**Not done** (FUTURE_WORK #281): every estimate — the loader's KV budget, admission, the
-split planner, a peer's bound, the prefix cache's bytes per position — still charges every
-position on every layer, so a node now holds less than it charges. A/B
-`SWARMLLM_KV_WINDOW_SLIDE=0`.
+The estimates came next (#281 (2), next section). A/B `SWARMLLM_KV_WINDOW_SLIDE=0`.
+
+## A windowed layer is charged as its window — in the worker (2026-10-16, FUTURE_WORK #281 (2))
+
+After (1) the cache held its window, but every estimate still charged each position on every
+layer at the WIDEST layer's rate (`kv_bytes_per_token` × layers): Gemma 4's 12B at 32K tokens
+charged 48 × 8 KiB × 32,768 = 12 GiB for ~1.0 held, so a card with 2 GiB of KV room refused a
+prompt past ~5K tokens and reported that as its context.
+
+**What vLLM and llama.cpp charge.** vLLM's `SlidingWindowSpec.max_memory_usage_bytes`: a
+sliding-window layer needs `cdiv(sliding_window − 1 + max_num_batched_tokens, block_size) + 1`
+blocks whatever the context — the window plus the widest batch. llama.cpp sizes its iSWA cache
+the same way (`n_swa + n_ubatch`). The term that is easy to miss is the BATCH: a forward wider
+than the growth quantum widens the buffer it lands in (`growth_step` lets a windowed buffer
+reach `keep + seq_len`), so a bound built from the window alone is wrong for a one-shot prompt.
+
+**How it is done here:**
+
+- `kv_budget::KvGrowth` is the worker's ONE price of a conversation: `bytes_for(n)` =
+  `every_position · n + windowed · min(n, cap)`, cap = `most_positions_a_window_holds(W,
+  quantum, widest_forward)` = `positions_kept_for_window(W)` + max(quantum, widest forward) —
+  what `SeqCache::append` can ever leave a windowed buffer at. `positions_within` is its
+  inverse (pinned by `the_positions_a_budget_holds_invert_what_they_cost`). `plus` / `share`
+  combine ranges (a merged window takes the widest).
+- The loader builds it PER LAYER (`kv_growth_over`): `split::kv_layers` (recurrent layers keep
+  none), each layer's own shape (`attention_shapes`; MLA's elements), its storage
+  (`kv_storage`), and whether its cache slides — `kv_cache::window_kept(window, storage)`, the
+  same predicate (`caches_slide`) `LayerKv::slide_beyond` asks, so the estimate and the cache
+  cannot disagree about a mirrored cache (which never slides).
+- The widest forward a model is handed is `SplitModel::widest_prompt_forward`: the worker's
+  `prefill_chunk_tokens` (`split::PROMPT_CHUNK_TOKENS`, set once in `run_worker`) through
+  `prompt_chunk_ceiling` — 512 on a card, up to `COPIED_CHUNK_MAX_TOKENS` on a split copying
+  its weights, the context for 0 (one forward). `SplitModel::kv_budget` widens the growth to
+  it. A forward this node does not size — a coordinator's piece of a prompt — is admitted at
+  its own width (`ensure_room_for_prompt`'s `forward_width`).
+- Readers: the loader's affordable tokens (its log lines' `kv_bytes_per_position` is the
+  figure while no window is full), admission (`admit_prompt_over` → `admit_prompt_in`
+  promises `bytes_for(positions)`), the snapshot plan (`plan_snapshot`), the context reported
+  (`context_fits_in`, `longest_prompt_that_fits`), `host_ram_positions`,
+  `positions_beside_live`.
+- **The head-room guard reads the buffers, not the estimate**: `KvCacheStore::bytes_a_forward_adds`
+  sums `LayerKv::bytes_added_by` — `SeqCache::positions_added_by` simulates `append` (slide,
+  `growth_step`, a first allocation) at the dtype the buffer holds, and the f16 mirror as
+  `append` treats it (nothing for a lazy decode step; caught up and grown on a chunk; built
+  `initial` wide only where `wants_shadow`). The estimate answers only the first forward,
+  before any buffer exists. Before, the claim was per-token × seq_len at the widest rate, a
+  mirrored cache priced at 6 bytes an element whether or not a mirror existed.
+  **A claim of 0 never meets the budget**: the guard's gate (`positions_to_allocate` over the
+  least `reach`) opens at every windowed buffer's end, where the cache slides in place, and
+  `claim_room` refuses even a zero claim once memory is over budget — a slide would have
+  ended, and cleared, a conversation because another program took memory (found in review;
+  `a_forward_that_only_slides_a_window_is_never_refused_for_room`, refused at position 576
+  without the skip). The device query (`kv_budget_now`) is asked only for a real claim.
+- **Hydration builds each layer as it keeps its cache** (`SplitModel::cache_layouts` →
+  `CacheLayout { storage, window }`): a long snapshot taken before a slide — a peer's, or one
+  kept with sliding off — is restored to a windowed layer as its newest `keep` positions,
+  never rebuilt whole into memory the estimates say it does not hold.
+
+**Tests, each red with its part off** (2026-10-16): with `growth_step`'s cap and
+`bytes_for`'s `min` both off, six go red —
+`a_forwards_claim_is_what_its_append_allocates` (a three-layer cache — windowed, global,
+mirrored — through 40 forwards of mixed widths at three reservations: every claim equals the
+bytes the append allocated, and the windowed buffer stays inside its cap and the global
+layer's buffer), `a_windowed_cache_keeps_its_newest_positions_in_one_buffer`,
+`a_windowed_layer_is_charged_no_further_than_its_window`,
+`the_positions_a_budget_holds_invert_what_they_cost`,
+`a_windowed_snapshot_is_planned_at_what_it_copies`,
+`a_windowed_model_fits_the_conversation_its_windows_leave_room_for`. With the mirror's
+pricing off the claim test fails at the first chunk that catches the mirror up (16,384 bytes
+allocated, 0 claimed). `a_long_snapshot_is_restored_to_a_windowed_layer_as_its_window` has
+its own control (no layouts: the layer is rebuilt whole). `positions_within` answered the cap
+for a budget that held positions past it (`<=` where `<` belongs; 959,500 bytes → 1,599, not
+1,600) — the inverse test now sweeps the cap in steps finer than a position.
+
+**On the real files, on the card** (`~/swarmllm-g3/card281b.sh`, the CUDA build, under the safety kit,
+0 driver events): accounting only, so the logits of the 1B (1,500 + 64 decode steps, 88 slides), the 4B
+whole on the card and the 4B split 17/34 are bit-identical to (1)'s card runs (max |d| = 0.0). The
+loader's figure moved as the arithmetic says: the 4B on the same card (7,387 MB free) covers **190,957**
+tokens of conversation against **29,445** with `SWARMLLM_KV_WINDOW_SLIDE=0` — 29 windowed layers held at
+1,599 positions (window 1,024: keep 1,087 + one 512 quantum), the 5 global layers growing:
+(1,001,130 − 29 × 1,599) / 5 = 190,952 positions, where 1,001,130 = 34 × 29,445 is the budget in
+one layer's positions — within 5 of the figure logged (rounding to whole positions).
 
 ## A family's attention scale is read, not assumed (2026-10-15, FUTURE_WORK #279)
 

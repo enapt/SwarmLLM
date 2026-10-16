@@ -5,7 +5,8 @@ use candle_core::{Device, Tensor};
 
 use crate::error::SwarmError;
 
-use super::kv_cache::KvHome;
+use super::kv_budget::KvGrowth;
+use super::kv_cache::{CacheLayout, KvHome};
 use super::token_embedding::TokenEmbedding;
 use super::{LayerVariant, ModelArch, QMatMul, SplitTokenizer};
 
@@ -72,10 +73,12 @@ pub struct SplitModel {
     /// shorter to guard against a case most never reach, and did not bound
     /// concurrency at all.
     pub(super) kv_budget_bytes: Option<u64>,
-    /// KV bytes one sequence position costs across the layers `device`
-    /// holds — a card/processor split's CARD-held layers only. Paired with
-    /// `kv_budget_bytes`; 0 when unknown.
-    pub(super) kv_bytes_per_token: u64,
+    /// What a conversation's cache costs as it grows over the layers `device`
+    /// holds — a card/processor split's CARD-held layers only, a sliding
+    /// window's layers charged no further than their window (FUTURE_WORK
+    /// #281). Paired with `kv_budget_bytes`; nothing when unknown. Read
+    /// through [`Self::kv_budget`], which hands it the widest forward.
+    pub(super) kv_growth: KvGrowth,
     /// A card/processor split's second budget (#262): what its processor-held
     /// layers' caches may take of the machine's memory — the daemon's
     /// `--kv-budget-bytes` when it handed one, else what the machine had
@@ -83,9 +86,10 @@ pub struct SplitModel {
     /// every claim, as the card's is with the card. `None` for a model on one
     /// device, and when the machine's memory cannot be read.
     pub(super) host_kv_budget_bytes: Option<u64>,
-    /// Paired with `host_kv_budget_bytes`: KV bytes a position costs the
-    /// processor-held layers of a split. 0 for a model on one device.
-    pub(super) host_kv_bytes_per_token: u64,
+    /// Paired with `host_kv_budget_bytes`: what a conversation's cache costs
+    /// the processor-held layers of a split. Nothing for a model on one
+    /// device.
+    pub(super) host_kv_growth: KvGrowth,
     /// Pre-computed KV cache store key: "{layer_start}-{layer_end}-{total_layers}".
     /// Avoids a `format!` allocation on every forward pass.
     pub(super) kv_model_key: String,
@@ -352,14 +356,17 @@ impl SplitModel {
     /// (`PromptRoom::bytes_per_token`) and what the card-held layers' caches
     /// keep of it.
     fn prompt_bytes_per_token_on_card(&self) -> PromptTokenBytes {
-        // `kv_bytes_per_token` is the card-held layers' figure (the loader's
-        // budget counts only what the card holds), so a layer's share is it
-        // over the CARD's layers, never over the segment's.
+        // `kv_growth` is the card-held layers' figure (the loader's budget
+        // counts only what the card holds), so a layer's share is it over the
+        // CARD's layers, never over the segment's. A position as it costs
+        // while every cache still grows: a forward wider than a window's
+        // quantum grows the windowed caches too.
+        let kept = self.kv_growth.per_position();
         let on_card = self.layer_devices.iter().filter(|d| d.is_cuda()).count() as u64;
-        let per_layer_kv = self.kv_bytes_per_token / on_card.max(1);
+        let per_layer_kv = kept / on_card.max(1);
         PromptTokenBytes {
             activations: self.prompt_room.bytes_per_token,
-            kept: self.kv_bytes_per_token,
+            kept,
             // A card-run processor layer pulls its cache history up for the
             // chunk (#138 (1c)): as f32 and again as the attention kernel's
             // f16, against a figure kept at f16 (2 bytes) or f32 (4) — three
@@ -531,23 +538,74 @@ impl SplitModel {
     /// devices' bytes refused a split at a quarter of what its card held.
     pub(crate) fn kv_homes(&self) -> impl Iterator<Item = KvHome> {
         let primary = self.kv_home();
-        let host =
-            (primary == KvHome::Card && self.host_kv_bytes_per_token > 0).then_some(KvHome::Host);
+        let host = (primary == KvHome::Card && self.host_kv_growth.per_position() > 0)
+            .then_some(KvHome::Host);
         std::iter::once(primary).chain(host)
     }
 
-    /// The runtime KV budget in `home` and the per-position cost it is
-    /// measured in: `(budget_bytes, bytes_per_token)`. `None` budget means
-    /// unknown, and an unknown budget admits everything (never a zero one);
-    /// `(None, 0)` for a memory this model keeps no cache in.
-    pub(crate) fn kv_budget(&self, home: KvHome) -> (Option<u64>, u64) {
-        if home == self.kv_home() {
-            (self.kv_budget_bytes, self.kv_bytes_per_token)
+    /// The runtime KV budget in `home` and what a conversation's cache costs
+    /// against it: `(budget_bytes, growth)`. `None` budget means unknown, and
+    /// an unknown budget admits everything (never a zero one); `(None,
+    /// nothing)` for a memory this model keeps no cache in. A sliding window's
+    /// caches are charged their window and this segment's widest prompt
+    /// forward ([`Self::widest_prompt_forward`]) — here, so no caller can
+    /// charge a window narrower than the caches are allocated.
+    pub(crate) fn kv_budget(&self, home: KvHome) -> (Option<u64>, KvGrowth) {
+        let (budget, growth) = if home == self.kv_home() {
+            (self.kv_budget_bytes, self.kv_growth)
         } else if home == KvHome::Host {
-            (self.host_kv_budget_bytes, self.host_kv_bytes_per_token)
+            (self.host_kv_budget_bytes, self.host_kv_growth)
         } else {
-            (None, 0)
+            (None, KvGrowth::default())
+        };
+        if growth.has_window() {
+            (budget, growth.widened_to(self.widest_prompt_forward()))
+        } else {
+            (budget, growth)
         }
+    }
+
+    /// The most positions one prompt forward of this segment reads: the chunk
+    /// every prompt pass is cut to (`prefill_pacer::prompt_chunk_ceiling`,
+    /// from this worker's `inference.prefill_chunk_tokens`), at the most a
+    /// split copying its weights to the card reads — or the whole context
+    /// where prompts are read in one forward. A sliding window's cache holds
+    /// its window AND this (`kv_cache::most_positions_a_window_holds`).
+    pub(crate) fn widest_prompt_forward(&self) -> usize {
+        use crate::inference::prefill_pacer::{
+            prompt_chunk_ceiling, PromptReader, COPIED_CHUNK_MAX_TOKENS,
+        };
+        let reader = if self.runs_entirely_on_card() {
+            PromptReader::Card
+        } else if self.reads_prompts_on_card() {
+            PromptReader::CardCopyingWeights {
+                room_tokens: COPIED_CHUNK_MAX_TOKENS,
+            }
+        } else {
+            PromptReader::Processor
+        };
+        match super::PROMPT_CHUNK_TOKENS.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => self.max_seq_len,
+            configured => prompt_chunk_ceiling(configured, reader),
+        }
+    }
+
+    /// How each of this segment's layers keeps its cache — what a cache
+    /// restored from a snapshot is built as
+    /// (`PrefixCache::hydrate_request_from_snapshot`), which the snapshot cannot
+    /// carry. `None` for a layer whose cache a forward conforms on its own
+    /// (MLA, Qwen 3.5's attention layers: no window).
+    pub(crate) fn cache_layouts(&self) -> Vec<Option<CacheLayout>> {
+        self.layers
+            .iter()
+            .enumerate()
+            .map(|(i, layer)| match layer {
+                LayerVariant::Dense(lw) => {
+                    Some(lw.cache_layout_on(self.layer_devices.get(i).unwrap_or(&self.device)))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// The KV budget as the device can honour it NOW, for a decision about to
@@ -570,8 +628,8 @@ impl SplitModel {
         home: KvHome,
         live_bytes: u64,
         cached_bytes: u64,
-    ) -> (Option<u64>, u64) {
-        let (Some(budget), per_token) = self.kv_budget(home) else {
+    ) -> (Option<u64>, KvGrowth) {
+        let (Some(budget), growth) = self.kv_budget(home) else {
             return (None, self.kv_budget(home).1);
         };
         let processor = Device::Cpu;
@@ -603,7 +661,7 @@ impl SplitModel {
                 "DIAG: KV budget reconciled with the device — less room than the load-time figure"
             );
         }
-        (Some(reconciled), per_token)
+        (Some(reconciled), growth)
     }
 
     /// Return the KV cache model key (used for cache cleanup).

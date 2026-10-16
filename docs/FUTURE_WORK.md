@@ -1741,24 +1741,24 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
-#### #281 — A windowed layer's cache is still CHARGED for every position it no longer keeps
-`P2` · memory · **OPEN** — 2026-10-16 · narrowed 2026-10-16: (1) the cache keeps its window (§ Closed)
+#### #281 — A windowed layer's cache is still CHARGED for every position by the daemon's estimates
+`P2` · memory · **OPEN** — 2026-10-16 · narrowed 2026-10-16: (1) the cache keeps its window, (2) the worker charges it as its window (§ Closed)
 
 Since (1) a windowed layer's cache holds its window, a rewind and one growth quantum
-(`LayerKv::slide_beyond`): on the Gemma 4 12B at 32K tokens ~1.0 GiB by the layout's
-arithmetic (f16 K+V: 40 windowed layers × 1,599 positions × 8 KiB + 8 global × 32K × 2 KiB),
-from 10.5.
-Every ESTIMATE of a conversation's cost still charges each position on every layer at the
-widest layer's rate (48 × 8 KiB on that 12B: 12 GiB at 32K) — the loader's KV budget
-(`loader` `kv_per_token_over`), admission (`VramFootprintInputs`, `vram.rs`), the split
-planner (`hybrid::plan_gpu_layers`), a peer's bound (`kv_bytes_per_position_per_layer`,
-advertised — a change there is a wire question), the process pool's card geometry and the
-prefix cache's `positions_ceiling`. Safe in direction — a node holds less than it charges —
-but the context it offers and the prompts it admits are still cut by the old factor. Next:
-one function answering "bytes for N positions of this model" (global layers × N, windowed ×
-min(N, kept + quantum)) beside `split::layers_keeping_kv`, read by every estimate. Also:
-hydration reserves the whole prompt for a windowed layer, before the first forward tells it
-its window (`hydrate_request_from_snapshot`).
+(`LayerKv::slide_beyond`), and since (2) the WORKER prices it so (`kv_budget::KvGrowth`: its KV
+budget, admission, the snapshot plan, the context it reports, the head-room guard). The daemon's
+estimates still charge each position on every layer at the widest layer's rate (48 × 8 KiB on
+Gemma 4's 12B: 12 GiB at 32K, against ~1.0 held): admission's footprint (`VramFootprintInputs`,
+`vram.rs`), the split planner (`hybrid::plan_gpu_layers`), the process pool's card geometry
+(`cost_curve_of`, `split_for_card`, `experts_in_ram_for_card`) and a peer's bound
+(`kv_bytes_per_position_per_layer`, advertised — the window must reach a coordinator on the
+wire: a `GgufTensorMeta` field with `#[serde(default)]` and a `features` bit). Safe in
+direction — a node holds less than it charges — but a model is placed and split as if it held
+every position. Next: build those from the header the way the loader builds `KvGrowth` (per
+layer: `split::kv_layers`, `attention_shapes`, `kv_storage`, `kv_cache::window_kept`), one
+function beside `split::layers_keeping_kv`. Also: `PrefixCache::positions_ceiling` divides
+its byte budget by every position on every layer — exact for a snapshot taken before a slide
+(it copies them all), heavy for one taken after.
 
 #### #265 — A later range loaded into a card/processor split worker is charged to the card whatever the loader does with it
 `P3` · memory · **OPEN** — 2026-10-13 · history: found closing #264
@@ -2427,7 +2427,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel, #283, #281 (1))
+**Closed 2026-10-15/16, not yet released** (#276, #277, #278, #279, #115 (1), #280, #115 (3), #282 calls + channel, #283, #281 (1), #281 (2))
 - #281 (1) — **A windowed layer's cache keeps its window, not the whole conversation.** Gemma
   2, 3 and 4 attend over a window on most layers, and those layers' caches kept every position
   (a Gemma 4 12B conversation at 32K tokens: 10.5 GiB of cache, now ~1.0 by the layout's
@@ -2440,6 +2440,18 @@ grep `^| N |`).
   (worst 0.999451 / 0.998622, top-1 12/12 both); on the card the half cache slides as well —
   mid-decode, past the CUDA graphs — bit-identical on and off, the 4B whole and split 17/34
   equal to the card run before it. Residual — the estimates — stays open as #281.
+- #281 (2) — **A Gemma model is charged for the window its sliding layers keep, not the whole
+  conversation.** The worker priced a conversation at every position on every layer at the
+  widest layer's rate, so a node holding ~1.0 GiB of cache for Gemma 4 12B at 32K tokens
+  refused prompts as if it needed 12 GiB, and reported a context to match. Now one price
+  (`kv_budget::KvGrowth`, built per layer by the loader) charges a global layer every position
+  at its own width and a windowed one no more than its window, a rewind and the widest forward
+  it is handed (vLLM's `SlidingWindowSpec.max_memory_usage_bytes`, llama.cpp's
+  `n_swa + n_ubatch`); the loader's budget, admission, the snapshot plan and the context
+  reported all read it. The head-room guard reads the buffers instead of an estimate: a
+  forward's claim is what its append allocates, slide and f16 mirror as `append` treats
+  them. A snapshot is restored to each layer as that layer keeps its cache. Residual — the
+  daemon's estimates and a peer's bound — stays open as #281.
 - #282 (calls, channel) — **Gemma 4's tool calls are tool calls.** It writes
   `<|tool_call>call:name{key:<|"|>text<|"|>,n:2}<tool_call|>` — its own syntax, not JSON — and
   every call reached the client as reply text. `tool_parse::try_gemma4` reads it as llama.cpp

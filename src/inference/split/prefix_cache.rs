@@ -43,7 +43,7 @@ use candle_core::{Device, Tensor};
 use crate::error::SwarmError;
 use crate::types::PrefixBlockEntry;
 
-use super::kv_cache::{KvCacheEntry, KvCacheStore};
+use super::kv_cache::{CacheLayout, KvCacheEntry, KvCacheStore};
 
 /// Compute the chained BLAKE3 hash chain over a token sequence, in blocks of
 /// `block_size` tokens. Returns one entry per block boundary that lies inside
@@ -1043,26 +1043,36 @@ impl PrefixCache {
     /// number of tokens seeded, or an error if deserialization failed.
     /// Does NOT re-BLAKE3-verify — the daemon's prefix probe
     /// (`daemon::background`, `verify_fetched_snapshot`) has done that.
-    pub fn hydrate_request_from_bytes(
+    pub(crate) fn hydrate_request_from_bytes(
         &self,
         kv_store: &KvCacheStore,
         model_key: &str,
         request_id: &str,
         bytes: &[u8],
         device: &candle_core::Device,
+        layouts: &[Option<CacheLayout>],
     ) -> Result<usize, SwarmError> {
         let (snap, _tokens) = deserialize_snapshot(bytes, device)?;
-        self.hydrate_request_from_snapshot(kv_store, model_key, request_id, &snap)
+        self.hydrate_request_from_snapshot(kv_store, model_key, request_id, &snap, layouts)
     }
 
     /// Seed a fresh `KvCacheEntry` for `request_id` from `snapshot`. Returns
     /// the number of tokens seeded. Creates the entry if it doesn't exist.
-    pub fn hydrate_request_from_snapshot(
+    ///
+    /// `layouts` is how each layer keeps its cache (`SplitModel::cache_layouts`)
+    /// — REQUIRED, because a snapshot cannot carry it: each layer's cache is
+    /// built as a forward would build it, and a sliding-window layer takes
+    /// only what its window reads. Built from a long snapshot as it used to be,
+    /// such a layer was allocated the whole prompt — memory every estimate of
+    /// its cost says it never holds (FUTURE_WORK #281). A layer with no layout
+    /// is built as before, and its first forward conforms it.
+    pub(crate) fn hydrate_request_from_snapshot(
         &self,
         kv_store: &KvCacheStore,
         model_key: &str,
         request_id: &str,
         snapshot: &KvSnapshot,
+        layouts: &[Option<CacheLayout>],
     ) -> Result<usize, SwarmError> {
         let num_layers = snapshot.layers.len();
         let key = KvCacheStore::cache_key(model_key, request_id);
@@ -1093,6 +1103,29 @@ impl PrefixCache {
             // A slid layer's copy starts past 0, and so does its cache — never
             // more positions than it would have held unslid (FUTURE_WORK #281).
             let from = snapshot.layer_held_from(i);
+            let layout = layouts.get(i).copied().flatten();
+            // A windowed layer keeps what its window reads, as its first slide
+            // would leave it: the rest of a long snapshot is never read again.
+            let held = k_src.dim(snapshot.dim).map_err(SwarmError::internal)?;
+            let kept = layout
+                .and_then(|l| l.window)
+                .map(super::kv_cache::positions_kept_for_window)
+                .filter(|&keep| held > keep);
+            let newest;
+            let (from, k_src, v_src) = match kept {
+                Some(keep) => {
+                    let skip = held - keep;
+                    newest = (|| -> candle_core::Result<(Tensor, Tensor)> {
+                        Ok((
+                            k_src.narrow(snapshot.dim, skip, keep)?,
+                            v_src.narrow(snapshot.dim, skip, keep)?,
+                        ))
+                    })()
+                    .map_err(SwarmError::internal)?;
+                    (from + skip, &newest.0, &newest.1)
+                }
+                None => (from, k_src, v_src),
+            };
             // Reserve from the snapshot's TOKEN COUNT, not its recorded
             // `max_seq_len`. Snapshots cross the network between peers
             // (`export_snapshot_bytes`), so that field may have been written by
@@ -1112,7 +1145,19 @@ impl PrefixCache {
                     .max(1),
                 crate::inference::layers::KV_CACHE_GROWTH_TOKENS,
             );
+            if let Some(layout) = layout {
+                kv.conform_to(layout.storage).map_err(|e| {
+                    SwarmError::Internal(format!(
+                        "prefix-cache hydrate layer {i}: conform failed: {e}"
+                    ))
+                })?;
+            }
             kv.begin_at(from);
+            // Told its window before the first append, a windowed cache is
+            // born its window and one quantum wide (`LayerKv::slide_beyond`).
+            if let Some(layout) = layout {
+                kv.slide_beyond(layout.window);
+            }
             kv.append(k_src, v_src).map_err(|e| {
                 SwarmError::Internal(format!(
                     "prefix-cache hydrate layer {i}: append failed: {e}"
@@ -1844,7 +1889,7 @@ mod tests {
             "narrowing kept the way back"
         );
         let restored = pc
-            .hydrate_request_from_snapshot(&kv_store, "m", "req-b", &snap)
+            .hydrate_request_from_snapshot(&kv_store, "m", "req-b", &snap, &[])
             .unwrap();
         assert_eq!(restored, 9);
         let key = KvCacheStore::cache_key("m", "req-b");
@@ -1885,7 +1930,7 @@ mod tests {
         let pc = PrefixCache::new(true, 8, 0, 4, 8192, 0);
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         assert_eq!(
-            pc.hydrate_request_from_snapshot(&kv_store, "m", "req", &host)
+            pc.hydrate_request_from_snapshot(&kv_store, "m", "req", &host, &[])
                 .unwrap(),
             4
         );
@@ -2221,7 +2266,7 @@ mod tests {
         let snap = pc.lookup("m", &lookup_tokens).expect("hit");
 
         let seeded = pc
-            .hydrate_request_from_snapshot(&kv_store, "m", "req-b", &snap)
+            .hydrate_request_from_snapshot(&kv_store, "m", "req-b", &snap, &[])
             .unwrap();
         assert_eq!(seeded, 10);
 
@@ -2798,7 +2843,7 @@ mod tests {
         assert_eq!(snap.serves_from, from + 3);
         assert!(serialize_snapshot_with_block_size(&snap, &tokens, Some(16)).is_err());
 
-        pc.hydrate_request_from_snapshot(&kv_store, "m", "restored", &snap)
+        pc.hydrate_request_from_snapshot(&kv_store, "m", "restored", &snap, &[])
             .unwrap();
         assert_eq!(positions_in(&kv_store, "restored", 0), held);
         assert_eq!(
@@ -2825,6 +2870,91 @@ mod tests {
         assert!(!unslid
             .insert_from_kv("m", "short", &kv_store, &tokens, ANYWHERE)
             .is_empty());
+    }
+
+    /// A long conversation's snapshot taken before its windowed layer ever
+    /// slid — a peer's, or one kept with sliding off — is restored to that
+    /// layer as its first slide would leave it: only what the window reads, in
+    /// a buffer its window and one quantum wide, never the whole prompt, which
+    /// every estimate of its cost says it does not hold (FUTURE_WORK #281).
+    #[test]
+    fn a_long_snapshot_is_restored_to_a_windowed_layer_as_its_window() {
+        use crate::inference::layers::{append_to_cache, KV_CACHE_GROWTH_TOKENS};
+        use crate::inference::split::kv_cache::{
+            positions_kept_for_window, KvStorage, NO_SLIDE_IN_TEST,
+        };
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let pc = PrefixCache::new(true, 8, 16, 4, 0, 0);
+        let positions = 2000;
+        NO_SLIDE_IN_TEST.with(|off| off.set(true));
+        {
+            let mut entry = kv_store.get_or_create("m", "r", 2);
+            for pos in (0..positions).step_by(500) {
+                let k = Tensor::arange(pos as f32, (pos + 500) as f32, &Device::Cpu)
+                    .unwrap()
+                    .reshape((1, 1, 500, 1))
+                    .unwrap()
+                    .broadcast_as((1, 1, 500, 4))
+                    .unwrap()
+                    .contiguous()
+                    .unwrap();
+                for (slot, window) in entry.layers.iter_mut().zip([Some(4), None]) {
+                    append_to_cache(slot, &k, &k, pos, KvStorage::F32, 4096, 0, window).unwrap();
+                }
+            }
+        }
+        NO_SLIDE_IN_TEST.with(|off| off.set(false));
+        let tokens: Vec<u32> = (0..positions as u32).collect();
+        assert!(
+            !pc.insert_from_kv("m", "r", &kv_store, &tokens, ANYWHERE)
+                .is_empty(),
+            "a snapshot that never slid is announced"
+        );
+        let mut probe = tokens.clone();
+        probe.push(9999);
+        let snap = pc.lookup("m", &probe).expect("the whole prompt hits");
+        let layouts = [
+            Some(CacheLayout {
+                storage: KvStorage::F32,
+                window: Some(4),
+            }),
+            Some(CacheLayout {
+                storage: KvStorage::F32,
+                window: None,
+            }),
+        ];
+        pc.hydrate_request_from_snapshot(&kv_store, "m", "restored", &snap, &layouts)
+            .unwrap();
+        let keep = positions_kept_for_window(4);
+        assert_eq!(
+            positions_in(&kv_store, "restored", 0),
+            (positions - keep..positions).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            positions_in(&kv_store, "restored", 1),
+            (0..positions).collect::<Vec<_>>()
+        );
+        let key = KvCacheStore::cache_key("m", "restored");
+        let entry = kv_store.get_entry(&key).unwrap();
+        let windowed = entry.layers[0].as_ref().unwrap();
+        assert_eq!(windowed.current_seq_len(), positions);
+        assert_eq!(windowed.serves_from(), positions - keep + 3);
+        let buffer = windowed.k_cache().max_seq_len();
+        assert!(
+            (keep..=keep + KV_CACHE_GROWTH_TOKENS).contains(&buffer),
+            "the windowed layer's buffer is {buffer} positions"
+        );
+        assert!(entry.layers[1].as_ref().unwrap().k_cache().max_seq_len() >= positions);
+        drop(entry);
+
+        // The control: restored with no layouts, the windowed layer is built
+        // to the whole prompt, as every restore was before.
+        pc.hydrate_request_from_snapshot(&kv_store, "m", "unshaped", &snap, &[])
+            .unwrap();
+        assert_eq!(
+            positions_in(&kv_store, "unshaped", 0),
+            (0..positions).collect::<Vec<_>>()
+        );
     }
 
     /// A slid layer weighs per position what it weighed before it slid: the

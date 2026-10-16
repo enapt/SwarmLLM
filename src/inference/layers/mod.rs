@@ -10,7 +10,7 @@ use candle_core::quantized::QTensor;
 // That is exactly what happened on 2026-08-07 (gotcha #264). Keep the import;
 // the `cfg` on the attribute is what tells the compiler the truth.
 use crate::inference::residual_norm::RmsNorm;
-use crate::inference::split::kv_cache::{KvStorage, LayerKv};
+use crate::inference::split::kv_cache::{CacheLayout, KvStorage, LayerKv};
 #[cfg_attr(not(feature = "flash-attn"), allow(unused_imports))]
 use candle_core::DType;
 use candle_core::{Device, Result as CandleResult, Tensor};
@@ -4362,6 +4362,17 @@ impl LayerWeights {
             self.n_kv_head,
             self.head_dim,
         )
+    }
+
+    /// How this layer's cache is kept on `device`: its storage and the window
+    /// it keeps (`kv_cache::window_kept`) — what [`append_to_cache`] builds it
+    /// as.
+    pub(crate) fn cache_layout_on(&self, device: &Device) -> CacheLayout {
+        let storage = self.kv_storage_on(device);
+        CacheLayout {
+            storage,
+            window: crate::inference::split::kv_cache::window_kept(self.sliding_window, storage),
+        }
     }
 
     pub(crate) fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize) -> CandleResult<Tensor> {

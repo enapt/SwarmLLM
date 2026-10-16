@@ -81,6 +81,158 @@ pub(crate) fn kv_bytes_per_token(
         .saturating_mul(storage.bytes_per_element())
 }
 
+/// What a conversation's KV cache costs as it grows, over the layers one
+/// memory holds (FUTURE_WORK #281): the bytes a position costs in the layers
+/// that keep every position, and in the sliding-window layers whose caches
+/// keep only their window (`kv_cache::window_kept`) — charged no further than
+/// the positions such a cache is ever allocated
+/// (`kv_cache::most_positions_a_window_holds`: its window, its rewind room and
+/// the widest forward it is handed). vLLM prices a windowed layer the same way
+/// (`SlidingWindowSpec::max_memory_usage_bytes`: `min(window - 1 + batch,
+/// context)` positions); llama.cpp sizes its windowed cache `n_swa + n_ubatch`
+/// (`llama_kv_cache_iswa`).
+///
+/// A model with no window that slides charges `every_position` alone: every
+/// position costs [`Self::per_position`], as every estimate here charged
+/// before #281.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct KvGrowth {
+    /// Bytes a position costs in the layers that keep every position.
+    every_position: u64,
+    /// Bytes a position costs in the layers that keep only their window.
+    windowed: u64,
+    /// Their window (`split::SlidingWindow::size`).
+    window: usize,
+    /// Their caches' growth quantum (`layers::kv_growth_quantum`).
+    quantum: usize,
+    /// The widest forward their caches are handed.
+    widest_forward: usize,
+}
+
+impl KvGrowth {
+    /// `per_position` bytes for every position of the conversation.
+    #[cfg(test)]
+    pub(crate) fn flat(per_position: u64) -> Self {
+        Self {
+            every_position: per_position,
+            ..Self::default()
+        }
+    }
+
+    /// `every_position` bytes a position in the layers that keep each one, and
+    /// `windowed` in those whose caches keep only `window` positions, grown by
+    /// `quantum`.
+    pub(crate) fn with_window(
+        every_position: u64,
+        windowed: u64,
+        window: usize,
+        quantum: usize,
+    ) -> Self {
+        Self {
+            every_position,
+            windowed,
+            window,
+            quantum,
+            widest_forward: 0,
+        }
+    }
+
+    /// Does any layer keep only its window?
+    pub(crate) fn has_window(&self) -> bool {
+        self.windowed > 0
+    }
+
+    /// The same caches, handed forwards up to `positions` wide: a windowed
+    /// cache holds its window AND the forward.
+    pub(crate) fn widened_to(self, positions: usize) -> Self {
+        Self {
+            widest_forward: self.widest_forward.max(positions),
+            ..self
+        }
+    }
+
+    /// Bytes a position costs while every cache still grows with the
+    /// conversation — before any window is full.
+    pub(crate) fn per_position(&self) -> u64 {
+        self.every_position.saturating_add(self.windowed)
+    }
+
+    /// The most positions a windowed layer's cache is allocated.
+    fn window_cap(&self) -> usize {
+        crate::inference::split::kv_cache::most_positions_a_window_holds(
+            self.window,
+            self.quantum,
+            self.widest_forward,
+        )
+    }
+
+    /// Bytes the caches of a conversation `positions` long hold — at most.
+    pub(crate) fn bytes_for(&self, positions: usize) -> u64 {
+        let windowed_positions = if self.has_window() {
+            positions.min(self.window_cap())
+        } else {
+            0
+        };
+        self.every_position
+            .saturating_mul(positions as u64)
+            .saturating_add(self.windowed.saturating_mul(windowed_positions as u64))
+    }
+
+    /// Bytes the caches take on growing from `from` positions to `to`.
+    pub(crate) fn bytes_between(&self, from: usize, to: usize) -> u64 {
+        self.bytes_for(to).saturating_sub(self.bytes_for(from))
+    }
+
+    /// The longest conversation `bytes` holds: the inverse of
+    /// [`Self::bytes_for`]. `usize::MAX` where nothing grows past the windows.
+    pub(crate) fn positions_within(&self, bytes: u64) -> usize {
+        let per_position = self.per_position();
+        if per_position == 0 {
+            return usize::MAX;
+        }
+        let cap = if self.has_window() {
+            self.window_cap() as u64
+        } else {
+            u64::MAX
+        };
+        let while_every_cache_grows = bytes / per_position;
+        // Short of the cap every cache still grows; AT it the windows are
+        // full, and what is left past them goes to the other layers alone.
+        if while_every_cache_grows < cap {
+            return usize::try_from(while_every_cache_grows).unwrap_or(usize::MAX);
+        }
+        // Past the windows only the layers that keep every position grow.
+        if self.every_position == 0 {
+            return usize::MAX;
+        }
+        let rest = bytes.saturating_sub(self.windowed.saturating_mul(cap));
+        usize::try_from(rest / self.every_position).unwrap_or(usize::MAX)
+    }
+
+    /// Two sets of the same model's layers together — a split's card-held and
+    /// processor-held caches.
+    pub(crate) fn plus(self, other: Self) -> Self {
+        Self {
+            every_position: self.every_position.saturating_add(other.every_position),
+            windowed: self.windowed.saturating_add(other.windowed),
+            window: self.window.max(other.window),
+            quantum: self.quantum.max(other.quantum),
+            widest_forward: self.widest_forward.max(other.widest_forward),
+        }
+    }
+
+    /// `part` of every `whole` of these layers — the share of a range's layers
+    /// a prompt runs through.
+    pub(crate) fn share(self, part: u64, whole: u64) -> Self {
+        let whole = whole.max(1);
+        Self {
+            every_position: self.every_position.saturating_mul(part) / whole,
+            windowed: self.windowed.saturating_mul(part) / whole,
+            ..self
+        }
+    }
+}
+
 /// Per-token K and V element counts for the standard (MHA/GQA) attention path.
 pub(crate) fn standard_kv_elems(head_count_kv: usize, head_dim: usize) -> (usize, usize) {
     let per = head_count_kv.saturating_mul(head_dim);
@@ -378,7 +530,11 @@ pub(crate) fn positions_to_allocate(
     }
 }
 
-/// Would reserving `positions` more push total KV occupancy past the budget?
+/// Would allocating `claim` more bytes push total KV occupancy past the
+/// budget? The claim is what the forward's caches newly allocate
+/// (`KvCacheStore::bytes_a_forward_adds`), not a per-position rate times the
+/// positions: a sliding-window layer's cache slides instead of growing, which
+/// no rate can see (FUTURE_WORK #281).
 ///
 /// `in_use_bytes` is what the whole store already holds — every request on
 /// this worker, not just the one asking. That is the point: the load-time
@@ -389,13 +545,7 @@ pub(crate) fn positions_to_allocate(
 /// refusal: vLLM must preempt and recompute because it has nowhere else to
 /// send the work, whereas a refused request in a swarm can be served by a
 /// peer — so refusing early is cheap and correct.
-pub(crate) fn claim_exceeds_headroom(
-    budget_bytes: u64,
-    in_use_bytes: u64,
-    kv_bytes_per_token: u64,
-    positions: usize,
-) -> bool {
-    let claim = kv_bytes_per_token.saturating_mul(positions as u64);
+pub(crate) fn claim_exceeds_headroom(budget_bytes: u64, in_use_bytes: u64, claim: u64) -> bool {
     in_use_bytes.saturating_add(claim) > budget_bytes
 }
 
@@ -428,14 +578,15 @@ pub(crate) enum PromptAdmission {
 /// request in hand. So the order is fit → evict cached prompts → refuse,
 /// and the refusal comes at token 0 rather than at chunk N with a partial
 /// cache already built (the ratchet of gotcha #387, one level up).
+///
+/// `claim` is the bytes the prompt's caches will hold — [`KvGrowth::bytes_for`]
+/// its positions.
 pub(crate) fn admit_prompt(
     budget_bytes: u64,
     live_bytes: u64,
     cached_prompt_bytes: u64,
-    kv_bytes_per_token: u64,
-    positions: usize,
+    claim: u64,
 ) -> PromptAdmission {
-    let claim = kv_bytes_per_token.saturating_mul(positions as u64);
     let total = live_bytes
         .saturating_add(cached_prompt_bytes)
         .saturating_add(claim);
@@ -470,21 +621,23 @@ pub(crate) struct SnapshotPlan {
 /// mid-reply and the tokens before it decoded at 3-6 tok/s. Older cached
 /// prompts go first; then the snapshot is cut to what fits, because a
 /// partial prefix still saves its length of prefill on the next turn
-/// (`lookup` narrows a longer entry to the shared length).
+/// (`lookup` narrows a longer entry to the shared length). A snapshot copies
+/// what each layer's cache holds, so a sliding-window layer's costs no more
+/// than its window ([`KvGrowth::bytes_for`]).
 pub(crate) fn plan_snapshot(
     budget_bytes: u64,
     live_bytes: u64,
     cached_prompt_bytes: u64,
-    kv_bytes_per_token: u64,
+    growth: KvGrowth,
     prompt_positions: usize,
 ) -> SnapshotPlan {
-    if kv_bytes_per_token == 0 {
+    if growth.per_position() == 0 {
         return SnapshotPlan {
             evict_bytes: 0,
             positions: prompt_positions,
         };
     }
-    let needed = kv_bytes_per_token.saturating_mul(prompt_positions as u64);
+    let needed = growth.bytes_for(prompt_positions);
     let room = budget_bytes.saturating_sub(live_bytes.saturating_add(cached_prompt_bytes));
     if room >= needed {
         return SnapshotPlan {
@@ -496,7 +649,7 @@ pub(crate) fn plan_snapshot(
     let room_after = room.saturating_add(evict_bytes);
     SnapshotPlan {
         evict_bytes,
-        positions: (room_after / kv_bytes_per_token).min(prompt_positions as u64) as usize,
+        positions: growth.positions_within(room_after).min(prompt_positions),
     }
 }
 
@@ -548,7 +701,7 @@ mod promised_tests {
 
         // First prompt: nothing live, nothing promised.
         assert!(matches!(
-            admit_prompt(budget, 0, 0, per_token, positions),
+            admit_prompt(budget, 0, 0, per_token * positions as u64),
             PromptAdmission::Fits
         ));
 
@@ -556,7 +709,7 @@ mod promised_tests {
         // live is still zero and it is admitted too. This is the defect.
         assert!(
             matches!(
-                admit_prompt(budget, 0, 0, per_token, positions),
+                admit_prompt(budget, 0, 0, per_token * positions as u64),
                 PromptAdmission::Fits
             ),
             "control: without counting the promise, both prompts pass"
@@ -566,7 +719,7 @@ mod promised_tests {
         let promised = per_token * positions as u64;
         assert!(
             matches!(
-                admit_prompt(budget, promised, 0, per_token, positions),
+                admit_prompt(budget, promised, 0, per_token * positions as u64),
                 PromptAdmission::Refuse { .. }
             ),
             "with the promise counted the second prompt is refused at token 0"
@@ -601,7 +754,7 @@ mod tests {
             host_snapshot_budget(2 * GB + GB / 2, 8 * GB, 0),
             0,
             0,
-            per_token,
+            KvGrowth::flat(per_token),
             3_774,
         );
         assert_eq!(plan.positions, 3_774);
@@ -610,7 +763,7 @@ mod tests {
             host_snapshot_budget(2 * GB + GB / 10, 8 * GB, 0),
             0,
             0,
-            per_token,
+            KvGrowth::flat(per_token),
             3_774,
         );
         assert_eq!(plan.positions as u64, (GB / 10) / per_token);
@@ -623,7 +776,7 @@ mod tests {
     fn a_snapshot_is_cut_to_what_fits_beside_the_live_cache() {
         // 1000-byte budget, 10 bytes a token, a 40-token prompt (400 bytes).
         assert_eq!(
-            plan_snapshot(1000, 400, 0, 10, 40),
+            plan_snapshot(1000, 400, 0, KvGrowth::flat(10), 40),
             SnapshotPlan {
                 evict_bytes: 0,
                 positions: 40
@@ -631,7 +784,7 @@ mod tests {
         );
         // Live 400 + cached 500: room 100 → evict all 500 cached, room 600 → whole prompt.
         assert_eq!(
-            plan_snapshot(1000, 400, 500, 10, 40),
+            plan_snapshot(1000, 400, 500, KvGrowth::flat(10), 40),
             SnapshotPlan {
                 evict_bytes: 300,
                 positions: 40
@@ -639,7 +792,7 @@ mod tests {
         );
         // Live 800, cached 100: room 100, evict 100 → room 200 → 20 positions.
         assert_eq!(
-            plan_snapshot(1000, 800, 100, 10, 40),
+            plan_snapshot(1000, 800, 100, KvGrowth::flat(10), 40),
             SnapshotPlan {
                 evict_bytes: 100,
                 positions: 20
@@ -647,7 +800,7 @@ mod tests {
         );
         // Live cache already at the budget: nothing to snapshot.
         assert_eq!(
-            plan_snapshot(1000, 1000, 0, 10, 40),
+            plan_snapshot(1000, 1000, 0, KvGrowth::flat(10), 40),
             SnapshotPlan {
                 evict_bytes: 0,
                 positions: 0
@@ -655,7 +808,7 @@ mod tests {
         );
         // Unknown per-token cost: no judgement, snapshot everything.
         assert_eq!(
-            plan_snapshot(1000, 1000, 0, 0, 40),
+            plan_snapshot(1000, 1000, 0, KvGrowth::flat(0), 40),
             SnapshotPlan {
                 evict_bytes: 0,
                 positions: 40
@@ -670,7 +823,7 @@ mod tests {
         let mb = 1024 * 1024u64;
         let per_token = 344 * 1024u64;
         let live = per_token * 7680;
-        let plan = plan_snapshot(4523 * mb, live, 0, per_token, 7649);
+        let plan = plan_snapshot(4523 * mb, live, 0, KvGrowth::flat(per_token), 7649);
         assert_eq!(plan.evict_bytes, 0);
         assert!(plan.positions > 0 && plan.positions < 7649, "{plan:?}");
         assert!(live + per_token * plan.positions as u64 <= 4523 * mb);
@@ -682,22 +835,22 @@ mod tests {
     #[test]
     fn a_prompt_is_admitted_evicts_cached_prompts_or_is_refused_at_token_zero() {
         // 1000-byte budget, 10 bytes a token.
-        assert_eq!(admit_prompt(1000, 0, 0, 10, 100), PromptAdmission::Fits);
-        assert_eq!(admit_prompt(1000, 500, 0, 10, 50), PromptAdmission::Fits);
+        assert_eq!(admit_prompt(1000, 0, 0, 1000), PromptAdmission::Fits);
+        assert_eq!(admit_prompt(1000, 500, 0, 500), PromptAdmission::Fits);
         // Live 500 + cached 300 + claim 300 = 1100: 100 over, cache can cover it.
         assert_eq!(
-            admit_prompt(1000, 500, 300, 10, 30),
+            admit_prompt(1000, 500, 300, 300),
             PromptAdmission::EvictBytes(100)
         );
         // Live 500 + cached 300 + claim 600 = 1400: 400 over, cache covers 300.
         assert_eq!(
-            admit_prompt(1000, 500, 300, 10, 60),
+            admit_prompt(1000, 500, 300, 600),
             PromptAdmission::Refuse { short_by: 100 }
         );
         // Exactly at the budget fits; one byte past it evicts one byte.
-        assert_eq!(admit_prompt(1000, 700, 100, 10, 20), PromptAdmission::Fits);
+        assert_eq!(admit_prompt(1000, 700, 100, 200), PromptAdmission::Fits);
         assert_eq!(
-            admit_prompt(999, 700, 100, 10, 20),
+            admit_prompt(999, 700, 100, 200),
             PromptAdmission::EvictBytes(1)
         );
     }
@@ -715,7 +868,7 @@ mod tests {
         let cached = per_token * 7680;
         assert!(cached < budget && 2 * cached > budget);
         assert_eq!(
-            admit_prompt(budget, 0, cached, per_token, 7680),
+            admit_prompt(budget, 0, cached, per_token * 7680),
             PromptAdmission::EvictBytes(2 * cached - budget)
         );
     }
@@ -832,12 +985,15 @@ mod tests {
         assert!(!claim_exceeds_headroom(
             budget,
             0,
-            per_token,
-            positions_to_allocate(0, 0, 1, q)
+            per_token * positions_to_allocate(0, 0, 1, q) as u64
         ));
         // ...but a ten-quantum prefill must not.
         assert!(
-            claim_exceeds_headroom(budget, 0, per_token, positions_to_allocate(0, 0, 5000, q)),
+            claim_exceeds_headroom(
+                budget,
+                0,
+                per_token * positions_to_allocate(0, 0, 5000, q) as u64
+            ),
             "a prefill spanning 10 quanta must be refused against a 2-quantum budget"
         );
     }
@@ -858,21 +1014,29 @@ mod tests {
         let budget = claim * 4; // room for four quanta in total
 
         // Nothing in use: fine.
-        assert!(!claim_exceeds_headroom(budget, 0, per_token, q));
+        assert!(!claim_exceeds_headroom(budget, 0, per_token * q as u64));
         // Three already held: the fourth still fits.
-        assert!(!claim_exceeds_headroom(budget, claim * 3, per_token, q));
+        assert!(!claim_exceeds_headroom(
+            budget,
+            claim * 3,
+            per_token * q as u64
+        ));
         // Four already held — by any mix of requests — and the fifth does not.
-        assert!(claim_exceeds_headroom(budget, claim * 4, per_token, q));
+        assert!(claim_exceeds_headroom(
+            budget,
+            claim * 4,
+            per_token * q as u64
+        ));
     }
 
     /// Arithmetic near the limits must saturate rather than wrap: wrapping
     /// would turn "no memory" into "unlimited memory".
     #[test]
     fn headroom_arithmetic_saturates() {
-        assert!(claim_exceeds_headroom(0, u64::MAX, 1, 1));
-        assert!(claim_exceeds_headroom(10, u64::MAX, u64::MAX, usize::MAX));
-        // A zero per-token cost cannot claim anything, so it never refuses.
-        assert!(!claim_exceeds_headroom(0, 0, 0, 512));
+        assert!(claim_exceeds_headroom(0, u64::MAX, 1));
+        assert!(claim_exceeds_headroom(10, u64::MAX, u64::MAX));
+        // A zero claim never refuses.
+        assert!(!claim_exceeds_headroom(0, 0, 0));
     }
 
     /// The f16 flash mirror is real VRAM and the head-room check must charge
@@ -961,19 +1125,19 @@ mod tests {
         assert!(per_token * positions as u64 > 2500 * mb);
         // Load-time budget: evicts and admits.
         assert!(matches!(
-            admit_prompt(budget, 0, cached, per_token, positions),
+            admit_prompt(budget, 0, cached, per_token * positions as u64),
             PromptAdmission::EvictBytes(_)
         ));
         // The card as it stood: refuse before prefill.
         let now = budget_reconciled_with_device(budget, 0, cached, 365 * mb, card);
         assert!(now < budget);
         assert!(matches!(
-            admit_prompt(now, 0, cached, per_token, positions),
+            admit_prompt(now, 0, cached, per_token * positions as u64),
             PromptAdmission::Refuse { .. }
         ));
         // A prompt that fits once the cache is gone is still admitted.
         assert!(matches!(
-            admit_prompt(now, 0, cached, per_token, 6000),
+            admit_prompt(now, 0, cached, per_token * 6000),
             PromptAdmission::EvictBytes(_)
         ));
     }
@@ -1065,5 +1229,84 @@ mod tests {
             24 * gib / 100 * DEVICE_FREE_MARGIN_PCT
         );
         assert!(device_free_margin_bytes(24 * gib) > DEVICE_FREE_MARGIN_MIN_BYTES);
+    }
+
+    /// Gemma 3's shape: five layers in six keep a 1,024-position window. Past
+    /// the window and one forward they cost nothing more, so a long
+    /// conversation costs the global layers' share, not every layer's
+    /// (FUTURE_WORK #281). The flat rate is what every estimate charged before.
+    #[test]
+    fn a_windowed_layer_is_charged_no_further_than_its_window() {
+        let growth = KvGrowth::with_window(100, 500, 1024, 512).widened_to(512);
+        let cap = crate::inference::split::kv_cache::most_positions_a_window_holds(1024, 512, 512);
+        assert_eq!(cap, 1023 + 64 + 512);
+        // Inside the window every layer grows.
+        assert_eq!(growth.bytes_for(1000), 600 * 1000);
+        assert_eq!(growth.bytes_for(1000), KvGrowth::flat(600).bytes_for(1000));
+        // Past it only the global layer does.
+        assert_eq!(growth.bytes_for(8192), 100 * 8192 + 500 * cap as u64);
+        assert!(growth.bytes_for(8192) < KvGrowth::flat(600).bytes_for(8192) / 2);
+        assert_eq!(growth.bytes_between(8192, 8704), 100 * 512);
+        // A wider forward is held beside the window.
+        let wide = growth.widened_to(4096);
+        assert_eq!(wide.bytes_for(32_768), 100 * 32_768 + 500 * (1087 + 4096));
+        // No window: the old figure exactly.
+        assert_eq!(KvGrowth::flat(600).bytes_for(8192), 600 * 8192);
+        assert_eq!(KvGrowth::flat(600).per_position(), growth.per_position());
+    }
+
+    /// `positions_within` is the inverse of `bytes_for`: the longest
+    /// conversation a budget holds, and not one position longer.
+    #[test]
+    fn the_positions_a_budget_holds_invert_what_they_cost() {
+        // The cap is 1,599 positions (window 1,024: keep 1,087 + 512); every
+        // budget across it, a step finer than a position's cost, and the one
+        // a position past the cap still fits (600 · 1,599 + 100).
+        let windowed = KvGrowth::with_window(100, 500, 1024, 512).widened_to(512);
+        let across_the_cap = (600 * 1590..600 * 1610).step_by(37);
+        let budgets = [0, 599, 600, 959_500, 5_000_000, 123_456_789];
+        for growth in [windowed, KvGrowth::flat(600)] {
+            for bytes in budgets.into_iter().chain(across_the_cap.clone()) {
+                let n = growth.positions_within(bytes);
+                assert!(growth.bytes_for(n) <= bytes, "{growth:?} {bytes}: {n}");
+                assert!(growth.bytes_for(n + 1) > bytes, "{growth:?} {bytes}: {n}");
+            }
+        }
+        assert_eq!(windowed.positions_within(959_500), 1600);
+        assert_eq!(KvGrowth::flat(600).positions_within(6_000), 10);
+        // Nothing grows past the windows of a segment that holds only
+        // windowed layers — from the budget that fills them on.
+        let only_windows = KvGrowth::with_window(0, 500, 1024, 512);
+        assert_eq!(only_windows.positions_within(500 * 1599), usize::MAX);
+        assert_eq!(only_windows.positions_within(500 * 1599 - 1), 1598);
+        assert_eq!(only_windows.positions_within(u64::MAX / 2), usize::MAX);
+        assert_eq!(KvGrowth::default().positions_within(1), usize::MAX);
+    }
+
+    /// A split's two memories add up, and a range's share scales both kinds.
+    #[test]
+    fn growths_add_and_share() {
+        let card = KvGrowth::with_window(100, 500, 1024, 512);
+        let host = KvGrowth::with_window(200, 0, 0, 0);
+        let both = card.plus(host);
+        assert_eq!(both.per_position(), 800);
+        assert_eq!(
+            both.bytes_for(8192),
+            card.bytes_for(8192) + host.bytes_for(8192)
+        );
+        let half = card.share(1, 2);
+        assert_eq!(half.bytes_for(8192), card.bytes_for(8192) / 2);
+    }
+
+    /// A long prompt's snapshot on a windowed model is kept whole where the
+    /// flat rate cut it to an opening — it copies the windows, not every
+    /// layer's whole history.
+    #[test]
+    fn a_windowed_snapshot_is_planned_at_what_it_copies() {
+        let growth = KvGrowth::with_window(100, 500, 1024, 512).widened_to(512);
+        let budget = growth.bytes_for(8192);
+        assert_eq!(plan_snapshot(budget, 0, 0, growth, 8192).positions, 8192);
+        let flat = plan_snapshot(budget, 0, 0, KvGrowth::flat(600), 8192);
+        assert!(flat.positions < 8192 / 2, "control: {flat:?}");
     }
 }

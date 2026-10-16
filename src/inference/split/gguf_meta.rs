@@ -369,9 +369,17 @@ fn recurrent_layer_marker(layer_idx: usize) -> String {
 /// overstated it fourfold: ~805 MB at the admission context for the 9B, the
 /// margin by which it missed an 8 GB card (FUTURE_WORK #228).
 pub(crate) fn layers_keeping_kv(ct: &gguf_file::Content, start: usize, end: usize) -> usize {
-    (start..end)
-        .filter(|&layer| !layer_is_recurrent(ct, layer))
-        .count()
+    kv_layers(ct, start, end).count()
+}
+
+/// The layers [`layers_keeping_kv`] counts, for an estimate that prices each
+/// one by its own shape and window (the loader's `KvGrowth`).
+pub(crate) fn kv_layers(
+    ct: &gguf_file::Content,
+    start: usize,
+    end: usize,
+) -> impl Iterator<Item = usize> + '_ {
+    (start..end).filter(move |&layer| !layer_is_recurrent(ct, layer))
 }
 
 /// The bytes of layers `[start, end)`'s routed expert stacks

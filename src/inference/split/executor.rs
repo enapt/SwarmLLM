@@ -901,7 +901,7 @@ impl SplitModel {
         // layers' bytes (#262).
         let mut claiming_once: Option<usize> = None;
         for home in self.kv_homes() {
-            let (Some(load_time_budget), per_token) = self.kv_budget(home) else {
+            let (Some(load_time_budget), growth) = self.kv_budget(home) else {
                 continue;
             };
             // Positions this forward newly ALLOCATES — zero for almost every
@@ -919,6 +919,21 @@ impl SplitModel {
                 )
             });
             if claiming > 0 {
+                // What this forward's caches newly allocate here, read off
+                // their buffers — a sliding window's slide included, which no
+                // per-position rate sees (FUTURE_WORK #281). Before the first
+                // append there are no buffers: the model's estimate, for a
+                // forward this wide, prices the first allocation.
+                let claim = kv_cache_store
+                    .bytes_a_forward_adds(&cache_key, index_pos, seq_len, home)
+                    .unwrap_or_else(|| growth.widened_to(seq_len).bytes_for(claiming));
+                // A forward that allocates nothing here needs no room — a
+                // windowed cache reaching the end of its buffer slides in
+                // place — so it is never refused, nor its conversation cleared,
+                // for memory other programs took since.
+                if claim == 0 {
+                    continue;
+                }
                 // The budget as the device can honour it at this moment — the
                 // load-time figure capped by what the device actually has
                 // left (`kv_budget_now`). Asked only here, at a growth
@@ -931,9 +946,7 @@ impl SplitModel {
                 // Live caches PLUS the prefix cache's snapshots: the same
                 // device memory, and charged nowhere until gotcha #440 —
                 // and evictable, which `claim_room` does before refusing.
-                if let Err(refused) =
-                    kv_cache_store.claim_room(home, budget, per_token, claiming, request_id)
-                {
+                if let Err(refused) = kv_cache_store.claim_room(home, budget, claim, request_id) {
                     let in_use = refused.in_use_bytes;
                     // Whether OTHER conversations hold the room this one needs
                     // — read before `clear_request` below takes this request's
@@ -941,10 +954,9 @@ impl SplitModel {
                     // (`docs/FUTURE_WORK.md` #122): an over-long conversation
                     // is helped by a shorter one, one that met other live
                     // chats only by waiting.
-                    let own = (kv_cache_store.allocated_positions(&cache_key) as u64)
-                        .saturating_mul(per_token);
+                    let own = kv_cache_store.allocated_bytes_of(&cache_key, home);
                     let others = refused.live_bytes.saturating_sub(own);
-                    let wanted = own.saturating_add((claiming as u64).saturating_mul(per_token));
+                    let wanted = own.saturating_add(claim);
                     let busy = others > 0 && wanted <= budget;
                     // Decomposed, because the total is store-wide and reads as
                     // if it were this request's. `entries > 1` says outright

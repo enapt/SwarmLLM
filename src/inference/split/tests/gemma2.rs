@@ -777,6 +777,43 @@ fn a_windowed_cache_that_slid_answers_as_one_that_kept_everything() {
     }
 }
 
+/// A forward that only slides a windowed cache allocates nothing, so the
+/// head-room guard lets it through even when memory is already over budget —
+/// it never refuses, nor clears, a conversation for room it does not ask for
+/// (FUTURE_WORK #281 (2)). The windowed buffer's end opens the guard's gate at
+/// every slide; the claim read off the buffers is 0 there. The control: the
+/// first forward the global layer must GROW for is still refused.
+#[test]
+fn a_forward_that_only_slides_a_window_is_never_refused_for_room() {
+    let mut model = gemma2_model_of_context(2, 2048);
+    set_windows(&mut model, &[Some(5), None]);
+    // Less than anything a cache holds: every claim of a byte is refused.
+    model.kv_budget_bytes = Some(1);
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+    // The global layer's buffer is born 1,024 wide; the windowed one 580 —
+    // its 68 kept positions and a 512 quantum — and slides at every end.
+    kv.set_reserved_positions("r", 1024);
+    let hidden = Tensor::randn(0f32, 1.0, (1, 1088, 256), &Device::Cpu).unwrap();
+    for pos in (0..1024).step_by(64) {
+        let piece = hidden.narrow(1, pos, 64).unwrap();
+        model
+            .forward(&piece, pos, &kv, "r")
+            .unwrap_or_else(|e| panic!("the forward at {pos} allocates nothing: {e}"));
+    }
+    assert!(
+        held_from(&model, &kv, "r")[0] > 0,
+        "the windowed layer slid"
+    );
+    let piece = hidden.narrow(1, 1024, 64).unwrap();
+    let err = model
+        .forward(&piece, 1024, &kv, "r")
+        .expect_err("growing the global layer's buffer claims room it does not have");
+    assert!(
+        matches!(err, crate::error::SwarmError::LocalMemoryUnavailable(_)),
+        "{err:?}"
+    );
+}
+
 /// A query scale (#279: Gemma 2's 27B) reaches both attention entry points:
 /// the batched forward agrees with the single one, and the scale moves the
 /// output — so the agreement is not two paths both ignoring it.

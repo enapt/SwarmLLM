@@ -50,7 +50,8 @@ pub use self::gguf_meta::{
     ROPE_FREQS_FILENAME, TIED_OUTPUT_FILENAME,
 };
 pub(crate) use self::gguf_meta::{
-    layer_is_recurrent, layers_keeping_kv, query_scale, routed_expert_bytes, SlidingWindow,
+    kv_layers, layer_is_recurrent, layers_keeping_kv, query_scale, routed_expert_bytes,
+    SlidingWindow,
 };
 pub use self::kv_cache::{KvCacheStore, KvOccupancy};
 pub use self::model::SplitModel;
@@ -172,6 +173,15 @@ pub(crate) fn gpu_layer_limit() -> Option<usize> {
 /// `0` = none. Set once from `--cpu-moe-layers`, like [`GPU_LAYER_LIMIT`].
 pub static CPU_EXPERT_LAYERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+
+/// `inference.prefill_chunk_tokens` as this worker was started with — the
+/// configured ceiling of a prompt forward
+/// (`prefill_pacer::prompt_chunk_ceiling`), which a sliding-window layer's
+/// cache holds beside its window (`SplitModel::widest_prompt_forward`,
+/// FUTURE_WORK #281). Set once in `run_worker`, like [`CPU_EXPERT_LAYERS`];
+/// the setting's default until then. 0 reads a prompt in one forward.
+pub static PROMPT_CHUNK_TOKENS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(128);
 
 /// [`CPU_EXPERT_LAYERS`], or `None` when every card-held layer keeps its experts.
 pub(crate) fn cpu_expert_layers() -> Option<usize> {
