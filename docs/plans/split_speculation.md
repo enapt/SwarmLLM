@@ -9,7 +9,7 @@ measurements are in `memory/perf_spread_0927_gpu.md`.
 > **Status 2026-10-02:** Phase 1 shipped (v0.3.211), guessing ahead has been on by default since
 > v0.3.213 (the "OFF by default" and "opt-in" lines below were true when written), and 4b, the
 > continuous stream, since v0.3.216. Open in `docs/FUTURE_WORK.md`: #134 (draft trees = Phase 2, a
-> drafter the node does not hold, the pipelined prompt pass = Phase 3, also #171), #149 (four stream
+> drafter the node does not hold; the pipelined prompt pass = Phase 3 was built as #171 in v0.3.234), #149 (four stream
 > refinements), #167 (no mid-reply failover of a speculative split). Phase 4's shadow and the
 > same-model-at-fewer-bits drafter are decided against as a default (#144, § "Decided"): no design
 > may need a user to hold a whole model, even at low bits. The delegated coordinator (#143) shipped
@@ -318,7 +318,7 @@ result from `payload_len`, which should fall from ~3 MB to tens of bytes.
    drafting), extending the most likely path. This hides drafting time rather
    than adding tokens per trip.
 
-### Phase 3 — the prompt pass, pipelined in chunks
+### Phase 3 — the prompt pass, pipelined in chunks (built 2026-10-10, v0.3.234 — `pipelined_prompt_pass.md`)
 
 A split reads a prompt serially: the head's layers, then the transfer, then the
 tail's layers. Sending the prompt in chunks lets the head read chunk k+1 while

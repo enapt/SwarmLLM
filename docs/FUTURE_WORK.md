@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #285**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #286**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -498,7 +498,7 @@ answers in ~5 s. Several contributors (diagnosis rule 6). Each is a hypothesis u
 - **No layer is priced as the model it belongs to.** (Corrected 2026-10-12: this bullet first said
   the hybrid price came from the whole file's bytes; it never sees the model.) Every candidate's
   per-layer compute is `1000 / est_tokens_per_sec_7b / BASELINE_LAYER_COUNT` (`parallax.rs`
-  `vertex_cost`), where `node_tokens_per_sec_7b` = memory bandwidth ÷ `MODEL_SIZE_7B_Q4` (4.4 GB) ×
+  `vertex_cost`), where `node_tokens_per_sec_7b` = memory bandwidth ÷ `MODEL_SIZE_7B_Q4_GB` (4.4 GB) ×
   efficiency. That holds for this node, for a gossiped peer, and for a measured peer, whose
   `PeerSpeed` ms per layer is keyed by node only. Its samples from a 2B therefore price that peer's
   30B layers too. Nothing in the scheduler, `parallax` or the planning half of the process pool
@@ -511,7 +511,7 @@ answers in ~5 s. Several contributors (diagnosis rule 6). Each is a hypothesis u
   **Design** (Petals measures throughput per MODEL, running one real block of it — `throughput.py`,
   cache key `model_{name}_device_…_dtype_…`; a mixture-of-experts block then counts only the experts
   it routes to): scale each layer's prior by the model's ACTIVE bytes per layer over the reference
-  layer's (`MODEL_SIZE_7B_Q4 / BASELINE_LAYER_COUNT`). Active bytes are the layer's non-expert
+  layer's (`MODEL_SIZE_7B_Q4_GB / BASELINE_LAYER_COUNT`). Active bytes are the layer's non-expert
   tensors plus its `_exps` tensors × `expert_used_count / expert_count`, from the manifest's tensor
   table (sizes and names) and the header (`GgufTensorMeta` needs `expert_used_count`, serde
   default). Store a measured peer's coefficient per REFERENCE layer (divide by the sampled model's
@@ -1992,6 +1992,28 @@ Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the 
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
 
+#### #285 — A tensor forward to a peer whose NodeId mapping is missing goes out without its session seal, and is accepted
+`P3` · security · **OPEN** — 2026-10-16 · history: none (found by the 2026-10-16 doc sweep)
+
+With `network.enable_encryption` on (the default), both send paths decide
+`use_encryption = enable_encryption && peer_node_id.is_some()` (`network/manager/tensors.rs`
+`handle_send_tensor`; `network/pipeline_stream.rs::encode_forward_for_wire`, whose
+"encryption requested but no NodeId" error is therefore unreachable), so a forward to a peer the
+reverse map (`peer_to_node` / `peer_id_map`) does not name is sent as plain `TENSOR_TAG_FORWARD`.
+The target PeerId comes from `resolve_peer_id_bytes` (persistent `peer_id_map`, then gossip), not
+from that map, so the window is real if narrow: a reconnect before Identify re-fills
+`peer_to_node`, or a mapping pruned while the connection stays up. Neither receiver
+(`requests.rs` `TensorPayload` → `handle_tensor_payload`; `pipeline_stream.rs::decode_inbound_forward`)
+asks whether a plaintext forward was expected. **Exposure**: every transport is Noise or QUIC/TLS,
+relay circuits included, so only the intended peer can read it — the loss is the session-key
+seal and its AAD binding (`build_layer_forward_aad`: `spec_logits_requested`, `truncate_kv_to`, …),
+i.e. defence in depth, not a leak to a third party. The `SEC: Never fall back to plaintext` comment
+covers only a seal FAILURE. Next: with encryption on and no NodeId, fail the forward
+(`fail_tensor_forward`, so the router re-plans) or wait for Identify, never send it bare; then
+decide whether a receiver with encryption on refuses `TENSOR_TAG_FORWARD` from a peer it holds a
+session with (an `enable_encryption = false` peer must still work). Wire and crypto →
+`security-reviewer` on the diff, and the split + failover rigs.
+
 #### #251 — `owned_by: "local"` reads as "my data stays here"; it means "every part is held here"
 `P2` · privacy · **PARTIAL** — 2026-10-12 · history: report #035 (a tester, v0.3.232-.234); (1), (2) per model and (4) done 2026-10-12
 
@@ -2124,7 +2146,7 @@ whole-PC freeze and a host network loss). Eliminated, so not re-derived: `cancel
 blocking DB calls (fixed in .191, fired 0 times). ⚠ Two arms log below the node's level, so the
 last visible line before a wedge can be unrelated. `release_request_kv` has the same unbounded
 shape but runs in a router task, and the supervisor still cannot see a hung (non-exited) task.
-Field reading, report #036 (2026-10-14): 0 `dispatch_stalled_for` / `DISPATCH_STALL` lines in a
+Field reading, report #036 (2026-10-14): 0 "The message dispatcher has taken nothing off its channel" lines in a
 tester's six days of logs (0.3.229 → 0.3.238).
 
 #### #49 — Auto-prune reportedly evicted parts the swarm held no other copy of

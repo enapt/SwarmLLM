@@ -451,7 +451,7 @@ update.
 | INFO | `An upload of this model could not be checked on HuggingFace` | skipped for 24 h (`permanent`) or 30 min; the next-best is tried |
 | INFO | `DIAG: registered the canonical upload's manifest` | a node holding none of the model now fetches against the canonical upload |
 | INFO | `DIAG: this node's parts are the canonical upload's` | the 64 KB-per-part byte check against HuggingFace passed |
-| WARN | `DIAG: parts on this node are not the canonical upload's bytes — deleting them and fetching the upload's` | `not_the_upload` = parts whose first 64 KB differ from the upload on HuggingFace; `in_dispute` = parts whose bytes disagree with the swarm's hash (#61) — settled by the upload's own bytes. Bytes that fail the check go at once even mid-request (that request was computing garbage, and fails and re-routes instead); a copy of another layout and disputed parts wait until the model is idle (`replacing`, withheld) |
+| WARN | `DIAG: parts on this node are not the canonical upload's bytes — deleting them and fetching the upload's` | `checked_holders_disagree` = parts two checked holders outvote (#160); `not_the_upload` = parts whose first 64 KB differ from the upload on HuggingFace; `in_dispute` = parts whose bytes disagree with the swarm's hash (#61) — settled by the upload's own bytes. Bytes that fail the check go at once even mid-request (that request was computing garbage, and fails and re-routes instead); a copy of another layout and disputed parts wait until the model is idle (`replacing`, withheld) |
 | WARN | `DIAG: deleted this node's parts that are not the canonical upload's — fetching the upload's in their place` | `deleted`, `fetching` = the upload's parts covering the same layers, queued for repair (`Fetching from the model's origin` / `P2P shard download complete` follow). A copy of another LAYOUT is deleted whole, the upload's header and manifest installed (`registered the canonical upload's manifest`) |
 | INFO | `This node holds another upload of this model and cannot reach the swarm's yet — keeping it, withheld, until it can` | HuggingFace did not answer, so nothing is deleted (nothing could be fetched back); state `replacing` |
 | WARN | `Replaced a header from another upload of this model` | the parts were right, `gguf_header.bin` was another upload's — replaced, model reloaded |
@@ -806,7 +806,7 @@ cargo dev-run -- run -vv 2>&1 | grep "DIAG:.*SSE"          # SSE streaming path
 cargo dev-run -- run -vv 2>&1 | grep "DIAG:.*KV-cache"     # KV-cache hit/miss
 cargo dev-run -- run -vv 2>&1 | grep "DIAG:.*split stream"  # Split model decode loop
 cargo dev-run -- run -vv 2>&1 | grep "DIAG:.*execute_request" # End-to-end request timing
-cargo dev-run -- run -vv 2>&1 | grep "DIAG:.*codec"           # Wire-protocol codec frames
+cargo dev-run -- run -vvv 2>&1 | grep "DIAG:.*codec"          # Wire-protocol codec frames (trace! only)
 ```
 
 ## End-to-End Request Trace
@@ -823,17 +823,17 @@ cargo dev-run -- run -vv 2>&1 | grep "request_id=<UUID>"
 2. **Dispatch** → `DIAG: dispatch_single starting inference` (router/mod.rs)
 3. **Pipeline assembly** → `DIAG: pipeline assembled` with `segments`, `standbys`, `schedule_ms` (router/distributed_exec.rs)
 4. **Forward start** → `DIAG: starting forward_through_segments` with `seq_num`, `index_pos`, `activation_bytes` (pipeline/distributed.rs)
-5. **Tensor forward send** → `DIAG: sent tensor forward via send_request` with `is_connected`, `total_connections`, `pending_tensor_count`, `outbound_id` (manager/tensors.rs)
-6. **Codec write** → `DIAG: codec write_request start/done` with `frame_len` (protocol.rs)
+5. **Tensor forward send** → DEBUG `DIAG: sent tensor forward via send_request (verbose)` with `peer_established_count`, `is_rr_pending`, `total_connections`, `pending_tensor_count`, `outbound_id` (manager/tensors.rs)
+6. **Codec write** → `DIAG: codec write_request start/done` with `frame_len` (network/protocol/mod.rs, trace)
 7. **Encryption (if enabled, R139)** → encrypt offloaded from event loop via `tokio::spawn`. Failure: `DIAG: tensor encrypt+encode failed — dropping forward` (manager/tensors.rs). On success the spawn task posts `NetworkCommand::SendEncodedTensor` back through `internal_cmd_tx`; the critical task then performs only the `send_request` step. Decode/decrypt offloaded symmetrically in the inbound path; failures log `DIAG: decrypt FAILED — possible AAD mismatch, key mismatch, or corruption`
 9. **Inbound dispatch** → `DIAG: inbound TensorPayload request` → `DIAG: acknowledged tensor forward on receipt` (manager/requests.rs) — the request is ACKed immediately; the result travels back as its own request (`features::FORWARD_ACK`, 2026-08-21). A coordinator that sees no ACK within the RTT-scaled deadline logs `DIAG: tensor forward not acknowledged within the ACK deadline` (manager/mod.rs, the stale sweep) and the pipeline fails over; an un-ACKed forward no longer waits out the segment deadline.
 10. **Dispatcher** → `DIAG: dispatcher received LayerForward, spawning handler` with `seq`, `layer_range`, `activation_bytes` (daemon/dispatch/mod.rs)
-11. **Local execution** → `DIAG: processing LayerForward locally` with `elapsed_ms` (daemon/dispatch/layer_forward.rs)
+11. **Local execution** → INFO `DIAG: processing LayerForward locally`, logged BEFORE the work, with `request_id`, `seq`, `activation_bytes`, `estimated_tokens`, `model_id`, `layer_range` (daemon/dispatch/layer_forward.rs)
 12. **Split model forward** → `DIAG: SplitModel forward pass complete` with `forward_ms`, `seq_len`, `num_layers` (split/executor.rs)
 13. **Result send** → `DIAG: LayerForward processed via worker subprocess` with `tokens`, `activations_bytes`, `elapsed_ms`, `layer_start`, `layer_end` (daemon/dispatch/layer_forward.rs)
-14. **Response write** → `DIAG: codec write_response start/done` with `frame_len` (protocol.rs)
+14. **Response write** → `DIAG: codec write_response start/done` with `frame_len` (network/protocol/mod.rs, trace)
 15. **ResponseSent event** → `DIAG: ResponseSent event — response written to wire` (manager/events.rs)
-16. **Response read** → `DIAG: codec read_response done` with `tag`, `len` (protocol.rs)
+16. **Response read** → `DIAG: codec read_response done` with `tag`, `len` (network/protocol/mod.rs, trace)
 17. **Response received** → `DIAG: received response` with `kind`, `was_tensor_forward`, `pending_tensor_out` (manager/events.rs)
 18. **Response dispatch** → `DIAG: received TensorPayload response` (manager/requests.rs)
 19. **Result delivery** → `DIAG: dispatcher received LayerResult` → `DIAG: LayerResult delivered to pipeline` (daemon/dispatch/mod.rs)
@@ -869,7 +869,7 @@ histograms. Adding a field means adding it there once, not at each surface.
 - **Decryption fail** → `DIAG: decrypt FAILED — possible AAD mismatch` (manager/tensors.rs)
 - **No standby** → `DIAG: NO standby available for failed segment` (pipeline/distributed.rs) — carries `tried` (every node the segment was attempted on) and `last_failure` since 2026-09-02
 - **Departed peer** → `DIAG: peer departed with forwards outstanding — failed them so the pipeline can fail over` (network/manager/connections.rs) — fires when a peer's connection closed AND its re-dial failed while forwards were still pinned to it; the pipeline then fails over immediately instead of waiting the segment deadline
-- **Client disconnect** → `DIAG: result_tx receiver dropped` (router/mod.rs)
+- **Client disconnect** → `DIAG: result_tx receiver dropped` … (router/types.rs: WARN when the client disconnected and an answer was lost, INFO when it disconnected and the request ended without one, DEBUG when dropped without a cancellation)
 - **Channel drop** → `DIAG: LayerResult delivered but pipeline receiver DROPPED` (daemon/dispatch/mod.rs)
 - **No pending channel** → `DIAG: No pending channel for LayerResult — timed out, duplicate, or hedge loser` (daemon/dispatch/mod.rs)
 - **Streaming done event** → `DIAG: streaming done_event send failed` (router/mod.rs or router/distributed_exec.rs)
@@ -1006,7 +1006,7 @@ The encrypted tensor path logs at multiple levels:
 | DEBUG | `DIAG: decrypting tensor` — AAD length, sealed length, session existence | manager/tensors.rs |
 | TRACE | `DIAG: seal() success` — nonce counter, ciphertext length | session.rs |
 | TRACE | `DIAG: open() decryption success` — nonce, plaintext length | session.rs |
-| ERROR | `DIAG: seal() encryption failed` — full context on encryption failure | manager/tensors.rs |
+| ERROR | `DIAG: seal() encryption failed` — `peer`, `nonce_counter`, `aad_len`, `plaintext_len` | crypto/session.rs |
 | ERROR | `DIAG: decrypt FAILED` — AAD mismatch, key mismatch, or corruption | manager/tensors.rs, session.rs |
 | ERROR | `DIAG: open() decryption FAILED` — nonce state, AAD/sealed lengths | session.rs |
 
@@ -1016,7 +1016,7 @@ The encrypted tensor path logs at multiple levels:
 
 **No Session**: The sender has an encryption session but the receiver doesn't (or vice versa). Check `has_session` in logs. Sessions are established via ECDH key exchange during peer discovery.
 
-**Nonce Replay**: If `Rejecting replayed nonce` appears, a duplicate or out-of-order message was received. This can happen with connection flapping.
+**Nonce Replay**: a replayed or out-of-window nonce fails `open`, which logs ERROR `DIAG: open() decryption FAILED under every key held for this peer` (`recv_nonce`, `aad_len`, `sealed_len`, `had_session`, `had_previous`, `had_retired`) and asks the peer to rekey. This can happen with connection flapping.
 
 ## Transport Layer
 
@@ -1095,8 +1095,8 @@ If `pending_tensor_forwards > 0` when a connection closes, those requests will g
 
 | Level | What | Where |
 |-------|------|-------|
-| ERROR | `DIAG: {label} tensor decompression failed` — zstd decompress error | protocol.rs |
-| DEBUG | `DIAG: {label} tensor decompressed` — `compressed_len`, `decompressed_len`, `ratio` | protocol.rs |
+| ERROR | `DIAG: {label} tensor decompression failed` — zstd decompress error | network/protocol/mod.rs |
+| DEBUG | `DIAG: {label} tensor decompressed` — `compressed_len`, `decompressed_len`, `ratio` | network/protocol/mod.rs |
 
 ## KV-Cache Diagnostics
 
@@ -1235,8 +1235,8 @@ If `schedule_ms` is high, the bottleneck is pipeline assembly. If `execute_ms` i
 
 Common causes:
 - **Timeout-then-failover**: A segment times out at 30s (the floor of `SEGMENT_TIMEOUT_MIN_SECS`; the deadline grows with layers and prompt, to 600 s), then failover succeeds quickly → ~30s total. Check for `DIAG: segment TIMED OUT` followed by `DIAG: failing over to standby`.
-- **Connection not established**: Tensor sent to a peer that's not connected. Check `is_connected=false` in `Sent tensor forward` logs.
-- **Encryption failure + fallback**: Encrypted send fails, falls back to plaintext, which also fails. Check for `DIAG: seal() encryption failed` logs.
+- **Connection not established**: Tensor sent to a peer that's not connected. Check for WARN `Peer not connected and no relay path — failing tensor forward`.
+- **Encryption failure**: a forward whose sealing fails is DROPPED, never sent in plaintext — check for `DIAG: tensor encrypt+encode failed — dropping forward` and `DIAG: seal() encryption failed`. (A peer with no NodeId mapping yet is a different case: its forward goes out unsealed — `docs/FUTURE_WORK.md` #285.)
 - **Channel backpressure**: Result arrives but the dispatcher channel is full. Check for `Outbound channel full, dropping tensor result`. **Read `nothing_accepted_for_secs` on that line before anything else** — a few hundred milliseconds is a burst under load, while tens of seconds means the dispatcher has stopped consuming and every inbound swarm message is being dropped, not just this one (`docs/FUTURE_WORK.md` #90, gotcha #648). The line is rate-limited to one per 30 s per channel, so `dropped_since_last` is the real volume.
 - **SSE fallback path**: If `DIAG: SSE stream no finish event from pipeline` appears, the streaming token channel broke and the system fell back to waiting for the full result — check pipeline errors above.
 
@@ -1386,6 +1386,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | DEBUG | `DIAG: chat template applied with the system turn folded into the first user turn` | `template_matched` |
 | WARN  | `DIAG: chat template failed, using gemma fallback` / `DIAG: chat template failed, using model-name fallback` / `DIAG: chat template failed, using fallback` | `fallback`; the model-name line adds `model_name` |
 | DEBUG | `DIAG: no chat template, using model-name fallback` / `DIAG: no chat template, using fallback` | `fallback`; the model-name line adds `model_name`, the other `template_matched` (false) |
+| WARN  | `DIAG: no chat template for a request carrying tools` — the model's own tool-call format is unreachable; tools are described in prose | `model_name` |
 | WARN  | `DIAG: chat template rendered a prompt with the user's question missing` — the render is discarded for the fallback chain | — |
 | DEBUG | `DIAG: build_prompt from header` (pipeline/prompt.rs) | `model`, `prompt_len` |
 
@@ -2239,7 +2240,7 @@ Two things that will otherwise be misread:
   run took 12.3 s and 17.7 s, so a graph that made the 0.8B 2.3× faster read as
   noise. Its stdout is flushed in ~1 KB pieces, not per token — time the pieces
   (`~/swarmllm-228/tok_timing.py`: first piece after `Generated:` to the last,
-  bytes scaled by ids per byte) or use a daemon's `decode_tok_s`.
+  bytes scaled by ids per byte) or use a daemon's `tpot_ms` on its `DIAG: request complete` line.
 - **The box must be idle.** The same unchanged code path measured 0.42 ms and
   0.97 ms here. A run taken while a build or another bench is going is worthless,
   and it will not look wrong — it will look like a result.

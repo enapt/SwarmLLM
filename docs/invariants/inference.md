@@ -3467,8 +3467,8 @@ which asks the rule per layer for the loader and every estimate before a load), 
 reads it off the header's architecture.
 
 **Every estimate asks the same rule**: the loader's KV budget, the card/processor split planner
-(`process_pool`), admission (`vram::card_kv_storage` — the GPU estimator's KV term at the storage's
-width; since #281 (3) all three through `kv_budget::KvLayout`, per layer), and the coordinator's bound on a PEER (`scheduler::KvDevice` → since #281 (4) `KvLayout::growth_on_peer` →
+(`process_pool`), admission (the GPU estimator's KV term at the storage's width — `VramFootprintInputs::kv`, a
+`kv_budget::KvPrice`; since #281 (3) all three through `kv_budget::KvLayout`, per layer), and the coordinator's bound on a PEER (`scheduler::KvDevice` → since #281 (4) `KvLayout::growth_on_peer` →
 `layers::kv_storage_as_advertised`, which reads `features::KV_HALF_ON_CARD` — bit 19, NOT in
 `features::ALL`, ORed in by the health monitor when `kv_half_on_card_enabled()`; a peer without it
 is priced as f32 + mirror, as before).
@@ -4247,7 +4247,7 @@ taken whole.
   `lookup` / `lookup_chain` skip an entry whose `serves_from` passes the usable length, and
   an earlier turn shorter than the new snapshot's `serves_from` is KEPT beside it (it serves a
   branch the new one cannot — llama.cpp's checkpoints, for the same reason). Hydration
-  starts the cache at `held_from` (`begin_at`). `bytes_per_position` — what the snapshot
+  starts the cache at `held_from` (`begin_at`). `SnapshotCost::per_position` — what the snapshot
   ceiling divides the byte budget by — divides a layer's views by the positions it HOLDS: by
   the conversation's length a slid layer read at a quarter of its weight
   (`a_slid_layer_weighs_the_same_per_position`, 40 bytes against 64 with that off).
@@ -4536,7 +4536,7 @@ jinja2 does (`gemma3_actual_template_matches_jinja2`).
 
 Tests: `gemma3_global_layers_scale_and_windowed_layers_turn_at_their_own_base`,
 `gemma2_windowed_layers_rotate_as_the_rest_unless_the_file_names_a_base`,
-`only_linear_scaling_is_applied`, `a_scale_multiplies_every_position`,
+`linear_and_yarn_scaling_are_read_and_nothing_else`, `a_scale_multiplies_every_position`,
 `windowed_layers_take_their_own_rope_tables` (red with `rope_for` ignoring the windowed
 tables), `gemma3_windows_five_layers_in_six_only_when_the_file_names_a_window`,
 `only_gemma3_27b_scales_its_queries_by_the_model_width`.

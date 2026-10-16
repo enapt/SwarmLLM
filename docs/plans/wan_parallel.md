@@ -95,7 +95,12 @@ math and code. Applies to ~27-46% of real chat prompts. Quality: see §7.
 **Agent sub-calls** are already separate streams (parallel tool calls, subagents);
 they only need to ride the same passes.
 
-## 4. The prompt pass can be parallel — not built yet
+## 4. The prompt pass can be parallel — built 2026-10-10 for the splits this node leads (v0.3.234)
+
+> **Since v0.3.234** a split's prompt goes in pieces, every machine reading at once
+> (`pipeline::prompt_chunks`, `features::PROMPT_CHUNKS`; the design as built is
+> `pipelined_prompt_pass.md`, what is left is `docs/FUTURE_WORK.md` #171). The text below is
+> the reasoning as written before it was built.
 
 Every prompt token is known, so the head CAN read chunk k+1 while chunk k crosses
 and the tail reads it: time ≈ the slowest stage or the link, not their sum
