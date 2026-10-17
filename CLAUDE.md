@@ -91,9 +91,9 @@ cargo dev-test                        # lib + integration; counts below come fro
 cargo dev-run -- run -p 8800 -v       # start a daemon serving the frontend from disk
 ```
 
-**Counts, measured at v0.3.240 (dev,claude-subscription)**: **3553 lib** (+17 ignored),
-79 integration (31 + 34 + 14 `yamux_substream`), **230 repo-consistency**,
-1 `api_key_side_effects`, 58 `swarmllm-types`, and 12 in the vendored
+**Counts, measured at v0.3.241 (dev,claude-subscription)**: **3605 lib** (+17 ignored),
+79 integration (31 + 34 + 14 `yamux_substream`), **232 repo-consistency**,
+1 `api_key_side_effects`, 59 `swarmllm-types`, and 12 in the vendored
 request-response patch — plus 18 in the `swarmllm` BIN target (`cli::*`, counted
 nowhere else). They are refreshed at release (`memory/release_gate.md`), not
 per change, so a higher count since then is expected. The types crate and the

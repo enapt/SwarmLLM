@@ -1,5 +1,66 @@
 # Changelog
 
+## [0.3.241-alpha] — 2026-10-17
+
+**A relayed message is taken as its sender's only when the sender signed it.** When two
+computers cannot reach each other directly, a third forwards their requests and model work,
+sealed so it cannot read them. The seal proved nothing about who made a message: another
+computer connected to yours could send one naming someone else as its sender, and it was
+handled as theirs. Now the sending computer signs each relayed message inside the seal, and
+this version accepts one only when the signature checks, it was not delivered before, and it
+is a kind of message computers relay. Direct connections were never affected. Relaying
+between this version and an older one pauses until the older one updates itself, which takes
+minutes; an older computer can still pass messages between two on this version.
+
+**Gemma 4's other sizes run.** The 26B-A4B (a mixture of experts: 26B in total, 4B used per
+token) loads, splits across computers and between a graphics card and the processor, and
+answers as llama.cpp does: median cosine 0.99911 at 28 tokens and 0.99917 at 1,536 on the
+processor, where two of llama.cpp's own processor code paths agree at 0.99895 and 0.99907. The
+E2B and E4B (text) run whole on one computer — only their first layers see the prompt's words,
+so they are not split across computers — and fit a small card: the E2B runs whole on a 4 GB
+card and the E4B on a 6 GB one (card estimates 1,859 MB and 3,483 MB, where they were
+3,696 MB and 5,688 MB).
+
+**A mixture-of-experts model that does not fit the graphics card reads prompts faster.** Its
+experts can now run on the card in the storage types Gemma 4 uses. A 1,527-token prompt to
+Gemma 4 26B-A4B with every expert in the computer's memory read its three chunks in
+4.0-10.3 / 3.2 / 3.1 s on the card, where it took about 10 s a chunk on the processor, and
+23.6-24.8 s for the first chunk on the card.
+
+**A model split between the graphics card and the processor takes on more layers instead of
+failing the request.** A tester's 12 GB card refused a second run of Qwen3-30B-A3B's layers on
+the card alone, with plenty of the computer's memory free, and the request failed; a whole copy
+of the same model answered in 6.7 s.
+
+**A part fetched for one request is no longer deleted minutes later, and a model held whole
+keeps every part.** A tester's computer holding all 34 parts of Qwen3-30B removed part 25,
+fetched it again and removed it 28 seconds after it arrived, three times in 13 hours. Trimming
+now measures against the highest need of the last day, keeps every part of a model held whole
+unless the disk is nearly full, and keeps a part that arrived in the last 30 minutes while
+there is room.
+
+**Routes are priced from measurements that fit the prompt.** A model load or a round trip timed
+on a small forward and scaled up to a long prompt priced one route at 17.6 hours, so a fast
+computer could lose to a slow one; the price now comes from warm forwards of at least 256 KB. A
+prompt estimated at 1,024 tokens or more is counted exactly before it is planned (it was
+estimated at 4 bytes a token). When this computer itself turned a request down, diagnostics no
+longer blame the first peer in the plan.
+
+**A connection that has just dropped is no longer mistaken for a peer that stopped
+answering.** Twenty requests in flight on a closed connection read as "has not answered 20
+requests in a row" — 14 of this computer's 16 such warnings on 2026-10-16. Only a timeout
+counts now.
+
+**Less upload when computers reconnect.** A computer connecting to a peer was sent all of the
+peer's model descriptions, about 35 KB each: a test computer joining the network received 84 of
+them (about 2.9 MB) from six peers in 20 seconds, describing 26 models. Between computers on
+this version it is told which version of each the peer holds, about 200 bytes a model, and
+fetches only what it lacks: about 12 KB per peer for those 26 models, and nothing for a peer
+that already has them. The repeat to the whole network drops from every 2 hours to once a day
+while every connected peer runs this version.
+
+Five library patch updates (serde_json, toml, zeroize, interprocess, uuid).
+
 ## [0.3.240-alpha] — 2026-10-16
 
 **Gemma 3 and Gemma 4 run.** Gemma 3 (text) and Gemma 4's 12B and 31B (text) can now be

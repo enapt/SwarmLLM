@@ -2477,7 +2477,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-16/17, not yet released** (#265, #286, #287, #288, #289, #290, #115 (3b), #292, #115 (3c), #296, #298)
+**Closed 2026-10-16/17, released in v0.3.241 (2026-10-17)** (#265, #286, #287, #288, #289, #290, #115 (3b), #292, #115 (3c), #296, #298)
 - #298 — **A relayed message or tensor is taken as its sender's only when the sender signed it.**
   Found 2026-10-17 by the security review of #91 (2), filed and fixed in one commit. The
   application relay (NAT'd nodes' remote-generate traffic and split tensors) sealed each body
