@@ -51,9 +51,10 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
 **P1 — silent, or broken for a whole class of users**
 3. **#1** — every Mac runs on the processor; no GPU backend is compiled for Apple Silicon (needs a
    Mac to verify on).
-4. **#220** — a worker's card faulted once (illegal memory access) and the driver took 14 minutes
-   to reset; the kernel is still unknown. Its next step runs only on a FRESH boot, under the safety
-   kit and memcheck.
+4. **#220** — WATCH: a worker's card faulted once (illegal memory access, 2026-10-04) and the driver
+   took 14 minutes to reset; the kernel is still unknown. Every planned run is done (memcheck clean
+   over ~27 min on two boots, FECS shown with no SwarmLLM code at 48 h, the drafter-in-one-process
+   change weighed and declined); nothing to run until the illegal access recurs.
 5. **#250** — a model held whole here, which the card holds only part of, can be routed through
    far peers instead of answering locally. Its causes closed in v0.3.236 and v0.3.239; left: the
    prompt priced on the processor prior for a card/processor split, and a far hop priced at
@@ -307,7 +308,7 @@ The stalls' root cause stays unknown and the guard does not need it. A card FAUL
 and the 14-minute driver reset after it are #220.
 
 #### #220 — A worker's card faulted once (illegal memory access), and the driver then took 14 minutes to reset
-`P1` · reliability · **OPEN** — 2026-10-05 · history: gotcha #790
+`P1` · reliability · **OPEN — WATCH: nothing to run until it recurs** — 2026-10-05 (WATCH from 2026-10-17) · history: gotcha #790
 
 On 2026-10-04 at 18:52:06 UTC, in the .225 gate's baselines (`~/swarmllm-gate-0225/repro_b5_old2_w6`,
 the v0.3.224 binary: Qwen2.5-Coder-7B layers 0-14 on the card, an fp16 Qwen2.5-0.5B drafter in a
@@ -432,6 +433,16 @@ two of our processes on the card and not with one.
 
 Field reading, report #036 (2026-10-14, an RTX 3060 node on Linux, 0.3.229 → 0.3.238, its whole log since
 10-08): 0 `illegal memory access` / CUDA error lines and 0 kernel `NVRM: Xid` events in six days.
+
+**WATCH from 2026-10-17.** Every step above is done and none named a next one, so the entry waits on a
+recurrence of the illegal access (or a fault caught with two of our processes on the card and not with one —
+(c)'s condition). One more FECS, 2026-10-17 05:39:31Z (Windows up ~101.5 h, past the ~100 h line, #804), in the
+.241 gate's `moe/prev` arm moments after the 30B MoE loaded (card 7.0 GB): no TDR, and every reply of the arm
+finished, but `nvidia-smi` stayed blocked ~3 min and the whole PC froze for ~78 s (both
+sides' telemetry stop; the user saw it), then recovered; the 06:04Z reboot was a clean Windows Update restart.
+The arm's node log was deleted with its temp dir, so whether a drafter shared the card is unknown — the gate
+keeps each arm's log since. The safety kit's own loop was blocked by that `nvidia-smi` and stopped the nodes
+2 min 48 s after Windows logged the event; fixed (gotcha #887).
 
 #### #193 — A whole-model reply travels as independent messages; only the serving node dying now loses it
 `P3` · reliability · **PARTIAL** — 2026-09-02 · absorbs archive § "The reply stream has no reliability layer…" and § "Intermittent token loss on the remote-generate fast path"; history: archive § "Replies truncated on the remote-generate fast path"

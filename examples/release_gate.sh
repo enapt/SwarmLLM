@@ -136,9 +136,12 @@ if [ "${SPEED:-1}" != 0 ]; then
     SWARMLLM_NODE_DATA_DIR="$D" "$1" run -p 8825 > "$D/node.log" 2>&1 &
     local P=$!
     for _ in $(seq 1 90); do [ -f "$D/api_key" ] && curl -s -m 3 localhost:8825/health > /dev/null && break; sleep 2; done
-    SWARMLLM_API_KEY_FILE="$D/api_key" python3 "$HERE/stream_bench.py" "$3" --port 8825 --unique --reps 3 --warmup 1 \
-      --max-tokens 128 --prompt-file "$PROMPT_FILE" --label "$2" --json-out "$OUT/speed.jsonl" 2>&1 | grep -v '^    text'
-    kill $P; wait $P 2>/dev/null; rm -f "$D/models"; rm -rf "$D"; settle
+    # Unbuffered, line by line: a safety kit names the step from this file's last "== " line, and
+    # buffered, the arm's header arrived only when the arm ENDED — the .241 gate's driver stop blamed
+    # "split/cand" for an event inside the next arm (gotcha #887). Each arm's node log is kept.
+    SWARMLLM_API_KEY_FILE="$D/api_key" python3 -u "$HERE/stream_bench.py" "$3" --port 8825 --unique --reps 3 --warmup 1 \
+      --max-tokens 128 --prompt-file "$PROMPT_FILE" --label "$2" --json-out "$OUT/speed.jsonl" 2>&1 | grep --line-buffered -v '^    text'
+    kill $P; wait $P 2>/dev/null; cp "$D/node.log" "$OUT/speed.${2//\//_}.node.log"; rm -f "$D/models"; rm -rf "$D"; settle
   }
   : > "$OUT/speed.jsonl"
   # name|model|config lines (\n in the config is a newline): whole on an 8 GB card, split between
