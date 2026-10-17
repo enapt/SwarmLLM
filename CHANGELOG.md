@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.3.242-alpha] — 2026-10-17
+
+**One computer can no longer stop yours receiving relayed messages.** When two computers cannot
+reach each other directly, a third relays their messages, and since v0.3.241 each computer
+remembers the relayed messages it has handled so that none is accepted twice. That memory was
+shared out per sending computer, and a new computer identity costs nothing to make: one machine
+posing as eight could fill it, and every relayed message addressed to yours was then refused
+while it kept sending and for up to 6 minutes after. The memory is now shared out per network a
+sender connects from, so filling it would take machines in eight different networks. And senders
+your computer only hears through a relay can no longer push the computers it is connected to out
+of its list of peers. Only v0.3.241 was affected; direct connections never were.
+
+**One request can be kept on this computer, whatever the model's setting.** A program using
+SwarmLLM can now ask for a single request to run only on this computer: send the header
+`X-SwarmLLM-Keep-On-This-Computer: true`, or put `"swarmllm": {"keep_on_this_computer": true}`
+in the request (on `/v1/chat/completions`, `/v1/messages` and `/v1/responses`), or, for an MCP
+tool call, `"_meta": {"com.swarmllm/keep_on_this_computer": true}`. Nothing of that request then
+goes to another computer or to a cloud provider, as for a model with "Keep on this computer"
+turned on in its ⚙ panel. If this computer cannot run it alone, the request is refused with an
+explanation, never sent out. `false` never undoes the model's own setting or private mode, and an
+instruction the node cannot read is refused rather than ignored.
+
+**A restart no longer sends every model description across the network twice.** At start-up a
+computer announced each model it describes, and announced them all again a few seconds later; on
+a computer describing 27 models that was about 7.4 MB of extra upload in the 40 minutes after
+each restart, and every release restarts every computer within minutes. Now a computer
+remembers across restarts which descriptions the network has already heard, and announces only
+what it has not.
+
 ## [0.3.241-alpha] — 2026-10-17
 
 **A relayed message is taken as its sender's only when the sender signed it.** When two
