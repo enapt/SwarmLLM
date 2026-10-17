@@ -176,7 +176,15 @@ pub struct ModelMgmt {
     /// RFC 6206 leaves "consistent" to the protocol; here it is per version, so
     /// each distinct version goes out once per window across the swarm — the
     /// disagreement is still published, just not every five minutes.
+    ///
+    /// **Kept across a restart** (tree `manifests_heard`, written by
+    /// `SharedState::persist_manifests_heard`, read back at boot): forgotten,
+    /// the first round after every restart gossiped each manifest the swarm
+    /// had heard within the day again, in full (#91 (2c)).
     pub manifest_heard: DashMap<(crate::types::ModelId, [u8; 32]), std::time::Instant>,
+    /// Bumped by every write to `manifest_heard`, so its stored copy is
+    /// rewritten only when it changed.
+    pub manifest_heard_changes: std::sync::atomic::AtomicU64,
     /// The receiving half of announce-then-pull (FUTURE_WORK #91 (2)): which
     /// manifest versions this node has verified, which it is pulling, and how
     /// much it has answered each peer. Written only by the dispatcher —
@@ -659,6 +667,8 @@ impl ModelMgmt {
             return;
         }
         self.manifest_heard.insert(key, std::time::Instant::now());
+        self.manifest_heard_changes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Has the swarm been handed exactly this manifest within `window`?
@@ -1129,6 +1139,7 @@ mod tests {
             shard_download_backoff: DashMap::new(),
             geometry_probe_retry_after: DashMap::new(),
             manifest_heard: DashMap::new(),
+            manifest_heard_changes: Default::default(),
             manifest_sync: Default::default(),
             model_request_counts: DashMap::new(),
             resource_schedule: RwLock::new(Default::default()),

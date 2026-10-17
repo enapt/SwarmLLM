@@ -48,6 +48,10 @@ pub struct HealthMonitor {
     /// last sent our `ManifestDigest` — at its catch-up, then every
     /// `MANIFEST_QUIET_WINDOW` (FUTURE_WORK #91 (2)).
     digest_sent_at: std::collections::HashMap<crate::types::NodeId, std::time::Instant>,
+    /// `models.manifest_heard_changes` as the last stored copy of
+    /// `manifest_heard` saw it (`SharedState::persist_manifests_heard`). Zero
+    /// at boot: what was just read back is what is stored.
+    manifests_heard_stored: u64,
     /// When the capability last went on the wire and what it said, so it is
     /// published when it says something new or `CAPABILITY_HEARTBEAT` has
     /// passed, not every tick (`capability_needs_broadcast`).
@@ -142,13 +146,14 @@ const MANIFEST_QUIET_WINDOW: Duration = Duration::from_secs(2 * 60 * 60);
 /// than dropped. Measured 2026-10-16 (release node, fleet on .240, idle):
 /// `swarm/models` 84% of the gossip sent, every manifest a repeat delivered
 /// ~3 times; a twelfth of the repeats is a twelfth of that.
-const MANIFEST_QUIET_WINDOW_WITH_DIGESTS: Duration = Duration::from_secs(24 * 60 * 60);
+pub(crate) const MANIFEST_QUIET_WINDOW_WITH_DIGESTS: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How long the swarm's hearing of a manifest stays quiet this round:
 /// [`MANIFEST_QUIET_WINDOW_WITH_DIGESTS`] when every connected peer takes
 /// digests, [`MANIFEST_QUIET_WINDOW`] otherwise — a peer without the bit is
 /// repaired only by the gossip repeat, as it always was. No peer at all is the
-/// short window: nothing has been told anything.
+/// short window: nothing has been told anything (and such a round gossips no
+/// manifest at all — `broadcast_manifests`, #91 (2c)).
 fn manifest_quiet_window(connected: usize, taking_digests: usize) -> Duration {
     if connected > 0 && taking_digests == connected {
         MANIFEST_QUIET_WINDOW_WITH_DIGESTS
@@ -493,6 +498,7 @@ impl HealthMonitor {
             manifest_announce_counter: 0,
             peers_told_about_manifests: std::collections::HashSet::new(),
             digest_sent_at: std::collections::HashMap::new(),
+            manifests_heard_stored: 0,
             last_published_capability: None,
             acq_liveness: std::collections::HashMap::new(),
             peer_dl_liveness: std::collections::HashMap::new(),
@@ -1553,7 +1559,18 @@ impl HealthMonitor {
 
         let mut sent = 0usize;
         let mut suppressed = 0usize;
-        for manifest in &manifests {
+        // With no peer connected nobody hears a broadcast: GossipSub keeps it
+        // for the first peer to subscribe, which the catch-up below tells
+        // point to point anyway, and this round's window cannot know whether
+        // peers take digests. The monitor's first round runs before any peer is
+        // back, so after a restart it gossiped every manifest the swarm had
+        // heard within the day again (#91 (2c)). It waits for a peer.
+        let to_gossip: &[crate::types::ModelManifest] = if connected.is_empty() {
+            &[]
+        } else {
+            &manifests
+        };
+        for manifest in to_gossip {
             // `manifest_hash` covers the shard table AND every tensor entry
             // (`ModelManifest::compute_hash`), so it is the right answer to
             // "would a peer see anything new?".
@@ -1721,6 +1738,11 @@ impl HealthMonitor {
                 repeated += 1;
             }
         }
+        // Our own broadcasts above are among what the swarm has heard; stored,
+        // a restart does not gossip them again (#91 (2c)).
+        self.manifests_heard_stored = self
+            .shared_state
+            .persist_manifests_heard(self.manifests_heard_stored);
         if sent > 0 || suppressed > 0 || repeated > 0 {
             tracing::debug!(
                 sent,
@@ -3088,6 +3110,123 @@ mod tests {
             }
         }
         sent
+    }
+
+    /// How many manifests went on gossip since the last look.
+    fn gossiped_manifests(rx: &mut mpsc::Receiver<NetworkCommand>) -> usize {
+        let mut gossiped = 0;
+        while let Ok(command) = rx.try_recv() {
+            if matches!(
+                command,
+                NetworkCommand::Broadcast(SwarmMessage::ModelManifest(_))
+            ) {
+                gossiped += 1;
+            }
+        }
+        gossiped
+    }
+
+    /// A monitor over the node whose data directory is `dir`, built as a boot
+    /// builds it — twice over one directory is a restart.
+    fn monitor_over(
+        dir: &std::path::Path,
+    ) -> (
+        Arc<SharedState>,
+        HealthMonitor,
+        mpsc::Receiver<NetworkCommand>,
+    ) {
+        let (state, _, _) = SharedState::new(
+            crate::config::Config::default(),
+            crate::identity::Identity::generate(),
+            crate::storage::db::Database::open(dir).unwrap(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::inference::executor::ModelExecutor::new(),
+            )),
+            None,
+        );
+        let (network_tx, network_rx) = mpsc::channel(1024);
+        let (rebalance_tx, _) = mpsc::channel(16);
+        let (_, shutdown_rx) = watch::channel(false);
+        let monitor = HealthMonitor::new(state.clone(), network_tx, rebalance_tx, shutdown_rx);
+        (state, monitor, network_rx)
+    }
+
+    /// Register a manifest this node published, at version `hash`.
+    fn publish_test_manifest(state: &SharedState, hash: [u8; 32]) {
+        state
+            .model_registry
+            .register_manifest(crate::types::ModelManifest {
+                id: crate::types::ModelId("restart-model".into()),
+                name: "restart-model".into(),
+                architecture: crate::types::ModelArchitecture::Llama,
+                num_layers: 2,
+                num_params_billions: 0.0,
+                quantization: crate::types::Quantization::Q4KM,
+                total_size_bytes: 0,
+                shard_count: 0,
+                shards: Vec::new(),
+                tokenizer_hash: [0; 32],
+                manifest_hash: hash,
+                publisher: state.identity.node_id().clone(),
+                publish_date: chrono::Utc::now(),
+                license: String::new(),
+                mmproj: None,
+                context_length: Some(4096),
+            });
+    }
+
+    /// #91 (2c): a restart gossips no manifest the swarm was gossiped within
+    /// the window. Before, the first round after a restart sent each again in
+    /// full (and the boot a second copy, `daemon::background`), because what
+    /// the swarm had heard lived only in memory.
+    #[tokio::test]
+    async fn a_restart_does_not_gossip_what_the_swarm_already_heard() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let (state, mut monitor, mut rx) = monitor_over(dir.path());
+            publish_test_manifest(&state, [5; 32]);
+            connect_peer(&state, 1, crate::types::features::ALL);
+            monitor.broadcast_manifests().await;
+            assert_eq!(
+                gossiped_manifests(&mut rx),
+                1,
+                "a version the swarm never heard goes on gossip"
+            );
+        }
+        let (state, mut monitor, mut rx) = monitor_over(dir.path());
+        publish_test_manifest(&state, [5; 32]);
+        connect_peer(&state, 1, crate::types::features::ALL);
+        monitor.broadcast_manifests().await;
+        assert_eq!(
+            gossiped_manifests(&mut rx),
+            0,
+            "restarted, the node still knows the swarm heard that version"
+        );
+        publish_test_manifest(&state, [6; 32]);
+        monitor.broadcast_manifests().await;
+        assert_eq!(
+            gossiped_manifests(&mut rx),
+            1,
+            "a change still goes on gossip"
+        );
+    }
+
+    /// #91 (2c): a round with no peer connected gossips no manifest — nobody
+    /// would hear it, and its window cannot know whether peers take digests —
+    /// and the first round with a peer does.
+    #[tokio::test]
+    async fn a_round_with_no_peer_connected_gossips_no_manifest() {
+        let (state, mut monitor, mut rx) = monitor_for_test();
+        publish_test_manifest(&state, [5; 32]);
+        monitor.broadcast_manifests().await;
+        assert_eq!(gossiped_manifests(&mut rx), 0, "no peer, nothing gossiped");
+        connect_peer(&state, 1, crate::types::features::ALL);
+        monitor.broadcast_manifests().await;
+        assert_eq!(
+            gossiped_manifests(&mut rx),
+            1,
+            "the first round with a peer announces the version"
+        );
     }
 
     /// The catch-up that was ~2.9 MB to one newcomer: a peer advertising

@@ -702,19 +702,10 @@ pub(super) fn spawn_initial_announcements(
                 .await;
         }
 
-        // Models we published OR hold at least one shard of, so shard-holding
-        // nodes propagate manifests to pure-consumer peers. Shared with the
-        // health monitor's periodic broadcast — see
-        // `ModelRegistry::manifests_to_gossip`.
-        // Each manifest carries the context its model declares (#189).
-        shared_state.fill_declared_contexts();
-        for manifest in shared_state.model_registry.manifests_to_gossip(&node_id) {
-            let _ = network_tx
-                .send(NetworkCommand::Broadcast(SwarmMessage::ModelManifest(
-                    manifest,
-                )))
-                .await;
-        }
+        // No manifests here: the health monitor's manifest round announces
+        // them, once a peer is connected and only what the swarm has not
+        // heard. A copy here, which recorded nothing, put every manifest on
+        // gossip twice at each restart (#91 (2c)).
         "initial_announcements"
     });
 }

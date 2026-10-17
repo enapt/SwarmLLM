@@ -82,6 +82,129 @@ fn load_kept_on_this_computer(
     Ok(set)
 }
 
+/// DB tree of the manifest versions the swarm was gossiped (#91 (2c)):
+/// `<manifest hash, hex>:<model id>` → when, in Unix milliseconds.
+pub(crate) const MANIFESTS_HEARD_TREE: &str = "manifests_heard";
+
+/// The manifest versions the swarm was gossiped, as stored, each put back on
+/// this boot's clock (`now`, `now_ms`: the same moment on both clocks). A record
+/// older than `kept_for` (the longest quiet window, which nothing older can
+/// suppress), dated after `now_ms` by a clock that went back, or not
+/// representable on this boot's clock, is left out: a lost record costs one
+/// repeat and never holds a repeat back past its window. Unreadable is empty,
+/// for the same price.
+fn load_manifests_heard(
+    db: &crate::storage::db::Database,
+    now: std::time::Instant,
+    now_ms: u64,
+    kept_for: std::time::Duration,
+) -> DashMap<(crate::types::ModelId, [u8; 32]), std::time::Instant> {
+    let heard = DashMap::new();
+    let stored = match db.get_all_json::<u64>(MANIFESTS_HEARD_TREE) {
+        Ok(stored) => stored,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read which manifests the swarm has heard — each is gossiped once more");
+            return heard;
+        }
+    };
+    for (key, heard_ms) in stored {
+        if heard.len() >= models::MAX_MANIFESTS_HEARD {
+            break;
+        }
+        let Some((hash_hex, model)) = key.split_once(':') else {
+            continue;
+        };
+        let Some(hash) = hex::decode(hash_hex)
+            .ok()
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        else {
+            continue;
+        };
+        let Some(at) = now_ms
+            .checked_sub(heard_ms)
+            .map(std::time::Duration::from_millis)
+            .filter(|age| *age < kept_for)
+            .and_then(|age| now.checked_sub(age))
+        else {
+            continue;
+        };
+        heard.insert((crate::types::ModelId(model.to_string()), hash), at);
+    }
+    heard
+}
+
+/// `heard` as [`load_manifests_heard`] reads it back, dated on the wall clock
+/// (`now`, `now_ms`: the same moment on both clocks).
+fn manifests_heard_records(
+    heard: &DashMap<(crate::types::ModelId, [u8; 32]), std::time::Instant>,
+    now: std::time::Instant,
+    now_ms: u64,
+) -> Vec<(String, Vec<u8>)> {
+    heard
+        .iter()
+        .map(|entry| {
+            let ((model, hash), at) = (entry.key(), *entry.value());
+            let age_ms =
+                u64::try_from(now.saturating_duration_since(at).as_millis()).unwrap_or(u64::MAX);
+            let heard_ms = now_ms.saturating_sub(age_ms);
+            (
+                format!("{}:{}", hex::encode(hash), model.0),
+                serde_json::to_vec(&heard_ms).unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+/// Now in Unix milliseconds — the clock a stored record survives a restart on.
+fn unix_ms_now() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod manifests_heard_tests {
+    use super::*;
+
+    /// A record read back is placed at its age on this boot's clock; one older
+    /// than the longest window, dated in the future, or that cannot be parsed
+    /// is left out, so it costs a repeat and never holds one back (#91 (2c)).
+    #[test]
+    fn a_stored_record_is_kept_only_where_this_boots_clock_can_hold_it() {
+        let db = crate::storage::db::Database::open_temp().unwrap();
+        let (now, now_ms) = (std::time::Instant::now(), unix_ms_now());
+        let heard = DashMap::new();
+        let model = crate::types::ModelId("m:with:colons".into());
+        heard.insert((model.clone(), [1; 32]), now);
+        let mut records = manifests_heard_records(&heard, now, now_ms);
+        let future = serde_json::to_vec(&(now_ms + 60_000)).unwrap();
+        records.push((format!("{}:future", hex::encode([2u8; 32])), future));
+        let ancient = serde_json::to_vec(&0u64).unwrap();
+        records.push((format!("{}:ancient", hex::encode([3u8; 32])), ancient));
+        let past_window = serde_json::to_vec(&(now_ms - 2 * 86_400_000)).unwrap();
+        records.push((format!("{}:two-days", hex::encode([5u8; 32])), past_window));
+        let fine = serde_json::to_vec(&now_ms).unwrap();
+        records.push(("not-hex:bad".into(), fine.clone()));
+        records.push((format!("{}:short", hex::encode([4u8; 16])), fine));
+        db.replace_tree(MANIFESTS_HEARD_TREE, &records).unwrap();
+
+        let later = now + std::time::Duration::from_secs(5);
+        let back = load_manifests_heard(
+            &db,
+            later,
+            now_ms + 5_000,
+            std::time::Duration::from_secs(86_400),
+        );
+        assert_eq!(back.len(), 1, "only the record this clock can hold");
+        let at = *back
+            .get(&(model, [1; 32]))
+            .expect("its key survives the colons");
+        let age = later.saturating_duration_since(at);
+        assert!(
+            age >= std::time::Duration::from_secs(4) && age <= std::time::Duration::from_secs(6),
+            "heard 5 s before the second boot's clock, read back {age:?}"
+        );
+    }
+}
+
 /// Completed traces kept for `GET /api/admin/diagnostics`. Larger than the
 /// failure ring because successful requests are the baseline you compare a
 /// slow one against, and they are cheap (no strings beyond node ids).
@@ -1258,6 +1381,13 @@ impl SharedState {
                 (dashmap::DashSet::new(), true)
             }
         };
+        // What the swarm was gossiped outlives a restart (#91 (2c)).
+        let manifest_heard = load_manifests_heard(
+            &db,
+            std::time::Instant::now(),
+            unix_ms_now(),
+            crate::health::monitor::MANIFEST_QUIET_WINDOW_WITH_DIGESTS,
+        );
         let signing_key_bytes: zeroize::Zeroizing<[u8; 32]> =
             zeroize::Zeroizing::new(identity.signing_key_bytes());
         let state = Arc::new(Self {
@@ -1448,7 +1578,8 @@ impl SharedState {
                 heal_pass_times: parking_lot::Mutex::new((None, None)),
                 shard_download_backoff: DashMap::new(),
                 geometry_probe_retry_after: DashMap::new(),
-                manifest_heard: DashMap::new(),
+                manifest_heard,
+                manifest_heard_changes: Default::default(),
                 manifest_sync: Default::default(),
                 parallax_stability: DashMap::new(),
                 cross_node_prefix_index: DashMap::new(),
@@ -2664,6 +2795,33 @@ impl SharedState {
         } else {
             self.models.kept_on_this_computer.remove(model_id);
             self.db.remove(KEPT_ON_THIS_COMPUTER_TREE, &model_id.0)
+        }
+    }
+
+    /// Store `models.manifest_heard` if it changed since `saved` (the change
+    /// count the last write stored), returning the count stored now. Called by
+    /// the health monitor's manifest round, so a restart knows what the swarm
+    /// was gossiped (#91 (2c)); a failed write is tried again next round, and
+    /// a record lost only costs one repeat.
+    pub fn persist_manifests_heard(&self, saved: u64) -> u64 {
+        let changes = self
+            .models
+            .manifest_heard_changes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if changes == saved {
+            return saved;
+        }
+        let records = manifests_heard_records(
+            &self.models.manifest_heard,
+            std::time::Instant::now(),
+            unix_ms_now(),
+        );
+        match self.db.replace_tree(MANIFESTS_HEARD_TREE, &records) {
+            Ok(()) => changes,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not store which manifests the swarm has heard");
+                saved
+            }
         }
     }
 

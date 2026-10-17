@@ -1725,6 +1725,7 @@ validates the trees in `CRITICAL_TREES` at startup and only reports.
 | network | inbound reachability (`INBOUND_REACHABILITY_TREE`) |
 | resource_schedule | the resource schedule (`"current"`) |
 | kept_on_this_computer | the models the owner keeps on this computer (#251) |
+| manifests_heard | the manifest versions the swarm was gossiped, and when, so a restart does not gossip them again (#91 (2c)) |
 | lifetime | what this node has served for others since it FIRST started (#226) |
 | measured_here | figures this node measured about itself, kept across restarts: its model-load rate (`model_load_ms_per_gib`, `daemon/state/load_rate.rs`) and each model's replica targets of the last 24 h (`replica_targets_seen`, `auto_manage/target_hold.rs`, #286) |
 

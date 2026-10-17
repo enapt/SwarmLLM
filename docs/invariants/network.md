@@ -4828,17 +4828,44 @@ private network namespace):
 - **The reconnect.** A restarted. It caught B and C up by digest again, and neither pulled.
 - **Mixed versions.** With C on .240, A caught C up in full and C learned the model. With A on
   .240, A caught both up in full and C learned it.
-- **Not new.** A restarted holder still broadcasts its manifests once on its first round, because
-  it keeps no memory of what it announced.
+- **Not new** (then). A restarted holder still broadcast its manifests on its first round, because
+  it kept no memory of what the swarm heard. It broadcast them twice, in fact — fixed as #91 (2c)
+  below.
 
 **The fleet** (FUTURE_WORK #91 (2b), 2026-10-17, release node, 8 peers all on .241, idle, a 60-min
 window at 1.0 → 2.0 h up): `ModelManifest` arrived once in the hour, against 0.83 a minute on the
 .240 fleet; `swarm/models` fell from 2.8 to 1.4 KB/s, now shard announcements and capability
 updates; the upload fell from 6.7 to 5.5 KB/s.
 
-**What it left: a restart gossips every manifest twice (#91 (2c)).** The rig's "Not new" note
-undercounted. At boot `daemon::background::spawn_initial_announcements` broadcasts every manifest
-it gossips and records nothing, and the monitor's first round, ~30 s later with an empty
-`last_announced_manifests` and an empty `manifest_heard`, sends the set again. The release node's
-first 39 min after a restart: `swarm/models` sent 10.7 MB in 96 publishes, ~7.4 MB and ~74
-publishes above its steady rate, holding 27 manifests.
+**What it left, fixed the same day: a restart gossiped every manifest twice (#91 (2c)).** The rig's
+"Not new" note undercounted. At boot `daemon::background::spawn_initial_announcements` broadcast
+every manifest it gossips and recorded nothing, and the monitor's first round, a few seconds
+apart (3 s on the rig) with an empty `last_announced_manifests` and an empty `manifest_heard`, sent
+the set again. The release node's first 39 min after a restart: `swarm/models` sent 10.7 MB in 96
+publishes, ~7.4 MB and ~74 publishes above its steady rate, holding 27 manifests.
+
+- **The boot loop is gone.** The monitor's manifest round is the one place a manifest is gossiped.
+- **A round with no peer connected gossips nothing.** Nobody hears it (GossipSub keeps the publish
+  for the first peer to subscribe, which the catch-up tells point to point anyway), and its window
+  cannot know whether peers take digests. The monitor's first round runs before any peer is back,
+  so it would otherwise use the 2 h window against records up to a day old.
+- **What the swarm heard outlives a restart.** `manifest_heard` is stored in the `manifests_heard`
+  tree (`<hash hex>:<model id>` → Unix ms) by `SharedState::persist_manifests_heard`, at the end of
+  each round and only when `manifest_heard_changes` moved, and read back at boot by
+  `load_manifests_heard`, each record placed at its age on this boot's clock. A record older than
+  the longest window (a day), dated in the future by a clock that went back, or unreadable is left
+  out: a lost record costs one repeat and never holds a repeat back past its window. A record
+  older than the machine's uptime is kept on Linux (a Rust `Instant` may go below boot time), so a
+  reboot loses nothing there; where the clock cannot hold it, it costs a repeat.
+- **Precedent**: Bitcoin Core's unbroadcast set (PR #18038) splits it the same way: an item is
+  re-announced until a peer has asked for it, and after that only the wallet's daily rebroadcast
+  repeats it — here the window's repeat.
+
+Rig (`examples/manifest_digest_rig.sh`, dev build, 2026-10-17), B and C's manifests received by
+gossip: before, 2 at A's first boot and 3 more after A's restart; after, 1 and 0. A's first round
+after the restart logged `sent=0 suppressed=1 quiet_window_secs=86400`. Tests, each red with its
+mechanism off (6 toggles: not restored, never stored, a write not counted, a peerless round
+gossiping, a future-dated record kept, a record past the window kept):
+`a_restart_does_not_gossip_what_the_swarm_already_heard` (two boots over one data directory),
+`a_round_with_no_peer_connected_gossips_no_manifest`,
+`a_stored_record_is_kept_only_where_this_boots_clock_can_hold_it`.

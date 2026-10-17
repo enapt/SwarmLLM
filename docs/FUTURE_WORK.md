@@ -66,8 +66,8 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    since #296.)
 7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
-   (0.83 a minute before (2)). Next: (2c) a restart gossips every manifest twice (~7 MB from a node
-   holding 27); then the 3.5 KB/s that is not gossip.
+   (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), unreleased). Next: the
+   3.5 KB/s that is not gossip (Kademlia, identify, pings, direct messages), 63% of the upload.
 8. **#251** — `owned_by: "local"` reads as "my data stays here": keep-on-this-computer per request
    on every surface, and the route on a streamed `/v1/responses` and in MCP.
 9. **#252** — a peer's measured context is not gossiped, so a planner cannot size a peer's share
@@ -956,7 +956,7 @@ libp2p-connection-limits has no per-protocol exemption). A dial by bare address 
 `PeerCondition::Disconnected`; check no other dialler (loopback probe, redial queue, PEX)
 does the same.
 
-#### #91 — An idle node still uploads ~5.5 KB/s, a restart gossips every manifest twice, and a total traffic ceiling does not exist
+#### #91 — An idle node still uploads ~5.5 KB/s, most of it no longer gossip, and a total traffic ceiling does not exist
 `P2` · network · **PARTIAL** — 2026-10-17 · history: archive row #91, `docs/invariants/network.md`
 
 Trickle suppression (`MANIFEST_QUIET_WINDOW`), per-(model, hash) `manifest_heard`,
@@ -1006,15 +1006,8 @@ peers all on .241, idle, 1.0 → 2.0 h up, a 60-min window, `/api/admin/stats` t
 minute, ~5.5 KB), each arriving ~2.85 times. What is not gossip (Kademlia, identify, pings, direct
 messages) is 3.5 KB/s, now 63% of the upload and the largest share left. The reconnect catch-up
 cannot be separated in these counters, since direct traffic has no per-kind meter; the rig showed a
-reconnect pulls nothing. **Found, (2c)**: a restart gossips every manifest it gossips in full, twice.
-`daemon::background`'s `initial_announcements` broadcasts the set and notes neither that it was
-announced nor that it was heard, and the monitor's first round, ~30 s later with an empty memory,
-sends it again. On the release node's first 39 min after its 09:05Z restart, `swarm/models` sent
-10.7 MB (~7.4 MB above its steady rate) in 96 publishes (~74 above). It holds 27 manifests, which
-fits two copies of each plus their source gossip. A restart keeps no memory of what it announced or
-heard, and every release restarts the fleet within minutes. Fix: drop the boot-time loop, and keep
-the announce and heard memory across a restart (redb, wall-clock times), so an unchanged manifest is
-not gossiped again; the digest catch-up already tells every reconnecting peer. Left besides: the
+reconnect pulls nothing. **(2c) fixed 2026-10-17, not yet released**: a restart gossiped every
+manifest it holds in full, twice, a few seconds apart (§ Closed). Left: the
 mesh is still sized once at startup, from peers ever met rather than reachable now (a rig first
 before going further: a thinner mesh partitions sooner); (3) a both-direction traffic ceiling at the transport
 (risky — throttling gossip can partition a node); `max_bandwidth_mbps` shapes part serving only.
@@ -2502,7 +2495,23 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-17, not yet released** (#299)
+**Closed 2026-10-17, not yet released** (#299, #91 (2c))
+- #91 (2c) — **A restart no longer puts every model manifest on gossip twice.** Found 2026-10-17
+  measuring (2b): at boot `daemon::background` broadcast every manifest the node gossips, and the
+  health monitor's first round, a few seconds later, broadcast them again, because neither recorded
+  anything and what the swarm had heard (`manifest_heard`) lived only in memory. On the release
+  node (27 manifests) the first 39 min after a restart sent ~7.4 MB more on `swarm/models` than its
+  steady rate, and every release restarts the fleet within minutes. Now the boot loop is gone, a
+  manifest round with no peer connected gossips nothing (nobody hears it, and its window cannot
+  know whether peers take digests), and `manifest_heard` is stored in the `manifests_heard` tree
+  (`SharedState::persist_manifests_heard`, by the round, only when it changed) and read back at
+  boot on the wall clock (`load_manifests_heard`; a record older than a day, dated in the future
+  or unreadable is left out, so a lost one costs a repeat and never holds one back). The digest
+  catch-up already tells every reconnecting peer. Bitcoin Core's unbroadcast set (PR #18038) is the
+  same split: an item is re-announced until a peer has asked for it, then only a daily repeat. Rig
+  `examples/manifest_digest_rig.sh`, B and C's manifests by gossip: first boot 2 → 1, after A's
+  restart 3 → 0 (A's first round after it: `suppressed=1`, window 86,400 s). Tests: 3, and 6
+  mechanisms toggled off and shown red; `docs/invariants/network.md` § "Announce, then pull".
 - #299 — **One machine minting key pairs can no longer stop relaying to this node, and relayed
   senders never crowd out a connected peer.** Found 2026-10-17 by the security review of #298.
   #298's replay memory (262,144 relayed bodies, refused when full, never forgetting one early)
