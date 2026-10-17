@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #300**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #301**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2087,23 +2087,21 @@ Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the 
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
 
-#### #299 — Eight peers can still fill the relayed-body replay memory, and a proven origin is registered without a cap
-`P3` · security · **OPEN** — 2026-10-17 · history: the `security-reviewer` pass on #298's fix
+#### #300 — A sender can fill the replay-memory share of the relay it sends through, refusing that relay's honest bodies here
+`P3` · security · **OPEN** — 2026-10-17 · history: the second `security-reviewer` pass on #299
 
-#298's `RelayReplayGuard` (`crypto::relay_seal`) refuses a new body when full rather than forget
-an old one, since forgetting early would take a replay. It shares its 262,144 entries out per
-origin (16,384) and per delivering peer (32,768). Eight delivering peers and sixteen origins
-reach the total, and both are key pairs anyone can mint. Every relayed body addressed to this
-node is then refused while they keep sending, and for up to 6 min after (a body dated 60 s ahead
-is remembered for its 5 min window). Each body costs the sender a signature and a seal, and only
-relaying stops: a refused body is never dispatched, and direct paths are untouched. Second,
-`take_proven_relayed_origin` → `ensure_relayed_origin_known` writes `peer_registry` and
-`peer_id_map` for each newly proven origin without the caps the identify path applies
-(`MAX_PEER_REGISTRY` 200 with eviction, `MAX_PEER_TO_NODE`), so one connection can grow both
-until the health monitor's stale-peer sweep. That half predates #298, where a forged origin
-needed no signature at all. Next: key the delivering share by something dearer to mint than a
-PeerId, or let the total grow only with the relays actually connected; apply the identify path's
-caps in `ensure_relayed_origin_known`. Wire and crypto → `security-reviewer` on the diff.
+The relayed-body replay memory's per-network share (#299) keeps a flood from one network off
+OTHER deliverers, never off the honest relay carrying it. A peer connected to the anchor sends
+32,768 signed bodies addressed to this node from two minted origins (16,384 each, the per-origin
+share); the anchor forwards them at its per-origin limit (`RELAY_FORWARD_MAX_PER_WINDOW`, 2,000
+per 10 s, `daemon/state/relay.rs`), so in ~82 s the anchor's share here is full, and every body
+the anchor relays to this node is refused for 5 min, again whenever the sender repeats it. Since
+v0.3.241 (#298); #299 does not change it. Only relaying stops; direct paths are untouched. A
+smaller per-origin share does not help (origins are free), and a per-target cap at the relay
+only moves the refusal there. Next: have the relay count what it forwards per (sending peer's
+`NetGroup`, target), so one network cannot push more than a fraction of a target's share through
+one relay; size it against an honest split decode (~25 forwards and results a second per
+stream). Wire → `security-reviewer` on the diff.
 
 #### #285 — A tensor forward to a peer whose NodeId mapping is missing goes out without its session seal, and is accepted
 `P3` · security · **OPEN** — 2026-10-16 · history: none (found by the 2026-10-16 doc sweep)
@@ -2488,6 +2486,55 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-17, not yet released** (#299)
+- #299 — **One machine minting key pairs can no longer stop relaying to this node, and relayed
+  senders never crowd out a connected peer.** Found 2026-10-17 by the security review of #298.
+  #298's replay memory (262,144 relayed bodies, refused when full, never forgetting one early)
+  was shared out per delivering peer id, 32,768 each, and a peer id costs nothing: eight key
+  pairs on one machine filled it, and every relayed body addressed here was refused while they
+  kept sending and up to 6 min after. The share is now per NETWORK the delivering peer reaches
+  this node from (`network::helpers::NetGroup`, Bitcoin Core's `GetGroup` rule: a public IPv4
+  address counts as its /16, a public IPv6 one as its /32; a private address as its host). A
+  host name counts only when this node's own bootstrap list names it (`ConfiguredNames`; libp2p
+  records a dial by its name, unresolved, and the default anchor is `/dns4/…`); any other name,
+  and anything naming no IP, is ONE group. A relay circuit is counted as `Circuit` of the
+  network this node's own connection TO the relay was counted in — never the relay's own share,
+  and never an IP or name written in the circuit's address, which libp2p-relay never dials when
+  it already holds a connection to the relay (an inbound circuit's relay is read from the
+  address it arrived on, since libp2p-relay 0.21 reports that remote as a bare `/p2p/<source>`). The group is
+  recorded with the connection (`PeerRemote`, in `peer_remote_addrs`, which at its cap now
+  drops only peers no longer connected) and applied by one admission both relayed kinds call
+  (`admit_relayed`). Filling the memory now takes machines in eight networks. Second, each
+  newly proven origin went into `peer_registry` and `peer_id_map` with no cap, and as such an
+  entry has no measured latency, the identify path's cap (200, evicting the highest-latency
+  peer and disconnecting it) dropped connected peers before it. One rule now serves both
+  writers (`evict_one_registered_peer`, `unconnected_registry_entries`): an entry for a node
+  this node is not connected to goes first, the one unseen longest, and only then a connected
+  peer. Proven origins hold at most 64 such entries beside the identified peers, never
+  displace a connected one, and every proven body marks its origin seen, so one still sending
+  is never the one dropped. `peer_id_map` has one capped writer (`remember_peer_id`: 10,000; a
+  mapping for a node no longer registered makes room). The `security-reviewer` pass on the
+  first version found that it grouped the anchor by "no IP": the anchor's own deliveries, every
+  circuit through it and every self-chosen name shared one share, so ONE peer with a circuit
+  through the anchor stopped relaying to every NAT'd node — worse than before (hence
+  `Circuit` and `ConfiguredNames`); and that an origin never marked seen was the one minted
+  origins pushed out (hence the mark). Its second pass found a circuit's network read from the
+  circuit's address, which nobody dials: one attacker relay and a PEX reply of fake prefixes
+  minted a group per prefix (hence the relay's own connection). Its third found that relay's
+  network read from its LATEST connection, so a relay that also came by circuit put every
+  circuit through it in one shared group (hence `PeerRemote::direct`, the network of its latest
+  DIRECT connection, kept while any lasts). Left by design: addresses in
+  eight /16s (cloud regions) still fill the memory for 5 min; an attacker reaching this node
+  through honest relays' circuits gains one group per such relay's network (it no longer
+  touches the relays' own deliveries); hosts inside a private network or tailnet are free groups
+  to its members; every unconfigured DNS-dialed peer shares one group; an origin whose bodies
+  are minutes apart can still be pushed out of the registry in the milliseconds between its
+  body and dispatch. Filed: #300, a sender filling the share of the very relay it sends
+  through. "Let the total grow with the relays actually connected" was weighed and not taken:
+  eight minted peers ARE connected. Tests: 3 for `NetGroup`, 7 against a real `NetworkManager`,
+  12 mechanisms toggled off and shown red; `docs/invariants/network.md` § "A relayed body's
+  origin is signed".
 
 **Closed 2026-10-16/17, released in v0.3.241 (2026-10-17)** (#265, #286, #287, #288, #289, #290, #115 (3b), #292, #115 (3c), #296, #298)
 - #298 — **A relayed message or tensor is taken as its sender's only when the sender signed it.**

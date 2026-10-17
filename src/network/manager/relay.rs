@@ -430,10 +430,7 @@ impl NetworkManager {
                 self.refuse_relayed(immediate_peer, &env.origin, "envelope", &why);
                 return;
             }
-            if let Err(why) =
-                self.relay_replay
-                    .admit(&env.origin, &immediate_peer.to_bytes(), digest, sent_at_ms)
-            {
+            if let Err(why) = self.admit_relayed(&env.origin, &immediate_peer, digest, sent_at_ms) {
                 self.refuse_relayed(immediate_peer, &env.origin, "envelope", &why);
                 return;
             }
@@ -538,10 +535,7 @@ impl NetworkManager {
                         return;
                     }
                 };
-            if let Err(why) =
-                self.relay_replay
-                    .admit(&rt.origin, &immediate_peer.to_bytes(), digest, sent_at_ms)
-            {
+            if let Err(why) = self.admit_relayed(&rt.origin, &immediate_peer, digest, sent_at_ms) {
                 self.refuse_relayed(immediate_peer, &rt.origin, "tensor", &why);
                 return;
             }
@@ -648,6 +642,28 @@ impl NetworkManager {
         }
     }
 
+    /// Take a proven relayed body into the replay memory, counted against the
+    /// network the peer that delivered it reaches this node from — the one
+    /// admission both relayed kinds go through (#299: counted per peer id,
+    /// eight minted key pairs filled the memory). A peer whose connection is
+    /// not on record counts with every unaddressed one, never as a network of
+    /// its own.
+    fn admit_relayed(
+        &mut self,
+        origin: &NodeId,
+        delivered_by: &PeerId,
+        digest: [u8; 32],
+        sent_at_ms: u64,
+    ) -> Result<(), crate::crypto::relay_seal::Refused> {
+        let network = self
+            .peer_remote_addrs
+            .get(delivered_by)
+            .map(|remote| remote.group)
+            .unwrap_or(crate::network::helpers::NetGroup::UNADDRESSED);
+        self.relay_replay
+            .admit(origin, &network, digest, sent_at_ms)
+    }
+
     /// What a relayed body PROVEN to come from `origin` teaches, and only such
     /// a body (#298 — an unproven one taught a forger's choice of route,
     /// registry entry and features for any NodeId): the origin is a known peer
@@ -677,15 +693,36 @@ impl NetworkManager {
     /// (so the "known peer" security gates pass). We ARE relaying inference with
     /// this peer, so it is legitimately known — via the relay, not a direct
     /// link. A richer existing entry is never clobbered.
+    ///
+    /// Both maps keep the identify path's caps (#299 — an origin costs nothing
+    /// to mint, so one connection could grow them until the stale-peer sweep):
+    /// `peer_id_map` through `remember_peer_id`, and the registry holds at most
+    /// `MAX_UNCONNECTED_REGISTERED` nodes this node is not connected to, the
+    /// one unseen longest making room. A connected peer is never displaced for
+    /// one. Every proven body marks its origin seen, so an origin still
+    /// sending is never the one unseen longest: minted origins, each used and
+    /// dropped, make room among themselves (security review of #299 — an
+    /// entry evicted between its body and dispatch is "an unknown peer").
     fn ensure_relayed_origin_known(&self, origin: &NodeId) {
         let Some(peer_id) = crate::network::transport::node_id_to_peer_id(origin) else {
             return;
         };
         let peer_bytes = peer_id.to_bytes();
-        self.shared_state
-            .peer_id_map
-            .insert(origin.clone(), peer_bytes.clone());
-        if !self.shared_state.peer_registry.contains_key(origin) {
+        self.remember_peer_id(origin, peer_bytes.clone());
+        let seen_again = match self.shared_state.peer_registry.get_mut(origin) {
+            Some(mut entry) => {
+                entry.last_seen = chrono::Utc::now();
+                true
+            }
+            None => false,
+        };
+        if !seen_again {
+            let (unconnected, oldest) = self.unconnected_registry_entries(origin);
+            if unconnected >= super::identify::MAX_UNCONNECTED_REGISTERED {
+                if let Some(oldest) = oldest {
+                    self.shared_state.peer_registry.remove(&oldest);
+                }
+            }
             let now_ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -978,6 +1015,346 @@ mod tests {
         assert!(
             state.relay_route_for_peer(&peer_bytes).is_none(),
             "past the gate: the unconnected relay's route is forgotten"
+        );
+    }
+
+    /// Record `peer`'s connection as coming from `addr`, as a real one would be.
+    fn connected_from(target: &mut Target, peer: PeerId, addr: &str) {
+        connected_by(
+            target,
+            peer,
+            libp2p::core::ConnectedPoint::Listener {
+                local_addr: "/ip4/0.0.0.0/tcp/8810".parse().unwrap(),
+                send_back_addr: addr.parse().unwrap(),
+            },
+        );
+    }
+
+    /// Record `peer`'s connection as the swarm would, with the default
+    /// bootstrap names configured.
+    fn connected_by(target: &mut Target, peer: PeerId, endpoint: libp2p::core::ConnectedPoint) {
+        let names = crate::network::helpers::ConfiguredNames::of_bootstrap(
+            &crate::config::network::default_bootstrap_peers(),
+        );
+        crate::network::manager::record_peer_remote(
+            &mut target.manager.peer_remote_addrs,
+            peer,
+            &endpoint,
+            &names,
+        );
+    }
+
+    /// FUTURE_WORK #299: the replay memory's share is the delivering peer's
+    /// NETWORK, not its peer id — a second key pair in the same /16 shares
+    /// the first one's share, and a peer in another network still has its own.
+    #[tokio::test]
+    async fn relays_in_one_network_share_one_share_of_the_replay_memory() {
+        let mut target = Target::new();
+        target.manager.relay_replay =
+            crate::crypto::relay_seal::RelayReplayGuard::with_network_share(2);
+        let (first, second, elsewhere) = (PeerId::random(), PeerId::random(), PeerId::random());
+        connected_from(&mut target, first, "/ip4/203.0.113.5/tcp/40000");
+        connected_from(&mut target, second, "/ip4/203.0.7.9/tcp/40001");
+        connected_from(&mut target, elsewhere, "/ip4/198.51.100.7/tcp/40002");
+        let target_id = target.id();
+        let mut deliver = |by: PeerId| {
+            let origin = Identity::generate();
+            let body =
+                seal_relayed_message(&origin, target_id.clone(), uuid::Uuid::new_v4(), &cancel())
+                    .unwrap();
+            target.manager.handle_relayed_envelope(by, body);
+            target.dispatched.try_recv().is_ok()
+        };
+        assert!(deliver(first));
+        assert!(deliver(first));
+        assert!(
+            !deliver(second),
+            "another key pair in the same network has no share of its own"
+        );
+        assert!(deliver(elsewhere), "another network is still served");
+    }
+
+    fn peer_entry(node: &NodeId, latency_ms: Option<u32>) -> PeerInfo {
+        PeerInfo {
+            node_id: node.clone(),
+            addresses: vec!["/ip4/203.0.113.5/tcp/8810".into()],
+            capability: None,
+            last_seen: chrono::Utc::now(),
+            latency_ms,
+            trust_score: 0.5,
+            peer_id_bytes: None,
+            ack_srtt_ms: None,
+            active_request_count: 0,
+            first_seen: 0,
+            verified_transaction_count: 0,
+            is_lan_peer: false,
+            goodput_bytes_per_sec: None,
+            goodput_samples: 0,
+        }
+    }
+
+    /// FUTURE_WORK #299: proven relayed origins — anyone can mint one — are
+    /// registered within their own bound and never displace a peer this node
+    /// is connected to, nor make the identify path's cap disconnect one.
+    #[tokio::test]
+    async fn proven_relayed_origins_never_displace_a_connected_peer() {
+        let target = Target::new();
+        let state = target.manager.shared_state.clone();
+        let connected: Vec<NodeId> = (0..200u32)
+            .map(|i| {
+                let mut id = [0u8; 32];
+                id[..4].copy_from_slice(&i.to_le_bytes());
+                NodeId(id)
+            })
+            .collect();
+        for (i, node) in connected.iter().enumerate() {
+            state
+                .peer_registry
+                .insert(node.clone(), peer_entry(node, Some(10 + i as u32)));
+            state.connected_node_ids.insert(node.clone());
+        }
+
+        for _ in 0..100 {
+            target
+                .manager
+                .ensure_relayed_origin_known(Identity::generate().node_id());
+        }
+        assert_eq!(
+            state.peer_registry.len(),
+            200 + super::super::identify::MAX_UNCONNECTED_REGISTERED,
+            "the origins are bounded by their own cap"
+        );
+        assert!(connected
+            .iter()
+            .all(|node| state.peer_registry.contains_key(node)));
+
+        let mut target = target;
+        target.manager.evict_one_registered_peer(&connected[0]);
+        assert!(
+            connected
+                .iter()
+                .all(|node| state.peer_registry.contains_key(node)),
+            "the registry cap drops a node this node is not connected to first"
+        );
+        assert_eq!(
+            state.peer_registry.len(),
+            200 + super::super::identify::MAX_UNCONNECTED_REGISTERED - 1
+        );
+    }
+
+    /// FUTURE_WORK #299: the persistent NodeId → PeerId map keeps its cap on
+    /// the relay path too, and a full one makes room with a mapping for a node
+    /// no longer registered rather than refusing the newest.
+    #[tokio::test]
+    async fn a_proven_relayed_origin_is_mapped_within_the_cap() {
+        let target = Target::new();
+        let state = target.manager.shared_state.clone();
+        let cap = super::super::identify::MAX_PEER_TO_NODE;
+        for i in 0..cap as u32 {
+            let mut id = [0u8; 32];
+            id[..4].copy_from_slice(&i.to_le_bytes());
+            state.peer_id_map.insert(NodeId(id), vec![1]);
+        }
+        let origin = Identity::generate();
+        target.manager.ensure_relayed_origin_known(origin.node_id());
+        assert_eq!(state.peer_id_map.len(), cap);
+        assert!(state.peer_id_map.contains_key(origin.node_id()));
+    }
+
+    /// Security review of #299: the default anchor is dialed by name and
+    /// relays for every NAT'd node. Neither a peer reaching this node through
+    /// the anchor's circuit nor one dialed by a name it chose may fill the
+    /// share the anchor's own deliveries are counted in.
+    #[tokio::test]
+    async fn nothing_reaching_this_node_through_the_anchor_fills_the_anchors_share() {
+        let mut target = Target::new();
+        target.manager.relay_replay =
+            crate::crypto::relay_seal::RelayReplayGuard::with_network_share(2);
+        let anchor_host = "/dns4/swarmllm.duckdns.org/tcp/8810";
+        let (anchor, via_circuit, named) = (PeerId::random(), PeerId::random(), PeerId::random());
+        connected_by(
+            &mut target,
+            anchor,
+            libp2p::core::ConnectedPoint::Dialer {
+                address: format!("{anchor_host}/p2p/{anchor}").parse().unwrap(),
+                role_override: libp2p::core::Endpoint::Dialer,
+                port_use: libp2p::core::transport::PortUse::Reuse,
+            },
+        );
+        connected_by(
+            &mut target,
+            via_circuit,
+            libp2p::core::ConnectedPoint::Listener {
+                local_addr: format!("{anchor_host}/p2p/{anchor}/p2p-circuit")
+                    .parse()
+                    .unwrap(),
+                send_back_addr: format!("/p2p/{via_circuit}").parse().unwrap(),
+            },
+        );
+        connected_by(
+            &mut target,
+            named,
+            libp2p::core::ConnectedPoint::Dialer {
+                address: format!("/dns4/chosen.example/tcp/8810/p2p/{named}")
+                    .parse()
+                    .unwrap(),
+                role_override: libp2p::core::Endpoint::Dialer,
+                port_use: libp2p::core::transport::PortUse::Reuse,
+            },
+        );
+        let target_id = target.id();
+        let mut deliver = |by: PeerId| {
+            let origin = Identity::generate();
+            let body =
+                seal_relayed_message(&origin, target_id.clone(), uuid::Uuid::new_v4(), &cancel())
+                    .unwrap();
+            target.manager.handle_relayed_envelope(by, body);
+            target.dispatched.try_recv().is_ok()
+        };
+        for flooder in [via_circuit, named] {
+            assert!(deliver(flooder) && deliver(flooder));
+            assert!(!deliver(flooder), "the flooder's own share is full");
+        }
+        assert!(
+            deliver(anchor) && deliver(anchor),
+            "the anchor's own deliveries are still taken"
+        );
+    }
+
+    /// Security review of #299: a proven body marks its origin seen, so an
+    /// origin still sending is never the one unseen longest, and origins
+    /// minted to churn the registry make room among themselves.
+    #[tokio::test]
+    async fn an_origin_still_sending_keeps_its_registry_entry() {
+        let target = Target::new();
+        let state = target.manager.shared_state.clone();
+        let cap = super::super::identify::MAX_UNCONNECTED_REGISTERED;
+        let honest = Identity::generate();
+        target.manager.ensure_relayed_origin_known(honest.node_id());
+        state
+            .peer_registry
+            .get_mut(honest.node_id())
+            .unwrap()
+            .last_seen = chrono::Utc::now() - chrono::Duration::seconds(100);
+        for _ in 1..cap {
+            target
+                .manager
+                .ensure_relayed_origin_known(Identity::generate().node_id());
+        }
+        target.manager.ensure_relayed_origin_known(honest.node_id());
+        for _ in 0..cap / 2 {
+            target
+                .manager
+                .ensure_relayed_origin_known(Identity::generate().node_id());
+        }
+        assert!(state.peer_registry.contains_key(honest.node_id()));
+        assert_eq!(state.peer_registry.len(), cap);
+    }
+
+    /// Second security-review pass on #299: libp2p-relay opens a circuit over
+    /// the connection it already has to the relay and never dials the address
+    /// it was handed, so an attacker's relay could advertise circuits "via"
+    /// any prefix and mint a network per prefix. Every circuit through one
+    /// relay counts in the network of this node's connection to that relay.
+    #[tokio::test]
+    async fn a_circuit_address_names_no_network_of_its_own() {
+        let mut target = Target::new();
+        target.manager.relay_replay =
+            crate::crypto::relay_seal::RelayReplayGuard::with_network_share(2);
+        let relay = PeerId::random();
+        connected_from(&mut target, relay, "/ip4/203.0.113.5/tcp/40000");
+        let through = |target: &mut Target, written: &str| {
+            let peer = PeerId::random();
+            connected_by(
+                target,
+                peer,
+                libp2p::core::ConnectedPoint::Dialer {
+                    address: format!("{written}/tcp/1/p2p/{relay}/p2p-circuit/p2p/{peer}")
+                        .parse()
+                        .unwrap(),
+                    role_override: libp2p::core::Endpoint::Dialer,
+                    port_use: libp2p::core::transport::PortUse::Reuse,
+                },
+            );
+            peer
+        };
+        let first = through(&mut target, "/ip4/1.0.0.1");
+        let second = through(&mut target, "/ip4/2.0.0.1");
+        let named = through(&mut target, "/dns4/swarmllm.duckdns.org");
+        let target_id = target.id();
+        let mut deliver = |by: PeerId| {
+            let origin = Identity::generate();
+            let body =
+                seal_relayed_message(&origin, target_id.clone(), uuid::Uuid::new_v4(), &cancel())
+                    .unwrap();
+            target.manager.handle_relayed_envelope(by, body);
+            target.dispatched.try_recv().is_ok()
+        };
+        assert!(deliver(first) && deliver(first));
+        assert!(
+            !deliver(second),
+            "another prefix written in the address is no network"
+        );
+        assert!(!deliver(named), "nor is the anchor's name");
+        assert!(
+            deliver(relay),
+            "the relay's own deliveries are counted apart"
+        );
+    }
+
+    /// Third security-review pass on #299: `peer_remote_addrs` keeps a peer's
+    /// LATEST connection, so a relay that also reached this node by a circuit
+    /// left every circuit through it in one group shared by all such relays.
+    /// A circuit through it still counts in its direct connection's network.
+    #[tokio::test]
+    async fn a_relay_that_also_came_by_circuit_keeps_its_network() {
+        let mut target = Target::new();
+        target.manager.relay_replay =
+            crate::crypto::relay_seal::RelayReplayGuard::with_network_share(2);
+        let (relay, neighbour, other) = (PeerId::random(), PeerId::random(), PeerId::random());
+        connected_from(&mut target, relay, "/ip4/203.0.113.5/tcp/40000");
+        connected_from(&mut target, neighbour, "/ip4/203.0.200.9/tcp/40000");
+        connected_from(&mut target, other, "/ip4/198.51.100.7/tcp/40000");
+        // The relay's newest connection: an inbound circuit through `other`.
+        connected_by(
+            &mut target,
+            relay,
+            libp2p::core::ConnectedPoint::Listener {
+                local_addr: format!("/ip4/198.51.100.7/tcp/40000/p2p/{other}/p2p-circuit")
+                    .parse()
+                    .unwrap(),
+                send_back_addr: format!("/p2p/{relay}").parse().unwrap(),
+            },
+        );
+        let through = |target: &mut Target, via: PeerId| {
+            let peer = PeerId::random();
+            connected_by(
+                target,
+                peer,
+                libp2p::core::ConnectedPoint::Dialer {
+                    address: format!("/p2p/{via}/p2p-circuit/p2p/{peer}")
+                        .parse()
+                        .unwrap(),
+                    role_override: libp2p::core::Endpoint::Dialer,
+                    port_use: libp2p::core::transport::PortUse::Reuse,
+                },
+            );
+            peer
+        };
+        let (first, second) = (through(&mut target, relay), through(&mut target, neighbour));
+        let target_id = target.id();
+        let mut deliver = |by: PeerId| {
+            let origin = Identity::generate();
+            let body =
+                seal_relayed_message(&origin, target_id.clone(), uuid::Uuid::new_v4(), &cancel())
+                    .unwrap();
+            target.manager.handle_relayed_envelope(by, body);
+            target.dispatched.try_recv().is_ok()
+        };
+        assert!(deliver(first) && deliver(first));
+        assert!(
+            !deliver(second),
+            "circuits through two relays in one /16 share one share, whichever came by circuit"
         );
     }
 }

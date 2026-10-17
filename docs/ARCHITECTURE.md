@@ -557,7 +557,9 @@ without ever being able to read them.
   the direct path. The target dispatches a body as its origin's only once the
   signature verifies, the body is not a replay (`RelayReplayGuard`: one-sided
   window, 5 min old / 60 s ahead, each body once, its memory shared out per
-  origin and per delivering peer and refusing when full) and an envelope's inner
+  origin and per network the delivering peer reaches us from — a public /16 or
+  /32, a private host, a configured host name, a relay's circuits apart from the
+  relay itself, #299 — and refusing when full) and an envelope's inner
   is a message a node relays; it learns the route, registry entry and proven
   features only then. An unsigned body is dropped, and a refusal is logged once
   a window per delivering peer.

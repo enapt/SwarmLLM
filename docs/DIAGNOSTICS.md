@@ -1709,7 +1709,7 @@ that fix firing.
 | Level | What | Fields |
 |-------|------|--------|
 | INFO  | `DIAG: relay reservation` | `peer` |
-| WARN  | `refusing a relayed envelope: <why>` / `refusing a relayed tensor: <why>` (v0.3.241+, #298) — a relayed body whose origin's signature is missing or wrong, a replay, or a full replay memory; logged once a window per delivering peer, `suppressed` counting the refusals folded into the line. A run of them from one `relayed_by` is a peer forging or replaying, or a build that signs wrongly | `relayed_by`, `claimed_origin`, `suppressed` |
+| WARN  | `refusing a relayed envelope: <why>` / `refusing a relayed tensor: <why>` (v0.3.241+, #298) — a relayed body whose origin's signature is missing or wrong, a replay, or a full replay memory (whole, one origin's share, or the share of the network the delivering peer is in — a public /16 or /32, a private host, a host name from this node's bootstrap list, or the circuits through one relay, counted apart from that relay's own deliveries; since #299 a second key pair in that network shares it); logged once a window per delivering peer, `suppressed` counting the refusals folded into the line. A run of them from one `relayed_by` is a peer forging or replaying, or a build that signs wrongly | `relayed_by`, `claimed_origin`, `suppressed` |
 
 ## Files Modified
 

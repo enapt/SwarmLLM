@@ -204,20 +204,19 @@ impl NetworkManager {
         }
         // Cap peer_remote_addrs at MAX_PEER_REMOTE_ADDRS — disconnected peers'
         // entries are removed in handle_connection_closed, but a cap defends
-        // against missed close events leaking entries indefinitely. Drop a
-        // random half via take() since peer_id has no natural ordering.
+        // against missed close events leaking entries indefinitely. Drop only
+        // those: a connected peer's entry is its network, which keys its share
+        // of the relayed-body replay memory, and an explicit `max_peers` may
+        // exceed the cap (security review of #299).
         if self.peer_remote_addrs.len() >= MAX_PEER_REMOTE_ADDRS {
-            let to_drop: Vec<_> = self
-                .peer_remote_addrs
-                .keys()
-                .take(MAX_PEER_REMOTE_ADDRS / 2)
-                .copied()
-                .collect();
-            for k in to_drop {
-                self.peer_remote_addrs.remove(&k);
-            }
+            let swarm = &self.swarm;
+            self.peer_remote_addrs
+                .retain(|peer, _| swarm.is_connected(peer));
         }
-        self.peer_remote_addrs.insert(peer_id, remote_addr.clone());
+        let names = crate::network::helpers::ConfiguredNames::of_bootstrap(
+            &self.shared_state.cfg().network.bootstrap_peers,
+        );
+        super::record_peer_remote(&mut self.peer_remote_addrs, peer_id, endpoint, &names);
         self.update_peer_count();
 
         // Layer 5: Peer Exchange — send PEX request on first connection only

@@ -4499,9 +4499,10 @@ cleanly.
   gotcha #44, and wider than gossip's 30 s because a refusal here fails an inference. A body
   already taken within the window is refused. An entry is swept (every 10 s) only once the
   window would refuse it anyway, so the memory IS the window. When full — 262,144 entries, or
-  16,384 from one origin, or 32,768 handed over by one delivering peer — a new body is refused,
-  never an old one forgotten: forgetting early would take a replay. Entries are keyed by the
-  signed digest; the shares count by the first 8 bytes of a BLAKE3 hash of origin and peer.
+  16,384 from one origin, or 32,768 handed over from one NETWORK (#299, below) — a new body is
+  refused, never an old one forgotten: forgetting early would take a replay. Entries are keyed
+  by the signed digest; the shares count by the first 8 bytes of a BLAKE3 hash of the origin and
+  of the network's `NetGroup::key_bytes`.
 - **Refusals are said, once a window per delivering peer** (`refuse_relayed`, through
   `observe_repeated_peer_failure`). The line names `relayed_by` — the one fact a forger cannot
   choose — beside the `claimed_origin`, and the reason (`Refused`'s `Display` gives the seconds
@@ -4516,9 +4517,96 @@ relays here as its own are dropped, so relaying between it and this one pauses u
 auto-update (minutes); that traffic goes direct meanwhile. An older node still RELAYS between
 two new ones: the signature is inside the seal, so it forwards the body intact.
 
-**What is left** (FUTURE_WORK #299): eight delivering peers and sixteen origins, all free to
-mint, still fill the replay memory and stop relaying here; and `ensure_relayed_origin_known`
-registers each newly proven origin without the identify path's caps (older than #298).
+**The shares count networks, not keys (2026-10-17, FUTURE_WORK #299).** The first version
+shared the memory out per delivering peer id, and #298's own review found the hole: a key pair
+costs nothing, so eight of them on one machine reached the total, and every relayed body to this
+node was refused while they kept sending and up to 6 min after (a body dated 60 s ahead is held
+its whole window). The share is now per network the delivering peer reaches this node from,
+`network::helpers::NetGroup`:
+
+- **Bitcoin Core's rule** (`NetGroupManager::GetGroup`, the anti-eclipse bucketing of its
+  address manager): a public IPv4 address counts as its /16, a public IPv6 one as its /32, an
+  IPv4-mapped IPv6 address as the IPv4 it maps.
+- **A private, loopback, link-local or CGN address counts as its host.** Bitcoin pools every
+  unroutable address into ONE group; here a LAN relay would then share with every machine on
+  the LAN. A peer can show such a source only from inside that network — whose members CAN add
+  hosts (a tailnet, a LAN), an accepted risk: the network is the owner's.
+- **A host name counts only if this node's configuration names it** (`ConfiguredNames`, the
+  bootstrap list's `/dns*` names). libp2p records a dial by the address it was handed,
+  unresolved (`libp2p-swarm` 0.47 `pool.rs`, the dial list's address), and the default anchor is
+  `/dns4/swarmllm.duckdns.org/…`. Resolving the name ourselves would not do: a name's owner
+  chooses what it resolves to, not where we connected. Any other name is the peer's choice.
+- **No IP and no name of ours is one group for all of them** — an unconfigured DNS name, a
+  circuit through a relay named only by its id, a peer whose connection is not on record.
+- **A circuit is `Circuit` of its relay's network, apart from the relay's own share** — and that
+  network is the one this node's own DIRECT connection to the relay was counted in
+  (`manager::relay_network`, `PeerRemote::direct` — kept while any connection to the relay
+  lasts, so a later circuit to the relay does not replace it; a relay never serves a circuit
+  over a relayed connection, libp2p-relay 0.21 `behaviour.rs`, so a circuit through it rides a
+  direct one), never an IP or name written in the
+  circuit's address. libp2p-relay 0.21 opens a circuit over a connection it already has to the
+  relay and never dials the address it was handed (`priv_client.rs`, the `DialReq` and reserve
+  paths), so that part says whatever its advertiser wrote; the relay's PEER ID is authenticated,
+  the circuit running over the connection to it. An inbound circuit's remote is a bare
+  `/p2p/<source>` (libp2p-relay's listener, `priv_client/transport.rs`; gotcha #179), so the
+  relay is read from the connection's local address — one group per relay, never one per source
+  behind it.
+
+**What the security review of the first version found** (it had neither the configured names
+nor the separate circuit group): a NAT'd node — the default — reserves its circuit at the anchor
+by that `/dns4/` address and the relay picker ranks the target's reservation relay first, so the
+anchor's own deliveries, every circuit through the anchor and every peer dialed by a name it chose
+fell into ONE share. One peer with one circuit through the anchor sending 32,768 signed bodies
+from two minted origins (seconds; nothing rate-limits bodies addressed to this node) refused
+every honest relayed body the anchor carried for 5 min, repeatably — worse than keying by peer
+id. Since the fix, a peer reaching this node through a relay's circuit fills only that relay's
+circuit share (`nothing_reaching_this_node_through_the_anchor_fills_the_anchors_share`). The
+SECOND pass found the next hole: that version read a circuit's network from the circuit's own
+address. One attacker running a relay X, connected here, answers this node's PEX request with
+`/ip4/1.0.0.1/…/p2p/X/p2p-circuit/p2p/R1`, `/ip4/2.0.0.1/…/R2`, … (fake public prefixes pass
+`is_non_public_addr`; `handle_pex_response` dials them); the relay client sees X connected and
+opens each circuit over that connection, and each R_i was a network of its own — nine key pairs
+filled the memory (`a_circuit_address_names_no_network_of_its_own`). The THIRD pass found that
+version read the relay's network from its LATEST connection: an attacker relay that also opened a
+circuit to this node through the anchor turned every circuit through it into one group shared by
+all such relays — one extra group, and honest relays in the same position shared it
+(`a_relay_that_also_came_by_circuit_keeps_its_network`). Every entry is now filed by one function,
+`manager::record_peer_remote`, which the tests call too.
+
+**What it does not close** (FUTURE_WORK #300): the per-network share keeps a flood off OTHER
+deliverers, never off the honest relay carrying it — a peer sending 32,768 bodies here through
+the anchor, at the anchor's per-origin forward limit, fills the anchor's share in ~82 s. That is
+#298's design limit, older than this entry; the fix belongs at the relay.
+
+It is computed from the whole `ConnectedPoint` at `ConnectionEstablished` and kept with the
+address (`PeerRemote` in `peer_remote_addrs`, the latest connection's, dropped at the last
+disconnect; at its 1,024-entry cap it drops only peers no longer connected, since an explicit
+`max_peers` may exceed it), and both relayed kinds are admitted through one call,
+`admit_relayed`. Filling the memory now takes delivering peers in eight networks — addresses in
+eight /16s, a few cloud regions: a cost, not a wall. Two smaller residuals: an attacker who can
+make this node dial circuits through honest relays (PEX hands out addresses) gains one group per
+such relay's network, bounded by the honest relays in distinct /16s and no longer touching those
+relays' own deliveries; and every unconfigured DNS-dialed peer shares one group, the price of not
+trusting a name. "Let the total grow only with the relays actually connected" (the entry's other
+option) was not taken, because eight minted peers ARE connected.
+
+**Relayed origins never crowd out a connected peer (same entry).** `ensure_relayed_origin_known`
+wrote `peer_registry` and `peer_id_map` for each newly proven origin with no cap (older than
+#298, where an origin needed no signature at all). Worse, a relay-only entry has no measured
+latency, and the identify path's cap (`MAX_PEER_REGISTRY` 200) evicted the highest-latency peer
+— reading an unmeasured one as 0 — and disconnected it, so a flood of minted origins cost real
+connections. One rule now serves both writers (`identify::evict_one_registered_peer`): an entry
+for a node this node is not connected to (`connected_node_ids`) goes first, the one unseen
+longest, then the connected peer with the highest latency; never a LAN peer, a node in a running
+pipeline, or the peer just identified. A proven origin may hold one of at most
+`MAX_UNCONNECTED_REGISTERED` (64) such entries beside the identified peers, the oldest making
+room, and never displaces a connected one. Every proven body marks its origin seen (the review
+found the first version never did, so an origin still sending was always the oldest, and minted
+origins pushed it out between its body's registration and the dispatcher's "known peer" check —
+an inference dropped as from an unknown peer); now minted origins, each used once, make room
+among themselves. `peer_id_map` has one capped writer for both paths,
+`remember_peer_id` (`MAX_PEER_TO_NODE` 10,000; at the cap a mapping for a node no longer
+registered makes room, as the health monitor's `cleanup_stale_peer_id_map` would).
 
 **Tests**, each shown red with its mechanism toggled off (10 toggles, one script, sources
 restored from a saved copy, re-run after the review's changes):
@@ -4533,8 +4621,29 @@ restored from a saved copy, re-run after the review's changes):
 | recipient not signed | `a_signed_body_cannot_be_forwarded_to_another_node` |
 | sweep forgets in-window bodies | `a_body_is_taken_once_and_only_inside_its_window` |
 | per-origin cap | `one_origin_cannot_fill_the_replay_memory` |
-| per-peer cap | `one_connection_cannot_fill_the_replay_memory` |
+| per-network cap | `one_network_cannot_fill_the_replay_memory` |
 | send gate | `a_peer_that_cannot_sign_back_is_never_relayed_to` |
+
+#299 added 12 toggles, same method, all re-run after each review pass's changes (the twelfth
+added with the third pass):
+
+| Mechanism toggled off | Red tests |
+|---|---|
+| share keyed per peer id again | `relays_in_one_network_share_one_share_of_the_replay_memory` |
+| a public IPv4 counted as its host | `a_group_is_a_network_not_a_name`, the share test |
+| an inbound circuit read from its remote | `a_circuit_is_counted_by_its_relays_own_connection`, the anchor test |
+| a circuit counted as its relay's own share | the circuit test, `nothing_reaching_this_node_through_the_anchor_fills_the_anchors_share`, `a_circuit_address_names_no_network_of_its_own` |
+| a circuit's network read from its own address | the circuit test, `a_circuit_address_names_no_network_of_its_own` |
+| configured names ignored | `only_a_name_this_node_configured_is_a_network_of_its_own`, the anchor test |
+| the relay path's registry cap | `proven_relayed_origins_never_displace_a_connected_peer` |
+| the identify cap preferring unconnected entries | the same |
+| a proven body not marking its origin seen | `an_origin_still_sending_keeps_its_registry_entry` |
+| the relay path's `peer_id_map` cap | `a_proven_relayed_origin_is_mapped_within_the_cap` |
+| a full map refusing the newest | the same |
+| a relay's network read from its latest connection, a circuit | `a_relay_that_also_came_by_circuit_keeps_its_network` |
+
+Not covered by a test: `peer_remote_addrs` keeping connected peers at its cap (it needs a live
+swarm past 1,024 connections).
 
 The two call-site tests drive a real `NetworkManager` (`Target` in `network::manager::relay`'s
 tests) and watch its dispatch feed; the third gives it a learned route to a target proven to

@@ -182,10 +182,57 @@ const MAX_INBOUND_SHARD_FETCHES: usize = 256;
 const PENDING_SHARD_TICKET_TTL_SECS: u64 = 60;
 /// Maximum entries in connection_addrs before half-eviction of oldest ConnectionIds.
 const MAX_CONNECTION_ADDRS: usize = 1024;
-/// Maximum entries in peer_remote_addrs before half-eviction of stale peers.
+/// Entries in peer_remote_addrs past which those of peers no longer connected are dropped.
 /// Disconnected peers' entries are removed in `handle_connection_closed`, but
 /// the cap defends against missed close events leaking entries into the map.
 const MAX_PEER_REMOTE_ADDRS: usize = 1024;
+
+/// A connected peer's most recent connection, as the swarm recorded it.
+pub(super) struct PeerRemote {
+    /// Its remote address — for an inbound circuit, a bare `/p2p/<source>`.
+    pub(super) addr: Multiaddr,
+    /// The network it reaches this node from, read from the whole endpoint.
+    pub(super) group: crate::network::helpers::NetGroup,
+    /// The network of its most recent DIRECT connection, kept while any
+    /// connection to it lasts — a later circuit does not replace it.
+    pub(super) direct: Option<crate::network::helpers::Network>,
+}
+
+/// Record `peer`'s newest connection. The one writer of `peer_remote_addrs`'
+/// entries, so the swarm and the tests file a connection the same way.
+pub(super) fn record_peer_remote(
+    remotes: &mut HashMap<libp2p::PeerId, PeerRemote>,
+    peer: libp2p::PeerId,
+    endpoint: &libp2p::core::ConnectedPoint,
+    names: &crate::network::helpers::ConfiguredNames,
+) {
+    use crate::network::helpers::NetGroup;
+    let group = NetGroup::of_connection(endpoint, names, |relay| relay_network(remotes, relay));
+    let direct = match group {
+        NetGroup::Direct(network) => Some(network),
+        NetGroup::Circuit(_) => remotes.get(&peer).and_then(|remote| remote.direct),
+    };
+    remotes.insert(
+        peer,
+        PeerRemote {
+            addr: endpoint.get_remote_address().clone(),
+            group,
+            direct,
+        },
+    );
+}
+
+/// The network a circuit through `relay` is counted in: that of this node's
+/// own direct connection to the relay, even when a circuit to the relay came
+/// later (a relay never serves a circuit over a relayed connection, so a
+/// circuit through it rides a direct one — third security-review pass on
+/// #299). None for a relay never reached directly, or not on record.
+pub(super) fn relay_network(
+    remotes: &HashMap<libp2p::PeerId, PeerRemote>,
+    relay: &libp2p::PeerId,
+) -> Option<crate::network::helpers::Network> {
+    remotes.get(relay)?.direct
+}
 /// Maximum entries in ping_sent_times before pruning stale entries.
 const MAX_PING_ENTRIES: usize = 2048;
 /// How often the run loop wakes to process the pending_redial queue.
@@ -525,10 +572,12 @@ pub struct NetworkManager {
     /// a circuit still can't reliably round-trip request_response.
     peer_direct_conns:
         HashMap<libp2p::PeerId, std::collections::HashSet<libp2p::swarm::ConnectionId>>,
-    /// Maps PeerId → most recent connected remote Multiaddr. Used by the Identify
-    /// handler to mark peers as LAN when their connected address is loopback/private,
-    /// even if their advertised listen_addrs are empty or public.
-    peer_remote_addrs: HashMap<libp2p::PeerId, Multiaddr>,
+    /// Maps PeerId → its most recent connection: the remote Multiaddr, which the
+    /// Identify handler reads to mark a peer LAN when it is loopback/private (even
+    /// if its advertised listen_addrs are empty or public), and the network it
+    /// reaches us from, which keys its share of the relayed-body replay memory
+    /// (`NetworkManager::admit_relayed`, #299).
+    peer_remote_addrs: HashMap<libp2p::PeerId, PeerRemote>,
     /// Tracks rr_ping send times per OutboundRequestId for RTT measurement.
     /// When the PEX response arrives, RTT is calculated and stored as `latency_ms`
     /// on the peer's PeerInfo, enabling tensor-parallelism group detection.

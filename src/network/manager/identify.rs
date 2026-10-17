@@ -8,9 +8,134 @@
 //! atomics for that reason.
 
 use crate::network::helpers::{extract_ipv4_bytes, is_non_public_ipv4_bytes};
-use crate::types::PeerInfo;
+use crate::types::{NodeId, PeerInfo};
 
 use super::{NetworkManager, MAX_FOREIGN_PEERS};
+
+/// Most `peer_registry` entries kept as peers identify (S3); past it one is
+/// dropped per identify (`NetworkManager::evict_one_registered_peer`).
+const MAX_PEER_REGISTRY: usize = 200;
+/// Most `peer_registry` entries for nodes this node is NOT connected to that
+/// proven relayed origins may hold (#299), on top of the peers that identified:
+/// a relayed origin is registered by its first proven body, and each body
+/// re-registers it, so dropping one costs only a re-registration.
+pub(super) const MAX_UNCONNECTED_REGISTERED: usize = 64;
+/// Most NodeId ↔ PeerId mappings kept, in `peer_to_node` and in the persistent
+/// `peer_id_map` (NET-C4).
+pub(super) const MAX_PEER_TO_NODE: usize = 10_000;
+
+impl NetworkManager {
+    /// The nodes in a pipeline this node is running, which keep their registry
+    /// entry whatever the cap.
+    fn active_pipeline_nodes(&self) -> std::collections::HashSet<NodeId> {
+        self.shared_state
+            .active_pipelines
+            .iter()
+            .flat_map(|e| {
+                e.value()
+                    .segments
+                    .iter()
+                    .map(|s| s.node_id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// The `peer_registry` entries that can go without touching a connection:
+    /// nodes this node is not connected to — a proven relayed origin, or a peer
+    /// gone and not yet swept — never a LAN peer, a node in a running pipeline
+    /// or `keep`. How many there are, and the one unseen longest.
+    pub(super) fn unconnected_registry_entries(&self, keep: &NodeId) -> (usize, Option<NodeId>) {
+        let in_pipelines = self.active_pipeline_nodes();
+        let mut count = 0;
+        let mut oldest: Option<(chrono::DateTime<chrono::Utc>, NodeId)> = None;
+        for entry in self.shared_state.peer_registry.iter() {
+            if entry.is_lan_peer
+                || entry.key() == keep
+                || in_pipelines.contains(entry.key())
+                || self.shared_state.connected_node_ids.contains(entry.key())
+            {
+                continue;
+            }
+            count += 1;
+            if oldest
+                .as_ref()
+                .is_none_or(|(seen, _)| entry.last_seen < *seen)
+            {
+                oldest = Some((entry.last_seen, entry.key().clone()));
+            }
+        }
+        (count, oldest.map(|(_, id)| id))
+    }
+
+    /// Drop one `peer_registry` entry to stay under [`MAX_PEER_REGISTRY`]: a
+    /// node this node is not connected to first, the one unseen longest, so
+    /// proven relayed origins — anyone can mint one — never cost a connection
+    /// (#299); only then the connected peer with the highest measured latency,
+    /// which is disconnected. Never a LAN peer, a node in a running pipeline or
+    /// `keep` (the peer that just identified).
+    pub(super) fn evict_one_registered_peer(&mut self, keep: &NodeId) {
+        if let (_, Some(unconnected)) = self.unconnected_registry_entries(keep) {
+            self.shared_state.peer_registry.remove(&unconnected);
+            tracing::debug!(
+                evicted = %unconnected,
+                registry_size = self.shared_state.peer_registry.len(),
+                "Dropped an unconnected node's entry to stay under the registry cap"
+            );
+            return;
+        }
+        let in_pipelines = self.active_pipeline_nodes();
+        let evict_candidate = self
+            .shared_state
+            .peer_registry
+            .iter()
+            .filter(|e| !e.is_lan_peer && !in_pipelines.contains(e.key()) && e.key() != keep)
+            // Prefer evicting peers with known high latency over unmeasured peers.
+            // Unmeasured peers (None) get 0 so they survive until measured.
+            .max_by_key(|e| e.latency_ms.unwrap_or(0))
+            .map(|e| e.key().clone());
+        if let Some(evict_id) = evict_candidate {
+            self.shared_state.peer_registry.remove(&evict_id);
+            // Also remove from peer_to_node and disconnect
+            let evict_peer = self
+                .peer_to_node
+                .iter()
+                .find(|e| *e.value() == evict_id)
+                .map(|e| *e.key());
+            if let Some(pid) = evict_peer {
+                self.peer_to_node.remove(&pid);
+                let _ = self.swarm.disconnect_peer_id(pid);
+            }
+            tracing::debug!(
+                evicted = %evict_id,
+                registry_size = self.shared_state.peer_registry.len(),
+                "Evicted distant peer to stay under registry cap"
+            );
+        }
+    }
+
+    /// Record `node_id`'s PeerId in the persistent `peer_id_map`, within
+    /// [`MAX_PEER_TO_NODE`] — the one writer for both Identify and a proven
+    /// relayed origin (#299). At the cap, a mapping for a node no longer in
+    /// `peer_registry` makes room (the health monitor drops those too,
+    /// `cleanup_stale_peer_id_map`); with none, the map is left as it is.
+    pub(super) fn remember_peer_id(&self, node_id: &NodeId, peer_bytes: Vec<u8>) {
+        let map = &self.shared_state.peer_id_map;
+        if map.len() >= MAX_PEER_TO_NODE && !map.contains_key(node_id) {
+            let stale = map
+                .iter()
+                .find(|e| !self.shared_state.peer_registry.contains_key(e.key()))
+                .map(|e| e.key().clone());
+            match stale {
+                Some(stale) => {
+                    map.remove(&stale);
+                }
+                None => return,
+            }
+        }
+        map.insert(node_id.clone(), peer_bytes);
+    }
+}
 
 /// Does this peer speak SwarmLLM at all?
 ///
@@ -280,7 +405,7 @@ impl NetworkManager {
         let addr_is_lan = self
             .peer_remote_addrs
             .get(&peer_id)
-            .map(multiaddr_is_local)
+            .map(|remote| multiaddr_is_local(&remote.addr))
             .unwrap_or(false);
         let is_lan = was_lan || addr_is_lan;
         let peer_info = PeerInfo {
@@ -352,60 +477,11 @@ impl NetworkManager {
             .signal_dashboard(crate::daemon::state::DashboardSignal::PeersChanged);
 
         // S3: Cap peer_registry to prevent unbounded growth at 10K+ nodes.
-        // Evict highest-latency non-LAN non-pipeline peer when over limit.
-        const MAX_PEER_REGISTRY: usize = 200;
         if self.shared_state.peer_registry.len() > MAX_PEER_REGISTRY {
-            // Find the worst peer to evict: highest latency, not LAN, not in active pipeline
-            let active_pipeline_nodes: std::collections::HashSet<_> = {
-                let segments: Vec<_> = self
-                    .shared_state
-                    .active_pipelines
-                    .iter()
-                    .flat_map(|e| {
-                        e.value()
-                            .segments
-                            .iter()
-                            .map(|s| s.node_id.clone())
-                            .collect::<Vec<_>>()
-                    })
-                    .collect();
-                segments.into_iter().collect()
-            };
-            let evict_candidate = self
-                .shared_state
-                .peer_registry
-                .iter()
-                .filter(|e| {
-                    !e.is_lan_peer
-                        && !active_pipeline_nodes.contains(e.key())
-                        && *e.key() != node_id
-                })
-                // Prefer evicting peers with known high latency over unmeasured peers.
-                // Unmeasured peers (None) get 0 so they survive until measured.
-                .max_by_key(|e| e.latency_ms.unwrap_or(0))
-                .map(|e| e.key().clone());
-            if let Some(evict_id) = evict_candidate {
-                self.shared_state.peer_registry.remove(&evict_id);
-                // Also remove from peer_to_node and disconnect
-                let evict_peer = self
-                    .peer_to_node
-                    .iter()
-                    .find(|e| *e.value() == evict_id)
-                    .map(|e| *e.key());
-                if let Some(pid) = evict_peer {
-                    self.peer_to_node.remove(&pid);
-                    let _ = self.swarm.disconnect_peer_id(pid);
-                }
-                tracing::debug!(
-                    evicted = %evict_id,
-                    registry_size = self.shared_state.peer_registry.len(),
-                    "Evicted distant peer to stay under registry cap"
-                );
-            }
+            self.evict_one_registered_peer(&node_id);
         }
 
         // NET-C4: Populate reverse PeerId → NodeId lookup (capped)
-        const MAX_PEER_TO_NODE: usize = 10_000;
         if self.peer_to_node.len() < MAX_PEER_TO_NODE || self.peer_to_node.contains_key(&peer_id) {
             self.peer_to_node.insert(peer_id, node_id.clone());
         }
@@ -486,13 +562,7 @@ impl NetworkManager {
         // stats-cache tick.
         crate::daemon::state::refresh_swarm_capacity(&self.shared_state);
         // Persistent NodeId → PeerId mapping (survives disconnects, same cap)
-        if self.shared_state.peer_id_map.len() < MAX_PEER_TO_NODE
-            || self.shared_state.peer_id_map.contains_key(&node_id)
-        {
-            self.shared_state
-                .peer_id_map
-                .insert(node_id.clone(), peer_id.to_bytes());
-        }
+        self.remember_peer_id(&node_id, peer_id.to_bytes());
 
         // Layer 6: Track subnet for anti-gaming — extract IPv4 from listen addrs.
         // Skip non-public IPs (loopback, RFC 1918, link-local, CGN/Tailscale,

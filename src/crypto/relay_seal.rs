@@ -36,6 +36,7 @@ use x25519_dalek::StaticSecret;
 use crate::crypto::session::{ed25519_pubkey_to_x25519, ephemeral_open, ephemeral_seal};
 use crate::error::SwarmError;
 use crate::identity::Identity;
+use crate::network::helpers::NetGroup;
 use crate::types::{NodeId, RelayedEnvelope, SwarmMessage};
 
 /// Upper bound on a sealed inner message (pre-seal plaintext). Inference relay
@@ -64,18 +65,20 @@ const SIGNED_CONTEXT: &str = "swarmllm 2026-10-17 relayed body origin proof v1";
 pub const RELAYED_MAX_AGE_MS: u64 = 5 * 60 * 1000;
 pub const RELAYED_SKEW_MS: u64 = 60 * 1000;
 /// The most relayed bodies remembered as taken, one origin's share of them,
-/// and one CONNECTION's. A body leaves the memory when it is too old to pass
-/// the window, so the memory is exactly the window; past any bound a new body
-/// is refused (never an old one forgotten, which would open it to replay).
-/// Keys cost nothing to mint, so one connection could present any number of
-/// proven origins: the share per delivering connection is what keeps one
-/// connection from filling the memory and refusing every honest relayed body
-/// (security review of #298) — it takes 8. An origin streaming ~25 tokens or
-/// forwards a second holds ~7,500 in the window; a relay carrying four such
-/// streams to this node, ~30,000.
+/// and one NETWORK's — the network the delivering peer reaches this node from
+/// (`network::helpers::NetGroup`: a public IPv4 /16, a public IPv6 /32, a
+/// private host, a host name our bootstrap list names, or the circuits through
+/// one relay, apart from that relay's own deliveries). A body leaves the memory when it is too
+/// old to pass the window, so the memory is exactly the window; past any bound
+/// a new body is refused (never an old one forgotten, which would open it to
+/// replay). Keys cost nothing to mint, so the share is counted by something
+/// that does cost: filling the memory takes delivering peers in 8 networks
+/// (#299; keyed per peer id, 8 minted key pairs did it — security review of
+/// #298). An origin streaming ~25 tokens or forwards a second holds ~7,500 in
+/// the window; relays in one network carrying four such streams here, ~30,000.
 pub const MAX_RELAYED_REMEMBERED: usize = 262_144;
 pub const MAX_RELAYED_REMEMBERED_PER_ORIGIN: usize = 16_384;
-pub const MAX_RELAYED_REMEMBERED_PER_CONNECTION: usize = 32_768;
+pub const MAX_RELAYED_REMEMBERED_PER_NETWORK: usize = 32_768;
 /// The memory is swept at most this often: a sweep walks all of it.
 const SWEEP_EVERY_MS: u64 = 10_000;
 
@@ -369,7 +372,7 @@ pub enum Refused {
     Replay,
     MemoryFull,
     OriginShareFull,
-    ConnectionShareFull,
+    NetworkShareFull,
 }
 
 impl std::fmt::Display for Refused {
@@ -390,16 +393,16 @@ impl std::fmt::Display for Refused {
             Self::Replay => write!(f, "already taken: a replay"),
             Self::MemoryFull => write!(f, "the replay memory is full"),
             Self::OriginShareFull => write!(f, "this origin's share of the replay memory is full"),
-            Self::ConnectionShareFull => {
-                write!(f, "this connection's share of the replay memory is full")
-            }
+            Self::NetworkShareFull => write!(
+                f,
+                "the share of the replay memory for the network this peer is in is full"
+            ),
         }
     }
 }
 
-/// A short, unforgeable-enough name for a NodeId or a connection's peer, for
-/// the share counts (finding a second value with the same 64 bits is 2^64
-/// work).
+/// A short, unforgeable-enough name for a NodeId or a network, for the share
+/// counts (finding a second value with the same 64 bits is 2^64 work).
 fn short_key(bytes: &[u8]) -> u64 {
     u64::from_le_bytes(
         blake3::hash(bytes).as_bytes()[..8]
@@ -412,7 +415,26 @@ fn short_key(bytes: &[u8]) -> u64 {
 struct Taken {
     sent_at_ms: u64,
     origin: u64,
-    connection: u64,
+    network: u64,
+}
+
+/// The bounds a [`RelayReplayGuard`] keeps: the constants above, smaller in a
+/// test that fills one.
+#[derive(Clone, Copy)]
+struct Limits {
+    total: usize,
+    per_origin: usize,
+    per_network: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            total: MAX_RELAYED_REMEMBERED,
+            per_origin: MAX_RELAYED_REMEMBERED_PER_ORIGIN,
+            per_network: MAX_RELAYED_REMEMBERED_PER_NETWORK,
+        }
+    }
 }
 
 /// Which signed relayed bodies this node has taken, so a relay cannot deliver
@@ -423,28 +445,47 @@ pub struct RelayReplayGuard {
     /// Every body taken within the window, by its digest.
     taken: HashMap<[u8; 32], Taken>,
     per_origin: HashMap<u64, usize>,
-    per_connection: HashMap<u64, usize>,
+    per_network: HashMap<u64, usize>,
     swept_at_ms: u64,
+    limits: Limits,
 }
 
 impl RelayReplayGuard {
-    /// Take a proven body from `origin`, delivered by the peer whose id bytes
-    /// are `connection`, or say why not. Only a body this returns `Ok` for may
+    /// A guard that fills after `per_network` bodies from one network.
+    #[cfg(test)]
+    pub(crate) fn with_network_share(per_network: usize) -> Self {
+        Self {
+            limits: Limits {
+                per_network,
+                ..Limits::default()
+            },
+            ..Self::default()
+        }
+    }
+
+    /// Take a proven body from `origin`, delivered by a peer in the network
+    /// `delivered_from`, or say why not. Only a body this returns `Ok` for may
     /// be dispatched.
     pub fn admit(
         &mut self,
         origin: &NodeId,
-        connection: &[u8],
+        delivered_from: &NetGroup,
         digest: [u8; 32],
         sent_at_ms: u64,
     ) -> Result<(), Refused> {
-        self.admit_at(origin, connection, digest, sent_at_ms, now_ms())
+        self.admit_at(
+            origin,
+            &delivered_from.key_bytes(),
+            digest,
+            sent_at_ms,
+            now_ms(),
+        )
     }
 
     fn admit_at(
         &mut self,
         origin: &NodeId,
-        connection: &[u8],
+        network: &[u8],
         digest: [u8; 32],
         sent_at_ms: u64,
         now_ms: u64,
@@ -465,26 +506,24 @@ impl RelayReplayGuard {
         if now_ms.saturating_sub(self.swept_at_ms) >= SWEEP_EVERY_MS {
             self.sweep(now_ms);
         }
-        if self.taken.len() >= MAX_RELAYED_REMEMBERED {
+        if self.taken.len() >= self.limits.total {
             return Err(Refused::MemoryFull);
         }
-        let (origin, connection) = (short_key(&origin.0), short_key(connection));
-        if self.per_origin.get(&origin).copied().unwrap_or(0) >= MAX_RELAYED_REMEMBERED_PER_ORIGIN {
+        let (origin, network) = (short_key(&origin.0), short_key(network));
+        if self.per_origin.get(&origin).copied().unwrap_or(0) >= self.limits.per_origin {
             return Err(Refused::OriginShareFull);
         }
-        if self.per_connection.get(&connection).copied().unwrap_or(0)
-            >= MAX_RELAYED_REMEMBERED_PER_CONNECTION
-        {
-            return Err(Refused::ConnectionShareFull);
+        if self.per_network.get(&network).copied().unwrap_or(0) >= self.limits.per_network {
+            return Err(Refused::NetworkShareFull);
         }
         *self.per_origin.entry(origin).or_insert(0) += 1;
-        *self.per_connection.entry(connection).or_insert(0) += 1;
+        *self.per_network.entry(network).or_insert(0) += 1;
         self.taken.insert(
             digest,
             Taken {
                 sent_at_ms,
                 origin,
-                connection,
+                network,
             },
         );
         Ok(())
@@ -493,13 +532,13 @@ impl RelayReplayGuard {
     /// Forget every body the window would refuse anyway — and only those.
     fn sweep(&mut self, now_ms: u64) {
         self.swept_at_ms = now_ms;
-        let (per_origin, per_connection) = (&mut self.per_origin, &mut self.per_connection);
+        let (per_origin, per_network) = (&mut self.per_origin, &mut self.per_network);
         self.taken.retain(|_, taken| {
             let keep = now_ms.saturating_sub(taken.sent_at_ms) <= RELAYED_MAX_AGE_MS;
             if !keep {
                 for (counts, key) in [
                     (&mut *per_origin, taken.origin),
-                    (&mut *per_connection, taken.connection),
+                    (&mut *per_network, taken.network),
                 ] {
                     if let Some(count) = counts.get_mut(&key) {
                         *count = count.saturating_sub(1);
@@ -509,7 +548,7 @@ impl RelayReplayGuard {
             keep
         });
         per_origin.retain(|_, count| *count > 0);
-        per_connection.retain(|_, count| *count > 0);
+        per_network.retain(|_, count| *count > 0);
     }
 }
 
@@ -785,21 +824,21 @@ mod tests {
         assert_eq!(guard.taken.len(), MAX_RELAYED_REMEMBERED_PER_ORIGIN + 1);
     }
 
-    /// Keys cost nothing, so one connection presenting fresh origins is held
-    /// to its own share, and another connection is still served (security
-    /// review of #298).
+    /// Keys cost nothing, so one network presenting fresh origins is held to
+    /// its own share, and another network is still served (security review of
+    /// #298; per network, not per peer id, since #299).
     #[test]
-    fn one_connection_cannot_fill_the_replay_memory() {
+    fn one_network_cannot_fill_the_replay_memory() {
         let mut guard = RelayReplayGuard::default();
         let now = 1_000_000_000;
-        for i in 0..MAX_RELAYED_REMEMBERED_PER_CONNECTION as u64 {
+        for i in 0..MAX_RELAYED_REMEMBERED_PER_NETWORK as u64 {
             let digest = *blake3::hash(&i.to_le_bytes()).as_bytes();
             let origin = NodeId(digest);
             assert!(guard.admit_at(&origin, b"sybil", digest, now, now).is_ok());
         }
         assert_eq!(
             guard.admit_at(&NodeId([0xEE; 32]), b"sybil", [0xFF; 32], now, now),
-            Err(Refused::ConnectionShareFull)
+            Err(Refused::NetworkShareFull)
         );
         assert!(guard
             .admit_at(&NodeId([0xEE; 32]), b"honest relay", [0xFE; 32], now, now)
