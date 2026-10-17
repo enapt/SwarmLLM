@@ -59,7 +59,10 @@ fetches only what it lacks: about 12 KB per peer for those 26 models, and nothin
 that already has them. The repeat to the whole network drops from every 2 hours to once a day
 while every connected peer runs this version.
 
-Five library patch updates (serde_json, toml, zeroize, interprocess, uuid).
+Five library patch updates (serde_json, toml, zeroize, interprocess, uuid), and the zip library
+inside the model loader moves to 9.0.4 for three advisories filed on 9-10 October
+(RUSTSEC-2026-0367, -0368, -0369). They concern unpacking an archive to disk, which SwarmLLM
+never does: the library is there only for two model formats SwarmLLM does not read.
 
 ## [0.3.240-alpha] — 2026-10-16
 

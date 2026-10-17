@@ -2817,7 +2817,10 @@ asserts exact equality — each output element is one `vec_dot` over the same
 operands either way, so there is no reduction reordering.
 
 This is why `vendor/candle` exists as a patched copy; the pre-existing reason was
-a `cudarc` linking hardcode (see `Cargo.toml` `[patch.crates-io]`).
+a `cudarc` linking hardcode (see `Cargo.toml` `[patch.crates-io]`). The copy also
+pins `zip` 9.0.4 where upstream 0.10.1 pins 7.2 (RUSTSEC-2026-0367/8/9; `npy.rs`
+and `pickle.rs` take zip 9's fallible entry names). Only candle's `.npz` / `.pth`
+readers use it, and SwarmLLM calls neither.
 
 ### A layer's experts run in one region per projection
 
