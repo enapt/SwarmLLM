@@ -278,6 +278,9 @@ pub(super) async fn handle_remote_generate_request(
             request_id,
             // A peer's request: served within the contribution level.
             crate::inference::process_pool::Requester::Swarm,
+            // A request its caller kept on THEIR computer never reaches this
+            // one, so a peer's request carries no such instruction (#251 (2b)).
+            crate::types::KeepAsked::Unasked,
             req.session_id,
             Some(token_tx),
         )
@@ -623,6 +626,9 @@ pub(super) async fn handle_delegated_split(
         req.session_id,
         None,
         delegation.tools,
+        // A peer's request: one its caller kept on their computer never
+        // reaches this one (#251 (2b)).
+        crate::types::KeepAsked::Unasked,
     );
     request.cancel = Some(cancel.clone());
     request.route_override = Some(crate::inference::route_override::RoutePlanOverride::lead_here());

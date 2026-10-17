@@ -7836,6 +7836,128 @@ fn every_path_a_request_leaves_by_asks_its_scope() {
     );
 }
 
+/// Where "no instruction" is the honest answer because there is no caller's
+/// request to read one from (#251 (2b)): the parser itself, an absent body
+/// field, `/v1/models` and the dashboard describing a model, and a PEER's
+/// request (one its caller kept on their computer never reaches this one).
+const KEEP_UNASKED_IS_THE_ANSWER: &[(&str, &str)] = &[
+    ("src/api/keep_here.rs", "*"),
+    ("src/api/openai/types.rs", "keep_asked"),
+    ("src/api/openai/mod.rs", "another_holder_could_take_part"),
+    ("src/api/admin_models/listing.rs", "list_models"),
+    ("src/api/admin_models/listing.rs", "pipeline_plan"),
+    (
+        "src/daemon/dispatch/remote_generate.rs",
+        "handle_remote_generate_request",
+    ),
+    (
+        "src/daemon/dispatch/remote_generate.rs",
+        "handle_delegated_split",
+    ),
+];
+
+/// The name of the smallest function whose body holds byte `at`.
+fn fn_containing_offset<'a>(src: &'a str, bodies: &[(usize, usize)], at: usize) -> Option<&'a str> {
+    let (start, _) = bodies
+        .iter()
+        .filter(|(s, e)| *s < at && at < *e)
+        .min_by_key(|(s, e)| e - s)?;
+    let sig = src[..*start].rfind("fn ")? + 3;
+    src[sig..]
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .next()
+}
+
+/// Every place in `src` (at `rel`) that writes "no instruction" where a
+/// request's own instruction belongs, as `file:line: in fn`.
+fn keep_unasked_written_for_a_request(rel: &str, src: &str) -> Vec<String> {
+    let bodies = fn_bodies(src);
+    let tests = cfg_test_spans(src);
+    let mut out = Vec::new();
+    for spelling in ["KeepAsked::Unasked", "KeepAsked::default()"] {
+        let mut from = 0usize;
+        while let Some(rel_at) = src[from..].find(spelling) {
+            let at = from + rel_at;
+            from = at + 1;
+            if tests.iter().any(|(s, e)| *s < at && at < *e) {
+                continue;
+            }
+            let line_start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+            if src[line_start..at].trim_start().starts_with("//") {
+                continue;
+            }
+            let name = fn_containing_offset(src, &bodies, at).unwrap_or("<no fn>");
+            if KEEP_UNASKED_IS_THE_ANSWER
+                .iter()
+                .any(|(file, f)| rel.ends_with(file) && (*f == "*" || *f == name))
+            {
+                continue;
+            }
+            out.push(format!("{rel}:{}: in `{name}`", src[..at].lines().count()));
+        }
+    }
+    out
+}
+
+/// **A request's own instruction to stay on this computer reaches every path
+/// that places it** (#251 (2b)). `request_scope`, the cloud gate, the
+/// scheduler, the worker's prompt cache and the MCP fan-out all take the
+/// instruction as a REQUIRED argument, so leaving it out does not compile —
+/// but passing "no instruction" in its place does, and that is the request
+/// leaving the computer its caller kept it on. So "no instruction" is written
+/// only where there is no caller's request to read one from
+/// ([`KEEP_UNASKED_IS_THE_ANSWER`]).
+#[test]
+fn a_requests_keep_instruction_is_never_replaced_by_none() {
+    let mut offenders = Vec::new();
+    for path in rust_files_under(std::path::Path::new("src")) {
+        let rel = path.to_string_lossy().replace('\\', "/");
+        if rel.ends_with("/tests.rs") || rel.contains("/tests/") {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        offenders.extend(keep_unasked_written_for_a_request(&rel, &src));
+    }
+    assert!(
+        offenders.is_empty(),
+        "a request path passes \"no instruction\" where the caller's own \
+         instruction to keep the request on this computer belongs — pass the \
+         request's (`InferenceRequest::keep`, `ChatCompletionRequest::keep_asked`), \
+         or add the place to `KEEP_UNASKED_IS_THE_ANSWER` with why it has no \
+         request:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The guard above sees a planted violation, wrapped or not, and nothing else.
+#[test]
+fn the_keep_instruction_guard_catches_a_path_that_drops_it() {
+    let planted = "pub async fn messages(req: R) {\n    let s = request_scope(\n        &state,\n        &m,\n        crate::types::KeepAsked::Unasked,\n    );\n}\n";
+    assert_eq!(
+        keep_unasked_written_for_a_request("src/api/anthropic/mod.rs", planted).len(),
+        1
+    );
+    let defaulted = "fn tool_chat() {\n    let r = local(m, KeepAsked::default());\n}\n";
+    assert_eq!(
+        keep_unasked_written_for_a_request("src/api/mcp/tools.rs", defaulted).len(),
+        1
+    );
+    // An allowed function is allowed in its own file only.
+    let models = "fn another_holder_could_take_part() {\n    request_scope(&s, &m, KeepAsked::Unasked);\n}\n";
+    assert!(keep_unasked_written_for_a_request("src/api/openai/mod.rs", models).is_empty());
+    assert_eq!(
+        keep_unasked_written_for_a_request("src/api/anthropic/mod.rs", models).len(),
+        1
+    );
+    // A test module and a comment are not violations.
+    let test_mod = "#[cfg(test)]\nmod tests {\n    fn t() { f(KeepAsked::Unasked); }\n}\n";
+    assert!(keep_unasked_written_for_a_request("src/api/x.rs", test_mod).is_empty());
+    let comment = "fn f() {\n    // KeepAsked::Unasked\n    let a = 1;\n}\n";
+    assert!(keep_unasked_written_for_a_request("src/api/x.rs", comment).is_empty());
+}
+
 /// **A model kept on this computer never goes to a cloud provider either.**
 /// Provider routing is by NAME, and a local model's name matches a provider's
 /// prefix rule (`mistral…`, `llama-…`, `gemma…`, `deepseek…`) — with that
@@ -10150,24 +10272,128 @@ fn fn_bodies(src: &str) -> Vec<(usize, usize)> {
             j += 1;
         }
         let Some(start) = body_start else { continue };
-        let mut depth = 0i32;
-        let mut k = start;
-        while k < bytes.len() {
-            match bytes[k] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        out.push((start, k));
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            k += 1;
+        if let Some(end) = closing_brace(bytes, start) {
+            out.push((start, end));
         }
     }
     out
+}
+
+/// The index of the `}` that closes the `{` at `open`, skipping what is not
+/// code: string literals (raw and byte ones too), character literals and
+/// comments. Counting every brace byte, one `Some("{".into())` in
+/// `api/openai/mod.rs`'s tests left each span opened before it unclosed, so
+/// `cfg_test_spans` found no test module in that file and its tests read as
+/// production code (2026-10-17, found by the keep-instruction guard).
+fn closing_brace(bytes: &[u8], open: usize) -> Option<usize> {
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut depth = 0i32;
+    let mut k = open;
+    while k < bytes.len() {
+        match bytes[k] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            b'/' if bytes.get(k + 1) == Some(&b'/') => {
+                while k < bytes.len() && bytes[k] != b'\n' {
+                    k += 1;
+                }
+                continue;
+            }
+            b'/' if bytes.get(k + 1) == Some(&b'*') => {
+                k += 2;
+                while k + 1 < bytes.len() && !(bytes[k] == b'*' && bytes[k + 1] == b'/') {
+                    k += 1;
+                }
+                k += 2;
+                continue;
+            }
+            // `r"…"`, `r#"…"#`, `br#"…"#` — not a raw identifier (`r#type`).
+            b'r' if matches!(bytes.get(k + 1), Some(b'"' | b'#'))
+                && (k == 0
+                    || !ident(bytes[k - 1])
+                    || (bytes[k - 1] == b'b' && (k == 1 || !ident(bytes[k - 2])))) =>
+            {
+                let mut j = k + 1;
+                let mut hashes = 0usize;
+                while bytes.get(j) == Some(&b'#') {
+                    hashes += 1;
+                    j += 1;
+                }
+                if bytes.get(j) == Some(&b'"') {
+                    j += 1;
+                    while j < bytes.len()
+                        && !(bytes[j] == b'"'
+                            && bytes.len() - (j + 1) >= hashes
+                            && bytes[j + 1..j + 1 + hashes].iter().all(|&c| c == b'#'))
+                    {
+                        j += 1;
+                    }
+                    k = j + 1 + hashes;
+                    continue;
+                }
+            }
+            b'"' => {
+                let mut j = k + 1;
+                while j < bytes.len() && bytes[j] != b'"' {
+                    j += if bytes[j] == b'\\' { 2 } else { 1 };
+                }
+                k = j + 1;
+                continue;
+            }
+            // A character literal (`'{'`, `'\''`); a lifetime has no closing
+            // quote two bytes on.
+            b'\'' if bytes.get(k + 1) == Some(&b'\\') => {
+                let mut j = k + 2;
+                while j < bytes.len() && bytes[j] != b'\'' {
+                    j += 1;
+                }
+                k = j + 1;
+                continue;
+            }
+            b'\'' if bytes.get(k + 2) == Some(&b'\'') => {
+                k += 3;
+                continue;
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    None
+}
+
+#[test]
+fn a_brace_inside_a_literal_does_not_end_a_span() {
+    let src = r##"
+fn before() {
+    let s = "{";
+    let c = '}';
+    let r = r#"{ "a": "}" }"#;
+    let e = "\"{";
+    // a stray } in prose
+    /* and { here */
+}
+
+#[cfg(test)]
+mod tests {
+    fn fixture() -> Option<String> {
+        Some("{".into())
+    }
+}
+"##;
+    let bodies = fn_bodies(src);
+    let before = &src[bodies[0].0..=bodies[0].1];
+    assert!(before.starts_with('{') && before.trim_end().ends_with('}'));
+    assert!(before.contains("and { here"), "{before}");
+    assert!(!before.contains("cfg(test)"), "{before}");
+    let tests = cfg_test_spans(src);
+    assert_eq!(tests.len(), 1, "the test module was not found: {tests:?}");
+    let module = &src[tests[0].0..=tests[0].1];
+    assert!(module.contains("fn fixture") && module.trim_end().ends_with('}'));
 }
 
 /// The byte span of everything behind a `#[cfg(test)]`, whether it guards a
@@ -10199,21 +10425,8 @@ fn cfg_test_spans(src: &str) -> Vec<(usize, usize)> {
             j += 1;
         }
         let Some(start) = start else { continue };
-        let mut depth = 0i32;
-        let mut k = start;
-        while k < bytes.len() {
-            match bytes[k] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        out.push((start, k));
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            k += 1;
+        if let Some(end) = closing_brace(bytes, start) {
+            out.push((start, end));
         }
     }
     out

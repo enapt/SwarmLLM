@@ -391,9 +391,14 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 && shard_count > 0
                 && state
                     .shared_state
-                    // `None`: a listing answers for the node, not for a request,
-                    // so there is no per-request override to apply.
-                    .local_fast_path_for(&crate::types::ModelId(id.to_string()), None),
+                    // `None` / `Unasked`: a listing answers for the node, not
+                    // for a request, so there is no per-request override or
+                    // instruction to apply.
+                    .local_fast_path_for(
+                        &crate::types::ModelId(id.to_string()),
+                        None,
+                        crate::types::KeepAsked::Unasked,
+                    ),
             // ⚠ ANY part, not the whole model. A split pipeline runs on
             // partial holders, so this is the honest count of who contributes
             // — and it cannot answer "who could serve this on their own",
@@ -1417,6 +1422,8 @@ pub async fn pipeline_plan(
         uuid::Uuid::new_v4(),
         crate::inference::scheduler::Purpose::Preview,
         None,
+        // A preview of a request that carries no instruction of its own.
+        crate::types::KeepAsked::Unasked,
     ) {
         Ok(a) => a,
         Err(e) if no_route_is_the_answer(&e) => {

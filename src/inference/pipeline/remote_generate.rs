@@ -390,8 +390,15 @@ pub(crate) fn delegation_eligible(exec: &PipelineExecutor) -> bool {
         return false;
     }
     // Any restriction on where this request may go (private mode, a model kept
-    // on this computer) keeps it off the hand-off, which plans nothing more.
-    if crate::pool::scope::request_scope(&exec.shared_state, &exec.request.model_id).is_some() {
+    // on this computer, a request kept here) keeps it off the hand-off, which
+    // plans nothing more.
+    if crate::pool::scope::request_scope(
+        &exec.shared_state,
+        &exec.request.model_id,
+        exec.request.keep,
+    )
+    .is_some()
+    {
         return false;
     }
     true

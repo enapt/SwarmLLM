@@ -213,6 +213,18 @@ pub enum SwarmError {
         missing_shards: Vec<u32>,
     },
 
+    /// The same refusal when it is the CALLER who asked to keep this one
+    /// request here (the `X-SwarmLLM-Keep-On-This-Computer` header, the body's
+    /// `swarmllm.keep_on_this_computer` or MCP's `_meta`; FUTURE_WORK #251
+    /// (2b)). Its own variant because the way out differs: the owner's
+    /// setting is lifted on the model's card, this one by sending the request
+    /// without the instruction — advice that would be wrong for the other.
+    #[error("this request asked to stay on this computer, and this computer cannot run it on its own with {model_id}{}", kept_here_shortfall(.missing_shards))]
+    RequestKeptOnThisComputer {
+        model_id: String,
+        missing_shards: Vec<u32>,
+    },
+
     /// `missing_shards` may hold `MMPROJ_SHARD_INDEX`: no pool device holds
     /// the model's image encoder, and a request carrying an image may not send
     /// it to one outside the pool (`pipeline::vision`).
@@ -876,6 +888,13 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
             err.to_string(),
             "kept_on_this_computer_error",
         ),
+        // The same situation to a caller as the owner's setting, so the same
+        // `error_type`; the variant differs only for the advice (#251 (2b)).
+        SwarmError::RequestKeptOnThisComputer { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            err.to_string(),
+            "kept_on_this_computer_error",
+        ),
         // The two ends of the same policy refusal, and deliberately the same
         // `error_type`: to a caller this is one situation — prompt privacy is
         // on and this node does not hold enough of the model to honour it. They
@@ -1400,6 +1419,18 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
              on the Dashboard, or turn the setting off with the ⚙ button on that card — but then \
              other people's computers can run your requests. Retrying as-is won't help.",
         )),
+        // The request's own instruction: the way out that keeps it here first
+        // (fetch the rest of the model), dropping the instruction last, with
+        // what that lets happen said.
+        SwarmError::RequestKeptOnThisComputer { .. } => Some((
+            "kept_on_this_computer_by_request",
+            "This request asked to stay on this computer, and this computer can't run it on its \
+             own: it doesn't have all of the model (or, for a picture, the part that reads \
+             images). Download the rest from the model's card on the Dashboard, or send the \
+             request without that instruction (the X-SwarmLLM-Keep-On-This-Computer header or the \
+             \"swarmllm\" field) — but then other people's computers can run it. Retrying \
+             as-is won't help.",
+        )),
         SwarmError::PrivateModeUnavailable { .. } => Some((
             "private_mode_unavailable",
             "Private mode keeps your prompts on your own devices and your local network, \
@@ -1522,6 +1553,10 @@ mod tests {
                 model_id: "m".into(),
                 missing_shards: vec![],
             },
+            SwarmError::RequestKeptOnThisComputer {
+                model_id: "m".into(),
+                missing_shards: vec![],
+            },
             SwarmError::PrivateModeUnavailable {
                 model_id: "m".into(),
                 missing_shards: vec![0],
@@ -1612,6 +1647,10 @@ mod tests {
                 model_id: "m".to_string(),
             },
             SwarmError::KeptOnThisComputer {
+                model_id: "m".to_string(),
+                missing_shards: vec![],
+            },
+            SwarmError::RequestKeptOnThisComputer {
                 model_id: "m".to_string(),
                 missing_shards: vec![],
             },
@@ -1916,6 +1955,10 @@ mod tests {
                 model_id: "m".into(),
             },
             SwarmError::KeptOnThisComputer {
+                model_id: "m".into(),
+                missing_shards: vec![],
+            },
+            SwarmError::RequestKeptOnThisComputer {
                 model_id: "m".into(),
                 missing_shards: vec![],
             },

@@ -138,6 +138,9 @@ pub fn request_to_chat(
         // knob is a testing instrument on the chat surface, not part of
         // OpenAI's Responses contract.
         swarm_route: None,
+        // The caller's instruction to keep the request here crosses the
+        // translation intact; `validate_chat_request` folds the header in.
+        swarmllm: req.swarmllm.clone(),
         cache_control: None,
         extras,
     })
@@ -755,6 +758,7 @@ mod tests {
             text: None,
             conversation: None,
             context_management: None,
+            swarmllm: None,
             extras: HashMap::new(),
         }
     }

@@ -1723,8 +1723,9 @@ Guard: `lan_membership_is_never_decided_from_what_a_peer_told_us`.
 
 ## A request reaches only the nodes its scope names, on every path (2026-10-12, #251)
 
-**`pool::scope::request_scope(shared, model_id)` is the one answer to "which nodes may this
-request's data reach"**: this node alone for a model kept on this computer; private mode's
+**`pool::scope::request_scope(shared, model_id, asked)` is the one answer to "which nodes may this
+request's data reach"**: this node alone for a model kept on this computer, or for a request that
+asked to stay here (`KeepAsked::OnThisComputer`, #251 (2b)); private mode's
 `allowed_node_set` plus `cross_pool_extras` otherwise; `None` = unrestricted routing (never trust —
 a credential still needs `is_pool_member`). `allowed_node_set` itself is for shard management, where
 what moves is public weights.
@@ -1765,7 +1766,63 @@ scoped.
   `error_type`, non-penalty, a hint that never says retry), refused up front in
   `assemble_pipeline_for` and again if `gather_candidates` finds nobody.
 - `local_fast_path_for` counts only connected peers INSIDE the scope as "peers to ask".
-- Left (FUTURE_WORK #251): the per-REQUEST form, and private mode's own cloud hole for a swarm model.
+- Private mode's own cloud hole for a swarm model closed as #251 (4).
+
+### The same choice per request (2026-10-17, #251 (2b))
+
+A caller asks with the header `X-SwarmLLM-Keep-On-This-Computer: true` (`true|false|1|0|yes|no`,
+anything else 400), the body field `"swarmllm": {"keep_on_this_computer": true}` on
+`/v1/chat/completions`, `/v1/messages` and `/v1/responses` (`deny_unknown_fields`: a misspelt key
+is a 400, never a silently unkept request), or MCP's `params._meta["com.swarmllm/keep_on_this_computer"]`
+(or the header on `/mcp`). `api::keep_here` reads all three; **the strictest wins and `false`
+never loosens anything** — not the owner's keep, not the header when the body says `false`. The
+field is never forwarded to a cloud provider (`skip_serializing` on OpenAI's shapes; a named field,
+so never in Anthropic's pass-through extras). A request kept here that this computer cannot run
+whole is `RequestKeptOnThisComputer` (503, `kept_on_this_computer_error`, non-penalty, its own hint
+naming the instruction); where the owner also keeps the model, the owner's refusal is the one named
+(`kept_here` orders Owner before Request — the owner's setting is the one the reader can change on
+the Dashboard).
+
+The instruction is a VALUE carried with the request, never looked up: `InferenceRequest.keep`
+(`#[serde(skip)]` — it never crosses the wire; a peer is never told, it is simply never asked),
+set by `InferenceRequest::local(.., keep)`. MCP's fan-out tools call the node's own `/v1/messages`
+over loopback and put the header on each call (`dispatch_model_call`).
+
+Enumerating the paths found two more:
+
+- **A session's earlier route was re-run without asking the scope — in code that never ran.**
+  `distributed_exec`'s "KV cache affinity" re-used a conversation's previous pipeline when every
+  node on it was still connected, with no scope check. It could not fire: the router records a
+  conversation (`KvCacheManager::register_multi_turn`) with an EMPTY route and nothing ever filled
+  it in, so the branch's `!segments.is_empty()` was always false (the split rig's control turn
+  showed no "Reusing previous pipeline" line). It was deleted rather than gated — a re-used route
+  is a second planner, and one that skips the scope is the shape of every leak above. Every turn
+  is planned afresh, inside its scope.
+- **A kept request's prompt cache could be announced and exported.** The worker's prefix cache
+  marks an entry it stores for a kept request (`Entry::kept_here`, from `IpcGenerate.keep_here`);
+  its `manifest()` is then empty, so it is never announced and — export finding entries only
+  through the manifest — never handed to a peer. An entry that covers a kept one inherits the mark
+  (a later unkept turn of the same conversation would otherwise re-announce the kept opening). The
+  mark lives on the entry, not in a side table, because the TTL sweep could drop a side mark during
+  a long prompt pass and fail open. Both ends of the worker's IPC are one build (a per-spawn socket,
+  close-on-exec), so no older worker can drop the flag. The worker's remote-prefix probe asks no
+  peer for a kept request
+  (`PrefixFetchProbe.keep_here` → `request_scope` in `background.rs`, whose scope is then this
+  node alone).
+
+A kept request for a name no manifest knows (a typo, a cloud model) is refused as
+`ModelNotAvailable` (404), never with advice to download the rest of a model there is none of. An
+MCP `_meta` that is not an object is a 400 (it would otherwise hide the key); a key repeated
+inside `_meta` cannot be seen — the JSON-RPC body is parsed into a map that keeps the last value.
+
+What a change must keep: a new surface reads `keep_here::asked` (or `from_mcp_meta`) before it
+routes; a new caller of `InferenceRequest::local` passes the request's keep; a `KeepAsked::Unasked`
+written for a request is an allowlisted, commented decision (a peer's own forward, a listing).
+Tests: `the_strictest_instruction_wins`, `an_instruction_that_cannot_be_read_is_refused`,
+`the_keep_instruction_reaches_the_request_and_never_a_provider`, `a_kept_requests_cache_is_reused_here_and_never_leaves`,
+`a_model_kept_on_this_computer_is_never_planned_onto_a_peer`,
+`private_mode_and_a_kept_model_refuse_the_cloud_for_a_model_of_the_swarm`; 7 mechanisms toggled
+off and shown red; `split_rig.sh keep` checks every form live against a second computer.
 
 ## A network coordinate must be published rough, and fed a MINIMUM
 

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::atomic::Ordering::Relaxed;
 
 use crate::daemon::state::SharedState;
-use crate::types::{ModelId, NodeId};
+use crate::types::{KeepAsked, ModelId, NodeId};
 
 /// Whether this peer is one the operator has explicitly admitted to their pool.
 ///
@@ -96,13 +96,63 @@ pub fn allowed_node_set(shared: &SharedState) -> Option<HashSet<NodeId>> {
 ///
 /// `None` is "unrestricted ROUTING", never trust: handing a peer a secret
 /// still needs [`is_pool_member`].
-pub fn request_scope(shared: &SharedState, model_id: &ModelId) -> Option<HashSet<NodeId>> {
-    if shared.kept_on_this_computer(model_id) {
+///
+/// `asked` is the caller's own instruction for this request (#251 (2b)) and
+/// is REQUIRED: a path that could leave it out is the path the request's
+/// data would leave by. Only `/v1/models`, which describes a model rather
+/// than placing a request, passes `KeepAsked::Unasked` with no request in hand.
+pub fn request_scope(
+    shared: &SharedState,
+    model_id: &ModelId,
+    asked: KeepAsked,
+) -> Option<HashSet<NodeId>> {
+    if kept_here(shared, model_id, asked).is_some() {
         return Some(HashSet::from([shared.identity.node_id().clone()]));
     }
     let mut scope = allowed_node_set(shared)?;
     scope.extend(cross_pool_extras(shared, model_id));
     Some(scope)
+}
+
+/// Who keeps a request on this computer, if anyone (#251).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeptBy {
+    /// The owner's per-model "Keep on this computer" setting.
+    Owner,
+    /// The caller, for this request alone (#251 (2b)).
+    Request,
+}
+
+impl KeptBy {
+    /// The refusal of a request kept here that this computer cannot run on
+    /// its own. Two variants because the advice differs: the owner changes
+    /// the model's setting, the caller drops their instruction.
+    pub fn refusal(self, model_id: String, missing_shards: Vec<u32>) -> crate::error::SwarmError {
+        match self {
+            Self::Owner => crate::error::SwarmError::KeptOnThisComputer {
+                model_id,
+                missing_shards,
+            },
+            Self::Request => crate::error::SwarmError::RequestKeptOnThisComputer {
+                model_id,
+                missing_shards,
+            },
+        }
+    }
+}
+
+/// Is a request for `model_id` kept on this computer, and by whom — the ONE
+/// answer, read by [`request_scope`], the cloud gate and both refusals. The
+/// owner's setting is named first when both apply: the caller dropping their
+/// instruction would not let the request out, so it is the wrong advice.
+pub fn kept_here(shared: &SharedState, model_id: &ModelId, asked: KeepAsked) -> Option<KeptBy> {
+    if shared.kept_on_this_computer(model_id) {
+        Some(KeptBy::Owner)
+    } else if asked == KeepAsked::OnThisComputer {
+        Some(KeptBy::Request)
+    } else {
+        None
+    }
 }
 
 /// The parts of `manifest` that no node in its request scope holds — what a
@@ -111,8 +161,9 @@ pub fn request_scope(shared: &SharedState, model_id: &ModelId) -> Option<HashSet
 pub fn parts_outside_scope(
     shared: &SharedState,
     manifest: &crate::types::ModelManifest,
+    asked: KeepAsked,
 ) -> Vec<u32> {
-    let scope = request_scope(shared, &manifest.id).unwrap_or_default();
+    let scope = request_scope(shared, &manifest.id, asked).unwrap_or_default();
     manifest
         .shards
         .iter()
@@ -321,15 +372,15 @@ mod tests {
         let kept = crate::types::ModelId("kept".into());
         let other = crate::types::ModelId("other".into());
         // THE CONTROL: nothing kept, private mode off → unrestricted.
-        assert!(request_scope(&state, &kept).is_none());
+        assert!(request_scope(&state, &kept, KeepAsked::Unasked).is_none());
 
         state.keep_on_this_computer(&kept, true).unwrap();
         assert_eq!(
-            request_scope(&state, &kept),
+            request_scope(&state, &kept, KeepAsked::Unasked),
             Some(HashSet::from([me.clone()]))
         );
         assert!(
-            request_scope(&state, &other).is_none(),
+            request_scope(&state, &other, KeepAsked::Unasked).is_none(),
             "the setting is per model"
         );
 
@@ -356,12 +407,49 @@ mod tests {
                 goodput_samples: 0,
             },
         );
-        assert_eq!(request_scope(&state, &kept), Some(HashSet::from([me])));
-        assert!(request_scope(&state, &other).unwrap().contains(&lan));
+        assert_eq!(
+            request_scope(&state, &kept, KeepAsked::Unasked),
+            Some(HashSet::from([me]))
+        );
+        assert!(request_scope(&state, &other, KeepAsked::Unasked)
+            .unwrap()
+            .contains(&lan));
 
         // Turning it off restores the node-wide answer.
         state.keep_on_this_computer(&kept, false).unwrap();
-        assert!(request_scope(&state, &kept).unwrap().contains(&lan));
+        assert!(request_scope(&state, &kept, KeepAsked::Unasked)
+            .unwrap()
+            .contains(&lan));
+    }
+
+    /// **A request whose CALLER asked to keep it here reaches nobody else**,
+    /// private mode or not, and the same model asked nothing keeps the
+    /// node-wide answer (#251 (2b)). When the owner keeps the model too, the
+    /// owner is named: dropping the instruction would not let it out.
+    #[test]
+    fn a_request_asked_to_stay_here_is_scoped_to_this_node_alone() {
+        let state = make_state(Config::default());
+        let me = state.identity.node_id().clone();
+        let model = crate::types::ModelId("asked".into());
+        assert!(request_scope(&state, &model, KeepAsked::Unasked).is_none());
+        assert_eq!(
+            request_scope(&state, &model, KeepAsked::OnThisComputer),
+            Some(HashSet::from([me]))
+        );
+        assert_eq!(
+            kept_here(&state, &model, KeepAsked::OnThisComputer),
+            Some(KeptBy::Request)
+        );
+        state.keep_on_this_computer(&model, true).unwrap();
+        assert_eq!(
+            kept_here(&state, &model, KeepAsked::OnThisComputer),
+            Some(KeptBy::Owner),
+            "the owner's setting is the one the caller cannot lift"
+        );
+        assert_eq!(
+            kept_here(&state, &model, KeepAsked::Unasked),
+            Some(KeptBy::Owner)
+        );
     }
 
     /// The local node is always itself.

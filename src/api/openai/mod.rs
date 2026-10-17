@@ -57,6 +57,19 @@ fn validate_chat_request(
         }
     }
 
+    // The caller's instruction to keep this request here (#251 (2b)): the
+    // header folded into the body's field, the strictest of the two, so every
+    // path below reads ONE answer (`ChatCompletionRequest::keep_asked`). The
+    // Responses API calls this handler with its own headers, so its header
+    // arrives here too.
+    if crate::api::keep_here::asked(headers, req.swarmllm.as_ref()).map_err(ApiError)?
+        == crate::types::KeepAsked::OnThisComputer
+    {
+        req.swarmllm = Some(crate::api::keep_here::SwarmllmOptions {
+            keep_on_this_computer: Some(true),
+        });
+    }
+
     // Bind session_id to the caller's API key so different users cannot
     // hijack each other's KV-cache sessions by guessing session IDs.
     if let Some(ref mut sid) = req.session_id {
@@ -216,7 +229,9 @@ async fn try_cloud_proxy(
 ) -> Result<Option<axum::response::Response>, ApiError> {
     // Reached only once nothing local or in the request's scope could take
     // it, so a kept model's answer is the refusal (#251).
-    if let Some(refusal) = crate::api::providers::cloud_refused_for(state, &req.model).await {
+    if let Some(refusal) =
+        crate::api::providers::cloud_refused_for(state, &req.model, req.keep_asked()).await
+    {
         return Err(ApiError(refusal));
     }
     // Claude subscription: proxy through local CLI subprocess (higher priority than API key)
@@ -418,7 +433,7 @@ pub async fn chat_completions(
         // Priority 2: Forward to a peer that hosts shards for this model.
         // That peer can handle inference locally or build its own pipeline.
         if !is_forwarded {
-            if let Some(peer) = find_peer_with_model(&state, &req.model) {
+            if let Some(peer) = find_peer_with_model(&state, &req.model, req.keep_asked()) {
                 tracing::info!(
                     request_id = %request_id,
                     peer_url = %peer.url,
@@ -494,7 +509,7 @@ pub async fn chat_completions(
             }
             // Re-check peer forwarding
             if !is_forwarded {
-                if let Some(peer) = find_peer_with_model(&state, &req.model) {
+                if let Some(peer) = find_peer_with_model(&state, &req.model, req.keep_asked()) {
                     tracing::info!(
                         request_id = %request_id,
                         peer_url = %peer.url,
@@ -542,9 +557,11 @@ pub async fn chat_completions(
     // `Generate`, which has no adapter, so the reply would be the base model's
     // (FUTURE_WORK #110). The router plans it as one local segment instead.
     let has_local_split_model = req.lora_adapter.is_none()
-        && state
-            .shared_state
-            .local_fast_path_for(&requested_mid, req.route_plan_override().as_ref());
+        && state.shared_state.local_fast_path_for(
+            &requested_mid,
+            req.route_plan_override().as_ref(),
+            req.keep_asked(),
+        );
 
     if has_local_split_model {
         // Echo the model the client actually requested (`req.model`), NOT the
@@ -567,6 +584,7 @@ pub async fn chat_completions(
                     .and_then(|v| v.get("include_usage"))
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
+                req.keep_asked(),
             )
             .await
             .into_response());
@@ -580,6 +598,7 @@ pub async fn chat_completions(
                 params,
                 requested_mid.clone(),
                 req.tool_definitions(),
+                req.keep_asked(),
             )
             .await;
         }
@@ -706,7 +725,9 @@ fn another_holder_could_take_part(shared: &crate::daemon::SharedState, model_id:
     let Some(manifest) = shared.model_registry.get_manifest(&id) else {
         return false;
     };
-    let scope = crate::pool::scope::request_scope(shared, &id);
+    // `/v1/models` describes the model to every caller, so it asks the scope
+    // of a request that carries no instruction of its own (#251 (2b)).
+    let scope = crate::pool::scope::request_scope(shared, &id, crate::types::KeepAsked::Unasked);
     let local = shared.identity.node_id();
     manifest.shards.iter().any(|s| {
         let shard = crate::types::ShardId {
@@ -1046,6 +1067,37 @@ pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The header is folded into the request (#251 (2b)), so every path below
+    /// reads one answer; a value that cannot be read is a 400, never ignored;
+    /// a misspelt body key is refused; and the field is never serialized, so
+    /// the cloud passthrough cannot forward it.
+    #[test]
+    fn the_keep_instruction_reaches_the_request_and_never_a_provider() {
+        let body = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
+        let header = |v: &str| {
+            let mut h = axum::http::HeaderMap::new();
+            h.insert(crate::api::keep_here::HEADER, v.parse().unwrap());
+            h
+        };
+        let mut req: ChatCompletionRequest = serde_json::from_str(body).unwrap();
+        assert_eq!(req.keep_asked(), crate::types::KeepAsked::Unasked);
+        assert!(validate_chat_request(&mut req, &header("true")).is_ok());
+        assert_eq!(req.keep_asked(), crate::types::KeepAsked::OnThisComputer);
+        assert!(serde_json::to_value(&req)
+            .unwrap()
+            .get("swarmllm")
+            .is_none());
+
+        let mut req: ChatCompletionRequest = serde_json::from_str(body).unwrap();
+        assert!(matches!(
+            validate_chat_request(&mut req, &header("maybe")),
+            Err(ApiError(crate::error::SwarmError::Validation(_)))
+        ));
+
+        let typo = r#"{"model":"m","messages":[],"swarmllm":{"keep_on_this_computr":true}}"#;
+        assert!(serde_json::from_str::<ChatCompletionRequest>(typo).is_err());
+    }
 
     /// A LoRA adapter id is a plain name — it names a file under the adapter
     /// directory — so a path is refused before anything is routed.
@@ -1414,6 +1466,7 @@ mod tests {
             session_id: None,
             lora_adapter: None,
             swarm_route: None,
+            swarmllm: None,
             cache_control: None,
             extras: Default::default(),
         };

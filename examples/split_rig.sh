@@ -77,7 +77,11 @@
 #          B. Three asks through A: the setting off (200 through B), on (A
 #          refuses: 503 `kept_on_this_computer_error`, and its preview plan is
 #          not routable), off again (200 through B). PASS = all three, and B
-#          was handed nothing while the setting was on. Default model tinyllama.
+#          was handed nothing while the setting was on. Then the same choice per
+#          REQUEST with the setting off (#251 (2b)): the header and the body's
+#          `swarmllm` field (503, B handed nothing), a bad header value and a
+#          misspelt field (400), the header saying `false` (200 through B), MCP's
+#          `_meta` (refused, B handed nothing). Default model tinyllama.
 #   context  the FAILOVER topology, but B serves a SHORTER conversation than the
 #          long prompt (CEIL_B, default 512, as B's own max_seq_len_override) —
 #          the field report of 2026-09-25, where an 8192-token peer refused an
@@ -674,12 +678,14 @@ echo "rig: A sees exactly its $PEERS_EXPECTED rig peer(s)"
 ask() { # prompt max_tokens label  (writes $OUT/<label>.{hdr,body}, prints a JSON line)
   local body
   # RIG_ROUTE: a `swarm_route` object for this ask (e.g. nodes to exclude).
+  # RIG_BODY: a JSON object merged into the body; RIG_HEADER: one more header.
   body=$(python3 -c 'import json,os,sys
 b={"model":sys.argv[1],"max_tokens":int(sys.argv[3]),"temperature":float(os.environ.get("RIG_TEMPERATURE","0")),"messages":[{"role":"user","content":sys.argv[2]}]}
 if os.environ.get("RIG_ROUTE"): b["swarm_route"]=json.loads(os.environ["RIG_ROUTE"])
+if os.environ.get("RIG_BODY"): b.update(json.loads(os.environ["RIG_BODY"]))
 print(json.dumps(b))' "$MODEL" "$1" "$2")
   curl -s -m 900 -D "$OUT/$3.hdr" -H "Authorization: Bearer $KA" -H "Content-Type: application/json" \
-       -X POST localhost:8900/v1/chat/completions -d "$body" -o "$OUT/$3.body"
+       ${RIG_HEADER:+-H "$RIG_HEADER"} -X POST localhost:8900/v1/chat/completions -d "$body" -o "$OUT/$3.body"
   python3 -c 'import json,sys
 h=open(sys.argv[1]).read().lower()
 status=h.splitlines()[0].strip() if h else "no response"
@@ -724,6 +730,51 @@ ok = (" 200" in status("open") and f0 > fo and " 503" in status("kept") and kept
 print("keep:", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)
 PY
+  PER_MODEL=$?
+  # The same choice per REQUEST, the setting off (#251 (2b)).
+  H="X-SwarmLLM-Keep-On-This-Computer"
+  G0=$(forwards)
+  RIG_HEADER="$H: true" ask "$Q" 24 hdrkept | tee -a "$OUT/keep.jsonl" | cut -c1-200
+  RIG_BODY='{"swarmllm": {"keep_on_this_computer": true}}' ask "$Q" 24 bodykept | tee -a "$OUT/keep.jsonl" | cut -c1-200
+  RIG_HEADER="$H: maybe" ask "$Q" 24 badheader | tee -a "$OUT/keep.jsonl" | cut -c1-200
+  RIG_BODY='{"swarmllm": {"keep_on_this_computr": true}}' ask "$Q" 24 typo | tee -a "$OUT/keep.jsonl" | cut -c1-200
+  curl -s -m 120 -H "Authorization: Bearer $KA" -H 'Content-Type: application/json' -X POST localhost:8900/mcp \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"chat\",\"arguments\":{\"model\":\"$MODEL\",\"max_tokens\":24,\"messages\":[{\"role\":\"user\",\"content\":\"$Q\"}]},\"_meta\":{\"com.swarmllm/keep_on_this_computer\":true}}}" \
+    -o "$OUT/mcpkept.body"
+  echo "keep: mcp -> $(cut -c1-200 "$OUT/mcpkept.body")"
+  G1=$(forwards)
+  RIG_HEADER="$H: false" ask "$Q" 24 hdrfalse | tee -a "$OUT/keep.jsonl" | cut -c1-200
+  G2=$(forwards)
+  python3 - "$OUT" "$G0 $G1 $G2" <<'PY'
+import json, sys
+out = sys.argv[1]
+g0, g1, g2 = map(int, sys.argv[2].split())
+status = lambda l: (open(f"{out}/{l}.hdr").read().splitlines() or ["none"])[0].strip()
+def err(l):
+    try:
+        e = json.load(open(f"{out}/{l}.body"))["error"]
+        return e.get("type"), e.get("message", "")
+    except Exception:
+        return "none", ""
+asked = lambda l: " 503" in status(l) and err(l)[0] == "kept_on_this_computer_error" and "asked to stay" in err(l)[1]
+mcp = open(f"{out}/mcpkept.body").read()
+checks = {
+    "header 503": asked("hdrkept"),
+    "body 503": asked("bodykept"),
+    "bad header 400": " 400" in status("badheader"),
+    "typo 400": " 400" in status("typo"),
+    "mcp refused": "asked to stay" in mcp,
+    "B handed nothing while asked": g1 == g0,
+    "false 200 through B": " 200" in status("hdrfalse") and g2 > g1,
+}
+for k, v in checks.items():
+    print(f"keep per request: {'ok  ' if v else 'FAIL'} {k}")
+ok = all(checks.values())
+print("keep per request:", "PASS" if ok else "FAIL")
+sys.exit(0 if ok else 1)
+PY
+  PER_REQUEST=$?
+  [ "$PER_MODEL" = 0 ] && [ "$PER_REQUEST" = 0 ]
   exit $?
 fi
 

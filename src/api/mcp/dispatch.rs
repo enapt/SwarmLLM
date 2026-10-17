@@ -130,6 +130,10 @@ pub(super) async fn dispatch_model_call(
     system: Option<&str>,
     temperature: f32,
     max_tokens: u32,
+    // The MCP caller's instruction to keep the call on this computer (#251
+    // (2b)), passed on to the node's own API as its header — every fan-out
+    // call goes through here, so none can drop it.
+    keep: crate::types::KeepAsked,
 ) -> ModelCallResult {
     let start = std::time::Instant::now();
 
@@ -144,13 +148,14 @@ pub(super) async fn dispatch_model_call(
         body["system"] = json!(sys);
     }
 
-    let result = client
+    let mut request = client
         .post(url)
         .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await;
+        .header("Content-Type", "application/json");
+    if keep.is_kept() {
+        request = request.header(crate::api::keep_here::HEADER, "true");
+    }
+    let result = request.json(&body).send().await;
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
@@ -205,6 +210,7 @@ pub(super) fn spawn_model_call_task<F>(
     system: Option<String>,
     temperature: f32,
     max_tokens: u32,
+    keep: crate::types::KeepAsked,
     shape: F,
 ) -> tokio::task::JoinHandle<serde_json::Value>
 where
@@ -221,6 +227,7 @@ where
             system.as_deref(),
             temperature,
             max_tokens,
+            keep,
         )
         .await;
         // Whether the model actually said anything is decided HERE — where the

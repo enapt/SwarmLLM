@@ -87,6 +87,7 @@ impl PipelineExecutor {
                 // A plan that came back here is the owner's, unless a peer
                 // delegated the request to us (`worker_requester`).
                 super::worker_requester(&self.request),
+                self.request.keep,
                 self.request.session_id.clone(),
                 token_tx,
             ),
@@ -217,6 +218,7 @@ mod tests {
             cancel: None,
             route_override: None,
             continuation: None,
+            keep: Default::default(),
         };
         let (tx, _rx) = tokio::sync::mpsc::channel::<NetworkCommand>(8);
         let assignment = PipelineAssignment {
@@ -592,6 +594,7 @@ mod tests {
             None,
             None,
             None,
+            crate::types::KeepAsked::Unasked,
         );
         assert!(worker_requester(&request) == Requester::Owner);
         request.route_override = Some(RoutePlanOverride {

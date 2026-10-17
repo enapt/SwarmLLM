@@ -59,7 +59,7 @@ use crate::inference::split::{
 };
 use crate::inference::swift::{SwiftCalibrator, SwiftConfig};
 use crate::inference::worker_ipc::*;
-use crate::types::{NetworkFinishReason, SamplingParams};
+use crate::types::{KeepAsked, NetworkFinishReason, SamplingParams};
 
 /// Configuration for the worker's cross-request prefix KV-cache.
 #[derive(Debug, Clone, Copy)]
@@ -2582,6 +2582,9 @@ async fn try_remote_prefix_hydrate(
     req_id_str: &str,
     prompt_ids: &[u32],
     prompt_tokens: usize,
+    // The request's caller asked to keep it on this computer (#251 (2b)):
+    // the probe says so, and the daemon then asks no peer.
+    keep: KeepAsked,
 ) -> usize {
     let block_size = prefix_cache.block_tokens();
     if block_size == 0 {
@@ -2613,6 +2616,7 @@ async fn try_remote_prefix_hydrate(
             request_id: probe_id,
             model_id: model_id.clone(),
             blocks,
+            keep_here: keep.is_kept(),
         },
         &[],
     )
@@ -4192,6 +4196,7 @@ async fn handle_generate(
             &req_id_str,
             &prompt_ids,
             prompt_tokens,
+            KeepAsked::kept_if(gen.keep_here),
         )
         .await;
     }
@@ -4264,8 +4269,14 @@ async fn handle_generate(
     // prefix skip the prefill work. insert_from_kv is a no-op when the
     // prompt is shorter than the configured floor or the cache is off.
     let room = snapshot_room(model, kv_store, prefix_cache, prompt_ids.len());
-    let manifest =
-        prefix_cache.insert_from_kv(&model_key_string, &req_id_str, kv_store, &prompt_ids, room);
+    let manifest = prefix_cache.insert_from_kv(
+        &model_key_string,
+        &req_id_str,
+        kv_store,
+        &prompt_ids,
+        room,
+        KeepAsked::kept_if(gen.keep_here),
+    );
     // A snapshot kept beside the live cache is device memory the head-room
     // guard must see.
     if prefix_cache_charged() {
@@ -5170,6 +5181,7 @@ async fn try_register_generate_slot(
             &req_id_str,
             &prompt_ids,
             prompt_tokens,
+            KeepAsked::kept_if(gen.keep_here),
         )
         .await;
     }
@@ -5221,6 +5233,7 @@ async fn try_register_generate_slot(
         finish_reason: None,
         error_message: None,
         matched_stop_sequence: None,
+        keep_here: gen.keep_here,
     };
     let prompt_len = slot.prompt_tokens;
     let remaining_after_prefix = prompt_len.saturating_sub(prefix_len);
@@ -5489,6 +5502,7 @@ async fn step_decode_pool(
                         kv_store,
                         &slot.prompt_ids,
                         room,
+                        KeepAsked::kept_if(slot.keep_here),
                     );
                     if prefix_cache_charged() {
                         kv_store.set_external_reserved(

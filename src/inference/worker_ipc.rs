@@ -294,6 +294,11 @@ pub enum WorkerMsg {
         request_id: Uuid,
         model_id: ModelId,
         blocks: Vec<PrefixBlockEntry>,
+        /// The probing request's caller asked to keep it on this computer
+        /// (#251 (2b)), so the daemon asks no peer: the probe's scope is
+        /// `pool::scope::request_scope` under that instruction.
+        #[serde(default)]
+        keep_here: bool,
     },
     /// Item 8 Phase 2b: worker's reply to `DaemonMsg::ExportPrefixSnapshot`.
     /// When `present == true`, the serialized `KvSnapshot` bytes are carried
@@ -560,6 +565,16 @@ pub struct IpcGenerate {
     /// bookkeeping (`KvCacheStore::mark_owner_request`).
     #[serde(default)]
     pub for_the_owner: bool,
+    /// The request's caller asked to keep it on this computer (#251 (2b)):
+    /// its prompt's cache is saved for reuse HERE only — never announced to a
+    /// peer, exported to one, or looked for on one (`PrefixCache`'s
+    /// `kept_here`, `WorkerMsg::PrefixFetchProbe::keep_here`). Both ends are
+    /// one build: a worker only ever talks to the daemon that spawned it (its
+    /// socket is named afresh at each spawn, and the daemon's end closes when
+    /// an update `exec`s the new binary), so an older worker can never drop
+    /// the field for a newer daemon.
+    #[serde(default)]
+    pub keep_here: bool,
 }
 
 /// A drafting call (`DaemonMsg::Draft`).

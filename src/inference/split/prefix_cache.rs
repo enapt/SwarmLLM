@@ -41,7 +41,7 @@ use crate::inference::split::kv_cache::LayerKv;
 use candle_core::{Device, Tensor};
 
 use crate::error::SwarmError;
-use crate::types::PrefixBlockEntry;
+use crate::types::{KeepAsked, PrefixBlockEntry};
 
 use super::kv_cache::{CacheLayout, KvCacheEntry, KvCacheStore};
 
@@ -335,6 +335,11 @@ struct Entry {
     /// read-lock path — bumping the timestamp no longer needs a write
     /// lock upgrade.
     last_hit: AtomicU64,
+    /// Saved from a request whose caller asked to keep it on this computer
+    /// (#251 (2b)): reused here, never announced to a peer or exported to one
+    /// — `manifest` is empty for it, and `export_snapshot_bytes` finds an
+    /// entry only through `manifest`.
+    kept_here: bool,
 }
 
 impl Entry {
@@ -346,9 +351,11 @@ impl Entry {
     /// Empty for a snapshot of a slid cache (FUTURE_WORK #281): the wire
     /// format carries every position from 0, and a peer reading a partial
     /// layer as whole would answer from the wrong keys — so it is neither
-    /// announced nor exported.
+    /// announced nor exported. Empty too for an entry kept on this computer
+    /// (#251 (2b)): a block hash is a commitment to the prompt it was taken
+    /// from, and the snapshot is the prompt's cache.
     fn manifest(&self, block_size: usize) -> Vec<PrefixBlockEntry> {
-        if !self.snapshot.holds_every_position() {
+        if self.kept_here || !self.snapshot.holds_every_position() {
             return Vec::new();
         }
         compute_block_hashes(&self.tokens, block_size)
@@ -581,6 +588,9 @@ impl PrefixCache {
         kv_store: &KvCacheStore,
         prompt_tokens: &[u32],
         room: SnapshotRoom,
+        // The request's own instruction (#251 (2b)) — required, so neither
+        // insert site can save a kept request's cache as one to share.
+        keep: KeepAsked,
     ) -> Vec<PrefixBlockEntry> {
         // `room` is where the copy goes and what fits there, from
         // `kv_budget::plan_snapshot` — a snapshot that does not fit is worse
@@ -750,15 +760,21 @@ impl PrefixCache {
         // of the conversation ours cannot — llama.cpp keeps checkpoints of a
         // windowed cache for the same reason (FUTURE_WORK #281).
         let serves = snap.serves_from;
-        bucket.retain(|e| {
-            !e.chain.is_empty() || !tokens.starts_with(&e.tokens) || e.tokens.len() < serves
-        });
+        let covered = |e: &Entry| {
+            e.chain.is_empty() && tokens.starts_with(&e.tokens) && e.tokens.len() >= serves
+        };
+        // An entry this one replaces passes its keep on: the strictest
+        // instruction wins, as it does for the request (`api::keep_here`).
+        let kept_here =
+            keep == KeepAsked::OnThisComputer || bucket.iter().any(|e| covered(e) && e.kept_here);
+        bucket.retain(|e| !covered(e));
         bucket.push(Entry {
             tokens,
             chain: Vec::new(),
             chain_block: 0,
             snapshot: snap,
             last_hit: AtomicU64::new(tick),
+            kept_here,
         });
         self.evict_over_caps(bucket);
 
@@ -966,6 +982,10 @@ impl PrefixCache {
             chain_block: block_tokens,
             snapshot: snap,
             last_hit: AtomicU64::new(tick),
+            // A split segment's entry has no manifest (no tokens), so it is
+            // never announced or exported whatever this says; and a request
+            // kept here has no segment on another computer to store one for.
+            kept_here: false,
         });
         self.evict_over_caps(bucket);
         // Held only if the eviction kept it.
@@ -1813,7 +1833,7 @@ mod tests {
         for (req, base) in [("req-a", 100u32), ("req-b", 200), ("req-c", 300)] {
             make_fake_kv(&kv_store, "m", req, 2, 10);
             let tokens: Vec<u32> = (base..base + 10).collect();
-            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE);
+            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE, KeepAsked::Unasked);
         }
         let b: Vec<u32> = (200..210).collect();
         assert!(pc.lookup("m", &b).is_some());
@@ -1870,7 +1890,7 @@ mod tests {
         for (req, base) in [("req-a", 100u32), ("req-b", 200)] {
             make_fake_kv(&kv_store, "m", req, 2, 10);
             let tokens: Vec<u32> = (base..base + 10).collect();
-            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE);
+            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE, KeepAsked::Unasked);
         }
         let per_entry = pc.bytes_in(SnapshotHome::BesideLive) / 2;
         assert!(per_entry > 0);
@@ -1903,7 +1923,14 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
         let tokens: Vec<u32> = (100..110).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
+        pc.insert_from_kv(
+            "m",
+            "req-a",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
         move_off_card(&pc, "m", 100);
 
         let snap = pc.lookup("m", &tokens).expect("hit");
@@ -2054,7 +2081,14 @@ mod tests {
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
 
         let tokens: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
+        pc.insert_from_kv(
+            "m",
+            "req-a",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
         assert_eq!(pc.entry_count("m"), 1);
 
         // New request with same tokens + 5 more: should hit at 10.
@@ -2142,7 +2176,7 @@ mod tests {
         );
         make_fake_kv(&kv_store, "m", "tok", 2, 10);
         let tokens: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "tok", &kv_store, &tokens, ANYWHERE);
+        pc.insert_from_kv("m", "tok", &kv_store, &tokens, ANYWHERE, KeepAsked::Unasked);
         assert_eq!(
             pc.entry_count("m"),
             2,
@@ -2185,7 +2219,14 @@ mod tests {
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
 
         let tokens_a: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens_a, ANYWHERE);
+        pc.insert_from_kv(
+            "m",
+            "req-a",
+            &kv_store,
+            &tokens_a,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
         assert_eq!(pc.entry_count("m"), 1);
 
         let mut tokens_b: Vec<u32> = (1..=6).collect();
@@ -2209,7 +2250,14 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 12);
         let tokens: Vec<u32> = (1..=12).collect();
-        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
+        let manifest = pc.insert_from_kv(
+            "m",
+            "req-a",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
         assert_eq!(pc.entry_count("m"), 1);
         // The announce manifest still covers every block boundary.
         assert_eq!(manifest.len(), 3);
@@ -2223,7 +2271,14 @@ mod tests {
 
         // req-a's KV is zeros (make_fake_kv); insert it.
         make_fake_kv(&kv_store, "m", "req-a", 2, 8);
-        let m1 = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
+        let m1 = pc.insert_from_kv(
+            "m",
+            "req-a",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
 
         // req-b holds DIFFERENT KV content (ones) for the same tokens. If the
         // second insert re-snapshots, the cached tensors become ones; if it
@@ -2239,7 +2294,14 @@ mod tests {
                 *slot = Some(kv);
             }
         }
-        let m2 = pc.insert_from_kv("m", "req-b", &kv_store, &tokens, ANYWHERE);
+        let m2 = pc.insert_from_kv(
+            "m",
+            "req-b",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
 
         assert_eq!(pc.entry_count("m"), 1);
         // The skip must still report the full manifest, or the caller stops
@@ -2268,6 +2330,7 @@ mod tests {
             &kv_store,
             &(1..=8).collect::<Vec<_>>(),
             ANYWHERE,
+            KeepAsked::Unasked,
         );
         make_fake_kv(&kv_store, "m", "req-b", 2, 12);
         pc.insert_from_kv(
@@ -2276,6 +2339,7 @@ mod tests {
             &kv_store,
             &(1..=12).collect::<Vec<_>>(),
             ANYWHERE,
+            KeepAsked::Unasked,
         );
 
         assert_eq!(pc.entry_count("m"), 1);
@@ -2291,7 +2355,14 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
         let tokens: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
+        pc.insert_from_kv(
+            "m",
+            "req-a",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
 
         let snap = pc.lookup("m", &tokens).expect("hit");
         assert_eq!(snap.token_count, 9);
@@ -2303,7 +2374,14 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
         let tokens_a: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens_a, ANYWHERE);
+        pc.insert_from_kv(
+            "m",
+            "req-a",
+            &kv_store,
+            &tokens_a,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
 
         let tokens_b: Vec<u32> = vec![99, 98, 97, 96, 95, 94, 93, 92];
         assert!(pc.lookup("m", &tokens_b).is_none());
@@ -2315,7 +2393,14 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
         let tokens: Vec<u32> = (1..=10).collect();
-        pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
+        pc.insert_from_kv(
+            "m",
+            "req-a",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
         // lookup requires at least one token left to forward, so query with a
         // longer prompt that still has `tokens` as its strict prefix.
         let lookup_tokens: Vec<u32> = (1..=12).collect();
@@ -2376,7 +2461,14 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 12);
         let tokens: Vec<u32> = (1..=12).collect();
-        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
+        let manifest = pc.insert_from_kv(
+            "m",
+            "req-a",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
         assert_eq!(manifest.len(), 3);
         // token_count grows by block_size (4) each entry.
         assert_eq!(manifest[0].token_count, 4);
@@ -2395,8 +2487,8 @@ mod tests {
         make_fake_kv(&kv_store, "m", "req-b", 2, 8);
         let a: Vec<u32> = vec![1, 2, 3, 4, 50, 51, 52, 53];
         let b: Vec<u32> = vec![1, 2, 3, 4, 60, 61, 62, 63];
-        let _ = pc.insert_from_kv("m", "req-a", &kv_store, &a, ANYWHERE);
-        let _ = pc.insert_from_kv("m", "req-b", &kv_store, &b, ANYWHERE);
+        let _ = pc.insert_from_kv("m", "req-a", &kv_store, &a, ANYWHERE, KeepAsked::Unasked);
+        let _ = pc.insert_from_kv("m", "req-b", &kv_store, &b, ANYWHERE, KeepAsked::Unasked);
         let manifest = pc.enumerate_manifest("m");
         // Block 0 (shared) appears once, plus block 1 from each prompt = 3.
         assert_eq!(manifest.len(), 3);
@@ -2419,6 +2511,7 @@ mod tests {
             &kv_store,
             &(1..=8).collect::<Vec<_>>(),
             ANYWHERE,
+            KeepAsked::Unasked,
         );
         // block_tokens=0 → enumerate_manifest is empty even though the
         // entry exists (it was inserted via the always-store-tail rule).
@@ -2553,6 +2646,70 @@ mod tests {
         assert!(deserialize_snapshot(&buf, &Device::Cpu).is_err());
     }
 
+    /// A request whose caller asked to keep it on this computer (#251 (2b))
+    /// is reused here and never leaves: its entry is neither announced nor
+    /// exported, though a later prompt on this node still hits it.
+    #[test]
+    fn a_kept_requests_cache_is_reused_here_and_never_leaves() {
+        let pc = PrefixCache::new(true, 8, 4, 4, 8192, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_fake_kv(&kv_store, "m", "kept", 2, 12);
+        let tokens: Vec<u32> = (1..=12).collect();
+        let announced = pc.insert_from_kv(
+            "m",
+            "kept",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::OnThisComputer,
+        );
+        assert!(
+            announced.is_empty(),
+            "a kept request's blocks are announced"
+        );
+        assert!(pc.enumerate_manifest("m").is_empty());
+        let hashes = compute_block_hashes(&tokens, 4);
+        for block in &hashes {
+            assert!(
+                pc.export_snapshot_bytes("m", &block.block_hash).is_none(),
+                "a kept request's cache is exported to a peer"
+            );
+        }
+        assert!(pc.lookup("m", &tokens).is_some(), "nor is it reused here");
+
+        // A longer prompt that replaces it keeps the mark: the strictest
+        // instruction wins.
+        let longer: Vec<u32> = (1..=16).collect();
+        make_fake_kv(&kv_store, "m", "later", 2, 16);
+        let announced = pc.insert_from_kv(
+            "m",
+            "later",
+            &kv_store,
+            &longer,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
+        assert!(
+            announced.is_empty(),
+            "the entry that replaced it lost its keep"
+        );
+
+        // The control: an unasked request's cache is announced and exported.
+        let open = PrefixCache::new(true, 8, 4, 4, 8192, 0);
+        let announced = open.insert_from_kv(
+            "m",
+            "kept",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
+        assert_eq!(announced.len(), 3);
+        assert!(open
+            .export_snapshot_bytes("m", &hashes[1].block_hash)
+            .is_some());
+    }
+
     #[test]
     fn export_snapshot_bytes_roundtrips_to_hashed_block() {
         // block=4 so a 12-token prompt inserts hashes at 4, 8, 12.
@@ -2560,7 +2717,14 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 12);
         let tokens: Vec<u32> = (1..=12).collect();
-        let manifest = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
+        let manifest = pc.insert_from_kv(
+            "m",
+            "req-a",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
         assert_eq!(manifest.len(), 3);
         // Request the middle block. Serving side should produce bytes
         // whose header `tokens` equal tokens[..8].
@@ -2660,7 +2824,14 @@ mod tests {
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         make_fake_kv(&kv_store, "m", "req-a", 2, 8);
         let tokens: Vec<u32> = (1..=8).collect();
-        let _ = pc.insert_from_kv("m", "req-a", &kv_store, &tokens, ANYWHERE);
+        let _ = pc.insert_from_kv(
+            "m",
+            "req-a",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
         // Hash derived from a different prompt should miss.
         let other = compute_block_hashes(&[99, 99, 99, 99, 99, 99, 99, 99], 4);
         assert!(pc
@@ -2700,7 +2871,7 @@ mod tests {
         for (i, req) in ["r1", "r2", "r3"].iter().enumerate() {
             make_fake_kv(&kv_store, "m", req, 2, 10);
             let tokens: Vec<u32> = (i as u32 * 10..i as u32 * 10 + 10).collect();
-            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE);
+            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE, KeepAsked::Unasked);
         }
 
         assert_eq!(pc.entry_count("m"), 2);
@@ -2724,6 +2895,7 @@ mod tests {
                 &kv_store,
                 &(0u32..10).collect::<Vec<_>>(),
                 ANYWHERE,
+                KeepAsked::Unasked,
             );
             pc.bytes_held("m")
         };
@@ -2733,7 +2905,7 @@ mod tests {
         for (i, req) in ["r1", "r2", "r3", "r4", "r5"].iter().enumerate() {
             make_fake_kv(&kv_store, "m", req, 2, 10);
             let tokens: Vec<u32> = (i as u32 * 10..i as u32 * 10 + 10).collect();
-            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE);
+            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE, KeepAsked::Unasked);
         }
         assert!(
             pc.entry_count("m") < 5,
@@ -2766,6 +2938,7 @@ mod tests {
             &kv_store,
             &(0u32..10).collect::<Vec<_>>(),
             ANYWHERE,
+            KeepAsked::Unasked,
         );
         assert_eq!(pc.entry_count("m"), 1);
         assert!(pc.bytes_held("m") <= FAKE_BYTES_PER_POSITION * 5);
@@ -2788,6 +2961,7 @@ mod tests {
             &kv_store,
             &(0u32..10).collect::<Vec<_>>(),
             ANYWHERE,
+            KeepAsked::Unasked,
         );
         assert_eq!(pc.entry_count("m"), 1, "the opening is kept, not refused");
         let later: Vec<u32> = (0u32..10).chain(20..30).collect();
@@ -2808,13 +2982,13 @@ mod tests {
 
         let pc = PrefixCache::new(true, 8, 0, 4, 0, FAKE_BYTES_PER_POSITION * 7);
         make_fake_kv(&kv_store, "m", "r1", 2, 10);
-        pc.insert_from_kv("m", "r1", &kv_store, &tokens, ANYWHERE);
+        pc.insert_from_kv("m", "r1", &kv_store, &tokens, ANYWHERE, KeepAsked::Unasked);
         assert_eq!(pc.lookup("m", &probe).unwrap().token_count, 7);
         assert_eq!(pc.bytes_held("m"), FAKE_BYTES_PER_POSITION * 7);
 
         let unbounded = PrefixCache::new(true, 8, 0, 4, 0, 0);
         make_fake_kv(&kv_store, "m", "r2", 2, 10);
-        unbounded.insert_from_kv("m", "r2", &kv_store, &tokens, ANYWHERE);
+        unbounded.insert_from_kv("m", "r2", &kv_store, &tokens, ANYWHERE, KeepAsked::Unasked);
         assert_eq!(unbounded.lookup("m", &probe).unwrap().token_count, 10);
     }
 
@@ -2827,7 +3001,7 @@ mod tests {
         for (i, req) in ["r1", "r2", "r3", "r4"].iter().enumerate() {
             make_fake_kv(&kv_store, "m", req, 2, 10);
             let tokens: Vec<u32> = (i as u32 * 10..i as u32 * 10 + 10).collect();
-            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE);
+            pc.insert_from_kv("m", req, &kv_store, &tokens, ANYWHERE, KeepAsked::Unasked);
         }
         assert_eq!(pc.entry_count("m"), 4);
     }
@@ -2887,7 +3061,8 @@ mod tests {
         let from = held[0];
         assert!(from > 0, "the windowed layer slid");
         let tokens: Vec<u32> = (0..400).collect();
-        let manifest = pc.insert_from_kv("m", "r", &kv_store, &tokens, ANYWHERE);
+        let manifest =
+            pc.insert_from_kv("m", "r", &kv_store, &tokens, ANYWHERE, KeepAsked::Unasked);
         assert!(manifest.is_empty(), "a slid snapshot is not announced");
         assert!(pc.enumerate_manifest("m").is_empty());
 
@@ -2924,7 +3099,14 @@ mod tests {
         make_windowed_kv(&kv_store, "short", 100);
         let tokens: Vec<u32> = (0..100).collect();
         assert!(!unslid
-            .insert_from_kv("m", "short", &kv_store, &tokens, ANYWHERE)
+            .insert_from_kv(
+                "m",
+                "short",
+                &kv_store,
+                &tokens,
+                ANYWHERE,
+                KeepAsked::Unasked
+            )
             .is_empty());
     }
 
@@ -2962,7 +3144,7 @@ mod tests {
         NO_SLIDE_IN_TEST.with(|off| off.set(false));
         let tokens: Vec<u32> = (0..positions as u32).collect();
         assert!(
-            !pc.insert_from_kv("m", "r", &kv_store, &tokens, ANYWHERE)
+            !pc.insert_from_kv("m", "r", &kv_store, &tokens, ANYWHERE, KeepAsked::Unasked)
                 .is_empty(),
             "a snapshot that never slid is announced"
         );
@@ -3056,13 +3238,13 @@ mod tests {
         next_turn.push(9999);
 
         let pc = PrefixCache::new(true, 8, 0, 4, 0, weighs);
-        pc.insert_from_kv("m", "r", &kv_store, &prompt, ANYWHERE);
+        pc.insert_from_kv("m", "r", &kv_store, &prompt, ANYWHERE, KeepAsked::Unasked);
         let hit = pc.lookup("m", &next_turn).expect("kept within its budget");
         assert_eq!(hit.token_count, 400);
 
         // The budget still binds: a byte less keeps a shorter opening.
         let tight = PrefixCache::new(true, 8, 0, 4, 0, weighs - 1);
-        tight.insert_from_kv("m", "r", &kv_store, &prompt, ANYWHERE);
+        tight.insert_from_kv("m", "r", &kv_store, &prompt, ANYWHERE, KeepAsked::Unasked);
         let hit = tight
             .lookup("m", &next_turn)
             .expect("its window answers 399");
@@ -3077,10 +3259,24 @@ mod tests {
         let pc = PrefixCache::new(true, 8, 0, 4, 0, 0);
         make_windowed_kv(&kv_store, "turn-1", 100);
         let turn_1: Vec<u32> = (0..100).collect();
-        pc.insert_from_kv("m", "turn-1", &kv_store, &turn_1, ANYWHERE);
+        pc.insert_from_kv(
+            "m",
+            "turn-1",
+            &kv_store,
+            &turn_1,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
         make_windowed_kv(&kv_store, "turn-2", 400);
         let turn_2: Vec<u32> = (0..400).collect();
-        pc.insert_from_kv("m", "turn-2", &kv_store, &turn_2, ANYWHERE);
+        pc.insert_from_kv(
+            "m",
+            "turn-2",
+            &kv_store,
+            &turn_2,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
         assert_eq!(pc.entry_count("m"), 2, "turn 1 is not covered by turn 2");
 
         let mut branch: Vec<u32> = (0..200).collect();

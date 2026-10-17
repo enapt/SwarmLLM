@@ -301,7 +301,7 @@ The per-shard tensor table is ~92% of a manifest and is derived, not sent: **`da
 
 ## A request reaches only the nodes its scope names, on every path (2026-10-12)
 
-**`pool::scope::request_scope(shared, model_id)` is the single answer** to which nodes a request's data may reach — "Keep on this computer" (this node alone) or private mode's set; `allowed_node_set` is for shard management only. Guards `every_path_a_request_leaves_by_asks_its_scope`, `every_cloud_path_asks_whether_the_model_is_kept_here` (`providers::cloud_refused_for`). A failure is never broadcast to the swarm.
+**`pool::scope::request_scope(shared, model_id, asked)` is the single answer** to which nodes a request's data may reach — "Keep on this computer" by the owner (per model) or by the REQUEST (`KeepAsked`, #251 (2b): `api::keep_here` reads the header, the body's `swarmllm` field or MCP's `_meta`; the strictest wins, an unreadable one is a 400) → this node alone, else private mode's set; `allowed_node_set` is for shard management only. `InferenceRequest::local` takes the keep as a REQUIRED argument; a path that writes `KeepAsked::Unasked` for a request is listed in `KEEP_UNASKED_IS_THE_ANSWER` (guard `a_requests_keep_instruction_is_never_replaced_by_none`). A kept request's prompt-cache entries are never announced or exported (`prefix_cache::Entry::kept_here`, sticky). Guards `every_path_a_request_leaves_by_asks_its_scope`, `every_cloud_path_asks_whether_the_model_is_kept_here` (`providers::cloud_refused_for`). A failure is never broadcast to the swarm.
 
 → `docs/invariants/network.md` § "A request reaches only the nodes its scope names, on every path"
 

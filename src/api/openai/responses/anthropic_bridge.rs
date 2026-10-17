@@ -633,11 +633,12 @@ pub async fn try_proxy_anthropic_responses(
     state: &AppState,
     headers: &axum::http::HeaderMap,
     req: &ResponsesRequest,
+    keep: crate::types::KeepAsked,
 ) -> Result<Option<Response>, ApiError> {
     let stream = req.stream.unwrap_or(false);
     // Tried BEFORE local inference: a kept model skips the cloud, and the
     // local path gives the answer (#251).
-    if crate::api::providers::cloud_refused_for(state, &req.model)
+    if crate::api::providers::cloud_refused_for(state, &req.model, keep)
         .await
         .is_some()
     {
@@ -1334,6 +1335,7 @@ mod tests {
             text: None,
             conversation: None,
             context_management: None,
+            swarmllm: None,
             extras: HashMap::new(),
         }
     }

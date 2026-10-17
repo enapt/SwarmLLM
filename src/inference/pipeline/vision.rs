@@ -75,14 +75,16 @@ impl PipelineExecutor {
         // to a computer outside its pool.
         let mmproj_holders = in_request_scope(
             mmproj_holders,
-            crate::pool::scope::request_scope(&self.shared_state, model_id).as_ref(),
+            crate::pool::scope::request_scope(&self.shared_state, model_id, self.request.keep)
+                .as_ref(),
         );
         if mmproj_holders.is_empty() {
-            if self.shared_state.kept_on_this_computer(model_id) {
-                return Err(SwarmError::KeptOnThisComputer {
-                    model_id: model_id.0.clone(),
-                    missing_shards: vec![crate::types::MMPROJ_SHARD_INDEX],
-                });
+            if let Some(kept) =
+                crate::pool::scope::kept_here(&self.shared_state, model_id, self.request.keep)
+            {
+                return Err(
+                    kept.refusal(model_id.0.clone(), vec![crate::types::MMPROJ_SHARD_INDEX])
+                );
             }
             return Err(SwarmError::PrivateModeUnavailable {
                 model_id: model_id.0.clone(),

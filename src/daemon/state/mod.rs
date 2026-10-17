@@ -3337,6 +3337,7 @@ impl SharedState {
         &self,
         model_id: &crate::types::ModelId,
         over: Option<&crate::inference::route_override::RoutePlanOverride>,
+        asked: crate::types::KeepAsked,
     ) -> bool {
         if !self.has_complete_split_model(model_id) {
             return false;
@@ -3358,10 +3359,11 @@ impl SharedState {
         // Peers to ask are the peers THIS request may reach
         // (`pool::scope::request_scope`): a model kept on this computer, or
         // private mode with no pool member connected, has nobody to ask, and a
-        // scheduling pass could only choose here (#251). Skipped when shedding,
-        // which declines the fast path whatever it says.
+        // scheduling pass could only choose here (#251) — as has a request
+        // whose caller asked to keep it here (#251 (2b)). Skipped when
+        // shedding, which declines the fast path whatever it says.
         let has_peers = !shedding_load
-            && match crate::pool::scope::request_scope(self, model_id) {
+            && match crate::pool::scope::request_scope(self, model_id, asked) {
                 None => !self.connected_node_ids.is_empty(),
                 Some(scope) => self.connected_node_ids.iter().any(|n| scope.contains(&*n)),
             };

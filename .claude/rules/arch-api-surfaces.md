@@ -95,6 +95,12 @@ Anything that removes a shard file or model MUST first check `active_pipelines` 
 
 → `docs/invariants/api-surfaces.md` § "Active-Pipeline Guard on Manual Mutations"
 
+## A request's keep-on-this-computer instruction is read on every surface (2026-10-17, #251 (2b))
+
+**`api::keep_here::asked(headers, body.swarmllm)`** (MCP: `from_header` + `from_mcp_meta`, `strictest`) is read before a surface routes, and its `KeepAsked` is passed to every scope question (`request_scope`, `local_fast_path_for`, `cloud_refused_for`, `find_peer_with_model`) and into `InferenceRequest::local`. An unreadable instruction is a 400, never "unkept"; `swarmllm` is never forwarded to a provider. Guard `a_requests_keep_instruction_is_never_replaced_by_none`.
+
+→ `docs/invariants/network.md` § "The same choice per request"
+
 ## API errors must be readable by the caller
 
 Every failure is `{"error": {"message", "type", "param", "code"}}`: take bodies with `JsonBody<T>`, never axum's `Json<T>`; keep the router `.fallback()` (`unknown_route`). Choose the STATUS from the cause (`probe_failure_is_user_fixable`).

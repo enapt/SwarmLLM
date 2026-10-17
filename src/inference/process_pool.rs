@@ -56,6 +56,9 @@ pub struct PrefixProbeEvent {
     pub model_id: ModelId,
     pub request_id: Uuid,
     pub blocks: Vec<PrefixBlockEntry>,
+    /// The probing request's caller asked to keep it on this computer
+    /// (#251 (2b)) — the scope the daemon asks is that request's.
+    pub keep: crate::types::KeepAsked,
 }
 
 const WORKER_CONNECT_TIMEOUT_SECS: u64 = 30;
@@ -1013,6 +1016,7 @@ async fn reader_actor(
                     request_id,
                     model_id: probe_model,
                     blocks,
+                    keep_here,
                 } = msg
                 {
                     if let Some(tx) = prefix_probe_tx.as_ref() {
@@ -1022,6 +1026,7 @@ async fn reader_actor(
                                 model_id: probe_model,
                                 request_id,
                                 blocks,
+                                keep: crate::types::KeepAsked::kept_if(keep_here),
                             })
                         {
                             // Dropped probes look indistinguishable from cross-node
@@ -8301,6 +8306,10 @@ impl ModelProcessPool {
     /// `requester` says whose request this is — the machine owner's, read on
     /// every core, or the swarm's, within the contribution level
     /// ([`Requester`]). Required, so no caller can forget to say.
+    ///
+    /// `keep` is the caller's instruction to keep the request on this
+    /// computer (#251 (2b)): the worker saves its prompt's cache for reuse
+    /// here only. Required for the same reason.
     #[allow(clippy::too_many_arguments)]
     pub async fn generate(
         &self,
@@ -8310,6 +8319,7 @@ impl ModelProcessPool {
         sampling: SamplingParams,
         request_id: uuid::Uuid,
         requester: Requester,
+        keep: crate::types::KeepAsked,
         session_id: Option<String>,
         token_tx: Option<crate::inference::router::StreamingTokenTx>,
     ) -> Result<crate::inference::router::InferenceOutput, SwarmError> {
@@ -8325,6 +8335,7 @@ impl ModelProcessPool {
                 sampling.clone(),
                 request_id,
                 requester,
+                keep,
                 session_id.clone(),
                 token_tx.clone(),
                 &emitted,
@@ -8357,6 +8368,7 @@ impl ModelProcessPool {
                         sampling,
                         request_id,
                         requester,
+                        keep,
                         session_id,
                         token_tx,
                         &emitted_retry,
@@ -8378,6 +8390,7 @@ impl ModelProcessPool {
         sampling: SamplingParams,
         request_id: uuid::Uuid,
         requester: Requester,
+        keep: crate::types::KeepAsked,
         session_id: Option<String>,
         token_tx: Option<crate::inference::router::StreamingTokenTx>,
         emitted: &std::sync::atomic::AtomicBool,
@@ -8404,6 +8417,7 @@ impl ModelProcessPool {
             sampling,
             session_id,
             for_the_owner: requester == Requester::Owner,
+            keep_here: keep.is_kept(),
         };
 
         if handle.dead.load(Ordering::Acquire) {

@@ -85,6 +85,12 @@ pub struct ResponsesRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_management: Option<serde_json::Value>,
 
+    /// SwarmLLM's own options (#251 (2b)) — ours, so never serialized: the
+    /// cloud passthrough forwards this struct as JSON, and a provider is not
+    /// sent a field it never defined.
+    #[serde(default, skip_serializing)]
+    pub swarmllm: Option<crate::api::keep_here::SwarmllmOptions>,
+
     /// Catch-all for fields OpenAI may add. Required for cloud-proxy
     /// forward compatibility (gpt-5, o-series ship new params constantly).
     #[serde(flatten)]
@@ -645,6 +651,33 @@ pub struct IncompleteDetails {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The body's `swarmllm` object is read (#251 (2b)) and never reaches a
+    /// provider: the cloud passthrough forwards this struct SERIALIZED, so the
+    /// field must not serialize, nor land in `extras`. A misspelt key in it is
+    /// refused.
+    #[test]
+    fn the_keep_instruction_is_read_and_never_forwarded() {
+        let req: ResponsesRequest = serde_json::from_value(json!({
+            "model": "m",
+            "input": "hi",
+            "swarmllm": {"keep_on_this_computer": true}
+        }))
+        .unwrap();
+        assert_eq!(
+            req.swarmllm.as_ref().map(|o| o.asked()),
+            Some(crate::types::KeepAsked::OnThisComputer)
+        );
+        assert!(!req.extras.contains_key("swarmllm"));
+        let forwarded = serde_json::to_value(&req).unwrap();
+        assert!(forwarded.get("swarmllm").is_none(), "{forwarded}");
+        assert!(serde_json::from_value::<ResponsesRequest>(json!({
+            "model": "m",
+            "input": "hi",
+            "swarmllm": {"keep_on_this_computr": true}
+        }))
+        .is_err());
+    }
 
     /// Helper: parse value, re-serialize, parse again, assert equal.
     /// Catches any field that doesn't round-trip (silent drops, key reorders,

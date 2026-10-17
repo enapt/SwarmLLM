@@ -1446,6 +1446,7 @@ mod tests {
             cancel: None,
             route_override: None,
             continuation: None,
+            keep: Default::default(),
         }
     }
 

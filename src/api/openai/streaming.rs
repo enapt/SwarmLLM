@@ -217,6 +217,7 @@ impl Drop for TraceGuard {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_split_stream(
     state: &AppState,
     model_id: &crate::types::ModelId,
@@ -229,6 +230,9 @@ pub fn spawn_split_stream(
     // exists at all.
     trace: Option<std::sync::Arc<crate::inference::trace::RequestTrace>>,
     tools: Option<&[serde_json::Value]>,
+    // The caller's instruction to keep the request on this computer (#251
+    // (2b)) — the worker then saves its prompt's cache for reuse here only.
+    keep: crate::types::KeepAsked,
 ) -> Option<SplitStream> {
     let meta = get_split_model_meta(&state.shared_state, model_id)?;
     let prompt = crate::inference::chat_template::build_prompt(
@@ -322,6 +326,7 @@ pub fn spawn_split_stream(
             rid,
             // Asked of this node's own API: the owner's request.
             crate::inference::process_pool::Requester::Owner,
+            keep,
             None,
             Some(token_tx),
         );
@@ -389,6 +394,9 @@ pub async fn submit_stream_to_router(
     // as a parameter rather than re-derived here because this helper is shared
     // with the Anthropic surface, which has no such field and passes `None`.
     route_override: Option<crate::inference::route_override::RoutePlanOverride>,
+    // The caller's instruction to keep the request on this computer (#251
+    // (2b)) — required, so neither surface can forget to pass it on.
+    keep: crate::types::KeepAsked,
 ) -> Result<
     (
         tokio::sync::oneshot::Receiver<
@@ -414,6 +422,7 @@ pub async fn submit_stream_to_router(
         session_id,
         lora_adapter,
         tools,
+        keep,
     );
     inference_req.cancel = cancel;
     inference_req.route_override = route_override;
@@ -446,6 +455,9 @@ pub async fn run_split_generate(
     params: SamplingParams,
     request_id: &str,
     tools: Option<&[serde_json::Value]>,
+    // The caller's instruction to keep the request on this computer (#251
+    // (2b)) — the worker then saves its prompt's cache for reuse here only.
+    keep: crate::types::KeepAsked,
 ) -> Result<crate::inference::router::InferenceOutput, ApiError> {
     let meta = get_split_model_meta(&state.shared_state, model_id)
         .ok_or(ApiError(crate::error::SwarmError::NoModelLoaded))?;
@@ -507,6 +519,7 @@ pub async fn run_split_generate(
             rid,
             // Asked of this node's own API: the owner's request.
             crate::inference::process_pool::Requester::Owner,
+            keep,
             None,
             None,
         )
@@ -557,6 +570,7 @@ pub(super) async fn router_inference(
         req.session_id.clone(),
         req.lora_adapter.clone(),
         req.tool_definitions(),
+        req.keep_asked(),
     );
     inference_req.cancel = cancel;
     inference_req.route_override = req.route_plan_override();
@@ -734,6 +748,7 @@ async fn router_inference_stream(
         Some(cancel.clone()),
         req.tool_definitions(),
         req.route_plan_override(),
+        req.keep_asked(),
     )
     .await?;
 
@@ -1010,6 +1025,7 @@ pub(super) async fn split_non_stream_response(
     // whether it must be told about them in prose. `tools_requested` is derived
     // below rather than passed beside them, so the two cannot disagree.
     tools: Option<Vec<serde_json::Value>>,
+    keep: crate::types::KeepAsked,
 ) -> Result<axum::response::Response, ApiError> {
     let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
     let output = run_split_generate(
@@ -1019,6 +1035,7 @@ pub(super) async fn split_non_stream_response(
         params.clone(),
         &request_id,
         tools.as_deref(),
+        keep,
     )
     .await?;
     let trace = output.trace.clone();
@@ -1062,6 +1079,7 @@ pub(super) async fn split_stream_response(
     // below rather than passed beside them, so the two cannot disagree.
     tools: Option<Vec<serde_json::Value>>,
     include_usage: bool,
+    keep: crate::types::KeepAsked,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
     // Captured before `state` is moved into the generation task. This is the
@@ -1115,6 +1133,7 @@ pub(super) async fn split_stream_response(
             &request_id,
             Some(stream_trace.clone()),
             tools.as_deref(),
+            keep,
         ) {
             Some(pair) => pair,
             None => {

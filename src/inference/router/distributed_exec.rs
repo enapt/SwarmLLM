@@ -336,7 +336,6 @@ pub(super) async fn execute_distributed_batch(
                     scheduler,
                     request.clone(),
                     token_tx,
-                    None, // No pipeline affinity for batched requests
                     trace.clone(),
                 )
                 .await;
@@ -404,6 +403,7 @@ async fn assemble_awaiting_dht(
     local_node_id: &crate::types::NodeId,
     request_id: uuid::Uuid,
     prompt: crate::inference::scheduler::cached_prefix::PromptPlan,
+    keep: crate::types::KeepAsked,
 ) -> Result<PipelineAssignment, SwarmError> {
     let prompt_tokens = prompt.tokens;
     // Learn the model's geometry BEFORE pricing anyone's memory, if this node
@@ -432,6 +432,7 @@ async fn assemble_awaiting_dht(
         request_id,
         Purpose::Route,
         prompt.clone(),
+        keep,
     );
     let Err(err) = first else {
         if let Ok(ref a) = first {
@@ -456,6 +457,7 @@ async fn assemble_awaiting_dht(
             request_id,
             Purpose::Route,
             prompt.clone(),
+            keep,
         ) {
             scheduler.record_peer_commitments(&assignment, local_node_id, prompt_tokens);
             tracing::info!(
@@ -591,7 +593,6 @@ pub(super) async fn execute_request(
     scheduler: PipelineScheduler,
     request: InferenceRequest,
     token_tx: Option<StreamingTokenTx>,
-    preferred_pipeline: Option<PipelineAssignment>,
     // `trace` is required, not optional: a path that quietly passes nothing
     // produces a trace with no route, which is indistinguishable from a local
     // request in every surface that renders it.
@@ -845,36 +846,6 @@ pub(super) async fn execute_request(
             request.id,
             adapter_id,
         )?
-    } else if let Some(prev) = preferred_pipeline {
-        let all_connected = prev.segments.iter().all(|seg| {
-            seg.node_id == local_node_id || shared_state.connected_node_ids.contains(&seg.node_id)
-        });
-        if all_connected && !prev.segments.is_empty() {
-            // Note for anyone measuring prompt-length routing: this path does
-            // NOT re-route, so the prefill term fires on the first turn of a
-            // session and after a disconnect, and never in between. That is
-            // deliberate — re-routing would abandon the KV cache this reuse
-            // exists to keep — but a multi-turn conversation whose context
-            // grows keeps the route it was given while it was short.
-            tracing::info!(
-                request_id = %request.id,
-                segments = prev.segments.len(),
-                "Reusing previous pipeline (KV cache affinity)"
-            );
-            PipelineAssignment {
-                request_id: request.id,
-                ..prev
-            }
-        } else {
-            assemble_awaiting_dht(
-                &scheduler,
-                model_id,
-                &local_node_id,
-                request.id,
-                prompt_plan,
-            )
-            .await?
-        }
     } else {
         assemble_awaiting_dht(
             &scheduler,
@@ -882,6 +853,7 @@ pub(super) async fn execute_request(
             &local_node_id,
             request.id,
             prompt_plan,
+            request.keep,
         )
         .await?
     };
@@ -1170,6 +1142,7 @@ pub(super) fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bo
         | SwarmError::InsufficientCapacity(_)
         | SwarmError::PrivateModeUnavailable { .. }
         | SwarmError::KeptOnThisComputer { .. }
+        | SwarmError::RequestKeptOnThisComputer { .. }
         | SwarmError::PromptPrivacyUnavailable { .. }
         // Our own setting, refusing because of what is on our own disk. Both
         // ends of it name this machine and nobody else's.

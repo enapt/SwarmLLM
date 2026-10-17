@@ -1225,17 +1225,6 @@ impl InferenceRouter {
         // Closes out `queue_ms`. Everything from here is scheduling or work.
         queued.trace.mark_dequeued();
 
-        // Pipeline affinity: get previous pipeline assignment for KV cache locality
-        let preferred_pipeline = if let Some(ref session_id) = queued.request.session_id {
-            if let Some(internal_id) = self.kv_cache.get_internal_id(session_id) {
-                self.kv_cache.get_previous_pipeline(&internal_id)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
         // Check for multi-turn KV-cache reuse. Hoist the chatml_fallback
         // allocation outside the if-let so the same prompt String is reused
         // by both check_multi_turn_reuse (above) and register_multi_turn
@@ -1430,9 +1419,8 @@ impl InferenceRouter {
             };
 
             // Re-plan on transient remote failures (silent rr drops or
-            // mid-flight peer disconnects). We reset `preferred_pipeline`
-            // to None so each further attempt re-runs the scheduler — which
-            // filters out the dead/dropped peer via `connected_node_ids`
+            // mid-flight peer disconnects). Each attempt runs the scheduler,
+            // which filters out the dead/dropped peer via `connected_node_ids`
             // and picks a different holder.
             //
             // The first re-plan is unconditional, as it has always been. A
@@ -1448,7 +1436,6 @@ impl InferenceRouter {
                     scheduler.clone(),
                     request.clone(),
                     token_tx.clone(),
-                    preferred_pipeline,
                     trace.clone(),
                 )
                 .await;
@@ -1555,7 +1542,6 @@ impl InferenceRouter {
                     scheduler.clone(),
                     request.clone(),
                     token_tx.clone(),
-                    None,
                     trace.clone(),
                 )
                 .await;
@@ -1599,7 +1585,6 @@ impl InferenceRouter {
                     scheduler.clone(),
                     continued,
                     token_tx.clone(),
-                    None,
                     trace.clone(),
                 )
                 .await;

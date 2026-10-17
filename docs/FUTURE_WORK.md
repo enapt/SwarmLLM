@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #301**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #302**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -68,8 +68,8 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
    (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), unreleased). Next: the
    3.5 KB/s that is not gossip (Kademlia, identify, pings, direct messages), 63% of the upload.
-8. **#251** — `owned_by: "local"` reads as "my data stays here": keep-on-this-computer per request
-   on every surface, and the route on a streamed `/v1/responses` and in MCP.
+8. **#251** — `owned_by: "local"` reads as "my data stays here": the route on a streamed
+   `/v1/responses` and in MCP (keeping a request here, per model or per request, is done).
 9. **#252** — a peer's measured context is not gossiped, so a planner cannot size a peer's share
    before asking ((a) parked: no named client reads the listed context).
 10. **#3**, **#180** — the routing cost model mis-prices a split by regime (one peer's fit,
@@ -2095,6 +2095,21 @@ Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the 
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
 
+#### #301 — The router's per-conversation table (`KvCacheManager`) decides nothing
+`P4` · cleanup · **OPEN** — 2026-10-17 · history: found by #251 (2b)'s split rig, whose control turn never reused a route
+
+The router keeps a table of conversations that send `session_id` (`inference::kv_cache`,
+`register_multi_turn` / `check_multi_turn_reuse`), saved to the `kv_sessions` tree at shutdown.
+Every entry is recorded with an EMPTY route and nothing fills it in, so its `cache_holders` are
+always empty and the "a holder went away" check can never fire; the hit/miss answer
+(`cache_start_pos` in `router::mod`) only decides whether to re-register and is logged — it is
+never handed to the request. The reuse that works is the worker's own prefix cache, keyed by the
+prompt's tokens. The one branch that read a recorded route (`distributed_exec`'s "KV cache
+affinity") could not fire and was deleted with #251 (2b). Next: confirm nothing else reads the
+table (`UpdateCacheTokens`, the persisted `kv_sessions`, the diagnostics), then delete it or make
+it record the route it claims to — deleting is likelier right, since the worker cache already
+answers "where is this conversation's KV" by content.
+
 #### #300 — A sender can fill the replay-memory share of the relay it sends through, refusing that relay's honest bodies here
 `P3` · security · **OPEN** — 2026-10-17 · history: the second `security-reviewer` pass on #299
 
@@ -2134,7 +2149,7 @@ session with (an `enable_encryption = false` peer must still work). Wire and cry
 `security-reviewer` on the diff, and the split + failover rigs.
 
 #### #251 — `owned_by: "local"` reads as "my data stays here"; it means "every part is held here"
-`P2` · privacy · **PARTIAL** — 2026-10-12 · history: report #035 (a tester, v0.3.232-.234); (1), (2) per model and (4) done 2026-10-12
+`P2` · privacy · **PARTIAL** — 2026-10-17 · history: report #035 (a tester, v0.3.232-.234); (1), (2) per model and (4) done 2026-10-12, (2b) per request 2026-10-17 (§ Closed)
 
 `api::model_source_for` answers `local` when this node holds every part, which says nothing about
 where a request runs. A model the card cannot hold whole may be split with peers (#250). The default boomerang starts and
@@ -2160,8 +2175,9 @@ hole for a model of the swarm; in private mode a model with a manifest here now 
 cloud provider (`PrivateModeUnavailable`, naming the parts no pool device holds —
 `pool::scope::parts_outside_scope`, shared with the scheduler). A cloud-only name still goes, being
 the owner's own configuration, and so does an explicit `provider:` prefix (the caller's own choice of
-a cloud model; the same prompt could go under the provider's model name). A kept model refuses both. Left: (2b) the same choice per REQUEST (a `swarm_route` value or
-header on all four surfaces); (3) the route on the surfaces that lack it. A NON-streamed `/v1/responses` already carries
+a cloud model; the same prompt could go under the provider's model name). A kept model refuses both. **Done (2b), 2026-10-17:** the same choice per REQUEST
+(`X-SwarmLLM-Keep-On-This-Computer`, the body's `swarmllm` field, MCP's `_meta`; § Closed). Left:
+(3) the route on the surfaces that lack it. A NON-streamed `/v1/responses` already carries
 `x-swarm-route`, `-segments`, `-peers`, `-nodes` and `server-timing`, copied from the chat
 handler's response (`create_response`; checked on v0.3.235, 2026-10-12). A STREAMED one carries
 none: `stream::run_streaming` returns the SSE before it awaits the chat call, so its headers
@@ -2495,7 +2511,34 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-17, not yet released** (#299, #91 (2c))
+**Closed 2026-10-17, not yet released** (#299, #91 (2c), #251 (2b))
+- #251 (2b) — **One request can now be kept on this computer, whatever the model's setting.** A
+  caller sends `X-SwarmLLM-Keep-On-This-Computer: true`, or `"swarmllm": {"keep_on_this_computer":
+  true}` in the body of `/v1/chat/completions`, `/v1/messages` or `/v1/responses`, or MCP's
+  `params._meta["com.swarmllm/keep_on_this_computer"]` (`api::keep_here`). The strictest
+  instruction wins and `false` never loosens anything; one the node cannot read (another header
+  value, a misspelt key — `deny_unknown_fields`) is a 400, never a silently unkept request. The
+  answer is a value carried with the request (`InferenceRequest.keep`, `KeepAsked`, a REQUIRED
+  argument of `InferenceRequest::local`, never on the wire) into every scope question
+  (`pool::scope::request_scope(.., asked)`, `local_fast_path_for`, `cloud_refused_for`,
+  `find_peer_with_model`, the image encoder, the prefix-KV probe); a request this computer cannot
+  run whole is `RequestKeptOnThisComputer` (503, `kept_on_this_computer_error`, its own hint in 21
+  languages naming the instruction). The `swarmllm` field never reaches a cloud provider. MCP's
+  fan-out tools put the header on their loopback calls. A kept request for a name no manifest
+  knows is a 404 (`ModelNotAvailable`), not advice to download a model there is none of.
+  Enumerating the paths found two more: the worker's prompt cache now marks an entry stored for
+  a kept request (`Entry::kept_here`, from `IpcGenerate.keep_here`; inherited by an entry covering
+  it), whose manifest is then empty, so it is never announced or exported; and `distributed_exec`
+  re-ran a conversation's previous route without asking the scope — in a branch that could never
+  fire (the router records every conversation with an empty route), so it was deleted, not gated.
+  A `KeepAsked::Unasked` written for a request must be in `KEEP_UNASKED_IS_THE_ANSWER` (guard
+  `a_requests_keep_instruction_is_never_replaced_by_none`, with its self-test). The
+  `security-reviewer` pass found no leak; its two Lows were a non-object MCP `_meta` read as "no
+  instruction" (now a 400) and an older worker dropping the cache flag (cannot happen: a worker
+  only talks to the daemon that spawned it, over a per-spawn close-on-exec socket). Tests: 11 new
+  or extended, 7 mechanisms toggled off and shown red, `split_rig.sh keep` live (every form
+  refused or served as it should, the second computer handed nothing while asked);
+  `docs/invariants/network.md` § "The same choice per request".
 - #91 (2c) — **A restart no longer puts every model manifest on gossip twice.** Found 2026-10-17
   measuring (2b): at boot `daemon::background` broadcast every manifest the node gossips, and the
   health monitor's first round, a few seconds later, broadcast them again, because neither recorded

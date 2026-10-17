@@ -460,6 +460,10 @@ pub async fn create_response(
     // cloud-proxy paths don't forward attacker-sized strings to upstream
     // providers (where they'd land in our log lines or burn quota).
     validate_responses_ingress(&req)?;
+    // The caller's instruction to keep this request here (#251 (2b)), asked
+    // before either cloud passthrough. The local path re-reads it from the
+    // same headers and the translated body in `validate_chat_request`.
+    let keep = crate::api::keep_here::asked(&headers, req.swarmllm.as_ref()).map_err(ApiError)?;
     // NOT counted here. A local Responses request is translated and handed to
     // `openai::chat_completions`, which counts it — adding a second increment
     // made one request register as two (measured 2026-08-09, start=0 →
@@ -477,7 +481,7 @@ pub async fn create_response(
     })?;
     let stream = req.stream.unwrap_or(false);
     if let Some(response) =
-        crate::api::providers::try_proxy_openai_responses(&state, &body_value, stream).await?
+        crate::api::providers::try_proxy_openai_responses(&state, &body_value, stream, keep).await?
     {
         // Counted here rather than at the top: this branch returns without ever
         // reaching `chat_completions`, which is where a local request is
@@ -493,7 +497,7 @@ pub async fn create_response(
     // `try_proxy_anthropic_responses` returns Ok(None) when the model
     // isn't Anthropic, letting us fall through to local inference.
     if let Some(response) =
-        anthropic_bridge::try_proxy_anthropic_responses(&state, &headers, &req).await?
+        anthropic_bridge::try_proxy_anthropic_responses(&state, &headers, &req, keep).await?
     {
         // Same reasoning as the branch above: returns without reaching
         // `chat_completions`.

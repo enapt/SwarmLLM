@@ -172,6 +172,30 @@ request on your own computers, use a private pool with
 `private_mode = true` and `private_mode_allow_lan = false`
 ([Joining the network > Private Networks](../getting-started/joining-network.md#private-networks)). The
 `x-swarm-route` response header names the computers that answered.
+
+To keep a single request on this computer, whatever the model's setting, send
+the header `X-SwarmLLM-Keep-On-This-Computer: true`, or put
+`"swarmllm": {"keep_on_this_computer": true}` in the body of
+`/v1/chat/completions`, `/v1/messages` or `/v1/responses`. An MCP tool call
+takes `"_meta": {"com.swarmllm/keep_on_this_computer": true}` in its `params`
+(or the same header on `/mcp`), and every model call the tool makes is kept.
+The request is then treated like one for a kept model: nothing of it goes to
+another computer or to a cloud provider, and if this computer cannot run it
+alone it is refused with `kept_on_this_computer_error` (503). The `swarmllm`
+field itself is never passed on to a provider. Whichever instruction is
+strictest wins — `false` never undoes the model's own setting — and an
+instruction the node cannot read (a header value other than `true`, `false`,
+`1`, `0`, `yes` or `no`, or a misspelt field name) is refused with a 400 rather
+than ignored.
+
+```bash
+curl http://localhost:8800/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "X-SwarmLLM-Keep-On-This-Computer: true" \
+  -d '{"model": "auto", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
 `max_model_len` and `context_length` are
 the same number — the longest conversation this node will serve, after the
 shipped 8192-token default and any `inference.max_seq_len_override`. The

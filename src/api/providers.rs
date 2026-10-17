@@ -412,12 +412,22 @@ pub(crate) fn get_provider_client() -> &'static reqwest::Client {
 /// answers with the refusal; where it is tried FIRST (the Responses API) the
 /// caller skips the cloud and lets the local path answer. Guard:
 /// `every_cloud_path_asks_whether_the_model_is_kept_here`.
-pub async fn cloud_refused_for(state: &AppState, model: &str) -> Option<crate::error::SwarmError> {
+///
+/// `asked` is the request's own instruction (#251 (2b)): a request whose
+/// caller asked to keep it here never goes to a cloud provider, under any
+/// name — a cloud-only model and an explicit `provider:` prefix included,
+/// since "on this computer" is what the caller asked for.
+pub async fn cloud_refused_for(
+    state: &AppState,
+    model: &str,
+    asked: crate::types::KeepAsked,
+) -> Option<crate::error::SwarmError> {
     let shared = &state.shared_state;
-    if !shared
-        .credits
-        .private_mode
-        .load(std::sync::atomic::Ordering::Relaxed)
+    if !asked.is_kept()
+        && !shared
+            .credits
+            .private_mode
+            .load(std::sync::atomic::Ordering::Relaxed)
         && !shared.keeps_any_model_here()
     {
         return None;
@@ -425,7 +435,7 @@ pub async fn cloud_refused_for(state: &AppState, model: &str) -> Option<crate::e
     let resolved = crate::api::openai::resolve_model_for_inference(state, model).await;
     // `openai:<id>` names a provider explicitly, and the provider is sent the
     // name after the colon — so that name is asked too.
-    cloud_refusal(shared, model, &resolved)
+    cloud_refusal(shared, model, &resolved, asked)
 }
 
 /// [`cloud_refused_for`]'s answer for a name already resolved.
@@ -433,6 +443,7 @@ fn cloud_refusal(
     shared: &crate::daemon::state::SharedState,
     model: &str,
     resolved: &str,
+    asked: crate::types::KeepAsked,
 ) -> Option<crate::error::SwarmError> {
     let private_mode = shared
         .credits
@@ -448,6 +459,27 @@ fn cloud_refusal(
             missing_shards: shared.parts_missing_here(&crate::types::ModelId(kept.to_string())),
         });
     }
+    if asked.is_kept() {
+        // A name no manifest knows is not a model of this computer at all — a
+        // typo, or a cloud provider's model. Refused either way (a cloud model
+        // cannot stay here), as the unknown model it is here: "download the
+        // rest" would be advice about a model there is none of.
+        let known = [model, resolved, unprefixed].iter().any(|m| {
+            shared
+                .model_registry
+                .get_manifest(&crate::types::ModelId(m.to_string()))
+                .is_some()
+        });
+        if !known {
+            return Some(crate::error::SwarmError::ModelNotAvailable(
+                crate::types::ModelId(resolved.to_string()),
+            ));
+        }
+        return Some(crate::pool::scope::KeptBy::Request.refusal(
+            resolved.to_string(),
+            shared.parts_missing_here(&crate::types::ModelId(resolved.to_string())),
+        ));
+    }
     if !private_mode {
         return None;
     }
@@ -457,7 +489,7 @@ fn cloud_refusal(
             .get_manifest(&crate::types::ModelId(m.to_string()))
     })?;
     Some(crate::error::SwarmError::PrivateModeUnavailable {
-        missing_shards: crate::pool::scope::parts_outside_scope(shared, &manifest),
+        missing_shards: crate::pool::scope::parts_outside_scope(shared, &manifest, asked),
         model_id: manifest.name,
     })
 }
@@ -670,6 +702,7 @@ pub async fn try_proxy_openai_responses(
     state: &AppState,
     body: &serde_json::Value,
     stream: bool,
+    asked: crate::types::KeepAsked,
 ) -> Result<Option<axum::response::Response>, ApiError> {
     let model = body
         .get("model")
@@ -677,7 +710,7 @@ pub async fn try_proxy_openai_responses(
         .unwrap_or_default();
     // Tried BEFORE local inference, so a kept model skips the cloud rather
     // than being refused here: the local path gives the answer.
-    if cloud_refused_for(state, model).await.is_some() {
+    if cloud_refused_for(state, model, asked).await.is_some() {
         return Ok(None);
     }
 
@@ -915,6 +948,7 @@ pub async fn list_providers(State(state): State<AppState>) -> Json<serde_json::V
 mod tests {
     use super::*;
     use crate::config::{CustomProvider, ProviderEntry, ProvidersConfig};
+    use crate::types::KeepAsked;
 
     /// **A model of the swarm never reaches a cloud provider while private
     /// mode is on, nor a model kept on this computer at all** (#251). A cloud
@@ -967,10 +1001,10 @@ mod tests {
 
         // THE CONTROL: private mode off, nothing kept → the cloud may answer.
         let id = "deepseek-swarm-7b";
-        assert!(cloud_refusal(&shared, id, id).is_none());
+        assert!(cloud_refusal(&shared, id, id, KeepAsked::Unasked).is_none());
 
         shared.credits.private_mode.store(true, Relaxed);
-        match cloud_refusal(&shared, id, id) {
+        match cloud_refusal(&shared, id, id, KeepAsked::Unasked) {
             Some(SwarmError::PrivateModeUnavailable {
                 model_id,
                 missing_shards,
@@ -981,12 +1015,18 @@ mod tests {
             other => panic!("a model of the swarm must stay in the pool: {other:?}"),
         }
         assert!(
-            cloud_refusal(&shared, "deepseek-chat", "deepseek-chat").is_none(),
+            cloud_refusal(
+                &shared,
+                "deepseek-chat",
+                "deepseek-chat",
+                KeepAsked::Unasked
+            )
+            .is_none(),
             "a cloud model is the owner's own configuration"
         );
         let prefixed = "deepseek:deepseek-swarm-7b";
         assert!(
-            cloud_refusal(&shared, prefixed, prefixed).is_none(),
+            cloud_refusal(&shared, prefixed, prefixed, KeepAsked::Unasked).is_none(),
             "an explicit provider prefix is a cloud request, which private mode does not govern"
         );
 
@@ -997,8 +1037,33 @@ mod tests {
         for name in [id, prefixed] {
             assert!(
                 matches!(
-                    cloud_refusal(&shared, name, name),
+                    cloud_refusal(&shared, name, name, KeepAsked::Unasked),
                     Some(SwarmError::KeptOnThisComputer { .. })
+                ),
+                "{name}"
+            );
+        }
+
+        // Asked by the request itself: no cloud for it under any name. A
+        // cloud-only model (no manifest here) is refused as the unknown model
+        // it is on this computer, never with advice to download its rest; the
+        // owner's setting is named first when both apply, since dropping the
+        // instruction would not help.
+        let asked = KeepAsked::OnThisComputer;
+        assert!(matches!(
+            cloud_refusal(&shared, "deepseek-chat", "deepseek-chat", asked),
+            Some(SwarmError::ModelNotAvailable(_))
+        ));
+        assert!(matches!(
+            cloud_refusal(&shared, id, id, asked),
+            Some(SwarmError::KeptOnThisComputer { .. })
+        ));
+        shared.keep_on_this_computer(&swarm_model, false).unwrap();
+        for name in [id, prefixed] {
+            assert!(
+                matches!(
+                    cloud_refusal(&shared, name, name, asked),
+                    Some(SwarmError::RequestKeptOnThisComputer { .. })
                 ),
                 "{name}"
             );

@@ -65,6 +65,44 @@ pub struct InferenceRequest {
     /// change.
     #[serde(skip)]
     pub continuation: Option<ReplyContinuation>,
+    /// Whether the CALLER asked for this request to stay on this computer
+    /// (FUTURE_WORK #251 (2b)) — beside the owner's per-model setting and
+    /// private mode, never instead of them: whichever is strictest decides.
+    /// Local only, like `route_override`: a request kept here never reaches a
+    /// peer, so no peer is ever told.
+    #[serde(skip)]
+    pub keep: KeepAsked,
+}
+
+/// A caller's instruction about where ONE request may run (#251 (2b)).
+///
+/// There is no value that loosens anything: a request that does not ask is
+/// placed by the node's own settings, exactly as before.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeepAsked {
+    /// The caller said nothing (or `false`): the node's settings decide.
+    #[default]
+    Unasked,
+    /// Run it on this computer or refuse it — no peer, no pool device, no
+    /// cloud provider, and nothing of its prompt shared.
+    OnThisComputer,
+}
+
+impl KeepAsked {
+    /// From a flag that says whether the request is kept here — the shape it
+    /// crosses the worker's IPC in.
+    pub fn kept_if(kept: bool) -> Self {
+        if kept {
+            Self::OnThisComputer
+        } else {
+            Self::Unasked
+        }
+    }
+
+    /// Whether the request is kept on this computer.
+    pub fn is_kept(self) -> bool {
+        self == Self::OnThisComputer
+    }
 }
 
 /// What a continued request has already sent its reader.
@@ -83,7 +121,9 @@ impl InferenceRequest {
     /// `tools` is a required parameter with no shorter form that omits it. A
     /// convenience wrapper passing `None` is exactly how a request loses the
     /// context that made it correct — see `chat_template::build_prompt`, which
-    /// carries the same note for the same reason.
+    /// carries the same note for the same reason. `keep` is required for the
+    /// same reason: a caller's instruction to keep a request on this computer
+    /// is exactly the context a shorter form would lose (#251 (2b)).
     #[allow(clippy::too_many_arguments)]
     pub fn local(
         model_id: ModelId,
@@ -93,6 +133,7 @@ impl InferenceRequest {
         session_id: Option<String>,
         lora_adapter: Option<String>,
         tools: Option<Vec<serde_json::Value>>,
+        keep: KeepAsked,
     ) -> Self {
         Self {
             id: uuid::Uuid::new_v4(),
@@ -109,6 +150,7 @@ impl InferenceRequest {
             cancel: None,
             route_override: None,
             continuation: None,
+            keep,
         }
     }
 

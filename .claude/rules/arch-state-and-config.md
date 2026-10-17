@@ -133,7 +133,7 @@ The daemon must write **only values that differ from the compiled default**.
 Each names the ONE place a decision is made; a second implementation is this codebase's most-repeated defect (`architecture.md` § "One invariant, N paths").
 
 - `SharedState::release_request_state` (per-request maps), `SharedState::cfg()` (live config), `SharedState::record_peer_serve`, `config::InferenceConfig::claims_shard` (never read `shard_range` directly).
-- `SharedState::local_executor_serves(&request)` — guard `the_singleton_executor_is_handed_a_request_only_through_one_predicate`; `SharedState::local_fast_path_for` (takes `swarm_route` as a REQUIRED argument; #633).
+- `SharedState::local_executor_serves(&request)` — guard `the_singleton_executor_is_handed_a_request_only_through_one_predicate`; `SharedState::local_fast_path_for` (takes `swarm_route` and the request's `KeepAsked` as REQUIRED arguments; #633, #251 (2b)).
 - ⚠ Credits are DORMANT — nothing may publish or act on a balance.
 
 → `docs/invariants/state-and-config.md` § "Single-source-of-truth helpers — SharedState, live config and credits"

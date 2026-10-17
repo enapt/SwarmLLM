@@ -217,6 +217,7 @@ pub(super) async fn anthropic_non_stream(
     // needs them to choose between this model's own template and prose.
     // `tools_requested` is derived below so the two cannot disagree.
     tools: Option<Vec<serde_json::Value>>,
+    keep: crate::types::KeepAsked,
 ) -> Result<axum::response::Response, ApiError> {
     let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
     let inference_req = InferenceRequest::local(
@@ -227,6 +228,7 @@ pub(super) async fn anthropic_non_stream(
         None,
         None,
         tools.clone(),
+        keep,
     );
 
     // A client that disconnects stops the work: `submit_to_router` cancels a
@@ -242,6 +244,7 @@ pub(super) async fn anthropic_non_stream(
 }
 
 /// Streaming inference via router, returning Anthropic SSE format.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn anthropic_stream(
     state: &AppState,
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
@@ -253,6 +256,7 @@ pub(super) async fn anthropic_stream(
     // needs them to choose between this model's own template and prose.
     // `tools_requested` is derived below so the two cannot disagree.
     tools: Option<Vec<serde_json::Value>>,
+    keep: crate::types::KeepAsked,
 ) -> Result<axum::response::Response, ApiError> {
     let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
     // The request's own cancel flag: `/v1/messages` has no cancel-by-token
@@ -272,6 +276,7 @@ pub(super) async fn anthropic_stream(
         // `swarm_route` is a testing knob on the chat-completions surface and is
         // deliberately not part of Anthropic's `/v1/messages` contract.
         None,
+        keep,
     )
     .await?;
     let progress_handle = Some((state.shared_state.clone(), traced_id));
@@ -498,6 +503,7 @@ pub(super) async fn anthropic_split_non_stream(
     // whether it must be told about them in prose. `tools_requested` is derived
     // below rather than passed beside them, so the two cannot disagree.
     tools: Option<Vec<serde_json::Value>>,
+    keep: crate::types::KeepAsked,
 ) -> Result<axum::response::Response, ApiError> {
     let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
     let requested_mid = crate::types::ModelId(model.clone());
@@ -508,6 +514,7 @@ pub(super) async fn anthropic_split_non_stream(
         params.clone(),
         &request_id,
         tools.as_deref(),
+        keep,
     )
     .await?;
 
@@ -535,6 +542,7 @@ pub(super) async fn anthropic_split_stream(
     // whether it must be told about them in prose. `tools_requested` is derived
     // below rather than passed beside them, so the two cannot disagree.
     tools: Option<Vec<serde_json::Value>>,
+    keep: crate::types::KeepAsked,
 ) -> Result<axum::response::Response, ApiError> {
     let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
     let progress_handle = Some((
@@ -577,6 +585,7 @@ pub(super) async fn anthropic_split_stream(
             &rid,
             Some(stream_trace.clone()),
             tools.as_deref(),
+            keep,
         ) {
             Some(pair) => pair,
             None => {
@@ -1481,6 +1490,7 @@ mod tests {
             tool_choice: None,
             metadata: None,
             thinking: None,
+            swarmllm: None,
             extras: std::collections::HashMap::new(),
         }
     }

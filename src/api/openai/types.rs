@@ -75,6 +75,13 @@ pub struct ChatCompletionRequest {
     /// for why there is deliberately no "give me N segments" knob.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swarm_route: Option<crate::inference::route_override::SwarmRouteRequest>,
+    /// SwarmLLM's own options (`api::keep_here`): `{"keep_on_this_computer":
+    /// true}` keeps this one request here (#251 (2b)). `validate_chat_request`
+    /// folds the header into it, so it is the request's whole instruction.
+    /// Never serialized: a cloud provider would refuse a field it does not
+    /// know, and a request kept here is never forwarded.
+    #[serde(default, skip_serializing)]
+    pub swarmllm: Option<crate::api::keep_here::SwarmllmOptions>,
     /// Optional cache control hints for prefix caching (Anthropic-compatible).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
@@ -394,6 +401,14 @@ impl ChatCompletionRequest {
         &self,
     ) -> Option<crate::inference::route_override::RoutePlanOverride> {
         self.swarm_route.as_ref()?.parse().ok()
+    }
+
+    /// The caller's instruction about where this request may run (#251 (2b)),
+    /// header included once `validate_chat_request` has folded it in.
+    pub fn keep_asked(&self) -> crate::types::KeepAsked {
+        self.swarmllm
+            .as_ref()
+            .map_or(crate::types::KeepAsked::Unasked, |o| o.asked())
     }
 
     pub(super) fn to_sampling_params(&self) -> SamplingParams {

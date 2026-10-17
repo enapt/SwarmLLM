@@ -27,12 +27,13 @@ pub use identity::{NicknameGossip, NicknameRecord, SealedPrompt};
 pub use ids::{Blake3Hash, ModelId, NodeId, ShardId, MMPROJ_SHARD_INDEX};
 pub use inference::{
     AllReduceOp, ChainHop, ChatMessage, ChunkAssemblyState, ChunkMeta, DelegatedSplit,
-    ForwardRefusal, GenerateUsage, ImageData, InferenceError, InferenceRequest, LayerForward,
-    LayerResult, NetworkFinishReason, PipelineAssignment, PipelineSegment, PromptCacheHint,
-    PromptSpan, RemoteGenerateRequest, ReplyContinuation, ResultStep, Role, SamplingParams,
-    StreamingToken, TensorFormat, TensorParallelGroup, TensorParallelMeta, TokenLogProbEntry,
-    ToolCallFunction, ToolCallTurn, ToolTurn, TpAllReduceRequest, TpAllReduceResponse, TpPhase,
-    TpRingChunk, VisionEncodeRequest, VisionEncodeResponse, DEFAULT_REPLY_BUDGET,
+    ForwardRefusal, GenerateUsage, ImageData, InferenceError, InferenceRequest, KeepAsked,
+    LayerForward, LayerResult, NetworkFinishReason, PipelineAssignment, PipelineSegment,
+    PromptCacheHint, PromptSpan, RemoteGenerateRequest, ReplyContinuation, ResultStep, Role,
+    SamplingParams, StreamingToken, TensorFormat, TensorParallelGroup, TensorParallelMeta,
+    TokenLogProbEntry, ToolCallFunction, ToolCallTurn, ToolTurn, TpAllReduceRequest,
+    TpAllReduceResponse, TpPhase, TpRingChunk, VisionEncodeRequest, VisionEncodeResponse,
+    DEFAULT_REPLY_BUDGET,
 };
 pub use model::{
     MmprojInfo, ModelArchitecture, ModelManifest, ModelTrustInfo, ModelTrustLevel, Quantization,

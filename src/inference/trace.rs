@@ -991,6 +991,7 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
         E::ReplyTruncated(_) => "ReplyTruncated",
         E::PrivateModeUnavailable { .. } => "PrivateModeUnavailable",
         E::KeptOnThisComputer { .. } => "KeptOnThisComputer",
+        E::RequestKeptOnThisComputer { .. } => "RequestKeptOnThisComputer",
         E::PromptPrivacyUnavailable { .. } => "PromptPrivacyUnavailable",
         E::PromptPrivacyNeedsFinalShard { .. } => "PromptPrivacyNeedsFinalShard",
         E::ModelIncompleteInSwarm { .. } => "ModelIncompleteInSwarm",

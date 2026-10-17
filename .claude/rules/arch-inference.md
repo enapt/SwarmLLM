@@ -281,7 +281,10 @@ only the positions it holds** (`prefix_cache::SnapshotCost`: `(budget +
 slid_away) / per_position`, #281 (5)) — a slid snapshot cannot keep an opening
 short of `serves_from`, so charging every position kept nothing. **A snapshot
 COPIES (`force_contiguous`)**: `contiguous()` hands back the live buffer for a
-one-KV-head view, which a window's in-place slide then rewrites (gotcha #874).
+one-KV-head view, which a window's in-place slide then rewrites (gotcha #874). **A kept request's snapshot
+never leaves the node** (`Entry::kept_here`: an empty manifest, so never
+announced or exported; an entry covering a kept one inherits it; the keep is a
+REQUIRED `KeepAsked` argument of `insert_from_kv`, #251 (2b)).
 
 → `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes"
 

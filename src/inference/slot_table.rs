@@ -105,6 +105,10 @@ pub struct Slot {
     /// stops and for `length`/`error` finishes. Plumbed into
     /// `WorkerMsg::GenerateDone.matched_stop_sequence`.
     pub matched_stop_sequence: Option<String>,
+    /// The request's caller asked to keep it on this computer (#251 (2b),
+    /// `IpcGenerate::keep_here`): its prompt's cache is saved for reuse here
+    /// only.
+    pub keep_here: bool,
 }
 
 impl Slot {
@@ -392,6 +396,7 @@ mod tests {
             finish_reason: None,
             error_message: None,
             matched_stop_sequence: None,
+            keep_here: false,
         }
     }
 
@@ -436,6 +441,7 @@ mod tests {
             finish_reason: None,
             error_message: None,
             matched_stop_sequence: None,
+            keep_here: false,
         }
     }
 

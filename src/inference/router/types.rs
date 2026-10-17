@@ -385,6 +385,7 @@ mod deliver_result_tests {
             None,
             None,
             None,
+            crate::types::KeepAsked::Unasked,
         );
         if cancelled {
             r.cancel = Some(Arc::new(AtomicBool::new(true)));

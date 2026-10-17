@@ -409,6 +409,7 @@ fn a_cards_room_is_charged_only_the_weights_the_card_holds() {
             None.into(),
             super::Purpose::Route,
             &|| false,
+            crate::types::KeepAsked::Unasked,
         );
         let bound = |n: &NodeId| {
             cands
@@ -502,10 +503,35 @@ fn a_model_kept_on_this_computer_is_never_planned_onto_a_peer() {
     let plan = scheduler.assemble_pipeline(&model, &local_id).unwrap();
     assert!(plan.segments.iter().all(|s| s.node_id != local_id));
 
+    // A request whose CALLER asked to keep it here (#251 (2b)) is refused
+    // the same way, with its own advice: drop the instruction.
+    let asked = |keep| {
+        scheduler.assemble_pipeline_for(
+            &model,
+            &local_id,
+            uuid::Uuid::new_v4(),
+            Purpose::Route,
+            None,
+            keep,
+        )
+    };
+    match asked(crate::types::KeepAsked::OnThisComputer) {
+        Err(SwarmError::RequestKeptOnThisComputer { missing_shards, .. }) => {
+            assert_eq!(missing_shards, vec![0, 1]);
+        }
+        other => panic!("a request kept here must be refused, not planned: {other:?}"),
+    }
+
     state.keep_on_this_computer(&model, true).unwrap();
     match scheduler.assemble_pipeline(&model, &local_id) {
         Err(SwarmError::KeptOnThisComputer { .. }) => {}
         other => panic!("a kept model must be refused, not planned: {other:?}"),
+    }
+    // Both apply: the owner's setting is named, because dropping the
+    // caller's instruction would not let the request out.
+    match asked(crate::types::KeepAsked::OnThisComputer) {
+        Err(SwarmError::KeptOnThisComputer { .. }) => {}
+        other => panic!("the owner's setting must be named first: {other:?}"),
     }
 }
 
@@ -3911,6 +3937,7 @@ fn a_peer_that_publishes_its_ranges_is_priced_by_them() {
         None.into(),
         super::Purpose::Route,
         &|| false,
+        crate::types::KeepAsked::Unasked,
     );
     let find = |n: &NodeId| cands.iter().find(|c| &c.node_id == n).unwrap();
     let (a, b) = (find(&with_ranges), find(&count_only));
@@ -4647,6 +4674,7 @@ fn the_search_s_boomerang_says_what_privacy_costs() {
             uuid::Uuid::new_v4(),
             super::Purpose::Route,
             Some(14_000),
+            crate::types::KeepAsked::Unasked,
         )
         .unwrap();
     let segs = &assignment.segments;
@@ -4666,6 +4694,7 @@ fn the_search_s_boomerang_says_what_privacy_costs() {
         Some(14_000).into(),
         super::Purpose::Preview,
         &|| true,
+        crate::types::KeepAsked::Unasked,
     );
     let cost = super::privacy_cost_of_plan(segs, &cands, &local, 32, Some(14_000), false)
         .expect("a boomerang with a prompt is priced");
@@ -4694,6 +4723,7 @@ fn a_route_preview_never_announces_a_privacy_cost() {
             uuid::Uuid::new_v4(),
             super::Purpose::Preview,
             Some(14_000),
+            crate::types::KeepAsked::Unasked,
         )
         .unwrap();
     assert!(
@@ -4769,6 +4799,7 @@ fn a_processor_bound_holder_hands_a_long_prompt_to_a_pipeline_of_faster_cards() 
             uuid::Uuid::new_v4(),
             super::Purpose::Route,
             Some(14_000),
+            crate::types::KeepAsked::Unasked,
         )
         .unwrap();
     let shape: Vec<(NodeId, (u32, u32))> = assignment
@@ -4813,6 +4844,7 @@ fn a_processor_holder_keeps_a_prompt_its_worker_already_holds() {
                 cached_locally: 13_952,
                 ..Default::default()
             },
+            crate::types::KeepAsked::Unasked,
         )
         .unwrap();
     let shape: Vec<(NodeId, (u32, u32))> = assignment
@@ -4847,6 +4879,7 @@ fn a_small_cached_prefix_does_not_keep_a_long_prompt_off_faster_cards() {
                 cached_locally: 1_024,
                 ..Default::default()
             },
+            crate::types::KeepAsked::Unasked,
         )
         .unwrap();
     let nodes: Vec<NodeId> = assignment
@@ -4966,6 +4999,7 @@ fn the_next_turn_of_a_split_goes_to_the_peer_holding_its_opening() {
                     cached_locally: 0,
                     split_openings,
                 },
+                crate::types::KeepAsked::Unasked,
             )
             .unwrap()
             .segments
@@ -5012,6 +5046,7 @@ fn a_peer_running_on_its_processor_is_not_priced_as_its_card() {
         Some(14_000).into(),
         super::Purpose::Route,
         &|| true,
+        crate::types::KeepAsked::Unasked,
     );
     let find = |n: &NodeId| cands.iter().find(|x| &x.node_id == n).unwrap();
     assert!(!find(&b).has_gpu, "B runs its models on its processor");
@@ -5043,6 +5078,7 @@ fn with_privacy_off_the_processor_bound_holder_hands_the_whole_model_to_the_card
             uuid::Uuid::new_v4(),
             super::Purpose::Route,
             Some(14_000),
+            crate::types::KeepAsked::Unasked,
         )
         .unwrap();
     let nodes: Vec<NodeId> = assignment
@@ -5071,6 +5107,7 @@ fn a_short_prompt_stays_on_the_processor_when_the_cards_are_far_away() {
                 uuid::Uuid::new_v4(),
                 super::Purpose::Route,
                 None,
+                crate::types::KeepAsked::Unasked,
             )
             .unwrap();
         (local, assignment)
@@ -5105,6 +5142,7 @@ fn a_slow_enough_processor_hands_even_a_short_prompt_to_distant_cards() {
             uuid::Uuid::new_v4(),
             super::Purpose::Route,
             None,
+            crate::types::KeepAsked::Unasked,
         )
         .unwrap();
     assert!(
@@ -5385,6 +5423,7 @@ fn the_local_candidate_is_priced_by_the_device_the_request_would_use() {
         None.into(),
         super::Purpose::Route,
         &|| false,
+        crate::types::KeepAsked::Unasked,
     ));
     let on_processor = pick(scheduler.gather_candidates(
         &manifest,
@@ -5393,6 +5432,7 @@ fn the_local_candidate_is_priced_by_the_device_the_request_would_use() {
         None.into(),
         super::Purpose::Route,
         &|| true,
+        crate::types::KeepAsked::Unasked,
     ));
     assert!(
         on_card.has_gpu,
@@ -5738,6 +5778,7 @@ fn a_whole_model_peer_no_longer_ends_the_search_before_it_runs() {
             uuid::Uuid::new_v4(),
             super::Purpose::Route,
             Some(14_000),
+            crate::types::KeepAsked::Unasked,
         )
         .unwrap();
     let nodes: Vec<NodeId> = assignment
@@ -5791,6 +5832,7 @@ fn the_whole_model_peer_is_still_chosen_when_it_is_genuinely_cheapest() {
             uuid::Uuid::new_v4(),
             super::Purpose::Route,
             Some(14_000),
+            crate::types::KeepAsked::Unasked,
         )
         .unwrap();
     let nodes: Vec<NodeId> = assignment
@@ -6306,6 +6348,7 @@ fn a_hand_off_records_what_the_cost_model_expected_of_it() {
             request_id,
             super::Purpose::Route,
             Some(14_000),
+            crate::types::KeepAsked::Unasked,
         )
         .unwrap();
 
@@ -6636,7 +6679,14 @@ fn a_full_holder_with_no_room(
     }
     let scheduler = PipelineScheduler::with_local_processor_speed(state, LOCAL_PROCESSOR_TPS);
     (
-        scheduler.assemble_pipeline_for(&model, &local, rid, super::Purpose::Route, Some(64)),
+        scheduler.assemble_pipeline_for(
+            &model,
+            &local,
+            rid,
+            super::Purpose::Route,
+            Some(64),
+            crate::types::KeepAsked::Unasked,
+        ),
         local,
     )
 }
@@ -6734,7 +6784,14 @@ fn restricting_a_peer_to_the_upper_shards_forces_a_two_machine_split() {
     let scheduler = PipelineScheduler::new(state.clone());
     let plan = |request_id: uuid::Uuid| {
         scheduler
-            .assemble_pipeline_for(&model, &local_id, request_id, Purpose::Route, None)
+            .assemble_pipeline_for(
+                &model,
+                &local_id,
+                request_id,
+                Purpose::Route,
+                None,
+                crate::types::KeepAsked::Unasked,
+            )
             .unwrap()
             .segments
             .iter()
@@ -6843,7 +6900,14 @@ fn a_request_delegated_to_us_is_led_here_and_never_handed_on() {
     let scheduler = PipelineScheduler::new(state.clone());
     let plan = |request_id: uuid::Uuid| {
         scheduler
-            .assemble_pipeline_for(&model, &local_id, request_id, Purpose::Route, None)
+            .assemble_pipeline_for(
+                &model,
+                &local_id,
+                request_id,
+                Purpose::Route,
+                None,
+                crate::types::KeepAsked::Unasked,
+            )
             .unwrap()
     };
 
@@ -6946,6 +7010,7 @@ fn a_peer_failing_a_model_every_time_is_left_out_unless_it_is_the_only_way() {
                 Some(1_000).into(),
                 super::Purpose::Route,
                 &|| true,
+                crate::types::KeepAsked::Unasked,
             )
             .into_iter()
             .filter(|cand| cand.available_ranges.iter().any(|r| r.0 <= 16 && r.1 >= 32))
@@ -7040,6 +7105,7 @@ fn local_candidate_for(
             None.into(),
             super::Purpose::Route,
             &|| true,
+            crate::types::KeepAsked::Unasked,
         )
         .into_iter()
         .find(|c| &c.node_id == local)
@@ -7183,6 +7249,7 @@ fn a_local_model_the_loader_splits_is_priced_with_the_cards_share() {
             None.into(),
             super::Purpose::Route,
             &|| true,
+            crate::types::KeepAsked::Unasked,
         )
         .into_iter()
         .find(|c| c.node_id == local)
@@ -7220,6 +7287,7 @@ fn a_local_model_the_loader_splits_is_priced_with_the_cards_share() {
             None.into(),
             super::Purpose::Route,
             &|| false,
+            crate::types::KeepAsked::Unasked,
         )
         .into_iter()
         .find(|c| c.node_id == local)
@@ -7529,6 +7597,7 @@ fn a_model_no_holder_could_ever_hold_is_refused_by_the_planner() {
             uuid::Uuid::new_v4(),
             super::Purpose::Route,
             None,
+            crate::types::KeepAsked::Unasked,
         )
     };
 
@@ -7540,6 +7609,7 @@ fn a_model_no_holder_could_ever_hold_is_refused_by_the_planner() {
         None.into(),
         super::Purpose::Preview,
         &|| true,
+        crate::types::KeepAsked::Unasked,
     );
     for n in [&b, &c] {
         let cand = cands.iter().find(|x| &x.node_id == n).unwrap();
@@ -7639,6 +7709,7 @@ fn a_cold_candidate_is_charged_its_own_load_and_a_warm_one_nothing() {
             None.into(),
             super::Purpose::Preview,
             &|| true,
+            crate::types::KeepAsked::Unasked,
         )
     };
     let gib_per_model = 4_000_000_000f32 / (1u64 << 30) as f32;
@@ -7725,6 +7796,7 @@ fn a_warm_peer_beats_a_faster_cold_one_once_the_load_is_priced() {
             uuid::Uuid::new_v4(),
             super::Purpose::Preview,
             Some(200),
+            crate::types::KeepAsked::Unasked,
         )
         .unwrap();
     let chosen: Vec<_> = assignment

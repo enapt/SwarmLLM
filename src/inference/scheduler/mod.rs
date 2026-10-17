@@ -2621,6 +2621,7 @@ impl PipelineScheduler {
             uuid::Uuid::new_v4(),
             Purpose::Route,
             None,
+            crate::types::KeepAsked::Unasked,
         )
     }
 
@@ -2692,9 +2693,18 @@ impl PipelineScheduler {
         request_id: uuid::Uuid,
         purpose: Purpose,
         prompt: impl Into<cached_prefix::PromptPlan>,
+        // The caller's instruction to keep the request on this computer (#251
+        // (2b)) — required, so no plan is made without its scope.
+        keep: crate::types::KeepAsked,
     ) -> Result<PipelineAssignment, SwarmError> {
-        let plan =
-            self.assemble_any_pipeline_for(model_id, local_node_id, request_id, purpose, prompt)?;
+        let plan = self.assemble_any_pipeline_for(
+            model_id,
+            local_node_id,
+            request_id,
+            purpose,
+            prompt,
+            keep,
+        )?;
         if self.runs_only_whole(model_id) {
             let num_layers = self
                 .shared_state
@@ -2743,6 +2753,7 @@ impl PipelineScheduler {
         // did before prompt length was threaded through, so a caller with no
         // prompt in hand loses nothing.
         prompt: impl Into<cached_prefix::PromptPlan>,
+        keep: crate::types::KeepAsked,
     ) -> Result<PipelineAssignment, SwarmError> {
         let prompt = prompt.into();
         let prompt_tokens = prompt.tokens;
@@ -2761,19 +2772,18 @@ impl PipelineScheduler {
 
         let start = std::time::Instant::now();
 
-        // A model the owner keeps on this computer runs here whole or not at
-        // all (#251). Refused up front when this computer does not hold all of
+        // A model the owner keeps on this computer, or a request its caller
+        // asked to keep here (#251 (2b)), runs here whole or not at all
+        // (#251). Refused up front when this computer does not hold all of
         // it: every plan for it would need a peer for the rest. Asked of the
         // parts held, never of a registration — a model bigger than the card
         // is not registered, and was refused while it ran here with the
         // setting off (`SharedState::parts_missing_here`).
-        if self.shared_state.kept_on_this_computer(model_id) {
+        let kept = crate::pool::scope::kept_here(&self.shared_state, model_id, keep);
+        if let Some(kept) = kept {
             let missing_shards = self.shared_state.parts_missing_here(model_id);
             if !missing_shards.is_empty() {
-                return Err(SwarmError::KeptOnThisComputer {
-                    model_id: manifest.name.clone(),
-                    missing_shards,
-                });
+                return Err(kept.refusal(manifest.name.clone(), missing_shards));
             }
         }
 
@@ -2817,6 +2827,7 @@ impl PipelineScheduler {
             prompt,
             purpose,
             &local_on_processor,
+            keep,
         );
         // A model that runs only whole (Gemma 4 E2B/E4B) is a candidate only
         // where one computer holds every layer: a part of it is no use alone.
@@ -2834,11 +2845,11 @@ impl PipelineScheduler {
             candidates
         };
         if candidates.is_empty() {
-            if self.shared_state.kept_on_this_computer(model_id) {
-                return Err(SwarmError::KeptOnThisComputer {
-                    model_id: manifest.name.clone(),
-                    missing_shards: self.shared_state.parts_missing_here(model_id),
-                });
+            if let Some(kept) = kept {
+                return Err(kept.refusal(
+                    manifest.name.clone(),
+                    self.shared_state.parts_missing_here(model_id),
+                ));
             }
             // In private mode, give a specific error showing which shards are missing
             if self
@@ -2855,6 +2866,7 @@ impl PipelineScheduler {
                     missing_shards: crate::pool::scope::parts_outside_scope(
                         &self.shared_state,
                         &manifest,
+                        keep,
                     ),
                 });
             }
@@ -3887,6 +3899,7 @@ impl PipelineScheduler {
             .unwrap_or(true)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn gather_candidates(
         &self,
         manifest: &ModelManifest,
@@ -3899,12 +3912,15 @@ impl PipelineScheduler {
         // closure: the answer prices the model against the graphics budget,
         // which reads its header off disk for a model with no worker resident.
         local_runs_on_processor: &dyn Fn() -> bool,
+        // The caller's instruction to keep the request here (#251 (2b)).
+        keep: crate::types::KeepAsked,
     ) -> Vec<NodeCandidate> {
         let prompt_tokens = prompt.tokens;
         // Which computers this request may reach (None = any): this node
-        // alone for a model kept on this computer (#251), else private mode's
-        // set with any cross-pool extras the owner opted into (R134.7).
-        let allowed_set = crate::pool::scope::request_scope(&self.shared_state, &manifest.id);
+        // alone for a model kept on this computer or a request kept here
+        // (#251), else private mode's set with any cross-pool extras the owner
+        // opted into (R134.7).
+        let allowed_set = crate::pool::scope::request_scope(&self.shared_state, &manifest.id, keep);
 
         // Average bytes a layer occupies, for a load's price below. The
         // manifest is the only size the coordinator has; it is the on-disk

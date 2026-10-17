@@ -31,6 +31,11 @@ pub struct MessagesRequest {
     /// Extended thinking configuration: {"type":"enabled","budget_tokens":N}
     #[serde(default)]
     pub thinking: Option<serde_json::Value>,
+    /// SwarmLLM's own options (#251 (2b)). A named field, so it is never
+    /// caught by `extras` below and forwarded to a provider that never
+    /// defined it.
+    #[serde(default)]
+    pub swarmllm: Option<crate::api::keep_here::SwarmllmOptions>,
     /// Catch-all for Anthropic request fields we don't explicitly model
     /// (`service_tier`, `container`, future extensions). `#[serde(flatten)]`
     /// preserves them verbatim so the proxy round-trip
@@ -322,6 +327,29 @@ fn is_zero_u32(v: &u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The body's `swarmllm` object is read as a named field (#251 (2b)), so
+    /// `extras` — which the cloud passthrough forwards verbatim — never
+    /// carries it to a provider; and a misspelt key in it is refused, never
+    /// dropped (the outer catch-all must not swallow it either).
+    #[test]
+    fn the_keep_instruction_is_read_and_never_forwarded() {
+        let body = |inner: &str| {
+            format!(r#"{{"model":"m","max_tokens":5,"messages":[],"swarmllm":{inner}}}"#)
+        };
+        let req: MessagesRequest =
+            serde_json::from_str(&body(r#"{"keep_on_this_computer":true}"#)).unwrap();
+        assert_eq!(
+            req.swarmllm.as_ref().map(|o| o.asked()),
+            Some(crate::types::KeepAsked::OnThisComputer)
+        );
+        assert!(!req.extras.contains_key("swarmllm"));
+        assert!(
+            serde_json::from_str::<MessagesRequest>(&body(r#"{"keep_on_this_computr":true}"#))
+                .is_err(),
+            "a misspelt instruction was dropped"
+        );
+    }
 
     #[test]
     fn response_content_block_serialization() {

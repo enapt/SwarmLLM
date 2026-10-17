@@ -117,6 +117,7 @@ mod tests {
             text: None,
             conversation: None,
             context_management: None,
+            swarmllm: None,
             extras: HashMap::new(),
         };
         let resp = ResponsesResponse {

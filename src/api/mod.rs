@@ -419,6 +419,7 @@ pub mod claude_session;
 pub mod claude_sub;
 pub mod dashboard_trust;
 pub mod identity;
+pub mod keep_here;
 pub mod mcp;
 pub mod metrics;
 pub mod middleware;
@@ -471,6 +472,7 @@ mod submit_to_router_tests {
             None,
             None,
             None,
+            crate::types::KeepAsked::Unasked,
         );
         req.cancel = cancel;
         req

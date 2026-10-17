@@ -15,11 +15,17 @@ pub(super) struct PeerTarget {
 /// Find a peer that hosts shards for this model and return how to reach it.
 /// This is a fallback for when not all layers are covered network-wide — the
 /// peer may be able to handle the request directly or assemble its own pipeline.
-pub(super) fn find_peer_with_model(state: &AppState, model: &str) -> Option<PeerTarget> {
-    // The request's scope (#251) — a model kept on this computer is never
-    // forwarded, and private mode bounds the rest. Asked beside the pool
-    // check below, never instead of it: no restriction is not trust.
-    let scope = crate::pool::scope::request_scope(&state.shared_state, &ModelId(model.to_string()));
+pub(super) fn find_peer_with_model(
+    state: &AppState,
+    model: &str,
+    asked: crate::types::KeepAsked,
+) -> Option<PeerTarget> {
+    // The request's scope (#251) — a model kept on this computer, or a request
+    // whose caller asked to keep it here, is never forwarded, and private mode
+    // bounds the rest. Asked beside the pool check below, never instead of it:
+    // no restriction is not trust.
+    let scope =
+        crate::pool::scope::request_scope(&state.shared_state, &ModelId(model.to_string()), asked);
     for entry in state.shared_state.peer_registry.iter() {
         if scope.as_ref().is_some_and(|s| !s.contains(entry.key())) {
             continue;

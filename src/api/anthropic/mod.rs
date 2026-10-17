@@ -165,6 +165,11 @@ pub async fn messages(
         req.messages.len(),
         req.temperature.unwrap_or(1.0).into(),
     )?;
+    // The caller's instruction to keep this request on this computer (#251
+    // (2b)) — the header (Claude Code sends it through
+    // `ANTHROPIC_CUSTOM_HEADERS`) or the body's `swarmllm` object, the
+    // strictest of the two. Read before anything can route.
+    let keep = crate::api::keep_here::asked(&headers, req.swarmllm.as_ref())?;
 
     // Cap max_tokens at the same upper bound the local sampling clamp uses
     // (`build_sampling_params` clamps to DEFAULT_MAX_TOKENS=32768). Without
@@ -282,7 +287,9 @@ pub async fn messages(
     // `None`: this surface has no `swarm_route` field to carry an override, the
     // same reason `submit_stream_to_router` takes one as a parameter rather than
     // deriving it.
-    let has_local_split_model = state.shared_state.local_fast_path_for(&requested_mid, None);
+    let has_local_split_model = state
+        .shared_state
+        .local_fast_path_for(&requested_mid, None, keep);
 
     tracing::debug!(
         request_id = %request_id,
@@ -300,6 +307,7 @@ pub async fn messages(
                 request_id,
                 model,
                 convert::tool_definitions_for_template(&req),
+                keep,
             )
             .await;
         } else {
@@ -310,6 +318,7 @@ pub async fn messages(
                 request_id,
                 model,
                 convert::tool_definitions_for_template(&req),
+                keep,
             )
             .await;
         }
@@ -335,6 +344,7 @@ pub async fn messages(
                     request_id,
                     model,
                     convert::tool_definitions_for_template(&req),
+                    keep,
                 )
                 .await;
             } else {
@@ -345,6 +355,7 @@ pub async fn messages(
                     request_id,
                     model,
                     convert::tool_definitions_for_template(&req),
+                    keep,
                 )
                 .await;
             }
@@ -402,7 +413,7 @@ pub async fn messages(
     //
     // Never for a model the owner keeps on this computer: nothing here could
     // run it, and its prompt may not leave (#251).
-    if let Some(refusal) = providers::cloud_refused_for(&state, &model).await {
+    if let Some(refusal) = providers::cloud_refused_for(&state, &model, keep).await {
         return Err(ApiError(refusal));
     }
     let (upstream_model, anthropic_allowed) = route_model(&req.model);
@@ -633,6 +644,7 @@ mod tests {
             tool_choice: None,
             metadata: None,
             thinking: None,
+            swarmllm: None,
             extras: std::collections::HashMap::new(),
         };
         let msgs = to_internal_messages(&req);
@@ -670,6 +682,7 @@ mod tests {
             tool_choice: None,
             metadata: None,
             thinking: None,
+            swarmllm: None,
             extras: std::collections::HashMap::new(),
         };
         let msgs = to_internal_messages(&req);
@@ -696,6 +709,7 @@ mod tests {
             tool_choice: None,
             metadata: None,
             thinking: None,
+            swarmllm: None,
             extras: std::collections::HashMap::new(),
         };
         let msgs = to_internal_messages(&req);
@@ -740,6 +754,7 @@ mod tests {
             tool_choice: None,
             metadata: None,
             thinking: None,
+            swarmllm: None,
             extras: std::collections::HashMap::new(),
         };
         assert!(is_connectivity_probe(&probe));
@@ -761,6 +776,7 @@ mod tests {
             tool_choice: None,
             metadata: None,
             thinking: None,
+            swarmllm: None,
             extras: std::collections::HashMap::new(),
         };
         assert!(!is_connectivity_probe(&normal));
@@ -782,6 +798,7 @@ mod tests {
             tool_choice: None,
             metadata: None,
             thinking: None,
+            swarmllm: None,
             extras: std::collections::HashMap::new(),
         };
         let params = to_sampling_params(&req);
@@ -1021,6 +1038,7 @@ mod tests {
             tool_choice: None,
             metadata: None,
             thinking: None,
+            swarmllm: None,
             extras: std::collections::HashMap::new(),
         };
         let msgs = to_internal_messages(&req);

@@ -11,14 +11,27 @@ use super::types::{
 use super::{MCP_MAX_MODEL_ID_BYTES, MCP_MAX_PROMPT_BYTES, MCP_MAX_TASK_ID_BYTES};
 use crate::api::server::AppState;
 use crate::api::{DEFAULT_MAX_TOKENS, DEFAULT_TOP_K};
+use crate::types::KeepAsked;
 
 pub(super) async fn handle_tools_call(
     state: &AppState,
+    headers: &axum::http::HeaderMap,
     id: Option<Value>,
     params: Value,
 ) -> JsonRpcResponse {
     let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+    // The caller's instruction to keep this call on this computer (#251
+    // (2b)): `params._meta["com.swarmllm/keep_on_this_computer"]` or the
+    // header on the `/mcp` request, the strictest of the two. One that cannot
+    // be read is refused, never dropped.
+    let keep = match crate::api::keep_here::from_header(headers).and_then(|h| {
+        crate::api::keep_here::from_mcp_meta(Some(&params))
+            .map(|m| crate::api::keep_here::strictest(h, m))
+    }) {
+        Ok(keep) => keep,
+        Err(e) => return JsonRpcResponse::error(id, INVALID_PARAMS, e.to_string()),
+    };
 
     // Count the tools that actually send something to a model. The dashboard
     // tile reads "messages you've sent to AI models", and MCP is a first-class
@@ -33,17 +46,22 @@ pub(super) async fn handle_tools_call(
     }
 
     match tool_name {
-        "chat" => tool_chat(state, id, arguments).await,
+        "chat" => tool_chat(state, id, arguments, keep).await,
         "models" => tool_models(state, id).await,
-        "compare" => tool_compare(state, id, arguments).await,
-        "research" => tool_research(state, id, arguments).await,
-        "batch_prompts" => tool_batch_prompts(state, id, arguments).await,
-        "delegate" => tool_delegate(state, id, arguments).await,
+        "compare" => tool_compare(state, id, arguments, keep).await,
+        "research" => tool_research(state, id, arguments, keep).await,
+        "batch_prompts" => tool_batch_prompts(state, id, arguments, keep).await,
+        "delegate" => tool_delegate(state, id, arguments, keep).await,
         "node_info" => tool_node_info(state, id).await,
         _ => JsonRpcResponse::error(id, INVALID_PARAMS, format!("Unknown tool: {tool_name}")),
     }
 }
-async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
+async fn tool_chat(
+    state: &AppState,
+    id: Option<Value>,
+    args: Value,
+    keep: KeepAsked,
+) -> JsonRpcResponse {
     let router_tx = match &state.router_tx {
         Some(tx) => tx.clone(),
         None => {
@@ -140,6 +158,7 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
         // The MCP surface exposes tools to ITS caller; it does not hand any to
         // the model it drives, which answers in prose.
         None,
+        keep,
     );
 
     match tokio::time::timeout(
@@ -215,7 +234,12 @@ async fn tool_models(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
 }
 
 /// Compare tool: sends the same prompt to multiple models concurrently.
-async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
+async fn tool_compare(
+    state: &AppState,
+    id: Option<Value>,
+    args: Value,
+    keep: KeepAsked,
+) -> JsonRpcResponse {
     let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
         Some(p) if p.len() <= MCP_MAX_PROMPT_BYTES => p.to_string(),
         Some(_) => {
@@ -290,6 +314,7 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
             system.clone(),
             temperature,
             max_tokens,
+            keep,
             |mid, r| match r.error {
                 None => json!({
                     "model": mid,
@@ -331,7 +356,12 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
 /// Research tool: fan-out a question to multiple models, collect all responses.
 /// If no models specified, auto-selects models on this node or the swarm — never a paid
 /// cloud model, which only an explicit `models` list can name.
-async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
+async fn tool_research(
+    state: &AppState,
+    id: Option<Value>,
+    args: Value,
+    keep: KeepAsked,
+) -> JsonRpcResponse {
     let question = match args.get("question").and_then(|v| v.as_str()) {
         Some(q) if q.len() <= MCP_MAX_PROMPT_BYTES => q.to_string(),
         Some(_) => {
@@ -425,6 +455,7 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
             system.clone(),
             0.7,
             max_tokens,
+            keep,
             |mid, r| match r.error {
                 None => json!({
                     "model": mid,
@@ -471,7 +502,12 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
 }
 
 /// Batch prompts tool: execute multiple independent prompts in parallel.
-async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
+async fn tool_batch_prompts(
+    state: &AppState,
+    id: Option<Value>,
+    args: Value,
+    keep: KeepAsked,
+) -> JsonRpcResponse {
     let tasks = match args.get("tasks").and_then(|v| v.as_array()) {
         Some(arr) => arr.clone(),
         None => {
@@ -598,6 +634,7 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
             system,
             temperature,
             max_tokens,
+            keep,
             move |mid, r| match r.error {
                 None => json!({
                     "task_id": task_id_for_shape,
@@ -668,7 +705,12 @@ fn fast_tier_rank(source: &str, size_bytes: u64, loaded: bool) -> (u8, u8, u64) 
     )
 }
 
-async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
+async fn tool_delegate(
+    state: &AppState,
+    id: Option<Value>,
+    args: Value,
+    keep: KeepAsked,
+) -> JsonRpcResponse {
     let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
         Some(p) if p.len() <= MCP_MAX_PROMPT_BYTES => p.to_string(),
         Some(_) => {
@@ -821,6 +863,7 @@ async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> Json
         system.as_deref(),
         0.7,
         max_tokens,
+        keep,
     )
     .await;
 

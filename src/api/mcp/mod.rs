@@ -79,6 +79,7 @@ fn accepted_no_body() -> axum::response::Response {
 
 pub async fn handle_mcp(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     // Parse the body here rather than via the `Json` extractor. The extractor
@@ -106,7 +107,7 @@ pub async fn handle_mcp(
             JsonRpcResponse::success(req.id, json!({}))
         }
         "tools/list" => handle_tools_list(req.id),
-        "tools/call" => handle_tools_call(&state, req.id, req.params).await,
+        "tools/call" => handle_tools_call(&state, &headers, req.id, req.params).await,
         "resources/list" => handle_resources_list(req.id),
         "resources/read" => handle_resources_read(&state, req.id, req.params).await,
         "ping" => JsonRpcResponse::success(req.id, json!({})),

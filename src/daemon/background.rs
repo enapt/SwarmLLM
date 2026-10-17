@@ -1103,8 +1103,13 @@ pub(super) fn spawn_prefix_probe_handler(
                         .cross_node_prefix_trust_min;
                     // A fetch tells its peer which opening this prompt has,
                     // so it goes only where the request itself may (#251:
-                    // private mode, a model kept on this computer).
-                    let scope = crate::pool::scope::request_scope(&shared_state, &event.model_id);
+                    // private mode, a model kept on this computer, a request
+                    // its caller asked to keep here — `event.keep`).
+                    let scope = crate::pool::scope::request_scope(
+                        &shared_state,
+                        &event.model_id,
+                        event.keep,
+                    );
                     let mut best: Option<(crate::types::NodeId, [u8; 32], u32)> = None;
                     if let Some(model_index) = shared_state
                         .models

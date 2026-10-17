@@ -43,6 +43,11 @@ the closing brace in column zero. For the same reason, never match a literal
 carrying indentation (`"shared\n        .config\n        .resources"`) — that is
 pinned to whatever rustfmt produced the day it was written.
 
+**Match braces through `closing_brace`** (what `fn_bodies` and `cfg_test_spans`
+use): it skips strings, raw strings, char literals and comments. Counting brace
+bytes, one `Some("{".into())` hid `api/openai/mod.rs`'s whole test module from
+`cfg_test_spans` (gotcha #889; `a_brace_inside_a_literal_does_not_end_a_span`).
+
 **A file-level `contains` is not a site-level claim.** The prompt-privacy guard
 asserted each FILE mentions the send somewhere, the setting somewhere and
 `cfg()` somewhere. Both files make unrelated `cfg()` calls, so the third

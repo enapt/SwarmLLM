@@ -424,11 +424,6 @@ impl KvCacheManager {
         self.sessions.len()
     }
 
-    /// Get a session's previous pipeline assignment for reuse.
-    pub fn get_previous_pipeline(&mut self, session_id: &SessionId) -> Option<PipelineAssignment> {
-        self.get_session(session_id).map(|s| s.pipeline.clone())
-    }
-
     /// Persist all active multi-turn sessions to the database.
     ///
     /// Called during graceful shutdown so sessions can be restored on next startup.
