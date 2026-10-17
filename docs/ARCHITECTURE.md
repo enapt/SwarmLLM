@@ -542,8 +542,24 @@ without ever being able to read them.
   **static** X25519 key (derived from its Ed25519 identity via
   `ed25519_pubkey_to_x25519`) using a fresh ephemeral keypair per message
   (`crypto/relay_seal.rs`). AAD binds `origin ‖ relay_to ‖ request_id`, so a
-  relay cannot redirect, replay across requests, or swap a payload between
-  transfers without Poly1305 rejection.
+  relay cannot redirect or swap a payload between transfers without Poly1305
+  rejection.
+- **The origin is signed, inside the seal (2026-10-17, FUTURE_WORK #298).** An
+  ephemeral seal is anonymous — anyone who knows the target's NodeId can seal a
+  body naming any `origin` — so the origin signs a BLAKE3 digest of the kind
+  (message / forward / result), both NodeIds, the request id, a timestamp and the
+  inner bytes, and the body carries `"SRS1" ‖ sent_at_ms ‖ signature ‖ inner`.
+  It sits inside the seal because a relay re-encodes the envelope and an older
+  relay would drop an outer field. A node relays only to a target advertising
+  `features::RELAY_SIGNED` (bit 24), always signed: an older target could not
+  read the body and its reply would come back unsigned, so to one the send takes
+  the direct path. The target dispatches a body as its origin's only once the
+  signature verifies, the body is not a replay (`RelayReplayGuard`: one-sided
+  window, 5 min old / 60 s ahead, each body once, its memory shared out per
+  origin and per delivering peer and refusing when full) and an envelope's inner
+  is a message a node relays; it learns the route, registry entry and proven
+  features only then. An unsigned body is dropped, and a refusal is logged once
+  a window per delivering peer.
 - **Separate-request return path.** A relayed forward and its result are two
   independent relayed requests, never an RR response substream (which the relay
   cannot proxy). The coordinator's `pending_layer_results` oneshot resolves when
@@ -600,7 +616,7 @@ without ever being able to read them.
   `KV_WINDOW_SLIDES`, is a statement like bit 19: the node's sliding-window
   layers keep only their window and it reads a prompt in chunks no wider than
   `COPIED_CHUNK_MAX_TOKENS` (`kv_budget::windows_advertised`), so a coordinator
-  charges such a layer its window for a prompt, #281 (4)); bit 23, `MANIFEST_DIGESTS`, is in `ALL`: the node reads a `ManifestDigest` and answers a `ManifestPull`, so a peer catches it up with versions instead of manifests (#91 (2)); a node only attempts a relayed send when
+  charges such a layer its window for a prompt, #281 (4)); bit 23, `MANIFEST_DIGESTS`, is in `ALL`: the node reads a `ManifestDigest` and answers a `ManifestPull`, so a peer catches it up with versions instead of manifests (#91 (2)); bit 24, `RELAY_SIGNED`, is in `ALL`: the node reads a relayed body signed by its origin and drops one that is not, so a relayed message or tensor is sent only to a target advertising it, always signed (#298); a node only attempts a relayed send when
   the *recipient* advertises the matching bit, so the protocol evolves additively
   with no flag-day. The relay is chosen only when there is no usable direct
   connection (`has_direct_connection` false — the circuit-only case); a real

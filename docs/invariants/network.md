@@ -4451,6 +4451,96 @@ Wiring the hold into relaying found the relay switch did less than it said:
 network switch drops both with the connection; only a link that turns metered
 in place (Windows "set as metered", or `pause`) leaves one to run out.
 
+## A relayed body's origin is signed (2026-10-17, FUTURE_WORK #298)
+
+**What was wrong.** The application relay (NETWORKING_PLAN Phase 1: a NAT'd node's
+remote-generate traffic in `RelayedEnvelope`, a split's tensors in `RelayedTensor`) sealed each
+body with `session::ephemeral_seal`, a fresh X25519 key to the target's static key. That is an
+anonymous sealed box. libsodium says of its own `crypto_box_seal` that the recipient "can verify
+the integrity of the message" but "cannot verify the identity of the sender". `origin` was in
+the AAD, which stops a relay re-addressing a body someone else sealed, and nothing more: anyone
+who knows the target's NodeId can seal a new body naming any origin. The target
+(`handle_relayed_envelope`, `handle_relayed_tensor`) took a body from any connected peer, and
+then did three things:
+
+- it learned a relay route, a `peer_registry` entry and "proven features" for the named origin;
+- it handed the inner message to dispatch as `Some(origin)`, so every arm trusting
+  `authenticated_sender` could be spoofed;
+- it never checked that the inner message was one of the four a node relays.
+
+The module doc also claimed a replay fails Poly1305; a verbatim replay opens. Found by the
+`security-reviewer` pass on #91 (2). Confirmed by reading, and by
+`a_forged_origin_is_never_proven`, whose unsigned half shows a body sealed by a stranger opening
+cleanly.
+
+**The fix.**
+
+- **The origin signs, inside the seal.** The signed digest is BLAKE3 `derive_key` (its own
+  context string) over the kind (message / forward / result), origin, `relay_to`, request id,
+  `sent_at_ms` and the inner bytes. The body is `"SRS1" ‖ sent_at_ms ‖ signature ‖ inner`. It
+  must be inside: a relay decodes and re-encodes the envelope, so an older relay would drop an
+  outer field.
+- **Why each field is signed.** Covering the recipient is Davis's repair for sign-then-encrypt
+  ("Defective Sign & Encrypt", USENIX 2001): without it the target could re-seal the signed body
+  to a third node as if written for it (`a_signed_body_cannot_be_forwarded_to_another_node`).
+  Covering the kind binds `RelayedTensor::is_result`, which travels in clear outside the AAD.
+- **Gated at the sender, and only signed.** `features::RELAY_SIGNED` (bit 24) is checked per
+  TARGET by `target_speaks`, which reads a proof or the capability; a message relays only to a
+  target that has it (`RELAY_SIGNED`), a tensor only to one with `TENSOR_RELAY | RELAY_SIGNED`.
+  Refused there, the send takes the direct path at once. A first version sent an older target
+  the unsigned body it could parse; the security review showed the target's REPLY then came back
+  unsigned and was dropped here, after the target had done the work.
+- **What the target refuses** (`relay_seal::Opened`): an unsigned body, a signature that does
+  not verify, an envelope whose inner is not `is_relay_eligible`, and a replay. Only then does
+  `take_proven_relayed_origin` learn the route, registry entry and proven features
+  (`RELAY | RELAY_SIGNED`, or `TENSOR_RELAY | RELAY_SIGNED`).
+- **Replay** (`RelayReplayGuard`, a plain field on the network loop, the only opener). A body
+  dated more than 60 s ahead or more than 5 min old is refused. The window is one-sided per
+  gotcha #44, and wider than gossip's 30 s because a refusal here fails an inference. A body
+  already taken within the window is refused. An entry is swept (every 10 s) only once the
+  window would refuse it anyway, so the memory IS the window. When full — 262,144 entries, or
+  16,384 from one origin, or 32,768 handed over by one delivering peer — a new body is refused,
+  never an old one forgotten: forgetting early would take a replay. Entries are keyed by the
+  signed digest; the shares count by the first 8 bytes of a BLAKE3 hash of origin and peer.
+- **Refusals are said, once a window per delivering peer** (`refuse_relayed`, through
+  `observe_repeated_peer_failure`). The line names `relayed_by` — the one fact a forger cannot
+  choose — beside the `claimed_origin`, and the reason (`Refused`'s `Display` gives the seconds
+  ahead or past the window). A forger can send refusals as fast as it likes.
+
+**What a change must keep.** Nothing is learned from a body before it is proven. Nothing is
+relayed to a target that cannot sign its reply. A new relayed kind gets its own `RelayedKind`.
+The signature stays inside the seal. The replay memory refuses when full.
+
+**Mixed versions.** A node before this build is not relayed to, and the unsigned bodies it
+relays here as its own are dropped, so relaying between it and this one pauses until its
+auto-update (minutes); that traffic goes direct meanwhile. An older node still RELAYS between
+two new ones: the signature is inside the seal, so it forwards the body intact.
+
+**What is left** (FUTURE_WORK #299): eight delivering peers and sixteen origins, all free to
+mint, still fill the replay memory and stop relaying here; and `ensure_relayed_origin_known`
+registers each newly proven origin without the identify path's caps (older than #298).
+
+**Tests**, each shown red with its mechanism toggled off (10 toggles, one script, sources
+restored from a saved copy, re-run after the review's changes):
+
+| Mechanism toggled off | Red tests |
+|---|---|
+| unsigned accepted | `a_forged_origin_is_never_proven`, `a_relayed_{envelope,tensor}_is_dispatched_only_when_its_origin_is_proven` |
+| eligibility check | the envelope test |
+| replay guard | both call-site tests |
+| learning before the proof | the envelope test |
+| kind not signed | `tensor_seal_open_roundtrip`, the tensor test |
+| recipient not signed | `a_signed_body_cannot_be_forwarded_to_another_node` |
+| sweep forgets in-window bodies | `a_body_is_taken_once_and_only_inside_its_window` |
+| per-origin cap | `one_origin_cannot_fill_the_replay_memory` |
+| per-peer cap | `one_connection_cannot_fill_the_replay_memory` |
+| send gate | `a_peer_that_cannot_sign_back_is_never_relayed_to` |
+
+The two call-site tests drive a real `NetworkManager` (`Target` in `network::manager::relay`'s
+tests) and watch its dispatch feed; the third gives it a learned route to a target proven to
+relay but not to sign, and checks the send is refused and the route kept. `test_relay_mixed_version` takes a signed body through two
+re-encoding hops.
+
 ## Region summaries were a third of the gossip and read by nothing (2026-10-15, FUTURE_WORK #91)
 
 **#91 (1), the re-measure.** Release node, v0.3.239 fleet, 3.3 → 4.3 h up, idle, one hour

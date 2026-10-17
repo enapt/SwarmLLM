@@ -18,6 +18,9 @@ fixes in R143–R150.
   since two circuit-connected peers otherwise looked "connected" and used the
   fragile circuit RR. Crypto in `crypto/relay_seal.rs`; transport in
   `network/manager/relay.rs`; state in `daemon/state/relay.rs`.
+  Since 2026-10-17 the origin SIGNS each body inside the seal
+  (`features::RELAY_SIGNED`, FUTURE_WORK #298): the seal alone is anonymous.
+  A node relays only to a peer advertising that bit.
 - ✅ **Tensor relay — distributed inference across NAT.** Extends the relay to
   the *distributed-pipeline* tensor path (`LayerForward`/`LayerResult`), so a
   multi-shard inference between two un-connectable nodes runs over the sealed

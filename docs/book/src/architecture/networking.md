@@ -30,7 +30,7 @@ The unified protocol uses a type-tag byte on every frame
 | `0x02` | `WIRE_TAG_TENSOR_COMPRESSED` | Q8_0 activation frame (flag-gated `activation_compression`) — ~3.76× smaller than `0x01` |
 | `0x03` | `WIRE_TAG_SHARD` | Raw shard bytes (ShardResponse payload; parts are sent in 8 MiB chunks, and this frame type may carry up to 256 MB — it bypasses the 4 MB JSON cap) |
 | `0x04` | `WIRE_TAG_PREFIX_KV` | Cross-node prefix-KV snapshot. Frame body's flag byte: `0` = miss, `1` = raw f32, `2` = zstd-compressed f32 (gated on `NetworkConfig::prefix_kv_compression`, default off). Receivers always decompress regardless of the send-side flag. |
-| `0x06` | `WIRE_TAG_RELAYED_TENSOR` | A tensor forward or result routed through a relay: `[relay_to:32][origin:32][request_id:16][is_result:1][ephemeral_pub:32][sealed…]`. Sent only to peers that advertise `features::TENSOR_RELAY` |
+| `0x06` | `WIRE_TAG_RELAYED_TENSOR` | A tensor forward or result routed through a relay: `[relay_to:32][origin:32][request_id:16][is_result:1][ephemeral_pub:32][sealed…]`. Sent only to peers that advertise both `features::TENSOR_RELAY` and `features::RELAY_SIGNED`; the sealed body carries the origin's signature, and the target drops an unsigned one |
 
 Receivers auto-dispatch on the leading byte; senders choose based on
 config + request kind. Only the `0x00` frame carries a JSON body; the

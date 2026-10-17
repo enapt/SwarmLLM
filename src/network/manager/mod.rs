@@ -480,6 +480,10 @@ pub struct NetworkManager {
     ///    time by `NetworkManager::ack_deadline_secs`, because the ACK is a
     ///    round trip and a fixed one declares a distant peer dead.
     pending_rr_observability: HashMap<OutboundRequestId, PendingRrSend>,
+    /// Which signed relayed bodies addressed to this node were taken, so a
+    /// relay cannot deliver one twice (FUTURE_WORK #298). Only this loop opens
+    /// relayed bodies (`relay.rs`), so it is a plain field.
+    relay_replay: crate::crypto::relay_seal::RelayReplayGuard,
     /// Fast-path content tokens this node has already re-sent once after a
     /// `Dropped` response or an `OutboundFailure` (gotcha #438). A re-send
     /// is tracked without a `stream_token` key, so a second failure is left
@@ -892,6 +896,7 @@ impl NetworkManager {
             parked_result_resends: Vec::new(),
             result_fault_fired: false,
             pending_rr_observability: HashMap::new(),
+            relay_replay: Default::default(),
             resent_stream_tokens: std::collections::HashSet::new(),
             faulted_stream_tokens: std::collections::HashSet::new(),
             peer_failure_log_suppression: HashMap::new(),

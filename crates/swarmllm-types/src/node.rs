@@ -291,6 +291,14 @@ pub mod features {
     /// node with one such peer keeps broadcasting its repeats.
     pub const MANIFEST_DIGESTS: u64 = 1 << 23;
 
+    /// Reads a relayed message or tensor whose sealed body carries its origin's
+    /// signature, signs its own, and refuses one without it (FUTURE_WORK #298).
+    /// A relay forwards the body without opening it, so an older relay passes
+    /// it on unchanged; the bit is checked per TARGET, and a target without it
+    /// is not relayed to at all — it could not parse a signed body, and its
+    /// reply would come back unsigned.
+    pub const RELAY_SIGNED: u64 = 1 << 24;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`] and [`KV_WINDOW_SLIDES`] beside it where they
     /// apply.
@@ -315,7 +323,8 @@ pub mod features {
         | CHAINED_VERIFY
         | SPLIT_PROMPT_CACHE
         | PROMPT_CHUNKS
-        | MANIFEST_DIGESTS;
+        | MANIFEST_DIGESTS
+        | RELAY_SIGNED;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

@@ -9,7 +9,7 @@
 //! level that is deterministic (no libp2p timing/flakiness) yet covers the real
 //! sealed-envelope transport a vN ↔ vN pair uses and the vN ↔ vN-1 gate.
 
-use swarmllm::crypto::relay_seal::{open_relayed_message, seal_relayed_message};
+use swarmllm::crypto::relay_seal::{open_relayed_message, seal_relayed_message, Opened};
 use swarmllm::identity::Identity;
 use swarmllm::types::{features, ModelId, RemoteGenerateRequest, SamplingParams, SwarmMessage};
 
@@ -41,8 +41,8 @@ fn relay_round_trip_relay_blind_target_recovers() {
 
     // A seals the inner request end-to-end for B; only the cleartext routing
     // header (relay_to = B, origin = A) is visible to the relay.
-    let env = seal_relayed_message(a.node_id().clone(), b.node_id().clone(), request_id, &inner)
-        .expect("seal for target");
+    let env =
+        seal_relayed_message(&a, b.node_id().clone(), request_id, &inner).expect("seal for target");
     assert_eq!(&env.relay_to, b.node_id());
     assert_eq!(&env.origin, a.node_id());
     // The plaintext prompt must NOT appear in the sealed bytes.
@@ -74,9 +74,16 @@ fn relay_round_trip_relay_blind_target_recovers() {
         panic!("expected a RelayedEnvelope at the target");
     };
 
-    // B opens it and recovers the EXACT inner request.
+    // B opens it and recovers the EXACT inner request, its origin proven: the
+    // signature rides inside the seal, so two re-encoding hops keep it (#298).
     let b_secret = b.x25519_secret();
     let recovered = open_relayed_message(&b_secret, &env_at_target).expect("target opens payload");
+    let Opened::Proven {
+        inner: recovered, ..
+    } = recovered
+    else {
+        panic!("a signed envelope must open as proven after two hops");
+    };
     match recovered {
         SwarmMessage::RemoteGenerateRequest(got) => {
             assert_eq!(got.request_id, request_id);
@@ -98,13 +105,8 @@ fn tampered_relay_header_is_rejected_by_target() {
     let inner = SwarmMessage::CancelInference(swarmllm::types::CancelInference {
         request_id: uuid::Uuid::new_v4(),
     });
-    let mut env = seal_relayed_message(
-        a.node_id().clone(),
-        b.node_id().clone(),
-        uuid::Uuid::new_v4(),
-        &inner,
-    )
-    .unwrap();
+    let mut env =
+        seal_relayed_message(&a, b.node_id().clone(), uuid::Uuid::new_v4(), &inner).unwrap();
     env.origin = evil.node_id().clone(); // relay tampers with the header
 
     let b_secret = b.x25519_secret();
@@ -129,11 +131,19 @@ fn mixed_version_gate_skips_feature_less_peer() {
     // The tensor relay is a distinct, separately-negotiated capability.
     assert!(features::supports(features::ALL, features::TENSOR_RELAY));
     assert!(!features::supports(features::RELAY, features::TENSOR_RELAY));
+    // So is the signed body (#298): a peer that relays but predates it is not
+    // relayed to at all — it could not parse a signed body, and its reply would
+    // come back unsigned and be dropped.
+    assert!(features::supports(features::ALL, features::RELAY_SIGNED));
+    assert!(!features::supports(
+        features::RELAY | features::TENSOR_RELAY,
+        features::RELAY_SIGNED
+    ));
 }
 
 #[test]
 fn tensor_relay_round_trip_relay_blind_target_recovers() {
-    use swarmllm::crypto::relay_seal::{open_relayed_tensor, seal_relayed_tensor};
+    use swarmllm::crypto::relay_seal::{open_relayed_tensor, seal_relayed_tensor, RelayedKind};
     use swarmllm::network::protocol::{
         decode_relayed_tensor, encode_relayed_tensor, RelayedTensor,
     };
@@ -149,7 +159,7 @@ fn tensor_relay_round_trip_relay_blind_target_recovers() {
 
     // A seals the encoded tensor for B and builds the relay envelope.
     let (eph, sealed) =
-        seal_relayed_tensor(a.node_id(), b.node_id(), &rid, &encoded_tensor).unwrap();
+        seal_relayed_tensor(&a, b.node_id(), &rid, RelayedKind::Forward, &encoded_tensor).unwrap();
     let rt = RelayedTensor {
         relay_to: b.node_id().clone(),
         origin: a.node_id().clone(),
@@ -167,6 +177,7 @@ fn tensor_relay_round_trip_relay_blind_target_recovers() {
         &at_relay.origin,
         &at_relay.relay_to,
         &at_relay.request_id,
+        RelayedKind::Forward,
         &at_relay.ephemeral_pub,
         &at_relay.sealed,
     )
@@ -179,10 +190,17 @@ fn tensor_relay_round_trip_relay_blind_target_recovers() {
         &at_target.origin,
         &at_target.relay_to,
         &at_target.request_id,
+        RelayedKind::Forward,
         &at_target.ephemeral_pub,
         &at_target.sealed,
     )
     .unwrap();
+    let Opened::Proven {
+        inner: recovered, ..
+    } = recovered
+    else {
+        panic!("a signed tensor must open as proven after two hops");
+    };
     assert_eq!(recovered, encoded_tensor);
     // The plaintext tensor must never appear in the sealed bytes.
     assert!(!at_target

@@ -187,6 +187,12 @@ UPnP is the DIRECT `libp2p-upnp` ≥ 0.6 dependency (it backs off a refused mapp
 
 → `docs/invariants/network.md` § ""Is this connection direct?" — `network::relay::addr_is_direct_transport`"
 
+## A relayed body is its origin's only once its origin is PROVEN
+
+An ephemeral seal is anonymous (`crypto::relay_seal`): `origin` in the AAD is a claim anyone can make. A relayed message or tensor is dispatched as `Some(origin)` only when **`relay_seal::Opened::Proven`** (the origin's signature inside the seal), **`RelayReplayGuard::admit`** takes it (refuse when full, never forget early), and an envelope's inner is **`is_relay_eligible`**. Nothing is learned from a body before that (`take_proven_relayed_origin` — route, registry entry, proven features). A node relays ONLY to a target that `target_speaks(RELAY_SIGNED)`, always signed: an older target's reply comes back unsigned (`a_peer_that_cannot_sign_back_is_never_relayed_to`). A refusal goes through `refuse_relayed` (throttled per delivering peer). A new relayed kind gets its own `RelayedKind`, signed. Tests `a_relayed_{envelope,tensor}_is_dispatched_only_when_its_origin_is_proven` (#298; residual #299).
+
+→ `docs/invariants/network.md` § "A relayed body's origin is signed"
+
 ## Whether a peer is on our LAN is decided only from what WE observed
 
 `is_lan_peer` is a privacy boundary: never derive it from `identify::Info` (peer-controlled); use only the connection's own address, mDNS, and a measured RTT. ⚠ The flag is sticky. Guard: `lan_membership_is_never_decided_from_what_a_peer_told_us`.

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #298**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #300**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2075,6 +2075,24 @@ Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the 
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
 
+#### #299 — Eight peers can still fill the relayed-body replay memory, and a proven origin is registered without a cap
+`P3` · security · **OPEN** — 2026-10-17 · history: the `security-reviewer` pass on #298's fix
+
+#298's `RelayReplayGuard` (`crypto::relay_seal`) refuses a new body when full rather than forget
+an old one, since forgetting early would take a replay. It shares its 262,144 entries out per
+origin (16,384) and per delivering peer (32,768). Eight delivering peers and sixteen origins
+reach the total, and both are key pairs anyone can mint. Every relayed body addressed to this
+node is then refused while they keep sending, and for up to 6 min after (a body dated 60 s ahead
+is remembered for its 5 min window). Each body costs the sender a signature and a seal, and only
+relaying stops: a refused body is never dispatched, and direct paths are untouched. Second,
+`take_proven_relayed_origin` → `ensure_relayed_origin_known` writes `peer_registry` and
+`peer_id_map` for each newly proven origin without the caps the identify path applies
+(`MAX_PEER_REGISTRY` 200 with eviction, `MAX_PEER_TO_NODE`), so one connection can grow both
+until the health monitor's stale-peer sweep. That half predates #298, where a forged origin
+needed no signature at all. Next: key the delivering share by something dearer to mint than a
+PeerId, or let the total grow only with the relays actually connected; apply the identify path's
+caps in `ensure_relayed_origin_known`. Wire and crypto → `security-reviewer` on the diff.
+
 #### #285 — A tensor forward to a peer whose NodeId mapping is missing goes out without its session seal, and is accepted
 `P3` · security · **OPEN** — 2026-10-16 · history: none (found by the 2026-10-16 doc sweep)
 
@@ -2459,7 +2477,32 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-16/17, not yet released** (#265, #286, #287, #288, #289, #290, #115 (3b), #292, #115 (3c), #296)
+**Closed 2026-10-16/17, not yet released** (#265, #286, #287, #288, #289, #290, #115 (3b), #292, #115 (3c), #296, #298)
+- #298 — **A relayed message or tensor is taken as its sender's only when the sender signed it.**
+  Found 2026-10-17 by the security review of #91 (2), filed and fixed in one commit. The
+  application relay (NAT'd nodes' remote-generate traffic and split tensors) sealed each body
+  with an ephemeral key to the target — an anonymous sealed box, as libsodium says of its own
+  ("cannot verify the identity of the sender") — and named the origin only in the AAD, which
+  stops a relay re-addressing a body, not anyone sealing a new one. The target took a body from
+  any connected peer and handed its inner message to dispatch as the named origin's, after
+  learning a route, a registry entry and proven features for it, and never checked that the
+  inner message was one a node relays; a verbatim replay also opened. Now the origin signs a
+  digest of the kind, both NodeIds, the request id, a timestamp and the inner bytes, inside the
+  seal (an older relay re-encodes the envelope and would drop an outer field); covering the
+  recipient is Davis's sign-then-encrypt repair (USENIX 2001). A node relays only to a target
+  advertising `features::RELAY_SIGNED` (bit 24), always signed; the target refuses an unsigned
+  body, a replay (`RelayReplayGuard`: 5 min old / 60 s ahead, each body once, its memory shared
+  out per origin and per delivering peer and refusing when full) and a message no node relays,
+  and learns nothing before; a refusal is logged once a window per delivering peer. Mixed
+  versions: a node before this build is not relayed to, and what it relays here as its own is
+  dropped, so relaying between it and this one pauses until its auto-update (minutes) and that
+  traffic goes direct meanwhile; an older node still relays between two new ones, and nothing
+  that does not relay changes. The `security-reviewer` pass on the first version found it still
+  relayed unsigned to an older target, whose reply then came back unsigned and was dropped after
+  the work was done (hence the send gate), and a replay memory one peer could fill (hence the
+  shares); what it left is #299. Tests: 5 new in `crypto::relay_seal`, 3 against a real
+  `NetworkManager`, 10 mechanisms each toggled off and shown red; `docs/invariants/network.md`
+  § "A relayed body's origin is signed".
 - #296 — **Gemma 4's E2B and E4B are priced as a card holds them.** Their per-layer table (1,837 MiB
   of the E2B Q4_K_M, 2,205 of the E4B's) stays in the machine's memory on every device, as
   llama.cpp keeps its input layer on the processor, and was charged to the card as weights while
