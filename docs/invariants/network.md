@@ -3880,6 +3880,9 @@ and served nothing while spending ~2.6 Mbit/s.
   versions (#61) un-hear each other, and ~90% of manifest gossip was holders
   of 9 disputed models re-announcing every round (2026-09-25). Each version
   now goes out once per window, swarm-wide.
+- **What one peer lacks is pulled, not pushed** (#91 (2), 2026-10-17): a peer
+  advertising `features::MANIFEST_DIGESTS` is told the versions and pulls only
+  what it lacks — § "Announce, then pull" below.
 
 ## A counter named for an outcome may only be counting the attempt
 
@@ -4519,3 +4522,114 @@ topic, 6.7 KB/s out (8.8 on .239), 3.3 KB/s of it gossip (6.5). `swarm/regions` 
 demand gossip alone (`ModelDemandGossip`, 3.0 a minute). What is left is the manifests:
 `swarm/models` is 84% of the gossip sent (`ModelManifest` 0.83 a minute received, ~35 KB each,
 forwarded on) — the case for announce-then-pull (FUTURE_WORK #91 (2)).
+
+## Announce, then pull: manifests (2026-10-17, FUTURE_WORK #91 (2))
+
+**What it replaced.** After (1) and (1b), `swarm/models` was 84% of an idle node's gossip, and
+the catch-up was a larger cost nobody had counted. A probe node joining the .240 fleet on
+2026-10-16 was sent **84 manifests, ~2.9 MB, by 6 peers in ~20 s**: every holder's full set,
+point to point, describing **26 models with exactly one version each**. All six agreed, so
+none of it was news. Peers reconnect about 7 times an hour on an 8-peer node (2026-09-21), and
+every reconnect repeated it.
+
+**The design** is Bitcoin's `inv`/`getdata` and Plumtree's lazy push (Leitão et al. 2007),
+which is what gossipsub's IHAVE/IWANT is too. Gossipsub cannot do it for us: an IHAVE names
+message ids, and each holder's manifest is its own message (its own publish, its own nonce), so
+one version from three holders is three ids. IDONTWANT (v1.2, messages over 1,000 B) only
+cancels a copy not yet sent, and every message still arrived 2.7-3.2 times. So the version
+itself is the announcement:
+
+- **The messages.** `SwarmMessage::ManifestDigest { versions: [(model_id, manifest_hash,
+  context_length)] }` and `ManifestPull { models }` are point to point only. They are sent only
+  to a peer advertising `features::MANIFEST_DIGESTS` (bit 23). Neither is in
+  `handle_broadcast`'s list, so neither can go on gossip. One ARRIVING on gossip, or without an
+  authenticated sender, is not answered.
+- **The sender** (`health::monitor::broadcast_manifests`). A newcomer that takes digests is sent
+  the digest plus each model's upload claim (`upload_claim`). The claims are a max-register that
+  converges only on what every node is eventually delivered, so they travel whether or not the
+  peer pulls. Every told, connected peer that takes digests is sent them again each
+  `MANIFEST_QUIET_WINDOW` (2 h). That was the repeat's interval, so a change lost in flight
+  reaches it no later than before.
+- **What is still gossiped.** A CHANGE goes on gossip in full: every holder of the old version
+  needs it. The gossiped repeat waits `MANIFEST_QUIET_WINDOW_WITH_DIGESTS` (24 h) only while
+  EVERY connected peer takes digests. One peer without the bit, or one whose capability has not
+  arrived, keeps the 2 h window. The repeat is kept at all for a node connected to no holder of a
+  model, which hears of it only from gossip relayed across the mesh.
+- **What the receiver pulls** (`daemon::state::manifest_sync::ManifestSync`,
+  `daemon::dispatch::manifest_sync`). It pulls a version it neither holds nor has seen, or one
+  whose copy here, and every copy it has seen, declare another context than the sender's
+  (`context_length` is outside the hash, #189). The digest carries the figure, not a flag: a
+  flag would leave a copy declaring a different figure unpulled. The `ModelManifest` arm writes
+  `note_seen` for EVERY transport, after verification and before the upload judgement, so a
+  version this node refuses is not pulled again from the next digest. A version being pulled is
+  not asked of the next peer: six peers' digests naming one version pull it once.
+- **When a pull is not answered.** After `PULL_PATIENCE` (20 s) the health monitor's round asks
+  EVERY connected peer that takes digests, once (`retry_overdue_pulls`). Otherwise a peer that
+  named a version and never answered (slow, gone or hostile) would leave it unpulled until a
+  digest up to 2 h later, where the old full catch-up always delivered. A pull costs ~100 bytes,
+  and a peer holding no part of the model answers nothing. **A digest never re-arms a pull**: a
+  peer that named a version first cannot hold it past the retry by naming it again, and only a
+  pull asked of everyone and still unanswered may be started again by a new digest. Pulls are
+  kept per VERSION, not per model: an answer carrying another version does not end the pull of
+  the one named, and two peers holding two versions of one model are both pulled
+  (`model::canonical` decides between them). (Tests
+  `an_unanswered_pull_is_asked_of_every_peer_and_cannot_be_held` and
+  `a_pull_left_unanswered_is_asked_of_every_peer_that_takes_digests`.)
+- **The bounds.** At most `MAX_DIGEST_VERSIONS` (1024) versions read from a digest and
+  `MAX_PULL_MODELS` (64) models a pull. The sender splits its digest at 64, so each digest can be
+  pulled whole. A model id over `MAX_MODEL_ID_BYTES` (256) is not read. An answer is ~35 KB a
+  model, so a pull is an amplification a peer must not be able to aim: each model is answered to
+  one peer once per `ANSWER_AGAIN_AFTER` (10 min, what the full catch-up delivered per
+  reconnect), and at most `ANSWERS_PER_WINDOW` (128) manifests a minute. Without the first, a
+  peer could pull the same few models at the full budget every minute, ~75 KB/s for ~2 KB of
+  asking. A connected peer can name made-up models as fast as it sends digests, so at most
+  `MAX_PULLS_IN_FLIGHT` (1024) pulls are out at once. One peer may hold no more of them than it
+  would answer in a window (128), so it cannot fill the bound and starve every other peer. At most
+  `MAX_SEEN_VERSIONS` (16,384) versions are remembered as seen, and `MAX_MANIFESTS_HEARD`
+  (16,384) as heard on gossip (`ModelMgmt::note_manifest_heard`, kept a day now that the repeat
+  can wait that long). Past a bound nothing new is added: a version not remembered is only pulled,
+  or announced, again. (Tests `one_peer_cannot_fill_the_pulls`, `the_seen_versions_are_bounded`,
+  `the_heard_versions_are_bounded`, `answers_to_one_peer_are_bounded` and
+  `a_model_is_answered_once_and_never_to_a_peer_not_connected`, each red with its bound off.)
+- **What a pull is answered with.** Only a manifest this node gossips (published or holding a
+  part, never withheld: `ModelRegistry::manifest_to_gossip`, the one-model form of
+  `manifests_to_gossip` by the same rule), with the claim beside each, exactly as the catch-up
+  sent them. Everything cheap is refused before any manifest is copied: a sender not connected
+  (the answer could not reach it), an over-long or duplicate id, a model this node does not
+  gossip, a spent budget. Copying the whole set per pull, as the first draft did, made a
+  ~40-byte request cost ~1-3 MB of copying on the dispatcher. The answer is sent from a task of
+  its own, so the dispatcher never waits on the network loop.
+- **Security review** (`security-reviewer`, 2026-10-17, on the whole diff): the re-arm, the
+  per-model answer bound, the copy-before-refusal, the context figure and the two map bounds
+  above, each fixed with its test.
+- **Old peers** see no change. Without the bit, they are sent manifests in full, both ways.
+
+**Sizes.** As JSON a version is ~200 B and a claim ~280 B, so 26 models come to ~12 KB per peer
+at a catch-up, against ~480 KB per peer before. A reconnecting peer that holds every version
+pulls nothing.
+
+**Tests**, each shown red with its branch toggled off:
+
+- `a_newcomer_that_takes_digests_is_sent_the_versions_not_the_manifests`: red with the catch-up
+  branch off, and red with the periodic repeat off.
+- `the_repeat_stretches_only_when_every_peer_takes_digests` and `a_digest_is_owed_once_a_window`.
+- `a_digest_pulls_from_its_sender_what_this_node_lacks`: red without the transport check.
+- `a_pull_is_answered_with_only_the_asked_manifests_this_node_gossips`: red without the
+  asked-for filter.
+- `an_unanswered_pull_is_asked_of_every_peer_and_cannot_be_held`: red with the re-ask off, and
+  red with a digest allowed to re-arm a pull. `a_pull_left_unanswered_is_asked_of_every_peer_that_takes_digests`:
+  red with the re-ask off; a peer without the bit is not asked.
+- `daemon::state::manifest_sync::tests::*`.
+
+**Rig** (`examples/manifest_digest_rig.sh`, 2026-10-17, dev build, three nodes on loopback in a
+private network namespace):
+
+- **The pull.** C joined after B had taken A's first broadcast. It pulled once and got the manifest
+  point to point 12 ms after the digest, with nothing by gossip.
+- **The reconnect.** A restarted. It caught B and C up by digest again, and neither pulled.
+- **Mixed versions.** With C on .240, A caught C up in full and C learned the model. With A on
+  .240, A caught both up in full and C learned it.
+- **Not new.** A restarted holder still broadcasts its manifests once on its first round, because
+  it keeps no memory of what it announced.
+
+The fleet figures wait for the release (FUTURE_WORK #91).

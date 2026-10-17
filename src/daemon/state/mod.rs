@@ -24,6 +24,7 @@ pub(crate) mod forward_streams;
 mod hf;
 pub(crate) mod lifetime;
 mod load_rate;
+pub(crate) mod manifest_sync;
 mod metrics;
 mod models;
 mod peer_outliers;
@@ -1448,6 +1449,7 @@ impl SharedState {
                 shard_download_backoff: DashMap::new(),
                 geometry_probe_retry_after: DashMap::new(),
                 manifest_heard: DashMap::new(),
+                manifest_sync: Default::default(),
                 parallax_stability: DashMap::new(),
                 cross_node_prefix_index: DashMap::new(),
                 peer_prefix_blocks: DashMap::new(),
@@ -3335,13 +3337,6 @@ impl SharedState {
             .unwrap_or(0)
     }
 
-    /// Does this peer understand a chained pipeline forward?
-    ///
-    /// A node without the bit ignores the field and returns its result to the
-    /// coordinator, which is correct in itself but would leave the coordinator
-    /// waiting on a node that is never going to answer — so a chain must never
-    /// be routed through one. Unknown counts as no, which costs a round trip
-    /// and always works.
     /// Does `node_id` advertise every bit of `feature`? Unknown counts as no —
     /// the additive-protocol rule: a peer is never sent something it has not
     /// said it understands.
@@ -3353,6 +3348,13 @@ impl SharedState {
             .unwrap_or(false)
     }
 
+    /// Does this peer understand a chained pipeline forward?
+    ///
+    /// A node without the bit ignores the field and returns its result to the
+    /// coordinator, which is correct in itself but would leave the coordinator
+    /// waiting on a node that is never going to answer — so a chain must never
+    /// be routed through one. Unknown counts as no, which costs a round trip
+    /// and always works.
     pub fn peer_supports_pipeline_chain(&self, node_id: &crate::types::NodeId) -> bool {
         self.peer_registry
             .get(node_id)

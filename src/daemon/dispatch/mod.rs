@@ -1594,6 +1594,25 @@ pub(crate) async fn dispatch_network_messages(
                                         // new shard holders change which shards are most needed.
                                         shared_state.models.auto_manage_notify.notify_one();
                                     }
+                                    // Announce-then-pull for manifests (FUTURE_WORK #91 (2)).
+                                    SwarmMessage::ManifestDigest(digest) => {
+                                        manifest_sync::on_digest(
+                                            shared_state,
+                                            &network_tx,
+                                            authenticated_sender.as_ref(),
+                                            transport,
+                                            &digest,
+                                        );
+                                    }
+                                    SwarmMessage::ManifestPull(pull) => {
+                                        manifest_sync::on_pull(
+                                            shared_state,
+                                            &network_tx,
+                                            authenticated_sender.as_ref(),
+                                            transport,
+                                            &pull,
+                                        );
+                                    }
                                     // Process model manifests from peers — register in model_registry
                                     SwarmMessage::ModelManifest(manifest) => {
                                         // SEC: Require transport-authenticated sender (prevents anonymous injection).
@@ -1752,6 +1771,15 @@ pub(crate) async fn dispatch_network_messages(
                                                     &manifest.id,
                                                     manifest.manifest_hash,
                                                     transport,
+                                                );
+                                                // Seen by ANY transport, and whether
+                                                // ingestion adopts it or not: a digest
+                                                // naming this version again is not pulled
+                                                // (FUTURE_WORK #91 (2)).
+                                                shared_state.models.manifest_sync.note_seen(
+                                                    &manifest.id,
+                                                    manifest.manifest_hash,
+                                                    manifest.context_length,
                                                 );
                                                 // A manifest of an upload the swarm does not
                                                 // use describes parts this node must never
@@ -3249,6 +3277,7 @@ pub(crate) async fn dispatch_network_messages(
     }
 }
 pub(crate) mod layer_forward;
+mod manifest_sync;
 pub(crate) mod remote_generate;
 mod vision;
 

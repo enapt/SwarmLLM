@@ -44,6 +44,10 @@ pub struct HealthMonitor {
     /// Peers that were connected when manifests last went out. A peer outside
     /// this set has never been sent our picture, and gets a full round.
     peers_told_about_manifests: std::collections::HashSet<crate::types::NodeId>,
+    /// When each connected peer advertising `features::MANIFEST_DIGESTS` was
+    /// last sent our `ManifestDigest` — at its catch-up, then every
+    /// `MANIFEST_QUIET_WINDOW` (FUTURE_WORK #91 (2)).
+    digest_sent_at: std::collections::HashMap<crate::types::NodeId, std::time::Instant>,
     /// When the capability last went on the wire and what it said, so it is
     /// published when it says something new or `CAPABILITY_HEARTBEAT` has
     /// passed, not every tick (`capability_needs_broadcast`).
@@ -126,6 +130,39 @@ const FULL_REANNOUNCE_EVERY_TICKS: u64 = 10;
 /// repeats. Two hours sits under RPL's default Trickle ceiling for the same job
 /// (RFC 6550 § 17: Imin 2^3 ms doubled 20 times, ~2.3 h).
 const MANIFEST_QUIET_WINDOW: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// The quiet window once EVERY connected peer advertises
+/// `features::MANIFEST_DIGESTS` (FUTURE_WORK #91 (2)).
+///
+/// Then the repair the gossip repeat was for is made point to point: each such
+/// peer is sent our `ManifestDigest` at its catch-up and every
+/// `MANIFEST_QUIET_WINDOW`, and pulls only a version it lacks. What the repeat
+/// is still for is a node connected to no holder of a model, which learns of it
+/// only from gossip relayed across the mesh — so it is kept, once a day, rather
+/// than dropped. Measured 2026-10-16 (release node, fleet on .240, idle):
+/// `swarm/models` 84% of the gossip sent, every manifest a repeat delivered
+/// ~3 times; a twelfth of the repeats is a twelfth of that.
+const MANIFEST_QUIET_WINDOW_WITH_DIGESTS: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How long the swarm's hearing of a manifest stays quiet this round:
+/// [`MANIFEST_QUIET_WINDOW_WITH_DIGESTS`] when every connected peer takes
+/// digests, [`MANIFEST_QUIET_WINDOW`] otherwise — a peer without the bit is
+/// repaired only by the gossip repeat, as it always was. No peer at all is the
+/// short window: nothing has been told anything.
+fn manifest_quiet_window(connected: usize, taking_digests: usize) -> Duration {
+    if connected > 0 && taking_digests == connected {
+        MANIFEST_QUIET_WINDOW_WITH_DIGESTS
+    } else {
+        MANIFEST_QUIET_WINDOW
+    }
+}
+
+/// Is a peer that takes digests owed our versions again? Every
+/// `MANIFEST_QUIET_WINDOW` since the last digest or catch-up it was sent; one
+/// with no record is owed one now.
+fn digest_due(last_sent: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    last_sent.is_none_or(|at| now.saturating_duration_since(at) >= MANIFEST_QUIET_WINDOW)
+}
 
 /// Is this a round where every manifest is BROADCAST, changed or not?
 ///
@@ -285,6 +322,34 @@ fn capability_needs_broadcast(
         .then(|| "heartbeat".to_string())
 }
 
+/// This node's claim of which HuggingFace upload `model` is — what
+/// `model::canonical` chooses from — as the message that carries it, or `None`
+/// when it knows no source. The ONE builder, for the broadcast round and the
+/// newcomer catch-up alike — and the answer to a peer's `ManifestPull` — so
+/// they cannot disagree about what a node claims.
+///
+/// Cloned out of `hf_sources` before anything is sent: `network_tx.send` waits
+/// whenever the network loop is busy, and a `Ref` held across it blocks the
+/// dispatcher's `hf_sources.insert` on the same shard (clippy.toml).
+pub(crate) fn upload_claim(
+    state: &crate::daemon::SharedState,
+    model: &crate::types::ModelId,
+    our_id: &crate::types::NodeId,
+) -> Option<SwarmMessage> {
+    let source = state
+        .models
+        .hf_sources
+        .get(model)
+        .map(|s| s.value().clone())?;
+    Some(SwarmMessage::HfSourceGossip(crate::types::HfSourceGossip {
+        model_id: model.clone(),
+        repo_id: source.repo_id,
+        filename: source.filename,
+        publisher: our_id.clone(),
+        mmproj_filename: source.mmproj_filename,
+    }))
+}
+
 /// Does this one manifest go on the wire this round?
 ///
 /// `last_announced` is the `manifest_hash` this node last broadcast for the
@@ -304,34 +369,6 @@ fn capability_needs_broadcast(
 /// the agreed hash and its heal waited for one). RFC 6206 §4.2 draws the same
 /// line: a node's own change of state starts a new interval, and only
 /// consistent transmissions heard within the current interval suppress.
-/// This node's claim of which HuggingFace upload `model` is — what
-/// `model::canonical` chooses from — as the message that carries it, or `None`
-/// when it knows no source. The ONE builder, for the broadcast round and the
-/// newcomer catch-up alike, so the two cannot disagree about what a node
-/// claims.
-///
-/// Cloned out of `hf_sources` before anything is sent: `network_tx.send` waits
-/// whenever the network loop is busy, and a `Ref` held across it blocks the
-/// dispatcher's `hf_sources.insert` on the same shard (clippy.toml).
-fn upload_claim(
-    state: &crate::daemon::SharedState,
-    model: &crate::types::ModelId,
-    our_id: &crate::types::NodeId,
-) -> Option<SwarmMessage> {
-    let source = state
-        .models
-        .hf_sources
-        .get(model)
-        .map(|s| s.value().clone())?;
-    Some(SwarmMessage::HfSourceGossip(crate::types::HfSourceGossip {
-        model_id: model.clone(),
-        repo_id: source.repo_id,
-        filename: source.filename,
-        publisher: our_id.clone(),
-        mmproj_filename: source.mmproj_filename,
-    }))
-}
-
 fn manifest_needs_broadcast(
     last_announced: Option<&([u8; 32], std::time::Instant)>,
     current_hash: &[u8; 32],
@@ -455,6 +492,7 @@ impl HealthMonitor {
             last_announced_manifests: std::collections::HashMap::new(),
             manifest_announce_counter: 0,
             peers_told_about_manifests: std::collections::HashSet::new(),
+            digest_sent_at: std::collections::HashMap::new(),
             last_published_capability: None,
             acq_liveness: std::collections::HashMap::new(),
             peer_dl_liveness: std::collections::HashMap::new(),
@@ -1435,7 +1473,10 @@ impl HealthMonitor {
     ///
     /// 1. **A newcomer is caught up point to point**, every manifest sent
     ///    directly and retried each tick until delivered. A broadcast cannot be
-    ///    addressed to the one node that needs it.
+    ///    addressed to the one node that needs it. A newcomer advertising
+    ///    `features::MANIFEST_DIGESTS` is sent only the versions
+    ///    (`ManifestDigest`) and pulls what it lacks, and is sent them again
+    ///    every `MANIFEST_QUIET_WINDOW` (#91 (2)).
     /// 2. **A full round every `FULL_REANNOUNCE_EVERY_TICKS` broadcasts**, the
     ///    anti-entropy that repairs a gossip message lost in flight — minus any
     ///    manifest the whole swarm was gossiped within `MANIFEST_QUIET_WINDOW`
@@ -1447,9 +1488,10 @@ impl HealthMonitor {
         let our_id = self.shared_state.identity.node_id().clone();
 
         self.manifest_announce_counter += 1;
+        // Kept as long as the longer of the two windows can ask about it.
         self.shared_state
             .models
-            .forget_manifests_heard_before(MANIFEST_QUIET_WINDOW);
+            .forget_manifests_heard_before(MANIFEST_QUIET_WINDOW_WITH_DIGESTS);
 
         // Anyone connected that the last round did not reach. Compared as a set
         // rather than a count so a simultaneous join and leave is still a join:
@@ -1460,6 +1502,19 @@ impl HealthMonitor {
             .iter()
             .map(|p| p.key().clone())
             .collect();
+        // Those told the versions in place of the manifests (#91 (2)). Unknown
+        // is no: a peer whose capability has not arrived is sent manifests.
+        let takes_digests: std::collections::HashSet<crate::types::NodeId> = connected
+            .iter()
+            .filter(|node_id| {
+                self.shared_state
+                    .peer_advertises_feature(node_id, crate::types::features::MANIFEST_DIGESTS)
+            })
+            .cloned()
+            .collect();
+        let quiet = manifest_quiet_window(connected.len(), takes_digests.len());
+        self.retry_overdue_manifest_pulls(&takes_digests).await;
+        self.shared_state.models.manifest_sync.forget_stale();
         // A newcomer no longer forces a BROADCAST round — it is caught up
         // directly below. Gossip has no way to address one peer, so answering
         // "someone new is here" with a topic-wide re-announce made a single
@@ -1505,7 +1560,7 @@ impl HealthMonitor {
             let swarm_heard_at = self.shared_state.models.manifest_heard_at(
                 &manifest.id,
                 &manifest.manifest_hash,
-                MANIFEST_QUIET_WINDOW,
+                quiet,
             );
             if !manifest_needs_broadcast(
                 self.last_announced_manifests.get(&manifest.id),
@@ -1566,6 +1621,24 @@ impl HealthMonitor {
                 // the next tick tries again.
                 continue;
             };
+            if takes_digests.contains(node_id) {
+                // The versions alone, ~200 bytes a model: the peer pulls only
+                // what it lacks, so one reconnecting with every version pulls
+                // nothing. Every manifest in full was ~2.9 MB from six peers
+                // to one probe node in 20 s (#91 (2), 2026-10-16).
+                if self
+                    .send_manifest_digest(&target_peer_bytes, &manifests, &our_id)
+                    .await
+                {
+                    caught_up.insert(node_id.clone());
+                }
+                tracing::debug!(
+                    peer = %node_id,
+                    versions = manifests.len(),
+                    "DIAG: caught a new peer up on manifests with a digest"
+                );
+                continue;
+            }
             let mut delivered = 0usize;
             for manifest in &manifests {
                 // The claim travels WITH the manifest. Without it a newcomer
@@ -1614,18 +1687,136 @@ impl HealthMonitor {
         // had just reached them — no longer true once a full round can be
         // suppressed, and a newcomer whose direct catch-up failed would then
         // be latched as told with nothing sent to it at all.
+        let now = std::time::Instant::now();
+        for node_id in &caught_up {
+            // A peer just caught up — in full or by digest — holds every
+            // version as of now, so its first repeat digest is a window away.
+            self.digest_sent_at.insert(node_id.clone(), now);
+        }
         self.peers_told_about_manifests.extend(caught_up);
         self.peers_told_about_manifests
             .retain(|node_id| connected.contains(node_id));
-        if sent > 0 || suppressed > 0 {
+        self.digest_sent_at
+            .retain(|node_id, _| connected.contains(node_id));
+
+        // The anti-entropy for a peer that takes digests: the versions again
+        // every `MANIFEST_QUIET_WINDOW`, the interval the gossiped repeat had
+        // before it was stretched for such peers — so a change lost in flight
+        // reaches one no later than it did, at ~200 bytes a model, not ~35 KB.
+        let mut repeated = 0usize;
+        for node_id in takes_digests.intersection(&self.peers_told_about_manifests) {
+            if !digest_due(self.digest_sent_at.get(node_id).copied(), now) {
+                continue;
+            }
+            let Some(target_peer_bytes) =
+                self.shared_state.resolve_connected_peer_id_bytes(node_id)
+            else {
+                continue;
+            };
+            if self
+                .send_manifest_digest(&target_peer_bytes, &manifests, &our_id)
+                .await
+            {
+                self.digest_sent_at.insert(node_id.clone(), now);
+                repeated += 1;
+            }
+        }
+        if sent > 0 || suppressed > 0 || repeated > 0 {
             tracing::debug!(
                 sent,
                 suppressed,
+                repeated_digests = repeated,
                 full_round,
+                quiet_window_secs = quiet.as_secs(),
                 "DIAG: broadcast model manifests (suppressed = the swarm was gossiped \
                  that exact manifest within the quiet window)"
             );
         }
+    }
+
+    /// Ask every connected peer that takes digests for each manifest version
+    /// a pull asked of one that has not answered within `PULL_PATIENCE` —
+    /// slow, gone or hostile — rather than leave it to a digest up to
+    /// `MANIFEST_QUIET_WINDOW` later (`ManifestSync::retry_overdue_pulls`,
+    /// #91 (2)). Every such peer, not a remembered few: a hostile peer could
+    /// fill any list it is put on, and a peer holding no part of the model
+    /// answers nothing.
+    async fn retry_overdue_manifest_pulls(
+        &self,
+        takes_digests: &std::collections::HashSet<crate::types::NodeId>,
+    ) {
+        let sync = &self.shared_state.models.manifest_sync;
+        let versions = sync.retry_overdue_pulls(std::time::Instant::now());
+        if versions.is_empty() {
+            return;
+        }
+        let mut asked = 0usize;
+        for peer in takes_digests {
+            let Some(target_peer_bytes) = self.shared_state.resolve_connected_peer_id_bytes(peer)
+            else {
+                continue;
+            };
+            let mut sent = true;
+            for chunk in versions.chunks(crate::daemon::state::manifest_sync::MAX_PULL_MODELS) {
+                let message = SwarmMessage::ManifestPull(crate::types::ManifestPull {
+                    models: chunk.iter().map(|(model, _)| model.clone()).collect(),
+                });
+                let msg = NetworkCommand::SendDirectMessage {
+                    target_peer_bytes: target_peer_bytes.clone(),
+                    message,
+                    delivery_request_id: None,
+                };
+                if self.network_tx.send(msg).await.is_err() {
+                    sent = false;
+                    break;
+                }
+            }
+            asked += usize::from(sent);
+        }
+        if asked == 0 {
+            sync.pull_not_sent(&versions);
+        }
+        tracing::debug!(
+            versions = versions.len(),
+            peers = asked,
+            "DIAG: asked every peer that takes digests for manifest versions a pull left unanswered"
+        );
+    }
+
+    /// Tell one peer which version of each manifest this node gossips, with
+    /// the upload claim each carries — the peer pulls (`ManifestPull`) only the
+    /// versions it lacks, answered by `daemon::dispatch::manifest_sync::on_pull`.
+    /// The claims go whether or not it pulls: they are a max-register that
+    /// converges only on claims every node is eventually delivered
+    /// (`model::canonical`), and they are small. True when every message was
+    /// handed to the network loop.
+    async fn send_manifest_digest(
+        &self,
+        target_peer_bytes: &[u8],
+        manifests: &[crate::types::ModelManifest],
+        our_id: &crate::types::NodeId,
+    ) -> bool {
+        let mut messages: Vec<SwarmMessage> = manifests
+            // At the size of one pull, so each digest can be pulled whole.
+            .chunks(crate::daemon::state::manifest_sync::MAX_PULL_MODELS)
+            .map(|chunk| {
+                SwarmMessage::ManifestDigest(crate::daemon::state::manifest_sync::digest_of(chunk))
+            })
+            .collect();
+        for manifest in manifests {
+            messages.extend(upload_claim(&self.shared_state, &manifest.id, our_id));
+        }
+        for message in messages {
+            let msg = NetworkCommand::SendDirectMessage {
+                target_peer_bytes: target_peer_bytes.to_vec(),
+                message,
+                delivery_request_id: None,
+            };
+            if self.network_tx.send(msg).await.is_err() {
+                return false;
+            }
+        }
+        true
     }
 
     /// Broadcast this node's demand to `swarm/regions`.
@@ -2795,6 +2986,230 @@ mod tests {
             (1..FULL_REANNOUNCE_EVERY_TICKS).all(|counter| !manifest_round_is_full(counter)),
             "no tick inside the interval broadcasts everything"
         );
+    }
+
+    /// The gossiped repeat stretches to a day only when EVERY connected peer is
+    /// repaired another way — one peer without the bit, or one whose capability
+    /// has not arrived, keeps the window it had (#91 (2)).
+    #[test]
+    fn the_repeat_stretches_only_when_every_peer_takes_digests() {
+        assert_eq!(
+            manifest_quiet_window(8, 8),
+            MANIFEST_QUIET_WINDOW_WITH_DIGESTS
+        );
+        assert_eq!(
+            manifest_quiet_window(8, 7),
+            MANIFEST_QUIET_WINDOW,
+            "a peer repaired only by the gossip repeat still needs it every 2 h"
+        );
+        assert_eq!(
+            manifest_quiet_window(0, 0),
+            MANIFEST_QUIET_WINDOW,
+            "no peer has been told anything"
+        );
+    }
+
+    #[test]
+    fn a_digest_is_owed_once_a_window() {
+        let at = std::time::Instant::now();
+        assert!(digest_due(None, at), "a peer with no record is owed one");
+        assert!(!digest_due(
+            Some(at),
+            at + MANIFEST_QUIET_WINDOW.saturating_sub(Duration::from_secs(1))
+        ));
+        assert!(digest_due(Some(at), at + MANIFEST_QUIET_WINDOW));
+    }
+
+    fn monitor_for_test() -> (
+        Arc<SharedState>,
+        HealthMonitor,
+        mpsc::Receiver<NetworkCommand>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, _, _) = SharedState::new(
+            crate::config::Config::default(),
+            crate::identity::Identity::generate(),
+            crate::storage::db::Database::open(temp.path()).unwrap(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::inference::executor::ModelExecutor::new(),
+            )),
+            None,
+        );
+        let (network_tx, network_rx) = mpsc::channel(1024);
+        let (rebalance_tx, _) = mpsc::channel(16);
+        let (_, shutdown_rx) = watch::channel(false);
+        let monitor = HealthMonitor::new(state.clone(), network_tx, rebalance_tx, shutdown_rx);
+        (state, monitor, network_rx)
+    }
+
+    /// A connected peer advertising `features`, reachable at `[byte; 4]`.
+    fn connect_peer(state: &SharedState, byte: u8, features: u64) -> crate::types::NodeId {
+        let node = crate::types::NodeId([byte; 32]);
+        let mut capability = capability_for_test();
+        capability.node_id = node.clone();
+        capability.features = features;
+        state.peer_registry.insert(
+            node.clone(),
+            crate::types::PeerInfo {
+                node_id: node.clone(),
+                addresses: vec![],
+                capability: Some(capability),
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(50),
+                trust_score: 0.5,
+                peer_id_bytes: None,
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        );
+        state.peer_id_map.insert(node.clone(), vec![byte; 4]);
+        state.connected_node_ids.insert(node.clone());
+        node
+    }
+
+    /// What each peer was sent point to point, by the bytes it is reached at.
+    fn direct_sends(
+        rx: &mut mpsc::Receiver<NetworkCommand>,
+    ) -> std::collections::HashMap<Vec<u8>, Vec<SwarmMessage>> {
+        let mut sent: std::collections::HashMap<Vec<u8>, Vec<SwarmMessage>> = Default::default();
+        while let Ok(command) = rx.try_recv() {
+            if let NetworkCommand::SendDirectMessage {
+                target_peer_bytes,
+                message,
+                ..
+            } = command
+            {
+                sent.entry(target_peer_bytes).or_default().push(message);
+            }
+        }
+        sent
+    }
+
+    /// The catch-up that was ~2.9 MB to one newcomer: a peer advertising
+    /// `features::MANIFEST_DIGESTS` is sent the versions, never a manifest, and
+    /// is sent them again once its record lapses; a peer without the bit is
+    /// sent the manifests exactly as before (#91 (2)).
+    #[tokio::test]
+    async fn a_newcomer_that_takes_digests_is_sent_the_versions_not_the_manifests() {
+        let (state, mut monitor, mut rx) = monitor_for_test();
+        let our_id = state.identity.node_id().clone();
+        let model = crate::types::ModelId("digest-model".into());
+        state
+            .model_registry
+            .register_manifest(crate::types::ModelManifest {
+                id: model.clone(),
+                name: "digest-model".into(),
+                architecture: crate::types::ModelArchitecture::Llama,
+                num_layers: 2,
+                num_params_billions: 0.0,
+                quantization: crate::types::Quantization::Q4KM,
+                total_size_bytes: 0,
+                shard_count: 0,
+                shards: Vec::new(),
+                tokenizer_hash: [0; 32],
+                manifest_hash: [5; 32],
+                publisher: our_id,
+                publish_date: chrono::Utc::now(),
+                license: String::new(),
+                mmproj: None,
+                context_length: Some(4096),
+            });
+        connect_peer(&state, 1, crate::types::features::ALL);
+        connect_peer(&state, 2, 0);
+
+        monitor.broadcast_manifests().await;
+        let sent = direct_sends(&mut rx);
+        let to_new = &sent[&vec![1u8; 4]];
+        assert!(
+            to_new
+                .iter()
+                .all(|m| !matches!(m, SwarmMessage::ModelManifest(_))),
+            "a peer that pulls is never pushed a manifest it may already hold"
+        );
+        let digest = to_new
+            .iter()
+            .find_map(|m| match m {
+                SwarmMessage::ManifestDigest(d) => Some(d),
+                _ => None,
+            })
+            .expect("the newcomer is told the versions");
+        assert_eq!(digest.versions.len(), 1);
+        assert_eq!(digest.versions[0].model_id, model);
+        assert_eq!(digest.versions[0].manifest_hash, [5; 32]);
+        assert_eq!(digest.versions[0].context_length, Some(4096));
+        assert!(
+            sent[&vec![2u8; 4]]
+                .iter()
+                .any(|m| matches!(m, SwarmMessage::ModelManifest(m) if m.id == model)),
+            "a peer without the bit is caught up in full, as it always was"
+        );
+
+        monitor.broadcast_manifests().await;
+        assert!(
+            direct_sends(&mut rx).is_empty(),
+            "a peer told this round is owed nothing the next"
+        );
+
+        monitor
+            .digest_sent_at
+            .remove(&crate::types::NodeId([1; 32]));
+        monitor.broadcast_manifests().await;
+        let sent = direct_sends(&mut rx);
+        assert!(
+            sent[&vec![1u8; 4]]
+                .iter()
+                .any(|m| matches!(m, SwarmMessage::ManifestDigest(_))),
+            "once its record lapses, a told peer is sent the versions again"
+        );
+        assert!(
+            !sent.contains_key(&vec![2u8; 4]),
+            "a peer without the bit is repaired by the gossip repeat, not a digest"
+        );
+    }
+
+    /// A pull its peer did not answer is asked, on the next round, of every
+    /// connected peer that takes digests — the one first asked too, which may
+    /// only have been slow — and never of a peer without the bit, which could
+    /// not decode it (#91 (2)). Marked unsent here so the round need not wait
+    /// out `PULL_PATIENCE`.
+    #[tokio::test]
+    async fn a_pull_left_unanswered_is_asked_of_every_peer_that_takes_digests() {
+        let (state, mut monitor, mut rx) = monitor_for_test();
+        let first = connect_peer(&state, 1, crate::types::features::ALL);
+        connect_peer(&state, 2, crate::types::features::ALL);
+        connect_peer(&state, 3, 0);
+        let sync = &state.models.manifest_sync;
+        let digest = crate::types::ManifestDigest {
+            versions: vec![crate::types::ManifestVersion {
+                model_id: crate::types::ModelId("m".into()),
+                manifest_hash: [7; 32],
+                context_length: None,
+            }],
+        };
+        let pulled = sync.versions_to_pull(&digest, &first, |_| None);
+        assert_eq!(pulled.len(), 1);
+        sync.pull_not_sent(&pulled);
+
+        monitor.broadcast_manifests().await;
+        let sent = direct_sends(&mut rx);
+        let asked = |byte: u8| {
+            sent.get(&vec![byte; 4]).is_some_and(|messages| {
+                messages.iter().any(|m| {
+                    matches!(m, SwarmMessage::ManifestPull(p)
+                        if p.models == [crate::types::ModelId("m".into())])
+                })
+            })
+        };
+        assert!(
+            asked(1) && asked(2),
+            "every peer that takes digests is asked"
+        );
+        assert!(!asked(3), "never a peer that could not decode it");
     }
 
     /// The whole point of the check. This warning first shipped unconditional at

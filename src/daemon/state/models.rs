@@ -177,6 +177,13 @@ pub struct ModelMgmt {
     /// each distinct version goes out once per window across the swarm — the
     /// disagreement is still published, just not every five minutes.
     pub manifest_heard: DashMap<(crate::types::ModelId, [u8; 32]), std::time::Instant>,
+    /// The receiving half of announce-then-pull (FUTURE_WORK #91 (2)): which
+    /// manifest versions this node has verified, which it is pulling, and how
+    /// much it has answered each peer. Written only by the dispatcher —
+    /// `note_seen` for every VERIFIED manifest whatever its transport,
+    /// `versions_to_pull` for a peer's `ManifestDigest`, `answers_allowed` for
+    /// its `ManifestPull` — and pruned by the health monitor's tick.
+    pub manifest_sync: super::manifest_sync::ManifestSync,
     pub model_request_counts: DashMap<crate::types::ModelId, AtomicU64>,
     pub resource_schedule: RwLock<crate::config::ResourceSchedule>,
     pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
@@ -437,6 +444,11 @@ impl std::fmt::Debug for ShardDownloadClaim {
     }
 }
 
+/// The most manifest versions `manifest_heard` remembers (security review,
+/// 2026-10-17: kept a day once every peer takes digests, it grew one record
+/// per made-up manifest a gossiper sent).
+pub const MAX_MANIFESTS_HEARD: usize = 16_384;
+
 impl ModelMgmt {
     /// Take the exclusive right to write this shard's `.tmp`, or `None` if a
     /// download of it is already running.
@@ -620,7 +632,8 @@ impl ModelMgmt {
         self.shard_download_backoff.remove(shard_id);
     }
 
-    /// Record that the swarm was handed `model`'s manifest with this hash, now.
+    /// Record that the swarm was handed `model`'s manifest with this hash, now
+    /// — at most [`MAX_MANIFESTS_HEARD`] versions.
     ///
     /// The transport is a REQUIRED argument, and anything but gossip is
     /// ignored: a point-to-point catch-up reached this node alone, so it is no
@@ -636,8 +649,16 @@ impl ModelMgmt {
         if transport != crate::types::MessageTransport::Gossip {
             return;
         }
-        self.manifest_heard
-            .insert((model.clone(), manifest_hash), std::time::Instant::now());
+        let key = (model.clone(), manifest_hash);
+        // Bounded: kept up to a day (`MANIFEST_QUIET_WINDOW_WITH_DIGESTS`),
+        // and a gossiper of made-up manifests adds one record each. Past the
+        // bound a new version is not remembered, which costs one repeat of it.
+        if !self.manifest_heard.contains_key(&key)
+            && self.manifest_heard.len() >= MAX_MANIFESTS_HEARD
+        {
+            return;
+        }
+        self.manifest_heard.insert(key, std::time::Instant::now());
     }
 
     /// Has the swarm been handed exactly this manifest within `window`?
@@ -1049,6 +1070,37 @@ mod tests {
         );
     }
 
+    /// A peer can gossip a verified manifest for any made-up model, so the
+    /// versions heard are bounded; past the bound a NEW one is not
+    /// remembered — which only means it is announced again — while one
+    /// already remembered is still refreshed (security review, #91 (2)).
+    #[test]
+    fn the_heard_versions_are_bounded() {
+        let state = make_mgmt();
+        let window = std::time::Duration::from_secs(30 * 60);
+        let first = ModelId("made-up-0".to_string());
+        for i in 0..MAX_MANIFESTS_HEARD + 10 {
+            let model = ModelId(format!("made-up-{i}"));
+            state.note_manifest_heard(&model, [1u8; 32], crate::types::MessageTransport::Gossip);
+        }
+        assert_eq!(state.manifest_heard.len(), MAX_MANIFESTS_HEARD);
+        let past = ModelId(format!("made-up-{}", MAX_MANIFESTS_HEARD + 5));
+        assert!(!state.manifest_heard_within(&past, &[1u8; 32], window));
+
+        let long_ago = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(3600))
+            .expect("the clock is past an hour");
+        state
+            .manifest_heard
+            .insert((first.clone(), [1u8; 32]), long_ago);
+        assert!(!state.manifest_heard_within(&first, &[1u8; 32], window));
+        state.note_manifest_heard(&first, [1u8; 32], crate::types::MessageTransport::Gossip);
+        assert!(
+            state.manifest_heard_within(&first, &[1u8; 32], window),
+            "a version already remembered is refreshed at the bound"
+        );
+    }
+
     pub(super) fn make_mgmt() -> ModelMgmt {
         ModelMgmt {
             acquisition_progress: DashMap::new(),
@@ -1077,6 +1129,7 @@ mod tests {
             shard_download_backoff: DashMap::new(),
             geometry_probe_retry_after: DashMap::new(),
             manifest_heard: DashMap::new(),
+            manifest_sync: Default::default(),
             model_request_counts: DashMap::new(),
             resource_schedule: RwLock::new(Default::default()),
             prune_history: RwLock::new(VecDeque::new()),

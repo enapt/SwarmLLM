@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #297**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #298**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -64,7 +64,8 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    since #296.)
 7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 6.7 KB/s on the .240
    fleet (8.8 on .239), ~3 copies of each message (from ~6.3), measured 2026-10-16. The manifests
-   are 84% of the gossip sent: next (2) announce-then-pull for manifests.
+   were 84% of the gossip sent: (2) announce-then-pull shipped 2026-10-17 (unreleased) — next,
+   re-measure once the fleet runs it.
 8. **#251** — `owned_by: "local"` reads as "my data stays here": keep-on-this-computer per request
    on every surface, and the route on a streamed `/v1/responses` and in MCP.
 9. **#252** — a peer's measured context is not gossiped, so a planner cannot size a peer's share
@@ -944,7 +945,7 @@ libp2p-connection-limits has no per-protocol exemption). A dial by bare address 
 does the same.
 
 #### #91 — An idle node still uploads ~7 KB/s, most of its gossip the model manifests, and a total traffic ceiling does not exist
-`P2` · network · **PARTIAL** — 2026-10-11 · history: archive row #91, `docs/invariants/network.md`
+`P2` · network · **PARTIAL** — 2026-10-17 · history: archive row #91, `docs/invariants/network.md`
 
 Trickle suppression (`MANIFEST_QUIET_WINDOW`), per-(model, hash) `manifest_heard`,
 per-category counters and the region-demand split shipped in .200-.206 and halved it (42 →
@@ -978,15 +979,18 @@ delivers **2.7-3.2 copies** of each message (`recv_msgs_unfiltered` ÷ `recv_msg
 no region summaries); no drops. **`swarm/models` is now 84% of the gossip sent** (2.8 KB/s):
 `ModelManifest` arrives 0.83 a minute at ~35 KB each, and each is forwarded on to the mesh. The
 3.4 KB/s that is not gossip (Kademlia, identify, pings, direct messages) is the next-largest share.
-Left: the mesh is still sized once at startup, from peers ever met
-rather than reachable now (a rig first before going further: a thinner mesh partitions sooner); (2) announce-then-pull for manifests — gossip `(model, hash)`
-and fetch the manifest point to point only for a version one lacks (Bitcoin
-`inv`/`getdata`, Plumtree lazy push), since the copies, not the size, are now the cost; it
-replaces the table-less manifest, which needed `compute_hash`'s verify-before-header order
-reversed. A new `SwarmMessage` variant plus a pull request, feature-bit gated at the sender —
-a broadcast, so digest-only when every connected peer advertises the bit; (3) a
-both-direction traffic ceiling at the transport (risky — throttling gossip can partition a
-node); `max_bandwidth_mbps` shapes part serving only.
+**(2) shipped 2026-10-17 (unreleased)**: a peer advertising `features::MANIFEST_DIGESTS` is caught up
+with the versions (`ManifestDigest`, ~200 B a model) and pulls (`ManifestPull`) only what it lacks; each
+such peer is sent the versions again every 2 h, and the gossiped repeat waits 24 h while every connected
+peer takes digests. A change still goes on gossip in full; older peers keep the old path both ways
+(`docs/invariants/network.md` § "Announce, then pull"). It replaces the catch-up that sent a probe node
+84 manifests (~2.9 MB) from six peers in 20 s, describing 26 versions. Rig
+`examples/manifest_digest_rig.sh`: a newcomer pulls once, a reconnect pulls nothing, mixed versions
+learn the model in full. Left: (2b) re-measure once the fleet runs it — `swarm/models` should fall to
+changes plus a daily repeat, and a reconnect's catch-up from ~480 KB to ~12 KB per peer; the mesh is
+still sized once at startup, from peers ever met rather than reachable now (a rig first before going
+further: a thinner mesh partitions sooner); (3) a both-direction traffic ceiling at the transport
+(risky — throttling gossip can partition a node); `max_bandwidth_mbps` shapes part serving only.
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
 `P3` · network · **PARTIAL** — 2026-07-25 · history: archive § "Connection churn on multi-interface hosts — deterministic dialer partial", gotcha #353

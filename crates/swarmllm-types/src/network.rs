@@ -174,6 +174,13 @@ pub enum SwarmMessage {
     // installed the new key. Additive: gated on
     // `features::SESSION_KEY_CONFIRM`, so an older node is never sent one.
     SessionKeyConfirm(SessionKeyConfirm),
+
+    // Announce-then-pull for model manifests (FUTURE_WORK #91 (2)): which
+    // version of each manifest a peer holds, and a request for the ones the
+    // receiver lacks. Point to point only, gated on
+    // `features::MANIFEST_DIGESTS` at the sender.
+    ManifestDigest(ManifestDigest),
+    ManifestPull(ManifestPull),
 }
 
 impl SwarmMessage {
@@ -221,6 +228,8 @@ impl SwarmMessage {
             Self::RelayedEnvelope(_) => "RelayedEnvelope",
             Self::ResendTokens(_) => "ResendTokens",
             Self::SessionKeyConfirm(_) => "SessionKeyConfirm",
+            Self::ManifestDigest(_) => "ManifestDigest",
+            Self::ManifestPull(_) => "ManifestPull",
         }
     }
 }
@@ -436,6 +445,42 @@ pub struct HfSourceGossip {
     /// Filename of the mmproj GGUF on HuggingFace (for VLM models).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mmproj_filename: Option<String>,
+}
+
+/// Which version of each model's manifest the sender holds — sent point to
+/// point to a peer advertising `features::MANIFEST_DIGESTS`, in place of the
+/// manifests themselves (FUTURE_WORK #91 (2)).
+///
+/// A manifest is ~35 KB and changes rarely; a version is its `manifest_hash`,
+/// ~200 bytes as JSON. The receiver pulls ([`ManifestPull`]) only a version
+/// it has not seen, so a peer that reconnects holding every version pulls
+/// nothing. Bitcoin's `inv`/`getdata` and Plumtree's lazy push make the same
+/// trade: announce what you have, send it only to whoever asks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestDigest {
+    pub versions: Vec<ManifestVersion>,
+}
+
+/// One model's manifest, as the sender of a [`ManifestDigest`] holds it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestVersion {
+    pub model_id: ModelId,
+    pub manifest_hash: crate::ids::Blake3Hash,
+    /// The context the sender's copy declares (`ModelManifest::context_length`),
+    /// which lies OUTSIDE the hash — so one version can be held with it,
+    /// without it, or with another figure, and a holder whose copy differs
+    /// pulls the version again from a peer whose copy declares it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
+}
+
+/// Send me your manifest of each of these models — the answer to a
+/// [`ManifestDigest`] naming versions the asker lacks. Answered with ordinary
+/// point-to-point `ModelManifest` messages (and the model's upload claim), so
+/// what arrives is checked by the same ingestion as any other manifest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestPull {
+    pub models: Vec<ModelId>,
 }
 
 /// Regional shard summary — compact per-region model availability gossip.
@@ -850,5 +895,43 @@ mod build_tag_tests {
         assert_eq!(a, build_tag_from_hash(&[7u8; 32]));
         assert_ne!(a, BUILD_TAG_UNKNOWN);
         assert_eq!(build_tag_from_hash(&[0u8; 32]), BUILD_TAG_UNKNOWN);
+    }
+}
+
+#[cfg(test)]
+mod manifest_digest_tests {
+    use super::*;
+    use crate::ids::ModelId;
+
+    /// Both announce-then-pull messages survive the wire as `SwarmMessage`s,
+    /// and a version that names no declared context reads as declaring none.
+    #[test]
+    fn a_digest_and_a_pull_round_trip_and_a_bare_version_decodes() {
+        let digest = SwarmMessage::ManifestDigest(ManifestDigest {
+            versions: vec![ManifestVersion {
+                model_id: ModelId("m".into()),
+                manifest_hash: [7u8; 32],
+                context_length: Some(4096),
+            }],
+        });
+        let pull = SwarmMessage::ManifestPull(ManifestPull {
+            models: vec![ModelId("m".into())],
+        });
+        for message in [digest, pull] {
+            let wire = serde_json::to_string(&message).expect("serialize");
+            let back: SwarmMessage = serde_json::from_str(&wire).expect("deserialize");
+            assert_eq!(
+                serde_json::to_string(&back).expect("serialize"),
+                wire,
+                "{} must survive the wire unchanged",
+                back.kind_name()
+            );
+        }
+        let bare: ManifestVersion = serde_json::from_value(serde_json::json!({
+            "model_id": "m",
+            "manifest_hash": vec![7u8; 32],
+        }))
+        .expect("a version without a context must decode");
+        assert_eq!(bare.context_length, None);
     }
 }

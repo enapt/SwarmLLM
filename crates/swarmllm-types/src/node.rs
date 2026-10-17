@@ -283,6 +283,14 @@ pub mod features {
     /// it, or one reading a prompt in one forward) is charged every position.
     pub const KV_WINDOW_SLIDES: u64 = 1 << 22;
 
+    /// Understands [`crate::network::ManifestDigest`] and
+    /// [`crate::network::ManifestPull`]: told which version of each model's
+    /// manifest a peer holds, it pulls only the ones it lacks (FUTURE_WORK #91
+    /// (2)). Both go point to point, never on gossip, so the bit is checked per
+    /// recipient: a peer without it is caught up with whole manifests, and a
+    /// node with one such peer keeps broadcasting its repeats.
+    pub const MANIFEST_DIGESTS: u64 = 1 << 23;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`] and [`KV_WINDOW_SLIDES`] beside it where they
     /// apply.
@@ -306,7 +314,8 @@ pub mod features {
         | DELEGATED_SPLIT
         | CHAINED_VERIFY
         | SPLIT_PROMPT_CACHE
-        | PROMPT_CHUNKS;
+        | PROMPT_CHUNKS
+        | MANIFEST_DIGESTS;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

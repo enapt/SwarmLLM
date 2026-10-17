@@ -1389,6 +1389,16 @@ impl ModelRegistry {
         self.manifests.get(model_id).map(|v| v.clone())
     }
 
+    /// Which version of `model_id`'s manifest this node holds — its
+    /// `manifest_hash`, and the context it declares (outside the hash) —
+    /// without cloning the manifest. What a peer's `ManifestDigest` is
+    /// compared against (FUTURE_WORK #91 (2)).
+    pub fn manifest_version(&self, model_id: &ModelId) -> Option<([u8; 32], Option<u32>)> {
+        self.manifests
+            .get(model_id)
+            .map(|m| (m.manifest_hash, m.context_length))
+    }
+
     /// Shard ids whose layer ranges overlap `layer_range`.
     ///
     /// **This is the answer to "which shards does a pipeline segment actually
@@ -1487,20 +1497,70 @@ impl ModelRegistry {
     /// a node holding none of the model adopts the first hashes it hears
     /// (`merge_known_shard_hashes`), then routes and verifies against them.
     pub fn manifests_to_gossip(&self, node_id: &NodeId) -> Vec<ModelManifest> {
-        let hosted: std::collections::HashSet<String> = self
-            .all_shard_entries()
-            .into_iter()
-            .filter_map(|(shard_id, holders)| {
-                holders
-                    .contains(node_id)
-                    .then(|| shard_id.model_id.0.clone())
-            })
-            .collect();
         self.models()
             .into_iter()
-            .filter(|m| m.publisher == *node_id || hosted.contains(&m.id.0))
-            .filter(|m| !self.model_is_withheld(&m.id))
+            .filter(|m| self.gossips(node_id, &m.id, &m.publisher, m.shard_count))
             .collect()
+    }
+
+    /// The manifest of `model_id` if `node_id` gossips it — the one-model
+    /// answer to [`Self::manifests_to_gossip`], by the same rule, cloning only
+    /// that manifest. What a peer's `ManifestPull` is answered with: cloning
+    /// the whole set per pull made a ~40-byte request cost ~1-3 MB of copying
+    /// on the dispatcher (security review, 2026-10-17, #91 (2)).
+    pub fn manifest_to_gossip(
+        &self,
+        node_id: &NodeId,
+        model_id: &ModelId,
+    ) -> Option<ModelManifest> {
+        // Read and released before any other map is asked: no guard of this
+        // map is held while another is locked.
+        let (publisher, shard_count) = {
+            let manifest = self.manifests.get(model_id)?;
+            (manifest.publisher.clone(), manifest.shard_count)
+        };
+        if !self.gossips(node_id, model_id, &publisher, shard_count) {
+            return None;
+        }
+        self.get_manifest(model_id)
+    }
+
+    /// Whether `node_id` gossips `model_id`'s manifest, without copying it.
+    pub fn gossips_model(&self, node_id: &NodeId, model_id: &ModelId) -> bool {
+        let Some((publisher, shard_count)) = self
+            .manifests
+            .get(model_id)
+            .map(|manifest| (manifest.publisher.clone(), manifest.shard_count))
+        else {
+            return false;
+        };
+        self.gossips(node_id, model_id, &publisher, shard_count)
+    }
+
+    /// Does `node_id` gossip this model's manifest: it published it, or holds
+    /// a part of it — one of its `shard_count` parts or its image encoder —
+    /// and its copy is not withheld. Asked part by part, never by scanning
+    /// every holder record, so one model costs its own parts.
+    fn gossips(
+        &self,
+        node_id: &NodeId,
+        model_id: &ModelId,
+        publisher: &NodeId,
+        shard_count: u32,
+    ) -> bool {
+        let hosts_a_part = || {
+            (0..shard_count)
+                .chain(std::iter::once(crate::types::MMPROJ_SHARD_INDEX))
+                .any(|index| {
+                    self.shard_holders
+                        .get(&ShardId {
+                            model_id: model_id.clone(),
+                            index,
+                        })
+                        .is_some_and(|holders| holders.contains_key(node_id))
+                })
+        };
+        (*publisher == *node_id || hosts_a_part()) && !self.model_is_withheld(model_id)
     }
 
     /// Build a "model not found" error carrying the list of known models.
