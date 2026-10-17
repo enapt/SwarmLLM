@@ -33,8 +33,9 @@ residual).
 
 ## ▶ PRIORITIES — read this first
 
-Re-ranked 2026-10-16 after v0.3.240 (released 2026-10-16), which closed #276-#284, #115's Gemma 3
-and Gemma 4 dense text, and #91's region summaries and peer-sized mesh. What each release carried
+Re-ranked 2026-10-17 after v0.3.241 (released 2026-10-17), which closed #265, #286-#290, #292,
+#296, #298 and #115's Gemma 4 26B-A4B, E2B and E4B, and shipped #91 (2)'s manifest digests; the
+items it filed (#291, #293-#295, #297, #299) are all P3, so no rank moved. What each release carried
 is in § "Closed" and `CHANGELOG.md`; the running log of re-rankings from 2026-10-02 to this one
 moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed here.
 `docs/plans/` holds the multi-step designs; the entries point at them.
@@ -64,8 +65,8 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    since #296.)
 7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 6.7 KB/s on the .240
    fleet (8.8 on .239), ~3 copies of each message (from ~6.3), measured 2026-10-16. The manifests
-   were 84% of the gossip sent: (2) announce-then-pull shipped 2026-10-17 (unreleased) — next,
-   re-measure once the fleet runs it.
+   were 84% of the gossip sent: (2) announce-then-pull was released in v0.3.241 — next, (2b)
+   re-measure now the fleet runs it.
 8. **#251** — `owned_by: "local"` reads as "my data stays here": keep-on-this-computer per request
    on every surface, and the route on a streamed `/v1/responses` and in MCP.
 9. **#252** — a peer's measured context is not gossiped, so a planner cannot size a peer's share
@@ -979,7 +980,7 @@ delivers **2.7-3.2 copies** of each message (`recv_msgs_unfiltered` ÷ `recv_msg
 no region summaries); no drops. **`swarm/models` is now 84% of the gossip sent** (2.8 KB/s):
 `ModelManifest` arrives 0.83 a minute at ~35 KB each, and each is forwarded on to the mesh. The
 3.4 KB/s that is not gossip (Kademlia, identify, pings, direct messages) is the next-largest share.
-**(2) shipped 2026-10-17 (unreleased)**: a peer advertising `features::MANIFEST_DIGESTS` is caught up
+**(2) shipped 2026-10-17, released in v0.3.241**: a peer advertising `features::MANIFEST_DIGESTS` is caught up
 with the versions (`ManifestDigest`, ~200 B a model) and pulls (`ManifestPull`) only what it lacks; each
 such peer is sent the versions again every 2 h, and the gossiped repeat waits 24 h while every connected
 peer takes digests. A change still goes on gossip in full; older peers keep the old path both ways

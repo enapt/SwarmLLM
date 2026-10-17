@@ -49,7 +49,8 @@ whether your machine is reachable from the internet, the last 50 requests with
 their routes, **per-peer serving performance** (ping, ms per layer, latency,
 region — slowest first), what your node has served for others, and recent
 failures with *which machine served each one*. That last detail is what separates
-"my node has a problem" from "one peer has a problem".
+"my node has a problem" from "one peer has a problem". A peer marked "(not that
+peer's doing)" only carried the request: the failure was on your own computer.
 
 ### Diagnosing from the client side
 

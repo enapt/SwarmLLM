@@ -53,6 +53,13 @@ moving the prompt's activations, and reading the weights in. Fit those against
 not: over 333 lines (FUTURE_WORK #3, 2026-10-10) its error grew with the plan's
 segments (1.08×, 2.00×, 3.35×) and not at all with the reply's length.
 
+The `prompt:` term is priced from that node's measured prompt rate
+(`ModelSpeed::prompt_ms_per_layer_byte`) — this node's own split segments too — set only
+by warm forwards of at least 256 KB (`PROMPT_RATE_MIN_BYTES`); until one has been
+timed, the device prior stands. A `prompt:` in the millions of ms beside a
+`total_ms` of seconds is the mispricing v0.3.241 fixed (#287): a cold load or a
+tiny forward scaled up to a long prompt priced one route at 17.6 h.
+
 To check the count specifically, compare `tokens` against
 `assumed_forward_passes` on the same line — the assumption is recorded rather
 than looked up, so an old log still says what the constant was when it ran.
@@ -75,6 +82,7 @@ This answers most questions on its own:
 | `route=relayed` | no direct path to a holder; ~1 extra RTT each way, see NAT section |
 | `outcome=error error_type=…` | the variant name points at the subsystem |
 | `outcome=cancelled` | the reader left (Stop, a closed tab) — nothing failed; `tokens=` is what they were shown, and the request is not in `-- recent inference failures --` (`DIAG: request stopped by the client`) |
+| a failure listed as `served peer <id> (not that peer's doing)` in `-- recent inference failures --` | this node caused it (its own memory refusal, configuration or an internal error — `failure_is_penalty_worthy` says no); the peer only carried the plan. The `NOTE: … suspect that peer` line under the list counts only the failures a peer could have caused (v0.3.241+, #288) |
 
 `sched_ms` is time spent *assembling*, summed across attempts — not
 time-since-dequeue, which would charge a failed attempt's whole execution to
@@ -194,6 +202,16 @@ DIAG: admitting model to GPU  model=X
 model-worker: Model loaded ... device=Cuda(...)
 ```
 
+A worker already running a model that is handed a LATER run of layers its card cannot hold
+whole (v0.3.241+, #265) places that run across the card and the processor instead of failing
+the request:
+
+```
+The graphics card cannot take this range whole — placing it across the card and the processor, as a fresh worker would be  model= layers=[a..b) card_mb= host_mb=
+model-worker: placing a later range where the daemon found room for it  layers=[a..b)
+Could not tell the model's worker where a range goes — the range's own forward will find the worker gone   (WARN; the worker had died — the request fails and is re-planned)
+```
+
 **Things that are NOT the explanation, each having cost a session:**
 
 - **An eviction is not necessarily the reclaim.** `try_idle_vram_unload` (timer,
@@ -229,6 +247,11 @@ Local node has full layer coverage — single local segment
          `local_runs_on_processor=false` means the card is expected to
          handle it, so no peer was sought; `parallax_routing=false` means
          the priced search was switched off and the fast path stands)
+Runs only whole, and starts and finishes on this computer — single local segment
+        (v0.3.241+: a model that cannot be cut between computers — Gemma 4
+         E2B/E4B — with "Start and finish on this computer" on runs whole
+         here; a node that does not hold every layer answers
+         PromptPrivacyUnavailable instead)
 Not handing this model to peer: <reason>  peer= latency_ms= free_vram_mb= peer_tokens_per_sec= local_cpu_tokens_per_sec=
         (one line per peer that did not qualify for a whole-model hand-off)
 This model does not fit our GPU, so a nearby peer runs the whole of it ...
@@ -419,9 +442,10 @@ different shape: many drops for one (peer, model), the `retained=` count
 climbing back between them. `examples/peer_prune_churn.py node.log.1 node.log`
 prints each peer's timeline. On 2026-10-16 it showed one peer dropping 53 parts
 of a 14B in a day and a half — the replica target moving with demand, the peer
-count and every restart (FUTURE_WORK #286). From the release after v0.3.240 a
-node sheds against the highest target of the last day, so a row that still
-shows drops every few minutes from a peer on that release is a new cause: grep
+count and every restart (FUTURE_WORK #286). From v0.3.241 a node sheds against
+the highest target it has read in the last 24 h, kept across restarts (it starts
+from its first reading after the update), so a row that still shows drops every
+few minutes from a peer on that release is a new cause: grep
 that peer's own log for `Pruning over-replicated shard` and the
 `AutoShardManager: requesting shard download` lines between them.
 
@@ -870,7 +894,13 @@ histograms. Adding a field means adding it there once, not at each surface.
 | WARN  | `DIAG: InboundFailure` — `pending_channels` | manager/events.rs |
 | DEBUG | `DIAG: remote-generate stream complete` — `streamed_count`, the number the done token carries so the coordinator can tell a finished stream from one whose end overtook its middle | daemon/dispatch/remote_generate.rs |
 | DEBUG | `DIAG: ResponseSent event` — confirms response written to wire. Per-message, so `-v`: at info these were three quarters of an idle node's log, and one line per streamed token under load | manager/events.rs |
-| DEBUG | `DIAG: manifest received` — every VERIFIED manifest: `model`, `manifest_hash`, each part's hash prefix (`0000` = a part the sender's copy does not know), `publisher`, `sender`, `transport`. Count distinct hashes per model to see how many VERSIONS of a model the swarm is carrying — the reading that found #91's remaining traffic (#61's disagreements re-announced every round). Run it on a throwaway probe with `SWARMLLM_LOGGING_LEVEL=debug`, never by raising the live node's level | daemon/dispatch/mod.rs |
+| DEBUG | `DIAG: manifest received` — every VERIFIED manifest: `model`, `manifest_hash`, each part's hash prefix (`0000` = a part the sender's copy does not know), `publisher`, `sender`, `transport`. Count distinct hashes per model to see how many VERSIONS of a model the swarm is carrying — the reading that found #91's remaining traffic (#61's disagreements re-announced every round). Run it on a throwaway probe with `SWARMLLM_LOGGING_LEVEL=debug`, never by raising the live node's level. From a peer that takes digests (v0.3.241+, bit 23 `MANIFEST_DIGESTS`) a manifest arrives only after this node PULLED it (the `pulling` line below), point to point; a reconnect where both hold the same versions shows none | daemon/dispatch/mod.rs |
+| DEBUG | `DIAG: caught a new peer up on manifests with a digest` — `peer`, `versions`: a newly connected peer that takes digests was told the versions this node holds instead of sent each manifest (#91 (2)) | health/monitor.rs |
+| DEBUG | `DIAG: caught a new peer up on manifests directly` — `peer`, `delivered`, `of`: an older peer, sent each manifest | health/monitor.rs |
+| DEBUG | `DIAG: pulling the manifest versions a peer's digest named that this node lacks` — `peer`, `named`, `pulling` | daemon/dispatch/manifest_sync.rs |
+| DEBUG | `DIAG: answering only part of a manifest pull — answered lately, or the peer has used its budget` — `peer`, `asked`, `allowed` | daemon/dispatch/manifest_sync.rs |
+| DEBUG | `DIAG: asked every peer that takes digests for manifest versions a pull left unanswered` — `versions`, `peers` | health/monitor.rs |
+| DEBUG | `Dropping unauthenticated ManifestDigest` / `Dropping unauthenticated ManifestPull` — one that came with no proven sender, not answered | daemon/dispatch/manifest_sync.rs |
 
 ### Failure Paths
 
@@ -1101,6 +1131,17 @@ DIAG: connection closed        — peer_id, cause, remaining, pending_tensor_for
 ```
 
 If `pending_tensor_forwards > 0` when a connection closes, those requests will get `OutboundFailure` and the pipeline will attempt failover.
+
+```
+Peer has not answered N requests in a row — closing the connection so it stops being offered work; a re-dial is scheduled   (WARN, manager/connections.rs)
+```
+
+Fires at 20 failed requests in a row to one peer, or 8 once nothing at all has come back from it
+for 90 s. Since v0.3.241 (#290) only a request that TIMED OUT (or a peer that does not speak the
+protocol) counts: a connection the transport lost fails every request in flight on it at once
+("connection lost", "connection is closed", end of stream), and those no longer count, so the line
+now means the peer stayed connected and silent. A peer serving one of our pipelines is not closed
+(`Peer is unresponsive but is serving an active pipeline — not closing`, DEBUG).
 
 ## Tensor Compression Diagnostics
 
@@ -1668,6 +1709,7 @@ that fix firing.
 | Level | What | Fields |
 |-------|------|--------|
 | INFO  | `DIAG: relay reservation` | `peer` |
+| WARN  | `refusing a relayed envelope: <why>` / `refusing a relayed tensor: <why>` (v0.3.241+, #298) — a relayed body whose origin's signature is missing or wrong, a replay, or a full replay memory; logged once a window per delivering peer, `suppressed` counting the refusals folded into the line. A run of them from one `relayed_by` is a peer forging or replaying, or a build that signs wrongly | `relayed_by`, `claimed_origin`, `suppressed` |
 
 ## Files Modified
 

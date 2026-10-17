@@ -4722,4 +4722,4 @@ private network namespace):
 - **Not new.** A restarted holder still broadcasts its manifests once on its first round, because
   it keeps no memory of what it announced.
 
-The fleet figures wait for the release (FUTURE_WORK #91).
+The fleet figures wait for the fleet to run v0.3.241, the release that carries this (FUTURE_WORK #91 (2b)).
