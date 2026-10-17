@@ -4831,4 +4831,14 @@ private network namespace):
 - **Not new.** A restarted holder still broadcasts its manifests once on its first round, because
   it keeps no memory of what it announced.
 
-The fleet figures wait for the fleet to run v0.3.241, the release that carries this (FUTURE_WORK #91 (2b)).
+**The fleet** (FUTURE_WORK #91 (2b), 2026-10-17, release node, 8 peers all on .241, idle, a 60-min
+window at 1.0 → 2.0 h up): `ModelManifest` arrived once in the hour, against 0.83 a minute on the
+.240 fleet; `swarm/models` fell from 2.8 to 1.4 KB/s, now shard announcements and capability
+updates; the upload fell from 6.7 to 5.5 KB/s.
+
+**What it left: a restart gossips every manifest twice (#91 (2c)).** The rig's "Not new" note
+undercounted. At boot `daemon::background::spawn_initial_announcements` broadcasts every manifest
+it gossips and records nothing, and the monitor's first round, ~30 s later with an empty
+`last_announced_manifests` and an empty `manifest_heard`, sends the set again. The release node's
+first 39 min after a restart: `swarm/models` sent 10.7 MB in 96 publishes, ~7.4 MB and ~74
+publishes above its steady rate, holding 27 manifests.

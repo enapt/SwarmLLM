@@ -64,10 +64,10 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
 6. **#115** — the rest of Gemma 3/4: the vision projectors and the drafters, refused by name
    today, never loaded wrong. (Its E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole
    since #296.)
-7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 6.7 KB/s on the .240
-   fleet (8.8 on .239), ~3 copies of each message (from ~6.3), measured 2026-10-16. The manifests
-   were 84% of the gossip sent: (2) announce-then-pull was released in v0.3.241 — next, (2b)
-   re-measure now the fleet runs it.
+7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
+   fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
+   (0.83 a minute before (2)). Next: (2c) a restart gossips every manifest twice (~7 MB from a node
+   holding 27); then the 3.5 KB/s that is not gossip.
 8. **#251** — `owned_by: "local"` reads as "my data stays here": keep-on-this-computer per request
    on every surface, and the route on a streamed `/v1/responses` and in MCP.
 9. **#252** — a peer's measured context is not gossiped, so a planner cannot size a peer's share
@@ -956,7 +956,7 @@ libp2p-connection-limits has no per-protocol exemption). A dial by bare address 
 `PeerCondition::Disconnected`; check no other dialler (loopback probe, redial queue, PEX)
 does the same.
 
-#### #91 — An idle node still uploads ~7 KB/s, most of its gossip the model manifests, and a total traffic ceiling does not exist
+#### #91 — An idle node still uploads ~5.5 KB/s, a restart gossips every manifest twice, and a total traffic ceiling does not exist
 `P2` · network · **PARTIAL** — 2026-10-17 · history: archive row #91, `docs/invariants/network.md`
 
 Trickle suppression (`MANIFEST_QUIET_WINDOW`), per-(model, hash) `manifest_heard`,
@@ -998,10 +998,25 @@ peer takes digests. A change still goes on gossip in full; older peers keep the 
 (`docs/invariants/network.md` § "Announce, then pull"). It replaces the catch-up that sent a probe node
 84 manifests (~2.9 MB) from six peers in 20 s, describing 26 versions. Rig
 `examples/manifest_digest_rig.sh`: a newcomer pulls once, a reconnect pulls nothing, mixed versions
-learn the model in full. Left: (2b) re-measure once the fleet runs it — `swarm/models` should fall to
-changes plus a daily repeat, and a reconnect's catch-up from ~480 KB to ~12 KB per peer; the mesh is
-still sized once at startup, from peers ever met rather than reachable now (a rig first before going
-further: a thinner mesh partitions sooner); (3) a both-direction traffic ceiling at the transport
+learn the model in full. **(2b) re-measured 2026-10-17 with the fleet on .241** (release node, 8
+peers all on .241, idle, 1.0 → 2.0 h up, a 60-min window, `/api/admin/stats` twice): **5.5 KB/s out
+(6.7 at .240), 2.1 of it gossip (3.3)**. `ModelManifest` arrived ONCE in the hour (0.83 a minute at
+.240), so the digests hold. `swarm/models` is still 68% of the gossip sent, but at 1.4 KB/s (from
+2.8), and it is now shard announcements (1.4 a minute, ~7.5 KB) and capability updates (1.7 a
+minute, ~5.5 KB), each arriving ~2.85 times. What is not gossip (Kademlia, identify, pings, direct
+messages) is 3.5 KB/s, now 63% of the upload and the largest share left. The reconnect catch-up
+cannot be separated in these counters, since direct traffic has no per-kind meter; the rig showed a
+reconnect pulls nothing. **Found, (2c)**: a restart gossips every manifest it gossips in full, twice.
+`daemon::background`'s `initial_announcements` broadcasts the set and notes neither that it was
+announced nor that it was heard, and the monitor's first round, ~30 s later with an empty memory,
+sends it again. On the release node's first 39 min after its 09:05Z restart, `swarm/models` sent
+10.7 MB (~7.4 MB above its steady rate) in 96 publishes (~74 above). It holds 27 manifests, which
+fits two copies of each plus their source gossip. A restart keeps no memory of what it announced or
+heard, and every release restarts the fleet within minutes. Fix: drop the boot-time loop, and keep
+the announce and heard memory across a restart (redb, wall-clock times), so an unchanged manifest is
+not gossiped again; the digest catch-up already tells every reconnecting peer. Left besides: the
+mesh is still sized once at startup, from peers ever met rather than reachable now (a rig first
+before going further: a thinner mesh partitions sooner); (3) a both-direction traffic ceiling at the transport
 (risky — throttling gossip can partition a node); `max_bandwidth_mbps` shapes part serving only.
 
 #### #169 — Connection churn on multi-interface hosts: only the LAN dial is deterministic
