@@ -19,6 +19,8 @@ pub mod mem_bandwidth;
 pub(crate) mod model_arch;
 pub mod model_worker;
 pub mod ngram_lookup;
+#[cfg(feature = "candle-cuda")]
+pub(crate) mod partial_rope;
 pub mod pipeline;
 pub mod prefetch;
 pub mod prefill_attn;

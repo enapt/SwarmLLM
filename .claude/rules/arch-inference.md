@@ -92,7 +92,7 @@ The vendored flash kernel's 512-wide block on sm86 attended WRONGLY at every sha
 
 ## A decoded token's attention on a card is ONE kernel, and never keeps the mirror in step (2026-09-29)
 
-**`decode_attn::gqa_decode_attention_cuda`** answers a one-position attention on a card (A/B `SWARMLLM_DECODE_ATTN=standard`). A one-position append leaves the f16 mirror behind (`LayerKv::append`); `flash_operands` declines a lagging mirror (`SWARMLLM_KV_MIRROR_EAGER=1` = old). ⚠ Not bit-identical to the matmul path — judge replies against llama.cpp.
+**`decode_attn::gqa_decode_attention_cuda`** answers a one-position attention on a card (A/B `SWARMLLM_DECODE_ATTN=standard`). A one-position append leaves the f16 mirror behind (`LayerKv::append`); `flash_operands` declines a lagging mirror (`SWARMLLM_KV_MIRROR_EAGER=1` = old). ⚠ Not bit-identical to the matmul path — judge replies against llama.cpp. **Its kernels are the same at every cache length** (`decode_attn::combine_every_length`: one chunk is merged too, bit-identical): a decode step's kernels must not change as the cache grows, or every graph group is rebuilt at once (790 ms in one Gemma 3 4B step at position 64). A/B `SWARMLLM_DECODE_ATTN_COMBINE=when-needed`.
 
 → `docs/invariants/inference.md` § "A decoded token's attention on a card is one kernel"
 
@@ -161,7 +161,7 @@ Never open-code it, and never estimate it.
 
 ## Partial RoPE has one implementation, and it answers with a tensor the KV cache can write
 
-**`inference::layers::rope_over_heads`** is the single partial-RoPE implementation; its result is contiguous (the pass-through half is made contiguous BEFORE `cat`), because `slice_set` refuses a non-contiguous source. `SeqCache::append` makes its source contiguous too. Never write a second copy.
+**`inference::layers::rope_over_heads`** is the single partial-RoPE implementation; its result is contiguous (the pass-through half is made contiguous BEFORE `cat`), because `slice_set` refuses a non-contiguous source. `SeqCache::append` makes its source contiguous too. Never write a second copy. On a card it is ONE launch (`inference::partial_rope`, llama.cpp's shape: the kernel copies the unrotated channels), bit-identical to `partial_rope_composed`; A/B `SWARMLLM_PARTIAL_ROPE=compose`.
 
 → `docs/invariants/inference.md` § "`inference::layers::rope_over_heads` — partial RoPE has one implementation, and it answers with a tensor the KV cache can write"
 

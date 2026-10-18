@@ -761,6 +761,24 @@ cannot bring the class back.
 
 → `docs/invariants/inference.md`
 
+**On a card it is one launch (2026-10-19).** The composition is five launches
+for each of Q and K — `ucopy` (rotated part), `rope`, `ucopy` (pass-through),
+and `cat`'s two `copy2d`s — eight more a layer than a full-width model, 256 a
+step on Phi-4-mini's 32 layers (the kernel census put `copy2d` at 4.47 and
+`ucopy` at 4 a layer). llama.cpp's `rope_neox` / `rope_norm`
+(`ggml/src/ggml-cuda/rope.cu`, master 4b1a27f) copy every channel at or past
+`n_dims` inside the rope kernel; `kernels/fused_decode.cu::rope_partial_f32` does
+the same, with candle's `rope` / `ropei` expressions for the rotated pairs, so
+it is bit-identical to `layers::partial_rope_composed` (pinned by
+`cuda_partial_rope_is_bit_identical_to_the_composed_path`, both layouts, cos/sin
+narrowed at an offset). `inference::partial_rope::on_the_card` checks every
+precondition and declines to the composition otherwise; the result is a fresh
+contiguous buffer, so the `slice_set` rule above still holds. A/B
+`SWARMLLM_PARTIAL_ROPE=compose`. Phi-4-mini Q4_K_M whole on the RTX 3070 Laptop (160-token
+reply, `test-split`'s rate after the first 8 steps, live node stopped, Windows up 39 h, arms
+alternated three times, the decode-attention stall below already removed): 87.0-87.1 → 91.8-92.1
+tokens a second, replies identical; llama.cpp `llama-bench` 103.1 (median sample).
+
 ## A RoPE layout is read off llama.cpp, per architecture (2026-09-24, FUTURE_WORK #96)
 
 **`ModelArch::use_rope_contiguous` is llama.cpp's `llama_model_rope_type`, arch
@@ -3835,6 +3853,29 @@ appearing once a cache passes 64 positions (`CUDA_CHUNK`): every group +2 kernel
 crossing and back when the next request starts below it (~10 launches a 4-request run), which the
 weighing keeps from resting. The stream arm accepted the same guesses on every arm (77 of 140, 82
 of 139, 81 of 139), which a changed drafter or target would not; the harness keeps no reply text.
+
+**That remainder was priced on 2026-10-19 and removed.** A Gemma 3 4B reply on the card (prompt
+37 tokens, live node stopped, Windows up 38 h) took ~12 ms a step on both sides of position 64
+and **790 ms for the step at 64**: 17 groups refused their update (`KERNEL 54 → 56, MEM_ALLOC 49
+→ 51` — the combine and its partials, in every layer) and were instantiated afresh. A 160-token
+decode read 45-56 tokens a second where its steady state is ~80, and llama.cpp's 87.9. The
+first instantiation of the same 17 groups, at the second decode step, took 27 ms — a REBUILD is
+what costs, and why is not established (it was not measured further). A short question to a
+model whose template adds no system prompt starts below 64, so this was one stall mid-reply in
+ordinary chat. The kernel now writes partials and runs the combine at EVERY length
+(`decode_attn::combine_every_length`), so the step's kernels never change with the cache: one
+chunk merged is bit-identical to the direct write — the combine's one weight is `expf(0) = 1`,
+and `fma(1, x, 0) = x` — pinned by `one_chunk_merged_is_bit_identical_to_the_direct_write`, at
+the price of one small launch a layer below 64 positions. A/B
+`SWARMLLM_DECODE_ATTN_COMBINE=when-needed`. Measured in one binary, 160-token replies, arms
+alternated twice (Windows up 39 h; old → new, tokens a second after the first 8 steps): Gemma 3
+4B 78.7 / 51.1 → 78.6 / 78.6, Phi-4-mini 66.9 / 51.5 → 92.1 / 92.2, Gemma 3 1B 164.0 / 154.2 →
+162.5 / 164.1, TinyLlama 234.8 / 239.1 → 241.0 / 236.2, Qwen 3.5 0.8B 141.6 / 140.2 → 142.9 /
+142.2, Llama 3.2 3B (its template's system prompt starts it past 64, so no rebuild either way)
+109.4 / 109.1 → 108.7 / 107.4. Every old run that crossed 64 logged one rebuild, no new run did,
+and every model's reply was the same on every arm. The first old Gemma 3 4B run's rebuild cost
+nothing visible (78.7) and the second's took the rate to 51.1: what a rebuild costs varies from
+run to run, which is the open question above.
 
 ## A header and its tensor table describe one upload — compared before a tensor is read (2026-10-03, #156)
 

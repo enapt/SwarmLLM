@@ -3265,6 +3265,10 @@ pub(crate) const KV_CACHE_GROWTH_TOKENS: usize = 512;
 /// pass-through contiguous first is what keeps that cheap: `cat` then writes
 /// both halves straight into one new buffer instead of copying the whole head
 /// twice.
+///
+/// On a card the partial branch is ONE launch (`inference::partial_rope`,
+/// bit-identical to [`partial_rope_composed`]) — the composition is five per
+/// tensor, and a card's decode step is bound by its launch count.
 pub(crate) fn rope_over_heads(
     x: &Tensor,
     cos: &Tensor,
@@ -3272,18 +3276,49 @@ pub(crate) fn rope_over_heads(
     rope_dim: usize,
     use_rope_contiguous: bool,
 ) -> CandleResult<Tensor> {
-    let rotate = |t: &Tensor| -> CandleResult<Tensor> {
-        if use_rope_contiguous {
-            candle_nn::rotary_emb::rope(t, cos, sin)
-        } else {
-            candle_nn::rotary_emb::rope_i(t, cos, sin)
-        }
-    };
-    let head_dim = x.dim(3)?;
-    if rope_dim >= head_dim {
-        return rotate(&x.contiguous()?);
+    if rope_dim >= x.dim(3)? {
+        return rotate_whole(&x.contiguous()?, cos, sin, use_rope_contiguous);
     }
-    let x_rot = rotate(&x.narrow(3, 0, rope_dim)?.contiguous()?)?;
+    #[cfg(feature = "candle-cuda")]
+    if let Some(roped) =
+        crate::inference::partial_rope::on_the_card(x, cos, sin, rope_dim, use_rope_contiguous)?
+    {
+        return Ok(roped);
+    }
+    partial_rope_composed(x, cos, sin, rope_dim, use_rope_contiguous)
+}
+
+/// candle's rope over every channel of a contiguous `t`: halves (NEOX) or
+/// interleaved pairs (NORM).
+fn rotate_whole(
+    t: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    use_rope_contiguous: bool,
+) -> CandleResult<Tensor> {
+    if use_rope_contiguous {
+        candle_nn::rotary_emb::rope(t, cos, sin)
+    } else {
+        candle_nn::rotary_emb::rope_i(t, cos, sin)
+    }
+}
+
+/// Partial RoPE composed from candle ops — on every device but a card, and the
+/// reference the card's one-launch kernel is held to bit for bit.
+pub(crate) fn partial_rope_composed(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    rope_dim: usize,
+    use_rope_contiguous: bool,
+) -> CandleResult<Tensor> {
+    let head_dim = x.dim(3)?;
+    let x_rot = rotate_whole(
+        &x.narrow(3, 0, rope_dim)?.contiguous()?,
+        cos,
+        sin,
+        use_rope_contiguous,
+    )?;
     let x_pass = x.narrow(3, rope_dim, head_dim - rope_dim)?.contiguous()?;
     Tensor::cat(&[&x_rot, &x_pass], 3)?.contiguous()
 }

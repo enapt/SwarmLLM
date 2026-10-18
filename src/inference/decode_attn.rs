@@ -278,6 +278,32 @@ pub fn gqa_decode_attention_cpu(
 /// model, 256 would be four blocks on a 40-SM card.
 #[cfg(feature = "candle-cuda")]
 pub(crate) const CUDA_CHUNK: usize = 64;
+
+/// Whether a cache of ONE chunk is merged by the combine kernel too, so a
+/// decode step launches the same two kernels at every length.
+///
+/// A decode step on a card is a captured CUDA graph, updated in place each
+/// step while its kernels stay the same (`inference::cuda_graph`). Writing a
+/// single chunk's result directly and adding the combine only past
+/// [`CUDA_CHUNK`] positions changed every layer's kernels at position 64 (and
+/// back when the next conversation started below it): the driver refuses the
+/// update and every group is instantiated afresh — 790 ms in ONE step of a
+/// Gemma 3 4B reply on the RTX 3070 Laptop (2026-10-19), against ~12 ms for
+/// the steps around it. A reply to a short question (Gemma's template adds no
+/// system prompt) stalled once mid-answer, and a 160-token decode averaged
+/// 45-56 tokens a second instead of ~80. A one-chunk merge is bit-identical to
+/// the direct write (its one weight is `expf(0) = 1`; pinned by
+/// `one_chunk_merged_is_bit_identical_to_the_direct_write`) and costs one
+/// small launch a layer below 64 positions.
+/// `SWARMLLM_DECODE_ATTN_COMBINE=when-needed` restores the direct write for an
+/// A/B inside one binary.
+#[cfg(feature = "candle-cuda")]
+fn combine_every_length() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("SWARMLLM_DECODE_ATTN_COMBINE").as_deref() != Ok("when-needed")
+    })
+}
 /// Query heads per KV head one block holds (`DA_MAX_REP`); head dims it
 /// handles (`DA_MAX_D`, and a multiple of 32).
 const CUDA_MAX_REP: usize = 16;
@@ -320,7 +346,8 @@ pub(crate) const DECODE_ATTN_PTX: &str = include_str!(concat!(env!("OUT_DIR"), "
 /// whole group, split into fixed chunks merged by flash-decoding's reduction.
 /// It replaces two cuBLAS matmuls around a softmax (plus the scale and the
 /// copies around them) — ~0.1 ms per layer at 512 positions, 0.32 at 8K on an
-/// RTX 3070 — with one launch (two past `CUDA_CHUNK` positions).
+/// RTX 3070 — with two launches, the chunks and their merge, at every cache
+/// length (`combine_every_length`).
 ///
 /// Scope: CUDA, an f32 query over an f32 OR f16 cache (K and V alike — the
 /// half cache a card keeps, `layers::KvStorage::F16`), `q_len == 1`, no mask
@@ -377,6 +404,7 @@ pub fn gqa_decode_attention_cuda(
         let op = cuda::DecodeAttn {
             scale,
             softcap: softcap.unwrap_or(0.0),
+            combine_one_chunk: combine_every_length(),
         };
         Ok(Some(q.apply_op3_no_bwd(k, v, &op)?))
     }
@@ -396,6 +424,9 @@ mod cuda {
         pub(super) scale: f32,
         /// 0 = none.
         pub(super) softcap: f32,
+        /// A one-chunk cache goes through the combine too
+        /// ([`super::combine_every_length`]).
+        pub(super) combine_one_chunk: bool,
     }
 
     /// The cache's K and V as the kernel reads them — f32, or the half cache
@@ -455,6 +486,7 @@ mod cuda {
             }
             let n_rep = n_head / n_kv_head;
             let n_chunks = s_len.div_ceil(CUDA_CHUNK);
+            let merged = n_chunks > 1 || self.combine_one_chunk;
 
             let q = s1.as_cuda_slice::<f32>()?.slice(qo..qe);
             // The cache views start where their layouts say; every read the
@@ -477,7 +509,7 @@ mod cuda {
             // Every element of both buffers is assigned: `out` by the one
             // kernel or the combine, `partial` by every (block, head, dim).
             let mut out = dev.alloc_fully_overwritten::<f32>(b * n_head * d)?;
-            let mut partial = if n_chunks > 1 {
+            let mut partial = if merged {
                 Some(
                     dev.alloc_fully_overwritten::<f32>(b * n_kv_head * n_chunks * n_rep * (d + 2))?,
                 )
@@ -815,6 +847,77 @@ mod tests {
                 "b={b} heads {n_head}/{n_kv_head} S={s_len} d={d} softcap={softcap:?} cache {cache_dtype:?}: worst abs {worst_abs} rel {worst_rel}"
             );
         }
+    }
+
+    /// A cache of ONE chunk merged by the combine kernel must equal the direct
+    /// write BIT FOR BIT: the combine runs at every length so a captured decode
+    /// step keeps its kernels as the cache passes `CUDA_CHUNK`
+    /// ([`super::combine_every_length`]), and that must move the launch count
+    /// and nothing a reply can see. Every length up to one chunk, both caches,
+    /// a soft cap, several query heads a group.
+    ///
+    /// ⚠ Gated, like the test above: run it on a card with `--nocapture` and
+    /// look for the SKIPPED line before believing a pass.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn one_chunk_merged_is_bit_identical_to_the_direct_write() {
+        use candle_core::DType;
+        let card = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIPPED decode attention one-chunk merge: no CUDA device ({e})");
+                return;
+            }
+        };
+        let mut compared = 0;
+        for (b, n_head, n_kv_head, d, softcap) in [
+            (1usize, 24usize, 8usize, 128usize, None),
+            (1, 8, 4, 256, Some(50.0f32)),
+            (2, 32, 32, 64, None),
+        ] {
+            for s_len in [1, 2, 17, CUDA_CHUNK - 1, CUDA_CHUNK] {
+                for cache_dtype in [DType::F32, DType::F16] {
+                    let q = Tensor::randn(0f32, 1.0, (b, n_head, 1, d), &card).unwrap();
+                    let cache = || {
+                        Tensor::randn(0f32, 1.0, (b, n_kv_head, s_len + 9, d), &card)
+                            .unwrap()
+                            .to_dtype(cache_dtype)
+                            .unwrap()
+                            .narrow(2, 0, s_len)
+                            .unwrap()
+                    };
+                    let (k, v) = (cache(), cache());
+                    let run = |combine_one_chunk: bool| {
+                        let op = cuda::DecodeAttn {
+                            scale: 1.0 / (d as f32).sqrt(),
+                            softcap: softcap.unwrap_or(0.0),
+                            combine_one_chunk,
+                        };
+                        q.apply_op3_no_bwd(&k, &v, &op)
+                            .unwrap()
+                            .flatten_all()
+                            .unwrap()
+                            .to_vec1::<f32>()
+                            .unwrap()
+                    };
+                    let (direct, merged) = (run(false), run(true));
+                    let differ = direct
+                        .iter()
+                        .zip(&merged)
+                        .filter(|(a, b)| a.to_bits() != b.to_bits())
+                        .count();
+                    assert_eq!(
+                        differ,
+                        0,
+                        "b={b} heads {n_head}/{n_kv_head} S={s_len} d={d} softcap={softcap:?} \
+                         cache {cache_dtype:?}: {differ} of {} differ",
+                        direct.len()
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 3 * 5 * 2);
     }
 
     #[test]

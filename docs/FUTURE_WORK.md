@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #307**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #308**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2681,7 +2681,20 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#3 (d))
+**Closed 2026-10-19, not yet released** (#3 (d); #307)
+- #307 — **Replies on a graphics card no longer stall once a conversation reaches 64 tokens, and
+  Phi-4-mini, GLM-4 and Qwen 3.5 decode with fewer launches.** Found by a card-decode sweep of
+  every reference family against llama.cpp (2026-10-19, `docs/DIAGNOSTICS.md` § "One model's
+  decode rate on this machine"). (a) The card's decode attention added its merge kernel only past
+  one 64-position chunk, so the step at position 64 changed every layer's kernels and every CUDA
+  graph group was rebuilt at once — 790 ms in one Gemma 3 4B step; the merge now runs at every
+  length (`decode_attn::combine_every_length`, bit-identical for one chunk). Gemma 3 4B 51-79 →
+  78.6 tokens a second steady, Phi-4-mini 51-67 → 92. (b) A rotary width narrower than the head
+  was five launches for each of Q and K; it is one (`inference::partial_rope`, llama.cpp's
+  `rope_neox` / `rope_norm` shape, bit-identical to the composition): Phi-4-mini 87.0 → 92.0.
+  Replies identical on every arm; A/B `SWARMLLM_DECODE_ATTN_COMBINE=when-needed`,
+  `SWARMLLM_PARTIAL_ROPE=compose`. Evidence: `docs/invariants/inference.md` § "That remainder was
+  priced on 2026-10-19", § "On a card it is one launch".
 - #3 (d) — **A split that guesses ahead is priced for the rounds it takes, not the tokens it
   writes.** A split driven from here crosses its hops and runs its segments once a ROUND, and the
   guess-check paths (the drafter's rounds and stream, the n-gram loop) carry several tokens a

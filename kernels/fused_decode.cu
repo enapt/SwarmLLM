@@ -134,3 +134,59 @@ extern "C" __global__ void add_rmsnorm_f32(
         normed[row*ncols + col] = scale * sum[row*ncols + col] * al;
     }
 }
+
+// Partial RoPE — rotate the leading `rope_dim` of every head, copy the rest —
+// as ONE kernel.
+//
+// A model whose rotary width is narrower than its heads (Phi-4-mini: 96 of 128;
+// GLM-4: 64 of 128; Qwen 3.5's attention layers: 64 of 256) was composed as
+// `ucopy` (the rotated part made contiguous), `rope`, `ucopy` (the pass-through
+// part) and a `cat` of two `copy2d`s — five launches for Q and five for K where
+// a full-width model makes one each. llama.cpp's `rope_neox` / `rope_norm`
+// (`ggml/src/ggml-cuda/rope.cu`, master 4b1a27f) copy every channel at or past
+// `n_dims` inside the rope kernel itself; this is the same shape.
+//
+// ⚠ **Bit-identical to the composition.** The rotated pair is candle's `rope`
+// (contiguous halves: element j pairs with j + rope_dim/2) or `ropei`
+// (interleaved: 2j pairs with 2j+1) from `candle-kernels/src/reduce.cu`,
+// expression for expression, with the same cos/sin index (position × half + j);
+// the pass-through is a plain copy, as `ucopy` and `copy2d` are.
+// `cuda_partial_rope_is_bit_identical_to_the_composed_path` pins it.
+//
+// LAYOUT: `src` and `dst` are `rows` contiguous heads of `head_dim` (a
+// `[b, heads, seq, head_dim]` tensor, so row r is at position r % seq); `cos`
+// and `sin` are `[seq, rope_dim / 2]`. Every element of `dst` is assigned, so it
+// may come from `alloc_fully_overwritten`.
+extern "C" __global__ void rope_partial_f32(
+    const float *src,
+    const float *cos,
+    const float *sin,
+    float *dst,
+    const unsigned int rows,
+    const unsigned int seq,
+    const unsigned int head_dim,
+    const unsigned int rope_dim,
+    const int interleaved
+) {
+    const unsigned int half = rope_dim / 2;
+    const unsigned int per_row = half + (head_dim - rope_dim);
+    const size_t total = (size_t)rows * per_row;
+    for (size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x; idx < total;
+         idx += (size_t)blockDim.x * gridDim.x) {
+        const size_t r = idx / per_row;
+        const unsigned int j = (unsigned int)(idx - r * per_row);
+        const size_t head = r * head_dim;
+        if (j < half) {
+            const size_t i_cs = (r % seq) * half + j;
+            const float c = cos[i_cs];
+            const float s = sin[i_cs];
+            const size_t i1 = interleaved ? head + 2 * j : head + j;
+            const size_t i2 = interleaved ? i1 + 1 : i1 + half;
+            dst[i1] = src[i1] * c - src[i2] * s;
+            dst[i2] = src[i1] * s + src[i2] * c;
+        } else {
+            const size_t k = head + rope_dim + (j - half);
+            dst[k] = src[k];
+        }
+    }
+}

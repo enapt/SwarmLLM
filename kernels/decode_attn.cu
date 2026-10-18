@@ -20,7 +20,7 @@
 // split the cached positions into fixed chunks, compute each chunk's softmax
 // partials in parallel, merge them with the log-sum-exp rescale.
 //   decode_attn_f32 / _f16kv grid (batch * n_kv_head, n_chunks), DA_THREADS
-//   decode_attn_combine_f32  grid (batch * n_head), only when n_chunks > 1
+//   decode_attn_combine_f32  grid (batch * n_head), at every length (see `partial`)
 // One block holds ONE KV head and EVERY query head of its group, so each K and
 // V row of its chunk is read once for the group — the rule the CPU kernel
 // (`inference::decode_attn`) learned the hard way (#119: once per query head
@@ -63,9 +63,14 @@ static __device__ __forceinline__ float da_warp_max(float x) {
 // q:  [b, n_head, d] contiguous, head = kv_head * n_rep + r (repeat_kv's order)
 // k,v: the cache VIEW — [b, n_kv_head, s_len, d], rows dense (stride d), batch
 //      and head strides as given (a reserved buffer narrowed to s_len)
-// out:     [b, n_head, d] — written here only when there is ONE chunk
+// out:     [b, n_head, d] — written here only when `partial` is null (ONE
+//          chunk, written directly: the A/B arm `SWARMLLM_DECODE_ATTN_COMBINE=when-needed`)
 // partial: [b * n_kv_head, n_chunks, n_rep, d + 2] = (max, Σexp, Σexp·v) per
-//          chunk and query head — written only when there are several
+//          chunk and query head — written whenever it is passed, one chunk
+//          included: the combine then runs at EVERY cache length, so a captured
+//          decode step keeps the same kernels as the cache grows past a chunk
+//          (`decode_attn::combine_every_length`). One chunk merged is
+//          bit-identical to the direct write (its weight is expf(0) = 1).
 // softcap: Gemma-2's tanh cap on the scaled score, 0 = none.
 // Requires d % 32 == 0, d <= DA_MAX_D, n_rep <= DA_MAX_REP (checked by the caller).
 //
@@ -192,7 +197,7 @@ static __device__ __forceinline__ void decode_attn_body(
 #pragma unroll
         for (int r = 0; r < DA_MAX_REP; r++) {
             if (r < n_rep) {
-                if (n_chunks == 1) {
+                if (partial == nullptr) {
                     out[((long long)g * n_rep + r) * d + j] = acc[r] / red_l[r];
                 } else {
                     float *part = partial + (((long long)g * n_chunks + c) * n_rep + r) * (d + 2);
