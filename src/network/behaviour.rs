@@ -16,10 +16,38 @@ use crate::network::relay::RelayServerConfig;
 
 /// Kademlia provider record TTL — how long a shard-holder record stays valid
 /// before being dropped. Republished automatically on the publication interval.
-const KAD_PROVIDER_TTL_SECS: u64 = 3600;
-/// Kademlia provider record republication interval. Must be < `KAD_PROVIDER_TTL_SECS`
-/// to ensure records refresh before expiry.
-const KAD_PUBLISH_INTERVAL_SECS: u64 = 1200;
+///
+/// 12 h (was 1 h), three publication intervals, so two missed republications
+/// in a row still do not drop a record. It must stay under
+/// `model::registry::RETRACTION_HONOURED_SECS` (26 h), or a record outlives the
+/// retraction that overrules it (gotcha #364, `docs/invariants/network.md` §
+/// "ModelRegistry Holder Counts"). A stale record never routes work to a node
+/// that left: the scheduler takes only connected holders (gotcha #83). Both
+/// rules are checked at compile time below.
+const KAD_PROVIDER_TTL_SECS: u64 = 12 * 60 * 60;
+/// Kademlia provider record republication interval.
+///
+/// 4 h (was 20 min). Every republication is a full lookup per record — and in a
+/// swarm smaller than Kademlia's k (20) that lookup asks EVERY node, each
+/// answering with its whole peer list and their addresses (~3.6 KB). Measured
+/// on the live node 2026-10-18 (`by_protocol`, 7 peers, idle): answering other
+/// nodes' lookups was ~2.1 KB/s of upload, the largest share after gossip, for
+/// records a request reads only when it routes a split (`dht_query_tx`).
+/// libp2p-kad's own default is 12 h / 48 h, Kubo's 22 h / 48 h
+/// (go-libp2p-kad-dht); ours stays shorter because the TTL is capped by the
+/// retraction window above. FUTURE_WORK #91 (2f).
+const KAD_PUBLISH_INTERVAL_SECS: u64 = 4 * 60 * 60;
+// The two rules above, checked when the crate compiles: a record outlives two
+// missed republications, and expires before the retraction that overrules it
+// (a record still served after the retraction ended re-adds the claim).
+const _: () = assert!(
+    KAD_PUBLISH_INTERVAL_SECS * 3 <= KAD_PROVIDER_TTL_SECS,
+    "a provider record must outlive two missed republications"
+);
+const _: () = assert!(
+    KAD_PROVIDER_TTL_SECS < crate::model::registry::RETRACTION_HONOURED_SECS,
+    "a provider record must expire before the retraction that overrules it"
+);
 /// GossipSub mesh heartbeat interval — controls mesh maintenance cadence.
 const GOSSIPSUB_HEARTBEAT_SECS: u64 = 10;
 /// request_response per-request timeout. 10 minutes accommodates CPU-only

@@ -68,8 +68,9 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
    (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), unreleased). The part
    that is not gossip is 2.5 KB/s on 10-18 (4.1 out), and our own direct messages are only 0.19 of it
-   ((2d), `direct_by_kind`): the rest is libp2p's protocols. Next: name them with `by_protocol` ((2e),
-   unreleased) on the live node, then attack the largest share.
+   ((2d), `direct_by_kind`): the rest is libp2p's protocols. `by_protocol` ((2e)) named the largest:
+   Kademlia answering other nodes' lookups, ~2.1 KB/s; (2f) republishes provider records every 4 h
+   instead of 20 min (unreleased). Next: re-read in the field after the release.
 8. **#3**, **#180** — the routing cost model mis-prices a split by regime (one peer's fit,
     2026-10-15: a measured per-visit hop 0.78, a `net:0` hop 1.53 under-priced, drafter arms 0.39
     unpriced), which keeps partial ranges off; fit per term from a second peer's traffic and
@@ -1020,8 +1021,17 @@ and the lists of up to 20 peers with their addresses every answer to a lookup ca
 AutoNAT and relay — estimates, so: **(2e) a per-protocol meter, 2026-10-18, not yet released**:
 `by_protocol` in the traffic payload counts every substream's bytes by the protocol it negotiated
 and by which side opened it — our own lookups vs our answers to others' (`network::protocol_traffic`, read off the multistream-select line this node wrote), counted on the
-same substreams as the total and adding up to it (tested over real TCP and QUIC swarms). Next:
-measure it on the live node the same way and attack the largest share. **(2c) fixed 2026-10-17, not yet released**: a restart gossiped every
+same substreams as the total and adding up to it (tested over real TCP and QUIC swarms; on the live
+node too: Σ rows = `out_bytes` and `in_bytes` to the byte). **Read 2026-10-18** on the live node,
+26 min from a restart (startup included, so a ceiling): gossip 2.6 KB/s, **Kademlia answering other
+nodes' lookups 2.1 KB/s** (896 answers, ~3.6 KB each — the whole peer list with addresses), our own
+Kademlia 0.4, our direct messages 0.3, relay setup 0.15 but in 2 415 streams (~1.5 a second, to
+look at), AutoNAT 84 KB once at startup (v2's dial-data deposit). **(2f) 2026-10-18, not yet
+released**: provider records republish every 4 h, not 20 min, and live 12 h, not 1 h
+(`network::behaviour::KAD_*`; still under the 26 h retraction window, checked at compile time) — in a
+swarm smaller than k every republication is a lookup that asks every node, so the answering cost
+falls ~12x once the fleet updates. Next: re-read `by_protocol` on the field after the release
+(expect the `/swarmllm/kad/1.0.0` `peer` row to fall), then the relay-stream rate. **(2c) fixed 2026-10-17, not yet released**: a restart gossiped every
 manifest it holds in full, twice, a few seconds apart (§ Closed). Left: the
 mesh is still sized once at startup, from peers ever met rather than reachable now (a rig first
 before going further: a thinner mesh partitions sooner); (3) a both-direction traffic ceiling at the transport
@@ -1058,7 +1068,7 @@ flooding valid signed messages is never penalised or pruned (no `PeerScoreParams
 Enable gossipsub peer scoring only after deriving parameters from measured delivery times on
 a real multi-node swarm, with permissive thresholds and a per-peer score metric so a wrongly
 penalised slow or CGNAT peer is visible — the risk is the mesh partitioning itself. Second
-half: DHT provider records are add-only and can outlive the fact by up to 24 h (see #49); a
+half: DHT provider records are add-only and can outlive the fact by up to their 12 h TTL (see #49); a
 capability challenge before trusting one would address it. No incident is known.
 
 #### #304 — A peer can lose its key for this node mid-request, with no disconnect

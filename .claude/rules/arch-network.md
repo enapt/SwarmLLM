@@ -234,8 +234,9 @@ Docker `172.17.0.1` loop-back).
 
 **`merge_dht_providers` is the one writer of `shard_holders` that cannot remove
 a holder** — it loops `record_shard_holder` over a DHT `GetProviders` result.
-That matters because a provider record outlives the fact it asserts: libp2p-kad
-keeps one for 24 h, republishes at 12 h, and other peers serve it, so a node that
+That matters because a provider record outlives the fact it asserts: this node
+keeps one for 12 h and republishes every 4 h (`network::behaviour::KAD_*`, #91
+(2f); it was 1 h / 20 min), and other peers serve it, so a node that
 deleted or lost a shard is still advertised as holding it for hours. An
 add-only writer wins every disagreement with a writer that removes, and its
 cadence decides how fast.

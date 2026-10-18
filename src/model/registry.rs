@@ -15,12 +15,13 @@ const MAX_HOLDERS_PER_SHARD: usize = 50;
 
 /// How long a holder's own retraction outranks a DHT provider record naming it.
 ///
-/// Sized to exceed libp2p-kad's provider-record lifetime (24 h by default, with
-/// republication at 12 h): the record is what keeps resurrecting the claim, so
-/// honouring the retraction for anything less leaves a window where the stale
-/// record wins again. A node that genuinely re-acquires the shard does not wait
-/// this out — its own announcement clears the entry immediately.
-const RETRACTION_HONOURED_SECS: u64 = 26 * 60 * 60;
+/// Sized to exceed the provider-record lifetime (`network::behaviour::
+/// KAD_PROVIDER_TTL_SECS`, 12 h; libp2p-kad's own default is longer): the
+/// record is what keeps resurrecting the claim, so honouring the retraction
+/// for anything less leaves a window where the stale record wins again. A node
+/// that genuinely re-acquires the shard does not wait this out — its own
+/// announcement clears the entry immediately.
+pub(crate) const RETRACTION_HONOURED_SECS: u64 = 26 * 60 * 60;
 
 /// Cap on remembered retractions; entries past `RETRACTION_HONOURED_SECS` are
 /// swept when it is reached, so the map stays bounded without its own timer.
