@@ -1793,7 +1793,17 @@ render a new template with jinja2 first (gotcha #798); (7) **the 4B decodes at ~
 on an RTX 3070 Laptop with or without CUDA-graph capture** (2026-10-11): ~26 ms a step reads its 2.5 GB of
 weights at ~96 GB/s against the card's 448, while the 0.8B went 50-54 → 121-126 with capture — so the 4B's step
 is bound by something on the card. Profile it (`SWARMLLM_PROFILE=1` turns capture off, which is fine here)
-and compare llama.cpp's `llama-bench -ngl 99 tg128` on the same file before changing a kernel.
+and compare llama.cpp's `llama-bench -ngl 99 tg128` on the same file before changing a kernel; (8) ~~every
+turn re-read the whole conversation~~ — **saved since 2026-10-18, not yet released**: the prefix cache
+skipped any request holding recurrent state, because a DeltaNet layer's state cannot be cut back to a
+shorter prefix the way attention KV can. Now the prompt is saved 16 tokens short of its end (llama.cpp's
+context checkpoints, PR #20288, read at `4b1a27f`: the next turn's template re-renders the last few
+tokens differently, so a save AT the end never matches), the prefill stops at that point to copy the
+state, and a hit restores it whole or not at all (`docs/invariants/inference.md` § "Qwen 3.5's prompt is
+saved short of its end"). Qwen3.5-0.8B Q8_0 on the processor (dev build, live node stopped,
+`~/swarmllm-228c/rig.sh`, both slot and sequential paths): a second turn of a 2,416-token conversation
+took 16.7 / 15.0 s instead of 127.6 / 135.8 s cold, replies identical to the cold run. Such a save is
+never announced to peers or exported — a peer's copy could not be narrowed either.
 
 A family in `supported_list` is a claim — check it against a REAL file's header (#715), and
 never flip `ModelArch::is_supported` without a real-file comparison against llama.cpp
@@ -2604,7 +2614,15 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-18, not yet released** (#303; #251 (3) — #251 closed)
+**Closed 2026-10-18, not yet released** (#303; #251 (3) — #251 closed; #228 (8))
+- #228 (8) — **Qwen 3.5 conversations no longer re-read their whole prompt every turn.** The
+  prompt cache left out every model with recurrent layers; it now saves Qwen 3.5's state 16 tokens
+  before the prompt ends and restores it whole. A second turn of a 2,416-token conversation on the
+  0.8B (processor, dev build): 16.7 s instead of 127.6 s, the reply identical. Tests:
+  `a_recurrent_snapshot_is_restored_whole_or_not_at_all`,
+  `a_recurrent_state_is_saved_only_at_the_attention_layers_position`,
+  `a_saved_recurrent_state_is_a_copy_on_both_sides`, `a_prefill_chunk_ends_at_the_save_point`;
+  `docs/invariants/inference.md` § "Qwen 3.5's prompt is saved short of its end".
 - #303 — **A split no longer waits out a deadline when a peer cannot open one piece of the
   prompt.** A peer that cannot decrypt a forward refuses it, and the coordinator sends it again
   once the link re-keys (#92) — but the refusal named no step, and a prompt piece's (or a streamed

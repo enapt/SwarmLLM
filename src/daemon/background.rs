@@ -1632,6 +1632,7 @@ mod tests {
             restore_to: Vec::new(),
             held_from: Vec::new(),
             serves_from: 0,
+            ssm: Vec::new(),
         }
     }
 
@@ -1705,6 +1706,7 @@ mod tests {
             restore_to: Vec::new(),
             held_from: Vec::new(),
             serves_from: 0,
+            ssm: Vec::new(),
         };
         let bytes = serialize_snapshot_with_block_size(&snap, &tokens, Some(4)).unwrap();
         let last_hash = hashes.last().unwrap().block_hash;

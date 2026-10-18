@@ -2587,7 +2587,10 @@ async fn try_remote_prefix_hydrate(
     keep: KeepAsked,
 ) -> usize {
     let block_size = prefix_cache.block_tokens();
-    if block_size == 0 {
+    // A peer's snapshot carries attention layers only (the wire format), and
+    // a recurrent layer cannot be restored beside them (#228) — no peer
+    // announces one for such a model, so asking would only wait.
+    if block_size == 0 || model.carries_recurrent_state() {
         return 0;
     }
     let blocks = crate::inference::split::compute_block_hashes(prompt_ids, block_size);
@@ -3154,6 +3157,30 @@ fn snapshot_room(
         home,
         max_positions,
     }
+}
+
+/// Saves the opening a request's caches hold now — `tokens`, every position
+/// read so far — to the prefix cache, where its pass reaches
+/// `PrefixCache::save_point` (#228). Both generate paths call it, so the plan
+/// of where the copy goes and the charge for it are one decision. Returns the
+/// blocks to announce (none for a kept request or a recurrent model's state).
+fn save_prompt_opening(
+    model: &SplitModel,
+    kv_store: &KvCacheStore,
+    prefix_cache: &PrefixCache,
+    model_key: &str,
+    req_id: &str,
+    tokens: &[u32],
+    keep: KeepAsked,
+) -> Vec<crate::types::PrefixBlockEntry> {
+    let room = snapshot_room(model, kv_store, prefix_cache, tokens.len());
+    let manifest = prefix_cache.insert_from_kv(model_key, req_id, kv_store, tokens, room, keep);
+    // A snapshot kept beside the live cache is device memory the head-room
+    // guard must see.
+    if prefix_cache_charged() {
+        kv_store.set_external_reserved(prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64);
+    }
+    manifest
 }
 
 /// Positions of a card's snapshot that fit in host RAM beside the
@@ -4201,20 +4228,21 @@ async fn handle_generate(
         .await;
     }
 
-    let (input, index_pos_start) = if prefix_len > 0 {
+    if prefix_len > 0 {
         tracing::info!(
             %request_id,
             matched_tokens = prefix_len,
             total_tokens = prompt_tokens,
             "DIAG: handle_generate prefix-cache HIT — prefilling suffix only"
         );
-        (
-            model.tensor_from_ids(&prompt_ids[prefix_len..])?,
-            prefix_len,
-        )
-    } else {
-        (model.tensor_from_ids(&prompt_ids)?, 0)
-    };
+    }
+    let index_pos_start = prefix_len;
+    // Where this pass saves its opening: the prompt's end, or short of it for
+    // a model with recurrent layers, whose pass stops there to save and goes
+    // on (`PrefixCache::save_point`, #228).
+    let save_at = PrefixCache::save_point(prompt_tokens, model.carries_recurrent_state());
+    let stop_to_save = (index_pos_start < save_at && save_at < prompt_tokens).then_some(save_at);
+    let keep = KeepAsked::kept_if(gen.keep_here);
 
     // SWIFT eligibility decided up-front so the prefill, baseline decode, and
     // verify all run under the same attention kernel when speculative work is
@@ -4230,9 +4258,26 @@ async fn handle_generate(
     let force_attn = force_standard_attn || swift_active;
 
     // Prefill — block_in_place for CPU-bound inference
+    let mut manifest = Vec::new();
     let prefill = tokio::task::block_in_place(|| {
         let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
-        model.forward(&input, index_pos_start, kv_store, &req_id_str)
+        let mut from = index_pos_start;
+        if let Some(at) = stop_to_save {
+            let head = model.tensor_from_ids(&prompt_ids[from..at])?;
+            model.forward(&head, from, kv_store, &req_id_str)?;
+            manifest = save_prompt_opening(
+                model,
+                kv_store,
+                prefix_cache,
+                &model_key_string,
+                &req_id_str,
+                &prompt_ids[..at],
+                keep,
+            );
+            from = at;
+        }
+        let rest = model.tensor_from_ids(&prompt_ids[from..])?;
+        model.forward(&rest, from, kv_store, &req_id_str)
     });
     let logits = match prefill {
         Ok(l) => l,
@@ -4266,21 +4311,19 @@ async fn handle_generate(
 
     // After prefill the KV cache holds exactly `prompt_tokens` positions.
     // Snapshot it into the prefix cache so future prompts sharing this
-    // prefix skip the prefill work. insert_from_kv is a no-op when the
-    // prompt is shorter than the configured floor or the cache is off.
-    let room = snapshot_room(model, kv_store, prefix_cache, prompt_ids.len());
-    let manifest = prefix_cache.insert_from_kv(
-        &model_key_string,
-        &req_id_str,
-        kv_store,
-        &prompt_ids,
-        room,
-        KeepAsked::kept_if(gen.keep_here),
-    );
-    // A snapshot kept beside the live cache is device memory the head-room
-    // guard must see.
-    if prefix_cache_charged() {
-        kv_store.set_external_reserved(prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64);
+    // prefix skip the prefill work — unless the pass saved short of the end
+    // above. insert_from_kv is a no-op when the prompt is shorter than the
+    // configured floor or the cache is off.
+    if save_at == prompt_tokens {
+        manifest = save_prompt_opening(
+            model,
+            kv_store,
+            prefix_cache,
+            &model_key_string,
+            &req_id_str,
+            &prompt_ids,
+            keep,
+        );
     }
     if !manifest.is_empty() {
         let _ = send_worker(
@@ -5234,6 +5277,7 @@ async fn try_register_generate_slot(
         error_message: None,
         matched_stop_sequence: None,
         keep_here: gen.keep_here,
+        save_at: PrefixCache::save_point(prompt_tokens, model.carries_recurrent_state()),
     };
     let prompt_len = slot.prompt_tokens;
     let remaining_after_prefix = prompt_len.saturating_sub(prefix_len);
@@ -5482,6 +5526,24 @@ async fn step_decode_pool(
                     (step.pos + step.chunk_len) as u32,
                     (step.pos + step.chunk_len + step.remaining_after) as u32,
                 ));
+                // The chunk that ends at the slot's save point — the prompt's
+                // end, or short of it for a recurrent model (#228) — saves the
+                // opening the caches now hold.
+                let read_to = step.pos + step.chunk_len;
+                if read_to == slot.save_at {
+                    let manifest = save_prompt_opening(
+                        model,
+                        kv_store,
+                        prefix_cache,
+                        &slot.model_key,
+                        &slot.req_id_str,
+                        &slot.prompt_ids[..read_to],
+                        KeepAsked::kept_if(slot.keep_here),
+                    );
+                    if !manifest.is_empty() {
+                        pending_announces.push((slot.model_id.clone(), manifest));
+                    }
+                }
                 if step.remaining_after == 0 {
                     let (first_token, first_logprob) =
                         match crate::inference::tensor_util::sample_token_with_logprob(
@@ -5495,23 +5557,6 @@ async fn step_decode_pool(
                                 continue;
                             }
                         };
-                    let room = snapshot_room(model, kv_store, prefix_cache, slot.prompt_ids.len());
-                    let manifest = prefix_cache.insert_from_kv(
-                        &slot.model_key,
-                        &slot.req_id_str,
-                        kv_store,
-                        &slot.prompt_ids,
-                        room,
-                        KeepAsked::kept_if(slot.keep_here),
-                    );
-                    if prefix_cache_charged() {
-                        kv_store.set_external_reserved(
-                            prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64,
-                        );
-                    }
-                    if !manifest.is_empty() {
-                        pending_announces.push((slot.model_id.clone(), manifest));
-                    }
                     let is_eos_first = slot.eos.contains(&first_token);
                     slot.promote_to_decoding(first_token, first_logprob);
                     if is_eos_first {

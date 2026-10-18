@@ -109,6 +109,11 @@ pub struct Slot {
     /// `IpcGenerate::keep_here`): its prompt's cache is saved for reuse here
     /// only.
     pub keep_here: bool,
+    /// The prompt position its pass saves the opening at
+    /// (`PrefixCache::save_point`, #228): the prompt's end, or short of it
+    /// for a model with recurrent layers — `take_prefill_chunk` never takes a
+    /// chunk across it, so one chunk ENDS there.
+    pub save_at: usize,
 }
 
 impl Slot {
@@ -197,9 +202,14 @@ impl Slot {
                 if remaining_ids.is_empty() {
                     return None;
                 }
-                let take = chunk_size.min(remaining_ids.len());
-                let chunk: Vec<u32> = remaining_ids.drain(..take).collect();
+                // A chunk stops at the save point, so the caches hold
+                // exactly that opening when it ends (#228).
                 let pos = *next_chunk_index_pos;
+                let to_save = self.save_at.checked_sub(pos).filter(|&n| n > 0);
+                let take = chunk_size
+                    .min(remaining_ids.len())
+                    .min(to_save.unwrap_or(usize::MAX));
+                let chunk: Vec<u32> = remaining_ids.drain(..take).collect();
                 *next_chunk_index_pos += take;
                 let remaining_after = remaining_ids.len();
                 Some((chunk, pos, remaining_after))
@@ -397,6 +407,7 @@ mod tests {
             error_message: None,
             matched_stop_sequence: None,
             keep_here: false,
+            save_at: usize::MAX,
         }
     }
 
@@ -442,6 +453,7 @@ mod tests {
             error_message: None,
             matched_stop_sequence: None,
             keep_here: false,
+            save_at: usize::MAX,
         }
     }
 
@@ -539,6 +551,25 @@ mod tests {
         assert_eq!(chunk, vec![6, 7, 8]);
         assert_eq!(pos, 5);
         assert_eq!(remaining_after, 0);
+    }
+
+    /// #228: a recurrent model's prompt is saved short of its end, and its
+    /// state can only be saved where a forward ends — so one chunk ends at
+    /// the save point, wherever the chunk size falls; a save point already
+    /// read (a cache hit past it) cuts nothing.
+    #[test]
+    fn a_prefill_chunk_ends_at_the_save_point() {
+        let chunks = |save_at: usize, prefilled: usize| {
+            let rest: Vec<u32> = (prefilled as u32 + 1..=20).collect();
+            let mut s = dummy_prefilling_slot(Uuid::new_v4(), (0, 22), rest, 20);
+            s.save_at = save_at;
+            std::iter::from_fn(|| s.take_prefill_chunk(8).map(|(c, pos, _)| (pos, c.len())))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(chunks(10, 0), vec![(0, 8), (8, 2), (10, 8), (18, 2)]);
+        assert_eq!(chunks(4, 0), vec![(0, 4), (4, 8), (12, 8)]);
+        assert_eq!(chunks(20, 0), vec![(0, 8), (8, 8), (16, 4)]);
+        assert_eq!(chunks(4, 6), vec![(6, 8), (14, 6)]);
     }
 
     #[test]

@@ -4038,11 +4038,65 @@ histories, a silently wrong reply.
   back to the target — at most the one step a card keeps (`SsmState::can_rewind_to`, #228 (4)) —
   so a path added later that truncates further fails loudly instead of answering from the wrong
   history.
-- **Prefix cache**: a snapshot is never taken of an entry holding SSM state, so a second turn reads
-  its prompt in full. A prompt pass at position 0 clears the entry (state included), which is also
+- **Prefix cache**: since 2026-10-18 a snapshot carries the recurrent state, saved short of the
+  prompt's end and restored whole or not at all — § "Qwen 3.5's prompt is saved short of its end,
+  and restored whole". A prompt pass at position 0 clears the entry (state included), which is also
   how a failover replay rebuilds it on a stand-in.
 
 Allowing speculation would need a snapshot of the recurrent state per draft (#228).
+
+## Qwen 3.5's prompt is saved short of its end, and restored whole (2026-10-18, FUTURE_WORK #228 (8))
+
+**What it replaced.** `PrefixCache::insert_from_kv` skipped any request holding SSM state
+("snapshot support not yet implemented"), so every turn of a Qwen 3.5 conversation read its whole
+prompt again — the system prompt, the tools and every earlier turn — however long it had grown.
+
+**Why the old mechanism could not simply be extended.** A token-keyed snapshot is taken once, at
+the prompt's full length, and `lookup` NARROWS it to whatever a later prompt shares: an attention
+cache is a list of positions. A recurrent layer's state is a summary of every token it read and
+cannot be cut back. And the next turn does not repeat this one's end: the template opens a reply
+(`<|im_start|>assistant\n<think>\n\n</think>\n\n`) differently from how it writes a past one, so a
+snapshot at the full length would never be repeated whole.
+
+**What other systems do.** llama.cpp's server keeps "context checkpoints" for such models: it stops
+a prompt pass 4 tokens before the end, and again a batch earlier and at the start of the last user
+message (`tools/server/server-context.cpp`, PR #20288, read at `4b1a27f`), and restores the
+newest checkpoint the new prompt reaches. vLLM's hybrid cache (`--mamba-cache-mode align`) keeps
+the state on its block grid during chunked prefill.
+
+**What this node does.**
+- **`PrefixCache::save_point(prompt_tokens, recurrent)`** is the ONE answer to where a pass saves:
+  the end for an attention-only model (unchanged), `RECURRENT_SAVE_BEFORE_END` (16) short of it for
+  one with recurrent layers. ONE point, not llama.cpp's two or three, so 16 rather than 4: a
+  template whose reply opening is longer than its writing of a past reply would otherwise miss the
+  whole prompt, and 12 more tokens a hit is the cheaper side.
+- **Both generate paths stop there.** The sequential `handle_generate` forwards up to the point,
+  saves (`model_worker::save_prompt_opening`, the one insert both paths call) and forwards the
+  rest; the slot path's `Slot::take_prefill_chunk` never takes a chunk across `Slot::save_at`, and
+  Stage 4 saves after the chunk that ends there. For an attention-only model the point is the end,
+  so both paths are the old ones.
+- **A snapshot carries a COPY of each recurrent layer's state** (`KvSnapshot::ssm`), taken only
+  when every state is at exactly the position the attention layers are saved at (`insert_from_kv`
+  refuses otherwise; `snapshot_at` checks again). A card's step writes into the state pair it read
+  two steps earlier (`SsmState`), so a shared buffer would be rewritten under the cache: the
+  snapshot copies (`force_contiguous`), and so does a restore. Under WSL2 the copy goes to host
+  RAM with KV's (`restore_to`).
+- **Whole or not at all**: such a snapshot's `serves_from` is its own length, so `lookup` finds it
+  only for a prompt that repeats all of it, `narrow_snapshot` refuses it, and an entry it would
+  have covered is kept — the shorter one serves an edit of an earlier turn (llama.cpp keeps its
+  checkpoints for the same reason); the byte budget evicts the oldest.
+- **It never leaves this node**: the wire format carries attention layers only, so `Entry::manifest`
+  is empty for it, `serialize_snapshot_with_block_size` refuses it, and a recurrent model never
+  probes a peer (`try_remote_prefix_hydrate`).
+
+**What a change must keep.** One save point for both paths; a state saved only at the attention
+layers' position; a copy on both sides; never narrowed, never sent. A split segment's chain entries
+still skip recurrent state (`insert_chain_from_kv`).
+
+**Tests.** `a_recurrent_snapshot_is_restored_whole_or_not_at_all` (red without the whole-only
+rule — `serves_from` and the narrow refusal both off), `a_recurrent_state_is_saved_only_at_the_attention_layers_position`
+(red with both position checks off), `a_saved_recurrent_state_is_a_copy_on_both_sides` (red with
+either copy off), `a_prefill_chunk_ends_at_the_save_point` (red without the cut).
 
 ## Qwen 3.5's delta rule is ONE op per layer, on the processor and on a card (2026-10-11, FUTURE_WORK #228 (3))
 

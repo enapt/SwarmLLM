@@ -288,6 +288,12 @@ REQUIRED `KeepAsked` argument of `insert_from_kv`, #251 (2b)).
 
 → `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes"
 
+## A recurrent model's prompt is saved short of its end, and restored whole (2026-10-18, #228 (8))
+
+**`PrefixCache::save_point`** is the one answer to where a prompt pass saves: the end, or `RECURRENT_SAVE_BEFORE_END` (16) short of it for a model with recurrent layers (llama.cpp's context checkpoints) — the next turn does not repeat a reply's opening. Both generate paths stop there (`Slot::save_at` cuts the chunk; `handle_generate` forwards in two) and save through **`model_worker::save_prompt_opening`**. The snapshot carries a COPY of each state (`KvSnapshot::ssm`), taken only at the attention layers' position, copied again on restore (a card's step writes into the pair it read). Its `serves_from` is its whole length: never narrowed, never announced, exported or serialized, and a recurrent model never probes a peer.
+
+→ `docs/invariants/inference.md` § "Qwen 3.5's prompt is saved short of its end, and restored whole"
+
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 
 Each names the ONE place a decision is made (`.claude/rules/architecture.md` § "One invariant, N paths"). **Read the topic file before changing one.**

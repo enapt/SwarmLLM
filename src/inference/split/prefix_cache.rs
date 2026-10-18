@@ -37,6 +37,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
+use crate::inference::layers::{SsmSlot, SsmState};
 use crate::inference::split::kv_cache::LayerKv;
 use candle_core::{Device, Tensor};
 
@@ -157,6 +158,15 @@ pub fn verify_token_hash_chain(
     }
 }
 
+/// How far short of a prompt's end a model with recurrent layers saves it
+/// (`PrefixCache::save_point`, #228). llama.cpp's server checkpoints such a
+/// model 4 tokens before the end, and again a batch earlier and at the last
+/// user message (`server-context.cpp`, PR #20288, read at `4b1a27f`); this
+/// node saves ONE point, so a template whose opening of a reply is longer
+/// than its writing of a past one would miss the whole prompt — 12 more
+/// tokens a hit is the cheaper side of that.
+pub const RECURRENT_SAVE_BEFORE_END: usize = 16;
+
 /// Per-layer KV snapshot at a specific token position.
 pub struct KvSnapshot {
     /// Number of tokens covered by this snapshot (== K/V seq dim).
@@ -185,11 +195,28 @@ pub struct KvSnapshot {
     pub held_from: Vec<usize>,
     /// The shortest prefix this snapshot can be restored at: past its
     /// windowed layers' starts by a window (`LayerKv::serves_from`, vLLM's
-    /// sliding-window prefix-hit rule). 0 for any prefix.
+    /// sliding-window prefix-hit rule). 0 for any prefix. For a snapshot
+    /// carrying recurrent state, its whole length: a summary of `token_count`
+    /// tokens cannot be cut back to fewer (#228).
     pub serves_from: usize,
+    /// Each recurrent layer's state after `token_count` tokens (Qwen 3.5's
+    /// DeltaNet: `(conv_state, recurrent_state)`), by layer like `layers` —
+    /// a layer holds a KV pair or a state, never both. A copy, never the live
+    /// buffers, which a card's next steps write into (`SsmState`). Kept in
+    /// host RAM with `restore_to` saying where it goes back, as for KV. Empty
+    /// for a model without recurrent layers and for every snapshot read off
+    /// the wire, which never carries one.
+    pub ssm: Vec<Option<(Tensor, Tensor)>>,
 }
 
 impl KvSnapshot {
+    /// Does this snapshot hold a recurrent state? Such a snapshot is restored
+    /// whole or not at all, and never leaves this node: the wire format
+    /// carries attention layers only.
+    pub fn carries_recurrent_state(&self) -> bool {
+        self.ssm.iter().any(Option::is_some)
+    }
+
     /// Where layer `i`'s copy starts — see [`Self::held_from`].
     pub fn layer_held_from(&self, i: usize) -> usize {
         self.held_from.get(i).copied().unwrap_or(0)
@@ -209,6 +236,7 @@ impl KvSnapshot {
     pub fn bytes(&self) -> usize {
         self.layers
             .iter()
+            .chain(self.ssm.iter())
             .flatten()
             .map(|(k, v)| {
                 k.elem_count() * k.dtype().size_in_bytes()
@@ -353,9 +381,15 @@ impl Entry {
     /// layer as whole would answer from the wrong keys — so it is neither
     /// announced nor exported. Empty too for an entry kept on this computer
     /// (#251 (2b)): a block hash is a commitment to the prompt it was taken
-    /// from, and the snapshot is the prompt's cache.
+    /// from, and the snapshot is the prompt's cache. Empty for a snapshot
+    /// carrying recurrent state (#228): the wire format has no place for it,
+    /// and a peer restoring the attention layers alone would answer from a
+    /// state that starts over.
     fn manifest(&self, block_size: usize) -> Vec<PrefixBlockEntry> {
-        if self.kept_here || !self.snapshot.holds_every_position() {
+        if self.kept_here
+            || !self.snapshot.holds_every_position()
+            || self.snapshot.carries_recurrent_state()
+        {
             return Vec::new();
         }
         compute_block_hashes(&self.tokens, block_size)
@@ -566,6 +600,24 @@ impl PrefixCache {
         Some(snapshot)
     }
 
+    /// Where a prompt pass saves its opening — the ONE answer for both
+    /// generate paths (#228).
+    ///
+    /// The prompt's end for a model whose caches can be cut back: `lookup`
+    /// narrows that snapshot to whatever a later prompt shares. A model with
+    /// recurrent layers (Qwen 3.5) is restored whole or not at all, and the
+    /// next turn's prompt does not repeat this one's end — the template's
+    /// opening of the reply (`<|im_start|>assistant\n<think>\n\n</think>\n\n`)
+    /// is not how it writes a past reply — so its pass stops
+    /// [`RECURRENT_SAVE_BEFORE_END`] tokens short, is saved there, and goes on.
+    pub fn save_point(prompt_tokens: usize, recurrent: bool) -> usize {
+        if recurrent {
+            prompt_tokens.saturating_sub(RECURRENT_SAVE_BEFORE_END)
+        } else {
+            prompt_tokens
+        }
+    }
+
     /// Capture the current KV state of `kv_store` for `request_id` as ONE
     /// snapshot at the full prompt length and insert it into the cache.
     /// Called after prefill (or at end of decode) when the full prompt KV is
@@ -631,15 +683,6 @@ impl PrefixCache {
         };
         let entry = entry_ref;
 
-        // Skip SSM/hybrid models — snapshot support not yet implemented.
-        if entry.ssm_states.iter().any(|s| s.is_some()) {
-            tracing::debug!(
-                model_key,
-                "prefix-cache: SSM state present, skipping snapshot"
-            );
-            return Vec::new();
-        }
-
         // Figure out the seq dim / max_seq_len from the first populated layer.
         let Some(first_kv) = entry.layers.iter().flatten().next() else {
             tracing::debug!(
@@ -692,6 +735,26 @@ impl PrefixCache {
             );
             return Vec::new();
         }
+        // A recurrent layer's state summarises the positions it has read and
+        // cannot be cut back, so it is saved only where the pass stopped to
+        // save it (`PrefixCache::save_point`, #228) — never beside attention
+        // layers narrowed to a shorter opening.
+        if let Some(at) = entry
+            .ssm_states
+            .iter()
+            .flatten()
+            .map(SsmState::positions)
+            .find(|&at| at != available)
+        {
+            tracing::info!(
+                model_key,
+                available,
+                recurrent_state_at = at,
+                "prefix-cache: not snapshotting — a recurrent layer's state is not at the \
+                 position the attention layers would be saved at"
+            );
+            return Vec::new();
+        }
 
         let snap_tokens = &prompt_tokens[..available];
 
@@ -723,7 +786,14 @@ impl PrefixCache {
         }
 
         let copy_started = Instant::now();
-        let snap = match snapshot_at(&entry.layers, available, dim, max_seq_len, room.home) {
+        let snap = match snapshot_at(
+            &entry.layers,
+            &entry.ssm_states,
+            available,
+            dim,
+            max_seq_len,
+            room.home,
+        ) {
             Ok(s) => Arc::new(s),
             Err(e) => {
                 // Most likely an allocation failure on a memory-starved
@@ -952,7 +1022,9 @@ impl PrefixCache {
                 return blocks as u32;
             }
         }
-        let snap = match snapshot_at(&entry.layers, positions, dim, max_seq_len, room.home) {
+        // A split segment's state is refused above: a chain entry carries
+        // attention layers only.
+        let snap = match snapshot_at(&entry.layers, &[], positions, dim, max_seq_len, room.home) {
             Ok(s) => Arc::new(s),
             Err(e) => {
                 tracing::warn!(model_key, positions, error = %e,
@@ -1206,6 +1278,39 @@ impl PrefixCache {
             })?;
             *kv_slot = Some(kv);
         }
+        // Each recurrent layer gets a COPY on its own device: a card's steps
+        // write into the pair they read two steps later (`SsmState`), and the
+        // snapshot must stay as saved for the next hit (#228).
+        for (i, state) in snapshot.ssm.iter().enumerate() {
+            let Some((conv, rec)) = state else {
+                continue;
+            };
+            let card = snapshot.restore_to.get(i).and_then(Option::as_ref);
+            let copy = |t: &Tensor| match card {
+                Some(card) => t.to_device(card),
+                None => t.force_contiguous(),
+            };
+            let slot = copy(conv)
+                .and_then(|conv_state| {
+                    Ok(SsmSlot {
+                        conv_state,
+                        recurrent_state: copy(rec)?,
+                    })
+                })
+                .map_err(|e| {
+                    SwarmError::Internal(format!(
+                        "prefix-cache hydrate layer {i}: recurrent state copy failed: {e}"
+                    ))
+                })?;
+            let Some(held) = entry.ssm_states.get_mut(i) else {
+                return Err(SwarmError::Internal(format!(
+                    "prefix-cache hydrate: the snapshot's recurrent layer {i} is past the \
+                     request's {} layers",
+                    num_layers
+                )));
+            };
+            *held = Some(SsmState::new(slot, snapshot.token_count));
+        }
         entry.last_accessed = Instant::now();
         if snapshot.home() == SnapshotHome::HostRam {
             tracing::info!(
@@ -1387,7 +1492,18 @@ fn narrow_snapshot(snap: &KvSnapshot, target_tokens: usize) -> Result<KvSnapshot
             restore_to: snap.restore_to.clone(),
             held_from: snap.held_from.clone(),
             serves_from: snap.serves_from,
+            ssm: snap.ssm.clone(),
         });
+    }
+    // Unreachable for one today — its `serves_from` is its whole length, so
+    // only the whole-length clone above passes — but a recurrent state cannot
+    // be cut back, and a new caller must not get a snapshot without it.
+    if snap.carries_recurrent_state() {
+        return Err(SwarmError::Internal(format!(
+            "narrow_snapshot: a recurrent state of {} positions cannot be cut back to \
+             {target_tokens} (#228)",
+            snap.token_count
+        )));
     }
     let mut out: Vec<Option<(Tensor, Tensor)>> = Vec::with_capacity(snap.layers.len());
     for (i, kv_opt) in snap.layers.iter().enumerate() {
@@ -1429,6 +1545,7 @@ fn narrow_snapshot(snap: &KvSnapshot, target_tokens: usize) -> Result<KvSnapshot
         restore_to: snap.restore_to.clone(),
         held_from: snap.held_from.clone(),
         serves_from: snap.serves_from,
+        ssm: Vec::new(),
     })
 }
 
@@ -1449,14 +1566,19 @@ fn serves_from(layers: &[Option<LayerKv>]) -> usize {
 /// card, copied to host memory and its card copy dropped before the next
 /// layer's, so the card never holds more than one layer's transient (~4 MB on
 /// a 7B at 4K tokens).
+///
+/// A recurrent layer's state (`ssm_states`, by layer) is copied too, and must
+/// describe exactly `pos` positions; such a snapshot serves only its whole
+/// length (`KvSnapshot::serves_from`, #228).
 fn snapshot_at(
     layers: &[Option<LayerKv>],
+    ssm_states: &[Option<SsmState>],
     pos: usize,
     dim: usize,
     max_seq_len: usize,
     home: SnapshotHome,
 ) -> Result<KvSnapshot, SwarmError> {
-    let serves_from = serves_from(layers);
+    let mut serves_from = serves_from(layers);
     if pos < serves_from {
         return Err(SwarmError::Internal(format!(
             "snapshot_at: position {pos} is before the {serves_from} a sliding-window layer \
@@ -1466,11 +1588,43 @@ fn snapshot_at(
     let mut out: Vec<Option<(Tensor, Tensor)>> = Vec::with_capacity(layers.len());
     let mut restore_to: Vec<Option<Device>> = Vec::with_capacity(layers.len());
     let mut held_from: Vec<usize> = Vec::with_capacity(layers.len());
-    for kv_opt in layers.iter() {
+    let mut ssm: Vec<Option<(Tensor, Tensor)>> = Vec::new();
+    // A COPY kept in `home`: on a card the live pair is written into in place
+    // two steps later (`SsmState`), and `force_contiguous` always copies.
+    let keep = |t: &Tensor| -> candle_core::Result<(Tensor, Option<Device>)> {
+        let copy = t.force_contiguous()?;
+        let card = copy.device().clone();
+        if home == SnapshotHome::HostRam && !card.is_cpu() {
+            Ok((copy.to_device(&Device::Cpu)?, Some(card)))
+        } else {
+            Ok((copy, None))
+        }
+    };
+    for (i, kv_opt) in layers.iter().enumerate() {
         let Some(kv) = kv_opt else {
+            let state = ssm_states.get(i).and_then(Option::as_ref);
+            let Some(state) = state else {
+                out.push(None);
+                restore_to.push(None);
+                held_from.push(0);
+                continue;
+            };
+            if state.positions() != pos {
+                return Err(SwarmError::Internal(format!(
+                    "snapshot_at: layer {i}'s recurrent state is at {} positions, not {pos}",
+                    state.positions()
+                )));
+            }
+            let slot = state.current();
+            let ((conv, card), (rec, _)) = keep(&slot.conv_state)
+                .and_then(|c| Ok((c, keep(&slot.recurrent_state)?)))
+                .map_err(|e| SwarmError::Internal(format!("snapshot recurrent state: {e}")))?;
+            ssm.resize_with(i, || None);
+            ssm.push(Some((conv, rec)));
             out.push(None);
-            restore_to.push(None);
+            restore_to.push(card);
             held_from.push(0);
+            serves_from = pos;
             continue;
         };
         let cur = kv.current_seq_len();
@@ -1526,6 +1680,7 @@ fn snapshot_at(
         restore_to,
         held_from,
         serves_from,
+        ssm,
     })
 }
 
@@ -1607,6 +1762,15 @@ pub fn serialize_snapshot_with_block_size(
         return Err(SwarmError::Internal(
             "serialize_snapshot: a sliding-window layer of this snapshot no longer holds \
              the prompt's opening"
+                .into(),
+        ));
+    }
+    // Nor does it carry a recurrent state (#228): the attention layers alone
+    // would restore beside a state that starts over.
+    if snap.carries_recurrent_state() {
+        return Err(SwarmError::Internal(
+            "serialize_snapshot: this snapshot carries a recurrent state, which the wire \
+             format does not"
                 .into(),
         ));
     }
@@ -1777,6 +1941,7 @@ pub fn deserialize_snapshot_full(
         restore_to: Vec::new(),
         held_from: Vec::new(),
         serves_from: 0,
+        ssm: Vec::new(),
     };
     Ok((snap, header.tokens, header.block_size))
 }
@@ -1877,6 +2042,7 @@ mod tests {
             restore_to: vec![Some(Device::Cpu); s.layers.len()],
             held_from: s.held_from.clone(),
             serves_from: s.serves_from,
+            ssm: Vec::new(),
         });
     }
 
@@ -1972,6 +2138,7 @@ mod tests {
             restore_to,
             held_from: Vec::new(),
             serves_from: 0,
+            ssm: Vec::new(),
         };
         let host = narrow_snapshot(&snap(vec![Some(Device::Cpu)]), 4).unwrap();
         let (hk, hv) = host.layers[0].as_ref().unwrap();
@@ -2028,7 +2195,7 @@ mod tests {
         let mut kv = LayerKv::with_capacity(2, 64, 64);
         kv.append(&k, &v).unwrap();
         let mut layers = vec![Some(kv)];
-        let snap = snapshot_at(&layers, 8, 2, 4096, SnapshotHome::BesideLive).unwrap();
+        let snap = snapshot_at(&layers, &[], 8, 2, 4096, SnapshotHome::BesideLive).unwrap();
 
         // The live cache rewinds and writes other positions where the saved
         // ones were.
@@ -2056,7 +2223,7 @@ mod tests {
         make_fake_kv(&kv_store, "m", "req-a", 2, 10);
         let key = KvCacheStore::cache_key("m", "req-a");
         let entry = kv_store.get_entry(&key).unwrap();
-        let snap = snapshot_at(&entry.layers, 10, 2, 4096, SnapshotHome::HostRam).unwrap();
+        let snap = snapshot_at(&entry.layers, &[], 10, 2, 4096, SnapshotHome::HostRam).unwrap();
         assert!(snap.restore_to.iter().all(Option::is_none));
         assert_eq!(snap.home(), SnapshotHome::BesideLive);
         assert_eq!(snap.bytes_in(SnapshotHome::BesideLive), snap.bytes());
@@ -2594,6 +2761,7 @@ mod tests {
             restore_to: Vec::new(),
             held_from: Vec::new(),
             serves_from: 0,
+            ssm: Vec::new(),
         };
         let tokens: Vec<u32> = vec![7, 8, 9, 10];
         let bytes = serialize_snapshot_with_block_size(&snap, &tokens, None).expect("serialize");
@@ -2710,6 +2878,197 @@ mod tests {
             .is_some());
     }
 
+    /// A Qwen 3.5-shaped cache: layer 0 attends (`positions` positions),
+    /// layer 1 is recurrent, its state after `state_at` tokens.
+    fn make_recurrent_kv(
+        kv_store: &KvCacheStore,
+        request_id: &str,
+        positions: usize,
+        state_at: usize,
+    ) {
+        let device = Device::Cpu;
+        let mut entry = kv_store.get_or_create("m", request_id, 2);
+        let k = Tensor::ones((1usize, 1, positions, 4), DType::F32, &device).unwrap();
+        let mut kv = LayerKv::with_capacity(2, 4096, 4096);
+        kv.append(&k, &k).unwrap();
+        entry.layers[0] = Some(kv);
+        let values = |n: usize, at: f32| (0..n).map(|i| at + i as f32).collect::<Vec<f32>>();
+        let slot = SsmSlot {
+            conv_state: Tensor::from_vec(values(6, 1.0), (1usize, 3, 2), &device).unwrap(),
+            recurrent_state: Tensor::from_vec(values(8, 10.0), (1usize, 2, 2, 2), &device).unwrap(),
+        };
+        entry.ssm_states[1] = Some(SsmState::new(slot, state_at));
+    }
+
+    fn recurrent_values(state: &SsmState) -> (Vec<f32>, Vec<f32>) {
+        let read = |t: &Tensor| t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        (
+            read(&state.current().conv_state),
+            read(&state.current().recurrent_state),
+        )
+    }
+
+    /// FUTURE_WORK #228: a recurrent layer's state summarises every token it
+    /// read and cannot be cut back, so its snapshot serves a prompt that
+    /// repeats ALL of it — never one sharing less, which an attention-only
+    /// snapshot would serve narrowed — and it never leaves this node.
+    #[test]
+    fn a_recurrent_snapshot_is_restored_whole_or_not_at_all() {
+        let pc = PrefixCache::new(true, 8, 4, 4, 8192, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        make_recurrent_kv(&kv_store, "turn1", 12, 12);
+        let tokens: Vec<u32> = (1..=12).collect();
+        let announced = pc.insert_from_kv(
+            "m",
+            "turn1",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
+        assert_eq!(pc.entry_count("m"), 1, "the recurrent cache was not saved");
+        assert!(announced.is_empty(), "a recurrent snapshot was announced");
+        assert!(pc.enumerate_manifest("m").is_empty());
+        for block in compute_block_hashes(&tokens, 4) {
+            assert!(pc.export_snapshot_bytes("m", &block.block_hash).is_none());
+        }
+
+        // The next turn repeats it all: restored whole, state included.
+        let next: Vec<u32> = (1..=20).collect();
+        let snap = pc.lookup("m", &next).expect("the next turn missed");
+        assert_eq!(snap.token_count, 12);
+        assert!(snap.carries_recurrent_state());
+        assert!(
+            serialize_snapshot_with_block_size(&snap, &next, Some(4)).is_err(),
+            "a recurrent snapshot was put on the wire"
+        );
+
+        // A prompt sharing only 10 tokens is a miss — the state cannot be
+        // cut back to them — as is the identical prompt, which would leave
+        // no token to read.
+        let branch: Vec<u32> = (1..=10).chain([99, 98, 97, 96]).collect();
+        assert!(pc.lookup("m", &branch).is_none());
+        assert!(pc.lookup("m", &tokens).is_none());
+
+        // The control: an attention-only cache serves that branch narrowed.
+        let plain = PrefixCache::new(true, 8, 4, 4, 8192, 0);
+        make_fake_kv(&kv_store, "m", "plain", 2, 12);
+        plain.insert_from_kv(
+            "m",
+            "plain",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
+        assert_eq!(plain.lookup("m", &branch).map(|s| s.token_count), Some(10));
+    }
+
+    /// The state is saved only where the attention layers are: one taken a
+    /// position past them, or attention narrowed to a shorter opening beside
+    /// a whole state, would restore two different histories.
+    #[test]
+    fn a_recurrent_state_is_saved_only_at_the_attention_layers_position() {
+        let pc = PrefixCache::new(true, 8, 4, 4, 8192, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let tokens: Vec<u32> = (1..=12).collect();
+        make_recurrent_kv(&kv_store, "ahead", 12, 13);
+        pc.insert_from_kv(
+            "m",
+            "ahead",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
+        make_recurrent_kv(&kv_store, "shorter", 12, 12);
+        pc.insert_from_kv(
+            "m",
+            "shorter",
+            &kv_store,
+            &tokens[..10],
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
+        assert_eq!(pc.entry_count("m"), 0);
+        // The control: the same cache saved at its own length is kept.
+        pc.insert_from_kv(
+            "m",
+            "shorter",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
+        assert_eq!(pc.entry_count("m"), 1);
+    }
+
+    /// A card's step writes into the state pair it read two steps before
+    /// (`SsmState`), so the snapshot copies the live state and a restore
+    /// copies the snapshot: neither request can rewrite what the next hit
+    /// restores. The snapshot is charged for the state too.
+    #[test]
+    fn a_saved_recurrent_state_is_a_copy_on_both_sides() {
+        let pc = PrefixCache::new(true, 8, 4, 4, 8192, 0);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let tokens: Vec<u32> = (1..=12).collect();
+        make_recurrent_kv(&kv_store, "turn1", 12, 12);
+        pc.insert_from_kv(
+            "m",
+            "turn1",
+            &kv_store,
+            &tokens,
+            ANYWHERE,
+            KeepAsked::Unasked,
+        );
+        let key = KvCacheStore::cache_key("m", "turn1");
+        let saved = recurrent_values(
+            kv_store.get_entry(&key).unwrap().ssm_states[1]
+                .as_ref()
+                .unwrap(),
+        );
+        let overwrite = |state: &SsmState| {
+            let s = &state.current().recurrent_state;
+            s.slice_set(&s.zeros_like().unwrap(), 0, 0).unwrap();
+        };
+        overwrite(
+            kv_store.get_entry(&key).unwrap().ssm_states[1]
+                .as_ref()
+                .unwrap(),
+        );
+
+        let next: Vec<u32> = (1..=20).collect();
+        let snap = pc.lookup("m", &next).unwrap();
+        assert_eq!(snap.bytes(), 12 * 4 * 4 * 2 + (6 + 8) * 4);
+        let restored = pc
+            .hydrate_request_from_snapshot(&kv_store, "m", "turn2", &snap, &[])
+            .unwrap();
+        assert_eq!(restored, 12);
+        let key2 = KvCacheStore::cache_key("m", "turn2");
+        {
+            let entry = kv_store.get_entry(&key2).unwrap();
+            let state = entry.ssm_states[1].as_ref().unwrap();
+            assert_eq!(state.positions(), 12);
+            assert_eq!(
+                recurrent_values(state),
+                saved,
+                "the saved state followed the live one"
+            );
+            overwrite(state);
+        }
+        let again = pc.lookup("m", &next).unwrap();
+        pc.hydrate_request_from_snapshot(&kv_store, "m", "turn3", &again, &[])
+            .unwrap();
+        let entry = kv_store
+            .get_entry(&KvCacheStore::cache_key("m", "turn3"))
+            .unwrap();
+        assert_eq!(
+            recurrent_values(entry.ssm_states[1].as_ref().unwrap()),
+            saved,
+            "a restored request rewrote the snapshot"
+        );
+    }
+
     #[test]
     fn export_snapshot_bytes_roundtrips_to_hashed_block() {
         // block=4 so a 12-token prompt inserts hashes at 4, 8, 12.
@@ -2758,6 +3117,7 @@ mod tests {
             restore_to: Vec::new(),
             held_from: Vec::new(),
             serves_from: 0,
+            ssm: Vec::new(),
         };
         assert!(snapshot_is_finite(&snap));
     }
@@ -2777,6 +3137,7 @@ mod tests {
             restore_to: Vec::new(),
             held_from: Vec::new(),
             serves_from: 0,
+            ssm: Vec::new(),
         };
         assert!(!snapshot_is_finite(&snap));
     }
@@ -2800,6 +3161,7 @@ mod tests {
             restore_to: Vec::new(),
             held_from: Vec::new(),
             serves_from: 0,
+            ssm: Vec::new(),
         };
         assert!(!snapshot_is_finite(&snap));
     }
@@ -2814,6 +3176,7 @@ mod tests {
             restore_to: Vec::new(),
             held_from: Vec::new(),
             serves_from: 0,
+            ssm: Vec::new(),
         };
         assert!(snapshot_is_finite(&snap));
     }
@@ -2853,6 +3216,7 @@ mod tests {
             restore_to: Vec::new(),
             held_from: Vec::new(),
             serves_from: 0,
+            ssm: Vec::new(),
         };
         let tokens: Vec<u32> = vec![11, 12];
         let bytes = serialize_snapshot_with_block_size(&snap, &tokens, None).unwrap();
