@@ -771,6 +771,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
         reply_tokens_at_most: None,
+        reply_tokens_expected: None,
         fresh_run_layers: None,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
@@ -1042,6 +1043,7 @@ fn greedy_assign_multi_range_candidate() {
             split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
             reply_tokens_at_most: None,
+            reply_tokens_expected: None,
             fresh_run_layers: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
@@ -1080,6 +1082,7 @@ fn greedy_assign_multi_range_candidate() {
             split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
             reply_tokens_at_most: None,
+            reply_tokens_expected: None,
             fresh_run_layers: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
@@ -2111,6 +2114,7 @@ fn cost_cand(
         split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
         reply_tokens_at_most: None,
+        reply_tokens_expected: None,
         fresh_run_layers: None,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
@@ -3513,6 +3517,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
         reply_tokens_at_most: None,
+        reply_tokens_expected: None,
         fresh_run_layers: None,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
@@ -3614,6 +3619,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
         reply_tokens_at_most: None,
+        reply_tokens_expected: None,
         fresh_run_layers: None,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
@@ -3715,6 +3721,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
         reply_tokens_at_most: None,
+        reply_tokens_expected: None,
         fresh_run_layers: None,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
@@ -6452,6 +6459,18 @@ fn a_reply_allowed_sixteen_tokens_is_priced_for_sixteen_passes() {
         Some(16),
         "a reply allowed 16 tokens cannot take 64 passes"
     );
+
+    // FUTURE_WORK #3 (b): once the model's replies have run 200 tokens, a
+    // reply is priced for 200 — still capped by its own budget.
+    for _ in 0..crate::daemon::state::reply_lengths::REPLIES_BEFORE_TRUSTED {
+        state.metrics.reply_lengths.record("split-14b", 200);
+    }
+    assert_eq!(
+        passes_recorded(plan().with_reply_of_at_most(2_048)),
+        Some(200),
+        "a model whose replies run 200 tokens is priced for 64"
+    );
+    assert_eq!(passes_recorded(plan().with_reply_of_at_most(16)), Some(16));
 }
 
 /// `DELEGATE_MIN_TRUST` decides who may be handed a user's prompt in cleartext;

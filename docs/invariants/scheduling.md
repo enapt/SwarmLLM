@@ -1636,9 +1636,13 @@ model alone.
 
 ## A reply is priced for no more passes than it may take
 
-**Rule (2026-10-18, FUTURE_WORK #3).** `NodeCandidate::forward_passes` is the
-number of passes every per-token cost is charged for: `ASSUMED_FORWARD_PASSES`
-(64), or the request's `max_tokens` where that is smaller, and at least 1. The
+**Rule (2026-10-18, FUTURE_WORK #3, #3 (b)).** `NodeCandidate::forward_passes` is the
+number of passes every per-token cost is charged for: the mean length of this
+model's recent replies (`daemon::state::reply_lengths::ReplyLengths::expected`,
+the last 32 that finished, once there are 4), else `ASSUMED_FORWARD_PASSES`
+(64); then capped by the request's `max_tokens` where that is smaller, and at
+least 1. `publish_request_trace` records each completed reply's length (the one
+writer); `gather_candidates` reads the expectation (the one reader). The
 router sets the budget once, where its two prompt plans meet
 (`distributed_exec`: `PromptPlan::with_reply_of_at_most`); `gather_candidates`
 copies it onto every candidate; `vertex_cost` (compute, a per-token hop),
@@ -1663,8 +1667,16 @@ splits through AU, IT and BE peers, `examples/split_cost_terms.py --rows`):
 - **A reply the request does not bound is still mis-priced by its length.** Two
   whole-model hand-offs measured per token (AU, BE) ran 2.49x and 2.62x their
   price at 160 tokens, 1.18x at 64 — the error is tokens ÷ 64 where the
-  per-token figure is right. That half is NOT fixed: the bound only lowers, and
-  raising needs an estimate of a reply's length the request does not state.
+  per-token figure is right. **Fixed the same day (#3 (b))**: the expectation is
+  the model's own recent mean, so a model answering at 160 tokens is priced for
+  160 passes. A request a caller bounds below that is still capped by its bound.
+  Why the MEAN: a pass costs the same wherever it falls, so the expected cost of
+  a reply is the cost of its expected length; a median would price a model with
+  a few very long replies as if they never happened. It is the baseline the
+  length predictors in the literature are measured against (S³, Jin et al.
+  2023; "Response Length Perception", Zheng et al. 2023). What it leaves: the
+  spread of ONE model's replies around its mean — a request has no length the
+  router can read before it is written.
 - The field (2026-10-06): `max_tokens=24` replies priced 16-19x their time.
 
 **What a change must keep.**
@@ -1672,7 +1684,10 @@ splits through AU, IT and BE peers, `examples/split_cost_terms.py --rows`):
 - **Never raise the assumption from `max_tokens`.** It is a loose ceiling — 2048
   when the caller names none (`DEFAULT_REPLY_BUDGET`) — and charging a split
   2048 crossings would price every boundary out (the reason the constant was
-  fixed in the first place).
+  fixed in the first place). Only a MEASURED length raises it.
+- **Only a finished reply is a sample.** `record` takes `Outcome::Ok` replies
+  with at least one token; a failure stops early and would drag the mean down
+  for the routes that failed most.
 - **One reading.** A path that multiplies by the bare constant prices the same
   request two ways, and the gates that compare two prices (`RoutePrices`,
   `costs_more_than_staying_here`) then compare different units.
@@ -1684,7 +1699,11 @@ Tests: `per_token_costs_are_charged_for_no_more_passes_than_the_reply_may_take`,
 `a_short_reply_is_not_sent_to_wait_for_a_faster_peer_to_load` (a 16-token reply
 stays on a slow local copy rather than wait for a 4x faster peer's load), and
 `a_reply_allowed_sixteen_tokens_is_priced_for_sixteen_passes` (the budget
-reaches the recorded prediction) — all three red with the bound off.
+reaches the recorded prediction, and once the model has 4 replies of 200
+tokens a request allowed 2,048 is priced for 200, one allowed 16 for 16) — all
+three red with the bound off, the last red with the learned length off.
+`reply_lengths`: `the_expectation_is_the_mean_of_recent_replies_once_there_are_enough`,
+`only_the_most_recent_replies_count`.
 
 ## A reply whose machine failed mid-stream is continued
 

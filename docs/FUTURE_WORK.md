@@ -73,8 +73,9 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    instead of 20 min (unreleased). Next: re-read in the field after the release.
 8. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
     ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
-    (16-token replies 0.49 → 0.97 of their price, unreleased); next, a chain its head leads is
-    priced as if driven from here (0.10-0.24). Never tune the constant.
+    (16-token replies 0.49 → 0.97 of their price) and a long one is priced at its model's mean
+    reply length (160-token replies were 2.5x their price), both unreleased; next, a chain its
+    head leads is priced as if driven from here (0.10-0.24). Never tune the constant.
 9. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
 10. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
@@ -640,9 +641,12 @@ for the worker's life), so measure how often a refusal still happens before buil
 passes the per-token terms are charged for (`NodeCandidate::forward_passes`; 16-token replies
 0.49 → 0.97 of their price). Left, largest first: (a) a chain holding no part of this node is
 LED by its head (`remote_generate::delegation_eligible`) but priced as if this node drove every
-token through every segment — 0.10-0.24 of its price warm; (b) a reply longer than 64 tokens is
-under-priced by its length ÷ 64 (2.49x / 2.62x at 160 tokens on two peers' hand-offs), a length
-no request states; (c) a peer's prompt cache is unpriced (a repeated 505-token prompt priced
+token through every segment — 0.10-0.24 of its price warm; (b) ~~a reply longer than 64 tokens is
+under-priced by its length ÷ 64~~ (2.49x / 2.62x at 160 tokens on two peers' hand-offs) —
+**fixed 2026-10-18, unreleased**: the passes are this model's mean recent reply length
+(`daemon::state::reply_lengths`, the last 32 finished replies once there are 4), still capped by
+`max_tokens`; left is one reply's spread around its model's mean, which nothing before the reply
+can read; (c) a peer's prompt cache is unpriced (a repeated 505-token prompt priced
 20 s, read in ~0: 0.25x); (d) the drafter's gain (0.39x, 10-15). (a) is next, and needs the
 hand-off's request-time conditions as ONE predicate the search can ask before the plan exists.
 
@@ -2614,7 +2618,14 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-18, not yet released** (#303; #251 (3) — #251 closed; #228 (8))
+**Closed 2026-10-18, not yet released** (#303; #251 (3) — #251 closed; #228 (8); #3 (b))
+- #3 (b) — **A long reply is no longer priced as if it were 64 tokens.** Routing charged every
+  reply's per-token costs for 64 passes unless the request allowed fewer, so a model that answers
+  at length had its split and hand-off routes under-priced by length ÷ 64 (2.49x and 2.62x at 160
+  tokens, two peers, 2026-10-18). The passes are now the mean of this model's last 32 finished
+  replies (once there are 4), still capped by the request's `max_tokens`. Test:
+  `a_reply_allowed_sixteen_tokens_is_priced_for_sixteen_passes` (extended);
+  `docs/invariants/scheduling.md` § "A reply is priced for no more passes than it may take".
 - #228 (8) — **Qwen 3.5 conversations no longer re-read their whole prompt every turn.** The
   prompt cache left out every model with recurrent layers; it now saves Qwen 3.5's state 16 tokens
   before the prompt ends and restores it whole. A second turn of a 2,416-token conversation on the

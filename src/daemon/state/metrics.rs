@@ -35,6 +35,12 @@ pub struct MetricsProviders {
     /// Serf's equivalent is a median.
     pub network_coord_samples:
         DashMap<crate::types::NodeId, swarmllm_types::netcoord::LatencyFilter>,
+    /// How long each model's recent replies ran — the length the planner
+    /// prices a reply's per-token costs for when the request states no
+    /// shorter bound (FUTURE_WORK #3 (b)). Written ONLY by
+    /// `SharedState::publish_request_trace`, the one place every finished
+    /// request passes; read ONLY by the scheduler's candidate builder.
+    pub reply_lengths: super::reply_lengths::ReplyLengths,
     pub inference_requests_total: AtomicU64,
     /// Mirror of node_stats.requests_served as an AtomicU64 — written from
     /// multiple async contexts. The RwLock-guarded field on NodeStats was

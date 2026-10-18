@@ -352,6 +352,15 @@ impl super::SharedState {
         let snap = trace.snapshot();
         tracing::info!("DIAG: request complete {}", snap.log_line());
 
+        // How long this model's replies run, for the price of the next one
+        // (FUTURE_WORK #3 (b)). Here because every finished request passes
+        // here, whatever route served it.
+        if matches!(snap.outcome, crate::inference::trace::Outcome::Ok) {
+            self.metrics
+                .reply_lengths
+                .record(&snap.model, snap.completion_tokens);
+        }
+
         // Prometheus. Fed from the same snapshot as the log line so a metric
         // can never disagree with what the logs say happened.
         *self

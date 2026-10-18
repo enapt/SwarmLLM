@@ -114,12 +114,13 @@ pub(super) const UNKNOWN_COMPUTE_MS: f32 = 25.0;
 /// that a boundary is not free, and it scales with the same units as the rest of
 /// the model.
 ///
-/// **A ceiling, lowered by the request's own budget** — read through
-/// `NodeCandidate::forward_passes`, never directly: a reply allowed 16 tokens
-/// cannot take 64 passes (FUTURE_WORK #3, 2026-10-18). The same data says a
-/// LONGER reply is under-priced by its length ÷ 64 (160 tokens: 2.49x, 2.62x
-/// on two peers' whole-model hand-offs) — a length the request does not state,
-/// so it is not raised here.
+/// **The PRIOR, until this model's replies have been measured** — read
+/// through `NodeCandidate::forward_passes`, never directly. A reply allowed
+/// 16 tokens cannot take 64 passes (its `max_tokens` caps them, FUTURE_WORK
+/// #3, 2026-10-18), and once a model has written a few replies their mean
+/// length replaces this figure (`ReplyLengths::expected`, #3 (b)): the same
+/// data priced a 160-token reply 2.49x and 2.62x under its time on two
+/// peers' whole-model hand-offs — exactly its length ÷ 64.
 pub(super) const ASSUMED_FORWARD_PASSES: f32 = 64.0;
 
 /// How much faster a machine reads a prompt than it writes a reply, before we
@@ -1544,6 +1545,7 @@ mod tests {
             split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
             reply_tokens_at_most: None,
+            reply_tokens_expected: None,
             fresh_run_layers: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
@@ -4098,6 +4100,7 @@ mod transfer_cost_tests {
             split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
             reply_tokens_at_most: None,
+            reply_tokens_expected: None,
             fresh_run_layers: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,

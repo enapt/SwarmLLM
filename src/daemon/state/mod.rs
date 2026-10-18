@@ -33,6 +33,7 @@ mod perf_history;
 mod relay;
 mod removed_shards;
 mod repair;
+pub(crate) mod reply_lengths;
 pub(crate) mod retained_activations;
 pub(crate) mod retained_replies;
 mod tp_allreduce;
@@ -1405,6 +1406,7 @@ impl SharedState {
             metrics: MetricsProviders {
                 network_coord: std::sync::RwLock::new(swarmllm_types::netcoord::NetworkCoord::new()),
                 network_coord_samples: dashmap::DashMap::new(),
+                reply_lengths: reply_lengths::ReplyLengths::default(),
                 node_stats: RwLock::new(NodeStats::default()),
                 inference_requests_total: AtomicU64::new(0),
                 requests_served_atomic: AtomicU64::new(0),

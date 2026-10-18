@@ -249,6 +249,10 @@ struct NodeCandidate {
     /// (`PromptPlan::reply_tokens_at_most`), the same on every candidate of a
     /// plan. Read only through [`Self::forward_passes`].
     reply_tokens_at_most: Option<u32>,
+    /// How long this model's recent replies ran (`ReplyLengths::expected`),
+    /// the same on every candidate of a plan; `None` until enough have been
+    /// written. Read only through [`Self::forward_passes`].
+    reply_tokens_expected: Option<u32>,
     /// For THIS node only: how wide one run of layers a fresh worker would take,
     /// card and processor together, for a model the loader would split across
     /// them (`ModelProcessPool::fresh_run_layers_for_planning`). `None` for every
@@ -421,10 +425,18 @@ impl NodeCandidate {
     /// (0.25-1.41). A field report (2026-10-06) had `max_tokens=24` replies
     /// priced 16-19x their time. At least one pass, because the prompt pass
     /// itself crosses every hop.
+    ///
+    /// **And the expectation is how long this model's replies have run**, where
+    /// enough have (`ReplyLengths::expected`, FUTURE_WORK #3 (b)) — in both
+    /// directions: the same data priced 160-token replies at 2.49x and 2.62x
+    /// under their time on two peers' hand-offs, by exactly their length ÷ 64.
+    /// The request's own budget still caps it.
     fn forward_passes(&self) -> f32 {
-        let assumed = parallax::ASSUMED_FORWARD_PASSES;
+        let expected = self
+            .reply_tokens_expected
+            .map_or(parallax::ASSUMED_FORWARD_PASSES, |n| n.max(1) as f32);
         self.reply_tokens_at_most
-            .map_or(assumed, |most| (most.max(1) as f32).min(assumed))
+            .map_or(expected, |most| (most.max(1) as f32).min(expected))
     }
 
     /// Leading tokens of this request's prompt that running `range` here would
@@ -3953,6 +3965,12 @@ impl PipelineScheduler {
         // (#251), else private mode's set with any cross-pool extras the owner
         // opted into (R134.7).
         let allowed_set = crate::pool::scope::request_scope(&self.shared_state, &manifest.id, keep);
+        // Read once for the plan, so every candidate is priced for one length.
+        let reply_tokens_expected = self
+            .shared_state
+            .metrics
+            .reply_lengths
+            .expected(&manifest.id.0);
 
         // Average bytes a layer occupies, for a load's price below. The
         // manifest is the only size the coordinator has; it is the on-disk
@@ -4687,6 +4705,7 @@ impl PipelineScheduler {
                 split_openings,
                 cold_load_ms_per_layer: cold_load_per_layer,
                 reply_tokens_at_most: prompt.reply_tokens_at_most,
+                reply_tokens_expected,
                 fresh_run_layers,
                 prompt_memory_refused: is_local
                     && self
