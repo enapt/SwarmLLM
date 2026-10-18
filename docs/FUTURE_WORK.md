@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #306**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #307**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2028,6 +2028,17 @@ a field refusal of a peer's segment, and build the up-front ask (2) before any g
 planner also charges a peer the prompt's positions while the peer admits
 `kv_cache_reservation(prompt + reply reserve)`; fold that in with (2).
 
+**Field refusal, 2026-10-18 12:17Z (v0.3.243, the reopen condition above).** The live node asked
+`qwen3-30b-a3b-instruct-2507-q4-k-m` (19-token prompt, 64 max) with no part held here. No route fit
+what the peers advertised, so the planner took the `PeersAtCeiling` rung ("a peer may refuse") and
+handed the chain to `aa3d1e66` (AU, RTX 3060, .243), which refused as delegate (layers 35..48 "need
+about 4901 MB more than this node has left") and then, driven from here, refused segment 0..3 for
+the PROMPT ("0 MB available for conversations … short by 6 MB"; no standby, logged at ERROR). The
+re-plan served it on `99aafc41` + `7c10ea04` (IT, BE): 200, ttft 134.7 s (most of it their cold
+load), predicted 93 s. The same request warm, 4 min later: AU + BE, ttft 24.8 s, 200. Shape: the
+relaxed rung's gamble lost twice on one peer, not a stale room figure under the strict bound — the
+up-front ask (2) would have turned both refusals into one round trip each.
+
 #### #187 — Head-room admission prices load and runtime on two different bases
 `P3` · memory · **PARTIAL** — 2026-08-08 · history: archive § "Head-room admission: two things the live test found"
 
@@ -2635,6 +2646,21 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-18, not yet released** (#306)
+- #306 — **A streamed reply this computer served alone now names this computer.** Found on the
+  live node 20 minutes after v0.3.243 shipped #251 (3): a streamed OpenAI, Anthropic or Responses
+  reply from a model held here said `"route": "local", "segments": 0, "nodes": []`, while the same
+  request unstreamed named this node. Both streamed surfaces answer such a request on the local fast path
+  (`spawn_split_stream`), which bypasses the router and never recorded its route on the trace the
+  finish chunk reads; only the unstreamed fast path did. #251 (3)'s tests drive a fake router and
+  its rig a two-node split, so neither reached this path. The route is now recorded inside the one
+  function both surfaces call, before generating (`mark_served_here`, shared with the unstreamed
+  path). Test: `a_reply_streamed_by_a_model_held_here_names_this_computer` (red with the call
+  removed: `segments: 0`). Rig: `split_rig.sh route` with `SHARDS_A` naming every shard now keeps
+  the model on A (a processor node with a peer up is planned by the router, so a plain whole-A run
+  never reached the fast path and PASSED on .243) and expects A alone: v0.3.243 FAILS the three
+  streamed forms (`segments: 0`), the fix PASSES all 8; the split topology still PASSES 8/8.
 
 **Closed 2026-10-18, released in v0.3.243** (#303; #251 (3) — #251 closed; #228 (8); #3 (b); #3 (a))
 - #3 (a) — **A chain run entirely on other people's computers is priced by the distance between

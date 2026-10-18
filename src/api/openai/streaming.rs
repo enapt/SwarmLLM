@@ -221,6 +221,32 @@ impl Drop for TraceGuard {
     }
 }
 
+/// Records that THIS computer serves the request alone, over the layers it
+/// holds: the route of both local fast paths, which bypass the router and so
+/// must say it themselves.
+///
+/// Called before generating, because a streamed reply reads its route when it
+/// FINISHES (#251 (3)) and the reader may take the last token before anything
+/// after the generate call runs. v0.3.243 shipped with only the unstreamed path
+/// recording it: every streamed reply this node served alone said
+/// `"segments": 0, "nodes": []` on OpenAI's finish chunk, Anthropic's
+/// `message_delta` and Responses' `response.completed` (found live after the
+/// release; FUTURE_WORK #306).
+///
+/// No scheduling happens on these paths, so 0 ms of it is the measurement, not
+/// a placeholder.
+fn mark_served_here(
+    state: &crate::daemon::SharedState,
+    trace: &crate::inference::trace::RequestTrace,
+    layer_range: (u32, u32),
+) {
+    trace.mark_assembled(
+        crate::inference::trace::Route::Local,
+        crate::inference::trace::local_segment(state.identity.node_id(), layer_range),
+        0,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_split_stream(
     state: &AppState,
@@ -309,17 +335,17 @@ pub fn spawn_split_stream(
     // so the later one silently displaced the earlier and only one of them
     // could ever be published — leaving progress reports landing on an object
     // nothing would go on to record.
-    let trace_guard = TraceGuard::register(
-        &state.shared_state,
-        rid,
-        trace.clone().unwrap_or_else(|| {
-            std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
-                rid,
-                model_id.0.clone(),
-                "chat",
-            ))
-        }),
-    );
+    let served = trace.unwrap_or_else(|| {
+        std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+            rid,
+            model_id.0.clone(),
+            "chat",
+        ))
+    });
+    // Here, inside the one function both streamed surfaces call, so neither
+    // caller can forget it.
+    mark_served_here(&state.shared_state, &served, layer_range);
+    let trace_guard = TraceGuard::register(&state.shared_state, rid, served);
     tokio::spawn(async move {
         let _trace_guard = trace_guard;
         let generate = pool.generate(
@@ -501,16 +527,7 @@ pub async fn run_split_generate(
     // is no help at all to somebody asking why a request is taking minutes.
     let _trace_guard = TraceGuard::register(&state.shared_state, rid, trace.clone());
     trace.mark_dequeued();
-    trace.mark_assembled(
-        crate::inference::trace::Route::Local,
-        crate::inference::trace::local_segment(
-            state.shared_state.identity.node_id(),
-            meta.layer_range,
-        ),
-        // No scheduling happens on the local-complete fast path — it bypasses
-        // the scheduler entirely, so reporting 0 is accurate, not a placeholder.
-        0,
-    );
+    mark_served_here(&state.shared_state, &trace, meta.layer_range);
 
     let mut output = state
         .shared_state
@@ -1739,6 +1756,70 @@ mod route_in_body_tests {
             1,
             "only the finish chunk carries it: {chunks:?}"
         );
+    }
+
+    /// **A reply streamed by a model this computer holds whole names this
+    /// computer** — the local fast path, which bypasses the router and so
+    /// records its own route. v0.3.243 left it unrecorded: the finish chunk
+    /// (and Anthropic's `message_delta`, same function) said `"segments": 0,
+    /// "nodes": []`. The test above drives a FAKE ROUTER, so it never reached
+    /// this path.
+    ///
+    /// Read straight after `spawn_split_stream` returns: on this single-thread
+    /// runtime its generation task has not started (the test never yields), so
+    /// the route cannot have come from anything after the generate call, and
+    /// no worker is spawned.
+    #[tokio::test]
+    async fn a_reply_streamed_by_a_model_held_here_names_this_computer() {
+        let app = test_app();
+        let model = ModelId("m".into());
+        app.state.shared_state.split_models.insert(
+            (model.clone(), 0, 22),
+            crate::inference::split::SplitModelEntry {
+                last_used: std::sync::atomic::AtomicU64::new(0),
+                estimated_vram_mb: 0,
+                is_complete: true,
+                eos_tokens: vec![],
+                eos_token_str: String::new(),
+                bos_token: String::new(),
+                cached_chat_template: None,
+                vocab: None,
+                layer_start: 0,
+                layer_end: 22,
+            },
+        );
+        let rid = crate::api::request_uuid("swarm-local");
+        let trace =
+            std::sync::Arc::new(crate::inference::trace::RequestTrace::new(rid, "m", "chat"));
+        let messages: Vec<ChatMessage> =
+            vec![
+                serde_json::from_value(serde_json::json!({"role": "user", "content": "hi"}))
+                    .unwrap(),
+            ];
+        let spawned = spawn_split_stream(
+            &app.state,
+            &model,
+            &messages,
+            SamplingParams::default(),
+            "swarm-local",
+            Some(trace.clone()),
+            None,
+            crate::types::KeepAsked::Unasked,
+        );
+        assert!(spawned.is_some(), "the model is held whole here");
+        let route = trace.snapshot().route_summary();
+        let me = trace_short_id(app.state.shared_state.identity.node_id());
+        assert_eq!(route.route, "local");
+        assert_eq!(route.segments, 1, "{route:?}");
+        assert_eq!(route.peers, 0, "{route:?}");
+        assert_eq!(route.nodes, vec![me], "{route:?}");
+    }
+
+    /// The short id a route names a computer by.
+    fn trace_short_id(node: &crate::types::NodeId) -> String {
+        crate::inference::trace::local_segment(node, (0, 1))[0]
+            .short_node()
+            .to_string()
     }
 
     /// **A streamed Responses reply names the route of the chat reply under

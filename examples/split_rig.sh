@@ -91,6 +91,11 @@
 #          `message_delta`, `response.completed`, MCP's
 #          `_meta["com.swarmllm/route"]` and compare's per-result `route` —
 #          and none of it in the text the model reads. Default model tinyllama.
+#          With SHARDS_A naming EVERY shard, A holds the model whole, it is
+#          kept on A (so the local fast path answers — on the processor with a
+#          peer up, the router would), and PASS = every reply names A alone
+#          (one segment, no peer). v0.3.243's streamed forms said
+#          `"segments": 0` there, which no split can see (#306).
 #   context  the FAILOVER topology, but B serves a SHORTER conversation than the
 #          long prompt (CEIL_B, default 512, as B's own max_seq_len_override) —
 #          the field report of 2026-09-25, where an 8192-token peer refused an
@@ -326,7 +331,11 @@ if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ 
   [ "$MODE" = repeat ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = disconnect ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = keep ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
-  [ "$MODE" = route ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
+  if [ "$MODE" = route ]; then
+    WHOLE_A=1
+    for s in $SHARDS; do case ",$SHARDS_A," in *",$s,"*) ;; *) WHOLE_A=0 ;; esac; done
+    GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
+  fi
 elif [ "$MODE" = peerkv ] || [ "$MODE" = refusepiece ]; then
   [ "$N" -ge 3 ] || { echo "$MODE needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
   PREV=$(echo "$SHARDS" | tail -2 | head -1)
@@ -811,7 +820,19 @@ fi
 
 if [ "$MODE" = route ]; then
   # One question through A in every form a reply can take. B holds every part
-  # but shard 0, so each answer ran on two computers and must say so.
+  # but shard 0, so each answer ran on two computers and must say so — unless
+  # SHARDS_A names every shard: then A holds the model whole and must name
+  # itself alone.
+  echo "route: A holds $([ $WHOLE_A = 1 ] && echo 'the whole model — expecting ONE computer' || echo "shards $SHARDS_A — expecting TWO computers")"
+  if [ $WHOLE_A = 1 ]; then
+    # A model held whole takes the local fast path only where it runs on the graphics card or
+    # nobody else may be asked (`local_fast_path_for`, gotcha #443); on the processor with B up
+    # the router plans it, the fast path is never reached, and v0.3.243 PASSED this way while
+    # its fast path named no computer (#306). Keeping the model on A leaves nobody to ask.
+    curl -s -m 30 -X PUT -H "Authorization: Bearer $KA" -H 'Content-Type: application/json' \
+         -d '{"enabled": true}' "localhost:8900/api/admin/models/$MODEL/keep-on-this-computer" > /dev/null
+    echo "route: $MODEL kept on A, so the local fast path answers"
+  fi
   post() { # path body label  (writes $OUT/<label>.{hdr,body})
     curl -s -m 300 -D "$OUT/$3.hdr" -H "Authorization: Bearer $KA" -H 'Content-Type: application/json' \
          -H 'anthropic-version: 2023-06-01' -X POST "localhost:8900$1" -d "$2" -o "$OUT/$3.body"
@@ -842,9 +863,12 @@ PY
   post /v1/responses "$(body resp_stream)" resp_stream
   post /mcp "$(body mcp_chat)" mcp_chat
   post /mcp "$(body mcp_compare)" mcp_compare
-  python3 - "$OUT" <<'PY'
+  python3 - "$OUT" "$WHOLE_A" <<'PY'
 import json, sys
-out = sys.argv[1]
+out, whole = sys.argv[1], sys.argv[2] == "1"
+# A alone when it holds the model whole, else A and one peer.
+want_seg, want_peers = (1, 0) if whole else (2, 1)
+n = "one computer" if whole else "two computers"
 def headers(l):
     lines = open(f"{out}/{l}.hdr").read().splitlines()
     return (lines[0].strip() if lines else "no response"), {
@@ -865,7 +889,8 @@ def text_of(l):  # MCP: the tool result's text, and the result itself
     return (r.get("content") or [{}])[0].get("text", ""), r
 status, h = headers("chat")
 ref = (doc("chat").get("swarmllm") or {}).get("route")
-two = lambda r: isinstance(r, dict) and r.get("segments") == 2 and r.get("peers") == 1
+two = lambda r: (isinstance(r, dict) and r.get("segments") == want_seg and r.get("peers") == want_peers
+                 and len(r.get("nodes") or []) == want_seg)
 same = lambda r: r == ref
 chunks = events("chat_stream")
 carrying = [c for c in chunks if "swarmllm" in c]
@@ -888,7 +913,8 @@ routes = {
 print(f"route: chat {status} headers route={h.get('x-swarm-route')} segments={h.get('x-swarm-segments')} "
       f"peers={h.get('x-swarm-peers')} nodes={h.get('x-swarm-nodes')}")
 checks = {
-    "the headers name two computers": " 200" in status and h.get("x-swarm-segments") == "2" and h.get("x-swarm-peers") == "1",
+    f"the headers name {n}": " 200" in status and h.get("x-swarm-segments") == str(want_seg)
+        and h.get("x-swarm-peers") == str(want_peers),
     "the body says what the headers say": two(ref) and ref.get("route") == h.get("x-swarm-route")
         and ",".join(ref.get("nodes", [])) == (h.get("x-swarm-nodes") or "").replace(" ", ""),
     "only the finish chunk carries it": len(carrying) == 1 and bool(carrying[0]["choices"])
@@ -896,7 +922,7 @@ checks = {
     "the model's text holds no route": "com.swarmllm" not in mcp_text and '"segments"' not in mcp_text,
 }
 for form, r in routes.items():
-    checks[f"{form}: two computers"] = two(r)
+    checks[f"{form}: {n}"] = two(r)
     print(f"route: {form:42s} {json.dumps(r)}")
 for k, v in checks.items():
     print(f"route: {'ok  ' if v else 'FAIL'} {k}")

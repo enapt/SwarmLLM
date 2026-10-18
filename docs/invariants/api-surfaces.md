@@ -2095,6 +2095,21 @@ router stream already awaits the router's final result before its epilogue, so i
 snapshot (the headers' own source) and falls back to the receiver. The local split paths own their
 trace and read it directly.
 
+**The local fast path records its own route, before generating** (#306, found live after
+v0.3.243). A model held whole here is answered by `spawn_split_stream` (streamed, OpenAI and
+Anthropic) or `run_split_generate` (not streamed), which bypass the router — and the router is
+what marks a trace assembled. Only the unstreamed one did it itself, so .243's streamed replies
+from this node said `"segments": 0, "nodes": []` (an unassembled trace reads as `Route::Local`,
+the enum's default, with no segments). Every test above drives a fake router and the rig a split,
+so none reached this path. `mark_served_here` is now called inside `spawn_split_stream`, the one
+function both streamed surfaces use, and by `run_split_generate`; a new fast path calls it before
+its generate (the reader can take the last token before anything after that call runs). Test
+`a_reply_streamed_by_a_model_held_here_names_this_computer`; rig `split_rig.sh route` with
+`SHARDS_A` naming every shard, which keeps the model on A: on the processor with a peer up the
+router plans even a whole-model holder (`local_fast_path_for`, gotcha #443), so without the keep
+the rig never reaches this path — v0.3.243 PASSED it that way, and FAILS it with the keep (the
+three streamed forms, Responses' included). The fix passes 8/8.
+
 **Why these carriers** (researched 2026-10-18, primary sources):
 
 - An extra top-level field on an existing chunk is what OpenRouter (`provider`) and this server
