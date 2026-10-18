@@ -68,18 +68,16 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
    (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), unreleased). Next: the
    3.5 KB/s that is not gossip (Kademlia, identify, pings, direct messages), 63% of the upload.
-8. **#252** — a peer's measured context is not gossiped, so a planner cannot size a peer's share
-   before asking ((a) parked: no named client reads the listed context).
-9. **#3**, **#180** — the routing cost model mis-prices a split by regime (one peer's fit,
+8. **#3**, **#180** — the routing cost model mis-prices a split by regime (one peer's fit,
     2026-10-15: a measured per-visit hop 0.78, a `net:0` hop 1.53 under-priced, drafter arms 0.39
     unpriced), which keeps partial ranges off; fit per term from a second peer's traffic and
     several reply lengths, never tune the constant.
-10. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
+9. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
-11. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
+10. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
-12. **#228** — Qwen 3.5 without speculation (its state cannot be wound back yet).
-13. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
+11. **#228** — Qwen 3.5 without speculation (its state cannot be wound back yet).
+12. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
     decision, with research, when picked up.
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
@@ -1045,7 +1043,7 @@ half: DHT provider records are add-only and can outlive the fact by up to 24 h (
 capability challenge before trusting one would address it. No incident is known.
 
 #### #304 — A peer can lose its key for this node mid-request, with no disconnect
-`P2` · network · crypto · **OPEN** — 2026-10-18 · history: found by #252 (b)'s rig, beside #303
+`P3` · network · crypto · **OPEN** — 2026-10-18 · history: found by #252 (b)'s rig, beside #303
 
 On the 2026-10-18 `split_rig.sh peerkv` run (A on 2 cores, a 5097-token prompt in pieces), B
 opened nine of A's prompt pieces and failed the tenth with `open() decryption FAILED …
@@ -1064,8 +1062,10 @@ B held NO key for A is not established; the logs of that run are gone. By elimin
    is refused at `REJECT_AFTER_TIME` (180 s) — the rejection is never the first sign.
 2. A disconnect logged only at debug (`Cleared encryption session`), more than 180 s before the
    failing piece, with the reconnect establishing nothing — unlikely: nine pieces opened between.
-Next: run the rig with B at `-v` past two eviction ticks (> 20 min) and read B's `DIAG: key
-rotation tick (eviction)` `stale_evicted` against the failure; then, if (1), retry an unanswered
+**Rare in the field**: the live node, serving the swarm 2026-09-17 → 10-18, logged 2 decryption
+failures in the month (2 repairs), the one carrying the fields with a session held — so P3 until
+it recurs. Next: run the rig with B at `-v` past two eviction ticks (> 20 min) and read B's
+`DIAG: key rotation tick (eviction)` `stale_evicted` against the failure; then, if (1), retry an unanswered
 rotation (WireGuard's schedule) and have an age eviction of a CONNECTED peer re-key first rather
 than destroy — `security-reviewer` on the change (key lifetime is a forward-secrecy bound).
 
@@ -1875,7 +1875,7 @@ and adapter close per reading — the closing is where it waited longest). Then 
 the thread sampler (`examples/thread_sample.py`).
 
 #### #252 — `/v1/models` advertises a context the card cannot hold
-`P2` · memory · **PARTIAL** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.234)
+`P3` · memory · **PARTIAL — (a) and (b) parked** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.234)
 
 Qwen3-14B on a 12 GB card: `/v1/models` says `max_model_len: 8192` (the declared limit under
 `DEFAULT_MAX_SEQ_LEN`), but with the weights loaded the KV budget is 860 MB, and a 6,228-token
@@ -1916,6 +1916,26 @@ free memory (#187's two bases). Its errors fall partly below the truth: the work
 without it), and the placement (card, card/processor split, processor). A figure below the truth
 makes the few clients that do read it (SDK-style frameworks) drop context silently. Reopen if a
 report names a client that sizes prompts from `/v1/models`.
+**(b) parked, 2026-10-18**, after a rig and a code reading. What a gossiped figure would fix is
+narrower than filed. (1) A processor peer's worker holds conversation room its advertised free
+memory does not show — the `typical_kv` inside its reservation (`record_cpu_kv_budget`: budget =
+typical + uncommitted headroom; 512 of 660 MB on `split_rig.sh peerkv`, RAM_B tight) — so the
+planner under-counts its room for the layers it already holds. Publishing it would have to be
+the RESERVED part only (the worker's room less the free memory it overlaps, or the shared
+headroom is counted twice when a plan both reuses and adds layers), charged first to the reused
+layers' prompt cache. But with one route the under-count changes only which rung finds the plan:
+`PeersAtCeiling` sends it anyway, by design, and the peer admits it. (2) The case that costs —
+the peer's real room SMALLER than the planner's view, refused after earlier machines have read
+the prompt (peerkv's tight case: 503 after up to 712 s) — a gossiped figure cannot fix, being as
+stale as the free memory beside it. That needs the peer asked BEFORE the pass, as #263 asks this
+node's own segments (`ModelProcessPool::admit_prompt`): an up-front admission message gated on a
+feature bit, answered with `layers_that_fit` so the re-plan holds the peer to a fact (vLLM's
+`can_allocate` covers the whole request before prefill; Petals prices `cache_tokens_left` as a
+routing penalty, never an exclusion), at one round trip per split. Field frequency is low: the
+live node logged 11 prompt refusals in a month, all on test days, none since 10-02. Reopen with
+a field refusal of a peer's segment, and build the up-front ask (2) before any gossip (1). The
+planner also charges a peer the prompt's positions while the peer admits
+`kv_cache_reservation(prompt + reply reserve)`; fold that in with (2).
 
 #### #187 — Head-room admission prices load and runtime on two different bases
 `P3` · memory · **PARTIAL** — 2026-08-08 · history: archive § "Head-room admission: two things the live test found"
