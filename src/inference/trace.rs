@@ -20,7 +20,7 @@
 //! (route shape, segment, peer, region) have no OTel equivalent and keep
 //! `swarm`-prefixed names.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -142,6 +142,9 @@ struct TraceInner {
     /// and the per-request forward-pass count that prediction assumed.
     predicted_ms: Option<u32>,
     assumed_forward_passes: Option<u32>,
+    /// The tokens a round of a split this prediction divided those passes by
+    /// (`split_rounds`, FUTURE_WORK #3 (d)); `None` = one round a token.
+    assumed_tokens_per_round: Option<f32>,
     predicted_terms: Option<PredictedTerms>,
     route: Route,
     segments: Vec<SegmentTrace>,
@@ -278,6 +281,11 @@ pub struct RequestTrace {
     /// An atomic rather than part of `inner` so the token channel can stamp it
     /// with a relaxed load per token instead of taking a lock.
     ttft_us: AtomicU64,
+    /// Rounds this request's decode sent through the first segment of a
+    /// split it drove — a plain step, a guess check, a stream's chunk — every
+    /// attempt (`note_decode_round`). An atomic for the reason `ttft_us` is
+    /// one: it is stamped once a round.
+    decode_rounds: AtomicU32,
     inner: Mutex<TraceInner>,
     /// The reply text the reader has been sent, and how many events carried
     /// it — what a continuation resumes from when the machine generating the
@@ -296,6 +304,7 @@ impl RequestTrace {
             operation,
             t_admitted: Instant::now(),
             ttft_us: AtomicU64::new(0),
+            decode_rounds: AtomicU32::new(0),
             inner: Mutex::new(TraceInner::default()),
             streamed: Mutex::new(crate::types::ReplyContinuation::default()),
         }
@@ -495,11 +504,33 @@ impl RequestTrace {
     /// of it. Wiring it to the chain alone left the shape the calibration
     /// question is actually about — the boomerang of #447(iii) — recording
     /// nothing at all.
-    pub fn note_predicted_cost(&self, ms: u32, assumed_forward_passes: u32, terms: PredictedTerms) {
+    pub fn note_predicted_cost(
+        &self,
+        ms: u32,
+        assumed_forward_passes: u32,
+        assumed_tokens_per_round: Option<f32>,
+        terms: PredictedTerms,
+    ) {
         let mut g = self.lock();
         g.predicted_ms = Some(ms);
         g.assumed_forward_passes = Some(assumed_forward_passes);
+        g.assumed_tokens_per_round = assumed_tokens_per_round;
         g.predicted_terms = Some(terms);
+    }
+
+    /// One round of a split's decode left for the first segment — a plain
+    /// step, a guess check or a stream's chunk. Called where each leaves
+    /// (`forward_through_segments` past the prompt pass,
+    /// `forward_verify_through_segments`, `dsd_stream`'s chunk), never by a
+    /// path's own loop, so a new path that sends through them is counted.
+    pub fn note_decode_round(&self) {
+        self.decode_rounds.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Rounds counted so far, every attempt — `PipelineExecutor::execute`
+    /// reads it before and after an attempt.
+    pub fn decode_rounds(&self) -> u32 {
+        self.decode_rounds.load(Ordering::Relaxed)
     }
 
     pub fn mark_assembled(&self, route: Route, segments: Vec<SegmentTrace>, sched_ms: u64) {
@@ -625,6 +656,8 @@ impl RequestTrace {
             assemblies: g.assemblies,
             predicted_ms: g.predicted_ms,
             assumed_forward_passes: g.assumed_forward_passes,
+            assumed_tokens_per_round: g.assumed_tokens_per_round,
+            decode_rounds: self.decode_rounds.load(Ordering::Relaxed),
             predicted_terms: g.predicted_terms,
             ttft_ms,
             decode_ms,
@@ -683,6 +716,14 @@ pub struct TraceSnapshot {
     /// self-describing: reading a log a month from now, the constant may have
     /// moved.
     pub assumed_forward_passes: Option<u32>,
+    /// The tokens a round of a split those passes were divided by — `None`
+    /// where the price assumed one round a token (FUTURE_WORK #3 (d)).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assumed_tokens_per_round: Option<f32>,
+    /// Rounds the decode of a split this node drove sent through its first
+    /// segment, every attempt; 0 where none ran here. Beside `tokens`, the
+    /// tokens a round actually yielded — what the line above assumed.
+    pub decode_rounds: u32,
     /// What `predicted_ms` is made of, term by term (`PredictedTerms`), so a
     /// fit over ordinary logs can tell which term is off — the total alone
     /// could not say (FUTURE_WORK #3, 2026-10-10: the error grows with the
@@ -792,6 +833,9 @@ impl TraceSnapshot {
             if let Some(a) = self.assumed_forward_passes {
                 let _ = write!(s, " assumed_forward_passes={a}");
             }
+            if let Some(t) = self.assumed_tokens_per_round {
+                let _ = write!(s, " assumed_tokens_per_round={t:.2}");
+            }
             if let Some(t) = self.predicted_terms {
                 let _ = write!(
                     s,
@@ -804,6 +848,11 @@ impl TraceSnapshot {
                     t.cold_load_ms
                 );
             }
+        }
+        // The rounds the prompt pass did not take — beside `tokens`, what a
+        // round of this split yielded (FUTURE_WORK #3 (d)).
+        if self.decode_rounds > 0 {
+            let _ = write!(s, " decode_rounds={}", self.decode_rounds);
         }
         if let Some(t) = self.tok_per_sec {
             let _ = write!(s, " tok_per_sec={t:.1}");
@@ -1610,6 +1659,7 @@ mod predicted_cost_tests {
         t.note_predicted_cost(
             4200,
             64,
+            Some(2.5),
             PredictedTerms {
                 network_ms: 1000,
                 compute_ms: 3000,
@@ -1620,6 +1670,7 @@ mod predicted_cost_tests {
         let line = t.snapshot().log_line();
         assert!(line.contains("predicted_ms=4200"), "{line}");
         assert!(line.contains("assumed_forward_passes=64"), "{line}");
+        assert!(line.contains("assumed_tokens_per_round=2.50"), "{line}");
         assert!(
             line.contains(
                 "predicted_terms=net:1000/compute:3000/prompt:200/queue:0/transfer:0/cold:0"
@@ -1651,7 +1702,13 @@ mod predicted_cost_tests {
     fn the_assumption_is_recorded_not_re_derived_at_read_time() {
         let t = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
         t.mark_dequeued();
-        t.note_predicted_cost(100, 7, PredictedTerms::default());
-        assert!(t.snapshot().log_line().contains("assumed_forward_passes=7"));
+        t.note_predicted_cost(100, 7, None, PredictedTerms::default());
+        let line = t.snapshot().log_line();
+        assert!(line.contains("assumed_forward_passes=7"), "{line}");
+        assert!(!line.contains("assumed_tokens_per_round"), "{line}");
+        assert!(!line.contains("decode_rounds"), "no round ran: {line}");
+        t.note_decode_round();
+        t.note_decode_round();
+        assert!(t.snapshot().log_line().contains("decode_rounds=2"));
     }
 }

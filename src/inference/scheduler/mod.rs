@@ -267,6 +267,12 @@ struct NodeCandidate {
     /// the same on every candidate of a plan; `None` until enough have been
     /// written. Read only through [`Self::forward_passes`].
     reply_tokens_expected: Option<u32>,
+    /// The tokens a round of this model's recent splits driven from here
+    /// yielded (`SplitRounds::tokens_per_round`), for a request that may guess
+    /// ahead (`PromptPlan::may_guess_ahead`); the same on every candidate of a
+    /// plan. `None` = one round a token. Read only through
+    /// [`Self::rounds_entered`].
+    split_tokens_per_round: Option<f32>,
     /// For THIS node only: how wide one run of layers a fresh worker would take,
     /// card and processor together, for a model the loader would split across
     /// them (`ModelProcessPool::fresh_run_layers_for_planning`). `None` for every
@@ -496,6 +502,33 @@ impl NodeCandidate {
             .map_or(parallax::ASSUMED_FORWARD_PASSES, |n| n.max(1) as f32);
         self.reply_tokens_at_most
             .map_or(expected, |most| (most.max(1) as f32).min(expected))
+    }
+
+    /// How many ROUNDS the per-token costs of running `range` are charged
+    /// for in a chain this node drives: [`Self::forward_passes`], divided —
+    /// for a SEGMENT of a split — by the tokens a round of this model's recent
+    /// splits yielded (`state.metrics.split_rounds`, FUTURE_WORK #3 (d)).
+    ///
+    /// A split driven from here guesses ahead on every guess-check path (the
+    /// drafter's rounds and stream, the n-gram loop), so a reply crosses each
+    /// hop and runs each segment once a round, not once a token — Leviathan et
+    /// al.'s E[tokens per round] = (1−α^(γ+1))/(1−α), here MEASURED, as vLLM
+    /// reports it ("mean acceptance length"). Unpriced, the splits with a
+    /// drafter ran in 0.39 of their price on this node's rigs (n=25,
+    /// 2026-10-15).
+    ///
+    /// Not for a whole model: a hand-off or a local generation runs in one
+    /// worker, which guesses on its own and is timed doing so. Not for a chain
+    /// its head leads: the head guesses with what IT holds, which this node
+    /// has not measured — `led_hop_ms` and the led roles keep the passes.
+    /// At least one round: the prompt pass crosses every hop.
+    fn rounds_entered(&self, range: (u32, u32), num_layers: u32) -> f32 {
+        let passes = self.forward_passes();
+        let whole_model = range.0 == 0 && range.1 == num_layers;
+        match self.split_tokens_per_round {
+            Some(per_round) if !whole_model && per_round > 1.0 => (passes / per_round).max(1.0),
+            _ => passes,
+        }
     }
 
     /// Leading tokens of this request's prompt that running `range` here would
@@ -2816,6 +2849,7 @@ impl PipelineScheduler {
             request_id,
             terms.total() as u32,
             passes as u32,
+            parallax::chain_tokens_per_round(segments, candidates, local_node_id, num_layers),
             crate::inference::trace::PredictedTerms {
                 network_ms: terms.network_ms as u32,
                 compute_ms: terms.compute_ms as u32,
@@ -4076,6 +4110,16 @@ impl PipelineScheduler {
             .metrics
             .reply_lengths
             .expected(&manifest.id.0);
+        // And for the yield of a split's round, where this request may guess
+        // ahead (FUTURE_WORK #3 (d)).
+        let split_tokens_per_round = if prompt.may_guess_ahead {
+            self.shared_state
+                .metrics
+                .split_rounds
+                .tokens_per_round(&manifest.id.0)
+        } else {
+            None
+        };
 
         // Average bytes a layer occupies, for a load's price below. The
         // manifest is the only size the coordinator has; it is the on-disk
@@ -4878,6 +4922,7 @@ impl PipelineScheduler {
                 cold_load_ms_per_layer: cold_load_per_layer,
                 reply_tokens_at_most: prompt.reply_tokens_at_most,
                 reply_tokens_expected,
+                split_tokens_per_round,
                 fresh_run_layers,
                 prompt_memory_refused: peer_prompt_fit.is_some()
                     || is_local
@@ -4948,6 +4993,9 @@ impl PipelineScheduler {
                 // The passes the per-token costs below are charged for: 64, or
                 // fewer where the reply may not use that many tokens (#3).
                 forward_passes = c.forward_passes(),
+                // What a round of this model's splits has yielded, for a
+                // request that may guess ahead (#3 (d)); `None` = one a token.
+                split_tokens_per_round = ?c.split_tokens_per_round,
                 has_gpu = c.has_gpu,
                 max_hostable_layers = ?c.max_hostable_layers,
                 max_hostable_layers_at_ceiling = ?c.max_hostable_layers_at_ceiling,
@@ -5178,8 +5226,12 @@ impl PipelineScheduler {
         // ~5.3 s for its 7 layers) and the stored prompt left behind, so turn 2
         // took 58.5 s against ~7 (FUTURE_WORK #10, `split_rig.sh splitcache`
         // with SPARE=1, 2026-10-10).
+        // Spread over the ROUNDS the per-token terms beside it are paid for —
+        // fewer than the passes where this model's splits guess ahead
+        // (`NodeCandidate::rounds_entered`, FUTURE_WORK #3 (d)).
+        let rounds = candidate.rounds_entered((current_layer, range.1), num_layers);
         let cold_load_per_layer =
-            candidate.cold_load_ms((current_layer, range.1)) / covered / candidate.forward_passes();
+            candidate.cold_load_ms((current_layer, range.1)) / covered / rounds;
         // Reading the prompt, at the search's rate (`parallax::prefill_ms_per_layer`)
         // and once per request, spread like the load: what this candidate does
         // NOT already hold of it (`NodeCandidate::prompt_tokens_held`). This
@@ -5194,8 +5246,7 @@ impl PipelineScheduler {
         }) {
             None | Some(0) => 0.0,
             Some(tokens) => {
-                parallax::prefill_ms_per_layer(candidate, tokens, compute_per_layer)
-                    / candidate.forward_passes()
+                parallax::prefill_ms_per_layer(candidate, tokens, compute_per_layer) / rounds
             }
         };
         candidate.latency_ms as f32 / covered

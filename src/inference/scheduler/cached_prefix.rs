@@ -97,6 +97,12 @@ pub struct PromptPlan {
     /// Empty unless tokenized, believed, and the hand-off would take the
     /// request (`remote_generate::request_may_be_handed_off`).
     pub(crate) handed_off: Vec<(NodeId, u32)>,
+    /// A split of this request driven from here may guess ahead
+    /// (`pipeline::request_may_guess_ahead`), so its segments are priced for
+    /// the rounds its model's splits have taken (`split_rounds`, FUTURE_WORK
+    /// #3 (d)). `false` where no request is behind the plan: one round a
+    /// token, exactly as before.
+    pub(crate) may_guess_ahead: bool,
 }
 
 impl PromptPlan {
@@ -133,6 +139,14 @@ impl PromptPlan {
     /// [`Self::with_reply_of_at_most`] is.
     pub(crate) fn with_head_leading(mut self, may_lead: bool) -> Self {
         self.head_may_lead = may_lead;
+        self
+    }
+
+    /// This plan, for a request a split driven from here may guess ahead for
+    /// (`pipeline::request_may_guess_ahead`). Set where
+    /// [`Self::with_reply_of_at_most`] is.
+    pub(crate) fn with_guessing_ahead(mut self, may: bool) -> Self {
+        self.may_guess_ahead = may;
         self
     }
 }
@@ -244,10 +258,11 @@ pub(crate) fn plan_prompt(state: &SharedState, request: &InferenceRequest) -> Op
         tokens: Some(u32::try_from(ids.len()).unwrap_or(u32::MAX)),
         cached_locally,
         split_openings: crate::inference::pipeline::held_openings(&request.model_id, &ids),
-        // The caller's: `with_reply_of_at_most` and `with_head_leading`,
-        // beside the fallback plan.
+        // The caller's: `with_reply_of_at_most`, `with_head_leading` and
+        // `with_guessing_ahead`, beside the fallback plan.
         reply_tokens_at_most: None,
         head_may_lead: false,
+        may_guess_ahead: false,
         handed_off: if crate::inference::pipeline::remote_generate::request_may_be_handed_off(
             state, request,
         ) {

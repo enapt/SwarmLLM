@@ -844,6 +844,11 @@ impl PipelineExecutor {
         pre_embedded: bool,
         generated_ids: &[u32],
     ) -> Result<LayerResult, SwarmError> {
+        // A decode step of a split this node drives is one round of its reply
+        // (FUTURE_WORK #3 (d)); the prompt pass is counted by the reader.
+        if sequence_num > 0 {
+            self.shared_state.note_decode_round(request_id);
+        }
         // Every caller's prompt pass comes through here, so this is where this
         // node's own segments are admitted — all of them, before any peer
         // starts reading the prompt (#263).
@@ -3920,7 +3925,7 @@ mod composite_takeover_tests {
 /// paths' own preconditions — each needs this node's copy of the model's header
 /// or a draft model. The worker asks the same question of its loaded model
 /// (`SplitModel::carries_recurrent_state`).
-fn speculation_can_roll_back(architecture: Option<&str>) -> bool {
+pub(super) fn speculation_can_roll_back(architecture: Option<&str>) -> bool {
     !architecture
         .is_some_and(|a| crate::inference::split::ModelArch::from_gguf_arch(a).is_hybrid_ssm())
 }

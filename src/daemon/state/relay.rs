@@ -586,11 +586,34 @@ impl super::SharedState {
         request_id: uuid::Uuid,
         predicted_ms: u32,
         assumed_forward_passes: u32,
+        assumed_tokens_per_round: Option<f32>,
         terms: crate::inference::trace::PredictedTerms,
     ) {
         if let Some(t) = self.active_traces.get(&request_id) {
-            t.note_predicted_cost(predicted_ms, assumed_forward_passes, terms);
+            t.note_predicted_cost(
+                predicted_ms,
+                assumed_forward_passes,
+                assumed_tokens_per_round,
+                terms,
+            );
         }
+    }
+
+    /// One round of the decode of a split `request_id` drives left for its
+    /// first segment (`RequestTrace::note_decode_round`, FUTURE_WORK #3 (d)).
+    /// A no-op without a live trace, as `record_segment_timing` is.
+    pub fn note_decode_round(&self, request_id: uuid::Uuid) {
+        if let Some(t) = self.active_traces.get(&request_id) {
+            t.note_decode_round();
+        }
+    }
+
+    /// The decode rounds counted for `request_id` so far, every attempt;
+    /// `None` without a live trace.
+    pub fn decode_rounds_of(&self, request_id: uuid::Uuid) -> Option<u32> {
+        self.active_traces
+            .get(&request_id)
+            .map(|t| t.decode_rounds())
     }
 
     /// Snapshot of recent request traces, oldest first.

@@ -143,6 +143,12 @@ A re-plan with the refusing holder barred can only describe its own search ("has
 
 → `docs/invariants/scheduling.md` § "A reply is priced for no more passes than it may take"
 
+## A split is priced for the rounds it takes (2026-10-19, #3 (d))
+
+**`NodeCandidate::rounds_entered` is the single answer to "how many rounds are a split segment's per-token costs charged for"**: `forward_passes()` ÷ the tokens a round of this model's recent splits yielded (`SplitRounds::tokens_per_round`, never below 1), for a SEGMENT of a chain driven from here; a whole model and a led chain keep the passes. Rounds are counted where each LEAVES (`RequestTrace::note_decode_round`: `forward_through_segments` past the prompt pass, `forward_verify_through_segments`, `dsd_stream`'s chunk) and recorded ONLY by `PipelineExecutor::execute`. **`pipeline::request_may_guess_ahead` is the one request-side question** — the router asks it into `PromptPlan::with_guessing_ahead`, the executor before recording. A new decode path sends through the counted functions or counts its own rounds.
+
+→ `docs/invariants/scheduling.md` § "A split is priced for the rounds it takes, not the tokens it writes"
+
 ## A forward the peer could not OPEN goes to it again, once the link is re-keyed
 
 **`pipeline::local::wait_for_result` takes a REQUIRED `ResendOnRefusal`**: on `ForwardRefusal::Undecryptable` (a TYPE) it waits for `SessionManager::rekeyed_since` and resends once to the same node. A chained forward passes `Never`; add no second resend.

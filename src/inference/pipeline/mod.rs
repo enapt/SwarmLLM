@@ -483,6 +483,11 @@ pub(super) async fn forward_verify_through_segments(
 ) -> Result<VerifyReply, SwarmError> {
     let num_segments = segments.len();
     let local_node_id = shared_state.identity.node_id().clone();
+    // A guess check — or an n-gram miss's one-token step — is one round of
+    // the reply (FUTURE_WORK #3 (d)).
+    if !verify_tokens.is_empty() {
+        shared_state.note_decode_round(request_id);
+    }
 
     let mut activation_bytes: Vec<u8> = pack_verify_tokens_to_le_bytes(verify_tokens);
 
@@ -1131,6 +1136,37 @@ pub(super) fn request_disqualifies_fast_paths(request: &crate::types::InferenceR
         || !crate::inference::vision::collect_images(&request.messages).is_empty()
 }
 
+/// May a split of this request that this node drives guess ahead at all — is
+/// any guess-check path switched on (the drafter's, `dsd`; the n-gram loop's,
+/// which needs no drafter), is the request free of what stands every fast
+/// path aside, and can the model take a refused guess back
+/// (`speculation_can_roll_back`)? What each path then asks of the PLAN and
+/// the drafter is its own, and the yield it got is measured, not assumed.
+///
+/// The ONE request-side answer for FUTURE_WORK #3 (d): the planner prices a
+/// split by its model's measured tokens per round only for a request this
+/// answers yes for (`PromptPlan::with_guessing_ahead`), and
+/// `PipelineExecutor::execute` records a split's rounds only for one — so the
+/// figure describes the requests it prices. A request with an image or an
+/// adapter runs one round a token and would otherwise lower it.
+pub(crate) fn request_may_guess_ahead(
+    state: &SharedState,
+    request: &crate::types::InferenceRequest,
+) -> bool {
+    let cfg = state.cfg();
+    let switched_on = (cfg.inference.speculative_decoding
+        && cfg.inference.decentralized_spec_decoding)
+        || cfg.inference.ngram_lookup_enabled;
+    switched_on
+        && !request_disqualifies_fast_paths(request)
+        && distributed::speculation_can_roll_back(
+            state
+                .gguf_meta_for(&request.model_id)
+                .map(|m| m.architecture.clone())
+                .as_deref(),
+        )
+}
+
 /// Common preconditions for any speculative-decoding fast path
 /// (`speculative.rs`'s single-segment Item 2 and `dsd.rs`'s
 /// multi-segment Item 12). Returns `true` when the request is
@@ -1351,11 +1387,42 @@ impl PipelineExecutor {
             .iter()
             .map(|s| s.node_id.clone())
             .collect();
+        let rounds_before = self.shared_state.decode_rounds_of(self.request.id);
         let outcome = self.execute_attempt(token_tx).await;
+        if let (Ok(out), Some(before)) = (&outcome, rounds_before) {
+            self.note_split_rounds(out, before);
+        }
         let ended_with = self.assignment.segments.iter().map(|s| s.node_id.clone());
         self.shared_state
             .note_request_peers(self.request.id, planned.into_iter().chain(ended_with));
         outcome
+    }
+
+    /// What this attempt's split yielded a round, for the price of the next
+    /// one (`state.metrics.split_rounds`, FUTURE_WORK #3 (d)): its tokens over
+    /// the rounds its decode sent through the first segment — counted where
+    /// each round leaves, whichever path ran (`RequestTrace::
+    /// note_decode_round`) — plus the prompt pass, which yields the first
+    /// token. Only a split of two or more segments, for a request that may
+    /// guess ahead (`request_may_guess_ahead`, the planner's own question),
+    /// whose decode ran HERE: a split led by its head, a hand-off or a local
+    /// generation sends no round from here and records nothing.
+    fn note_split_rounds(&self, out: &InferenceOutput, rounds_before: u32) {
+        let Some(after) = self.shared_state.decode_rounds_of(self.request.id) else {
+            return;
+        };
+        let rounds = after.saturating_sub(rounds_before);
+        if rounds == 0
+            || self.assignment.segments.len() < 2
+            || !request_may_guess_ahead(&self.shared_state, &self.request)
+        {
+            return;
+        }
+        self.shared_state.metrics.split_rounds.record(
+            &self.request.model_id.0,
+            out.completion_tokens,
+            rounds.saturating_add(1),
+        );
     }
 
     async fn execute_attempt(
@@ -3103,6 +3170,170 @@ mod tests {
             state.pending_layer_results.is_empty(),
             "pending_layer_results leak after network-drop failure path"
         );
+    }
+
+    /// FUTURE_WORK #3 (d): a round of a split's reply is counted where it
+    /// leaves — a plain step through `forward_through_segments`, a guess check
+    /// of any length through `forward_verify_through_segments` — once,
+    /// whatever then becomes of it. The prompt pass is not counted there: the
+    /// executor adds it when it records the attempt.
+    #[tokio::test]
+    async fn a_round_of_a_split_is_counted_where_it_leaves_and_the_prompt_pass_is_not() {
+        let state = make_test_state();
+        // Every send fails at once: what is counted is the round LEAVING.
+        let (tx, rx) = mpsc::channel::<NetworkCommand>(8);
+        drop(rx);
+        let request = make_test_request(&state);
+        let request_id = request.id;
+        let trace = Arc::new(crate::inference::trace::RequestTrace::new(
+            request_id, "test", "chat",
+        ));
+        state.active_traces.insert(request_id, trace.clone());
+        let (a, d) = (NodeId([0xA1; 32]), NodeId([0xD4; 32]));
+        state.peer_id_map.insert(a.clone(), vec![0xA1]);
+        state.peer_id_map.insert(d.clone(), vec![0xD4]);
+        let segments = vec![remote_segment(&a, (0, 16)), remote_segment(&d, (16, 32))];
+        let assignment = PipelineAssignment {
+            request_id,
+            segments: segments.clone(),
+            standbys: vec![],
+            tp_groups: vec![],
+            supports_speculative: true,
+        };
+        let mut executor = PipelineExecutor::new(state.clone(), tx.clone(), request, assignment);
+        let within = std::time::Duration::from_secs(10);
+
+        let _ = tokio::time::timeout(
+            within,
+            executor.forward_through_segments(
+                request_id,
+                0,
+                0,
+                b"hello".to_vec(),
+                None,
+                false,
+                &[],
+            ),
+        )
+        .await
+        .expect("a failed send answers at once");
+        assert_eq!(
+            trace.decode_rounds(),
+            0,
+            "the prompt pass is not a decode round"
+        );
+
+        let _ = tokio::time::timeout(
+            within,
+            executor.forward_through_segments(
+                request_id,
+                1,
+                5,
+                vec![7, 0, 0, 0],
+                None,
+                false,
+                &[7],
+            ),
+        )
+        .await
+        .expect("a failed send answers at once");
+        assert_eq!(trace.decode_rounds(), 1, "a plain step is one round");
+
+        let _ = tokio::time::timeout(
+            within,
+            forward_verify_through_segments(
+                &state,
+                &tx,
+                request_id,
+                6,
+                &segments,
+                &[7, 8, 9],
+                None,
+                None,
+                crate::inference::process_pool::Requester::Owner,
+                false,
+            ),
+        )
+        .await
+        .expect("a failed send answers at once");
+        assert_eq!(
+            trace.decode_rounds(),
+            2,
+            "a check of three guesses is ONE round"
+        );
+    }
+
+    /// FUTURE_WORK #3 (d): a finished split is recorded at its tokens over
+    /// its rounds plus the prompt pass — and only a split (two or more
+    /// segments) of a request that may guess ahead, the planner's own
+    /// question, whose rounds ran here.
+    #[test]
+    fn a_finished_split_is_recorded_at_its_tokens_a_round_only_where_it_is_priced_so() {
+        let state = make_test_state();
+        let (tx, _rx) = mpsc::channel::<NetworkCommand>(8);
+        let (a, d) = (NodeId([0xA1; 32]), NodeId([0xD4; 32]));
+        let executor_for = |request: InferenceRequest, segments: Vec<PipelineSegment>| {
+            let assignment = PipelineAssignment {
+                request_id: request.id,
+                segments,
+                standbys: vec![],
+                tp_groups: vec![],
+                supports_speculative: true,
+            };
+            PipelineExecutor::new(state.clone(), tx.clone(), request, assignment)
+        };
+        let split = || vec![remote_segment(&a, (0, 16)), remote_segment(&d, (16, 32))];
+        // An attempt whose decode sent `rounds` rounds and wrote `tokens`.
+        let finish = |executor: &PipelineExecutor, rounds: u32, tokens: u32| {
+            let id = executor.request.id;
+            let trace = Arc::new(crate::inference::trace::RequestTrace::new(
+                id, "test", "chat",
+            ));
+            state.active_traces.insert(id, trace.clone());
+            for _ in 0..rounds {
+                trace.note_decode_round();
+            }
+            let out = InferenceOutput {
+                request_id: id,
+                content: String::new(),
+                prompt_tokens: 5,
+                completion_tokens: tokens,
+                finish_reason: "stop".into(),
+                session_id: None,
+                token_logprobs: vec![],
+                matched_stop_sequence: None,
+                trace: None,
+            };
+            executor.note_split_rounds(&out, 0);
+        };
+        let per_round = || state.metrics.split_rounds.tokens_per_round("test");
+
+        // Not a split, no round here, an adapter (one round a token, which
+        // would lower the figure for the requests it prices): none recorded.
+        let mut with_adapter = make_test_request(&state);
+        with_adapter.lora_adapter = Some("an-adapter".into());
+        for _ in 0..crate::daemon::state::split_rounds::SPLITS_BEFORE_TRUSTED {
+            finish(
+                &executor_for(make_test_request(&state), vec![remote_segment(&a, (0, 32))]),
+                9,
+                30,
+            );
+            finish(&executor_for(make_test_request(&state), split()), 0, 30);
+            let mut adapted = with_adapter.clone();
+            adapted.id = uuid::Uuid::new_v4();
+            finish(&executor_for(adapted, split()), 9, 30);
+        }
+        assert_eq!(
+            per_round(),
+            None,
+            "only a split this node drove may be recorded"
+        );
+
+        // 30 tokens in 9 rounds and the prompt pass: 3 a round.
+        for _ in 0..crate::daemon::state::split_rounds::SPLITS_BEFORE_TRUSTED {
+            finish(&executor_for(make_test_request(&state), split()), 9, 30);
+        }
+        assert_eq!(per_round(), Some(3.0));
     }
 
     /// Drive one verify round to completion and answer it, so

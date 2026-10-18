@@ -1746,6 +1746,89 @@ three red with the bound off, the last red with the learned length off.
 `reply_lengths`: `the_expectation_is_the_mean_of_recent_replies_once_there_are_enough`,
 `only_the_most_recent_replies_count`.
 
+## A split is priced for the rounds it takes, not the tokens it writes
+
+**Rule (2026-10-19, FUTURE_WORK #3 (d)).** `NodeCandidate::rounds_entered(range,
+num_layers)` is the single answer to "how many rounds are a split segment's
+per-token costs charged for": `forward_passes()` divided — for a SEGMENT (a range
+short of the whole model) in a chain this node DRIVES — by the tokens a round
+of this model's recent splits yielded (`daemon::state::split_rounds::SplitRounds::
+tokens_per_round`: the last 32 finished splits' tokens over their rounds, once
+there are 4, never below 1), at least one round. `vertex_cost` (role
+`DrivenFromHere`), greedy's spread of the once-per-request terms and the logged
+`assumed_tokens_per_round` (`parallax::chain_tokens_per_round`) read it. A whole
+model, and a chain its head leads, keep `forward_passes()`.
+
+- **Counted where a round LEAVES, whichever path ran**: `RequestTrace::
+  note_decode_round` at `forward_through_segments` past the prompt pass (the
+  plain loop), `forward_verify_through_segments` with any guesses (the drafter's
+  rounds, the n-gram loop's hits and misses), and `dsd_stream`'s chunk. A new
+  path that sends through those is counted without knowing it.
+- **Recorded once per finished attempt** by `PipelineExecutor::execute`
+  (`note_split_rounds`: tokens over rounds + 1, the prompt pass yielding the
+  first token, so a plain loop reads exactly 1) — only for two or more segments,
+  a round that ran HERE, and a request that may guess ahead.
+- **One request-side question on both sides**: `pipeline::request_may_guess_ahead`
+  (a guess-check path switched on — the drafter's or the n-gram loop's — no
+  adapter or image, a model that can take a guess back). The router asks it
+  into `PromptPlan::with_guessing_ahead`; the executor asks it before
+  recording. A request it answers no for runs one round a token, and recording
+  it would lower the figure for the requests it prices.
+
+**What it replaced.** Every split was charged its compute and its hops once per
+TOKEN. The guess-check paths cross once per ROUND — several tokens where the
+guesses hold. On this node's #273/#275 rigs (2026-10-14/15, n=25) the splits with
+a drafter ran in **0.39** of their price.
+
+**Research.** vLLM reports exactly this figure as its "mean acceptance length"
+(tokens per verification step, the bonus token included; `docs.vllm.ai` §
+Per-Request Acceptance Metrics); SmartSpec (Liu et al. 2024, arXiv 2406.14066)
+and SGLang's adaptive speculation steer by a running average of it. The
+expectation is Leviathan et al.'s (1−α^(γ+1))/(1−α), here MEASURED rather than
+derived from α and γ, so the n-gram loop, the stream and a γ that walks are all
+covered by one number. SmartSpec's known trap is the one this leaves: a check of
+several positions costs more than one step where a segment computes on a
+processor (its batch time is linear in positions). The γ controller holds such
+a check short and stops guessing where it does not pay
+(`dsd_controller::best_gamma_for_check`), and the stream's overlap — counted as
+whole rounds — errs the other way.
+
+**Measured.** `examples/split_rig.sh repeat`, 2026-10-19 (`RIG_NETNS=1`, both nodes on the
+processor: Qwen2.5-Coder-7B split A [shard 0] + B [the rest], the 0.5B drafter on A,
+seven greedy asks of 120 tokens; `scratchpad/rounds3d.sh`). Every ask took the
+drafter's stream and logged `decode_rounds=72 tokens=120` — 1.64 tokens a round —
+and from the fifth ask (four to trust) the planner read
+`split_tokens_per_round=Some(1.64)` and the line `assumed_tokens_per_round=1.64`.
+Asks 5-7 (65.8 s each) were priced 85.4 s (0.77); priced a round a token at the
+same 120-token reply length they would have been 133.4 s (0.49). What is left
+is the price of a round (1.03 s priced, ~0.8 s taken), not their number.
+**Why the count and not α:** the drafter's own figures (α 0.73, γ 2) give
+Leviathan's 2.26 tokens a round — ~53 rounds — but the stream sent 72 chunks,
+39 of them on guesses already refused, and on this rig the time followed the
+chunks. A figure derived from α would have priced it ~30% low.
+
+**What a change must keep.**
+
+- **Measured, never derived.** A figure from α and γ prices the drafter's rounds
+  and nothing else; the count is what every path actually did.
+- **Never below one token a round.** A stream's chunk sent on guesses that were
+  then refused overlapped another; it must not price a split above the one round
+  a token it was priced at before.
+- **Not for a whole model, not for a led chain.** A hand-off or a local run
+  guesses inside one worker, timed as it does; a led chain's head guesses with
+  what IT holds, which this node has never measured.
+- **The prompt is not divided.** It is read once whatever the rounds.
+
+Tests: `a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds`
+(compute and hops ÷ 3, the prompt unchanged, a request that may not guess ahead
+priced as before, the prediction records 3.00),
+`a_round_of_a_split_is_counted_where_it_leaves_and_the_prompt_pass_is_not`,
+`a_finished_split_is_recorded_at_its_tokens_a_round_only_where_it_is_priced_so`
+— each red with its part switched off (the divisor, the plain-step count, the
+check count, the request gate, the split gate). `split_rounds`:
+`a_models_splits_yield_their_tokens_over_their_rounds`,
+`a_round_is_never_priced_at_less_than_a_token`, `only_the_most_recent_splits_count`.
+
 ## A chain its head will lead is priced as its head leading it
 
 **Rule (2026-10-18, FUTURE_WORK #3 (a)).** `parallax::chain_is_led_by_its_head`

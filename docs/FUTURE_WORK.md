@@ -80,8 +80,10 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
     by its own hops (network term 57.9 s → 3.6 s, same peers and passes), all in v0.3.243; two
     peers whose workers already chain are planned that chain (#3 (e)) and a led chain's peers are
     priced by their own published decode time (#3 (f)), and a peer handed a prompt is priced for
-    its cached opening on the next turn (#3 (c)), all fixed 10-18, unreleased; next, the
-    drafter's gain (#3 (d)) and a chain driven from here (#3 (a2)). Never tune the constant.
+    its cached opening on the next turn (#3 (c)), all fixed 10-18, and a split is priced for the
+    rounds it takes, a guessed token not crossing alone (#3 (d), 0.49 → 0.77 of its price on the
+    drafter rig), 10-19, all unreleased; next, a chain driven from here (#3 (a2)). Never tune the
+    constant.
 9. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
 10. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
@@ -660,7 +662,10 @@ under-priced by its length ÷ 64~~ (2.49x / 2.62x at 160 tokens on two peers' ha
 `max_tokens`; left is one reply's spread around its model's mean, which nothing before the reply
 can read; (c) ~~a peer's prompt cache is unpriced~~ (a repeated 505-token prompt priced
 20 s, read in ~0: 0.25x) — **fixed 2026-10-18, not yet released** (§ Closed): a peer is
-credited the opening of a prompt this node handed it in the last 300 s; (d) the drafter's gain (0.39x, 10-15); found by (a)'s check (2026-10-18, five requests on
+credited the opening of a prompt this node handed it in the last 300 s; (d) ~~the drafter's gain is
+unpriced~~ (0.39x, 10-15) — **fixed 2026-10-19, not yet released** (§ Closed): a segment of a split
+driven from here is priced for the rounds its model's splits took (tokens per round, measured where
+each round leaves); found by (a)'s check (2026-10-18, five requests on
 the live swarm): (e) ~~a led chain is charged a load that never happens~~ — **fixed 2026-10-18,
 not yet released** (§ Closed); (f) ~~a led chain's peers are never measured from here~~ (a
 warm two-peer 16-token reply priced 2.3 s of compute, took 19.4 s) — **fixed 2026-10-18, not yet
@@ -2663,6 +2668,24 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-19, not yet released** (#3 (d))
+- #3 (d) — **A split that guesses ahead is priced for the rounds it takes, not the tokens it
+  writes.** A split driven from here crosses its hops and runs its segments once a ROUND, and the
+  guess-check paths (the drafter's rounds and stream, the n-gram loop) carry several tokens a
+  round; the price charged every token a crossing, and the drafter rigs ran in 0.39 of it
+  (2026-10-15, n=25). Now each round is counted where it leaves (`RequestTrace::note_decode_round`
+  in `forward_through_segments` past the prompt pass, `forward_verify_through_segments`,
+  `dsd_stream`'s chunk), each finished split recorded per model by `PipelineExecutor::execute`
+  (`daemon::state::split_rounds`: tokens over rounds, the last 32 once there are 4, never below 1 —
+  vLLM's "mean acceptance length", the figure SmartSpec and SGLang steer by), and a segment of a
+  split driven from here priced for the passes over it (`NodeCandidate::rounds_entered`); a whole
+  model and a led chain keep the passes. Only for a request that may guess ahead
+  (`pipeline::request_may_guess_ahead`, asked by the router and before recording). Rig
+  `split_rig.sh repeat` with the 0.5B drafter (7B on the processor): 72 rounds for 120 tokens,
+  1.64 a round, and the asks priced with it read 0.77 of their price where a round a token reads
+  0.49. Counting, not deriving from α and γ: those give 2.26 tokens a round, and the stream sent
+  72 chunks whose time it took. Left: the price of one round (#3's per-term fit).
 
 **Closed 2026-10-18, not yet released** (#306; #3 (c); #3 (e); #3 (f); #252 (b) (2))
 - #3 (c) — **A conversation's next turn on the same peer is priced for what that peer already

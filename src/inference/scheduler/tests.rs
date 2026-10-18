@@ -772,6 +772,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         cold_load_ms_per_layer: 0.0,
         reply_tokens_at_most: None,
         reply_tokens_expected: None,
+        split_tokens_per_round: None,
         ring: Default::default(),
         stated_ms_per_layer: None,
         fresh_run_layers: None,
@@ -1046,6 +1047,7 @@ fn greedy_assign_multi_range_candidate() {
             cold_load_ms_per_layer: 0.0,
             reply_tokens_at_most: None,
             reply_tokens_expected: None,
+            split_tokens_per_round: None,
             ring: Default::default(),
             stated_ms_per_layer: None,
             fresh_run_layers: None,
@@ -1087,6 +1089,7 @@ fn greedy_assign_multi_range_candidate() {
             cold_load_ms_per_layer: 0.0,
             reply_tokens_at_most: None,
             reply_tokens_expected: None,
+            split_tokens_per_round: None,
             ring: Default::default(),
             stated_ms_per_layer: None,
             fresh_run_layers: None,
@@ -2121,6 +2124,7 @@ fn cost_cand(
         cold_load_ms_per_layer: 0.0,
         reply_tokens_at_most: None,
         reply_tokens_expected: None,
+        split_tokens_per_round: None,
         ring: Default::default(),
         stated_ms_per_layer: None,
         fresh_run_layers: None,
@@ -3526,6 +3530,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         cold_load_ms_per_layer: 0.0,
         reply_tokens_at_most: None,
         reply_tokens_expected: None,
+        split_tokens_per_round: None,
         ring: Default::default(),
         stated_ms_per_layer: None,
         fresh_run_layers: None,
@@ -3630,6 +3635,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         cold_load_ms_per_layer: 0.0,
         reply_tokens_at_most: None,
         reply_tokens_expected: None,
+        split_tokens_per_round: None,
         ring: Default::default(),
         stated_ms_per_layer: None,
         fresh_run_layers: None,
@@ -3734,6 +3740,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         cold_load_ms_per_layer: 0.0,
         reply_tokens_at_most: None,
         reply_tokens_expected: None,
+        split_tokens_per_round: None,
         ring: Default::default(),
         stated_ms_per_layer: None,
         fresh_run_layers: None,
@@ -5061,6 +5068,7 @@ fn the_next_turn_of_a_split_goes_to_the_peer_holding_its_opening() {
                     reply_tokens_at_most: None,
                     head_may_lead: false,
                     handed_off: Vec::new(),
+                    may_guess_ahead: false,
                 },
                 crate::types::KeepAsked::Unasked,
             )
@@ -6519,6 +6527,112 @@ fn a_reply_allowed_sixteen_tokens_is_priced_for_sixteen_passes() {
         "a model whose replies run 200 tokens is priced for 64"
     );
     assert_eq!(passes_recorded(plan().with_reply_of_at_most(16)), Some(16));
+}
+
+/// FUTURE_WORK #3 (d), 2026-10-19: a split driven from here runs its
+/// segments and crosses its hops once a ROUND, and a round of a guess-check
+/// path carries several tokens. Once this model's splits have yielded 3 tokens
+/// a round, the per-token terms of a split are priced for a third of the
+/// passes — and the prompt is not, and nothing changes for a request that may
+/// not guess ahead. The recorded prediction says what it assumed.
+#[test]
+fn a_split_whose_rounds_carry_three_tokens_is_priced_for_a_third_of_the_rounds() {
+    let (state, local, _b, _c) = processor_holder_beside_two_gpu_halves_with(600, 9.0, |c| {
+        c.inference.parallax_routing = false;
+    });
+    let near = NodeId([0xD1; 32]);
+    let model = ModelId("split-14b".into());
+    for i in 0..2 {
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: model.clone(),
+                index: i,
+            },
+            near.clone(),
+        );
+    }
+    state
+        .peer_registry
+        .insert(near.clone(), gpu_holder_info(&near, 3, 40.0));
+    state.connected_node_ids.insert(near.clone());
+    let scheduler =
+        PipelineScheduler::with_delegation_footprint(state.clone(), LOCAL_PROCESSOR_TPS, 8_000);
+
+    let priced = |plan: cached_prefix::PromptPlan| {
+        let request_id = uuid::Uuid::new_v4();
+        let trace = std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+            request_id,
+            "split-14b",
+            "chat",
+        ));
+        state.active_traces.insert(request_id, trace.clone());
+        let assignment = scheduler
+            .assemble_pipeline_for(
+                &model,
+                &local,
+                request_id,
+                super::Purpose::Route,
+                plan,
+                crate::types::KeepAsked::Unasked,
+            )
+            .unwrap();
+        assert!(
+            assignment.segments.len() >= 2 && assignment.segments.iter().any(|s| s.node_id == near),
+            "control: a split through the peer; got {:?}",
+            assignment.segments
+        );
+        trace.snapshot()
+    };
+    let plan = || cached_prefix::PromptPlan::from(Some(14_000)).with_reply_of_at_most(2_048);
+
+    let unmeasured = priced(plan().with_guessing_ahead(true));
+    assert_eq!(
+        unmeasured.assumed_tokens_per_round, None,
+        "control: nothing measured, one round a token"
+    );
+    for _ in 0..crate::daemon::state::split_rounds::SPLITS_BEFORE_TRUSTED {
+        state.metrics.split_rounds.record("split-14b", 300, 100);
+    }
+    let plain = priced(plan());
+    let guessing = priced(plan().with_guessing_ahead(true));
+    // Each plan books the route, so the queue term grows; the rest is fixed.
+    let per_token = |t: &crate::inference::trace::TraceSnapshot| {
+        t.predicted_terms
+            .map(|t| (t.compute_ms, t.network_ms, t.prefill_ms))
+    };
+    assert_eq!(
+        per_token(&plain),
+        per_token(&unmeasured),
+        "a request that may not guess ahead is priced as before"
+    );
+    assert_eq!(plain.assumed_tokens_per_round, None);
+    assert_eq!(guessing.assumed_tokens_per_round, Some(3.0));
+    assert_eq!(
+        guessing.assumed_forward_passes, plain.assumed_forward_passes,
+        "the reply is as long as it was; it takes fewer rounds"
+    );
+    let (p, g) = (
+        plain.predicted_terms.unwrap(),
+        guessing.predicted_terms.unwrap(),
+    );
+    assert!(p.compute_ms > 0, "control: the split has a compute term");
+    let ratio = p.compute_ms as f32 / g.compute_ms.max(1) as f32;
+    assert!(
+        (ratio - 3.0).abs() < 0.01,
+        "compute is paid once a round: {} vs {} ({ratio})",
+        p.compute_ms,
+        g.compute_ms
+    );
+    assert!(
+        g.network_ms * 3 <= p.network_ms + 3,
+        "every hop too: {} vs {}",
+        p.network_ms,
+        g.network_ms
+    );
+    assert_eq!(
+        p.prefill_ms, g.prefill_ms,
+        "the prompt is read once whatever the rounds"
+    );
 }
 
 /// `DELEGATE_MIN_TRUST` decides who may be handed a user's prompt in cleartext;

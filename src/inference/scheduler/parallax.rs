@@ -417,6 +417,28 @@ pub(super) fn chain_is_led_by_its_head(
             .all(|s| find(&s.node_id).is_some_and(|c| may_join_a_led_chain(c, local)))
 }
 
+/// The tokens a round the price of this chain assumed
+/// (`NodeCandidate::rounds_entered`), for the completion line: `None` for a
+/// whole model, a chain its head leads, or a split priced at one round a
+/// token (FUTURE_WORK #3 (d)).
+pub(super) fn chain_tokens_per_round(
+    segments: &[PipelineSegment],
+    candidates: &[NodeCandidate],
+    local: &NodeId,
+    num_layers: u32,
+) -> Option<f32> {
+    let [first, _, ..] = segments else {
+        return None;
+    };
+    if chain_is_led_by_its_head(segments, candidates, local) {
+        return None;
+    }
+    let c = candidates.iter().find(|c| c.node_id == first.node_id)?;
+    let passes = c.forward_passes();
+    let rounds = c.rounds_entered(first.layer_range, num_layers);
+    (rounds < passes).then(|| passes / rounds)
+}
+
 /// How many attempts one intact answer from `c` takes — see `vertex_cost`.
 fn attempts(c: &NodeCandidate) -> f32 {
     if c.expected_attempts.is_finite() && c.expected_attempts >= 1.0 {
@@ -610,7 +632,13 @@ fn vertex_cost_as(
     // where the reply may not use that many tokens — which is what weighs the
     // once-per-request terms below (the prompt, a load, a hand-off's one trip)
     // against the per-token ones for a short reply.
-    let passes = c.forward_passes();
+    // A chain driven from here is entered once a ROUND, which may carry
+    // several guessed tokens (`NodeCandidate::rounds_entered`, #3 (d)); a led
+    // chain's head guesses with what it holds, unmeasured here.
+    let passes = match role {
+        ChainRole::DrivenFromHere => c.rounds_entered(range, num_layers),
+        ChainRole::LeadsTheChain | ChainRole::InLedChain => c.forward_passes(),
+    };
     let compute_ms = per_layer_ms * layers * passes;
 
     // The asymmetry the model was missing. Every remote segment short of the
@@ -1848,6 +1876,7 @@ mod tests {
             cold_load_ms_per_layer: 0.0,
             reply_tokens_at_most: None,
             reply_tokens_expected: None,
+            split_tokens_per_round: None,
             ring: Default::default(),
             stated_ms_per_layer: None,
             fresh_run_layers: None,
@@ -4696,6 +4725,7 @@ mod transfer_cost_tests {
             cold_load_ms_per_layer: 0.0,
             reply_tokens_at_most: None,
             reply_tokens_expected: None,
+            split_tokens_per_round: None,
             ring: Default::default(),
             stated_ms_per_layer: None,
             fresh_run_layers: None,

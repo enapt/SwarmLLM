@@ -494,6 +494,10 @@ impl StreamRun<'_, '_> {
             SwarmError::Internal("a streamed reply ran past its checks' numbering".into())
         })?;
         self.turn += 1;
+        // A chunk is a round of the reply (FUTURE_WORK #3 (d)) — counted as
+        // one although it overlaps the chunks still in flight, so a stream's
+        // yield reads lower than it is, never higher.
+        self.state.note_decode_round(request_id);
 
         // This node's own layers before the peer's, one segment after another.
         let mut activations = super::pack_verify_tokens_to_le_bytes(&rows);

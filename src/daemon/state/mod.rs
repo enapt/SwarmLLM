@@ -37,6 +37,7 @@ mod repair;
 pub(crate) mod reply_lengths;
 pub(crate) mod retained_activations;
 pub(crate) mod retained_replies;
+pub(crate) mod split_rounds;
 mod tp_allreduce;
 
 pub use activity::{ActivityEvent, DashboardSignal, LoadedModelInfo};
@@ -1429,6 +1430,7 @@ impl SharedState {
                 network_coord: std::sync::RwLock::new(swarmllm_types::netcoord::NetworkCoord::new()),
                 network_coord_samples: dashmap::DashMap::new(),
                 reply_lengths: reply_lengths::ReplyLengths::default(),
+                split_rounds: split_rounds::SplitRounds::default(),
                 node_stats: RwLock::new(NodeStats::default()),
                 inference_requests_total: AtomicU64::new(0),
                 requests_served_atomic: AtomicU64::new(0),

@@ -839,7 +839,13 @@ pub(super) async fn execute_request(
                     &shared_state,
                     &request,
                 ),
-            );
+            )
+            // A split driven from here crosses its hops once a ROUND, and a
+            // round may carry several guessed tokens (FUTURE_WORK #3 (d)).
+            .with_guessing_ahead(crate::inference::pipeline::request_may_guess_ahead(
+                &shared_state,
+                &request,
+            ));
     if prompt_plan.cached_locally > 0 {
         tracing::info!(
             request_id = %request.id,

@@ -63,6 +63,13 @@ tiny forward scaled up to a long prompt priced one route at 17.6 h.
 To check the count specifically, compare `tokens` against
 `assumed_forward_passes` on the same line — the assumption is recorded rather
 than looked up, so an old log still says what the constant was when it ran.
+A split this node drove also prints `decode_rounds=` (the rounds its decode sent
+through the first segment, every guess-check path included; the prompt pass is
+not one) and, once its model has a measured figure and the request may guess
+ahead, `assumed_tokens_per_round=` — the divisor the price used
+(FUTURE_WORK #3 (d)). `tokens ÷ (decode_rounds + 1)` is what a round actually
+yielded; the planner's candidate line prints the same figure as
+`split_tokens_per_round`.
 **Do not tune anything from a single request**; see `docs/FUTURE_WORK.md`.
 
 This answers most questions on its own:

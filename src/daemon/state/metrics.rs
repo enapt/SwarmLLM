@@ -41,6 +41,12 @@ pub struct MetricsProviders {
     /// `SharedState::publish_request_trace`, the one place every finished
     /// request passes; read ONLY by the scheduler's candidate builder.
     pub reply_lengths: super::reply_lengths::ReplyLengths,
+    /// How many tokens a round of each model's recent splits yielded — what
+    /// the planner divides a split's per-token costs by (FUTURE_WORK #3 (d)).
+    /// Written ONLY by `PipelineExecutor::execute`, once per finished attempt
+    /// of a split this node drove; read ONLY by the scheduler's candidate
+    /// builder.
+    pub split_rounds: super::split_rounds::SplitRounds,
     pub inference_requests_total: AtomicU64,
     /// Mirror of node_stats.requests_served as an AtomicU64 — written from
     /// multiple async contexts. The RwLock-guarded field on NodeStats was
