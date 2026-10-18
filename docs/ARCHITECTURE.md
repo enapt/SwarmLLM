@@ -35,7 +35,7 @@ swarmllm/
 │   ├── config/    (mod, providers, credit, network, ops, node, inference)
 │   ├── daemon/    (mod, manifest, shard_loader, gpu_support (CUDA compute-capability floor + pre-Ampere CPU fallback), machine_memory (the ONE reading of how much memory this process may use: the host's figures under its cgroup's limit — a container's `--memory`, a systemd `MemoryMax`), metered (is the connection metered — NetworkManager, the Windows connection cost — and `SharedState::metered_hold`, the one answer to whether this node holds back what it does on its own: downloads nobody asked for, new work and parts for peers), dispatch/, startup, background, helpers, supervisor)
 │   │   └── state/        (mod, activity, canonical (which upload of each model this node uses — the only writer of `hf_sources`, `origin_claims`, `canonical_builds`; `fetch_model_header`), capacity, capacity_plan, credits, events, forward_streams (a streamed verify's forwards run in their stream's order, #4b), hf, lifetime (what this node served for others since it FIRST started, kept across restarts — #226), load_rate (how fast this node loads a model, kept across restarts so a restart does not price its first cold load at the prior), manifest_sync (announce-then-pull of model manifests: the versions this node has seen, the pulls in flight, each peer's answer budget — #91 (2); its dispatch half is `dispatch/manifest_sync`), metrics, models, peer_outliers (a peer failing a model on consecutive requests is left out of its plans for a while — Envoy's outlier ejection, never for a part only it holds), peer_speed (each node's speed per model, this node's too: deadlines keep cold samples, ranking reads warm work only, and a prompt is priced from warm forwards of at least 256 KB — #287), perf_history, relay, removed_shards, repair, retained_activations (what was sent to each segment, so a stand-in can be replayed it and take over mid-reply), retained_replies (fast-path replies kept for ResendTokens, #438), tp_allreduce)
-│   ├── network/   (manager/{mod,events,requests,tensors,identify,commands,connections,dht,shard_transfer,relay,upnp_watch (explains a router that refused UPnP; hands mappings back at shutdown)}, behaviour, discovery, protocol/{mod,encrypted,layer_forward,layer_result}, transport, relay, peer_cache, redact (address redaction for the pasteable diagnostics report), bandwidth (what this node actually puts on the wire — libp2p's transport counters, read back), helpers, pipeline_stream)
+│   ├── network/   (manager/{mod,events,requests,tensors,identify,commands,connections,dht,shard_transfer,relay,upnp_watch (explains a router that refused UPnP; hands mappings back at shutdown)}, behaviour, discovery, protocol/{mod,encrypted,layer_forward,layer_result}, transport, relay, peer_cache, redact (address redaction for the pasteable diagnostics report), bandwidth (what this node actually puts on the wire — libp2p's transport counters, read back), protocol_traffic (those bytes by the libp2p protocol each substream negotiated, read off the multistream-select line this node wrote — #91), helpers, pipeline_stream)
 │   ├── model/     (manifest, shard, distribution, registry, acquisition, reference (R150 get-model), canonical (one upload per model id: the swarm-wide ranking of uploads, `CanonicalBuild`, #151), huggingface/, auto_manage/, lora)
 │   │   ├── auto_manage/  (mod, manager, scoring, download, prune, scan, vram, parallax, wishlist, quant (R133 recommender), coverage (#231: a model its holders cannot run is fetched by the one machine chosen to carry it, and prune keeps the copies that carry it), target_hold (#286: the highest replica target of the last day, which prune sheds against, kept across restarts), test_support (test fixtures), canonical (background task: verify the swarm's upload of each model on HuggingFace, check every held part against it, and DELETE parts that are not its bytes — re-fetched through the repair queue from peers or HuggingFace; header staged in `<data_dir>/canonical/<model>`))
 │   │   └── huggingface/  (mod, download, private_types, probe, search, shards, watcher, tests)
@@ -666,8 +666,9 @@ must be announcements" — so the total is split by category in
 | `gossip_*` (+ `gossip_by_topic`) | GossipSub's own per-topic counters | floor — message length, not framing |
 | `shard_served_bytes` / `shard_fetched_bytes` | the choke point that applies the bandwidth cap | exact, and makes the cap's scope checkable |
 | `inference_out_bytes` / `inference_in_bytes` | **the codec** (`network/protocol/mod.rs`) | exact, including this protocol's 5-byte frame header |
-| `other_*` | the remainder | our own direct messages other than inference and parts (catch-ups, digests, peer exchange), DHT, identify, ping, relaying for others, and everything above's transport overhead |
+| `other_*` | the remainder | our own direct messages other than inference and parts (catch-ups, digests, peer exchange), Kademlia, identify, AutoNAT, relaying for others, gossip's envelopes and control messages, and every substream's negotiation. NOT noise, yamux or QUIC framing: the total itself is counted on substreams, above them |
 | `direct_by_kind` | **the codec**, every request-response frame by `kind` and `frame` (request / response), sent and received | exact frames; a BREAKDOWN of all direct traffic, inference and parts included — never subtracted from `other_*` |
+| `by_protocol` | **each connection's muxer** (`network/protocol_traffic.rs`), every substream by the protocol it negotiated, with `streams` | exact; a split of the WHOLE that adds up to `out_bytes` / `in_bytes` |
 
 - **Inference is counted in the CODEC, not at the send sites**, because
   `network.tensor_compression` defaults ON: the send site holds the
@@ -687,6 +688,19 @@ must be announcements" — so the total is split by category in
   rust; our own request-response frames can. `other_out_bytes` less the
   non-inference, non-part rows' `sent_bytes` (and less their framing below the
   codec) is libp2p's own protocols.
+- **`by_protocol` names libp2p's half too (#91 (2e)).** rust-libp2p hands a
+  behaviour its stream with no hook (go-libp2p counts per protocol on the
+  negotiated stream, `BandwidthCounter`), so the muxer of every connection is
+  wrapped — yamux through the builder's multiplexer argument (TCP, relayed
+  circuits), QUIC where it is added (`with_other_transport`, never
+  `with_quic()`; guard `every_transport_the_node_builds_is_metered_by_protocol`)
+  — and each substream is labelled from the multistream-select line THIS node
+  wrote: our proposal on a stream we open, our echo on one we accept. A label
+  is therefore a protocol this node speaks; a peer cannot add names. Counted on
+  the same substreams `libp2p-metrics` counts, so the rows add up to its totals
+  (`the_rows_add_up_to_the_transport_totals_on_tcp_and_quic`, over real TCP and
+  QUIC swarms). A relayed connection is in both twice: in its own protocols,
+  and sealed, in the relay protocol of the connection it rides on.
 
 ## Inference Pipeline
 

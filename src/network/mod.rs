@@ -6,6 +6,7 @@ pub mod manager;
 pub mod peer_cache;
 pub mod pipeline_stream;
 pub mod protocol;
+pub mod protocol_traffic;
 pub mod redact;
 pub mod relay;
 pub mod transport;

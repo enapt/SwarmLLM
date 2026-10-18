@@ -827,6 +827,13 @@ impl NetworkManager {
         let gossip_meter = shared_state.metrics.gossip.clone();
         let inference_traffic = shared_state.metrics.inference.clone();
         let direct_traffic = shared_state.metrics.direct_by_kind.clone();
+        // Where each substream's bytes are booked to the protocol it
+        // negotiated (`network::protocol_traffic`): every connection's muxer
+        // is wrapped — yamux through the builder's multiplexer argument (TCP,
+        // relayed circuits), QUIC where it is added — so the rows add up to
+        // the totals `with_bandwidth_metrics` counts on the same streams.
+        let by_protocol = shared_state.metrics.by_protocol.clone();
+        let quic_by_protocol = by_protocol.clone();
         let swarm = shared_state.metrics.bandwidth.clone().arm(|bw_registry| {
             let swarm = SwarmBuilder::with_existing_identity(keypair)
                 .with_tokio()
@@ -837,10 +844,30 @@ impl NetworkManager {
                     // NOTE: Do NOT call set_receive_window_size or set_max_buffer_size — those
                     // are deprecated and silently downgrade to yamux 0.12 which has severe
                     // substream opening delays (~30s between successful outbound requests).
-                    libp2p::yamux::Config::default,
+                    crate::network::protocol_traffic::metered_muxer(
+                        libp2p::yamux::Config::default,
+                        by_protocol.clone(),
+                    ),
                 )
                 .map_err(|e| SwarmError::Network(format!("TCP transport error: {e}")))?
-                .with_quic()
+                // QUIC, added the way `with_quic()` adds it (`or_transport` of
+                // `quic::tokio::Transport::new(quic::Config::new(key))`), with
+                // its connection wrapped: QUIC has no multiplexer argument.
+                .with_other_transport(|key| {
+                    use libp2p::core::Transport as _;
+                    libp2p::quic::tokio::Transport::new(libp2p::quic::Config::new(key)).map(
+                        move |(peer, connection), _| {
+                            (
+                                peer,
+                                crate::network::protocol_traffic::MeteredMuxer::new(
+                                    connection,
+                                    quic_by_protocol.clone(),
+                                ),
+                            )
+                        },
+                    )
+                })
+                .unwrap_or_else(|never| match never {})
                 // Wrap the transports with DNS resolution so `/dns4` / `/dns6` /
                 // `/dnsaddr` multiaddrs are dialable — without this, dialing a
                 // DNS-named peer (e.g. the default `swarmllm.duckdns.org` bootstrap
@@ -848,7 +875,13 @@ impl NetworkManager {
                 // "Multiaddr is not supported". Uses the system resolver.
                 .with_dns()
                 .map_err(|e| SwarmError::Network(format!("DNS transport error: {e}")))?
-                .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)
+                .with_relay_client(
+                    libp2p::noise::Config::new,
+                    crate::network::protocol_traffic::metered_muxer(
+                        libp2p::yamux::Config::default,
+                        by_protocol,
+                    ),
+                )
                 .map_err(|e| SwarmError::Network(format!("Relay client error: {e}")))?
                 // Count the bytes. This is the only phase of the builder where a
                 // transport can be wrapped, and it is after every other layer, so

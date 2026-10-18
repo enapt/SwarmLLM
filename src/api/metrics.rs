@@ -147,6 +147,26 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
             })
             .collect();
         obj.insert("direct_by_kind".into(), direct.into());
+        // Every byte by the libp2p protocol its substream negotiated
+        // (`ProtocolTrafficMeter`) — the one breakdown that names Kademlia,
+        // identify, relay and AutoNAT, and gossip's control traffic beside its
+        // messages. It adds up to `out_bytes` / `in_bytes`, so it is a split
+        // of the WHOLE, never of `other_*`.
+        let by_protocol: Vec<serde_json::Value> = shared
+            .metrics
+            .by_protocol
+            .totals()
+            .into_iter()
+            .map(|p| {
+                serde_json::json!({
+                    "protocol": p.protocol,
+                    "streams": p.streams,
+                    "sent_bytes": p.sent_bytes,
+                    "recv_bytes": p.recv_bytes,
+                })
+            })
+            .collect();
+        obj.insert("by_protocol".into(), by_protocol.into());
     }
     if let Some(g) = shared.metrics.gossip.totals() {
         // The counts ride beside the bytes because bytes alone cannot say WHY a

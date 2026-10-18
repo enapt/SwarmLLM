@@ -326,6 +326,11 @@ pub struct MetricsProviders {
     /// every frame, inference and parts included — never subtracted from the
     /// remainder beside them (`DirectKindMeter`).
     pub direct_by_kind: Arc<crate::network::bandwidth::DirectKindMeter>,
+    /// Every byte on every substream, by the libp2p protocol it negotiated —
+    /// Kademlia, identify, gossip, relay, AutoNAT and our own — counted in
+    /// each connection's muxer, so the rows add up to `bandwidth`'s totals
+    /// (`ProtocolTrafficMeter`).
+    pub by_protocol: Arc<crate::network::protocol_traffic::ProtocolTrafficMeter>,
 }
 
 /// How long a channel may keep refusing messages before the next drop is

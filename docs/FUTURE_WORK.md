@@ -66,9 +66,10 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    since #296.)
 7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
-   (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), unreleased). Next: the
-   3.5 KB/s that is not gossip, 63% of the upload — measure it with `direct_by_kind` ((2d),
-   unreleased), which names our own direct messages; the rest is libp2p's protocols.
+   (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), unreleased). The part
+   that is not gossip is 2.5 KB/s on 10-18 (4.1 out), and our own direct messages are only 0.19 of it
+   ((2d), `direct_by_kind`): the rest is libp2p's protocols. Next: name them with `by_protocol` ((2e),
+   unreleased) on the live node, then attack the largest share.
 8. **#3**, **#180** — the routing cost model mis-prices a split by regime (one peer's fit,
     2026-10-15: a measured per-visit hop 0.78, a `net:0` hop 1.53 under-priced, drafter arms 0.39
     unpriced), which keeps partial ranges off; fit per term from a second peer's traffic and
@@ -1008,8 +1009,19 @@ payload counts every request-response frame by message kind, request or answer, 
 codec (`network::bandwidth::DirectKindMeter`). libp2p cannot name its own protocols' bytes from rust
 (`libp2p-metrics` labels by transport only; go-libp2p's `GetBandwidthByProtocol` has no rust
 counterpart), so what `other_out_bytes` keeps beyond this list's non-inference, non-part rows is
-Kademlia, identify, ping and relay. Next: measure it on the live node (two readings an hour apart,
-idle) and attack the largest share. **(2c) fixed 2026-10-17, not yet released**: a restart gossiped every
+Kademlia, identify, ping and relay. **Measured 2026-10-18** (live node on the meter build, 7 peers,
+idle, 1.0 → 1.9 h up, a 3453 s window, `/api/admin/stats` twice): 4.1 KB/s out, 1.6 of it gossip,
+2.5 the remainder — and our own messages are **0.19 KB/s** of that (peer exchange answers 115 B/s,
+health pongs 55, key exchanges 15, receipts 5). The remainder is libp2p's: ~2.3 KB/s. Gossip's
+envelope (sender, sequence number, topic, a 64-byte signature — outside `gossip_sent_bytes`, which
+is message data) is ~135 B on each of 1.09 copies a second, ~150 B/s; IHAVE at a 10 s heartbeat
+adds perhaps as much. That leaves ~2 KB/s for Kademlia (110 shard records republished every 20 min,
+and the lists of up to 20 peers with their addresses every answer to a lookup carries), identify,
+AutoNAT and relay — estimates, so: **(2e) a per-protocol meter, 2026-10-18, not yet released**:
+`by_protocol` in the traffic payload counts every substream's bytes by the protocol it negotiated
+(`network::protocol_traffic`, read off the multistream-select line this node wrote), counted on the
+same substreams as the total and adding up to it (tested over real TCP and QUIC swarms). Next:
+measure it on the live node the same way and attack the largest share. **(2c) fixed 2026-10-17, not yet released**: a restart gossiped every
 manifest it holds in full, twice, a few seconds apart (§ Closed). Left: the
 mesh is still sized once at startup, from peers ever met rather than reachable now (a rig first
 before going further: a thinner mesh partitions sooner); (3) a both-direction traffic ceiling at the transport

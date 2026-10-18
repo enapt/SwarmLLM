@@ -2001,7 +2001,7 @@ timer is still firing** — reading `sent_msgs` as a publish rate is what made
 `swarm/regions` look like it was still on a timer after v0.3.196 change-gated
 it (measured after: 0.12 published/s, against 236 sent/s of pure relay).
 
-## What is the upload that is not gossip? (`direct_by_kind`, 2026-10-18, #91)
+## What is the upload that is not gossip? (`direct_by_kind`, `by_protocol`, 2026-10-18, #91)
 
 An idle node's `other_out_bytes` mixes two things no other counter separates:
 our own point-to-point messages (a newcomer's catch-up, manifest digests and
@@ -2018,14 +2018,29 @@ Read it as a RATE: take `/api/admin/stats` twice, an hour apart on an idle node
 - **Our share** = Σ `sent_bytes` over the rows that are neither inference
   (`LayerForward`, `LayerResult`, `TensorPayload`, `StreamingToken`, …) nor
   parts (`ShardTransfer`, `ShardData`).
-- **libp2p's share** ≈ Δ`other_out_bytes` − our share. It also absorbs every
-  frame's transport overhead (noise, yamux, QUIC), so it is a ceiling, not a
-  measurement of Kademlia alone.
+- **libp2p's share** ≈ Δ`other_out_bytes` − our share. It also holds gossip's
+  envelopes and control messages and every substream's negotiation, so it is a
+  ceiling, not a measurement of Kademlia alone. (Not noise, yamux or QUIC
+  framing: `out_bytes` is counted on substreams, above them.)
 
 ⚠ **Never subtract the whole list from `other_*`.** It counts inference and
 parts as well — the same bytes `inference_out_bytes` and `shard_*` already
 took out — so subtracting it counts them twice. An `Ack` row is the receipt nearly
 every message and forward request is answered with, so its count follows theirs.
+
+**`by_protocol` names libp2p's share (#91 (2e)).** Every substream's bytes, by
+the protocol it negotiated (`/swarmllm/kad/1.0.0`, `/ipfs/id/1.0.0`,
+`/meshsub/1.x.0`, `/libp2p/circuit/relay/0.2.0/{hop,stop}`,
+`/libp2p/autonat/2/*`, our request-response protocol, …), with `streams`
+opened. Difference two readings the same way. Two checks before trusting it:
+Σ`sent_bytes` = `out_bytes` (it is counted on the same substreams — a gap
+means a transport is not metered), and our request-response row ≥ Σ
+`direct_by_kind` `sent_bytes` (the codec counts frames; the row adds their
+negotiation). Gossip's control traffic is its `/meshsub/*` row less
+`gossip_sent_bytes`. `(unnegotiated)` is a stream that ended before a protocol
+was chosen; `(unreadable)` should never appear (it means the reading of the
+opening is wrong). A relayed connection appears twice, as in `out_bytes`:
+under its own protocols, and sealed under the relay protocol.
 
 ## "no receipt acknowledgement within Ns" — late, or missing? (2026-08-25)
 
