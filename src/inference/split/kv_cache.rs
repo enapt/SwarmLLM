@@ -1634,8 +1634,17 @@ impl KvCacheStore {
     /// the graph can then neither be replayed nor trusted.
     ///
     /// A recurrent layer (Qwen 3.5's DeltaNet) keeps no KV cache: it holds when
-    /// the buffers its next step writes into exist (`SsmState`, #228 (4)).
-    pub(crate) fn every_cache_holds(&self, key: &str, positions: usize) -> bool {
+    /// the buffers its next step writes into exist (`SsmState`, #228 (4)). A
+    /// slot `keeps_no_cache` names stays empty by design and holds too — a
+    /// Gemma 4 E2B/E4B layer attending an earlier layer's cache
+    /// (`SplitModel::slot_keeps_no_cache`, #295); read as a cache yet to be
+    /// built, it kept every step of those models from being captured.
+    pub(crate) fn every_cache_holds(
+        &self,
+        key: &str,
+        positions: usize,
+        keeps_no_cache: impl Fn(usize) -> bool,
+    ) -> bool {
         self.caches.get(key).is_some_and(|entry| {
             !entry.layers.is_empty()
                 && entry
@@ -1647,6 +1656,7 @@ impl KvCacheStore {
                             .all_caches()
                             .iter()
                             .all(|c| c.all_data().is_some() && c.reach() >= positions),
+                        None if keeps_no_cache(i) => true,
                         None => entry
                             .ssm_states
                             .get(i)
@@ -2462,7 +2472,7 @@ mod tests {
         let store = KvCacheStore::new(std::time::Duration::from_secs(600));
         let key = KvCacheStore::cache_key("m", "r");
         assert!(
-            !store.every_cache_holds(&key, 1),
+            !store.every_cache_holds(&key, 1, |_| false),
             "no entry yet: the first append allocates"
         );
         let fill = |layer: usize| {
@@ -2474,7 +2484,7 @@ mod tests {
         };
         fill(0);
         assert!(
-            !store.every_cache_holds(&key, 6),
+            !store.every_cache_holds(&key, 6, |_| false),
             "a layer with no cache yet allocates on its first append"
         );
         fill(1);
@@ -2483,10 +2493,10 @@ mod tests {
             capacity > 6,
             "one growth quantum holds more than the prompt"
         );
-        assert!(store.every_cache_holds(&key, 6));
-        assert!(store.every_cache_holds(&key, capacity));
+        assert!(store.every_cache_holds(&key, 6, |_| false));
+        assert!(store.every_cache_holds(&key, capacity, |_| false));
         assert!(
-            !store.every_cache_holds(&key, capacity + 1),
+            !store.every_cache_holds(&key, capacity + 1, |_| false),
             "one position past the buffer grows it"
         );
     }
@@ -3207,7 +3217,7 @@ mod tests {
             entry.layers = vec![Some(filled(&dev, 8)), None];
             entry.ssm_states = vec![None, Some(SsmState::new(slot(), 8))];
         }
-        assert!(!store.every_cache_holds(&key, 8));
+        assert!(!store.every_cache_holds(&key, 8, |_| false));
         {
             let mut entry = store.get_or_create_keyed(&key, 2);
             entry.ssm_states[1]
@@ -3215,7 +3225,30 @@ mod tests {
                 .unwrap()
                 .advance(slot(), 9, true);
         }
-        assert!(store.every_cache_holds(&key, 8));
+        assert!(store.every_cache_holds(&key, 8, |_| false));
+    }
+
+    /// A Gemma 4 E2B/E4B layer that attends an earlier layer's cache keeps
+    /// none of its own: its empty slot holds a captured step, where an empty
+    /// slot of any other layer is a cache still to be built (#295).
+    #[test]
+    fn a_layer_that_keeps_no_cache_holds_a_captured_step() {
+        let dev = candle_core::Device::Cpu;
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let key = KvCacheStore::cache_key("m", "r");
+        {
+            let mut entry = store.get_or_create_keyed(&key, 3);
+            entry.layers = vec![Some(filled(&dev, 8)), None, Some(filled(&dev, 8))];
+        }
+        assert!(
+            !store.every_cache_holds(&key, 8, |_| false),
+            "an empty slot of a layer that keeps a cache allocates on its first append"
+        );
+        assert!(store.every_cache_holds(&key, 8, |slot| slot == 1));
+        assert!(
+            !store.every_cache_holds(&key, 8, |slot| slot == 0),
+            "a slot is excused only by its own layer"
+        );
     }
 
     #[test]
@@ -3841,8 +3874,8 @@ mod tests {
         assert!(reach > 400);
         store.get_or_create_keyed(&key, 1).layers[0] = Some(kv);
         assert_eq!(store.allocated_positions(&key), reach);
-        assert!(store.every_cache_holds(&key, 401));
-        assert!(!store.every_cache_holds(&key, reach + 1));
+        assert!(store.every_cache_holds(&key, 401, |_| false));
+        assert!(!store.every_cache_holds(&key, reach + 1, |_| false));
     }
 
     /// The slide copies the newest positions, so it never runs on a cache

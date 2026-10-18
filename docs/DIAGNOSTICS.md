@@ -2139,6 +2139,32 @@ the same sitting. It agreed with a reply streamed through a node within 3% on Qw
 (FUTURE_WORK #228 (7)). Not `SWARMLLM_PROFILE`'s totals: a forward on a card returns before
 the card has finished, so they undercount.
 
+Every reference family whole on the RTX 3070 Laptop, 2026-10-19 (live node stopped, Windows up
+~37 h; ours two runs, llama.cpp `4b1a27f` the MEDIAN of its samples — its `avg_ts` can carry one
+outlier sample; tokens a second). Rows marked † were re-measured after FUTURE_WORK #307 and #295 (a):
+
+| model | ours | llama.cpp | ratio |
+|---|---|---|---|
+| Llama 3.1 8B Q4_K_M | 57.7-60.2 | 60.9 | 0.97 |
+| Mistral 7B v0.3 Q4_K_M | 59.5-61.7 | 62.9 | 0.96 |
+| Llama 3.2 3B Q4_K_M | 107.6-110.6 | 116.3 | 0.94 |
+| Qwen2.5-Coder 7B Q4_K_M | 56.8-57.1 | 61.2 | 0.93 |
+| Llama 3.2 1B Q8_0 | 174.3-174.8 | 189.4 | 0.92 |
+| Qwen3 1.7B Q8_0 | 120.6-121.7 | 135.1 | 0.90 |
+| Gemma 3 4B Q4_K_M † | 78.6 | 87.9 | 0.89 |
+| Phi-4-mini Q4_K_M † | 91.8-92.2 | 103.1 | 0.89 |
+| Gemma 2 2B Q4_K_M | 108.2-116.8 | 126.7 | 0.89 |
+| Phi-3.5-mini Q4_K_M | 83.0-93.8 | 100.0 | 0.88 |
+| GLM-4 9B Q4_K_M | 41.5-42.0 | 47.7 | 0.87 |
+| Gemma 3 1B Q4_K_M † | 162.5-164.1 | 201.3 | 0.81 |
+| TinyLlama 1.1B Q4_K_M † | 236.2-241.0 | 299.2 | 0.80 |
+| Qwen 3.5 0.8B Q8_0 † | 142.2-142.9 | 212.9 | 0.67 |
+| Gemma 4 E2B Q4_K_M † | 60.7-62.8 | 114.6 | 0.54 |
+| Qwen2.5 0.5B **F16** | 107.4-115.6 | 227.6 | 0.49 |
+
+The open gaps: unquantized weights (FUTURE_WORK #308), small dense models (#309), Qwen 3.5
+(#228), Gemma 4 E2B/E4B (#295).
+
 ### `examples/constrained_node_test.sh` — a SMALL node, reproduced locally
 
 Every memory defect reported from the field since #452 (#454-#457, #461-#468)

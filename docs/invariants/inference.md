@@ -5092,9 +5092,23 @@ a `feed_forward_length` per layer — 6,144 to layer 14, 12,288 after):
   refuses with `PromptPrivacyUnavailable`; the loader refuses a partial range; the local
   embedder refuses it; a forward handed hidden states (`forward_pre_embedded`, a later segment)
   is refused; tensor parallelism refuses such a layer.
-- **A decode step on a card is not captured** (`decode_graph_ineligibility`: "per-layer inputs
-  gathered on the processor") — each step's rows are a host-to-card copy, which a capture would
-  replay from a stale address (FUTURE_WORK #295).
+- **A decode step on a card is captured since 2026-10-19** (FUTURE_WORK #295). Until then
+  `decode_graph_ineligibility` declined such a model outright, for two reasons. (1) Each step's
+  rows are a host-to-card copy, which a capture replays from a stale host address (§ "A decode
+  step can go to the card as one CUDA graph"). They are now gathered and copied BEFORE the
+  capture (`PerLayerInputs::rows_on`), and the recorded forward builds the inputs from that card
+  buffer (`executor::RecordedStep::per_layer_rows` → `PerLayerInputs::forward_from_rows`: the
+  same operations, split at the copy, so bit-identical), the way a peer's hidden state is moved
+  before the capture. (2) A shared layer's empty cache slot read as a cache still to be built,
+  so `KvCacheStore::every_cache_holds` would have refused every step. It now takes
+  `keeps_no_cache` (`SplitModel::slot_keeps_no_cache`: `kv_source.is_some()`); pinned by
+  `a_layer_that_keeps_no_cache_holds_a_captured_step`, which fails without it. Measured whole on
+  the RTX 3070 Laptop (live node stopped, Windows up 39 h, 160-token replies, graph vs
+  `SWARMLLM_CUDA_GRAPH=0` alternated twice, one binary): E2B Q4_K_M 44.6 / 49.1 → 62.8 / 60.7
+  tokens a second, E4B Q4_K_M 39.9 / 33.9 → 50.3 / 49.9. A 600-token E2B reply ran 48.1 → 59.0,
+  with one rebuild. Every capture was accepted (no "capture refused" line), and replies were
+  identical on every arm. llama.cpp reads 114.6 on the E2B (median sample, same day), so half the
+  gap is still open.
 
 **Verified.** Tiny files (`examples/make_tiny_gemma_gguf.py` ARCH=gemma4 QK_STD=0.25, 12 layers
 at period 6; `SHARED=6` so the last kept layer is global, as llama.cpp requires), ours against

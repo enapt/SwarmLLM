@@ -96,10 +96,28 @@ impl PerLayerInputs {
     /// `x0`'s device: `ids` the prompt's tokens (`[b, seq]`), `x0` their
     /// embedding as the first layer reads it (`[b, seq, n_embd]`, scaled).
     pub(crate) fn forward(&self, ids: &Tensor, x0: &Tensor) -> candle_core::Result<Tensor> {
+        let rows = self.rows_on(ids, x0.device())?;
+        self.forward_from_rows(&rows, x0)
+    }
+
+    /// Each token's row of the table, scaled by `√width`, on `device` —
+    /// `[tokens, layers × width]`. The table is in the machine's memory, so this
+    /// is the forward's one host→device copy: a decode step recorded as a CUDA
+    /// graph makes it BEFORE its capture (`executor::RecordedStep`), where a
+    /// copy inside would be replayed from a stale host address (#295).
+    pub(crate) fn rows_on(&self, ids: &Tensor, device: &Device) -> candle_core::Result<Tensor> {
+        (self.rows(ids)? * (self.width as f64).sqrt())?.to_device(device)
+    }
+
+    /// [`Self::forward`] from rows [`Self::rows_on`] already put on `x0`'s
+    /// device — every operation on that device.
+    pub(crate) fn forward_from_rows(
+        &self,
+        rows: &Tensor,
+        x0: &Tensor,
+    ) -> candle_core::Result<Tensor> {
         let (b, seq, n_embd) = x0.dims3()?;
-        let rows = (self.rows(ids)?.reshape((b, seq, self.layers, self.width))?
-            * (self.width as f64).sqrt())?
-        .to_device(x0.device())?;
+        let rows = rows.reshape((b, seq, self.layers, self.width))?;
         let proj = (self.model_proj.forward(x0)? * (1.0 / (n_embd as f64).sqrt()))?;
         let proj = self
             .proj_norm

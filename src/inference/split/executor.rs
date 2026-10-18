@@ -45,11 +45,20 @@ fn window_overflow_is_a_finished_reply(seq_len: usize, index_pos: usize) -> bool
     seq_len == 1 && index_pos > 0
 }
 
-/// Called after each layer of a forward with the layer's index (within the
-/// segment) and the residual stream, which it hands back — possibly moved.
-/// A CUDA graph capture uses it to launch the step in groups
-/// (`forward_decode_as_graph`); every other forward passes `None`.
-type LayerEndHook<'a> = Option<&'a mut dyn FnMut(usize, Residual) -> Result<Residual, SwarmError>>;
+/// What only a decode step being recorded as a CUDA graph hands its forward
+/// (`decode_step_with_graph`); every other forward passes `None`.
+struct RecordedStep<'a> {
+    /// Called after each layer with the layer's index (within the segment)
+    /// and the residual stream, which it hands back — possibly moved — so the
+    /// step is launched in groups while the next is recorded.
+    at_layer_end: &'a mut dyn FnMut(usize, Residual) -> Result<Residual, SwarmError>,
+    /// The step's per-layer rows (Gemma 4 E2B/E4B,
+    /// `per_layer::PerLayerInputs::rows_on`), gathered on the processor and
+    /// copied to the card BEFORE the capture began. Made inside it, that copy
+    /// is replayed from a host address that no longer holds this step's rows,
+    /// and the capture is refused (`htod_copies_so_far`, #295).
+    per_layer_rows: Option<&'a Tensor>,
+}
 
 impl SplitModel {
     /// Build an ADDITIVE causal mask: `0.0` where a query may attend, `-inf`
@@ -619,12 +628,9 @@ impl SplitModel {
         if !self.layer_devices.is_empty() {
             return Some("the model is split between the card and the processor");
         }
-        // Each step's per-layer rows are gathered on the processor and copied
-        // to the card — a host copy a capture would replay from a stale
-        // address (`htod_copies_so_far`).
-        if self.per_layer_inputs.is_some() {
-            return Some("per-layer inputs gathered on the processor (Gemma 4 E2B/E4B)");
-        }
+        // Gemma 4 E2B/E4B's per-layer rows are gathered on the processor; a
+        // captured step copies them to the card BEFORE its capture
+        // (`RecordedStep::per_layer_rows`, #295).
         for layer in &self.layers {
             let ffn = match layer {
                 LayerVariant::Dense(lw) => &lw.ffn,
@@ -710,7 +716,10 @@ impl SplitModel {
         let ready = graph
             .template(all_positions, positions)
             .filter(|_| {
-                follows && kv_cache_store.every_cache_holds(&cache_key, index_pos + positions)
+                follows
+                    && kv_cache_store.every_cache_holds(&cache_key, index_pos + positions, |slot| {
+                        self.slot_keeps_no_cache(slot)
+                    })
             })
             .cloned();
         let template = match ready {
@@ -734,8 +743,18 @@ impl SplitModel {
         };
         // Everything that crosses from the host happens BEFORE the capture:
         // the input (a hidden state from the previous node arrives on the
-        // processor) and the tensor the result is copied into.
+        // processor), the tensor the result is copied into, and Gemma 4
+        // E2B/E4B's per-layer rows, gathered on the processor from the step's
+        // tokens (#295) and read by the graph from a card buffer made here, as
+        // `input` is.
         let device = self.device.clone();
+        let per_layer_rows = match &self.per_layer_inputs {
+            Some(p) if !skip_embedding && self.tok_embeddings.is_some() => Some(
+                p.rows_on(input, &device)
+                    .map_err(|e| SwarmError::Internal(format!("per-layer rows: {e}")))?,
+            ),
+            _ => None,
+        };
         // Token ids arrive as i64 from the host and as u32 from the card's own
         // argmax — the drafter feeds both into one conversation — and the
         // embedding casts i64 to u32. Inside the capture that cast is one more
@@ -795,7 +814,10 @@ impl SplitModel {
                 skip_embedding,
                 all_positions,
                 None,
-                Some(&mut at_layer_end),
+                Some(RecordedStep {
+                    at_layer_end: &mut at_layer_end,
+                    per_layer_rows: per_layer_rows.as_ref(),
+                }),
             )?;
             // The step's own output is graph memory, freed inside the graph
             // when `step` drops at the end of this closure; `out` was made
@@ -839,7 +861,7 @@ impl SplitModel {
         skip_embedding: bool,
         all_positions: bool,
         skip_mask: Option<&[bool]>,
-        mut at_layer_end: LayerEndHook<'_>,
+        mut recording: Option<RecordedStep<'_>>,
     ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
         // Skip the clock_gettime syscall when DEBUG tracing is off — fires per
         // token per layer-forward, and the elapsed time is consumed only by
@@ -891,7 +913,10 @@ impl SplitModel {
         let (layer_in, per_layer_inputs) = if is_first && !skip_embedding {
             // First segment: input is token IDs → apply embedding
             let embedded = self.embed_tokens(&input)?;
-            let per_layer = self.per_layer_inputs_for(&input, &embedded)?;
+            let per_layer = match recording.as_ref().and_then(|r| r.per_layer_rows) {
+                Some(rows) => self.per_layer_inputs_from_rows(rows, &embedded)?,
+                None => self.per_layer_inputs_for(&input, &embedded)?,
+            };
             (embedded, per_layer)
         } else {
             // Non-first segment or pre-embedded: input is already hidden states
@@ -1342,8 +1367,8 @@ impl SplitModel {
                         hidden = Residual::Ready(taken);
                     }
                 }
-                if let Some(hook) = at_layer_end.as_mut() {
-                    hidden = hook(layer_idx, hidden)?;
+                if let Some(recording) = recording.as_mut() {
+                    hidden = (recording.at_layer_end)(layer_idx, hidden)?;
                 }
             }
             Ok(hidden)
@@ -1704,6 +1729,28 @@ impl SplitModel {
             .map(|p| p.forward(input, embedded))
             .transpose()
             .map_err(|e| SwarmError::Internal(format!("per-layer inputs: {e}")))
+    }
+
+    /// [`Self::per_layer_inputs_for`] from the step's rows, already on the
+    /// card ([`RecordedStep::per_layer_rows`]).
+    fn per_layer_inputs_from_rows(
+        &self,
+        rows: &Tensor,
+        embedded: &Tensor,
+    ) -> Result<Option<Tensor>, SwarmError> {
+        self.per_layer_inputs
+            .as_ref()
+            .map(|p| p.forward_from_rows(rows, embedded))
+            .transpose()
+            .map_err(|e| SwarmError::Internal(format!("per-layer inputs: {e}")))
+    }
+
+    /// Whether cache slot `slot` stays empty by design: its layer attends an
+    /// earlier layer's cache (Gemma 4 E2B/E4B, `LayerWeights::kv_source`) and
+    /// computes no K or V of its own — what `KvCacheStore::every_cache_holds`
+    /// must not read as a cache yet to be built.
+    fn slot_keeps_no_cache(&self, slot: usize) -> bool {
+        matches!(self.layers.get(slot), Some(LayerVariant::Dense(lw)) if lw.kv_source.is_some())
     }
 
     /// A model whose layers read per-layer inputs is handed hidden states
