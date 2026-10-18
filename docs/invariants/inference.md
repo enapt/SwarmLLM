@@ -5096,10 +5096,10 @@ a `feed_forward_length` per layer — 6,144 to layer 14, 12,288 after):
   `decode_graph_ineligibility` declined such a model outright, for two reasons. (1) Each step's
   rows are a host-to-card copy, which a capture replays from a stale host address (§ "A decode
   step can go to the card as one CUDA graph"). They are now gathered and copied BEFORE the
-  capture (`PerLayerInputs::rows_on`), and the recorded forward builds the inputs from that card
-  buffer (`executor::RecordedStep::per_layer_rows` → `PerLayerInputs::forward_from_rows`: the
-  same operations, split at the copy, so bit-identical), the way a peer's hidden state is moved
-  before the capture. (2) A shared layer's empty cache slot read as a cache still to be built,
+  capture (`PerLayerInputs::rows_on`), and the recorded forward built the inputs from that card
+  buffer (`executor::Prepared::PerLayerRows` → `PerLayerInputs::forward_from_rows`: the same
+  operations, split at the copy, so bit-identical), the way a peer's hidden state is moved before
+  the capture. (2) A shared layer's empty cache slot read as a cache still to be built,
   so `KvCacheStore::every_cache_holds` would have refused every step. It now takes
   `keeps_no_cache` (`SplitModel::slot_keeps_no_cache`: `kv_source.is_some()`); pinned by
   `a_layer_that_keeps_no_cache_holds_a_captured_step`, which fails without it. Measured whole on
@@ -5108,7 +5108,25 @@ a `feed_forward_length` per layer — 6,144 to layer 14, 12,288 after):
   tokens a second, E4B Q4_K_M 39.9 / 33.9 → 50.3 / 49.9. A 600-token E2B reply ran 48.1 → 59.0,
   with one rebuild. Every capture was accepted (no "capture refused" line), and replies were
   identical on every arm. llama.cpp reads 114.6 on the E2B (median sample, same day), so half the
-  gap is still open.
+  gap was still open.
+- **The rest was graph memory crossing groups (2026-10-19, the same day).** With the inputs built
+  in the first group, the E2B step was HOST-bound: `SWARMLLM_PROFILE` (no sync, graphs on) read a
+  14 ms forward on the host against 3-4 ms for Gemma 3 1B and 4B, and the rate moved with the group
+  size as no other family's does (layers a group 1 / 2 / 4 / whole: 41 / 61-64 / 80-83 / 61; the
+  2026-09-30 table has every other family within 3%). Profile stages added that day split the
+  "unattributed" time: the group boundaries took 8.8-9.9 ms, and of that **launching** the 17
+  groups took 5.8 ms (Gemma 3 4B: 0.4). The inputs are graph-ALLOCATED memory that every later
+  group reads, and CUDA's guide (Programming Guide § 4.2.5, graph memory nodes) says "physical
+  pages cannot be reused if they are bound to more than one executing graph at the same time" and
+  that mappings may be updated "during graph instantiation, launch, or execution" — "relatively
+  expensive". The token embedding and the per-layer inputs are now built BEFORE the capture, in
+  pool memory (`executor::Prepared::Inputs`); the launches took 0.7 ms. One binary, arms
+  alternated twice, 160-token replies, Windows up 40 h: E2B 60.4 / 60.9 → 93.3 / 92.9 tokens a
+  second (0.81 of llama.cpp), E4B 51.3 / 50.3 → 60.4 / 59.8; at four layers a group the old arm
+  read 79.8-81.4 and the new 90.3-90.8, so two stays the size. Replies identical on all 16 runs.
+  A/B `SWARMLLM_PER_LAYER_INPUTS=in-graph`. **The rule it leaves: no memory a group allocates may
+  be read by a later group** — anything every layer reads is made before the capture, like the
+  parked residual stream (`DecodeGraph::boundaries`).
 
 **Verified.** Tiny files (`examples/make_tiny_gemma_gguf.py` ARCH=gemma4 QK_STD=0.25, 12 layers
 at period 6; `SHARED=6` so the last kept layer is global, as llama.cpp requires), ours against

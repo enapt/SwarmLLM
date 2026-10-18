@@ -2141,7 +2141,7 @@ the card has finished, so they undercount.
 
 Every reference family whole on the RTX 3070 Laptop, 2026-10-19 (live node stopped, Windows up
 ~37 h; ours two runs, llama.cpp `4b1a27f` the MEDIAN of its samples — its `avg_ts` can carry one
-outlier sample; tokens a second). Rows marked † were re-measured after FUTURE_WORK #307 and #295 (a):
+outlier sample; tokens a second). Rows marked † were re-measured after FUTURE_WORK #307 and #295 (a)/(b):
 
 | model | ours | llama.cpp | ratio |
 |---|---|---|---|
@@ -2157,13 +2157,13 @@ outlier sample; tokens a second). Rows marked † were re-measured after FUTURE_
 | Phi-3.5-mini Q4_K_M | 83.0-93.8 | 100.0 | 0.88 |
 | GLM-4 9B Q4_K_M | 41.5-42.0 | 47.7 | 0.87 |
 | Gemma 3 1B Q4_K_M † | 162.5-164.1 | 201.3 | 0.81 |
+| Gemma 4 E2B Q4_K_M † | 92.9-93.3 | 114.6 | 0.81 |
 | TinyLlama 1.1B Q4_K_M † | 236.2-241.0 | 299.2 | 0.80 |
 | Qwen 3.5 0.8B Q8_0 † | 142.2-142.9 | 212.9 | 0.67 |
-| Gemma 4 E2B Q4_K_M † | 60.7-62.8 | 114.6 | 0.54 |
 | Qwen2.5 0.5B **F16** | 107.4-115.6 | 227.6 | 0.49 |
 
-The open gaps: unquantized weights (FUTURE_WORK #308), small dense models (#309), Qwen 3.5
-(#228), Gemma 4 E2B/E4B (#295).
+The open gaps: unquantized weights (FUTURE_WORK #308), small models' per-step cost (#309, the
+E2B included), Qwen 3.5 (#228).
 
 ### `examples/constrained_node_test.sh` — a SMALL node, reproduced locally
 
@@ -2293,6 +2293,13 @@ submission COUNT, not bandwidth".
    binary is stripped. First use (2026-09-24): 22 of TinyLlama's 24 copies per
    token were one per layer, attention copying the whole V cache
    (`layers::value_for_matmul`) — where the plan had read them as fixed per token.
+3d. **Is a captured step bound by the HOST?** `SWARMLLM_PROFILE=1` alone, graphs on: the
+   `total` is then the host's time to record and launch the step, beside `test-split`'s ms a step.
+   Near the step time = host-bound (Gemma 4 E2B: 14 of 16 ms; Gemma 3 4B: 4 of 12.7). The stage
+   `cuda graph groups but the last` and its `of which:` rows (end / update / launch) price the
+   group boundaries; a LAUNCH far above other models' (5.8 ms a step against 0.4) is graph memory
+   one group allocated and a later group reads — FUTURE_WORK #295 (b),
+   `.claude/rules/arch-inference.md` § "A decode step goes to the card as CUDA graphs".
 4. **Where inside a layer?** `SWARMLLM_PROFILE=1` **plus**
    `SWARMLLM_PROFILE_SYNC=1` for correct per-stage attribution on CUDA.
    ⚠ **Read the two runs for different questions.** Sync inserts a

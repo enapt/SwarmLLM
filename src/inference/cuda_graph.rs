@@ -210,14 +210,16 @@ impl Cutter<'_> {
     /// copied into memory made OUTSIDE the capture ([`DecodeGraph::boundaries`]).
     /// An `Err` (`GROUP_REFUSED`) means stop the forward.
     pub(crate) fn cut(&mut self) -> Result<(), SwarmError> {
+        let began = std::time::Instant::now();
         #[cfg(feature = "candle-cuda")]
-        {
-            self.session.cut()
-        }
+        let cut = self.session.cut();
         #[cfg(not(feature = "candle-cuda"))]
-        {
-            Ok(())
-        }
+        let cut = Ok(());
+        crate::inference::prof::add(
+            crate::inference::prof::Stage::GraphGroups,
+            began.elapsed().as_nanos() as u64,
+        );
+        cut
     }
 }
 
@@ -1129,13 +1131,24 @@ mod cuda {
             Ok(())
         }
 
-        /// End the current group's capture, update (or build) its graph, launch it.
-        fn end_and_launch(&mut self) -> Result<(), Refusal> {
+        /// End the current group's capture, update (or build) its graph, launch
+        /// it. `report`: time each call into the profile's nested stages — the
+        /// groups a forward cuts, not the step's last, which closes after the
+        /// forward's report (gotcha #841).
+        fn end_and_launch(&mut self, report: bool) -> Result<(), Refusal> {
+            use crate::inference::prof::{add, Stage};
+            let timed = |stage: Stage, since: std::time::Instant| {
+                if report {
+                    add(stage, since.elapsed().as_nanos() as u64);
+                }
+            };
             let stream = self.dev.cuda_stream();
             let ctx = stream.context();
             self.capturing = false;
+            let began = std::time::Instant::now();
             // SAFETY: the stream this thread began capturing.
             let ended = unsafe { result::stream::end_capture(stream.cu_stream()) };
+            timed(Stage::GraphEnd, began);
             let copies = htod_copies_so_far().wrapping_sub(self.copies_before);
             // A buffer dropped inside a broken capture records its failed free
             // on the context, where it would surface as the error of some
@@ -1159,6 +1172,7 @@ mod cuda {
                 self.execs.resize_with(self.group + 1, || None);
             }
             let slot = &mut self.execs[self.group];
+            let began = std::time::Instant::now();
             let updated = slot.as_ref().is_some_and(|x| {
                 // SAFETY: zeroed is a valid bit pattern for this plain C
                 // struct, and the driver writes it before returning.
@@ -1195,9 +1209,13 @@ mod cuda {
                 });
                 self.all_updated = false;
             }
+            timed(Stage::GraphUpdate, began);
             let x = slot.as_ref().expect("set just above");
+            let began = std::time::Instant::now();
             // SAFETY: a live exec, launched on the stream it was captured from.
-            if let Err(e) = unsafe { result::graph::launch(x.raw, stream.cu_stream()) } {
+            let launched = unsafe { result::graph::launch(x.raw, stream.cu_stream()) };
+            timed(Stage::GraphLaunch, began);
+            if let Err(e) = launched {
                 *slot = None;
                 return Err(refused("the graph would not launch", e));
             }
@@ -1222,7 +1240,7 @@ mod cuda {
 
         pub(super) fn cut(&mut self) -> Result<(), SwarmError> {
             if self.refusal.is_none() {
-                let next = self.end_and_launch().and_then(|()| {
+                let next = self.end_and_launch(true).and_then(|()| {
                     self.group += 1;
                     self.begin()
                 });
@@ -1272,7 +1290,7 @@ mod cuda {
             session.abandon();
             return Err(refused(super::FORWARD_FAILED, e));
         }
-        session.end_and_launch()?;
+        session.end_and_launch(false)?;
         Ok((
             session.all_updated,
             std::mem::take(&mut session.refused_updates),

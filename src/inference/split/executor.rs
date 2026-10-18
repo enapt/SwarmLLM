@@ -52,12 +52,65 @@ struct RecordedStep<'a> {
     /// and the residual stream, which it hands back — possibly moved — so the
     /// step is launched in groups while the next is recorded.
     at_layer_end: &'a mut dyn FnMut(usize, Residual) -> Result<Residual, SwarmError>,
-    /// The step's per-layer rows (Gemma 4 E2B/E4B,
-    /// `per_layer::PerLayerInputs::rows_on`), gathered on the processor and
-    /// copied to the card BEFORE the capture began. Made inside it, that copy
-    /// is replayed from a host address that no longer holds this step's rows,
-    /// and the capture is refused (`htod_copies_so_far`, #295).
-    per_layer_rows: Option<&'a Tensor>,
+    /// What the step's forward is handed already built, outside the capture.
+    prepared: Prepared<'a>,
+}
+
+/// What a recorded decode step's forward is handed already built — before
+/// the capture began, in memory made outside it (#295).
+enum Prepared<'a> {
+    /// Nothing: the forward embeds the tokens itself.
+    Nothing,
+    /// Gemma 4 E2B/E4B's per-layer rows (`per_layer::PerLayerInputs::rows_on`),
+    /// gathered on the processor and copied to the card. Made inside the
+    /// capture, that copy is replayed from a host address that no longer holds
+    /// this step's rows, and the capture is refused (`htod_copies_so_far`).
+    /// The inputs are then built from them inside the first group — the A/B
+    /// arm `SWARMLLM_PER_LAYER_INPUTS=in-graph`.
+    PerLayerRows(&'a Tensor),
+    /// The token embedding and every layer's per-layer input (Gemma 4
+    /// E2B/E4B), built whole before the capture. Built inside the first
+    /// group, the inputs were graph-allocated memory every later group reads,
+    /// and the driver remaps or waits for such memory at each LAUNCH ("physical
+    /// pages cannot be reused if they are bound to more than one executing
+    /// graph at the same time", CUDA Programming Guide § 4.2.5): launching an
+    /// E2B step's 17 groups took 5.8 ms, 0.7 ms once the inputs came from the
+    /// pool (2026-10-19, `SWARMLLM_PROFILE`'s "of which: launch it"), and the
+    /// E2B decodes 60.4-60.9 → 92.9-93.3 tokens a second, replies identical.
+    Inputs {
+        embedded: &'a Tensor,
+        per_layer: &'a Tensor,
+    },
+}
+
+/// Gemma 4 E2B/E4B: build a recorded step's token embedding and per-layer
+/// inputs before the capture (the default), or record them in the first group
+/// from rows copied before it (`SWARMLLM_PER_LAYER_INPUTS=in-graph`), the A/B
+/// inside one binary (#295). Read once.
+fn per_layer_inputs_before_capture() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_PER_LAYER_INPUTS").as_deref() != Ok("in-graph"))
+}
+
+/// What [`Prepared`] borrows, owned by `decode_step_with_graph` until the
+/// capture is over: memory made outside a capture must not be freed inside it.
+enum Staged {
+    Nothing,
+    Rows(Tensor),
+    Inputs(Tensor, Tensor),
+}
+
+impl Staged {
+    fn prepared(&self) -> Prepared<'_> {
+        match self {
+            Staged::Nothing => Prepared::Nothing,
+            Staged::Rows(rows) => Prepared::PerLayerRows(rows),
+            Staged::Inputs(embedded, per_layer) => Prepared::Inputs {
+                embedded,
+                per_layer,
+            },
+        }
+    }
 }
 
 impl SplitModel {
@@ -629,8 +682,8 @@ impl SplitModel {
             return Some("the model is split between the card and the processor");
         }
         // Gemma 4 E2B/E4B's per-layer rows are gathered on the processor; a
-        // captured step copies them to the card BEFORE its capture
-        // (`RecordedStep::per_layer_rows`, #295).
+        // captured step builds its per-layer inputs BEFORE its capture
+        // (`Prepared`, #295).
         for layer in &self.layers {
             let ffn = match layer {
                 LayerVariant::Dense(lw) => &lw.ffn,
@@ -748,13 +801,6 @@ impl SplitModel {
         // tokens (#295) and read by the graph from a card buffer made here, as
         // `input` is.
         let device = self.device.clone();
-        let per_layer_rows = match &self.per_layer_inputs {
-            Some(p) if !skip_embedding && self.tok_embeddings.is_some() => Some(
-                p.rows_on(input, &device)
-                    .map_err(|e| SwarmError::Internal(format!("per-layer rows: {e}")))?,
-            ),
-            _ => None,
-        };
         // Token ids arrive as i64 from the host and as u32 from the card's own
         // argmax — the drafter feeds both into one conversation — and the
         // embedding casts i64 to u32. Inside the capture that cast is one more
@@ -771,6 +817,27 @@ impl SplitModel {
             input.clone()
         };
         let input = input.to_device(&device).map_err(SwarmError::internal)?;
+        // Gemma 4 E2B/E4B's per-layer inputs, from the step's tokens: the rows
+        // are gathered on the processor, so at least they are copied up here.
+        let staged = match &self.per_layer_inputs {
+            Some(p) if !skip_embedding && self.tok_embeddings.is_some() => {
+                if per_layer_inputs_before_capture() {
+                    let embedded = self.embed_tokens(&input)?;
+                    let per_layer =
+                        self.per_layer_inputs_for(&input, &embedded)?
+                            .ok_or_else(|| {
+                                SwarmError::Internal("per-layer inputs were not built".into())
+                            })?;
+                    Staged::Inputs(embedded, per_layer)
+                } else {
+                    Staged::Rows(
+                        p.rows_on(&input, &device)
+                            .map_err(|e| SwarmError::Internal(format!("per-layer rows: {e}")))?,
+                    )
+                }
+            }
+            _ => Staged::Nothing,
+        };
         let (shape, dtype) = template;
         let out = Tensor::zeros(shape, dtype, &device).map_err(SwarmError::internal)?;
         let boundaries = graph.boundaries(&device, positions, self.hidden_dim)?;
@@ -816,7 +883,7 @@ impl SplitModel {
                 None,
                 Some(RecordedStep {
                     at_layer_end: &mut at_layer_end,
-                    per_layer_rows: per_layer_rows.as_ref(),
+                    prepared: staged.prepared(),
                 }),
             )?;
             // The step's own output is graph memory, freed inside the graph
@@ -912,12 +979,24 @@ impl SplitModel {
         // every layer's per-layer input, built from the same tokens.
         let (layer_in, per_layer_inputs) = if is_first && !skip_embedding {
             // First segment: input is token IDs → apply embedding
-            let embedded = self.embed_tokens(&input)?;
-            let per_layer = match recording.as_ref().and_then(|r| r.per_layer_rows) {
-                Some(rows) => self.per_layer_inputs_from_rows(rows, &embedded)?,
-                None => self.per_layer_inputs_for(&input, &embedded)?,
-            };
-            (embedded, per_layer)
+            crate::inference::prof::timed!(crate::inference::prof::Stage::Embedding, {
+                match recording.as_ref().map(|r| &r.prepared) {
+                    Some(Prepared::Inputs {
+                        embedded,
+                        per_layer,
+                    }) => (Tensor::clone(embedded), Some(Tensor::clone(per_layer))),
+                    Some(Prepared::PerLayerRows(rows)) => {
+                        let embedded = self.embed_tokens(&input)?;
+                        let per_layer = self.per_layer_inputs_from_rows(rows, &embedded)?;
+                        (embedded, per_layer)
+                    }
+                    Some(Prepared::Nothing) | None => {
+                        let embedded = self.embed_tokens(&input)?;
+                        let per_layer = self.per_layer_inputs_for(&input, &embedded)?;
+                        (embedded, per_layer)
+                    }
+                }
+            })
         } else {
             // Non-first segment or pre-embedded: input is already hidden states
             self.refuse_hidden_states_without_their_tokens()?;
@@ -1449,17 +1528,19 @@ impl SplitModel {
                 .as_ref()
                 .ok_or_else(|| SwarmError::Internal("Missing final norm".into()))?;
 
-            // The last layer's closing add, fused into the final norm.
-            let (_, x) = hidden
-                .add_norm(norm)
-                .map_err(|e| SwarmError::Internal(format!("final_norm: {e}")))?;
-            let x = if all_positions {
-                x
-            } else {
-                x.i((.., seq_len - 1, ..))
-                    .map_err(|e| SwarmError::Internal(format!("last_token_select: {e}")))?
-            };
-            self.logits_from(&x)
+            crate::inference::prof::timed!(crate::inference::prof::Stage::OutputHead, {
+                // The last layer's closing add, fused into the final norm.
+                let (_, x) = hidden
+                    .add_norm(norm)
+                    .map_err(|e| SwarmError::Internal(format!("final_norm: {e}")))?;
+                let x = if all_positions {
+                    x
+                } else {
+                    x.i((.., seq_len - 1, ..))
+                        .map_err(|e| SwarmError::Internal(format!("last_token_select: {e}")))?
+                };
+                self.logits_from(&x)
+            })
         } else {
             // Intermediate segment: return hidden states for next segment —
             // a plain tensor of its own, since this is what gets serialised
@@ -1732,7 +1813,7 @@ impl SplitModel {
     }
 
     /// [`Self::per_layer_inputs_for`] from the step's rows, already on the
-    /// card ([`RecordedStep::per_layer_rows`]).
+    /// card ([`Prepared::PerLayerRows`]).
     fn per_layer_inputs_from_rows(
         &self,
         rows: &Tensor,
@@ -2652,6 +2733,21 @@ fn per_layer_input(inputs: Option<&Tensor>, layer: usize) -> Result<Option<Tenso
 /// for such a layer, and left to the next norm point for every other. Every
 /// dense layer's path ends here, so none can skip the embedding.
 fn scaled_output(
+    lw: &LayerWeights,
+    out: Residual,
+    per_layer_input: Option<&Tensor>,
+) -> Result<Residual, SwarmError> {
+    if lw.per_layer_embedding.is_none() && lw.output_scale.is_none() {
+        return Ok(out);
+    }
+    crate::inference::prof::timed!(
+        crate::inference::prof::Stage::LayerOutput,
+        scaled_output_of(lw, out, per_layer_input)
+    )
+}
+
+/// [`scaled_output`] for a layer that has an embedding or a scale.
+fn scaled_output_of(
     lw: &LayerWeights,
     out: Residual,
     per_layer_input: Option<&Tensor>,

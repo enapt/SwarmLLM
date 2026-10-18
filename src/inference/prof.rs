@@ -63,6 +63,24 @@ stages! {
     // one fused kernel with the norm (`inference::residual_norm`), so there is
     // no separate add left to time. It was its own stage until 2026-09-23.
     Norms      => "residual add + rms norm",
+    // Outside every layer's stages above: what a forward does before the first
+    // layer and after the last, Gemma 4's per-layer embedding (E2B/E4B), and
+    // what a captured decode step pays at each group boundary. Without them a
+    // captured E2B step read 10.6 of its 14 ms "unattributed" (#295).
+    Embedding  => "token embedding + per-layer inputs",
+    LayerOutput => "per-layer embedding + output scale (gemma 4)",
+    OutputHead => "final norm + output head",
+    // `cuda_graph::Cutter::cut`: end the capture, update (or instantiate) the
+    // group's graph, launch it, begin the next — host time; the card runs the
+    // group while the next is recorded. Every group but the step's last, which
+    // closes after this report is printed (the report runs inside it, gotcha #841).
+    GraphGroups => "cuda graph groups but the last: end, update, launch (host)",
+    // Inside `GraphGroups`, so left out of the sum: the driver calls one at a
+    // time. A model whose groups cost far more than another's at the same
+    // node count is told apart here (#295).
+    GraphEnd    => "  of which: end the capture",
+    GraphUpdate => "  of which: update (or instantiate) the group's graph",
+    GraphLaunch => "  of which: launch it",
 }
 
 pub(crate) const N: usize = LABELS.len();
@@ -230,6 +248,9 @@ pub(crate) fn dump_and_reset(tag: &str, total_ms: f64, card: Option<&candle_core
         Stage::WeightsToCard as usize,
         Stage::MoeCpuProducts as usize,
         Stage::ExpertsToCard as usize,
+        Stage::GraphEnd as usize,
+        Stage::GraphUpdate as usize,
+        Stage::GraphLaunch as usize,
     ];
     let summed: u64 = vals
         .iter()

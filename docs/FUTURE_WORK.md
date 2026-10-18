@@ -1365,18 +1365,14 @@ was measured against the never-repacked reference above. Not ours, and llama.cpp
 clocks down between steps of a split (255-600 MHz between 1755 MHz bursts), and back-to-back
 runs on this laptop heat it enough to slow a split step 133 → 185 ms within 40 tokens (gotcha #825).
 
-#### #295 — Gemma 4's E2B/E4B decode on a card runs at about half llama.cpp's rate
-`P3` · perf-local · **PARTIAL** — 2026-10-17 · history: #115 (3c); (a) captured 2026-10-19
+#### #295 — Gemma 4's E2B/E4B split between card and processor copies a shared layer's history every step
+`P3` · perf-local · **PARTIAL** — 2026-10-17 · history: #115 (3c); (a) captured, (b) launches fixed, 2026-10-19
 
-(a) ~~not captured as a CUDA graph~~ — **captured since 2026-10-19** (§ Closed): E2B Q4_K_M 44.6-49.1
-→ 60.7-62.8 tokens a second, E4B 33.9-39.9 → 49.9-50.3, replies identical. What is left: llama.cpp
-`4b1a27f` decodes the E2B at 114.6 (median sample, same day), so a step is still ~16 ms against
-~8.7. Not established: where. The step still gathers each token's per-layer rows on the processor,
-which must wait for the token id wherever the card picked it, and copies 35 × 256
-floats up; the rest is launches and kernels. Next: `SWARMLLM_COUNT_KERNELS=1` and
-`SWARMLLM_PROFILE=1 SWARMLLM_PROFILE_SYNC=1` on one step, against llama.cpp's kernel count (nsys),
-and the gather timed on its own. A card/processor split of one (a card under ~3 GB since #296)
-also copies each shared layer's source history to the processor every step where the cut parts
+(a) ~~not captured as a CUDA graph~~ and (b) ~~each group launch waiting on graph memory~~ — **both
+closed 2026-10-19** (§ Closed): whole on the card the E2B decodes 44.6-49.1 → 92.9-93.3 tokens a
+second (llama.cpp 114.6, 0.81 — the same per-step gap as the other small models, #309) and the
+E4B 33.9-39.9 → 59.8-60.4. What is left: a card/processor split of one (a card under ~3 GB since
+#296) copies each shared layer's source history to the processor every step where the cut parts
 them (`layers::history_beside_queries`; unmeasured, ~50 MB a step at 4K positions by the shapes):
 cutting at the first source (the E2B's 13) would trade it for up to 21 more processor layers, so
 measure both before choosing.
@@ -1406,7 +1402,8 @@ small model — the drafter choice already prefers a quantized copy (gotcha #849
 
 Whole on the RTX 3070 Laptop (2026-10-19, `test-split` after the first 8 steps, live node stopped;
 llama.cpp `llama-bench -ngl 99 -n 128`, median sample): TinyLlama 1.1B Q4_K_M 236-241 against 299.2
-(0.80), Gemma 3 1B Q4_K_M 162-166 against 201.3 (0.82). Every 3B-and-larger family reads 0.84-0.97
+(0.80), Gemma 3 1B Q4_K_M 162-166 against 201.3 (0.82), Gemma 4 E2B 92.9-93.3 against 114.6
+(0.81, since #295 (b)). Every 3B-and-larger family reads 0.84-0.97
 (`docs/DIAGNOSTICS.md` § "One model's decode rate on this machine" has the table), so what is left
 is a per-step cost that a small model's short step cannot hide: ~4.2 ms against ~3.3 ms on
 TinyLlama, with every step captured as CUDA graphs. Not established: which kernels. Next: nsys one
@@ -2711,7 +2708,17 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#3 (d); #307; #295 (a))
+**Closed 2026-10-19, not yet released** (#3 (d); #307; #295 (a), (b))
+- #295 (b) — **Gemma 4 E2B writes replies about half as fast again on a graphics card, E4B a fifth.**
+  Once captured, an E2B step was bound by the host: launching its 17 graph groups took 5.8 ms
+  (Gemma 3 4B: 0.4). Its per-layer inputs were built inside the first group, so every later group
+  read memory a graph had allocated, and the driver remaps or waits for such memory at each launch
+  (CUDA Programming Guide § 4.2.5). They are now built before the capture (`executor::Prepared`):
+  launches 0.7 ms, E2B 60.4-60.9 → 92.9-93.3 tokens a second, E4B 50.3-51.3 → 59.8-60.4, replies
+  identical on all 16 runs; A/B `SWARMLLM_PER_LAYER_INPUTS=in-graph`. Found with four new
+  `SWARMLLM_PROFILE` stages (token embedding, Gemma 4's per-layer embedding, output head, and the
+  graph group boundaries split into end / update / launch). Evidence: `docs/invariants/inference.md`
+  § "Gemma 4's E2B and E4B", "The rest was graph memory crossing groups".
 - #295 (a) — **Gemma 4 E2B and E4B write replies about a third faster on a graphics card.** Their
   decode steps were never recorded as CUDA graphs: each step's per-layer rows are gathered on the
   processor and copied to the card, a copy a recorded step would replay from a stale address, and
