@@ -826,6 +826,7 @@ impl NetworkManager {
         // and the two readings stay independently parseable.
         let gossip_meter = shared_state.metrics.gossip.clone();
         let inference_traffic = shared_state.metrics.inference.clone();
+        let direct_traffic = shared_state.metrics.direct_by_kind.clone();
         let swarm = shared_state.metrics.bandwidth.clone().arm(|bw_registry| {
             let swarm = SwarmBuilder::with_existing_identity(keypair)
                 .with_tokio()
@@ -873,6 +874,7 @@ impl NetworkManager {
                             .effective_max_connections(config.node.contribution.clone()),
                         Some(&gossip_meter),
                         Some(inference_traffic.clone()),
+                        Some(direct_traffic.clone()),
                     )
                     .map_err(|e| {
                         Box::new(std::io::Error::other(e.to_string()))

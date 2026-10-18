@@ -182,6 +182,34 @@ pub struct SwarmCodec {
     /// the interface never carried. `None` in `Default` and in tests, so the
     /// codec stays constructible with no node behind it.
     pub inference_traffic: Option<std::sync::Arc<crate::network::bandwidth::InferenceTraffic>>,
+    /// Where every frame is counted by kind, both ways — what the direct part
+    /// of this node's traffic is made of (`network::bandwidth::DirectKindMeter`).
+    /// `None` in `Default` and in tests, like `inference_traffic`.
+    pub direct_traffic: Option<std::sync::Arc<crate::network::bandwidth::DirectKindMeter>>,
+}
+
+/// The kind a request is counted under in `DirectKindMeter`: a message's own
+/// variant name, else the frame's.
+fn request_kind(req: &SwarmRequest) -> &'static str {
+    match req {
+        SwarmRequest::Message(m) => m.kind_name(),
+        SwarmRequest::ShardTransfer(_) => "ShardTransfer",
+        SwarmRequest::TensorPayload(_) => "TensorPayload",
+        SwarmRequest::RelayedTensor(_) => "RelayedTensor",
+        SwarmRequest::PrefixKvFetch(_) => "PrefixKvFetch",
+    }
+}
+
+/// The kind a response is counted under — see [`request_kind`].
+fn response_kind(resp: &SwarmResponse) -> &'static str {
+    match resp {
+        SwarmResponse::Message(m) => m.kind_name(),
+        SwarmResponse::ShardData(_) => "ShardData",
+        SwarmResponse::Ack => "Ack",
+        SwarmResponse::Dropped => "Dropped",
+        SwarmResponse::TensorPayload(_) => "TensorPayload",
+        SwarmResponse::PrefixKvData(_) => "PrefixKvData",
+    }
 }
 
 /// This protocol's own frame header: one tag byte and a four-byte big-endian
@@ -229,6 +257,7 @@ impl Default for SwarmCodec {
             compress_level: 1,
             compress_threshold: 1024,
             inference_traffic: None,
+            direct_traffic: None,
         }
     }
 }
@@ -562,6 +591,13 @@ impl request_response::Codec for SwarmCodec {
                 traffic.record_in(wire_len);
             }
         }
+        if let Some(direct) = &self.direct_traffic {
+            direct.note_recv(
+                crate::network::bandwidth::DirectFrame::Request,
+                request_kind(&req),
+                wire_len as usize,
+            );
+        }
         Ok(req)
     }
 
@@ -575,8 +611,10 @@ impl request_response::Codec for SwarmCodec {
     {
         let (tag, buf) = read_wire_frame(io, "read_response", RESPONSE_LARGE_TAGS).await?;
         tracing::trace!(tag, len = buf.len(), "DIAG: codec read_response done");
+        // Header added back, as `read_request` does.
+        let wire_len = buf.len() + WIRE_FRAME_HEADER_LEN;
 
-        match tag {
+        let resp = match tag {
             WIRE_TAG_JSON => serde_json::from_slice(&buf)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
             WIRE_TAG_SHARD => {
@@ -637,7 +675,15 @@ impl request_response::Codec for SwarmCodec {
                 io::ErrorKind::InvalidData,
                 format!("Unknown wire tag: 0x{:02x}", unknown),
             )),
+        }?;
+        if let Some(direct) = &self.direct_traffic {
+            direct.note_recv(
+                crate::network::bandwidth::DirectFrame::Response,
+                response_kind(&resp),
+                wire_len,
+            );
         }
+        Ok(resp)
     }
 
     async fn write_request<T>(
@@ -653,6 +699,7 @@ impl request_response::Codec for SwarmCodec {
         // goes on the wire — after compression, which is the whole reason this
         // counting lives here rather than at the send site.
         let is_inference = self.inference_traffic.is_some() && counts_as_inference(&req);
+        let kind = request_kind(&req);
         // Build the complete frame in a single buffer before writing.
         // Quinn's QUIC stream has no BufWriter and flush() is a no-op,
         // so a single write_all() is more reliable than multiple small writes.
@@ -672,6 +719,13 @@ impl request_response::Codec for SwarmCodec {
                 traffic.record_out(frame_len as u64);
             }
         }
+        if let Some(direct) = &self.direct_traffic {
+            direct.note_sent(
+                crate::network::bandwidth::DirectFrame::Request,
+                kind,
+                frame_len,
+            );
+        }
         tracing::trace!(frame_len, "DIAG: codec write_request start");
         io.write_all(&frame).await?;
         tracing::trace!(frame_len, "DIAG: codec write_request done");
@@ -690,6 +744,7 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
+        let kind = response_kind(&resp);
         // Single write_all — see write_request comment.
         let frame = match resp {
             SwarmResponse::TensorPayload(payload) => compression::build_tensor_frame(
@@ -751,6 +806,13 @@ impl request_response::Codec for SwarmCodec {
             other => build_json_frame(&other, "response")?,
         };
         let frame_len = frame.len();
+        if let Some(direct) = &self.direct_traffic {
+            direct.note_sent(
+                crate::network::bandwidth::DirectFrame::Response,
+                kind,
+                frame_len,
+            );
+        }
         tracing::trace!(frame_len, "DIAG: codec write_response start");
         io.write_all(&frame).await?;
         tracing::trace!(frame_len, "DIAG: codec write_response done");
@@ -1040,6 +1102,101 @@ mod tests {
         assert_eq!(
             received, sent,
             "the receiver must account for the same bytes the sender did"
+        );
+    }
+
+    /// The per-kind meter (#91) must name a message by its own variant, count
+    /// the frame that really went (header included), and agree with the other
+    /// side about it — for a request AND for the answer to it. It counts the
+    /// same bytes the inference counter does, which is what makes it a
+    /// breakdown of every frame rather than another category beside them.
+    #[tokio::test]
+    async fn direct_frames_are_counted_by_kind_the_same_on_both_sides() {
+        use crate::network::bandwidth::{DirectFrame, DirectKindMeter, InferenceTraffic};
+        use futures::io::Cursor;
+        let proto = StreamProtocol::new(PROTOCOL_ID);
+        let a_meter = std::sync::Arc::new(DirectKindMeter::default());
+        let b_meter = std::sync::Arc::new(DirectKindMeter::default());
+        let a_inference = std::sync::Arc::new(InferenceTraffic::default());
+        let mut a = SwarmCodec {
+            direct_traffic: Some(a_meter.clone()),
+            inference_traffic: Some(a_inference.clone()),
+            ..SwarmCodec::default()
+        };
+        let mut b = SwarmCodec {
+            direct_traffic: Some(b_meter.clone()),
+            ..SwarmCodec::default()
+        };
+        let row = |m: &DirectKindMeter, kind: &str, frame: DirectFrame| {
+            m.totals()
+                .into_iter()
+                .find(|k| k.kind == kind && k.frame == frame)
+                .unwrap_or_else(|| panic!("no {kind} {frame:?} row in {:?}", m.totals()))
+        };
+
+        // A asks; B reads the request.
+        let mut sink = Cursor::new(Vec::new());
+        a.write_request(
+            &proto,
+            &mut sink,
+            SwarmRequest::Message(Box::new(SwarmMessage::PeerExchangeRequest)),
+        )
+        .await
+        .unwrap();
+        let wire = sink.into_inner();
+        let got = b
+            .read_request(&proto, &mut Cursor::new(wire.clone()))
+            .await
+            .unwrap();
+        assert!(
+            matches!(&got, SwarmRequest::Message(m) if matches!(**m, SwarmMessage::PeerExchangeRequest))
+        );
+        let sent = row(&a_meter, "PeerExchangeRequest", DirectFrame::Request);
+        assert_eq!(
+            (sent.sent_msgs, sent.sent_bytes),
+            (1, wire.len() as u64),
+            "the frame that was written, header included"
+        );
+        let recv = row(&b_meter, "PeerExchangeRequest", DirectFrame::Request);
+        assert_eq!(
+            (recv.recv_msgs, recv.recv_bytes),
+            (1, wire.len() as u64),
+            "the reader adds back the header it consumed"
+        );
+
+        // B answers; A reads the response.
+        let mut sink = Cursor::new(Vec::new());
+        b.write_response(&proto, &mut sink, SwarmResponse::Ack)
+            .await
+            .unwrap();
+        let wire = sink.into_inner();
+        let got = a
+            .read_response(&proto, &mut Cursor::new(wire.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(got, SwarmResponse::Ack));
+        assert_eq!(
+            row(&b_meter, "Ack", DirectFrame::Response).sent_bytes,
+            wire.len() as u64
+        );
+        assert_eq!(
+            row(&a_meter, "Ack", DirectFrame::Response).recv_bytes,
+            wire.len() as u64
+        );
+
+        // A tensor frame: the same bytes the inference counter records.
+        let mut sink = Cursor::new(Vec::new());
+        a.write_request(
+            &proto,
+            &mut sink,
+            SwarmRequest::TensorPayload(vec![0x5Au8; 40_000]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            row(&a_meter, "TensorPayload", DirectFrame::Request).sent_bytes,
+            a_inference.totals().0,
+            "the compressed frame, as `InferenceTraffic` counts it"
         );
     }
 

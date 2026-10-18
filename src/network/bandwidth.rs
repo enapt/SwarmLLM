@@ -817,6 +817,51 @@ gossip_timedout_messages_dropped_per_topic_total{hash=\"swarmllm/models\"} 118
         }
     }
 
+    /// The question this meter exists for is what an idle node UPLOADS
+    /// (#91), so the heaviest sender comes first; a request and the answer
+    /// to it are two rows, because a catch-up we ask for and one we serve
+    /// cost different directions of the same line.
+    #[test]
+    fn direct_traffic_is_split_by_kind_and_frame_heaviest_upload_first() {
+        let meter = DirectKindMeter::default();
+        assert!(meter.totals().is_empty());
+        meter.note_sent(DirectFrame::Request, "ManifestDigest", 400);
+        meter.note_sent(DirectFrame::Request, "ManifestDigest", 400);
+        meter.note_recv(DirectFrame::Request, "ManifestDigest", 9_000);
+        meter.note_sent(DirectFrame::Response, "ManifestDigest", 1_000);
+        meter.note_sent(DirectFrame::Request, "HealthPing", 1_000);
+        meter.note_recv(DirectFrame::Response, "Ack", 5);
+
+        let got = meter.totals();
+        let rows: Vec<_> = got.iter().map(|k| (k.kind, k.frame)).collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("HealthPing", DirectFrame::Request),
+                ("ManifestDigest", DirectFrame::Response),
+                ("ManifestDigest", DirectFrame::Request),
+                ("Ack", DirectFrame::Response),
+            ],
+            "by bytes SENT first (the upload is the question), a tie on sent \
+             bytes settled by what arrived, then by name and frame"
+        );
+        let digest_req = &got[2];
+        assert_eq!(
+            (
+                digest_req.sent_msgs,
+                digest_req.sent_bytes,
+                digest_req.recv_msgs,
+                digest_req.recv_bytes
+            ),
+            (2, 800, 1, 9_000),
+            "both directions accumulate on the one row"
+        );
+        assert_eq!(
+            got[3].sent_bytes, 0,
+            "a kind only ever received still shows"
+        );
+    }
+
     /// The queue-FULL path has no metric family at all, so a reader who only
     /// has the registry cannot see it. Zero must therefore mean zero here.
     #[test]
@@ -1187,6 +1232,117 @@ impl GossipKindMeter {
         // By bytes, then by name so equal rows do not reorder between reads —
         // a listing a person diffs against an earlier one must not shuffle.
         out.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.kind.cmp(b.kind)));
+        out
+    }
+}
+
+/// What this node's DIRECT traffic is made of — every request-response frame,
+/// by kind and by whether it was a request or the answer to one, both ways.
+///
+/// The transport total less gossip, parts and inference left 3.5 KB/s of an
+/// idle node's 5.5 KB/s upload unexplained (`docs/FUTURE_WORK.md` #91,
+/// 2026-10-17): our own point-to-point messages (catch-ups at every
+/// connection, digests, peer exchange) and libp2p's protocols (Kademlia,
+/// identify, ping, relay) share it, and libp2p's bandwidth counter labels a
+/// byte only by its TRANSPORT (`libp2p-metrics` 0.17 `Labels { protocols,
+/// direction }`, the multiaddr stack), never by the stream's protocol —
+/// go-libp2p's `GetBandwidthByProtocol` has no rust counterpart. This meter
+/// names our half; what remains after it is libp2p's own.
+///
+/// **Counted on SEND as well as receive**, unlike [`GossipKindMeter`]: a
+/// direct message is never relayed, so what this node sends is its own.
+/// Counted in the codec ([`crate::network::protocol::SwarmCodec`]) as the
+/// whole frame, the protocol's 5-byte header included — the same bytes
+/// [`InferenceTraffic`] counts, which is why this is a BREAKDOWN of every
+/// frame, inference and parts included, and must never be subtracted from
+/// the remainder beside those categories. Multistream negotiation, noise,
+/// yamux and QUIC sit underneath, uncounted.
+#[derive(Debug, Default)]
+pub struct DirectKindMeter {
+    by_kind: dashmap::DashMap<(DirectFrame, &'static str), DirectKindCount>,
+}
+
+/// Whether a frame asked something or answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum DirectFrame {
+    Request,
+    Response,
+}
+
+impl DirectFrame {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Response => "response",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct DirectKindCount {
+    sent_msgs: AtomicU64,
+    sent_bytes: AtomicU64,
+    recv_msgs: AtomicU64,
+    recv_bytes: AtomicU64,
+}
+
+/// One kind's share of this node's direct traffic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectKindTotals {
+    pub frame: DirectFrame,
+    pub kind: &'static str,
+    pub sent_msgs: u64,
+    pub sent_bytes: u64,
+    pub recv_msgs: u64,
+    pub recv_bytes: u64,
+}
+
+impl DirectKindMeter {
+    /// One frame this node wrote, `wire_bytes` long.
+    pub fn note_sent(&self, frame: DirectFrame, kind: &'static str, wire_bytes: usize) {
+        let entry = self.by_kind.entry((frame, kind)).or_default();
+        entry.sent_msgs.fetch_add(1, Ordering::Relaxed);
+        entry
+            .sent_bytes
+            .fetch_add(wire_bytes as u64, Ordering::Relaxed);
+    }
+
+    /// One frame this node read, `wire_bytes` long, header included.
+    pub fn note_recv(&self, frame: DirectFrame, kind: &'static str, wire_bytes: usize) {
+        let entry = self.by_kind.entry((frame, kind)).or_default();
+        entry.recv_msgs.fetch_add(1, Ordering::Relaxed);
+        entry
+            .recv_bytes
+            .fetch_add(wire_bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Every kind seen, the most SENT first — an idle node's upload is the
+    /// question — then by what arrived, then by name, so equal rows keep their
+    /// order between reads.
+    pub fn totals(&self) -> Vec<DirectKindTotals> {
+        let mut out: Vec<DirectKindTotals> = self
+            .by_kind
+            .iter()
+            .map(|e| {
+                let (frame, kind) = *e.key();
+                let c = e.value();
+                DirectKindTotals {
+                    frame,
+                    kind,
+                    sent_msgs: c.sent_msgs.load(Ordering::Relaxed),
+                    sent_bytes: c.sent_bytes.load(Ordering::Relaxed),
+                    recv_msgs: c.recv_msgs.load(Ordering::Relaxed),
+                    recv_bytes: c.recv_bytes.load(Ordering::Relaxed),
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.sent_bytes
+                .cmp(&a.sent_bytes)
+                .then_with(|| b.recv_bytes.cmp(&a.recv_bytes))
+                .then_with(|| a.kind.cmp(b.kind))
+                .then_with(|| a.frame.cmp(&b.frame))
+        });
         out
     }
 }

@@ -2001,6 +2001,32 @@ timer is still firing** — reading `sent_msgs` as a publish rate is what made
 `swarm/regions` look like it was still on a timer after v0.3.196 change-gated
 it (measured after: 0.12 published/s, against 236 sent/s of pure relay).
 
+## What is the upload that is not gossip? (`direct_by_kind`, 2026-10-18, #91)
+
+An idle node's `other_out_bytes` mixes two things no other counter separates:
+our own point-to-point messages (a newcomer's catch-up, manifest digests and
+pulls, peer exchange) and libp2p's protocols (Kademlia, identify, ping, relay).
+libp2p's bandwidth counter labels bytes by transport only, so the second half
+cannot be named; `direct_by_kind` names the first. Each row is one message
+kind (`kind`, a `SwarmMessage` variant or the frame's own name) as a
+`request` or a `response`, with `sent_*` and `recv_*`, counted in the codec as
+the whole frame.
+
+Read it as a RATE: take `/api/admin/stats` twice, an hour apart on an idle node
+(no inference, no part transfers), and difference each row. Then:
+
+- **Our share** = Σ `sent_bytes` over the rows that are neither inference
+  (`LayerForward`, `LayerResult`, `TensorPayload`, `StreamingToken`, …) nor
+  parts (`ShardTransfer`, `ShardData`).
+- **libp2p's share** ≈ Δ`other_out_bytes` − our share. It also absorbs every
+  frame's transport overhead (noise, yamux, QUIC), so it is a ceiling, not a
+  measurement of Kademlia alone.
+
+⚠ **Never subtract the whole list from `other_*`.** It counts inference and
+parts as well — the same bytes `inference_out_bytes` and `shard_*` already
+took out — so subtracting it counts them twice. An `Ack` row is the receipt nearly
+every message and forward request is answered with, so its count follows theirs.
+
 ## "no receipt acknowledgement within Ns" — late, or missing? (2026-08-25)
 
 A peer that fails every distributed request with this looks dead. It may simply

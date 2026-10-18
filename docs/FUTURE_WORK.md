@@ -67,7 +67,8 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
 7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
    (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), unreleased). Next: the
-   3.5 KB/s that is not gossip (Kademlia, identify, pings, direct messages), 63% of the upload.
+   3.5 KB/s that is not gossip, 63% of the upload — measure it with `direct_by_kind` ((2d),
+   unreleased), which names our own direct messages; the rest is libp2p's protocols.
 8. **#3**, **#180** — the routing cost model mis-prices a split by regime (one peer's fit,
     2026-10-15: a measured per-visit hop 0.78, a `net:0` hop 1.53 under-priced, drafter arms 0.39
     unpriced), which keeps partial ranges off; fit per term from a second peer's traffic and
@@ -953,7 +954,7 @@ libp2p-connection-limits has no per-protocol exemption). A dial by bare address 
 does the same.
 
 #### #91 — An idle node still uploads ~5.5 KB/s, most of it no longer gossip, and a total traffic ceiling does not exist
-`P2` · network · **PARTIAL** — 2026-10-17 · history: archive row #91, `docs/invariants/network.md`
+`P2` · network · **PARTIAL** — 2026-10-18 · history: archive row #91, `docs/invariants/network.md`
 
 Trickle suppression (`MANIFEST_QUIET_WINDOW`), per-(model, hash) `manifest_heard`,
 per-category counters and the region-demand split shipped in .200-.206 and halved it (42 →
@@ -1001,8 +1002,14 @@ peers all on .241, idle, 1.0 → 2.0 h up, a 60-min window, `/api/admin/stats` t
 2.8), and it is now shard announcements (1.4 a minute, ~7.5 KB) and capability updates (1.7 a
 minute, ~5.5 KB), each arriving ~2.85 times. What is not gossip (Kademlia, identify, pings, direct
 messages) is 3.5 KB/s, now 63% of the upload and the largest share left. The reconnect catch-up
-cannot be separated in these counters, since direct traffic has no per-kind meter; the rig showed a
-reconnect pulls nothing. **(2c) fixed 2026-10-17, not yet released**: a restart gossiped every
+could not be separated in these counters; the rig showed a reconnect pulls nothing. **(2d) a
+per-kind meter for direct traffic, 2026-10-18, not yet released**: `direct_by_kind` in the traffic
+payload counts every request-response frame by message kind, request or answer, both ways, in the
+codec (`network::bandwidth::DirectKindMeter`). libp2p cannot name its own protocols' bytes from rust
+(`libp2p-metrics` labels by transport only; go-libp2p's `GetBandwidthByProtocol` has no rust
+counterpart), so what `other_out_bytes` keeps beyond this list's non-inference, non-part rows is
+Kademlia, identify, ping and relay. Next: measure it on the live node (two readings an hour apart,
+idle) and attack the largest share. **(2c) fixed 2026-10-17, not yet released**: a restart gossiped every
 manifest it holds in full, twice, a few seconds apart (§ Closed). Left: the
 mesh is still sized once at startup, from peers ever met rather than reachable now (a rig first
 before going further: a thinner mesh partitions sooner); (3) a both-direction traffic ceiling at the transport

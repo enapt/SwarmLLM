@@ -124,6 +124,29 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
         let (inf_out, inf_in) = shared.metrics.inference.totals();
         obj.insert("inference_out_bytes".into(), inf_out.into());
         obj.insert("inference_in_bytes".into(), inf_in.into());
+        // What the DIRECT traffic is made of — every request-response frame by
+        // kind, both ways (`DirectKindMeter`). It covers every frame, inference
+        // and parts included, so it is never subtracted from `other_*`: what
+        // `other_*` keeps beyond this list's non-inference, non-part rows is
+        // libp2p's own protocols (Kademlia, identify, ping, relay), which no
+        // counter names.
+        let direct: Vec<serde_json::Value> = shared
+            .metrics
+            .direct_by_kind
+            .totals()
+            .into_iter()
+            .map(|k| {
+                serde_json::json!({
+                    "kind": k.kind,
+                    "frame": k.frame.as_str(),
+                    "sent_msgs": k.sent_msgs,
+                    "sent_bytes": k.sent_bytes,
+                    "recv_msgs": k.recv_msgs,
+                    "recv_bytes": k.recv_bytes,
+                })
+            })
+            .collect();
+        obj.insert("direct_by_kind".into(), direct.into());
     }
     if let Some(g) = shared.metrics.gossip.totals() {
         // The counts ride beside the bytes because bytes alone cannot say WHY a

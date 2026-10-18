@@ -124,6 +124,10 @@ pub fn build_behaviour(
     // is cloned per connection — see `network::bandwidth::InferenceTraffic` for
     // why it cannot be counted at the send sites.
     inference_traffic: Option<std::sync::Arc<crate::network::bandwidth::InferenceTraffic>>,
+    // Where the codec counts every frame by kind — what this node's direct
+    // traffic is made of (`network::bandwidth::DirectKindMeter`). Cloned in for
+    // the same reason.
+    direct_traffic: Option<std::sync::Arc<crate::network::bandwidth::DirectKindMeter>>,
 ) -> Result<SwarmBehaviour, Box<dyn std::error::Error>> {
     let local_peer_id = local_key.public().to_peer_id();
 
@@ -209,10 +213,12 @@ pub fn build_behaviour(
             compress_level: net_cfg.tensor_compress_level,
             compress_threshold: net_cfg.tensor_compress_threshold,
             inference_traffic,
+            direct_traffic,
         }
     } else {
         SwarmCodec {
             inference_traffic,
+            direct_traffic,
             ..SwarmCodec::default()
         }
     };
@@ -495,6 +501,7 @@ mod tests {
             150,
             None,
             None,
+            None,
         );
         assert!(result.is_ok());
     }
@@ -523,6 +530,7 @@ mod tests {
             150,
             None,
             None,
+            None,
         );
         assert!(result.is_ok());
     }
@@ -544,6 +552,7 @@ mod tests {
             0,
             None,
             150,
+            None,
             None,
             None,
         );
@@ -574,6 +583,7 @@ mod tests {
             0,
             None,
             150,
+            None,
             None,
             None,
         );

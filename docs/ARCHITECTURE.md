@@ -666,7 +666,8 @@ must be announcements" — so the total is split by category in
 | `gossip_*` (+ `gossip_by_topic`) | GossipSub's own per-topic counters | floor — message length, not framing |
 | `shard_served_bytes` / `shard_fetched_bytes` | the choke point that applies the bandwidth cap | exact, and makes the cap's scope checkable |
 | `inference_out_bytes` / `inference_in_bytes` | **the codec** (`network/protocol/mod.rs`) | exact, including this protocol's 5-byte frame header |
-| `other_*` | the remainder | DHT, identify, ping, relaying for others, and everything above's transport overhead |
+| `other_*` | the remainder | our own direct messages other than inference and parts (catch-ups, digests, peer exchange), DHT, identify, ping, relaying for others, and everything above's transport overhead |
+| `direct_by_kind` | **the codec**, every request-response frame by `kind` and `frame` (request / response), sent and received | exact frames; a BREAKDOWN of all direct traffic, inference and parts included — never subtracted from `other_*` |
 
 - **Inference is counted in the CODEC, not at the send sites**, because
   `network.tensor_compression` defaults ON: the send site holds the
@@ -680,6 +681,12 @@ must be announcements" — so the total is split by category in
   exceed the total. That happens benignly — the total is a health-monitor
   snapshot and the categories are read live — and the first version floored it
   instead, reporting `other_out_bytes: 0` while 72 MB was in flight.
+- **`direct_by_kind` names our half of the remainder (#91).** libp2p's
+  bandwidth counter labels a byte only by its transport stack, never by the
+  stream's protocol, so Kademlia, identify, ping and relay cannot be named from
+  rust; our own request-response frames can. `other_out_bytes` less the
+  non-inference, non-part rows' `sent_bytes` (and less their framing below the
+  codec) is libp2p's own protocols.
 
 ## Inference Pipeline
 

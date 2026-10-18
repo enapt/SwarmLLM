@@ -321,6 +321,11 @@ pub struct MetricsProviders {
     /// relays is what it received. Bytes are the sealed frame as it arrived, so
     /// they are comparable with the per-topic counters beside them.
     pub gossip_by_kind: Arc<crate::network::bandwidth::GossipKindMeter>,
+    /// What this node's DIRECT (request-response) traffic is made of: every
+    /// frame by kind, sent and received, counted in the codec. A breakdown of
+    /// every frame, inference and parts included — never subtracted from the
+    /// remainder beside them (`DirectKindMeter`).
+    pub direct_by_kind: Arc<crate::network::bandwidth::DirectKindMeter>,
 }
 
 /// How long a channel may keep refusing messages before the next drop is
