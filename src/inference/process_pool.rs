@@ -446,6 +446,91 @@ fn promotion_is_worth_weighing(i: &PromotionInputs) -> bool {
 
 static RESPONSE_ATTEMPT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// How many of a worker's latest decode steps its published speed is the
+/// fastest of ([`OwnDecodeSpeed`]).
+const OWN_DECODE_STEPS_KEPT: usize = 32;
+
+/// Fewest decode steps a worker publishes a speed from.
+const OWN_DECODE_STEPS_TO_PUBLISH: usize = 4;
+
+/// How long after its last decode step a worker still publishes its speed; a
+/// step after that starts a new window.
+///
+/// A figure nobody refreshes describes the worker as it was, and one that
+/// prices it slow keeps away the very steps that would correct it — the ratchet
+/// `peer_speed::RANKING_STALE_AFTER` exists for. Hardware does not change
+/// within the hour; load does, and an hour bounds that.
+const OWN_DECODE_PUBLISHED_FOR: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// This worker's own decode speed on its model, per layer: the FASTEST of its
+/// last [`OWN_DECODE_STEPS_KEPT`] single-token steps run for PEERS, each timed
+/// by the pool from the forward's send to its result (FUTURE_WORK #3 (f)).
+///
+/// Published to the swarm as `ResidentModelLayers::decode_us_per_layer`, the
+/// way a Petals server publishes the `inference_rps` it timed on the real
+/// block (`petals/server/throughput.py`, kept per model, device and dtype —
+/// here per worker, which is all three). A coordinator never times a peer
+/// inside a chain another peer leads, so without this it priced one from its
+/// stated 7B speed alone.
+///
+/// **The minimum, as a round trip's floor is kept (BBR's windowed min RTT;
+/// `LatencyFilter` here).** Waiting only ever ADDS to a step — behind another
+/// request's prompt pass, in a batch's collection window — so the fastest step
+/// is the one closest to what the worker computes. A median let any peer that
+/// sent this node work make it publish a slow figure for an hour, steering
+/// coordinators elsewhere, by queueing half its steps behind other forwards
+/// (security review, 2026-10-18); against the minimum it must slow EVERY step
+/// in the window, which is the node really being that busy. It is also steady:
+/// it moves only when a faster step arrives or the fastest ages out, so it
+/// rarely crosses the publish deadband (`health::monitor::
+/// CAPABILITY_SPEED_DEADBAND`, #91).
+///
+/// **Peers' work only** ([`Requester::Swarm`]): the owner's own requests are
+/// not timed, so the figure says nothing about when the owner last used a
+/// model — not to a peer outside a private pool either.
+#[derive(Debug, Default)]
+struct OwnDecodeSpeed {
+    /// Microseconds per layer, oldest first.
+    steps: std::collections::VecDeque<u32>,
+    last_step_at: Option<std::time::Instant>,
+}
+
+impl OwnDecodeSpeed {
+    /// Fold in one decode step that ran `layers` layers in `elapsed`.
+    fn note(&mut self, layers: u32, elapsed: std::time::Duration, now: std::time::Instant) {
+        if layers == 0 {
+            return;
+        }
+        // A window that has stopped publishing is not resumed by one step.
+        if self
+            .last_step_at
+            .is_some_and(|at| now.saturating_duration_since(at) > OWN_DECODE_PUBLISHED_FOR)
+        {
+            self.steps.clear();
+        }
+        let us_per_layer = elapsed.as_micros() / u128::from(layers);
+        if self.steps.len() == OWN_DECODE_STEPS_KEPT {
+            self.steps.pop_front();
+        }
+        self.steps
+            .push_back(u32::try_from(us_per_layer).unwrap_or(u32::MAX).max(1));
+        self.last_step_at = Some(now);
+    }
+
+    /// What this worker publishes: µs per layer, or `None` before
+    /// [`OWN_DECODE_STEPS_TO_PUBLISH`] steps and once
+    /// [`OWN_DECODE_PUBLISHED_FOR`] has passed without one.
+    fn published(&self, now: std::time::Instant) -> Option<u32> {
+        if self.steps.len() < OWN_DECODE_STEPS_TO_PUBLISH {
+            return None;
+        }
+        if now.saturating_duration_since(self.last_step_at?) > OWN_DECODE_PUBLISHED_FOR {
+            return None;
+        }
+        self.steps.iter().copied().min()
+    }
+}
+
 /// A handle to a running model worker subprocess.
 ///
 /// The socket is split into a shared writer (one-at-a-time under `Mutex`) and
@@ -617,6 +702,12 @@ struct WorkerHandle {
     /// Written by the reader actor, read by [`ModelProcessPool::context_fits`].
     /// On the handle, so the figure dies with the worker that measured it.
     context_fits: Arc<std::sync::atomic::AtomicU32>,
+    /// This worker's own decode speed ([`OwnDecodeSpeed`]), written by
+    /// [`ModelProcessPool::note_decode_step`] and published by
+    /// [`ModelProcessPool::resident_model_layers`]. On the handle for the
+    /// reason `context_fits` is: a worker respawned on the other device starts
+    /// with no figure rather than the old device's.
+    own_decode: std::sync::Mutex<OwnDecodeSpeed>,
 }
 
 /// Longest path a Unix domain socket may have, INCLUDING its NUL terminator.
@@ -2904,6 +2995,30 @@ enum BatchSchedulerMsg {
         fwd: crate::types::LayerForward,
         resp_tx: tokio::sync::oneshot::Sender<Result<crate::types::LayerResult, SwarmError>>,
     },
+}
+
+/// Is this forward ONE decode step of the base model — what a worker's own
+/// published speed is timed on ([`OwnDecodeSpeed`], FUTURE_WORK #3 (f))?
+///
+/// One position past a prompt pass, counted the way the serve credit counts it
+/// ([`crate::inference::tensor_util::positions_carried`]), through the model's
+/// own weights: no tensor-parallel share of a layer, no image, no adapter.
+/// Whatever ELSE the step asks is the same work for a segment: a check of one
+/// position (`spec_logits_requested`, a tail walk) and a rewind before it
+/// (`truncate_kv_to`) are how a coordinator speculating with n-grams sends every
+/// step that found no guess — the batch path's test ([`forward_is_schedulable`])
+/// refuses those, and a chain driven that way was never timed (the
+/// `split_rig.sh owntiming` run of 2026-10-18: a peer served 5 such steps and
+/// published nothing). A check of several positions is not one step.
+fn forward_is_one_decode_step(f: &crate::types::LayerForward) -> bool {
+    f.sequence_num != 0
+        && f.index_pos != 0
+        && f.prompt_cache.is_none()
+        && f.prompt_span.is_none()
+        && f.tp_meta.is_none()
+        && f.vision_embeddings.is_none()
+        && f.adapter_id.is_none()
+        && crate::inference::tensor_util::positions_carried(f) == 1
 }
 
 /// Can this `LayerForward` share a `BatchForward` message with others? Matches
@@ -5690,6 +5805,12 @@ impl ModelProcessPool {
                             releasable_layers: h.releasable_layers,
                         })
                         .collect(),
+                    // What this worker timed of its own decode steps (#3 (f)).
+                    decode_us_per_layer: handle
+                        .own_decode
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .published(std::time::Instant::now()),
                 });
             }
         }
@@ -7677,6 +7798,7 @@ impl ModelProcessPool {
             // says so through `placed_on_cpu_because: None` alone.
             card_split: card_split.filter(|_| placed_on_cpu_because.is_none()),
             context_fits,
+            own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
         })
     }
 
@@ -7723,7 +7845,54 @@ impl ModelProcessPool {
     /// worker as `IpcForward::for_the_owner`, which it marks on the request;
     /// before that only the `Generate` path marked anything, so a split plan
     /// read the owner's prompt at the contribution width.
+    ///
+    /// A decode step run for PEERS is timed HERE — the one call every segment
+    /// served for a peer's pipeline passes through, and a split a peer handed
+    /// this node to lead — into the worker's published speed
+    /// ([`OwnDecodeSpeed`], FUTURE_WORK #3 (f)). The owner's own requests are
+    /// not timed (see there). Only a step that answered counts: a cancelled or
+    /// failed one timed nothing.
     pub async fn forward_for_request(
+        &self,
+        forward: crate::types::LayerForward,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+        requester: Requester,
+    ) -> Result<crate::types::LayerResult, SwarmError> {
+        let decode_step = (requester == Requester::Swarm && forward_is_one_decode_step(&forward))
+            .then(|| (forward.model_id.clone(), forward.layer_range));
+        let started = std::time::Instant::now();
+        let result = self.forward_to_worker(forward, cancel, requester).await;
+        if let (Ok(_), Some((model_id, range))) = (&result, decode_step) {
+            self.note_decode_step(&model_id, range, started);
+        }
+        result
+    }
+
+    /// Fold one decode step of `range`, sent at `started`, into the speed its
+    /// worker publishes. A worker spawned after the step was sent did not run
+    /// it — the one it went to was retired in between — and is left alone.
+    fn note_decode_step(&self, model_id: &ModelId, range: (u32, u32), started: std::time::Instant) {
+        let now = std::time::Instant::now();
+        let Some(handle) = self.workers.get(model_id).map(|e| e.value().clone()) else {
+            return;
+        };
+        if handle.spawned_at > started || handle.dead.load(Ordering::Acquire) {
+            return;
+        }
+        handle
+            .own_decode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .note(
+                range.1.saturating_sub(range.0),
+                now.saturating_duration_since(started),
+                now,
+            );
+    }
+
+    /// [`Self::forward_for_request`] without the timing: the batch scheduler
+    /// for a decode step it can coalesce, the worker directly otherwise.
+    async fn forward_to_worker(
         &self,
         forward: crate::types::LayerForward,
         cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -10951,6 +11120,166 @@ mod tests {
         assert_eq!(ranges, vec![((0, 2), 0), ((14, 40), 26)]);
     }
 
+    /// FUTURE_WORK #3 (f): what a worker timed of its own decode steps reaches
+    /// what peers are told, per layer of the range each step ran — and only
+    /// from the worker that ran them.
+    #[tokio::test]
+    async fn a_workers_own_decode_steps_are_published_beside_its_layers() {
+        let pool = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-own-speed"));
+        let model = ModelId("own-speed".into());
+        pool.set_ram_budget_mb(100_000);
+        worker_holding_both_ends(&pool, &model).await;
+        let told = || {
+            pool.resident_model_layers()
+                .into_iter()
+                .find(|r| r.model_id == model.0)
+                .expect("a resident model is announced")
+                .decode_us_per_layer
+        };
+        assert_eq!(told(), None, "nothing timed yet");
+
+        // Steps sent before this worker existed were run by one before it:
+        // enough to publish, were they counted.
+        let before_the_spawn = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(10))
+            .expect("a clock ten seconds old");
+        for _ in 0..OWN_DECODE_STEPS_TO_PUBLISH {
+            pool.note_decode_step(&model, (14, 40), before_the_spawn);
+        }
+        assert_eq!(told(), None, "another worker's steps");
+
+        let sent = std::time::Instant::now();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        for _ in 0..OWN_DECODE_STEPS_TO_PUBLISH {
+            pool.note_decode_step(&model, (14, 40), sent);
+        }
+        // At least 30 ms over the 26 layers of [14..40): 1153 µs a layer.
+        let us = told().expect("published once enough steps were timed");
+        assert!((1_153..20_000).contains(&us), "{us}");
+    }
+
+    /// A coordinator speculating with n-grams sends every step that found no
+    /// guess as a check of ONE position — logits asked for, a rewind before it.
+    /// That is one decode step for the segment and is timed; the batch path's
+    /// test refuses it, and a chain driven that way published nothing (the
+    /// `split_rig.sh owntiming` run of 2026-10-18). A check of several
+    /// positions, a prompt pass, a share of a layer or an adapter's step is not
+    /// one step of the base model.
+    #[test]
+    fn a_one_position_check_is_timed_as_a_decode_step() {
+        let step = schedulable_decode_forward();
+        assert!(forward_is_one_decode_step(&step), "a plain step");
+
+        let miss_round = crate::types::LayerForward {
+            spec_logits_requested: true,
+            truncate_kv_to: Some(11),
+            ..schedulable_decode_forward()
+        };
+        assert!(
+            !forward_is_schedulable(&miss_round),
+            "fixture: the batch path refuses it"
+        );
+        assert!(
+            forward_is_one_decode_step(&miss_round),
+            "an n-gram miss round is one decode step"
+        );
+        let streamed = crate::types::LayerForward {
+            stream_seq: Some(3),
+            ..miss_round.clone()
+        };
+        assert!(forward_is_one_decode_step(&streamed));
+
+        // Past the first segment the position count is the hidden state's.
+        let hidden = |positions: usize| {
+            crate::inference::tensor_util::tensor_to_bytes(
+                &candle_core::Tensor::zeros(
+                    (1, positions, 64),
+                    candle_core::DType::F32,
+                    &candle_core::Device::Cpu,
+                )
+                .expect("a tensor"),
+            )
+            .expect("its bytes")
+        };
+        let later_step = crate::types::LayerForward {
+            layer_range: (4, 8),
+            activations: hidden(1),
+            ..miss_round.clone()
+        };
+        assert!(forward_is_one_decode_step(&later_step));
+
+        let not_one_step = [
+            crate::types::LayerForward {
+                activations: vec![0u8; 8 * 5],
+                ..miss_round.clone()
+            },
+            crate::types::LayerForward {
+                layer_range: (4, 8),
+                activations: hidden(5),
+                ..miss_round.clone()
+            },
+            crate::types::LayerForward {
+                sequence_num: 0,
+                ..schedulable_decode_forward()
+            },
+            crate::types::LayerForward {
+                index_pos: 0,
+                ..schedulable_decode_forward()
+            },
+            crate::types::LayerForward {
+                adapter_id: Some("a".into()),
+                ..schedulable_decode_forward()
+            },
+        ];
+        for (i, f) in not_one_step.iter().enumerate() {
+            assert!(!forward_is_one_decode_step(f), "case {i}");
+        }
+    }
+
+    /// The figure is the FASTEST recent step: waiting only adds to a step, so a
+    /// peer that slows most of them — by queueing them behind its other work —
+    /// cannot move it (security review, 2026-10-18), and a real slowdown shows
+    /// once every step in the window is slower.
+    #[test]
+    fn a_workers_own_speed_is_the_fastest_of_its_latest_steps() {
+        let t = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        let mut s = OwnDecodeSpeed::default();
+        for _ in 1..OWN_DECODE_STEPS_TO_PUBLISH {
+            s.note(10, ms(10), t);
+        }
+        assert_eq!(s.published(t), None, "too few steps to publish");
+        s.note(10, ms(10), t);
+        assert_eq!(s.published(t), Some(1_000), "10 ms over 10 layers");
+        // Every step but one in the window held up, 50x: nothing moves.
+        for _ in 1..OWN_DECODE_STEPS_KEPT {
+            s.note(10, ms(500), t);
+        }
+        assert_eq!(s.published(t), Some(1_000));
+        // Once the whole window is slower, so is the figure — and the window
+        // stays bounded.
+        s.note(10, ms(30), t);
+        assert_eq!(s.published(t), Some(3_000));
+        assert_eq!(s.steps.len(), OWN_DECODE_STEPS_KEPT);
+        // A step over no layers is no step.
+        s.note(0, ms(1), t);
+        assert_eq!(s.published(t), Some(3_000));
+        // An hour without a step: withdrawn, not left describing the worker
+        // as it was ...
+        let later = t + OWN_DECODE_PUBLISHED_FOR;
+        assert_eq!(s.published(later), Some(3_000));
+        let gone = later + ms(1);
+        assert_eq!(s.published(gone), None);
+        // ... and one step then starts a new window rather than re-publishing
+        // the old one.
+        s.note(10, ms(20), gone);
+        assert_eq!(s.published(gone), None);
+        for _ in 1..OWN_DECODE_STEPS_TO_PUBLISH {
+            s.note(10, ms(20), gone);
+        }
+        assert_eq!(s.published(gone), Some(2_000));
+    }
+
     /// A live worker has already paid the fixed terms, and a further range is
     /// charged its layers alone — so the room the bound reports must not
     /// charge the process overhead a second time.
@@ -11292,6 +11621,7 @@ mod tests {
             gpu_estimate_mb: 0,
             card_split,
             context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
         });
         (handle, client)
     }

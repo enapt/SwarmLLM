@@ -117,6 +117,17 @@ struct NodeCandidate {
     /// ([`layer_work_for`]). The same for every candidate of one model; 1.0 when
     /// unknown, which prices as before #250.
     layer_work: f32,
+    /// What one decode step of THIS model costs the peer's own worker, per
+    /// layer, in ms — the figure it publishes from timing the steps it ran
+    /// (`ResidentModelLayers::decode_us_per_layer`, FUTURE_WORK #3 (f)), read
+    /// through [`stated_decode_ms_per_layer`]. `None` for this node and for a
+    /// peer that published none.
+    ///
+    /// A self-report, so it is a PRIOR, read only by
+    /// [`Self::prior_ms_per_layer`]: anything THIS node measured of the peer
+    /// still outranks it, and it can price the peer slower than its stated
+    /// speed says, never faster.
+    stated_ms_per_layer: Option<f32>,
     /// Observed per-layer latency EMA (ms/layer) for remote segments this peer
     /// served for us. None = no samples yet, use `est_tokens_per_sec` as proxy.
     /// Populated by `state.record_peer_segment_latency` after successful
@@ -384,6 +395,24 @@ pub(super) fn layer_work_from_bytes(active_bytes_per_layer: f64) -> f32 {
 /// peer (`SharedState::merge_peer_segment_latency`).
 pub(crate) const LAYER_WORK_RANGE: std::ops::RangeInclusive<f32> = 0.02..=50.0;
 
+/// The most a peer's published decode figure is read as, in µs per layer: 60 s.
+/// A 405B at Q4 on a processor reading 5 GB/s spends ~0.4 s a layer, so nothing
+/// real comes near it; past it a figure is held here rather than dropped, since
+/// dropping it would price the peer FASTER than it says it is.
+const STATED_DECODE_US_PER_LAYER_MAX: u32 = 60_000_000;
+
+/// A peer's published decode figure (`ResidentModelLayers::decode_us_per_layer`)
+/// as ms per layer, or `None` for none or for 0, which no timing produces
+/// (FUTURE_WORK #3 (f)). [`NodeCandidate::prior_ms_per_layer`] only ever takes
+/// it as a FLOOR under the stated speed, so a figure too small to be true
+/// changes nothing; this bounds the other end, where a garbled one could
+/// otherwise push a cost out of all proportion.
+fn stated_decode_ms_per_layer(us_per_layer: Option<u32>) -> Option<f32> {
+    us_per_layer
+        .filter(|&us| us > 0)
+        .map(|us| us.min(STATED_DECODE_US_PER_LAYER_MAX) as f32 / 1000.0)
+}
+
 impl NodeCandidate {
     /// The static price of one of THIS model's layers on this candidate, in ms
     /// per token: its 7B-reference token time spread over the reference's
@@ -395,13 +424,25 @@ impl NodeCandidate {
     /// it, so a model's size reaches both routers or neither (#250). (Greedy keeps
     /// its own unknown-speed figure, `DEFAULT_COMPUTE_MS_PER_LAYER`, weighed by
     /// `layer_work` too.)
+    ///
+    /// **A peer's own timing of this model raises it, never lowers it**
+    /// (`stated_ms_per_layer`, FUTURE_WORK #3 (f)). The stated speed is a
+    /// memory-bandwidth figure for a 7B, and for the work a chain asks of a
+    /// peer it was the optimistic side: a warm two-peer chain priced 2.3 s of
+    /// compute took 19.4 s, and a chain its head leads is never timed from
+    /// here, so nothing ever corrected it. Taking the larger keeps that fix
+    /// whole while the new field adds no way to look FASTER than the stated
+    /// speed already allows — a peer that wants work can only state a speed
+    /// it was always able to state.
     fn prior_ms_per_layer(&self) -> f32 {
         let reference_layer_ms = if self.est_tokens_per_sec > 0.0 {
             1000.0 / self.est_tokens_per_sec / parallax::BASELINE_LAYER_COUNT
         } else {
             parallax::UNKNOWN_COMPUTE_MS
         };
-        reference_layer_ms * self.layer_work
+        let stated_speed = reference_layer_ms * self.layer_work;
+        self.stated_ms_per_layer
+            .map_or(stated_speed, |timed| timed.max(stated_speed))
     }
 
     /// Layers of NEW memory this candidate needs to run `range` — its width,
@@ -4776,6 +4817,9 @@ impl PipelineScheduler {
                 region_score,
                 est_tokens_per_sec,
                 layer_work,
+                stated_ms_per_layer: stated_decode_ms_per_layer(
+                    reported.as_ref().and_then(|r| r.decode_us_per_layer),
+                ),
                 observed_latency_ms_per_layer,
                 observed_fixed_ms_per_visit,
                 observed_delegated_ms_per_layer,
@@ -4849,6 +4893,9 @@ impl PipelineScheduler {
                 // What one of this model's layers weighs in 7B-reference
                 // layers (#250); 1.0 = priced as before, or unknown.
                 layer_work = c.layer_work,
+                // The peer's own timing of this model, per layer (#3 (f)):
+                // `None` = priced from the stated speed alone, as before.
+                stated_ms_per_layer = ?c.stated_ms_per_layer,
                 observed_ms_per_layer = ?c.observed_latency_ms_per_layer,
                 // Present only where the samples could separate a per-visit
                 // cost from a per-layer one. Its absence is the ordinary case
@@ -4895,14 +4942,17 @@ impl PipelineScheduler {
                 // What we have measured this path to actually deliver, and how
                 // many forwards said so. Both, for the same reason the delivery
                 // count is here: an unmeasured path and a fast one are
-                // indistinguishable from the estimate alone.
-                goodput_bytes_per_sec = ?c.goodput_bytes_per_sec,
-                goodput_samples = self
-                    .shared_state
-                    .peer_registry
-                    .get(&c.node_id)
-                    .map(|p| p.goodput_samples)
-                    .unwrap_or(0),
+                // indistinguishable from the estimate alone. One field, as
+                // `(bytes_per_sec, samples)`: an event holds 32 values and this
+                // one is full.
+                goodput = ?(
+                    c.goodput_bytes_per_sec,
+                    self.shared_state
+                        .peer_registry
+                        .get(&c.node_id)
+                        .map(|p| p.goodput_samples)
+                        .unwrap_or(0)
+                ),
                 load = c.load,
                 prompt_tokens = ?prompt_tokens,
                 // Priced over the WHOLE model, so candidates are comparable to

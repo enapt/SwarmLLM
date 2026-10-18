@@ -2243,7 +2243,12 @@ is not news, so **a field added later is news by default**. Carried over:
 `uptime_seconds` (moves every tick by construction), the observed-latency hint,
 figures inside a deadband measured from the last SENT value (memory 256 MB,
 disk 1 GB, coordinate 5 ms — send-on-delta, so a value on a grid line cannot
-flap), and **free RAM wherever its one reader would not see it**.
+flap), and **free RAM wherever its one reader would not see it**. A worker's own
+decode timing (`ResidentModelLayers::decode_us_per_layer`, FUTURE_WORK #3 (f),
+2026-10-18) is retimed on every step it runs, so its deadband is a FACTOR, 1.5x
+(`CAPABILITY_SPEED_DEADBAND`), and its appearing or going is news; the fastest
+of 32 steps it is drawn from barely moves between rounds (guard
+`a_workers_own_speed_is_news_only_past_its_deadband`).
 
 ### The field that held it open
 

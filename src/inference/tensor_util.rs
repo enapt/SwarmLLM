@@ -383,6 +383,55 @@ pub fn activation_positions(bytes: &[u8]) -> Option<u32> {
     dim(ndim - 2)
 }
 
+/// How many token positions a forward carries — the ONE answer, read by the
+/// serving node's "tokens served" and serve credit (`dispatch::layer_forward`)
+/// and by the worker's own decode timing, which times a step of exactly one
+/// (`process_pool::forward_is_one_decode_step`, FUTURE_WORK #3 (f)).
+pub(crate) fn positions_carried(forward: &crate::types::LayerForward) -> u32 {
+    forward_positions(
+        &forward.activations,
+        forward.pre_embedded || forward.layer_range.0 > 0,
+        crate::inference::model_worker::first_segment_input_is_text(
+            forward.index_pos,
+            forward.prompt_cache.is_some(),
+            forward.prompt_span.is_some(),
+        ),
+    )
+}
+
+/// How many token positions a forward's payload carries — the unit "tokens
+/// served" and the serve credit are counted in. Asked through
+/// [`positions_carried`].
+///
+/// Three payloads cross a segment boundary, and the byte length means something
+/// different in each:
+/// - **hidden states** (`hidden_states`: any segment past the first, or a
+///   pre-embedded first one) — `[batch, seq, hidden]` in f32 or Q8_0, counted
+///   from the shape header ([`activation_positions`]), because the length is
+///   seq × hidden × bytes;
+/// - **prompt text** (a first segment's whole prompt pass from position 0 —
+///   `model_worker::first_segment_input_is_text`, the worker's own rule) — ~4
+///   characters a token, an estimate kept cheap on the serving path;
+/// - **token ids** (a first segment's later steps, a resumed pass, a piece of
+///   a pass) — 8 bytes each: one for a decode step, the guesses for a check, a
+///   piece's positions.
+///
+/// It divided every prompt pass's bytes by 4, which for hidden states is
+/// tokens × hidden size: a 20-token prompt pass of a 2048-wide model counted as
+/// 40,965 tokens, and the dashboard's "tokens served" and tok/s read ~2000×
+/// high (field report #004, 2026-10-01). A later step counted 1 whatever it
+/// carried, so a check's guesses were not counted at all.
+pub(crate) fn forward_positions(activations: &[u8], hidden_states: bool, prompt_text: bool) -> u32 {
+    let positions = if hidden_states {
+        activation_positions(activations).map(|p| p as usize)
+    } else if prompt_text {
+        Some(String::from_utf8_lossy(activations).chars().count() / 4)
+    } else {
+        Some(activations.len() / 8)
+    };
+    positions.unwrap_or(1).clamp(1, u32::MAX as usize) as u32
+}
+
 /// Does a segment's RETURNED activation carry the same shape as the one it was
 /// handed, in a well-formed payload for whatever encoding the peer chose?
 ///

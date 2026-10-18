@@ -1849,6 +1849,7 @@ mod tests {
             reply_tokens_at_most: None,
             reply_tokens_expected: None,
             ring: Default::default(),
+            stated_ms_per_layer: None,
             fresh_run_layers: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
@@ -1982,6 +1983,71 @@ mod tests {
             c.ring.request_may_be_led = false;
         }
         assert_eq!(route(&cands), vec![(4, (0, 32))]);
+    }
+
+    /// FUTURE_WORK #3 (f): two peers leading their own chain state a fast card's
+    /// speed and time themselves at 8x slower — the shape of a warm two-peer
+    /// chain priced 2.3 s of compute that took 19.4 s. A chain its head leads
+    /// is never timed from here, so their own figure is the only one there is.
+    #[test]
+    fn a_led_chain_is_priced_by_its_peers_own_timing_where_nothing_was_measured_here() {
+        let (local, mut cands) = two_close_peers_far_from_here();
+        for c in &mut cands {
+            c.est_tokens_per_sec = 56.0;
+        }
+        // A third peer holds the whole model, measured here at 3 ms a layer:
+        // 6,144 ms over 64 passes.
+        let mut whole = cand(4, vec![(0, 32)], 400, 0.0, true, true, 0.0);
+        whole.observed_delegated_ms_per_layer = Some(3.0);
+        cands.push(whole);
+        let route = |cands: &[NodeCandidate]| {
+            route_shortest_path(
+                32,
+                cands,
+                &local,
+                false,
+                false,
+                CapacityBound::Everyone,
+                None,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.node_id.0[0], s.layer_range))
+            .collect::<Vec<_>>()
+        };
+        // At their stated speed (1000 / 56 / 32 ms a layer) the led halves cost
+        // 1,143 ms of compute and 3,360 of hops: cheaper than the whole copy.
+        let stated = 1000.0 / 56.0 / BASELINE_LAYER_COUNT * 32.0 * 64.0;
+        assert!(
+            (chain_cost_ms(&halves(2, 3), &cands, &local, 32, None) - (stated + 3_360.0)).abs()
+                < 0.5
+        );
+        assert_eq!(route(&cands), vec![(2, (0, 16)), (3, (16, 32))]);
+
+        // Their own timing, 8x their stated speed, prices them as they run.
+        for c in &mut cands[..2] {
+            c.stated_ms_per_layer = Some(1000.0 / 56.0 / BASELINE_LAYER_COUNT * 8.0);
+        }
+        let timed = chain_cost_ms(&halves(2, 3), &cands, &local, 32, None);
+        assert!((timed - (8.0 * stated + 3_360.0)).abs() < 0.5, "{timed}");
+        assert_eq!(route(&cands), vec![(4, (0, 32))]);
+
+        // A figure FASTER than the stated speed is no discount.
+        for c in &mut cands[..2] {
+            c.stated_ms_per_layer = Some(0.01);
+        }
+        assert_eq!(route(&cands), vec![(2, (0, 16)), (3, (16, 32))]);
+        assert!(
+            (chain_cost_ms(&halves(2, 3), &cands, &local, 32, None) - (stated + 3_360.0)).abs()
+                < 0.5
+        );
+
+        // And a figure THIS node measured outranks the peer's own.
+        for c in &mut cands[..2] {
+            c.stated_ms_per_layer = Some(1000.0);
+            c.observed_delegated_ms_per_layer = Some(0.5);
+        }
+        assert_eq!(route(&cands), vec![(2, (0, 16)), (3, (16, 32))]);
     }
 
     #[test]
@@ -4631,6 +4697,7 @@ mod transfer_cost_tests {
             reply_tokens_at_most: None,
             reply_tokens_expected: None,
             ring: Default::default(),
+            stated_ms_per_layer: None,
             fresh_run_layers: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,

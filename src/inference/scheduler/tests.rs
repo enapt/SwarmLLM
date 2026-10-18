@@ -773,6 +773,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         reply_tokens_at_most: None,
         reply_tokens_expected: None,
         ring: Default::default(),
+        stated_ms_per_layer: None,
         fresh_run_layers: None,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
@@ -1046,6 +1047,7 @@ fn greedy_assign_multi_range_candidate() {
             reply_tokens_at_most: None,
             reply_tokens_expected: None,
             ring: Default::default(),
+            stated_ms_per_layer: None,
             fresh_run_layers: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
@@ -1086,6 +1088,7 @@ fn greedy_assign_multi_range_candidate() {
             reply_tokens_at_most: None,
             reply_tokens_expected: None,
             ring: Default::default(),
+            stated_ms_per_layer: None,
             fresh_run_layers: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
@@ -2119,6 +2122,7 @@ fn cost_cand(
         reply_tokens_at_most: None,
         reply_tokens_expected: None,
         ring: Default::default(),
+        stated_ms_per_layer: None,
         fresh_run_layers: None,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
@@ -3523,6 +3527,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         reply_tokens_at_most: None,
         reply_tokens_expected: None,
         ring: Default::default(),
+        stated_ms_per_layer: None,
         fresh_run_layers: None,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
@@ -3626,6 +3631,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         reply_tokens_at_most: None,
         reply_tokens_expected: None,
         ring: Default::default(),
+        stated_ms_per_layer: None,
         fresh_run_layers: None,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
@@ -3729,6 +3735,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         reply_tokens_at_most: None,
         reply_tokens_expected: None,
         ring: Default::default(),
+        stated_ms_per_layer: None,
         fresh_run_layers: None,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
@@ -3958,6 +3965,7 @@ fn a_peer_that_publishes_its_ranges_is_priced_by_them() {
             model_id: mid.0.clone(),
             layers: 12,
             ranges,
+            decode_us_per_layer: None,
         }];
         state.peer_registry.insert(
             node.clone(),
@@ -7813,7 +7821,93 @@ fn publish_resident(state: &SharedState, node: &NodeId, model: &ModelId, range: 
             end: range.1,
             releasable_layers: 0,
         }],
+        decode_us_per_layer: None,
     }];
+}
+
+/// FUTURE_WORK #3 (f): a peer's own timing of the model, published beside the
+/// layers it holds, reaches its candidate — and prices it only where it says
+/// the peer is slower than its stated speed does.
+#[test]
+fn a_peers_published_timing_reaches_its_candidate_as_a_floor_on_its_price() {
+    let (state, local, b, c, model) = two_whole_model_card_peers();
+    publish_resident(&state, &b, &model, (0, 32));
+    publish_resident(&state, &c, &model, (0, 32));
+    let publish_timing = |node: &NodeId, us: Option<u32>| {
+        let mut p = state.peer_registry.get_mut(node).unwrap();
+        p.capability.as_mut().unwrap().resident_layers[0].decode_us_per_layer = us;
+    };
+    let scheduler =
+        PipelineScheduler::with_local_processor_speed(state.clone(), LOCAL_PROCESSOR_TPS);
+    let manifest = state.model_registry.get_manifest(&model).unwrap();
+    let cand = |node: &NodeId| {
+        scheduler
+            .gather_candidates(
+                &manifest,
+                &local,
+                uuid::Uuid::new_v4(),
+                None.into(),
+                super::Purpose::Preview,
+                &|| true,
+                crate::types::KeepAsked::Unasked,
+            )
+            .into_iter()
+            .find(|x| &x.node_id == node)
+            .unwrap()
+    };
+    let compute =
+        |x: &NodeCandidate| parallax::vertex_cost(x, (0, 32), &local, 32, None).compute_ms;
+
+    // Nothing published: the stated speed alone, as before.
+    let unpublished = cand(&c);
+    assert_eq!(unpublished.stated_ms_per_layer, None);
+    let stated_speed = compute(&unpublished);
+
+    // A published 100 ms a layer is far slower than any card states.
+    publish_timing(&c, Some(100_000));
+    let slow = cand(&c);
+    assert_eq!(slow.stated_ms_per_layer, Some(100.0));
+    assert_eq!(compute(&slow), 100.0 * 32.0 * slow.forward_passes());
+    assert!(compute(&slow) > stated_speed);
+    assert_eq!(
+        cand(&b).stated_ms_per_layer,
+        None,
+        "only the peer that published"
+    );
+
+    // One claiming to be faster than its stated speed is priced at that speed.
+    publish_timing(&c, Some(1));
+    assert_eq!(compute(&cand(&c)), stated_speed);
+    // 0, which no timing produces, is no figure; a garbled giant is held to
+    // the bound rather than dropped, which would price the peer FASTER.
+    publish_timing(&c, Some(0));
+    assert_eq!(cand(&c).stated_ms_per_layer, None);
+    publish_timing(&c, Some(u32::MAX));
+    assert_eq!(
+        cand(&c).stated_ms_per_layer,
+        Some(super::STATED_DECODE_US_PER_LAYER_MAX as f32 / 1000.0)
+    );
+
+    // Measured here, the peer is priced by what this node timed, whatever it
+    // says. (Twice: the first sample on a peer is a cold one, which no decode
+    // figure keeps.)
+    publish_timing(&c, Some(100_000));
+    for _ in 0..2 {
+        state.record_peer_segment_latency(
+            &c,
+            &model,
+            crate::daemon::state::peer_speed::WorkKind::Delegated,
+            64,
+            32,
+            0,
+        );
+    }
+    let measured = cand(&c);
+    assert_eq!(measured.stated_ms_per_layer, Some(100.0));
+    assert!(
+        compute(&measured) < compute(&slow),
+        "this node's own measurement outranks the peer's figure"
+    );
 }
 
 fn whole_model_cold_load_ms(cands: &[NodeCandidate], node: &NodeId, local: &NodeId) -> f32 {

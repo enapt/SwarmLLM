@@ -96,6 +96,19 @@
 #          peer up, the router would), and PASS = every reply names A alone
 #          (one segment, no peer). v0.3.243's streamed forms said
 #          `"segments": 0` there, which no split can see (#306).
+#   owntiming  FUTURE_WORK #3 (f): split's topology (A shard 0, B the rest, both
+#          on the processor). Each worker times its own decode steps and
+#          publishes the figure beside the layers it holds
+#          (`ResidentModelLayers::decode_us_per_layer`); a planner reads it as
+#          `stated_ms_per_layer` on its candidate line. Only work run FOR
+#          PEERS is timed. Three asks through A, TIMING_WAIT_S (default 75) for
+#          two capability rounds, a fourth through A, one through B, the wait
+#          again, one more through B. PASS = A's first plan had no figure for
+#          B; its fourth had B's (timed on the segments B served A); B's first
+#          plan had NONE for A (A had run only its own requests, never timed —
+#          they would tell the swarm when the owner used a model); B's second
+#          had A's (A served B's first segment). Run with an older BIN_B and
+#          the second check fails: nothing publishes it.
 #   context  the FAILOVER topology, but B serves a SHORTER conversation than the
 #          long prompt (CEIL_B, default 512, as B's own max_seq_len_override) —
 #          the field report of 2026-09-25, where an 8192-token peer refused an
@@ -267,7 +280,7 @@
 #          re-plans (503 after 403.8 s on 2026-10-18). PASS = 200, `A took the
 #          refusal: 1`, `A timed out: 0`, `A re-planned: 0`.
 #
-# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece|owntiming <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -292,13 +305,24 @@
 # live node's own mDNS will find the rig, and a rig node that can see a third
 # peer can route through it — so this refuses to run a request unless A sees
 # exactly one peer. Stop the live node first. `gossip_network_id` is NOT
-# isolation (#352).
+# isolation (#352) — or set RIG_NETNS=1, below.
 set -u
+
+# RIG_NETNS=1: run in a private network namespace (`unshare -rn`, as
+# ceiling_test.sh does), where no other node on this machine can reach the rig
+# nor it them — so it can run beside the live node. Nothing in it reaches the
+# internet either, so a mode that needs HuggingFace cannot run this way.
+if [ "${RIG_NETNS:-}" = 1 ] && [ -z "${RIG_IN_NETNS:-}" ]; then
+  exec env RIG_IN_NETNS=1 unshare -rn bash "$0" "$@"
+fi
+if [ -n "${RIG_IN_NETNS:-}" ]; then
+  ip link set lo up || { echo "cannot bring up loopback"; exit 2; }
+fi
 
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv or refusepiece"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece|owntiming) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, refusepiece or owntiming"; exit 2 ;; esac
 if [ -n "${RAM_A:-}${RAM_B:-}" ] && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[resources\]'; then
   echo "RAM_A/RAM_B are written to that node's [resources]; EXTRA_TOML may not open that table too"; exit 2
 fi
@@ -306,7 +330,7 @@ if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOM
   echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
 fi
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
-if [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ]; then
+if [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 elif [ "$MODE" = cache ]; then
   MODEL="${MODEL:-qwen2.5-0.5b-instruct-fp16}"
@@ -324,7 +348,7 @@ SHARDS=$(ls "$SRC" | sed -n 's/^shard_\([0-9]*\)\.bin$/\1/p' | sed 's/^0*\([0-9]
 LAST=$(echo "$SHARDS" | tail -1)
 N=$(echo "$SHARDS" | wc -l)
 [ "$N" -ge 2 ] || { echo "$MODEL has $N shard file(s) here; a split needs at least 2"; exit 2; }
-if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ]; then
+if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
   # Processor unless asked otherwise: the reference is scored on the processor.
@@ -450,7 +474,7 @@ fi
 # private gossip id stop none of it. A probe node on 8970 (D's range) put
 # nine peers in front of A on 2026-09-25.
 OTHERS=$(ps -eo pid,comm | awk '$2 ~ /swarmllm/ {print $1}' | paste -sd' ')
-if [ -n "$OTHERS" ]; then
+if [ -n "$OTHERS" ] && [ -z "${RIG_IN_NETNS:-}" ]; then
   echo "rig: other SwarmLLM processes are running (pids: $OTHERS). Stop them first —"
   echo "     any node on this machine finds the rig through its loopback probe."
   exit 2
@@ -576,6 +600,12 @@ ADDRS=$(curl -s -m 8 -H "Authorization: Bearer $KA" "localhost:8900/api/admin/di
   | grep -oE "/ip4/[0-9.]+/tcp/[0-9]+/p2p/[A-Za-z0-9]+" | grep -v "p2p-circuit")
 ADDR=$(echo "$ADDRS" | grep -v "10\.255\.255\.254" | head -1)
 [ -z "$ADDR" ] && ADDR=$(echo "$ADDRS" | head -1)
+# In its own namespace the rig has only loopback, which A does not publish: dial
+# it there, as ceiling_test.sh does (P2P listens 10 above the API port).
+if [ -z "$ADDR" ] && [ -n "${RIG_IN_NETNS:-}" ]; then
+  ID_A=$(grep -a -m1 -oE "Initializing network peer_id=12D3Koo[A-Za-z0-9]+" "$BASE/A/node.log" | cut -d= -f2)
+  [ -n "$ID_A" ] && ADDR="/ip4/127.0.0.1/tcp/8910/p2p/$ID_A"
+fi
 [ -n "$ADDR" ] || { echo "A published no address to dial"; exit 1; }
 make_node "$BASE/B" "$SHARDS_B" "\"$ADDR\""
 if [ "$MODE" = mixed ]; then
@@ -1033,6 +1063,74 @@ fi
 if [ "$MODE" = split ]; then
   ask "What is the capital of France? Answer in one sentence." 64 q1 | tee "$OUT/replies.jsonl"
   ask "Write a short Python function that returns the factorial of n." 64 q2 | tee -a "$OUT/replies.jsonl"
+  exit 0
+fi
+
+if [ "$MODE" = owntiming ]; then
+  # The figure each node's planner was handed for the OTHER node, from that
+  # request's `pipeline candidate` line: (stated_ms_per_layer, observed_ms_per_layer).
+  seen() { # log node-hex-prefix line-count-before
+    tail -n +"$(( $3 + 1 ))" "$1" | grep -a "DIAG: pipeline candidate node=$2" | tail -1 \
+      | grep -oE "(stated_ms_per_layer|observed_ms_per_layer)=[A-Za-z0-9.()]+" | paste -sd' '
+  }
+  lines() { wc -l < "$1"; }
+  IDA=$(curl -s -m 5 -H "Authorization: Bearer $KA" localhost:8900/api/admin/network-code \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:16])')
+  KB=$(cat "$BASE/B/api_key")
+  IDB=$(curl -s -m 5 -H "Authorization: Bearer $KB" localhost:8920/api/admin/network-code \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:16])')
+  L0=$(lines "$BASE/A/node.log")
+  ask "What is the capital of France? Answer in one sentence." 48 q1 | tee "$OUT/replies.jsonl" | cut -c1-160
+  BEFORE=$(seen "$BASE/A/node.log" "$IDB" "$L0")
+  ask "Write a short Python function that returns the factorial of n." 48 q2 | tee -a "$OUT/replies.jsonl" | cut -c1-160
+  ask "Name three rivers in Europe." 48 q3 | tee -a "$OUT/replies.jsonl" | cut -c1-160
+  echo "owntiming: waiting ${TIMING_WAIT_S:-75} s for two capability rounds"
+  sleep "${TIMING_WAIT_S:-75}"
+  L1=$(lines "$BASE/A/node.log")
+  ask "What is the capital of Italy? Answer in one sentence." 16 q4 | tee -a "$OUT/replies.jsonl" | cut -c1-160
+  A_OF_B=$(seen "$BASE/A/node.log" "$IDB" "$L1")
+  # B holds every part but the first, so its plan needs A. A has run only its
+  # OWN requests so far, which are never timed: B must be handed no figure.
+  # The ask makes A serve B's first segment; after the rounds, B's next plan
+  # is handed A's timing of THAT.
+  ask_b() { # prompt max_tokens label
+    local body
+    body=$(python3 -c 'import json,sys
+print(json.dumps({"model":sys.argv[1],"max_tokens":int(sys.argv[3]),"temperature":0,"messages":[{"role":"user","content":sys.argv[2]}]}))' "$MODEL" "$1" "$2")
+    curl -s -m 600 -o "$OUT/$3.body" -w "{\"$3_status\":%{http_code}}\n" -H "Authorization: Bearer $KB" \
+         -H "Content-Type: application/json" -X POST localhost:8920/v1/chat/completions -d "$body"
+  }
+  M0=$(lines "$BASE/B/node.log")
+  # Long enough for A to serve well past the 4 steps a figure needs. B drives
+  # it, and a coordinator that speculates with n-grams sends every step that
+  # found no guess as a check of one position — the steps a first cut of this
+  # never timed (2026-10-18): the line below says whether this run took them.
+  ask_b "List the days of the week, one per line." 48 q5
+  B_OF_A_OWN=$(seen "$BASE/B/node.log" "$IDA" "$M0")
+  echo "owntiming: B drove q5 through n-gram checks: $(tail -n +"$(( M0 + 1 ))" "$BASE/B/node.log" | grep -ac 'ngram-only: starting')"
+  sleep "${TIMING_WAIT_S:-75}"
+  M1=$(lines "$BASE/B/node.log")
+  ask_b "What is the capital of Portugal? Answer in one sentence." 16 q6
+  B_OF_A=$(seen "$BASE/B/node.log" "$IDA" "$M1")
+  echo "owntiming: A's plan, before any step:      B ${BEFORE:-<no candidate line>}"
+  echo "owntiming: A's plan, after B served it:    B ${A_OF_B:-<no candidate line>}"
+  echo "owntiming: B's plan, A ran only its own:   A ${B_OF_A_OWN:-<no candidate line>}"
+  echo "owntiming: B's plan, after A served B:     A ${B_OF_A:-<no candidate line>}"
+  python3 - "$BEFORE" "$A_OF_B" "$B_OF_A_OWN" "$B_OF_A" <<'PY'
+import re, sys
+before, a_of_b, b_of_a_own, b_of_a = sys.argv[1:5]
+fig = lambda s: (re.search(r"stated_ms_per_layer=Some\(([0-9.]+)\)", s) or [None, None])[1]
+ok = [
+    ("A planned before any step with no figure for B", "stated_ms_per_layer=None" in before),
+    ("A was handed B's own timing of the segments it served A", fig(a_of_b) is not None),
+    ("B was handed no figure for A while A had run only its own requests",
+     "stated_ms_per_layer=None" in b_of_a_own),
+    ("B was handed A's own timing once A had served B", fig(b_of_a) is not None),
+]
+for what, good in ok:
+    print(("PASS " if good else "FAIL ") + what)
+print("owntiming:", "PASS" if all(g for _, g in ok) else "FAIL")
+PY
   exit 0
 fi
 

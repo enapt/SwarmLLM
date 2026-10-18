@@ -76,8 +76,9 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
     (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
     reply length (160-token replies were 2.5x their price), and a chain its head leads is priced
     by its own hops (network term 57.9 s → 3.6 s, same peers and passes), all in v0.3.243; two
-    peers whose workers already chain are planned that chain (#3 (e), fixed 10-18, unreleased);
-    next, a led chain's peers' unmeasured compute (#3 (f)). Never tune the constant.
+    peers whose workers already chain are planned that chain (#3 (e)) and a led chain's peers are
+    priced by their own published decode time (#3 (f)), both fixed 10-18, unreleased; next, a
+    peer's prompt cache (#3 (c)) and the drafter's gain (#3 (d)). Never tune the constant.
 9. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
 10. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
@@ -657,14 +658,10 @@ under-priced by its length ÷ 64~~ (2.49x / 2.62x at 160 tokens on two peers' ha
 can read; (c) a peer's prompt cache is unpriced (a repeated 505-token prompt priced
 20 s, read in ~0: 0.25x); (d) the drafter's gain (0.39x, 10-15); found by (a)'s check (2026-10-18, five requests on
 the live swarm): (e) ~~a led chain is charged a load that never happens~~ — **fixed 2026-10-18,
-not yet released** (§ Closed); (f) **a led chain's peers are never measured from here** (a
-delegated reply records no speed sample), so their compute stays a stated-speed prior: a warm
-two-peer 16-token reply priced 2.3 s without the load, took 19.4 s. (f) is next: each node to
-publish the per-layer decode time its own worker measured for each model it holds loaded, as
-Petals servers publish `inference_rps` (measured on the real block, cached per model, device and
-dtype; `server/throughput.py`, read 2026-10-18) and its client prices a span's compute from it
-(`sequence_manager.py`, 300 rps when unknown) — with a deadband, or every EMA wobble is
-capability news (#91).
+not yet released** (§ Closed); (f) ~~a led chain's peers are never measured from here~~ (a
+warm two-peer 16-token reply priced 2.3 s of compute, took 19.4 s) — **fixed 2026-10-18, not yet
+released** (§ Closed): each worker publishes its own decode time per layer, as Petals servers
+publish `inference_rps`, and a coordinator takes it as a floor under the stated speed.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
@@ -2648,7 +2645,34 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-18, not yet released** (#306; #3 (e))
+**Closed 2026-10-18, not yet released** (#306; #3 (e); #3 (f))
+- #3 (f) — **A peer inside a chain another peer leads is priced by its own measured speed.** The
+  head drives such a chain, so this node never timed the peers behind it and priced their compute
+  from their stated speed — the optimistic side: a warm two-peer 16-token reply on Qwen3-30B-A3B
+  priced 2.3 s of compute took 19.4 s. Now, after Petals (`server/throughput.py` times
+  `inference_rps` on the real block; `sequence_manager.py` prices a span from it), each worker
+  times the one-position decode steps it runs FOR PEERS (`ModelProcessPool::forward_for_request`,
+  `OwnDecodeSpeed`) and publishes the fastest of its last 32 as
+  `ResidentModelLayers::decode_us_per_layer` (after 4 steps; gone an hour after the last), which a
+  coordinator takes as a FLOOR under the stated speed (`prior_ms_per_layer` = the max), never a
+  discount; anything it measured itself still outranks it. A 1.5x deadband keeps it from being
+  capability news on every wobble (#91). A security review (2026-10-18) changed two choices: a
+  median let any peer queue a node's steps into a slow figure (now the minimum, which only a node
+  really that busy moves), and timing the owner's own steps would have told the swarm when the
+  owner ran a split (now peers' work only). Tests (each red with its part off):
+  `a_led_chain_is_priced_by_its_peers_own_timing_where_nothing_was_measured_here`,
+  `a_peers_published_timing_reaches_its_candidate_as_a_floor_on_its_price`,
+  `a_workers_own_decode_steps_are_published_beside_its_layers`,
+  `a_workers_own_speed_is_the_fastest_of_its_latest_steps`,
+  `a_workers_own_speed_is_news_only_past_its_deadband`, `a_one_position_check_is_timed_as_a_decode_step`.
+  Rig `split_rig.sh owntiming` (`RIG_NETNS=1` runs it beside a live node): PASS 4/4 — each node's
+  plan carries the other's own timing once it has served it, and none while it ran only its own.
+  Its first run FAILED the last check, and found a gap no test had: a coordinator speculating with
+  n-grams sends each step that found no guess as a one-position check, which the batch path's test
+  of "a decode step" refused, so a chain driven that way published nothing. A step is now one
+  position counted the way the serve credit counts it (`tensor_util::positions_carried`, moved there
+  so the two cannot disagree). `docs/invariants/scheduling.md` § "A peer's own timing is a floor
+  under its stated speed".
 - #3 (e) — **Two peers whose loaded ranges already form a chain are planned that chain.** A
   machine's own loaded range was offered to the route search only on a pass that found no route
   (#275's retry, which also cuts OTHER machines' ranges and is rightly held back). Live, Qwen3-30B-A3B:

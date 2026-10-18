@@ -93,16 +93,9 @@ pub(super) async fn handle_layer_forward(
     };
 
     // The token positions this forward carries — what "tokens served" and the
-    // serve credit are counted in (`record_peer_serve`). See `forward_positions`.
-    let estimated_tokens: u32 = forward_positions(
-        &forward.activations,
-        forward.pre_embedded || forward.layer_range.0 > 0,
-        crate::inference::model_worker::first_segment_input_is_text(
-            forward.index_pos,
-            forward.prompt_cache.is_some(),
-            forward.prompt_span.is_some(),
-        ),
-    );
+    // serve credit are counted in (`record_peer_serve`). See
+    // `tensor_util::forward_positions`.
+    let estimated_tokens: u32 = crate::inference::tensor_util::positions_carried(&forward);
     let forward_start = std::time::Instant::now();
     tracing::info!(
         request_id = %request_id,
@@ -617,38 +610,6 @@ const RESULT_HANDOFF_SLOW: std::time::Duration = std::time::Duration::from_secs(
 /// Commands queued ahead of a result that are worth a line — an eighth of the
 /// network command channel's 1024.
 const RESULT_HANDOFF_BACKLOG: usize = 128;
-
-/// How many token positions a forward's payload carries — the unit "tokens
-/// served" and the serve credit are counted in.
-///
-/// Three payloads cross a segment boundary, and the byte length means something
-/// different in each:
-/// - **hidden states** (`hidden_states`: any segment past the first, or a
-///   pre-embedded first one) — `[batch, seq, hidden]` in f32 or Q8_0, counted
-///   from the shape header (`tensor_util::activation_positions`), because the
-///   length is seq × hidden × bytes;
-/// - **prompt text** (a first segment's whole prompt pass from position 0 —
-///   `model_worker::first_segment_input_is_text`, the worker's own rule) — ~4
-///   characters a token, an estimate kept cheap on the serving path;
-/// - **token ids** (a first segment's later steps, a resumed pass, a piece of
-///   a pass) — 8 bytes each: one for a decode step, the guesses for a check, a
-///   piece's positions.
-///
-/// It divided every prompt pass's bytes by 4, which for hidden states is
-/// tokens × hidden size: a 20-token prompt pass of a 2048-wide model counted as
-/// 40,965 tokens, and the dashboard's "tokens served" and tok/s read ~2000×
-/// high (field report #004, 2026-10-01). A later step counted 1 whatever it
-/// carried, so a check's guesses were not counted at all.
-fn forward_positions(activations: &[u8], hidden_states: bool, prompt_text: bool) -> u32 {
-    let positions = if hidden_states {
-        crate::inference::tensor_util::activation_positions(activations).map(|p| p as usize)
-    } else if prompt_text {
-        Some(String::from_utf8_lossy(activations).chars().count() / 4)
-    } else {
-        Some(activations.len() / 8)
-    };
-    positions.unwrap_or(1).clamp(1, u32::MAX as usize) as u32
-}
 
 /// How long a streamed forward waits here for the one numbered before it. A
 /// piece of a prompt pass (#171) is hundreds of positions, not a check's few: it
@@ -1334,7 +1295,8 @@ mod tests {
 
 #[cfg(test)]
 mod forward_positions_tests {
-    use super::{forward_positions, turn_wait};
+    use super::turn_wait;
+    use crate::inference::tensor_util::forward_positions;
     use crate::inference::tensor_util::{tensor_to_bytes, tensor_to_bytes_q8_0};
     use candle_core::{DType, Device, Tensor};
 

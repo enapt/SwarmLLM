@@ -3324,7 +3324,7 @@ fn refuse_a_prompt_past_the_served_context(
 /// resumes a kept prompt (#10) nor is a piece of a pass (#171): those, and every
 /// later step, carry ids (8 bytes each). One rule for the worker that reads the
 /// input and the serving node that counts it
-/// (`dispatch::layer_forward::forward_positions`).
+/// (`tensor_util::forward_positions`).
 pub(crate) fn first_segment_input_is_text(
     index_pos: u32,
     resumes_a_kept_prompt: bool,

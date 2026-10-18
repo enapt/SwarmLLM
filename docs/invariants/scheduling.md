@@ -4187,6 +4187,84 @@ more compute against the network, so a split onto a faster card is priced more a
 Before release, a WAN split rig must show that this adds no route slower than the one it
 replaced (`docs/plans/regional_pipelines.md`).
 
+## A peer's own timing is a floor under its stated speed (2026-10-18, FUTURE_WORK #3 (f))
+
+**What it replaced.** A peer this node has not timed is priced from its stated speed — memory
+bandwidth for a 7B, scaled by `layer_work`. A chain its head leads (#3 (a)) is never timed from
+here: the head drives it, and the coordinator records no sample for the peers behind it. So those
+peers stayed on the stated-speed prior for good, and it was the optimistic side: on the live swarm
+(2026-10-18, five requests on Qwen3-30B-A3B) a warm two-peer 16-token reply priced 2.3 s of compute
+took 19.4 s.
+
+**The change, after Petals.** A Petals server times its own block (`server/throughput.py`:
+`inference_rps` from single-token steps on the real block, cached per model, device and dtype) and
+publishes it; its client prices a span's compute from it (`sequence_manager.py`, 300 rps when
+unknown). Here each worker times the decode steps it runs for PEERS — `ModelProcessPool::forward_for_request`,
+the one call every segment served for a peer's pipeline passes through, and a split a peer handed
+this node to lead (`Requester::Swarm`), from send to result, answered steps only, a step being
+ONE position of the base model (`process_pool::forward_is_one_decode_step`: the count the serve
+credit uses, `tensor_util::positions_carried`; no share of a layer, image or adapter) whatever else
+it asks — into `OwnDecodeSpeed` on the
+`WorkerHandle`, so a worker respawned on the other device starts with no figure (per device, as
+Petals keeps it). Published per resident model
+as `ResidentModelLayers::decode_us_per_layer` (`#[serde(default, skip_serializing_if)]`; an older
+node reads past it, as it reads past `ranges`).
+
+**Four choices, each against a measured or named failure:**
+
+- **The FASTEST of the last 32 steps — not the EMA `peer_speed` keeps, and not a median.** Waiting
+  only ever ADDS to a step (behind another request's prompt pass, in a batch's collection window),
+  which is the round trip's shape, and the answer is the same: BBR's windowed minimum RTT, and
+  `LatencyFilter` here, which takes the minimum over Serf's median because the slow mode is the
+  MAJORITY (`docs/invariants/network.md` § network coordinates). The first build took a median;
+  the security review (2026-10-18) found any peer that sent this node work could queue half its
+  steps behind other forwards and make it publish a slow figure for an hour, steering coordinators
+  away. Against the minimum it must slow EVERY step in the window — the node really being that
+  busy. An EMA at 0.3 swings several-fold on one such step and back, and each swing past the
+  deadband is capability news to every peer (#91); the minimum moves only when a faster step
+  arrives or the fastest ages out. Published after 4 steps; withdrawn an hour after the last, and
+  a step after that starts a NEW window — a figure that prices a node slow keeps away the steps
+  that would correct it, `RANKING_STALE_AFTER`'s ratchet.
+- **Peers' work only.** The owner's own split steps were counted at first; the review noted the
+  figure's appearing and going would then tell every peer — a private pool's outsiders included,
+  capability gossip has no scope — when the owner last ran a split of a model. Serving work is
+  what peers already sent.
+- **A floor, not a replacement**: `prior_ms_per_layer` = `max(peer's timing, stated-speed prior)`.
+  The error #3 (f) measured runs that way (the prior was ~8x fast), and the max means the field
+  opens no new way to look FASTER than the stated speed already allows — a peer that wants work can
+  only state a speed it could always state. `stated_decode_ms_per_layer` drops 0 and holds a figure
+  past 60 s a layer at the bound (dropping it would price the peer faster). Anything this node
+  measured (`observed_*`) still outranks it; `priced_from_a_measurement` is unchanged.
+- **A 1.5x deadband** in `health::monitor::capability_news` (`CAPABILITY_SPEED_DEADBAND`), with
+  appearing and going as news.
+
+**Tests, each red with its part switched off:** `a_led_chain_is_priced_by_its_peers_own_timing_where_nothing_was_measured_here`
+(two led peers stating a card's speed and timing 8x slower lose to a whole copy measured at 3 ms a
+layer; red without the timing and with a faster figure taken as a discount),
+`a_peers_published_timing_reaches_its_candidate_as_a_floor_on_its_price` (red when
+`gather_candidates` does not read it), `a_workers_own_decode_steps_are_published_beside_its_layers`
+(red without the spawn guard: a step sent before the worker existed was run by another),
+`a_workers_own_speed_is_the_fastest_of_its_latest_steps` (red as the latest step, and without the
+expiry), `a_workers_own_speed_is_news_only_past_its_deadband`,
+`a_one_position_check_is_timed_as_a_decode_step` (red with the batch path's test in front).
+
+**On the wire (#333's lesson — a gossiped field nobody checks on a real node is unverified):**
+`split_rig.sh owntiming`, TinyLlama on two processor nodes in a private network namespace
+(`RIG_NETNS=1`, beside the live node), 2026-10-18, four checks. A's first plan read no figure for B;
+after three split replies A's plan read B's `stated_ms_per_layer=Some(3.192)` beside its own timing
+of B, `observed_ms_per_layer=Some(4.373)` (the round trip on top). B's plan read NO figure for A
+while A had run only its own requests (the first build, which timed the owner's steps, handed B
+`Some(2.592)` there — the control). After B drove a 48-token reply through A — speculating with
+n-grams, so 37 of A's steps were checks of one position and 10 of several — B's plan read A's
+`Some(2.284)`, its own timing `Some(3.193)`. PASS 4/4. The run before that FAILED the last check on
+a 7-token reply: A served 5 such one-position checks, the batch path's test refused them all, and A
+published nothing — no test reached that path, the rig did.
+
+**What a change must keep, and what is open.** Never let the figure lower a price (the max), and
+never count it as this node's measurement. A model run here only WHOLE (`Generate`) times nothing
+this way, so a node that never serves a segment of it publishes no figure; its peers keep the
+stated speed for it, as before.
+
 ## Inference Router Queue
 
 `drain_queue` only fires on `RouterCommand::Submit` / `StreamSubmit` or

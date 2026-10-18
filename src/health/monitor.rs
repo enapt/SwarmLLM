@@ -221,6 +221,22 @@ const CAPABILITY_DISK_DEADBAND_MB: u64 = 1024;
 /// folds ours into its own estimate.
 const CAPABILITY_COORD_DEADBAND_MS: f32 = 5.0;
 
+/// The same for a worker's own decode speed (`ResidentModelLayers::
+/// decode_us_per_layer`, FUTURE_WORK #3 (f)), as a FACTOR: it is news once the
+/// larger of the last-published and current figures is this many times the
+/// smaller, or when one appears or goes. A peer reads it only as a floor
+/// under the stated speed it prices by, and the error it corrects was 8x
+/// (2.3 s priced, 19.4 s taken); a figure within 1.5x of the truth leaves
+/// little of that, and the fastest-of-32 it is drawn from moves only when a
+/// faster step arrives or the fastest ages out.
+pub(crate) const CAPABILITY_SPEED_DEADBAND: f64 = 1.5;
+
+/// Is `now` within [`CAPABILITY_SPEED_DEADBAND`] of `sent`?
+fn speed_within_deadband(now: u32, sent: u32) -> bool {
+    let (low, high) = (now.min(sent).max(1), now.max(sent));
+    f64::from(high) < f64::from(low) * CAPABILITY_SPEED_DEADBAND
+}
+
 /// Does `now` tell the swarm anything `sent` — the capability as last
 /// PUBLISHED — did not?
 ///
@@ -293,6 +309,20 @@ fn capability_news(
         let moved = (n.x - s.x).hypot(n.y - s.y) + (n.height - s.height).abs();
         if moved < CAPABILITY_COORD_DEADBAND_MS {
             now.coord = sent.coord;
+        }
+    }
+    // Each worker's own decode speed moves with every step it times; the rest
+    // of its residency entry is compared exactly, as before.
+    for entry in &mut now.resident_layers {
+        let published = sent
+            .resident_layers
+            .iter()
+            .find(|s| s.model_id == entry.model_id)
+            .and_then(|s| s.decode_us_per_layer);
+        if let (Some(n), Some(s)) = (entry.decode_us_per_layer, published) {
+            if speed_within_deadband(n, s) {
+                entry.decode_us_per_layer = Some(s);
+            }
         }
     }
     // A capability that cannot be serialized cannot be compared: say it is
@@ -2836,6 +2866,52 @@ mod tests {
         );
     }
 
+    /// A worker's own decode speed (FUTURE_WORK #3 (f)) is timed afresh on
+    /// every step it runs, so only a move past `CAPABILITY_SPEED_DEADBAND` — or
+    /// the figure appearing or going — is news; otherwise every reply a node
+    /// served would gossip its capability to the whole swarm (#91).
+    #[test]
+    fn a_workers_own_speed_is_news_only_past_its_deadband() {
+        let with = |speed: Option<u32>| {
+            let mut c = capability_for_test();
+            c.resident_layers = vec![crate::types::ResidentModelLayers {
+                model_id: "llama-3.2-3b".into(),
+                layers: 28,
+                ranges: Vec::new(),
+                decode_us_per_layer: speed,
+            }];
+            c
+        };
+        let sent = with(Some(1_000));
+        for drift in [1_000, 700, 1_400, 1_499, 667] {
+            assert!(
+                capability_news(&sent, &with(Some(drift))).is_empty(),
+                "{drift} µs a layer against 1000 is inside the band"
+            );
+        }
+        for moved in [1_500, 2_000, 666, 300] {
+            assert_eq!(
+                capability_news(&sent, &with(Some(moved))),
+                ["resident_layers"],
+                "{moved} µs a layer against 1000 is news"
+            );
+        }
+        assert_eq!(
+            capability_news(&sent, &with(None)),
+            ["resident_layers"],
+            "a figure that went is news"
+        );
+        assert_eq!(
+            capability_news(&with(None), &with(Some(1_000))),
+            ["resident_layers"],
+            "a figure that appeared is news"
+        );
+        // The rest of the entry is still compared exactly.
+        let mut grown = with(Some(1_100));
+        grown.resident_layers[0].layers = 30;
+        assert_eq!(capability_news(&sent, &grown), ["resident_layers"]);
+    }
+
     /// Free RAM moves with everything else running on the host, and a peer
     /// reads it only from a node stating neither a RAM budget nor a card. So
     /// it is never news on a node that states one — the rig found it holding
@@ -2886,6 +2962,7 @@ mod tests {
                         model_id: "llama-3.2-3b".into(),
                         layers: 28,
                         ranges: Vec::new(),
+                        decode_us_per_layer: None,
                     })
                 }),
             ),

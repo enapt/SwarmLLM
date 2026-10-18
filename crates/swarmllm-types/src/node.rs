@@ -607,6 +607,24 @@ pub struct ResidentModelLayers {
     /// types denies unknown fields, so an older node reads past it.
     #[serde(default)]
     pub ranges: Vec<ResidentLayerRange>,
+    /// What one decode step of this model costs this node's OWN worker, per
+    /// layer, in MICROSECONDS: its warm decode figure for the work it ran
+    /// itself — segments it served for a peer, and its own share of a split.
+    /// Petals servers publish the same thing (`inference_rps`, timed on the
+    /// real block and kept per model, device and data type) and its clients
+    /// price a span's compute from it.
+    ///
+    /// **A coordinator prices with it only where it has measured nothing
+    /// itself** — never over a figure it timed, and never as a measurement
+    /// that clears a gate. Without it, a peer only ever reached inside a chain
+    /// another peer leads is never timed by the coordinator at all, and was
+    /// priced from its bandwidth-derived speed: a warm two-peer chain priced
+    /// 2.3 s of compute took 19.4 s (FUTURE_WORK #3 (f)).
+    ///
+    /// `None` until measured, and from a node predating the field (read past
+    /// by older nodes, as `ranges` is).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_us_per_layer: Option<u32>,
 }
 
 /// One range a node's worker holds, and what loading a range that strictly
@@ -1079,10 +1097,23 @@ mod resident_ranges_tests {
                     releasable_layers: 2,
                 },
             ],
+            decode_us_per_layer: Some(1_250),
         };
         let back: ResidentModelLayers =
             serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
         assert_eq!(back, entry);
+
+        // A worker's own decode speed (#3 (f)): an older build's entry has
+        // none, and an entry without one sends nothing an older build would
+        // have to read past.
+        assert_eq!(old.resident_layers[0].decode_us_per_layer, None);
+        let unmeasured = ResidentModelLayers {
+            decode_us_per_layer: None,
+            ..entry
+        };
+        assert!(!serde_json::to_string(&unmeasured)
+            .unwrap()
+            .contains("decode_us_per_layer"));
 
         // A range whose sender left `releasable_layers` out releases nothing —
         // the side that cannot over-credit a peer.
