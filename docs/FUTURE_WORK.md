@@ -75,9 +75,9 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
     ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
     (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
     reply length (160-token replies were 2.5x their price), and a chain its head leads is priced
-    by its own hops (network term 57.9 s → 3.6 s, same peers and passes), all in v0.3.243; next, a led chain charged a
-    load that never happens (#3 (e)), then its peers' unmeasured compute (#3 (f)). Never tune
-    the constant.
+    by its own hops (network term 57.9 s → 3.6 s, same peers and passes), all in v0.3.243; two
+    peers whose workers already chain are planned that chain (#3 (e), fixed 10-18, unreleased);
+    next, a led chain's peers' unmeasured compute (#3 (f)). Never tune the constant.
 9. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
 10. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
@@ -656,14 +656,15 @@ under-priced by its length ÷ 64~~ (2.49x / 2.62x at 160 tokens on two peers' ha
 `max_tokens`; left is one reply's spread around its model's mean, which nothing before the reply
 can read; (c) a peer's prompt cache is unpriced (a repeated 505-token prompt priced
 20 s, read in ~0: 0.25x); (d) the drafter's gain (0.39x, 10-15); found by (a)'s check (2026-10-18, five requests on
-the live swarm): (e) **a led chain is charged a load that never happens** — this node cut
-Qwen3-30B-A3B at layer 19, the head re-planned onto the ranges its peers' workers hold ([0,18),
-[18,48)), and a peer's worker keys ranges exactly, so warm repeats carried 78-83 s of
-`cold_load_ms` (priced 84.9 / 90.3 s, took 19.4 / 29.4 s). A held range is offered to the search
-only when no route exists (#275's rule, `route_over(.., meet_held)`) — the fix is there, and must
-not re-cut existing routes blindly; (f) **a led chain's peers are never measured from here** (a
+the live swarm): (e) ~~a led chain is charged a load that never happens~~ — **fixed 2026-10-18,
+not yet released** (§ Closed); (f) **a led chain's peers are never measured from here** (a
 delegated reply records no speed sample), so their compute stays a stated-speed prior: a warm
-two-peer 16-token reply priced 2.3 s without the load, took 19.4 s. (e) is next.
+two-peer 16-token reply priced 2.3 s without the load, took 19.4 s. (f) is next: each node to
+publish the per-layer decode time its own worker measured for each model it holds loaded, as
+Petals servers publish `inference_rps` (measured on the real block, cached per model, device and
+dtype; `server/throughput.py`, read 2026-10-18) and its client prices a span's compute from it
+(`sequence_manager.py`, 300 rps when unknown) — with a deadband, or every EMA wobble is
+capability news (#91).
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
@@ -2647,7 +2648,28 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-18, not yet released** (#306)
+**Closed 2026-10-18, not yet released** (#306; #3 (e))
+- #3 (e) — **Two peers whose loaded ranges already form a chain are planned that chain.** A
+  machine's own loaded range was offered to the route search only on a pass that found no route
+  (#275's retry, which also cuts OTHER machines' ranges and is rightly held back). Live, Qwen3-30B-A3B:
+  an Italian peer held shards [0..19) with a worker on [0..18), a Belgian one a worker on
+  [18..48); Italy's whole [0..19) fit, so the plan was [0..19) + [19..48) — 29 layers Belgium's
+  worker reads again — priced 84.9 / 90.3 s for replies that took 19.4 / 29.4 s (the head
+  re-planned onto the loaded ranges; a chain driven from here would have loaded them). Now a
+  machine's own loaded range is a vertex on every pass. And a peer's room for new layers is
+  compared unrounded with what its loaded range costs this prompt: rounded down against a KV
+  charge rounded up to a whole layer, Belgium (0.6 of a layer free, ~1.5 MB of cache needed) was
+  refused its own range on the two strict rungs and the plan went to the one where "a peer may
+  refuse". Tests `two_peers_whose_workers_already_chain_are_planned_that_chain` (the live
+  figures; red both ways: `[(0, 19), (19, 48)]` with the vertices behind the retry, no route on
+  `Everyone` with the rounding) and `a_peer_with_less_than_a_layer_free_still_runs_the_range_it_holds`.
+  Live (`~/swarmllm-3e/check.sh`, the dev build as this node, 2026-10-18 14:42-14:46Z): 5/5
+  answered; Belgium's room read 0.39 (was `Some(0)`) and a held-range route was found on
+  `Everyone`; warm 16-token replies priced 17.3 s, took 15.5 s (the release, same peers minutes
+  earlier: 7.6 s priced, 23.8 s taken). The peers' loaded ranges had moved by then, so the
+  morning's exact shape was not on offer live. One request was refused by an Australian peer
+  whose advertised room (~16 new layers) was stale (its own three workers held 23.7 GB): #252
+  (b)'s case, recovered by the re-plan.
 - #306 — **A streamed reply this computer served alone now names this computer.** Found on the
   live node 20 minutes after v0.3.243 shipped #251 (3): a streamed OpenAI, Anthropic or Responses
   reply from a model held here said `"route": "local", "segments": 0, "nodes": []`, while the same

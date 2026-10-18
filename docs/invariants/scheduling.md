@@ -591,6 +591,47 @@ without the retry) and `a_route_that_exists_is_not_recut_at_a_held_range`
 route). Live: see `room.sh`'s confirm runs in § "A split leaves room for the
 model that guesses for it".
 
+**A machine's OWN held range is a vertex on every pass; only the cuts in OTHER
+ranges wait for a pass with no route (2026-10-18, FUTURE_WORK #3 (e)).** The
+retry above bundled two kinds of vertex: a candidate's range cut at someone
+else's held endpoint (a re-cut of a route that may exist) and the candidate's
+own held range (the one shape it runs with nothing to load, cutting nobody).
+Behind the retry, the second was invisible whenever ANY route existed. Measured
+on the live swarm, Qwen3-30B-A3B (48 layers): an Italian peer held shards
+[0..19) with a worker on [0..18); a Belgian peer held every shard with a worker
+on [18..48), ceiling 30. Italy's whole [0..19) fits, so it was never cut, and
+the plan was [0..19) + [19..48) — 29 layers Belgium's exact-key worker reads
+again (`layers_added_by`: contained in a held superset). Delegated to Italy,
+which re-planned onto the two held ranges, warm repeats were priced 84.9 / 90.3 s
+(78-83 s of it `cold_load_ms`) and took 19.4 / 29.4 s; driven from here, the
+same plan would have made Belgium load the 29 layers. Petals routes over the
+blocks each server has LOADED (`sequence_manager.py`), never a span it would
+load — the same shape.
+
+A second fault put that plan on the riskiest rung. Belgium read
+`new_layer_room=Some(0)`: its room for new layers (weights + this prompt's KV)
+rounded DOWN, against a held range's charge — the reused layers' KV — rounded
+UP to a whole layer. 30 held layers of a 25-token prompt carry ~1.5 MB of KV
+against ~360 MB a layer, yet "under one layer free" refused the peer its own
+range on `Everyone` and `PeersAtFaceValue`, and the plan went to
+`PeersAtCeiling` ("a peer may refuse"). `PublishedRoom` now keeps the room
+unrounded (`room_for_new_layers`, `usable_bytes_for_layers` shared with
+`max_hostable_layers`) and `NodeCandidate::capacity_charge` returns the
+fractional charge; whole-layer arithmetic for THIS node's running total reads
+`layers_charged`.
+
+**Evidence.** `two_peers_whose_workers_already_chain_are_planned_that_chain`
+(the live figures): with the own-held vertices back behind `meet_held` it plans
+`[(0, 19), (19, 48)]` on `PeersAtCeiling`, the live plan; with the room and
+charge rounded it finds no route on `Everyone`. Both red, both restored green.
+`a_peer_with_less_than_a_layer_free_still_runs_the_range_it_holds` (charge 1
+of a 0.6 room when rounded). `a_route_that_exists_is_not_recut_at_a_held_range`
+stays green: the re-cut it guards is a cut in ANOTHER candidate's range. Live
+(`~/swarmllm-3e/check.sh`, the dev build as this node, 14:42-14:46Z): 5/5
+answered, Belgium's room read 0.39 where the release read `Some(0)`, and a
+held-range route was found on `Everyone`; the morning's exact shape had moved
+on by then, so the test above carries its reproduction.
+
 **From the rules file (moved 2026-10-02):**
 
 **`NodeCandidate::held_ranges` + `layers_it_would_add`** charge a local segment

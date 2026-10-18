@@ -55,7 +55,7 @@ Where this node cannot hold every layer, each planner FIRST plans with its bound
 
 ## Room for more layers is not room for the layers already held
 
-**`NodeCandidate::held_ranges` + `layers_it_would_add`** charge a local segment only the layers it would ADD (`process_pool::layers_added_by`), never its width. Peers publishing `ResidentModelLayers::ranges` go through `NodeCandidate::capacity_charge`. ⚠ `max_hostable_layers` stays TOTAL for peers. A held range must be REACHABLE by its neighbours: with partial ranges off, a rung with no route is retried with the parts that meet held endpoints (`parallax::route_over(.., meet_held)`, #275's rig) — only then, so no existing route is re-cut.
+**`NodeCandidate::held_ranges` + `layers_it_would_add`** charge a local segment only the layers it would ADD (`process_pool::layers_added_by`), never its width. Peers publishing `ResidentModelLayers::ranges` go through `NodeCandidate::capacity_charge`. ⚠ `max_hostable_layers` stays TOTAL for peers. A candidate's OWN held range is a vertex on EVERY pass — it cuts nobody else's range (#3 (e): offered only on no route, two peers whose workers chained were planned a 29-layer re-read). A peer's room and a held range's charge are compared UNROUNDED (`PublishedRoom`: the held layers' KV is a fraction of one layer). Other candidates' ranges are cut at held endpoints only on a rung with no route (`parallax::route_over(.., meet_held)`, #275's rig), so no existing route is cut at another machine's held range.
 
 → `docs/invariants/scheduling.md` § "Room for more layers is not room for the layers already held (2026-09-24, #95)"
 

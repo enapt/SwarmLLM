@@ -3853,30 +3853,61 @@ fn a_layer_a_peer_already_holds_still_costs_this_prompts_kv() {
         releasable_layers: 0,
     }];
     let room = |reused_share: f64| super::PublishedRoom {
-        new_layers: Some(8),
-        new_layers_at_face_value: Some(8),
+        new_layers: Some(8.0),
+        new_layers_at_face_value: Some(8.0),
         reused_share,
     };
 
     // A short prompt: the held range is free, a disjoint one costs its width.
     c.published_room = Some(room(0.0));
-    assert_eq!(c.capacity_charge((0, 20)), 0, "held exactly: nothing new");
-    assert_eq!(c.capacity_charge((20, 28)), 8, "disjoint: all new");
+    assert_eq!(c.capacity_charge((0, 20)), 0.0, "held exactly: nothing new");
+    assert_eq!(c.capacity_charge((20, 28)), 8.0, "disjoint: all new");
     // Contained in the held range: the loader keys ranges exactly and loads
     // it again, so it is all new however much of it is resident.
-    assert_eq!(c.capacity_charge((4, 12)), 8);
+    assert_eq!(c.capacity_charge((4, 12)), 8.0);
 
     // A long prompt whose KV is half a layer's full price: the same held range
-    // now costs ceil(20 × 0.5) = 10 layers of room, more than the 8 it has.
+    // now costs 20 × 0.5 = 10 layers of room, more than the 8 it has.
     c.published_room = Some(room(0.5));
-    assert_eq!(c.capacity_charge((0, 20)), 10);
-    // Rounded UP, never down, so the charge cannot undercount a refusal.
+    assert_eq!(c.capacity_charge((0, 20)), 10.0);
+    // NOT rounded up to a whole layer: compared with an unrounded room, a
+    // short prompt over held layers costs what its cache costs (#3 (e)).
     c.published_room = Some(room(0.01));
-    assert_eq!(c.capacity_charge((0, 20)), 1);
+    assert!((c.capacity_charge((0, 20)) - 0.2).abs() < 1e-9);
 
     // A peer that published nothing is charged the width, as before.
     let plain = simple_candidate(3, vec![(0, 32)]);
-    assert_eq!(plain.capacity_charge((0, 20)), 20);
+    assert_eq!(plain.capacity_charge((0, 20)), 20.0);
+}
+
+/// **FUTURE_WORK #3 (e): a peer with less than one new layer free still runs
+/// the range it holds.** Its room is weights + this prompt's KV per new layer;
+/// a range it already holds costs the KV alone, a fraction of one. Rounded down
+/// on one side and up on the other, a peer with 0.6 of a layer free was refused
+/// its own held range for a 25-token prompt — measured on the live swarm
+/// (2026-10-18): a Belgian peer holding [18..48) of Qwen3-30B-A3B read
+/// `new_layer_room=Some(0)`, so no route fit the first two rungs and the plan
+/// went to the one where "a peer may refuse".
+#[test]
+fn a_peer_with_less_than_a_layer_free_still_runs_the_range_it_holds() {
+    let mut c = simple_candidate(2, vec![(0, 48)]);
+    c.held_ranges = vec![crate::inference::process_pool::HeldRange {
+        range: (18, 48),
+        releasable_layers: 0,
+    }];
+    // ~1.5 MB of KV over 30 layers of ~360 MB each: share ~1.4e-4.
+    c.published_room = Some(super::PublishedRoom {
+        new_layers: Some(0.6),
+        new_layers_at_face_value: Some(0.75),
+        reused_share: 1.4e-4,
+    });
+    let held = c.capacity_charge((18, 48));
+    let cap = super::parallax::CapacityBound::Everyone
+        .peer_cap(&c)
+        .expect("a published room is a cap");
+    assert!(held <= cap, "the held range fits: {held} of {cap}");
+    // ...and one new layer does not.
+    assert!(c.capacity_charge((17, 18)) > cap);
 }
 
 /// **FUTURE_WORK #99, gather half.** A peer that PUBLISHES the ranges behind
@@ -3980,7 +4011,7 @@ fn a_peer_that_publishes_its_ranges_is_priced_by_them() {
     // No prompt, so no KV: the total is the room for new layers plus the 12
     // held — the same free memory, read two ways.
     assert_eq!(
-        room.new_layers.map(|n| n + 12),
+        room.new_layers.map(|n| n.floor() as u32 + 12),
         a.max_hostable_layers,
         "room for new layers is the total less what is held"
     );

@@ -271,17 +271,19 @@ impl CapacityBound {
     /// held to its total and charged the width, as before (FUTURE_WORK #99).
     /// The ceiling is a total either way — resident layers occupy it too — so a
     /// peer charged its new layers is held to it LENIENTLY, never wrongly.
-    fn peer_cap(self, c: &NodeCandidate) -> Option<u32> {
+    /// Unrounded where the room is (`PublishedRoom`): what a held range costs
+    /// a peer is a fraction of one layer.
+    pub(super) fn peer_cap(self, c: &NodeCandidate) -> Option<f64> {
         let figure = match (self, c.published_room) {
             (Self::Everyone, Some(room)) => room.new_layers,
             (Self::PeersAtFaceValue, Some(room)) => room.new_layers_at_face_value,
-            (Self::Everyone, None) => c.max_hostable_layers,
-            (Self::PeersAtFaceValue, None) => c.max_hostable_layers_at_face_value,
+            (Self::Everyone, None) => c.max_hostable_layers.map(f64::from),
+            (Self::PeersAtFaceValue, None) => c.max_hostable_layers_at_face_value.map(f64::from),
             (Self::PeersAtCeiling | Self::LocalUnbounded, _) => None,
         };
         // Every rung, not only the last two: a peer whose CURRENT figure is
         // unknown is still never handed more than it could ever hold.
-        c.within_ceiling(figure)
+        super::clamp_room_to_ceiling(figure, c.max_hostable_layers_at_ceiling)
     }
 }
 
@@ -926,10 +928,11 @@ pub(super) fn route_shortest_path(
     // costs it nothing new and was inexpressible: every request was refused for
     // eleven minutes until the peer let the range go.
     //
-    // Only where the search found NO route, so every route that exists today is
-    // exactly what it was: partial ranges stay off for the hop-pricing reason
-    // `config.inference.parallax_partial_ranges` gives, and these vertices are
-    // offered only when the alternative is no plan.
+    // Only where the search found NO route, so no route that exists is cut at
+    // another machine's held range: partial ranges stay off for the hop-pricing
+    // reason `config.inference.parallax_partial_ranges` gives, and these
+    // vertices are offered only when the alternative is no plan. (A machine's
+    // OWN held range cuts nobody else's and is offered on every pass, #3 (e).)
     if routed.is_err() && !partial_ranges && candidates.iter().any(|c| !c.held_ranges.is_empty()) {
         if let Ok(segments) = route_over(
             num_layers,
@@ -954,7 +957,8 @@ pub(super) fn route_shortest_path(
 
 /// [`route_shortest_path`]'s search. `meet_held`: also offer each candidate
 /// the parts of its range that end or begin where some machine's held range
-/// does (and its own held ranges), with partial ranges off.
+/// does, with partial ranges off. (Its OWN held ranges are offered on every
+/// pass — FUTURE_WORK #3 (e).)
 #[allow(clippy::too_many_arguments)]
 fn route_over(
     num_layers: u32,
@@ -1160,6 +1164,7 @@ fn route_over(
                 .binds_local()
                 .then_some(c.max_hostable_layers)
                 .flatten()
+                .map(f64::from)
         } else {
             // A peer is ALWAYS held to a figure it gave us; which of the two it
             // is held to is the only thing a relaxation changes.
@@ -1171,7 +1176,7 @@ fn route_over(
         // published its ranges the same plus the reused layers' KV (#99); for
         // any other peer the width, since its figure already folds in what it
         // has resident (`PeerResidency`).
-        let charged = |range: (u32, u32)| -> u32 { c.capacity_charge(range) };
+        let charged = |range: (u32, u32)| -> f64 { c.capacity_charge(range) };
         // This node's other allowance: ONE run a fresh worker would split across
         // card and processor, weighed by its width (`fresh_run_layers`). A
         // range inside it is a vertex; whether the chain keeps it to one run is
@@ -1216,16 +1221,31 @@ fn route_over(
         // to a node that can only take 20 of them costs a round trip and a
         // refusal.
         if !split_enabled && !over_capacity {
+            // The range its own worker already holds, on every pass: the one
+            // shape it runs with nothing to load, and no cut in anyone else's
+            // range — it joins a chain only where its neighbours' vertices
+            // already meet its ends (a split that answered the last request).
+            // Behind `meet_held` alone, a pass that found ANY route never saw
+            // it (FUTURE_WORK #3 (e), 2026-10-18): a peer holding [0..19) on
+            // disk and [0..18) loaded was offered only its whole [0..19), so
+            // the next peer, holding [18..48) loaded, was planned [19..48) —
+            // 29 layers its exact-key worker reads again — and a warm 30B
+            // chain was priced 84.9 s for the ~20 s it took. Petals routes the
+            // same way: over the blocks each server has LOADED
+            // (`sequence_manager.py`), never a span it would load.
+            for h in &c.held_ranges {
+                let range = (h.range.0, h.range.1.min(num_layers));
+                if lo <= range.0 && range.1 <= hi && range.0 < range.1 && range != (lo, hi) {
+                    push(range);
+                }
+            }
+            // Its range cut where some machine's held range begins or ends:
+            // a cut in a route that exists, so only on a pass that found none
+            // (#275's rule — see `route_shortest_path`).
             if meet_held {
                 for &p in held_points.iter().filter(|&&p| lo < p && p < hi) {
                     push((lo, p));
                     push((p, hi));
-                }
-                for h in &c.held_ranges {
-                    let range = (h.range.0, h.range.1.min(num_layers));
-                    if lo <= range.0 && range.1 <= hi && range.0 < range.1 && range != (lo, hi) {
-                        push(range);
-                    }
                 }
             }
             continue;
@@ -1423,13 +1443,14 @@ fn route_over(
     // to what this node's worker already holds (#95), which for a node
     // holding nothing is its width, exactly as before — and its width again
     // once this node's conversation memory has refused the prompt (#263).
-    // The one definition, `NodeCandidate::capacity_charge`, as the vertex
-    // filter above asks it.
+    // The one definition, `NodeCandidate::layers_charged`, which the vertex
+    // filter above asks through `capacity_charge` (whole layers for this node,
+    // which publishes no room).
     let local_added = |range: (u32, u32)| -> u32 {
         candidates
             .iter()
             .find(|c| &c.node_id == local_node_id)
-            .map_or(range.1 - range.0, |c| c.capacity_charge(range))
+            .map_or(range.1 - range.0, |c| c.layers_charged(range))
     };
     // A path's local total is carried as (what earlier local runs added, where
     // the CURRENT local run began). Two adjacent local vertices are merged into
@@ -4374,8 +4395,8 @@ mod tests {
         peer.max_hostable_layers_at_face_value = Some(39);
         peer.held_ranges = vec![held((14, 48), 0)];
         peer.published_room = Some(crate::inference::scheduler::PublishedRoom {
-            new_layers: Some(5),
-            new_layers_at_face_value: Some(5),
+            new_layers: Some(5.0),
+            new_layers_at_face_value: Some(5.0),
             reused_share: 0.0,
         });
         let both = [me, peer];
@@ -4452,6 +4473,62 @@ mod tests {
         assert!(recut.len() > 1, "the control must split: {recut:?}");
     }
 
+    /// **FUTURE_WORK #3 (e), the live shape (2026-10-18).** Qwen3-30B-A3B, 48
+    /// layers: an Italian peer holds shards [0..19) with a worker on [0..18);
+    /// a Belgian one holds every shard with a worker on [18..48), and could
+    /// ever hold 30. The two workers ARE a chain, costing nothing to load.
+    ///
+    /// 1. On the rung where the plan was made (`PeersAtCeiling`), the search
+    ///    offered Italy only its whole [0..19) — it fits, so it is not cut, and
+    ///    the held-range vertices came only on a pass with no route — so
+    ///    Belgium was planned [19..48), 29 layers its exact-key worker reads
+    ///    again: priced 84.9 s, taken in 19.4.
+    /// 2. Belgium read `new_layer_room=Some(0)`: under one new layer free, and
+    ///    its own range was refused on the first two rungs for a cache of a
+    ///    fraction of a layer, which is why the plan was made on the third.
+    #[test]
+    fn two_peers_whose_workers_already_chain_are_planned_that_chain() {
+        let local = NodeId([9u8; 32]);
+        let mut italy = cand(1, vec![(0, 19)], 300, 0.0, true, true, 20.0);
+        italy.held_ranges = vec![held((0, 18), 0)];
+        italy.max_hostable_layers = Some(30);
+        italy.max_hostable_layers_at_face_value = Some(30);
+        italy.max_hostable_layers_at_ceiling = Some(33);
+        italy.cold_load_ms_per_layer = 2_800.0;
+        // ~1.5 MB of a 25-token prompt's KV against ~360 MB of weights a layer.
+        let share = 1.4e-4;
+        italy.published_room = Some(crate::inference::scheduler::PublishedRoom {
+            new_layers: Some(12.4),
+            new_layers_at_face_value: Some(15.5),
+            reused_share: share,
+        });
+        let mut belgium = cand(2, vec![(0, 48)], 300, 0.0, true, true, 20.0);
+        belgium.held_ranges = vec![held((18, 48), 0)];
+        belgium.max_hostable_layers = Some(30);
+        belgium.max_hostable_layers_at_face_value = Some(30);
+        belgium.max_hostable_layers_at_ceiling = Some(30);
+        belgium.cold_load_ms_per_layer = 1_600.0;
+        belgium.published_room = Some(crate::inference::scheduler::PublishedRoom {
+            new_layers: Some(0.6),
+            new_layers_at_face_value: Some(0.75),
+            reused_share: share,
+        });
+        let both = [italy, belgium];
+        let shape = |capacity: CapacityBound| -> Vec<(u8, (u32, u32))> {
+            route_shortest_path(48, &both, &local, false, false, capacity, Some(25))
+                .unwrap_or_else(|e| panic!("{capacity:?}: {e}"))
+                .iter()
+                .map(|s| (s.node_id.0[0], s.layer_range))
+                .collect()
+        };
+        let held_chain = vec![(1, (0, 18)), (2, (18, 48))];
+
+        // (2): the first rung already has the chain.
+        assert_eq!(shape(CapacityBound::Everyone), held_chain);
+        // (1): and the rung the live plan was made on picks it over the re-cut.
+        assert_eq!(shape(CapacityBound::PeersAtCeiling), held_chain);
+    }
+
     #[test]
     fn a_peer_is_planned_the_range_it_holds_not_one_of_the_same_length() {
         let local = NodeId([1u8; 32]);
@@ -4495,8 +4572,8 @@ mod tests {
 
         peer.held_ranges = peer_holds.to_vec();
         peer.published_room = Some(crate::inference::scheduler::PublishedRoom {
-            new_layers: Some(8),
-            new_layers_at_face_value: Some(8),
+            new_layers: Some(8.0),
+            new_layers_at_face_value: Some(8.0),
             reused_share: 0.0,
         });
         let segs = route(peer);

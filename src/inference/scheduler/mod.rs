@@ -325,14 +325,22 @@ fn cold_load_ms_per_layer(ms_per_gib: Option<u32>, bytes_per_layer: u64) -> f32 
 /// through by one new layer's full price (`weights + kv`), that is
 /// `added + (width − added) × reused_share <= new_layers` — so the room is a
 /// Cold-shaped bound and the charge is [`NodeCandidate::capacity_charge`].
+///
+/// **Neither side is rounded.** The reused layers' KV is a FRACTION of one new
+/// layer, so a room rounded down to whole layers against a charge rounded up
+/// refused a peer the range it holds whenever it had less than one new layer
+/// free — however small this prompt's cache: 30 held layers of a 30B, 25
+/// prompt tokens, ~1.5 MB of KV, refused at a room of 0 on the first two
+/// rungs (FUTURE_WORK #3 (e), 2026-10-18).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PublishedRoom {
     /// New layers (weights + this prompt's KV) its advertised free memory
-    /// buys, with our safety margin. `None` = cannot tell, never "no room".
-    new_layers: Option<u32>,
+    /// buys, with our safety margin, unrounded ([`room_for_new_layers`]).
+    /// `None` = cannot tell, never "no room".
+    new_layers: Option<f64>,
     /// The same, taken at its word — what `CapacityBound::PeersAtFaceValue`
     /// holds it to.
-    new_layers_at_face_value: Option<u32>,
+    new_layers_at_face_value: Option<f64>,
     /// What a layer it already holds costs this prompt, as a share of a new
     /// layer: `kv / (weights + kv)`. 0 when either is unknown.
     reused_share: f64,
@@ -475,30 +483,35 @@ impl NodeCandidate {
         clamp_to_ceiling(figure, self.max_hostable_layers_at_ceiling)
     }
 
-    /// What `range` costs this candidate against the cap the pipeline search
-    /// holds it to ([`parallax::CapacityBound`]), in layers.
-    ///
-    /// - A peer that published its ranges: the layers it would add, plus the
-    ///   reused layers' share of this prompt's KV, rounded UP so the charge
-    ///   never undercounts — see [`PublishedRoom`].
-    /// - Anyone else: [`Self::layers_it_would_add`] — for the local node, room
-    ///   for new layers is exactly what its cap measures (#95); for a peer that
-    ///   published nothing, holding nothing we know of, it is the width, and
-    ///   its figure already folds in residency (`PeerResidency`).
-    /// - This node once its conversation memory refused the prompt: the width
-    ///   ([`Self::prompt_memory_refused`]).
-    fn capacity_charge(&self, range: (u32, u32)) -> u32 {
+    /// Whole layers `range` costs this candidate's layer bound: the layers it
+    /// would add ([`Self::layers_it_would_add`]) — for the local node, room for
+    /// new layers is exactly what its cap measures (#95); for a peer that
+    /// published nothing, holding nothing we know of, it is the width, and its
+    /// figure already folds in residency (`PeerResidency`) — or the width once
+    /// this node's conversation memory refused the prompt
+    /// ([`Self::prompt_memory_refused`]). What the search's running total of
+    /// this node's layers adds up.
+    fn layers_charged(&self, range: (u32, u32)) -> u32 {
         if self.prompt_memory_refused {
             return range.1.saturating_sub(range.0);
         }
-        let added = self.layers_it_would_add(range);
+        self.layers_it_would_add(range)
+    }
+
+    /// What `range` costs this candidate against the cap the pipeline search
+    /// holds it to ([`parallax::CapacityBound`]), in new layers:
+    /// [`Self::layers_charged`], plus — for a peer that published its ranges
+    /// — the reused layers' share of this prompt's KV, a fraction of one new
+    /// layer each, compared unrounded with an unrounded room (see
+    /// [`PublishedRoom`]).
+    fn capacity_charge(&self, range: (u32, u32)) -> f64 {
+        let charged = self.layers_charged(range);
         match self.published_room {
             Some(room) => {
-                let reused = range.1.saturating_sub(range.0).saturating_sub(added);
-                let kv_units = (f64::from(reused) * room.reused_share).ceil() as u32;
-                added.saturating_add(kv_units)
+                let reused = range.1.saturating_sub(range.0).saturating_sub(charged);
+                f64::from(charged) + f64::from(reused) * room.reused_share
             }
-            None => added,
+            None => f64::from(charged),
         }
     }
 }
@@ -596,20 +609,7 @@ fn max_hostable_layers(
         PeerResidency::Cold | PeerResidency::Layers(_) if bytes_per_layer == 0 => return None,
         _ => {}
     }
-    let cap = capability?;
-    // A GPU node is judged on its card; a node with no card, on its RAM. This
-    // mirrors `allocate_offline`, which asks the same question for capacity
-    // planning — the worker subprocess can host layers in either.
-    let free_mb = cap.memory_for_model_layers_mb();
-    if free_mb == 0 {
-        // Not "no room": no information. See the doc comment.
-        return None;
-    }
-    // Subtract AFTER the zero test, because zero means "told us nothing" and
-    // our own commitments cannot turn no information into a refusal. Saturating,
-    // so an over-commitment reads as no room rather than wrapping to all of it.
-    let free_mb = free_mb.saturating_sub(committed_mb);
-    let usable_bytes = (free_mb as f64 * 1_048_576.0 / margin) as u64;
+    let usable_bytes = usable_bytes_for_layers(capability, margin, committed_mb)?;
     // Clamped by the model, because the warm branch above answers a narrower
     // question than its name. A warm peer is charged KV only, so with a short
     // prompt the divisor is a few hundred KB and the quotient is thousands —
@@ -655,6 +655,51 @@ fn max_hostable_layers(
         }
     };
     Some(answer.min(model_layers))
+}
+
+/// The bytes a peer's advertised free memory leaves a model's layers, after
+/// what this node has booked onto it since (`committed_mb`) and with `margin`
+/// on top. `None` when it told us nothing — no capability, or a zero — which
+/// is never "no room" ([`max_hostable_layers`]'s doc says why).
+fn usable_bytes_for_layers(
+    capability: Option<&swarmllm_types::NodeCapability>,
+    margin: f64,
+    committed_mb: u64,
+) -> Option<u64> {
+    // A GPU node is judged on its card; a node with no card, on its RAM. This
+    // mirrors `allocate_offline`, which asks the same question for capacity
+    // planning — the worker subprocess can host layers in either.
+    let free_mb = capability?.memory_for_model_layers_mb();
+    if free_mb == 0 {
+        // Not "no room": no information.
+        return None;
+    }
+    // Subtract AFTER the zero test, because zero means "told us nothing" and
+    // our own commitments cannot turn no information into a refusal. Saturating,
+    // so an over-commitment reads as no room rather than wrapping to all of it.
+    let free_mb = free_mb.saturating_sub(committed_mb);
+    Some((free_mb as f64 * 1_048_576.0 / margin) as u64)
+}
+
+/// A peer's room for NEW layers of a model — each at its weights plus this
+/// prompt's KV — UNROUNDED, for [`PublishedRoom`]: the Cold reading of
+/// [`max_hostable_layers`] (which is this, rounded down) kept to the fraction,
+/// because what a range it already holds costs is a fraction of one layer.
+/// `None` where that function's Cold reading is.
+fn room_for_new_layers(
+    model_layers: u32,
+    capability: Option<&swarmllm_types::NodeCapability>,
+    bytes_per_layer: u64,
+    margin: f64,
+    prompt_kv_bytes_per_layer: u64,
+    committed_mb: u64,
+) -> Option<f64> {
+    if bytes_per_layer == 0 {
+        return None;
+    }
+    let usable_bytes = usable_bytes_for_layers(capability, margin, committed_mb)?;
+    let full_price = bytes_per_layer.saturating_add(prompt_kv_bytes_per_layer);
+    Some((usable_bytes as f64 / full_price as f64).min(f64::from(model_layers)))
 }
 
 /// KV-cache bytes ONE prompt position costs across ONE layer of `meta`'s model
@@ -1144,6 +1189,15 @@ fn clamp_to_ceiling(figure: Option<u32>, ceiling: Option<u32>) -> Option<u32> {
     match (figure, ceiling) {
         (Some(figure), Some(ceiling)) => Some(figure.min(ceiling)),
         (figure, ceiling) => figure.or(ceiling),
+    }
+}
+
+/// [`clamp_to_ceiling`] for an unrounded room ([`PublishedRoom`]).
+fn clamp_room_to_ceiling(room: Option<f64>, ceiling: Option<u32>) -> Option<f64> {
+    let ceiling = ceiling.map(f64::from);
+    match (room, ceiling) {
+        (Some(room), Some(ceiling)) => Some(room.min(ceiling)),
+        (room, ceiling) => room.or(ceiling),
     }
 }
 
@@ -4564,9 +4618,21 @@ impl PipelineScheduler {
                     // inputs as the totals below, so the two cannot drift.
                     if !held_ranges.is_empty() {
                         let full_price = held_bytes_per_layer.saturating_add(prompt_kv_per_layer);
+                        let room = |margin: f64| {
+                            self.shared_state.peer_registry.get(&node_id).and_then(|p| {
+                                room_for_new_layers(
+                                    manifest.num_layers,
+                                    p.capability.as_ref(),
+                                    held_bytes_per_layer,
+                                    margin,
+                                    prompt_kv_per_layer,
+                                    committed_mb,
+                                )
+                            })
+                        };
                         published_room = Some(PublishedRoom {
-                            new_layers: bound(PeerResidency::Cold, DELEGATE_VRAM_MARGIN),
-                            new_layers_at_face_value: bound(PeerResidency::Cold, 1.0),
+                            new_layers: room(DELEGATE_VRAM_MARGIN),
+                            new_layers_at_face_value: room(1.0),
                             reused_share: if full_price == 0 {
                                 0.0
                             } else {
@@ -4630,8 +4696,9 @@ impl PipelineScheduler {
                 max_hostable_layers_at_ceiling,
             );
             if let Some(room) = published_room.as_mut() {
-                room.new_layers = clamp_to_ceiling(room.new_layers, max_hostable_layers_at_ceiling);
-                room.new_layers_at_face_value = clamp_to_ceiling(
+                room.new_layers =
+                    clamp_room_to_ceiling(room.new_layers, max_hostable_layers_at_ceiling);
+                room.new_layers_at_face_value = clamp_room_to_ceiling(
                     room.new_layers_at_face_value,
                     max_hostable_layers_at_ceiling,
                 );
