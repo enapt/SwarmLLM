@@ -276,15 +276,18 @@ struct NodeCandidate {
     /// may use the run's WIDTH up to this; a plan giving it two or more is held
     /// to `max_hostable_layers` in layers added, as before (2026-10-08).
     fresh_run_layers: Option<u32>,
-    /// For THIS node only: its conversation memory refused this request's
-    /// prompt (`ModelProcessPool::admit_prompt`, #263). Every layer a segment
+    /// This node's conversation memory refused this request's prompt
+    /// (`ModelProcessPool::admit_prompt`, #263), or a PEER's did when asked
+    /// before the pass (`peer_layers_fitting_for_request`, #252 (b)) — its
+    /// bounds then already hold the layers it said fit. Every layer a segment
     /// runs needs the prompt's cache, held weights or not, so while set
     /// [`Self::capacity_charge`] is a range's WIDTH and `max_hostable_layers`
     /// the most layers this node may run in all — never only the new ones,
     /// or the re-plan rebuilds the plan whose layers it already held.
     prompt_memory_refused: bool,
-    /// For THIS node only: its loader or its conversation memory has refused
-    /// this request (`SharedState::local_memory_refused_for_request`). Every
+    /// This node's loader or conversation memory has refused this request
+    /// (`SharedState::local_memory_refused_for_request`), or a peer's
+    /// conversation memory did when asked before the pass (#252 (b)). Every
     /// planner then holds it to `max_hostable_layers`, the relaxed passes
     /// included — the search's last rung already declines to plan past it, and
     /// the greedy fallback beneath it rebuilt the refused plan on its relaxed
@@ -4724,6 +4727,21 @@ impl PipelineScheduler {
                 crate::inference::process_pool::layers_that_fit(ceiling_mb, fixed_mb, per_layer_mb)
                     .map(|layers| layers.min(manifest.num_layers))
             });
+            // A peer that refused this prompt when asked before the pass holds
+            // at most the layers it said its conversation memory fits, held or
+            // not, on every rung — the relaxed ones read the ceiling, so the
+            // verdict goes there (#252 (b); this node's own is
+            // `local_layers_fitting_for_request`, above).
+            let peer_prompt_fit = if is_local {
+                None
+            } else {
+                self.shared_state
+                    .peer_layers_fitting_for_request(request_id, &node_id)
+            };
+            let max_hostable_layers_at_ceiling = match peer_prompt_fit {
+                Some(fit) => Some(max_hostable_layers_at_ceiling.map_or(fit, |c| c.min(fit))),
+                None => max_hostable_layers_at_ceiling,
+            };
             // Every figure a reader bounds a peer by is held to its ceiling
             // HERE, once — the search and greedy, but also delegation, the
             // whole-model disqualifier and the standbys, which read
@@ -4840,15 +4858,17 @@ impl PipelineScheduler {
                 reply_tokens_at_most: prompt.reply_tokens_at_most,
                 reply_tokens_expected,
                 fresh_run_layers,
-                prompt_memory_refused: is_local
-                    && self
-                        .shared_state
-                        .local_layers_fitting_for_request(request_id)
-                        .is_some(),
-                memory_refused_this_request: is_local
-                    && self
-                        .shared_state
-                        .local_memory_refused_for_request(request_id),
+                prompt_memory_refused: peer_prompt_fit.is_some()
+                    || is_local
+                        && self
+                            .shared_state
+                            .local_layers_fitting_for_request(request_id)
+                            .is_some(),
+                memory_refused_this_request: peer_prompt_fit.is_some()
+                    || is_local
+                        && self
+                            .shared_state
+                            .local_memory_refused_for_request(request_id),
                 ring,
             });
         }

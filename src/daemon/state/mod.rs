@@ -30,6 +30,7 @@ mod models;
 mod peer_outliers;
 pub(crate) mod peer_speed;
 mod perf_history;
+pub(crate) mod prompt_admission;
 mod relay;
 mod removed_shards;
 mod repair;
@@ -994,6 +995,27 @@ pub struct SharedState {
     /// per-request map.
     pub local_memory_refusals: dashmap::DashMap<uuid::Uuid, LocalMemoryRefusal>,
 
+    /// What each PEER said when asked to admit a request's prompt before the
+    /// pass and refused: the most layers its conversation memory holds
+    /// (FUTURE_WORK #252 (b)). Write ONLY `note_peer_prompt_refusal`, read only
+    /// `peer_layers_fitting_for_request` (the scheduler); released by
+    /// `release_request_state`.
+    pub peer_prompt_refusals: prompt_admission::PeerPromptRefusals,
+
+    /// Answers awaited from peers asked whether they hold a prompt, keyed by
+    /// the question (`PromptAdmissionAsk::ask_id`, fresh per question) and the
+    /// peer asked — completed by the dispatcher's `PromptAdmissionAnswer` arm
+    /// only for that peer; removed by the asker on every exit.
+    pub pending_prompt_admissions: DashMap<
+        (uuid::Uuid, crate::types::NodeId),
+        tokio::sync::oneshot::Sender<crate::types::PromptAdmissionVerdict>,
+    >,
+
+    /// How many peers' prompt questions this node has weighed lately, per
+    /// peer and in all (`prompt_admission::AskBudget`): spent only by the
+    /// ask's handler; past it a question is answered "go ahead" unweighed.
+    pub(crate) prompt_ask_budget: prompt_admission::AskBudget,
+
     /// The peers each request THIS node led ran segments on, across every
     /// attempt — what it tells, once the request is over, that the request is
     /// over (`router::release_request_on_peers`, #238). A peer serving a segment
@@ -1680,6 +1702,9 @@ impl SharedState {
             perf_history: perf_history::PerfHistory::load(&db),
             request_holder_blacklist: DashMap::new(),
             local_memory_refusals: dashmap::DashMap::new(),
+            peer_prompt_refusals: DashMap::new(),
+            pending_prompt_admissions: DashMap::new(),
+            prompt_ask_budget: prompt_admission::AskBudget::default(),
             request_peers: dashmap::DashMap::new(),
             planned_past_offered_memory: DashMap::new(),
             route_plan_overrides: DashMap::new(),

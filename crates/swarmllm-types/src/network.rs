@@ -181,6 +181,13 @@ pub enum SwarmMessage {
     // `features::MANIFEST_DIGESTS` at the sender.
     ManifestDigest(ManifestDigest),
     ManifestPull(ManifestPull),
+
+    // A split's coordinator asking each peer, before the prompt pass, whether
+    // its conversation memory holds the prompt over its segments, and the
+    // answer (FUTURE_WORK #252 (b)). Point to point, gated on
+    // `features::PROMPT_ADMISSION` at the sender.
+    PromptAdmissionAsk(PromptAdmissionAsk),
+    PromptAdmissionAnswer(PromptAdmissionAnswer),
 }
 
 impl SwarmMessage {
@@ -230,6 +237,8 @@ impl SwarmMessage {
             Self::SessionKeyConfirm(_) => "SessionKeyConfirm",
             Self::ManifestDigest(_) => "ManifestDigest",
             Self::ManifestPull(_) => "ManifestPull",
+            Self::PromptAdmissionAsk(_) => "PromptAdmissionAsk",
+            Self::PromptAdmissionAnswer(_) => "PromptAdmissionAnswer",
         }
     }
 }
@@ -481,6 +490,54 @@ pub struct ManifestVersion {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestPull {
     pub models: Vec<ModelId>,
+}
+
+/// Will your conversation memory hold this prompt over these layers? Sent by a
+/// split's coordinator to each peer whose segment runs after other work, before
+/// the prompt pass starts (FUTURE_WORK #252 (b)) — the question #263 asks this
+/// node's own worker (`ModelProcessPool::admit_prompt`), so a peer that has no
+/// room says so before anyone reads the prompt, not after.
+///
+/// The question is only WEIGHED: the asked peer holds no room and records
+/// nothing for it (vLLM's `can_allocate`, never `allocate`); the request's
+/// forwards are admitted as they arrive, as before.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptAdmissionAsk {
+    pub request_id: uuid::Uuid,
+    /// Fresh for every question, echoed in the answer and what the answer is
+    /// matched by: a re-plan keeps its request id, so a late answer to an
+    /// earlier attempt's question must not settle the next one's.
+    pub ask_id: uuid::Uuid,
+    pub model_id: ModelId,
+    /// Every range the plan gives the asked peer, each `start < end`.
+    pub layer_ranges: Vec<(u32, u32)>,
+    /// The prompt's length in positions.
+    pub prompt_tokens: u32,
+}
+
+/// A peer's answer to a [`PromptAdmissionAsk`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptAdmissionAnswer {
+    pub request_id: uuid::Uuid,
+    /// The [`PromptAdmissionAsk::ask_id`] this answers.
+    pub ask_id: uuid::Uuid,
+    pub verdict: PromptAdmissionVerdict,
+}
+
+/// What a peer said to a [`PromptAdmissionAsk`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromptAdmissionVerdict {
+    /// Go ahead: it fits, or nothing here could weigh it (no worker runs the
+    /// model yet, the worker was busy, the asker has asked a lot lately) — the
+    /// segments admit it as they arrive.
+    Proceed,
+    /// Its conversation memory does not hold the prompt over those ranges:
+    /// `layers_that_fit` of them it does, which the coordinator's re-plan
+    /// holds this peer to; `message` is the refusal in the peer's words.
+    Refused {
+        message: String,
+        layers_that_fit: u32,
+    },
 }
 
 /// Regional shard summary — compact per-region model availability gossip.

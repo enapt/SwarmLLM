@@ -129,6 +129,7 @@ impl super::SharedState {
         self.request_holder_blacklist.remove(request_id);
         self.peer_vram_commitments.remove(request_id);
         self.local_memory_refusals.remove(request_id);
+        self.peer_prompt_refusals.remove(request_id);
         self.request_peers.remove(request_id);
         // A refusal the router never took into its record (no re-plan followed).
         let _ = self.model_process_pool.take_layers_refused(*request_id);

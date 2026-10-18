@@ -70,7 +70,9 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    that is not gossip is 2.5 KB/s on 10-18 (4.1 out), and our own direct messages are only 0.19 of it
    ((2d), `direct_by_kind`): the rest is libp2p's protocols. `by_protocol` ((2e)) named the largest:
    Kademlia answering other nodes' lookups, ~2.1 KB/s; (2f) republishes provider records every 4 h
-   instead of 20 min (v0.3.243). Next: re-read in the field after the release.
+   instead of 20 min (v0.3.243). Field re-read 10-18: upload 2.7 KB/s, but the Kademlia answers
+   fell to 0.90 KB/s, 2.3x, not the 12x the republication alone predicted. Next: count which
+   lookups peers send (the meter splits by protocol, not by Kademlia request).
 8. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
     ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
     (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
@@ -1081,7 +1083,14 @@ ever shows a refused family. **(2f) 2026-10-18, released in v0.3.243**: provider
 (`network::behaviour::KAD_*`; still under the 26 h retraction window, checked at compile time) — in a
 swarm smaller than k every republication is a lookup that asks every node, so the answering cost
 falls ~12x once the fleet updates. Next: re-read `by_protocol` on the field after the release
-(expect the `/swarmllm/kad/1.0.0` `peer` row to fall), then the relay-stream rate. **(2c) fixed 2026-10-17, released in v0.3.242**: a restart gossiped every
+(expect the `/swarmllm/kad/1.0.0` `peer` row to fall), then the relay-stream rate. **Re-read 10-18
+15:20-16:16Z** (`~/swarmllm-91/out_243/r3,r4`, 56 min, 5 of 6 peers on .243, one on .242): upload 2716 B/s
+(5.5 KB/s on .241) = gossip 1493 (message data 1304), kad `peer` 901 (2.1 → 0.59 in the first hour → 0.90),
+relay hop 91, `/swarmllm/1.0.0` 190, our own direct messages 169 of it. The kad row fell 2.3x, not 12x: the
+one .242 peer explains ~0.3 KB/s, so ~0.6 KB/s is lookups other than republication — the periodic
+routing-table bootstrap (libp2p's default, every 5 min, untouched here) and `get_providers` are the
+candidates, and nothing counts them apart. Next: count inbound Kademlia requests by kind
+(`kad::Event::InboundRequest`) before changing either. **(2c) fixed 2026-10-17, released in v0.3.242**: a restart gossiped every
 manifest it holds in full, twice, a few seconds apart (§ Closed). Left: the
 mesh is still sized once at startup, from peers ever met rather than reachable now (a rig first
 before going further: a thinner mesh partitions sooner); (3) a both-direction traffic ceiling at the transport
@@ -1964,7 +1973,7 @@ and adapter close per reading — the closing is where it waited longest). Then 
 the thread sampler (`examples/thread_sample.py`).
 
 #### #252 — `/v1/models` advertises a context the card cannot hold
-`P3` · memory · **PARTIAL — (a) and (b) parked** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.234)
+`P3` · memory · **PARTIAL — (a) parked; (b) (2) fixed 2026-10-18, not yet released; (b) (1) parked** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.234)
 
 Qwen3-14B on a 12 GB card: `/v1/models` says `max_model_len: 8192` (the declared limit under
 `DEFAULT_MAX_SEQ_LEN`), but with the weights loaded the KV budget is 860 MB, and a 6,228-token
@@ -2036,6 +2045,14 @@ re-plan served it on `99aafc41` + `7c10ea04` (IT, BE): 200, ttft 134.7 s (most o
 load), predicted 93 s. The same request warm, 4 min later: AU + BE, ttft 24.8 s, 200. Shape: the
 relaxed rung's gamble lost twice on one peer, not a stale room figure under the strict bound — the
 up-front ask (2) would have turned both refusals into one round trip each.
+
+**(b) (2) fixed 2026-10-18, not yet released** (§ Closed): the coordinator asks each peer whose
+segment runs after other work before the pass, and a "no" holds that peer to the layers it said
+fit on the re-plan. Left: (b) (1), the gossiped figure — parked as above; the planner still
+charges a peer the prompt's positions where the peer admits `kv_cache_reservation(prompt + reply
+reserve)` (not folded in); and no rig has yet shown "the peer refuses, the re-plan gives the excess
+to another, 200" — the clamp it rests on is a scheduler test
+(`docs/invariants/memory.md` § "A split's peers are asked about room before the pass too").
 
 #### #187 — Head-room admission prices load and runtime on two different bases
 `P3` · memory · **PARTIAL** — 2026-08-08 · history: archive § "Head-room admission: two things the live test found"
@@ -2645,7 +2662,24 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-18, not yet released** (#306; #3 (e); #3 (f))
+**Closed 2026-10-18, not yet released** (#306; #3 (e); #3 (f); #252 (b) (2))
+- #252 (b) (2) — **A split whose peer has no room for the prompt finds out before anyone reads
+  it.** A peer's segment was admitted only when its forward arrived — after every machine before
+  it had read the prompt — and its refusal barred it from the re-plan. On `split_rig.sh peerkv`'s
+  tight case v0.3.242 answered 503 after 132.8 s with the peer refusing two forwards; now 1.4 s,
+  the peer refusing one question in 3 ms and no forward. The coordinator sends
+  `PromptAdmissionAsk` (feature bit 25) beside #263's own admission, waits at most ~1-5 s, and a
+  "no" carries `layers_that_fit`, to which the re-plan holds that peer (never barring it, as
+  Petals prices `cache_tokens_left` rather than excluding). The asked peer only WEIGHS — vLLM's
+  `can_allocate`, not `allocate`: `Admitting::OnlyWeigh` is a required argument of the worker's
+  admission, under a fresh correlation id, holding, releasing and stamping nothing, rationed to
+  12 questions a minute per peer and 60 in all. Two security-review passes shaped it: the first
+  design ADMITTED on a question under the asker's request id, which let a peer displace a live
+  forward's answer and park the owner's conversation memory (two HIGH); the second pass caught a
+  question keeping a model from ever unloading, a late answer settling a re-plan's question, an
+  overflow in the refusal arithmetic, and per-question task/log cost — all fixed, each with a test
+  that fails without its fix. The coordinator gives a refusal one class whatever the peer wrote,
+  and repeats its words bounded and on one line. Gotcha #896.
 - #3 (f) — **A peer inside a chain another peer leads is priced by its own measured speed.** The
   head drives such a chain, so this node never timed the peers behind it and priced their compute
   from their stated speed — the optimistic side: a warm two-peer 16-token reply on Qwen3-30B-A3B

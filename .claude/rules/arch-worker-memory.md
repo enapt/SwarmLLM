@@ -84,7 +84,9 @@ In `handle_forward` the FIRST piece of a `prompt_span` clears, restores and is a
 
 **`ModelProcessPool::admit_prompt`** (`DaemonMsg::AdmitPrompt`), asked once from `forward_through_segments` when a peer takes part, admits the prompt over every range the plan gives this node — the same decision as one segment's (`model_worker::admit_prompt_over`) — before any peer reads it. A segment admitted up front clears with `clear_request_caches` (never `clear_request`, which forgets the promise) and skips its own admission. A refusal carries `layers_that_fit` for the re-plan. The wait is bounded (`UP_FRONT_ADMISSION_WAIT`): a worker busy with another forward answers late, and the pass goes ahead per segment.
 
-→ `docs/invariants/memory.md` § "A split's local segments are admitted together"
+**Its PEERS are asked at the same moment (#252 (b))**: `PromptAdmissionAsk` to every peer whose segment runs after other work (`pipeline::prompt_admission`, `features::PROMPT_ADMISSION`). The asked worker WEIGHS with the same arithmetic and records nothing — `Admitting::OnlyWeigh`, a REQUIRED argument of `admit_prompt_over`: no reserved positions, no promise, no release (it counts `finished_conversations_bytes_in`), no cleanup — under a fresh correlation id (`ModelProcessPool::weigh_peer_prompt`), in a slot that does not stamp `last_used` (`WorkerHandle::register_question` — a question is not use, or one every 5 s pins the model). Never let a peer's question write worker state. A "no" holds the peer to `layers_that_fit` on the re-plan (`note_peer_prompt_refusal`), never bars it.
+
+→ `docs/invariants/memory.md` § "A split's local segments are admitted together", § "A split's peers are asked about room before the pass too"
 
 ## A model loaded for ANOTHER model's request is a guest (2026-09-28)
 

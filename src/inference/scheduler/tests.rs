@@ -8042,3 +8042,79 @@ fn a_warm_peer_beats_a_faster_cold_one_once_the_load_is_priced() {
         "the warm peer, not the faster cold one ({b:?}): got {chosen:?}"
     );
 }
+
+/// FUTURE_WORK #252 (b): a peer that refused this request's prompt when asked
+/// before the pass is held, on the re-plan, to the layers it said its
+/// conversation memory fits — held or not, on every rung, the relaxed greedy
+/// pass included — rather than barred. Other requests, and other peers, are
+/// untouched; a second refusal only tightens; the request's end forgets it.
+#[test]
+fn a_peer_that_refused_the_prompt_up_front_is_held_to_the_layers_it_said_fit() {
+    let (state, local, b, c, model) = two_whole_model_card_peers();
+    publish_resident(&state, &b, &model, (0, 32));
+    publish_resident(&state, &c, &model, (0, 32));
+    let scheduler =
+        PipelineScheduler::with_local_processor_speed(state.clone(), LOCAL_PROCESSOR_TPS);
+    let manifest = state.model_registry.get_manifest(&model).unwrap();
+    let rid = uuid::Uuid::new_v4();
+    let gather = |request_id: uuid::Uuid| {
+        scheduler.gather_candidates(
+            &manifest,
+            &local,
+            request_id,
+            None.into(),
+            super::Purpose::Route,
+            &|| true,
+            crate::types::KeepAsked::Unasked,
+        )
+    };
+    let of = |cands: &[NodeCandidate], node: &NodeId| {
+        cands.iter().find(|x| &x.node_id == node).unwrap().clone()
+    };
+    let layers_on = |plan: &[PipelineSegment], node: &NodeId| -> u32 {
+        plan.iter()
+            .filter(|s| &s.node_id == node)
+            .map(|s| s.layer_range.1 - s.layer_range.0)
+            .sum()
+    };
+
+    // THE CONTROL: unrefused, one peer takes the whole model.
+    let before = gather(rid);
+    assert!(!of(&before, &b).prompt_memory_refused);
+    let unrefused = scheduler
+        .greedy_assign(32, &before, None, false, false, super::Purpose::Route)
+        .expect("a plan");
+    assert!(
+        layers_on(&unrefused, &b) == 32 || layers_on(&unrefused, &c) == 32,
+        "{unrefused:?}"
+    );
+
+    state.note_peer_prompt_refusal(rid, &b, 12);
+    state.note_peer_prompt_refusal(rid, &c, 20);
+    let after = gather(rid);
+    for (node, fit) in [(&b, 12), (&c, 20)] {
+        let x = of(&after, node);
+        assert!(x.prompt_memory_refused && x.memory_refused_this_request);
+        assert_eq!(x.max_hostable_layers_at_ceiling, Some(fit));
+        assert!(x.max_hostable_layers.is_some_and(|l| l <= fit), "{x:?}");
+        assert!(x
+            .max_hostable_layers_at_face_value
+            .is_some_and(|l| l <= fit));
+    }
+    // The relaxed pass too: the two peers' verdicts hold, so the plan splits.
+    let replanned = scheduler
+        .greedy_assign(32, &after, None, false, false, super::Purpose::Route)
+        .expect("12 + 20 layers still cover 32");
+    assert!(layers_on(&replanned, &b) <= 12, "{replanned:?}");
+    assert!(layers_on(&replanned, &c) <= 20, "{replanned:?}");
+
+    // Another request is untouched; a looser second verdict does not loosen.
+    assert!(!of(&gather(uuid::Uuid::new_v4()), &b).prompt_memory_refused);
+    state.note_peer_prompt_refusal(rid, &b, 25);
+    assert_eq!(state.peer_layers_fitting_for_request(rid, &b), Some(12));
+    state.note_peer_prompt_refusal(rid, &b, 5);
+    assert_eq!(state.peer_layers_fitting_for_request(rid, &b), Some(5));
+
+    state.release_request_state(&rid);
+    assert_eq!(state.peer_layers_fitting_for_request(rid, &b), None);
+}

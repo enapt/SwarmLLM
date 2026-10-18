@@ -3382,8 +3382,25 @@ fn ensure_room_for_prompt(
         prompt_tokens,
         reply_positions,
         forward_width,
+        Admitting::Record,
     )
     .map_err(|refused| refused.error)
+}
+
+/// What an admission may change. A REQUIRED argument of [`admit_prompt_over`]:
+/// the one decision answers both, and only one of them may write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admitting {
+    /// This worker will run the prompt: record its reservation and promise,
+    /// end finished conversations and evict saved prompts to make the room.
+    Record,
+    /// A PEER asks whether it would fit (`PromptAdmissionAsk`, FUTURE_WORK
+    /// #252 (b)): the same arithmetic, counting the room the release and the
+    /// eviction WOULD free, and nothing written — vLLM's `can_allocate`, not an
+    /// allocation. Room held for a machine that may never send its forwards
+    /// was a reservation any peer could take for the cache TTL (security
+    /// review, 2026-10-18).
+    OnlyWeigh,
 }
 
 /// A prompt [`admit_prompt_over`] would not take: the cache it `needed`, in
@@ -3405,7 +3422,18 @@ fn layers_that_fit(layers: u32, needed: u64, short_by: u64) -> u32 {
         return layers;
     }
     let room = needed.saturating_sub(short_by);
-    u32::try_from(u64::from(layers) * room / needed).unwrap_or(layers)
+    // In u128: a peer's question names the layers (#252 (b)), and a width near
+    // `u32::MAX` times a room near `u64::MAX` overflows u64 — a panic in a
+    // debug build, the whole worker with it.
+    u32::try_from(u128::from(layers) * u128::from(room) / u128::from(needed)).unwrap_or(layers)
+}
+
+/// The layers `ranges` name, together. Saturating: the ranges may be a peer's
+/// (#252 (b)), each only checked `start < end`.
+fn layers_named(ranges: &[(u32, u32)]) -> u32 {
+    ranges.iter().fold(0u32, |sum, (start, end)| {
+        sum.saturating_add(end.saturating_sub(*start))
+    })
 }
 
 /// The ONE admission decision for a prompt's cache, over every range of this
@@ -3430,6 +3458,7 @@ fn admit_prompt_over(
     prompt_tokens: usize,
     reply_positions: usize,
     forward_width: usize,
+    admitting: Admitting,
 ) -> Result<(), PromptRefusal> {
     let Some(context_window) = ranges.iter().map(|(m, _)| m.context_window()).min() else {
         return Ok(());
@@ -3450,7 +3479,9 @@ fn admit_prompt_over(
     // a copy of everything so far at each step (FUTURE_WORK #32). Recorded
     // before any budget question, because a node with no budget to check
     // still pays for the growth.
-    kv_store.set_reserved_positions(request_id, positions.min(context_window));
+    if admitting == Admitting::Record {
+        kv_store.set_reserved_positions(request_id, positions.min(context_window));
+    }
     if !prefix_cache_charged() {
         return Ok(());
     }
@@ -3482,8 +3513,12 @@ fn admit_prompt_over(
             reply_positions,
             positions,
             forward_width,
+            admitting,
         )?;
         promises.extend(promise.map(|bytes| (home, bytes)));
+    }
+    if admitting == Admitting::OnlyWeigh {
+        return Ok(());
     }
     // Record what this prompt has been promised, so the NEXT one is weighed
     // against it rather than against memory it is about to take. Released by
@@ -3509,6 +3544,7 @@ fn admit_prompt_in(
     reply_positions: usize,
     positions: usize,
     forward_width: usize,
+    admitting: Admitting,
 ) -> Result<Option<u64>, PromptRefusal> {
     let occupancy = kv_store.occupancy();
     let in_home = occupancy.allocated_in(home);
@@ -3574,11 +3610,16 @@ fn admit_prompt_in(
     // does, and before this one is refused: a node serving segments for other
     // computers is never told their replies ended (report #005).
     if !matches!(verdict, PromptAdmission::Fits) {
-        let freed = kv_store.release_finished_conversations(
-            crate::inference::split::kv_cache::FINISHED_CONVERSATION_AFTER,
-            request_id,
-        );
-        if freed > 0 {
+        let idle = crate::inference::split::kv_cache::FINISHED_CONVERSATION_AFTER;
+        if admitting == Admitting::OnlyWeigh {
+            // The room the release would give, released by nobody: a peer's
+            // question never ends another conversation.
+            let would_free = kv_store.finished_conversations_bytes_in(home, idle, request_id);
+            if would_free > 0 {
+                live = live.saturating_sub(would_free);
+                verdict = admit_prompt(budget, live, cached, claim);
+            }
+        } else if kv_store.release_finished_conversations(idle, request_id) > 0 {
             // What was freed in THIS memory: the release counts every device.
             live = kv_store
                 .occupancy()
@@ -3592,6 +3633,11 @@ fn admit_prompt_in(
     let promise = claim;
     let short_by = match verdict {
         PromptAdmission::Fits => {
+            return Ok(Some(promise));
+        }
+        // `admit_prompt` asks for an eviction only when the saved prompts cover
+        // the excess, and `release` can free every one of them.
+        PromptAdmission::EvictBytes(_) if admitting == Admitting::OnlyWeigh => {
             return Ok(Some(promise));
         }
         PromptAdmission::EvictBytes(needed) => {
@@ -3618,19 +3664,21 @@ fn admit_prompt_in(
         }
         PromptAdmission::Refuse { short_by } => short_by,
     };
-    tracing::warn!(
-        request_id,
-        prompt_tokens,
-        positions,
-        live_mb = mb(live),
-        promised_mb = mb(promised),
-        cached_mb = mb(cached),
-        budget_mb = mb(budget),
-        load_time_budget_mb = mb(load_time_budget),
-        short_by_mb = mb(short_by),
-        memory = ?home,
-        "DIAG: KV admission — refusing this prompt before prefill: it would not fit on the device"
-    );
+    if admitting == Admitting::Record {
+        tracing::warn!(
+            request_id,
+            prompt_tokens,
+            positions,
+            live_mb = mb(live),
+            promised_mb = mb(promised),
+            cached_mb = mb(cached),
+            budget_mb = mb(budget),
+            load_time_budget_mb = mb(load_time_budget),
+            short_by_mb = mb(short_by),
+            memory = ?home,
+            "DIAG: KV admission — refusing this prompt before prefill: it would not fit on the device"
+        );
+    }
     // "budget" unqualified is the wrong word here, and the sibling refusal in
     // `auto_manage::vram` proves it: that one says "This node's budget allows
     // N MB (`resources.max_ram_mb` is N MB)" about the WHOLE node, while this
@@ -3677,6 +3725,11 @@ fn admit_prompt_up_front(
     admit: &crate::inference::worker_ipc::IpcAdmitPrompt,
 ) -> Result<(), (SwarmError, u32)> {
     let request_id = admit.request_id.to_string();
+    let admitting = if admit.only_weigh {
+        Admitting::OnlyWeigh
+    } else {
+        Admitting::Record
+    };
     // Each range: the loaded model holding it (a plan's range may sit inside a
     // loaded one) and the layers of it the prompt uses.
     let mut loaded: Vec<(&SplitModel, u32)> = Vec::new();
@@ -3712,8 +3765,11 @@ fn admit_prompt_up_front(
     let unloaded = loaded_growth.share(u64::from(unloaded_layers), loaded_layers.max(1));
     // The pass starts every range's cache afresh, so an earlier attempt's
     // caches for this request (a re-plan keeps the request's id) are not
-    // weighed against it; the forwards would clear them anyway.
-    kv_store.cleanup_request_id(&request_id);
+    // weighed against it; the forwards would clear them anyway. A peer's
+    // question names a fresh id and clears nothing.
+    if admitting == Admitting::Record {
+        kv_store.cleanup_request_id(&request_id);
+    }
     match admit_prompt_over(
         &loaded,
         unloaded,
@@ -3723,24 +3779,28 @@ fn admit_prompt_up_front(
         admit.prompt_tokens as usize,
         REPLY_RESERVE_POSITIONS,
         0,
+        admitting,
     ) {
         Ok(()) => {
-            kv_store.record_ranges_admitted(&request_id, admit.layer_ranges.clone());
+            if admitting == Admitting::Record {
+                kv_store.record_ranges_admitted(&request_id, admit.layer_ranges.clone());
+            }
             Ok(())
         }
         Err(refused) => {
             // Nothing of this attempt runs here now: the reservation the
             // admission recorded before it weighed would hold room against
             // every other conversation until the re-plan's own admission.
-            kv_store.cleanup_request_id(&request_id);
-            let layers: u32 = admit
-                .layer_ranges
-                .iter()
-                .map(|(start, end)| end.saturating_sub(*start))
-                .sum();
+            if admitting == Admitting::Record {
+                kv_store.cleanup_request_id(&request_id);
+            }
             Err((
                 refused.error,
-                layers_that_fit(layers, refused.needed, refused.short_by),
+                layers_that_fit(
+                    layers_named(&admit.layer_ranges),
+                    refused.needed,
+                    refused.short_by,
+                ),
             ))
         }
     }
@@ -4067,6 +4127,19 @@ mod reply_reserve_tests {
         assert_eq!(layers_that_fit(30, needed, needed), 0);
         assert_eq!(layers_that_fit(30, needed, 2 * needed), 0);
         assert_eq!(layers_that_fit(30, 0, 0), 30);
+    }
+
+    /// A peer names the ranges it asks about (#252 (b)), each only checked
+    /// `start < end`: the arithmetic over them saturates rather than overflow,
+    /// which a debug build turns into a dead worker.
+    #[test]
+    fn the_layers_a_peer_names_cannot_overflow_the_refusal() {
+        assert_eq!(layers_named(&[(0, 4), (10, 12)]), 6);
+        assert_eq!(layers_named(&[(0, u32::MAX), (1, u32::MAX)]), u32::MAX);
+        assert_eq!(
+            layers_that_fit(u32::MAX, u64::MAX, u64::MAX / 2),
+            u32::MAX / 2
+        );
     }
 }
 

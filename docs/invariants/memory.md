@@ -2985,14 +2985,119 @@ The conversation is noted on the worker (`note_conversation`) only on a "yes". T
 **Worker IPC compatibility.** A worker can be newer than its daemon, never the reverse in one
 binary; the worker sends `PromptAdmitted` / `PromptRefused` only in answer to `AdmitPrompt`.
 
-**Residuals.** A PEER's segments are still admitted per segment at the peer (the planner charges
-them the prompt's cache through `PublishedRoom`). The planner itself does not yet ask our cache
+**Residuals.** A PEER's segments are weighed before the pass too since 2026-10-18 (#252 (b), the
+next section). The planner itself does not yet ask our cache
 room before planning — #252 (1). A later attempt of the same request that sends no admission (a
 re-plan of this node alone) finds the earlier attempt's record: a subset of ranges the same
 prompt was admitted for, under the same reservation, so it is still covered. Tests:
 `an_up_front_admission_survives_each_segments_first_forward` (kv_cache),
 `a_refused_prompt_says_how_many_of_its_layers_fit`,
 `a_prompt_is_admitted_up_front_only_where_a_worker_runs_the_model`.
+
+## A split's peers are asked about room before the pass too (2026-10-18, FUTURE_WORK #252 (b))
+
+#263 asks this node's worker before any segment runs; a PEER's segment was still admitted only
+when its forward arrived — after every machine before it had read the prompt — and its refusal
+barred it from the re-plan, though most of its layers might have fit. On the `split_rig.sh peerkv`
+tight case (v0.3.242: a peer on the processor with 660 MB for conversations, a 5,097-token prompt)
+that was a 503 after 132.8 s with the peer refusing two forwards, and up to 712 s on another
+shape. A field refusal on v0.3.243 (12:17Z 10-18, Qwen3-30B-A3B) refused the same peer twice.
+
+**The mechanism.** `PipelineExecutor::admit_segments_up_front` (`pipeline/distributed.rs`, the
+#263 call site) sends `SwarmMessage::PromptAdmissionAsk { request_id, model_id, layer_ranges,
+prompt_tokens }` to each peer whose segment runs after other work
+(`pipeline::prompt_admission::peers_to_ask`; a peer whose only segment opens the pass is not
+asked — its own forward answers as early and nobody has read the prompt yet), concurrently with
+this node's own admission, and only to a connected peer advertising `features::PROMPT_ADMISSION`
+(bit 25). A "no" carries `layers_that_fit`; the coordinator records it
+(`SharedState::note_peer_prompt_refusal`, the fewest per peer) and returns
+`ServiceUnavailable` — ALWAYS that class, whatever the peer wrote. The router re-plans (a remote
+segment was planned), and `gather_candidates` holds that peer's TOTAL layers to the figure on
+every rung (`max_hostable_layers_at_ceiling`, which `clamp_to_ceiling` applies to every bound) with
+`prompt_memory_refused` and `memory_refused_this_request` set — the same treatment #263 gives
+this node. Nothing bars the peer: the bar for a forward's refusal is set in dispatch when its
+error result arrives, and an up-front answer never passes there.
+
+**A question is weighed, never granted.** The asked node runs #263's arithmetic and records
+NOTHING: `ModelProcessPool::weigh_peer_prompt` sends `IpcAdmitPrompt { only_weigh: true }` under a
+FRESH correlation id, and the worker's `admit_prompt_over` takes `Admitting::OnlyWeigh` — a
+required argument, so no caller can forget it — under which it sets no reserved positions,
+records no promise, releases no ended conversation (it counts what the release WOULD free,
+`KvCacheStore::finished_conversations_bytes_in`), treats "fits after an eviction" as fits, and
+cleans nothing; the pool notes no conversation. The request's forwards are admitted as they
+always were when they arrive. This is vLLM's split between `can_allocate` (a question) and
+`allocate` (done only once the group is scheduled).
+
+The first design ADMITTED on a peer's ask — the room held until the forwards, the request's end
+or the KV TTL, at most four outstanding asks per peer — and a security review the same day
+(security-reviewer, 2026-10-18) found it unsound: (1) the pool registered the worker's answer slot
+under the asker's request id, and a request id is known to every machine on a route, so a peer's
+ask could take a live forward's answer — the request failed and an honest node was barred;
+(2) an ask reserved up to the whole budget for the TTL and could be refreshed forever, so any peer
+could refuse or evict the owner's own prompts, the per-peer cap counting asks not bytes;
+(3) refused asks were unmetered worker work and a free reading of this node's memory and
+activity; (4) the coordinator let the peer's TEXT choose the error class
+(`reclassify_flattened_error`: a forged "Validation error:" ended the request 400, no re-plan),
+unbounded and logged unescaped; (5) a route member could overwrite another coordinator's promise.
+Weighing closes (1), (2) and (5) by construction — nothing is keyed by the asker's id and nothing
+is held. A second pass over the redesign found four smaller holes, each fixed: the question's
+response slot stamped the worker's `last_used`, so one question every 5 s from any peer kept a
+model from ever being idle-unloaded or reclaimed (`WorkerHandle::register_question` takes the slot
+without the stamp); a late answer to one attempt's question settled the re-plan's, the request id
+being the same (every question carries a fresh `ask_id`, echoed in its answer, and the wait is
+keyed by it); the worker's refusal arithmetic over peer-named ranges overflowed — a panic in a
+debug build, the worker with it (`layers_named` saturates, `layers_that_fit` multiplies in u128);
+and an unweighed answer (over budget, metered) cost a task and an info line each (now one
+`try_send` from the dispatcher and a debug line). What weighing gives up: two coordinators asked at once may both hear "yes" and one
+forward is then refused as before — no worse than before the question existed.
+
+**Bounded on both ends.** The coordinator waits `UP_FRONT_ADMISSION_WAIT` (the asked worker's own
+bound) plus two round trips to the slowest peer asked (`answer_wait`: `ack_srtt_ms`, else the
+ping; an untimed peer counts 500 ms, none more than 2 s), and stops waiting when the request is
+cancelled. Past the wait the pass goes ahead and each segment admits itself, exactly as before the
+ask — a peer that never answers costs at most ~5 s, never a refusal. The asked node weighs at most
+`ASKS_PER_PEER` (12) questions a minute from one peer and `ASKS_PER_NODE` (60) from all
+(`daemon::state::prompt_admission::AskBudget`, a sliding window pruned as it goes); past either it
+answers "go ahead" without the worker — the pre-question behaviour, so a flood costs an honest
+coordinator only its early answer (closes (3)). A metered connection answers `Refused` with 0
+layers (its forwards would be refused, #277). A malformed ask (no range, an empty or reversed one,
+more than 16, no prompt) is dropped.
+
+**Words.** The asked node's refusal goes through `sanitize_peer_facing_error`, as a forward's
+does; the coordinator repeats it through `pipeline::prompt_admission::peer_words` — the error
+type's "Service unavailable: " dropped, cut to 1,024 bytes, every control character a space —
+so a peer cannot forge a log line or choose the reply's class (closes (4)).
+
+**Wire.** Two new variants, never a changed one; gated at the sender on the feature bit, so an
+older node is never sent one; neither is relay-eligible. An answer is accepted only from the peer
+it was asked of, for the question it was asked: the waiter is keyed `(ask_id, NodeId)` and the
+answer arm resolves the key of its authenticated sender; asker and answerer both resolve the peer through
+`resolve_connected_peer_id_bytes`.
+
+Log lines: coordinator `DIAG: KV admission up front — asked this split's peers` (asked, answered,
+refused, took, wait) and `… a peer refused the prompt before the pass; re-planning`; the asked
+node `DIAG: answered a peer's up-front prompt admission`. The worker's `refusing this prompt
+before prefill` warning is a FORWARD's (or this node's own up-front admission's) — a weighed
+question logs none. Rig: `split_rig.sh peerkv` (RIG_NETNS=1 beside a live node). Tests:
+`a_peer_that_refused_the_prompt_up_front_is_held_to_the_layers_it_said_fit` (scheduler),
+`the_room_a_question_is_weighed_with_is_what_the_release_would_free` (kv_cache),
+`questions_are_weighed_a_few_a_minute_per_peer_and_in_all`,
+`a_peers_question_does_not_mark_the_model_used`,
+`the_layers_a_peer_names_cannot_overflow_the_refusal`,
+`a_peers_refusal_is_repeated_bounded_and_on_one_line`,
+`a_peer_is_asked_for_every_range_it_runs_after_other_work`,
+`the_wait_for_answers_follows_the_slowest_link_asked`,
+`only_an_ask_an_honest_coordinator_could_send_is_answered`.
+
+**Measured** (`split_rig.sh peerkv`, `RIG_NETNS=1`, dev build, 2026-10-18, final design): the
+tight case answers in 1.4 s — B asked once, answered in 3 ms (`took_ms=3`, `wait_ms=1004`),
+refused with `layers_that_fit=12`, A re-planned once, and the reply is the accurate
+`SwarmShortOfMemory` (A's two shards and B's twelve layers cannot hold 28), with NO forward
+refused; v0.3.242 on the same shape: 132.8 s, B refusing two forwards. With A holding three shards
+on four cores (B's worker then has 1,277 MB for conversations) B is asked, says "go ahead", and the
+request answers 200 — the released v0.3.243 asks nothing there and also answers 200. The case
+"B refuses, the re-plan gives A the excess, 200" did not arise in either shape; the clamp it rests
+on is the scheduler test above.
 
 ## A cache is charged to the memory it lives in (2026-10-13, FUTURE_WORK #262)
 

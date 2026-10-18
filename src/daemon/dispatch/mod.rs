@@ -1613,6 +1613,36 @@ pub(crate) async fn dispatch_network_messages(
                                             &pull,
                                         );
                                     }
+                                    // A split's coordinator asking, before its prompt pass,
+                                    // whether this node holds the prompt (#252 (b)).
+                                    SwarmMessage::PromptAdmissionAsk(ask) => {
+                                        let Some(sender) = authenticated_sender.clone() else {
+                                            tracing::debug!("Dropping unauthenticated PromptAdmissionAsk");
+                                            continue;
+                                        };
+                                        if !shared_state.peer_registry.contains_key(&sender) {
+                                            tracing::warn!(sender = %sender, "PromptAdmissionAsk from unknown peer — dropping");
+                                            continue;
+                                        }
+                                        prompt_admission::on_ask(
+                                            shared_state.clone(),
+                                            network_tx.clone(),
+                                            sender,
+                                            ask,
+                                        );
+                                    }
+                                    // Only the peer that was asked completes its wait: the
+                                    // waiter is keyed by the question AND that peer.
+                                    SwarmMessage::PromptAdmissionAnswer(answer) => {
+                                        if let Some(sender) = authenticated_sender.clone() {
+                                            if let Some((_, tx)) = shared_state
+                                                .pending_prompt_admissions
+                                                .remove(&(answer.ask_id, sender))
+                                            {
+                                                let _ = tx.send(answer.verdict);
+                                            }
+                                        }
+                                    }
                                     // Process model manifests from peers — register in model_registry
                                     SwarmMessage::ModelManifest(manifest) => {
                                         // SEC: Require transport-authenticated sender (prevents anonymous injection).
@@ -3278,6 +3308,7 @@ pub(crate) async fn dispatch_network_messages(
 }
 pub(crate) mod layer_forward;
 mod manifest_sync;
+mod prompt_admission;
 pub(crate) mod remote_generate;
 mod vision;
 

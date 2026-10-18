@@ -109,6 +109,35 @@ pub const DEFAULT_KV_CACHE_TTL_SECS: u64 = 600;
 /// (`KvCacheStore::release_finished_conversations`).
 pub(crate) const CONVERSATION_GAP_SECS: u64 = 120;
 
+/// What a worker said to one `DaemonMsg::AdmitPrompt`
+/// ([`ModelProcessPool::send_admission`]).
+enum Admission {
+    /// No live worker runs the model: nothing loaded to weigh.
+    NoWorker,
+    /// No answer within `UP_FRONT_ADMISSION_WAIT`: the worker is busy.
+    Busy,
+    Admitted {
+        handle: Arc<WorkerHandle>,
+    },
+    Refused {
+        message: String,
+        layers_that_fit: u32,
+    },
+}
+
+/// This node's answer to a peer's question about a prompt
+/// ([`ModelProcessPool::weigh_peer_prompt`], FUTURE_WORK #252 (b)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PeerPromptWeight {
+    /// It would fit — or nothing here can say it would not.
+    Fits,
+    /// It would not: the worker's words, and how many of the asked layers fit.
+    DoesNotFit {
+        message: String,
+        layers_that_fit: u32,
+    },
+}
+
 /// How many refusals `ModelProcessPool::layers_refused` holds before it drops
 /// the stale ones. The router takes each entry within a second of the refusal,
 /// so anything older than [`LAYERS_REFUSED_FOR`] is one no router will take.
@@ -119,7 +148,7 @@ const LAYERS_REFUSED_FOR: std::time::Duration = std::time::Duration::from_secs(6
 /// the answer is a budget sum and one device reading, milliseconds — but on how
 /// long this request's peers may be held while our worker finishes ANOTHER
 /// request's forward, which the old per-segment admission never waited for.
-const UP_FRONT_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+pub(crate) const UP_FRONT_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How long a live card reading stands for a plan
 /// ([`ModelProcessPool::card_budget_for_planning`]): one plan asks the card
@@ -1646,6 +1675,29 @@ impl WorkerHandle {
     ) -> (ResponseGuard, Option<u64>) {
         self.last_used
             .store(self.spawned_at.elapsed().as_secs(), Ordering::Relaxed);
+        self.register_unseen(request_id, tx, cancel_on_drop)
+    }
+
+    /// [`Self::register_response`] for a PEER's question
+    /// ([`ModelProcessPool::weigh_peer_prompt`]): the slot, without marking the
+    /// worker used. A question is no work for this node's own users, so it
+    /// must not keep a model looking busy — one every few seconds would hold
+    /// off the idle unload and the card reclaim forever (security review,
+    /// 2026-10-18). The slot itself lives the milliseconds of the answer.
+    fn register_question(
+        self: &Arc<Self>,
+        request_id: Uuid,
+        tx: ResponseTx,
+    ) -> (ResponseGuard, Option<u64>) {
+        self.register_unseen(request_id, tx, true)
+    }
+
+    fn register_unseen(
+        self: &Arc<Self>,
+        request_id: Uuid,
+        tx: ResponseTx,
+        cancel_on_drop: bool,
+    ) -> (ResponseGuard, Option<u64>) {
         let (token, displaced) = claim_response_slot(&self.responses, request_id, tx);
         if displaced.is_some() {
             tracing::warn!(
@@ -6235,13 +6287,113 @@ impl ModelProcessPool {
         admit: IpcAdmitPrompt,
         cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<(), SwarmError> {
+        // This node will run the prompt: the admission records. A peer's
+        // question goes through `weigh_peer_prompt`, never here.
+        let admit = IpcAdmitPrompt {
+            only_weigh: false,
+            ..admit
+        };
+        let request_id = admit.request_id;
+        let model_id = admit.model_id.clone();
+        match self.send_admission(admit, cancel).await? {
+            Admission::NoWorker => Ok(()),
+            Admission::Busy => {
+                tracing::info!(
+                    %request_id,
+                    model = %model_id,
+                    wait_ms = UP_FRONT_ADMISSION_WAIT.as_millis() as u64,
+                    "DIAG: KV admission up front — the worker is busy with another forward; \
+                     each local segment admits itself instead"
+                );
+                Ok(())
+            }
+            Admission::Admitted { handle } => {
+                // The admission holds a reservation for this request until its
+                // forwards arrive, so the worker is in use from here
+                // (`kv_holders`).
+                handle.note_conversation(request_id);
+                Ok(())
+            }
+            Admission::Refused {
+                message,
+                layers_that_fit,
+            } => {
+                tracing::info!(
+                    %request_id,
+                    model = %model_id,
+                    layers_that_fit,
+                    "DIAG: KV admission up front — this node's segments of the plan \
+                     cannot hold the prompt; refused before any peer read it, the \
+                     re-plan holds this node to the layers that fit"
+                );
+                self.note_layers_fitting(request_id, layers_that_fit);
+                Err(self.classify_worker_error(&model_id, message, false, true))
+            }
+        }
+    }
+
+    /// Would this node's worker hold a prompt a PEER asks about — its
+    /// `PromptAdmissionAsk` (FUTURE_WORK #252 (b))? The same decision as
+    /// [`Self::admit_prompt`], weighed and recorded NOWHERE
+    /// (`model_worker::Admitting::OnlyWeigh`): no room is held for a machine
+    /// that may never send its forwards, and they admit themselves as they
+    /// arrive, as they always have.
+    ///
+    /// Sent under a FRESH correlation id, never the request's: a worker's
+    /// answers are routed by id, and an ask naming a request whose forward
+    /// runs here would otherwise take that forward's answer (security review,
+    /// 2026-10-18). The conversation is not noted either — a question does not
+    /// keep a model loaded. Anything but a refusal (no worker, a busy one, a
+    /// worker error) is "go ahead": the forwards find out as they always have.
+    pub(crate) async fn weigh_peer_prompt(
+        &self,
+        model_id: &ModelId,
+        layer_ranges: Vec<(u32, u32)>,
+        prompt_tokens: u32,
+    ) -> PeerPromptWeight {
+        let ask = IpcAdmitPrompt {
+            request_id: Uuid::new_v4(),
+            model_id: model_id.clone(),
+            layer_ranges,
+            prompt_tokens,
+            only_weigh: true,
+        };
+        match self.send_admission(ask, None).await {
+            Ok(Admission::Refused {
+                message,
+                layers_that_fit,
+            }) => PeerPromptWeight::DoesNotFit {
+                message,
+                layers_that_fit,
+            },
+            _ => PeerPromptWeight::Fits,
+        }
+    }
+
+    /// Send one `DaemonMsg::AdmitPrompt` to the model's live worker and wait,
+    /// bounded, for its answer. A worker answers one message at a time, so an
+    /// admission sent while it is reading another request's prompt waits for
+    /// that forward to end — which a peer's first segment of THIS request need
+    /// not have done. The answer itself takes milliseconds; a worker that has
+    /// not given it by `UP_FRONT_ADMISSION_WAIT` is busy, and the caller goes
+    /// ahead as it always did. A recording admission still reaches the worker
+    /// ahead of its request's forwards, which see its record.
+    async fn send_admission(
+        &self,
+        admit: IpcAdmitPrompt,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<Admission, SwarmError> {
         let Some(handle) = self.live_worker(&admit.model_id) else {
-            return Ok(());
+            return Ok(Admission::NoWorker);
         };
         let request_id = admit.request_id;
         let model_id = admit.model_id.clone();
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
-        let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
+        let (mut guard, _) = if admit.only_weigh {
+            handle.register_question(request_id, resp_tx)
+        } else {
+            handle.register_response(request_id, resp_tx, true)
+        };
         let attempt_token = guard.token;
         {
             let mut writer = handle.writer.lock().await;
@@ -6261,11 +6413,9 @@ impl ModelProcessPool {
                     Some((msg, _)) => match msg {
                         WorkerMsg::PromptAdmitted { request_id: rid } if rid == request_id => {
                             guard.disarm();
-                            // The admission holds a reservation for this request
-                            // until its forwards arrive, so the worker is in use
-                            // from here (`kv_holders`).
-                            handle.note_conversation(request_id);
-                            return Ok(());
+                            return Ok(Admission::Admitted {
+                                handle: handle.clone(),
+                            });
                         }
                         WorkerMsg::PromptRefused {
                             request_id: rid,
@@ -6273,16 +6423,10 @@ impl ModelProcessPool {
                             layers_that_fit,
                         } if rid == request_id => {
                             guard.disarm();
-                            tracing::info!(
-                                %request_id,
-                                model = %model_id,
+                            return Ok(Admission::Refused {
+                                message,
                                 layers_that_fit,
-                                "DIAG: KV admission up front — this node's segments of the plan \
-                                 cannot hold the prompt; refused before any peer read it, the \
-                                 re-plan holds this node to the layers that fit"
-                            );
-                            self.note_layers_fitting(request_id, layers_that_fit);
-                            return Err(self.classify_worker_error(&model_id, message, false, true));
+                            });
                         }
                         WorkerMsg::Error {
                             request_id: rid,
@@ -6313,33 +6457,17 @@ impl ModelProcessPool {
                 }
             }
         };
-        // A worker answers one message at a time, so an admission sent while it
-        // is reading another request's prompt waits for that forward to end —
-        // which a peer's first segment of THIS request need not have done. The
-        // answer itself takes milliseconds; a worker that has not given it by
-        // `UP_FRONT_ADMISSION_WAIT` is busy, and the pass goes ahead as it always
-        // did, each local segment admitting itself. The admission still reaches
-        // the worker ahead of this request's forwards, which see its record.
         let bounded = async {
             match tokio::time::timeout(UP_FRONT_ADMISSION_WAIT, wait).await {
-                Ok(answer) => answer.map(Some),
-                Err(_busy) => Ok(None),
+                Ok(answer) => answer,
+                Err(_busy) => Ok(Admission::Busy),
             }
         };
-        match crate::inference::cancel::unless_cancelled(bounded, cancel.as_ref()).await? {
-            Some(()) => Ok(()),
-            None => {
-                guard.disarm();
-                tracing::info!(
-                    %request_id,
-                    model = %model_id,
-                    wait_ms = UP_FRONT_ADMISSION_WAIT.as_millis() as u64,
-                    "DIAG: KV admission up front — the worker is busy with another forward; \
-                     each local segment admits itself instead"
-                );
-                Ok(())
-            }
+        let answer = crate::inference::cancel::unless_cancelled(bounded, cancel.as_ref()).await;
+        if matches!(answer, Ok(Admission::Busy)) {
+            guard.disarm();
         }
+        answer
     }
 
     /// Remember how many of a request's local layers this node's conversation
@@ -9764,6 +9892,7 @@ mod tests {
             model_id: m.clone(),
             layer_ranges: vec![(0, 4)],
             prompt_tokens: 6002,
+            only_weigh: false,
         };
         let started = std::time::Instant::now();
         let answer = p.admit_prompt(admit, None).await;
@@ -9777,6 +9906,42 @@ mod tests {
         assert!(
             p.live_worker(&m).is_some(),
             "a busy worker is not a dead one"
+        );
+    }
+
+    /// **A peer's question never makes a model look used** (#252 (b), security
+    /// review 2026-10-18). The idle unload and the card reclaim read the
+    /// worker's `last_used`; a question that stamped it, one every few seconds
+    /// from any peer, would keep a model loaded forever. This node's OWN
+    /// admission is real use and still stamps it. The fake worker never
+    /// answers: a question to a busy worker is answered "fits" after the bound
+    /// and leaves no slot behind.
+    #[tokio::test]
+    async fn a_peers_question_does_not_mark_the_model_used() {
+        let p = ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-weigh-idle"));
+        let m = ModelId("asked".into());
+        let h = fake_worker_handle(false).await;
+        p.workers.insert(m.clone(), h.clone());
+        const LONG_AGO: u64 = 7;
+        h.last_used.store(LONG_AGO, Ordering::Relaxed);
+
+        let weight = p.weigh_peer_prompt(&m, vec![(0, 4)], 6002).await;
+        assert_eq!(weight, PeerPromptWeight::Fits);
+        assert_eq!(h.last_used.load(Ordering::Relaxed), LONG_AGO);
+        assert!(h.responses.is_empty(), "the question's slot is gone");
+
+        let admit = IpcAdmitPrompt {
+            request_id: Uuid::new_v4(),
+            model_id: m.clone(),
+            layer_ranges: vec![(0, 4)],
+            prompt_tokens: 6002,
+            only_weigh: false,
+        };
+        assert!(p.admit_prompt(admit, None).await.is_ok());
+        assert_ne!(
+            h.last_used.load(Ordering::Relaxed),
+            LONG_AGO,
+            "this node's own admission is use"
         );
     }
 
@@ -13897,6 +14062,7 @@ mod admission_tests {
             model_id: ModelId("not-running".into()),
             layer_ranges: vec![(0, 1), (8, 20), (32, 48)],
             prompt_tokens: 6002,
+            only_weigh: false,
         };
         assert!(p.admit_prompt(admit, None).await.is_ok());
         assert_eq!(p.take_layers_fitting(rid), None, "nothing refused");

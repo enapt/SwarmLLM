@@ -43,10 +43,10 @@ pub use network::{
     build_tag_from_hash, build_tags_conflict, AuthenticatedMessage, CancelInference, DownloadState,
     EphemeralKeyExchange, HfSourceGossip, ManifestDigest, ManifestPull, ManifestVersion,
     MessageTransport, ModelDemandGossip, NetworkCommand, PoolModelAvailability, PrefixBlockEntry,
-    PrefixCacheAnnounce, PruneEvent, RebalanceEvent, RegionShardSummary, RelayedEnvelope,
-    ResendTokens, SessionKeyConfirm, ShardAnnounce, ShardDownloadProgress, ShardRequest,
-    ShardResponse, SwarmMessage, WishlistAnnouncement, WishlistAnnouncementEntry,
-    BUILD_TAG_UNKNOWN,
+    PrefixCacheAnnounce, PromptAdmissionAnswer, PromptAdmissionAsk, PromptAdmissionVerdict,
+    PruneEvent, RebalanceEvent, RegionShardSummary, RelayedEnvelope, ResendTokens,
+    SessionKeyConfirm, ShardAnnounce, ShardDownloadProgress, ShardRequest, ShardResponse,
+    SwarmMessage, WishlistAnnouncement, WishlistAnnouncementEntry, BUILD_TAG_UNKNOWN,
 };
 pub use node::{
     features, ContributionLevel, CpuInfo, GpuInfo, LatencyObservation, NodeCapability, NodeStats,

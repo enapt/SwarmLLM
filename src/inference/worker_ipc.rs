@@ -363,6 +363,14 @@ pub struct IpcAdmitPrompt {
     /// The whole prompt, in positions — what every range's cache will hold
     /// once the prompt pass is done, a kept opening (#10) included.
     pub prompt_tokens: u32,
+    /// Weigh the prompt and record NOTHING (`model_worker::Admitting::OnlyWeigh`):
+    /// a PEER's question (`PromptAdmissionAsk`, FUTURE_WORK #252 (b)). No room
+    /// is held for a machine that may never send its forwards, no conversation
+    /// is ended and no saved prompt evicted to answer it, and `request_id` is a
+    /// fresh correlation id, never the request's own — an ask naming a request
+    /// that runs here must not displace its forwards' answers.
+    #[serde(default)]
+    pub only_weigh: bool,
 }
 
 /// Forward-pass request header (activation bytes are the binary payload).

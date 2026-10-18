@@ -848,7 +848,7 @@ impl PipelineExecutor {
         // node's own segments are admitted — all of them, before any peer
         // starts reading the prompt (#263).
         if sequence_num == 0 && precomputed_vision.is_none() && !pre_embedded {
-            self.admit_local_segments_up_front(request_id, &initial_activations)
+            self.admit_segments_up_front(request_id, &initial_activations)
                 .await?;
         }
         // A split's prompt pass that keeps its prompt between turns
@@ -903,25 +903,29 @@ impl PipelineExecutor {
         .await
     }
 
-    /// Admit this prompt's conversation memory on THIS node for every segment
-    /// the plan gives it, at once, before any segment runs (FUTURE_WORK #263).
+    /// Admit this prompt's conversation memory on every machine of the plan,
+    /// before any segment runs: THIS node's segments at once (FUTURE_WORK
+    /// #263), and each peer whose segment runs after other work, asked at the
+    /// same moment (#252 (b), `prompt_admission`).
     ///
-    /// Each local segment used to be admitted as its forward arrived. A plan
-    /// with one of ours AFTER a peer's therefore found out we had no room only
-    /// once the peers had read the prompt: a tester's 6,002-token prompt spent
-    /// 277 s, 125 s and 30 s of three countries' prefill before our last
-    /// segment refused, and two requests became four attempts and 15 minutes
-    /// for no reply. Asked here, the refusal costs one round trip to our own
-    /// worker, and it carries how many layers fit, which the re-plan holds this
-    /// node to (`SharedState::note_local_memory_refusal`).
+    /// Each segment used to be admitted as its forward arrived. A plan with a
+    /// segment AFTER a peer's therefore found out it had no room only once the
+    /// peers had read the prompt: a tester's 6,002-token prompt spent 277 s,
+    /// 125 s and 30 s of three countries' prefill before our last segment
+    /// refused, and two requests became four attempts and 15 minutes for no
+    /// reply. Asked here, a refusal costs one round trip, and it carries how
+    /// many layers fit, which the re-plan holds that machine to
+    /// (`SharedState::note_local_memory_refusal`, `note_peer_prompt_refusal`)
+    /// — a peer refused at its forward was barred from the re-plan instead.
     ///
     /// Only where a peer takes part: a plan of ours alone loses nothing to the
     /// per-segment check. A prompt that is not text (an image, embeddings sent
     /// pre-made) is left to that check, as are workers not running the model
-    /// yet ([`ModelProcessPool::admit_prompt`]).
+    /// yet ([`ModelProcessPool::admit_prompt`]), peers on an older build, and
+    /// peers that do not answer in time.
     ///
     /// [`ModelProcessPool::admit_prompt`]: crate::inference::process_pool::ModelProcessPool::admit_prompt
-    async fn admit_local_segments_up_front(
+    async fn admit_segments_up_front(
         &self,
         request_id: uuid::Uuid,
         prompt_bytes: &[u8],
@@ -933,22 +937,69 @@ impl PipelineExecutor {
             .filter(|s| s.node_id == local)
             .map(|s| s.layer_range)
             .collect();
-        if layer_ranges.is_empty() || layer_ranges.len() == segments.len() {
+        if layer_ranges.len() == segments.len() {
+            return Ok(());
+        }
+        let peers = super::prompt_admission::peers_to_ask(segments, &local);
+        if layer_ranges.is_empty() && peers.is_empty() {
             return Ok(());
         }
         let Some(ids) = self.tokenize_prompt(prompt_bytes) else {
             return Ok(());
         };
-        let admit = crate::inference::worker_ipc::IpcAdmitPrompt {
-            request_id,
-            model_id: segments[0].shard_id.model_id.clone(),
-            layer_ranges,
-            prompt_tokens: u32::try_from(ids.len()).unwrap_or(u32::MAX),
+        let prompt_tokens = u32::try_from(ids.len()).unwrap_or(u32::MAX);
+        let model_id = segments[0].shard_id.model_id.clone();
+        let ours = async {
+            if layer_ranges.is_empty() {
+                return Ok(());
+            }
+            let admit = crate::inference::worker_ipc::IpcAdmitPrompt {
+                request_id,
+                model_id: model_id.clone(),
+                layer_ranges,
+                prompt_tokens,
+                only_weigh: false,
+            };
+            self.shared_state
+                .model_process_pool
+                .admit_prompt(admit, self.request.cancel.clone())
+                .await
         };
-        self.shared_state
-            .model_process_pool
-            .admit_prompt(admit, self.request.cancel.clone())
-            .await
+        let theirs = super::prompt_admission::ask_peers(
+            &self.shared_state,
+            &self.network_tx,
+            request_id,
+            &model_id,
+            peers,
+            prompt_tokens,
+            self.request.cancel.as_ref(),
+        );
+        let (ours, refusals) = tokio::join!(ours, theirs);
+        // Every peer's verdict is kept for the re-plan, whichever refusal is
+        // reported.
+        for refusal in &refusals {
+            self.shared_state.note_peer_prompt_refusal(
+                request_id,
+                &refusal.node_id,
+                refusal.layers_that_fit,
+            );
+        }
+        ours?;
+        let Some(refusal) = refusals.into_iter().next() else {
+            return Ok(());
+        };
+        tracing::info!(
+            %request_id,
+            peer = %refusal.node_id,
+            layers_that_fit = refusal.layers_that_fit,
+            "DIAG: KV admission up front — a peer refused the prompt before the pass; re-planning"
+        );
+        // One class whatever the peer wrote: "this holder cannot serve", which
+        // the router re-plans (`remote_peer_could_not_serve`) holding the peer
+        // to what it said fits. The peer's text never picks the class — a
+        // forged "Validation error:" would otherwise end the request with a
+        // 400 and no re-plan.
+        Err(SwarmError::ServiceUnavailable(refusal.message))
     }
 
     /// The forward as it always ran, with the peer-error check — what

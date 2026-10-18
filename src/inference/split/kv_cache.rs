@@ -2083,12 +2083,11 @@ impl KvCacheStore {
         let mut freed = 0u64;
         let mut finished: Vec<String> = Vec::new();
         self.caches.retain(|key, entry| {
-            let request = key.split('\0').nth(1).unwrap_or_default();
-            if request == keep || entry.last_accessed.elapsed() < idle {
+            if !conversation_has_ended(key, entry, idle, keep) {
                 return true;
             }
             freed = freed.saturating_add(entry.occupancy().allocated_bytes);
-            finished.push(request.to_string());
+            finished.push(request_of_key(key).to_string());
             false
         });
         finished.sort_unstable();
@@ -2108,6 +2107,25 @@ impl KvCacheStore {
             );
         }
         freed
+    }
+
+    /// What [`Self::release_finished_conversations`] would free in `home` now,
+    /// freeing nothing: the room a peer's question is weighed with
+    /// (`model_worker::Admitting::OnlyWeigh`, FUTURE_WORK #252 (b)), which must
+    /// not end another conversation to answer it. Their caches only — a
+    /// finished request's admission claim has been drawn down by what it
+    /// wrote, so it adds next to nothing.
+    pub(crate) fn finished_conversations_bytes_in(
+        &self,
+        home: KvHome,
+        idle: std::time::Duration,
+        keep: &str,
+    ) -> u64 {
+        self.caches
+            .iter()
+            .filter(|e| conversation_has_ended(e.key(), e.value(), idle, keep))
+            .map(|e| e.value().occupancy().allocated_in(home))
+            .fold(0u64, u64::saturating_add)
     }
 
     /// Remove all cache entries for a given request_id (across all models).
@@ -2147,6 +2165,23 @@ impl KvCacheStore {
             .load(std::sync::atomic::Ordering::Relaxed);
         out
     }
+}
+
+/// The request a store key belongs to (`cache_key`: `model\0request`).
+fn request_of_key(key: &str) -> &str {
+    key.split('\0').nth(1).unwrap_or_default()
+}
+
+/// Has the conversation under `key` ended: silent for `idle`, and not `keep`'s
+/// own? The one reading behind [`KvCacheStore::release_finished_conversations`]
+/// and the read-only [`KvCacheStore::finished_conversations_bytes_in`].
+fn conversation_has_ended(
+    key: &str,
+    entry: &KvCacheEntry,
+    idle: std::time::Duration,
+    keep: &str,
+) -> bool {
+    request_of_key(key) != keep && entry.last_accessed.elapsed() >= idle
 }
 
 #[cfg(test)]
@@ -2281,6 +2316,34 @@ mod tests {
         store.mark_owner_request("r3");
         store.cleanup_request_id("r3");
         assert!(!store.serves_the_owner("r3"), "and by the other cleanup");
+    }
+
+    /// A peer's question is weighed with the room the release WOULD free
+    /// (#252 (b)), and asking frees nothing: the figure is exactly what the
+    /// release then frees in that memory — never the asking request's own
+    /// cache, never a conversation still going.
+    #[test]
+    fn the_room_a_question_is_weighed_with_is_what_the_release_would_free() {
+        let gap = FINISHED_CONVERSATION_AFTER;
+        let long_ago = gap + std::time::Duration::from_secs(1);
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        conversation(&store, "ended", 4, long_ago);
+        let one = store.occupancy().allocated_bytes;
+        assert!(one > 0, "the test needs a cache that holds bytes");
+        conversation(&store, "asking", 4, long_ago);
+        conversation(&store, "going", 4, gap / 2);
+
+        let would = store.finished_conversations_bytes_in(KvHome::Host, gap, "asking");
+        assert_eq!(would, one, "the ended conversation only");
+        assert_eq!(store.occupancy().entries, 3, "asking freed nothing");
+        assert_eq!(
+            store.finished_conversations_bytes_in(KvHome::Card, gap, "asking"),
+            0,
+            "a cache in host memory frees no card memory"
+        );
+        assert_eq!(store.release_finished_conversations(gap, "asking"), would);
+        assert!(store.request_holds_state("m", "asking"));
+        assert!(store.request_holds_state("m", "going"));
     }
 
     /// **An up-front admission outlives the start of each segment's prompt

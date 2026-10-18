@@ -299,6 +299,13 @@ pub mod features {
     /// reply would come back unsigned.
     pub const RELAY_SIGNED: u64 = 1 << 24;
 
+    /// Answers [`crate::network::PromptAdmissionAsk`]: asked before a split's
+    /// prompt pass whether its conversation memory holds the prompt over the
+    /// ranges the plan gives it, it weighs it — holding nothing — and says
+    /// "go ahead" or how many of those layers it holds (FUTURE_WORK #252 (b)). A peer without it is not
+    /// asked: its segments admit the prompt as their forwards arrive, as before.
+    pub const PROMPT_ADMISSION: u64 = 1 << 25;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`] and [`KV_WINDOW_SLIDES`] beside it where they
     /// apply.
@@ -324,7 +331,8 @@ pub mod features {
         | SPLIT_PROMPT_CACHE
         | PROMPT_CHUNKS
         | MANIFEST_DIGESTS
-        | RELAY_SIGNED;
+        | RELAY_SIGNED
+        | PROMPT_ADMISSION;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

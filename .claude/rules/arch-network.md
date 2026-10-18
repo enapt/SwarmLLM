@@ -249,6 +249,12 @@ cadence decides how fast.
 
 → `docs/invariants/network.md` § "A report built to be handed to a stranger is a publishing surface"
 
+## A peer's question is weighed, never granted — nothing is held or keyed by the asker's request id (2026-10-18, #252 (b))
+
+`SwarmMessage::PromptAdmissionAsk` / `PromptAdmissionAnswer`, gated at the SENDER on `features::PROMPT_ADMISSION` (bit 25). The coordinator's wait is keyed `(ask_id, NodeId)` — a fresh id per QUESTION, since a re-plan keeps the request id (`pending_prompt_admissions`) — and dispatch resolves only the AUTHENTICATED sender's key; both ends resolve the peer with `resolve_connected_peer_id_bytes`. The asked node drops a malformed ask (`ask_is_well_formed`), answers a metered hold with `Refused`, rations weighing (`AskBudget`: 12/min per peer, 60/min in all — past it "go ahead" unweighed, by `try_send` from the dispatcher, no task) and weighs under a FRESH correlation id (`weigh_peer_prompt`): a request id is known to every machine on a route, so anything keyed or held by it is a peer's lever on a live request (the first design's two HIGH findings). The coordinator gives a refusal ONE class (`ServiceUnavailable`) and repeats its words through `peer_words`. A missing answer is "go ahead", never a refusal. Worker side: `arch-worker-memory.md`.
+
+→ `docs/invariants/memory.md` § "A split's peers are asked about room before the pass too"
+
 ## A request someone waits on is sent until answered (2026-10-15)
 
 A gossip publish that succeeded says nothing about who received it. A pool join is resent (`pool::manager::JoinResend`) until accepted or its window ends — said out loud; the owner answers a repeat from the code's claimer with the SAME invitation (`PoolInviteCode::claimed_by`), at most once per `REPEAT_JOIN_ANSWER_GAP`. The CLI reports the outcome, not the send.

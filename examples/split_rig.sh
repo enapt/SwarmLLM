@@ -270,9 +270,11 @@
 #   peerkv  FUTURE_WORK #252 (b): latekv's shape mirrored — the PEER holds the
 #          last two shards on the processor with a tight budget (RAM_B, MB),
 #          A every shard but the last. q1 (short) loads B's worker and prints
-#          its `CPU worker KV budget`; q2 is the ~5,100-token prompt. Prints B's
-#          refusals (`refusing this prompt before prefill`), A's re-plans and
-#          the routes A planned. Default model llama-3.2-3b.
+#          its `CPU worker KV budget`; q2 is the ~5,100-token prompt. Prints the
+#          asks B answered before the pass and refused (#252 (b)), the forwards
+#          it refused, A's re-plans and the routes A planned. An older release is
+#          the control: B refuses a forward after A has read the prompt and is
+#          barred. Default model llama-3.2-3b.
 #   refusepiece FUTURE_WORK #303: peerkv's shape, the long prompt only. Run
 #          with SWARMLLM_FAULT_REFUSE_DECRYPT=3: B treats its 3rd forward — a
 #          PIECE of the prompt — as undecryptable. An older release is the
@@ -1033,10 +1035,15 @@ if [ "$MODE" = peerkv ]; then
   echo "peerkv: q2 took $(python3 -c "print(round($(date +%s.%N) - $T0, 1))") s"
   tail -n +"$((MARK_A + 1))" "$BASE/A/node.log" > "$OUT/A.q2.log"
   tail -n +"$((MARK_B + 1))" "$BASE/B/node.log" > "$OUT/B.q2.log"
-  echo "peerkv: B refused a forward: $(grep -c 'refusing this prompt before prefill' "$OUT/B.q2.log")," \
+  # An up-front ask is only weighed (#252 (b)): the worker's refusal line is a
+  # FORWARD's, and the ask's verdict is in the answer's DIAG line.
+  echo "peerkv: B was asked up front: $(grep -c "answered a peer's up-front prompt admission" "$OUT/B.q2.log")," \
+    "refused the ask: $(grep -c "answered a peer's up-front prompt admission.*Refused" "$OUT/B.q2.log")," \
+    "refused a forward: $(grep -c 'refusing this prompt before prefill' "$OUT/B.q2.log")," \
     "A re-planned: $(grep -c 'retrying with fresh pipeline' "$OUT/A.q2.log")"
   grep -m3 -oE 'route=[a-z_]+ segments=[0-9]+ nodes=[0-9a-f,]+' "$OUT/A.q2.log" | sed 's/^/peerkv: /'
-  grep -m2 -oE 'refusing this prompt before prefill.{0,200}' "$OUT/B.q2.log" | sed 's/^/peerkv: B /'
+  grep -m2 -oE 'verdict=Refused.{0,200}' "$OUT/B.q2.log" | sed 's/^/peerkv: B asked: /'
+  grep -m2 -oE 'refusing this prompt before prefill.{0,200}' "$OUT/B.q2.log" | sed 's/^/peerkv: B forward: /'
   exit 0
 fi
 if [ "$MODE" = latekv ]; then
