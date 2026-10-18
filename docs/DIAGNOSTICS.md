@@ -2031,8 +2031,11 @@ every message and forward request is answered with, so its count follows theirs.
 **`by_protocol` names libp2p's share (#91 (2e)).** Every substream's bytes, by
 the protocol it negotiated (`/swarmllm/kad/1.0.0`, `/ipfs/id/1.0.0`,
 `/meshsub/1.x.0`, `/libp2p/circuit/relay/0.2.0/{hop,stop}`,
-`/libp2p/autonat/2/*`, our request-response protocol, …), with `streams`
-opened. Difference two readings the same way. Two checks before trusting it:
+`/libp2p/autonat/2/*`, our request-response protocol, …) and by `opened_by` —
+`us` for streams this node opened (its own lookups, requests, pushes), `peer`
+for the ones it answered — with `streams` opened. A Kademlia cost under `us`
+is our own publishing and lookups; under `peer`, our answers to everyone
+else's. Difference two readings the same way. Two checks before trusting it:
 Σ`sent_bytes` = `out_bytes` (it is counted on the same substreams — a gap
 means a transport is not metered), and our request-response row ≥ Σ
 `direct_by_kind` `sent_bytes` (the codec counts frames; the row adds their

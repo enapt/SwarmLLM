@@ -60,10 +60,31 @@ const SNIFF_CAP: usize = 512;
 const MAX_PROTOCOL_LEN: usize = 140;
 const MULTISTREAM_HEADER: &[u8] = b"/multistream/1.0.0";
 
-/// Bytes by protocol, since the daemon started.
+/// Bytes by protocol and by which side opened the stream, since the daemon
+/// started. The side is what splits a cost between this node's own asking (a
+/// Kademlia lookup it runs, sent small, answered large) and its answering of
+/// everyone else's.
 #[derive(Debug, Default)]
 pub struct ProtocolTrafficMeter {
-    by_protocol: dashmap::DashMap<String, Arc<ProtocolCount>>,
+    by_protocol: dashmap::DashMap<(String, OpenedBy), Arc<ProtocolCount>>,
+}
+
+/// Which side opened a substream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum OpenedBy {
+    /// This node: its own request, query or push.
+    Us,
+    /// The peer: this node is answering.
+    Peer,
+}
+
+impl OpenedBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Us => "us",
+            Self::Peer => "peer",
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -77,6 +98,7 @@ pub struct ProtocolCount {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProtocolTotals {
     pub protocol: String,
+    pub opened_by: OpenedBy,
     /// Substreams that carried it.
     pub streams: u64,
     pub sent_bytes: u64,
@@ -85,20 +107,17 @@ pub struct ProtocolTotals {
 
 impl ProtocolTrafficMeter {
     /// The counter a stream books to, once it has a name.
-    fn count_for(&self, protocol: &str) -> Arc<ProtocolCount> {
-        if let Some(count) = self.by_protocol.get(protocol) {
+    fn count_for(&self, protocol: &str, opened_by: OpenedBy) -> Arc<ProtocolCount> {
+        let key = (protocol.to_string(), opened_by);
+        if let Some(count) = self.by_protocol.get(&key) {
             return count.clone();
         }
         let key = if self.by_protocol.len() >= MAX_PROTOCOLS {
-            OVERFLOW
+            (OVERFLOW.to_string(), opened_by)
         } else {
-            protocol
+            key
         };
-        self.by_protocol
-            .entry(key.to_string())
-            .or_default()
-            .value()
-            .clone()
+        self.by_protocol.entry(key).or_default().value().clone()
     }
 
     /// Every protocol seen, the most SENT first — an idle node's upload is the
@@ -109,7 +128,8 @@ impl ProtocolTrafficMeter {
             .by_protocol
             .iter()
             .map(|e| ProtocolTotals {
-                protocol: e.key().clone(),
+                protocol: e.key().0.clone(),
+                opened_by: e.key().1,
                 streams: e.value().streams.load(Ordering::Relaxed),
                 sent_bytes: e.value().sent_bytes.load(Ordering::Relaxed),
                 recv_bytes: e.value().recv_bytes.load(Ordering::Relaxed),
@@ -120,6 +140,7 @@ impl ProtocolTrafficMeter {
                 .cmp(&a.sent_bytes)
                 .then_with(|| b.recv_bytes.cmp(&a.recv_bytes))
                 .then_with(|| a.protocol.cmp(&b.protocol))
+                .then_with(|| a.opened_by.cmp(&b.opened_by))
         });
         out
     }
@@ -259,7 +280,11 @@ where
     ) -> Poll<Result<Self::Substream, Self::Error>> {
         let this = self.get_mut();
         let inner = ready!(Pin::new(&mut this.inner).poll_inbound(cx))?;
-        Poll::Ready(Ok(MeteredStream::new(inner, this.meter.clone())))
+        Poll::Ready(Ok(MeteredStream::new(
+            inner,
+            this.meter.clone(),
+            OpenedBy::Peer,
+        )))
     }
 
     fn poll_outbound(
@@ -268,7 +293,11 @@ where
     ) -> Poll<Result<Self::Substream, Self::Error>> {
         let this = self.get_mut();
         let inner = ready!(Pin::new(&mut this.inner).poll_outbound(cx))?;
-        Poll::Ready(Ok(MeteredStream::new(inner, this.meter.clone())))
+        Poll::Ready(Ok(MeteredStream::new(
+            inner,
+            this.meter.clone(),
+            OpenedBy::Us,
+        )))
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -299,14 +328,16 @@ enum Label {
 pub struct MeteredStream<S> {
     inner: S,
     meter: Arc<ProtocolTrafficMeter>,
+    opened_by: OpenedBy,
     label: Label,
 }
 
 impl<S> MeteredStream<S> {
-    fn new(inner: S, meter: Arc<ProtocolTrafficMeter>) -> Self {
+    fn new(inner: S, meter: Arc<ProtocolTrafficMeter>, opened_by: OpenedBy) -> Self {
         Self {
             inner,
             meter,
+            opened_by,
             label: Label::Unknown {
                 written: Vec::new(),
                 sent: 0,
@@ -334,9 +365,11 @@ impl<S> MeteredStream<S> {
                     }
                 }
                 match protocol_named(written) {
-                    Sniff::Named(name) => self.meter.count_for(name),
+                    Sniff::Named(name) => self.meter.count_for(name, self.opened_by),
                     Sniff::NeedMore if written.len() < SNIFF_CAP => return,
-                    Sniff::NeedMore | Sniff::Unreadable => self.meter.count_for(UNREADABLE),
+                    Sniff::NeedMore | Sniff::Unreadable => {
+                        self.meter.count_for(UNREADABLE, self.opened_by)
+                    }
                 }
             }
         };
@@ -367,7 +400,7 @@ impl<S> Drop for MeteredStream<S> {
     fn drop(&mut self) {
         if let Label::Unknown { sent, recv, .. } = self.label {
             if sent + recv > 0 {
-                let count = self.meter.count_for(UNNEGOTIATED);
+                let count = self.meter.count_for(UNNEGOTIATED, self.opened_by);
                 self.book(count);
             }
         }
@@ -474,7 +507,7 @@ mod tests {
     #[test]
     fn a_stream_that_ends_unnamed_is_still_counted() {
         let meter = Arc::new(ProtocolTrafficMeter::default());
-        let mut stream = MeteredStream::new((), meter.clone());
+        let mut stream = MeteredStream::new((), meter.clone(), OpenedBy::Us);
         let header = line("/multistream/1.0.0");
         stream.note_sent(header.len(), std::iter::once(&header[..]));
         stream.note_recv(7);
@@ -483,6 +516,7 @@ mod tests {
             meter.totals(),
             vec![ProtocolTotals {
                 protocol: UNNEGOTIATED.into(),
+                opened_by: OpenedBy::Us,
                 streams: 1,
                 sent_bytes: header.len() as u64,
                 recv_bytes: 7,
@@ -495,7 +529,7 @@ mod tests {
     #[test]
     fn what_crossed_before_the_name_was_known_is_booked_to_it() {
         let meter = Arc::new(ProtocolTrafficMeter::default());
-        let mut stream = MeteredStream::new((), meter.clone());
+        let mut stream = MeteredStream::new((), meter.clone(), OpenedBy::Peer);
         stream.note_recv(30);
         let header = line("/multistream/1.0.0");
         let echo = line("/ipfs/id/1.0.0");
@@ -510,6 +544,7 @@ mod tests {
             meter.totals(),
             vec![ProtocolTotals {
                 protocol: "/ipfs/id/1.0.0".into(),
+                opened_by: OpenedBy::Peer,
                 streams: 1,
                 sent_bytes: (header.len() + echo.len() + 100) as u64,
                 recv_bytes: 80,
@@ -693,11 +728,23 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             };
             let names: Vec<&str> = rows.iter().map(|r| r.protocol.as_str()).collect();
-            for wanted in ["/ipfs/id/1.0.0", "/probe/kad/1.0.0"] {
+            // A ran the lookup, so its Kademlia stream is its own and B's
+            // is the answer; each side opens its own identify stream.
+            let kad_side = if who == "A" {
+                OpenedBy::Us
+            } else {
+                OpenedBy::Peer
+            };
+            for (wanted, side) in [
+                ("/ipfs/id/1.0.0", None),
+                ("/probe/kad/1.0.0", Some(kad_side)),
+            ] {
                 let row = rows
                     .iter()
-                    .find(|r| r.protocol == wanted)
-                    .unwrap_or_else(|| panic!("quic={quic} {who}: no {wanted} row in {names:?}"));
+                    .find(|r| r.protocol == wanted && side.is_none_or(|s| r.opened_by == s))
+                    .unwrap_or_else(|| {
+                        panic!("quic={quic} {who}: no {wanted} {side:?} row in {rows:?}")
+                    });
                 assert!(
                     row.streams >= 1 && row.sent_bytes > 0 && row.recv_bytes > 0,
                     "quic={quic} {who}: {row:?}"

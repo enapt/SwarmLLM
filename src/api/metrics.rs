@@ -160,6 +160,8 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
             .map(|p| {
                 serde_json::json!({
                     "protocol": p.protocol,
+                    // `us`: this node's own asking; `peer`: its answers.
+                    "opened_by": p.opened_by.as_str(),
                     "streams": p.streams,
                     "sent_bytes": p.sent_bytes,
                     "recv_bytes": p.recv_bytes,

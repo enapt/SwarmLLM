@@ -1019,7 +1019,7 @@ adds perhaps as much. That leaves ~2 KB/s for Kademlia (110 shard records republ
 and the lists of up to 20 peers with their addresses every answer to a lookup carries), identify,
 AutoNAT and relay — estimates, so: **(2e) a per-protocol meter, 2026-10-18, not yet released**:
 `by_protocol` in the traffic payload counts every substream's bytes by the protocol it negotiated
-(`network::protocol_traffic`, read off the multistream-select line this node wrote), counted on the
+and by which side opened it — our own lookups vs our answers to others' (`network::protocol_traffic`, read off the multistream-select line this node wrote), counted on the
 same substreams as the total and adding up to it (tested over real TCP and QUIC swarms). Next:
 measure it on the live node the same way and attack the largest share. **(2c) fixed 2026-10-17, not yet released**: a restart gossiped every
 manifest it holds in full, twice, a few seconds apart (§ Closed). Left: the
