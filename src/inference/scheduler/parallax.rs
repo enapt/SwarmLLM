@@ -33,11 +33,12 @@ use super::NodeCandidate;
 /// Per-vertex cost components. All in milliseconds.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct VertexCost {
-    /// `2 * latency_ms` for remote peers, 0 for local — multiplied by
-    /// `ASSUMED_FORWARD_PASSES` when the segment is entered mid-chain, since the
-    /// coordinator round-trips into it per token.
+    /// `2 * latency_ms` for remote peers, 0 for local — multiplied by the
+    /// request's passes (`NodeCandidate::forward_passes`: `ASSUMED_FORWARD_PASSES`
+    /// or a smaller `max_tokens`) when the segment is entered mid-chain, since
+    /// the coordinator round-trips into it per token.
     pub(super) network_ms: f32,
-    /// Per-layer cost × layers × `ASSUMED_FORWARD_PASSES`.
+    /// Per-layer cost × layers × the request's passes.
     pub(super) compute_ms: f32,
     /// active_request_count * LOAD_COMPENSATOR_MS.
     pub(super) load_ms: f32,
@@ -51,7 +52,7 @@ pub(super) struct VertexCost {
     /// **Charged ONCE, not per forward pass.** The big payload crosses on the
     /// prompt pass; every decode step after it carries one position. That is
     /// why this is its own term instead of joining `network_ms`, which is
-    /// multiplied by `ASSUMED_FORWARD_PASSES`.
+    /// multiplied by the request's passes.
     pub(super) transfer_ms: f32,
     /// Reading the model's weights into memory before the first pass, for the
     /// layers this candidate does not already hold (FUTURE_WORK #129).
@@ -112,6 +113,13 @@ pub(super) const UNKNOWN_COMPUTE_MS: f32 = 25.0;
 /// splitting. Order of magnitude is what matters: the term must be large enough
 /// that a boundary is not free, and it scales with the same units as the rest of
 /// the model.
+///
+/// **A ceiling, lowered by the request's own budget** — read through
+/// `NodeCandidate::forward_passes`, never directly: a reply allowed 16 tokens
+/// cannot take 64 passes (FUTURE_WORK #3, 2026-10-18). The same data says a
+/// LONGER reply is under-priced by its length ÷ 64 (160 tokens: 2.49x, 2.62x
+/// on two peers' whole-model hand-offs) — a length the request does not state,
+/// so it is not raised here.
 pub(super) const ASSUMED_FORWARD_PASSES: f32 = 64.0;
 
 /// How much faster a machine reads a prompt than it writes a reply, before we
@@ -428,14 +436,18 @@ pub(super) fn vertex_cost(
     // Compute is per forward pass, and a request is many passes. Scaling every
     // candidate by the same factor leaves their relative order untouched, but it
     // puts compute in the same units as the per-token network term below, so the
-    // two can be compared at all.
-    let compute_ms = per_layer_ms * layers * ASSUMED_FORWARD_PASSES;
+    // two can be compared at all. How many: `ASSUMED_FORWARD_PASSES`, or fewer
+    // where the reply may not use that many tokens — which is what weighs the
+    // once-per-request terms below (the prompt, a load, a hand-off's one trip)
+    // against the per-token ones for a short reply.
+    let passes = c.forward_passes();
+    let compute_ms = per_layer_ms * layers * passes;
 
     // The asymmetry the model was missing. Every remote segment short of the
     // whole model is round-tripped into for every token; only a delegated whole
     // model pays its network once, because it decodes remotely on its own.
     let network_ms = if entered_per_token {
-        base_network_ms * ASSUMED_FORWARD_PASSES
+        base_network_ms * passes
     } else {
         base_network_ms
     };
@@ -1531,11 +1543,98 @@ mod tests {
             cached_prefix_tokens: 0,
             split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
+            reply_tokens_at_most: None,
             fresh_run_layers: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
             goodput_bytes_per_sec: None,
         }
+    }
+
+    /// FUTURE_WORK #3, 2026-10-18: the per-token terms are charged for the
+    /// passes the reply can take — `ASSUMED_FORWARD_PASSES`, or fewer where its
+    /// `max_tokens` allows fewer — and the once-per-request ones are not.
+    #[test]
+    fn per_token_costs_are_charged_for_no_more_passes_than_the_reply_may_take() {
+        let local = NodeId([1; 32]);
+        let mut mid = cand(2, vec![(0, 32)], 0, 0.0, true, true, 0.0);
+        mid.observed_latency_ms_per_layer = Some(4.0);
+        mid.observed_fixed_ms_per_visit = Some(100.0);
+        mid.cold_load_ms_per_layer = 50.0;
+        let priced = |most: Option<u32>| {
+            let mut c = mid.clone();
+            c.reply_tokens_at_most = most;
+            vertex_cost(&c, (8, 24), &local, 32, None)
+        };
+        for (most, passes) in [
+            (None, 64.0),
+            (Some(2_048), 64.0),
+            (Some(16), 16.0),
+            (Some(0), 1.0),
+        ] {
+            let v = priced(most);
+            assert_eq!(
+                v.compute_ms,
+                4.0 * 16.0 * passes,
+                "compute, budget {most:?}"
+            );
+            assert_eq!(
+                v.network_ms,
+                100.0 * passes,
+                "per-visit network, budget {most:?}"
+            );
+            assert_eq!(
+                v.cold_load_ms,
+                50.0 * 16.0,
+                "a load is once per request, budget {most:?}"
+            );
+        }
+    }
+
+    /// The decision the bound changes: a slow machine here holding the whole
+    /// model, against a peer four times faster that must first read the model
+    /// in. A reply of 64 tokens or more repays the load (16,896 ms against
+    /// 20,480 here); one allowed 16 tokens does not (13,824 against 5,120), and
+    /// was routed to wait for the load while priced for 64 passes it could
+    /// never take (FUTURE_WORK #3).
+    #[test]
+    fn a_short_reply_is_not_sent_to_wait_for_a_faster_peer_to_load() {
+        let local = NodeId([1; 32]);
+        let route = |most: Option<u32>| {
+            let mut here = cand(1, vec![(0, 32)], 0, 0.0, true, true, 0.0);
+            here.observed_latency_ms_per_layer = Some(10.0);
+            let mut peer = cand(2, vec![(0, 32)], 10, 0.0, true, true, 0.0);
+            peer.observed_delegated_ms_per_layer = Some(2.0);
+            peer.cold_load_ms_per_layer = 400.0;
+            here.reply_tokens_at_most = most;
+            peer.reply_tokens_at_most = most;
+            route_shortest_path(
+                32,
+                &[here, peer],
+                &local,
+                false,
+                false,
+                CapacityBound::Everyone,
+                None,
+            )
+            .expect("a route exists")
+        };
+        let stays_here = |segs: &[PipelineSegment]| segs.iter().all(|s| s.node_id == local);
+        assert!(
+            !stays_here(&route(None)),
+            "control: priced for 64 passes the faster peer repays its load, got {:?}",
+            route(None)
+        );
+        assert!(
+            !stays_here(&route(Some(2_048))),
+            "a loose budget prices as before, got {:?}",
+            route(Some(2_048))
+        );
+        assert!(
+            stays_here(&route(Some(16))),
+            "a 16-token reply must not wait for the peer's load, got {:?}",
+            route(Some(16))
+        );
     }
 
     /// FUTURE_WORK #250 (report #035): a layer is priced as the model it
@@ -3998,6 +4097,7 @@ mod transfer_cost_tests {
             cached_prefix_tokens: 0,
             split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
+            reply_tokens_at_most: None,
             fresh_run_layers: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,

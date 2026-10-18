@@ -1634,6 +1634,58 @@ model alone.
 
 → `docs/invariants/scheduling.md`
 
+## A reply is priced for no more passes than it may take
+
+**Rule (2026-10-18, FUTURE_WORK #3).** `NodeCandidate::forward_passes` is the
+number of passes every per-token cost is charged for: `ASSUMED_FORWARD_PASSES`
+(64), or the request's `max_tokens` where that is smaller, and at least 1. The
+router sets the budget once, where its two prompt plans meet
+(`distributed_exec`: `PromptPlan::with_reply_of_at_most`); `gather_candidates`
+copies it onto every candidate; `vertex_cost` (compute, a per-token hop),
+greedy (`estimated_cost_per_layer`, which spreads the load and the prompt over
+the passes) and `note_route_prediction` (the logged `assumed_forward_passes`)
+read it. The candidate log line prints `forward_passes`.
+
+**What it replaced.** A flat 64 for every request. The cost model weighs terms
+paid ONCE (reading the prompt, loading the model, a hand-off's one trip, the
+prompt pass's transfer) against terms paid per token; at 64 passes a reply
+allowed 16 tokens had its per-token side priced four times over, so a load or a
+long prompt counted for a quarter of what it does.
+
+**Measured** (live node, 2026-10-18 06:32-06:38Z, `~/swarmllm-3/collect.sh`:
+qwen3.5-9b, xLAM-2-8B and Qwen3-30B-A3B at `max_tokens` 16/64/160, priced
+splits through AU, IT and BE peers, `examples/split_cost_terms.py --rows`):
+
+- **The six replies capped at 16 tokens** ran at a median 0.49 of their price
+  (0.10-1.08). Re-priced at 16 passes (compute and per-token hops × 16/64; the
+  prompt, the load and a hand-off's one trip unchanged) the same rows read 0.97
+  (0.25-1.41).
+- **A reply the request does not bound is still mis-priced by its length.** Two
+  whole-model hand-offs measured per token (AU, BE) ran 2.49x and 2.62x their
+  price at 160 tokens, 1.18x at 64 — the error is tokens ÷ 64 where the
+  per-token figure is right. That half is NOT fixed: the bound only lowers, and
+  raising needs an estimate of a reply's length the request does not state.
+- The field (2026-10-06): `max_tokens=24` replies priced 16-19x their time.
+
+**What a change must keep.**
+
+- **Never raise the assumption from `max_tokens`.** It is a loose ceiling — 2048
+  when the caller names none (`DEFAULT_REPLY_BUDGET`) — and charging a split
+  2048 crossings would price every boundary out (the reason the constant was
+  fixed in the first place).
+- **One reading.** A path that multiplies by the bare constant prices the same
+  request two ways, and the gates that compare two prices (`RoutePrices`,
+  `costs_more_than_staying_here`) then compare different units.
+- **The once-per-request terms are not scaled.** A load or a prompt is paid
+  once whatever the reply's length; the bound changes only how many times the
+  per-token side is counted beside them.
+
+Tests: `per_token_costs_are_charged_for_no_more_passes_than_the_reply_may_take`,
+`a_short_reply_is_not_sent_to_wait_for_a_faster_peer_to_load` (a 16-token reply
+stays on a slow local copy rather than wait for a 4x faster peer's load), and
+`a_reply_allowed_sixteen_tokens_is_priced_for_sixteen_passes` (the budget
+reaches the recorded prediction) — all three red with the bound off.
+
 ## A reply whose machine failed mid-stream is continued
 
 (2026-10-08, FUTURE_WORK #236; design `docs/plans/mid_reply_continuation.md`.) Once a

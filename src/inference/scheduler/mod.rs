@@ -245,6 +245,10 @@ struct NodeCandidate {
     /// A peer that must first load was predicted like a warm one — 4.5 s
     /// predicted, 46 s taken (FUTURE_WORK #129).
     cold_load_ms_per_layer: f32,
+    /// The most tokens THIS request's reply may use
+    /// (`PromptPlan::reply_tokens_at_most`), the same on every candidate of a
+    /// plan. Read only through [`Self::forward_passes`].
+    reply_tokens_at_most: Option<u32>,
     /// For THIS node only: how wide one run of layers a fresh worker would take,
     /// card and processor together, for a model the loader would split across
     /// them (`ModelProcessPool::fresh_run_layers_for_planning`). `None` for every
@@ -399,6 +403,28 @@ impl NodeCandidate {
     /// ask it, so a cold peer costs the same to both routers.
     fn cold_load_ms(&self, range: (u32, u32)) -> f32 {
         self.cold_load_ms_per_layer * self.layers_it_would_add(range) as f32
+    }
+
+    /// How many forward passes this request's per-token costs are charged
+    /// for — by `parallax::vertex_cost`, and by greedy where it spreads the
+    /// once-per-request terms over them: `ASSUMED_FORWARD_PASSES`, never more
+    /// than the reply's own `max_tokens` allows.
+    ///
+    /// **A bound the request states, never a guess at its length.** A reply
+    /// of `n` tokens takes at most `n` passes (one per token, fewer where a
+    /// drafter guesses ahead), so capping the assumption can only remove
+    /// passes that cannot happen; a larger budget leaves the assumption
+    /// alone, because `max_tokens` is a loose ceiling (2048 by default).
+    /// Measured (FUTURE_WORK #3, 2026-10-18, live node, three peers): six
+    /// replies capped at 16 tokens ran at a median 0.49 of their price
+    /// (0.10-1.08); priced at 16 passes the same rows read 0.97
+    /// (0.25-1.41). A field report (2026-10-06) had `max_tokens=24` replies
+    /// priced 16-19x their time. At least one pass, because the prompt pass
+    /// itself crosses every hop.
+    fn forward_passes(&self) -> f32 {
+        let assumed = parallax::ASSUMED_FORWARD_PASSES;
+        self.reply_tokens_at_most
+            .map_or(assumed, |most| (most.max(1) as f32).min(assumed))
     }
 
     /// Leading tokens of this request's prompt that running `range` here would
@@ -2663,10 +2689,16 @@ impl PipelineScheduler {
             num_layers,
             prompt_tokens,
         );
+        // The passes this request was priced for — the same on every
+        // candidate — so the completion line says what the prediction assumed.
+        let passes = candidates.first().map_or(
+            parallax::ASSUMED_FORWARD_PASSES,
+            NodeCandidate::forward_passes,
+        );
         self.shared_state.note_predicted_route_cost(
             request_id,
             terms.total() as u32,
-            parallax::ASSUMED_FORWARD_PASSES as u32,
+            passes as u32,
             crate::inference::trace::PredictedTerms {
                 network_ms: terms.network_ms as u32,
                 compute_ms: terms.compute_ms as u32,
@@ -4654,6 +4686,7 @@ impl PipelineScheduler {
                 cached_prefix_tokens: if is_local { prompt.cached_locally } else { 0 },
                 split_openings,
                 cold_load_ms_per_layer: cold_load_per_layer,
+                reply_tokens_at_most: prompt.reply_tokens_at_most,
                 fresh_run_layers,
                 prompt_memory_refused: is_local
                     && self
@@ -4715,6 +4748,9 @@ impl PipelineScheduler {
                 observed_fixed_ms_per_visit = ?c.observed_fixed_ms_per_visit,
                 observed_delegated_ms_per_layer = ?c.observed_delegated_ms_per_layer,
                 observed_prefill_ms_per_layer_byte = ?c.observed_prefill_ms_per_layer_byte,
+                // The passes the per-token costs below are charged for: 64, or
+                // fewer where the reply may not use that many tokens (#3).
+                forward_passes = c.forward_passes(),
                 has_gpu = c.has_gpu,
                 max_hostable_layers = ?c.max_hostable_layers,
                 max_hostable_layers_at_ceiling = ?c.max_hostable_layers_at_ceiling,
@@ -4932,9 +4968,9 @@ impl PipelineScheduler {
         let load_multiplier = 1.0 + candidate.load.max(0.0);
         // A peer that must first read the layers in is charged for it, as the
         // priced search charges it (`NodeCandidate::cold_load_ms`) — once per
-        // request, so in this per-token figure it is spread over the
-        // `ASSUMED_FORWARD_PASSES` the search multiplies compute by, which
-        // keeps the two terms in the proportion `vertex_cost` gives them.
+        // request, so in this per-token figure it is spread over the passes
+        // the search multiplies compute by (`NodeCandidate::forward_passes`),
+        // which keeps the two terms in the proportion `vertex_cost` gives them.
         // Without it this fallback, which plans every split whose holders
         // OVERLAP (the search sees whole ranges only), sent a conversation's
         // second turn to a cold spare that advertised 6.35 ms a layer over the
@@ -4942,9 +4978,8 @@ impl PipelineScheduler {
         // ~5.3 s for its 7 layers) and the stored prompt left behind, so turn 2
         // took 58.5 s against ~7 (FUTURE_WORK #10, `split_rig.sh splitcache`
         // with SPARE=1, 2026-10-10).
-        let cold_load_per_layer = candidate.cold_load_ms((current_layer, range.1))
-            / covered
-            / parallax::ASSUMED_FORWARD_PASSES;
+        let cold_load_per_layer =
+            candidate.cold_load_ms((current_layer, range.1)) / covered / candidate.forward_passes();
         // Reading the prompt, at the search's rate (`parallax::prefill_ms_per_layer`)
         // and once per request, spread like the load: what this candidate does
         // NOT already hold of it (`NodeCandidate::prompt_tokens_held`). This
@@ -4960,7 +4995,7 @@ impl PipelineScheduler {
             None | Some(0) => 0.0,
             Some(tokens) => {
                 parallax::prefill_ms_per_layer(candidate, tokens, compute_per_layer)
-                    / parallax::ASSUMED_FORWARD_PASSES
+                    / candidate.forward_passes()
             }
         };
         candidate.latency_ms as f32 / covered

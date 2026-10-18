@@ -137,6 +137,12 @@ A re-plan with the refusing holder barred can only describe its own search ("has
 
 → `docs/invariants/scheduling.md` § "What a peer costs per VISIT is not what it costs per layer"
 
+## A reply is priced for no more passes than it may take (2026-10-18, #3)
+
+**`NodeCandidate::forward_passes` is the single answer to "how many passes are the per-token costs charged for"**: `ASSUMED_FORWARD_PASSES`, lowered — never raised — by the request's `max_tokens` (`PromptPlan::with_reply_of_at_most`, set once in `distributed_exec`). `vertex_cost`, greedy's spread of the once-per-request terms and the recorded `assumed_forward_passes` all read it; never the bare constant. `None` (preview, tests) prices as before.
+
+→ `docs/invariants/scheduling.md` § "A reply is priced for no more passes than it may take"
+
 ## A forward the peer could not OPEN goes to it again, once the link is re-keyed
 
 **`pipeline::local::wait_for_result` takes a REQUIRED `ResendOnRefusal`**: on `ForwardRefusal::Undecryptable` (a TYPE) it waits for `SessionManager::rekeyed_since` and resends once to the same node. A chained forward passes `Never`; add no second resend.

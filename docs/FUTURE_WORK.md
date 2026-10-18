@@ -71,10 +71,10 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    ((2d), `direct_by_kind`): the rest is libp2p's protocols. `by_protocol` ((2e)) named the largest:
    Kademlia answering other nodes' lookups, ~2.1 KB/s; (2f) republishes provider records every 4 h
    instead of 20 min (unreleased). Next: re-read in the field after the release.
-8. **#3**, **#180** — the routing cost model mis-prices a split by regime (one peer's fit,
-    2026-10-15: a measured per-visit hop 0.78, a `net:0` hop 1.53 under-priced, drafter arms 0.39
-    unpriced), which keeps partial ranges off; fit per term from a second peer's traffic and
-    several reply lengths, never tune the constant.
+8. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
+    ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
+    (16-token replies 0.49 → 0.97 of their price, unreleased); next, a chain its head leads is
+    priced as if driven from here (0.10-0.24). Never tune the constant.
 9. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
 10. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
@@ -633,14 +633,25 @@ against it, and price (not bar) prompt + `max_tokens` beyond it, the stale-figur
 Petals makes. #235 removed the way that room most often vanished (finished conversations kept
 for the worker's life), so measure how often a refusal still happens before building this.
 
-#### #3 — The routing cost model mis-prices a split by regime: a measured hop over-priced, a `net:0` hop under-priced, speculation unpriced
+#### #3 — The routing cost model mis-prices a split by regime: a chain its head leads priced as if driven from here, a long reply under-priced by its length, speculation unpriced
 `P2` · routing · **OPEN** — 2026-09-08 · history: archive row #3 and § "The routing cost model's network term overestimates a boomerang" (three dated measurements)
+
+**Where it stands (2026-10-18, the fit below):** the reply's own `max_tokens` now caps the
+passes the per-token terms are charged for (`NodeCandidate::forward_passes`; 16-token replies
+0.49 → 0.97 of their price). Left, largest first: (a) a chain holding no part of this node is
+LED by its head (`remote_generate::delegation_eligible`) but priced as if this node drove every
+token through every segment — 0.10-0.24 of its price warm; (b) a reply longer than 64 tokens is
+under-priced by its length ÷ 64 (2.49x / 2.62x at 160 tokens on two peers' hand-offs), a length
+no request states; (c) a peer's prompt cache is unpriced (a repeated 505-token prompt priced
+20 s, read in ~0: 0.25x); (d) the drafter's gain (0.39x, 10-15). (a) is next, and needs the
+hand-off's request-time conditions as ONE predicate the search can ask before the plan exists.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
 decision since v0.3.164, silently. The structural claim is settled; **do not tune the
 constant**. ~~Next: an estimator of the expected reply length~~ — superseded 2026-10-10 by the
-collected data below: the error follows the HOPS, not the reply length, so do not build it. Also: peer speed does not track RTT, and a chain runs at its worst
+collected data below: the error follows the HOPS, not the reply length, so do not build it
+(but see 2026-10-18: within ONE shape the error IS the length). Also: peer speed does not track RTT, and a chain runs at its worst
 segment's pace, so a term linear in layers cannot express it. This gates turning
 `parallax_partial_ranges` on (#180) — on 2026-09-20 the flag on made a 4-segment, 3-peer
 route that did not finish in 580 s. Method: `memory/archive/perf_baseline_0920_post192.md`,
@@ -698,6 +709,25 @@ correlation" pooled regimes whose errors run in opposite directions. In the `net
 per-visit term (~650 ms) is ~1.7× a real whole token (~400 ms), which a 96 ÷ 64 under-count
 partly cancels. Needs a second peer's traffic, and replies of several lengths, before any term is
 changed.
+**Fit, 2026-10-18** (live node, 06:32-06:38Z, `~/swarmllm-3/collect.sh`: 15 priced requests, one at
+a time — qwen3.5-9b and xLAM-2-8B at `max_tokens` 16/64/160 × a 29- and a 490-token prompt,
+Qwen3-30B-A3B at 16/64; peers AU, IT, BE; `split_cost_terms.py --rows`):
+- **The hypothesis holds, on two more peers.** Whole-model hand-offs priced from a per-token
+  figure measured on that shape ran 2.49x (AU) and 2.62x (BE) at 160 tokens, 1.18x at 64 — the
+  error is tokens ÷ 64. **Fixed for the short side**: a reply's `max_tokens` caps the passes
+  (`NodeCandidate::forward_passes`, `docs/invariants/scheduling.md` § "A reply is priced for no
+  more passes than it may take"); the six 16-token replies 0.49 (0.10-1.08) → 0.97 (0.25-1.41)
+  re-priced. The long side needs a length no request states — an estimate, not a bound.
+- **A chain this node holds no part of is priced as if driven from here.** All three such plans
+  (AU+IT for qwen3.5, IT+BE and IT+BE+AU for the 30B) were handed to their head to lead
+  (`delegated split: this node holds none of the plan`), yet `vertex_cost` charged every segment
+  this node's own per-visit cost × the passes: 0.10, 0.14, 0.21, 0.24 warm (net 96,640 ms
+  predicted for 16 tokens that took 13.5 s in all), 0.73 cold. The head's segment is entered
+  once, and the other hops are the head's, which this node has never measured.
+- **A peer's prompt cache is unpriced**: xLAM's 505-token prompt sent to BE a second time was
+  priced 20.2 s of prompt and the whole request took 7.1 s (0.25x, twice).
+- The first request for qwen3.5-9b split it across AU (room for 9 layers) and IT (26) although
+  both hold all 32 — capacity, not price: neither could take the whole model at that moment.
 
 #### #180 — A node holding the whole model takes every request for it; partial ranges stay off by default
 `P2` · routing · **PARTIAL** — 2026-07-28 · history: archive § "A node holding every shard monopolises the model"

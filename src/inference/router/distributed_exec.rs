@@ -826,7 +826,11 @@ pub(super) async fn execute_request(
                     request.tools.as_deref(),
                 ))
                 .into()
-            });
+            })
+            // A reply takes no more decode passes than the tokens it may use,
+            // and the cost model charges its per-token terms for no more than
+            // that (FUTURE_WORK #3: replies capped at 16 tokens priced at 64).
+            .with_reply_of_at_most(request.sampling_params.max_tokens);
     if prompt_plan.cached_locally > 0 {
         tracing::info!(
             request_id = %request.id,

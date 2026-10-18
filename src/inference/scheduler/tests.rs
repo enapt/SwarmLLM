@@ -770,6 +770,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         cached_prefix_tokens: 0,
         split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
+        reply_tokens_at_most: None,
         fresh_run_layers: None,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
@@ -1040,6 +1041,7 @@ fn greedy_assign_multi_range_candidate() {
             cached_prefix_tokens: 0,
             split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
+            reply_tokens_at_most: None,
             fresh_run_layers: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
@@ -1077,6 +1079,7 @@ fn greedy_assign_multi_range_candidate() {
             cached_prefix_tokens: 0,
             split_openings: Vec::new(),
             cold_load_ms_per_layer: 0.0,
+            reply_tokens_at_most: None,
             fresh_run_layers: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
@@ -2107,6 +2110,7 @@ fn cost_cand(
         cached_prefix_tokens: 0,
         split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
+        reply_tokens_at_most: None,
         fresh_run_layers: None,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
@@ -3508,6 +3512,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         cached_prefix_tokens: 0,
         split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
+        reply_tokens_at_most: None,
         fresh_run_layers: None,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
@@ -3608,6 +3613,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         cached_prefix_tokens: 0,
         split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
+        reply_tokens_at_most: None,
         fresh_run_layers: None,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
@@ -3708,6 +3714,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         cached_prefix_tokens: 0,
         split_openings: Vec::new(),
         cold_load_ms_per_layer: 0.0,
+        reply_tokens_at_most: None,
         fresh_run_layers: None,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
@@ -4998,6 +5005,7 @@ fn the_next_turn_of_a_split_goes_to_the_peer_holding_its_opening() {
                     tokens: Some(2_306),
                     cached_locally: 0,
                     split_openings,
+                    reply_tokens_at_most: None,
                 },
                 crate::types::KeepAsked::Unasked,
             )
@@ -6371,6 +6379,78 @@ fn a_hand_off_records_what_the_cost_model_expected_of_it() {
     assert!(
         snap.assumed_forward_passes.is_some(),
         "the token assumption travels with the prediction it was used in"
+    );
+}
+
+/// FUTURE_WORK #3, 2026-10-18: the reply's own budget reaches the price. The
+/// router hands the plan the request's `max_tokens`
+/// (`PromptPlan::with_reply_of_at_most`); every candidate is priced for no more
+/// passes than that, and the recorded prediction says so — the line a fit over
+/// ordinary logs reads to tell a 16-token price from a 64-token one.
+#[test]
+fn a_reply_allowed_sixteen_tokens_is_priced_for_sixteen_passes() {
+    let (state, local, _b, _c) = processor_holder_beside_two_gpu_halves_with(600, 9.0, |c| {
+        c.inference.parallax_routing = false;
+    });
+    let near = NodeId([0xD1; 32]);
+    let model = ModelId("split-14b".into());
+    for i in 0..2 {
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: model.clone(),
+                index: i,
+            },
+            near.clone(),
+        );
+    }
+    state
+        .peer_registry
+        .insert(near.clone(), gpu_holder_info(&near, 3, 40.0));
+    state.connected_node_ids.insert(near.clone());
+    let scheduler =
+        PipelineScheduler::with_delegation_footprint(state.clone(), LOCAL_PROCESSOR_TPS, 8_000);
+
+    let passes_recorded = |plan: cached_prefix::PromptPlan| {
+        let request_id = uuid::Uuid::new_v4();
+        let trace = std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+            request_id,
+            "split-14b",
+            "chat",
+        ));
+        state.active_traces.insert(request_id, trace.clone());
+        let assignment = scheduler
+            .assemble_pipeline_for(
+                &model,
+                &local,
+                request_id,
+                super::Purpose::Route,
+                plan,
+                crate::types::KeepAsked::Unasked,
+            )
+            .unwrap();
+        assert!(
+            assignment.segments.iter().any(|s| s.node_id == near),
+            "control: a priced route through the peer; got {:?}",
+            assignment.segments
+        );
+        trace.snapshot().assumed_forward_passes
+    };
+
+    let plan = || cached_prefix::PromptPlan::from(Some(14_000));
+    assert_eq!(
+        passes_recorded(plan()),
+        Some(64),
+        "control: with no request behind the plan, the assumption stands"
+    );
+    assert_eq!(
+        passes_recorded(plan().with_reply_of_at_most(2_048)),
+        Some(64),
+        "a loose budget never RAISES the assumption"
+    );
+    assert_eq!(
+        passes_recorded(plan().with_reply_of_at_most(16)),
+        Some(16),
+        "a reply allowed 16 tokens cannot take 64 passes"
     );
 }
 

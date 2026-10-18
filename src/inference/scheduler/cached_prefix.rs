@@ -73,6 +73,13 @@ pub struct PromptPlan {
     /// prompt as a SEGMENT of a split, with the layer range and how many
     /// tokens (`pipeline::held_openings`). Empty unless tokenized and believed.
     pub(crate) split_openings: Vec<crate::inference::pipeline::HeldOpening>,
+    /// The most tokens this request's reply may use — its `max_tokens` — so
+    /// the most decode passes it can take. The cost model charges its
+    /// per-token terms for no more passes than this
+    /// (`NodeCandidate::forward_passes`, FUTURE_WORK #3). `None` where no
+    /// request is behind the plan (the admin preview, the tests): priced at
+    /// `ASSUMED_FORWARD_PASSES` exactly as before.
+    pub reply_tokens_at_most: Option<u32>,
 }
 
 impl From<Option<u32>> for PromptPlan {
@@ -81,6 +88,16 @@ impl From<Option<u32>> for PromptPlan {
             tokens,
             ..Self::default()
         }
+    }
+}
+
+impl PromptPlan {
+    /// This plan, for a request whose reply may use at most `max_tokens`.
+    /// Set by the router where it plans a real request
+    /// (`distributed_exec`), the one place both of its prompt plans meet.
+    pub(crate) fn with_reply_of_at_most(mut self, max_tokens: u32) -> Self {
+        self.reply_tokens_at_most = Some(max_tokens);
+        self
     }
 }
 
@@ -190,6 +207,8 @@ pub(crate) fn plan_prompt(state: &SharedState, request: &InferenceRequest) -> Op
         tokens: Some(u32::try_from(ids.len()).unwrap_or(u32::MAX)),
         cached_locally,
         split_openings: crate::inference::pipeline::held_openings(&request.model_id, &ids),
+        // The caller's: `with_reply_of_at_most`, beside the fallback plan.
+        reply_tokens_at_most: None,
     })
 }
 
