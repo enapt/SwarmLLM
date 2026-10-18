@@ -29,7 +29,7 @@ measured at, and what a change must keep — lives in `docs/invariants/`.
 
 ## A disconnect retires a session key; it must not destroy it — and must not keep it
 
-`SessionManager::remove_session` retires the live key (openable, never sealable, for `PREVIOUS_KEY_GRACE`) on EVERY full disconnect, with no exemption — not even mid-pipeline (`a_disconnect_retires_the_session_even_mid_pipeline`). A failed `open` calls `request_rekey` (inside `open`, so every decrypt site inherits it), including when we hold no session at all; the refused forward is resent once the repair lands (`ForwardRefusal::Undecryptable`, `0x06`, gated on `features::FORWARD_REFUSAL_REASON`; `arch-scheduling.md`).
+`SessionManager::remove_session` retires the live key (openable, never sealable, for `PREVIOUS_KEY_GRACE`) on EVERY full disconnect, with no exemption — not even mid-pipeline (`a_disconnect_retires_the_session_even_mid_pipeline`). A failed `open` calls `request_rekey` (inside `open`, so every decrypt site inherits it), including when we hold no session at all; the refused forward is resent once the repair lands (`ForwardRefusal::Undecryptable`, `0x06`, gated on `features::FORWARD_REFUSAL_REASON`; `arch-scheduling.md`). The refusal names its forward (`LayerForward::step`, as every answer does): a streamed forward's wait is keyed by its number, and an unnamed refusal reached no one (#303).
 
 → `docs/invariants/network.md` § "A disconnect retires a session key; it must not destroy it"
 
@@ -153,7 +153,7 @@ A verify's last segment walks the drafts and answers with token ids (`LayerForwa
 
 ## A result names the step it answers; one that did not arrive is sent again (2026-09-25)
 
-`LayerResult::answers_step` (`0x07`) names the forward; `PendingLayerResult::expects_step` refuses any other, and every registration sets it from the forward it actually sends. Only then may a serving node resend a lost result (`resend_lost_result`, gated on `features::RESULT_STEP`). Test with `SWARMLLM_FAULT_RESULT=lose|duplicate`.
+`LayerResult::answers_step` (`0x07`) names the forward — a serving node builds it from **`LayerForward::step`**; `PendingLayerResult::expects_step` refuses any other, and every registration sets it from the forward it actually sends. Only then may a serving node resend a lost result (`resend_lost_result`, gated on `features::RESULT_STEP`). Test with `SWARMLLM_FAULT_RESULT=lose|duplicate`.
 
 → `docs/invariants/network.md` § "A result names the step it answers"
 

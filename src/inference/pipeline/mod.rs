@@ -1860,11 +1860,7 @@ mod tests {
                     continue;
                 };
                 let node = peers[&target_peer_bytes].clone();
-                let answers = Some(crate::types::ResultStep {
-                    index_pos: forward.index_pos,
-                    layer_range: forward.layer_range,
-                    stream_seq: forward.stream_seq,
-                });
+                let answers = Some(forward.step());
                 let base = LayerResult {
                     locally_constructed: false,
                     answers_step: answers,
@@ -2037,11 +2033,7 @@ mod tests {
                         locally_constructed: false,
                         finish_reason: None,
                         activations: vec![1, 2, 3, 4],
-                        answers_step: Some(crate::types::ResultStep {
-                            index_pos: forward.index_pos,
-                            layer_range: forward.layer_range,
-                            stream_seq: forward.stream_seq,
-                        }),
+                        answers_step: Some(forward.step()),
                         ..LayerResult::error(forward.request_id, "")
                     };
                     state.resolve_pending_layer_result(Some(&node), answer);

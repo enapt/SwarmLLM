@@ -579,6 +579,22 @@ pub struct LayerForward {
     pub prompt_span: Option<PromptSpan>,
 }
 
+impl LayerForward {
+    /// The step this forward is — position, layers and stream number. EVERY
+    /// result answering it names it (`LayerResult::answering_step`), failures
+    /// and refusals included: the coordinator's wait for a streamed forward
+    /// (a prompt piece, a streamed verify) is keyed by the number, so an
+    /// answer without it reaches no one and the coordinator sits out its
+    /// segment deadline for an answer given in milliseconds.
+    pub fn step(&self) -> ResultStep {
+        ResultStep {
+            index_pos: self.index_pos,
+            layer_range: self.layer_range,
+            stream_seq: self.stream_seq,
+        }
+    }
+}
+
 /// The positions a prompt pass read in pieces covers — see
 /// [`LayerForward::prompt_span`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

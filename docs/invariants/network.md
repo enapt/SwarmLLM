@@ -201,6 +201,28 @@ the refusal carries `ForwardRefusal::Undecryptable` (the `0x06` result
 trailer, gated on `features::FORWARD_REFUSAL_REASON`) and the coordinator's
 `wait_for_result` resends on `rekeyed_since` — `arch-scheduling.md`.
 
+**The refusal names the forward it refuses** (2026-10-18, FUTURE_WORK #303).
+`refusal_for_undecryptable` built a bare `LayerResult::error` — no
+`answers_step` — while every other answer a serving node sends names its step.
+For an unstreamed forward that was harmless: its wait is keyed by the request.
+A STREAMED forward's wait — a prompt piece (#171), a streamed verify — is keyed
+by its number (`WaiterKey::of_result` ← `answers_step.stream_seq`), so the
+refusal found no waiter and was dropped at `resolve_pending_layer_result`
+(debug only), and the resend above never happened: the piece sat out its
+segment deadline. Found by #252 (b)'s `split_rig.sh peerkv` run (B failed the
+10th of a 5097-token prompt's pieces with no session for A — why is #304), then
+reproduced on purpose with `SWARMLLM_FAULT_REFUSE_DECRYPT=3 split_rig.sh
+refusepiece`: **503 after 403.8 s** (two 105 s segment timeouts, a re-plan, A
+never saw the refusal). Now the refusal carries `LayerForward::step` — the one
+construction, also used by `handle_layer_forward` and `RefusalAddress::of` — and
+the same rig answered **200**: the refusal reached A's wait 189 ms after the
+piece was sent, the link re-keyed 28 ms later and the piece went again (A took
+the refusal: 1, timed out: 0, re-planned: 0). The step comes from the frame's
+cleartext, so it is the claim of the peer it goes back to (both callers answer
+on the connection the frame came in on), and the waiter is still pinned to that
+peer. Test: `a_refused_prompt_piece_reaches_the_wait_for_that_piece` (over the
+wire codec and the delivery choke point; red without the step).
+
 → `docs/invariants/network.md`
 
 ## A disagreement nobody can read is not an instrument

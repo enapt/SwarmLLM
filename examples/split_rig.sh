@@ -249,8 +249,20 @@
 #          anything, A's late refusal (`refusing this prompt before prefill` on
 #          a forward) never happened, and q2 answered 200 on a plan giving A
 #          fewer layers. Default model llama-3.2-3b.
+#   peerkv  FUTURE_WORK #252 (b): latekv's shape mirrored — the PEER holds the
+#          last two shards on the processor with a tight budget (RAM_B, MB),
+#          A every shard but the last. q1 (short) loads B's worker and prints
+#          its `CPU worker KV budget`; q2 is the ~5,100-token prompt. Prints B's
+#          refusals (`refusing this prompt before prefill`), A's re-plans and
+#          the routes A planned. Default model llama-3.2-3b.
+#   refusepiece FUTURE_WORK #303: peerkv's shape, the long prompt only. Run
+#          with SWARMLLM_FAULT_REFUSE_DECRYPT=3: B treats its 3rd forward — a
+#          PIECE of the prompt — as undecryptable. An older release is the
+#          control: the refusal reaches no wait, A times the piece out twice and
+#          re-plans (503 after 403.8 s on 2026-10-18). PASS = 200, `A took the
+#          refusal: 1`, `A timed out: 0`, `A re-planned: 0`.
 #
-# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -264,6 +276,7 @@
 #              default 400%) and reads it as its machine, so the room it advertises
 #              follows its own use, not the machine's free RAM (#162 b)
 #   EXTRA_TOML appended to EVERY node's config.toml (default: nothing)
+#   RAM_B      peerkv: B's `resources.max_ram_mb`, the same way
 #   RAM_A      latekv: A's `resources.max_ram_mb` (EXTRA_TOML may not open
 #              [resources] beside it)
 #   MODELS_DIR where the shards come from (default: the live node's)
@@ -280,9 +293,9 @@ set -u
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route or latekv"; exit 2 ;; esac
-if [ -n "${RAM_A:-}" ] && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[resources\]'; then
-  echo "RAM_A is written to A's [resources]; EXTRA_TOML may not open that table too"; exit 2
+case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv or refusepiece"; exit 2 ;; esac
+if [ -n "${RAM_A:-}${RAM_B:-}" ] && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[resources\]'; then
+  echo "RAM_A/RAM_B are written to that node's [resources]; EXTRA_TOML may not open that table too"; exit 2
 fi
 if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[inference\]'; then
   echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
@@ -314,6 +327,12 @@ if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ 
   [ "$MODE" = disconnect ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = keep ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = route ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
+elif [ "$MODE" = peerkv ] || [ "$MODE" = refusepiece ]; then
+  [ "$N" -ge 3 ] || { echo "$MODE needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
+  PREV=$(echo "$SHARDS" | tail -2 | head -1)
+  SHARDS_B="${SHARDS_B:-$PREV,$LAST}"
+  SHARDS_A="${SHARDS_A:-$(echo "$SHARDS" | grep -vx "$LAST" | paste -sd,)}"
+  GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
 elif [ "$MODE" = latekv ]; then
   [ "$N" -ge 3 ] || { echo "latekv needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
   PREV=$(echo "$SHARDS" | tail -2 | head -1)
@@ -484,6 +503,8 @@ CFG
   [ -n "$extra" ] && printf '\n%s\n' "$extra" >> "$d/config.toml"
   [ "$(basename "$d")" = A ] && [ -n "${RAM_A:-}" ] \
     && printf '\n[resources]\nmax_ram_mb = %s\n' "$RAM_A" >> "$d/config.toml"
+  [ "$(basename "$d")" = B ] && [ -n "${RAM_B:-}" ] \
+    && printf '\n[resources]\nmax_ram_mb = %s\n' "$RAM_B" >> "$d/config.toml"
   return 0
 }
 start() { # dir port bin gpu [memory limit]
@@ -930,6 +951,36 @@ if [ "$MODE" = softunload ]; then
   T0=$(date +%s.%N)
   ask "Explain in three sentences why the sky is blue." 64 q2 | tee -a "$OUT/replies.jsonl"
   echo "softunload: q2 took $(python3 -c "print(round($(date +%s.%N) - $T0, 1))") s"
+  exit 0
+fi
+if [ "$MODE" = refusepiece ]; then
+  # B treats its Nth forward as undecryptable (SWARMLLM_FAULT_REFUSE_DECRYPT,
+  # default 3: a PIECE of the long prompt, the first request B sees).
+  PROMPT="Here are some notes on household appliances. $(for i in $(seq 1 120); do printf 'A refrigerator moves heat from its inside to the room using a refrigerant that evaporates in the cold coils and condenses in the warm ones; the compressor drives the cycle and the thermostat decides when it runs. '; done)Using only these notes, say in one sentence what the compressor does."
+  T0=$(date +%s.%N)
+  ask "$PROMPT" 8 q1 | tee "$OUT/replies.jsonl" | cut -c1-300
+  echo "refusepiece: took $(python3 -c "print(round($(date +%s.%N) - $T0, 1))") s"
+  echo "refusepiece: B refused (fault): $(grep -c 'FAULT: treating this forward as undecryptable' "$BASE/B/node.log")," \
+    "A took the refusal: $(grep -c 'LayerResult delivered to pipeline.*Could not decrypt' "$BASE/A/node.log")," \
+    "A timed out: $(grep -c 'segment TIMED OUT' "$BASE/A/node.log")," \
+    "A re-planned: $(grep -c 'retrying with fresh pipeline' "$BASE/A/node.log")"
+  exit 0
+fi
+if [ "$MODE" = peerkv ]; then
+  ask "What is the capital of France? Answer in one sentence." 16 q1 | tee "$OUT/replies.jsonl"
+  echo "peerkv: B's worker — $(grep -m1 'CPU worker KV budget' "$BASE/B/node.log" | grep -oE '(kv_budget_mb|typical_kv_mb|headroom_mb)=[0-9]+' | paste -sd' ')"
+  PROMPT="Here are some notes on household appliances. $(for i in $(seq 1 120); do printf 'A refrigerator moves heat from its inside to the room using a refrigerant that evaporates in the cold coils and condenses in the warm ones; the compressor drives the cycle and the thermostat decides when it runs. '; done)Using only these notes, say in one sentence what the compressor does."
+  printf '%s' "$PROMPT" > "$OUT/prompt.txt"
+  MARK_A=$(wc -l < "$BASE/A/node.log"); MARK_B=$(wc -l < "$BASE/B/node.log")
+  T0=$(date +%s.%N)
+  ask "$PROMPT" 16 q2 | tee -a "$OUT/replies.jsonl"
+  echo "peerkv: q2 took $(python3 -c "print(round($(date +%s.%N) - $T0, 1))") s"
+  tail -n +"$((MARK_A + 1))" "$BASE/A/node.log" > "$OUT/A.q2.log"
+  tail -n +"$((MARK_B + 1))" "$BASE/B/node.log" > "$OUT/B.q2.log"
+  echo "peerkv: B refused a forward: $(grep -c 'refusing this prompt before prefill' "$OUT/B.q2.log")," \
+    "A re-planned: $(grep -c 'retrying with fresh pipeline' "$OUT/A.q2.log")"
+  grep -m3 -oE 'route=[a-z_]+ segments=[0-9]+ nodes=[0-9a-f,]+' "$OUT/A.q2.log" | sed 's/^/peerkv: /'
+  grep -m2 -oE 'refusing this prompt before prefill.{0,200}' "$OUT/B.q2.log" | sed 's/^/peerkv: B /'
   exit 0
 fi
 if [ "$MODE" = latekv ]; then

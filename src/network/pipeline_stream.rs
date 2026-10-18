@@ -625,6 +625,17 @@ fn decode_inbound_forward(
 /// chunk opens none of them, so answering each would send K refusals, and the
 /// ones arriving after the coordinator's resend would be taken as that
 /// resend's result. The first chunk answers for the forward.
+///
+/// **It names the forward it answers** (`LayerForward::step`), as every other
+/// answer a serving node sends does. The coordinator's wait for a STREAMED
+/// forward — a prompt piece (#171), a streamed verify — is keyed by its
+/// number (`WaiterKey::of_result`), so a refusal without one reached no
+/// waiter: the piece sat out its whole segment deadline (403.8 s on the
+/// 2026-10-18 `split_rig.sh refusepiece` run) for a refusal sent in
+/// milliseconds, and the resend it asks for never happened. The step is read
+/// from the frame's cleartext, chosen by the peer it goes back to — the one
+/// connection both callers answer on — so it can only echo that peer's own
+/// claim back to it, and the waiter stays pinned to that peer.
 pub(crate) fn refusal_for_undecryptable(
     forward: &LayerForward,
     sender_reads_reason: bool,
@@ -632,7 +643,8 @@ pub(crate) fn refusal_for_undecryptable(
     if forward.chunk_meta.is_some_and(|m| m.chunk_idx != 0) {
         return None;
     }
-    let refusal = LayerResult::error(forward.request_id, "Could not decrypt forward");
+    let refusal = LayerResult::error(forward.request_id, "Could not decrypt forward")
+        .answering_step(forward.step());
     Some(if sender_reads_reason {
         refusal.with_refusal(crate::types::ForwardRefusal::Undecryptable)
     } else {
@@ -867,6 +879,58 @@ mod tests {
             .map(|c| refusal_for_undecryptable(c, true).is_some())
             .collect();
         assert_eq!(answered, vec![true, false, false, false]);
+    }
+
+    /// **A refused prompt piece reaches the wait for that piece.** A piece of
+    /// a prompt read in pieces (#171) is a streamed forward, and its wait is
+    /// keyed by its number. The refusal named no step, so it was keyed by the
+    /// request alone, reached no waiter and was dropped: the coordinator sat
+    /// out the piece's whole deadline (403.8 s, `split_rig.sh refusepiece`,
+    /// 2026-10-18) and never made the resend the refusal asks for. Over the
+    /// wire codec and through the one delivery point, as it travels.
+    #[test]
+    fn a_refused_prompt_piece_reaches_the_wait_for_that_piece() {
+        let state = test_state();
+        let peer = crate::types::NodeId([7u8; 32]);
+        let seq = swarmllm_types::inference::stream_seq::compose(2, 3).unwrap();
+        let mut piece = base_layer_forward(vec![0u8; 16]);
+        piece.sequence_num = 0;
+        piece.index_pos = 512;
+        piece.layer_range = (14, 28);
+        piece.stream_seq = Some(seq);
+        piece.prompt_span = Some(crate::types::PromptSpan {
+            start: 0,
+            end: 2048,
+        });
+        let (tx, mut rx) = oneshot::channel();
+        state.pending_layer_results.insert(
+            crate::daemon::state::WaiterKey::streamed(piece.request_id, seq),
+            crate::daemon::state::PendingLayerResult {
+                tx,
+                awaiting: Some(peer.clone()),
+                chain_members: Vec::new(),
+                expects_step: Some(crate::daemon::state::ExpectedStep::one(512, (14, 28))),
+            },
+        );
+
+        let refusal = refusal_for_undecryptable(&piece, true).expect("a piece is answered");
+        let wire = protocol::encode_layer_result(&refusal).unwrap();
+        let arrived = protocol::decode_layer_result(&wire).unwrap();
+        assert!(
+            !arrived.locally_constructed,
+            "it arrives as the peer's answer"
+        );
+        assert!(
+            state.resolve_pending_layer_result(Some(&peer), arrived),
+            "the refusal must reach the wait for the piece it refuses"
+        );
+        let taken = rx.try_recv().expect("delivered");
+        assert_eq!(
+            taken.refusal,
+            Some(crate::types::ForwardRefusal::Undecryptable),
+            "and still say why, so the wait resends it once the link is re-keyed"
+        );
+        assert_eq!(taken.answers_step, Some(piece.step()));
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #303**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #306**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -76,10 +76,10 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
     several reply lengths, never tune the constant.
 10. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
-12. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
+11. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
-13. **#228** — Qwen 3.5 without speculation (its state cannot be wound back yet).
-14. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
+12. **#228** — Qwen 3.5 without speculation (its state cannot be wound back yet).
+13. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
     decision, with research, when picked up.
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
@@ -1043,6 +1043,46 @@ a real multi-node swarm, with permissive thresholds and a per-peer score metric 
 penalised slow or CGNAT peer is visible — the risk is the mesh partitioning itself. Second
 half: DHT provider records are add-only and can outlive the fact by up to 24 h (see #49); a
 capability challenge before trusting one would address it. No incident is known.
+
+#### #304 — A peer can lose its key for this node mid-request, with no disconnect
+`P2` · network · crypto · **OPEN** — 2026-10-18 · history: found by #252 (b)'s rig, beside #303
+
+On the 2026-10-18 `split_rig.sh peerkv` run (A on 2 cores, a 5097-token prompt in pieces), B
+opened nine of A's prompt pieces and failed the tenth with `open() decryption FAILED …
+had_session=false had_previous=false had_retired=false`, with no disconnect logged at info. The
+repair worked (`request_rekey` → a fresh exchange) — it was the refusal that was lost (#303). Why
+B held NO key for A is not established; the logs of that run are gone. By elimination in
+`crypto/session.rs`, two paths leave all three empty while traffic flows:
+1. **`SessionManager::evict_stale` destroys a live session by AGE** — `sessions.retain` on
+   `created_at` older than `MAX_SESSION_AGE` (600 s), with no retired copy (`remove_session`, the
+   disconnect path, retires for `PREVIOUS_KEY_GRACE`). Every install refreshes `created_at`, so a
+   session lives only while rotations land: rotation is ONE attempt per `KEY_ROTATION_INTERVAL`
+   (600 s, 300 s out of phase with eviction), with no retry. One exchange lost or unanswered and
+   the next eviction tick drops a session both ends are using; the other end keeps sealing with
+   it. WireGuard's scar is exactly this: it re-keys at `REKEY_AFTER_TIME` (120 s) and RETRIES the
+   handshake every `REKEY_TIMEOUT` (5 s) for up to `REKEY_ATTEMPT_TIME` (90 s), all before the key
+   is refused at `REJECT_AFTER_TIME` (180 s) — the rejection is never the first sign.
+2. A disconnect logged only at debug (`Cleared encryption session`), more than 180 s before the
+   failing piece, with the reconnect establishing nothing — unlikely: nine pieces opened between.
+Next: run the rig with B at `-v` past two eviction ticks (> 20 min) and read B's `DIAG: key
+rotation tick (eviction)` `stale_evicted` against the failure; then, if (1), retry an unanswered
+rotation (WireGuard's schedule) and have an age eviction of a CONNECTED peer re-key first rather
+than destroy — `security-reviewer` on the change (key lifetime is a forward-secrecy bound).
+
+#### #305 — A chain hop that cannot open its forward refuses to the hop before it, which is not waiting
+`P3` · network · crypto · **OPEN** — 2026-10-18 · history: found by the security review of #303
+
+`refusal_for_undecryptable`'s two callers answer on the connection the frame came in on. For a
+CHAINED forward (`verify_may_chain`, a chained check) a hop past the head received it from the
+previous HOP, which holds no waiter and does not pass an inbound result on, so the coordinator
+waits out the chain's deadline for a refusal given in milliseconds — the undecryptable twin of
+gotcha #707, which `layer_forward::reply_target` closed for every refusal the DISPATCHER sends.
+Do not answer the frame's `requester_node_id` instead: it is cleartext the seal did not
+authenticate, so a forger could make an honest hop send a refusal for another node's request
+(a chained check resends on nothing, so that refusal would end it). The safe shape: the previous
+hop, which recorded the coordinator when it handed the forward on (`hop_reply_to`), passes an
+inbound refusal from its next hop on to that coordinator — attributed to itself, a chain member
+the waiter already accepts. `security-reviewer` on the change.
 
 #### #191 — A part download that loses its peer restarts from byte 0 on the next one
 `P3` · storage · **OPEN** — 2026-09-03 · history: archive § "A multi-megabyte forward over ONE QUIC stream can kill the connection" (its banner: the cause was quinn-proto, #112)
@@ -2485,7 +2525,17 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-18, not yet released** (#251 (3) — #251 closed)
+**Closed 2026-10-18, not yet released** (#303; #251 (3) — #251 closed)
+- #303 — **A split no longer waits out a deadline when a peer cannot open one piece of the
+  prompt.** A peer that cannot decrypt a forward refuses it, and the coordinator sends it again
+  once the link re-keys (#92) — but the refusal named no step, and a prompt piece's (or a streamed
+  verify's) wait is keyed by its number, so the refusal reached no one: the piece waited its whole
+  segment deadline and the request re-planned or failed. `split_rig.sh refusepiece`
+  (`SWARMLLM_FAULT_REFUSE_DECRYPT=3`): 503 after 403.8 s before; 200 after, the refusal taken 189 ms
+  after the send, the piece resent 28 ms later. The refusal now names its forward
+  (`LayerForward::step`, the one construction). Found by #252 (b)'s rig, where B also held no key for
+  A mid-prompt (#304, open). Test: `a_refused_prompt_piece_reaches_the_wait_for_that_piece`;
+  `docs/invariants/network.md` § "A disconnect retires a session key".
 - #251 (3) — **Every reply now says which computers served it, streamed or not, on every
   surface.** Closes #251 (`owned_by: "local"` read as "my data stays here"; it means "every part is
   held here"): (1) the book's OpenAI page says what `owned_by` means and what a peer sees, (2) "Keep

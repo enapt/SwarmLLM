@@ -18,11 +18,7 @@ pub(super) async fn handle_layer_forward(
     // coordinator can tell this answer from a late copy of an earlier one, or
     // from this node's answer for another segment at the same position (#113).
     let index_pos = forward.index_pos;
-    let answering = crate::types::ResultStep {
-        index_pos,
-        layer_range: forward.layer_range,
-        stream_seq: forward.stream_seq,
-    };
+    let answering = forward.step();
     let sender_peer_bytes = match forward.sender_peer_bytes {
         Some(ref bytes) => bytes.clone(),
         None => {
@@ -779,11 +775,7 @@ impl RefusalAddress {
     pub(super) fn of(forward: &crate::types::LayerForward) -> Self {
         Self {
             request_id: forward.request_id,
-            answering: crate::types::ResultStep {
-                index_pos: forward.index_pos,
-                layer_range: forward.layer_range,
-                stream_seq: forward.stream_seq,
-            },
+            answering: forward.step(),
             requester_node_id: forward.requester_node_id,
             sender_peer_bytes: forward.sender_peer_bytes.clone(),
             restarts: forward.truncate_kv_to.is_some(),
