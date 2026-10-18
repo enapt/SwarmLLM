@@ -233,6 +233,9 @@ where
         // Filled from the chat stream's terminal usage chunk (see the
         // `include_usage` opt-in above); stays zero if none ever arrives.
         let mut final_usage = ResponsesUsage::default();
+        // What the response carries over from the chat reply: the route
+        // (`swarmllm`) its finish chunk names (#251 (3)).
+        let mut reply_extras: HashMap<String, serde_json::Value> = HashMap::new();
 
         // ---- response.created (V1: emitted before chat_future is awaited) ----
         yield BufferedEvent {
@@ -406,6 +409,12 @@ where
                     if let Some(m) = chunk.get("model").and_then(|v| v.as_str()) {
                         model_from_chunk = Some(m.to_string());
                     }
+                }
+                // Only the finish chunk carries it; every other chunk leaves
+                // what is held alone.
+                let carried = super::translate::reply_extras_from_chat(&chunk);
+                if !carried.is_empty() {
+                    reply_extras = carried;
                 }
 
                 // The terminal usage chunk carries `choices: []`, so read it
@@ -784,7 +793,7 @@ where
             modalities: original.modalities.clone(),
             service_tier: original.service_tier.clone(),
             background: original.background,
-            extras: HashMap::new(),
+            extras: reply_extras,
         };
 
         // Persist the fully-assembled response before emitting the

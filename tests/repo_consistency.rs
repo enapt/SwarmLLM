@@ -10432,6 +10432,75 @@ fn cfg_test_spans(src: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// Whether `parent` (a module file's text) declares `module` only under
+/// `#[cfg(test)]` — a module FILE that is fixtures end to end, like a
+/// `tests.rs`, but named for what it supports (`api/route_test_support.rs`).
+/// Only the attributes and doc comments directly above the declaration count,
+/// so a `#[cfg(test)]` on a neighbouring `mod` never vouches for this one.
+fn declared_only_for_tests(parent: &str, module: &str) -> bool {
+    let lines: Vec<&str> = parent.lines().map(str::trim).collect();
+    for (i, line) in lines.iter().enumerate() {
+        let decl = line
+            .strip_prefix("pub(crate) ")
+            .or_else(|| line.strip_prefix("pub(super) "))
+            .or_else(|| line.strip_prefix("pub "))
+            .unwrap_or(line);
+        if decl != format!("mod {module};") {
+            continue;
+        }
+        return lines[..i]
+            .iter()
+            .rev()
+            .take_while(|l| l.starts_with("#[") || l.starts_with("///"))
+            .any(|l| *l == "#[cfg(test)]");
+    }
+    false
+}
+
+/// [`declared_only_for_tests`] for a file on disk: asks its parent module
+/// (`dir/mod.rs`, or `dir.rs` beside the directory).
+fn module_file_is_test_only(path: &std::path::Path) -> bool {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_stem()) else {
+        return false;
+    };
+    let name = name.to_string_lossy();
+    if name == "mod" {
+        return false;
+    }
+    [dir.join("mod.rs"), dir.with_extension("rs")]
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .any(|parent| declared_only_for_tests(&parent, &name))
+}
+
+#[test]
+fn a_module_file_declared_for_tests_only_is_a_fixture() {
+    assert!(declared_only_for_tests(
+        "#[cfg(test)]\npub(crate) mod route_test_support;\n",
+        "route_test_support"
+    ));
+    assert!(declared_only_for_tests(
+        "/// Fixtures.\n#[cfg(test)]\nmod x;\n",
+        "x"
+    ));
+    assert!(
+        !declared_only_for_tests("#[cfg(test)]\nmod other;\nmod x;\n", "x"),
+        "a neighbour's #[cfg(test)] must not vouch for this module"
+    );
+    assert!(!declared_only_for_tests("pub mod x;\n", "x"));
+    assert!(
+        !declared_only_for_tests("#[cfg(test)]\nmod x_more;\n", "x"),
+        "a longer name is another module"
+    );
+    // The real one the reply-finalising guard skips for this reason.
+    assert!(module_file_is_test_only(
+        &repo_root().join("src/api/route_test_support.rs")
+    ));
+    assert!(!module_file_is_test_only(
+        &repo_root().join("src/api/openai/streaming.rs")
+    ));
+}
+
 /// Every site in `text` that builds an `InferenceOutput` carrying content
 /// without its enclosing function calling `finalize_reply_text`, as 1-indexed
 /// line numbers. Separated from the test so the planted-violation self-test
@@ -10517,9 +10586,13 @@ fn every_reply_source_finalises_its_text() {
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            // A `tests.rs` beside its module is fixtures end to end; the
+            // A `tests.rs` beside its module, or a module file declared only
+            // under `#[cfg(test)]`, is fixtures end to end; the
             // `#[cfg(test)]` span check covers in-file test modules.
-            if rel.ends_with("/tests.rs") || rel.contains("/tests/") {
+            if rel.ends_with("/tests.rs")
+                || rel.contains("/tests/")
+                || module_file_is_test_only(&path)
+            {
                 continue;
             }
             let Ok(text) = std::fs::read_to_string(&path) else {

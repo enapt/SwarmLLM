@@ -54,7 +54,18 @@ pub enum StreamEvent {
     Delta {
         content: Option<String>,
         role: Option<String>,
-        finish_reason: Option<String>,
+    },
+    /// The reply finished: the chunk carrying `finish_reason`.
+    ///
+    /// Its own variant, with the route a REQUIRED field, because the finish
+    /// chunk is where a streamed reply says which computers served it
+    /// (`swarmllm.route`, #251 (3)) — it has no headers to say it in. As a
+    /// field of `Delta` it would be one more thing for each of the producers
+    /// to remember; here a new finish cannot be written without saying what
+    /// its route was (`None` only where there is no swarm route).
+    Finish {
+        reason: String,
+        route: Option<crate::inference::trace::RouteSummary>,
     },
     /// A failure, in the same terms the non-streaming sibling would report it.
     ///
@@ -142,7 +153,6 @@ pub async fn send_role_preamble(tx: &mpsc::Sender<StreamEvent>) -> bool {
     tx.send(StreamEvent::Delta {
         content: None,
         role: Some("assistant".into()),
-        finish_reason: None,
     })
     .await
     .is_ok()

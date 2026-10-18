@@ -2970,7 +2970,8 @@ no trace is registered.
 | Surface | Contents |
 |---|---|
 | `DIAG: request complete` log line | The whole route and timing set on one greppable line |
-| Response headers | `x-swarm-route`, `x-swarm-segments`, `x-swarm-peers`, `x-swarm-nodes`, `x-swarm-regions` + W3C `Server-Timing`, attached by `api::attach_route_headers` |
+| Response headers | `x-swarm-route`, `x-swarm-segments`, `x-swarm-peers`, `x-swarm-nodes`, `x-swarm-regions` + W3C `Server-Timing`, attached by `api::attach_route_headers` to a reply that is NOT streamed |
+| Reply body | `swarmllm.route` (`TraceSnapshot::route_summary`, the headers' own reading): both non-streamed bodies, a streamed chat reply's finish chunk, Anthropic's `message_delta`, the Responses object; MCP `_meta["com.swarmllm/route"]` (fan-out: each result's `route`). A streamed reply's only route (#251 (3)) |
 | `GET /api/admin/diagnostics` | Plain text for a shell: recent requests, per-peer performance, served-for-others, failures. Addresses redacted unless `?full=1` |
 | `GET /api/admin/performance` | Same as JSON, plus the hourly trend |
 | `/metrics` | OTel-named TTFT/TPOT histograms + `requests_by_route{route,outcome}` + serving-side counters |

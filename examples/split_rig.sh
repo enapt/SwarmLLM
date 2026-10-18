@@ -82,6 +82,15 @@
 #          `swarmllm` field (503, B handed nothing), a bad header value and a
 #          misspelt field (400), the header saying `false` (200 through B), MCP's
 #          `_meta` (refused, B handed nothing). Default model tinyllama.
+#   route  FUTURE_WORK #251 (3): keep's topology (A shard 0, B the rest, both on
+#          the processor). One question through A as chat, Anthropic and
+#          Responses, each streamed and not, and MCP `chat` and `compare`.
+#          PASS = every reply names two computers, one of them a peer: the
+#          headers of the unstreamed chat reply, its body's `swarmllm.route`
+#          (the same route), the streamed chat's FINISH chunk (and no other),
+#          `message_delta`, `response.completed`, MCP's
+#          `_meta["com.swarmllm/route"]` and compare's per-result `route` —
+#          and none of it in the text the model reads. Default model tinyllama.
 #   context  the FAILOVER topology, but B serves a SHORTER conversation than the
 #          long prompt (CEIL_B, default 512, as B's own max_seq_len_override) —
 #          the field report of 2026-09-25, where an 8192-token peer refused an
@@ -241,7 +250,7 @@
 #          a forward) never happened, and q2 answered 200 on a plan giving A
 #          fewer layers. Default model llama-3.2-3b.
 #
-# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|latekv <binary> [<binary for B>]
+# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -271,7 +280,7 @@ set -u
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|latekv) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep or latekv"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route or latekv"; exit 2 ;; esac
 if [ -n "${RAM_A:-}" ] && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[resources\]'; then
   echo "RAM_A is written to A's [resources]; EXTRA_TOML may not open that table too"; exit 2
 fi
@@ -279,7 +288,7 @@ if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOM
   echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
 fi
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
-if [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ]; then
+if [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 elif [ "$MODE" = cache ]; then
   MODEL="${MODEL:-qwen2.5-0.5b-instruct-fp16}"
@@ -297,13 +306,14 @@ SHARDS=$(ls "$SRC" | sed -n 's/^shard_\([0-9]*\)\.bin$/\1/p' | sed 's/^0*\([0-9]
 LAST=$(echo "$SHARDS" | tail -1)
 N=$(echo "$SHARDS" | wc -l)
 [ "$N" -ge 2 ] || { echo "$MODEL has $N shard file(s) here; a split needs at least 2"; exit 2; }
-if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ]; then
+if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
   # Processor unless asked otherwise: the reference is scored on the processor.
   [ "$MODE" = repeat ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = disconnect ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = keep ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
+  [ "$MODE" = route ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
 elif [ "$MODE" = latekv ]; then
   [ "$N" -ge 3 ] || { echo "latekv needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
   PREV=$(echo "$SHARDS" | tail -2 | head -1)
@@ -775,6 +785,104 @@ sys.exit(0 if ok else 1)
 PY
   PER_REQUEST=$?
   [ "$PER_MODEL" = 0 ] && [ "$PER_REQUEST" = 0 ]
+  exit $?
+fi
+
+if [ "$MODE" = route ]; then
+  # One question through A in every form a reply can take. B holds every part
+  # but shard 0, so each answer ran on two computers and must say so.
+  post() { # path body label  (writes $OUT/<label>.{hdr,body})
+    curl -s -m 300 -D "$OUT/$3.hdr" -H "Authorization: Bearer $KA" -H 'Content-Type: application/json' \
+         -H 'anthropic-version: 2023-06-01' -X POST "localhost:8900$1" -d "$2" -o "$OUT/$3.body"
+  }
+  Q="What is the capital of France? Answer in one sentence."
+  body() { python3 - "$MODEL" "$Q" "$1" <<'PY'
+import json, sys
+model, q, form = sys.argv[1:]
+msgs = [{"role": "user", "content": q}]
+b = {
+    "chat": {"model": model, "max_tokens": 24, "temperature": 0, "messages": msgs},
+    "resp": {"model": model, "max_output_tokens": 24, "temperature": 0, "input": q},
+    "mcp_chat": {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "chat",
+                 "arguments": {"model": model, "max_tokens": 24, "temperature": 0, "messages": msgs}}},
+    "mcp_compare": {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "compare",
+                    "arguments": {"models": [model], "prompt": q, "max_tokens": 24, "temperature": 0}}},
+}[form.removesuffix("_stream")]
+if form.endswith("_stream"):
+    b["stream"] = True
+print(json.dumps(b))
+PY
+  }
+  post /v1/chat/completions "$(body chat)" chat
+  post /v1/chat/completions "$(body chat_stream)" chat_stream
+  post /v1/messages "$(body chat)" msgs
+  post /v1/messages "$(body chat_stream)" msgs_stream
+  post /v1/responses "$(body resp)" resp
+  post /v1/responses "$(body resp_stream)" resp_stream
+  post /mcp "$(body mcp_chat)" mcp_chat
+  post /mcp "$(body mcp_compare)" mcp_compare
+  python3 - "$OUT" <<'PY'
+import json, sys
+out = sys.argv[1]
+def headers(l):
+    lines = open(f"{out}/{l}.hdr").read().splitlines()
+    return (lines[0].strip() if lines else "no response"), {
+        k.strip().lower(): v.strip() for k, v in (x.split(":", 1) for x in lines[1:] if ":" in x)}
+def events(l):  # the JSON payloads of an SSE body (or of an MCP reply sent as SSE)
+    got = []
+    for x in open(f"{out}/{l}.body").read().splitlines():
+        if x.startswith("data:") and x[5:].strip() not in ("", "[DONE]"):
+            try: got.append(json.loads(x[5:]))
+            except ValueError: pass
+    return got
+def doc(l):
+    raw = open(f"{out}/{l}.body").read()
+    try: return json.loads(raw)
+    except ValueError: return (events(l) or [{}])[-1]
+def text_of(l):  # MCP: the tool result's text, and the result itself
+    r = doc(l).get("result") or {}
+    return (r.get("content") or [{}])[0].get("text", ""), r
+status, h = headers("chat")
+ref = (doc("chat").get("swarmllm") or {}).get("route")
+two = lambda r: isinstance(r, dict) and r.get("segments") == 2 and r.get("peers") == 1
+same = lambda r: r == ref
+chunks = events("chat_stream")
+carrying = [c for c in chunks if "swarmllm" in c]
+delta = [e for e in events("msgs_stream") if e.get("type") == "message_delta"]
+done = [e for e in events("resp_stream") if e.get("type") == "response.completed"]
+mcp_text, mcp_result = text_of("mcp_chat")
+compare_text, _ = text_of("mcp_compare")
+try: compared = json.loads(compare_text).get("results") or [{}]
+except ValueError: compared = [{}]
+routes = {
+    "chat, not streamed": ref,
+    "chat, streamed (finish chunk)": (carrying[-1].get("swarmllm") or {}).get("route") if carrying else None,
+    "messages, not streamed": (doc("msgs").get("swarmllm") or {}).get("route"),
+    "messages, streamed (message_delta)": (delta[-1].get("swarmllm") or {}).get("route") if delta else None,
+    "responses, not streamed": (doc("resp").get("swarmllm") or {}).get("route"),
+    "responses, streamed (response.completed)": ((done[-1].get("response") or {}).get("swarmllm") or {}).get("route") if done else None,
+    "mcp chat (_meta)": (mcp_result.get("_meta") or {}).get("com.swarmllm/route"),
+    "mcp compare (per result)": compared[0].get("route"),
+}
+print(f"route: chat {status} headers route={h.get('x-swarm-route')} segments={h.get('x-swarm-segments')} "
+      f"peers={h.get('x-swarm-peers')} nodes={h.get('x-swarm-nodes')}")
+checks = {
+    "the headers name two computers": " 200" in status and h.get("x-swarm-segments") == "2" and h.get("x-swarm-peers") == "1",
+    "the body says what the headers say": two(ref) and ref.get("route") == h.get("x-swarm-route")
+        and ",".join(ref.get("nodes", [])) == (h.get("x-swarm-nodes") or "").replace(" ", ""),
+    "only the finish chunk carries it": len(carrying) == 1 and bool(carrying[0]["choices"])
+        and carrying[0]["choices"][0].get("finish_reason") is not None,
+    "the model's text holds no route": "com.swarmllm" not in mcp_text and '"segments"' not in mcp_text,
+}
+for form, r in routes.items():
+    checks[f"{form}: two computers"] = two(r)
+    print(f"route: {form:42s} {json.dumps(r)}")
+for k, v in checks.items():
+    print(f"route: {'ok  ' if v else 'FAIL'} {k}")
+ok = all(checks.values())
+print("route:", "PASS" if ok else "FAIL")
+sys.exit(0 if ok else 1)
+PY
   exit $?
 fi
 

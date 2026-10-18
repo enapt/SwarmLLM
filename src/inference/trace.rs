@@ -721,14 +721,19 @@ impl TraceSnapshot {
     /// voluntary field). Empty string when no segment declared one at all, so
     /// the header can be omitted entirely rather than sent as noise.
     pub fn regions_csv(&self) -> String {
+        self.regions().join(",")
+    }
+
+    /// Each segment's region, `??` where its computer declared none; empty
+    /// when no segment declared one at all.
+    pub fn regions(&self) -> Vec<String> {
         if !self.segments.iter().any(|s| s.region.is_some()) {
-            return String::new();
+            return Vec::new();
         }
         self.segments
             .iter()
-            .map(|s| s.region.as_deref().unwrap_or("??"))
-            .collect::<Vec<_>>()
-            .join(",")
+            .map(|s| s.region.clone().unwrap_or_else(|| "??".to_string()))
+            .collect()
     }
 
     /// Number of remote hops. 0 for a purely local request.
@@ -911,36 +916,83 @@ where
         .collect()
 }
 
+/// Which computers served a request — the facts a reply reports about its own
+/// route, in every form it reports them (#251 (3)).
+///
+/// The ONE reading of a trace for that purpose: the `x-swarm-*` headers of a
+/// reply that is not streamed ([`response_headers`]) and the `swarmllm.route`
+/// object in a reply's body — the finish chunk of a streamed chat completion,
+/// an Anthropic `message_delta`, the Responses API's response object, an MCP
+/// result's `_meta` — are all built from it, so no surface can describe the
+/// same request differently from another.
+///
+/// It describes the route the reply was finished on. A request that was
+/// re-planned after a failure reports its last route only (`assemblies` on the
+/// trace says it was re-planned), here and in the headers alike.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RouteSummary {
+    /// `local`, `distributed`, … — [`Route::as_str`].
+    pub route: String,
+    /// Pipeline segments, this computer's included.
+    pub segments: usize,
+    /// Segments run by OTHER computers. Distinct from `segments`: a
+    /// two-segment pipeline with one local segment used one peer, and "2
+    /// peers" would be wrong. Given rather than left for a reader to derive,
+    /// since the local/remote split is not recoverable from the node list.
+    pub peers: usize,
+    /// Short node ids in segment order, e.g. `["0718d8b9", "96842635"]`.
+    pub nodes: Vec<String>,
+    /// Each segment's declared region, `??` where its computer declared none;
+    /// empty, and left out, when no segment declared one (region is voluntary).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regions: Vec<String>,
+}
+
+impl TraceSnapshot {
+    /// This request's route, as every reply reports it — see [`RouteSummary`].
+    pub fn route_summary(&self) -> RouteSummary {
+        RouteSummary {
+            route: self.route.as_str().to_string(),
+            segments: self.segments.len(),
+            peers: self.remote_segments(),
+            nodes: self
+                .segments
+                .iter()
+                .map(|s| s.short_node().to_string())
+                .collect(),
+            regions: self.regions(),
+        }
+    }
+}
+
 /// Response headers describing how a request was served.
 ///
 /// Returned as name/value pairs rather than written into a specific response
-/// type so the OpenAI, Anthropic, Responses and MCP paths all attach the same
-/// set through one function — the alternative is four hand-built header blocks
-/// that drift, which is the defect `.claude/rules/architecture.md` documents.
+/// type so the OpenAI, Anthropic and Responses paths attach the same set
+/// through one function — the alternative is hand-built header blocks that
+/// drift, which is the defect `.claude/rules/architecture.md` documents. The
+/// routing identity comes from [`TraceSnapshot::route_summary`], the reading a
+/// streamed reply puts in its body, so a header and a body cannot disagree.
 ///
 /// Routing identity goes in `x-swarm-*`; durations go in the W3C
 /// `Server-Timing` header, which browser devtools renders natively and
 /// `PerformanceServerTiming` exposes to JS.
 ///
-/// `streaming` MUST be true for SSE responses: headers flush before the body,
-/// so time-to-first-token and decode time are not yet known and are omitted
-/// rather than sent as zeros. Those ride the final SSE usage event instead.
+/// `streaming` leaves out what is unknown until the body ends —
+/// time-to-first-token and decode time — rather than sending zeros. No SSE
+/// response is given these headers (they would flush before a route exists);
+/// a streamed reply names its route in its body instead.
 pub fn response_headers(snap: &TraceSnapshot, streaming: bool) -> Vec<(&'static str, String)> {
+    let summary = snap.route_summary();
     let mut out = Vec::with_capacity(5);
-    out.push(("x-swarm-route", snap.route.as_str().to_string()));
-    out.push(("x-swarm-segments", snap.segments.len().to_string()));
-    // Remote segments, i.e. how many OTHER machines were involved. Distinct
-    // from `segments`: a two-segment pipeline with one local segment used one
-    // peer, and reporting "2 peers" would be wrong. Sent explicitly rather than
-    // left for a client to derive, since the local/remote split is not
-    // recoverable from the node list.
-    out.push(("x-swarm-peers", snap.remote_segments().to_string()));
-    if !snap.segments.is_empty() {
-        out.push(("x-swarm-nodes", snap.nodes_csv()));
+    out.push(("x-swarm-route", summary.route));
+    out.push(("x-swarm-segments", summary.segments.to_string()));
+    out.push(("x-swarm-peers", summary.peers.to_string()));
+    if !summary.nodes.is_empty() {
+        out.push(("x-swarm-nodes", summary.nodes.join(",")));
     }
-    let regions = snap.regions_csv();
-    if !regions.is_empty() {
-        out.push(("x-swarm-regions", regions));
+    if !summary.regions.is_empty() {
+        out.push(("x-swarm-regions", summary.regions.join(",")));
     }
     let timing = snap.server_timing(streaming);
     if !timing.is_empty() {
@@ -1373,6 +1425,55 @@ mod tests {
 
         let h2: std::collections::HashMap<_, _> = response_headers(&s, false).into_iter().collect();
         assert!(h2["server-timing"].contains("ttft;dur="));
+    }
+
+    /// A reply's body and its headers describe the same route (#251 (3)): the
+    /// body is what a streamed reply has instead of headers, and a reader must
+    /// not get a different answer from the form it happened to ask in.
+    #[test]
+    fn a_replys_route_summary_and_its_headers_say_the_same_thing() {
+        let t = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
+        let mut far = seg(1, "9684263580c6660f", false, Transport::Direct);
+        far.region = Some("IT".into());
+        t.mark_assembled(
+            Route::Distributed,
+            vec![seg(0, "0718d8b987a4975a", true, Transport::Local), far],
+            0,
+        );
+        let s = t.snapshot();
+        let summary = s.route_summary();
+        assert_eq!(
+            summary,
+            RouteSummary {
+                route: "distributed".into(),
+                segments: 2,
+                peers: 1,
+                nodes: vec!["0718d8b9".into(), "96842635".into()],
+                regions: vec!["??".into(), "IT".into()],
+            }
+        );
+        let h: std::collections::HashMap<_, _> = response_headers(&s, false).into_iter().collect();
+        assert_eq!(h["x-swarm-route"], summary.route);
+        assert_eq!(h["x-swarm-segments"], summary.segments.to_string());
+        assert_eq!(h["x-swarm-peers"], summary.peers.to_string());
+        assert_eq!(h["x-swarm-nodes"], summary.nodes.join(","));
+        assert_eq!(h["x-swarm-regions"], summary.regions.join(","));
+
+        // No region declared anywhere: no regions in either form.
+        let quiet = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
+        quiet.mark_assembled(
+            Route::Local,
+            vec![seg(0, "0718d8b987a4975a", true, Transport::Local)],
+            0,
+        );
+        let qs = quiet.snapshot();
+        assert!(qs.route_summary().regions.is_empty());
+        assert!(!serde_json::to_string(&qs.route_summary())
+            .unwrap()
+            .contains("regions"));
+        assert!(!response_headers(&qs, false)
+            .iter()
+            .any(|(n, _)| *n == "x-swarm-regions"));
     }
 
     #[test]

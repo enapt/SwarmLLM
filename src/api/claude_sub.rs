@@ -266,6 +266,8 @@ fn build_content_chunk(
         }],
         session_id: None,
         usage: None,
+        // A Claude subscription's reply: a cloud provider, no swarm route.
+        swarmllm: None,
     }
 }
 

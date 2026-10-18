@@ -22,8 +22,22 @@ use crate::inference::router::InferenceOutput;
 /// Build the final Anthropic `MessagesResponse` from a router-produced
 /// `InferenceOutput`. Centralises the `map_finish_reason_with_match` +
 /// `MessagesResponse::text_with_stop` sequence shared by both the
-/// distributed-router and split-model non-streaming paths.
+/// distributed-router and split-model non-streaming paths — and the route the
+/// reply names in its body (`swarmllm.route`, #251 (3)), from the same trace
+/// its headers are built from.
 fn build_messages_response(
+    request_id: String,
+    model: String,
+    output: InferenceOutput,
+    tools_requested: bool,
+) -> MessagesResponse {
+    let swarmllm = crate::api::SwarmllmReply::for_trace(output.trace.as_ref());
+    let mut response = messages_response_body(request_id, model, output, tools_requested);
+    response.swarmllm = swarmllm;
+    response
+}
+
+fn messages_response_body(
     request_id: String,
     model: String,
     output: InferenceOutput,
@@ -239,7 +253,6 @@ pub(super) async fn anthropic_non_stream(
     Ok(crate::api::attach_route_headers(
         Json(response).into_response(),
         trace.as_ref(),
-        false,
     ))
 }
 
@@ -386,6 +399,14 @@ pub(super) async fn anthropic_stream(
 
         // Get authoritative token count from the result when available
         let result = result_rx.await;
+        // Which computers served it (#251 (3)): the router's final snapshot —
+        // what a non-streamed reply's headers give — else the trace the router
+        // attached to the token sender.
+        let route = match &result {
+            Ok(Ok(output)) => output.trace.as_ref().map(|t| t.route_summary()),
+            _ => None,
+        }
+        .or_else(|| token_rx.route());
         if got_finish {
             let (output_tokens, matched_from_result, prompt_tokens) =
                 stream_usage_from_result(&result, streamed_token_count);
@@ -418,6 +439,7 @@ pub(super) async fn anthropic_stream(
                 // usage at all, while its non-streaming sibling reported it
                 // correctly. Same defect the split path had until 2026-08-10.
                 prompt_tokens,
+                route,
             )
             .await;
         } else {
@@ -446,6 +468,7 @@ pub(super) async fn anthropic_stream(
                         output.completion_tokens,
                         TextBlock::Open,
                         Some(prompt_tokens),
+                        route,
                     )
                     .await;
                 }
@@ -523,7 +546,6 @@ pub(super) async fn anthropic_split_non_stream(
     Ok(crate::api::attach_route_headers(
         Json(response).into_response(),
         trace.as_ref(),
-        false,
     ))
 }
 
@@ -589,7 +611,8 @@ pub(super) async fn anthropic_split_stream(
         ) {
             Some(pair) => pair,
             None => {
-                send_sse_epilogue(&sse_tx, "end_turn".into(), 0, None).await;
+                // Nothing ran, so there is no route to report.
+                send_sse_epilogue(&sse_tx, "end_turn".into(), 0, None, None).await;
                 return;
             }
         };
@@ -746,6 +769,7 @@ pub(super) async fn anthropic_split_stream(
             total_output_tokens,
             text_block,
             prompt_tokens,
+            Some(stream_trace.snapshot().route_summary()),
         )
         .await;
     });
@@ -1213,6 +1237,8 @@ fn openai_response_to_anthropic(openai_resp: &Value, model: &str) -> MessagesRes
             output_tokens,
             ..Default::default()
         },
+        // An OpenAI-compatible provider's reply: no swarm route.
+        swarmllm: None,
     }
 }
 
@@ -1366,7 +1392,8 @@ async fn stream_openai_to_anthropic(
         Some("stop") | None => "end_turn",
         Some(other) => map_finish_reason(other),
     };
-    send_sse_epilogue(&sse_tx, stop_reason.into(), output_tokens, None).await;
+    // An OpenAI-compatible provider's stream: a cloud reply, no swarm route.
+    send_sse_epilogue(&sse_tx, stop_reason.into(), output_tokens, None, None).await;
 }
 
 #[cfg(test)]
@@ -1822,5 +1849,89 @@ mod tests {
         let body = build_openai_request_body(&req, upstream)
             .unwrap_or_else(|_| panic!("translation failed"));
         assert_eq!(body["model"], "deepseek-v4-flash");
+    }
+}
+
+#[cfg(test)]
+mod route_in_body_tests {
+    use super::*;
+    use crate::api::route_test_support::{fake_router, sse_payloads, test_app, two_computer_trace};
+
+    /// **A streamed Anthropic reply names the computers that served it** on
+    /// `message_delta`, the event that closes it (#251 (3)) — the stream has
+    /// no `x-swarm-*` headers. Driven through the real router-stream handler.
+    #[tokio::test]
+    async fn a_streamed_anthropic_reply_names_its_route_on_message_delta() {
+        let app = test_app();
+        let response = anthropic_stream(
+            &app.state,
+            fake_router("hello"),
+            Vec::new(),
+            crate::api::build_sampling_params(0.7, 1.0, 0, Some(8), Vec::new(), 0.0, 0.0, false, 0),
+            "msg_test".into(),
+            "m".into(),
+            None,
+            crate::types::KeepAsked::Unasked,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{}", e.0));
+        let events: Vec<serde_json::Value> = sse_payloads(response)
+            .await
+            .into_iter()
+            .filter_map(|p| serde_json::from_str(&p).ok())
+            .collect();
+        let delta = events
+            .iter()
+            .find(|e| e["type"] == "message_delta")
+            .unwrap_or_else(|| panic!("the reply closes: {events:?}"));
+        let route = &delta["swarmllm"]["route"];
+        assert_eq!(route["route"], "distributed", "{delta}");
+        assert_eq!(route["segments"], 2);
+        assert_eq!(route["peers"], 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.get("swarmllm").is_some())
+                .count(),
+            1,
+            "only message_delta carries it: {events:?}"
+        );
+    }
+
+    /// The reply that is not streamed carries the same object in its body, from
+    /// the trace its headers are built from; none without a swarm route.
+    #[test]
+    fn an_unstreamed_anthropic_reply_carries_the_route_in_its_body() {
+        let snapshot = two_computer_trace(uuid::Uuid::nil()).snapshot();
+        let output = |trace| InferenceOutput {
+            request_id: uuid::Uuid::nil(),
+            content: "hi".into(),
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            finish_reason: "stop".into(),
+            session_id: None,
+            token_logprobs: Vec::new(),
+            matched_stop_sequence: None,
+            trace,
+        };
+        let served = serde_json::to_value(build_messages_response(
+            "msg".into(),
+            "m".into(),
+            output(Some(snapshot.clone())),
+            false,
+        ))
+        .unwrap();
+        assert_eq!(
+            served["swarmllm"]["route"],
+            serde_json::to_value(snapshot.route_summary()).unwrap()
+        );
+        let unrouted = serde_json::to_value(build_messages_response(
+            "msg".into(),
+            "m".into(),
+            output(None),
+            false,
+        ))
+        .unwrap();
+        assert!(unrouted.get("swarmllm").is_none());
     }
 }

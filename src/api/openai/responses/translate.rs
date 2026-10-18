@@ -541,6 +541,23 @@ fn collect_content_parts(parts: &[InputContentPart]) -> Result<MessageContent, S
 /// empty, no message item is emitted — just the function_call items.
 /// `output_text` always reflects only the text content, never the
 /// arguments JSON (matches OpenAI's wire format).
+/// What a Responses object carries over from the chat reply it was made from,
+/// beyond the translated fields: the `swarmllm` object naming the computers
+/// that served it (#251 (3)). Read from the non-streamed chat body here and
+/// from the streamed one's finish chunk in `stream.rs`, so a response — live,
+/// in the background, or read back later from the store — names its route
+/// exactly as the chat reply under it did. Nothing when the chat reply had none
+/// (a cloud provider's), and never anything else of the chat body's.
+pub(super) fn reply_extras_from_chat(
+    chat: &serde_json::Value,
+) -> HashMap<String, serde_json::Value> {
+    let mut extras = HashMap::new();
+    if let Some(swarmllm) = chat.get("swarmllm").filter(|v| v.is_object()) {
+        extras.insert("swarmllm".to_string(), swarmllm.clone());
+    }
+    extras
+}
+
 pub fn chat_response_to_responses(
     chat: &serde_json::Value,
     original: &ResponsesRequest,
@@ -716,7 +733,7 @@ pub fn chat_response_to_responses(
         modalities: original.modalities.clone(),
         service_tier: original.service_tier.clone(),
         background: original.background,
-        extras: HashMap::new(),
+        extras: reply_extras_from_chat(chat),
     })
 }
 
@@ -728,6 +745,39 @@ pub fn chat_response_to_responses(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A Responses object names the route of the chat reply it was made from
+    /// (#251 (3)) — and what is stored is this object, so a response read back
+    /// later names it too. Only `swarmllm` is carried over; a chat reply with
+    /// none (a cloud provider's) gives none.
+    #[test]
+    fn a_response_names_the_route_its_chat_reply_named() {
+        let route = json!({"route": "distributed", "segments": 2, "peers": 1,
+                           "nodes": ["01010101", "09090909"]});
+        let chat = json!({
+            "model": "m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "swarmllm": {"route": route},
+            "session_id": "not carried",
+        });
+        let resp = chat_response_to_responses(&chat, &req_text("x"), "r", 0).unwrap();
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["swarmllm"]["route"], route);
+        assert!(
+            v.get("session_id").is_none(),
+            "nothing else of the chat body: {v}"
+        );
+
+        let mut cloud = chat.clone();
+        cloud.as_object_mut().unwrap().remove("swarmllm");
+        let resp = chat_response_to_responses(&cloud, &req_text("x"), "r", 0).unwrap();
+        assert!(serde_json::to_value(&resp)
+            .unwrap()
+            .get("swarmllm")
+            .is_none());
+    }
 
     fn req_text(input: &str) -> ResponsesRequest {
         ResponsesRequest {

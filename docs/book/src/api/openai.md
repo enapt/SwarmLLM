@@ -170,8 +170,22 @@ those requests, and one this computer cannot run alone is refused with
 `kept_on_this_computer_error` (503) instead of being sent out. To keep every
 request on your own computers, use a private pool with
 `private_mode = true` and `private_mode_allow_lan = false`
-([Joining the network > Private Networks](../getting-started/joining-network.md#private-networks)). The
-`x-swarm-route` response header names the computers that answered.
+([Joining the network > Private Networks](../getting-started/joining-network.md#private-networks)).
+
+Every reply says which computers answered it. A reply that is not streamed
+carries the `x-swarm-route`, `x-swarm-segments`, `x-swarm-peers` (how many
+OTHER computers took part), `x-swarm-nodes` and, where they declared one,
+`x-swarm-regions` headers. The same facts are in the reply itself, as
+`"swarmllm": {"route": {"route": "distributed", "segments": 2, "peers": 1,
+"nodes": ["0718d8b9", "96842635"]}}`: in the body of a chat completion or an
+Anthropic reply, in the last chunk of a streamed chat completion (the one with
+`finish_reason`), in a streamed Anthropic reply's `message_delta`, and in the
+response object of `/v1/responses` (also when it is streamed, run in the
+background or read back later). A streamed reply has no route headers — they are
+sent before the route exists — so read it there. An MCP tool that asks one model
+puts it in the result's `_meta["com.swarmllm/route"]`; `compare`, `research` and
+`batch_prompts` give each model's result its own `route`. A reply a cloud
+provider wrote carries none.
 
 To keep a single request on this computer, whatever the model's setting, send
 the header `X-SwarmLLM-Keep-On-This-Computer: true`, or put

@@ -101,6 +101,12 @@ Anything that removes a shard file or model MUST first check `active_pipelines` 
 
 → `docs/invariants/network.md` § "The same choice per request"
 
+## A reply says which computers served it, in every form (2026-10-18, #251 (3))
+
+**`TraceSnapshot::route_summary`** is the one reading, for the `x-swarm-*` headers (not streamed) AND `swarmllm.route` in the body: a streamed chat reply's FINISH chunk (`StreamEvent::Finish`, route REQUIRED), Anthropic's `message_delta` (`send_sse_epilogue_with_stop`'s REQUIRED `route`), both non-streamed bodies, the Responses object (copied from the chat reply, `reply_extras_from_chat`), MCP `_meta["com.swarmllm/route"]` / each fan-out result's `route`. A stream reads it when it FINISHES, from the trace the router attached to its sender (`StreamingTokenRx::route`) — never by holding headers until planning (the dashboard's queued/planning status rides the open stream), never as a chunk of its own (`choices: []` breaks clients).
+
+→ `docs/invariants/api-surfaces.md` § "A reply says which computers served it, in every form it can take"
+
 ## API errors must be readable by the caller
 
 Every failure is `{"error": {"message", "type", "param", "code"}}`: take bodies with `JsonBody<T>`, never axum's `Json<T>`; keep the router `.fallback()` (`unknown_route`). Choose the STATUS from the cause (`probe_failure_is_user_fixable`).
@@ -155,7 +161,8 @@ A second implementation of any of these is this codebase's most-repeated defect 
 
 - **`api::metrics::network_traffic_json`** — traffic in every status payload (THREE surfaces; `every_stats_surface_carries_the_traffic_figure`).
 - **`api::openai::max_model_len_for`** — a model's context on `/v1/models`: declared, override-capped, lowered to what this node holds (`ModelProcessPool::context_fits`) only while no connected holder in scope could take part (`context_served_here`, #252 (1)); never raised. → § "A model's context on `/v1/models` is what this node holds".
-- **`api::mcp::dispatch::spawn_model_call_task`** — whether a fan-out call **answered**.
+- **`inference::trace::TraceSnapshot::route_summary`** — which computers served a request, in every reply form (headers, `swarmllm.route`, MCP `_meta`).
+- **`api::mcp::dispatch::spawn_model_call_task`** — whether a fan-out call **answered**, and its route.
 - **`inference::model_worker::resolve_max_new_tokens`** — a reply's token budget.
 - **`crate::error::reclassify_flattened_error`** — an error's CLASS after a boundary.
 - **`crate::error::classify_error`** — `(StatusCode, message, error type)`.

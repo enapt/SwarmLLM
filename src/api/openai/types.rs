@@ -515,6 +515,11 @@ pub struct ChatCompletionResponse {
     /// requests to reuse cached KV state and skip redundant prefill.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Which computers served the request (`swarmllm.route`, #251 (3)) —
+    /// the same facts as the `x-swarm-*` headers. `None` (left out) where
+    /// there is no swarm route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swarmllm: Option<crate::api::SwarmllmReply>,
 }
 
 #[derive(Debug, Serialize)]
@@ -580,6 +585,11 @@ pub struct ChatCompletionChunk {
     /// every intermediate chunk so existing clients see no change.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// Which computers served the request (`swarmllm.route`, #251 (3)), on
+    /// the FINISH chunk only — a streamed reply has no `x-swarm-*` headers
+    /// (they flush before a route exists). Left out of every other chunk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swarmllm: Option<crate::api::SwarmllmReply>,
 }
 
 #[derive(Debug, Serialize)]

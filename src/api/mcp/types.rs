@@ -63,10 +63,35 @@ impl JsonRpcResponse {
 
 /// A tool result carrying one text block — the shape every MCP tool returns.
 pub(super) fn tool_text_result(id: Option<Value>, text: impl Into<String>) -> JsonRpcResponse {
-    JsonRpcResponse::success(
-        id,
-        serde_json::json!({ "content": [{ "type": "text", "text": text.into() }] }),
-    )
+    tool_text_result_with_route(id, text, None)
+}
+
+/// The `_meta` key a tool result names its route under (#251 (3)) — which
+/// computers served the model call behind it. Reverse-DNS, as MCP asks of a
+/// `_meta` key (2025-11-25 § `_meta`), and the twin of the request-side
+/// `com.swarmllm/keep_on_this_computer` (`keep_here::MCP_META_KEY`).
+pub(super) const ROUTE_META_KEY: &str = "com.swarmllm/route";
+
+/// [`tool_text_result`] for a tool whose answer is ONE model call's: its route
+/// goes in the result's `_meta`, for the program driving the tool rather than
+/// in the text the model reads. A JSON-RPC answer has no headers of its own, so
+/// this is the only place an MCP caller can learn where a call ran. `None`
+/// (no swarm route: a cloud model, a refusal) leaves `_meta` out.
+pub(super) fn tool_text_result_with_route(
+    id: Option<Value>,
+    text: impl Into<String>,
+    route: Option<crate::inference::trace::RouteSummary>,
+) -> JsonRpcResponse {
+    let mut result = serde_json::json!({ "content": [{ "type": "text", "text": text.into() }] });
+    if let Some(route) = route {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            ROUTE_META_KEY.to_string(),
+            serde_json::to_value(route).unwrap_or_default(),
+        );
+        result["_meta"] = Value::Object(meta);
+    }
+    JsonRpcResponse::success(id, result)
 }
 
 // JSON-RPC error codes

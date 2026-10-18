@@ -29,8 +29,8 @@ use distributed_exec::{execute_request, finalize_request};
 use types::{deliver_result, QueuedRequest};
 
 pub use types::{
-    InferenceOutput, InferenceResultTx, RouterCommand, StreamingTokenEvent, StreamingTokenTx,
-    TokenLogProbEntry,
+    InferenceOutput, InferenceResultTx, RouterCommand, StreamingTokenEvent, StreamingTokenRx,
+    StreamingTokenTx, TokenLogProbEntry,
 };
 
 /// What a failed request leaves in the diagnostics' list of recent failures,

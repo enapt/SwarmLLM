@@ -91,6 +91,14 @@ async fn collect_within(
     results
 }
 
+/// The route an Anthropic-shaped reply from this node names in its body
+/// (`swarmllm.route`, #251 (3)); `None` for a reply with none (a cloud model).
+pub(super) fn reply_route(
+    body: &serde_json::Value,
+) -> Option<crate::inference::trace::RouteSummary> {
+    serde_json::from_value(body.get("swarmllm")?.get("route")?.clone()).ok()
+}
+
 /// Extract text content and token usage from an Anthropic Messages API response body.
 pub(super) fn extract_anthropic_response(body: &serde_json::Value) -> (String, u64, u64) {
     let content = body["content"]
@@ -115,6 +123,8 @@ pub(super) struct ModelCallResult {
     pub elapsed_ms: u64,
     /// None on success, Some(message) on error.
     pub error: Option<String>,
+    /// Which computers served the call, as the reply named them (#251 (3)).
+    pub route: Option<crate::inference::trace::RouteSummary>,
 }
 
 /// Send a prompt to a model endpoint and return the parsed result.
@@ -172,6 +182,7 @@ pub(super) async fn dispatch_model_call(
                 output_tokens,
                 elapsed_ms,
                 error: None,
+                route: reply_route(&resp_body),
             }
         }
         Ok(resp) => {
@@ -184,6 +195,7 @@ pub(super) async fn dispatch_model_call(
                 output_tokens: 0,
                 elapsed_ms,
                 error: Some(format!("HTTP {status}: {truncated}")),
+                route: None,
             }
         }
         Err(e) => ModelCallResult {
@@ -192,6 +204,7 @@ pub(super) async fn dispatch_model_call(
             output_tokens: 0,
             elapsed_ms,
             error: Some(format!("{e}")),
+            route: None,
         },
     }
 }
@@ -237,10 +250,28 @@ where
         // it wrong by picking a different key for its answer field. See
         // `count_answered` for what went wrong when this was done downstream.
         let blank = r.error.is_none() && r.content.trim().is_empty();
+        let route = r.route.clone();
         let mut shaped = shape(&model_id, r);
         stamp_blank_answer(&mut shaped, blank);
+        stamp_route(&mut shaped, route);
         shaped
     })
+}
+
+/// Stamp which computers served a fan-out call onto its shaped result
+/// (#251 (3)) — here, where every fan-out tool's calls pass, so none can leave
+/// it out. On the result rather than in the tool result's `_meta`: one call
+/// fans out to several models, and each answer has its own route.
+pub(super) fn stamp_route(
+    shaped: &mut serde_json::Value,
+    route: Option<crate::inference::trace::RouteSummary>,
+) {
+    if let (Some(obj), Some(route)) = (shaped.as_object_mut(), route) {
+        obj.insert(
+            "route".to_string(),
+            serde_json::to_value(route).unwrap_or_default(),
+        );
+    }
 }
 
 /// Stamp the "succeeded but said nothing" marker onto an already-shaped result.
@@ -265,6 +296,29 @@ pub(super) fn stamp_blank_answer(shaped: &mut serde_json::Value, blank: bool) {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    /// A fan-out call's route is read from the reply's body (#251 (3)) and
+    /// stamped on that model's own result — the fan-out's one choke point, so
+    /// no tool can leave it out; a reply with none (a cloud model) gets none.
+    #[test]
+    fn a_fan_out_result_names_the_route_its_reply_named() {
+        let route = crate::api::route_test_support::two_computer_trace(uuid::Uuid::nil())
+            .snapshot()
+            .route_summary();
+        let body = json!({
+            "content": [{"type": "text", "text": "hi"}],
+            "swarmllm": {"route": serde_json::to_value(&route).unwrap()},
+        });
+        assert_eq!(reply_route(&body), Some(route.clone()));
+        assert_eq!(reply_route(&json!({"content": []})), None);
+
+        let mut shaped = json!({"model": "m", "status": "ok"});
+        stamp_route(&mut shaped, Some(route.clone()));
+        assert_eq!(shaped["route"], serde_json::to_value(&route).unwrap());
+        let mut bare = json!({"model": "m", "status": "ok"});
+        stamp_route(&mut bare, None);
+        assert!(bare.get("route").is_none());
+    }
 
     /// The three fan-out tools shape a successful answer differently on the
     /// wire. These are the real shapes, kept here so a tool that changes its

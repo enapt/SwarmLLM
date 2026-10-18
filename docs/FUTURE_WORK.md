@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #302**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #303**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -68,15 +68,13 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
    (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), unreleased). Next: the
    3.5 KB/s that is not gossip (Kademlia, identify, pings, direct messages), 63% of the upload.
-8. **#251** — `owned_by: "local"` reads as "my data stays here": the route on a streamed
-   `/v1/responses` and in MCP (keeping a request here, per model or per request, is done).
-9. **#252** — a peer's measured context is not gossiped, so a planner cannot size a peer's share
+8. **#252** — a peer's measured context is not gossiped, so a planner cannot size a peer's share
    before asking ((a) parked: no named client reads the listed context).
-10. **#3**, **#180** — the routing cost model mis-prices a split by regime (one peer's fit,
+9. **#3**, **#180** — the routing cost model mis-prices a split by regime (one peer's fit,
     2026-10-15: a measured per-visit hop 0.78, a `net:0` hop 1.53 under-priced, drafter arms 0.39
     unpriced), which keeps partial ranges off; fit per term from a second peer's traffic and
     several reply lengths, never tune the constant.
-11. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
+10. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
 12. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
@@ -1933,6 +1931,21 @@ live A/B on every surface (OpenAI stream / non-stream, Anthropic stream / non-st
 foreground / background, MCP). Until then: choke-point helpers (`finalize_reply_text`,
 `strip_prefix_in_body`) and `.claude/rules/architecture.md` § "One invariant, N paths".
 
+#### #302 — A request re-planned after a failure names only the route it finished on
+`P3` · api · privacy · **OPEN** — 2026-10-18 · history: found closing #251 (3)
+
+A reply's route — the `x-swarm-*` headers and the body's `swarmllm.route` — is read from the
+request's trace, and `RequestTrace::mark_assembled` REPLACES the trace's segments on every
+assembly. A request that went to a peer, failed there (the peer went silent, refused, or broke
+mid-reply and was continued) and was re-planned onto this computer reports `route: local`, one
+segment, no peers — while a peer did see that request's hidden states, and a continued reply's
+first part was generated there. Only the `DIAG: request complete` log line (`assemblies=N`) says a
+re-plan happened. The answer #251 promised is "which computers served this", so a re-planned
+request should name every computer any attempt reached: keep the union of the attempts' nodes
+(and peers) beside the final route, and report both — the route the reply finished on, and
+every computer it was sent to. Check `continuation_after`'s path keeps the same trace, and that
+a hand-off (`remote_generate`) and a delegated split record their peer in the trace first.
+
 #### #141 — A non-streamed reply does not carry a reasoning model's scratchpad; the stream does
 `P3` · api · **OPEN** — deferred 2026-09-28 · history: archive row #141
 
@@ -2147,45 +2160,6 @@ covers only a seal FAILURE. Next: with encryption on and no NodeId, fail the for
 decide whether a receiver with encryption on refuses `TENSOR_TAG_FORWARD` from a peer it holds a
 session with (an `enable_encryption = false` peer must still work). Wire and crypto →
 `security-reviewer` on the diff, and the split + failover rigs.
-
-#### #251 — `owned_by: "local"` reads as "my data stays here"; it means "every part is held here"
-`P2` · privacy · **PARTIAL** — 2026-10-17 · history: report #035 (a tester, v0.3.232-.234); (1), (2) per model and (4) done 2026-10-12, (2b) per request 2026-10-17 (§ Closed)
-
-`api::model_source_for` answers `local` when this node holds every part, which says nothing about
-where a request runs. A model the card cannot hold whole may be split with peers (#250). The default boomerang starts and
-ends that route here, so peers never see the prompt TEXT. They do see hidden states, ~81% invertible
-to text (`docs/ARCHITECTURE.md` § Pipeline Privacy Model). Before (2), a user could keep requests on their own
-computer only node-wide (a pool with `private_mode = true` and `private_mode_allow_lan = false`).
-`x-swarm-route` reports the route on the OpenAI and Anthropic surfaces and a non-streamed `/v1/responses`. **Done (1), 2026-10-12:**
-the book's OpenAI page says what `owned_by` means, what a peer sees, how to keep requests here and
-where the route is reported. **Done (2) per model, 2026-10-12:** "Keep on this computer" on the
-model's ⚙ panel (`PUT /api/admin/models/{id}/keep-on-this-computer`). `pool::scope::request_scope`
-is now the one answer to which nodes a request may reach (kept → this node; else private mode's set),
-asked by every path a request's data leaves by (guard `every_path_a_request_leaves_by_asks_its_scope`);
-a kept model this computer cannot run whole is refused as `KeptOnThisComputer` (503, never "retry").
-Enumerating the paths found three more holes, closed with it: the image encoder went to its nearest
-holder in private mode (`c84c12dd`), the prefix-KV probe asked any holder of the cached blocks, and
-every failed request was broadcast to the whole swarm with its error text (only ever logged by the
-receivers — removed). And a cloud provider is chosen by NAME, so a local model called `mistral…`,
-`llama-…`, `gemma…` or `deepseek…` could go to that provider when the swarm lacked a part of it:
-`providers::cloud_refused_for` now refuses a kept model on every cloud path (guard
-`every_cloud_path_asks_whether_the_model_is_kept_here`). A kept model's stored prompt openings are
-neither announced nor served to peers. **Done (4), 2026-10-12:** private mode had the same cloud
-hole for a model of the swarm; in private mode a model with a manifest here now never goes to a
-cloud provider (`PrivateModeUnavailable`, naming the parts no pool device holds —
-`pool::scope::parts_outside_scope`, shared with the scheduler). A cloud-only name still goes, being
-the owner's own configuration, and so does an explicit `provider:` prefix (the caller's own choice of
-a cloud model; the same prompt could go under the provider's model name). A kept model refuses both. **Done (2b), 2026-10-17:** the same choice per REQUEST
-(`X-SwarmLLM-Keep-On-This-Computer`, the body's `swarmllm` field, MCP's `_meta`; § Closed). Left:
-(3) the route on the surfaces that lack it. A NON-streamed `/v1/responses` already carries
-`x-swarm-route`, `-segments`, `-peers`, `-nodes` and `server-timing`, copied from the chat
-handler's response (`create_response`; checked on v0.3.235, 2026-10-12). A STREAMED one carries
-none: `stream::run_streaming` returns the SSE before it awaits the chat call, so its headers
-flush before a route exists. That is deliberate, so the lifecycle events go out before inference
-setup blocks. The choice is between waiting for planning before `response.created` (as
-`/v1/chat/completions` streaming already does) and naming the route in an event. MCP answers
-JSON-RPC, and one call may fan out to several models, so its route belongs per result (`_meta`),
-not in a header. `attach_route_headers`' doc claims all four surfaces; correct it with the fix.
 
 #### #30 — The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on
 `P2` · security · **OPEN** — 2026-09-10 · history: archive row #30 and § "The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on"
@@ -2511,7 +2485,35 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-17, not yet released** (#299, #91 (2c), #251 (2b))
+**Closed 2026-10-18, not yet released** (#251 (3) — #251 closed)
+- #251 (3) — **Every reply now says which computers served it, streamed or not, on every
+  surface.** Closes #251 (`owned_by: "local"` read as "my data stays here"; it means "every part is
+  held here"): (1) the book's OpenAI page says what `owned_by` means and what a peer sees, (2) "Keep
+  on this computer" per model (2026-10-12) and (2b) per request (2026-10-17), (4) private mode
+  never sends a swarm model to a cloud provider (2026-10-12) — and now (3), the route. The gap was
+  wider than filed: the route was only ever in the `x-swarm-*` headers of a reply that was NOT
+  streamed. `attach_route_headers` claimed four surfaces and took a `streaming` flag no caller
+  passed — measured on the live node (v0.3.242), `stream: true` answered no route header at all,
+  and chat streaming did not "already wait for planning" as this entry said. Holding headers until
+  planning would silence the dashboard's queued/planning status comments and could name a route a
+  re-plan later replaced, so the route travels in the BODY as `swarmllm: {"route": {...}}` (the
+  reply-side twin of the request's `swarmllm` field), from ONE reading of the trace
+  (`TraceSnapshot::route_summary`, which the headers are now built from too): a chat completion's
+  body or its streamed FINISH chunk (`StreamEvent::Finish`, route REQUIRED); Anthropic's body or
+  `message_delta` (`send_sse_epilogue_with_stop`'s REQUIRED `route`); the Responses object in every
+  form, copied from the chat reply under it (`translate::reply_extras_from_chat`); MCP `chat` /
+  `delegate` in `_meta["com.swarmllm/route"]` (`tool_text_result_with_route`), and each fan-out
+  result its own `route` (`spawn_model_call_task`). A streamed reply reads the route at FINISH from
+  the trace its sender was given (`StreamingTokenTx::channel` → `StreamingTokenRx::route`), never
+  `active_traces` (racy). A reply with no swarm route (cloud, refused before dispatch) carries no
+  `swarmllm`. Research: OpenRouter's extra top-level `provider` field; never a `choices: []`
+  chunk (azure-sdk-for-go #21086); Anthropic's Python SDK drops an unknown event NAME; MCP
+  2025-11-25 § `_meta` reverse-DNS keys. A re-planned request names only its last route (#302).
+  Tests: 11, 13 mechanisms toggled off and shown red; `split_rig.sh route` live (all eight forms
+  named both computers); `docs/invariants/api-surfaces.md` § "A
+  reply says which computers served it, in every form it can take".
+
+**Closed 2026-10-17, released in v0.3.242 (2026-10-18 00:27 UTC)** (#299, #91 (2c), #251 (2b))
 - #251 (2b) — **One request can now be kept on this computer, whatever the model's setting.** A
   caller sends `X-SwarmLLM-Keep-On-This-Computer: true`, or `"swarmllm": {"keep_on_this_computer":
   true}` in the body of `/v1/chat/completions`, `/v1/messages` or `/v1/responses`, or MCP's

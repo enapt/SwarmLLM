@@ -221,26 +221,67 @@ pub(crate) fn clamp_peer_sampling(s: &mut crate::types::SamplingParams) {
     }
 }
 
-/// Attach routing + timing headers to a response.
+/// What a reply says about itself in its body, beside the content: the
+/// `swarmllm` object (#251 (3)).
 ///
-/// The single place any response path adds them, so all four (OpenAI,
-/// Anthropic, Responses, MCP) stay identical by construction rather than by
-/// four authors remembering. A `None` trace leaves the response untouched —
-/// cloud-proxied and pre-dispatch-rejected requests have no swarm route, and an
-/// absent header is honest where `x-swarm-route: local` would not be.
+/// The reply-side twin of the request's `swarmllm` field
+/// (`keep_here::SwarmllmOptions`). It carries the route — which computers
+/// served the request — on every reply that has one: the body of a chat
+/// completion, the finish chunk of a streamed one, an Anthropic reply and its
+/// streamed `message_delta`, the Responses API's response object. A streamed
+/// reply cannot carry the `x-swarm-*` headers (they flush before a route
+/// exists), so this is how it says where it ran; a reply that is not streamed
+/// carries both, built from the one [`RouteSummary`] reading.
 ///
-/// Pass `streaming: true` for SSE: headers flush before the body, so TTFT and
-/// decode are not yet known and are omitted rather than reported as zero.
+/// An extra top-level field, the shape OpenRouter's `provider` and this
+/// server's own `session_id` already put on a chunk: the OpenAI and Anthropic
+/// SDKs keep fields they do not know (pydantic `extra="allow"`; the Node SDKs
+/// pass the parsed JSON through). Never a chunk of its own — a chunk with
+/// `choices: []` that a client did not ask for breaks every reader that takes
+/// `choices[0]` (Azure's first chunk did).
+///
+/// [`RouteSummary`]: crate::inference::trace::RouteSummary
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SwarmllmReply {
+    pub route: crate::inference::trace::RouteSummary,
+}
+
+impl SwarmllmReply {
+    /// The object for a reply served on `route`; `None` where there is no
+    /// swarm route (a cloud provider's reply, a refusal before dispatch) — an
+    /// absent field is honest where a guessed `local` would not be.
+    pub fn for_route(route: Option<crate::inference::trace::RouteSummary>) -> Option<Self> {
+        route.map(|route| Self { route })
+    }
+
+    /// [`Self::for_route`] from a finished request's trace.
+    pub fn for_trace(trace: Option<&crate::inference::trace::TraceSnapshot>) -> Option<Self> {
+        Self::for_route(trace.map(|t| t.route_summary()))
+    }
+}
+
+/// Attach routing + timing headers to a response that is not streamed.
+///
+/// The single place a response path adds them, so the OpenAI, Anthropic and
+/// Responses surfaces (the last through the chat handler's response) stay
+/// identical by construction rather than by authors remembering. A `None`
+/// trace leaves the response untouched — cloud-proxied and
+/// pre-dispatch-rejected requests have no swarm route, and an absent header is
+/// honest where `x-swarm-route: local` would not be.
+///
+/// No SSE response comes through here: its headers flush before a route
+/// exists, so a streamed reply names its route in its body
+/// ([`SwarmllmReply`]), and so does an MCP result (`_meta`), which answers
+/// JSON-RPC rather than with headers of its own.
 pub(crate) fn attach_route_headers(
     mut response: axum::response::Response,
     trace: Option<&crate::inference::trace::TraceSnapshot>,
-    streaming: bool,
 ) -> axum::response::Response {
     let Some(snap) = trace else {
         return response;
     };
     let headers = response.headers_mut();
-    for (name, value) in crate::inference::trace::response_headers(snap, streaming) {
+    for (name, value) in crate::inference::trace::response_headers(snap, false) {
         // Values are node-id hex, ISO region codes, integers and Server-Timing
         // tokens, so a parse failure means we built something malformed — skip
         // rather than fail the user's request over a diagnostic header.
@@ -428,6 +469,8 @@ pub mod origin;
 pub mod pool;
 pub mod process_memory;
 pub mod providers;
+#[cfg(test)]
+pub(crate) mod route_test_support;
 pub mod server;
 pub mod sse;
 pub mod tailscale;

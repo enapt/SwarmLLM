@@ -28,21 +28,73 @@ pub struct StreamingTokenTx {
     /// `None` on paths with no trace (tests, internal fan-out). The wrapper
     /// still forwards; it just records nothing.
     trace: Option<std::sync::Arc<crate::inference::trace::RequestTrace>>,
+    /// The same trace, for the receiver — see [`StreamingTokenRx::route`].
+    shared: TraceSlot,
+}
+
+/// The trace a channel's sender was given, readable by its receiver.
+///
+/// The router makes a streamed request's trace at admission and attaches it to
+/// the sender it was handed (`with_trace`); the API code holding the receiver
+/// never sees it. Shared through the channel rather than looked up in
+/// `active_traces`, which only the distributed path writes and which is
+/// cleared the moment the router finishes — possibly before the reader has
+/// taken the last token.
+type TraceSlot =
+    std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::inference::trace::RequestTrace>>>;
+
+/// The receiving end of a [`StreamingTokenTx`]: the token stream, and the
+/// route of the request it carries.
+pub struct StreamingTokenRx {
+    inner: mpsc::Receiver<StreamingTokenEvent>,
+    shared: TraceSlot,
+}
+
+impl StreamingTokenRx {
+    pub async fn recv(&mut self) -> Option<StreamingTokenEvent> {
+        self.inner.recv().await
+    }
+
+    pub fn try_recv(&mut self) -> Result<StreamingTokenEvent, mpsc::error::TryRecvError> {
+        self.inner.try_recv()
+    }
+
+    /// The route this request is being served on — `None` until a trace is
+    /// attached, and on paths that have none.
+    ///
+    /// Read when the reply FINISHES, which is what a streamed reply reports in
+    /// its body (#251 (3)): every re-plan has happened by then, so it is the
+    /// route a non-streamed reply's headers give for the same request.
+    pub fn route(&self) -> Option<crate::inference::trace::RouteSummary> {
+        self.shared.get().map(|t| t.snapshot().route_summary())
+    }
 }
 
 impl StreamingTokenTx {
     /// Create the channel. Preferred over building an `mpsc::channel` by hand
     /// so the sender is always the traced wrapper.
-    pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<StreamingTokenEvent>) {
+    pub fn channel(capacity: usize) -> (Self, StreamingTokenRx) {
         let (inner, rx) = mpsc::channel(capacity);
-        (Self { inner, trace: None }, rx)
+        let shared = TraceSlot::default();
+        (
+            Self {
+                inner,
+                trace: None,
+                shared: shared.clone(),
+            },
+            StreamingTokenRx { inner: rx, shared },
+        )
     }
 
-    /// Attach the trace whose TTFT this channel should stamp.
+    /// Attach the trace whose TTFT this channel should stamp, and whose route
+    /// its receiver reports.
     pub fn with_trace(
         mut self,
         trace: std::sync::Arc<crate::inference::trace::RequestTrace>,
     ) -> Self {
+        // A channel carries one request, so one trace: a second attach (none
+        // today) keeps the first for the receiver.
+        let _ = self.shared.set(trace.clone());
         self.trace = Some(trace);
         self
     }
@@ -508,5 +560,33 @@ mod deliver_result_tests {
     fn a_delivered_result_logs_nothing() {
         assert!(levels_when(false, true).is_empty());
         assert!(levels_when(true, true).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod streaming_route_tests {
+    use super::*;
+    use crate::inference::trace::{local_segment, RequestTrace, Route};
+
+    /// The receiver of a streamed request reports the route of the trace the
+    /// ROUTER attached to the sender (#251 (3)) — the API code holding the
+    /// receiver never sees that trace, and a streamed reply has no headers to
+    /// carry the route in. Read live: a re-plan after the attach is what the
+    /// receiver reports, as a non-streamed reply's headers would.
+    #[test]
+    fn a_stream_reader_sees_the_route_its_sender_was_given() {
+        let (tx, rx) = StreamingTokenTx::channel(4);
+        assert_eq!(rx.route(), None, "no trace attached, no route to report");
+
+        let trace = std::sync::Arc::new(RequestTrace::new(uuid::Uuid::nil(), "m", "chat"));
+        let me = crate::types::NodeId([7u8; 32]);
+        trace.mark_assembled(Route::Distributed, local_segment(&me, (0, 22)), 0);
+        let _tx = tx.with_trace(trace.clone());
+        let first = rx.route().expect("the sender was given a trace");
+        assert_eq!(first.route, "distributed");
+        assert_eq!(first.segments, 1);
+
+        trace.mark_assembled(Route::Local, local_segment(&me, (0, 22)), 0);
+        assert_eq!(rx.route().map(|r| r.route), Some("local".to_string()));
     }
 }

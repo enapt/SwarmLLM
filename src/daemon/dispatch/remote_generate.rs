@@ -315,7 +315,7 @@ async fn stream_reply_to_requester(
     network_tx: mpsc::Sender<NetworkCommand>,
     request_id: uuid::Uuid,
     sender_bytes: Vec<u8>,
-    mut token_rx: mpsc::Receiver<crate::inference::router::StreamingTokenEvent>,
+    mut token_rx: crate::inference::router::StreamingTokenRx,
     gen_fut: tokio::task::JoinHandle<
         Result<crate::inference::router::InferenceOutput, crate::error::SwarmError>,
     >,

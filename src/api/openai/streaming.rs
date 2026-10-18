@@ -10,7 +10,7 @@ use crate::api::sse::{send_role_preamble, StreamEvent};
 use crate::api::SSE_KEEPALIVE_INTERVAL_SECS;
 use crate::error::ApiError;
 use crate::inference::chat_template;
-use crate::inference::router::{RouterCommand, StreamingTokenEvent};
+use crate::inference::router::RouterCommand;
 use crate::types::{ChatMessage, InferenceRequest, ModelId, SamplingParams};
 
 use super::resolver::get_split_model_meta;
@@ -40,6 +40,9 @@ fn build_chat_completion_response(
     session_id: Option<String>,
     token_logprobs: &[crate::inference::router::TokenLogProbEntry],
     tools_requested: bool,
+    // Which computers served it — REQUIRED, so a new caller cannot build a
+    // reply that leaves its route out of the body (#251 (3)).
+    trace: Option<&crate::inference::trace::TraceSnapshot>,
 ) -> ChatCompletionResponse {
     let logprobs = if token_logprobs.is_empty() {
         None
@@ -127,6 +130,7 @@ fn build_chat_completion_response(
         }],
         usage: Usage::from_counts(prompt_tokens, completion_tokens),
         session_id,
+        swarmllm: crate::api::SwarmllmReply::for_trace(trace),
     }
 }
 
@@ -179,7 +183,7 @@ pub type SplitStreamUsage = std::sync::Arc<std::sync::Mutex<Option<(u32, u32)>>>
 /// A local split-model stream: the token receiver, the failure slot to consult
 /// if the stream ends without producing tokens, and the final token counts.
 pub type SplitStream = (
-    tokio::sync::mpsc::Receiver<crate::inference::router::StreamingTokenEvent>,
+    crate::inference::router::StreamingTokenRx,
     SplitStreamFailure,
     SplitStreamUsage,
 );
@@ -402,7 +406,7 @@ pub async fn submit_stream_to_router(
         tokio::sync::oneshot::Receiver<
             Result<crate::inference::router::InferenceOutput, crate::error::SwarmError>,
         >,
-        tokio::sync::mpsc::Receiver<StreamingTokenEvent>,
+        crate::inference::router::StreamingTokenRx,
         // The id the router will trace this request under. `InferenceRequest`
         // mints its own, unrelated to the public `swarm-<hex>` request id, so
         // the caller cannot derive it — returning it is the only way a caller
@@ -589,12 +593,12 @@ pub(super) async fn router_inference(
         output.session_id,
         &output.token_logprobs,
         req.tools.as_ref().is_some_and(|t| !t.is_empty()),
+        trace.as_ref(),
     );
 
     Ok(crate::api::attach_route_headers(
         Json(response).into_response(),
         trace.as_ref(),
-        false,
     ))
 }
 
@@ -639,7 +643,6 @@ async fn push_and_send(
                 StreamEvent::Delta {
                     content: Some(safe),
                     role: None,
-                    finish_reason: None,
                 },
             )
             .await
@@ -674,7 +677,6 @@ async fn emit_openai_tool_calls(
                 StreamEvent::Delta {
                     content: Some(text),
                     role: None,
-                    finish_reason: None,
                 },
             )
             .await;
@@ -693,7 +695,6 @@ async fn emit_openai_tool_calls(
             StreamEvent::Delta {
                 content: Some(text),
                 role: None,
-                finish_reason: None,
             },
         )
         .await;
@@ -846,11 +847,12 @@ async fn router_inference_stream(
                 if !buffered.is_empty() && emit_openai_tool_calls(&sse_tx, &mut buffered).await {
                     reason = "tool_calls".to_string();
                 }
+                // The route of the trace the router attached to the token
+                // sender, read now that the reply is over (#251 (3)).
                 if sse_tx
-                    .send(StreamEvent::Delta {
-                        content: None,
-                        role: None,
-                        finish_reason: Some(reason.clone()),
+                    .send(StreamEvent::Finish {
+                        reason: reason.clone(),
+                        route: token_rx.route(),
                     })
                     .await
                     .is_err()
@@ -906,7 +908,6 @@ async fn router_inference_stream(
                             .send(StreamEvent::Delta {
                                 content: Some(output.content),
                                 role: None,
-                                finish_reason: None,
                             })
                             .await
                             .is_err()
@@ -916,10 +917,9 @@ async fn router_inference_stream(
                         );
                     }
                     if sse_tx
-                        .send(StreamEvent::Delta {
-                            content: None,
-                            role: None,
-                            finish_reason: Some(output.finish_reason.clone()),
+                        .send(StreamEvent::Finish {
+                            reason: output.finish_reason.clone(),
+                            route: output.trace.as_ref().map(|t| t.route_summary()),
                         })
                         .await
                         .is_err()
@@ -1051,12 +1051,12 @@ pub(super) async fn split_non_stream_response(
         None,
         &[],
         tools_requested,
+        trace.as_ref(),
     );
 
     Ok(crate::api::attach_route_headers(
         Json(response).into_response(),
         trace.as_ref(),
-        false,
     ))
 }
 
@@ -1296,10 +1296,9 @@ pub(super) async fn split_stream_response(
         // the worker has already finished).
         if !crate::api::sse_send_live(
             &tx,
-            StreamEvent::Delta {
-                content: None,
-                role: None,
-                finish_reason: Some(finish),
+            StreamEvent::Finish {
+                reason: finish,
+                route: Some(stream_trace.snapshot().route_summary()),
             },
         )
         .await
@@ -1358,7 +1357,6 @@ pub(super) async fn stream_response(
                     StreamEvent::Delta {
                         content: Some(token.to_string()),
                         role: None,
-                        finish_reason: None,
                     },
                 );
                 if !delivered {
@@ -1381,11 +1379,12 @@ pub(super) async fn stream_response(
         match result {
             Ok(r) => {
                 let finish = r.finish_reason.as_str().to_string();
+                // The in-process executor, with no router: no trace, so no
+                // route — its non-streamed sibling refuses rather than answers.
                 if tx
-                    .send(StreamEvent::Delta {
-                        content: None,
-                        role: None,
-                        finish_reason: Some(finish.clone()),
+                    .send(StreamEvent::Finish {
+                        reason: finish.clone(),
+                        route: None,
                     })
                     .await
                     .is_err()
@@ -1472,6 +1471,7 @@ fn stream_events_to_sse(
                     }],
                     session_id: None,
                     usage: None,
+                    swarmllm: None,
                 };
                 Event::default().data(serde_json::to_string(&chunk).unwrap_or_default())
             })
@@ -1482,16 +1482,7 @@ fn stream_events_to_sse(
             activity.note()
         })
         .map(move |event| match event {
-            StreamEvent::Delta {
-                content,
-                role,
-                finish_reason,
-            } => {
-                let sid = if finish_reason.is_some() {
-                    session_id.clone()
-                } else {
-                    None
-                };
+            StreamEvent::Delta { content, role } => {
                 let chunk = ChatCompletionChunk {
                     id: request_id.clone(),
                     object: "chat.completion.chunk",
@@ -1505,11 +1496,49 @@ fn stream_events_to_sse(
                             reasoning_content: None,
                             tool_calls: None,
                         },
-                        finish_reason,
+                        finish_reason: None,
                         logprobs: None,
                     }],
-                    session_id: sid,
+                    session_id: None,
                     usage: None,
+                    swarmllm: None,
+                };
+                json_buf.clear();
+                let json = if serde_json::to_writer(&mut json_buf, &chunk).is_ok() {
+                    // R108: per-token. Move the buffer into String without
+                    // copying; serde_json::to_writer guarantees valid UTF-8 so
+                    // `from_utf8` cannot fail. Re-prime json_buf for the next
+                    // event with the same starting capacity.
+                    let taken = std::mem::take(&mut json_buf);
+                    json_buf = Vec::with_capacity(512);
+                    String::from_utf8(taken).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                Ok::<_, Infallible>(Event::default().data(json))
+            }
+            // The finish chunk: the reply's last word on itself — the session
+            // to send back, and which computers served it (#251 (3)).
+            StreamEvent::Finish { reason, route } => {
+                let chunk = ChatCompletionChunk {
+                    id: request_id.clone(),
+                    object: "chat.completion.chunk",
+                    created,
+                    model: model_name.clone(),
+                    choices: vec![ChunkChoice {
+                        index: 0,
+                        delta: Delta {
+                            role: None,
+                            content: None,
+                            reasoning_content: None,
+                            tool_calls: None,
+                        },
+                        finish_reason: Some(reason),
+                        logprobs: None,
+                    }],
+                    session_id: session_id.clone(),
+                    usage: None,
+                    swarmllm: crate::api::SwarmllmReply::for_route(route),
                 };
                 json_buf.clear();
                 let json = if serde_json::to_writer(&mut json_buf, &chunk).is_ok() {
@@ -1546,6 +1575,7 @@ fn stream_events_to_sse(
                     }],
                     session_id: None,
                     usage: None,
+                    swarmllm: None,
                 };
                 Ok::<_, Infallible>(
                     Event::default().data(serde_json::to_string(&chunk).unwrap_or_default()),
@@ -1570,6 +1600,7 @@ fn stream_events_to_sse(
                     }],
                     session_id: None,
                     usage: None,
+                    swarmllm: None,
                 };
                 Ok::<_, Infallible>(
                     Event::default().data(serde_json::to_string(&chunk).unwrap_or_default()),
@@ -1617,6 +1648,7 @@ fn stream_events_to_sse(
                         prompt_tokens,
                         completion_tokens,
                     )),
+                    swarmllm: None,
                 };
                 let json = serde_json::to_string(&chunk).unwrap_or_default();
                 Ok(Event::default().data(json))
@@ -1648,4 +1680,137 @@ fn stream_events_to_sse(
     Sse::new(StreamExt::merge(stream, ticker)).keep_alive(
         KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
     )
+}
+
+#[cfg(test)]
+mod route_in_body_tests {
+    use super::*;
+    use crate::api::route_test_support::{fake_router, sse_payloads, test_app, two_computer_trace};
+
+    fn chat_request() -> ChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "stream": true,
+            "messages": [{"role": "user", "content": "hi"}],
+        }))
+        .unwrap()
+    }
+
+    /// **A streamed chat reply names the computers that served it** (#251
+    /// (3)). It has no `x-swarm-*` headers — they flush before a route exists
+    /// — so the finish chunk carries `swarmllm.route`, read from the trace the
+    /// ROUTER attached to the token sender: the API code never sees that trace
+    /// any other way. Driven through the real stream task and encoder.
+    #[tokio::test]
+    async fn a_streamed_chat_reply_names_its_route_on_the_finish_chunk() {
+        let app = test_app();
+        let response = router_inference_stream(
+            &app.state,
+            fake_router("hello"),
+            &chat_request(),
+            Vec::new(),
+            "swarm-test".into(),
+            0,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{}", e.0));
+        let chunks: Vec<serde_json::Value> = sse_payloads(response)
+            .await
+            .into_iter()
+            .filter(|p| p != "[DONE]")
+            .map(|p| serde_json::from_str(&p).unwrap())
+            .collect();
+        let finish: Vec<_> = chunks
+            .iter()
+            .filter(|c| c["choices"][0]["finish_reason"].is_string())
+            .collect();
+        assert_eq!(finish.len(), 1, "one finish chunk: {chunks:?}");
+        let route = &finish[0]["swarmllm"]["route"];
+        assert_eq!(route["route"], "distributed", "{chunks:?}");
+        assert_eq!(route["segments"], 2);
+        assert_eq!(route["peers"], 1);
+        assert_eq!(route["nodes"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            chunks
+                .iter()
+                .filter(|c| c.get("swarmllm").is_some())
+                .count(),
+            1,
+            "only the finish chunk carries it: {chunks:?}"
+        );
+    }
+
+    /// **A streamed Responses reply names the route of the chat reply under
+    /// it** — in the response object of `response.completed`, which is also
+    /// what is stored and read back. Its stream is built on the chat stream, so
+    /// this drives the two together.
+    #[tokio::test]
+    async fn a_streamed_response_names_the_route_of_the_chat_reply_under_it() {
+        let app = test_app();
+        let state = app.state.clone();
+        let chat_future = async move {
+            router_inference_stream(
+                &state,
+                fake_router("hello"),
+                &chat_request(),
+                Vec::new(),
+                "swarm-test".into(),
+                0,
+                None,
+            )
+            .await
+        };
+        let req: crate::api::openai::responses::types::ResponsesRequest =
+            serde_json::from_value(serde_json::json!({"model": "m", "input": "hi"})).unwrap();
+        let events: Vec<_> = futures::StreamExt::collect(
+            crate::api::openai::responses::stream::run_streaming_buffered(
+                chat_future,
+                req,
+                "resp_x".into(),
+                "msg_x".into(),
+                0,
+                None,
+            ),
+        )
+        .await;
+        let completed = events
+            .iter()
+            .find(|e| e.event_name == "response.completed")
+            .expect("the response completes");
+        let route = &completed.data["response"]["swarmllm"]["route"];
+        assert_eq!(route["route"], "distributed", "{:?}", completed.data);
+        assert_eq!(route["peers"], 1);
+    }
+
+    /// A chat completion that is not streamed carries the same object in its
+    /// body as well as the headers, so one parser reads both forms; a reply
+    /// with no swarm route leaves it out rather than guessing.
+    #[test]
+    fn an_unstreamed_chat_reply_carries_the_route_in_its_body_too() {
+        let snapshot = two_computer_trace(uuid::Uuid::nil()).snapshot();
+        let build = |trace| {
+            serde_json::to_value(build_chat_completion_response(
+                "id".into(),
+                0,
+                "m".into(),
+                "hi".into(),
+                "stop".into(),
+                1,
+                1,
+                None,
+                &[],
+                false,
+                trace,
+            ))
+            .unwrap()
+        };
+        let served = build(Some(&snapshot));
+        assert_eq!(served["swarmllm"]["route"]["segments"], 2);
+        assert_eq!(
+            served["swarmllm"]["route"],
+            serde_json::to_value(snapshot.route_summary()).unwrap()
+        );
+        assert!(build(None).get("swarmllm").is_none());
+    }
 }

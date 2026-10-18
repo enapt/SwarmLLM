@@ -54,6 +54,13 @@ pub(super) enum AnthropicSseEvent {
         /// correctly (measured 2026-08-10: 0 against a true 59). Reporting it
         /// here, where it IS known, is what the official SDKs accumulate.
         input_tokens: Option<u32>,
+        /// Which computers served the request, sent as the event's top-level
+        /// `swarmllm.route` (#251 (3)): a streamed reply has no `x-swarm-*`
+        /// headers. On `message_delta` because it is the event that closes the
+        /// reply — the route is final — and because the Python SDK drops an
+        /// event NAME it does not know while keeping unknown fields
+        /// (`extra="allow"`). `None` where there is no swarm route.
+        route: Option<crate::inference::trace::RouteSummary>,
     },
     MessageStop,
     /// A failure, in the shape the Anthropic API actually uses for one.
@@ -173,6 +180,7 @@ pub(super) fn serialize_anthropic_event(event: &AnthropicSseEvent) -> (&'static 
             stop_sequence,
             output_tokens,
             input_tokens,
+            route,
         } => ("message_delta", {
             let mut usage = serde_json::json!({ "output_tokens": output_tokens });
             // Omitted rather than sent as 0 when unknown: a client that sums
@@ -180,12 +188,15 @@ pub(super) fn serialize_anthropic_event(event: &AnthropicSseEvent) -> (&'static 
             if let Some(input) = input_tokens {
                 usage["input_tokens"] = (*input).into();
             }
-            serde_json::json!({
+            let mut event = serde_json::json!({
                 "type": "message_delta",
                 "delta": { "stop_reason": stop_reason, "stop_sequence": stop_sequence },
                 "usage": usage
-            })
-            .to_string()
+            });
+            if let Some(reply) = crate::api::SwarmllmReply::for_route(route.clone()) {
+                event["swarmllm"] = serde_json::to_value(reply).unwrap_or_default();
+            }
+            event.to_string()
         }),
         AnthropicSseEvent::MessageStop => (
             "message_stop",
@@ -282,6 +293,7 @@ pub(super) async fn send_sse_epilogue(
     stop_reason: String,
     output_tokens: u32,
     input_tokens: Option<u32>,
+    route: Option<crate::inference::trace::RouteSummary>,
 ) {
     send_sse_epilogue_with_stop(
         sse_tx,
@@ -290,6 +302,7 @@ pub(super) async fn send_sse_epilogue(
         output_tokens,
         TextBlock::Open,
         input_tokens,
+        route,
     )
     .await
 }
@@ -317,6 +330,10 @@ pub(super) enum TextBlock {
 
 /// Variant that carries the matched `stop_sequence` string in the
 /// `message_delta` event when `stop_reason == "stop_sequence"`.
+///
+/// `route` is REQUIRED, like `text_block`: the epilogue is where a streamed
+/// reply says which computers served it (#251 (3)), so a new streaming path
+/// has to say what its route was — `None` only where there is no swarm route.
 pub(super) async fn send_sse_epilogue_with_stop(
     sse_tx: &tokio::sync::mpsc::Sender<AnthropicSseEvent>,
     stop_reason: String,
@@ -324,6 +341,7 @@ pub(super) async fn send_sse_epilogue_with_stop(
     output_tokens: u32,
     text_block: TextBlock,
     input_tokens: Option<u32>,
+    route: Option<crate::inference::trace::RouteSummary>,
 ) {
     if text_block == TextBlock::Open {
         let _ = sse_tx
@@ -336,6 +354,7 @@ pub(super) async fn send_sse_epilogue_with_stop(
             stop_sequence,
             output_tokens,
             input_tokens,
+            route,
         })
         .await;
     let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
@@ -458,6 +477,7 @@ mod block_sequencing_tests {
                 stop_sequence: None,
                 output_tokens: 1,
                 input_tokens: None,
+                route: None,
             });
             let v: serde_json::Value = serde_json::from_str(&data).unwrap();
             let got = v["delta"]["stop_reason"].as_str().unwrap_or_default();
@@ -522,6 +542,7 @@ mod block_sequencing_tests {
             5,
             TextBlock::AlreadyClosed,
             None,
+            None,
         )
         .await;
         drop(tx);
@@ -541,7 +562,8 @@ mod block_sequencing_tests {
     #[tokio::test]
     async fn epilogue_closes_the_text_block_when_still_open() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(8);
-        send_sse_epilogue_with_stop(&tx, "end_turn".into(), None, 5, TextBlock::Open, None).await;
+        send_sse_epilogue_with_stop(&tx, "end_turn".into(), None, 5, TextBlock::Open, None, None)
+            .await;
         drop(tx);
 
         let mut names = Vec::new();
@@ -565,8 +587,16 @@ mod block_sequencing_tests {
     #[tokio::test]
     async fn the_epilogue_reports_prompt_tokens_when_known() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(8);
-        send_sse_epilogue_with_stop(&tx, "end_turn".into(), None, 5, TextBlock::Open, Some(38))
-            .await;
+        send_sse_epilogue_with_stop(
+            &tx,
+            "end_turn".into(),
+            None,
+            5,
+            TextBlock::Open,
+            Some(38),
+            None,
+        )
+        .await;
         drop(tx);
 
         let mut delta = None;
@@ -586,7 +616,8 @@ mod block_sequencing_tests {
     #[tokio::test]
     async fn an_unknown_prompt_count_is_omitted_rather_than_zero() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(8);
-        send_sse_epilogue_with_stop(&tx, "end_turn".into(), None, 5, TextBlock::Open, None).await;
+        send_sse_epilogue_with_stop(&tx, "end_turn".into(), None, 5, TextBlock::Open, None, None)
+            .await;
         drop(tx);
 
         let mut delta = None;

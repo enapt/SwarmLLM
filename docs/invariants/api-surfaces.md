@@ -2053,6 +2053,81 @@ bars that peer from the retry.
 `error_type`, because to a caller it is one situation; two variants because the
 two send the reader after DIFFERENT parts, and one hint cannot do that.
 
+## A reply says which computers served it, in every form it can take (2026-10-18, #251 (3))
+
+**What was wrong.** The route — which computers ran a request — was only ever in the
+`x-swarm-*` headers of a reply that was NOT streamed. `attach_route_headers` said it served "all
+four (OpenAI, Anthropic, Responses, MCP)" and took a `streaming: true` flag "for SSE", but no
+caller ever passed it: no streamed reply on any surface carried a route, and MCP has no headers.
+Measured on the live node (v0.3.242, gemma-2-2b): `stream: false` answered `x-swarm-route: local`,
+`-segments`, `-peers`, `-nodes`, `server-timing`; `stream: true` answered none of them. FUTURE_WORK
+#251 had also said chat streaming "already waits for planning before its headers"; it does not —
+`router_inference_stream` returns its SSE response as soon as the request is queued.
+
+**Why not hold the headers until the route is planned.** The dashboard reads a stream's
+`swarmllm-status` comments for the phases BEFORE any token — queued, planning, contacting other
+computers (`api::sse::keep_alive_lines`). Holding the response until planning would put nothing on
+the wire for exactly that window, and a queued request can wait minutes. And a route planned is not
+the route finished: a re-plan after a failure replaces it, so headers flushed at the start could name
+computers that ended up serving nothing.
+
+**So the route travels in the body**, as `swarmllm: {"route": {...}}` — the reply-side twin of the
+request's `swarmllm` field — from ONE reading of the trace, `TraceSnapshot::route_summary`, which
+the headers are now built from too (`a_replys_route_summary_and_its_headers_say_the_same_thing`):
+
+| Reply | Where `swarmllm.route` goes |
+|---|---|
+| Chat completion, not streamed | the body (beside the headers) |
+| Chat completion, streamed | the FINISH chunk only (`StreamEvent::Finish`, route REQUIRED) |
+| Anthropic `/v1/messages`, not streamed | the body (beside the headers) |
+| Anthropic, streamed | `message_delta` (`send_sse_epilogue_with_stop`'s REQUIRED `route`) |
+| Responses API, any form | the response object, copied from the chat reply under it (`translate::reply_extras_from_chat`) — live, background, and as stored |
+| MCP `chat` / `delegate` | the result's `_meta["com.swarmllm/route"]` |
+| MCP fan-out (compare, research, batch) | each model's own result object, `route`, stamped in `spawn_model_call_task` |
+
+**Where a streamed reply gets the route.** The router makes a request's trace at admission and
+attaches it to the token sender it was handed; the API code holds only the receiver. The channel now
+shares that trace (`StreamingTokenTx::channel` → `StreamingTokenRx::route`), read when the reply
+FINISHES — every re-plan has happened by then, so it is the route a non-streamed reply's headers give
+for the same request. Not `active_traces`: only the distributed path writes it, and the router
+removes the entry as it finishes, possibly before the reader takes the last token. The Anthropic
+router stream already awaits the router's final result before its epilogue, so it uses that
+snapshot (the headers' own source) and falls back to the receiver. The local split paths own their
+trace and read it directly.
+
+**Why these carriers** (researched 2026-10-18, primary sources):
+
+- An extra top-level field on an existing chunk is what OpenRouter (`provider`) and this server
+  (`session_id`, on the same finish chunk) already do; the OpenAI and Anthropic Python SDKs keep
+  unknown fields (`BaseModel` `extra="allow"`), the Node SDKs pass the parsed JSON through.
+- NEVER a chunk of its own: a `choices: []` chunk a client did not ask for breaks every reader
+  that indexes `choices[0]` — Azure's first `prompt_filter_results` chunk did
+  (azure-sdk-for-go #21086), and OpenRouter gives its usage chunk one empty choice for that reason.
+- Anthropic's Python SDK silently drops an event NAME it does not know (`_streaming.py`), so a
+  new event would vanish there; a field on `message_delta` is kept.
+- MCP 2025-11-25 § `_meta`: a `Result` (so `CallToolResult`) may carry `_meta`; keys take a
+  reverse-DNS prefix, and `…modelcontextprotocol…`/`…mcp…` second labels are reserved. `_meta` is
+  for the program driving the tool — the route is not put in the text the model reads.
+- HTTP trailers are not readable from `fetch`/XHR (MDN), and no LLM API uses them for this.
+
+**What it reports, and does not.** The route the reply FINISHED on. A request re-planned after a
+failure (`assemblies > 1` on the trace) reports its last route only — in the body and the headers
+alike; FUTURE_WORK #302. A reply with no swarm route (a cloud provider's, a refusal before
+dispatch, the router-less in-process executor) carries no `swarmllm` at all: absent is honest where
+a guessed `local` would not be.
+
+**What a change must keep.** A new streaming path passes a route to `StreamEvent::Finish` /
+`send_sse_epilogue_with_stop` (the compiler asks); a new reply builder takes the trace
+(`build_chat_completion_response`'s REQUIRED `trace`, `build_messages_response`); a new MCP tool
+that answers with one model call uses `tool_text_result_with_route`, a fan-out goes through
+`spawn_model_call_task`. Tests: 11 (`route_in_body_tests` in `openai/streaming.rs` and
+`anthropic/handlers.rs` drive the real stream tasks over a router that attaches a trace,
+`route_test_support`), 13 mechanisms toggled off and shown red.
+Live, `examples/split_rig.sh route` (2026-10-18, TinyLlama, A holding shard 0 and B shard 1, both
+on the processor): all eight forms — chat, Anthropic and Responses each streamed and not, MCP
+`chat` and `compare` — named `distributed`, 2 segments, 1 peer, the nodes the headers named; the
+streamed chat carried it on its finish chunk alone, and the text the model reads held none of it.
+
 ## Single-source-of-truth helpers — API surfaces, errors and streaming
 
 Each names the ONE place a decision is made. A second implementation of any of
@@ -2063,7 +2138,8 @@ Full evidence: `docs/invariants/api-surfaces.md`
 
 - **`api::metrics::network_traffic_json` — every status payload reports traffic the same way, and there are THREE.** `/api/admin/stats`, the WebSocket `stats_update` tick, and `/v1/status` (which `swarmllm status` reads). One builder is not one surface: the figure reached two of them and the CLI printed nothing, while its formatter passed against a hand-made object (gotcha #569). `every_stats_surface_carries_the_traffic_figure` in `tests/repo_consistency.rs` names all three.
 
-- **`api::mcp::dispatch::spawn_model_call_task`** — the single place that decides whether a fan-out model call actually **answered**, as opposed to merely not erroring.
+- **`inference::trace::TraceSnapshot::route_summary`** — the single reading of which computers served a request, for every reply that reports it: the `x-swarm-*` headers and `swarmllm.route` in a reply's body, streamed or not, Anthropic, Responses, MCP `_meta`. → § "A reply says which computers served it, in every form it can take".
+- **`api::mcp::dispatch::spawn_model_call_task`** — the single place that decides whether a fan-out model call actually **answered**, as opposed to merely not erroring — and stamps each fan-out answer's route.
 - **`inference::model_worker::resolve_max_new_tokens`** — the single answer to "how many tokens may this reply use", against the model's real context window. Both tokenization sites call it AND use what it returns. A budget the caller did not name is a ceiling to lower, never a value to check and refuse.
 - **`crate::error::reclassify_flattened_error`** — recovers an error's CLASS from a message that crossed a boundary carrying no types.
 - **`crate::error::classify_error`** — the single answer to "what is this failure, to a caller": `(StatusCode, client-safe message, error type)`.

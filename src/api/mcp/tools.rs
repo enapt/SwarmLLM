@@ -167,7 +167,11 @@ async fn tool_chat(
     )
     .await
     {
-        Ok(Ok(response)) => tool_text_result(id, response.content),
+        Ok(Ok(response)) => super::types::tool_text_result_with_route(
+            id,
+            response.content,
+            response.trace.as_ref().map(|t| t.route_summary()),
+        ),
         Ok(Err(e)) => JsonRpcResponse::error(
             id,
             super::types::tool_error_code(&e.0),
@@ -888,9 +892,10 @@ async fn tool_delegate(
         "latency_ms": call.elapsed_ms,
     });
 
-    tool_text_result(
+    super::types::tool_text_result_with_route(
         id,
         serde_json::to_string_pretty(&result).unwrap_or_default(),
+        call.route,
     )
 }
 
@@ -1047,5 +1052,47 @@ mod fast_tier_tests {
             fast_tier_rank("network", 4_000_000_000, false) < fast_tier_rank("network", 0, false),
             "unknown size must sort last, not first"
         );
+    }
+}
+
+#[cfg(test)]
+mod route_meta_tests {
+    use super::*;
+
+    /// **An MCP `chat` result names the computers that served it** in its
+    /// `_meta` (#251 (3)) — JSON-RPC has no headers to say it in, and `_meta`
+    /// is for the program driving the tool, not the text the model reads.
+    /// Driven through the real tool over a router that serves on two computers.
+    #[tokio::test]
+    async fn an_mcp_chat_result_names_its_route_in_meta() {
+        let mut app = crate::api::route_test_support::test_app();
+        app.state.router_tx = Some(crate::api::route_test_support::fake_unstreamed_router("hi"));
+        let reply = tool_chat(
+            &app.state,
+            Some(json!(1)),
+            json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]}),
+            KeepAsked::Unasked,
+        )
+        .await;
+        let v = serde_json::to_value(reply).unwrap();
+        let route = &v["result"]["_meta"][super::super::types::ROUTE_META_KEY];
+        assert_eq!(route["route"], "distributed", "{v}");
+        assert_eq!(route["peers"], 1);
+        assert!(
+            !v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("distributed"),
+            "the route is for the program, not the model's text: {v}"
+        );
+    }
+
+    /// A result with no swarm route carries no `_meta` at all — absent is
+    /// honest where a guessed route would not be.
+    #[test]
+    fn a_result_with_no_route_has_no_meta() {
+        let v = serde_json::to_value(super::super::types::tool_text_result(Some(json!(1)), "x"))
+            .unwrap();
+        assert!(v["result"].get("_meta").is_none(), "{v}");
     }
 }

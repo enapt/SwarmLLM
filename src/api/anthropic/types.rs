@@ -208,6 +208,12 @@ pub struct MessagesResponse {
     pub stop_reason: Option<String>,
     pub stop_sequence: Option<String>,
     pub usage: AnthropicUsage,
+    /// Which computers served the request (`swarmllm.route`, #251 (3)) — the
+    /// same facts as the `x-swarm-*` headers. Left out where there is no
+    /// swarm route; set by `handlers::build_messages_response`, the one
+    /// builder of a reply the swarm served.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swarmllm: Option<crate::api::SwarmllmReply>,
 }
 
 impl MessagesResponse {
@@ -255,6 +261,7 @@ impl MessagesResponse {
                 output_tokens,
                 ..Default::default()
             },
+            swarmllm: None,
         }
     }
 
@@ -285,6 +292,7 @@ impl MessagesResponse {
                 output_tokens,
                 ..Default::default()
             },
+            swarmllm: None,
         }
     }
 }
