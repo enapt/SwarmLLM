@@ -12,7 +12,11 @@ what this node's upload and download are made of. Since 0.3.243, `direct_by_kind
 lists this node's own messages by kind, and `by_protocol` lists every byte by the
 network protocol its connection used, with `opened_by`: `us` for what this node
 asked, `peer` for what it answered. The `by_protocol` rows add up to `out_bytes`
-and `in_bytes`.
+and `in_bytes`. Since 0.3.244, `kad_inbound` has one row for each kind of
+Kademlia request other nodes send this one (`find_node`, `get_provider`,
+`add_provider`, `get_record`, `put_record`, zeros included): `requests` handled,
+and the peers its answers listed — `closer_peers`, and `provider_peers` for the
+holders it named.
 
 ### GET /api/admin/peers
 Connected peers with latency, trust scores, and hosted models.

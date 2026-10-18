@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.3.244-alpha] — 2026-10-19
+
+**Replies on a graphics card no longer slow down after 64 tokens.** When a conversation
+reached 64 tokens, the card's work for each step changed shape, so the recorded steps the card
+replays were all rebuilt in that one step: 790 ms on Gemma 3 4B. Every model on a card paid
+it, and a reply's speed depended on whether it crossed that point. Gemma 3 4B ran at 51 to 79
+tokens a second and now holds 78.6; Phi-4-mini ran at 51 to 67 and now holds 92. Replies are
+the same.
+
+**Gemma 4 E2B writes replies about twice as fast on a graphics card, and E4B about 1.5 times.**
+On an RTX 3070 Laptop, Gemma 4 E2B went from 45-49 tokens a second to 93 (llama.cpp: 115), and
+E4B from 34-40 to 60. These two models' steps could not be recorded for the card to replay, and
+once they could, preparing each step spent most of its time waiting on the card's memory
+handling. Both are fixed. Phi-4-mini, GLM-4 and Qwen 3.5 also do one part of each layer's step
+with two card instructions instead of ten. Replies are the same on every model.
+
+**Requests across several computers are priced more accurately, so better routes win.** When a
+model can run more than one way, SwarmLLM estimates how long each way would take and picks the
+quickest. Four more errors in those estimates are fixed:
+- A conversation's next message sent to the same computer was estimated as if that computer
+  had to read the whole conversation again, but it keeps what it already read. A 2,744-token
+  agent conversation's second message was estimated at 148.8 s and took 14.8 s; it is now
+  estimated at 7.8 s.
+- A split that guesses several tokens ahead and checks them together was estimated one full
+  trip per token. It is now estimated from how many tokens its recent rounds actually produced:
+  such requests took 0.77 of their estimate, where they took 0.49.
+- In a chain run entirely on other computers, the computers after the first were estimated from
+  the speed they claim. Each computer now measures and announces how fast it really serves other
+  people's requests, and that figure can only make it look slower, never faster. A reply
+  estimated at 2.3 s of work had taken 19.4 s.
+- Computers already holding a chain of a model's layers in memory are now planned that chain,
+  instead of a slightly different split that made one of them read 29 layers from disk again.
+  Replies were estimated at 7.6 s and took 23.8 s; now 17.3 s and 15.5 s.
+
+**A split no longer reads a long prompt only to find a computer cannot hold it.** Before reading
+the prompt, the computer driving a split now asks each computer later in the chain whether it
+has room. One that does not says how much of its part would fit, and the split is planned around
+that. In a two-computer test where the second had too little room, the previous release answered
+after 132.8 s; this one answers in 1.4 s. The question reserves nothing, older computers are not
+asked, and a computer that does not answer within a few seconds is treated as having room, as
+before.
+
+**A streamed reply answered by this computer alone now says so.** Since v0.3.243 every reply
+names the computers that answered it in `"swarmllm": {"route": ...}`. A streamed reply from a
+model this computer holds whole reported no computer at all. The replies themselves were
+unaffected.
+
+**The traffic stats count the network lookups other computers send.** `network_traffic` in
+`/api/admin/stats` gains `kad_inbound`: for each kind of lookup a peer can send, how many this
+computer answered and how many peers the answers listed. It shows what the remaining idle
+upload is spent on.
+
+For developers: `swarmllm test-split` now prints its decode rate after the first 8 steps, and
+`SWARMLLM_PROFILE=1` names the token embedding, the output head and each recorded step's
+hand-over to the card, so a step bound by the processor can be told from one bound by the card
+(`docs/DIAGNOSTICS.md`).
+
 ## [0.3.243-alpha] — 2026-10-18
 
 **Qwen 3.5 conversations answer the next message much sooner.** Each new message in a Qwen 3.5

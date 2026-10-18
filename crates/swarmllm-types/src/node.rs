@@ -616,9 +616,10 @@ pub struct ResidentModelLayers {
     #[serde(default)]
     pub ranges: Vec<ResidentLayerRange>,
     /// What one decode step of this model costs this node's OWN worker, per
-    /// layer, in MICROSECONDS: its warm decode figure for the work it ran
-    /// itself — segments it served for a peer, and its own share of a split.
-    /// Petals servers publish the same thing (`inference_rps`, timed on the
+    /// layer, in MICROSECONDS: the fastest of the last 32 single-token steps
+    /// its worker ran for OTHER nodes — never its owner's own requests, so the
+    /// figure says nothing about when the owner used a model
+    /// (`process_pool::OwnDecodeSpeed`). Petals servers publish the same thing (`inference_rps`, timed on the
     /// real block and kept per model, device and data type) and its clients
     /// price a span's compute from it.
     ///

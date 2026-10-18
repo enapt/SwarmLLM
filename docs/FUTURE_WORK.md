@@ -72,7 +72,7 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    Kademlia answering other nodes' lookups, ~2.1 KB/s; (2f) republishes provider records every 4 h
    instead of 20 min (v0.3.243). Field re-read 10-18: upload 2.7 KB/s, but the Kademlia answers
    fell to 0.90 KB/s, 2.3x, not the 12x the republication alone predicted. `kad_inbound` ((2g),
-   10-19, unreleased) now counts which lookups peers send; next, re-read it on the field.
+   v0.3.244) now counts which lookups peers send; next, re-read it on the field.
 8. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
     ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
     (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
@@ -82,7 +82,7 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
     priced by their own published decode time (#3 (f)), and a peer handed a prompt is priced for
     its cached opening on the next turn (#3 (c)), all fixed 10-18, and a split is priced for the
     rounds it takes, a guessed token not crossing alone (#3 (d), 0.49 → 0.77 of its price on the
-    drafter rig), 10-19, all unreleased; next, a chain driven from here (#3 (a2)). Never tune the
+    drafter rig), 10-19, all in v0.3.244; next, a chain driven from here (#3 (a2)). Never tune the
     constant.
 9. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
@@ -661,15 +661,15 @@ under-priced by its length ÷ 64~~ (2.49x / 2.62x at 160 tokens on two peers' ha
 (`daemon::state::reply_lengths`, the last 32 finished replies once there are 4), still capped by
 `max_tokens`; left is one reply's spread around its model's mean, which nothing before the reply
 can read; (c) ~~a peer's prompt cache is unpriced~~ (a repeated 505-token prompt priced
-20 s, read in ~0: 0.25x) — **fixed 2026-10-18, not yet released** (§ Closed): a peer is
+20 s, read in ~0: 0.25x) — **fixed 2026-10-18, released in v0.3.244** (§ Closed): a peer is
 credited the opening of a prompt this node handed it in the last 300 s; (d) ~~the drafter's gain is
-unpriced~~ (0.39x, 10-15) — **fixed 2026-10-19, not yet released** (§ Closed): a segment of a split
+unpriced~~ (0.39x, 10-15) — **fixed 2026-10-19, released in v0.3.244** (§ Closed): a segment of a split
 driven from here is priced for the rounds its model's splits took (tokens per round, measured where
 each round leaves); found by (a)'s check (2026-10-18, five requests on
 the live swarm): (e) ~~a led chain is charged a load that never happens~~ — **fixed 2026-10-18,
-not yet released** (§ Closed); (f) ~~a led chain's peers are never measured from here~~ (a
-warm two-peer 16-token reply priced 2.3 s of compute, took 19.4 s) — **fixed 2026-10-18, not yet
-released** (§ Closed): each worker publishes its own decode time per layer, as Petals servers
+released in v0.3.244** (§ Closed); (f) ~~a led chain's peers are never measured from here~~ (a
+warm two-peer 16-token reply priced 2.3 s of compute, took 19.4 s) — **fixed 2026-10-18, released
+in v0.3.244** (§ Closed): each worker publishes its own decode time per layer, as Petals servers
 publish `inference_rps`, and a coordinator takes it as a floor under the stated speed.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
@@ -1096,7 +1096,7 @@ falls ~12x once the fleet updates. Next: re-read `by_protocol` on the field afte
 relay hop 91, `/swarmllm/1.0.0` 190, our own direct messages 169 of it. The kad row fell 2.3x, not 12x: the
 one .242 peer explains ~0.3 KB/s, so ~0.6 KB/s is lookups other than republication — the periodic
 routing-table bootstrap (libp2p's default, every 5 min, untouched here) and `get_providers` are the
-candidates, and nothing counted them apart. **(2g) 2026-10-19, not yet released**: `kad_inbound` in the
+candidates, and nothing counted them apart. **(2g) 2026-10-19, released in v0.3.244**: `kad_inbound` in the
 traffic payload counts every Kademlia request peers send, by kind (`find_node` = a routing-table
 refresh or a publication's lookup, `get_provider` = a holder lookup, `add_provider` = a publication),
 with the peers each answer listed (`KadInboundMeter`, the five kinds libp2p-metrics' `inbound_requests`
@@ -1406,9 +1406,18 @@ llama.cpp `llama-bench -ngl 99 -n 128`, median sample): TinyLlama 1.1B Q4_K_M 23
 (0.81, since #295 (b)). Every 3B-and-larger family reads 0.84-0.97
 (`docs/DIAGNOSTICS.md` § "One model's decode rate on this machine" has the table), so what is left
 is a per-step cost that a small model's short step cannot hide: ~4.2 ms against ~3.3 ms on
-TinyLlama, with every step captured as CUDA graphs. Not established: which kernels. Next: nsys one
-step of each, ours against llama.cpp's, and compare kernel counts and per-kernel times (the group
-boundaries' parking copies, `rms_norm`, the sampler's host round trip are the candidates).
+TinyLlama, with every step captured as CUDA graphs. **It is on the card, not the host**
+(2026-10-19, `SWARMLLM_PROFILE` with graphs on, whose `total` is then the host's recording time;
+median of a 60-token reply's last steps): TinyLlama host 2.0 of a 4.29 ms step, Gemma 3 1B 3.0 of
+6.08, Qwen 3.5 0.8B 5.0 of 7.07, Llama 3.2 1B 2.0 of 5.71, Gemma 4 E2B 6.0 of 10.45; graph launches
+0.1-0.5 ms a step on every family (so none has #295 (b)'s defect). Kernel counts are near
+llama.cpp's by construction (Gemma 3 1B 26 a layer: 7 quantized matmuls, 4 q8_1 quantizes, 6
+norms, rope and cache writes twice, decode attention and its merge, GELU × up), so the difference
+is per-kernel time. Not established: which kernels. nsys records NO GPU kernels on this WSL2 box
+(only API calls, 2026-10-19), so per-kernel time needs another instrument. Next: llama.cpp's
+`test-backend-ops perf -o MUL_MAT` (built in `~/llama.cpp-ref/build-cuda/bin`) against our vendored
+`mul_mat_vec_*_q8_1` at the same shapes, each timed inside a CUDA graph so launch cost is
+excluded — candle's copy of the kernel predates llama.cpp's later small-matrix tuning.
 
 #### #293 — A split's first prompt chunk after load spends 1-6 s in its first attention, once its experts go to the card
 `P3` · speed · **OPEN** — 2026-10-16 · history: found measuring #292
@@ -2019,7 +2028,7 @@ and adapter close per reading — the closing is where it waited longest). Then 
 the thread sampler (`examples/thread_sample.py`).
 
 #### #252 — `/v1/models` advertises a context the card cannot hold
-`P3` · memory · **PARTIAL — (a) parked; (b) (2) fixed 2026-10-18, not yet released; (b) (1) parked** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.234)
+`P3` · memory · **PARTIAL — (a) parked; (b) (2) fixed 2026-10-18, released in v0.3.244; (b) (1) parked** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.234)
 
 Qwen3-14B on a 12 GB card: `/v1/models` says `max_model_len: 8192` (the declared limit under
 `DEFAULT_MAX_SEQ_LEN`), but with the weights loaded the KV budget is 860 MB, and a 6,228-token
@@ -2092,7 +2101,7 @@ load), predicted 93 s. The same request warm, 4 min later: AU + BE, ttft 24.8 s,
 relaxed rung's gamble lost twice on one peer, not a stale room figure under the strict bound — the
 up-front ask (2) would have turned both refusals into one round trip each.
 
-**(b) (2) fixed 2026-10-18, not yet released** (§ Closed): the coordinator asks each peer whose
+**(b) (2) fixed 2026-10-18, released in v0.3.244** (§ Closed): the coordinator asks each peer whose
 segment runs after other work before the pass, and a "no" holds that peer to the layers it said
 fit on the re-plan. Left: (b) (1), the gossiped figure — parked as above; the planner still
 charges a peer the prompt's positions where the peer admits `kv_cache_reservation(prompt + reply
@@ -2708,7 +2717,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#3 (d); #307; #295 (a), (b))
+**Closed 2026-10-19, released in v0.3.244** (#3 (d); #307; #295 (a), (b))
 - #295 (b) — **Gemma 4 E2B writes replies about half as fast again on a graphics card, E4B a fifth.**
   Once captured, an E2B step was bound by the host: launching its 17 graph groups took 5.8 ms
   (Gemma 3 4B: 0.4). Its per-layer inputs were built inside the first group, so every later group
@@ -2757,7 +2766,7 @@ grep `^| N |`).
   0.49. Counting, not deriving from α and γ: those give 2.26 tokens a round, and the stream sent
   72 chunks whose time it took. Left: the price of one round (#3's per-term fit).
 
-**Closed 2026-10-18, not yet released** (#306; #3 (c); #3 (e); #3 (f); #252 (b) (2))
+**Closed 2026-10-18, released in v0.3.244** (#306; #3 (c); #3 (e); #3 (f); #252 (b) (2))
 - #3 (c) — **A conversation's next turn on the same peer is priced for what that peer already
   read.** A peer that runs a whole model for this node keeps the prompt in its prefix cache and
   reads only what is new next turn, but the planner priced every turn as a full read: on the live
