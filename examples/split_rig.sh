@@ -172,6 +172,12 @@
 #          much. Default model qwen2.5-0.5b (it renders tools natively, like
 #          the reporter's Qwen-based xLAM). Run BIN_A = an older release for
 #          the baseline: no planner line, and the route is decided cold.
+#   handoffcache  FUTURE_WORK #3 (c): cache's two turns, but A holds the
+#          header only and B every part (processor), so each turn is handed to
+#          B whole. PASS = on turn 2 A's planner logged that B still holds the
+#          opening it was handed (`handed_off`) and B's worker `prefix-cache HIT`
+#          matched at least that much. An older BIN_A logs no credit (FAIL is
+#          the baseline): the turn is priced as a full read.
 #   splitcache  FUTURE_WORK #10: a SPLIT keeps its conversation's prompt
 #          between turns. A holds shard 0, B every other shard, both on the
 #          processor; two turns of an agent-shaped conversation (a long system
@@ -324,7 +330,7 @@ fi
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece|owntiming) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, refusepiece or owntiming"; exit 2 ;; esac
+case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece|owntiming) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, refusepiece or owntiming"; exit 2 ;; esac
 if [ -n "${RAM_A:-}${RAM_B:-}" ] && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[resources\]'; then
   echo "RAM_A/RAM_B are written to that node's [resources]; EXTRA_TOML may not open that table too"; exit 2
 fi
@@ -334,7 +340,7 @@ fi
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
 if [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
-elif [ "$MODE" = cache ]; then
+elif [ "$MODE" = cache ] || [ "$MODE" = handoffcache ]; then
   MODEL="${MODEL:-qwen2.5-0.5b-instruct-fp16}"
 elif [ "$MODE" = softunload ]; then
   MODEL="${MODEL:-qwen2.5-14b-instruct-q4-k-m}"
@@ -386,6 +392,11 @@ elif [ "$MODE" = softunload ] || [ "$MODE" = layerprice ]; then
 elif [ "$MODE" = cache ]; then
   SHARDS_A=$(echo "$SHARDS" | paste -sd,)
   SHARDS_B=$SHARDS_A
+  GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
+elif [ "$MODE" = handoffcache ]; then
+  # A holds the header only, so every turn is handed to B whole.
+  SHARDS_A=""
+  SHARDS_B=$(echo "$SHARDS" | paste -sd,)
   GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
 elif [ "$MODE" = fetch ]; then
   SHARDS_A=$(echo "$SHARDS" | paste -sd,)
@@ -1343,7 +1354,7 @@ fi
 # the prompt the #106 reference scores were taken on (repeat).
 PROMPT="Here are some notes on household appliances. $(for i in $(seq 1 12); do printf 'A refrigerator moves heat from its inside to the room using a refrigerant that evaporates in the cold coils and condenses in the warm ones; the compressor drives the cycle and the thermostat decides when it runs. '; done)Using only these notes, explain step by step how a refrigerator keeps food cold."
 
-if [ "$MODE" = cache ]; then
+if [ "$MODE" = cache ] || [ "$MODE" = handoffcache ]; then
   # Two turns of an agent conversation: a long system prompt and tool schemas
   # sent unchanged every turn, then the history grows. Written to files and
   # posted as-is, so the tools reach the template exactly as a harness sends
@@ -1370,11 +1381,35 @@ for name, msgs in (("turn1", turn1), ("turn2", turn2)):
 PY
   for t in turn1 turn2; do
     # Turn 2's lines are the ones after this — turn 1 logs a local plan too.
-    [ "$t" = turn2 ] && FROM=$(wc -l < "$BASE/A/node.log")
+    [ "$t" = turn2 ] && FROM=$(wc -l < "$BASE/A/node.log") && FROM_B=$(wc -l < "$BASE/B/node.log")
     curl -s -m 900 -D "$OUT/$t.hdr" -H "Authorization: Bearer $KA" -H "Content-Type: application/json" \
          -X POST localhost:8900/v1/chat/completions --data-binary "@$OUT/$t.json" -o "$OUT/$t.body"
-    echo "cache: $t -> $(head -1 "$OUT/$t.hdr" | tr -d '\r')  route=$(grep -i '^x-swarm-route' "$OUT/$t.hdr" | cut -d' ' -f2- | tr -d '\r')"
+    echo "$MODE: $t -> $(head -1 "$OUT/$t.hdr" | tr -d '\r')  route=$(grep -i '^x-swarm-route' "$OUT/$t.hdr" | cut -d' ' -f2- | tr -d '\r')"
   done
+  if [ "$MODE" = handoffcache ]; then
+    # FUTURE_WORK #3 (c): turn 2 is priced for what B was handed on turn 1.
+    # B's worker logs its HIT to B's log, after FROM_B (taken before turn 2).
+    python3 - "$BASE/A/node.log" "$BASE/B/node.log" "$OUT" "$FROM" "$FROM_B" <<'PY'
+import json, re, sys
+log_a = open(sys.argv[1], errors="replace").read().splitlines()[int(sys.argv[4]):]
+log_b = open(sys.argv[2], errors="replace").read().splitlines()[int(sys.argv[5]):]
+out = sys.argv[3]
+def last(log, pat):
+    hits = [l for l in log if re.search(pat, l)]
+    return hits[-1] if hits else ""
+credit = last(log_a, r"handed this prompt's opening to still holds it")
+handed = [int(t) for t in re.findall(r", (\d+)\)", credit)]
+hit = last(log_b, r"DIAG: prefix-cache HIT model_key")
+m = re.search(r"matched_tokens=(\d+)", hit)
+matched = int(m.group(1)) if m else None
+print(f"handoffcache: planner credit={handed or None}  B's worker HIT matched={matched}")
+print(f"handoffcache: planner line: {credit[:260] or '(none)'}")
+ok = bool(handed) and matched is not None and matched >= max(handed)
+print("handoffcache: PASS" if ok else "handoffcache: FAIL")
+sys.exit(0 if ok else 1)
+PY
+    exit $?
+  fi
   python3 - "$BASE/A/node.log" "$OUT" "$FROM" <<'PY'
 import json, re, sys
 log = open(sys.argv[1], errors="replace").read().splitlines()[int(sys.argv[3]):]

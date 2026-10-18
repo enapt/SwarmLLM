@@ -79,8 +79,9 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
     reply length (160-token replies were 2.5x their price), and a chain its head leads is priced
     by its own hops (network term 57.9 s → 3.6 s, same peers and passes), all in v0.3.243; two
     peers whose workers already chain are planned that chain (#3 (e)) and a led chain's peers are
-    priced by their own published decode time (#3 (f)), both fixed 10-18, unreleased; next, a
-    peer's prompt cache (#3 (c)) and the drafter's gain (#3 (d)). Never tune the constant.
+    priced by their own published decode time (#3 (f)), and a peer handed a prompt is priced for
+    its cached opening on the next turn (#3 (c)), all fixed 10-18, unreleased; next, the
+    drafter's gain (#3 (d)) and a chain driven from here (#3 (a2)). Never tune the constant.
 9. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
 10. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
@@ -657,8 +658,9 @@ under-priced by its length ÷ 64~~ (2.49x / 2.62x at 160 tokens on two peers' ha
 **fixed 2026-10-18, released in v0.3.243**: the passes are this model's mean recent reply length
 (`daemon::state::reply_lengths`, the last 32 finished replies once there are 4), still capped by
 `max_tokens`; left is one reply's spread around its model's mean, which nothing before the reply
-can read; (c) a peer's prompt cache is unpriced (a repeated 505-token prompt priced
-20 s, read in ~0: 0.25x); (d) the drafter's gain (0.39x, 10-15); found by (a)'s check (2026-10-18, five requests on
+can read; (c) ~~a peer's prompt cache is unpriced~~ (a repeated 505-token prompt priced
+20 s, read in ~0: 0.25x) — **fixed 2026-10-18, not yet released** (§ Closed): a peer is
+credited the opening of a prompt this node handed it in the last 300 s; (d) the drafter's gain (0.39x, 10-15); found by (a)'s check (2026-10-18, five requests on
 the live swarm): (e) ~~a led chain is charged a load that never happens~~ — **fixed 2026-10-18,
 not yet released** (§ Closed); (f) ~~a led chain's peers are never measured from here~~ (a
 warm two-peer 16-token reply priced 2.3 s of compute, took 19.4 s) — **fixed 2026-10-18, not yet
@@ -2662,7 +2664,21 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-18, not yet released** (#306; #3 (e); #3 (f); #252 (b) (2))
+**Closed 2026-10-18, not yet released** (#306; #3 (c); #3 (e); #3 (f); #252 (b) (2))
+- #3 (c) — **A conversation's next turn on the same peer is priced for what that peer already
+  read.** A peer that runs a whole model for this node keeps the prompt in its prefix cache and
+  reads only what is new next turn, but the planner priced every turn as a full read: on the live
+  swarm a repeated 505-token prompt was priced 20.2 s and the whole request took 7.1 s. Now, as
+  SGLang's cache-aware router and llm-d's approximate prefix scorer do, this node remembers what
+  it handed each peer (`pipeline::handoff_prompt_cache`: the prompt's 64-token block chain, keyed
+  with this process's secret and never sent anywhere, for 300 s — the idle unload — and dropped
+  on a failed hand-off) and credits the matching opening on a whole-model run there, only for a
+  request the hand-off will take (`remote_generate::request_may_be_handed_off`, split out of the
+  hand-off's own check) and only while the peer still holds the whole model. It is a price, never
+  a pin. Rig `split_rig.sh handoffcache`: turn 2 of 2,744 tokens credited 2,688, the peer's
+  worker hit 2,713; priced 7.8 s for 15.1 s, against 148.8 s for 14.8 s on v0.3.243. The old
+  reason for crediting no peer — the n-gram path running before the hand-off — had been stale
+  since 2026-09-27.
 - #252 (b) (2) — **A split whose peer has no room for the prompt finds out before anyone reads
   it.** A peer's segment was admitted only when its forward arrived — after every machine before
   it had read the prompt — and its refusal barred it from the re-plan. On `split_rig.sh peerkv`'s

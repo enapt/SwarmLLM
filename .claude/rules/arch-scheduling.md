@@ -67,7 +67,7 @@ Where this node cannot hold every layer, each planner FIRST plans with its bound
 
 ## A warm prompt is priced warm (2026-09-26)
 
-**`scheduler::cached_prefix::plan_prompt`** prices the prompt warm for a LOCAL whole-model vertex (`NodeCandidate::cached_prefix_tokens`) and for a split SEGMENT this node believes holds its opening for exactly that range (`PromptPlan::split_openings` ← `pipeline::held_openings`, the beliefs a prompt pass resumes from; #10), tokenized via `pipeline::render_prompt_from_header`. Both routers read **`NodeCandidate::prompt_tokens_held`**; greedy prices the UNREAD prompt at `parallax::prefill_ms_per_layer`, never a bare credit. **`NodeCapability::models_run_on_card`**, never `gpu.is_some()`.
+**`scheduler::cached_prefix::plan_prompt`** prices the prompt warm for a LOCAL whole-model vertex (`NodeCandidate::cached_prefix_tokens`), for a PEER's whole-model vertex from what this node handed it in the last 300 s (`PromptPlan::handed_off` ← `pipeline::handoff_prompt_cache`, only under `remote_generate::request_may_be_handed_off` and while the peer holds the whole model resident; never from its opt-in announcement; #3 (c)), and for a split SEGMENT this node believes holds its opening for exactly that range (`PromptPlan::split_openings` ← `pipeline::held_openings`, the beliefs a prompt pass resumes from; #10), tokenized via `pipeline::render_prompt_from_header`. Both routers read **`NodeCandidate::prompt_tokens_held`**; greedy prices the UNREAD prompt at `parallax::prefill_ms_per_layer`, never a bare credit. **`NodeCapability::models_run_on_card`**, never `gpu.is_some()`.
 
 → `docs/invariants/scheduling.md` § "A warm prompt is priced warm (2026-09-26)"
 

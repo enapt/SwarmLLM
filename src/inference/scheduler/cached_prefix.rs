@@ -29,13 +29,18 @@
 //! genuinely faster route still win (their `cache_threshold` +
 //! `balance_*_threshold`). See `docs/FUTURE_WORK.md` #10.
 //!
-//! **A whole model is credited only for this node's own cache.** A whole-model
-//! run here goes through `Generate`, the one path that consults the cache
-//! (`PipelineExecutor::try_local_generate_fastpath`; the three speculative paths
-//! before it all decline a plan that is entirely local). A PEER's announced
-//! cache would be priced and not delivered whenever the n-gram path takes the
-//! request — it runs before `remote_generate` for a remote single segment, and
-//! sends forwards, which never look the cache up.
+//! **A whole model is credited for this node's own cache, and for what a peer
+//! was handed.** A whole-model run here goes through `Generate`, the one path
+//! that consults the cache (`PipelineExecutor::try_local_generate_fastpath`; the
+//! three speculative paths before it all decline a plan that is entirely
+//! local). A whole model on a PEER goes through the peer's `Generate` too when
+//! the hand-off takes it (`remote_generate::eligible`; the n-gram loop stands
+//! aside for every such plan since 2026-09-27) — so a peer is credited the
+//! opening of a prompt this node handed it within the last few minutes
+//! (`pipeline::handoff_prompt_cache`, FUTURE_WORK #3 (c)), and only for a
+//! request the hand-off will take (`remote_generate::request_may_be_handed_off`).
+//! It is never credited from its own announcement (`peer_prefix_blocks`):
+//! that is opt-in, and says nothing of whether the hand-off will run.
 //!
 //! **A segment of a split is credited for what this node believes it holds**
 //! (`PromptPlan::split_openings`, FUTURE_WORK #10): the segments' own answers
@@ -86,6 +91,23 @@ pub struct PromptPlan {
     /// `false` where no request is behind the plan: priced as driven from
     /// here, exactly as before.
     pub(crate) head_may_lead: bool,
+    /// The peers believed to hold the opening of this prompt for a WHOLE-MODEL
+    /// run, with how many tokens of it: what this node handed each in the
+    /// last few minutes (`pipeline::handoff_prompt_cache`, FUTURE_WORK #3 (c)).
+    /// Empty unless tokenized, believed, and the hand-off would take the
+    /// request (`remote_generate::request_may_be_handed_off`).
+    pub(crate) handed_off: Vec<(NodeId, u32)>,
+}
+
+impl PromptPlan {
+    /// The leading tokens of this prompt `peer` is believed to hold for a
+    /// whole-model run, from an earlier hand-off.
+    pub(crate) fn handed_off_to(&self, peer: &NodeId) -> u32 {
+        self.handed_off
+            .iter()
+            .find(|(node, _)| node == peer)
+            .map_or(0, |(_, tokens)| *tokens)
+    }
 }
 
 impl From<Option<u32>> for PromptPlan {
@@ -147,7 +169,8 @@ fn worth_planning(state: &SharedState, request: &InferenceRequest) -> bool {
     // one these hash chains describe.
     !request.messages.iter().any(|m| !m.images.is_empty())
         && (local_cache_worth_asking(state, request)
-            || crate::inference::pipeline::believes_any_of(&request.model_id))
+            || crate::inference::pipeline::believes_any_of(&request.model_id)
+            || crate::inference::pipeline::handoff_prompt_cache::believes_any_of(&request.model_id))
 }
 
 /// The estimate past which a prompt is counted exactly, in tokens.
@@ -225,6 +248,17 @@ pub(crate) fn plan_prompt(state: &SharedState, request: &InferenceRequest) -> Op
         // beside the fallback plan.
         reply_tokens_at_most: None,
         head_may_lead: false,
+        handed_off: if crate::inference::pipeline::remote_generate::request_may_be_handed_off(
+            state, request,
+        ) {
+            crate::inference::pipeline::handoff_prompt_cache::handed_off_openings(
+                &request.model_id,
+                &ids,
+                std::time::Instant::now(),
+            )
+        } else {
+            Vec::new()
+        },
     })
 }
 

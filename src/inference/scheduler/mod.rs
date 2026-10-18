@@ -231,14 +231,17 @@ struct NodeCandidate {
     /// see [`PublishedRoom`].
     published_room: Option<PublishedRoom>,
     /// Leading tokens of THIS request's prompt that this candidate's worker
-    /// already holds in its prefix cache. Non-zero only for the LOCAL node
-    /// (`cached_prefix::plan_prompt`).
+    /// already holds in its prefix cache: this node's, as its worker reported
+    /// (`cached_prefix::plan_prompt`), or a peer's, as this node handed it the
+    /// prompt's opening within the last few minutes and the peer still holds
+    /// the whole model (`PromptPlan::handed_off`, FUTURE_WORK #3 (c)).
     ///
     /// `parallax::vertex_cost` takes it off the prompt a WHOLE-MODEL run
-    /// reads, and off nothing else: a whole-model run here goes through
-    /// `Generate`, the one path that looks the cache up, and a segment of a
-    /// split never does. **Never set it for a peer** — `cached_prefix`'s module
-    /// doc says why a peer's cache would be priced and not delivered.
+    /// reads, and off nothing else: a whole-model run goes through `Generate`
+    /// — here, or on the peer the hand-off sends it to — the one path that
+    /// looks the cache up, and a segment of a split never does. **Never set it
+    /// for a peer from its announcement** — `cached_prefix`'s module doc says
+    /// why.
     cached_prefix_tokens: u32,
     /// Leading tokens of THIS request's prompt this candidate is believed to
     /// hold as one SEGMENT of a split, by the exact layer range it held them
@@ -4540,6 +4543,20 @@ impl PipelineScheduler {
                     })
                     .unwrap_or_default()
             };
+            // What this peer was handed of the prompt, while it still holds
+            // the whole model: the worker keys its layers by exact range, and
+            // a hand-off runs the whole model, so only a range that IS the
+            // whole model holds the cache a hand-off left (#3 (c)).
+            let handed_off_tokens = if !is_local
+                && held_ranges
+                    .iter()
+                    .any(|h: &crate::inference::process_pool::HeldRange| {
+                        h.range == (0, manifest.num_layers)
+                    }) {
+                prompt.handed_off_to(&node_id)
+            } else {
+                0
+            };
             let mut published_room = None;
             // Bounded by the memory cap of whoever asked — the owner's, or the
             // swarm's for a split a peer delegated here — as the spawn will
@@ -4851,8 +4868,12 @@ impl PipelineScheduler {
                 has_gpu,
                 held_ranges,
                 published_room,
-                // Ours only — see the field.
-                cached_prefix_tokens: if is_local { prompt.cached_locally } else { 0 },
+                // Ours, or what a peer was handed — see the field.
+                cached_prefix_tokens: if is_local {
+                    prompt.cached_locally
+                } else {
+                    handed_off_tokens
+                },
                 split_openings,
                 cold_load_ms_per_layer: cold_load_per_layer,
                 reply_tokens_at_most: prompt.reply_tokens_at_most,

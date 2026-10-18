@@ -5060,6 +5060,7 @@ fn the_next_turn_of_a_split_goes_to_the_peer_holding_its_opening() {
                     split_openings,
                     reply_tokens_at_most: None,
                     head_may_lead: false,
+                    handed_off: Vec::new(),
                 },
                 crate::types::KeepAsked::Unasked,
             )
@@ -8117,4 +8118,70 @@ fn a_peer_that_refused_the_prompt_up_front_is_held_to_the_layers_it_said_fit() {
 
     state.release_request_state(&rid);
     assert_eq!(state.peer_layers_fitting_for_request(rid, &b), None);
+}
+
+/// FUTURE_WORK #3 (c): a peer this node handed a prompt's opening is credited
+/// it on the next turn — it reads only what is new, through its own
+/// `Generate` — so the slower of two warm whole-model holders wins a long
+/// prompt it already holds. Only while it still holds the WHOLE model: with
+/// part of it, the cache the hand-off left is gone.
+#[test]
+fn a_peer_handed_a_prompt_is_credited_its_opening_while_it_holds_the_model() {
+    let (state, local, b, c, model) = two_whole_model_card_peers();
+    publish_resident(&state, &b, &model, (0, 32));
+    publish_resident(&state, &c, &model, (0, 32));
+    let scheduler =
+        PipelineScheduler::with_local_processor_speed(state.clone(), LOCAL_PROCESSOR_TPS);
+    let prompt = |handed_off: Vec<(NodeId, u32)>| super::cached_prefix::PromptPlan {
+        tokens: Some(4_000),
+        handed_off,
+        ..Default::default()
+    };
+    let route = |p| {
+        scheduler
+            .assemble_pipeline_for(
+                &model,
+                &local,
+                uuid::Uuid::new_v4(),
+                super::Purpose::Route,
+                p,
+                crate::types::KeepAsked::Unasked,
+            )
+            .unwrap()
+            .segments
+            .iter()
+            .map(|s| (s.node_id.clone(), s.layer_range))
+            .collect::<Vec<_>>()
+    };
+
+    // The control: nobody holds it, and the faster peer reads it all.
+    assert_eq!(route(prompt(Vec::new())), vec![(b.clone(), (0, 32))]);
+    // The slower peer was handed its opening: it reads 32 tokens, not 4,000.
+    assert_eq!(
+        route(prompt(vec![(c.clone(), 3_968)])),
+        vec![(c.clone(), (0, 32))]
+    );
+
+    let manifest = state.model_registry.get_manifest(&model).unwrap();
+    let credited = |node: &NodeId| {
+        scheduler
+            .gather_candidates(
+                &manifest,
+                &local,
+                uuid::Uuid::new_v4(),
+                prompt(vec![(c.clone(), 3_968)]),
+                super::Purpose::Preview,
+                &|| true,
+                crate::types::KeepAsked::Unasked,
+            )
+            .into_iter()
+            .find(|x| &x.node_id == node)
+            .unwrap()
+            .cached_prefix_tokens
+    };
+    assert_eq!(credited(&c), 3_968);
+    assert_eq!(credited(&b), 0, "only the peer it was handed to");
+    // Holding part of the model, the worker that read it is gone.
+    publish_resident(&state, &c, &model, (0, 16));
+    assert_eq!(credited(&c), 0);
 }

@@ -408,13 +408,11 @@ pub(crate) fn request_may_be_led_by_its_head(
     crate::pool::scope::request_scope(state, &request.model_id, request.keep).is_none()
 }
 
-/// Preconditions for the fast path. All checks are local and cheap.
 /// Will the whole-model hand-off take this plan? The single answer — the n-gram
 /// loop, which runs earlier in `execute_distributed`, asks it too and stands
 /// aside for every plan this says yes to.
 pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
-    // Shared disqualifiers: TP, LoRA adapter, vision images.
-    if super::fastpath_request_disqualified(exec) {
+    if !exec.assignment.tp_groups.is_empty() {
         return false;
     }
     // Single segment.
@@ -426,7 +424,24 @@ pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
     if exec.assignment.segments[0].node_id == *exec.shared_state.identity.node_id() {
         return false;
     }
-    let model_id = &exec.request.model_id;
+    request_may_be_handed_off(&exec.shared_state, &exec.request)
+}
+
+/// [`eligible`]'s conditions on the REQUEST — everything but the plan's shape.
+/// The planner asks it before any plan exists, so a peer believed to hold
+/// this prompt from an earlier hand-off is credited it only for a request the
+/// hand-off will take (`cached_prefix::plan_prompt`, FUTURE_WORK #3 (c)) —
+/// any other path to a whole model on a peer sends forwards, which never look
+/// the cache up. The hand-off asks it again, so the two cannot disagree.
+pub(crate) fn request_may_be_handed_off(
+    state: &crate::daemon::SharedState,
+    request: &crate::types::InferenceRequest,
+) -> bool {
+    // LoRA adapter, vision images.
+    if super::request_disqualifies_fast_paths(request) {
+        return false;
+    }
+    let model_id = &request.model_id;
     // Ask the one accessor. Re-deriving it from the per-model map missed the
     // automatic case (`encrypted_pipeline_auto`, the default), so a model with
     // privacy in force did not disqualify the fast path here — the path that
@@ -439,15 +454,10 @@ pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
     // here disagreed with the plan: the scheduler handed the whole model to one
     // peer, and this refused the hand-off, so the request ran one round trip
     // per token instead (2026-09-27, the spread benchmark's peer arm).
-    let encrypted_for_model = exec
-        .shared_state
-        .encrypted_pipeline_for_request(model_id, exec.request.id);
+    let encrypted_for_model = state.encrypted_pipeline_for_request(model_id, request.id);
     // `encrypted_pipeline` forces local embedding (no raw tokens on wire).
     // `local_embedding_privacy` is similar. Both bypass the fast path.
-    if encrypted_for_model || exec.shared_state.config.inference.local_embedding_privacy {
-        return false;
-    }
-    true
+    !(encrypted_for_model || state.config.inference.local_embedding_privacy)
 }
 
 /// Base budget for the first token: connection, queueing and the decode of a
@@ -611,8 +621,17 @@ impl PipelineExecutor {
             return Ok(None);
         }
         let wire_id = self.request.id;
-        self.run_hand_off(token_tx, HandOff::WholeModel, wire_id)
-            .await
+        let result = self
+            .run_hand_off(token_tx, HandOff::WholeModel, wire_id)
+            .await;
+        if result.is_err() {
+            // What that peer's cache holds is no longer known (#3 (c)).
+            super::handoff_prompt_cache::forget(
+                &self.assignment.segments[0].node_id,
+                &self.request.model_id,
+            );
+        }
+        result
     }
 
     /// Hand a split none of which is ours to the holder of its first layers,
@@ -739,10 +758,13 @@ impl PipelineExecutor {
         // budget by several-fold across scripts. It is often unavailable here —
         // this path exists precisely because the model runs elsewhere — so fall
         // back to the estimate.
-        let prompt_tokens_est = self
+        let prompt_ids: Option<Vec<u32>> = self
             .shared_state
             .standalone_tokenizer(&self.request.model_id)
-            .map(|tk| tk.encode(&prompt).len())
+            .map(|tk| tk.encode(&prompt).into_iter().map(|t| t as u32).collect());
+        let prompt_tokens_est = prompt_ids
+            .as_ref()
+            .map(Vec::len)
             .unwrap_or_else(|| estimate_prompt_tokens(&prompt));
         // Whom the first token waits behind: the one peer for a whole model,
         // every segment of the plan for a delegate that will lead it.
@@ -1408,6 +1430,19 @@ impl PipelineExecutor {
                     0,
                 );
             }
+        }
+
+        // The peer's worker read this prompt through `Generate`, which keeps
+        // it in its prefix cache: its next turn there is priced for what is
+        // new (#3 (c)). A delegate leads a split, whose segments keep their
+        // own (`split_prompt_cache`).
+        if let Some(ids) = prompt_ids.as_deref().filter(|_| whole_model) {
+            super::handoff_prompt_cache::note_handed_off(
+                &segment.node_id,
+                &self.request.model_id,
+                ids,
+                std::time::Instant::now(),
+            );
         }
 
         // Reply text is finalised in exactly one place — see

@@ -850,6 +850,16 @@ pub(super) async fn execute_request(
              here on the part it has not read"
         );
     }
+    if !prompt_plan.handed_off.is_empty() {
+        tracing::info!(
+            request_id = %request.id,
+            model = %model_id,
+            prompt_tokens = ?prompt_plan.tokens,
+            handed_off = ?prompt_plan.handed_off,
+            "A peer this node handed this prompt's opening to still holds it — pricing a \
+             whole-model run there on the part it has not read (FUTURE_WORK #3 (c))"
+        );
+    }
 
     let assignment = if let Some(adapter_id) = request.lora_adapter.as_deref() {
         lora_local_assignment(

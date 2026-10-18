@@ -3580,6 +3580,9 @@ that is entirely local. A PEER's whole-model plan does not: the n-gram path runs
 BEFORE `remote_generate` for a remote single segment, and it sends forwards,
 which never look the cache up. A peer credit would be priced and not delivered
 whenever that path won — so peers get none until that is resolved (FUTURE_WORK #10).
+*Resolved 2026-09-27* — the n-gram path stands aside for every plan the hand-off
+takes (`ngram_only_spec::eligible` asks `remote_generate::eligible`) — and a peer
+is credited since 2026-10-18 (the subsection "A peer handed a prompt…" below).
 
 **What it keeps from SGLang** (v0.4 cache-aware routing, and
 sgl-project/sglang#26263): the key is the full rendered prefill input, tools
@@ -3676,6 +3679,60 @@ card" — a card beside a stated `ram_model_budget_mb` (`gpu_layers = 0`) does
 not. Never `gpu.is_some()`.
 
 → `docs/invariants/scheduling.md` § "A warm prompt is priced warm"
+
+### A peer handed a prompt is credited its opening on the next turn (2026-10-18, FUTURE_WORK #3 (c))
+
+**What was wrong.** The live node handed xLAM-2-8B's 505-token prompt to a peer
+(BE) a second time: priced 20.2 s of prompt, the whole request took 7.1 s
+(0.25x, twice). The peer's worker had read the prompt through `Generate` on the
+first send and kept it in its `PrefixCache`; nothing this node prices with knew.
+The paragraph above barred a peer credit because the n-gram path once ran before
+the hand-off — true until 2026-09-27, stale since.
+
+**Why not the peer's announcement.** `peer_prefix_blocks` holds a peer's own
+blocks only if its owner opted in (`share_prefix_cache_with_peers`, default off
+— a block hash commits to the prompt), and says nothing of whether the hand-off
+will run.
+
+**The mechanism** (`pipeline::handoff_prompt_cache`): after a whole-model
+hand-off answers, this node records the prompt's block chain against that peer
+and model (`note_handed_off`, the keyed `split_prompt_cache::chain_keys` at 64
+tokens, the default `prefix_cache_block_tokens`; the ids from the tokenizing
+the hand-off already did to size its first-token wait); a failed hand-off
+forgets it. `plan_prompt` then fills `PromptPlan::handed_off` — whole blocks of
+the new prompt matching a remembered chain, never the last token — only when
+`remote_generate::request_may_be_handed_off` holds: the hand-off's own request
+conditions, split out of `eligible` so the price and the path cannot disagree.
+`gather_candidates` gives it to the peer as `cached_prefix_tokens` only while
+the peer reports a resident range that IS the whole model (unloaded, or holding
+part of it, the worker that read the prompt is gone), and `vertex_cost` takes it
+off the whole-model vertex as it does this node's.
+
+**Precedent and its trap.** SGLang's cache-aware router keeps an approximate
+radix tree per worker from the requests it routed, never asking the worker;
+llm-d's approximate prefix scorer records the pod after scheduling. Both drift:
+the router never sees an eviction or a restart (llm-d's "precise" scorer exists
+to close that gap with the engine's KV events — our opt-in announcement). So a
+belief lasts `BELIEF_TTL` (300 s, the default idle unload — it cannot describe a
+worker unloaded and loaded again), at most 8 per (peer, model), the longer of a
+growing conversation replacing the shorter as the worker's covered-prefix
+pruning does; and it is a price, never a pin. Unseen: an eviction under memory
+pressure, a card reclaim and reload inside the window, a peer with a
+non-default block size — each costs one read priced as a hit.
+
+**Measured** (`examples/split_rig.sh handoffcache`, qwen2.5-0.5b fp16, A holding
+the header only and B every part, both on the processor, dev build, 2026-10-18):
+turn 2 of 2,744 tokens — A's planner credited B 2,688 (42 blocks), B's worker
+`prefix-cache HIT matched_tokens=2713` on the same request id; the turn was
+priced 7,847 ms and took 15,085 ms. The released v0.3.243 as A, same B: no
+credit, priced 148,827 ms for 14,811 ms (10x). Turn 1 is over-priced ~2.3x on
+both (151 s / 162 s for 67 s) — the rest of the cost model on a debug build,
+not this credit.
+
+Tests: `a_peer_handed_a_prompt_is_credited_its_opening_while_it_holds_the_model`
+(scheduler: the slower of two warm holders wins a 4,000-token prompt it holds;
+no credit once it holds part of the model), `a_peer_is_credited_the_opening_it_was_handed`,
+`a_belief_ages_out_and_a_failure_forgets_it`, `a_growing_conversation_is_one_belief`.
 
 ## Where a peer's models RUN is not whether it owns a card (2026-09-26)
 
