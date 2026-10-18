@@ -1834,11 +1834,14 @@ Llama-3.2-3B Q4_K_M, a long-verified family, misses on 1 by MORE (0.306, "why th
 Unquantized, the 0.8B matches llama.cpp exactly (worst cos 0.999999), at Q8_0 within 0.012: the
 model's arithmetic is right and 4-bit near-ties fall the other way through our kernels' rounding. Re-check with
 `~/llama.cpp-ref/{dump_logits,ref_generate}` (llama-cpp-python 0.3.16 cannot load `qwen35`), and
-render a new template with jinja2 first (gotcha #798); (7) **the 4B decodes at ~37 tokens a second whole
-on an RTX 3070 Laptop with or without CUDA-graph capture** (2026-10-11): ~26 ms a step reads its 2.5 GB of
-weights at ~96 GB/s against the card's 448, while the 0.8B went 50-54 → 121-126 with capture — so the 4B's step
-is bound by something on the card. Profile it (`SWARMLLM_PROFILE=1` turns capture off, which is fine here)
-and compare llama.cpp's `llama-bench -ngl 99 tg128` on the same file before changing a kernel; (8) ~~every
+render a new template with jinja2 first (gotcha #798); (7) ~~the 4B decodes at ~37 tokens a second whole on an RTX 3070 Laptop with or without CUDA-graph capture~~ —
+**no longer true, re-measured 2026-10-19**: 70.8-75.3 tokens a second through a node (an isolated node serving
+the file's parts, a streamed 200-token reply, after its first 8) and 72-76 in `test-split`, which now prints its
+decode rate, against llama.cpp's 80.3 (`llama-bench -ngl 99 -n 128`, same file, same sitting, live node
+stopped): 89-94%. Without capture it reads 40, the old figure; on 10-11 capture did not lift the 4B and now it
+does, and which change between did it is not established. Left: the 6-11% to llama.cpp — 1,540 launches a
+step against Phi-4-mini's 804: each DeltaNet layer quantizes one input four times (`QMatMul::forward_shared`
+would do it once), runs its convolution as ~12 launches, softplus and the L2 norm as ~5 each; (8) ~~every
 turn re-read the whole conversation~~ — **saved since 2026-10-18, released in v0.3.243**: the prefix cache
 skipped any request holding recurrent state, because a DeltaNet layer's state cannot be cut back to a
 shorter prefix the way attention KV can. Now the prompt is saved 16 tokens short of its end (llama.cpp's

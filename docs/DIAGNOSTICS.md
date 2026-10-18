@@ -2128,6 +2128,17 @@ records the hash as origin-verified, so no peer's claim can displace it.
 
 ## Benchmarks
 
+### One model's decode rate on this machine, against llama.cpp (2026-10-19)
+
+`swarmllm test-split --gpu-layers 99 --model <file.gguf> --max-tokens 160 --prompt "…"`
+(a CUDA build, the live node stopped) prints `Decode after the first 8 steps: N steps, X ms a
+step`. It times each step from the host, sampling included, so on a card it waits out the
+card's work; the first 8 steps (a graph's capture, the pool's growth) are left out. Set it
+beside `llama-bench -m <file> -ngl 99 -p 0 -n 128 -o jsonl` (`~/llama.cpp-ref/build-cuda`) in
+the same sitting. It agreed with a reply streamed through a node within 3% on Qwen 3.5 4B
+(FUTURE_WORK #228 (7)). Not `SWARMLLM_PROFILE`'s totals: a forward on a card returns before
+the card has finished, so they undercount.
+
 ### `examples/constrained_node_test.sh` — a SMALL node, reproduced locally
 
 Every memory defect reported from the field since #452 (#454-#457, #461-#468)

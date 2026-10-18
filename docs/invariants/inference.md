@@ -4226,6 +4226,13 @@ prompt tokens are identical and the kernel probe is unchanged (top-1 200/200, wo
 ms a step, ~96 GB/s of its 2.5 GB of weights against the card's 448 — where that goes is
 FUTURE_WORK #228 (7).
 
+**Re-measured 2026-10-19, and the 4B row no longer holds** (same card, live node stopped,
+`llama-bench -ngl 99 -n 128` on the same file in the same sitting): 70.8-75.3 tok/s through a
+node (an isolated node serving the file's parts, a streamed 200-token reply after its first 8)
+and 72-76 in `test-split` with capture, 40 without, against llama.cpp's 80.3. Capture now lifts
+the 4B as it lifted the 0.8B; which change since 10-11 did it is not established. The step is
+not card-bound: 13-14 ms, 1,540 launches.
+
 ## A mixture-of-experts layer stacked on the card is captured too (2026-10-14, FUTURE_WORK #138 (2))
 
 **What refused it.** `decode_graph_ineligibility` let no MoE layer into a capture ("unchecked").

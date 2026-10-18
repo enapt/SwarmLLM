@@ -119,10 +119,21 @@ pub async fn test_split_inference(
         }
     }
 
-    // Generate remaining tokens
+    // Generate remaining tokens. Each step is timed from the host's side,
+    // sampling included: on a card the forward returns before the card has
+    // finished, so only the step that reads the token back waits it out.
     let mut index_pos = token_ids.len();
+    let decode_started = std::time::Instant::now();
+    let mut decode_steps: u32 = 0;
+    // The first steps pay one-time work (a graph's capture, the pool's
+    // growth), so the steady rate is read from here on.
+    const WARM_AFTER_STEPS: u32 = 8;
+    let mut warm_from: Option<std::time::Instant> = None;
     #[allow(clippy::explicit_counter_loop)]
     for _ in 1..max_tokens {
+        if decode_steps == WARM_AFTER_STEPS {
+            warm_from = Some(std::time::Instant::now());
+        }
         let last_token = *generated
             .last()
             .expect("generated tokens must be non-empty") as i64;
@@ -135,6 +146,7 @@ pub async fn test_split_inference(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
         let token_id = sample_token(&logits, 0.0, 1.0).map_err(|e| anyhow::anyhow!("{e}"))?;
         index_pos += 1;
+        decode_steps += 1;
 
         // Check EOS tokens loaded from GGUF metadata
         if model.eos_tokens().contains(&token_id) {
@@ -156,6 +168,25 @@ pub async fn test_split_inference(
         }
     }
     println!();
+    let decode_secs = decode_started.elapsed().as_secs_f64();
+    if decode_steps > 0 {
+        println!(
+            "Decode: {decode_steps} steps in {decode_secs:.2} s, {:.2} ms a step ({:.1} tokens a second)",
+            decode_secs * 1000.0 / decode_steps as f64,
+            decode_steps as f64 / decode_secs
+        );
+    }
+    if let Some(warm) = warm_from {
+        let steps = decode_steps - WARM_AFTER_STEPS;
+        let secs = warm.elapsed().as_secs_f64();
+        if steps > 0 {
+            println!(
+                "Decode after the first {WARM_AFTER_STEPS} steps: {steps} steps, {:.2} ms a step ({:.1} tokens a second)",
+                secs * 1000.0 / steps as f64,
+                steps as f64 / secs
+            );
+        }
+    }
     println!("Total generated: {} tokens", generated.len());
     println!("Token IDs: {:?}", generated);
 
