@@ -818,6 +818,16 @@ impl NetworkManager {
                 }
             }
 
+            // A request another node sent this node's Kademlia and libp2p
+            // answered. Counted by kind so the answering cost
+            // (`by_protocol`'s Kademlia `peer` row) can be read as the
+            // lookups it is made of (#91).
+            SwarmEvent::Behaviour(SwarmBehaviourEvent::Kademlia(
+                libp2p::kad::Event::InboundRequest { request },
+            )) => {
+                self.shared_state.metrics.kad_inbound.note(&request);
+            }
+
             // ── mDNS ──
             SwarmEvent::Behaviour(SwarmBehaviourEvent::Mdns(libp2p::mdns::Event::Discovered(
                 peers,

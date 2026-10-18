@@ -169,6 +169,24 @@ pub fn network_traffic_json(shared: &crate::daemon::SharedState) -> serde_json::
             })
             .collect();
         obj.insert("by_protocol".into(), by_protocol.into());
+        // What the Kademlia `peer` row above is spent answering: every
+        // request a peer sent, by kind, with the peers the answers listed
+        // (`KadInboundMeter`). All five kinds, zeros included.
+        let kad_inbound: Vec<serde_json::Value> = shared
+            .metrics
+            .kad_inbound
+            .totals()
+            .into_iter()
+            .map(|k| {
+                serde_json::json!({
+                    "kind": k.kind.as_str(),
+                    "requests": k.requests,
+                    "closer_peers": k.closer_peers,
+                    "provider_peers": k.provider_peers,
+                })
+            })
+            .collect();
+        obj.insert("kad_inbound".into(), kad_inbound.into());
     }
     if let Some(g) = shared.metrics.gossip.totals() {
         // The counts ride beside the bytes because bytes alone cannot say WHY a

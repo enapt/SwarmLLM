@@ -343,6 +343,11 @@ pub struct MetricsProviders {
     /// each connection's muxer, so the rows add up to `bandwidth`'s totals
     /// (`ProtocolTrafficMeter`).
     pub by_protocol: Arc<crate::network::protocol_traffic::ProtocolTrafficMeter>,
+    /// What other nodes ask this node's Kademlia, by kind (`find_node`,
+    /// `get_provider`, …): written ONLY by the network loop's
+    /// `kad::Event::InboundRequest` arm, read by the traffic payload. Names
+    /// what `by_protocol`'s Kademlia `peer` row is spent answering (#91).
+    pub kad_inbound: crate::network::bandwidth::KadInboundMeter,
 }
 
 /// How long a channel may keep refusing messages before the next drop is

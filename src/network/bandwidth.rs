@@ -862,6 +862,66 @@ gossip_timedout_messages_dropped_per_topic_total{hash=\"swarmllm/models\"} 118
         );
     }
 
+    /// The question is which of the swarm's lookups this node is answering
+    /// (#91): a routing-table refresh arrives as `find_node`, a holder lookup
+    /// as `get_provider`, a publication as `add_provider`. Each request lands
+    /// on its own kind's row, with the peers its answer listed.
+    #[test]
+    fn each_kademlia_request_a_peer_sends_is_counted_under_its_own_kind() {
+        use libp2p::kad::InboundRequest as Asked;
+        for (i, kind) in KadRequest::ALL.iter().enumerate() {
+            assert_eq!(*kind as usize, i, "a kind's row is its place in ALL");
+        }
+        let meter = KadInboundMeter::default();
+        assert!(
+            meter.totals().iter().all(|k| k.requests == 0),
+            "every kind is listed from the start, at zero"
+        );
+        meter.note(&Asked::FindNode {
+            num_closer_peers: 6,
+        });
+        meter.note(&Asked::FindNode {
+            num_closer_peers: 5,
+        });
+        meter.note(&Asked::GetProvider {
+            num_closer_peers: 6,
+            num_provider_peers: 2,
+        });
+        meter.note(&Asked::AddProvider { record: None });
+        meter.note(&Asked::GetRecord {
+            num_closer_peers: 4,
+            present_locally: true,
+        });
+        meter.note(&Asked::PutRecord {
+            source: libp2p::PeerId::random(),
+            connection: libp2p::swarm::ConnectionId::new_unchecked(1),
+            record: None,
+        });
+
+        let got: Vec<_> = meter
+            .totals()
+            .into_iter()
+            .map(|k| {
+                (
+                    k.kind.as_str(),
+                    k.requests,
+                    k.closer_peers,
+                    k.provider_peers,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("find_node", 2, 11, 0),
+                ("get_provider", 1, 6, 2),
+                ("add_provider", 1, 0, 0),
+                ("get_record", 1, 4, 0),
+                ("put_record", 1, 0, 0),
+            ]
+        );
+    }
+
     /// The queue-FULL path has no metric family at all, so a reader who only
     /// has the registry cannot see it. Zero must therefore mean zero here.
     #[test]
@@ -1344,5 +1404,121 @@ impl DirectKindMeter {
                 .then_with(|| a.frame.cmp(&b.frame))
         });
         out
+    }
+}
+
+/// What other nodes ask this node's Kademlia, by kind: the requests it
+/// ANSWERED, counted from `kad::Event::InboundRequest` (#91).
+///
+/// `by_protocol`'s `/swarmllm/kad/1.0.0` `peer` row says what answering costs
+/// in bytes; this says what is being answered. The kinds tell the swarm's
+/// lookups apart: a routing-table refresh (libp2p's periodic bootstrap, every
+/// 5 min by default) and the lookup before a provider publication both arrive
+/// as `find_node`, a holder lookup (`get_providers`) as `get_provider`, the
+/// publication itself as `add_provider`. libp2p-metrics counts the same five
+/// kinds (its `inbound_requests` family), behind a Prometheus registry this
+/// node does not read back. The event names no peer, so neither does this.
+///
+/// `closer_peers` and `provider_peers` add up what the answers listed. An
+/// answer grows with them, so read the bytes per request against them.
+/// libp2p reports an `add_provider` / `put_record` only once its store took
+/// the record; one the store refused is not counted.
+#[derive(Debug, Default)]
+pub struct KadInboundMeter {
+    counts: [KadInboundCount; KadRequest::ALL.len()],
+}
+
+/// The five things a peer can ask a Kademlia node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KadRequest {
+    FindNode,
+    GetProvider,
+    AddProvider,
+    GetRecord,
+    PutRecord,
+}
+
+impl KadRequest {
+    /// Every kind, in the order the payload lists them.
+    pub const ALL: [KadRequest; 5] = [
+        Self::FindNode,
+        Self::GetProvider,
+        Self::AddProvider,
+        Self::GetRecord,
+        Self::PutRecord,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FindNode => "find_node",
+            Self::GetProvider => "get_provider",
+            Self::AddProvider => "add_provider",
+            Self::GetRecord => "get_record",
+            Self::PutRecord => "put_record",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct KadInboundCount {
+    requests: AtomicU64,
+    closer_peers: AtomicU64,
+    provider_peers: AtomicU64,
+}
+
+/// One kind's share of what this node's Kademlia answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KadInboundTotals {
+    pub kind: KadRequest,
+    pub requests: u64,
+    pub closer_peers: u64,
+    pub provider_peers: u64,
+}
+
+impl KadInboundMeter {
+    /// One request a peer sent and this node handled.
+    pub fn note(&self, request: &libp2p::kad::InboundRequest) {
+        use libp2p::kad::InboundRequest as Asked;
+        let (kind, closer, providers) = match request {
+            Asked::FindNode { num_closer_peers } => (KadRequest::FindNode, *num_closer_peers, 0),
+            Asked::GetProvider {
+                num_closer_peers,
+                num_provider_peers,
+            } => (
+                KadRequest::GetProvider,
+                *num_closer_peers,
+                *num_provider_peers,
+            ),
+            Asked::AddProvider { .. } => (KadRequest::AddProvider, 0, 0),
+            Asked::GetRecord {
+                num_closer_peers, ..
+            } => (KadRequest::GetRecord, *num_closer_peers, 0),
+            Asked::PutRecord { .. } => (KadRequest::PutRecord, 0, 0),
+        };
+        let count = &self.counts[kind as usize];
+        count.requests.fetch_add(1, Ordering::Relaxed);
+        count
+            .closer_peers
+            .fetch_add(closer as u64, Ordering::Relaxed);
+        count
+            .provider_peers
+            .fetch_add(providers as u64, Ordering::Relaxed);
+    }
+
+    /// Every kind, zeros included, in [`KadRequest::ALL`]'s order. A zero is
+    /// a reading: no peer asked that.
+    pub fn totals(&self) -> Vec<KadInboundTotals> {
+        KadRequest::ALL
+            .iter()
+            .map(|&kind| {
+                let c = &self.counts[kind as usize];
+                KadInboundTotals {
+                    kind,
+                    requests: c.requests.load(Ordering::Relaxed),
+                    closer_peers: c.closer_peers.load(Ordering::Relaxed),
+                    provider_peers: c.provider_peers.load(Ordering::Relaxed),
+                }
+            })
+            .collect()
     }
 }

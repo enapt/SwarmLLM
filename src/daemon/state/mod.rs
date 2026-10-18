@@ -1500,6 +1500,7 @@ impl SharedState {
                 by_protocol: Arc::new(
                     crate::network::protocol_traffic::ProtocolTrafficMeter::default(),
                 ),
+                kad_inbound: crate::network::bandwidth::KadInboundMeter::default(),
                 shard_bytes_out: std::sync::atomic::AtomicU64::new(0),
                 shard_bytes_in: std::sync::atomic::AtomicU64::new(0),
                 inference: Arc::new(crate::network::bandwidth::InferenceTraffic::default()),

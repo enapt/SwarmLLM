@@ -71,8 +71,8 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    ((2d), `direct_by_kind`): the rest is libp2p's protocols. `by_protocol` ((2e)) named the largest:
    Kademlia answering other nodes' lookups, ~2.1 KB/s; (2f) republishes provider records every 4 h
    instead of 20 min (v0.3.243). Field re-read 10-18: upload 2.7 KB/s, but the Kademlia answers
-   fell to 0.90 KB/s, 2.3x, not the 12x the republication alone predicted. Next: count which
-   lookups peers send (the meter splits by protocol, not by Kademlia request).
+   fell to 0.90 KB/s, 2.3x, not the 12x the republication alone predicted. `kad_inbound` ((2g),
+   10-19, unreleased) now counts which lookups peers send; next, re-read it on the field.
 8. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
     ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
     (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
@@ -655,7 +655,7 @@ between consecutive peers and back to the head, as Petals prices its edges), in 
 per head; the network term of an IT → BE chain at 64 passes went 57,856 → 3,620 ms
 (`docs/invariants/scheduling.md` § "A chain its head will lead is priced as its head leading
 it"). A chain this node drives through chaining peers is still priced a round trip from here per
-segment, and so is the head's own re-plan of a led chain — (a2), smaller, untouched; (b) ~~a reply longer than 64 tokens is
+segment, and so is the head's own re-plan of a led chain — (a2), smaller, untouched. The only field evidence is three driven chains through two consecutive peers on 10-14 (`225e6fe7 → BE → AU`, 0.72 and 0.92 of their price at 64 passes for 96-token replies, ~0.5-0.6 re-priced at their length), and they ran during the drafter rigs, so (d) and (a2) cannot be told apart in them; a fix needs a driven chain over WAN peers to measure; (b) ~~a reply longer than 64 tokens is
 under-priced by its length ÷ 64~~ (2.49x / 2.62x at 160 tokens on two peers' hand-offs) —
 **fixed 2026-10-18, released in v0.3.243**: the passes are this model's mean recent reply length
 (`daemon::state::reply_lengths`, the last 32 finished replies once there are 4), still capped by
@@ -1096,8 +1096,17 @@ falls ~12x once the fleet updates. Next: re-read `by_protocol` on the field afte
 relay hop 91, `/swarmllm/1.0.0` 190, our own direct messages 169 of it. The kad row fell 2.3x, not 12x: the
 one .242 peer explains ~0.3 KB/s, so ~0.6 KB/s is lookups other than republication — the periodic
 routing-table bootstrap (libp2p's default, every 5 min, untouched here) and `get_providers` are the
-candidates, and nothing counts them apart. Next: count inbound Kademlia requests by kind
-(`kad::Event::InboundRequest`) before changing either. **(2c) fixed 2026-10-17, released in v0.3.242**: a restart gossiped every
+candidates, and nothing counted them apart. **(2g) 2026-10-19, not yet released**: `kad_inbound` in the
+traffic payload counts every Kademlia request peers send, by kind (`find_node` = a routing-table
+refresh or a publication's lookup, `get_provider` = a holder lookup, `add_provider` = a publication),
+with the peers each answer listed (`KadInboundMeter`, the five kinds libp2p-metrics' `inbound_requests`
+counts; DIAGNOSTICS § "What is the upload that is not gossip?"). Three idle nodes on loopback
+(`unshare -rn`, 400 s): the node the other two joined answered 34 requests on exactly 34 Kademlia
+streams, and each joiner's 5-minute routing-table refresh asked it 5 `find_node`. A swarm of N nodes
+therefore sends each ~5(N-1) refresh lookups every 5 min, each answered with up to 20 peers and their
+addresses — the first suspect; go-libp2p-kad-dht refreshes every 10 min and skips a bucket refreshed
+within that interval (`RoutingTable.RefreshInterval`, `rtrefresh/rt_refresh_manager.go`). Next: re-read it on the field after the release, then change whichever kind carries
+the ~0.6 KB/s. **(2c) fixed 2026-10-17, released in v0.3.242**: a restart gossiped every
 manifest it holds in full, twice, a few seconds apart (§ Closed). Left: the
 mesh is still sized once at startup, from peers ever met rather than reachable now (a rig first
 before going further: a thinner mesh partitions sooner); (3) a both-direction traffic ceiling at the transport
@@ -1664,10 +1673,10 @@ prompt pass goes through `forward_through_segments`. What is left:
   cache THIS node did not fill is invisible — gossip prefix digests (the credit must then require
   `cross_node_prefix_trust_min` and `share_prefix_cache_with_peers`, default off); keep caches
   longer than the 10-minute KV idle expiry with a RAM/disk tier; price a CPU requester's long
-  prompt against a GPU peer's rate (`faster_than_local.md` § 3.1). Delivery trap for a WHOLE
-  model on a peer (no split credit reaches it): `try_ngram_only_distributed` runs before
-  `try_remote_generate_fastpath` and takes a remote single segment, so a priced credit would not
-  be delivered — make the n-gram path decline a plan priced warm.
+  prompt against a GPU peer's rate (`faster_than_local.md` § 3.1). (The delivery trap noted here
+  until 10-19 — the n-gram path taking a whole-model hand-off first — was already closed:
+  `ngram_only_spec::eligible` declines every plan `remote_generate::eligible` takes, since
+  2026-09-27, and `split_rig.sh handoffcache` read the peer's HIT for #3 (c).)
 - **Limits the split half accepts**: a resumed request gives up the mid-reply replay onto a
   stand-in (the router continues the reply instead, #236); a model with a recurrent state (Qwen
   3.5) stores nothing; images, pre-embedded input and tensor-parallel groups run whole; the

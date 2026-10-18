@@ -672,6 +672,7 @@ must be announcements" — so the total is split by category in
 | `other_*` | the remainder | our own direct messages other than inference and parts (catch-ups, digests, peer exchange), Kademlia, identify, AutoNAT, relaying for others, gossip's envelopes and control messages, and every substream's negotiation. NOT noise, yamux or QUIC framing: the total itself is counted on substreams, above them |
 | `direct_by_kind` | **the codec**, every request-response frame by `kind` and `frame` (request / response), sent and received | exact frames; a BREAKDOWN of all direct traffic, inference and parts included — never subtracted from `other_*` |
 | `by_protocol` | **each connection's muxer** (`network/protocol_traffic.rs`), every substream by the protocol it negotiated and `opened_by` (`us`: our own asking; `peer`: our answers), with `streams` | exact; a split of the WHOLE that adds up to `out_bytes` / `in_bytes` |
+| `kad_inbound` | **the network loop**, every `kad::Event::InboundRequest`: the Kademlia requests peers sent this node, by `kind` (`find_node`, `get_provider`, `add_provider`, `get_record`, `put_record`), with the `closer_peers` / `provider_peers` the answers listed | exact counts, no bytes — what `by_protocol`'s Kademlia `peer` row is spent answering (#91) |
 
 - **Inference is counted in the CODEC, not at the send sites**, because
   `network.tensor_compression` defaults ON: the send site holds the

@@ -2052,6 +2052,26 @@ was chosen; `(unreadable)` should never appear (it means the reading of the
 opening is wrong). A relayed connection appears twice, as in `out_bytes`:
 under its own protocols, and sealed under the relay protocol.
 
+**`kad_inbound` says what the Kademlia `peer` row is answering.** One row per
+request kind a peer can send — `find_node`, `get_provider`, `add_provider`,
+`get_record`, `put_record` — with `requests` and the `closer_peers` /
+`provider_peers` the answers listed, counted from libp2p's
+`kad::Event::InboundRequest`. Difference two readings as above. Read it as:
+
+- `find_node` — another node's routing-table refresh (libp2p's periodic
+  bootstrap, every 5 min by default) or the lookup it runs before publishing a
+  provider record. The answer lists up to 20 peers with their addresses, so it
+  is the expensive kind.
+- `get_provider` — another node looking for a part's holders (`get_providers`).
+- `add_provider` — a provider record stored here; one the store refused is not
+  counted (libp2p reports only the ones it took).
+
+Bytes per request = Δ Kademlia `peer` `sent_bytes` / Δ Σ `requests`, read
+against `closer_peers` per request. The event names no peer, so the row cannot
+say WHO asks. A rust-libp2p asker opens a substream for each request
+(`libp2p-kad` 0.48's handler), so Δ`streams` on the `peer` row ≈ Δ Σ`requests`;
+a gap is streams that closed unanswered.
+
 ## "no receipt acknowledgement within Ns" — late, or missing? (2026-08-25)
 
 A peer that fails every distributed request with this looks dead. It may simply
