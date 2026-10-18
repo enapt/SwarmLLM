@@ -2,10 +2,18 @@
 //!
 //! Adapted from Parallax Phase 2 (arxiv 2509.26182 / GradientHQ/parallax MIT).
 //! Parallax was designed for peer-to-peer pipeline data flow where transition
-//! edge cost is `rtt(peer_A, peer_B)`. SwarmLLM pipelines are coordinator-relayed:
-//! every hop routes through the local node. So edge weight collapses into a
-//! per-vertex cost: `2 * rtt_local_to_peer + compute_time + load_compensator`
-//! (local node: just compute_time).
+//! edge cost is `rtt(peer_A, peer_B)`. A chain this node drives is priced as
+//! coordinator-relayed: every hop is charged as a round trip from the local
+//! node, so edge weight collapses into a per-vertex cost:
+//! `2 * rtt_local_to_peer + compute_time + load_compensator` (local node: just
+//! compute_time).
+//!
+//! **A chain holding no part of this node is the exception** (FUTURE_WORK #3
+//! (a)): the delegated split hands it to its head, which drives every token
+//! from there, and each peer forwards to the next. That chain is priced by its
+//! hops — the one-way delay between consecutive peers and from the tail back
+//! to the head, from their network coordinates — in a search pass of its own
+//! per head ([`chain_is_led_by_its_head`]).
 //!
 //! Two departures from the paper, both because it targets GPU clusters where
 //! compute dominates rather than heterogeneous nodes on home connections:
@@ -27,6 +35,7 @@
 
 use crate::error::SwarmError;
 use crate::types::{NodeId, PipelineSegment};
+use swarmllm_types::netcoord::NetworkCoord;
 
 use super::NodeCandidate;
 
@@ -326,7 +335,140 @@ fn subrange_cost(points: &[u32], clamped: &[(usize, (u32, u32))]) -> usize {
         .sum()
 }
 
-/// Compute per-vertex cost for a (candidate, range) pair.
+/// What pricing a chain its HEAD leads needs to know of a candidate
+/// (FUTURE_WORK #3 (a)). The default — nothing known — prices every chain as
+/// driven from here, exactly as before, which is also what a peer without a
+/// usable coordinate or either feature gets.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct RingFacts {
+    /// The request may be handed to a split's head
+    /// (`PromptPlan::head_may_lead` ← `remote_generate::request_may_be_led_by_its_head`),
+    /// the same on every peer candidate of a plan.
+    pub(super) request_may_be_led: bool,
+    /// The peer's published network coordinate, kept only where usable
+    /// (`NetworkCoord::is_usable`).
+    pub(super) coord: Option<NetworkCoord>,
+    /// It advertises `features::DELEGATED_SPLIT`: it can be handed a split to
+    /// lead (`remote_generate::delegation_eligible` asks the same bit).
+    pub(super) leads_splits: bool,
+    /// It advertises `features::PIPELINE_CHAIN`: it hands its activations to
+    /// the next segment itself (`pipeline::plan_chain`), so a token crosses
+    /// from peer to peer instead of back through whoever leads.
+    pub(super) chains_forwards: bool,
+}
+
+/// How a segment is reached, which decides what its network costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChainRole {
+    /// This node coordinates: a remote segment short of the whole model is
+    /// entered from here once per token.
+    DrivenFromHere,
+    /// The head of a chain it leads: handed the request ONCE, like a
+    /// whole-model hand-off, and runs its own layers where it leads.
+    LeadsTheChain,
+    /// A later segment of a chain its head leads: entered once per token from
+    /// the segment before it ([`led_hop_ms`]), never from here.
+    InLedChain,
+}
+
+/// May `c` head a chain priced as led by it ([`chain_is_led_by_its_head`])?
+fn may_lead_a_chain(c: &NodeCandidate, local: &NodeId) -> bool {
+    &c.node_id != local
+        && c.ring.request_may_be_led
+        && c.ring.leads_splits
+        && c.ring.chains_forwards
+        && c.ring.coord.is_some()
+}
+
+/// May `c` be a later segment of a chain priced as led by its head?
+fn may_join_a_led_chain(c: &NodeCandidate, local: &NodeId) -> bool {
+    &c.node_id != local && c.ring.chains_forwards && c.ring.coord.is_some()
+}
+
+/// Is `segments` a chain the delegated split hands to its head, AND one this
+/// cost model can price that way? The single answer, for the search's led
+/// passes (via [`may_lead_a_chain`] / [`may_join_a_led_chain`]) and for
+/// [`chain_cost_terms`], which every gate and the logged prediction read — so
+/// the price a chain was chosen at is the price it is reported at.
+///
+/// The shape is `remote_generate::delegation_eligible`'s: two or more
+/// segments, none of them this node's, the head holding layer 0 and
+/// advertising `DELEGATED_SPLIT`, for a request the hand-off would take. Two
+/// more conditions are this model's own: every peer forwards to the next
+/// (`PIPELINE_CHAIN`; one that does not is round-tripped into by the head) and
+/// has a usable coordinate, the only figure for a distance between two peers.
+/// Where either is missing the chain is priced as driven from here, as before.
+pub(super) fn chain_is_led_by_its_head(
+    segments: &[PipelineSegment],
+    candidates: &[NodeCandidate],
+    local: &NodeId,
+) -> bool {
+    let find = |id: &NodeId| candidates.iter().find(|c| &c.node_id == id);
+    let [head, rest @ ..] = segments else {
+        return false;
+    };
+    !rest.is_empty()
+        && head.layer_range.0 == 0
+        && find(&head.node_id).is_some_and(|c| may_lead_a_chain(c, local))
+        && rest
+            .iter()
+            .all(|s| find(&s.node_id).is_some_and(|c| may_join_a_led_chain(c, local)))
+}
+
+/// How many attempts one intact answer from `c` takes — see `vertex_cost`.
+fn attempts(c: &NodeCandidate) -> f32 {
+    if c.expected_attempts.is_finite() && c.expected_attempts >= 1.0 {
+        c.expected_attempts
+    } else {
+        1.0
+    }
+}
+
+/// What the hop from `from` into `to` costs a chain its head leads, over the
+/// whole reply: the one-way delay between them, once per pass, scaled by
+/// `to`'s attempts as the rest of its vertex is. Also the hop from the tail
+/// back to the head, with `to` the head. `None` where either has no usable
+/// coordinate.
+///
+/// The one-way delay is half the round trip the two coordinates predict —
+/// Petals prices the same edge the same way (`_rtt_to_delay`: `rtt / 2`, from
+/// the pings each server publishes to the next; `sequence_manager.py`, read
+/// 2026-10-18). Checked against three peers here (2026-10-18): a warm
+/// three-segment chain IT → BE → AU took ~400 ms a token, the hops so priced
+/// plus its compute ~357; a round trip per hop would read ~670.
+///
+/// ⚠ Coordinates predict a NEAR pair poorly (60 ms for a 1 ms LAN link, the
+/// same day): a led chain between close machines is priced high, never low,
+/// so the error is on the side of the price as it stood.
+pub(super) fn led_hop_ms(from: &NodeCandidate, to: &NodeCandidate) -> Option<f32> {
+    let one_way = if from.node_id == to.node_id {
+        0.0
+    } else {
+        from.ring.coord?.distance_ms(&to.ring.coord?) / 2.0
+    };
+    Some(one_way * to.forward_passes() * attempts(to))
+}
+
+/// Compute per-vertex cost for a (candidate, range) pair, as a chain this
+/// node drives — every caller but the led chain's pricing.
+pub(super) fn vertex_cost(
+    c: &NodeCandidate,
+    range: (u32, u32),
+    local: &NodeId,
+    num_layers: u32,
+    prompt_tokens: Option<u32>,
+) -> VertexCost {
+    vertex_cost_as(
+        c,
+        range,
+        local,
+        num_layers,
+        prompt_tokens,
+        ChainRole::DrivenFromHere,
+    )
+}
+
+/// Compute per-vertex cost for a (candidate, range) pair in `role`.
 ///
 /// Cost priority for `compute_ms`:
 /// 1. Observed per-layer latency EMA if the candidate has any samples (Phase B).
@@ -336,7 +478,7 @@ fn subrange_cost(points: &[u32], clamped: &[(usize, (u32, u32))]) -> usize {
 /// 2. Static `est_tokens_per_sec` capability estimate when no observations exist.
 /// 3. `UNKNOWN_COMPUTE_MS` when neither is available — deliberately non-zero,
 ///    because a free unmeasured candidate outranks every measured one.
-pub(super) fn vertex_cost(
+fn vertex_cost_as(
     c: &NodeCandidate,
     range: (u32, u32),
     local: &NodeId,
@@ -346,6 +488,7 @@ pub(super) fn vertex_cost(
     // length was threaded through — so an offline allocation or a test that
     // does not have a prompt prices requests exactly as it always did.
     prompt_tokens: Option<u32>,
+    role: ChainRole,
 ) -> VertexCost {
     let is_local = &c.node_id == local;
     let layers = (range.1 - range.0) as f32;
@@ -362,8 +505,18 @@ pub(super) fn vertex_cost(
     // segment its network ONCE and so quietly subsidised splitting: the routing
     // model could not see most of the cost of the boundary it was choosing.
     let covers_whole_model = range.0 == 0 && range.1 == num_layers;
-    let delegated_whole_model = !is_local && covers_whole_model;
-    let entered_per_token = !is_local && !covers_whole_model;
+    // A chain its head leads (FUTURE_WORK #3 (a)): the head is handed the
+    // request once, as a whole model is; a later segment is entered per token
+    // from the segment before it, which `led_hop_ms` prices beside this.
+    let (delegated_whole_model, entered_per_token) = match role {
+        ChainRole::DrivenFromHere => (
+            !is_local && covers_whole_model,
+            !is_local && !covers_whole_model,
+        ),
+        ChainRole::LeadsTheChain => (true, false),
+        ChainRole::InLedChain => (false, false),
+    };
+    let in_led_chain = role == ChainRole::InLedChain;
 
     // Pick the observation measured on the shape being priced, and never
     // substitute one for the other.
@@ -393,7 +546,10 @@ pub(super) fn vertex_cost(
     // right-shaped figure takes over. `partial_ranges` is off by default, so a
     // single holder is routed the whole model and earns that sample on its
     // first request.
-    let observation = if delegated_whole_model {
+    // A later segment of a led chain is not round-tripped into from here
+    // either, so the figure that carries no round trip of ours is the right one
+    // there too, and the mid-chain one its upper bound.
+    let observation = if delegated_whole_model || in_led_chain {
         c.observed_delegated_ms_per_layer
             .or(c.observed_latency_ms_per_layer)
     } else {
@@ -423,9 +579,20 @@ pub(super) fn vertex_cost(
         // `None` keeps the previous behaviour exactly: the observation is then
         // the proportional EMA, which already carries the round trip inside it,
         // and adding a network term beside it would double-count.
-        (c.observed_fixed_ms_per_visit.unwrap_or(0.0), obs_per_layer)
+        //
+        // In a led chain the visit is the predecessor's, not ours: what is
+        // left of the fixed cost once OUR round trip to the peer is taken out
+        // of it is that peer's own per-visit work, and the hop into it is
+        // priced by `led_hop_ms` (#3 (a)).
+        let fixed = c.observed_fixed_ms_per_visit.unwrap_or(0.0);
+        let per_visit = if in_led_chain {
+            (fixed - c.latency_ms as f32).max(0.0)
+        } else {
+            fixed
+        };
+        (per_visit, obs_per_layer)
     } else {
-        let network = if is_local {
+        let network = if is_local || in_led_chain {
             0.0
         } else {
             2.0 * c.latency_ms as f32
@@ -447,7 +614,7 @@ pub(super) fn vertex_cost(
     // The asymmetry the model was missing. Every remote segment short of the
     // whole model is round-tripped into for every token; only a delegated whole
     // model pays its network once, because it decodes remotely on its own.
-    let network_ms = if entered_per_token {
+    let network_ms = if entered_per_token || in_led_chain {
         base_network_ms * passes
     } else {
         base_network_ms
@@ -532,18 +699,16 @@ pub(super) fn vertex_cost(
     //   The standing contract of every routing input here, and what keeps a
     //   mixed-version swarm routable.
     let transfer_ms = match (prompt_tokens, c.goodput_bytes_per_sec) {
-        (Some(tokens), Some(bps)) if tokens > 0 && bps > 0 && entered_per_token && range.0 != 0 => {
+        (Some(tokens), Some(bps))
+            if tokens > 0 && bps > 0 && (entered_per_token || in_led_chain) && range.0 != 0 =>
+        {
             let bytes = tokens as f64 * ACTIVATION_BYTES_PER_TOKEN as f64;
             (bytes / bps as f64 * 1000.0) as f32
         }
         _ => 0.0,
     };
 
-    let attempts = if c.expected_attempts.is_finite() && c.expected_attempts >= 1.0 {
-        c.expected_attempts
-    } else {
-        1.0
-    };
+    let attempts = attempts(c);
     // What the candidate must read in before it can start: the layers of this
     // range it does not hold, at its own load speed. This node is charged its
     // own figure too — leaving it out would make a cold peer look cheaper than
@@ -617,6 +782,11 @@ pub(super) fn chain_cost_ms(
 
 /// [`chain_cost_ms`] term by term: each [`VertexCost`] field summed over the
 /// chain's segments. The total is its `total()`, so the two cannot disagree.
+///
+/// A chain its head leads ([`chain_is_led_by_its_head`]) is priced as the
+/// search's led pass prices it: the head handed the request once, each later
+/// segment entered from the one before it, and the hop from the tail back to
+/// the head — those hops in `network_ms`.
 pub(super) fn chain_cost_terms(
     segments: &[PipelineSegment],
     candidates: &[NodeCandidate],
@@ -624,13 +794,38 @@ pub(super) fn chain_cost_terms(
     num_layers: u32,
     prompt_tokens: Option<u32>,
 ) -> VertexCost {
-    segments
+    let find = |id: &NodeId| candidates.iter().find(|c| &c.node_id == id);
+    let led = chain_is_led_by_its_head(segments, candidates, local_node_id);
+    let role = |i: usize| match (led, i) {
+        (false, _) => ChainRole::DrivenFromHere,
+        (true, 0) => ChainRole::LeadsTheChain,
+        (true, _) => ChainRole::InLedChain,
+    };
+    // Every hop a token makes in a led chain, the closing one included; none
+    // for a chain driven from here, whose round trips are in its vertices.
+    let hops_ms: f32 = if led {
+        let ring: Vec<&NodeCandidate> = segments.iter().filter_map(|s| find(&s.node_id)).collect();
+        ring.iter()
+            .zip(ring.iter().cycle().skip(1))
+            .filter_map(|(from, to)| led_hop_ms(from, to))
+            .sum()
+    } else {
+        0.0
+    };
+    let mut terms = segments
         .iter()
-        .filter_map(|seg| {
-            candidates
-                .iter()
-                .find(|c| c.node_id == seg.node_id)
-                .map(|c| vertex_cost(c, seg.layer_range, local_node_id, num_layers, prompt_tokens))
+        .enumerate()
+        .filter_map(|(i, seg)| {
+            find(&seg.node_id).map(|c| {
+                vertex_cost_as(
+                    c,
+                    seg.layer_range,
+                    local_node_id,
+                    num_layers,
+                    prompt_tokens,
+                    role(i),
+                )
+            })
         })
         .fold(VertexCost::default(), |sum, v| VertexCost {
             network_ms: sum.network_ms + v.network_ms,
@@ -639,7 +834,9 @@ pub(super) fn chain_cost_terms(
             prefill_ms: sum.prefill_ms + v.prefill_ms,
             transfer_ms: sum.transfer_ms + v.transfer_ms,
             cold_load_ms: sum.cold_load_ms + v.cold_load_ms,
-        })
+        });
+    terms.network_ms += hops_ms;
+    terms
 }
 
 /// Route layers [0, num_layers) across candidates using shortest-path DP.
@@ -780,6 +977,10 @@ fn route_over(
         cand_idx: usize,
         range: (u32, u32),
         cost_ms: f32,
+        /// Its cost in a chain its head leads — as that head where the range
+        /// starts at 0, else as a later segment, the hop into it apart
+        /// (`led_hop_ms`). `None` where it can be neither.
+        led_cost_ms: Option<f32>,
     }
     // Split points at which a segment boundary can usefully fall: the ends of
     // every candidate's ranges, plus the model's own ends. A sub-range is only
@@ -989,10 +1190,18 @@ fn route_over(
             if !fits(range) {
                 return;
             }
+            let led_role = if range.0 == 0 {
+                may_lead_a_chain(c, local_node_id).then_some(ChainRole::LeadsTheChain)
+            } else {
+                may_join_a_led_chain(c, local_node_id).then_some(ChainRole::InLedChain)
+            };
             vertices.push(Vertex {
                 cand_idx,
                 range,
                 cost_ms: vertex_cost(c, range, local_node_id, num_layers, prompt_tokens).total(),
+                led_cost_ms: led_role.map(|role| {
+                    vertex_cost_as(c, range, local_node_id, num_layers, prompt_tokens, role).total()
+                }),
             });
         };
         // The whole range is always available, so a chain that was routable
@@ -1269,7 +1478,25 @@ fn route_over(
     //
     // Returns the winning sink and the parent chain that reaches it, or `None`
     // when no source it was allowed to start from can reach any sink.
-    let run_pass = |apply_trust: bool| -> Option<(Vec<Option<usize>>, usize, f32)> {
+    //
+    // `led_by`: a pass over chains the vertex `h` LEADS (FUTURE_WORK #3 (a)) —
+    // seeded from `h` alone, through peers' vertices only, each entered from
+    // its predecessor (`led_hop_ms`), and closed by the hop from the sink back
+    // to `h`. Exact for a fixed head, because every cost on such a path is a
+    // vertex's or an edge's and the closing hop depends only on its two ends.
+    //
+    // The driven pass still starts from a head that may lead, so a chain
+    // through a peer the led pass cannot price (no coordinate, no chaining) is
+    // still routable, priced as before. A chain the led pass CAN price is
+    // never cheaper driven: its hops are one-way legs between consecutive
+    // machines, and by the triangle inequality on the coordinates
+    // (`distance_ms` is planar distance plus both heights) the legs round a
+    // ring cost no more than a round trip from here to each of them — so the
+    // cheaper of the two prices, the one the search keeps, is the led one, the
+    // price `chain_cost_terms` reports.
+    let run_pass = |apply_trust: bool,
+                    led_by: Option<usize>|
+     -> Option<(Vec<Option<usize>>, usize, f32)> {
         let mut best_cost = vec![f32::INFINITY; n];
         let mut parent: Vec<Option<usize>> = vec![None; n];
         let mut used_capped = vec![0u64; n];
@@ -1285,12 +1512,19 @@ fn route_over(
         // Initialize sources.
         for i in 0..n {
             if source_ok(&vertices[i], apply_trust) {
+                let seed = match led_by {
+                    None => Some(vertices[i].cost_ms),
+                    Some(h) => vertices[i].led_cost_ms.filter(|_| i == h),
+                };
+                let Some(seed) = seed else {
+                    continue;
+                };
                 let run = is_local_vertex(i).then_some(vertices[i].range.0);
                 let runs = u8::from(run.is_some());
                 if !local_fits(0, run, vertices[i].range.1, runs, 0) {
                     continue;
                 }
-                best_cost[i] = vertices[i].cost_ms;
+                best_cost[i] = seed;
                 used_capped[i] = bit_of(i);
                 local_base[i] = 0;
                 local_run[i] = run;
@@ -1349,7 +1583,22 @@ fn route_over(
                     // its segments, than its own loader will take.
                     continue;
                 }
-                let new_cost = best_cost[v_idx] + vertices[w_idx].cost_ms;
+                // Entering `w`: its own cost, or in a led chain its cost there
+                // plus the hop into it from `v`'s machine.
+                let step = match led_by {
+                    None => Some(vertices[w_idx].cost_ms),
+                    Some(_) => vertices[w_idx]
+                        .led_cost_ms
+                        .zip(led_hop_ms(
+                            &candidates[vertices[v_idx].cand_idx],
+                            &candidates[vertices[w_idx].cand_idx],
+                        ))
+                        .map(|(own, hop)| own + hop),
+                };
+                let Some(step) = step else {
+                    continue;
+                };
+                let new_cost = best_cost[v_idx] + step;
                 if new_cost < best_cost[w_idx] {
                     best_cost[w_idx] = new_cost;
                     parent[w_idx] = Some(v_idx);
@@ -1362,15 +1611,27 @@ fn route_over(
             }
         }
 
-        // Pick the best sink.
-        let best_sink = (0..n).filter(|&i| is_sink(&vertices[i])).min_by(|&a, &b| {
-            best_cost[a]
-                .partial_cmp(&best_cost[b])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // Pick the best sink. A led chain is two segments or more (one is a
+        // whole-model hand-off, priced as one), and is closed by the hop from
+        // its tail back to its head.
+        let sink_cost = |i: usize| -> Option<f32> {
+            match led_by {
+                None => Some(best_cost[i]),
+                Some(h) if i == h => None,
+                Some(h) => led_hop_ms(
+                    &candidates[vertices[i].cand_idx],
+                    &candidates[vertices[h].cand_idx],
+                )
+                .map(|closing| best_cost[i] + closing),
+            }
+        };
+        let best_sink = (0..n)
+            .filter(|&i| is_sink(&vertices[i]))
+            .filter_map(|i| sink_cost(i).map(|cost| (i, cost)))
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         match best_sink {
-            Some(i) if best_cost[i].is_finite() => Some((parent, i, best_cost[i])),
+            Some((i, cost)) if cost.is_finite() => Some((parent, i, cost)),
             _ => None,
         }
     };
@@ -1388,9 +1649,29 @@ fn route_over(
     //
     // Standing down on the ROUTE costs a second pass only when the first found
     // nothing, which is exactly when the request was about to fail anyway.
-    let (parent, sink_idx, _cost) = match run_pass(true) {
+    // Every pass for one trust setting: the driven one, then one per head that
+    // may lead a chain, the cheapest winning. A led chain found is a route
+    // found — the trust bar below stands down only when neither kind exists.
+    let search = |apply_trust: bool| -> Option<(Vec<Option<usize>>, usize, f32)> {
+        let mut best = run_pass(apply_trust, None);
+        for h in (0..n).filter(|&h| vertices[h].range.0 == 0 && vertices[h].led_cost_ms.is_some()) {
+            if let Some(led) = run_pass(apply_trust, Some(h)) {
+                if best.as_ref().is_none_or(|b| led.2 < b.2) {
+                    tracing::debug!(
+                        head = %candidates[vertices[h].cand_idx].node_id,
+                        cost_ms = led.2,
+                        driven_ms = ?best.as_ref().map(|b| b.2),
+                        "parallax: a chain its head leads prices cheapest so far"
+                    );
+                    best = Some(led);
+                }
+            }
+        }
+        best
+    };
+    let (parent, sink_idx, _cost) = match search(true) {
         Some(found) => found,
-        None => match run_pass(false) {
+        None => match search(false) {
             Some(found) => {
                 // Named at the call site because `Vertex` is local to this
                 // function — and the peers about to be shown the prompt are the
@@ -1546,6 +1827,7 @@ mod tests {
             cold_load_ms_per_layer: 0.0,
             reply_tokens_at_most: None,
             reply_tokens_expected: None,
+            ring: Default::default(),
             fresh_run_layers: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
@@ -1556,6 +1838,176 @@ mod tests {
     /// FUTURE_WORK #3, 2026-10-18: the per-token terms are charged for the
     /// passes the reply can take — `ASSUMED_FORWARD_PASSES`, or fewer where its
     /// `max_tokens` allows fewer — and the once-per-request ones are not.
+    /// A peer at `x` ms along a line, no height: two such peers are predicted
+    /// `|x1 - x2|` ms apart, round trip.
+    fn on_the_line(c: &mut NodeCandidate, x: f32) {
+        c.ring = RingFacts {
+            request_may_be_led: true,
+            coord: Some(NetworkCoord {
+                x,
+                y: 0.0,
+                height: 0.0,
+                error: 0.1,
+            }),
+            leads_splits: true,
+            chains_forwards: true,
+        };
+    }
+
+    /// Two unmeasured peers, each 400 ms from here and 40 ms from each other,
+    /// holding the halves of a 32-layer model (FUTURE_WORK #3 (a)).
+    fn two_close_peers_far_from_here() -> (NodeId, Vec<NodeCandidate>) {
+        let mut a = cand(2, vec![(0, 16)], 400, 0.0, true, false, 0.0);
+        let mut b = cand(3, vec![(16, 32)], 400, 0.0, false, true, 0.0);
+        on_the_line(&mut a, 0.0);
+        on_the_line(&mut b, 40.0);
+        (NodeId([1; 32]), vec![a, b])
+    }
+
+    fn halves(a: u8, b: u8) -> Vec<PipelineSegment> {
+        let seg = |byte: u8, range: (u32, u32)| PipelineSegment {
+            node_id: NodeId([byte; 32]),
+            shard_id: ShardId {
+                model_id: ModelId("m".into()),
+                index: 0,
+            },
+            layer_range: range,
+        };
+        vec![seg(a, (0, 16)), seg(b, (16, 32))]
+    }
+
+    #[test]
+    fn a_chain_its_head_leads_is_priced_by_the_hops_between_its_peers() {
+        let (local, cands) = two_close_peers_far_from_here();
+        let chain = halves(2, 3);
+        assert!(chain_is_led_by_its_head(&chain, &cands, &local));
+        let led = chain_cost_terms(&chain, &cands, &local, 32, None);
+        // The head is handed the request once (2 × 400, as a whole-model
+        // hand-off is), and each of 64 passes crosses A → B and B → A at half
+        // their 40 ms round trip.
+        assert_eq!(led.network_ms, 800.0 + 64.0 * (20.0 + 20.0));
+        // Compute is the same work wherever it is driven from.
+        assert_eq!(led.compute_ms, UNKNOWN_COMPUTE_MS * 32.0 * 64.0);
+
+        // Driven from here, each half was a round trip from here per pass —
+        // what this morning's chains were priced at, 4-10x their time.
+        let driven = 64.0 * 2.0 * (2.0 * 400.0);
+        let priced_as_before = |cands: &[NodeCandidate]| {
+            assert!(!chain_is_led_by_its_head(&chain, cands, &local));
+            assert_eq!(
+                chain_cost_terms(&chain, cands, &local, 32, None).network_ms,
+                driven
+            );
+        };
+        // A request the hand-off would not take (privacy, a scope, a
+        // continuation...) is driven from here, and priced so.
+        let mut not_led = cands.clone();
+        not_led[0].ring.request_may_be_led = false;
+        priced_as_before(&not_led);
+        // No distance between two peers without both coordinates.
+        let mut no_coord = cands.clone();
+        no_coord[1].ring.coord = None;
+        priced_as_before(&no_coord);
+        // A peer that answers whoever leads instead of forwarding.
+        let mut no_chain = cands.clone();
+        no_chain[1].ring.chains_forwards = false;
+        priced_as_before(&no_chain);
+        // A head that cannot be handed a split.
+        let mut cannot_lead = cands.clone();
+        cannot_lead[0].ring.leads_splits = false;
+        priced_as_before(&cannot_lead);
+        // A chain with a part here is driven from here.
+        let mut with_local = cands;
+        with_local[1].node_id = local.clone();
+        let mut ours = chain.clone();
+        ours[1].node_id = local.clone();
+        assert!(!chain_is_led_by_its_head(&ours, &with_local, &local));
+    }
+
+    #[test]
+    fn a_far_requester_takes_the_chain_its_peers_lead_over_a_slower_whole_copy() {
+        let (local, mut cands) = two_close_peers_far_from_here();
+        // A third peer holds the whole model and runs it at 40 ms a layer:
+        // 81,920 ms over 64 passes. The halves cost 25 ms a layer, 51,200, plus
+        // their hops: 3,360 led by A, 102,400 driven from here.
+        let mut whole = cand(4, vec![(0, 32)], 400, 0.0, true, true, 0.0);
+        whole.observed_delegated_ms_per_layer = Some(40.0);
+        cands.push(whole);
+        let route = |cands: &[NodeCandidate]| {
+            route_shortest_path(
+                32,
+                cands,
+                &local,
+                false,
+                false,
+                CapacityBound::Everyone,
+                None,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.node_id.0[0], s.layer_range))
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(route(&cands), vec![(2, (0, 16)), (3, (16, 32))]);
+        // The price it was chosen at is the price every gate reads.
+        assert_eq!(
+            chain_cost_ms(&halves(2, 3), &cands, &local, 32, None),
+            UNKNOWN_COMPUTE_MS * 32.0 * 64.0 + 800.0 + 64.0 * 40.0
+        );
+
+        // Not a request the hand-off takes: driven from here, the halves cost
+        // more than the whole copy.
+        for c in &mut cands {
+            c.ring.request_may_be_led = false;
+        }
+        assert_eq!(route(&cands), vec![(4, (0, 32))]);
+    }
+
+    #[test]
+    fn a_chain_the_led_pass_cannot_price_is_still_routed_driven_from_here() {
+        // The head may lead, but the peer after it published no coordinate:
+        // the chain cannot be priced by its hops, and must still be a route —
+        // at the price it always had.
+        let (local, mut cands) = two_close_peers_far_from_here();
+        cands[1].ring.coord = None;
+        let segs = route_shortest_path(
+            32,
+            &cands,
+            &local,
+            false,
+            false,
+            CapacityBound::Everyone,
+            None,
+        )
+        .unwrap();
+        let shape = |s: &[PipelineSegment]| {
+            s.iter()
+                .map(|s| (s.node_id.0[0], s.layer_range))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shape(&segs), shape(&halves(2, 3)));
+        assert_eq!(
+            chain_cost_terms(&segs, &cands, &local, 32, None).network_ms,
+            64.0 * 2.0 * (2.0 * 400.0)
+        );
+    }
+
+    #[test]
+    fn a_led_peer_is_charged_its_own_visit_not_our_round_trip_to_it() {
+        // Measured from here, a visit costs 500 ms beside 4 ms a layer — 400 of
+        // it our round trip to the peer. Led by another peer, that round trip
+        // is replaced by the hop from its predecessor (`led_hop_ms`).
+        let local = NodeId([1; 32]);
+        let mut b = cand(3, vec![(16, 32)], 400, 0.0, false, true, 0.0);
+        b.observed_latency_ms_per_layer = Some(4.0);
+        b.observed_fixed_ms_per_visit = Some(500.0);
+        let driven = vertex_cost(&b, (16, 32), &local, 32, None);
+        let led = vertex_cost_as(&b, (16, 32), &local, 32, None, ChainRole::InLedChain);
+        assert_eq!(driven.network_ms, 500.0 * 64.0);
+        assert_eq!(led.network_ms, 100.0 * 64.0);
+        assert_eq!(led.compute_ms, driven.compute_ms);
+    }
+
     #[test]
     fn per_token_costs_are_charged_for_no_more_passes_than_the_reply_may_take() {
         let local = NodeId([1; 32]);
@@ -4101,6 +4553,7 @@ mod transfer_cost_tests {
             cold_load_ms_per_layer: 0.0,
             reply_tokens_at_most: None,
             reply_tokens_expected: None,
+            ring: Default::default(),
             fresh_run_layers: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,

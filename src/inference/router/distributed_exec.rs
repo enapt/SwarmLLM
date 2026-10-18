@@ -830,7 +830,16 @@ pub(super) async fn execute_request(
             // A reply takes no more decode passes than the tokens it may use,
             // and the cost model charges its per-token terms for no more than
             // that (FUTURE_WORK #3: replies capped at 16 tokens priced at 64).
-            .with_reply_of_at_most(request.sampling_params.max_tokens);
+            .with_reply_of_at_most(request.sampling_params.max_tokens)
+            // A chain holding none of this node is handed to its head, which
+            // drives every token from there; it is priced that way only for a
+            // request the hand-off would take (FUTURE_WORK #3 (a)).
+            .with_head_leading(
+                crate::inference::pipeline::remote_generate::request_may_be_led_by_its_head(
+                    &shared_state,
+                    &request,
+                ),
+            );
     if prompt_plan.cached_locally > 0 {
         tracing::info!(
             request_id = %request.id,

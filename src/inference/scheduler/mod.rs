@@ -279,6 +279,10 @@ struct NodeCandidate {
     /// the greedy fallback beneath it rebuilt the refused plan on its relaxed
     /// pass, three attempts in under a second on the #263 rig.
     memory_refused_this_request: bool,
+    /// What pricing a chain its HEAD leads needs to know of this candidate
+    /// (`parallax::chain_is_led_by_its_head`, FUTURE_WORK #3 (a)). Default
+    /// (nothing known) prices every chain as driven from here.
+    ring: parallax::RingFacts,
 }
 
 /// Assumed load speed for a node that has not reported its own
@@ -4663,6 +4667,24 @@ impl PipelineScheduler {
                 .filter(|held| held.node == node_id)
                 .map(|held| (held.range, held.tokens))
                 .collect();
+            let ring = if is_local {
+                // This node is never inside a chain its head leads.
+                parallax::RingFacts::default()
+            } else {
+                parallax::RingFacts {
+                    request_may_be_led: prompt.head_may_lead,
+                    coord: self
+                        .shared_state
+                        .peer_registry
+                        .get(&node_id)
+                        .and_then(|p| p.capability.as_ref().and_then(|c| c.coord))
+                        .filter(swarmllm_types::netcoord::NetworkCoord::is_usable),
+                    leads_splits: self
+                        .shared_state
+                        .peer_advertises_feature(&node_id, crate::types::features::DELEGATED_SPLIT),
+                    chains_forwards: self.shared_state.peer_supports_pipeline_chain(&node_id),
+                }
+            };
             candidates.push(NodeCandidate {
                 // Measured on real forwards to this peer, like `ack_srtt_ms`
                 // one line below — and `None` for the local node, which sends
@@ -4716,6 +4738,7 @@ impl PipelineScheduler {
                     && self
                         .shared_state
                         .local_memory_refused_for_request(request_id),
+                ring,
             });
         }
 

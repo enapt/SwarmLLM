@@ -325,6 +325,12 @@ Each names the ONE place a decision is made; a second implementation of any is t
 
 ## A split none of which is ours is LED by its head (2026-10-02)
 
-**`remote_generate::delegation_eligible` is the single answer**; `try_delegated_split` runs FIRST in `execute_distributed`, under `RoutePlanOverride::lead_here`. Local work uses **`pipeline::worker_requester`**, never a hardcoded `Requester::Owner`.
+**`remote_generate::delegation_eligible` is the single answer**; its conditions on the REQUEST are **`request_may_be_led_by_its_head`**, which the planner asks too. `try_delegated_split` runs FIRST in `execute_distributed`, under `RoutePlanOverride::lead_here`. Local work uses **`pipeline::worker_requester`**, never a hardcoded `Requester::Owner`.
 
 → `docs/invariants/scheduling.md` § "A split none of which is ours is LED by its head, never driven from here (2026-10-02)"
+
+## A chain its head will lead is priced as its head leading it (2026-10-18, #3 (a))
+
+**`parallax::chain_is_led_by_its_head` is the single answer to "is this chain priced as led by its head"**: `delegation_eligible`'s shape, for a request the hand-off takes (`PromptPlan::with_head_leading` ← `request_may_be_led_by_its_head`, set once in `distributed_exec`), every peer forwarding (`PIPELINE_CHAIN`) with a usable coordinate (`NodeCandidate::ring`). The search runs one led pass per head; each hop is `parallax::led_hop_ms` (half the coordinates' round trip × passes), the tail's back to the head included. `chain_cost_terms` prices a chain the same way, so every gate and the logged prediction read the price it was chosen at. Anything unknown prices it driven, as before — and the driven pass still starts from a head that may lead, or a chain the led pass cannot price has no route.
+
+→ `docs/invariants/scheduling.md` § "A chain its head will lead is priced as its head leading it"

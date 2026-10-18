@@ -350,10 +350,10 @@ fn delegation_switched_off() -> bool {
 ///   and the delegate could not follow it;
 /// - the request is not itself one a peer delegated to us (never handed on).
 pub(crate) fn delegation_eligible(exec: &PipelineExecutor) -> bool {
-    if delegation_switched_off() {
+    if !exec.assignment.tp_groups.is_empty() {
         return false;
     }
-    if super::fastpath_request_disqualified(exec) {
+    if !request_may_be_led_by_its_head(&exec.shared_state, &exec.request) {
         return false;
     }
     let segments = &exec.assignment.segments;
@@ -364,44 +364,48 @@ pub(crate) fn delegation_eligible(exec: &PipelineExecutor) -> bool {
     if segments.iter().any(|s| &s.node_id == me) {
         return false;
     }
-    if exec.request.route_override.is_some() {
+    let head = &segments[0];
+    if head.layer_range.0 != 0 {
+        return false;
+    }
+    exec.shared_state
+        .peer_advertises_feature(&head.node_id, crate::types::features::DELEGATED_SPLIT)
+}
+
+/// [`delegation_eligible`]'s conditions on the REQUEST — everything but the
+/// plan's shape. The planner asks it before any plan exists, so a chain the
+/// hand-off will take is PRICED as its head leading it
+/// (`PromptPlan::head_may_lead` → `parallax::chain_is_led_by_its_head`,
+/// FUTURE_WORK #3 (a)); the hand-off asks it again, so the two cannot
+/// disagree about a request.
+pub(crate) fn request_may_be_led_by_its_head(
+    state: &crate::daemon::SharedState,
+    request: &crate::types::InferenceRequest,
+) -> bool {
+    if delegation_switched_off() {
+        return false;
+    }
+    if super::request_disqualifies_fast_paths(request) {
+        return false;
+    }
+    // A peer delegated to us carries `lead_here`, so it is never handed on.
+    if request.route_override.is_some() {
         return false;
     }
     // The delegate renders the conversation itself from `messages`, so a
     // continuation — the reply so far appended to the prompt HERE — would be
     // lost; this node coordinates it instead (FUTURE_WORK #236).
-    if exec.request.continuation.is_some() {
+    if request.continuation.is_some() {
         return false;
     }
-    let head = &segments[0];
-    if head.layer_range.0 != 0 {
-        return false;
-    }
-    if !exec
-        .shared_state
-        .peer_advertises_feature(&head.node_id, crate::types::features::DELEGATED_SPLIT)
-    {
-        return false;
-    }
-    let encrypted = exec
-        .shared_state
-        .encrypted_pipeline_for_request(&exec.request.model_id, exec.request.id);
-    if encrypted || exec.shared_state.config.inference.local_embedding_privacy {
+    let encrypted = state.encrypted_pipeline_for_request(&request.model_id, request.id);
+    if encrypted || state.config.inference.local_embedding_privacy {
         return false;
     }
     // Any restriction on where this request may go (private mode, a model kept
     // on this computer, a request kept here) keeps it off the hand-off, which
     // plans nothing more.
-    if crate::pool::scope::request_scope(
-        &exec.shared_state,
-        &exec.request.model_id,
-        exec.request.keep,
-    )
-    .is_some()
-    {
-        return false;
-    }
-    true
+    crate::pool::scope::request_scope(state, &request.model_id, request.keep).is_none()
 }
 
 /// Preconditions for the fast path. All checks are local and cheap.

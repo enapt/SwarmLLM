@@ -1118,13 +1118,15 @@ pub(super) fn fastpath_request_disqualified(exec: &PipelineExecutor) -> bool {
     if !exec.assignment.tp_groups.is_empty() {
         return true;
     }
-    if exec.request.lora_adapter.is_some() {
-        return true;
-    }
-    if !crate::inference::vision::collect_images(&exec.request.messages).is_empty() {
-        return true;
-    }
-    false
+    request_disqualifies_fast_paths(&exec.request)
+}
+
+/// [`fastpath_request_disqualified`]'s half that is about the REQUEST, not
+/// the plan — what the planner can ask before a plan exists
+/// (`remote_generate::request_may_be_led_by_its_head`).
+pub(super) fn request_disqualifies_fast_paths(request: &crate::types::InferenceRequest) -> bool {
+    request.lora_adapter.is_some()
+        || !crate::inference::vision::collect_images(&request.messages).is_empty()
 }
 
 /// Common preconditions for any speculative-decoding fast path

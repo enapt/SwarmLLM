@@ -1705,6 +1705,95 @@ three red with the bound off, the last red with the learned length off.
 `reply_lengths`: `the_expectation_is_the_mean_of_recent_replies_once_there_are_enough`,
 `only_the_most_recent_replies_count`.
 
+## A chain its head will lead is priced as its head leading it
+
+**Rule (2026-10-18, FUTURE_WORK #3 (a)).** `parallax::chain_is_led_by_its_head`
+is the single answer to "is this chain priced as led by its head". It is
+`remote_generate::delegation_eligible`'s shape — two or more segments, none of
+them this node's, the head holding layer 0 and advertising `DELEGATED_SPLIT` —
+for a request the hand-off takes (`remote_generate::request_may_be_led_by_its_head`,
+the request half of `delegation_eligible`, which the router asks once into
+`PromptPlan::with_head_leading`), plus two conditions of the cost model's own:
+every peer forwards to the next (`PIPELINE_CHAIN`) and has a usable network
+coordinate (`NodeCandidate::ring`). Such a chain costs:
+
+- the head: handed the request ONCE, as a whole-model hand-off is
+  (`ChainRole::LeadsTheChain` — its network once, the delegated figure for its
+  compute);
+- each later peer: its compute, plus its own per-visit work where measured (the
+  fixed term less OUR round trip to it), entered from the peer before it
+  (`ChainRole::InLedChain`);
+- every hop, the tail's back to the head included: `parallax::led_hop_ms`, half
+  the round trip the two coordinates predict, once per pass.
+
+The search runs one led pass per head that may lead (`route_over`'s `run_pass(..,
+Some(h))`: seeded from that head, through peers only, closed by the hop back),
+beside the driven pass, and keeps the cheapest; `chain_cost_terms` prices a
+chain the same way, so the gates and the logged `predicted_terms` read the price
+the chain was chosen at.
+
+**What it replaced.** Every peer segment priced as a round trip from HERE per
+pass (`2 × latency_ms` unmeasured). The delegated split (#143) had moved the
+loop to the head on 2026-10-02 and nothing told the cost model: a chain of
+three peers 20-300 ms apart, 220-420 ms from here, was priced at the
+requester's distance three times over.
+
+**Research.** Petals prices the same graph the same way: an edge between two
+servers is `rtt / 2` from the pings each server publishes to its next servers
+(`next_pings`), plus a closing edge back to the client
+(`client/routing/sequence_manager.py`, `_build_inference_graph` /
+`_rtt_to_delay`, read 2026-10-18). Here the "client" of a led chain is its head.
+
+**Measured** (live node, 2026-10-18; the working-tree build run AS the local
+node for five requests, `~/swarmllm-3a/check.sh`; Qwen3-30B-A3B held only by
+peers, so every plan was handed to the Italian head):
+
+- The hop price, against the morning's warm three-peer chain IT → BE → AU (64
+  tokens, 25,907 ms, ~400 ms a token): one-way hops plus compute ~357 ms a
+  token; a round trip per hop would be ~670.
+- The network term, same peers and passes: 57,856 ms (IT, BE, 64 passes) in
+  the morning, 3,620 with this; IT, BE, AU read 114,304 at 64 passes then and
+  6,506 at 16 now (driven, 16 passes would be ~28,600). The coordinates against measured round trips here, the same day:
+  224 → 253, 274 → 282, 417 → 454, 557 → 453 ms; a 1 ms LAN peer reads 60.
+- Totals, NOT yet right, for two other reasons this check exposed (FUTURE_WORK
+  #3 (e), (f)): the first, cold request priced 89,807 ms and took 99,854
+  (0.90); the warm repeats priced 84,863 / 90,273 and took 19,437 / 29,448,
+  because each still carried 78-83 s of loading that never happened — this
+  node's plan cut the model at layer 19, the head re-planned onto the ranges its
+  peers' workers hold ([0,18) and [18,48)), and a peer's worker keys ranges
+  exactly. Without that term the same two read 2,261 and 12,071: the compute
+  of a led chain's peers is a stated-speed prior that is never corrected, since
+  a delegated reply records no speed sample.
+
+**What a change must keep.**
+
+- **One predicate for the price.** A chain priced led by the search and driven
+  by `chain_cost_terms` (or the reverse) is chosen at one price and gated at
+  another — the gates (`RoutePrices`, the hand-off comparison) compare
+  `chain_cost_ms` figures.
+- **The request half is the hand-off's own.** `delegation_eligible` calls
+  `request_may_be_led_by_its_head`; a condition added to the hand-off goes
+  THERE, or a chain the hand-off refuses is priced as handed over.
+- **The driven pass still starts from a head that may lead.** A chain through a
+  peer the led pass cannot price (no coordinate, no chaining) must still be a
+  route; excluding such heads left it none
+  (`a_chain_the_led_pass_cannot_price_is_still_routed_driven_from_here`). A chain
+  the led pass can price is never cheaper driven: by the triangle inequality on
+  the coordinates, one-way legs round a ring cost no more than a round trip
+  from here to each machine, so the cheaper price kept is the led one.
+- **Unknown prices as before**: no coordinate, no feature, a request the
+  hand-off would not take — the chain is priced driven from here, exactly as it
+  was.
+- ⚠ **Coordinates predict a near pair poorly** (the 60 ms LAN peer above): a led
+  chain between close machines is priced high, never low. Do not ORDER near
+  candidates by `led_hop_ms`; it prices, it does not rank the near half.
+
+Tests: `a_chain_its_head_leads_is_priced_by_the_hops_between_its_peers` (and
+every condition that prices it driven), `a_far_requester_takes_the_chain_its_peers_lead_over_a_slower_whole_copy`
+(red with led pricing off), `a_led_peer_is_charged_its_own_visit_not_our_round_trip_to_it`
+(red with the fixed term kept whole), `a_chain_the_led_pass_cannot_price_is_still_routed_driven_from_here`
+(red with leading heads excluded from the driven pass).
+
 ## A reply whose machine failed mid-stream is continued
 
 (2026-10-08, FUTURE_WORK #236; design `docs/plans/mid_reply_continuation.md`.) Once a

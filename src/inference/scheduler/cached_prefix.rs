@@ -80,6 +80,12 @@ pub struct PromptPlan {
     /// request is behind the plan (the admin preview, the tests): priced at
     /// `ASSUMED_FORWARD_PASSES` exactly as before.
     pub reply_tokens_at_most: Option<u32>,
+    /// This request may be handed to the head of a split that holds no part
+    /// of this node (`remote_generate::request_may_be_led_by_its_head`), so
+    /// such a chain is priced as its head leading it (FUTURE_WORK #3 (a)).
+    /// `false` where no request is behind the plan: priced as driven from
+    /// here, exactly as before.
+    pub(crate) head_may_lead: bool,
 }
 
 impl From<Option<u32>> for PromptPlan {
@@ -97,6 +103,14 @@ impl PromptPlan {
     /// (`distributed_exec`), the one place both of its prompt plans meet.
     pub(crate) fn with_reply_of_at_most(mut self, max_tokens: u32) -> Self {
         self.reply_tokens_at_most = Some(max_tokens);
+        self
+    }
+
+    /// This plan, for a request the delegated split would take
+    /// (`remote_generate::request_may_be_led_by_its_head`). Set where
+    /// [`Self::with_reply_of_at_most`] is.
+    pub(crate) fn with_head_leading(mut self, may_lead: bool) -> Self {
+        self.head_may_lead = may_lead;
         self
     }
 }
@@ -207,8 +221,10 @@ pub(crate) fn plan_prompt(state: &SharedState, request: &InferenceRequest) -> Op
         tokens: Some(u32::try_from(ids.len()).unwrap_or(u32::MAX)),
         cached_locally,
         split_openings: crate::inference::pipeline::held_openings(&request.model_id, &ids),
-        // The caller's: `with_reply_of_at_most`, beside the fallback plan.
+        // The caller's: `with_reply_of_at_most` and `with_head_leading`,
+        // beside the fallback plan.
         reply_tokens_at_most: None,
+        head_may_lead: false,
     })
 }
 

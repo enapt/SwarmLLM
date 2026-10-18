@@ -73,9 +73,11 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    instead of 20 min (unreleased). Next: re-read in the field after the release.
 8. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
     ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
-    (16-token replies 0.49 → 0.97 of their price) and a long one is priced at its model's mean
-    reply length (160-token replies were 2.5x their price), both unreleased; next, a chain its
-    head leads is priced as if driven from here (0.10-0.24). Never tune the constant.
+    (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
+    reply length (160-token replies were 2.5x their price), and a chain its head leads is priced
+    by its own hops (network term 57.9 s → 3.6 s, same peers and passes), all unreleased; next, a led chain charged a
+    load that never happens (#3 (e)), then its peers' unmeasured compute (#3 (f)). Never tune
+    the constant.
 9. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
 10. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
@@ -639,16 +641,29 @@ for the worker's life), so measure how often a refusal still happens before buil
 
 **Where it stands (2026-10-18, the fit below):** the reply's own `max_tokens` now caps the
 passes the per-token terms are charged for (`NodeCandidate::forward_passes`; 16-token replies
-0.49 → 0.97 of their price). Left, largest first: (a) a chain holding no part of this node is
+0.49 → 0.97 of their price). Left, largest first: (a) ~~a chain holding no part of this node is
 LED by its head (`remote_generate::delegation_eligible`) but priced as if this node drove every
-token through every segment — 0.10-0.24 of its price warm; (b) ~~a reply longer than 64 tokens is
+token through every segment~~ (0.10-0.24 of its price warm) — **fixed 2026-10-18, unreleased**:
+`parallax::chain_is_led_by_its_head` prices it by its hops (half the coordinates' round trip
+between consecutive peers and back to the head, as Petals prices its edges), in one search pass
+per head; the network term of an IT → BE chain at 64 passes went 57,856 → 3,620 ms
+(`docs/invariants/scheduling.md` § "A chain its head will lead is priced as its head leading
+it"). A chain this node drives through chaining peers is still priced a round trip from here per
+segment, and so is the head's own re-plan of a led chain — (a2), smaller, untouched; (b) ~~a reply longer than 64 tokens is
 under-priced by its length ÷ 64~~ (2.49x / 2.62x at 160 tokens on two peers' hand-offs) —
 **fixed 2026-10-18, unreleased**: the passes are this model's mean recent reply length
 (`daemon::state::reply_lengths`, the last 32 finished replies once there are 4), still capped by
 `max_tokens`; left is one reply's spread around its model's mean, which nothing before the reply
 can read; (c) a peer's prompt cache is unpriced (a repeated 505-token prompt priced
-20 s, read in ~0: 0.25x); (d) the drafter's gain (0.39x, 10-15). (a) is next, and needs the
-hand-off's request-time conditions as ONE predicate the search can ask before the plan exists.
+20 s, read in ~0: 0.25x); (d) the drafter's gain (0.39x, 10-15); found by (a)'s check (2026-10-18, five requests on
+the live swarm): (e) **a led chain is charged a load that never happens** — this node cut
+Qwen3-30B-A3B at layer 19, the head re-planned onto the ranges its peers' workers hold ([0,18),
+[18,48)), and a peer's worker keys ranges exactly, so warm repeats carried 78-83 s of
+`cold_load_ms` (priced 84.9 / 90.3 s, took 19.4 / 29.4 s). A held range is offered to the search
+only when no route exists (#275's rule, `route_over(.., meet_held)`) — the fix is there, and must
+not re-cut existing routes blindly; (f) **a led chain's peers are never measured from here** (a
+delegated reply records no speed sample), so their compute stays a stated-speed prior: a warm
+two-peer 16-token reply priced 2.3 s without the load, took 19.4 s. (e) is next.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
@@ -2618,7 +2633,17 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-18, not yet released** (#303; #251 (3) — #251 closed; #228 (8); #3 (b))
+**Closed 2026-10-18, not yet released** (#303; #251 (3) — #251 closed; #228 (8); #3 (b); #3 (a))
+- #3 (a) — **A chain run entirely on other people's computers is priced by the distance between
+  them, not by its distance from you.** The chain is handed to its first machine, which drives
+  every token from there, but routing priced each machine as a round trip from here per token —
+  4-10x too slow for chains of nearby peers far from the requester. It is now priced by its hops:
+  half the round trip the network coordinates predict between consecutive machines and from the
+  last back to the first. Measured on the live swarm: the network part of a two-peer chain's
+  estimate went from 57.9 s to 3.6 s (same peers, same reply length). Tests: `a_chain_its_head_leads_is_priced_by_the_hops_between_its_peers`,
+  `a_far_requester_takes_the_chain_its_peers_lead_over_a_slower_whole_copy`,
+  `a_led_peer_is_charged_its_own_visit_not_our_round_trip_to_it`,
+  `a_chain_the_led_pass_cannot_price_is_still_routed_driven_from_here`. Left: #3 (e), (f).
 - #3 (b) — **A long reply is no longer priced as if it were 64 tokens.** Routing charged every
   reply's per-token costs for 64 passes unless the request allowed fewer, so a model that answers
   at length had its split and hand-off routes under-priced by length ÷ 64 (2.49x and 2.62x at 160
