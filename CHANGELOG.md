@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.3.243-alpha] — 2026-10-18
+
+**Qwen 3.5 conversations answer the next message much sooner.** Each new message in a Qwen 3.5
+conversation made the model read the whole conversation again from the start: part of what
+this model remembers about a conversation could not be cut back and reused the way other
+models' memory can. It is now kept from just before the end of each prompt, and the next
+message starts from there. On Qwen3.5-0.8B on the processor, the second message of a
+2,416-token conversation was answered in 16.7 s instead of 127.6 s, with the same reply. This
+kept memory stays on your computer: it is not announced to other computers or exported.
+
+**Requests are sent along better routes.** When a model can run more than one way (on your
+computer, on another one, or split across several), SwarmLLM estimates how long each way
+would take and picks the quickest. Three errors in those estimates are fixed. They change
+which route is picked, not how fast a route runs.
+- Every reply was counted as 64 tokens long. A request allowing only 16 had its per-token
+  costs counted four times over, so the cost of loading a model counted for a quarter of what
+  it is: such replies took a median 0.49 of their estimate, and now 0.97.
+- A long reply was estimated too fast: 160-token replies took about 2.5 times their
+  estimate. Each computer now learns how long each model's replies run (the average of its
+  last 32) and estimates from that, never past the request's own `max_tokens`.
+- A split run entirely on other computers passes the work straight from one computer to the
+  next, but was estimated as if every step made a round trip to yours: 4 to 10 times too
+  slow, so a chain of computers close to each other but far from you was passed over for
+  worse routes. It is now estimated from the distance between those computers. For a
+  two-computer chain in Italy and Belgium, the network part of the estimate went from 57.9 s
+  to 3.6 s for the same reply.
+
+**A split request no longer stalls when one computer cannot open part of the prompt.** When a
+computer cannot read a piece of work sent to it, it refuses it, and the piece is sent again
+once the two computers have agreed fresh keys. For a long prompt read in pieces, the refusal
+did not say which piece it was about, so nothing acted on it: the piece waited out its whole
+time limit. In a two-computer test, a request that failed after 404 s now answers: the
+refused piece went again about a quarter of a second after it was first sent.
+
+**Every reply says which computers answered it, streamed or not.** Programs using SwarmLLM
+could only read this from the `x-swarm-*` headers of a reply that was not streamed. Every reply
+now also carries `"swarmllm": {"route": {...}}` (the route, how many computers and which ones):
+in a streamed chat reply's last chunk, in Anthropic's `message_delta`, on the `/v1/responses`
+object (streamed, in the background or read back later), in an MCP result's
+`_meta["com.swarmllm/route"]`, and on each model's result from `compare`, `research` and
+`batch_prompts`. A reply a cloud provider wrote carries none.
+
+**An idle computer uploads less.** Each computer re-announced where to find its model parts
+every 20 minutes, and in a network of fewer than 20 computers every announcement asked every
+computer, each answering with its list of peers: about 2.1 KB/s of upload on an idle computer
+with 7 peers. Announcements now repeat every 4 hours and last 12 hours (they lasted 1 hour),
+which cuts that cost about 12 times once computers have updated.
+
+**The traffic stats say what the upload is made of.** The `network_traffic` figure in
+`/api/admin/stats` (and `/v1/status`) gains `direct_by_kind`, this computer's own messages by
+kind, and `by_protocol`, every byte by the network protocol it went over, with whether this
+computer asked (`us`) or answered (`peer`). The `by_protocol` rows add up exactly to the totals.
+
 ## [0.3.242-alpha] — 2026-10-17
 
 **One computer can no longer stop yours receiving relayed messages.** When two computers cannot

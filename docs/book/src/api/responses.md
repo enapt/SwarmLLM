@@ -41,6 +41,11 @@ All endpoints accept the same Bearer-auth header as the rest of the API.
    with HTTP 400 because they require backing infrastructure SwarmLLM
    does not run.
 
+A response that ran locally or on the swarm names the computers that served it,
+as `"swarmllm": {"route": {...}}` on the response object, whether it was
+streamed, run in the background or read back later
+([OpenAI-compatible API](openai.md) describes its fields).
+
 ## Capabilities
 
 - **Multimodal input (V2)** — `input_image` and `input_file` (UTF-8 only)

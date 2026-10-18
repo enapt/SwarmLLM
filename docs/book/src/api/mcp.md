@@ -19,6 +19,9 @@ All requests use JSON-RPC 2.0 format. All tools include [tool annotations](https
 ### `chat`
 
 Send a message to any model available on the node (local, network, or cloud).
+The result's `_meta["com.swarmllm/route"]` names the computers that served it
+(as does `delegate`'s; `compare`, `research` and `batch_prompts` give each
+model's result its own `route`). A cloud provider's reply carries none.
 
 ```json
 {

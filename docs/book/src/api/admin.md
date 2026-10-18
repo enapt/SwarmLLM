@@ -7,6 +7,13 @@ Every `/api/admin/*` endpoint needs `Authorization: Bearer <key>` — the key is
 ### GET /api/admin/stats
 Node statistics and hardware info.
 
+Its `network_traffic` figure (also on `/v1/status` and the dashboard's stats) says
+what this node's upload and download are made of. Since 0.3.243, `direct_by_kind`
+lists this node's own messages by kind, and `by_protocol` lists every byte by the
+network protocol its connection used, with `opened_by`: `us` for what this node
+asked, `peer` for what it answered. The `by_protocol` rows add up to `out_bytes`
+and `in_bytes`.
+
 ### GET /api/admin/peers
 Connected peers with latency, trust scores, and hosted models.
 

@@ -91,8 +91,8 @@ cargo dev-test                        # lib + integration; counts below come fro
 cargo dev-run -- run -p 8800 -v       # start a daemon serving the frontend from disk
 ```
 
-**Counts, measured at v0.3.242 (dev,claude-subscription)**: **3625 lib** (+17 ignored),
-79 integration (31 + 34 + 14 `yamux_substream`), **235 repo-consistency**,
+**Counts, measured at v0.3.243 (dev,claude-subscription)**: **3657 lib** (+17 ignored),
+79 integration (31 + 34 + 14 `yamux_substream`), **236 repo-consistency**,
 1 `api_key_side_effects`, 59 `swarmllm-types`, and 12 in the vendored
 request-response patch — plus 18 in the `swarmllm` BIN target (`cli::*`, counted
 nowhere else). They are refreshed at release (`memory/release_gate.md`), not
@@ -138,8 +138,8 @@ mmproj). Never edit a count without the run behind it (`completeness.md`).
 - **A family in `supported_list` is a claim**: check it against a REAL file's
   header (#715).
 - **A split is only fast when the machines are CLOSE** (0.35 tok/s
-  Thailand↔Italy vs 6.76 at 18 ms); nothing routes on coordinates yet →
-  `docs/plans/regional_pipelines.md`. Why split decode is slow →
+  Thailand↔Italy vs 6.76 at 18 ms); coordinates only PRICE a chain its head leads
+  (#3 (a)), nothing ranks near peers by them → `docs/plans/regional_pipelines.md`. Why split decode is slow →
   `docs/plans/faster_than_local.md`, `docs/plans/split_speculation.md`.
 - **Local GPU decode is bound by SUBMISSION COUNT**; ONE CUDA stream per device,
   decode and speculative checks submitted as CUDA graphs → `arch-inference.md`,

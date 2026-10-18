@@ -595,7 +595,10 @@ without ever being able to read them.
   for the access link) makes the distance between any two published coordinates
   an estimate of the round trip between those two nodes, computed locally with
   no extra probing. Added 2026-09-20, additive, `#[serde(default)]`, gated by
-  `features::NETWORK_COORDS`; `region` remains the coarse fallback.
+  `features::NETWORK_COORDS`; `region` remains the coarse fallback. Since
+  2026-10-18 the pipeline search prices a chain its head leads by these
+  distances (§ "What a route is priced at"); it prices with them, it does not
+  rank near peers by them.
   **Two things it is easy to get wrong, both found in the field**: a coordinate
   must be published even while rough (the error rides with it and the receiver
   discounts by `w = e_i/(e_i+e_j)`; withholding it deadlocks every node at
@@ -828,8 +831,12 @@ references: `docs/plans/qwen35_support.md`.
   wound back one step at most (on a card, which keeps the state the last step read — what a refused
   CUDA-graph capture needs), so **every speculative path refuses such a model** (`pipeline::distributed::
   speculation_can_roll_back`, `SplitModel::carries_recurrent_state` for the worker's own n-gram and
-  SWIFT), `KvCacheEntry::truncate_to` refuses anything further, and the prefix cache never
-  snapshots it. A prompt pass at position 0 clears the entry, so a failover replay rebuilds it.
+  SWIFT), and `KvCacheEntry::truncate_to` refuses anything further. So the prefix cache never
+  cuts such a state back: since 2026-10-18 (#228 (8)) the prompt pass pauses
+  `RECURRENT_SAVE_BEFORE_END` (16) tokens before the prompt's end to save it whole (llama.cpp's
+  context checkpoints do the same — the next turn's template re-renders the last few tokens), and
+  a later turn restores it whole or not at all. Such saves are never announced or exported. A
+  prompt pass at position 0 clears the entry, so a failover replay rebuilds it.
 - **Card/processor split since v0.3.230** (`hybrid::arch_supports_hybrid`): every tensor the loop
   loads goes through the shadowed `device`/`cos`/`sin`, and a DeltaNet layer makes its state on its
   input's device. Memory is charged only to the layers that keep a KV cache
@@ -1103,6 +1110,21 @@ reconstruction. It is exempt from "a capped candidate appears at most once"
 (prompt privacy needs it at both ends), so the per-vertex cap cannot bound what
 it takes in total — and a constraint checked only after reconstruction fails the
 whole search rather than the one chain that broke it.
+
+**What a route is priced at (`parallax::chain_cost_terms`, read by every gate).**
+Costs paid once per request (reading the prompt, loading layers, the hand-off) are
+weighed against costs paid per forward pass, and the passes are
+`NodeCandidate::forward_passes`: the mean length of the model's last 32 finished
+replies once 4 are known (`daemon::state::reply_lengths`, else 64), capped by the
+request's `max_tokens` (FUTURE_WORK #3, #3 (b)). A chain held only by peers whose
+head will lead it (`parallax::chain_is_led_by_its_head`: the request passes
+`request_may_be_led_by_its_head`, the head advertises `DELEGATED_SPLIT`, every
+member `PIPELINE_CHAIN` and a usable coordinate) is priced by its own hops — half
+the round trip the coordinates predict between consecutive members, plus the
+closing hop to the head, per pass (`led_hop_ms`, Petals' `rtt/2`) — in a led pass
+of the search beside the driven one; the cheaper wins (#3 (a)). Every other chain
+is still priced by this node's round trip to each member. →
+`docs/invariants/scheduling.md`
 
 **Re-planning after a local memory refusal.** `SwarmError::LocalMemoryUnavailable`
 is the only local failure the router re-plans without a remote segment having
@@ -2177,7 +2199,7 @@ fetched from a provider is BLAKE3-verified on arrival, and a failed check costs
 that peer trust (`ShardVerificationFail`).
 - Key: `/swarm/provide/<model_id>/<shard_index>` per shard
 - Functions: `start_providing_shards()` / `stop_providing_shards()` / `query_shard_providers()`
-- Provider TTL: 1 hour, republication: 20 minutes
+- Provider TTL: 12 hours, republication: 4 hours (#91 (2f); see Tier 2 above)
 - PeerId→NodeId via `peer_id_to_node_id()` in `transport.rs` (production); the reverse direction is test-only since libp2p derives PeerIds from keypairs directly
 
 `verify_dht_value()` in `src/network/discovery.rs` would check a

@@ -84,6 +84,11 @@ Messages can contain these content block types:
 }
 ```
 
+A reply SwarmLLM ran also names the computers that served it, as
+`"swarmllm": {"route": {...}}` in the body, or in the `message_delta` event of a
+streamed reply ([OpenAI-compatible API](openai.md) describes its fields). A reply
+a cloud provider wrote carries none.
+
 ## Model Routing
 
 A model this node or the swarm holds is always used first. Only a name that is

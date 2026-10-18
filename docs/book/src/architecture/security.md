@@ -75,7 +75,7 @@ All inbound network messages carry transport-authenticated sender identity:
 The Kademlia DHT holds only **provider records** (`start_providing` / `get_providers`) saying which peers hold which shard. They are not signed payloads:
 - `start_providing_shards()` announces a shard key; it signs nothing
 - A provider record is only as trustworthy as the peer that announced it — which is why every shard fetched from a provider is BLAKE3-verified on arrival, and a failed check costs that peer 0.20 trust (`ShardVerificationFail`)
-- Provider records expire after 1 hour and are republished every 20 minutes
+- Provider records expire after 12 hours and are republished every 4 hours (since 0.3.243; they were 1 hour and 20 minutes)
 - `verify_dht_value()` would check `[32B pubkey][64B signature][payload]` values on a `GetRecord` result, but this build issues no `GetRecord` queries, so it never runs
 
 ## Identity

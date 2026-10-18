@@ -66,16 +66,16 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    since #296.)
 7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
-   (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), unreleased). The part
+   (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), v0.3.242). The part
    that is not gossip is 2.5 KB/s on 10-18 (4.1 out), and our own direct messages are only 0.19 of it
    ((2d), `direct_by_kind`): the rest is libp2p's protocols. `by_protocol` ((2e)) named the largest:
    Kademlia answering other nodes' lookups, ~2.1 KB/s; (2f) republishes provider records every 4 h
-   instead of 20 min (unreleased). Next: re-read in the field after the release.
+   instead of 20 min (v0.3.243). Next: re-read in the field after the release.
 8. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
     ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
     (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
     reply length (160-token replies were 2.5x their price), and a chain its head leads is priced
-    by its own hops (network term 57.9 s → 3.6 s, same peers and passes), all unreleased; next, a led chain charged a
+    by its own hops (network term 57.9 s → 3.6 s, same peers and passes), all in v0.3.243; next, a led chain charged a
     load that never happens (#3 (e)), then its peers' unmeasured compute (#3 (f)). Never tune
     the constant.
 9. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
@@ -643,7 +643,7 @@ for the worker's life), so measure how often a refusal still happens before buil
 passes the per-token terms are charged for (`NodeCandidate::forward_passes`; 16-token replies
 0.49 → 0.97 of their price). Left, largest first: (a) ~~a chain holding no part of this node is
 LED by its head (`remote_generate::delegation_eligible`) but priced as if this node drove every
-token through every segment~~ (0.10-0.24 of its price warm) — **fixed 2026-10-18, unreleased**:
+token through every segment~~ (0.10-0.24 of its price warm) — **fixed 2026-10-18, released in v0.3.243**:
 `parallax::chain_is_led_by_its_head` prices it by its hops (half the coordinates' round trip
 between consecutive peers and back to the head, as Petals prices its edges), in one search pass
 per head; the network term of an IT → BE chain at 64 passes went 57,856 → 3,620 ms
@@ -651,7 +651,7 @@ per head; the network term of an IT → BE chain at 64 passes went 57,856 → 3,
 it"). A chain this node drives through chaining peers is still priced a round trip from here per
 segment, and so is the head's own re-plan of a led chain — (a2), smaller, untouched; (b) ~~a reply longer than 64 tokens is
 under-priced by its length ÷ 64~~ (2.49x / 2.62x at 160 tokens on two peers' hand-offs) —
-**fixed 2026-10-18, unreleased**: the passes are this model's mean recent reply length
+**fixed 2026-10-18, released in v0.3.243**: the passes are this model's mean recent reply length
 (`daemon::state::reply_lengths`, the last 32 finished replies once there are 4), still capped by
 `max_tokens`; left is one reply's spread around its model's mean, which nothing before the reply
 can read; (c) a peer's prompt cache is unpriced (a repeated 505-token prompt priced
@@ -1054,7 +1054,7 @@ peers all on .241, idle, 1.0 → 2.0 h up, a 60-min window, `/api/admin/stats` t
 minute, ~5.5 KB), each arriving ~2.85 times. What is not gossip (Kademlia, identify, pings, direct
 messages) is 3.5 KB/s, now 63% of the upload and the largest share left. The reconnect catch-up
 could not be separated in these counters; the rig showed a reconnect pulls nothing. **(2d) a
-per-kind meter for direct traffic, 2026-10-18, not yet released**: `direct_by_kind` in the traffic
+per-kind meter for direct traffic, 2026-10-18, released in v0.3.243**: `direct_by_kind` in the traffic
 payload counts every request-response frame by message kind, request or answer, both ways, in the
 codec (`network::bandwidth::DirectKindMeter`). libp2p cannot name its own protocols' bytes from rust
 (`libp2p-metrics` labels by transport only; go-libp2p's `GetBandwidthByProtocol` has no rust
@@ -1067,7 +1067,7 @@ envelope (sender, sequence number, topic, a 64-byte signature — outside `gossi
 is message data) is ~135 B on each of 1.09 copies a second, ~150 B/s; IHAVE at a 10 s heartbeat
 adds perhaps as much. That leaves ~2 KB/s for Kademlia (110 shard records republished every 20 min,
 and the lists of up to 20 peers with their addresses every answer to a lookup carries), identify,
-AutoNAT and relay — estimates, so: **(2e) a per-protocol meter, 2026-10-18, not yet released**:
+AutoNAT and relay — estimates, so: **(2e) a per-protocol meter, 2026-10-18, released in v0.3.243**:
 `by_protocol` in the traffic payload counts every substream's bytes by the protocol it negotiated
 and by which side opened it — our own lookups vs our answers to others' (`network::protocol_traffic`, read off the multistream-select line this node wrote), counted on the
 same substreams as the total and adding up to it (tested over real TCP and QUIC swarms; on the live
@@ -1075,12 +1075,15 @@ node too: Σ rows = `out_bytes` and `in_bytes` to the byte). **Read 2026-10-18**
 26 min from a restart (startup included, so a ceiling): gossip 2.6 KB/s, **Kademlia answering other
 nodes' lookups 2.1 KB/s** (896 answers, ~3.6 KB each — the whole peer list with addresses), our own
 Kademlia 0.4, our direct messages 0.3, relay setup 0.15 but in 2 415 streams (~1.5 a second, to
-look at), AutoNAT 84 KB once at startup (v2's dial-data deposit). **(2f) 2026-10-18, not yet
-released**: provider records republish every 4 h, not 20 min, and live 12 h, not 1 h
+look at), AutoNAT 84 KB once at startup (v2's dial-data deposit). ⚠ A stream this node opens
+whose FIRST proposal the peer refuses is booked under the refused name: the `na` skip covers only
+our own refusals (found by the v0.3.243 pre-release review). A label error only, the rows still
+add up, and rare between nodes of one build; label from the proposal the peer echoed if a reading
+ever shows a refused family. **(2f) 2026-10-18, released in v0.3.243**: provider records republish every 4 h, not 20 min, and live 12 h, not 1 h
 (`network::behaviour::KAD_*`; still under the 26 h retraction window, checked at compile time) — in a
 swarm smaller than k every republication is a lookup that asks every node, so the answering cost
 falls ~12x once the fleet updates. Next: re-read `by_protocol` on the field after the release
-(expect the `/swarmllm/kad/1.0.0` `peer` row to fall), then the relay-stream rate. **(2c) fixed 2026-10-17, not yet released**: a restart gossiped every
+(expect the `/swarmllm/kad/1.0.0` `peer` row to fall), then the relay-stream rate. **(2c) fixed 2026-10-17, released in v0.3.242**: a restart gossiped every
 manifest it holds in full, twice, a few seconds apart (§ Closed). Left: the
 mesh is still sized once at startup, from peers ever met rather than reachable now (a rig first
 before going further: a thinner mesh partitions sooner); (3) a both-direction traffic ceiling at the transport
@@ -1813,7 +1816,7 @@ on an RTX 3070 Laptop with or without CUDA-graph capture** (2026-10-11): ~26 ms 
 weights at ~96 GB/s against the card's 448, while the 0.8B went 50-54 → 121-126 with capture — so the 4B's step
 is bound by something on the card. Profile it (`SWARMLLM_PROFILE=1` turns capture off, which is fine here)
 and compare llama.cpp's `llama-bench -ngl 99 tg128` on the same file before changing a kernel; (8) ~~every
-turn re-read the whole conversation~~ — **saved since 2026-10-18, not yet released**: the prefix cache
+turn re-read the whole conversation~~ — **saved since 2026-10-18, released in v0.3.243**: the prefix cache
 skipped any request holding recurrent state, because a DeltaNet layer's state cannot be cut back to a
 shorter prefix the way attention KV can. Now the prompt is saved 16 tokens short of its end (llama.cpp's
 context checkpoints, PR #20288, read at `4b1a27f`: the next turn's template re-renders the last few
@@ -2633,7 +2636,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-18, not yet released** (#303; #251 (3) — #251 closed; #228 (8); #3 (b); #3 (a))
+**Closed 2026-10-18, released in v0.3.243** (#303; #251 (3) — #251 closed; #228 (8); #3 (b); #3 (a))
 - #3 (a) — **A chain run entirely on other people's computers is priced by the distance between
   them, not by its distance from you.** The chain is handed to its first machine, which drives
   every token from there, but routing priced each machine as a round trip from here per token —

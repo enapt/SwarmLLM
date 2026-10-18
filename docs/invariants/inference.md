@@ -2743,7 +2743,7 @@ took 23.8-31.8 ms of a step — the gap to llama.cpp at this placement is still
 there (stage A: ~72% of its speed).
 
 **Found on the way, #266:** at the default contribution level a 16 GB GPU
-node's RAM budget is 4997 MB, so since #264 (unreleased) it refused this model
+node's RAM budget is 4997 MB, so since #264 it refused this model
 under EITHER placement, which v0.3.236 runs.
 
 **Verified.** Mechanism on the real path: the daemon's INFO line ("placing all
