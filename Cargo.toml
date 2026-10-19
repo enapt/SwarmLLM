@@ -523,6 +523,19 @@ assets = [
     { source = "config/default.toml", dest = "/etc/swarmllm/default.toml", mode = "644", config = true },
     { source = "packaging/swarmllm.service", dest = "/usr/lib/systemd/system/swarmllm.service", mode = "644" },
 ]
+# The .deb's maintainer scripts, as rpm scriptlets (#163). A value naming no
+# file is packaged AS the script — cargo-generate-rpm falls back to inline text
+# silently — so `every_rpm_scriptlet_names_a_file` checks each path.
+pre_install_script = "packaging/rpm/pre"
+post_install_script = "packaging/rpm/post"
+post_trans_script = "packaging/rpm/posttrans"
+pre_uninstall_script = "packaging/rpm/preun"
+post_uninstall_script = "packaging/rpm/postun"
 
 [package.metadata.generate-rpm.requires]
-openssl = ">= 3.0"
+# The libraries the binary links (libssl.so.3 / libcrypto.so.3 with their
+# OPENSSL_3.0.0 versions, glibc's symbol versions) are required automatically;
+# naming the `openssl` package asked for the command-line tool, which the node
+# never runs, and failed `rpm -i` on a minimal Fedora (#163). `pre` creates the
+# service's user.
+"/usr/sbin/useradd" = "*"

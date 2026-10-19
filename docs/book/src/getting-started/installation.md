@@ -135,14 +135,16 @@ sudo dpkg -i swarmllm_*_amd64.deb
 sudo systemctl enable --now swarmllm                   # start it as a background service
 ```
 
-Fedora / RHEL — the .rpm does not yet create the user the service runs as, so
-create it once before starting the service (systemd creates the data folder):
+Fedora, and Red Hat Enterprise Linux 10 or later:
 
 ```bash
-sudo rpm -i swarmllm_*.x86_64.rpm
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin swarmllm
+sudo dnf install ./swarmllm_*.x86_64.rpm
 sudo systemctl enable --now swarmllm
 ```
+
+Red Hat Enterprise Linux 9 and the systems built from it (Rocky Linux 9,
+AlmaLinux 9) have an older core system library than SwarmLLM needs, so the
+package refuses to install there; use [Docker](#docker) on those.
 
 Either way SwarmLLM runs as a background service that keeps its data in
 `/var/lib/swarmllm` (the access token is in `/var/lib/swarmllm/api_key`).

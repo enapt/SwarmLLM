@@ -1,0 +1,9 @@
+#!/bin/sh
+# rpm %preun — before the files are removed. $1: 0 = the package is being
+# REMOVED, 1+ = an upgrade is replacing it. Stopping and disabling belongs to
+# removal only: the .deb once did both on every upgrade and left each updated
+# node stopped and disabled (gotcha #313). Not `--no-reload`: without the
+# reload, the stop warns the person removing it to run `daemon-reload`.
+if [ "$1" -eq 0 ] && [ -d /run/systemd/system ]; then
+    systemctl disable --now swarmllm.service || :
+fi

@@ -1,0 +1,12 @@
+#!/bin/sh
+# rpm %posttrans — once, at the end of the transaction, from the NEW package
+# only. That is why the restart lives here rather than in %postun, which on an
+# upgrade is the OLD package's: a package that shipped no scriptlets (every
+# .rpm before #163) would otherwise leave its node on the old binary until the
+# machine rebooted. `try-restart` restarts a RUNNING service and does nothing
+# to a stopped one, so a first install is untouched; whether the service is
+# enabled is never changed, in either direction (gotcha #313).
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || :
+    systemctl try-restart swarmllm.service || :
+fi

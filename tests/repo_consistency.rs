@@ -1147,6 +1147,85 @@ fn every_declared_example_has_an_explicit_path() {
     );
 }
 
+/// The scriptlet keys `cargo-generate-rpm` reads (0.21.1, `src/config/mod.rs`).
+const RPM_SCRIPTLET_KEYS: [&str; 8] = [
+    "pre_install_script",
+    "pre_uninstall_script",
+    "pre_trans_script",
+    "pre_untrans_script",
+    "post_install_script",
+    "post_uninstall_script",
+    "post_trans_script",
+    "post_untrans_script",
+];
+
+/// What is wrong with the .rpm's scriptlets in `manifest`, read against `root`.
+fn rpm_scriptlet_faults(manifest: &str, root: &std::path::Path) -> Vec<String> {
+    let table: toml::Table = manifest.parse().expect("Cargo.toml parses");
+    let Some(rpm) = table
+        .get("package")
+        .and_then(|p| p.get("metadata"))
+        .and_then(|m| m.get("generate-rpm"))
+        .and_then(|g| g.as_table())
+    else {
+        return vec!["no [package.metadata.generate-rpm]".into()];
+    };
+    let mut faults = Vec::new();
+    for (key, value) in rpm {
+        let is_scriptlet_setting = key.contains("script")
+            && !key.ends_with("_script_flags")
+            && !key.ends_with("_script_prog");
+        if !is_scriptlet_setting {
+            continue;
+        }
+        if !RPM_SCRIPTLET_KEYS.contains(&key.as_str()) {
+            faults.push(format!("`{key}` is not a key cargo-generate-rpm reads"));
+            continue;
+        }
+        match value.as_str() {
+            Some(path) if root.join(path).is_file() => {}
+            Some(path) => faults.push(format!("`{key}` names `{path}`, which is not a file")),
+            None => faults.push(format!("`{key}` is not a string")),
+        }
+    }
+    faults
+}
+
+/// **Every .rpm scriptlet names a file that exists** (#163). cargo-generate-rpm
+/// reads a scriptlet value as a path when that file exists and otherwise
+/// packages the value ITSELF as the script, silently — a mistyped
+/// `packaging/rpm/pre` would ship a `%pre` that runs `packaging/rpm/pre` as a
+/// command, fail, and abort every install, with nothing to see at build time.
+/// A misspelt key is ignored just as silently, so the service's user would
+/// never be made again.
+#[test]
+fn every_rpm_scriptlet_names_a_file() {
+    let root = repo_root();
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo.toml");
+    let faults = rpm_scriptlet_faults(&manifest, &root);
+    assert!(faults.is_empty(), "the .rpm's scriptlets: {faults:?}");
+    // The user the service runs as is made by one of them.
+    assert!(
+        manifest.contains("pre_install_script = \"packaging/rpm/pre\""),
+        "the .rpm must create the service's user before it is installed (#163)"
+    );
+}
+
+#[test]
+fn the_rpm_scriptlet_check_catches_a_missing_file_and_a_misspelt_key() {
+    let root = repo_root();
+    let planted = "[package]\nname = \"x\"\n[package.metadata.generate-rpm]\n\
+                   assets = []\n\
+                   pre_install_script = \"packaging/rpm/pre\"\n\
+                   post_install_script = \"packaging/rpm/postt\"\n\
+                   post_install_scripts = \"packaging/rpm/post\"\n\
+                   pre_install_script_flags = 0\n";
+    let faults = rpm_scriptlet_faults(planted, &root);
+    assert_eq!(faults.len(), 2, "{faults:?}");
+    assert!(faults[0].contains("packaging/rpm/postt"), "{faults:?}");
+    assert!(faults[1].contains("post_install_scripts"), "{faults:?}");
+}
+
 /// The advertised minimum Rust version must be the real one.
 ///
 /// **This was wrong by nine minor versions and nothing noticed.** The repo

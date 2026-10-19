@@ -1,0 +1,12 @@
+#!/bin/sh
+# rpm %pre — before the files are unpacked. $1: 1 = first install, 2+ = upgrade.
+# Runs on an upgrade too, so a machine whose user was made by hand (the guide's
+# step before #163) keeps it.
+set -e
+
+# The service runs as this user (packaging/swarmllm.service), and rpm only
+# creates users itself from rpmbuild's sysusers support, which this package is
+# not built with — so it is made here, exactly as the .deb's postinst does.
+if ! getent passwd swarmllm >/dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin swarmllm
+fi

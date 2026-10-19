@@ -1,0 +1,7 @@
+#!/bin/sh
+# rpm %postun — after the files are removed. $1: 0 = removed, 1+ = upgraded.
+# The user and /var/lib/swarmllm (the node's identity, key and models) are
+# kept, as the .deb keeps them.
+if [ "$1" -eq 0 ] && [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || :
+fi

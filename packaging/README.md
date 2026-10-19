@@ -26,17 +26,24 @@ Pre-built `.deb` packages are attached to [GitHub releases](https://github.com/e
 ## Fedora / RHEL (.rpm)
 
 ```bash
-# Build locally:
+# Build locally (an rpm version may not contain `-`, so 0.3.244-alpha is
+# written 0.3.244~alpha, as release.yml does):
 cargo install cargo-generate-rpm
 cargo build --release
-cargo generate-rpm
+V=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+cargo generate-rpm --set-metadata "version = '${V//-/\~}'"
 
 # Install:
-sudo rpm -i target/generate-rpm/swarmllm-*.rpm
-# The package does not create the user its service runs as yet (FUTURE_WORK #163):
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin swarmllm
+sudo dnf install ./target/generate-rpm/swarmllm-*.rpm
 sudo systemctl enable --now swarmllm
 ```
+
+`rpm/` holds the package's scriptlets, the `.deb`'s maintainer scripts in rpm's
+terms: `pre` creates the `swarmllm` user, `post` the data folder and its
+config, `posttrans` restarts a node that was running when it was upgraded,
+`preun` stops and disables it on removal only. The user and
+`/var/lib/swarmllm` are kept when the package is removed. The binary needs
+glibc 2.35, so RHEL 9 and its rebuilds refuse the package (FUTURE_WORK #311).
 
 Pre-built `.rpm` packages are attached to [GitHub releases](https://github.com/enapt/SwarmLLM/releases).
 
@@ -61,6 +68,6 @@ journalctl -u swarmllm -f              # follow logs
 ```
 
 Data is stored in `/var/lib/swarmllm/`, and the node reads its settings from
-`/var/lib/swarmllm/config.toml` — the file the dashboard saves to. The `.deb`
-copies `/etc/swarmllm/default.toml` there on first install only (the `.rpm`
-never does), so editing the `/etc` copy afterwards changes nothing.
+`/var/lib/swarmllm/config.toml` — the file the dashboard saves to. Both
+packages copy `/etc/swarmllm/default.toml` there on first install only, so
+editing the `/etc` copy afterwards changes nothing.

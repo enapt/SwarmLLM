@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #311**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #312**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2322,15 +2322,17 @@ Moving: map each call to the vocabulary API keeping the old semantics (read 0.1.
 (a new llama-cpp-sys rebuilds llama.cpp's CUDA kernels — cold, about an hour here) and run the
 gate's llama-path steps on the artifact.
 
-#### #163 — The .rpm installs a service whose user it never creates
-`P3` · packaging · **OPEN** — 2026-10-02 · history: archive row #163
+#### #311 — RHEL 9 and its rebuilds cannot run SwarmLLM natively
+`P3` · packaging · **OPEN** — 2026-10-19 · history: found closing #163
 
-`packaging/swarmllm.service` runs as `User=swarmllm`; the .deb's `postinst` runs `useradd`, the
-.rpm (`[package.metadata.generate-rpm]` in Cargo.toml) has no scriptlets, so the service cannot
-start after `rpm -i`. The installation guide gives the `useradd` step meanwhile. Fix: a
-`pre_install_script` doing `getent passwd swarmllm || useradd --system --no-create-home --shell
-/usr/sbin/nologin swarmllm`, verified by installing the built .rpm in a Fedora/Rocky container
-and starting the unit; then drop the doc workaround.
+The Linux binaries are built on ubuntu-22.04, so they need glibc 2.35 (`libm.so.6(GLIBC_2.35)`
+is in the .rpm's automatic requirements); RHEL 9.8 has 2.34. Measured in `ubi9/ubi`: `rpm -i
+--test` refuses the .rpm with that dependency (a clean refusal, not a broken service), and the bare
+binary would not start either. RHEL 10.2 (2.39) and Fedora 44 install it. Rocky / Alma 9 are the
+same as RHEL 9, a large share of servers. The installation guide now says so and points them at
+Docker. A fix builds the Linux assets against an older glibc — `cargo zigbuild --target
+x86_64-unknown-linux-gnu.2.28` (what `memory/env_proxmox_crossbuild.md` uses) or a manylinux_2_28
+container — for the CPU AND CUDA builds, each run on RHEL 9 before it ships.
 
 #### #183 — A Windows GPU node's auto-update never refreshes the bundled CUDA libraries
 `P3` · packaging · **OPEN** — 2026-08 (v0.3.20 asset audit) · history: archive § "Windows-GPU auto-update carries stale CUDA redist DLLs"
@@ -2740,7 +2742,22 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302; #186 decided)
+**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163; #186 decided)
+- #163 — **The .rpm creates the user its service runs as, and does everything else the .deb's
+  scripts do.** It shipped no scriptlets: after `rpm -i` the service restarted in a loop for want of
+  its user, the node's config was never seeded, an upgrade left the old binary running and removal
+  left the service enabled. `packaging/rpm/` now holds `pre` (the user), `post` (data folder,
+  config seeded once), `posttrans` (`try-restart` — in the NEW package, so the first upgrade from a
+  scriptless .rpm restarts too; rpm runs the OLD package's `%postun`, gotcha #905), `preun`
+  (stop + disable on removal only, gotcha #313), `postun`. rpm's own sysusers support needs
+  rpmbuild, which cargo-generate-rpm is not. Also dropped the `openssl >= 3.0` requirement: it
+  asked for the command-line tool, which a minimal Fedora lacks (`rpm -i` failed) and the node never
+  runs; the libraries are required automatically. Guard `every_rpm_scriptlet_names_a_file` (a
+  mistyped path is packaged as the script text, silently). Verified in Fedora 44 containers booted
+  with systemd: fresh install → enable → upgrade (restarted, still enabled, admin's config edit
+  kept) → remove (stopped, disabled, user and data kept) → reinstall; upgrading from the released
+  v0.3.244 .rpm both with and without the guide's hand-made user (the stuck node came up by
+  itself). RHEL 10.2 installs it; RHEL 9 refuses it for glibc (#311).
 - #302 — **A request re-planned after a failure names every computer it reached, not only the
   route it finished on.** `mark_assembled` replaced the trace's segments per plan, so a request
   that failed on a peer and was re-planned here said `local`, no peers, while that peer had been

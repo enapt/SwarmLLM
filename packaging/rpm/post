@@ -1,0 +1,25 @@
+#!/bin/sh
+# rpm %post — after the files are unpacked. $1: 1 = first install, 2+ = upgrade.
+# The same steps as packaging/deb/postinst; the restart after an upgrade is in
+# posttrans, which only the NEW package runs.
+set -e
+
+mkdir -p /var/lib/swarmllm
+chown swarmllm:swarmllm /var/lib/swarmllm
+
+# Seed the node's config from the shipped template on first install only: the
+# daemon reads <data_dir>/config.toml and is never told about
+# /etc/swarmllm/default.toml (see packaging/deb/postinst).
+if [ ! -e /var/lib/swarmllm/config.toml ] && [ -f /etc/swarmllm/default.toml ]; then
+    cp /etc/swarmllm/default.toml /var/lib/swarmllm/config.toml
+    chown swarmllm:swarmllm /var/lib/swarmllm/config.toml
+    chmod 644 /var/lib/swarmllm/config.toml
+fi
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || :
+    if [ "$1" -eq 1 ]; then
+        echo "SwarmLLM installed. Enable and start with:"
+        echo "  sudo systemctl enable --now swarmllm"
+    fi
+fi
