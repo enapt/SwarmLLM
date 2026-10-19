@@ -100,14 +100,12 @@ pub(super) fn gemma_fallback(messages: &[ChatMessage]) -> String {
     prompt
 }
 
-/// The `<image>` placeholder token used by LLaVA to mark where vision embeddings go.
-const IMAGE_PLACEHOLDER: &str = "<image>";
-
 /// Build a Vicuna v1.1 formatted prompt (used by LLaVA and other Vicuna-based models).
 ///
-/// When a user message contains images, `<image>\n` is prepended to the user content
-/// so that the vision encoder embeddings can replace the `<image>` token embedding
-/// at the correct position in the sequence.
+/// A user message's images are already in its content, as a marker where each
+/// was (`vision::join_content`), so this adds none of its own. It used to put
+/// `<image>\n` before the text, which no code read as an image: it reached the
+/// model as text while the image itself was prepended to the whole prompt.
 pub(super) fn vicuna_fallback(messages: &[ChatMessage]) -> String {
     let mut prompt = String::new();
     // System message
@@ -121,10 +119,6 @@ pub(super) fn vicuna_fallback(messages: &[ChatMessage]) -> String {
             Role::System => {} // already handled
             Role::User => {
                 prompt.push_str("USER: ");
-                if !msg.images.is_empty() {
-                    prompt.push_str(IMAGE_PLACEHOLDER);
-                    prompt.push('\n');
-                }
                 prompt.push_str(&msg.content);
                 prompt.push(' ');
             }

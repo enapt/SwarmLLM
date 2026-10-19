@@ -559,6 +559,7 @@
   "error_hint.shard_integrity": "En modellfil var skadad och hämtas om automatiskt. Det beror oftast på en avbruten hämtning — försök igen om en stund.",
   "error_hint.swarm_short_of_memory": "Den här modellen behöver mer minne än datorerna som har den kan avsätta, så ett nytt försök hjälper inte. Välj en mindre modell, eller vänta tills en dator med mer minne har den här. Är en av dem din ger en högre Bidragsnivå i Inställningar nätverket mer utrymme.",
   "error_hint.unauthorized": "Autentisering krävs. Din API-nyckel finns på sidan Inställningar i panelen. Skicka med den som Bearer-token i Authorization-huvudet.",
+  "error_hint.vision_encoder_unavailable": "Ingen dator som kör den här modellen har delen som läser bilder, eller så kan den här modellen inte läsa bilder alls. Skicka meddelandet utan bilden, eller välj en modell som läser bilder. Att försöka igen som det är hjälper inte.",
   "errors.connection_lost": "Anslutningen till SwarmLLM förlorades — återansluter...",
   "errors.failed_toggle_enc": "Det gick inte att ändra ”Börja och avsluta på den här datorn”",
   "errors.request_timeout": "Begäran tog för lång tid — servern kan vara upptagen eller oåtkomlig",

@@ -271,7 +271,7 @@ pub async fn messages(
         return Ok(Json(response).into_response());
     }
 
-    let internal_messages = to_internal_messages(&req);
+    let internal_messages = to_internal_messages(&req)?;
     let sampling_params = to_sampling_params(&req);
 
     // Resolve model alias (display name → registry ID, "auto" → `resolve_auto`).
@@ -647,7 +647,7 @@ mod tests {
             swarmllm: None,
             extras: std::collections::HashMap::new(),
         };
-        let msgs = to_internal_messages(&req);
+        let msgs = to_internal_messages(&req).unwrap();
         assert_eq!(msgs.len(), 2);
         assert!(matches!(msgs[0].role, Role::System));
         assert_eq!(msgs[0].content, "You are helpful.");
@@ -685,7 +685,7 @@ mod tests {
             swarmllm: None,
             extras: std::collections::HashMap::new(),
         };
-        let msgs = to_internal_messages(&req);
+        let msgs = to_internal_messages(&req).unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].content, "Line 1\nLine 2");
     }
@@ -712,7 +712,7 @@ mod tests {
             swarmllm: None,
             extras: std::collections::HashMap::new(),
         };
-        let msgs = to_internal_messages(&req);
+        let msgs = to_internal_messages(&req).unwrap();
         assert_eq!(msgs.len(), 1);
         assert!(matches!(msgs[0].role, Role::User));
     }
@@ -1043,7 +1043,7 @@ mod tests {
             swarmllm: None,
             extras: std::collections::HashMap::new(),
         };
-        let msgs = to_internal_messages(&req);
+        let msgs = to_internal_messages(&req).unwrap();
         let shape: Vec<(String, &str)> = msgs
             .iter()
             .map(|m| (format!("{:?}", m.role), m.content.as_str()))

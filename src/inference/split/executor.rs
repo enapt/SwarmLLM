@@ -1585,15 +1585,12 @@ impl SplitModel {
 
     /// Forward pass for multimodal (vision + text) inference.
     ///
-    /// If this is the first segment and `vision_embeddings` is provided, the input
-    /// is expected to contain TWO segments of token IDs separated by a marker:
-    /// `[before_image_tokens...][MARKER=-1][after_image_tokens...]`
-    ///
-    /// The marker value -1 (as i64) indicates where vision embeddings should be
-    /// inserted. Each part is embedded separately, then concatenated:
-    /// `[before_emb][vision_emb][after_emb]`
-    ///
-    /// This matches llama.cpp's LLaVA approach of splitting the prompt at `<image>`.
+    /// On the first segment with `vision_embeddings`, the input is the prompt's
+    /// ids with one `vision::IMAGE_TOKEN_ID` (-1) per image
+    /// (`vision::encode_prompt_with_images`); each is replaced by that image's
+    /// rows (`vision::splice_image_rows` — the text scaled as this model
+    /// scales a token's embedding, the image rows not), and the merged hidden
+    /// states run through the layers. A prompt with no marker is refused.
     ///
     /// `vision_embeddings` shape: (num_image_tokens, hidden_dim)
     pub fn forward_multimodal(
@@ -1608,125 +1605,42 @@ impl SplitModel {
 
         match (is_first, vision_embeddings) {
             (true, Some(vision_emb)) => {
-                let input_dev = input
-                    .to_device(&self.device)
-                    .map_err(|e| SwarmError::Internal(format!("Device transfer: {e}")))?;
-
-                // Read the token IDs to find the -1 marker
-                let token_ids: Vec<i64> = input_dev
+                let token_ids: Vec<i64> = input
                     .flatten_all()
-                    .map_err(|e| SwarmError::Internal(format!("flatten: {e}")))?
-                    .to_vec1()
-                    .map_err(|e| SwarmError::Internal(format!("to_vec1: {e}")))?;
-
-                let marker_pos = token_ids.iter().position(|&id| id == -1);
-
-                let tok_emb_layer = self
-                    .tok_embeddings
-                    .as_ref()
-                    .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?;
-
-                let merged = if let Some(pos) = marker_pos {
-                    // Split at marker: embed before and after separately, insert vision between
-                    let num_vision = vision_emb
-                        .dim(0)
-                        .map_err(|e| SwarmError::Internal(format!("vision dim: {e}")))?;
-                    let hidden = vision_emb
-                        .dim(1)
-                        .map_err(|e| SwarmError::Internal(format!("vision dim1: {e}")))?;
-
-                    // All parts must be (1, seq, hidden) for cat along dim 1
-                    let vision_3d = vision_emb
-                        .reshape(&[1, num_vision, hidden])
-                        .map_err(|e| SwarmError::Internal(format!("vision reshape: {e}")))?;
-
-                    let mut parts: Vec<Tensor> = Vec::new();
-
-                    // Embed tokens before <image>
-                    if pos > 0 {
-                        let before_ids = Tensor::new(&token_ids[..pos], &self.device)
-                            .map_err(|e| SwarmError::Internal(format!("before tensor: {e}")))?
-                            .reshape(&[1, pos])
-                            .map_err(|e| SwarmError::Internal(format!("before reshape: {e}")))?;
-                        let mut before_emb = tok_emb_layer
-                            .forward(&before_ids)
-                            .map_err(|e| SwarmError::Internal(format!("before embed: {e}")))?;
-                        // Apply Gemma embedding scale (must match forward_inner_impl)
-                        if self.arch.use_gemma_norm() {
-                            let scale = (self.hidden_dim as f64).sqrt();
-                            before_emb = before_emb
+                    .and_then(|t| t.to_vec1())
+                    .map_err(|e| SwarmError::Internal(format!("image prompt ids: {e}")))?;
+                let merged = {
+                    let tok_emb_layer = self
+                        .tok_embeddings
+                        .as_ref()
+                        .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?;
+                    let device = &self.device;
+                    // Gemma's embedding scale, which `forward_inner_impl`
+                    // applies to a token it embeds itself.
+                    let gemma_scale = self
+                        .arch
+                        .use_gemma_norm()
+                        .then(|| (self.hidden_dim as f64).sqrt());
+                    crate::inference::vision::splice_image_rows(&token_ids, vision_emb, |run| {
+                        let ids = Tensor::new(run, device)
+                            .and_then(|t| t.reshape(&[1, run.len()]))
+                            .map_err(|e| SwarmError::Internal(format!("text ids: {e}")))?;
+                        let mut emb = tok_emb_layer
+                            .forward(&ids)
+                            .map_err(|e| SwarmError::Internal(format!("text embed: {e}")))?;
+                        if let Some(scale) = gemma_scale {
+                            emb = emb
                                 .affine(scale, 0.0)
                                 .map_err(|e| SwarmError::Internal(format!("gemma scale: {e}")))?;
                         }
-                        // Ensure 3D: (1, pos, hidden)
-                        let before_3d = if before_emb.dims().len() == 2 {
-                            before_emb.unsqueeze(0).map_err(|e| {
-                                SwarmError::Internal(format!("before unsqueeze: {e}"))
-                            })?
-                        } else {
-                            before_emb
-                        };
-                        parts.push(before_3d);
-                    }
-
-                    // Insert vision embeddings
-                    parts.push(vision_3d);
-
-                    // Embed tokens after <image>
-                    let after_len = token_ids.len() - pos - 1;
-                    if after_len > 0 {
-                        let after_ids = Tensor::new(&token_ids[pos + 1..], &self.device)
-                            .map_err(|e| SwarmError::Internal(format!("after tensor: {e}")))?
-                            .reshape(&[1, after_len])
-                            .map_err(|e| SwarmError::Internal(format!("after reshape: {e}")))?;
-                        let mut after_emb = tok_emb_layer
-                            .forward(&after_ids)
-                            .map_err(|e| SwarmError::Internal(format!("after embed: {e}")))?;
-                        // Apply Gemma embedding scale (must match forward_inner_impl)
-                        if self.arch.use_gemma_norm() {
-                            let scale = (self.hidden_dim as f64).sqrt();
-                            after_emb = after_emb
-                                .affine(scale, 0.0)
-                                .map_err(|e| SwarmError::Internal(format!("gemma scale: {e}")))?;
+                        if emb.dims().len() == 2 {
+                            emb = emb.unsqueeze(0).map_err(|e| {
+                                SwarmError::Internal(format!("text unsqueeze: {e}"))
+                            })?;
                         }
-                        let after_3d = if after_emb.dims().len() == 2 {
-                            after_emb.unsqueeze(0).map_err(|e| {
-                                SwarmError::Internal(format!("after unsqueeze: {e}"))
-                            })?
-                        } else {
-                            after_emb
-                        };
-                        parts.push(after_3d);
-                    }
-
-                    let refs: Vec<&Tensor> = parts.iter().collect();
-                    tracing::info!(
-                        request_id,
-                        marker_pos = pos,
-                        before_tokens = pos,
-                        after_tokens = after_len,
-                        vision_tokens = num_vision,
-                        "VLM: inserting vision embeddings at <image> position"
-                    );
-                    Tensor::cat(&refs, 1)
-                        .map_err(|e| SwarmError::Internal(format!("merge cat: {e}")))?
-                } else {
-                    // No marker found — fallback to prepending vision before text
-                    let text_embeddings = tok_emb_layer
-                        .forward(&input_dev)
-                        .map_err(|e| SwarmError::Internal(format!("Embedding: {e}")))?;
-                    crate::inference::vision::merge_vision_text_embeddings(
-                        &text_embeddings,
-                        vision_emb,
-                        &[],
-                    )?
+                        Ok(emb)
+                    })?
                 };
-
-                tracing::info!(
-                    request_id,
-                    merged_seq_len = ?merged.dims(),
-                    "VLM: merged embeddings ready for transformer"
-                );
 
                 // Run through layers with merged hidden states.
                 // Temporarily remove tok_embeddings so forward() treats input as hidden states.

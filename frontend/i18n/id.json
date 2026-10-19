@@ -559,6 +559,7 @@
   "error_hint.shard_integrity": "Sebuah berkas model rusak dan akan diunduh ulang secara otomatis. Biasanya ini akibat unduhan yang terputus — coba lagi sebentar lagi.",
   "error_hint.swarm_short_of_memory": "Model ini membutuhkan lebih banyak memori daripada yang bisa disisihkan komputer-komputer yang memegangnya, jadi mencoba lagi tidak akan membantu. Pilih model yang lebih kecil, atau tunggu sampai komputer dengan memori lebih besar memegang model ini. Jika salah satunya milik Anda, menaikkan Tingkat Kontribusinya di Pengaturan memberi jaringan lebih banyak ruang.",
   "error_hint.unauthorized": "Perlu autentikasi. Kunci API Anda ada di halaman Pengaturan pada dasbor. Sertakan sebagai token Bearer di header Authorization.",
+  "error_hint.vision_encoder_unavailable": "Tidak ada komputer yang menjalankan model ini yang memiliki bagian yang membaca gambar, atau model ini sama sekali tidak bisa membaca gambar. Kirim pesan tanpa gambar, atau pilih model yang bisa membaca gambar. Mencoba lagi apa adanya tidak akan membantu.",
   "errors.connection_lost": "Koneksi ke SwarmLLM terputus — menghubungkan kembali...",
   "errors.failed_toggle_enc": "Tidak dapat mengubah \"Mulai dan selesai di komputer ini\"",
   "errors.request_timeout": "Permintaan habis waktu — server mungkin sibuk atau tidak dapat dijangkau",

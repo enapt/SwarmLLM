@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #310**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #311**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -61,9 +61,9 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
-6. **#115** — the rest of Gemma 3/4: the vision projectors and the drafters, refused by name
-   today, never loaded wrong. (Its E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole
-   since #296.)
+6. **#115** — the rest of Gemma 3/4: Gemma 3's picture attention (2b), Gemma 4's image reader
+   and its drafters, refused by name today, never loaded wrong. (Gemma 3 reads pictures since
+   2026-10-19; its E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
 7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
    (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), v0.3.242). The part
@@ -1952,13 +1952,36 @@ to test on (the swarm's Italian M4 peer belongs to a tester).
 
 Requested for gemma-4-26B-A4B. Order: ~~(1) Gemma 3 text~~, ~~(3) Gemma 4 dense text~~ (the
 12B and 31B), ~~(3b) the 26B-A4B~~ and ~~(3c) the E2B/E4B~~ (closed 2026-10-16/17, § Closed;
-what (3c) left is #294-#296); (2) the `gemma3` projector (SigLIP + pool + RMSNorm + linear),
-after `vision.rs` gets a projector-type dispatch; (4) `gemma4v`; (5) the `-assistant` drafters
+what (3c) left is #294-#296); ~~(2a) the `gemma3` projector and pictures at their place in the
+prompt~~ (closed 2026-10-19, § Closed); (2b) Gemma 3 reads a picture's 256 rows with attention
+running both ways inside the picture (llama.cpp `mtmd_decode_use_non_causal`, true for `gemma3`;
+HF's `token_type_ids` mask) — here they are causal like text. It matters: llama.cpp forced causal
+(a one-line `mtmd.cpp` patch, `~/swarmllm-115/ab_causal.sh`, greedy, CPU) reads
+`~/swarmllm-115/shapes.png` — a red circle, a blue square and a green stripe on black — as "a flag
+with a green band at the bottom, a white band in the middle, and a red band at the top"; both ways,
+it names the shapes and the black background. The moon-landing front page reads right either way.
+Needs a per-forward flag on the layer request (`#[serde(default)]`) and a
+feature bit, since a peer holding later layers must apply the same mask; (4) `gemma4v`; (5) the `-assistant` drafters
 (`gemma4-assistant` in llama.cpp, an unknown family here). Experts carrying a gate/up scale are
 refused by name (`GgufTensorMeta::unbuilt_gemma4_part`; llama.cpp reads them, no file met so far
 has one). The 31B
 has the 12B's layout (60 layers, 16 / 4 key/value heads) and is unchecked. Gemma 4's reference is llama.cpp MASTER
 (`~/llama.cpp-ref/dump_logits`, `tok_cases`); llama-cpp-python 0.3.16 predates it.
+
+#### #310 — LLaVA's image reader differs from llama.cpp's in three places
+`P3` · model-support · **OPEN** — 2026-10-19 · history: #115 (2a)
+
+Found reading llama.cpp's `tools/mtmd/models/llava.cpp` and `clip.cpp` for #115 (2a); not
+measured against a reply yet. (1) llama.cpp drops the class token for the `mlp` projector (its
+`patches` input starts at 1, `patch_offset`), so an image is 576 rows; here it is 577.
+(2) Its feed-forward activation is read off `clip.use_gelu` / `clip.use_silu` and is quick-GELU
+when neither is set (LLaVA 1.5's mmproj); here it is erf GELU (`vision::Gelu::Erf`). (3) It runs
+the encoder only to the deepest `clip.vision.feature_layer` when the file names one; here every
+layer runs, then `v.post_ln` if present. Fix all three off the file's keys, then judge LLaVA-1.5-7B's
+reply about `~/swarmllm-115/shapes.png` against `llama-mtmd-cli` (built at `~/llama.cpp-ref/build/bin/`).
+`TOKENS_PER_IMAGE` (577, the router's estimate before an image is read) moves with (1). Separately,
+a picture inside an Anthropic `tool_result` block is still dropped (`anthropic::convert`): its
+content becomes text only.
 
 #### #294 — Gemma 4's E2B and E4B run only whole on one computer
 `P3` · model-support · **OPEN** — 2026-10-17 · history: #115 (3c)
@@ -2757,6 +2780,28 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-19, not yet released** (#115 (2a))
+- #115 (2a) — **Pictures reach the model where you put them, and Gemma 3 can read images.** Every
+  picture used to go in FRONT of the whole prompt, ahead of the chat template's opening: no surface
+  marked where it belonged (the OpenAI surface dropped the image part's place, the Anthropic
+  surface dropped image blocks, the fallback wrote the text `<image>`), and the splice prepended the
+  rows when it found no mark. Every surface now writes llama.cpp's marker where the picture was
+  (`vision::MEDIA_MARKER`), the rows go there (`vision::splice_image_rows`, the one splice, which
+  refuses a prompt with no mark), the prompt's positions count each picture's rows
+  (`vision::positions_with_images`), and a picture that cannot be read is the request's error,
+  never a reply without it. Gemma 3's image reader (`clip.projector_type` `gemma3`: letterboxed to
+  896, SigLIP, 4×4 pooled to 256 rows, its own norm and projection) is new; a projector type not
+  built here is refused by name. A first segment must advertise `features::IMAGES_AT_MARKERS`
+  (bit 26). On the way, three older faults that each lost the picture silently (gotcha #901):
+  every node dropped its claim to an image reader minutes after downloading it
+  (`ShardStore::shard_path` named the wrong file), a picture sent to a model held whole here took a
+  text-only shortcut (`pipeline::FastPathNeeds`), and on a processor the splice handed the first
+  layer 16-bit values it refuses (gotcha #241's fault, also in tensor parallelism's embed step;
+  guard `every_token_lookup_goes_through_embed_tokens`). Verified on Gemma 3 4B: `shapes.png` and
+  a 1969 newspaper front page described as llama.cpp (causal) describes them — `shapes.png` word
+  for word but one verb — on both surfaces. Evidence: `docs/invariants/inference.md` § "An image
+  sits at its marker". Left: (2b) Gemma 3's picture attention both ways; #310.
 
 **Closed 2026-10-19, released in v0.3.244** (#3 (d); #307; #295 (a), (b))
 - #295 (b) — **Gemma 4 E2B writes replies about half as fast again on a graphics card, E4B a fifth.**

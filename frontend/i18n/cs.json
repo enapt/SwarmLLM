@@ -559,6 +559,7 @@
   "error_hint.shard_integrity": "Soubor modelu byl poškozen a stáhne se automaticky znovu. Obvykle za to může přerušené stahování — zkuste to za chvíli.",
   "error_hint.swarm_short_of_memory": "Tento model potřebuje víc paměti, než mohou počítače, které ho mají, vyhradit, takže nový pokus nepomůže. Vyberte menší model, nebo počkejte, až ho bude mít počítač s větší pamětí. Pokud je jeden z nich váš, zvýšení jeho Úrovně příspěvku v Nastavení dá síti víc místa.",
   "error_hint.unauthorized": "Je vyžadováno ověření. Svůj klíč API najdete v panelu na stránce Nastavení. Pošlete jej jako token Bearer v hlavičce Authorization.",
+  "error_hint.vision_encoder_unavailable": "Žádný počítač, který tento model spouští, nemá jeho část, která čte obrázky — nebo tento model obrázky číst vůbec neumí. Pošlete zprávu bez obrázku, nebo vyberte model, který obrázky čte. Opakování beze změny nepomůže.",
   "errors.connection_lost": "Spojení se SwarmLLM ztraceno — opětovné připojování...",
   "errors.failed_toggle_enc": "Nastavení „Začít a skončit na tomto počítači“ se nepodařilo změnit",
   "errors.request_timeout": "Časový limit požadavku vypršel — server může být zaneprázdněn nebo nedostupný",

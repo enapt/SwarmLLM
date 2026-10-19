@@ -1439,7 +1439,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | Level | What | Fields |
 |-------|------|--------|
 | DEBUG | `DIAG: encode_images` | `image_count`, `patch_count`, `elapsed_ms` |
-| DEBUG | `DIAG: merge_vision_text_embeddings` | `text_seq`, `num_vision`, `hidden`, `positions` |
+| INFO  | `DIAG: splice_image_rows` — each image's rows placed at its marker in the prompt; absent on an image request means the picture never reached the model | `markers`, `rows_per_image`, `hidden`, `positions` |
 | INFO  | `DIAG: precompute_vision_embeddings local` | `image_count`, `compressed_bytes` |
 | INFO  | `DIAG: precompute_vision_embeddings remote` | `remote_node` |
 

@@ -1865,12 +1865,25 @@ async fn handle_forward(
             fwd.prompt_cache.is_some(),
             prompt_span.is_some(),
         ) {
-            // Prefill: activations are the prompt text → tokenize
+            // Prefill: activations are the prompt text → tokenize. A prompt
+            // sent with image rows is tokenized with its markers, one id per
+            // image for `forward_multimodal` to replace — the coordinator
+            // counted its positions the same way (`vision::encode_prompt_with_images`).
             let prompt = String::from_utf8_lossy(&activation_bytes);
-            let token_ids: Vec<i64> = if let Some(tokenizer) = model.tokenizer() {
-                tokenizer.encode(&prompt)
-            } else {
-                prompt.bytes().map(|b| b as i64).collect()
+            let carries_images = !vision_bytes.is_empty();
+            let token_ids: Vec<i64> = match model.tokenizer() {
+                Some(tokenizer) if carries_images => {
+                    crate::inference::vision::encode_prompt_with_images(tokenizer, &prompt)
+                }
+                Some(tokenizer) => tokenizer.encode(&prompt),
+                None if carries_images => {
+                    return Err(SwarmError::Inference(
+                        "this computer cannot read the model's vocabulary, so it cannot \
+                         place the picture in the prompt"
+                            .into(),
+                    ))
+                }
+                None => prompt.bytes().map(|b| b as i64).collect(),
             };
             candle_core::Tensor::from_vec(
                 token_ids.clone(),
@@ -1909,87 +1922,15 @@ async fn handle_forward(
         split::bytes_to_tensor(&activation_bytes)?
     };
 
-    // Decompress vision embeddings if present.
-    // Wire format: 8-byte header (num_tokens u32 LE + hidden_dim u32 LE) + zstd(FP16 data)
+    // Decompress vision embeddings if present (`vision::decode_wire_embeddings`).
+    // An unreadable payload fails the forward: it used to be dropped with a
+    // warning, and the reply then described a picture the model never saw.
     let vision_tensor: Option<candle_core::Tensor> = if vision_bytes.is_empty() {
         None
     } else {
-        let compressed = &vision_bytes;
-        if compressed.len() < 8 {
-            tracing::warn!(request_id = %fwd.request_id, bytes = compressed.len(), "Vision embedding too short — dropping vision tensor");
-            None
-        } else {
-            // Read shape header
-            let num_tokens =
-                u32::from_le_bytes([compressed[0], compressed[1], compressed[2], compressed[3]])
-                    as usize;
-            let hidden_dim =
-                u32::from_le_bytes([compressed[4], compressed[5], compressed[6], compressed[7]])
-                    as usize;
-            let zstd_data = &compressed[8..];
-            match zstd::decode_all(std::io::Cursor::new(zstd_data)) {
-                Ok(raw_bytes) => {
-                    const MAX_VISION_EMBEDDING_BYTES: usize = 50 * 1024 * 1024;
-                    if raw_bytes.len() > MAX_VISION_EMBEDDING_BYTES || raw_bytes.len() % 2 != 0 {
-                        None
-                    } else {
-                        let f32_values: Vec<f32> = raw_bytes
-                            .as_chunks::<2>()
-                            .0
-                            .iter()
-                            .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
-                            .collect();
-                        // SEC: reject NaN/Inf from peer-supplied vision embeddings.
-                        // Without this, a poisoned tensor propagates through the KV
-                        // cache for the session, contaminating every subsequent
-                        // decode step. Same convention as `spec_logits` decode and
-                        // AllReduce sums.
-                        if f32_values.iter().any(|v| !v.is_finite()) {
-                            tracing::warn!(
-                                request_id = %fwd.request_id,
-                                "Vision embeddings contain NaN/Inf — dropping vision tensor"
-                            );
-                            return Err(SwarmError::Validation(
-                                "Vision embeddings contain non-finite values".into(),
-                            ));
-                        }
-                        // SEC: checked_mul guards against integer overflow
-                        // for adversarial shape headers. On 32-bit platforms
-                        // num_tokens * hidden_dim can wrap if both are near
-                        // u32::MAX, bypassing the length-equality check and
-                        // letting Tensor::from_vec receive a mismatched len.
-                        match num_tokens.checked_mul(hidden_dim) {
-                            None => {
-                                tracing::warn!(
-                                    num_tokens,
-                                    hidden_dim,
-                                    "Vision embedding shape multiply overflow — dropping tensor"
-                                );
-                                None
-                            }
-                            Some(expected_len) if f32_values.len() != expected_len => {
-                                tracing::warn!(
-                                    expected = expected_len,
-                                    actual = f32_values.len(),
-                                    "Vision embedding shape mismatch"
-                                );
-                                None
-                            }
-                            Some(_) => candle_core::Tensor::from_vec(
-                                f32_values,
-                                &[num_tokens, hidden_dim],
-                                &candle_core::Device::Cpu,
-                            )
-                            .ok(),
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to decompress vision embeddings");
-                    None
-                }
-            }
-        }
+        Some(crate::inference::vision::decode_wire_embeddings(
+            &vision_bytes,
+        )?)
     };
 
     // The LoRA adapter this request asked for, if any — loaded from its
@@ -2060,7 +2001,19 @@ async fn handle_forward(
         }
         _ => None,
     };
-    let input_positions = input_tensor.dims().get(1).copied().unwrap_or(0);
+    // An image prompt's ids hold one marker per image, each of which becomes
+    // that image's rows: the positions the pass will hold are the merged
+    // sequence's, the count the coordinator made (`vision::positions_with_images`).
+    let input_positions = match &vision_tensor {
+        Some(rows) if is_first && !pre_embedded => {
+            let ids: Vec<i64> = input_tensor
+                .flatten_all()
+                .and_then(|t| t.to_vec1())
+                .map_err(|e| SwarmError::Internal(format!("image prompt ids: {e}")))?;
+            crate::inference::vision::positions_with_images(&ids, rows.dims()[0])
+        }
+        _ => input_tensor.dims().get(1).copied().unwrap_or(0),
+    };
     if let Some(span) = prompt_span {
         if !span.holds(fwd.index_pos, input_positions as u32) {
             return Err(SwarmError::Validation(format!(

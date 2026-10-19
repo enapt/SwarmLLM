@@ -4,11 +4,13 @@
 //! - Image preprocessing: resize, normalize, convert to candle tensors
 //! - Vision encoder (ViT-style): patch embedding, transformer blocks, projection
 //! - Multimodal projection: map vision features into the LLM embedding space
-//! - Support for LLaVA (CLIP ViT + Llama) and Qwen2-VL architectures
+//! - Projectors, chosen by the file's `clip.projector_type`: LLaVA's MLP
+//!   (`mlp`, CLIP ViT) and Gemma 3's (`gemma3`, SigLIP + 4×4 pool + RMS norm +
+//!   linear); any other kind is refused by name
 //!
-//! The vision encoder can run as a separate shard — the first segment in a
-//! multimodal pipeline processes images into vision embeddings, which are
-//! prepended to the text token embeddings before entering the LLM layers.
+//! The vision encoder can run as a separate shard — the node encoding an
+//! image sends its rows beside the prompt, and the first segment puts them
+//! where the prompt marks the image ([`MEDIA_MARKER`], [`splice_image_rows`]).
 
 use candle_core::{Device, IndexOp, Tensor};
 use candle_nn::{Linear, Module};
@@ -27,15 +29,60 @@ const CLIP_MEAN: [f32; 3] = [0.48145466, 0.4578275, 0.40821073];
 #[allow(clippy::excessive_precision)]
 const CLIP_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
 
+/// How an image is made the encoder's square, read off the projector the way
+/// llama.cpp's `mtmd_image_preprocessor_fixed_size` does.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Preprocess {
+    /// The side of the square the encoder reads.
+    pub size: u32,
+    /// Per-channel mean and spread (`clip.vision.image_mean` / `image_std`).
+    pub mean: [f32; 3],
+    pub std: [f32; 3],
+    pub fit: Fit,
+}
+
+/// Whether an image keeps its shape on the way to the square.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fit {
+    /// Stretched to the square (LLaVA here, as before).
+    Stretch,
+    /// Scaled to fit inside the square and centred on black — llama.cpp's
+    /// `PAD_CEIL` resize, which Gemma 3 reads: the scaled sides are rounded UP,
+    /// the offsets are integer halves of what is left.
+    Letterbox,
+}
+
+impl Preprocess {
+    /// LLaVA's square, with CLIP's published mean and spread.
+    pub fn clip_stretch(size: u32) -> Self {
+        Self {
+            size,
+            mean: CLIP_MEAN,
+            std: CLIP_STD,
+            fit: Fit::Stretch,
+        }
+    }
+}
+
+/// The scaled size and offset of an image letterboxed into a `size` square —
+/// llama.cpp's `img_tool::resize` with `PAD_CEIL`.
+fn letterbox_geometry(width: u32, height: u32, size: u32) -> (u32, u32, u32, u32) {
+    let scale = (size as f32 / width as f32).min(size as f32 / height as f32);
+    let w = ((width as f32 * scale).ceil() as u32).clamp(1, size);
+    let h = ((height as f32 * scale).ceil() as u32).clamp(1, size);
+    (w, h, (size - w) / 2, (size - h) / 2)
+}
+
 /// Preprocess an image for the vision encoder.
 ///
-/// 1. Resize to `target_size x target_size` using bilinear interpolation
+/// 1. Resize to `pre.size x pre.size` (antialiased bilinear), stretched or
+///    letterboxed on black as `pre.fit` says
 /// 2. Convert to f32 [0, 1]
-/// 3. Normalize with CLIP mean/std
+/// 3. Normalize with the projector's mean/std
 /// 4. Return tensor of shape (3, H, W)
 fn preprocess_image(
     image: &ImageData,
-    target_size: u32,
+    pre: &Preprocess,
     device: &Device,
 ) -> Result<Tensor, SwarmError> {
     // Reject images that would exhaust memory when decoded to float tensors
@@ -56,12 +103,20 @@ fn preprocess_image(
     )
     .ok_or_else(|| SwarmError::Inference("Invalid image dimensions".into()))?;
 
-    let resized = image::imageops::resize(
-        &img_buf,
-        target_size,
-        target_size,
-        image::imageops::FilterType::Triangle,
-    );
+    let size = pre.size;
+    let resized = match pre.fit {
+        Fit::Stretch => {
+            image::imageops::resize(&img_buf, size, size, image::imageops::FilterType::Triangle)
+        }
+        Fit::Letterbox => {
+            let (w, h, x0, y0) = letterbox_geometry(image.width, image.height, size);
+            let scaled =
+                image::imageops::resize(&img_buf, w, h, image::imageops::FilterType::Triangle);
+            let mut canvas = image::ImageBuffer::from_pixel(size, size, image::Rgb([0u8, 0, 0]));
+            image::imageops::replace(&mut canvas, &scaled, x0 as i64, y0 as i64);
+            canvas
+        }
+    };
 
     let (w, h) = (resized.width() as usize, resized.height() as usize);
 
@@ -72,7 +127,7 @@ fn preprocess_image(
             let pixel = resized.get_pixel(x as u32, y as u32);
             for c in 0..3 {
                 let val = pixel[c] as f32 / 255.0;
-                let normalized = (val - CLIP_MEAN[c]) / CLIP_STD[c];
+                let normalized = (val - pre.mean[c]) / pre.std[c];
                 data[c * h * w + y * w + x] = normalized;
             }
         }
@@ -85,7 +140,7 @@ fn preprocess_image(
 /// Preprocess a batch of images into a single (B, 3, H, W) tensor.
 pub fn preprocess_images(
     images: &[ImageData],
-    target_size: u32,
+    pre: &Preprocess,
     device: &Device,
 ) -> Result<Tensor, SwarmError> {
     if images.is_empty() {
@@ -94,7 +149,7 @@ pub fn preprocess_images(
 
     let tensors: Vec<Tensor> = images
         .iter()
-        .map(|img| preprocess_image(img, target_size, device))
+        .map(|img| preprocess_image(img, pre, device))
         .collect::<Result<Vec<_>, _>>()?;
 
     // Stack into batch: each is (3, H, W) → (B, 3, H, W)
@@ -107,14 +162,16 @@ pub fn preprocess_images(
 /// Patch embedding: converts image patches into a sequence of embeddings.
 ///
 /// Input: (B, 3, H, W) image tensor
-/// Output: (B, num_patches + 1, hidden_dim) — includes `[CLS]` token
+/// Output: (B, num_patches + 1, hidden_dim) with a `[CLS]` token (CLIP), or
+/// (B, num_patches, hidden_dim) without one (SigLIP, Gemma 3's encoder)
 pub struct PatchEmbedding {
     /// Conv2D projection: (hidden_dim, 3, patch_size, patch_size)
     proj_weight: Tensor,
     proj_bias: Tensor,
-    /// `[CLS]` token embedding: (1, 1, hidden_dim)
-    cls_token: Tensor,
-    /// Positional embeddings: (1, num_patches + 1, hidden_dim)
+    /// `[CLS]` token embedding: (1, 1, hidden_dim) — `v.class_embd`, which a
+    /// SigLIP encoder does not have.
+    cls_token: Option<Tensor>,
+    /// Positional embeddings: (1, num_patches (+ 1), hidden_dim)
     position_embedding: Tensor,
     patch_size: usize,
 }
@@ -123,7 +180,7 @@ impl PatchEmbedding {
     pub fn new(
         proj_weight: Tensor,
         proj_bias: Tensor,
-        cls_token: Tensor,
+        cls_token: Option<Tensor>,
         position_embedding: Tensor,
         patch_size: usize,
     ) -> Self {
@@ -136,7 +193,7 @@ impl PatchEmbedding {
         }
     }
 
-    /// Forward: (B, 3, H, W) → (B, num_patches + 1, hidden_dim)
+    /// Forward: (B, 3, H, W) → (B, num_patches (+ 1), hidden_dim)
     pub fn forward(&self, x: &Tensor) -> Result<Tensor, SwarmError> {
         let (b, _c, h, w) = x
             .dims4()
@@ -183,28 +240,53 @@ impl PatchEmbedding {
             .broadcast_add(&self.proj_bias)
             .map_err(|e| SwarmError::Inference(format!("Patch bias: {e}")))?;
 
-        // Prepend CLS token
-        let cls_expanded = self
-            .cls_token
-            .broadcast_as(&[b, 1, hidden_dim])
-            .map_err(|e| SwarmError::Inference(format!("CLS broadcast: {e}")))?;
-
-        let sequence = Tensor::cat(&[&cls_expanded, &projected], 1)
-            .map_err(|e| SwarmError::Inference(format!("CLS concat: {e}")))?;
+        // Prepend CLS token, where the encoder has one
+        let sequence = match &self.cls_token {
+            Some(cls) => {
+                let cls_expanded = cls
+                    .broadcast_as(&[b, 1, hidden_dim])
+                    .map_err(|e| SwarmError::Inference(format!("CLS broadcast: {e}")))?;
+                Tensor::cat(&[&cls_expanded, &projected], 1)
+                    .map_err(|e| SwarmError::Inference(format!("CLS concat: {e}")))?
+            }
+            None => projected,
+        };
+        let positions = num_patches + usize::from(self.cls_token.is_some());
 
         // Add positional embeddings
-        let pos_embed = if self.position_embedding.dim(1).unwrap_or(0) == num_patches + 1 {
+        let pos_embed = if self.position_embedding.dim(1).unwrap_or(0) == positions {
             self.position_embedding.clone()
         } else {
             // Interpolate position embeddings if needed (image size mismatch)
             self.position_embedding
-                .i((.., ..num_patches + 1, ..))
+                .i((.., ..positions, ..))
                 .map_err(|e| SwarmError::Inference(format!("Pos embed slice: {e}")))?
         };
 
         sequence
             .broadcast_add(&pos_embed)
             .map_err(|e| SwarmError::Inference(format!("Pos embed add: {e}")))
+    }
+}
+
+/// Which GELU an encoder's feed-forward uses.
+///
+/// llama.cpp reads it off `clip.use_gelu`: true is `ggml_gelu`, the TANH
+/// approximation (Gemma 3's SigLIP, HF's `gelu_pytorch_tanh`). LLaVA's CLIP
+/// keeps the erf form here, as it always has (llama.cpp gives it quick-GELU —
+/// FUTURE_WORK #115's note on LLaVA).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gelu {
+    Erf,
+    Tanh,
+}
+
+impl Gelu {
+    fn apply(self, x: &Tensor) -> candle_core::Result<Tensor> {
+        match self {
+            Self::Erf => x.gelu_erf(),
+            Self::Tanh => x.gelu(),
+        }
     }
 }
 
@@ -218,6 +300,7 @@ pub struct VisionTransformerBlock {
     mlp_fc2: Linear,
     num_heads: usize,
     head_dim: usize,
+    gelu: Gelu,
 }
 
 impl VisionTransformerBlock {
@@ -241,7 +324,14 @@ impl VisionTransformerBlock {
             mlp_fc2,
             num_heads,
             head_dim: hidden_dim / num_heads,
+            gelu: Gelu::Erf,
         }
+    }
+
+    /// The same block with the feed-forward's GELU set (see [`Gelu`]).
+    pub fn with_gelu(mut self, gelu: Gelu) -> Self {
+        self.gelu = gelu;
+        self
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor, SwarmError> {
@@ -288,15 +378,34 @@ impl VisionTransformerBlock {
             .contiguous()
             .map_err(map_err("vit_v_contiguous"))?;
 
-        // Scaled dot-product attention (no causal mask — ViT uses full attention)
-        let scale = (self.head_dim as f64).sqrt();
-        let attn_weights = q
-            .matmul(&k.t().map_err(map_err("vit_k_t"))?)
-            .map_err(map_err("vit_attn_matmul"))?;
-        let attn_weights = (attn_weights / scale).map_err(map_err("vit_attn_scale"))?;
-        let attn_weights =
-            candle_nn::ops::softmax_last_dim(&attn_weights).map_err(map_err("vit_softmax"))?;
-        let attn_output = attn_weights.matmul(&v).map_err(map_err("vit_attn_v"))?;
+        // Scaled dot-product attention (no causal mask — ViT uses full
+        // attention). On the processor it is the prompt pass's key-tiled
+        // kernel, which never writes the score matrix: Gemma 3's 4,096 patches
+        // × 16 heads would be a 1 GB matrix per block, made three times over
+        // (scores, scaled, softmax). The matmul form stays as the fallback and
+        // for any other device.
+        let tiled = crate::inference::prefill_attn::gqa_prefill_attention_cpu(
+            &q,
+            &k,
+            &v,
+            None,
+            1.0 / (self.head_dim as f32).sqrt(),
+            None,
+        )
+        .map_err(map_err("vit_attn_tiled"))?;
+        let attn_output = match tiled {
+            Some(out) => out,
+            None => {
+                let scale = (self.head_dim as f64).sqrt();
+                let attn_weights = q
+                    .matmul(&k.t().map_err(map_err("vit_k_t"))?)
+                    .map_err(map_err("vit_attn_matmul"))?;
+                let attn_weights = (attn_weights / scale).map_err(map_err("vit_attn_scale"))?;
+                let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)
+                    .map_err(map_err("vit_softmax"))?;
+                attn_weights.matmul(&v).map_err(map_err("vit_attn_v"))?
+            }
+        };
 
         // Reshape back: (B, num_heads, S, head_dim) → (B, S, hidden_dim)
         let attn_output = attn_output
@@ -320,8 +429,7 @@ impl VisionTransformerBlock {
         let residual = &h;
         let ff_in = self.ln2.forward(&h).map_err(map_err("vit_ln2"))?;
         let ff = self.mlp_fc1.forward(&ff_in).map_err(map_err("vit_fc1"))?;
-        // GELU activation
-        let ff = ff.gelu_erf().map_err(map_err("vit_gelu"))?;
+        let ff = self.gelu.apply(&ff).map_err(map_err("vit_gelu"))?;
         let ff = self.mlp_fc2.forward(&ff).map_err(map_err("vit_fc2"))?;
 
         (ff + residual).map_err(map_err("vit_residual2"))
@@ -386,21 +494,22 @@ impl VisionEncoder {
         &self.config
     }
 
-    /// Number of vision tokens produced per image (num_patches + 1 for CLS).
+    /// Number of vision tokens produced per image (num_patches, + 1 for a CLS).
     pub fn num_vision_tokens(&self) -> usize {
-        let ps = self.config.patch_size as usize;
-        let img = self.config.image_size as usize;
-        let num_patches = (img / ps) * (img / ps);
-        num_patches + 1 // +1 for CLS token
+        self.patches_per_side().pow(2) + usize::from(self.patch_embed.cls_token.is_some())
+    }
+
+    /// Patches along one side of the square.
+    pub fn patches_per_side(&self) -> usize {
+        (self.config.image_size / self.config.patch_size) as usize
     }
 }
 
 // ── Multimodal Projection ──
 
-/// Projects vision encoder outputs into the LLM's embedding space.
-///
-/// For LLaVA: a 2-layer MLP (vision_hidden → projection_dim → llm_hidden_dim)
-/// For Qwen2-VL: a linear projection with additional spatial merging
+/// LLaVA's projector (`clip.projector_type` `mlp`): a 2-layer MLP
+/// (vision_hidden → projection_dim → llm_hidden_dim). Gemma 3's is
+/// [`Gemma3Projection`]; every other projector type is refused at load.
 pub struct MultimodalProjection {
     proj1: Linear,
     proj2: Linear,
@@ -439,21 +548,113 @@ impl MultimodalProjection {
     }
 }
 
+/// Gemma 3's projection (`clip.projector_type = gemma3`, llama.cpp's
+/// `PROJECTOR_TYPE_GEMMA3` in `models/siglip.cpp`): the encoder's 64×64 patch
+/// grid averaged over 4×4 squares to 16×16 = 256 tokens, RMS-normed with
+/// `mm.soft_emb_norm` (stored as the scale itself, 1 + w), then multiplied by
+/// `mm.input_projection` into the language model's width. No bias, no scale.
+pub struct Gemma3Projection {
+    /// `mm.soft_emb_norm.weight`: (vision_hidden,)
+    soft_emb_norm: Tensor,
+    /// `mm.input_projection.weight` in candle order: (vision_hidden, llm_hidden),
+    /// so the projection is `x @ W` (GGUF `ne = [llm_hidden, vision_hidden]`).
+    input_projection: Tensor,
+    /// The side of the averaged square (`clip.vision.projector.scale_factor`,
+    /// 4 for every Gemma 3).
+    pool: usize,
+    eps: f64,
+}
+
+impl Gemma3Projection {
+    pub fn new(soft_emb_norm: Tensor, input_projection: Tensor, pool: usize, eps: f64) -> Self {
+        Self {
+            soft_emb_norm,
+            input_projection,
+            pool,
+            eps,
+        }
+    }
+
+    /// (B, side², vision_hidden) → (B, (side / pool)², llm_hidden). Patches are
+    /// row-major, so patch `y * side + x` is row y, column x of the grid, and
+    /// each output token is the mean of one pool × pool square.
+    pub fn forward(&self, features: &Tensor, side: usize) -> Result<Tensor, SwarmError> {
+        let map_err = |msg: &'static str| {
+            move |e: candle_core::Error| SwarmError::Inference(format!("{msg}: {e}"))
+        };
+        let (b, n, hidden) = features.dims3().map_err(map_err("gemma3_proj_dims"))?;
+        if n != side * side || !side.is_multiple_of(self.pool) {
+            return Err(SwarmError::Inference(format!(
+                "Gemma 3 projection: {n} patches do not make a {side}-wide grid that pools by {}",
+                self.pool
+            )));
+        }
+        let out_side = side / self.pool;
+        let pooled = features
+            .reshape(&[b, out_side, self.pool, out_side, self.pool, hidden])
+            .map_err(map_err("gemma3_pool_reshape"))?
+            .mean(4)
+            .map_err(map_err("gemma3_pool_x"))?
+            .mean(2)
+            .map_err(map_err("gemma3_pool_y"))?
+            .reshape(&[b, out_side * out_side, hidden])
+            .map_err(map_err("gemma3_pool_flatten"))?;
+        let normed = candle_nn::ops::rms_norm(&pooled, &self.soft_emb_norm, self.eps as f32)
+            .map_err(map_err("gemma3_soft_emb_norm"))?;
+        normed
+            .broadcast_matmul(&self.input_projection)
+            .map_err(map_err("gemma3_input_projection"))
+    }
+
+    pub fn llm_hidden_dim(&self) -> usize {
+        self.input_projection.dims().last().copied().unwrap_or(0)
+    }
+
+    /// Tokens one image becomes.
+    pub fn tokens_per_image(&self, patches_per_side: usize) -> usize {
+        (patches_per_side / self.pool).pow(2)
+    }
+}
+
+/// How an encoder's features reach the language model — chosen ONCE, from the
+/// file's `clip.projector_type`, by [`load_from_mmproj_gguf`].
+pub enum Projector {
+    /// LLaVA's 2-layer MLP (`mlp`, the default of a file that names none).
+    Llava(MultimodalProjection),
+    /// Gemma 3's pool + RMS norm + linear (`gemma3`).
+    Gemma3(Gemma3Projection),
+}
+
+impl Projector {
+    /// LLM hidden dimension this projection targets.
+    pub fn llm_hidden_dim(&self) -> usize {
+        match self {
+            Self::Llava(p) => p.llm_hidden_dim(),
+            Self::Gemma3(p) => p.llm_hidden_dim(),
+        }
+    }
+}
+
 // ── VLM Pipeline Integration ──
 
 /// Holds a loaded vision encoder + projection, ready for inference.
 /// Stored in SharedState for reuse across requests.
 pub struct VisionModule {
     pub encoder: VisionEncoder,
-    pub projection: MultimodalProjection,
+    pub projection: Projector,
+    /// How an image is made the encoder's square.
+    pub preprocess: Preprocess,
     pub device: Device,
 }
 
 impl VisionModule {
-    /// Number of tokens produced per image (patches + CLS token).
-    /// For CLIP ViT-L/14 @ 336px: (336/14)^2 + 1 = 577.
+    /// Number of tokens one image becomes in the prompt.
+    /// CLIP ViT-L/14 @ 336px (LLaVA): (336/14)^2 + 1 = 577; Gemma 3: 256.
     pub fn num_image_tokens(&self) -> usize {
-        self.encoder.num_vision_tokens()
+        match &self.projection {
+            Projector::Llava(_) => self.encoder.num_vision_tokens(),
+            Projector::Gemma3(p) => p.tokens_per_image(self.encoder.patches_per_side()),
+        }
     }
 
     /// Process images from a multimodal request and produce LLM-space embeddings.
@@ -466,14 +667,16 @@ impl VisionModule {
         }
 
         let start = std::time::Instant::now();
-        let target_size = self.encoder.config().image_size;
-        let pixel_values = preprocess_images(images, target_size, &self.device)?;
+        let pixel_values = preprocess_images(images, &self.preprocess, &self.device)?;
 
-        // (B, 3, H, W) → (B, num_tokens, vision_hidden)
+        // (B, 3, H, W) → (B, num_patches (+ 1), vision_hidden)
         let vision_features = self.encoder.forward(&pixel_values)?;
 
-        // (B, num_tokens, vision_hidden) → (B, num_tokens, llm_hidden)
-        let projected = self.projection.forward(&vision_features)?;
+        // (B, num_patches (+ 1), vision_hidden) → (B, num_tokens, llm_hidden)
+        let projected = match &self.projection {
+            Projector::Llava(p) => p.forward(&vision_features)?,
+            Projector::Gemma3(p) => p.forward(&vision_features, self.encoder.patches_per_side())?,
+        };
 
         // Flatten batch: (B, num_tokens, llm_hidden) → (B * num_tokens, llm_hidden)
         let (b, n, h) = projected
@@ -495,83 +698,246 @@ impl VisionModule {
     }
 }
 
-/// Merge vision embeddings with text token embeddings for multimodal forward pass.
+// ── Where an image sits in the prompt ──
+//
+// An image travels from the API edge to the first segment as a MARKER in the
+// prompt's text, where the caller put it (llama.cpp's server and `mtmd` do the
+// same, with the same string), and becomes one [`IMAGE_TOKEN_ID`] per image
+// when the prompt is tokenized. The first segment replaces each with that
+// image's rows. Before #115 (2) nothing put a marker in a prompt at all, so
+// every image was PREPENDED — ahead of the BOS and the system turn — and the
+// coordinator counted LLaVA's `<image>` text as one position.
+
+/// The text that stands for one image in a rendered prompt — llama.cpp's
+/// `mtmd_default_marker()`. Inserted only for a message that carries images,
+/// so a request without one tokenizes this string as the text it is.
+pub const MEDIA_MARKER: &str = "<__media__>";
+
+/// The id a [`MEDIA_MARKER`] becomes in a tokenized prompt: no vocabulary has
+/// it, so the first segment finds it unambiguously.
+pub const IMAGE_TOKEN_ID: i64 = -1;
+
+/// One part of a message's content, in the order the caller gave them.
+pub enum ContentPiece<'a> {
+    Text(&'a str),
+    Image,
+}
+
+/// A message's text with a [`MEDIA_MARKER`] where each image was — llama.cpp's
+/// rule (`common/chat.cpp`, `concat_content_parts`): text parts are joined by a
+/// newline, and no newline goes before or after an image. Every API surface
+/// builds a message's content through this, so an image sits in the same
+/// place whichever one it came in by.
+pub fn join_content<'a>(pieces: impl IntoIterator<Item = ContentPiece<'a>>) -> String {
+    let mut text = String::new();
+    let mut last_was_image = false;
+    for piece in pieces {
+        match piece {
+            ContentPiece::Text(t) => {
+                if !last_was_image && !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(t);
+                last_was_image = false;
+            }
+            ContentPiece::Image => {
+                text.push_str(MEDIA_MARKER);
+                last_was_image = true;
+            }
+        }
+    }
+    text
+}
+
+/// A rendered prompt with each image's marker wrapped the way the model's
+/// family was trained to see an image — llama.cpp's `img_beg` / `img_end`
+/// (`mtmd.cpp`): Gemma 3 reads `<start_of_image>` … `<end_of_image>`, both
+/// CONTROL tokens its tokenizer matches whole; LLaVA reads the bare image.
 ///
-/// Merge vision embeddings into text embeddings.
+/// Called where every path's prompt is built
+/// (`PipelineExecutor::build_prompt_with_header`), so the coordinator's count
+/// of positions and the first segment's tokens describe the same prompt.
+pub fn wrap_images_for_family(prompt: String, architecture: Option<&str>) -> String {
+    match architecture {
+        Some("gemma3") if prompt.contains(MEDIA_MARKER) => prompt.replace(
+            MEDIA_MARKER,
+            &format!("<start_of_image>{MEDIA_MARKER}<end_of_image>"),
+        ),
+        _ => prompt,
+    }
+}
+
+/// A prompt carrying images, tokenized: the text between markers as the
+/// tokenizer reads it, one [`IMAGE_TOKEN_ID`] per marker. Only the opening
+/// piece may get a BOS (`SplitTokenizer::encode`); the rest continue it —
+/// llama.cpp's `mtmd_tokenize`, which tokenizes each piece on its own with
+/// `add_special` only for the first.
 ///
-/// Given:
-/// - `text_embeddings`: (1, text_seq_len, hidden_dim) from tok_embeddings
-/// - `vision_embeddings`: (num_image_tokens, hidden_dim) from vision encoder
-/// - `image_positions`: indices in the text sequence where `<image>` placeholder tokens are
+/// The ONE tokenization of an image prompt: the first segment's worker builds
+/// its input from it and the coordinator counts the prompt's positions from it
+/// ([`positions_with_images`]), so the two cannot disagree.
+pub fn encode_prompt_with_images(
+    tokenizer: &crate::inference::split::SplitTokenizer,
+    prompt: &str,
+) -> Vec<i64> {
+    let mut ids = Vec::new();
+    for (i, piece) in prompt.split(MEDIA_MARKER).enumerate() {
+        if i == 0 {
+            ids.extend(tokenizer.encode(piece));
+        } else {
+            ids.push(IMAGE_TOKEN_ID);
+            if !piece.is_empty() {
+                ids.extend(tokenizer.encode_continuation(piece));
+            }
+        }
+    }
+    ids
+}
+
+/// How many positions a tokenized image prompt occupies once each marker is
+/// replaced by its image's rows: `image_rows` is every image's together, as
+/// the vision payload's header states it ([`wire_rows`]).
+pub fn positions_with_images(ids: &[i64], image_rows: usize) -> usize {
+    let markers = ids.iter().filter(|&&id| id == IMAGE_TOKEN_ID).count();
+    ids.len() - markers + image_rows
+}
+
+/// A tokenized prompt's embeddings with each image's rows where its marker is.
 ///
-/// If `image_positions` contains exactly one position, replaces that token's embedding
-/// with all vision embeddings (expanding 1 token → num_image_tokens). This matches
-/// LLaVA's training where `<image>` marks the insertion point.
+/// `embed_text` embeds one run of ordinary ids as `(1, n, hidden)`, scaled as
+/// the model scales a token's embedding (Gemma's `sqrt(hidden)`); an image's
+/// rows are NOT scaled — llama.cpp's Gemma 3 graph scales `ubatch.token` input
+/// only. `vision` is `(rows, hidden)`, every image's rows in order, split
+/// evenly between the markers.
 ///
-/// Falls back to prepending vision tokens if no positions are given.
-///
-/// Returns: (1, new_seq_len, hidden_dim)
-pub fn merge_vision_text_embeddings(
-    text_embeddings: &Tensor,
-    vision_embeddings: &Tensor,
-    image_positions: &[usize],
+/// The ONE splice, for the first segment (`SplitModel::forward_multimodal`)
+/// and a prompt embedded on this node (`LocalEmbedder::embed_prompt`). A
+/// prompt with no marker is refused: the old fallback prepended the image,
+/// and a count that does not divide means the payload is not this prompt's.
+pub fn splice_image_rows(
+    ids: &[i64],
+    vision: &Tensor,
+    mut embed_text: impl FnMut(&[i64]) -> Result<Tensor, SwarmError>,
 ) -> Result<Tensor, SwarmError> {
     let map_err = |msg: &'static str| {
         move |e: candle_core::Error| SwarmError::Inference(format!("{msg}: {e}"))
     };
-
-    let (_, text_seq, hidden) = text_embeddings.dims3().map_err(map_err("text_dims"))?;
-    let num_vision = vision_embeddings.dim(0).map_err(map_err("vision_dim0"))?;
-
-    // Reshape vision: (num_image_tokens, hidden_dim) → (1, num_image_tokens, hidden_dim)
-    let vision_3d = vision_embeddings
-        .reshape(&[1, num_vision, hidden])
-        .map_err(map_err("vision_reshape"))?;
-
-    tracing::debug!(
-        text_seq,
-        num_vision,
-        hidden,
-        positions = ?image_positions,
-        "DIAG: merge_vision_text_embeddings"
-    );
-
-    if image_positions.len() == 1 {
-        // Replace <image> token at the given position with vision embeddings
-        let pos = image_positions[0];
-        if pos >= text_seq {
-            return Err(SwarmError::Inference(format!(
-                "image token position {pos} out of range (text_seq={text_seq})"
-            )));
-        }
-
-        let mut parts: Vec<Tensor> = Vec::new();
-
-        // Text before <image>
-        if pos > 0 {
-            let before = text_embeddings
-                .narrow(1, 0, pos)
-                .map_err(map_err("narrow_before"))?;
-            parts.push(before);
-        }
-
-        // Vision embeddings replacing the <image> token
-        parts.push(vision_3d);
-
-        // Text after <image>
-        if pos + 1 < text_seq {
-            let after = text_embeddings
-                .narrow(1, pos + 1, text_seq - pos - 1)
-                .map_err(map_err("narrow_after"))?;
-            parts.push(after);
-        }
-
-        let refs: Vec<&Tensor> = parts.iter().collect();
-        Tensor::cat(&refs, 1).map_err(map_err("vision_text_cat_replace"))
-    } else {
-        // Fallback: prepend vision tokens before text tokens
-        Tensor::cat(&[&vision_3d, text_embeddings], 1).map_err(map_err("vision_text_cat"))
+    let markers = ids.iter().filter(|&&id| id == IMAGE_TOKEN_ID).count();
+    let (rows, hidden) = vision.dims2().map_err(map_err("vision_dims"))?;
+    if markers == 0 || !rows.is_multiple_of(markers) {
+        return Err(SwarmError::Validation(format!(
+            "the prompt marks {markers} place(s) for an image, and the image data \
+             has {rows} rows, which do not divide between them"
+        )));
     }
+    let per_image = rows / markers;
+    let mut parts: Vec<Tensor> = Vec::with_capacity(2 * markers + 1);
+    // Where the text's embeddings live, which the image rows are moved to.
+    let mut text_home: Option<(Device, candle_core::DType)> = None;
+    for (i, run) in ids.split(|&id| id == IMAGE_TOKEN_ID).enumerate() {
+        if i > 0 {
+            parts.push(
+                vision
+                    .narrow(0, (i - 1) * per_image, per_image)
+                    .and_then(|t| t.reshape(&[1, per_image, hidden]))
+                    .map_err(map_err("vision_rows"))?,
+            );
+        }
+        if !run.is_empty() {
+            let text = embed_text(run)?;
+            text_home.get_or_insert_with(|| (text.device().clone(), text.dtype()));
+            parts.push(text);
+        }
+    }
+    let parts = match text_home {
+        Some((device, dtype)) => parts
+            .into_iter()
+            .map(|t| t.to_device(&device).and_then(|t| t.to_dtype(dtype)))
+            .collect::<candle_core::Result<Vec<_>>>()
+            .map_err(map_err("vision_text_device"))?,
+        None => parts,
+    };
+    let merged = Tensor::cat(&parts, 1).map_err(map_err("vision_text_cat"))?;
+    tracing::info!(
+        markers,
+        rows_per_image = per_image,
+        hidden,
+        positions = merged.dim(1).unwrap_or(0),
+        "DIAG: splice_image_rows"
+    );
+    Ok(merged)
+}
+
+// ── The vision payload on the wire ──
+//
+// 8-byte header (rows u32 LE + hidden u32 LE), then zstd of the rows as f16.
+// Written by `PipelineExecutor::compress_vision_embeddings` (and a remote
+// encoder, `daemon::dispatch::vision`), read here.
+
+/// The rows a vision payload's header states, or `None` for a payload too
+/// short to have one.
+pub fn wire_rows(payload: &[u8]) -> Option<usize> {
+    let header: [u8; 4] = payload.get(..4)?.try_into().ok()?;
+    Some(u32::from_le_bytes(header) as usize)
+}
+
+/// Decode a vision payload into a `(rows, hidden)` f32 tensor on the processor.
+///
+/// A payload that cannot be read is the request's failure, never an image
+/// quietly dropped: the old reader logged and went on without it, and the
+/// model then answered about a picture it never saw.
+pub fn decode_wire_embeddings(payload: &[u8]) -> Result<Tensor, SwarmError> {
+    /// Larger than any encoder's output for a few images (Gemma 3: 256 × 2560
+    /// × 2 bytes = 1.3 MB an image), small enough that a peer cannot make a
+    /// worker allocate without bound.
+    const MAX_VISION_EMBEDDING_BYTES: usize = 50 * 1024 * 1024;
+    let bad = |why: String| SwarmError::Validation(format!("unreadable image data: {why}"));
+    if payload.len() < 8 {
+        return Err(bad(format!(
+            "{} bytes, shorter than its header",
+            payload.len()
+        )));
+    }
+    let rows = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+    let hidden = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+    let mut raw = Vec::new();
+    {
+        use std::io::Read;
+        let decoder = zstd::stream::read::Decoder::new(std::io::Cursor::new(&payload[8..]))
+            .map_err(|e| bad(format!("zstd: {e}")))?;
+        // One byte past the cap, so a payload that inflates past it is caught
+        // without inflating all of it.
+        decoder
+            .take(MAX_VISION_EMBEDDING_BYTES as u64 + 1)
+            .read_to_end(&mut raw)
+            .map_err(|e| bad(format!("zstd: {e}")))?;
+    }
+    if raw.len() > MAX_VISION_EMBEDDING_BYTES || !raw.len().is_multiple_of(2) {
+        return Err(bad(format!("{} bytes of rows", raw.len())));
+    }
+    // checked_mul: an adversarial header near u32::MAX must not wrap past the
+    // length check on a 32-bit platform.
+    if rows.checked_mul(hidden) != Some(raw.len() / 2) {
+        return Err(bad(format!(
+            "header says {rows} x {hidden}, payload holds {} values",
+            raw.len() / 2
+        )));
+    }
+    let values: Vec<f32> = raw
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| half::f16::from_le_bytes(*b).to_f32())
+        .collect();
+    // SEC: a non-finite row would poison the request's KV cache for every
+    // later step — the same rule as `spec_logits` and AllReduce sums.
+    if values.iter().any(|v| !v.is_finite()) {
+        return Err(SwarmError::Validation(
+            "Vision embeddings contain non-finite values".into(),
+        ));
+    }
+    Tensor::from_vec(values, &[rows, hidden], &Device::Cpu)
+        .map_err(|e| SwarmError::Inference(format!("vision tensor: {e}")))
 }
 
 /// Check if a list of chat messages contains any images.
@@ -654,21 +1020,79 @@ pub fn load_from_mmproj_gguf(
     let hidden_size = get_u32("clip.vision.embedding_length")? as usize;
     let num_heads = get_u32("clip.vision.attention.head_count")? as usize;
     let num_layers = get_u32("clip.vision.block_count")? as usize;
-    // Get projection dim from mm.0.weight shape or default to hidden_size
-    let projection_dim = ct
-        .tensor_infos
-        .get("mm.0.weight")
-        .map(|t| t.shape.dims()[0])
-        .unwrap_or(hidden_size);
+    if patch_size == 0 || !image_size.is_multiple_of(patch_size) || num_heads == 0 {
+        return Err(SwarmError::Inference(format!(
+            "mmproj geometry is not usable: image {image_size}, patch {patch_size}, heads {num_heads}"
+        )));
+    }
 
-    // Get LLM hidden dim from mm.2.weight output shape
-    let llm_hidden_dim = ct
-        .tensor_infos
-        .get("mm.2.weight")
-        .map(|t| t.shape.dims()[0])
-        .ok_or_else(|| {
-            SwarmError::Inference("Missing mm.2.weight — cannot determine LLM hidden dim".into())
-        })?;
+    // The projector decides everything after the encoder (llama.cpp's
+    // `clip.projector_type`; a file that names none is LLaVA's `mlp`). One is
+    // read here and nowhere else — an unknown kind is refused by name rather
+    // than loaded as LLaVA, which is what every file was before (#115 (2)).
+    let projector_type = ct
+        .metadata
+        .get("clip.projector_type")
+        .and_then(|v| v.to_string().ok())
+        .map(String::as_str)
+        .unwrap_or("mlp");
+    let kind = match projector_type {
+        "mlp" => ProjectorKind::Llava,
+        "gemma3" => ProjectorKind::Gemma3,
+        other => {
+            return Err(SwarmError::Validation(format!(
+                "This model's image reader (projector type '{other}') is not supported yet. \
+                 Supported: mlp (LLaVA), gemma3."
+            )))
+        }
+    };
+
+    let dim0_of = |name: &str| ct.tensor_infos.get(name).map(|t| t.shape.dims()[0]);
+    let dims_of = |name: &str| ct.tensor_infos.get(name).map(|t| t.shape.dims().to_vec());
+    let (projection_dim, llm_hidden_dim) = match kind {
+        // mm.0's output width; the language model's width is mm.2's output.
+        ProjectorKind::Llava => (
+            dim0_of("mm.0.weight").unwrap_or(hidden_size),
+            dim0_of("mm.2.weight").ok_or_else(|| {
+                SwarmError::Inference(
+                    "Missing mm.2.weight — cannot determine LLM hidden dim".into(),
+                )
+            })?,
+        ),
+        // candle order (vision_hidden, llm_hidden): the projection is x @ W.
+        ProjectorKind::Gemma3 => match dims_of("mm.input_projection.weight").as_deref() {
+            Some([vision, llm]) if *vision == hidden_size => (*llm, *llm),
+            other => {
+                return Err(SwarmError::Inference(format!(
+                    "Gemma 3 mmproj: mm.input_projection.weight is {other:?}, \
+                     expected [{hidden_size}, <language model width>]"
+                )))
+            }
+        },
+    };
+
+    // Per-channel mean and spread: the file's own (SigLIP's are 0.5), CLIP's
+    // published values where a file states none.
+    let channel_triple = |key: &str| -> Option<[f32; 3]> {
+        let v = ct.metadata.get(key)?.to_vec().ok()?;
+        match v.as_slice() {
+            [a, b, c] => Some([a.to_f32().ok()?, b.to_f32().ok()?, c.to_f32().ok()?]),
+            _ => None,
+        }
+    };
+    let preprocess = Preprocess {
+        size: image_size,
+        mean: channel_triple("clip.vision.image_mean").unwrap_or(CLIP_MEAN),
+        std: channel_triple("clip.vision.image_std").unwrap_or(CLIP_STD),
+        fit: match kind {
+            ProjectorKind::Llava => Fit::Stretch,
+            ProjectorKind::Gemma3 => Fit::Letterbox,
+        },
+    };
+    let gelu = match kind {
+        ProjectorKind::Llava => Gelu::Erf,
+        ProjectorKind::Gemma3 => Gelu::Tanh,
+    };
 
     let config = VisionConfig {
         image_size,
@@ -680,6 +1104,7 @@ pub fn load_from_mmproj_gguf(
     };
 
     tracing::info!(
+        projector_type,
         image_size,
         patch_size,
         hidden_size,
@@ -752,9 +1177,14 @@ pub fn load_from_mmproj_gguf(
     };
     let patch_proj_bias = load_opt!("v.patch_embd.bias")
         .unwrap_or_else(|| Tensor::zeros(&[hidden_size], DType::F32, device).unwrap());
-    let cls_token = load!("v.class_embd")
-        .reshape(&[1, 1, hidden_size])
-        .map_err(|e| SwarmError::Inference(format!("cls_reshape: {e}")))?;
+    // CLIP prepends a class token; SigLIP (Gemma 3's encoder) has none.
+    let cls_token = match load_opt!("v.class_embd") {
+        Some(t) => Some(
+            t.reshape(&[1, 1, hidden_size])
+                .map_err(|e| SwarmError::Inference(format!("cls_reshape: {e}")))?,
+        ),
+        None => None,
+    };
 
     // Position embedding: GGUF shape [hidden, num_pos] → need (1, num_pos, hidden)
     let position_embedding_raw = load!("v.position_embd.weight");
@@ -863,16 +1293,19 @@ pub fn load_from_mmproj_gguf(
         let fc2_b = load_opt!(&format!("v.blk.{i}.{fc2_name}.bias"));
         let mlp_fc2 = Linear::new(fc2_w, fc2_b);
 
-        blocks.push(VisionTransformerBlock::new(
-            ln1,
-            attn_qkv,
-            attn_proj,
-            ln2,
-            mlp_fc1,
-            mlp_fc2,
-            num_heads,
-            hidden_size,
-        ));
+        blocks.push(
+            VisionTransformerBlock::new(
+                ln1,
+                attn_qkv,
+                attn_proj,
+                ln2,
+                mlp_fc1,
+                mlp_fc2,
+                num_heads,
+                hidden_size,
+            )
+            .with_gelu(gelu),
+        );
     }
 
     // ── Post layer norm (optional — not all CLIP models have it) ──
@@ -894,23 +1327,54 @@ pub fn load_from_mmproj_gguf(
     let mut encoder = VisionEncoder::new(patch_embed, blocks, final_ln, config);
     encoder.pre_ln = pre_ln;
 
-    // ── Multimodal projection (2-layer MLP: mm.0 → GELU → mm.2) ──
-    let mm0_w = load!("mm.0.weight");
-    let mm0_b = load_opt!("mm.0.bias");
-    let mm2_w = load!("mm.2.weight");
-    let mm2_b = load_opt!("mm.2.bias");
-
-    let proj1 = Linear::new(mm0_w, mm0_b);
-    let proj2 = Linear::new(mm2_w, mm2_b);
-    let projection = MultimodalProjection::new(proj1, proj2, llm_hidden_dim);
+    let projection = match kind {
+        // ── LLaVA: 2-layer MLP, mm.0 → GELU → mm.2 ──
+        ProjectorKind::Llava => {
+            let mm0_w = load!("mm.0.weight");
+            let mm0_b = load_opt!("mm.0.bias");
+            let mm2_w = load!("mm.2.weight");
+            let mm2_b = load_opt!("mm.2.bias");
+            let proj1 = Linear::new(mm0_w, mm0_b);
+            let proj2 = Linear::new(mm2_w, mm2_b);
+            Projector::Llava(MultimodalProjection::new(proj1, proj2, llm_hidden_dim))
+        }
+        // ── Gemma 3: 4×4 average pool, RMS norm, linear ──
+        ProjectorKind::Gemma3 => {
+            let pool = ct
+                .metadata
+                .get("clip.vision.projector.scale_factor")
+                .and_then(|v| v.to_u32().ok())
+                .unwrap_or(4) as usize;
+            let side = (image_size / patch_size) as usize;
+            if pool == 0 || !side.is_multiple_of(pool) {
+                return Err(SwarmError::Inference(format!(
+                    "Gemma 3 mmproj: a {side}-patch side does not pool by {pool}"
+                )));
+            }
+            Projector::Gemma3(Gemma3Projection::new(
+                load!("mm.soft_emb_norm.weight"),
+                load!("mm.input_projection.weight"),
+                pool,
+                ln_eps,
+            ))
+        }
+    };
 
     tracing::info!(llm_hidden_dim, "VisionModule loaded from mmproj GGUF");
 
     Ok(VisionModule {
         encoder,
         projection,
+        preprocess,
         device: device.clone(),
     })
+}
+
+/// The projector kinds [`load_from_mmproj_gguf`] builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectorKind {
+    Llava,
+    Gemma3,
 }
 
 // ── Tests ──
@@ -959,7 +1423,7 @@ mod tests {
             height: 64,
         };
         let device = Device::Cpu;
-        let tensor = preprocess_image(&img, 224, &device).unwrap();
+        let tensor = preprocess_image(&img, &Preprocess::clip_stretch(224), &device).unwrap();
         assert_eq!(tensor.dims(), &[3, 224, 224]);
     }
 
@@ -972,7 +1436,7 @@ mod tests {
             height: 16,
         };
         let device = Device::Cpu;
-        let tensor = preprocess_image(&img, 16, &device).unwrap();
+        let tensor = preprocess_image(&img, &Preprocess::clip_stretch(16), &device).unwrap();
 
         // After normalization: (1.0 - mean) / std
         // Channel 0: (1.0 - 0.48145466) / 0.26862954 ≈ 1.93
@@ -999,14 +1463,14 @@ mod tests {
             },
         ];
         let device = Device::Cpu;
-        let batch = preprocess_images(&images, 224, &device).unwrap();
+        let batch = preprocess_images(&images, &Preprocess::clip_stretch(224), &device).unwrap();
         assert_eq!(batch.dims(), &[2, 3, 224, 224]);
     }
 
     #[test]
     fn preprocess_empty_batch_errors() {
         let device = Device::Cpu;
-        let result = preprocess_images(&[], 224, &device);
+        let result = preprocess_images(&[], &Preprocess::clip_stretch(224), &device);
         assert!(result.is_err());
     }
 
@@ -1073,15 +1537,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_vision_text_concatenates() {
-        let device = Device::Cpu;
-        let text_embed = Tensor::zeros(&[1, 10, 64], DType::F32, &device).unwrap();
-        let vision_embed = Tensor::ones(&[5, 64], DType::F32, &device).unwrap();
-        let merged = merge_vision_text_embeddings(&text_embed, &vision_embed, &[]).unwrap();
-        assert_eq!(merged.dims(), &[1, 15, 64]);
-    }
-
-    #[test]
     fn vision_config_defaults() {
         let config = VisionConfig {
             image_size: 336,
@@ -1110,8 +1565,13 @@ mod tests {
         let pos_embed =
             Tensor::zeros(&[1, num_patches + 1, hidden_dim], DType::F32, &device).unwrap();
 
-        let _patch_embed =
-            PatchEmbedding::new(proj_weight, proj_bias, cls_token, pos_embed, patch_size);
+        let _patch_embed = PatchEmbedding::new(
+            proj_weight,
+            proj_bias,
+            Some(cls_token),
+            pos_embed,
+            patch_size,
+        );
         // Construction succeeds — forward requires specific candle matmul broadcasting
         // which is validated with real model weights in E2E testing
     }
@@ -1179,8 +1639,13 @@ mod tests {
         let cls_token = Tensor::zeros(&[1, 1, hidden_dim], DType::F32, &device).unwrap();
         let pos_embed =
             Tensor::zeros(&[1, num_patches + 1, hidden_dim], DType::F32, &device).unwrap();
-        let patch_embed =
-            PatchEmbedding::new(proj_weight, proj_bias, cls_token, pos_embed, patch_size);
+        let patch_embed = PatchEmbedding::new(
+            proj_weight,
+            proj_bias,
+            Some(cls_token),
+            pos_embed,
+            patch_size,
+        );
 
         let vm = VarMap::new();
         let vb = candle_nn::VarBuilder::from_varmap(&vm, DType::F32, &device);
@@ -1227,7 +1692,7 @@ mod tests {
             height: size as u32,
         };
         let device = Device::Cpu;
-        let tensor = preprocess_image(&img, 16, &device).unwrap();
+        let tensor = preprocess_image(&img, &Preprocess::clip_stretch(16), &device).unwrap();
         assert_eq!(tensor.dims(), &[3, 16, 16]);
 
         // Verify channel statistics differ (gradient creates variation)
@@ -1238,5 +1703,224 @@ mod tests {
         let mean1: f32 = ch1.iter().sum::<f32>() / ch1.len() as f32;
         // Channels should have different means due to different gradient patterns
         assert!((mean0 - mean1).abs() > 0.01, "Channels should differ");
+    }
+
+    // ── Where an image sits in the prompt (#115 (2)) ──
+
+    /// llama.cpp's joining rule: text parts on their own lines, an image's
+    /// marker against its neighbours with no newline either side.
+    #[test]
+    fn content_is_joined_with_a_marker_where_each_image_was() {
+        use ContentPiece::{Image, Text};
+        assert_eq!(join_content([Text("a"), Text("b")]), "a\nb");
+        assert_eq!(
+            join_content([Image, Text("Describe it.")]),
+            "<__media__>Describe it."
+        );
+        assert_eq!(
+            join_content([Text("Compare"), Image, Image, Text("please")]),
+            "Compare<__media__><__media__>please"
+        );
+        assert_eq!(join_content([Text("Look:"), Image]), "Look:<__media__>");
+    }
+
+    #[test]
+    fn gemma3_frames_each_image_and_other_families_do_not() {
+        let prompt = || "x<__media__>y".to_string();
+        assert_eq!(
+            wrap_images_for_family(prompt(), Some("gemma3")),
+            "x<start_of_image><__media__><end_of_image>y"
+        );
+        assert_eq!(wrap_images_for_family(prompt(), Some("llama")), prompt());
+        assert_eq!(wrap_images_for_family(prompt(), None), prompt());
+    }
+
+    /// A tiny SentencePiece vocabulary with Gemma 3's image frame as CONTROL
+    /// tokens: `<bos>` 1, `<start_of_image>` 3, `<end_of_image>` 4, `a` 5, `b` 6.
+    fn image_vocab() -> crate::inference::split::SplitTokenizer {
+        let toks: Vec<String> = [
+            "<unk>",
+            "<bos>",
+            "<eos>",
+            "<start_of_image>",
+            "<end_of_image>",
+            "a",
+            "b",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let scores = vec![0.0; toks.len()];
+        let mut types = vec![1i32; toks.len()];
+        for t in types.iter_mut().take(5) {
+            *t = 3;
+        }
+        crate::inference::split::SplitTokenizer::from_sentencepiece(
+            &toks,
+            &scores,
+            false,
+            true,
+            Some(1),
+            &types,
+        )
+    }
+
+    /// One BOS for the whole prompt, one -1 per marker, the frame matched
+    /// whole on both sides of it.
+    #[test]
+    fn an_image_prompt_is_tokenized_with_one_id_per_marker_and_one_bos() {
+        let tok = image_vocab();
+        let framed = wrap_images_for_family("<bos>a<__media__>b".into(), Some("gemma3"));
+        assert_eq!(
+            encode_prompt_with_images(&tok, &framed),
+            vec![1, 5, 3, IMAGE_TOKEN_ID, 4, 6]
+        );
+        // The BOS the tokenizer adds goes on the first piece only.
+        assert_eq!(
+            encode_prompt_with_images(&tok, "a<__media__>b<__media__>"),
+            vec![1, 5, IMAGE_TOKEN_ID, 6, IMAGE_TOKEN_ID]
+        );
+    }
+
+    #[test]
+    fn an_image_prompts_positions_count_each_marker_as_its_rows() {
+        let ids = [1, 5, IMAGE_TOKEN_ID, 6, IMAGE_TOKEN_ID];
+        assert_eq!(positions_with_images(&ids, 512), 3 + 512);
+        assert_eq!(positions_with_images(&[1, 5, 6], 0), 3);
+    }
+
+    /// Each image's rows land at its own marker, in order, and the text is
+    /// embedded run by run around them.
+    #[test]
+    fn image_rows_are_spliced_at_their_markers() {
+        let device = Device::Cpu;
+        // Two images of two rows each: rows 10, 11 then 20, 21.
+        let vision = Tensor::new(&[[10f32], [11.], [20.], [21.]], &device).unwrap();
+        let ids = [1i64, 2, IMAGE_TOKEN_ID, 3, IMAGE_TOKEN_ID, 4];
+        let mut runs = Vec::new();
+        let merged = splice_image_rows(&ids, &vision, |run| {
+            runs.push(run.to_vec());
+            // "Embed" an id as itself, scaled, so the text is told apart.
+            let vals: Vec<f32> = run.iter().map(|&i| i as f32 * 100.0).collect();
+            Ok(Tensor::from_vec(vals, &[1, run.len(), 1], &device).unwrap())
+        })
+        .unwrap();
+        assert_eq!(runs, vec![vec![1, 2], vec![3], vec![4]]);
+        let flat: Vec<f32> = merged.flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(flat, vec![100., 200., 10., 11., 300., 20., 21., 400.]);
+        assert_eq!(merged.dims(), &[1, positions_with_images(&ids, 4), 1]);
+    }
+
+    /// The old fallback PREPENDED an image to a prompt that marked no place
+    /// for it. Refused now — and so is a row count the markers do not divide.
+    #[test]
+    fn an_image_with_no_marked_place_is_refused_not_prepended() {
+        let device = Device::Cpu;
+        let vision = Tensor::zeros(&[3, 1], DType::F32, &device).unwrap();
+        let embed =
+            |run: &[i64]| Ok(Tensor::zeros(&[1, run.len(), 1], DType::F32, &Device::Cpu).unwrap());
+        assert!(splice_image_rows(&[1, 2, 3], &vision, embed).is_err());
+        assert!(splice_image_rows(&[1, IMAGE_TOKEN_ID, IMAGE_TOKEN_ID], &vision, embed).is_err());
+    }
+
+    /// llama.cpp's PAD_CEIL letterbox, computed in f32 as it is there: the
+    /// 1200×600 test image becomes 896×448 at (0, 224).
+    #[test]
+    fn letterbox_geometry_matches_llama_cpp() {
+        assert_eq!(letterbox_geometry(1200, 600, 896), (896, 448, 0, 224));
+        assert_eq!(letterbox_geometry(600, 1200, 896), (448, 896, 224, 0));
+        assert_eq!(letterbox_geometry(896, 896, 896), (896, 896, 0, 0));
+        // A 3-pixel-wide sliver keeps at least one column.
+        let (w, h, _, _) = letterbox_geometry(3, 5000, 896);
+        assert!(w >= 1 && h == 896);
+    }
+
+    #[test]
+    fn a_letterboxed_image_is_centred_on_black() {
+        let img = ImageData {
+            rgb_bytes: vec![255u8; 3 * 8 * 4],
+            width: 8,
+            height: 4,
+        };
+        let pre = Preprocess {
+            size: 8,
+            mean: [0.0; 3],
+            std: [1.0; 3],
+            fit: Fit::Letterbox,
+        };
+        let t = preprocess_image(&img, &pre, &Device::Cpu).unwrap();
+        let rows: Vec<Vec<f32>> = t.i(0).unwrap().to_vec2().unwrap();
+        // 8×4 into 8×8: rows 2..6 white, the bands above and below black.
+        for (y, row) in rows.iter().enumerate() {
+            let expect = if (2..6).contains(&y) { 1.0 } else { 0.0 };
+            assert!(
+                row.iter().all(|&v| (v - expect).abs() < 1e-6),
+                "row {y}: {row:?}"
+            );
+        }
+    }
+
+    /// Gemma 3's pool: token t is the mean of one pool×pool square of the
+    /// row-major patch grid, then RMS-normed and projected.
+    #[test]
+    fn gemma3_pools_squares_of_the_patch_grid() {
+        let device = Device::Cpu;
+        // A 4×4 grid of two-channel patches, so the RMS norm is not trivial:
+        // patch p carries (p, 1).
+        let vals: Vec<f32> = (0..16).flat_map(|p| [p as f32, 1.0]).collect();
+        let features = Tensor::from_vec(vals, &[1, 16, 2], &device).unwrap();
+        let proj = Gemma3Projection::new(
+            Tensor::ones(&[2], DType::F32, &device).unwrap(),
+            Tensor::eye(2, DType::F32, &device).unwrap(),
+            2,
+            1e-6,
+        );
+        let out = proj.forward(&features, 4).unwrap();
+        assert_eq!(out.dims(), &[1, 4, 2]);
+        assert_eq!(proj.tokens_per_image(4), 4);
+        // Token 0 = mean of patches 0, 1, 4, 5 = 2.5; token 3 = mean of
+        // 10, 11, 14, 15 = 12.5 — each against a second channel of 1.
+        let got: Vec<Vec<f32>> = out.i(0).unwrap().to_vec2().unwrap();
+        let rms = |a: f32| ((a * a + 1.0) / 2.0 + 1e-6).sqrt();
+        for (t, mean) in [(0usize, 2.5f32), (1, 4.5), (2, 10.5), (3, 12.5)] {
+            assert!(
+                (got[t][0] - mean / rms(mean)).abs() < 1e-4,
+                "token {t}: {:?}",
+                got[t]
+            );
+            assert!(
+                (got[t][1] - 1.0 / rms(mean)).abs() < 1e-4,
+                "token {t}: {:?}",
+                got[t]
+            );
+        }
+    }
+
+    /// The wire payload round-trips, and one that does not describe its rows
+    /// is refused rather than dropped.
+    #[test]
+    fn a_vision_payload_round_trips_and_a_bad_one_is_refused() {
+        let encode = |rows: u32, hidden: u32, vals: &[f32]| {
+            let raw: Vec<u8> = vals
+                .iter()
+                .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
+                .collect();
+            let mut out = rows.to_le_bytes().to_vec();
+            out.extend(hidden.to_le_bytes());
+            out.extend(zstd::encode_all(std::io::Cursor::new(raw), 1).unwrap());
+            out
+        };
+        let good = encode(2, 3, &[1., 2., 3., 4., 5., 6.]);
+        assert_eq!(wire_rows(&good), Some(2));
+        let t = decode_wire_embeddings(&good).unwrap();
+        assert_eq!(
+            t.to_vec2::<f32>().unwrap(),
+            vec![vec![1., 2., 3.], vec![4., 5., 6.]]
+        );
+
+        assert!(decode_wire_embeddings(&encode(3, 3, &[1., 2., 3., 4., 5., 6.])).is_err());
+        assert!(decode_wire_embeddings(&encode(1, 1, &[f32::NAN])).is_err());
+        assert!(decode_wire_embeddings(&good[..6]).is_err());
+        assert_eq!(wire_rows(&good[..3]), None);
     }
 }

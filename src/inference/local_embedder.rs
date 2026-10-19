@@ -113,18 +113,52 @@ impl LocalEmbedder {
     /// Embed a full prompt string into hidden-state activations.
     ///
     /// Returns serialized tensor bytes (via `tensor_to_bytes`) with shape
-    /// `[1, num_tokens, hidden_dim]`. The output is ready to be sent as
-    /// `LayerForward.activations` with `pre_embedded = true`.
-    pub fn embed_prompt(&self, prompt: &str) -> Result<(Vec<u8>, usize), SwarmError> {
-        let token_ids: Vec<i64> = if let Some(ref tokenizer) = self.tokenizer {
-            tokenizer.encode(prompt)
-        } else {
+    /// `[1, positions, hidden_dim]` and the positions. The output is ready to
+    /// be sent as `LayerForward.activations` with `pre_embedded = true`.
+    ///
+    /// `vision` is the request's image rows, REQUIRED so no caller can leave
+    /// them out: before #115 (2) this path tokenized the text alone, and a
+    /// request with a picture that took it — prompt privacy, on by itself
+    /// wherever this node holds both ends — was answered without the picture.
+    /// With rows, the prompt is tokenized with its markers and the rows put
+    /// there (`vision::splice_image_rows`, the first segment's own splice).
+    pub fn embed_prompt(
+        &self,
+        prompt: &str,
+        vision: Option<&Tensor>,
+    ) -> Result<(Vec<u8>, usize), SwarmError> {
+        let token_ids: Vec<i64> = match (&self.tokenizer, vision) {
+            (Some(tokenizer), Some(_)) => {
+                crate::inference::vision::encode_prompt_with_images(tokenizer, prompt)
+            }
+            (Some(tokenizer), None) => tokenizer.encode(prompt),
+            (None, Some(_)) => {
+                return Err(SwarmError::Inference(
+                    "this computer cannot read the model's vocabulary, so it cannot place \
+                     the picture in the prompt"
+                        .into(),
+                ))
+            }
             // Fallback: byte-level encoding
-            prompt.bytes().map(|b| b as i64).collect()
+            (None, None) => prompt.bytes().map(|b| b as i64).collect(),
         };
 
-        let num_tokens = token_ids.len();
-        let input = Tensor::new(&token_ids[..], &Device::Cpu)
+        let emb = match vision {
+            Some(rows) => crate::inference::vision::splice_image_rows(&token_ids, rows, |run| {
+                self.embed_ids(run)
+            })?,
+            None => self.embed_ids(&token_ids)?,
+        };
+        let positions = emb
+            .dim(1)
+            .map_err(|e| SwarmError::Internal(format!("Embedding dims: {e}")))?;
+        let bytes = tensor_to_bytes(&emb)?;
+        Ok((bytes, positions))
+    }
+
+    /// `(1, n, hidden)` embeddings of `ids`, scaled as the model scales them.
+    fn embed_ids(&self, ids: &[i64]) -> Result<Tensor, SwarmError> {
+        let input = Tensor::new(ids, &Device::Cpu)
             .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?
             .unsqueeze(0)
             .map_err(|e| SwarmError::Internal(format!("Unsqueeze: {e}")))?;
@@ -141,9 +175,7 @@ impl LocalEmbedder {
                 .affine(scale, 0.0)
                 .map_err(|e| SwarmError::Internal(format!("Embedding scale: {e}")))?;
         }
-
-        let bytes = tensor_to_bytes(&emb)?;
-        Ok((bytes, num_tokens))
+        Ok(emb)
     }
 
     /// Embed a single token ID into hidden-state activations.
@@ -206,7 +238,7 @@ mod tests {
         assert!(embedder.hidden_dim > 0);
 
         let (bytes, num_tokens) = embedder
-            .embed_prompt("Hello world")
+            .embed_prompt("Hello world", None)
             .expect("embed_prompt failed");
         assert!(num_tokens > 0);
         assert!(!bytes.is_empty());

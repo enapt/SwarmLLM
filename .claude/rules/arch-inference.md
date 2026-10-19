@@ -235,6 +235,12 @@ Byte-identical replies across releases prove no REGRESSION, never correctness.
 
 → `docs/invariants/inference.md` § "A special token is what the vocabulary says it is — and a prompt gets ONE BOS"
 
+## An image sits at its marker, and its rows are counted as positions (2026-10-19, #115 (2a))
+
+Every surface writes **`vision::MEDIA_MARKER`** where an image was (`vision::join_content`); **`vision::encode_prompt_with_images`** gives each marker one `IMAGE_TOKEN_ID` and the prompt one BOS; **`vision::splice_image_rows`** is the ONE place rows meet text (executor + local embedder) — no marker, or rows the markers do not divide, is REFUSED, never prepended; **`vision::positions_with_images`** is the one position count (rows from `vision::wire_rows`, never a cached module); **`vision::decode_wire_embeddings`** the one payload reader. A failed encode is the request's error. The payload goes only to a first segment advertising `features::IMAGES_AT_MARKERS`. A projector is dispatched on `clip.projector_type` — a new one is read off llama.cpp's `tools/mtmd/models/<type>.cpp`, preprocessing included. Check against `llama-mtmd-cli`.
+
+→ `docs/invariants/inference.md` § "An image sits at its marker"
+
 ## A vocabulary piece becomes token ids in exactly one place
 
 **`inference::tokenizer::BpeTokenizer::push_piece_ids`** is the only way a merged

@@ -559,6 +559,7 @@
   "error_hint.shard_integrity": "Un fichier du modèle était corrompu et sera retéléchargé automatiquement. C'est généralement dû à un téléchargement interrompu : réessayez dans un instant.",
   "error_hint.swarm_short_of_memory": "Ce modèle demande plus de mémoire que les ordinateurs qui l'hébergent ne peuvent en réserver : réessayer n'y changera rien. Choisissez un modèle plus petit, ou attendez qu'un ordinateur disposant de plus de mémoire l'héberge. Si l'un d'eux est le vôtre, augmenter son Niveau de contribution dans les Paramètres donne plus de place au réseau.",
   "error_hint.unauthorized": "Authentification requise. Votre clé d'API se trouve sur la page Paramètres du tableau de bord. Incluez-la comme jeton Bearer dans l'en-tête Authorization.",
+  "error_hint.vision_encoder_unavailable": "Aucun ordinateur qui exécute ce modèle n'a la partie qui lit les images, ou ce modèle ne sait pas du tout lire les images. Envoyez le message sans l'image, ou choisissez un modèle qui lit les images. Réessayer en l'état ne changera rien.",
   "errors.connection_lost": "Connexion perdue avec SwarmLLM — reconnexion...",
   "errors.failed_toggle_enc": "Impossible de modifier « Commencer et finir sur cet ordinateur »",
   "errors.request_timeout": "Délai d'attente dépassé — le serveur est peut-être occupé ou inaccessible",

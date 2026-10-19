@@ -263,19 +263,23 @@ impl ApiChatMessage {
     pub fn to_chat_message(&self) -> Result<ChatMessage, crate::error::SwarmError> {
         let (text, images) = match &self.content {
             MessageContent::Text(s) => (s.clone(), vec![]),
+            // Each image leaves a marker where it was among the text
+            // (`vision::join_content`, llama.cpp's joining rule), so the model
+            // sees it there — not ahead of the whole prompt.
             MessageContent::Parts(parts) => {
-                let mut text_parts = Vec::new();
+                use crate::inference::vision::ContentPiece;
+                let mut pieces = Vec::with_capacity(parts.len());
                 let mut images = Vec::new();
                 for part in parts {
                     match part {
-                        ContentPart::Text { text } => text_parts.push(text.clone()),
+                        ContentPart::Text { text } => pieces.push(ContentPiece::Text(text)),
                         ContentPart::ImageUrl { image_url } => {
-                            let img = decode_image_url(&image_url.url)?;
-                            images.push(img);
+                            images.push(decode_image_url(&image_url.url)?);
+                            pieces.push(ContentPiece::Image);
                         }
                     }
                 }
-                (text_parts.join("\n"), images)
+                (crate::inference::vision::join_content(pieces), images)
             }
         };
 
@@ -432,7 +436,7 @@ impl ChatCompletionRequest {
 }
 
 /// Decode a base64 data URI image to raw RGB pixels.
-fn decode_image_url(url: &str) -> Result<ImageData, crate::error::SwarmError> {
+pub(crate) fn decode_image_url(url: &str) -> Result<ImageData, crate::error::SwarmError> {
     let base64_data = if let Some(rest) = url.strip_prefix("data:") {
         if let Some(comma_pos) = rest.find(',') {
             let header = &rest[..comma_pos];

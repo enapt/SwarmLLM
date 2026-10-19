@@ -14,7 +14,7 @@
 //! Covers the multimodal path that unit tests cannot reach: the real vicuna
 //! prompt fallback, a real CLIP encode, and the `-1` marker splice in
 //! `SplitModel::forward_multimodal` where vision embeddings replace the
-//! `<image>` position (`split/executor.rs`).
+//! image's marker (`vision::MEDIA_MARKER`, `vision::splice_image_rows`).
 
 use std::path::PathBuf;
 
@@ -85,9 +85,15 @@ fn run_one(
     //
     // This GGUF embeds no `tokenizer.chat_template`, so `None` here is what
     // the daemon really passes; the model-name heuristic selects vicuna.
+    // The content as the API edge builds it for `[image, text]`: the image's
+    // marker where it was (`vision::join_content`).
+    use swarmllm::inference::vision::{self, ContentPiece};
     let messages = vec![ChatMessage {
         role: Role::User,
-        content: "What color is the shape in this image?".into(),
+        content: vision::join_content([
+            ContentPiece::Image,
+            ContentPiece::Text("What color is the shape in this image?"),
+        ]),
         images: vec![colour_square(336, rgb)],
         tool: Default::default(),
     }];
@@ -105,9 +111,8 @@ fn run_one(
         "expected vicuna framing, got: {prompt:?}"
     );
     assert!(
-        prompt.contains("<image>"),
-        "image placeholder missing — vision embeddings would land at the wrong \
-         position: {prompt:?}"
+        prompt.contains(vision::MEDIA_MARKER),
+        "image marker missing — vision embeddings would have nowhere to go: {prompt:?}"
     );
 
     // ── 2. Vision tower ──
@@ -132,19 +137,15 @@ fn run_one(
         .expect("load text model");
     eprintln!("model loaded in {:.1}s", t.elapsed().as_secs_f64());
 
-    // ── 4. Splice the marker ──
+    // ── 4. Tokenize with the marker ──
     //
-    // Mirrors `split/executor.rs::forward_multimodal`: tokens before `<image>`,
-    // a single `-1` standing in for it, then tokens after. The encoder replaces
-    // that one position with all 577 vision embeddings.
-    let (head, tail) = prompt.split_once("<image>").expect("placeholder present");
-    let mut ids: Vec<i64> = model
-        .encode_ids(head)
-        .into_iter()
-        .map(|t| t as i64)
-        .collect();
-    ids.push(-1);
-    ids.extend(model.encode_ids(tail).into_iter().map(|t| t as i64));
+    // The worker's own tokenization (`vision::encode_prompt_with_images`): the
+    // text before the marker, a single `-1` standing in for it, then the text
+    // after. `forward_multimodal` replaces that one id with all 577 rows.
+    let ids = vision::encode_prompt_with_images(
+        model.tokenizer().expect("the model's tokenizer"),
+        &prompt,
+    );
     eprintln!(
         "{} prompt tokens (marker at {:?})",
         ids.len(),
@@ -165,7 +166,7 @@ fn run_one(
     // 1 marker token expands to N vision tokens, so the next position is
     // offset by the expansion, not by ids.len(). Getting this wrong does not
     // error — it silently misaligns the KV cache and yields fluent nonsense.
-    let base_pos = ids.len() - 1 + vision_emb.dims()[0];
+    let base_pos = vision::positions_with_images(&ids, vision_emb.dims()[0]);
     eprintln!(
         "prefill done in {:.1}s, next index_pos={base_pos}",
         t.elapsed().as_secs_f64()

@@ -306,6 +306,13 @@ pub mod features {
     /// asked: its segments admit the prompt as their forwards arrive, as before.
     pub const PROMPT_ADMISSION: u64 = 1 << 25;
 
+    /// Its first segment puts each image's rows where the prompt's text marks
+    /// the image (`<__media__>`, llama.cpp's marker), tokenized as the
+    /// coordinator counted it. An older node reads the marker as text and
+    /// prepends the rows, so it is sent no image prompt: the coordinator bars
+    /// it from the request and plans again (#115 (2)).
+    pub const IMAGES_AT_MARKERS: u64 = 1 << 26;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`] and [`KV_WINDOW_SLIDES`] beside it where they
     /// apply.
@@ -332,7 +339,8 @@ pub mod features {
         | PROMPT_CHUNKS
         | MANIFEST_DIGESTS
         | RELAY_SIGNED
-        | PROMPT_ADMISSION;
+        | PROMPT_ADMISSION
+        | IMAGES_AT_MARKERS;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

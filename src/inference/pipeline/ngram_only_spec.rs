@@ -342,7 +342,7 @@ impl PipelineExecutor {
             ));
         }
         let first_token = prefill_result.token_ids[0];
-        let (_extract_ptc, eos_tokens, decoder) = self.extract_model_cache(&prompt).await;
+        let (_extract_ptc, eos_tokens, decoder) = self.extract_model_cache(&prompt, 0).await;
         let eos_tokens: std::collections::HashSet<u32> = eos_tokens.into_iter().collect();
         // Use the standalone tokenizer's count (consistent with the n-gram
         // history and with the remote worker, since both derive from the

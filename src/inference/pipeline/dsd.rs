@@ -271,7 +271,7 @@ impl PipelineExecutor {
             ));
         }
         let first_token = prefill_result.token_ids[0];
-        let (prompt_token_count, eos_tokens, decoder) = self.extract_model_cache(&prompt).await;
+        let (prompt_token_count, eos_tokens, decoder) = self.extract_model_cache(&prompt, 0).await;
         let eos_set: std::collections::HashSet<u32> = eos_tokens.into_iter().collect();
 
         // Phase 2: the drafter reads the prompt. llama.cpp re-acquires its lock

@@ -1,6 +1,9 @@
 //! Conversion helpers between Anthropic API wire types and internal types.
 
-use crate::types::{ChatMessage, Role, SamplingParams, ToolCallFunction, ToolCallTurn, ToolTurn};
+use crate::error::SwarmError;
+use crate::types::{
+    ChatMessage, ImageData, Role, SamplingParams, ToolCallFunction, ToolCallTurn, ToolTurn,
+};
 
 use super::types::{AnthropicContent, ContentBlock, MessagesRequest};
 
@@ -24,8 +27,33 @@ pub(super) fn is_connectivity_probe(req: &MessagesRequest) -> bool {
     content_len <= 20
 }
 
+/// An Anthropic image block's `source` as the image it carries, through the
+/// OpenAI surface's decoder (one size cap, one format check). `base64` is a
+/// data URI in all but name; `url` is refused like an OpenAI remote URL.
+fn decode_image_source(source: &serde_json::Value) -> Result<ImageData, SwarmError> {
+    let field = |name: &str| source.get(name).and_then(|v| v.as_str());
+    match field("type") {
+        Some("base64") => {
+            let media_type = field("media_type").unwrap_or("image/png");
+            let data = field("data").ok_or_else(|| {
+                SwarmError::Validation("image source of type base64 has no `data`".into())
+            })?;
+            crate::api::openai::decode_image_url(&format!("data:{media_type};base64,{data}"))
+        }
+        Some("url") => crate::api::openai::decode_image_url(field("url").unwrap_or("")),
+        other => Err(SwarmError::Validation(format!(
+            "image source type {} is not supported here; send the picture as base64",
+            other.unwrap_or("<none>")
+        ))),
+    }
+}
+
 /// Convert Anthropic messages to internal ChatMessage format.
-pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
+///
+/// A user's image blocks become images at their place in the text
+/// (`vision::join_content`, the OpenAI surface's rule). They were dropped
+/// here until #115 (2), under a comment saying the OpenAI path handled them.
+pub(super) fn to_internal_messages(req: &MessagesRequest) -> Result<Vec<ChatMessage>, SwarmError> {
     let mut messages = Vec::new();
 
     // System prompt → System role
@@ -55,15 +83,18 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
         // that has none, the shape the tool description asked the model for —
         // is chosen where the prompt is built (`chat_template::tool_turns`).
         let mut calls = Vec::new();
+        let mut images = Vec::new();
         let text = match &msg.content {
             AnthropicContent::Text(s) => s.clone(),
             AnthropicContent::Blocks(blocks) => {
-                let mut texts = Vec::new();
+                // `None` marks where an image was (`vision::ContentPiece::Image`).
+                let mut texts: Vec<Option<String>> = Vec::new();
                 for b in blocks {
                     match b {
-                        ContentBlock::Text { text } => texts.push(text.clone()),
-                        ContentBlock::Image { .. } => {
-                            // Image handling: VLM images handled via openai.rs path
+                        ContentBlock::Text { text } => texts.push(Some(text.clone())),
+                        ContentBlock::Image { source } => {
+                            images.push(decode_image_source(source)?);
+                            texts.push(None);
                         }
                         ContentBlock::ToolResult {
                             tool_use_id,
@@ -105,11 +136,11 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
                             });
                         }
                         ContentBlock::ToolUse { name, input, .. } => {
-                            texts.push(format!("[Tool call: {name}({input})]"));
+                            texts.push(Some(format!("[Tool call: {name}({input})]")));
                         }
                         ContentBlock::Thinking { thinking } => {
                             // Include thinking in context for local models
-                            texts.push(format!("<thinking>{thinking}</thinking>"));
+                            texts.push(Some(format!("<thinking>{thinking}</thinking>")));
                         }
                         ContentBlock::RedactedThinking { .. } => {}
                         // Server-tool & citation blocks: the local-inference path
@@ -118,13 +149,13 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
                         // proxy path never takes this branch (it re-serializes
                         // the raw request before forwarding).
                         ContentBlock::ServerToolUse { name, input, .. } => {
-                            texts.push(format!("[Server tool call: {name}({input})]"));
+                            texts.push(Some(format!("[Server tool call: {name}({input})]")));
                         }
                         ContentBlock::WebSearchToolResult { content, .. }
                         | ContentBlock::CodeExecutionToolResult { content, .. }
                         | ContentBlock::BashToolResult { content, .. }
                         | ContentBlock::TextEditorToolResult { content, .. } => {
-                            texts.push(format!("[Tool result: {content}]"));
+                            texts.push(Some(format!("[Tool result: {content}]")));
                         }
                         ContentBlock::Document { .. } | ContentBlock::SearchResult { .. } => {
                             // Citations sources — local models can't index into them
@@ -132,7 +163,10 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
                         }
                     }
                 }
-                texts.join("\n")
+                crate::inference::vision::join_content(texts.iter().map(|t| match t {
+                    Some(t) => crate::inference::vision::ContentPiece::Text(t),
+                    None => crate::inference::vision::ContentPiece::Image,
+                }))
             }
         };
         // A user turn that only carried results has said everything already.
@@ -145,7 +179,7 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
         messages.push(ChatMessage {
             role,
             content: text,
-            images: vec![],
+            images,
             tool: ToolTurn {
                 tool_calls: calls,
                 ..Default::default()
@@ -153,7 +187,7 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
         });
     }
 
-    messages
+    Ok(messages)
 }
 
 /// Convert Anthropic request to SamplingParams.

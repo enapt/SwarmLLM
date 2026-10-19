@@ -241,7 +241,7 @@ impl PipelineExecutor {
             let first_token = prefill_result.token_ids[0];
             // Extract model cache (EOS, decoder, ptc) — must happen after the
             // first forward has populated split_models / executor state.
-            let (ptc, eos, decoder) = self.extract_model_cache(&prompt).await;
+            let (ptc, eos, decoder) = self.extract_model_cache(&prompt, 0).await;
             let eos_set: std::collections::HashSet<u32> = eos.into_iter().collect();
             (first_token, ptc, eos_set, decoder)
         };

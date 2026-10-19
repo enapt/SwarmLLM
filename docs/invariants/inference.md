@@ -5283,6 +5283,93 @@ embedding), `per_layer_inputs_are_built_as_llama_cpp_builds_them`,
 `a_shared_layer_with_nothing_before_it_names_itself`, and
 `gemma4_sizes_this_build_cannot_run_are_refused` (which now asserts the E2B shape runs whole only).
 
+## An image sits at its marker (2026-10-19, FUTURE_WORK #115 (2a))
+
+**What it replaced.** `merge_vision_text_embeddings` put an image's rows where the prompt's ids
+held a `-1`, and PREPENDED them — ahead of the BOS and the chat template's opening — when there
+was none. No production path ever wrote one: the OpenAI surface dropped where the image part
+sat, the vicuna fallback wrote the TEXT `<image>\n` (ordinary pieces), and the Anthropic surface
+dropped image blocks altogether. The same request path lost the picture four more ways: the
+coordinator counted an image as one position (zero when a PEER encoded it — it read
+`vision_modules`, which only the encoding node fills), so its cache length was short by the
+image's rows; the "Start and finish on this computer" embedder dropped the image; an encode
+failure was logged and the request answered without the picture; and the worker's zstd decode
+had no size cap. Gotcha #901.
+
+**What it is now — llama.cpp's `mtmd` shape** (`tools/mtmd/mtmd.cpp`, `mtmd-cli.cpp`):
+- Each surface writes `vision::MEDIA_MARKER` (`<__media__>`, `mtmd_default_marker`) at the
+  image's place; `vision::join_content` joins the parts with `\n` except beside a marker (llama.cpp
+  `common/chat.cpp` joins text parts with `\n`; mtmd-cli puts the marker straight before its text).
+- Gemma 3 frames each marker `<start_of_image>…<end_of_image>` (`vision::wrap_images_for_family`,
+  in `build_prompt_with_header`, every path's prompt) — CONTROL tokens, matched whole.
+- `vision::encode_prompt_with_images` splits at the markers: one BOS on the first piece
+  (`SplitTokenizer::encode`), the rest `encode_continuation` — `mtmd_tokenize`'s rule — and one
+  `IMAGE_TOKEN_ID` per marker.
+- `vision::splice_image_rows` is the ONE place rows meet text (the executor's first segment and
+  `LocalEmbedder::embed_prompt`): text embedded run by run (Gemma's √hidden scale on text only —
+  llama.cpp scales `inp_embd` for tokens, never for `ubatch.embd`), rows cut evenly between the
+  markers, moved to the text's device and dtype. No marker, or rows the markers do not divide:
+  `Validation`, never a guess. It logs `DIAG: splice_image_rows`.
+- `vision::positions_with_images` (ids − markers + rows) is the one position count, with the
+  rows read off the payload's header (`vision::wire_rows`) — the coordinator's cache length
+  (`prompt_positions`, `extract_model_cache`) and the worker's admission alike.
+- `vision::decode_wire_embeddings` is the one payload reader: header (rows, hidden), zstd capped
+  at 50 MB, shape by `checked_mul`, every value finite.
+- A precompute failure is the request's error; `VisionEncoderUnavailable` has its own hint
+  (`error_hint.vision_encoder_unavailable`, retrying cannot help).
+- An older first segment would prepend the rows, so the payload goes only to one advertising
+  `features::IMAGES_AT_MARKERS` (bit 26, in `ALL`): the main send blacklists a holder without it
+  and returns `ServiceUnavailable` (the router re-plans, no penalty); failover skips such a
+  standby.
+
+**Gemma 3's projector** (`PROJECTOR_TYPE_GEMMA3`, `tools/mtmd/models/siglip.cpp` +
+`mtmd-image.cpp`), dispatched on `clip.projector_type` (`mlp` the default; anything else refused
+by name): letterbox with `PAD_CEIL` geometry in f32 onto black, triangle filter
+(`letterbox_geometry_matches_llama_cpp`: 1200×600 → 896×448 at y 224); mean/std from
+`clip.vision.image_mean`/`image_std` (0.5); no class token; GELU tanh (`clip.use_gelu`);
+attention through the tiled CPU kernel (4,096 patches — the matmul path writes a 1 GB score
+matrix per layer); the 64×64 grid averaged 4×4 (`clip.vision.projector.scale_factor`) to 256 rows,
+RMS-normed by `mm.soft_emb_norm` at `clip.vision.attention.layer_norm_epsilon`, then
+`x @ mm.input_projection` (stored [vision, llm]).
+
+**What a change must keep.** One marker per image on every surface; one BOS; rows at their
+markers or a refusal; positions counted from the payload. **An image prompt is never kept in a
+prompt cache**: every image position is the same id (−1), so two pictures at the same place read
+as one prompt. Today none is: the split prompt cache refuses one (`split_prompt_to_keep`'s
+`vision`), the local fast path and the hand-off stand aside for images (the API's
+`local_fast_path_for` too, through its REQUIRED `pipeline::FastPathNeeds`, gotcha #901). A cache that takes them
+must key each image by its bytes (llama.cpp's server hashes each image chunk's bitmap).
+The image reader is a part under `MMPROJ_SHARD_INDEX` whose file is `mmproj.gguf`, and
+`ShardStore::shard_path` is the one place that says so: named `shard_4294967295.bin`, every node's
+health reconcile withdrew its claim minutes after the download (gotcha #901).
+Tests (`vision::tests`):
+`content_is_joined_with_a_marker_where_each_image_was`,
+`gemma3_frames_each_image_and_other_families_do_not`,
+`an_image_prompt_is_tokenized_with_one_id_per_marker_and_one_bos`,
+`an_image_prompts_positions_count_each_marker_as_its_rows`,
+`image_rows_are_spliced_at_their_markers`, `an_image_with_no_marked_place_is_refused_not_prepended`,
+`a_letterboxed_image_is_centred_on_black`, `gemma3_pools_squares_of_the_patch_grid`,
+`a_vision_payload_round_trips_and_a_bad_one_is_refused`. These pin new helpers; the regression
+check is the real request below.
+
+**Verified by the real request** (2026-10-19, `gemma-3-4b-it-q4-k-m` on the processor, the
+llama.cpp mmproj f16, an isolated node in its own network namespace; temperature 0, "Describe this
+image in two sentences.", picture first). Each request logged `DIAG: splice_image_rows markers=1
+rows_per_image=256 hidden=2560 positions=274` — the rows at the marker, 274 positions — and was
+judged against `llama-mtmd-cli` built CAUSAL (`~/swarmllm-115/ab_causal.sh`), the attention this
+build uses. `shapes.png`: "a flag with a horizontal tricolor design. It features a green band at
+the bottom, a white band in the middle, and a red band at the top, with a red circle and a blue
+square placed on the white band" — llama.cpp's reply word for word but one verb ("displays" for
+"depicts"), on both the OpenAI and the Anthropic surface. `test-1.jpeg`: the New York Times of July
+21, 1969, "MEN WALK ON MOON", Armstrong and Aldrin — as llama.cpp. The first runs found three more
+losses on the way (gotcha #901 (a)-(c)): the node withdrew its claim to the image reader, the
+API's local shortcut ignored pictures, and on a processor the splice's own table lookup handed
+the first norm f16.
+
+**Left.** Gemma 3 attends inside an image both ways in llama.cpp (`mtmd_decode_use_non_causal`);
+here causally, and it changes a reply (#115 (2b)). LLaVA's three differences from llama.cpp
+(#310). An image inside an Anthropic `tool_result` is still dropped (#310).
+
 ## A model that cannot write replies is refused off its header (2026-10-15)
 
 A tester's fresh node offered `Qwen/Qwen3-Embedding-0.6B-GGUF` in the HuggingFace

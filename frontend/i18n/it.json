@@ -559,6 +559,7 @@
   "error_hint.shard_integrity": "Un file del modello era danneggiato e verrà riscaricato automaticamente. Di solito dipende da un download interrotto: riprova tra poco.",
   "error_hint.swarm_short_of_memory": "Questo modello richiede più memoria di quanta i computer che lo hanno possano riservare, quindi riprovare non servirà. Scegli un modello più piccolo, oppure attendi che lo abbia un computer con più memoria. Se uno di essi è tuo, alzare il suo Livello di contributo nelle Impostazioni dà più spazio alla rete.",
   "error_hint.unauthorized": "Autenticazione richiesta. La tua chiave API si trova nella pagina Impostazioni del pannello. Includila come token Bearer nell'intestazione Authorization.",
+  "error_hint.vision_encoder_unavailable": "Nessun computer che esegue questo modello ha la parte che legge le immagini, oppure questo modello non sa leggere immagini. Invia il messaggio senza l'immagine, oppure scegli un modello che legge le immagini. Riprovare così com'è non servirà.",
   "errors.connection_lost": "Connessione a SwarmLLM persa — riconnessione...",
   "errors.failed_toggle_enc": "Impossibile modificare «Iniziare e finire su questo computer»",
   "errors.request_timeout": "Richiesta scaduta — il server potrebbe essere occupato o irraggiungibile",

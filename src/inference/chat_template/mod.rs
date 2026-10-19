@@ -30,8 +30,7 @@ use fallbacks::{
 /// an unknown variable, a stray `{% endfor %}` and an unclosed `{% if %}` all
 /// evaluate quietly to the empty string. Reporting those as success handed the
 /// model an empty prompt — no system message, no user turn, and for a VLM no
-/// `<image>` placeholder, so vision embeddings were prepended instead of being
-/// inserted at the right token position.
+/// image marker for its rows to be placed at.
 /// Ceiling on rendered prompt size (R101). A template is untrusted input and
 /// `{% set x = x + x %}` doubles a value in one statement, so output is bounded
 /// rather than trusted.
@@ -868,9 +867,8 @@ fn build_prompt_attempt(
         }
         // Template failed. Prefer evidence from the template body itself — it
         // describes the model that shipped it — then fall back to the same
-        // model-name heuristic the no-template branch uses. Reaching ChatML
-        // here would drop LLaVA's `<image>` placeholder, which prepends the
-        // vision embeddings instead of inserting them at the right position.
+        // model-name heuristic the no-template branch uses: a model answers in
+        // the format it was asked in, and ChatML is no LLaVA's.
         //
         // The fallbacks read no calls: refit the tool turns for them, or a
         // call left as structure for a template that renders it is lost.

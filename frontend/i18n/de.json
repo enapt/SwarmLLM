@@ -559,6 +559,7 @@
   "error_hint.shard_integrity": "Eine Modelldatei war beschädigt und wird automatisch neu heruntergeladen. Meist liegt das an einem abgebrochenen Download — versuchen Sie es gleich noch einmal.",
   "error_hint.swarm_short_of_memory": "Dieses Modell braucht mehr Arbeitsspeicher, als die Computer, die es halten, bereitstellen können — ein erneuter Versuch hilft daher nicht. Wähle ein kleineres Modell oder warte, bis ein Computer mit mehr Speicher dieses Modell hält. Gehört einer davon dir, gibt eine höhere Beitragsstufe in den Einstellungen dem Netzwerk mehr Platz.",
   "error_hint.unauthorized": "Anmeldung erforderlich. Ihren API-Schlüssel finden Sie im Dashboard auf der Seite „Einstellungen“. Senden Sie ihn als Bearer-Token im Authorization-Header mit.",
+  "error_hint.vision_encoder_unavailable": "Kein Computer, der dieses Modell ausführt, hat den Teil, der Bilder liest — oder dieses Modell kann überhaupt keine Bilder lesen. Senden Sie die Nachricht ohne das Bild, oder wählen Sie ein Modell, das Bilder liest. Ein erneuter Versuch ändert daran nichts.",
   "errors.connection_lost": "Verbindung zu SwarmLLM verloren — verbinde neu...",
   "errors.failed_toggle_enc": "„Auf diesem Computer beginnen und beenden“ konnte nicht geändert werden",
   "errors.request_timeout": "Zeitüberschreitung der Anfrage — Server ist möglicherweise beschäftigt oder nicht erreichbar",

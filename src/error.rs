@@ -1379,6 +1379,15 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
              request — usually because they are busy running other models and are short of \
              memory for now. Try again in a few minutes, or pick another model.",
         )),
+        // Raised when no holder of the model in scope has its image reader —
+        // or the model has none — so the picture cannot be read. It used to be
+        // swallowed and the model answered without the picture (#115 (2)).
+        SwarmError::VisionEncoderUnavailable(_) => Some((
+            "vision_encoder_unavailable",
+            "No computer running this model has the part of it that reads images, or this \
+             model can't read images at all. Send the message without the picture, or choose \
+             a model that reads images. Retrying as-is won't help.",
+        )),
         SwarmError::PromptPrivacyUnavailable { .. } => Some((
             "prompt_privacy_unavailable",
             "“Start and finish on this computer” is on for this model, and that needs \

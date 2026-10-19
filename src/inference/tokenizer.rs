@@ -1301,11 +1301,18 @@ impl SplitTokenizer {
                 out.push(bos as i64);
             }
         }
-        out.extend(match &self.kind {
+        out.extend(self.encode_continuation(text));
+        out
+    }
+
+    /// Encode text that CONTINUES a prompt already opened — never a BOS. The
+    /// pieces of a prompt after its first image (`vision::encode_prompt_with_images`;
+    /// llama.cpp's `mtmd_tokenize` passes `add_special` for the first piece only).
+    pub fn encode_continuation(&self, text: &str) -> Vec<i64> {
+        match &self.kind {
             TokenizerKind::Bpe(bpe) => bpe.encode(text),
             TokenizerKind::SentencePiece(spm) => spm.encode(text),
-        });
-        out
+        }
     }
 
     /// Decode a single token string back to UTF-8 bytes.

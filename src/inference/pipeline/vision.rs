@@ -8,6 +8,18 @@ use crate::types::{NetworkCommand, SwarmMessage};
 use super::{PipelineExecutor, VISION_ENCODE_TIMEOUT_SECS};
 
 impl PipelineExecutor {
+    /// May an image prompt's first forward go to `node`: this node, or a peer
+    /// advertising `features::IMAGES_AT_MARKERS` — one that tokenizes the
+    /// prompt with its markers and puts each image's rows there, as this node
+    /// counted it. An older peer prepends the rows and reads the markers as
+    /// text, so every position after the prompt would be off.
+    pub(super) fn may_send_image_prompt_to(&self, node: &crate::types::NodeId) -> bool {
+        node == self.shared_state.identity.node_id()
+            || self
+                .shared_state
+                .peer_advertises_feature(node, swarmllm_types::node::features::IMAGES_AT_MARKERS)
+    }
+
     /// T14: Pre-compute vision embeddings before the text pipeline.
     /// Encodes images locally if this node has mmproj, otherwise sends to a remote node.
     /// Returns zstd-compressed FP16 bytes, or None if no images / no encoder available.

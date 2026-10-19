@@ -890,12 +890,32 @@ Node A (rank 0, coordinator)          Node B (rank 1)
 
 ### Vision Language Models (VLM)
 
-SwarmLLM supports multimodal inference via `src/inference/vision.rs`:
-- **LLaVA** — CLIP vision encoder + LLM backbone, image patches projected into token space
-- **Qwen2-VL** — Native vision-language architecture with dynamic resolution
-- Images are pre-processed, encoded into vision tokens, and inserted at the `<image>` token position in the prompt (matching llama.cpp's approach: prompt split at `<image>`, before/after tokenized separately, vision embeddings inserted at exact position)
-- **mmproj GGUF loading** — `load_from_mmproj_gguf()` loads CLIP ViT weights directly from llama.cpp-compatible mmproj GGUF files (verified with LLaVA-v1.5-7B mmproj: 577 vision tokens × 4096 LLM dim)
-- **Status**: Full E2E verified — LLaVA-v1.5-7B: base64 image → CLIP vision encoder (577 tokens × 4096 dim) → position-aware embedding insertion at `<image>` → 7B text model → correct output. CPU-only (~4min prefill, ~1.8s/token)
+SwarmLLM reads images through `src/inference/vision.rs`, dispatching on the mmproj's
+`clip.projector_type` (anything else is refused with a 400 naming the type):
+- **`mlp` — LLaVA**: CLIP ViT + a 2-layer MLP, the image stretched to a square; 577 rows an image
+  (llama.cpp drops the class token, 576 — `docs/FUTURE_WORK.md` #310).
+- **`gemma3` — Gemma 3**: SigLIP (no class token, tanh GELU), the image letterboxed onto black
+  (llama.cpp's `PAD_CEIL`), the 64×64 patch grid averaged 4×4 to 256 rows, RMS-normed
+  (`mm.soft_emb_norm`) and projected (`mm.input_projection`). Each image is framed
+  `<start_of_image>…<end_of_image>` (`vision::wrap_images_for_family`). Its image rows still attend
+  causally — llama.cpp attends both ways inside an image (`docs/FUTURE_WORK.md` #115 (2b)).
+
+**An image sits where the user put it** (llama.cpp's `mtmd` shape). Both API surfaces —
+`/v1/chat/completions` image parts and `/v1/messages` image blocks — write
+`vision::MEDIA_MARKER` (`<__media__>`) at the image's place (`vision::join_content`); the
+tokenizer gives each marker one id `IMAGE_TOKEN_ID` (−1) and the prompt one BOS
+(`vision::encode_prompt_with_images`); **`vision::splice_image_rows`** is the one place rows are
+put at their markers (the executor's first segment and the local embedder both call it), and a
+prompt with no marker, or rows its markers do not divide, is refused — never prepended.
+**`vision::positions_with_images`** is the one count of an image prompt's positions (each marker
+counts its rows, read off the payload's header — `vision::wire_rows`), for the coordinator's
+cache length and the worker's admission alike. A failed encode is the request's error
+(`VisionEncoderUnavailable` → 503 with its own hint), never a reply without the picture.
+
+- **mmproj GGUF loading** — `load_from_mmproj_gguf()` loads the encoder, its mean/std
+  (`clip.vision.image_mean`/`image_std`) and its projector directly from a llama.cpp mmproj.
+- **Status**: LLaVA-v1.5-7B verified end to end (`tests/llava_e2e.rs`, `#[ignore]`); Gemma 3 4B
+  judged against `llama-mtmd-cli` (`docs/FUTURE_WORK.md` § Closed, #115 (2a)).
 
 #### Distributed mmproj
 
@@ -921,7 +941,7 @@ Text Pipeline (unchanged): embeddings travel with LayerForward
 **Key design decisions:**
 - Sentinel shard index (`u32::MAX`) reuses all ShardId infrastructure (registry, announcements, auto-manage, pruning)
 - `VisionEncodeRequest` / `VisionEncodeResponse` network messages for remote encoding (JPEG-compressed images on wire)
-- `LayerForward.vision_embeddings: Option<Vec<u8>>` carries zstd-compressed FP16 embeddings on first forward
+- `LayerForward.vision_embeddings: Option<Vec<u8>>` carries the embeddings on the first forward: an 8-byte header (rows, hidden — u32 LE) then zstd of the f16 rows, decoded only by `vision::decode_wire_embeddings` (50 MB cap, shape and finiteness checked). Sent only to a first segment that advertises `features::IMAGES_AT_MARKERS` (bit 26) — an older one would prepend the rows; the holder is blacklisted for the request and the router re-plans, and failover skips a standby without the bit
 - Vision node selection: prefer local → first-segment node → any mmproj holder
 - `precompute_vision_embeddings()` runs once before the token generation loop
 - Auto-manage: 5x priority bonus for mmproj download, higher pruning floor (min 3 replicas), only prunes under extreme pressure (>0.95)
@@ -2855,7 +2875,7 @@ Routes Claude model requests through a locally-authenticated `claude` CLI subpro
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
 
 ### Frontend Features
-- **i18n**: 1414 translation keys (1416 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
+- **i18n**: 1415 translation keys (1417 entries per locale incl. `_lang` + `_dir`) across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Swarm background**: animated canvas flocking network behind the dashboard (`frontend/js/neural-bg.js`). Up to 90 boids (scaled by viewport area) with connecting links, feeler tendrils, gentle drift and mouse repulsion/glow. State-reactive colouring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected); peer count boosts vibrancy and active requests trigger firing pulses.
   **It is the one thing on the page with an ongoing power cost, so it is bounded at four levels.** It advances at 30 Hz rather than the browser's 60 while the pointer is in play; drops to 10 Hz once the pointer has been still for 4 s, which is the ordinary state of a dashboard left open; drops to 8 Hz whenever `state.active > 0` (this page is usually open on the machine running the node, so the decoration yields to the real work — the slowest applicable rate wins); and stops entirely when the tab is hidden. Users can switch it off in Settings (`App.SWARM_ANIM_KEY`), and it defaults to OFF where the device reports `prefers-reduced-motion: reduce` — a canvas loop is invisible to the CSS media query that honours that everywhere else on the page. Turning it off cancels the frame loop rather than hiding the canvas, since a hidden animation costs what a visible one does.
@@ -3206,7 +3226,7 @@ The list is split into **open** (will be addressed) and **won't fix unless a con
 
 - **DeepSeek-2 (V2/V2-Lite/V3, Kimi-K2, GLM-4.7-Flash) — recognised, refused, code kept** — see `docs/FUTURE_WORK.md` #116 for the list of what a real file needs. The loader's MLA branch, `MlaWeights` and `LayerVariant::DeepSeek` stay as its starting point and are unreachable until `ModelArch::is_supported` admits the family again.
 
-- **Gemma 3's and 4's images and Gemma 4's drafters — recognised, refused by name; the E2B/E4B run only whole** — `docs/FUTURE_WORK.md` #115: `gemma4v` / Gemma 3's vision projector and the `-assistant` drafters are refused; `GgufTensorMeta::unbuilt_gemma4_part` refuses experts carrying a gate/up scale. Gemma 3 and Gemma 4 12B/31B/26B-A4B/E2B/E4B text run; the E2B/E4B only on one computer holding every layer (`GgufTensorMeta::runs_only_whole`) — splitting them across computers would need the per-layer inputs sent between segments, as vLLM's Gemma 3n sends them (`docs/FUTURE_WORK.md` #294).
+- **Gemma 4's images and drafters — recognised, refused by name; Gemma 3's image rows attend causally; the E2B/E4B run only whole** — `docs/FUTURE_WORK.md` #115: `gemma4v` and the `-assistant` drafters are refused; Gemma 3 reads images (#115 (2a)) but without llama.cpp's both-ways attention inside an image (#115 (2b)); `GgufTensorMeta::unbuilt_gemma4_part` refuses experts carrying a gate/up scale. Gemma 3 and Gemma 4 12B/31B/26B-A4B/E2B/E4B text run; the E2B/E4B only on one computer holding every layer (`GgufTensorMeta::runs_only_whole`) — splitting them across computers would need the per-layer inputs sent between segments, as vLLM's Gemma 3n sends them (`docs/FUTURE_WORK.md` #294).
 
 - **Metered-connection detection on macOS** — `daemon::metered::read` answers unknown there, so automatic downloads and serving peers are held back on a metered connection only with `auto_manage.on_metered_connection = "pause"`. macOS exposes the cost through `NWPath.isExpensive` / `isConstrained` (Network framework), which needs Objective-C/Swift bindings this crate does not carry.
 

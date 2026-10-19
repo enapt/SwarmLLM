@@ -1232,7 +1232,7 @@ fn mistral_name_fallback_uses_inst_format_not_chatml() {
 }
 
 /// A LLaVA build named after its Mistral base is still a LLaVA model — the
-/// vicuna check must win, or vision prompts lose their `<image>` placement.
+/// vicuna check must win, or it is asked in a format it was not trained on.
 #[test]
 fn llava_mistral_build_still_uses_vicuna() {
     let msgs = user_only_messages();

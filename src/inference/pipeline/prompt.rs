@@ -142,15 +142,25 @@ impl CachedDecoder {
 /// The estimate survives only where there is genuinely no tokenizer, and says
 /// so: a node with no `gguf_header.bin` cannot count, and refusing the request
 /// would be worse than a reply that may drift.
+///
+/// `image_rows` is every image's rows together (0 without images), REQUIRED:
+/// an image prompt is tokenized with its markers and each counts as its
+/// image's rows (`vision::positions_with_images`), exactly as the first
+/// segment builds its input.
 fn prompt_positions(
     prompt: &str,
     tokenizer: Option<&crate::inference::split::SplitTokenizer>,
     model_id: &crate::types::ModelId,
+    image_rows: usize,
 ) -> usize {
     match tokenizer {
+        Some(tok) if image_rows > 0 => crate::inference::vision::positions_with_images(
+            &crate::inference::vision::encode_prompt_with_images(tok, prompt),
+            image_rows,
+        ),
         Some(tok) => tok.encode(prompt).len().max(1),
         None => {
-            let estimate = (prompt.chars().count() / 4).max(1);
+            let estimate = (prompt.chars().count() / 4).max(1) + image_rows;
             tracing::warn!(
                 model = %model_id,
                 estimate,
@@ -301,6 +311,27 @@ impl PipelineExecutor {
         header_data: Option<&(Option<String>, String, String)>,
     ) -> String {
         let mut prompt = self.render_messages_prompt(header_data).await;
+        if prompt.contains(crate::inference::vision::MEDIA_MARKER)
+            && crate::inference::vision::has_images(&self.request.messages)
+        {
+            // Each image in the frame its family was trained on (Gemma 3's
+            // `<start_of_image>` … `<end_of_image>`), here where every path's
+            // prompt is built. The arch is copied out before any await (a
+            // DashMap guard never lives across one).
+            let architecture = self
+                .shared_state
+                .gguf_meta_for(&self.request.model_id)
+                .map(|m| m.architecture.clone());
+            if architecture.is_none() {
+                tracing::warn!(
+                    model = %self.request.model_id,
+                    "this model's family is unknown here, so its images are placed \
+                     without the frame some families expect around one"
+                );
+            }
+            prompt =
+                crate::inference::vision::wrap_images_for_family(prompt, architecture.as_deref());
+        }
         if let Some(c) = &self.request.continuation {
             prompt.push_str(&c.text);
         }
@@ -417,16 +448,25 @@ impl PipelineExecutor {
     /// calls this and none of them has to remember; the figure only ever
     /// decorates a partial reply's usage, so a path that skips it loses the
     /// number rather than the reply.
+    ///
+    /// `image_rows`: every image's rows together, 0 without images — see
+    /// `prompt_positions`. The speculative coordinators pass 0: an image
+    /// disqualifies them (`request_disqualifies_fast_paths`).
     pub(super) async fn extract_model_cache(
         &self,
         prompt: &str,
+        image_rows: usize,
     ) -> (usize, Vec<u32>, CachedDecoder) {
-        let out = self.extract_model_cache_inner(prompt).await;
+        let out = self.extract_model_cache_inner(prompt, image_rows).await;
         self.partial_reply.note_prompt_tokens(out.0 as u32);
         out
     }
 
-    async fn extract_model_cache_inner(&self, prompt: &str) -> (usize, Vec<u32>, CachedDecoder) {
+    async fn extract_model_cache_inner(
+        &self,
+        prompt: &str,
+        image_rows: usize,
+    ) -> (usize, Vec<u32>, CachedDecoder) {
         let model_id = &self.assignment.segments[0].shard_id.model_id;
         let entry_key = self.shared_state.find_split_model_key(model_id);
         let entry = entry_key
@@ -460,7 +500,7 @@ impl PipelineExecutor {
             let decoder = CachedDecoder::new(vocab, tokenizer.as_deref());
 
             (
-                prompt_positions(prompt, tokenizer.as_deref(), model_id),
+                prompt_positions(prompt, tokenizer.as_deref(), model_id, image_rows),
                 eos,
                 decoder,
             )
@@ -475,7 +515,8 @@ impl PipelineExecutor {
             if header_path.exists() {
                 match Self::decoder_from_header(&header_path) {
                     Some((eos, decoder, tokenizer_opt)) => {
-                        let ptc = prompt_positions(prompt, tokenizer_opt.as_ref(), model_id);
+                        let ptc =
+                            prompt_positions(prompt, tokenizer_opt.as_ref(), model_id, image_rows);
                         tracing::debug!(
                             model = %model_id,
                             vocab_size = decoder.vocab.len(),
@@ -499,7 +540,7 @@ impl PipelineExecutor {
                              ends its turn, so the reply will run until max_tokens or a stop \
                              sequence. Fetch the model's header to fix this"
                         );
-                        let ptc = prompt_positions(prompt, None, model_id);
+                        let ptc = prompt_positions(prompt, None, model_id, image_rows);
                         (ptc, Vec::new(), CachedDecoder::new(Vec::new(), None))
                     }
                 }
@@ -513,7 +554,8 @@ impl PipelineExecutor {
                 );
                 if let Ok((path, _)) = self.shared_state.fetch_model_header(model_id).await {
                     if let Some((eos, decoder, tokenizer_opt)) = Self::decoder_from_header(&path) {
-                        let ptc = prompt_positions(prompt, tokenizer_opt.as_ref(), model_id);
+                        let ptc =
+                            prompt_positions(prompt, tokenizer_opt.as_ref(), model_id, image_rows);
                         return (ptc, eos, decoder);
                     }
                 }
@@ -526,7 +568,7 @@ impl PipelineExecutor {
                     "No GGUF header or local model — this node cannot tell where this model ends \
                      its turn, so the reply will run until max_tokens or a stop sequence"
                 );
-                let ptc = prompt_positions(prompt, None, model_id);
+                let ptc = prompt_positions(prompt, None, model_id, image_rows);
                 (ptc, Vec::new(), CachedDecoder::new(Vec::new(), None))
             }
         }
@@ -870,7 +912,7 @@ mod prompt_position_tests {
         let prompt = "a".repeat(64);
         let truth = tok.encode(&prompt).len();
         assert_eq!(
-            prompt_positions(&prompt, Some(&tok), &model),
+            prompt_positions(&prompt, Some(&tok), &model, 0),
             truth,
             "the prompt's length in positions must come from the tokenizer"
         );
@@ -888,8 +930,8 @@ mod prompt_position_tests {
     #[test]
     fn with_no_tokenizer_it_falls_back_to_an_estimate() {
         let model = ModelId("test-model".into());
-        assert_eq!(prompt_positions(&"a".repeat(64), None, &model), 16);
+        assert_eq!(prompt_positions(&"a".repeat(64), None, &model, 0), 16);
         // Never zero: position 0 is where the prompt starts, not where it ends.
-        assert_eq!(prompt_positions("ab", None, &model), 1);
+        assert_eq!(prompt_positions("ab", None, &model, 0), 1);
     }
 }

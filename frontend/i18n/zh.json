@@ -559,6 +559,7 @@
   "error_hint.shard_integrity": "某个模型文件已损坏，系统将自动重新下载。这通常是下载中断造成的——请稍候重试。",
   "error_hint.swarm_short_of_memory": "这个模型需要的内存超过了持有它的计算机所能腾出的内存，因此重试也无济于事。请选择更小的模型，或等到有内存更大的计算机持有它。如果其中一台是你的，在设置中提高它的贡献级别可以为网络提供更多空间。",
   "error_hint.unauthorized": "需要身份验证。您的 API 密钥可在控制台的「设置」页面找到，请将其作为 Bearer 令牌放入 Authorization 请求头。",
+  "error_hint.vision_encoder_unavailable": "运行此模型的计算机都没有读取图片的部分，或者此模型根本无法读取图片。请不带图片发送消息，或选择一个能读取图片的模型。保持现状重试不会有帮助。",
   "errors.connection_lost": "与 SwarmLLM 的连接已断开 — 正在重连...",
   "errors.failed_toggle_enc": "无法更改“在本机开始和结束”",
   "errors.request_timeout": "请求超时 — 服务器可能繁忙或无法访问",

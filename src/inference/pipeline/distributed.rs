@@ -201,24 +201,25 @@ impl PipelineExecutor {
         // This decouples vision encoding from the text pipeline — any node with
         // mmproj can encode, and the embeddings travel with LayerForward.
         // Collect images once to avoid scanning messages twice.
+        //
+        // A failure is the request's failure. It used to log "proceeding
+        // without images", and the model was then asked about a picture it
+        // was never shown — and answered anyway (#115 (2)).
         let has_images =
             !crate::inference::vision::collect_images(&self.request.messages).is_empty();
         let mut precomputed_vision: Option<Vec<u8>> = if has_images {
-            match self.precompute_vision_embeddings().await {
-                Ok(Some(bytes)) => Some(bytes),
-                Ok(None) => None,
-                Err(e) => {
-                    tracing::warn!(
-                        request_id = %request_id,
-                        error = %e,
-                        "Vision pre-computation failed, proceeding without images"
-                    );
-                    None
-                }
-            }
+            self.precompute_vision_embeddings().await?
         } else {
             None
         };
+        // Every image's rows together, as the payload states them: what the
+        // prompt's markers become, so what its positions count
+        // (`vision::positions_with_images`). Read once, before the payload is
+        // handed to the first forward.
+        let image_rows = precomputed_vision
+            .as_deref()
+            .and_then(crate::inference::vision::wire_rows)
+            .unwrap_or(0);
 
         // Local embedding privacy: check if we should embed locally before sending
         // activations to the first pipeline segment. This prevents remote nodes from
@@ -307,7 +308,14 @@ impl PipelineExecutor {
                 if seq_num == 0 {
                     let prompt =
                         std::str::from_utf8(prompt_bytes_opt.as_ref().unwrap()).unwrap_or("");
-                    let (bytes, token_count) = embedder.embed_prompt(prompt)?;
+                    // The image rows are placed HERE, in the embeddings sent;
+                    // the payload itself is not sent on (a pre-embedded first
+                    // segment never reads one).
+                    let vision = precomputed_vision
+                        .take()
+                        .map(|payload| crate::inference::vision::decode_wire_embeddings(&payload))
+                        .transpose()?;
+                    let (bytes, token_count) = embedder.embed_prompt(prompt, vision.as_ref())?;
                     // Set prompt_token_count from local tokenization
                     if prompt_token_count.is_none() {
                         prompt_token_count = Some(token_count);
@@ -404,31 +412,16 @@ impl PipelineExecutor {
                     // in a SINGLE lock acquisition: prompt token count, EOS tokens, and
                     // cached decoder for lock-free per-token decoding.
                     if seq_num == 0 {
-                        let (ptc, eos, decoder) = self.extract_model_cache(&prompt).await;
-                        // For VLM: the <image> token (1 tok) was replaced by N vision
-                        // tokens per image. The vision module produces
-                        // (image_size/patch_size)^2 + 1 tokens per image. Look up the
-                        // actual count from the cached vision module if available.
-                        let has_images =
-                            crate::inference::vision::has_images(&self.request.messages);
-                        let vision_expand = if has_images {
-                            let model_id = &self.assignment.segments[0].shard_id.model_id;
-                            self.shared_state
-                                .vision_modules
-                                .get(model_id)
-                                .map(|vm| {
-                                    let num_patches = vm.value().num_image_tokens();
-                                    let num_images: usize =
-                                        self.request.messages.iter().map(|m| m.images.len()).sum();
-                                    // Each <image> token (1) is replaced by num_patches tokens
-                                    num_patches * num_images - num_images
-                                })
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        };
-                        index_pos = ptc + vision_expand;
-                        prompt_token_count = Some(ptc + vision_expand);
+                        // An image prompt's positions count each marker as its
+                        // image's rows, from the payload sent. They used to be
+                        // read off this node's cached vision module — absent
+                        // wherever a peer encoded the image, so every token
+                        // after the prompt went to the wrong position — and
+                        // counted LLaVA's `<image>` text as one token.
+                        let (ptc, eos, decoder) =
+                            self.extract_model_cache(&prompt, image_rows).await;
+                        index_pos = ptc;
+                        prompt_token_count = Some(ptc);
                         cached_eos = Some(eos.into_iter().collect());
                         cached_decoder = Some(decoder);
                     } else {
@@ -1434,6 +1427,19 @@ impl PipelineExecutor {
                 } else {
                     None
                 };
+                // A peer that would read the prompt's image markers as text
+                // is barred from this request and the router plans again —
+                // `ServiceUnavailable` from a remote segment is its re-plan
+                // signal, penalty-exempt (an older build is no misconduct).
+                if vision_for_wire.is_some() && !self.may_send_image_prompt_to(&segment.node_id) {
+                    self.shared_state
+                        .blacklist_holder_for_request(request_id, &segment.node_id);
+                    return Err(SwarmError::ServiceUnavailable(format!(
+                        "the computer holding the start of this model ({}) runs an older \
+                         version that cannot place a picture in the prompt",
+                        segment.node_id
+                    )));
+                }
                 let hint_for_wire = self.prompt_cache_hint.clone().filter(|_| sequence_num == 0);
                 // A closure so the SAME forward can be built again if the peer
                 // refuses it unopened (`ResendOnRefusal`), from what this loop
@@ -2721,6 +2727,27 @@ impl PipelineExecutor {
                         continue;
                     }
                 }
+            }
+
+            // An image prompt's first forward goes only to a standby that
+            // places the image where the prompt marks it (`IMAGES_AT_MARKERS`).
+            if failed_idx == 0
+                && sequence_num == 0
+                && precomputed_vision.is_some()
+                && !self.may_send_image_prompt_to(&backup.node_id)
+            {
+                tracing::warn!(
+                    request_id = %request_id,
+                    backup_node = %backup.node_id,
+                    "standby runs an older version that cannot place a picture in the prompt — trying the next one"
+                );
+                last_failure = Some(format!(
+                    "the standby {} runs an older version that cannot place a picture in the prompt",
+                    backup.node_id
+                ));
+                tried.push(backup.node_id.clone());
+                abandoned = backup.node_id;
+                continue;
             }
 
             // Register a response channel BEFORE sending the request.

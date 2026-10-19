@@ -559,6 +559,7 @@
   "error_hint.shard_integrity": "Plik modelu był uszkodzony i zostanie pobrany ponownie automatycznie. Zwykle powodem jest przerwane pobieranie — spróbuj za chwilę.",
   "error_hint.swarm_short_of_memory": "Ten model potrzebuje więcej pamięci, niż komputery, które go mają, mogą przeznaczyć, więc ponowna próba nie pomoże. Wybierz mniejszy model albo poczekaj, aż będzie go mieć komputer z większą ilością pamięci. Jeśli jeden z nich jest twój, podniesienie jego Poziomu udziału w Ustawieniach da sieci więcej miejsca.",
   "error_hint.unauthorized": "Wymagane uwierzytelnienie. Klucz API znajdziesz na stronie Ustawienia w panelu. Prześlij go jako token Bearer w nagłówku Authorization.",
+  "error_hint.vision_encoder_unavailable": "Żaden komputer, który uruchamia ten model, nie ma jego części, która czyta obrazy — albo ten model w ogóle nie umie czytać obrazów. Wyślij wiadomość bez obrazu albo wybierz model, który czyta obrazy. Ponowna próba bez zmian nic nie da.",
   "errors.connection_lost": "Utracono połączenie z SwarmLLM — ponowne łączenie...",
   "errors.failed_toggle_enc": "Nie udało się zmienić „Początek i koniec na tym komputerze”",
   "errors.request_timeout": "Przekroczono limit czasu żądania — serwer może być zajęty lub niedostępny",

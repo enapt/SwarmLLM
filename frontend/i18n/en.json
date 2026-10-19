@@ -559,6 +559,7 @@
   "error_hint.shard_integrity": "A model file was corrupted and will be re-downloaded automatically. This is usually caused by an interrupted download — try again in a moment.",
   "error_hint.swarm_short_of_memory": "This model needs more memory than the computers holding it can set aside, so trying again won't help. Pick a smaller model, or wait until a computer with more memory holds this one. If one of them is yours, raising its Contribution Level in Settings gives the swarm more room.",
   "error_hint.unauthorized": "Authentication required. Your API key can be found on the dashboard Settings page. Include it as a Bearer token in the Authorization header.",
+  "error_hint.vision_encoder_unavailable": "No computer running this model has the part of it that reads images, or this model can't read images at all. Send the message without the picture, or choose a model that reads images. Retrying as-is won't help.",
   "errors.connection_lost": "Lost connection to SwarmLLM — reconnecting...",
   "errors.failed_toggle_enc": "Could not change “Start and finish on this computer”",
   "errors.request_timeout": "Request timed out — server may be busy or unreachable",

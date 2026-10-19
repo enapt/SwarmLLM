@@ -559,6 +559,7 @@
   "error_hint.shard_integrity": "Một tệp của mô hình đã bị hỏng và sẽ được tải lại tự động. Nguyên nhân thường là do quá trình tải bị gián đoạn — hãy thử lại sau giây lát.",
   "error_hint.swarm_short_of_memory": "Mô hình này cần nhiều bộ nhớ hơn mức các máy tính giữ nó có thể dành ra, nên thử lại cũng không giúp được. Hãy chọn một mô hình nhỏ hơn, hoặc chờ đến khi một máy tính có nhiều bộ nhớ hơn giữ mô hình này. Nếu một trong số đó là máy của bạn, tăng Mức đóng góp của nó trong Cài đặt sẽ cho mạng thêm chỗ.",
   "error_hint.unauthorized": "Cần xác thực. Khóa API của bạn nằm ở trang «Cài đặt» trong bảng điều khiển. Hãy gửi kèm dưới dạng token Bearer trong tiêu đề Authorization.",
+  "error_hint.vision_encoder_unavailable": "Không máy tính nào đang chạy mô hình này có phần đọc hình ảnh, hoặc mô hình này hoàn toàn không đọc được hình ảnh. Hãy gửi tin nhắn mà không kèm hình ảnh, hoặc chọn một mô hình đọc được hình ảnh. Thử lại y nguyên sẽ không giúp được gì.",
   "errors.connection_lost": "Mất kết nối với SwarmLLM — đang kết nối lại...",
   "errors.failed_toggle_enc": "Không thể thay đổi \"Bắt đầu và kết thúc trên máy tính này\"",
   "errors.request_timeout": "Yêu cầu đã hết thời gian — máy chủ có thể đang bận hoặc không thể truy cập",
