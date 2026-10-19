@@ -885,16 +885,9 @@ impl AutoShardManager {
                 continue;
             }
 
-            // Actually delete the shard file (or mmproj.gguf for sentinel)
-            let shard_path = if candidate.shard_index == crate::types::MMPROJ_SHARD_INDEX {
-                crate::model::shard::model_dir(
-                    &self.shared_state.config.node.data_dir,
-                    &candidate.model_id.0,
-                )
-                .join(crate::model::shard::MMPROJ_FILENAME)
-            } else {
-                shard_store.shard_path(&candidate.model_id, candidate.shard_index)
-            };
+            // Actually delete the shard file (`shard_path` names mmproj.gguf
+            // for the image reader's sentinel index).
+            let shard_path = shard_store.shard_path(&candidate.model_id, candidate.shard_index);
             if shard_path.exists() {
                 let sp = shard_path.clone();
                 let result = tokio::task::spawn_blocking(move || std::fs::remove_file(&sp)).await;

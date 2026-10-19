@@ -226,7 +226,19 @@ impl ShardStore {
     }
 
     /// Get the path to a specific shard file.
+    ///
+    /// The image reader is held as a part under the sentinel index
+    /// `MMPROJ_SHARD_INDEX`, and its file is `mmproj.gguf`, so this is the one
+    /// place that says so. Every question about a held part — is it on disk
+    /// (the health monitor's reconcile), delete it, serve it — asks here. It
+    /// used to name `shard_4294967295.bin`, so the monitor found the reader
+    /// missing on its next pass and withdrew this node's claim to it: every
+    /// node that downloaded one stopped offering it within minutes, and its
+    /// own pictures then found no reader (2026-10-19, gotcha #901).
     pub fn shard_path(&self, model_id: &ModelId, index: u32) -> PathBuf {
+        if index == crate::types::MMPROJ_SHARD_INDEX {
+            return self.model_dir(model_id).join(MMPROJ_FILENAME);
+        }
         self.model_dir(model_id)
             .join(format!("shard_{index:03}.bin"))
     }
@@ -980,6 +992,37 @@ mod tests {
         std::fs::write(&path, b"").unwrap();
 
         assert!(store.shard_file_present(&shard));
+    }
+
+    #[test]
+    fn a_held_image_reader_is_found_where_it_was_downloaded() {
+        // The image reader is a part under a sentinel index, written by its
+        // download as `mmproj.gguf`. The health monitor's reconcile asks
+        // `missing_shard_reason` of every part this node claims; when the path
+        // was `shard_4294967295.bin` it answered Absent, the claim was
+        // withdrawn minutes after the download, and pictures sent here then
+        // found no reader (2026-10-19, gotcha #901).
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::ShardStore::new(dir.path());
+        let reader = crate::types::ShardId {
+            model_id: crate::types::ModelId("gemma-3-4b-it-q4-k-m".into()),
+            index: crate::types::MMPROJ_SHARD_INDEX,
+        };
+        let downloaded =
+            super::model_dir(dir.path(), &reader.model_id.0).join(super::MMPROJ_FILENAME);
+        std::fs::create_dir_all(downloaded.parent().unwrap()).unwrap();
+        std::fs::write(&downloaded, b"GGUF").unwrap();
+
+        assert_eq!(store.shard_path(&reader.model_id, reader.index), downloaded);
+        assert!(store.shard_file_present(&reader));
+        assert_eq!(store.missing_shard_reason(&reader), None);
+
+        store.delete_shard(&reader.model_id, reader.index).unwrap();
+        assert!(!downloaded.exists(), "deleting the reader deletes its file");
+        assert_eq!(
+            store.missing_shard_reason(&reader),
+            Some(super::MissingShard::Absent)
+        );
     }
 
     use super::*;
