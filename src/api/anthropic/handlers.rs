@@ -1450,6 +1450,7 @@ mod tests {
         crate::inference::router::InferenceOutput {
             request_id: uuid::Uuid::nil(),
             content: "hi".into(),
+            reasoning: None,
             prompt_tokens,
             completion_tokens,
             finish_reason: "stop".into(),
@@ -1906,6 +1907,7 @@ mod route_in_body_tests {
         let output = |trace| InferenceOutput {
             request_id: uuid::Uuid::nil(),
             content: "hi".into(),
+            reasoning: None,
             prompt_tokens: 1,
             completion_tokens: 1,
             finish_reason: "stop".into(),

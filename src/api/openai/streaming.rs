@@ -34,6 +34,10 @@ fn build_chat_completion_response(
     created: i64,
     model: String,
     content: String,
+    // The closed scratchpad the reply source took off `content`
+    // (`InferenceOutput::reasoning`) — the stream sent it as
+    // `delta.reasoning_content`, so this body carries it too (#141).
+    reasoning: Option<String>,
     finish_reason: String,
     prompt_tokens: u32,
     completion_tokens: u32,
@@ -96,20 +100,30 @@ fn build_chat_completion_response(
                 // `finish_reason` must be "tool_calls" or clients never
                 // dispatch them (the reported response said "length").
                 let leading = crate::api::tool_parse::leading_content(&content).map(str::to_string);
-                (leading, None, Some(calls), "tool_calls".to_string())
+                (leading, reasoning, Some(calls), "tool_calls".to_string())
             }
             None => {
-                let (content, reasoning) =
+                let (content, unfinished) =
                     crate::api::tool_parse::split_unfinished_reasoning(content);
-                (Some(content), reasoning, None, finish_reason)
+                (
+                    Some(content),
+                    crate::api::tool_parse::scratchpads_in_order(reasoning, unfinished),
+                    None,
+                    finish_reason,
+                )
             }
         }
     } else {
         // A reply that ended inside its scratchpad: the stream sent it as
         // `reasoning_content` and no content, so this must too — the same reply
         // may not answer differently for `stream` (see `ReasoningOut::Separate`).
-        let (content, reasoning) = crate::api::tool_parse::split_unfinished_reasoning(content);
-        (Some(content), reasoning, None, finish_reason)
+        let (content, unfinished) = crate::api::tool_parse::split_unfinished_reasoning(content);
+        (
+            Some(content),
+            crate::api::tool_parse::scratchpads_in_order(reasoning, unfinished),
+            None,
+            finish_reason,
+        )
     };
 
     ChatCompletionResponse {
@@ -604,6 +618,7 @@ pub(super) async fn router_inference(
         created,
         req.model.clone(),
         output.content,
+        output.reasoning,
         output.finish_reason,
         output.prompt_tokens,
         output.completion_tokens,
@@ -1062,6 +1077,7 @@ pub(super) async fn split_non_stream_response(
         created,
         model_name,
         output.content,
+        output.reasoning,
         output.finish_reason.clone(),
         output.prompt_tokens,
         output.completion_tokens,
@@ -1864,6 +1880,56 @@ mod route_in_body_tests {
         assert_eq!(route["peers"], 1);
     }
 
+    /// **A reply that is not streamed carries the scratchpad its stream would
+    /// have sent** (#141): the closed block the reply source took off the text
+    /// reached the stream as `delta.reasoning_content` and was dropped from
+    /// every non-streamed body — tool calls included.
+    #[test]
+    fn an_unstreamed_reply_carries_the_scratchpad_its_stream_would_send() {
+        let build = |content: &str, reasoning: Option<&str>, tools: bool| {
+            serde_json::to_value(build_chat_completion_response(
+                "id".into(),
+                0,
+                "m".into(),
+                content.into(),
+                reasoning.map(str::to_string),
+                "stop".into(),
+                1,
+                1,
+                None,
+                &[],
+                tools,
+                None,
+            ))
+            .unwrap()
+        };
+        let reply = build("Yes.", Some("weighing it"), false);
+        let message = &reply["choices"][0]["message"];
+        assert_eq!(message["content"], "Yes.");
+        assert_eq!(message["reasoning_content"], "weighing it");
+
+        let call = build(
+            r#"<tool_call>{"name": "f", "arguments": {}}</tool_call>"#,
+            Some("pick f"),
+            true,
+        );
+        assert_eq!(call["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(call["choices"][0]["message"]["reasoning_content"], "pick f");
+
+        // A reply that went on to open a second block and ended inside it
+        // keeps both, in the order written.
+        let both = build("<think>and then", Some("first"), false);
+        assert_eq!(
+            both["choices"][0]["message"]["reasoning_content"],
+            "first\n\nand then"
+        );
+
+        let plain = build("Yes.", None, false);
+        assert!(plain["choices"][0]["message"]
+            .get("reasoning_content")
+            .is_none());
+    }
+
     /// A chat completion that is not streamed carries the same object in its
     /// body as well as the headers, so one parser reads both forms; a reply
     /// with no swarm route leaves it out rather than guessing.
@@ -1876,6 +1942,7 @@ mod route_in_body_tests {
                 0,
                 "m".into(),
                 "hi".into(),
+                None,
                 "stop".into(),
                 1,
                 1,

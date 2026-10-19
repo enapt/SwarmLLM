@@ -95,6 +95,7 @@ pub(crate) fn fake_router(reply: &'static str) -> tokio::sync::mpsc::Sender<Rout
         let _ = result_tx.send(Ok(InferenceOutput {
             request_id: request.id,
             content: reply.to_string(),
+            reasoning: None,
             prompt_tokens: 3,
             completion_tokens: 1,
             finish_reason: "stop".into(),
@@ -138,6 +139,7 @@ pub(crate) fn fake_unstreamed_router(
         let _ = result_tx.send(Ok(InferenceOutput {
             request_id: request.id,
             content: reply.to_string(),
+            reasoning: None,
             prompt_tokens: 3,
             completion_tokens: 1,
             finish_reason: "stop".into(),

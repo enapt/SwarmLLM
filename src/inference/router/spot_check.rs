@@ -259,6 +259,7 @@ mod tests {
         InferenceOutput {
             request_id: uuid::Uuid::new_v4(),
             content: content.to_string(),
+            reasoning: None,
             prompt_tokens: 4,
             completion_tokens,
             finish_reason: "stop".into(),
@@ -499,6 +500,7 @@ mod degeneration_tests {
         InferenceOutput {
             request_id: uuid::Uuid::new_v4(),
             content: content.to_string(),
+            reasoning: None,
             prompt_tokens: 34,
             completion_tokens: 64,
             finish_reason: finish_reason.into(),

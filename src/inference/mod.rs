@@ -176,11 +176,15 @@ pub(crate) const REPLY_LEADING_WHITESPACE: [char; 3] = ['\n', '\r', ' '];
 /// "everywhere". Pass an empty `stops` slice when the caller has none — steps
 /// 2 and 3 then do nothing and the rest still applies.
 ///
-/// Returns the stop sequence that truncated the text, if any, so a caller can
-/// set `finish_reason` from it. It is safe to call more than once: every step
-/// is idempotent, which lets a caller run it again with a different stop set
-/// (the router applies template-derived stops that the executor never sees).
-pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> Option<String> {
+/// Returns what it took out besides trimming ([`FinishedReply`]): the stop
+/// sequence that truncated the text, so a caller can set `finish_reason` from
+/// it, and a reasoning model's closed scratchpad, which the caller hands on in
+/// `InferenceOutput::reasoning` (#141). It is safe to call more than once:
+/// every step is idempotent, which lets a caller run it again with a different
+/// stop set (the router applies template-derived stops that the executor never
+/// sees) — a second call finds no scratchpad, so a caller keeps the FIRST
+/// call's.
+pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> FinishedReply {
     // Snapshot enough of the incoming text to identify it if the steps below
     // consume all of it. Costs one small allocation per completion — this runs
     // once per reply, never per token — and nothing at all when the model
@@ -193,7 +197,7 @@ pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> Option
     };
 
     strip_control_token_artifacts(text);
-    take_leading_reasoning_block(text);
+    let reasoning = take_leading_reasoning_block(text);
     let mut matched = None;
     for stop in stops {
         if let Some(pos) = text.find(stop.as_str()) {
@@ -229,7 +233,27 @@ pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> Option
         );
     }
 
-    matched
+    FinishedReply {
+        stop: matched,
+        reasoning,
+    }
+}
+
+/// What [`finalize_reply_text`] took out of a reply besides trimming it.
+///
+/// `must_use` because dropping it is the bug it exists for: the closed
+/// scratchpad is gone from the text once the call returns, so a source that
+/// ignores `reasoning` loses it for every surface (#141 — every non-streamed
+/// reply did, while the stream carried it as `delta.reasoning_content`).
+#[must_use = "a reply's reasoning goes in `InferenceOutput::reasoning`, or it is lost (#141)"]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct FinishedReply {
+    /// The caller's stop sequence that truncated the text, if any.
+    pub stop: Option<String>,
+    /// A reasoning model's CLOSED scratchpad from the start of the reply,
+    /// trimmed as the stream trims what it sends; `None` when there was none.
+    /// An unclosed one stays in the text (see [`take_leading_reasoning_block`]).
+    pub reasoning: Option<String>,
 }
 
 /// Replies the model generated and finalisation then removed entirely —
@@ -447,21 +471,22 @@ const EMPTIED_REPLY_LOG_CHARS: usize = 240;
 ///   warning below is the thing that would otherwise fire on every such reply.
 /// - **Only the block, plus the whitespace after it.** The answer follows.
 ///
-/// The reasoning itself is DISCARDED rather than surfaced. Exposing it wants a
-/// field on both API surfaces (`reasoning_content` on OpenAI, a thinking block
-/// on Anthropic) and is worth doing; returning it glued to the answer is not a
-/// smaller version of that, it is the bug.
-pub(crate) fn take_leading_reasoning_block(text: &mut String) {
+/// The reasoning itself is RETURNED, trimmed (`None` when it was blank), for
+/// the surface that has a field for it: OpenAI's `message.reasoning_content`,
+/// as llama.cpp, SGLang and DeepSeek name it and as our own stream sends it
+/// (vLLM has since renamed its field `reasoning`). Anthropic withholds it, as
+/// its stream does. Returning it glued to the answer is the bug, not a smaller
+/// version of the field.
+pub(crate) fn take_leading_reasoning_block(text: &mut String) -> Option<String> {
     let lead = text.len() - text.trim_start().len();
-    let Some(block) = opening_reasoning_block(&text[lead..]) else {
-        return;
-    };
-    let Some(rel) = text[lead..].find(block.close) else {
-        return;
-    };
+    let block = opening_reasoning_block(&text[lead..])?;
+    let rel = text[lead..].find(block.close)?;
+    let inner = text[lead + block.open.len()..lead + rel].trim();
+    let reasoning = (!inner.is_empty()).then(|| inner.to_string());
     let mut end = lead + rel + block.close.len();
     end += text[end..].len() - text[end..].trim_start().len();
     text.drain(..end);
+    reasoning
 }
 
 /// The markers of one kind of reasoning block.
@@ -851,7 +876,7 @@ mod finalize_reply_text_tests {
     #[test]
     fn marker_before_the_answer_keeps_the_answer() {
         let mut t = "<|im_end|>Red, blue and yellow.".to_string();
-        let matched = finalize_reply_text(&mut t, &stops());
+        let matched = finalize_reply_text(&mut t, &stops()).stop;
         assert_eq!(t, "Red, blue and yellow.");
         assert_eq!(matched, None, "a scrubbed artifact is not a stop match");
     }
@@ -871,7 +896,7 @@ mod finalize_reply_text_tests {
         use std::sync::atomic::Ordering;
         let before = EMPTY_REPLIES_TOTAL.load(Ordering::Relaxed);
         let mut t = String::from("<|im_end|>");
-        finalize_reply_text(&mut t, &stops());
+        let _ = finalize_reply_text(&mut t, &stops());
         assert!(t.trim().is_empty(), "control: the reply was emptied");
         assert!(
             EMPTY_REPLIES_TOTAL.load(Ordering::Relaxed) > before,
@@ -882,14 +907,14 @@ mod finalize_reply_text_tests {
     #[test]
     fn a_reply_of_nothing_but_a_marker_finalises_to_empty() {
         let mut t = "<|im_end|>".to_string();
-        finalize_reply_text(&mut t, &stops());
+        let _ = finalize_reply_text(&mut t, &stops());
         assert!(t.trim().is_empty(), "expected the marker to leave nothing");
 
         // ...and a stop matching at position 0 does the same thing by a
         // different route, which is the prompt-fault shape rather than the
         // template-fault one.
         let mut t = "\nUser: who asked?".to_string();
-        finalize_reply_text(&mut t, &["\nUser:".to_string()]);
+        let _ = finalize_reply_text(&mut t, &["\nUser:".to_string()]);
         assert!(t.trim().is_empty());
     }
     /// The report has to name what was removed — that text is the entire
@@ -1016,7 +1041,7 @@ mod finalize_reply_text_tests {
         let mut t = "<|im_end|>".to_string();
         let before: String = t.chars().take(EMPTIED_REPLY_LOG_CHARS).collect();
         let had_content = !t.trim().is_empty();
-        finalize_reply_text(&mut t, &stops());
+        let _ = finalize_reply_text(&mut t, &stops());
         assert!(t.is_empty(), "the marker-only reply must finalise to empty");
         assert!(
             emptied_reply_evidence(had_content, &t, &before).is_some(),
@@ -1030,12 +1055,12 @@ mod finalize_reply_text_tests {
     #[test]
     fn finalising_multibyte_text_does_not_panic() {
         let mut t = "日本語のテキストです。".repeat(40);
-        finalize_reply_text(&mut t, &stops());
+        let _ = finalize_reply_text(&mut t, &stops());
         assert!(t.starts_with("日本語"), "content must survive untouched");
 
         let mut emoji = "🙂🙃".repeat(300);
         emoji.push_str("<|im_end|>");
-        finalize_reply_text(&mut emoji, &stops());
+        let _ = finalize_reply_text(&mut emoji, &stops());
         assert!(emoji.starts_with("🙂"));
     }
 
@@ -1049,12 +1074,12 @@ mod finalize_reply_text_tests {
         let s = vec!["\nUser:".to_string()];
         let mut t2 = "Answer.\nUser: next question".to_string();
         assert_eq!(
-            finalize_reply_text(&mut t2, &s),
+            finalize_reply_text(&mut t2, &s).stop,
             Some("\nUser:".to_string())
         );
         assert_eq!(t2, "Answer.");
         // The control-token form is scrubbed rather than truncated.
-        finalize_reply_text(&mut t, &stops());
+        let _ = finalize_reply_text(&mut t, &stops());
         assert_eq!(t, "Answer.trailing");
     }
 
@@ -1063,7 +1088,7 @@ mod finalize_reply_text_tests {
     #[test]
     fn strands_no_leading_newlines() {
         let mut t = "<|im_end|>\n\nHello".to_string();
-        finalize_reply_text(&mut t, &stops());
+        let _ = finalize_reply_text(&mut t, &stops());
         assert_eq!(t, "Hello");
     }
 
@@ -1072,9 +1097,9 @@ mod finalize_reply_text_tests {
     #[test]
     fn is_idempotent_across_repeated_calls() {
         let mut once = "<|im_end|>\nHi there".to_string();
-        finalize_reply_text(&mut once, &[]);
+        let _ = finalize_reply_text(&mut once, &[]);
         let mut twice = once.clone();
-        finalize_reply_text(&mut twice, &stops());
+        let _ = finalize_reply_text(&mut twice, &stops());
         assert_eq!(once, twice);
         assert_eq!(twice, "Hi there");
     }
@@ -1083,7 +1108,7 @@ mod finalize_reply_text_tests {
     #[test]
     fn empty_stops_still_scrubs() {
         let mut t = "<|eot_id|>\nAnswer".to_string();
-        assert_eq!(finalize_reply_text(&mut t, &[]), None);
+        assert_eq!(finalize_reply_text(&mut t, &[]).stop, None);
         assert_eq!(t, "Answer");
     }
 }
@@ -1231,12 +1256,49 @@ mod reasoning_block_tests {
     fn the_shared_finaliser_applies_it_before_stop_sequences() {
         let mut t =
             "<think>\nI should not say STOP here.\n</think>\n\nThe answer is 4.".to_string();
-        let matched = finalize_reply_text(&mut t, &["STOP".to_string()]);
+        let finished = finalize_reply_text(&mut t, &["STOP".to_string()]);
+        let matched = finished.stop;
         assert_eq!(t, "The answer is 4.");
         assert_eq!(
             matched, None,
             "a stop sequence inside the scratchpad must not truncate the answer"
         );
+        assert_eq!(
+            finished.reasoning.as_deref(),
+            Some("I should not say STOP here."),
+            "the scratchpad is handed back, trimmed, for the surface with a field for it (#141)"
+        );
+    }
+
+    /// The scratchpad is reported ONCE: a second call finds none, which is why
+    /// a caller that finalises again keeps the first call's (#141).
+    #[test]
+    fn the_scratchpad_is_reported_once_and_a_blank_one_not_at_all() {
+        let mut t = "<think>\n  weighing it  \n</think>\n\nYes.".to_string();
+        assert_eq!(
+            finalize_reply_text(&mut t, &[]).reasoning.as_deref(),
+            Some("weighing it")
+        );
+        assert_eq!(finalize_reply_text(&mut t, &[]).reasoning, None);
+        assert_eq!(t, "Yes.");
+
+        let mut blank = "<think>\n\n</think>\n\nYes.".to_string();
+        assert_eq!(finalize_reply_text(&mut blank, &[]).reasoning, None);
+        assert_eq!(blank, "Yes.");
+
+        let mut unclosed = "<think>still going".to_string();
+        assert_eq!(finalize_reply_text(&mut unclosed, &[]).reasoning, None);
+        assert_eq!(
+            unclosed, "<think>still going",
+            "an unclosed block stays in the text"
+        );
+
+        let mut gemma = "<|channel>thought\nhmm\n<channel|>Sure.".to_string();
+        assert_eq!(
+            finalize_reply_text(&mut gemma, &[]).reasoning.as_deref(),
+            Some("hmm")
+        );
+        assert_eq!(gemma, "Sure.");
     }
 
     /// Idempotent, like every other step in the finaliser — the router runs it
@@ -1244,9 +1306,9 @@ mod reasoning_block_tests {
     #[test]
     fn running_it_twice_changes_nothing() {
         let mut t = "<think>\nreasoning\n</think>\n\nanswer".to_string();
-        finalize_reply_text(&mut t, &[]);
+        let _ = finalize_reply_text(&mut t, &[]);
         let once = t.clone();
-        finalize_reply_text(&mut t, &[]);
+        let _ = finalize_reply_text(&mut t, &[]);
         assert_eq!(t, once);
     }
 }

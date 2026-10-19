@@ -609,7 +609,18 @@ it takes `detect_tools`: the surfaces answer it differently.
   `content` (`split_unfinished_reasoning`, applied in the one builder,
   `build_chat_completion_response`). The "lesser harm" argument for leaving it
   in the text does not survive a field: the scratchpad is visible and
-  `finish_reason` says `length`. llama.cpp gives the same shape.
+  `finish_reason` says `length`. llama.cpp gives the same shape. **A FINISHED
+  block reaches the non-streamed reply too** (#141, 2026-10-19; it was dropped
+  from every one while the stream sent it): `finalize_reply_text` returns it
+  (`FinishedReply::reasoning`, `#[must_use]`), each reply source puts the FIRST
+  call's into the REQUIRED `InferenceOutput::reasoning` (a second call finds
+  none), and `build_chat_completion_response` writes it before any unfinished
+  one (`tool_parse::scratchpads_in_order`), tool calls included. The guard
+  compares both halves' scratchpad as well as their content. Rig
+  `split_rig.sh reasoning` (qwen3-1.7b, greedy, after a warm-up — the first
+  request's n-gram path flipped a near-tie 40 tokens from the end): split
+  558/558 and whole-model local 537/537 characters, same content; v0.3.244
+  gave 0 against 558.
 - **`Withheld` — the Anthropic surface.** A `thinking` block exists only for a
   request that enabled thinking and carries a signature this server cannot
   produce, so nothing changes there: withheld while streaming, an unfinished

@@ -3374,6 +3374,7 @@ mod tests {
             let out = InferenceOutput {
                 request_id: id,
                 content: String::new(),
+                reasoning: None,
                 prompt_tokens: 5,
                 completion_tokens: tokens,
                 finish_reason: "stop".into(),

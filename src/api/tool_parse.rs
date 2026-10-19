@@ -605,6 +605,19 @@ pub fn split_unfinished_reasoning(content: String) -> (String, Option<String>) {
     (String::new(), reasoning)
 }
 
+/// A reply's scratchpads for the reasoning field, in the order the model wrote
+/// them: the CLOSED block `finalize_reply_text` took off the front
+/// (`InferenceOutput::reasoning`), then one the reply ended inside
+/// ([`split_unfinished_reasoning`]). Both are kept, never one dropped for the
+/// other. The non-streamed half of what [`ReasoningOut::Separate`] streams
+/// (#141).
+pub fn scratchpads_in_order(closed: Option<String>, unfinished: Option<String>) -> Option<String> {
+    match (closed, unfinished) {
+        (Some(closed), Some(unfinished)) => Some(format!("{closed}\n\n{unfinished}")),
+        (closed, unfinished) => closed.or(unfinished),
+    }
+}
+
 impl StreamingToolText {
     /// A buffer for one streamed reply.
     ///
@@ -2899,7 +2912,9 @@ mod tool_choice_tests {
 
 #[cfg(test)]
 mod streaming_reasoning_tests {
-    use super::{split_unfinished_reasoning, ReasoningOut, StreamingToolText};
+    use super::{
+        scratchpads_in_order, split_unfinished_reasoning, ReasoningOut, StreamingToolText,
+    };
 
     /// Run a reply through the buffer with tool detection ON — the shape these
     /// tests have always used.
@@ -3050,7 +3065,7 @@ mod streaming_reasoning_tests {
         // Unstreamed: the finaliser drops the channel, the call parses, and no
         // content is left beside it.
         let mut whole = reply.to_string();
-        crate::inference::finalize_reply_text(&mut whole, &[]);
+        let _ = crate::inference::finalize_reply_text(&mut whole, &[]);
         assert_eq!(super::parse_tool_calls(&whole).map(|c| c.len()), Some(1));
         assert_eq!(super::leading_content(&whole), None);
     }
@@ -3123,7 +3138,7 @@ mod streaming_reasoning_tests {
             // of it: comparing against the reasoning step alone let the opening
             // whitespace differ between the two halves unnoticed.
             let mut whole: String = chunks.concat();
-            crate::inference::finalize_reply_text(&mut whole, &[]);
+            let closed = crate::inference::finalize_reply_text(&mut whole, &[]).reasoning;
 
             // BOTH ways round. A reply's content must not depend on whether the
             // caller asked to stream it, and it must not depend on whether the
@@ -3139,10 +3154,12 @@ mod streaming_reasoning_tests {
             }
 
             // And the surface with a reasoning field: its non-streamed half is
-            // the finaliser plus `split_unfinished_reasoning`, which is what
-            // `build_chat_completion_response` applies. Content must agree; the
-            // scratchpad of a reply that ended inside it must agree too.
+            // the finaliser's scratchpad plus `split_unfinished_reasoning`,
+            // which is what `build_chat_completion_response` applies. Content
+            // must agree, and so must the scratchpad, closed or not — the
+            // closed one was dropped from every non-streamed reply (#141).
             let (content, unfinished) = split_unfinished_reasoning(whole.clone());
+            let scratchpad = scratchpads_in_order(closed, unfinished).unwrap_or_default();
             for detect_tools in [true, false] {
                 let (streamed, reasoning) =
                     streamed_reply_in(chunks, detect_tools, ReasoningOut::Separate);
@@ -3150,12 +3167,10 @@ mod streaming_reasoning_tests {
                     streamed, content,
                     "Separate (detect_tools={detect_tools}): content disagrees on {chunks:?}"
                 );
-                if let Some(unfinished) = &unfinished {
-                    assert_eq!(
-                        &reasoning, unfinished,
-                        "Separate: the unfinished scratchpad disagrees on {chunks:?}"
-                    );
-                }
+                assert_eq!(
+                    reasoning, scratchpad,
+                    "Separate (detect_tools={detect_tools}): the scratchpad disagrees on {chunks:?}"
+                );
             }
         }
     }

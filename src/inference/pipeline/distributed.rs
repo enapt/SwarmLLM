@@ -34,6 +34,7 @@ impl PipelineExecutor {
             return Ok(InferenceOutput {
                 request_id,
                 content: String::new(),
+                reasoning: None,
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 finish_reason: "length".to_string(),
@@ -693,7 +694,7 @@ impl PipelineExecutor {
         // `finalize_reply_text`. This path previously trimmed before scrubbing
         // and skipped the leading-newline cleanup, so it could still return an
         // answer-less reply after the scrub was supposedly everywhere.
-        crate::inference::finalize_reply_text(&mut generated_text, &stop_strings);
+        let finished = crate::inference::finalize_reply_text(&mut generated_text, &stop_strings);
 
         // Batch credit write — one DB persist for the entire request instead of per-token.
         // Formula: rate * tokens (no layer multiplier — balanced with consume side).
@@ -721,6 +722,7 @@ impl PipelineExecutor {
         let output = InferenceOutput {
             request_id,
             content: generated_text,
+            reasoning: finished.reasoning,
             prompt_tokens: prompt_token_count.unwrap_or_else(|| prompt.chars().count() / 4) as u32,
             completion_tokens: clean_tokens.len() as u32,
             finish_reason: if finish_reason.is_empty() {
@@ -3312,7 +3314,8 @@ impl PipelineExecutor {
             None => {
                 let (mut content, ids, prompt_tokens) =
                     partial.expect("produced_any is false without a partial");
-                crate::inference::finalize_reply_text(&mut content, self.reply_stops().await);
+                let finished =
+                    crate::inference::finalize_reply_text(&mut content, self.reply_stops().await);
                 tracing::info!(
                     request_id = %request_id,
                     completion_tokens = ids.len(),
@@ -3335,6 +3338,7 @@ impl PipelineExecutor {
                 return Ok(Some(InferenceOutput {
                     request_id,
                     content,
+                    reasoning: finished.reasoning,
                     prompt_tokens,
                     completion_tokens: ids.len() as u32,
                     finish_reason: "length".to_string(),
@@ -3354,7 +3358,8 @@ impl PipelineExecutor {
         }
         // Finalised like any other reply — a partial is still a reply, and the
         // text accumulated here has been through no scrub at all (gotcha #643).
-        crate::inference::finalize_reply_text(&mut content, self.reply_stops().await);
+        let finished =
+            crate::inference::finalize_reply_text(&mut content, self.reply_stops().await);
         tracing::info!(
             request_id = %request_id,
             completion_tokens = ids.len(),
@@ -3366,6 +3371,7 @@ impl PipelineExecutor {
             InferenceOutput {
                 request_id,
                 content,
+                reasoning: finished.reasoning,
                 prompt_tokens,
                 completion_tokens: ids.len() as u32,
                 finish_reason: crate::inference::FINISH_REASON_INTERRUPTED.to_string(),

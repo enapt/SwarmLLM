@@ -683,6 +683,7 @@ impl ModelExecutor {
                 FinishReason::Stop
             },
             matched_stop_sequence,
+            reasoning: None,
         })
     }
 
@@ -724,6 +725,7 @@ impl ModelExecutor {
                 FinishReason::Stop
             },
             matched_stop_sequence: None,
+            reasoning: None,
         })
     }
 
@@ -740,7 +742,9 @@ impl ModelExecutor {
         })?;
         // Reply text is finalised in exactly one place — see
         // `finalize_reply_text`.
-        crate::inference::finalize_reply_text(&mut output, &params.stop);
+        let mut result = result;
+        result.reasoning =
+            crate::inference::finalize_reply_text(&mut output, &params.stop).reasoning;
         Ok((output, result))
     }
 
@@ -1185,6 +1189,7 @@ impl ModelExecutor {
             // Speculative path: stop-sequence detection lives in the worker
             // path (not exercised here today). Leave None.
             matched_stop_sequence: None,
+            reasoning: None,
         };
 
         Ok((gen_result, spec_state))
@@ -1200,6 +1205,11 @@ pub struct GenerationResult {
     /// Populated only when `finish_reason == Stop` and the match was a
     /// custom stop sequence (not EOS).
     pub matched_stop_sequence: Option<String>,
+    /// The closed scratchpad `finalize_reply_text` took off the reply — set
+    /// only by [`ModelExecutor::generate`], the one executor call that
+    /// finalises; `None` from a streamed generation, whose consumer reads the
+    /// text as it comes (#141).
+    pub reasoning: Option<String>,
 }
 
 /// Run a synchronous generation loop without starving the async runtime.

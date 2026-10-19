@@ -1467,7 +1467,7 @@ impl PipelineExecutor {
         // the peer correctly kept. What is left — the control-token scrub, the
         // leading reasoning block, the stranded newlines — is the part no peer
         // can have done on our behalf.
-        crate::inference::finalize_reply_text(&mut content, &[]);
+        let finished = crate::inference::finalize_reply_text(&mut content, &[]);
 
         crate::inference::report_short_reply(
             &request_id,
@@ -1478,6 +1478,7 @@ impl PipelineExecutor {
         Ok(Some(InferenceOutput {
             request_id,
             content,
+            reasoning: finished.reasoning,
             prompt_tokens,
             completion_tokens,
             finish_reason,

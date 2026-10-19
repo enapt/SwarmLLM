@@ -218,6 +218,14 @@ impl Ord for QueuedRequest {
 pub struct InferenceOutput {
     pub request_id: uuid::Uuid,
     pub content: String,
+    /// A reasoning model's closed scratchpad, which `finalize_reply_text` took
+    /// off the front of `content` — from that call's `FinishedReply`, the
+    /// FIRST one for this text (a second finds none). `None` when there was
+    /// none, and on paths whose text never held one (a cloud provider's).
+    /// OpenAI's non-streamed reply shows it as `message.reasoning_content`, as
+    /// its stream sends `delta.reasoning_content`; Anthropic withholds it, as
+    /// its stream does (#141).
+    pub reasoning: Option<String>,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub finish_reason: String,
@@ -259,6 +267,7 @@ impl InferenceOutput {
         Self {
             request_id,
             content,
+            reasoning: gen_result.reasoning.clone(),
             prompt_tokens: gen_result.prompt_tokens,
             completion_tokens: gen_result.completion_tokens,
             finish_reason,
@@ -464,6 +473,7 @@ mod deliver_result_tests {
         let output = InferenceOutput {
             request_id: req.id,
             content: "hi".into(),
+            reasoning: None,
             prompt_tokens: 1,
             completion_tokens: 1,
             finish_reason: "stop".into(),
@@ -507,6 +517,7 @@ mod deliver_result_tests {
                 Ok(InferenceOutput {
                     request_id: req.id,
                     content: "hi".into(),
+                    reasoning: None,
                     prompt_tokens: 1,
                     completion_tokens: 1,
                     finish_reason: "stop".into(),

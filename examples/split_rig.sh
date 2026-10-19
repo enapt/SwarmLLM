@@ -14,6 +14,10 @@
 #
 # MODES
 #   split  two greedy questions through A; prints the route headers and replies.
+#   reasoning  one greedy question to a reasoning model (default qwen3-1.7b-q8-0)
+#          through the split, streamed and not: the finished scratchpad must be
+#          the same in message.reasoning_content and delta.reasoning_content,
+#          and in neither content (#141). RIG_QUESTION=… asks another question.
 #   kill   one long reply through A, then mid-reply: KILL=A kills A's worker,
 #          KILL=B kills B's worker, KILL=B_UNLOAD unloads the model on B through
 #          the admin API (lands between two forwards, as a user unloading from
@@ -288,7 +292,7 @@
 #          re-plans (503 after 403.8 s on 2026-10-18). PASS = 200, `A took the
 #          refusal: 1`, `A timed out: 0`, `A re-planned: 0`.
 #
-# usage: split_rig.sh split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece|owntiming <binary> [<binary for B>]
+# usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece|owntiming <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -330,7 +334,7 @@ fi
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece|owntiming) ;; *) echo "mode must be split, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, refusepiece or owntiming"; exit 2 ;; esac
+case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece|owntiming) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, refusepiece or owntiming"; exit 2 ;; esac
 if [ -n "${RAM_A:-}${RAM_B:-}" ] && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[resources\]'; then
   echo "RAM_A/RAM_B are written to that node's [resources]; EXTRA_TOML may not open that table too"; exit 2
 fi
@@ -338,7 +342,9 @@ if { [ "$MODE" = context ] || [ "$MODE" = whole ]; } && printf '%s' "${EXTRA_TOM
   echo "$MODE: EXTRA_TOML may not open [inference] — B's ceiling is written there"; exit 2
 fi
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
-if [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ]; then
+if [ "$MODE" = reasoning ]; then
+  MODEL="${MODEL:-qwen3-1.7b-q8-0}"
+elif [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 elif [ "$MODE" = cache ] || [ "$MODE" = handoffcache ]; then
   MODEL="${MODEL:-qwen2.5-0.5b-instruct-fp16}"
@@ -356,13 +362,14 @@ SHARDS=$(ls "$SRC" | sed -n 's/^shard_\([0-9]*\)\.bin$/\1/p' | sed 's/^0*\([0-9]
 LAST=$(echo "$SHARDS" | tail -1)
 N=$(echo "$SHARDS" | wc -l)
 [ "$N" -ge 2 ] || { echo "$MODEL has $N shard file(s) here; a split needs at least 2"; exit 2; }
-if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ]; then
+if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ] || [ "$MODE" = reasoning ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
   # Processor unless asked otherwise: the reference is scored on the processor.
   [ "$MODE" = repeat ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = disconnect ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = keep ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
+  [ "$MODE" = reasoning ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   if [ "$MODE" = route ]; then
     WHOLE_A=1
     for s in $SHARDS; do case ",$SHARDS_A," in *",$s,"*) ;; *) WHOLE_A=0 ;; esac; done
@@ -1078,6 +1085,50 @@ if [ "$MODE" = latekv ]; then
   grep -oE 'prompt_memory_refused=true' "$OUT/A.q2.log" | sort | uniq -c | sed 's/^/latekv: candidate lines /'
   exit 0
 fi
+if [ "$MODE" = reasoning ]; then
+  # #141: a reasoning model's finished scratchpad reaches the NON-streamed reply
+  # as message.reasoning_content, as the stream sends it in
+  # delta.reasoning_content; before, the non-streamed reply dropped it. Greedy,
+  # so both should write the same tokens — after a warm-up, because a split's
+  # FIRST request takes the n-gram path and its numerics can flip a near-tie
+  # (the first run of this mode did, 40 tokens from the end). PASS = both carry
+  # the same non-empty reasoning and the same content, and neither content
+  # holds a scratchpad.
+  Q="${RIG_QUESTION:-What is 17 + 25? Reply with just the number.}"
+  ask "$Q" 16 warmup > /dev/null
+  ask "$Q" 700 nonstream > "$OUT/reasoning.jsonl"
+  body=$(python3 -c 'import json,sys
+print(json.dumps({"model":sys.argv[1],"max_tokens":700,"temperature":0,"stream":True,"messages":[{"role":"user","content":sys.argv[2]}]}))' "$MODEL" "$Q")
+  curl -s -N -m 900 -H "Authorization: Bearer $KA" -H "Content-Type: application/json" \
+       -X POST localhost:8900/v1/chat/completions -d "$body" -o "$OUT/stream.sse"
+  python3 - "$OUT/nonstream.body" "$OUT/stream.sse" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))["choices"][0]
+reasoning, content = m["message"].get("reasoning_content") or "", m["message"].get("content") or ""
+s_reasoning, s_content, s_finish = "", "", None
+for line in open(sys.argv[2]):
+    line = line.strip()
+    if not line.startswith("data:") or line == "data: [DONE]":
+        continue
+    try:
+        d = json.loads(line[5:])
+    except ValueError:
+        continue
+    for ch in d.get("choices", []):
+        delta = ch.get("delta") or {}
+        s_reasoning += delta.get("reasoning_content") or ""
+        s_content += delta.get("content") or ""
+        s_finish = ch.get("finish_reason") or s_finish
+print("non-streamed:", json.dumps({"finish": m["finish_reason"], "reasoning": reasoning[:200], "content": content[:200]}))
+print("streamed:    ", json.dumps({"finish": s_finish, "reasoning": s_reasoning[:200], "content": s_content[:200]}))
+leaked = any(t in c for c in (content, s_content) for t in ("<think>", "</think>"))
+ok = bool(reasoning) and reasoning == s_reasoning and content == s_content and not leaked
+print("reasoning: " + ("PASS" if ok else "FAIL") + f" (reasoning {len(reasoning)} vs {len(s_reasoning)} chars, content equal {content == s_content}, scratchpad in content {leaked})")
+sys.exit(0 if ok else 1)
+PY
+  exit $?
+fi
+
 if [ "$MODE" = split ]; then
   ask "What is the capital of France? Answer in one sentence." 64 q1 | tee "$OUT/replies.jsonl"
   ask "Write a short Python function that returns the factorial of n." 64 q2 | tee -a "$OUT/replies.jsonl"

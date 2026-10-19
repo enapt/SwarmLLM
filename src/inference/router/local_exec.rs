@@ -94,6 +94,7 @@ pub(super) async fn execute_local_batch(
             Ok(InferenceOutput {
                 request_id: request.id,
                 content: String::new(),
+                reasoning: None,
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 finish_reason: "stop".to_string(),
@@ -223,7 +224,11 @@ pub(super) async fn execute_local_batch(
                         // `params.stop`). Same finaliser, so the ordering rule
                         // cannot drift from the other reply paths.
                         let mut finish = gen_result.finish_reason.as_str().to_string();
+                        // Its scratchpad was taken by the executor's own
+                        // pass; this one finds none, and `from_gen_result`
+                        // keeps the executor's.
                         if crate::inference::finalize_reply_text(&mut content, &local_stop_strings)
+                            .stop
                             .is_some()
                         {
                             finish = "stop".to_string();

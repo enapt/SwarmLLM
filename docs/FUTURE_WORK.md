@@ -2251,16 +2251,17 @@ request should name every computer any attempt reached: keep the union of the at
 every computer it was sent to. Check `continuation_after`'s path keeps the same trace, and that
 a hand-off (`remote_generate`) and a delegated split record their peer in the trace first.
 
-#### #141 — A non-streamed reply does not carry a reasoning model's scratchpad; the stream does
-`P3` · api · **OPEN** — deferred 2026-09-28 · history: archive row #141
+#### #141 (b) — The Anthropic surface never shows a reasoning model's scratchpad, even when the request enables thinking
+`P4` · api · **OPEN** — 2026-10-19 (the OpenAI half closed) · history: archive row #141
 
-Streamed, a `<think>` block arrives as `delta.reasoning_content`; non-streamed, a FINISHED block
-is drained by `finalize_reply_text` and dropped. Make `finalize_reply_text` return a struct
-(content + reasoning) that every one of the eight reply sources must destructure (`local_exec`,
-`executor`, `process_pool`, three distributed, speculative, `remote_generate`) — not a second
-helper nobody is obliged to call. Anthropic: emit a `thinking` block only when the request
-enabled thinking, with a signature this server cannot produce; first confirm `api/anthropic`
-drops thinking blocks on input (Claude Code sends them back).
+OpenAI's chat surface now carries a finished scratchpad both ways (`message.reasoning_content`,
+`delta.reasoning_content`); `/v1/messages` withholds it on both, consistently
+(`ReasoningOut::Withheld`, `InferenceOutput::reasoning` unread). Anthropic's shape is a
+`thinking` block, emitted only when the request sets `thinking`, and it carries a `signature`
+this server cannot produce; llama.cpp's server emits one before the text under
+`--reasoning-format deepseek`. Next: confirm what `api/anthropic` does with a `thinking` block a
+client sends back (Claude Code does), then emit one for a request that enabled thinking, from the
+same `InferenceOutput::reasoning`, streamed as `thinking_delta`.
 
 #### #196 — MCP reports every tool failure as a protocol error, never `isError`
 `P3` · api · **OPEN** — 2026-08-18 · history: archive § "MCP reports every tool failure as a protocol error, never `isError`"
@@ -2753,9 +2754,6 @@ archive under the named heading. Reopen one only with the evidence its line name
 - **"Shard file missing on disk — skipping registration" once per boot per missing part** —
   startup cannot tell never-held from vanished; a per-model summary is the optional quieting.
   Archive § "Log noise observed on a live node".
-- **A reply that is ONLY a finished `<think>` block** shows the scratchpad when streamed and
-  nothing when not — left deliberately (no field report; #141 is the general fix). Archive §
-  "Known and deliberately left: a reply that is ONLY a scratchpad".
 - **`candle-*` held at 0.10** — vendored and patched; bump only when upstream carries something
   we need. Archive § "Major-version dependency migrations Dependabot may not do".
 
@@ -2765,7 +2763,18 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b), #91 (2h), #285; #186 decided)
+**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b), #91 (2h), #285, #141; #186 decided)
+- #141 — **A non-streamed reply carries a reasoning model's finished scratchpad, as the stream
+  does.** Streamed, a `<think>` block (or Gemma 4's thought channel) arrived as
+  `delta.reasoning_content`; non-streamed, `finalize_reply_text` removed it and nothing kept it.
+  The finaliser now returns it (`FinishedReply`, `#[must_use]`), every reply source puts it in the
+  REQUIRED `InferenceOutput::reasoning` — the worker pool, the in-process executor, the three
+  distributed paths, speculation, the hand-off, a continued reply — and the OpenAI reply writes it
+  as `message.reasoning_content` (llama.cpp's, SGLang's and DeepSeek's name), tool calls included.
+  The in-process speculative path returned its text unfinalised and now goes through the same
+  finaliser. A reply that is only a scratchpad now shows it both ways (it was listed as
+  deliberately left). Rig `split_rig.sh reasoning` (qwen3-1.7b): split 558/558 and local 537/537
+  characters, same content; v0.3.244: 0 against 558. Anthropic stays withheld both ways: #141 (b).
 - #186 — an emptied reply stays a 200: moved to § "Decided — not doing" (Product scope).
 - #285 — **A tensor forward is never sent unsealed while encryption is on.** Both senders
   (`handle_send_tensor`, the pipeline stream's `encode_forward_for_wire`) looked the peer's NodeId

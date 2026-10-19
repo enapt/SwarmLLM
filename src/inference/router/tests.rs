@@ -917,6 +917,7 @@ fn salvage(request_id: uuid::Uuid, content: &str) -> super::InferenceOutput {
     super::InferenceOutput {
         request_id,
         content: content.to_string(),
+        reasoning: None,
         prompt_tokens: 7,
         completion_tokens: content.split_whitespace().count() as u32,
         finish_reason: crate::inference::FINISH_REASON_INTERRUPTED.to_string(),

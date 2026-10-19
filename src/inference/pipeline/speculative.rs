@@ -619,10 +619,13 @@ impl PipelineExecutor {
             .collect();
         let completion_tokens = clean.len() as u32;
         let mut content = decoder.decode_tokens(&clean);
-        let matched = crate::inference::finalize_reply_text(&mut content, self.reply_stops().await);
+        let finished =
+            crate::inference::finalize_reply_text(&mut content, self.reply_stops().await);
+        let matched = finished.stop;
         InferenceOutput {
             request_id,
             content,
+            reasoning: finished.reasoning,
             prompt_tokens,
             completion_tokens,
             // A reply a stop sequence ended did not run out of room. Every

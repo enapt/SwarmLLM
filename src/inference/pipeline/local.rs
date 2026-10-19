@@ -287,7 +287,7 @@ impl PipelineExecutor {
                     return Err(SwarmError::NoModelLoaded);
                 }
                 let mut content = String::new();
-                let (gen_result, spec_state) =
+                let (mut gen_result, spec_state) =
                     crate::inference::executor::without_starving_the_runtime(|| {
                         executor.generate_speculative(
                             &mut draft,
@@ -304,6 +304,13 @@ impl PipelineExecutor {
                     acceptance_rate = %spec_state.acceptance_rate(),
                     "Speculative decoding acceptance rate"
                 );
+                // Finalised like every other reply source — this one returned
+                // its text raw, control tokens and scratchpad included (#141).
+                gen_result.reasoning = crate::inference::finalize_reply_text(
+                    &mut content,
+                    &self.request.sampling_params.stop,
+                )
+                .reasoning;
                 return Ok(InferenceOutput::from_gen_result(
                     self.request.id,
                     self.request.session_id.clone(),

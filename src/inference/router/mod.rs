@@ -1593,7 +1593,8 @@ impl InferenceRouter {
                     // once, as a reply from one machine is.
                     let streamed = trace.streamed_so_far();
                     let mut text = streamed.text;
-                    crate::inference::finalize_reply_text(&mut text, &[]);
+                    whole.reasoning =
+                        crate::inference::finalize_reply_text(&mut text, &[]).reasoning;
                     whole.content = text;
                     whole.completion_tokens = streamed.tokens.max(whole.completion_tokens);
                     whole.prompt_tokens = whole.prompt_tokens.saturating_sub(resume.tokens);
