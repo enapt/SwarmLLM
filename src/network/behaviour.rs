@@ -48,6 +48,32 @@ const _: () = assert!(
     KAD_PROVIDER_TTL_SECS < crate::model::registry::RETRACTION_HONOURED_SECS,
     "a provider record must expire before the retraction that overrules it"
 );
+/// How often this node refreshes its Kademlia routing table — libp2p's
+/// periodic bootstrap: a lookup of its own id, then one random-key lookup per
+/// bucket farther than its closest neighbour's.
+///
+/// 10 min, go-libp2p-kad-dht's default (`RoutingTable.RefreshInterval`);
+/// libp2p-kad's own is 5 min, and the discovery tick used to start a second
+/// refresh every 5 min as well, which only pushed libp2p's timer back. In a
+/// swarm smaller than k (20) every lookup asks every node, so one refresh is
+/// ~5 lookups per peer, each answered with up to 20 peers and their addresses
+/// (~3.7 KB). On 2026-10-19 the live node answered 8.3 `find_node` a minute
+/// (`kad_inbound`, 3714 s, no provider publication in the window): 509 B/s of
+/// upload, the largest share after gossip. A peer is still in the table the
+/// moment it connects — libp2p inserts it and, while the table is short of k,
+/// refreshes at once — and the discovery tick still redials cached peers every
+/// 5 min. FUTURE_WORK #91 (2h). A/B: `SWARMLLM_KAD_REFRESH_SECS=300`.
+const KAD_REFRESH_SECS: u64 = 10 * 60;
+
+/// [`KAD_REFRESH_SECS`], or `SWARMLLM_KAD_REFRESH_SECS` for an A/B run.
+fn kad_refresh_interval() -> Duration {
+    let secs = std::env::var("SWARMLLM_KAD_REFRESH_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(KAD_REFRESH_SECS);
+    Duration::from_secs(secs)
+}
 /// GossipSub mesh heartbeat interval — controls mesh maintenance cadence.
 const GOSSIPSUB_HEARTBEAT_SECS: u64 = 10;
 /// request_response per-request timeout. 10 minutes accommodates CPU-only
@@ -168,6 +194,12 @@ pub fn build_behaviour(
     kad_config.set_provider_record_ttl(Some(Duration::from_secs(KAD_PROVIDER_TTL_SECS)));
     kad_config
         .set_provider_publication_interval(Some(Duration::from_secs(KAD_PUBLISH_INTERVAL_SECS)));
+    let kad_refresh = kad_refresh_interval();
+    kad_config.set_periodic_bootstrap_interval(Some(kad_refresh));
+    tracing::info!(
+        kad_refresh_secs = kad_refresh.as_secs(),
+        "Kademlia routing-table refresh interval"
+    );
     let mut kademlia = kad::Behaviour::with_config(local_peer_id, store, kad_config);
     // Use Server mode so nodes accept each other's DHT queries.
     // Client mode rejects inbound queries — when BOTH nodes are Client, rejected

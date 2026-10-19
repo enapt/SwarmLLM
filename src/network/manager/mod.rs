@@ -1563,7 +1563,10 @@ impl NetworkManager {
                     } else {
                         tracing::debug!("Discovery tick");
                         self.explain_a_silent_router();
-                        let _ = discovery::trigger_bootstrap(&mut self.swarm);
+                        // No routing-table refresh here: libp2p runs its own
+                        // (`behaviour::KAD_REFRESH_SECS`), and a second one
+                        // every tick only pushed its timer back while peers
+                        // answered ~5 lookups each (FUTURE_WORK #91 (2h)).
                         // Re-dial cached peers that we're not currently connected to.
                         // This handles peers that went offline and came back.
                         let cached = self.dialable_peer_cache();
@@ -1965,8 +1968,9 @@ impl NetworkManager {
                         // Disconnect stale peers to reset the yamux session.
                         // The connection task may be stuck (handler not polled, SubstreamRequested
                         // timeout not firing). Disconnecting kills the stale TCP+yamux session.
-                        // The peer will be reconnected on the next send_request() or Kademlia
-                        // re-bootstrap (`discovery::DISCOVERY_INTERVAL`, 5 min).
+                        // The peer will be reconnected on the next send_request() or the
+                        // discovery tick's redial of cached peers (`discovery::DISCOVERY_INTERVAL`,
+                        // 5 min).
                         for peer in &stale_peers {
                             if self.swarm.is_connected(peer) {
                                 tracing::warn!(

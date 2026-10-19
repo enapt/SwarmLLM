@@ -387,7 +387,7 @@ SwarmLLM uses a 5-layer zero-config discovery stack. Each layer is independent �
 │    physical RTT < 2.5ms → auto-detect as LAN peer (TP).    │
 │                                                             │
 │  Layer 5: Kademlia DHT + Bootstrap                           │
-│    Existing: --bootstrap flag, Kademlia re-bootstrap 5 min  │
+│    Existing: --bootstrap flag, Kademlia refresh 10 min      │
 │    (10/30/60/120 s retries while no peer is connected)      │
 │                                                             │
 │  Anti-Gaming: Subnet Clustering Detection                    │

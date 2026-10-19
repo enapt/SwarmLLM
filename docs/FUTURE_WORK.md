@@ -72,7 +72,9 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    Kademlia answering other nodes' lookups, ~2.1 KB/s; (2f) republishes provider records every 4 h
    instead of 20 min (v0.3.243). Field re-read 10-18: upload 2.7 KB/s, but the Kademlia answers
    fell to 0.90 KB/s, 2.3x, not the 12x the republication alone predicted. `kad_inbound` ((2g),
-   v0.3.244) now counts which lookups peers send; next, re-read it on the field.
+   v0.3.244) read on the field 10-19: upload 2.4 KB/s, Kademlia answers 0.51 KB/s, every one a
+   `find_node` — peers' routing-table refreshes. (2h) refreshes every 10 min instead of 5 (not yet
+   released); next, re-read once the fleet runs it, then the answers' size.
 8. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
     ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
     (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
@@ -1012,7 +1014,7 @@ libp2p-connection-limits has no per-protocol exemption). A dial by bare address 
 does the same.
 
 #### #91 — An idle node still uploads ~5.5 KB/s, most of it no longer gossip, and a total traffic ceiling does not exist
-`P2` · network · **PARTIAL** — 2026-10-18 · history: archive row #91, `docs/invariants/network.md`
+`P2` · network · **PARTIAL** — 2026-10-19 · history: archive row #91, `docs/invariants/network.md`
 
 Trickle suppression (`MANIFEST_QUIET_WINDOW`), per-(model, hash) `manifest_heard`,
 per-category counters and the region-demand split shipped in .200-.206 and halved it (42 →
@@ -1105,8 +1107,22 @@ counts; DIAGNOSTICS § "What is the upload that is not gossip?"). Three idle nod
 streams, and each joiner's 5-minute routing-table refresh asked it 5 `find_node`. A swarm of N nodes
 therefore sends each ~5(N-1) refresh lookups every 5 min, each answered with up to 20 peers and their
 addresses — the first suspect; go-libp2p-kad-dht refreshes every 10 min and skips a bucket refreshed
-within that interval (`RoutingTable.RefreshInterval`, `rtrefresh/rt_refresh_manager.go`). Next: re-read it on the field after the release, then change whichever kind carries
-the ~0.6 KB/s. **(2c) fixed 2026-10-17, released in v0.3.242**: a restart gossiped every
+within that interval (`RoutingTable.RefreshInterval`, `rtrefresh/rt_refresh_manager.go`). **Field
+re-read 10-19 06:10-07:12Z** (`~/swarmllm-91/out_244/r1,r2`, 3714 s, the live node up 32 min at r1):
+upload 2410 B/s = gossip 1340 (message data), kad `peer` 509 B/s on 8.3 streams a minute, relay hop
+195, our direct messages 157. `kad_inbound`: 516 `find_node`, 0 `get_provider`, 0 `add_provider` —
+the whole row is peers' refreshes, each answer ~3.7 KB listing 17 peers. **(2h) 2026-10-19, not yet
+released**: libp2p's refresh runs every 10 min (`behaviour::KAD_REFRESH_SECS`, go-libp2p-kad-dht's
+interval), and the discovery tick no longer starts one of its own. That call ran every ~295 s, just
+inside libp2p's 300 s, so it only pushed libp2p's timer back: the old cadence was ONE refresh per
+5 min, not two (each joiner's log, `kad_refresh_rig.sh` on v0.3.244). Rig (`examples/kad_refresh_rig.sh`,
+three arms at once, 1503 s): v0.3.244 5 refreshes ~296 s apart, 27 `find_node` at the hub; this
+build at `SWARMLLM_KAD_REFRESH_SECS=300` 5, 15; this build 2, 592 s apart, 6. Expected on the field
+once peers update: about half the `find_node`, ~0.25 KB/s. Next: re-read `kad_inbound` after the
+release; then the answers' SIZE — ~215 B per listed peer is several addresses each (unmeasured:
+`dial_bootstrap_peers` hands Kademlia every cached address of a peer, and a routing entry's address
+list has no cap in libp2p-kad 0.48), and the walk itself (go skips a bucket refreshed within the
+interval; libp2p-kad refreshes every bucket past the nearest neighbour's each time). **(2c) fixed 2026-10-17, released in v0.3.242**: a restart gossiped every
 manifest it holds in full, twice, a few seconds apart (§ Closed). Left: the
 mesh is still sized once at startup, from peers ever met rather than reachable now (a rig first
 before going further: a thinner mesh partitions sooner); (3) a both-direction traffic ceiling at the transport
@@ -2774,7 +2790,15 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b))
+**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b), #91 (2h))
+- #91 (2h) — **An idle node answers about half as many routing-table lookups.** Every node
+  refreshed its Kademlia routing table every 5 min, and in a swarm smaller than 20 each refresh asks
+  every peer ~5 lookups, each answered with ~3.7 KB of peers and addresses: on 10-19 that was all of
+  the live node's 509 B/s of Kademlia upload. libp2p now refreshes every 10 min
+  (`behaviour::KAD_REFRESH_SECS`, go-libp2p-kad-dht's interval) and the discovery tick no longer
+  starts a refresh of its own. Rig `examples/kad_refresh_rig.sh`: 5 refreshes in 25 min → 2, the
+  hub's answered `find_node` 15 → 6 on one binary (A/B `SWARMLLM_KAD_REFRESH_SECS=300`). A peer still
+  enters the table the moment it connects. Left in #91: the answers' size, re-read on the field.
 - #115 (2b) — **Gemma 3 reads a picture as a whole, as llama.cpp does.** Its picture rows were
   read in order like text; Gemma 3 was trained with every row of a picture seeing every other
   (llama.cpp `mtmd_decode_use_non_causal`), and read in order it called a red circle, a blue
