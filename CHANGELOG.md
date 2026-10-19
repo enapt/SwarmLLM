@@ -1,5 +1,81 @@
 # Changelog
 
+## [0.3.245-alpha] — 2026-10-20
+
+**Gemma 3 can read pictures, and pictures go where you put them.** A picture sent with a message
+used to be placed in front of the whole conversation, whatever the message said around it; the
+Anthropic API dropped pictures altogether. Every API now puts a picture exactly where it was in
+the message, a picture inside an Anthropic tool result included. Gemma 3 reads a picture the way
+it was trained to, all of it at once: on a test image of three shapes it used to describe a
+striped flag, and it now names the shapes. Scored through llama.cpp's own picture reader, 95-97%
+of its words are llama.cpp's first choice, where 87-91% were before. A picture request split
+across several computers needs every one of them on this release; an older one is left out of
+that request's plan.
+
+**Pictures work on computers without a graphics card.** Every picture request on a processor-only
+computer failed with "attn_norm: unsupported dtype for rmsnorm F16". A picture sent to a model
+this computer holds whole was answered from the text alone. And a node withdrew its claim to a
+model's image reader a few minutes after downloading it, so pictures then found none. All three
+are fixed.
+
+**LLaVA reads a picture the way LLaVA was trained to.** Five differences from LLaVA's own image
+reader are gone (576 picture rows, not 577; the right activation; no extra normalisation; the
+picture letterboxed on its mean colour, not stretched). Its rows now match an exact reading of the
+same file on every row, where they matched at 0.917 at the median.
+
+**Small models write replies 4-18% faster on a graphics card.** The part of each step that looks
+back over a short conversation kept most of the card idle. On an RTX 3070 Laptop, in tokens a
+second (llama.cpp in brackets): TinyLlama 1.1B 252-258 → 297-304 (312), Gemma 3 1B 175-187 →
+196-209 (210), Llama 3.2 1B 187-189 → 197-202 (209), Gemma 2 2B 118-120 → 126-127 (128), Llama
+3.2 3B 116-117 → 121-122 (126), Gemma 4 E2B 101-104 → 108-109 (125). Long conversations are
+unchanged.
+
+**A temperature-0 reply on the processor is the same every time.** With the prompt cache on (the
+default), the same request gave one reply the first time and a different one on every repeat:
+reading the conversation from the cache added up one row of numbers in a different order. Both
+ways now add it up the same way, bit for bit. Replies agree with llama.cpp as closely as before,
+and reading a long prompt is slightly faster (6,144 tokens: 58.2 tokens a second, was 56.6).
+
+**Splits across computers recover faster when one of them has trouble.**
+- When a reply is split across three computers and the last one cannot read a step, the
+  computer driving the request now hears about it at once. In a test it waited 45.8 s for that
+  step to time out; it now recovers in 1.5 s.
+- Two computers change the key that encrypts their traffic every ten minutes. If one change did
+  not complete, the next cleanup threw away a key both ends were still using, and the next
+  message between them could not be read. The old key is now kept for reading for three minutes,
+  never for sending, while a new one is agreed at once.
+- With encryption on (the default), a split's forward to a computer that had just reconnected
+  could go out without its own per-session seal. The connection itself is always encrypted, so
+  no one else could read it. It is now always sealed, or not sent.
+
+**Reasoning models' thinking reaches non-streamed replies.** A streamed reply from a model such as
+Qwen3 carried its thinking as `reasoning_content`; a non-streamed one dropped it. It now carries it
+as `message.reasoning_content`, the name llama.cpp, SGLang and DeepSeek use.
+
+**MCP tools that fail answer with a result the model can read.** A failed `chat` call (a model that
+does not exist, a missing argument, a reply that timed out) came back as a protocol error, which a
+client may never show its model. It is now an ordinary result marked `isError`, with the reason
+and the same advice the dashboard gives.
+
+**A reply that was moved to another computer names every computer it reached.** A reply re-planned
+after a failure reported only the computer that finished it. Replies now add `attempts`,
+`all_nodes` and `all_peers` (headers `x-swarm-attempts`, `x-swarm-all-nodes`,
+`x-swarm-all-peers`), and the dashboard's chat says "tried 1 other computer first". The
+dashboard also shows the route of a streamed reply, which it had not.
+
+**Fedora and other .rpm installs start.** The .rpm never created the `swarmllm` user its service
+runs as, so the service restarted in a loop. It now creates the user and the data folder, seeds
+the config once, restarts the node on upgrade, and stops and disables it on removal, as the .deb
+does.
+
+**An idle node uploads less.** It refreshed its routing table every 5 minutes, which in a small
+swarm was all of its routing upload (about 509 bytes a second on the live node). It now refreshes
+every 10 minutes, as go-libp2p does: in a three-node test, 15 lookups answered became 6.
+
+**Stopping a node no longer logs its model processes as crashed.** Every stop logged "Worker reader
+exiting — evicting" as a warning. A worker that ends because the node is stopping is now a debug
+line; one that dies while the node runs is still a warning.
+
 ## [0.3.244-alpha] — 2026-10-19
 
 **Replies on a graphics card no longer slow down after 64 tokens.** When a conversation
