@@ -240,10 +240,9 @@ pub(crate) fn finalize_reply_text(text: &mut String, stops: &[String]) -> Option
 /// "stop"`, HTTP 200 — indistinguishable from a real answer — so nothing in the
 /// response, the request counters or the latency histogram moves when it
 /// happens, and how OFTEN it happens on a node was unknowable except by reading
-/// its log. This is the figure the open question "should an emptied reply fail
-/// the request so a client re-routes?" needs before it can be answered: an
-/// empty reply can be legitimate (an empty prompt), so the rate has to be seen
-/// first. A `static` because `finalize_reply_text` is a free function reached
+/// its log. An emptied reply stays a 200, as OpenAI, vLLM and llama.cpp answer
+/// an empty generation — an error would fail legitimate ones too (FUTURE_WORK
+/// § "Decided", #186); this figure is what would reopen that. A `static` because `finalize_reply_text` is a free function reached
 /// from all three reply-text sources and has no state to hang a counter on.
 pub static EMPTY_REPLIES_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 

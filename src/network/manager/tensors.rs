@@ -188,8 +188,9 @@ impl NetworkManager {
     }
 
     /// Send a tensor forward to a specific peer via the unified binary tensor protocol.
-    /// Uses WIRE_TAG_TENSOR (0x01) framing. Encrypts activations when an encryption
-    /// session exists, falls back to plaintext.
+    /// Uses WIRE_TAG_TENSOR (0x01) framing. With encryption on (the default) the
+    /// activations are sealed with the peer's session key, and a forward that
+    /// cannot be sealed FAILS — it never falls back to plaintext (#285).
     ///
     /// Encryption path (default config — `enable_encryption=true`) offloads the
     /// CPU-bound ChaCha20-Poly1305 sealing + protocol encoding to a
@@ -262,10 +263,24 @@ impl NetworkManager {
             // direct send over the circuit.
         }
 
-        // Try to find the peer's NodeId for encryption
-        let peer_node_id = self.peer_to_node_id(&peer_id);
+        // Sealed whenever encryption is on, never sent plain (#285): an id
+        // with no key in it is failed here, and a seal that fails in the
+        // encrypt task comes back as `FailEncodedTensor` — both through
+        // `fail_tensor_forward`, so a chained hop tells its coordinator.
         let use_encryption =
-            self.shared_state.config.network.enable_encryption && peer_node_id.is_some();
+            match crate::network::pipeline_stream::seal_for(&peer_id, &self.shared_state) {
+                Ok(node) => node.is_some(),
+                Err(e) => {
+                    tracing::warn!(
+                        %peer_id,
+                        request_id = %forward.request_id,
+                        "DIAG: the peer's id carries no key to seal for — failing the tensor \
+                         forward instead of sending it unsealed"
+                    );
+                    self.fail_tensor_forward(forward.request_id, &peer_id, e.to_string());
+                    return;
+                }
+            };
 
         if use_encryption {
             // Encryption path — offload ChaCha20 sealing + encode to a spawn
@@ -275,46 +290,11 @@ impl NetworkManager {
             // wire bytes are byte-identical with the persistent-stream path.
             let shared_state = self.shared_state.clone();
             let internal_cmd_tx = self.internal_cmd_tx.clone();
-            let request_id = forward.request_id;
-            let num_layers = forward.layer_range.1.saturating_sub(forward.layer_range.0);
-            let activation_bytes = forward.activations.len();
-            let target_peer_bytes_for_cmd = target_peer_bytes.clone();
             tokio::spawn(async move {
-                let payload = match crate::network::pipeline_stream::encode_forward_for_wire(
-                    &forward,
-                    &peer_id,
-                    &shared_state,
-                ) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        // SEC: Never fall back to plaintext — fail the forward
-                        // instead. Plaintext fallback would silently strip
-                        // encryption, allowing eavesdroppers to read
-                        // intermediate tensor activations.
-                        tracing::warn!(
-                            error = %e,
-                            %request_id,
-                            %peer_id,
-                            activation_len = activation_bytes,
-                            "DIAG: tensor encrypt+encode failed — dropping forward"
-                        );
-                        fail_pending_forward(
-                            &shared_state,
-                            request_id,
-                            &peer_id,
-                            format!("Encryption failed: {e}"),
-                        );
-                        return;
-                    }
-                };
-                let cmd = NetworkCommand::SendEncodedTensor {
-                    target_peer_bytes: target_peer_bytes_for_cmd,
-                    payload,
-                    request_id,
-                    num_layers,
-                    activation_bytes,
-                };
+                let request_id = forward.request_id;
+                let cmd = sealed_or_failed(&forward, &peer_id, target_peer_bytes, &shared_state);
                 if let Err(e) = internal_cmd_tx.send(cmd).await {
+                    // The loop is gone: only a local waiter is left to tell.
                     tracing::warn!(
                         error = %e,
                         %request_id,
@@ -336,6 +316,12 @@ impl NetworkManager {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to encode tensor forward");
+                // Said to the waiter, or it sits out its whole deadline.
+                self.fail_tensor_forward(
+                    forward.request_id,
+                    &peer_id,
+                    format!("Failed to encode tensor forward: {e}"),
+                );
                 return;
             }
         };
@@ -357,6 +343,22 @@ impl NetworkManager {
             activation_bytes,
             /*encrypted*/ false,
         );
+    }
+
+    /// The other continuation of `handle_send_tensor`'s encryption branch:
+    /// the spawned task could not seal or encode the forward. Failed here, on
+    /// the loop, through the one failure path (#285).
+    pub(super) fn handle_fail_encoded_tensor(
+        &mut self,
+        target_peer_bytes: Vec<u8>,
+        request_id: uuid::Uuid,
+        reason: String,
+    ) {
+        let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, "failed tensor encode")
+        else {
+            return;
+        };
+        self.fail_tensor_forward(request_id, &peer_id, reason);
     }
 
     /// Continuation of `handle_send_tensor`'s encryption branch. The spawned
@@ -1517,6 +1519,48 @@ pub(super) fn ack_deadline_with_payload(base_secs: u64, activation_bytes: usize)
         .min(super::MAX_TENSOR_FORWARD_SECS)
 }
 
+/// The encrypt task's work, off the event loop: seal and encode `forward` for
+/// `peer_id`, and say what the loop does next — `SendEncodedTensor` with the
+/// wire-ready payload, or `FailEncodedTensor` when it cannot be sealed (no
+/// session with the peer yet, most often). Never a plain payload: a forward
+/// that cannot be sealed fails (#285). The failure goes back to the loop
+/// rather than to `fail_pending_forward` here, because only the loop's
+/// `fail_tensor_forward` also tells a chained hop's coordinator — a hop has no
+/// waiter of its own, and the coordinator waited out its whole deadline.
+pub(super) fn sealed_or_failed(
+    forward: &crate::types::LayerForward,
+    peer_id: &libp2p::PeerId,
+    target_peer_bytes: Vec<u8>,
+    shared_state: &crate::daemon::SharedState,
+) -> NetworkCommand {
+    let request_id = forward.request_id;
+    let activation_bytes = forward.activations.len();
+    match crate::network::pipeline_stream::encode_forward_for_wire(forward, peer_id, shared_state) {
+        Ok(payload) => NetworkCommand::SendEncodedTensor {
+            target_peer_bytes,
+            payload,
+            request_id,
+            num_layers: forward.layer_range.1.saturating_sub(forward.layer_range.0),
+            activation_bytes,
+        },
+        Err(e) => {
+            // SEC: never fall back to plaintext — fail the forward instead.
+            tracing::warn!(
+                error = %e,
+                %request_id,
+                %peer_id,
+                activation_len = activation_bytes,
+                "DIAG: tensor encrypt+encode failed — failing the forward"
+            );
+            NetworkCommand::FailEncodedTensor {
+                target_peer_bytes,
+                request_id,
+                reason: format!("Encryption failed: {e}"),
+            }
+        }
+    }
+}
+
 /// Resolve the `pending_layer_results` waiter for `request_id` with a
 /// `LayerResult::error(reason)`. Used from within `tokio::spawn` closures that
 /// don't have `&mut self` access (where the
@@ -1896,6 +1940,103 @@ mod goodput_tests {
         let a = g.estimate();
         for _ in 0..5 {
             assert_eq!(g.estimate(), a);
+        }
+    }
+}
+
+#[cfg(test)]
+mod seal_tests {
+    use super::sealed_or_failed;
+    use crate::types::NetworkCommand;
+    use std::sync::Arc;
+
+    fn forward() -> crate::types::LayerForward {
+        crate::types::LayerForward {
+            request_id: uuid::Uuid::new_v4(),
+            sequence_num: 1,
+            index_pos: 0,
+            activations: vec![9u8; 64],
+            format: crate::types::TensorFormat::FP32,
+            model_id: crate::types::ModelId("m".into()),
+            layer_range: (4, 8),
+            tp_meta: None,
+            vision_embeddings: None,
+            chain: Vec::new(),
+            sender_peer_bytes: None,
+            requester_node_id: None,
+            pre_embedded: false,
+            generated_ids: Vec::new(),
+            adapter_id: None,
+            draft_tokens: Vec::new(),
+            spec_logits_requested: false,
+            spec_walk_at_tail: false,
+            coupling_seed: None,
+            stream_seq: None,
+            truncate_kv_to: None,
+            prompt_cache: None,
+            chunk_meta: None,
+            sampling: None,
+            prompt_span: None,
+            image_spans: Vec::new(),
+        }
+    }
+
+    /// **A forward the encrypt task cannot seal comes back to the loop as a
+    /// failure** (#285). The task used to tell only a local waiter, and a
+    /// chained hop has none, so its coordinator waited out the whole deadline;
+    /// `FailEncodedTensor` reaches `fail_tensor_forward`, which tells it. It is
+    /// never a plain payload, and with a session it is the sealed one.
+    #[test]
+    fn a_forward_that_cannot_be_sealed_comes_back_to_the_loop_as_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            crate::identity::Identity::generate(),
+            crate::storage::db::Database::open(dir.path()).unwrap(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::inference::executor::ModelExecutor::new(),
+            )),
+            None,
+        );
+        let peer = crate::identity::Identity::generate();
+        let peer_id = crate::network::transport::node_id_to_peer_id(peer.node_id()).unwrap();
+        let fwd = forward();
+
+        match sealed_or_failed(&fwd, &peer_id, peer_id.to_bytes(), &state) {
+            NetworkCommand::FailEncodedTensor {
+                target_peer_bytes,
+                request_id,
+                reason,
+            } => {
+                assert_eq!(target_peer_bytes, peer_id.to_bytes());
+                assert_eq!(request_id, fwd.request_id);
+                assert!(reason.starts_with("Encryption failed"), "{reason}");
+            }
+            other => panic!("no session, yet the task asked the loop for {other:?}"),
+        }
+
+        let peer_sessions =
+            crate::crypto::SessionManager::from_ed25519_key(&peer.signing_key_bytes());
+        state
+            .session_manager
+            .establish_session(peer.node_id(), *peer_sessions.local_public_key());
+        match sealed_or_failed(&fwd, &peer_id, peer_id.to_bytes(), &state) {
+            NetworkCommand::SendEncodedTensor {
+                payload,
+                request_id,
+                num_layers,
+                activation_bytes,
+                ..
+            } => {
+                assert_eq!(request_id, fwd.request_id);
+                assert_eq!((num_layers, activation_bytes), (4, 64));
+                assert_ne!(
+                    payload,
+                    crate::network::protocol::encode_layer_forward(&fwd).unwrap(),
+                    "sealed, never plain"
+                );
+            }
+            other => panic!("a session, yet the task asked the loop for {other:?}"),
         }
     }
 }

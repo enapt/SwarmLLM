@@ -695,23 +695,54 @@ pub fn chunk_layer_forward(forward: &LayerForward, chunk_size_bytes: usize) -> V
     out
 }
 
+/// Which node a tensor forward to `peer_id` is sealed for — the one answer for
+/// every forward send (`NetworkManager::handle_send_tensor`, the pipeline
+/// stream, through [`encode_forward_for_wire`]). FUTURE_WORK #285.
+///
+/// `Ok(None)`: encryption is off, the forward goes plain. `Ok(Some(node))`:
+/// seal it with `node`'s session key — and if there is no session yet (a
+/// reconnect before the key exchange), the seal fails and so does the forward
+/// (the router re-plans); it never goes plain. `Err`: the peer's id carries no
+/// Ed25519 key, so no session can exist for it — not a SwarmLLM node.
+///
+/// The node is DERIVED from the peer's id (`transport::peer_id_to_node_id`:
+/// both come from the same Ed25519 key, and Identify records exactly that
+/// pair), never looked up. Both senders used to look it up in a map that a
+/// reconnect or a pruned entry could leave empty, and then sent the forward
+/// unsealed; nothing on the receiving side asks whether a plain forward was
+/// expected. The transport (Noise, QUIC/TLS, relay circuits too) still kept it
+/// from third parties; what went was the session seal and its AAD binding.
+///
+/// `enable_encryption` is read from the boot config: it is a startup setting,
+/// not one the Settings panel changes.
+pub fn seal_for(
+    peer_id: &PeerId,
+    shared_state: &SharedState,
+) -> Result<Option<crate::types::NodeId>, SwarmError> {
+    if !shared_state.config.network.enable_encryption {
+        return Ok(None);
+    }
+    crate::network::transport::peer_id_to_node_id(peer_id)
+        .map(Some)
+        .ok_or_else(|| {
+            SwarmError::Network(
+                "the peer's id carries no key a session can be made with, so the forward \
+                 cannot be sealed for it"
+                    .into(),
+            )
+        })
+}
+
 /// Encode a `LayerForward` into wire bytes suitable for a pipeline-stream
-/// frame. Applies ChaCha sealing when encryption is enabled and a session
-/// exists for the target peer. Mirrors the logic in
-/// `NetworkManager::handle_send_tensor` so the RR and stream paths produce
-/// byte-identical frames.
+/// frame. Sealed with the peer's session key whenever encryption is on
+/// ([`seal_for`] decides, and refuses rather than send it plain). Both the RR
+/// and stream paths encode through here, so their frames are byte-identical.
 pub fn encode_forward_for_wire(
     forward: &LayerForward,
     peer_id: &PeerId,
     shared_state: &SharedState,
 ) -> Result<Vec<u8>, SwarmError> {
-    let peer_node_id = shared_state.peer_to_node_id_from_registry(peer_id);
-    let use_encryption = shared_state.config.network.enable_encryption && peer_node_id.is_some();
-
-    if use_encryption {
-        let node_id = peer_node_id.ok_or_else(|| {
-            SwarmError::Network("encryption requested but no NodeId for peer".into())
-        })?;
+    if let Some(node_id) = seal_for(peer_id, shared_state)? {
         // Single source of truth — `protocol::build_layer_forward_aad` is
         // shared with the RR encrypt path (`network/manager/tensors.rs`)
         // and the decrypt path (`decode_layer_forward_encrypted`). Inline
@@ -855,6 +886,74 @@ mod tests {
             decode_inbound_forward(&frame, TENSOR_TAG_ENCRYPTED, &stranger, &state),
             InboundForward::Dropped
         ));
+    }
+
+    /// **A forward is never sent unsealed while encryption is on** (#285). To
+    /// a peer this node could not find in its map — a reconnect before
+    /// Identify, a pruned entry — both senders sent it plain, and no receiver
+    /// asks whether a plain forward was expected. Now the node is derived from
+    /// the peer's id, so a peer never identified is still sealed for; with no
+    /// session yet the seal fails and so does the forward. Only with
+    /// encryption off does a forward go plain.
+    #[test]
+    fn a_forward_is_never_sent_unsealed_while_encryption_is_on() {
+        let state = test_state();
+        assert!(state.config.network.enable_encryption, "the default");
+        let forward = base_layer_forward(vec![3u8; 64]);
+        let plain = protocol::encode_layer_forward(&forward).unwrap();
+
+        // A real node this one has never identified: no map entry at all.
+        let peer = crate::identity::Identity::generate();
+        let peer_node = peer.node_id().clone();
+        let peer_id = crate::network::transport::node_id_to_peer_id(&peer_node).unwrap();
+        assert!(state.peer_to_node_id_from_registry(&peer_id).is_none());
+        assert_eq!(
+            seal_for(&peer_id, &state).unwrap(),
+            Some(peer_node.clone()),
+            "the node is read off the peer's id, not out of a map"
+        );
+        assert!(
+            encode_forward_for_wire(&forward, &peer_id, &state).is_err(),
+            "no session with it yet: the seal fails, and nothing goes out plain"
+        );
+
+        // Once the two hold a session, the forward is sealed for that peer.
+        let peer_sessions =
+            crate::crypto::SessionManager::from_ed25519_key(&peer.signing_key_bytes());
+        let local_node = state.identity.node_id().clone();
+        state
+            .session_manager
+            .establish_session(&peer_node, *peer_sessions.local_public_key());
+        peer_sessions.establish_session(&local_node, *state.session_manager.local_public_key());
+        let frame = encode_forward_for_wire(&forward, &peer_id, &state).unwrap();
+        assert_ne!(frame, plain);
+        let (_, sealed, aad) = protocol::decode_layer_forward_encrypted(&frame).unwrap();
+        assert_eq!(
+            peer_sessions.open(&local_node, &sealed, &aad).unwrap(),
+            forward.activations,
+            "the peer opens it with its own session key"
+        );
+
+        // An id with no key in it cannot be a SwarmLLM node: refused outright.
+        let stranger = PeerId::random();
+        assert!(seal_for(&stranger, &state).is_err());
+        assert!(encode_forward_for_wire(&forward, &stranger, &state).is_err());
+
+        let mut config = crate::config::Config::default();
+        config.network.enable_encryption = false;
+        let (plain_state, _, _) = SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            crate::storage::db::Database::open(tempfile::tempdir().unwrap().path()).unwrap(),
+            Arc::new(Mutex::new(crate::inference::executor::ModelExecutor::new())),
+            None,
+        );
+        assert_eq!(seal_for(&peer_id, &plain_state).unwrap(), None);
+        assert_eq!(
+            encode_forward_for_wire(&forward, &peer_id, &plain_state).unwrap(),
+            plain,
+            "with encryption off a forward goes plain"
+        );
     }
 
     /// One answer per forward: a key that does not open one chunk opens none,

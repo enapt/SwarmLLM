@@ -53,6 +53,7 @@ impl NetworkManager {
             NetworkCommand::Broadcast(_) => "Broadcast",
             NetworkCommand::SendTensor { .. } => "SendTensor",
             NetworkCommand::SendEncodedTensor { .. } => "SendEncodedTensor",
+            NetworkCommand::FailEncodedTensor { .. } => "FailEncodedTensor",
             NetworkCommand::SendTensorResult { .. } => "SendTensorResult",
             NetworkCommand::SendStreamingToken { .. } => "SendStreamingToken",
             NetworkCommand::SendShardRequest { .. } => "SendShardRequest",
@@ -92,6 +93,13 @@ impl NetworkManager {
                     num_layers,
                     activation_bytes,
                 );
+            }
+            NetworkCommand::FailEncodedTensor {
+                target_peer_bytes,
+                request_id,
+                reason,
+            } => {
+                self.handle_fail_encoded_tensor(target_peer_bytes, request_id, reason);
             }
             NetworkCommand::SendTensorResult {
                 target_peer_bytes,

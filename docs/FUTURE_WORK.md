@@ -2262,15 +2262,6 @@ helper nobody is obliged to call. Anthropic: emit a `thinking` block only when t
 enabled thinking, with a signature this server cannot produce; first confirm `api/anthropic`
 drops thinking blocks on input (Claude Code sends them back).
 
-#### #186 — A reply emptied by finalisation is still returned as a success
-`P3` · api · **PARTIAL** — 2026-07-29 · history: archive § "An empty completion is still reported as success"
-
-A WARN in `finalize_reply_text` and the `swarmllm_empty_replies_total` counter shipped; the
-reply is still HTTP 200 with `finish_reason: stop`. Decide from the counter whether an emptied
-reply becomes an error so retry-capable clients re-route. Only when the model generated
-something and finalisation removed all of it — an empty reply can be legitimate. Implement at
-`finalize_reply_text` only (all text sources inherit it).
-
 #### #196 — MCP reports every tool failure as a protocol error, never `isError`
 `P3` · api · **OPEN** — 2026-08-18 · history: archive § "MCP reports every tool failure as a protocol error, never `isError`"
 
@@ -2443,28 +2434,6 @@ only moves the refusal there. Next: have the relay count what it forwards per (s
 `NetGroup`, target), so one network cannot push more than a fraction of a target's share through
 one relay; size it against an honest split decode (~25 forwards and results a second per
 stream). Wire → `security-reviewer` on the diff.
-
-#### #285 — A tensor forward to a peer whose NodeId mapping is missing goes out without its session seal, and is accepted
-`P3` · security · **OPEN** — 2026-10-16 · history: none (found by the 2026-10-16 doc sweep)
-
-With `network.enable_encryption` on (the default), both send paths decide
-`use_encryption = enable_encryption && peer_node_id.is_some()` (`network/manager/tensors.rs`
-`handle_send_tensor`; `network/pipeline_stream.rs::encode_forward_for_wire`, whose
-"encryption requested but no NodeId" error is therefore unreachable), so a forward to a peer the
-reverse map (`peer_to_node` / `peer_id_map`) does not name is sent as plain `TENSOR_TAG_FORWARD`.
-The target PeerId comes from `resolve_peer_id_bytes` (persistent `peer_id_map`, then gossip), not
-from that map, so the window is real if narrow: a reconnect before Identify re-fills
-`peer_to_node`, or a mapping pruned while the connection stays up. Neither receiver
-(`requests.rs` `TensorPayload` → `handle_tensor_payload`; `pipeline_stream.rs::decode_inbound_forward`)
-asks whether a plaintext forward was expected. **Exposure**: every transport is Noise or QUIC/TLS,
-relay circuits included, so only the intended peer can read it — the loss is the session-key
-seal and its AAD binding (`build_layer_forward_aad`: `spec_logits_requested`, `truncate_kv_to`, …),
-i.e. defence in depth, not a leak to a third party. The `SEC: Never fall back to plaintext` comment
-covers only a seal FAILURE. Next: with encryption on and no NodeId, fail the forward
-(`fail_tensor_forward`, so the router re-plans) or wait for Identify, never send it bare; then
-decide whether a receiver with encryption on refuses `TENSOR_TAG_FORWARD` from a peer it holds a
-session with (an `enable_encryption = false` peer must still work). Wire and crypto →
-`security-reviewer` on the diff, and the split + failover rigs.
 
 #### #30 — The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on
 `P2` · security · **OPEN** — 2026-09-10 · history: archive row #30 and § "The plaintext-prompt trust bar sits exactly at the score an unknown peer starts on"
@@ -2758,6 +2727,12 @@ archive under the named heading. Reopen one only with the evidence its line name
 - **Credits never move between nodes** — by design while credits are dormant;
   `docs/CREDITS_DESIGN.md` carries the finding and the exit criteria. Archive § "Credits never
   move between nodes".
+- **An emptied reply as an error** (#186, decided 2026-10-19) — a reply finalisation empties
+  stays HTTP 200 with `content: ""`, as OpenAI, vLLM and llama.cpp's server answer an empty
+  generation; an error would fail a legitimate reply too (a reasoning model whose answer is all
+  scratchpad, #141). The WARN in `finalize_reply_text` and `swarmllm_empty_replies_total` stay the
+  diagnosis: 0 on the live node, and no "reply is empty after finalisation" line in its log since
+  2026-09-17. Reopen with a field node's counter above 0 and the template it names.
 
 **Code and process**
 - **`manifest.json` lost update across read-modify-write sites** (#66) — the corruption half is
@@ -2790,7 +2765,20 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b), #91 (2h))
+**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b), #91 (2h), #285; #186 decided)
+- #186 — an emptied reply stays a 200: moved to § "Decided — not doing" (Product scope).
+- #285 — **A tensor forward is never sent unsealed while encryption is on.** Both senders
+  (`handle_send_tensor`, the pipeline stream's `encode_forward_for_wire`) looked the peer's NodeId
+  up in a map that a reconnect before Identify or a pruned entry could leave empty, and then sent
+  the forward plain. The transport still kept it from third parties; what went was the session
+  seal and its AAD binding. `pipeline_stream::seal_for` is the one answer now, and DERIVES the
+  node from the peer's id (both come from one Ed25519 key); with no session yet the seal fails and
+  so does the forward — and the encrypt task's failure goes back to the event loop
+  (`FailEncodedTensor` → `fail_tensor_forward`), so a chained hop tells its coordinator instead of
+  leaving it to its whole deadline (security review). Receivers still take a plain forward: the
+  connection is authenticated end to end (Noise or TLS, relay circuits too), so only the peer
+  itself can send one, and a node with encryption off must keep working. Split rig at debug: 63
+  forwards sealed, 0 plain; kill-B fail-over: 382 sealed, 0 plain, answered.
 - #91 (2h) — **An idle node answers about half as many routing-table lookups.** Every node
   refreshed its Kademlia routing table every 5 min, and in a swarm smaller than 20 each refresh asks
   every peer ~5 lookups, each answered with ~3.7 KB of peers and addresses: on 10-19 that was all of

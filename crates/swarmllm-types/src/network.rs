@@ -707,6 +707,17 @@ pub enum NetworkCommand {
         num_layers: u32,
         activation_bytes: usize,
     },
+    /// Internal: the off-loop encrypt+encode of a `SendTensor` failed (no
+    /// session with the peer yet, most often). Posted back like
+    /// `SendEncodedTensor` so the event loop fails the forward through
+    /// `fail_tensor_forward`, the one failure path that also tells a chained
+    /// hop's coordinator; from the spawned task only a local waiter could be
+    /// told, and a hop has none (#285). Not constructed by daemon-side callers.
+    FailEncodedTensor {
+        target_peer_bytes: Vec<u8>,
+        request_id: uuid::Uuid,
+        reason: String,
+    },
     /// Send a tensor result back to a specific peer as a new request.
     SendTensorResult {
         target_peer_bytes: Vec<u8>,
