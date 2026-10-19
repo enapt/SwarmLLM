@@ -2331,11 +2331,10 @@ from it, so the same failure cannot be named two things:
 | OpenAI SSE | `StreamEvent::from_error` → `Error { message, error_type, hint, hint_key }` |
 | Anthropic SSE | `AnthropicSseEvent::Error`, translated by `anthropic_error_type` |
 | Responses API | `responses::stream::classify_error_code` (both the streaming and background paths) |
-| MCP | `mcp::types::tool_error_code` → JSON-RPC `-32602` / `-32000` / `-32603` |
+| MCP | `mcp::types::tool_failed` → an `isError: true` result, `error_body` under `_meta["com.swarmllm/error"]` (#196) |
 
-Two **refinements** are deliberate and documented at their definition: Responses
-names a provider failure `upstream_error`, and MCP maps 503 to
-`RESOURCE_UNAVAILABLE`. A refinement names something more precisely than the
+One **refinement** is deliberate and documented at its definition: Responses
+names a provider failure `upstream_error`. A refinement names something more precisely than the
 canonical answer; a *divergence* is the same meaning under a different word and
 is a bug.
 

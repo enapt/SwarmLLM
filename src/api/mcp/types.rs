@@ -94,6 +94,86 @@ pub(super) fn tool_text_result_with_route(
     JsonRpcResponse::success(id, result)
 }
 
+/// The `_meta` key a failed tool result carries its classified error under
+/// (#196): the API's own error object (`crate::error::error_body` — `message`,
+/// `type`, `code`, `hint`, `hint_key`), for the program driving the tool. The
+/// text block is what the model reads; this is what code can branch on.
+pub(super) const ERROR_META_KEY: &str = "com.swarmllm/error";
+
+/// A tool that RAN and failed (#196): a JSON-RPC SUCCESS whose result says
+/// `isError: true`, the failure in a text block the model reads.
+///
+/// MCP 2025-11-25 § "Error Handling" splits failures in two. A protocol error
+/// (a JSON-RPC `error`) is for an unknown tool, a request that does not fit
+/// `CallToolRequest`, and server faults. Everything a model can act on — input
+/// validation, API failures, business logic — is a tool execution error, which
+/// "clients SHOULD provide … to language models to enable self-correction",
+/// while a protocol error MAY never reach the model at all. SEP-1303 moved input
+/// validation here for exactly that reason, and the official TypeScript and
+/// Python SDKs turn every failure inside a tool into this shape.
+///
+/// Every tool failure here used to be a JSON-RPC error whose CODE said who
+/// should act (`tool_error_code`: `-32602` "fix the call", `-32000` "not right
+/// now", `-32603` "broken" — 2026-08-12, when a missing model and an over-long
+/// prompt both said `-32603`). That judgement is kept, in a form both readers
+/// get: the class goes in [`ERROR_META_KEY`] as the HTTP surfaces' own error
+/// object, and its advice goes in the text. The message is the client-safe one
+/// every other surface sends: an internal fault reads "An internal error
+/// occurred", and the full error goes to this node's log.
+pub(super) fn tool_failed(
+    id: Option<Value>,
+    doing: Option<&str>,
+    err: &crate::error::SwarmError,
+) -> JsonRpcResponse {
+    // A worker or network hop may have flattened the class to text, re-wrapped
+    // as a 500 — recover it then, and only then, so a typed error keeps its own.
+    let internal =
+        crate::error::classify_error(err).0 == axum::http::StatusCode::INTERNAL_SERVER_ERROR;
+    let recovered = internal
+        .then(|| crate::error::reclassify_flattened_error(&err.to_string()))
+        .flatten();
+    let err = recovered.as_ref().unwrap_or(err);
+    crate::log_failure!(err, error = %err, "MCP tool call failed");
+
+    let body = crate::error::error_body(err);
+    let message = body["message"].as_str().unwrap_or_default();
+    let mut text = match doing {
+        Some(doing) => format!("{doing}: {message}"),
+        None => message.to_string(),
+    };
+    if let Some(hint) = body["hint"].as_str() {
+        text.push_str("\n\n");
+        text.push_str(hint);
+    }
+    let mut response = tool_failed_text(id, text);
+    if let Some(result) = response.result.as_mut() {
+        let mut meta = serde_json::Map::new();
+        meta.insert(ERROR_META_KEY.to_string(), body);
+        result["_meta"] = Value::Object(meta);
+    }
+    response
+}
+
+/// [`tool_failed`] for an argument the model can correct: a missing field, a
+/// value past a limit.
+pub(super) fn invalid_input(id: Option<Value>, why: impl Into<String>) -> JsonRpcResponse {
+    tool_failed(id, None, &crate::error::SwarmError::Validation(why.into()))
+}
+
+/// The bare `isError` result, for a failure that reached the tool only as TEXT
+/// — `delegate`'s call to this node's own API, whose error body the text then
+/// carries whole. No class is guessed for it: absent is honest where a class
+/// read back out of prose would not be.
+pub(super) fn tool_failed_text(id: Option<Value>, text: impl Into<String>) -> JsonRpcResponse {
+    JsonRpcResponse::success(
+        id,
+        serde_json::json!({
+            "content": [{ "type": "text", "text": text.into() }],
+            "isError": true,
+        }),
+    )
+}
+
 // JSON-RPC error codes
 /// Invalid JSON was received — the body could not be parsed at all.
 pub(super) const PARSE_ERROR: i64 = -32700;
@@ -104,91 +184,118 @@ pub(super) const INVALID_REQUEST: i64 = -32600;
 pub(super) const METHOD_NOT_FOUND: i64 = -32601;
 pub(super) const INVALID_PARAMS: i64 = -32602;
 pub(super) const INTERNAL_ERROR: i64 = -32603;
-/// Application-level error: resource unavailable (no models loaded).
-pub(super) const RESOURCE_UNAVAILABLE: i64 = -32000;
 /// A `uri` that is well-formed but names no resource this server has. The MCP
 /// resources spec names this code specifically, and it is a different situation
 /// from [`INVALID_PARAMS`], which says the caller's argument was malformed —
 /// asking correctly for something that is not here is not a malformed ask.
 pub(super) const RESOURCE_NOT_FOUND: i64 = -32002;
 
-/// The JSON-RPC code for a failure raised while serving a tool call.
-///
-/// Derived from `crate::error::classify_error`, so the code follows the same
-/// judgement the HTTP surfaces make about the same failure instead of a
-/// separate one made here.
-///
-/// Every inference failure used to be `INTERNAL_ERROR`: a model name that does
-/// not exist and a prompt longer than the context both came back as "the server
-/// had an internal error", when this file was already careful to answer
-/// `INVALID_PARAMS` for its OWN argument checks a few lines earlier (measured
-/// 2026-08-12). An MCP client reads `-32603` as "the tool is broken" and
-/// `-32602` as "fix the call" — the difference decides whether it retries
-/// forever or tells the user.
-pub(super) fn tool_error_code(err: &crate::error::SwarmError) -> i64 {
-    // The class may already have been flattened to text by a worker or network
-    // hop, in which case recover it first — same reason as everywhere else.
-    let recovered = crate::error::reclassify_flattened_error(&err.to_string());
-    let effective = recovered.as_ref().unwrap_or(err);
-    let (status, _msg, _ty) = crate::error::classify_error(effective);
-    if status == axum::http::StatusCode::SERVICE_UNAVAILABLE {
-        // The node cannot serve this right now — the caller's request is fine.
-        RESOURCE_UNAVAILABLE
-    } else if status.is_client_error() {
-        INVALID_PARAMS
-    } else {
-        INTERNAL_ERROR
-    }
-}
-
 #[cfg(test)]
-mod tool_error_code_tests {
+mod tool_failed_tests {
     use super::*;
     use crate::error::SwarmError;
     use crate::types::ModelId;
 
-    /// A caller's own mistake must reach an MCP client as "fix the call", not
-    /// "the tool is broken" — the two lead a client to opposite behaviour.
-    #[test]
-    fn a_callers_mistake_is_invalid_params_not_internal_error() {
-        for err in [
-            SwarmError::Validation("prompt too long".into()),
-            SwarmError::ModelNotAvailable(ModelId("nope".into())),
-            SwarmError::NotFound("session".into()),
-        ] {
-            assert_eq!(
-                tool_error_code(&err),
-                INVALID_PARAMS,
-                "{err} must be invalid-params"
-            );
-        }
+    fn as_json(r: JsonRpcResponse) -> Value {
+        serde_json::to_value(r).unwrap()
     }
 
-    /// "Not right now" is neither the caller's fault nor a bug.
+    /// **A tool that ran and failed is a RESULT the model reads, not a
+    /// protocol error** (#196, MCP 2025-11-25 § Error Handling): no JSON-RPC
+    /// `error`, `isError: true`, the reason in the text — and the class the
+    /// HTTP surfaces give the same failure, for the program.
     #[test]
-    fn a_node_that_cannot_serve_is_resource_unavailable() {
-        assert_eq!(
-            tool_error_code(&SwarmError::ServiceUnavailable("worker died".into())),
-            RESOURCE_UNAVAILABLE
+    fn a_failed_tool_is_an_is_error_result_carrying_its_class() {
+        let v = as_json(tool_failed(
+            Some(json_id()),
+            None,
+            &SwarmError::ModelNotAvailable(ModelId("nope".into())),
+        ));
+        assert!(v.get("error").is_none(), "{v}");
+        assert_eq!(v["id"], json_id());
+        assert_eq!(v["result"]["isError"], true, "{v}");
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("Model not available: nope"), "{text}");
+        let class = &v["result"]["_meta"][ERROR_META_KEY];
+        assert_eq!(class["type"], "not_found_error", "{v}");
+        assert_eq!(class["hint_key"], "model_not_available");
+        assert!(
+            text.contains(class["hint"].as_str().unwrap()),
+            "the advice reaches the model too: {text}"
         );
     }
 
-    /// A genuine bug must still say so, or it hides.
+    /// "Fix the call", "not right now" and "broken" stay three different
+    /// classes, as the JSON-RPC codes they replace were.
     #[test]
-    fn an_actual_fault_stays_internal_error() {
+    fn who_should_act_is_still_told_apart() {
+        let class = |e: SwarmError| {
+            as_json(tool_failed(None, None, &e))["result"]["_meta"][ERROR_META_KEY]["type"].clone()
+        };
         assert_eq!(
-            tool_error_code(&SwarmError::Internal("boom".into())),
-            INTERNAL_ERROR
+            class(SwarmError::Validation("prompt too long".into())),
+            "invalid_request_error"
+        );
+        assert_eq!(
+            class(SwarmError::ServiceUnavailable("worker died".into())),
+            "server_error"
+        );
+        assert_eq!(class(SwarmError::Internal("boom".into())), "server_error");
+        assert_eq!(
+            as_json(invalid_input(None, "Missing required field: model"))["result"]["content"][0]
+                ["text"],
+            "Validation error: Missing required field: model"
         );
     }
 
-    /// The class survives a boundary that flattened it to text — the same
-    /// recovery every other surface now does.
+    /// An internal fault is reported with the client-safe message every other
+    /// surface sends — the detail stays in this node's log.
     #[test]
-    fn a_flattened_class_is_recovered_before_coding() {
+    fn an_internal_fault_does_not_reach_the_model_in_detail() {
+        let v = as_json(tool_failed(
+            None,
+            None,
+            &SwarmError::Internal("/home/someone/.local/share/swarmllm/db locked".into()),
+        ));
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("An internal error occurred"), "{v}");
+        assert!(!text.contains("/home"), "{v}");
+    }
+
+    /// The class survives a boundary that flattened it to text — and a typed
+    /// error is not re-read from its own prose.
+    #[test]
+    fn a_flattened_class_is_recovered_and_a_typed_one_kept() {
         let flattened = SwarmError::Inference(
             "Validation error: Sequence length (10036) exceeds model context window (4096)".into(),
         );
-        assert_eq!(tool_error_code(&flattened), INVALID_PARAMS);
+        let v = as_json(tool_failed(None, Some("Delegating failed"), &flattened));
+        assert_eq!(
+            v["result"]["_meta"][ERROR_META_KEY]["type"],
+            "invalid_request_error"
+        );
+        assert!(v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Delegating failed: Validation error: Sequence length (10036)"));
+        // Its Display carries an earlier marker, so re-reading it would make it
+        // a `Validation` error.
+        let typed = SwarmError::ModelNotAvailable(ModelId("Validation error: x".into()));
+        assert_eq!(
+            as_json(tool_failed(None, None, &typed))["result"]["_meta"][ERROR_META_KEY]["type"],
+            "not_found_error"
+        );
+    }
+
+    /// A failure that arrived as text carries no guessed class.
+    #[test]
+    fn a_text_failure_has_no_class() {
+        let v = as_json(tool_failed_text(None, "HTTP 502: upstream"));
+        assert_eq!(v["result"]["isError"], true);
+        assert!(v["result"].get("_meta").is_none(), "{v}");
+    }
+
+    fn json_id() -> Value {
+        serde_json::json!(7)
     }
 }

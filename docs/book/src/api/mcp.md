@@ -317,16 +317,25 @@ The compare functionality is also available in the web dashboard via the **Compa
 
 ## Errors
 
-Tool failures come back as JSON-RPC errors whose code says who should act:
+A tool that ran and failed answers the way MCP (2025-11-25) asks: a normal
+result with `isError: true` and the reason in its text, so the model driving the
+tool reads it and can correct the call, choose another model or tell you. That
+covers a model name that does not exist, a prompt longer than the context
+window, a missing required field, no models loaded, and a request that timed
+out. The text carries the same advice the dashboard shows, and
+`_meta["com.swarmllm/error"]` carries the API's error object (`type`, `message`,
+`hint`, `hint_key`) for a program that wants to branch on it:
 
-| Code | Meaning | Examples |
-|---|---|---|
-| `-32602` | Invalid params — fix the call | model name does not exist, prompt longer than the context window, missing required field |
-| `-32000` | Resource unavailable — the node cannot serve this right now, the call is fine | no models loaded, worker unavailable |
-| `-32603` | Internal error — an actual fault | a bug in the server |
+```json
+{"jsonrpc": "2.0", "id": 4, "result": {
+  "content": [{"type": "text", "text": "Model not available: no-such-model\n\nThis model isn't available yet. …"}],
+  "isError": true,
+  "_meta": {"com.swarmllm/error": {"type": "not_found_error", "hint_key": "model_not_available", "…": "…"}}
+}}
+```
 
-The distinction matters for a tool client: `-32603` reads as "this tool is
-broken" and invites a retry or a bug report, while `-32602` tells the caller
-what to change. Fan-out tools (`compare`, `research`, `batch_prompts`) do not
+Only a call no tool could run is a JSON-RPC error: an unknown tool name
+(`-32602`), an unreadable keep-on-this-computer instruction (`-32602`), and a
+node whose inference service is not running (`-32603`). Fan-out tools (`compare`, `research`, `batch_prompts`) do not
 fail the whole call when one model fails — each result carries its own `status`
 and `error`, and the summary counts only the ones that actually answered.

@@ -6,7 +6,8 @@ use super::dispatch::{
 };
 use super::resources::mcp_peer_json;
 use super::types::{
-    tool_text_result, JsonRpcResponse, INTERNAL_ERROR, INVALID_PARAMS, RESOURCE_UNAVAILABLE,
+    invalid_input, tool_failed, tool_failed_text, tool_text_result, JsonRpcResponse,
+    INTERNAL_ERROR, INVALID_PARAMS,
 };
 use super::{MCP_MAX_MODEL_ID_BYTES, MCP_MAX_PROMPT_BYTES, MCP_MAX_TASK_ID_BYTES};
 use crate::api::server::AppState;
@@ -24,7 +25,9 @@ pub(super) async fn handle_tools_call(
     // The caller's instruction to keep this call on this computer (#251
     // (2b)): `params._meta["com.swarmllm/keep_on_this_computer"]` or the
     // header on the `/mcp` request, the strictest of the two. One that cannot
-    // be read is refused, never dropped.
+    // be read is refused, never dropped — as a protocol error, not an
+    // `isError` result (#196): the program driving the tool sets it, not the
+    // model, so it is a malformed request rather than an input to correct.
     let keep = match crate::api::keep_here::from_header(headers).and_then(|h| {
         crate::api::keep_here::from_mcp_meta(Some(&params))
             .map(|m| crate::api::keep_here::strictest(h, m))
@@ -53,6 +56,8 @@ pub(super) async fn handle_tools_call(
         "batch_prompts" => tool_batch_prompts(state, id, arguments, keep).await,
         "delegate" => tool_delegate(state, id, arguments, keep).await,
         "node_info" => tool_node_info(state, id).await,
+        // A protocol error by the spec's own example (2025-11-25 § Error
+        // Handling): no tool ran.
         _ => JsonRpcResponse::error(id, INVALID_PARAMS, format!("Unknown tool: {tool_name}")),
     }
 }
@@ -64,6 +69,8 @@ async fn tool_chat(
 ) -> JsonRpcResponse {
     let router_tx = match &state.router_tx {
         Some(tx) => tx.clone(),
+        // This server's own machinery is missing — a server fault, so a
+        // protocol error; every failure past this point is the tool's (#196).
         None => {
             return JsonRpcResponse::error(id, INTERNAL_ERROR, "Inference router not available");
         }
@@ -72,21 +79,21 @@ async fn tool_chat(
     let model = match args.get("model").and_then(|v| v.as_str()) {
         Some(m) => m.to_string(),
         None => {
-            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: model");
+            return invalid_input(id, "Missing required field: model");
         }
     };
     if model.len() > MCP_MAX_MODEL_ID_BYTES {
-        return JsonRpcResponse::error(id, INVALID_PARAMS, "Model name too long");
+        return invalid_input(id, "Model name too long");
     }
 
     let messages = match args.get("messages").and_then(|v| v.as_array()) {
         Some(msgs) => msgs.clone(),
         None => {
-            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: messages");
+            return invalid_input(id, "Missing required field: messages");
         }
     };
     if messages.len() > 4096 {
-        return JsonRpcResponse::error(id, INVALID_PARAMS, "Too many messages (max 4096)");
+        return invalid_input(id, "Too many messages (max 4096)");
     }
 
     let temperature = args
@@ -121,7 +128,7 @@ async fn tool_chat(
         .collect();
 
     if chat_messages.is_empty() {
-        return JsonRpcResponse::error(id, INVALID_PARAMS, "No valid messages provided");
+        return invalid_input(id, "No valid messages provided");
     }
 
     // SEC: cap per-message and total prompt size before submitting to the
@@ -131,7 +138,7 @@ async fn tool_chat(
     // to assemble the prompt.
     if let Err(e) = crate::api::validate_content_size(chat_messages.iter().map(|m| m.content.len()))
     {
-        return JsonRpcResponse::error(id, INVALID_PARAMS, format!("{}", e.0));
+        return tool_failed(id, None, &e.0);
     }
 
     let request = crate::types::InferenceRequest::local(
@@ -172,12 +179,12 @@ async fn tool_chat(
             response.content,
             response.trace.as_ref().map(|t| t.route_summary()),
         ),
-        Ok(Err(e)) => JsonRpcResponse::error(
+        Ok(Err(e)) => tool_failed(id, None, &e.0),
+        Err(_) => tool_failed(
             id,
-            super::types::tool_error_code(&e.0),
-            format!("Inference error: {}", e.0),
+            None,
+            &crate::error::SwarmError::InferenceTimeout(MCP_TASK_TIMEOUT.as_secs()),
         ),
-        Err(_) => JsonRpcResponse::error(id, INTERNAL_ERROR, "Inference request timed out"),
     }
 }
 
@@ -247,10 +254,10 @@ async fn tool_compare(
     let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
         Some(p) if p.len() <= MCP_MAX_PROMPT_BYTES => p.to_string(),
         Some(_) => {
-            return JsonRpcResponse::error(id, INVALID_PARAMS, "prompt exceeds maximum length");
+            return invalid_input(id, "prompt exceeds maximum length");
         }
         None => {
-            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: prompt");
+            return invalid_input(id, "Missing required field: prompt");
         }
     };
 
@@ -260,15 +267,15 @@ async fn tool_compare(
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect(),
         None => {
-            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: models");
+            return invalid_input(id, "Missing required field: models");
         }
     };
 
     if models.is_empty() {
-        return JsonRpcResponse::error(id, INVALID_PARAMS, "models array must not be empty");
+        return invalid_input(id, "models array must not be empty");
     }
     if models.len() > 10 {
-        return JsonRpcResponse::error(id, INVALID_PARAMS, "Maximum 10 models per comparison");
+        return invalid_input(id, "Maximum 10 models per comparison");
     }
 
     let system = args
@@ -279,7 +286,7 @@ async fn tool_compare(
         .as_ref()
         .is_some_and(|s| s.len() > MCP_MAX_PROMPT_BYTES)
     {
-        return JsonRpcResponse::error(id, INVALID_PARAMS, "system prompt exceeds maximum length");
+        return invalid_input(id, "system prompt exceeds maximum length");
     }
     let temperature = args
         .get("temperature")
@@ -369,10 +376,10 @@ async fn tool_research(
     let question = match args.get("question").and_then(|v| v.as_str()) {
         Some(q) if q.len() <= MCP_MAX_PROMPT_BYTES => q.to_string(),
         Some(_) => {
-            return JsonRpcResponse::error(id, INVALID_PARAMS, "question exceeds maximum length");
+            return invalid_input(id, "question exceeds maximum length");
         }
         None => {
-            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: question");
+            return invalid_input(id, "Missing required field: question");
         }
     };
 
@@ -394,7 +401,7 @@ async fn tool_research(
         .as_ref()
         .is_some_and(|s| s.len() > MCP_MAX_PROMPT_BYTES)
     {
-        return JsonRpcResponse::error(id, INVALID_PARAMS, "system prompt exceeds maximum length");
+        return invalid_input(id, "system prompt exceeds maximum length");
     }
 
     // Determine which models to query
@@ -432,14 +439,14 @@ async fn tool_research(
     };
 
     if models.is_empty() {
-        return JsonRpcResponse::error(
+        return tool_failed(
             id,
-            RESOURCE_UNAVAILABLE,
-            "No models available for research",
+            Some("No model to research with"),
+            &crate::error::SwarmError::NoModelLoaded,
         );
     }
     if models.len() > 20 {
-        return JsonRpcResponse::error(id, INVALID_PARAMS, "Maximum 20 models per research query");
+        return invalid_input(id, "Maximum 20 models per research query");
     }
 
     // Reuse the compare infrastructure but with research-focused framing
@@ -515,15 +522,15 @@ async fn tool_batch_prompts(
     let tasks = match args.get("tasks").and_then(|v| v.as_array()) {
         Some(arr) => arr.clone(),
         None => {
-            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: tasks");
+            return invalid_input(id, "Missing required field: tasks");
         }
     };
 
     if tasks.is_empty() {
-        return JsonRpcResponse::error(id, INVALID_PARAMS, "tasks array must not be empty");
+        return invalid_input(id, "tasks array must not be empty");
     }
     if tasks.len() > 20 {
-        return JsonRpcResponse::error(id, INVALID_PARAMS, "Maximum 20 tasks per batch");
+        return invalid_input(id, "Maximum 20 tasks per batch");
     }
 
     let client = crate::api::providers::get_provider_client();
@@ -718,16 +725,16 @@ async fn tool_delegate(
     let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
         Some(p) if p.len() <= MCP_MAX_PROMPT_BYTES => p.to_string(),
         Some(_) => {
-            return JsonRpcResponse::error(id, INVALID_PARAMS, "prompt exceeds maximum length");
+            return invalid_input(id, "prompt exceeds maximum length");
         }
         None => {
-            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: prompt");
+            return invalid_input(id, "Missing required field: prompt");
         }
     };
     let tier = match args.get("tier").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
         None => {
-            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: tier");
+            return invalid_input(id, "Missing required field: tier");
         }
     };
     let system = args
@@ -775,10 +782,10 @@ async fn tool_delegate(
     }
 
     if candidates.is_empty() {
-        return JsonRpcResponse::error(
+        return tool_failed(
             id,
-            RESOURCE_UNAVAILABLE,
-            "No models available for delegation",
+            Some("No model to delegate to"),
+            &crate::error::SwarmError::NoModelLoaded,
         );
     }
 
@@ -833,21 +840,17 @@ async fn tool_delegate(
                 .cloned()
         }
         _ => {
-            return JsonRpcResponse::error(
-                id,
-                INVALID_PARAMS,
-                "Invalid tier: must be 'fast', 'cheap', or 'smart'",
-            );
+            return invalid_input(id, "Invalid tier: must be 'fast', 'cheap', or 'smart'");
         }
     };
 
     let (model_id, source, _) = match selected {
         Some(s) => s,
         None => {
-            return JsonRpcResponse::error(
+            return tool_failed(
                 id,
-                RESOURCE_UNAVAILABLE,
-                "No suitable model found for tier",
+                Some(&format!("No model for the '{tier}' tier")),
+                &crate::error::SwarmError::NoModelLoaded,
             );
         }
     };
@@ -872,14 +875,12 @@ async fn tool_delegate(
     .await;
 
     if let Some(err) = call.error {
-        // Classified exactly as `chat`'s identical failure is. Hardcoding
-        // INTERNAL_ERROR here meant the SAME underlying failure — a model that
-        // does not exist, a prompt past the context — told the client "the tool
-        // is broken" through `delegate` and "fix your call" through `chat`.
-        let code = crate::error::reclassify_flattened_error(&err)
-            .map(|e| super::types::tool_error_code(&e))
-            .unwrap_or(INTERNAL_ERROR);
-        return JsonRpcResponse::error(id, code, format!("Delegate failed: {err}"));
+        // An `isError` result like `chat`'s (#196), naming the model the tier
+        // chose so the model reading it can ask for another. The failure came
+        // back from this node's own API as text — its status and error body,
+        // hint included — so the text carries it whole and no class is
+        // re-read out of it.
+        return tool_failed_text(id, format!("Delegating to {model_id} failed: {err}"));
     }
 
     let result = json!({
@@ -1085,6 +1086,117 @@ mod route_meta_tests {
                 .contains("distributed"),
             "the route is for the program, not the model's text: {v}"
         );
+    }
+
+    /// A router that refuses its one request with `err`.
+    fn failing_router(
+        err: crate::error::SwarmError,
+    ) -> tokio::sync::mpsc::Sender<crate::inference::router::RouterCommand> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            if let Some(crate::inference::router::RouterCommand::Submit { result_tx, .. }) =
+                rx.recv().await
+            {
+                let _ = result_tx.send(Err(err));
+            }
+        });
+        tx
+    }
+
+    /// **A `chat` call that ran and failed is an `isError` result the model
+    /// reads, never a JSON-RPC error** (#196) — whether the inference failed,
+    /// the class was flattened on its way back, or the model's own arguments
+    /// were wrong. Driven through the real tool.
+    #[tokio::test]
+    async fn a_chat_that_failed_is_a_result_the_model_reads() {
+        let ask = json!({"model": "nope", "messages": [{"role": "user", "content": "hi"}]});
+        for (err, class, text) in [
+            (
+                crate::error::SwarmError::ModelNotAvailable(crate::types::ModelId("nope".into())),
+                "not_found_error",
+                "Model not available: nope",
+            ),
+            (
+                crate::error::SwarmError::Inference(
+                    "Inference error: Validation error: This conversation is too long".into(),
+                ),
+                "invalid_request_error",
+                "Validation error: This conversation is too long",
+            ),
+        ] {
+            let mut app = crate::api::route_test_support::test_app();
+            app.state.router_tx = Some(failing_router(err));
+            let v = serde_json::to_value(
+                tool_chat(&app.state, Some(json!(1)), ask.clone(), KeepAsked::Unasked).await,
+            )
+            .unwrap();
+            assert!(v.get("error").is_none(), "{v}");
+            assert_eq!(v["result"]["isError"], true, "{v}");
+            assert!(
+                v["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(text),
+                "{v}"
+            );
+            assert_eq!(
+                v["result"]["_meta"][super::super::types::ERROR_META_KEY]["type"],
+                class
+            );
+        }
+
+        let app = crate::api::route_test_support::test_app();
+        let missing = serde_json::to_value(
+            tool_chat(
+                &app.state,
+                Some(json!(2)),
+                json!({"messages": []}),
+                KeepAsked::Unasked,
+            )
+            .await,
+        )
+        .unwrap();
+        // `test_app` has no router: that is a server fault, a protocol error.
+        assert_eq!(missing["error"]["code"], INTERNAL_ERROR, "{missing}");
+
+        let mut app = crate::api::route_test_support::test_app();
+        app.state.router_tx = Some(failing_router(crate::error::SwarmError::Internal(
+            "unused".into(),
+        )));
+        let missing = serde_json::to_value(
+            tool_chat(
+                &app.state,
+                Some(json!(3)),
+                json!({"messages": []}),
+                KeepAsked::Unasked,
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(missing["result"]["isError"], true, "{missing}");
+        assert_eq!(
+            missing["result"]["content"][0]["text"],
+            "Validation error: Missing required field: model"
+        );
+    }
+
+    /// An unknown tool is still a protocol error: no tool ran (the spec's own
+    /// example, 2025-11-25 § Error Handling).
+    #[tokio::test]
+    async fn an_unknown_tool_is_still_a_protocol_error() {
+        let app = crate::api::route_test_support::test_app();
+        let v = serde_json::to_value(
+            handle_tools_call(
+                &app.state,
+                &axum::http::HeaderMap::new(),
+                Some(json!(1)),
+                json!({"name": "no_such_tool", "arguments": {}}),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(v["error"]["code"], INVALID_PARAMS, "{v}");
+        assert!(v.get("result").is_none(), "{v}");
     }
 
     /// A result with no swarm route carries no `_meta` at all — absent is

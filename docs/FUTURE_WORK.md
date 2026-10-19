@@ -2263,14 +2263,6 @@ this server cannot produce; llama.cpp's server emits one before the text under
 client sends back (Claude Code does), then emit one for a request that enabled thinking, from the
 same `InferenceOutput::reasoning`, streamed as `thinking_delta`.
 
-#### #196 — MCP reports every tool failure as a protocol error, never `isError`
-`P3` · api · **OPEN** — 2026-08-18 · history: archive § "MCP reports every tool failure as a protocol error, never `isError`"
-
-Recoverable failures ("no models loaded", a peer timeout) reach MCP clients such as Claude
-Code as a broken server, and the model may never read them. Add a `tool_failed_result` beside
-`tool_text_result`, move the recoverable failures there, and keep `tool_error_code` for genuine
-server faults (`delegate` already classifies through it). Verify against Claude Code itself.
-
 #### #188 — MCP `node_info` repeats the whole cloud-model catalogue the `models` tool also returns
 `P3` · api · **OPEN** — 2026-08-12 · history: archive § "MCP `node_info` duplicates the whole cloud-model catalogue"
 
@@ -2763,7 +2755,21 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b), #91 (2h), #285, #141; #186 decided)
+**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b), #91 (2h), #285, #141, #196; #186 decided)
+- #196 — **An MCP tool that ran and failed answers with a result the model reads (`isError:
+  true`), not a protocol error.** MCP 2025-11-25 § "Error Handling" puts input validation, API
+  failures and business logic there (SEP-1303: a protocol error may never reach the model); the
+  official TypeScript and Python SDKs turn every failure inside a tool into it. One constructor,
+  `mcp::types::tool_failed`, for every such failure of the seven tools — 22 argument checks, a
+  failed or timed-out inference, "no model to research with / delegate to" — with the client-safe
+  message and its hint as the text and `error_body` under `_meta["com.swarmllm/error"]`, so the
+  class `tool_error_code` coded as `-32602` / `-32000` / `-32603` is still there for a program
+  (`tool_error_code` and `RESOURCE_UNAVAILABLE` are gone; the archive's objection 2 answered).
+  A 500's detail no longer reaches the caller, as on every other surface. An unknown tool, an
+  unreadable keep instruction and a missing router stay JSON-RPC errors. Checked against Claude
+  Code itself (`examples/mcp_client_rig.sh`, Haiku): it showed its model the old protocol error
+  too (`is_error=True`, message only), so there the change brings the advice; for a client that
+  drops protocol errors it brings the failure at all.
 - #141 — **A non-streamed reply carries a reasoning model's finished scratchpad, as the stream
   does.** Streamed, a `<think>` block (or Gemma 4's thought channel) arrived as
   `delta.reasoning_content`; non-streamed, `finalize_reply_text` removed it and nothing kept it.

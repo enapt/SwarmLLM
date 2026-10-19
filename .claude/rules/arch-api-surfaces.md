@@ -109,7 +109,7 @@ Anything that removes a shard file or model MUST first check `active_pipelines` 
 
 ## API errors must be readable by the caller
 
-Every failure is `{"error": {"message", "type", "param", "code"}}`: take bodies with `JsonBody<T>`, never axum's `Json<T>`; keep the router `.fallback()` (`unknown_route`). Choose the STATUS from the cause (`probe_failure_is_user_fixable`).
+Every failure is `{"error": {"message", "type", "param", "code"}}`: take bodies with `JsonBody<T>`, never axum's `Json<T>`; keep the router `.fallback()` (`unknown_route`). Choose the STATUS from the cause (`probe_failure_is_user_fixable`). An MCP tool that ran and failed is **`mcp::types::tool_failed`** — an `isError: true` result the model reads, the same `error_body` under `_meta` — never a JSON-RPC error, which is only for a call no tool could run (#196).
 
 → `docs/invariants/api-surfaces.md` § "API errors must be readable by the caller"
 

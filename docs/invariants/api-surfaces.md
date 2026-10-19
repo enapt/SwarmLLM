@@ -2187,10 +2187,25 @@ different ways at once (gotchas #300-#305), and
 `tests/repo_consistency.rs` now fails the build on a new one.
 
 A surface may **refine** — Responses names a provider failure `upstream_error`,
-MCP maps 503 to `RESOURCE_UNAVAILABLE`, Anthropic translates into its own
-vocabulary — when the refinement names something *more precisely* than the
+Anthropic translates into its own vocabulary — when the refinement names something *more precisely* than the
 canonical answer, and it must be commented at its definition. Naming the same
 meaning with a different word is a divergence, not a refinement, and is a bug.
+
+**MCP reports a tool that ran and failed as a RESULT, not a protocol error**
+(#196, 2026-10-19). `mcp::types::tool_failed` answers a JSON-RPC success with
+`isError: true`, the client-safe message and its hint as the text, and
+`error_body` under `_meta["com.swarmllm/error"]` — MCP 2025-11-25 § "Error
+Handling" puts input validation, API failures and business logic there so the
+model reads them (SEP-1303: a protocol error may never reach it), and the
+official TypeScript and Python SDKs turn every failure inside a tool into that
+shape. It replaced `tool_error_code`, which coded the same classification as
+`-32602` / `-32000` / `-32603`; the class is now the HTTP surfaces' own object
+rather than an MCP-only `RESOURCE_UNAVAILABLE`. A JSON-RPC error is left for a
+call no tool could run: an unknown tool, an unreadable keep instruction (the
+program sets it, not the model), no inference router. Recovery
+(`reclassify_flattened_error`) runs only on a 500, so a typed error is never
+re-read from its own prose; `delegate`'s failure arrives as the text of this
+node's own API reply and is passed on whole, with no class guessed.
 
 **A type that crossed a boundary is already lost.** `SwarmError` survives neither
 the worker IPC hop nor the network hop; both deliver a `String` that gets

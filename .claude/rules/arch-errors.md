@@ -20,8 +20,8 @@ encoders, the Responses API, MCP. A literal next to `"type":` is the bug
 (gotchas #300-#305); `a_streamed_error_names_the_same_failure_as_its_non_streaming_sibling`
 fails the build on a new one.
 
-A surface may **refine** — Responses' `upstream_error`, MCP's
-`RESOURCE_UNAVAILABLE`, Anthropic's own vocabulary — only when it names
+A surface may **refine** — Responses' `upstream_error`, Anthropic's own
+vocabulary — only when it names
 something more precisely, commented at its definition. The same meaning under a
 different word is a divergence, and a bug.
 
