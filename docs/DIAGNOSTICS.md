@@ -2300,6 +2300,16 @@ submission COUNT, not bandwidth".
    group boundaries; a LAUNCH far above other models' (5.8 ms a step against 0.4) is graph memory
    one group allocated and a later group reads — FUTURE_WORK #295 (b),
    `.claude/rules/arch-inference.md` § "A decode step goes to the card as CUDA graphs".
+3e. **Which KERNEL, against llama.cpp's?** nsys's CUDA trace, both sides the same way. On WSL2 it
+   records GPU work only with `CuptiUseRawGpuTimestamps=false` in the file `nsys -z` names
+   (`~/.config/NVIDIA Corporation/nsys-config.ini` here; NVIDIA's documented WSL workaround), and
+   a graph's kernels only with `--cuda-graph-trace=node`:
+   `nsys profile --trace=cuda --cuda-graph-trace=node --sample=none --cpuctxsw=none -o ours swarmllm test-split …`
+   and the same around `llama-bench -p 0 -n 24 -r 1`; then `nsys stats --report cuda_gpu_trace
+   --format csv`, find the repeating step and sum it by kernel name. Tracing doubles the WALL time
+   of a step but not the kernels' durations: compare kernel sums, never traced step times. First
+   reading (2026-10-19, FUTURE_WORK #309): TinyLlama 3501 µs of kernels a step against 2912, of which
+   decode attention 778 against 173 — the matvecs were faster than llama.cpp's.
 4. **Where inside a layer?** `SWARMLLM_PROFILE=1` **plus**
    `SWARMLLM_PROFILE_SYNC=1` for correct per-stage attribution on CUDA.
    ⚠ **Read the two runs for different questions.** Sync inserts a

@@ -1413,11 +1413,24 @@ median of a 60-token reply's last steps): TinyLlama host 2.0 of a 4.29 ms step, 
 0.1-0.5 ms a step on every family (so none has #295 (b)'s defect). Kernel counts are near
 llama.cpp's by construction (Gemma 3 1B 26 a layer: 7 quantized matmuls, 4 q8_1 quantizes, 6
 norms, rope and cache writes twice, decode attention and its merge, GELU × up), so the difference
-is per-kernel time. Not established: which kernels. nsys records NO GPU kernels on this WSL2 box
-(only API calls, 2026-10-19), so per-kernel time needs another instrument. Next: llama.cpp's
-`test-backend-ops perf -o MUL_MAT` (built in `~/llama.cpp-ref/build-cuda/bin`) against our vendored
-`mul_mat_vec_*_q8_1` at the same shapes, each timed inside a CUDA graph so launch cost is
-excluded — candle's copy of the kernel predates llama.cpp's later small-matrix tuning.
+is per-kernel time. **It is decode attention** (nsys does record kernels here once configured,
+`docs/DIAGNOSTICS.md` step 3e): TinyLlama's kernels sum to 3,501 µs a step against llama.cpp's
+2,912, and decode attention alone is 778 against 173 (35 µs a layer against 6-9 at ~40 positions)
+— the whole gap. The matrix-vector products are already faster than llama.cpp's (nsys, and
+`examples/qmatvec_graph_bench.rs`, each product timed inside one CUDA graph).
+
+**Tried and not shipped (2026-10-19): keeping more loads in flight inside one block.** The guess was
+that a short cache is a few blocks (TinyLlama: 4 at 40 positions) each waiting on memory at every
+position. A body that loaded the K rows of 4 positions before using any, ran a position's
+reductions side by side and kept 16 V rows in flight was bit-identical to the current one (a
+deliberately broken copy failed the test, 1,405 of 2,048 values differing), used 94 registers
+against 170 with no spills — and was SLOWER where it was aimed. 160-token replies, both bodies
+alternated twice in one binary, Windows up 2.2 h: TinyLlama 229-232 tok/s against 256-260, Gemma 3
+1B 146 against 180-184, Gemma 2 2B 95 against 118, Llama 3.2 3B 105 against 118, Qwen 3.5 0.8B
+level; faster only behind a 1,700-token prompt (214-215 against 201-202). Replies identical. So one
+block's memory latency is not what costs the time at short lengths. Next: read llama.cpp's
+`fattn-vec` launch for a short cache (blocks per query head rather than per KV group, and how it
+splits the cache across blocks) against ours, one block per KV group and 64-position chunk.
 
 #### #293 — A split's first prompt chunk after load spends 1-6 s in its first attention, once its experts go to the card
 `P3` · speed · **OPEN** — 2026-10-16 · history: found measuring #292

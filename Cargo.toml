@@ -413,6 +413,12 @@ name = "qmatvec_card_bench"
 path = "examples/qmatvec_card_bench.rs"
 required-features = ["candle-cuda"]
 
+# A small model's products, each timed inside one CUDA graph (#309).
+[[example]]
+name = "qmatvec_graph_bench"
+path = "examples/qmatvec_graph_bench.rs"
+required-features = ["candle-cuda"]
+
 [[test]]
 name = "integration"
 path = "tests/integration/api_test.rs"
