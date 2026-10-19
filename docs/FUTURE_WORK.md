@@ -1397,8 +1397,14 @@ replies-against-llama.cpp check (`score_against_reference.py`), since a prompt p
 activations to f16 as llama.cpp's does. Who it helps: anyone who downloads a repo's "F16" file of a
 small model — the drafter choice already prefers a quantized copy (gotcha #849).
 
-#### #309 — Small dense models decode at 0.80-0.83 of llama.cpp on a card
-`P3` · perf-local · **OPEN** — 2026-10-19 · history: #307's sweep
+#### #309 — Small dense models decoded at 0.80-0.83 of llama.cpp on a card; 0.94-1.00 since the attention chunk follows the cache, Gemma 4 E2B 0.87
+`P3` · perf-local · **PARTIAL** — 2026-10-19 · history: #307's sweep
+
+**Residual (2026-10-19):** Gemma 4 E2B decodes at 0.87 of llama.cpp (108-109 against 124.8 tok/s,
+same session), TinyLlama and Llama 3.2 1B at 0.95-0.97. Next: an nsys kernel sum of an E2B step
+against llama.cpp's (`docs/DIAGNOSTICS.md` step 3e) to name where its remaining 1.2 ms a step goes;
+then, if decode attention is still above llama.cpp's on the small models, an `mma` body for GQA ≥ 2
+on sm_80+ (below). The history follows.
 
 Whole on the RTX 3070 Laptop (2026-10-19, `test-split` after the first 8 steps, live node stopped;
 llama.cpp `llama-bench -ngl 99 -n 128`, median sample): TinyLlama 1.1B Q4_K_M 236-241 against 299.2
@@ -1428,9 +1434,31 @@ against 170 with no spills — and was SLOWER where it was aimed. 160-token repl
 alternated twice in one binary, Windows up 2.2 h: TinyLlama 229-232 tok/s against 256-260, Gemma 3
 1B 146 against 180-184, Gemma 2 2B 95 against 118, Llama 3.2 3B 105 against 118, Qwen 3.5 0.8B
 level; faster only behind a 1,700-token prompt (214-215 against 201-202). Replies identical. So one
-block's memory latency is not what costs the time at short lengths. Next: read llama.cpp's
-`fattn-vec` launch for a short cache (blocks per query head rather than per KV group, and how it
-splits the cache across blocks) against ours, one block per KV group and 64-position chunk.
+block's memory latency is not what costs the time at short lengths.
+
+**What llama.cpp runs instead (2026-10-19)**: not its vector kernel. The same nsys trace names
+`flash_attn_ext_f16` (6.32 µs a layer) plus `flash_attn_stream_k_fixup_uniform` (1.54 µs): on
+Ampere with an f16 cache and a GQA ratio ≥ 2, `ggml_cuda_get_best_fattn_kernel` (`fattn.cu`) picks
+the tensor-core MMA kernel — a KV head's query heads become the rows of one `mma` product — and
+stream-K spreads the cache over the SMs; the vector kernel is for Ada and later, or no GQA. Ours is
+scalar f32 math in 4 blocks at 40 positions (one per KV head, 64-position chunks) on a 40-SM card.
+The vendored flash kernel is no shortcut: it has no split-KV kernel, so one decode position cannot
+fill the card (up to 25x slower per call, `docs/invariants/inference.md`). Next, cheapest first:
+more blocks at short lengths (a smaller chunk, or a KV head's query heads split across blocks),
+measured by nsys kernel sums AND tokens a second; then an `mma` body for GQA ≥ 2 on sm_80+.
+
+**Done (2026-10-19): the chunk follows the cache length** (`decode_attn::chunk_for`: the smallest
+of 16, 32 and 64 positions keeping the grid within 256 blocks and 64 chunks; the chunk is a kernel
+argument, so a captured step only updates as it grows). Smaller chunks win at short caches
+(TinyLlama at ~200 positions: 39.8 → 12.0 µs a layer) and lose at long ones, where each chunk
+costs the merge ~0.45 µs (Llama 3.2 3B at ~4,000 positions: 253 µs in 64s, 294 in 32s). Against
+the fixed 64, alternated in one binary, Windows up 3.8-4.1 h, llama.cpp re-measured the same
+session: TinyLlama 297-304 tok/s against 252-258 (llama.cpp 312.1), Gemma 3 1B 196-209 against
+175-187 over four prompts (209.7), Gemma 2 2B 126-127 against 118-120 (128.0), Llama 3.2 3B 121-122
+against 116-117 (126.1), Llama 3.2 1B 197-202 against 187-189 (208.8), Gemma 4 E2B 108-109 against
+101-104 (124.8); level behind a 4,320-token prompt, where the rule picks 64. Replies score against
+llama.cpp as the fixed chunk's did, no graph was rebuilt in 47 runs (a positive control logged
+one) — `docs/invariants/inference.md` § "Its chunk follows the cache length".
 
 #### #293 — A split's first prompt chunk after load spends 1-6 s in its first attention, once its experts go to the card
 `P3` · speed · **OPEN** — 2026-10-16 · history: found measuring #292

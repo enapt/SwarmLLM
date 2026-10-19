@@ -3463,7 +3463,8 @@ flash then read them, and a split's checks drifted to llama.cpp's 2nd choice (#7
 ## A decoded token's attention on a card is one kernel (2026-09-29)
 
 **What.** `decode_attn::gqa_decode_attention_cuda` + `kernels/decode_attn.cu`: one query position,
-the f32 cache read where it lies, split into fixed 64-position chunks (Dao et al., "Flash-Decoding
+the f32 cache read where it lies, split into chunks — 16, 32 or 64 positions by the cache length
+since 2026-10-19 (§ "Its chunk follows the cache length"), a fixed 64 before (Dao et al., "Flash-Decoding
 for long-context inference", 2023; llama.cpp's `fattn-vec` + `flash_attn_combine_results`). One
 block holds ONE KV head and EVERY query head of its group, so a K or V row is read once per group
 (#119's lesson from the CPU kernel). Replaces `affine` + two cuBLAS matmuls + `softmax`. Pinned
@@ -3501,11 +3502,70 @@ graph step shows `recording_ms_per_launch` ≈ 4.5 ms against a 20.8 ms cycle, i
 time** against ~19.8 op by op; the recording is what eats the gain. Next: record layer groups and
 launch each as it is recorded, so the card never waits for the recording.
 
+### Its chunk follows the cache length (2026-10-19, FUTURE_WORK #309)
+
+**What.** The chunk was a fixed 64 positions. It is now `decode_attn::chunk_for(groups, s_len)`:
+the smallest of 16, 32 and 64 that keeps the grid within 256 blocks (`groups` × chunks) AND within
+64 chunks, else 64. The kernel takes the chunk as an ARGUMENT (`DA_CHUNK` = 64 is only what its
+shared memory is sized for), so one kernel serves every chunk and a captured decode step only
+updates its arguments as the chunk grows with the cache.
+
+**Why a short cache needed more blocks.** A block's time is its chunk's positions one after
+another. TinyLlama (4 KV heads) at ~40 positions was 4 blocks on a 40-SM RTX 3070 Laptop, and nsys
+put decode attention at 778 µs a step against llama.cpp's 173 — the whole small-model gap. At ~200
+positions a layer's attention took 39.8 µs in chunks of 64 and 12.0 in chunks of 16. Keeping more
+loads in flight inside one block had been tried first and was 11-20 % SLOWER, so memory latency in
+one block was not the cost; the number of blocks was.
+
+**Why not always the smallest chunk.** The merge walks a head's chunks one after another, ~0.45 µs
+each. Llama 3.2 3B at ~4,000 positions took 224 + 29 µs in chunks of 64 and 237 + 57 in chunks of
+32; TinyLlama at ~1,700 was fastest in 32, not 16. Each chunk alternated twice in one binary (rigs
+b15, b16), the rule picks the fastest arm at every point measured.
+
+**Why it reads the length and the layout, never the card.** The chunk sets the summation order, so
+a rule that read the SM count would give a reply that depends on the card. As it stands a reply
+depends on the file and the cache length only, as it did with the fixed chunk.
+
+**Why one kernel with an argument, not one kernel per chunk.** A step whose kernels change is
+refused an in-place update and every graph group is rebuilt (790 ms in one step at position 64,
+#307). Grid and arguments may change in an update; the kernel may not.
+
+**Measured** (rigs `~/swarmllm-309/b17.sh`, `b18.sh`, Windows up 3.8-4.1 h, live node stopped;
+the rule and `SWARMLLM_DECODE_ATTN_CHUNK=64` alternated in one binary; 160-token replies unless
+noted; llama.cpp `llama-bench -ngl 99 -p 0 -n 128`, median of 5, in the b18 sitting):
+
+| model | rule | fixed 64 | llama.cpp | rule / llama.cpp |
+|---|---|---|---|---|
+| TinyLlama 1.1B Q4_K_M | 297.2-303.6 | 251.5-257.6 | 312.1 | 0.95-0.97 |
+| Gemma 3 1B Q4_K_M (4 prompts) | 196.3-209.0 | 174.7-187.4 | 209.7 | 0.94-1.00 |
+| Gemma 2 2B Q4_K_M | 125.8-127.3 | 118.0-120.1 | 128.0 | 0.98-0.99 |
+| Llama 3.2 3B Q4_K_M | 121.3-122.1 | 116.0-116.9 | 126.1 | 0.96-0.97 |
+| Llama 3.2 1B Q8_0 | 197.4-202.5 | 187.1-189.2 | 208.8 | 0.95-0.97 |
+| Gemma 4 E2B Q4_K_M | 108.2-109.0 | 101.1-104.1 | 124.8 | 0.87 |
+| Qwen 3.5 0.8B Q8_0 | 155.5-156.8 | 149.2-156.4 | 227.7 | 0.68-0.69 (#228) |
+| TinyLlama, 1,848-token prompt, 64 tokens | 207.5-215.4 | 200.3-203.5 | — | — |
+| Llama 3.2 3B, 672-token prompt, 64 tokens | 108.2-110.6 | 105.1-106.9 | — | — |
+| Llama 3.2 3B, 4,320-token prompt, 64 tokens | 68.1-69.0 | 68.3-70.2 | — | — (both 64) |
+
+**Checked.** On the card, `cuda_decode_kernel_matches_the_matmul_path` holds at every chunk
+(< 1e-5 abs), and a copy whose blocks start at `c * 64` whatever the chunk FAILS it. A TinyLlama
+reply whose cache crosses 1,025 positions (16 → 32 mid-reply) logged no refused update; the
+positive control (fixed 64 + `SWARMLLM_DECODE_ATTN_COMBINE=when-needed`, which changes kernels at
+position 64) logged one, so the log would have shown it. 0 rebuilds in 47 runs.
+
+**Replies.** Not bit-identical to fixed 64 (another summation order), so judged against llama.cpp.
+Re-tokenized (`score_against_reference.py`): Llama 3.2 3B the same at three prompt lengths (at
+4,320 both arms are 64 and the replies are byte-identical), Gemma 2 2B worst rank 2 / gap 0.26
+against 3 / 0.52. By exact ids against llama.cpp master (`~/llama.cpp-ref/score_ids_dump.py`):
+TinyLlama worst gap 0.024 against 0.130; Gemma 3 1B over four prompts 20 picks more than 0.05 off
+llama.cpp's first choice against 16, 8 against 9 more than 0.3, worst 1.0 against 1.9 — the same
+spread, no shift; Qwen 3.5 0.8B one each.
+
 **From the rules file (moved 2026-10-02):**
 
 **`decode_attn::gqa_decode_attention_cuda`** (`kernels/decode_attn.cu`, flash-decoding: one
-block per KV head and 64-position chunk, every query head of the group, a combine kernel past one
-chunk) answers a one-position attention on a card, from `standard_attention` — the card's twin of
+block per KV head and 64-position chunk — 16/32/64 by length since 2026-10-19 —, every query head
+of the group, a combine kernel past one chunk) answers a one-position attention on a card, from `standard_attention` — the card's twin of
 the CPU kernel, same `SWARMLLM_DECODE_ATTN=standard` A/B. **And a one-position append leaves the
 f16 mirror behind** (`LayerKv::append`); the next multi-position append catches it up, and
 `flash_operands` declines a lagging mirror quietly (`SWARMLLM_KV_MIRROR_EAGER=1` = old). Together

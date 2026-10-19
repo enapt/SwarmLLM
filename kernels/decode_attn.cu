@@ -26,11 +26,18 @@
 // (`inference::decode_attn`) learned the hard way (#119: once per query head
 // was 7x the traffic on Qwen2.5-7B).
 //
-// The chunk is FIXED (`DA_CHUNK`, mirrored by `decode_attn::CUDA_CHUNK`), so the
-// summation order — and the result — depends on the cache length only, never on
+// The chunk is fixed for a cache length (`decode_attn::chunk_for`), so the
+// summation order — and the result — depends on the cache length and the head layout only, never on
 // the card or the scheduling. It is not bit-identical to the matmul path it
 // replaces (a different summation order): replies are judged against
-// llama.cpp, as for the tensor-core prompt pass.
+// llama.cpp, as for the tensor-core prompt pass. The chunk is an ARGUMENT
+// (16, 32 or `DA_CHUNK` = 64, the most shared memory is sized for), chosen by
+// the caller from the group count and the cache length only
+// (`decode_attn::chunk_for`): a short cache needs more blocks than one per KV
+// head (TinyLlama at 40 positions was 4 blocks of 64 on a 40-SM card), a long
+// one has them already and pays for each extra chunk in the merge (FUTURE_WORK
+// #309). One kernel at every chunk, so a captured step only updates its
+// arguments as the chunk grows with the cache.
 //
 // Built WITHOUT `-use_fast_math`, like every kernel here (`build.rs`).
 
@@ -99,7 +106,8 @@ static __device__ __forceinline__ void decode_attn_body(
     const long long v_sb,
     const long long v_sh,
     const float scale,
-    const float softcap
+    const float softcap,
+    const int chunk
 ) {
     __shared__ float q_sh[DA_MAX_REP * DA_MAX_D];
     __shared__ float sc[DA_MAX_REP * DA_CHUNK];
@@ -111,8 +119,8 @@ static __device__ __forceinline__ void decode_attn_body(
     const int h = g % n_kv_head;
     const int c = blockIdx.y;
     const int n_chunks = gridDim.y;
-    const int s0 = c * DA_CHUNK;
-    const int n = min(DA_CHUNK, s_len - s0);
+    const int s0 = c * chunk;
+    const int n = min(chunk, s_len - s0);
     const int tid = threadIdx.x;
     const int lane = tid & 31;
     const int warp = tid >> 5;
@@ -219,9 +227,9 @@ static __device__ __forceinline__ void decode_attn_body(
         float *__restrict__ partial, const int n_kv_head, const int n_rep,      \
         const int d, const int s_len, const long long k_sb,                     \
         const long long k_sh, const long long v_sb, const long long v_sh,       \
-        const float scale, const float softcap) {                               \
+        const float scale, const float softcap, const int chunk) {              \
         decode_attn_body<KV>(q, k, v, out, partial, n_kv_head, n_rep, d, s_len, \
-                             k_sb, k_sh, v_sb, v_sh, scale, softcap);           \
+                             k_sb, k_sh, v_sb, v_sh, scale, softcap, chunk);    \
     }
 
 // The f32 cache (the processor's layout, and a card's where the half cache does

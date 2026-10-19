@@ -271,13 +271,76 @@ pub fn gqa_decode_attention_cpu(
     )?))
 }
 
-/// Cached positions per block on the CARD — `DA_CHUNK` in
-/// `kernels/decode_attn.cu`, and FIXED for the same reason [`CHUNK`] is: the
-/// result depends on the cache length only. Smaller than the processor's
-/// because a card needs blocks to fill it: at 200 positions on a 4-KV-head
-/// model, 256 would be four blocks on a 40-SM card.
-#[cfg(feature = "candle-cuda")]
+/// The most cached positions per block on the CARD — `DA_CHUNK` in
+/// `kernels/decode_attn.cu`, what its shared memory is sized for, and the
+/// chunk a long cache gets ([`chunk_for`]). Smaller than the processor's
+/// [`CHUNK`] because a card needs blocks to fill it: at 200 positions on a
+/// 4-KV-head model, 256 would be four blocks on a 40-SM card.
+#[cfg(any(feature = "candle-cuda", test))]
 pub(crate) const CUDA_CHUNK: usize = 64;
+
+/// The chunks the card kernel takes, smallest first — its `chunk` argument,
+/// at most [`CUDA_CHUNK`] (`DA_CHUNK`, what its shared memory is sized for).
+#[cfg(any(feature = "candle-cuda", test))]
+const CARD_CHUNKS: [usize; 3] = [16, 32, CUDA_CHUNK];
+
+/// The most blocks a smaller chunk may make ([`chunk_for`]).
+#[cfg(any(feature = "candle-cuda", test))]
+const CHUNK_MAX_BLOCKS: usize = 256;
+
+/// The most chunks a smaller chunk may make: the merge walks a head's chunks
+/// one after another, ~0.45 µs each ([`chunk_for`]).
+#[cfg(any(feature = "candle-cuda", test))]
+const CHUNK_MAX_CHUNKS: usize = 64;
+
+/// Positions per block for `groups` (batch × KV heads) over `s_len` cached
+/// positions: the smallest of [`CARD_CHUNKS`] that keeps the blocks within
+/// [`CHUNK_MAX_BLOCKS`] and the chunks within [`CHUNK_MAX_CHUNKS`], else
+/// [`CUDA_CHUNK`].
+///
+/// A block's time is its chunk's positions one after another, so a short
+/// cache in few blocks idles the card: TinyLlama at ~200 positions is 16
+/// blocks of 64 on a 40-SM RTX 3070 Laptop, and its attention took 39.8 µs a
+/// layer against llama.cpp's ~8 — 12.0 µs in chunks of 16 (nsys, FUTURE_WORK
+/// #309). A long cache has blocks to spare, and each extra chunk costs the
+/// merge: Llama 3.2 3B at ~4,000 positions took 224 + 29 µs in chunks of 64
+/// and 237 + 57 in chunks of 32. Measured end to end (2026-10-19, 160-token
+/// replies, each chunk alternated twice in one binary), the rule picks the
+/// fastest arm at every point: TinyLlama ~200 positions → 16 (300.6 tok/s
+/// against 252 in 64), 1,700 → 32 (209 against 201); Llama 3.2 3B ~200 → 16
+/// (122 against 117), ~600 → 32 (level), ~4,000 → 64 (68.5 against 63.7 in
+/// 32). The rule against fixed 64, alternated twice in one binary: TinyLlama
+/// 297-304 tok/s against 252-258 (llama.cpp 299), Gemma 3 1B 196-209 against
+/// 175, Gemma 2 2B 126-127 against 118-120, Llama 3.2 3B 121-122 against
+/// 116-117; behind 1,848 and 672-token prompts +4 and +3 %; at 4,320 it is 64
+/// and the reply is the same byte for byte. It reads the head layout and the
+/// length only — never the card — so a reply is the same on every card, and a
+/// captured step only updates its arguments as the chunk grows (a reply
+/// crossing 16 → 32 rebuilt no graph).
+#[cfg(any(feature = "candle-cuda", test))]
+pub(crate) fn chunk_for(groups: usize, s_len: usize) -> usize {
+    CARD_CHUNKS
+        .into_iter()
+        .find(|&c| {
+            let chunks = s_len.div_ceil(c);
+            chunks <= CHUNK_MAX_CHUNKS && groups * chunks <= CHUNK_MAX_BLOCKS
+        })
+        .unwrap_or(CUDA_CHUNK)
+}
+
+/// `SWARMLLM_DECODE_ATTN_CHUNK=16|32|64` holds the card kernel to one chunk
+/// for an A/B inside one binary (`64` = the kernel before [`chunk_for`]);
+/// unset, [`chunk_for`] chooses per call.
+#[cfg(feature = "candle-cuda")]
+fn fixed_chunk() -> Option<usize> {
+    static CHUNK: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *CHUNK.get_or_init(|| {
+        std::env::var("SWARMLLM_DECODE_ATTN_CHUNK")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|c| CARD_CHUNKS.contains(c))
+    })
+}
 
 /// Whether a cache of ONE chunk is merged by the combine kernel too, so a
 /// decode step launches the same two kernels at every length.
@@ -294,7 +357,7 @@ pub(crate) const CUDA_CHUNK: usize = 64;
 /// 45-56 tokens a second instead of ~80. A one-chunk merge is bit-identical to
 /// the direct write (its one weight is `expf(0) = 1`; pinned by
 /// `one_chunk_merged_is_bit_identical_to_the_direct_write`) and costs one
-/// small launch a layer below 64 positions.
+/// small launch a layer while the cache is one chunk.
 /// `SWARMLLM_DECODE_ATTN_COMBINE=when-needed` restores the direct write for an
 /// A/B inside one binary.
 #[cfg(feature = "candle-cuda")]
@@ -405,6 +468,7 @@ pub fn gqa_decode_attention_cuda(
             scale,
             softcap: softcap.unwrap_or(0.0),
             combine_one_chunk: combine_every_length(),
+            chunk: fixed_chunk(),
         };
         Ok(Some(q.apply_op3_no_bwd(k, v, &op)?))
     }
@@ -417,7 +481,6 @@ pub fn gqa_decode_attention_cuda(
 
 #[cfg(feature = "candle-cuda")]
 mod cuda {
-    use super::CUDA_CHUNK;
     use candle_core::{CpuStorage, CustomOp3, Layout, Result, Shape};
 
     pub(super) struct DecodeAttn {
@@ -427,6 +490,9 @@ mod cuda {
         /// A one-chunk cache goes through the combine too
         /// ([`super::combine_every_length`]).
         pub(super) combine_one_chunk: bool,
+        /// Positions per block, one of [`super::CARD_CHUNKS`]; `None` =
+        /// [`super::chunk_for`] the call's shape ([`super::fixed_chunk`]).
+        pub(super) chunk: Option<usize>,
     }
 
     /// The cache's K and V as the kernel reads them — f32, or the half cache
@@ -485,7 +551,13 @@ mod cuda {
                 candle_core::bail!("decode-attention: unexpected layout");
             }
             let n_rep = n_head / n_kv_head;
-            let n_chunks = s_len.div_ceil(CUDA_CHUNK);
+            let chunk = self
+                .chunk
+                .unwrap_or_else(|| super::chunk_for(b * n_kv_head, s_len));
+            if !super::CARD_CHUNKS.contains(&chunk) {
+                candle_core::bail!("decode-attention: no kernel for {chunk}-position chunks");
+            }
+            let n_chunks = s_len.div_ceil(chunk);
             let merged = n_chunks > 1 || self.combine_one_chunk;
 
             let q = s1.as_cuda_slice::<f32>()?.slice(qo..qe);
@@ -530,8 +602,13 @@ mod cuda {
                 block_dim: (128, 1, 1),
                 shared_mem_bytes: 0,
             };
-            let (n_kv_i, n_rep_i, d_i, s_len_i) =
-                (n_kv_head as i32, n_rep as i32, d as i32, s_len as i32);
+            let (n_kv_i, n_rep_i, d_i, s_len_i, chunk_i) = (
+                n_kv_head as i32,
+                n_rep as i32,
+                d as i32,
+                s_len as i32,
+                chunk as i32,
+            );
             let (k_sb, k_sh, v_sb, v_sh) = (ks[0] as i64, ks[1] as i64, vs[0] as i64, vs[1] as i64);
             // A null pointer for whichever output this launch does not write.
             let null: u64 = 0;
@@ -568,8 +645,9 @@ mod cuda {
                 builder.arg(&v_sh);
                 builder.arg(&self.scale);
                 builder.arg(&self.softcap);
+                builder.arg(&chunk_i);
                 // SAFETY: ffi. Shapes, strides and scope (d % 32 == 0, d <= 256,
-                // n_rep <= 16) are checked by the caller and above; the kernel
+                // n_rep <= 16, chunk <= 64) are checked by the caller and above; the kernel
                 // reads within the views and writes `out` or `partial`, each
                 // sized for exactly what it assigns.
                 unsafe { builder.launch(cfg) }.w()?;
@@ -824,34 +902,52 @@ mod tests {
                     .unwrap()
             };
             let (qc, kc, vc) = (q.to_device(&card).unwrap(), on_card(&kbuf), on_card(&vbuf));
-            let got = gqa_decode_attention_cuda(&qc, &kc, &vc, None, scale, softcap)
-                .unwrap()
-                .expect("the card kernel applies to these inputs")
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap();
-            assert_eq!(got.len(), want.len());
-            let worst_abs = got
-                .iter()
-                .zip(&want)
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
-            let worst_rel = got
-                .iter()
-                .zip(&want)
-                .map(|(a, b)| (a - b).abs() / a.abs().max(b.abs()).max(0.05))
-                .fold(0f32, f32::max);
-            assert!(
-                worst_abs < 1e-5 && worst_rel < 1e-4,
-                "b={b} heads {n_head}/{n_kv_head} S={s_len} d={d} softcap={softcap:?} cache {cache_dtype:?}: worst abs {worst_abs} rel {worst_rel}"
-            );
+            let flat = |t: Tensor| t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            // The entry point as callers reach it, then every chunk the kernel
+            // is built for (`SWARMLLM_DECODE_ATTN_CHUNK`).
+            let mut arms = vec![(
+                "entry point".to_string(),
+                flat(
+                    gqa_decode_attention_cuda(&qc, &kc, &vc, None, scale, softcap)
+                        .unwrap()
+                        .expect("the card kernel applies to these inputs"),
+                ),
+            )];
+            for chunk in CARD_CHUNKS {
+                let op = cuda::DecodeAttn {
+                    scale,
+                    softcap: softcap.unwrap_or(0.0),
+                    combine_one_chunk: true,
+                    chunk: Some(chunk),
+                };
+                arms.push((
+                    format!("{chunk}-position chunks"),
+                    flat(qc.apply_op3_no_bwd(&kc, &vc, &op).unwrap()),
+                ));
+            }
+            for (arm, got) in arms {
+                assert_eq!(got.len(), want.len());
+                let worst_abs = got
+                    .iter()
+                    .zip(&want)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, f32::max);
+                let worst_rel = got
+                    .iter()
+                    .zip(&want)
+                    .map(|(a, b)| (a - b).abs() / a.abs().max(b.abs()).max(0.05))
+                    .fold(0f32, f32::max);
+                assert!(
+                    worst_abs < 1e-5 && worst_rel < 1e-4,
+                    "{arm}: b={b} heads {n_head}/{n_kv_head} S={s_len} d={d} softcap={softcap:?} cache {cache_dtype:?}: worst abs {worst_abs} rel {worst_rel}"
+                );
+            }
         }
     }
 
     /// A cache of ONE chunk merged by the combine kernel must equal the direct
     /// write BIT FOR BIT: the combine runs at every length so a captured decode
-    /// step keeps its kernels as the cache passes `CUDA_CHUNK`
+    /// step keeps its kernels as the cache passes one chunk
     /// ([`super::combine_every_length`]), and that must move the launch count
     /// and nothing a reply can see. Every length up to one chunk, both caches,
     /// a soft cap, several query heads a group.
@@ -892,6 +988,7 @@ mod tests {
                             scale: 1.0 / (d as f32).sqrt(),
                             softcap: softcap.unwrap_or(0.0),
                             combine_one_chunk,
+                            chunk: Some(CUDA_CHUNK),
                         };
                         q.apply_op3_no_bwd(&k, &v, &op)
                             .unwrap()
@@ -918,6 +1015,36 @@ mod tests {
             }
         }
         assert_eq!(compared, 3 * 5 * 2);
+    }
+
+    /// [`chunk_for`] at every point it was measured (FUTURE_WORK #309, 2026-10-19), and at its edges.
+    #[test]
+    fn the_card_chunk_grows_with_the_cache_and_the_heads() {
+        // TinyLlama 1.1B: 4 KV heads.
+        assert_eq!(chunk_for(4, 200), 16);
+        assert_eq!(chunk_for(4, 1_700), 32);
+        // Llama 3.2 3B: 8 KV heads.
+        assert_eq!(chunk_for(8, 200), 16);
+        assert_eq!(chunk_for(8, 600), 32);
+        assert_eq!(chunk_for(8, 4_000), 64);
+        // One KV head (Gemma 3 1B): the merge's chunk count binds, not the blocks.
+        assert_eq!(chunk_for(1, 1_024), 16);
+        assert_eq!(chunk_for(1, 1_025), 32);
+        assert_eq!(chunk_for(1, 4_000), 64);
+        // The edges: 64 chunks of 16 and 256 blocks are allowed, one more is not.
+        assert_eq!(chunk_for(4, 1_024), 16);
+        assert_eq!(chunk_for(4, 1_025), 32);
+        assert_eq!(chunk_for(16, 256), 16);
+        assert_eq!(chunk_for(16, 257), 32);
+        // Past what any smaller chunk allows, the widest; and a one-position cache.
+        assert_eq!(chunk_for(32, 100_000), CUDA_CHUNK);
+        assert_eq!(chunk_for(1, 1), 16);
+        // It only ever answers a chunk the kernel takes.
+        for groups in [1, 2, 4, 8, 32, 64, 300] {
+            for s_len in [1, 15, 16, 17, 255, 1_000, 5_000, 70_000] {
+                assert!(CARD_CHUNKS.contains(&chunk_for(groups, s_len)));
+            }
+        }
     }
 
     #[test]

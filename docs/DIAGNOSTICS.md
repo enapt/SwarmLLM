@@ -2162,8 +2162,16 @@ outlier sample; tokens a second). Rows marked † were re-measured after FUTURE_
 | Qwen 3.5 0.8B Q8_0 † | 142.2-142.9 | 212.9 | 0.67 |
 | Qwen2.5 0.5B **F16** | 107.4-115.6 | 227.6 | 0.49 |
 
-The open gaps: unquantized weights (FUTURE_WORK #308), small models' per-step cost (#309, the
-E2B included), Qwen 3.5 (#228).
+Since the decode-attention chunk follows the cache (FUTURE_WORK #309, 2026-10-19 — Windows up
+3.8-4.1 h, llama.cpp re-run the same session): TinyLlama 297-304 against 312.1 (0.95-0.97),
+Gemma 3 1B 196-209 against 209.7 (0.94-1.00), Gemma 2 2B 126-127 against 128.0 (0.98-0.99),
+Llama 3.2 3B 121-122 against 126.1 (0.96-0.97), Llama 3.2 1B 197-202 against 208.8 (0.95-0.97),
+Gemma 4 E2B 108-109 against 124.8 (0.87), Qwen 3.5 0.8B 155-157 against 227.7 (0.68-0.69).
+⚠ **llama.cpp itself read 1-10 % faster that session than in the table above** (same binary, same
+files; Windows up ~4 h against ~37 h), and so did ours: a ratio is only good within ONE sitting.
+
+The open gaps: unquantized weights (FUTURE_WORK #308), Gemma 4 E2B's step (#309), Qwen 3.5
+(#228).
 
 ### `examples/constrained_node_test.sh` — a SMALL node, reproduced locally
 
