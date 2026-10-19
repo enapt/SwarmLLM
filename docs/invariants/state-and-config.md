@@ -477,6 +477,21 @@ gate's callers: test it from the API, not from the function.
 
 
 
+### The request's needs half (2026-10-19, gotcha #901)
+
+The fast path is `ModelProcessPool::generate` — text in, text out. It reads no
+image and loads no adapter. The pipeline's own fast paths already stood aside
+for both (`request_disqualifies_fast_paths`), but this predicate is asked at the
+API edge, BEFORE the request is built, and only the OpenAI surface checked
+LoRA beside the call; nothing on either surface checked images. A picture sent
+to a model held whole here was generated from its text alone, answered 200.
+Found by the first real picture request through the Anthropic surface.
+
+**`pipeline::FastPathNeeds` is a REQUIRED fourth argument**, built by
+`FastPathNeeds::of(messages, lora_adapter)` — the same rule the pipeline uses,
+so the two cannot drift. The admin listing passes `FastPathNeeds::NO_REQUEST`.
+Test: `a_picture_or_an_adapter_keeps_a_request_off_the_fast_paths`.
+
 ### The override half (2026-09-17, gotcha #633)
 
 The predicate now takes the request's `swarm_route` override as a **required**

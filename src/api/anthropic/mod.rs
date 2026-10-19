@@ -287,9 +287,13 @@ pub async fn messages(
     // `None`: this surface has no `swarm_route` field to carry an override, the
     // same reason `submit_stream_to_router` takes one as a parameter rather than
     // deriving it.
-    let has_local_split_model = state
-        .shared_state
-        .local_fast_path_for(&requested_mid, None, keep);
+    // No adapter on this surface; a picture stands the fast path aside (#115 (2a)).
+    let has_local_split_model = state.shared_state.local_fast_path_for(
+        &requested_mid,
+        None,
+        keep,
+        crate::inference::pipeline::FastPathNeeds::of(&internal_messages, None),
+    );
 
     tracing::debug!(
         request_id = %request_id,

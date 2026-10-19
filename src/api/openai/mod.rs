@@ -553,15 +553,19 @@ pub async fn chat_completions(
     // One predicate for both API surfaces — see `SharedState::local_fast_path_for`.
     // The override rides in because this branch decides whether the request ever
     // reaches the router, which is the only reader of it.
-    // A LoRA request never takes this fast path: it runs the whole-model
-    // `Generate`, which has no adapter, so the reply would be the base model's
-    // (FUTURE_WORK #110). The router plans it as one local segment instead.
-    let has_local_split_model = req.lora_adapter.is_none()
-        && state.shared_state.local_fast_path_for(
-            &requested_mid,
-            req.route_plan_override().as_ref(),
-            req.keep_asked(),
-        );
+    // A LoRA request or one with a picture never takes this fast path: it runs
+    // the whole-model `Generate`, which has neither, so the reply would be the
+    // base model's (FUTURE_WORK #110) or about a picture it was never shown
+    // (#115 (2a)). The router plans it as one local segment instead.
+    let has_local_split_model = state.shared_state.local_fast_path_for(
+        &requested_mid,
+        req.route_plan_override().as_ref(),
+        req.keep_asked(),
+        crate::inference::pipeline::FastPathNeeds::of(
+            &internal_messages,
+            req.lora_adapter.as_deref(),
+        ),
+    );
 
     if has_local_split_model {
         // Echo the model the client actually requested (`req.model`), NOT the

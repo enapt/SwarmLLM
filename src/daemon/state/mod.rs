@@ -3367,12 +3367,22 @@ impl SharedState {
     /// no delegate it assigns the request here anyway, so the only cost is a
     /// scheduling pass. A node with no peers keeps the fast path: there is
     /// nobody to ask.
+    ///
+    /// And one that is not about the node at all: the fast path runs the
+    /// worker's whole-model `Generate`, which can serve neither a picture nor
+    /// an adapter — `needs` (REQUIRED, `pipeline::FastPathNeeds::of` the
+    /// request) says whether this request carries one. A picture sent down it
+    /// reached the model as the text `<__media__>` (#115 (2a)).
     pub fn local_fast_path_for(
         &self,
         model_id: &crate::types::ModelId,
         over: Option<&crate::inference::route_override::RoutePlanOverride>,
         asked: crate::types::KeepAsked,
+        needs: crate::inference::pipeline::FastPathNeeds,
     ) -> bool {
+        if !needs.fast_paths_serve() {
+            return false;
+        }
         if !self.has_complete_split_model(model_id) {
             return false;
         }

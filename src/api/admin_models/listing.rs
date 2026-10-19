@@ -398,6 +398,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                         &crate::types::ModelId(id.to_string()),
                         None,
                         crate::types::KeepAsked::Unasked,
+                        crate::inference::pipeline::FastPathNeeds::NO_REQUEST,
                     ),
             // ⚠ ANY part, not the whole model. A split pipeline runs on
             // partial holders, so this is the honest count of who contributes

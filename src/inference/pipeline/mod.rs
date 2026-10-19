@@ -1132,8 +1132,78 @@ pub(super) fn fastpath_request_disqualified(exec: &PipelineExecutor) -> bool {
 /// the plan — what the planner can ask before a plan exists
 /// (`remote_generate::request_may_be_led_by_its_head`).
 pub(super) fn request_disqualifies_fast_paths(request: &crate::types::InferenceRequest) -> bool {
-    request.lora_adapter.is_some()
-        || !crate::inference::vision::collect_images(&request.messages).is_empty()
+    !FastPathNeeds::of(&request.messages, request.lora_adapter.as_deref()).fast_paths_serve()
+}
+
+/// What a request carries that no fast path can serve: a picture (only the
+/// pipeline's first segment puts image rows in the prompt,
+/// `vision::splice_image_rows`; the worker's whole-model `Generate` has no
+/// image path) or a LoRA adapter (that `Generate` has none, FUTURE_WORK #110).
+///
+/// The one rule for the pipeline's fast paths ([`request_disqualifies_fast_paths`])
+/// AND the API surfaces' local fast path (`SharedState::local_fast_path_for`,
+/// where it is a REQUIRED argument). Until 2026-10-19 that gate never saw the
+/// request: the OpenAI surface checked the adapter beside it, neither surface
+/// checked for pictures, and a picture sent to a node holding the whole model
+/// reached it as the text `<__media__>` — the model then described an image it
+/// was never shown (#115 (2a), gotcha #901).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FastPathNeeds {
+    images: bool,
+    adapter: bool,
+}
+
+impl FastPathNeeds {
+    /// What THIS request needs, read off its messages and adapter.
+    pub fn of(messages: &[crate::types::ChatMessage], lora_adapter: Option<&str>) -> Self {
+        Self {
+            images: crate::inference::vision::has_images(messages),
+            adapter: lora_adapter.is_some(),
+        }
+    }
+
+    /// A question about the model with no request behind it (the model list's
+    /// "runs here"): nothing a request could carry is asked about.
+    pub const NO_REQUEST: Self = Self {
+        images: false,
+        adapter: false,
+    };
+
+    /// May a fast path serve it?
+    pub fn fast_paths_serve(self) -> bool {
+        !self.images && !self.adapter
+    }
+}
+
+#[cfg(test)]
+mod fast_path_needs_tests {
+    use super::FastPathNeeds;
+    use crate::types::{ChatMessage, ImageData, Role};
+
+    fn turn(images: Vec<ImageData>) -> ChatMessage {
+        ChatMessage {
+            role: Role::User,
+            content: "look".into(),
+            images,
+            tool: Default::default(),
+        }
+    }
+
+    /// A picture anywhere in the conversation, or an adapter, keeps a request
+    /// off every fast path — the API's local one included, which once sent a
+    /// picture to the whole-model `Generate` as the text `<__media__>`.
+    #[test]
+    fn a_picture_or_an_adapter_keeps_a_request_off_the_fast_paths() {
+        let picture = ImageData {
+            rgb_bytes: vec![0; 3],
+            width: 1,
+            height: 1,
+        };
+        assert!(FastPathNeeds::of(&[turn(vec![])], None).fast_paths_serve());
+        assert!(!FastPathNeeds::of(&[turn(vec![]), turn(vec![picture])], None).fast_paths_serve());
+        assert!(!FastPathNeeds::of(&[turn(vec![])], Some("adapter")).fast_paths_serve());
+        assert!(FastPathNeeds::NO_REQUEST.fast_paths_serve());
+    }
 }
 
 /// May a split of this request that this node drives guess ahead at all — is
