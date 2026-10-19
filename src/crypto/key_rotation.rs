@@ -68,7 +68,7 @@ pub async fn run_key_rotation(
             }
             _ = eviction_interval.tick() => {
                 let before = session_manager.session_count();
-                session_manager.evict_stale(MAX_SESSION_AGE);
+                let aged = session_manager.evict_stale(MAX_SESSION_AGE);
                 let after = session_manager.session_count();
                 tracing::debug!(
                     active_sessions = before,
@@ -76,6 +76,29 @@ pub async fn run_key_rotation(
                     remaining = after,
                     "DIAG: key rotation tick (eviction)"
                 );
+                // A session ages out only when no rotation renewed it, and the
+                // peer may still be using it: re-key now rather than wait for
+                // the peer's next message to fail (#304). Its key was retired,
+                // so what the peer sealed meanwhile still opens.
+                if !aged.is_empty() {
+                    let mut sent = 0usize;
+                    for peer in &aged {
+                        if initiate_exchange(
+                            &session_manager,
+                            &network_tx,
+                            &local_node_id,
+                            &shared_state,
+                            peer,
+                        ) {
+                            sent += 1;
+                        }
+                    }
+                    tracing::info!(
+                        aged_out = aged.len(),
+                        rekey_initiated = sent,
+                        "DIAG: re-keying sessions no rotation renewed"
+                    );
+                }
             }
             _ = rotation_interval.tick() => {
                 // Initiate ephemeral re-keying with all active peers

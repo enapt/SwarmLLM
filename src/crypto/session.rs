@@ -621,7 +621,12 @@ impl SessionManager {
                 });
             }
             Entry::Vacant(vacant) => {
-                vacant.insert(CachedSession::new(cipher_key));
+                // The window comes along here too: a key promoted from
+                // `unconfirmed` after its session aged out or the peer
+                // disconnected must not forget the nonce that just opened.
+                let mut session = CachedSession::new(cipher_key);
+                session.replay_window = std::sync::Mutex::new(window);
+                vacant.insert(session);
             }
         }
     }
@@ -971,16 +976,49 @@ impl SessionManager {
         Some(plaintext)
     }
 
-    /// Evict sessions older than `max_age` and pending ephemeral exchanges older than 60s.
-    pub fn evict_stale(&self, max_age: std::time::Duration) {
+    /// End sessions older than `max_age` — RETIRED, like a disconnect's, never
+    /// destroyed — and purge pending ephemeral exchanges older than 60 s.
+    /// Returns the peers whose session aged out, for the caller to re-key at
+    /// once.
+    ///
+    /// A session reaches `max_age` only when no rotation landed in that time
+    /// (each install resets its clock), and the peer may well still be sealing
+    /// with it: destroying it left the peer's next message unopenable under
+    /// every key (`had_session=false had_previous=false had_retired=false`,
+    /// FUTURE_WORK #304) and this node unable to seal at all until something
+    /// re-keyed. WireGuard never lets the rejection be the first sign — it
+    /// re-keys at `REKEY_AFTER_TIME` and retries before `REJECT_AFTER_TIME`.
+    /// Here the key stops SEALING at the same age as before; it may still OPEN
+    /// for [`PREVIOUS_KEY_GRACE`] against its own replay window, as a rotated
+    /// or disconnected key does, while the caller's fresh exchange lands.
+    pub fn evict_stale(&self, max_age: std::time::Duration) -> Vec<NodeId> {
         let now = Instant::now();
-        self.sessions.retain(|peer, session| {
-            let keep = now.duration_since(session.created_at) < max_age;
-            if !keep {
-                tracing::debug!(peer = %peer, "Evicted stale encryption session");
+        let aged: Vec<NodeId> = self
+            .sessions
+            .iter()
+            .filter(|s| now.duration_since(s.value().created_at) >= max_age)
+            .map(|s| s.key().clone())
+            .collect();
+        let mut retired_peers = Vec::with_capacity(aged.len());
+        for peer in aged {
+            // Re-checked under the entry's lock: a rotation that installed in
+            // between has given the peer a fresh session, which stays.
+            let removed = self
+                .sessions
+                .remove_if(&peer, |_, s| now.duration_since(s.created_at) >= max_age);
+            if let Some((_, session)) = removed {
+                self.retired.insert(
+                    peer.clone(),
+                    PreviousKey {
+                        cipher_key: session.cipher_key,
+                        replay_window: session.replay_window,
+                        retired_at: Instant::now(),
+                    },
+                );
+                tracing::debug!(peer = %peer, "Retired an encryption session no rotation renewed");
+                retired_peers.push(peer);
             }
-            keep
-        });
+        }
         // Retired keys outlive their usefulness at the grace window; holding
         // one longer would widen the window in which an old key still opens
         // anything, for no benefit.
@@ -1014,6 +1052,7 @@ impl SessionManager {
             self.pending_ephemeral_pub
                 .retain(|peer, _| self.pending_ephemeral.contains_key(peer));
         }
+        retired_peers
     }
 
     /// Number of active sessions.
@@ -1417,8 +1456,9 @@ mod tests {
         sm.evict_stale(std::time::Duration::from_secs(3600));
         assert_eq!(sm.session_count(), 1);
 
-        // Evicting with zero max_age should remove it
-        sm.evict_stale(std::time::Duration::ZERO);
+        // Evicting with zero max_age should end it, and name the peer so the
+        // caller re-keys it
+        assert_eq!(sm.evict_stale(std::time::Duration::ZERO), vec![node_b]);
         assert_eq!(sm.session_count(), 0);
     }
 
@@ -1661,6 +1701,42 @@ mod disconnect_retirement_tests {
         assert!(a.establish_session(&nb, b.local_public));
         assert!(b.establish_session(&na, a.local_public));
         (a, b, na, nb)
+    }
+
+    /// A session no rotation renewed is retired, not destroyed: the peer,
+    /// which may still be sealing with it, is still read for the grace window
+    /// while the fresh exchange the caller starts lands — and this node seals
+    /// nothing more with it (#304).
+    #[test]
+    fn a_session_that_ages_out_still_opens_what_the_peer_sealed_with_it() {
+        let (a, b, na, nb) = pair();
+        let aad = b"header";
+        let in_flight = a.seal(&nb, b"piece 10", aad).unwrap();
+
+        assert_eq!(b.evict_stale(Duration::ZERO), vec![na.clone()]);
+        assert_eq!(
+            b.open(&na, &in_flight, aad).unwrap(),
+            b"piece 10",
+            "the peer's message under the aged key still opens"
+        );
+        assert!(
+            b.open(&na, &in_flight, aad).is_err(),
+            "under its own replay window, once"
+        );
+        assert!(
+            matches!(b.seal(&na, b"x", aad), Err(SwarmError::NoSession(_))),
+            "an aged key seals nothing more"
+        );
+        let later = a.seal(&nb, b"piece 11", aad).unwrap();
+        if let Some(mut k) = b.retired.get_mut(&na) {
+            k.retired_at = Instant::now()
+                .checked_sub(PREVIOUS_KEY_GRACE + Duration::from_secs(1))
+                .expect("up for longer than the grace window");
+        }
+        assert!(
+            b.open(&na, &later, aad).is_err(),
+            "past the grace window it opens nothing"
+        );
     }
 
     /// A complete ephemeral rekey, all three legs — initiate, accept, confirm
@@ -2035,6 +2111,33 @@ mod key_confirmation_tests {
         let a_pub = a.initiate_ephemeral_exchange(&nb);
         let b_pub = b.accept_ephemeral_exchange(&na, &a_pub, KeyAdoption::OnConfirmation);
         let confirm = a.complete_ephemeral_session(&nb, &b_pub).unwrap();
+
+        assert!(b.open(&na, &confirm, SESSION_CONFIRM_MARKER).is_ok());
+        assert!(
+            b.open(&na, &confirm, SESSION_CONFIRM_MARKER).is_err(),
+            "the same frame must not open twice under the promoted key"
+        );
+    }
+
+    /// Nor when the session it would replace has gone in the meantime — aged
+    /// out at the eviction tick between the answer and the confirmation, so
+    /// the promotion builds a new session rather than replacing one.
+    #[test]
+    fn the_confirming_message_cannot_be_replayed_after_the_session_aged_out() {
+        let (a, b, na, nb) = pair();
+
+        let a_pub = a.initiate_ephemeral_exchange(&nb);
+        let b_pub = b.accept_ephemeral_exchange(&na, &a_pub, KeyAdoption::OnConfirmation);
+        let confirm = a.complete_ephemeral_session(&nb, &b_pub).unwrap();
+        // The session is old; the key waiting to replace it is not.
+        let max_age = Duration::from_secs(600);
+        if let Some(mut s) = b.sessions.get_mut(&na) {
+            s.created_at = Instant::now()
+                .checked_sub(max_age + Duration::from_secs(1))
+                .expect("up for longer than the session age");
+        }
+        assert_eq!(b.evict_stale(max_age), vec![na.clone()]);
+        assert!(b.unconfirmed.get(&na).is_some(), "the waiting key stays");
 
         assert!(b.open(&na, &confirm, SESSION_CONFIRM_MARKER).is_ok());
         assert!(

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #314**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #316**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1158,32 +1158,36 @@ penalised slow or CGNAT peer is visible — the risk is the mesh partitioning it
 half: DHT provider records are add-only and can outlive the fact by up to their 12 h TTL (see #49); a
 capability challenge before trusting one would address it. No incident is known.
 
-#### #304 — A peer can lose its key for this node mid-request, with no disconnect
-`P3` · network · crypto · **OPEN** — 2026-10-18 · history: found by #252 (b)'s rig, beside #303
+#### #315 — Two key exchanges in flight to one peer: the first answer meets the second secret
+`P4` · crypto · **OPEN** — 2026-10-20 · history: #304's security review (LOW, pre-existing)
 
-On the 2026-10-18 `split_rig.sh peerkv` run (A on 2 cores, a 5097-token prompt in pieces), B
-opened nine of A's prompt pieces and failed the tenth with `open() decryption FAILED …
-had_session=false had_previous=false had_retired=false`, with no disconnect logged at info. The
-repair worked (`request_rekey` → a fresh exchange) — it was the refusal that was lost (#303). Why
-B held NO key for A is not established; the logs of that run are gone. By elimination in
-`crypto/session.rs`, two paths leave all three empty while traffic flows:
-1. **`SessionManager::evict_stale` destroys a live session by AGE** — `sessions.retain` on
-   `created_at` older than `MAX_SESSION_AGE` (600 s), with no retired copy (`remove_session`, the
-   disconnect path, retires for `PREVIOUS_KEY_GRACE`). Every install refreshes `created_at`, so a
-   session lives only while rotations land: rotation is ONE attempt per `KEY_ROTATION_INTERVAL`
-   (600 s, 300 s out of phase with eviction), with no retry. One exchange lost or unanswered and
-   the next eviction tick drops a session both ends are using; the other end keeps sealing with
-   it. WireGuard's scar is exactly this: it re-keys at `REKEY_AFTER_TIME` (120 s) and RETRIES the
-   handshake every `REKEY_TIMEOUT` (5 s) for up to `REKEY_ATTEMPT_TIME` (90 s), all before the key
-   is refused at `REJECT_AFTER_TIME` (180 s) — the rejection is never the first sign.
-2. A disconnect logged only at debug (`Cleared encryption session`), more than 180 s before the
-   failing piece, with the reconnect establishing nothing — unlikely: nine pieces opened between.
-**Rare in the field**: the live node, serving the swarm 2026-09-17 → 10-18, logged 2 decryption
-failures in the month (2 repairs), the one carrying the fields with a session held — so P3 until
-it recurs. Next: run the rig with B at `-v` past two eviction ticks (> 20 min) and read B's
-`DIAG: key rotation tick (eviction)` `stale_evicted` against the failure; then, if (1), retry an unanswered
-rotation (WireGuard's schedule) and have an age eviction of a CONNECTED peer re-key first rather
-than destroy — `security-reviewer` on the change (key lifetime is a forward-secrecy bound).
+`SessionManager::initiate_ephemeral_exchange` overwrites `pending_ephemeral` for the peer, and
+`complete_ephemeral_session` does not match the answer's `session_id`, so two exchanges begun
+within one round trip (a rotation or #304's re-key beside a `request_rekey` repair) combine the
+FIRST answer with the SECOND secret: a key the peer does not hold is installed and the second
+answer is dropped ("No pending ephemeral exchange"). It heals itself — the next unopenable message
+asks for a repair — at the cost of one refused forward. Next: keep the session id with the pending
+secret and drop an answer that names another (`EphemeralKeyExchange` carries a `session_id`;
+check the answer echoes the initiator's), or skip a new exchange while one is pending for the peer.
+
+#### #314 — The network event loop stalls 0.2-2.6 s, most often while this machine is busy
+`P3` · network · **OPEN** — 2026-10-20 · history: the live node's log, 10-19
+
+`docs/DIAGNOSTICS.md` calls zero `DIAG: network event loop stalled` lines the normal reading; the
+live node (v0.3.244, serving nothing) logged 65 on 10-19 (190 ms-2.6 s: 43 in
+`swarm_event:RequestResponse`, 15 `Identify`, 7 `peer_cache_interval`) and some on most days since
+09-17 (1-112 a day, 774 on 10-16). The gaps between them cluster at ~29 s and ~58 s — the health
+monitor's 30 s tick, whose ping replies land in the RequestResponse arm — and they bunch while this
+machine runs builds, benches and rigs. Not reproduced, with `examples/thread_sample.py` on the live
+node: 4.5 GB of synced writes, 16 cores saturated for 90 s, an incremental test build. An Explore
+search of the RequestResponse path found no database access and no awaited bounded send; inline
+there: `shard_store.write_chunk` on a `ShardData` response, the log file's global mutex, relay
+opening of large payloads. The monitor's tick does synchronous database commits on a runtime
+worker (`persist_manifests_heard`, `persist_served_lifetime`, `persist_load_rate` — each a synced
+redb commit when its figure changed), which can hold the network task in that worker's LIFO slot
+(#244's mechanism). Next: sample the threads across a FULL `cargo dev-test` (the 19:12Z stall fell
+inside one) and read the stalled window's runtime workers; if one sits in a commit, move the tick's
+writes off the runtime.
 
 #### #191 — A part download that loses its peer restarts from byte 0 on the next one
 `P3` · storage · **OPEN** — 2026-09-03 · history: archive § "A multi-megabyte forward over ONE QUIC stream can kill the connection" (its banner: the cause was quinn-proto, #112)
@@ -2710,7 +2714,23 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#269, #305, #184, #179, #115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163, #310; #186 decided)
+**Closed 2026-10-19, not yet released** (#304, #269, #305, #184, #179, #115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163, #310; #186 decided)
+- #304 — **A link whose key rotation did not land keeps working.** Every 600 s
+  `SessionManager::evict_stale` destroyed each session older than 600 s — which a session reaches
+  only when no rotation renewed it — while the peer went on sealing with it: its next message opened
+  under nothing (`had_session=false had_previous=false had_retired=false`, the 2026-10-18 `peerkv`
+  rig's tenth prompt piece) and this node could not seal to it until something re-keyed. Now the
+  aged session is retired like a disconnected one (openable, never sealable, its own replay window,
+  `PREVIOUS_KEY_GRACE`) and the rotation task starts a fresh exchange with each such peer at once
+  (WireGuard re-keys before it rejects). Whether this was the rig's cause is not proven (its logs
+  are gone); it is the one path that fits without a disconnect. Test
+  `a_session_that_ages_out_still_opens_what_the_peer_sealed_with_it` (red without the
+  retirement). The security review (nothing at MEDIUM or above) found a LOW it makes easier to
+  reach, fixed with it: a key promoted from `unconfirmed` into an EMPTY session slot
+  (`install_with_window`'s vacant arm) started a fresh replay window, so the frame that confirmed
+  it could open once more (`the_confirming_message_cannot_be_replayed_after_the_session_aged_out`,
+  red without). Its other LOW is #315. Evidence: `docs/invariants/network.md` § "An aged-out
+  session is retired and re-keyed".
 - #269 — **A node that stops no longer logs its model workers' end as a warning.** A stop signals
   the worker and the daemon together (a terminal's Ctrl-C, systemd's control group, a `kill` of
   every `swarmllm` process), so every stop logged `Worker reader exiting — evicting` at WARN — 65

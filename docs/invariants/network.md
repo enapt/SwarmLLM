@@ -225,6 +225,36 @@ wire codec and the delivery choke point; red without the step).
 
 → `docs/invariants/network.md`
 
+### An aged-out session is retired and re-keyed, like a disconnected one (2026-10-20, #304)
+
+**What happened.** On the 2026-10-18 `split_rig.sh peerkv` run, B opened nine of A's prompt
+pieces and failed the tenth with `had_session=false had_previous=false had_retired=false`, no
+disconnect at info. By elimination in `crypto/session.rs`, the path that leaves all three empty
+while the link is up is `evict_stale`: every 600 s it DESTROYED each session older than
+`MAX_SESSION_AGE` (600 s). A session reaches that age only when no rotation landed in the time
+(each install resets `created_at`; one attempt per 600 s, no retry), and nothing told the peer —
+it went on sealing with the key, so its next message opened under nothing, and this node could not
+seal to it at all (`NoSession`) until something re-keyed. WireGuard's scar is exactly this: it
+re-keys at `REKEY_AFTER_TIME` (120 s), retries every `REKEY_TIMEOUT` (5 s), and refuses the key
+only at `REJECT_AFTER_TIME` (180 s) — the rejection is never the first sign. (Whether this was
+that run's cause is not proven — its logs are gone; it is the one path that fits without a
+disconnect.)
+
+**Now.** `evict_stale` retires an aged-out session exactly as `remove_session` retires a
+disconnected one — into `retired`: openable, never sealable, its own replay window, for
+`PREVIOUS_KEY_GRACE` — and returns those peers; the rotation task's eviction arm starts one
+ephemeral exchange with each (`initiate_exchange`), logging `DIAG: re-keying sessions no rotation
+renewed`. The key stops SEALING at the same age as before; it may OPEN for up to 180 s more, as a
+rotated or disconnected key already does. The removal re-checks the age under the entry
+(`remove_if`), so a rotation that installed between the scan and the removal keeps its session.
+
+**What a change must keep.** No path ends a key the peer may still be using without a grace window
+to read it in and a fresh exchange to replace it. Test:
+`a_session_that_ages_out_still_opens_what_the_peer_sealed_with_it` (red with the retirement
+switched off: the peer's message fails to open). The same review fixed `install_with_window`'s
+vacant arm, which started a fresh replay window for a key promoted into an empty slot — the
+confirming frame could open twice (`the_confirming_message_cannot_be_replayed_after_the_session_aged_out`).
+
 ## A disagreement nobody can read is not an instrument
 
 (2026-09-13.) **`state.models.disputed_shards` is the record of "we checked,
