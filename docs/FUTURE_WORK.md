@@ -2346,18 +2346,6 @@ to verify. Keep `prometheus.yml` correct for bare-metal Prometheus.
 timeouts) first, keep the inactivity-timeout rule, and re-run each path against real
 endpoints. `candle-*` stays on 0.10 deliberately (§ "Decided").
 
-#### #269 — Every shutdown logs `Worker reader exiting — evicting` as a WARN, which reads like a crash
-`P4` · logging · **OPEN** — 2026-10-14 · history: none (the live node's log scan after v0.3.237)
-
-The live node logged it 24 times in 31 h, every one within 0.5 s of `NetworkManager shutting down` /
-`All subsystems shut down cleanly`, never otherwise: a stop signals the whole group (a terminal
-Ctrl-C, systemd's `KillMode=control-group`, our scripts' `kill` of every `swarmllm` process), the
-worker dies with its daemon, and the reader (`process_pool.rs` `reader_actor`'s `Err(e)` arm) sees
-`early eof` before its handle drops (an unload drops the handle first, which aborts the reader —
-no line). A field report's log excerpt shows it as a worker failure. Next: the reader logs the EOF
-at `debug!` once the daemon's shutdown has begun (a pool flag set where `supervisor::run` starts
-the stop), keeping the WARN for a worker that dies while the node runs — the case it exists for.
-
 ### Security, privacy and credits
 
 Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the build if one
@@ -2722,7 +2710,19 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#305, #184, #179, #115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163, #310; #186 decided)
+**Closed 2026-10-19, not yet released** (#269, #305, #184, #179, #115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163, #310; #186 decided)
+- #269 — **A node that stops no longer logs its model workers' end as a warning.** A stop signals
+  the worker and the daemon together (a terminal's Ctrl-C, systemd's control group, a `kill` of
+  every `swarmllm` process), so every stop logged `Worker reader exiting — evicting` at WARN — 65
+  times in the live node's log, every one at a stop, which a field report's excerpt read as a
+  crash. The reader now evicts first and then judges (`process_pool::worker_ended_with_the_node`,
+  on its own task — dropping the worker's handle aborts the reader): the daemon's stop asked
+  already, or within 2 s (`WORKER_ENDED_WITH_THE_NODE_WITHIN`; in 4 of the 65 the worker's end
+  reached the daemon first, by under 0.2 ms) → `debug!` "Model worker stopped with the node";
+  otherwise the WARN, as before. The pool reads the daemon's stop watch
+  (`ModelProcessPool::watch_daemon_stop`). Checked on one TinyLlama node: v0.3.244 stopped by a
+  group SIGTERM logged the WARN, the fix logged only the debug line, and a worker killed alone
+  while the node ran still logged the WARN.
 - #305 — **A machine in the middle of a split passes a refusal from the machine after it on to
   the computer that is waiting.** A machine that cannot open a forward answers the connection it
   came in on — in a chain, the machine before it, which was not waiting and dropped it, so the

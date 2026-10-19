@@ -1022,6 +1022,35 @@ struct SideBand {
     load_rate: Arc<LoadRate>,
     /// This worker's `WorkerHandle::context_fits`.
     context_fits: Arc<std::sync::atomic::AtomicU32>,
+    /// The daemon's stop signal ([`ModelProcessPool::watch_daemon_stop`]):
+    /// whether a worker's death is news or the node stopping.
+    daemon_stopping: Option<tokio::sync::watch::Receiver<bool>>,
+}
+
+/// How long after a worker's connection ends the daemon may still begin
+/// stopping for the two to be one event. A Ctrl-C in a terminal, systemd's
+/// `KillMode=control-group` and a `kill` of every `swarmllm` process signal
+/// the worker and the daemon at the same instant; the live node's log had
+/// the worker's end FIRST in 4 of 65 stops, by under 0.2 ms (#269).
+const WORKER_ENDED_WITH_THE_NODE_WITHIN: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether a worker whose connection just ended went because the node is
+/// stopping: the daemon's stop was asked already, or is within
+/// [`WORKER_ENDED_WITH_THE_NODE_WITHIN`]. A daemon gone entirely (the watch
+/// closed) is stopping too. No watch — a pool built without a daemon —
+/// is never stopping.
+async fn worker_ended_with_the_node(stopping: Option<tokio::sync::watch::Receiver<bool>>) -> bool {
+    let Some(mut stopping) = stopping else {
+        return false;
+    };
+    // Finished in time either way: the stop was asked, or the watch closed.
+    let finished_in_time = tokio::time::timeout(
+        WORKER_ENDED_WITH_THE_NODE_WITHIN,
+        stopping.wait_for(|asked| *asked),
+    )
+    .await
+    .is_ok();
+    finished_in_time
 }
 
 /// Reader actor: owns the read half of the worker socket, dispatches each
@@ -1042,6 +1071,7 @@ async fn reader_actor(
         slow_card,
         load_rate,
         context_fits,
+        daemon_stopping,
     } = side;
     let mut skipped: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
@@ -1196,7 +1226,6 @@ async fn reader_actor(
                 }
             }
             Err(e) => {
-                tracing::warn!(model = %model_id, error = %e, "Worker reader exiting — evicting");
                 // R107: Release ordering pairs with Acquire loads at every
                 // dead-check call site. On weakly-ordered CPUs (ARM), a
                 // Relaxed load could legally observe `dead == false` after
@@ -1210,6 +1239,21 @@ async fn reader_actor(
                 // makes each caller's `recv()` return `None`, which we map
                 // to a "worker died" error.
                 responses.clear();
+                // Evicted first, judged after: the judgement may wait for the
+                // daemon's stop, and it runs on its own task because dropping
+                // this worker's handle aborts this one (#269).
+                let error = e.to_string();
+                tokio::spawn(async move {
+                    if worker_ended_with_the_node(daemon_stopping).await {
+                        tracing::debug!(
+                            model = %model_id,
+                            %error,
+                            "Model worker stopped with the node"
+                        );
+                    } else {
+                        tracing::warn!(model = %model_id, %error, "Worker reader exiting — evicting");
+                    }
+                });
                 return;
             }
         }
@@ -3021,6 +3065,9 @@ pub struct ModelProcessPool {
     /// load timings — written by every reader actor, advertised by the health
     /// monitor and priced by the planner through [`Self::load_ms_per_gib`].
     load_rate: Arc<LoadRate>,
+    /// The daemon's stop signal, set by `SharedState::new`
+    /// ([`Self::watch_daemon_stop`]); unset in a pool built without a daemon.
+    daemon_stopping: std::sync::OnceLock<tokio::sync::watch::Receiver<bool>>,
     /// A model's `(fixed_mb, per_layer_mb)` for a test that needs the growth
     /// path to weigh something. The real curve is read off a GGUF header on
     /// disk, which a unit test must not depend on the developer's node for.
@@ -3241,6 +3288,7 @@ impl ModelProcessPool {
             prefix_probe_tx: std::sync::OnceLock::new(),
             slow_card: Arc::new(crate::inference::cuda_pool::SlowCardNotice::default()),
             load_rate: Arc::new(LoadRate::default()),
+            daemon_stopping: std::sync::OnceLock::new(),
             #[cfg(test)]
             test_cost_curve: DashMap::new(),
             #[cfg(test)]
@@ -3257,6 +3305,13 @@ impl ModelProcessPool {
     /// local-index update. Idempotent — a second call is a no-op.
     pub fn set_progress_tx(&self, tx: mpsc::Sender<ProgressEvent>) {
         let _ = self.progress_tx.set(tx);
+    }
+
+    /// Hand the pool the daemon's stop signal (`SharedState::shutdown_rx`),
+    /// so a worker that ends because the node is stopping is not reported
+    /// as one that died (#269). Idempotent — a second call is a no-op.
+    pub fn watch_daemon_stop(&self, stopping: tokio::sync::watch::Receiver<bool>) {
+        let _ = self.daemon_stopping.set(stopping);
     }
 
     pub fn set_prefix_manifest_tx(&self, tx: mpsc::Sender<PrefixManifestEvent>) {
@@ -7908,6 +7963,7 @@ impl ModelProcessPool {
                 slow_card: self.slow_card.clone(),
                 load_rate: self.load_rate.clone(),
                 context_fits: context_fits.clone(),
+                daemon_stopping: self.daemon_stopping.get().cloned(),
             },
         ));
         Ok(WorkerHandle {
@@ -9486,6 +9542,42 @@ impl ModelProcessPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A worker that ends while the node runs is news; one that ends because
+    /// the node is stopping — asked before, or within the window after, the
+    /// same signal reached both (#269) — is not.
+    #[tokio::test(start_paused = true)]
+    async fn a_worker_that_ends_with_the_node_is_not_reported_as_dying() {
+        assert!(
+            !worker_ended_with_the_node(None).await,
+            "a pool with no daemon"
+        );
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        assert!(
+            !worker_ended_with_the_node(Some(rx.clone())).await,
+            "the node keeps running: the worker died"
+        );
+
+        // The worker's end reached the daemon first; the stop follows.
+        let later = rx.clone();
+        let judged = tokio::spawn(worker_ended_with_the_node(Some(later)));
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        tx.send(true).unwrap();
+        assert!(judged.await.unwrap(), "the stop came just after");
+
+        assert!(
+            worker_ended_with_the_node(Some(rx)).await,
+            "the stop was asked already"
+        );
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        drop(tx);
+        assert!(
+            worker_ended_with_the_node(Some(rx)).await,
+            "the daemon is gone"
+        );
+    }
 
     #[test]
     fn a_lone_decode_stream_is_dispatched_without_waiting() {
