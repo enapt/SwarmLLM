@@ -322,6 +322,7 @@ Each names the ONE place a decision is made (`.claude/rules/architecture.md` § 
 - **`KvCacheStore::set_cancel_oracle`** — `forward_was_cancelled` is the one reader.
 - **`split::token_embedding::rows_on_demand_eligible`**
 - **`inference::split::read_gguf_header`** — the single way to parse a GGUF header off a PATH.
+- **`SplitModel::embed_tokens`** — the ONE token lookup: the f16 table's rows widened to the f32 the layers read (a processor's norm refuses f16, a card's does not), then Gemma's scale. Three paths looked up for themselves and failed every request on a processor (gotchas #241, #901); guard `every_token_lookup_goes_through_embed_tokens`.
 - **`SplitModel::logits_from`** — the output head, the ONE place a forward makes logits (single, batched, captured): Gemma 2's soft cap and the file's `suppress_tokens` (`SUPPRESSED_LOGIT`, finite: a peer's check rows must be, #282). → § "The output head is one place"
 - **`GgufTensorMeta::tied_output_location`**
 

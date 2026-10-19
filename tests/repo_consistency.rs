@@ -13891,3 +13891,86 @@ fn the_capacity_snapshot_built_on_the_network_loop_reads_nothing_from_the_card()
         "only the health monitor's tick reads the budget for the snapshot: {callers:?}"
     );
 }
+
+/// Every place a `SplitModel` reads its token-embedding table OTHER than
+/// `embed_tokens` — the scan behind
+/// `every_token_lookup_goes_through_embed_tokens`.
+///
+/// Outside that one method the table may only be asked about (`is_some`,
+/// `is_none`), set aside (`take`) or put back (`=`). Anything else reads it.
+fn token_table_reads_outside_embed_tokens(text: &str) -> Vec<(usize, String)> {
+    let body = method_body(text, "fn embed_tokens(").unwrap_or("");
+    // Blank the one method out, keeping its line breaks so a reported line
+    // is the file's own.
+    let blank = "\n".repeat(body.matches('\n').count());
+    let scanned = if body.is_empty() {
+        text.to_string()
+    } else {
+        text.replacen(body, &blank, 1)
+    };
+    let mut out = Vec::new();
+    for (line_no, st) in statements(&scanned) {
+        let mut rest = st.as_str();
+        while let Some(at) = rest.find("self.tok_embeddings") {
+            let after = &rest[at + "self.tok_embeddings".len()..];
+            let allowed = [".is_some()", ".is_none()", ".take()", " = "]
+                .iter()
+                .any(|ok| after.starts_with(ok));
+            if !allowed {
+                out.push((line_no, st.trim().to_string()));
+                break;
+            }
+            rest = after;
+        }
+    }
+    out
+}
+
+/// The token-embedding table is kept as f16 (`EMBEDDING_DTYPE`) and every
+/// layer after it reads f32 — on a processor a norm REFUSES f16
+/// (`attn_norm: unsupported dtype for rmsnorm F16`; a card accepts it, so a
+/// card node never shows the fault). `SplitModel::embed_tokens` is the one
+/// lookup: the table, the widening, Gemma's scale. Three paths have done their
+/// own lookup and dropped the widening: the batched forward (gotcha #241: every
+/// request on a processor failed once two overlapped), and on 2026-10-19 the
+/// first segment's picture splice (every picture on a processor) and tensor
+/// parallelism's embed step (gotcha #901).
+#[test]
+fn every_token_lookup_goes_through_embed_tokens() {
+    let root = repo_root();
+    let mut offenders: Vec<String> = Vec::new();
+    for p in rust_files_under(&root.join("src/inference/split")) {
+        let rel = p
+            .strip_prefix(&root)
+            .unwrap_or(&p)
+            .to_string_lossy()
+            .replace('\\', "/");
+        // Tests build tables by hand; the loader builds the field itself.
+        if rel.contains("/tests/") || rel.contains("/loader/") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        for (line_no, st) in token_table_reads_outside_embed_tokens(&text) {
+            offenders.push(format!("{rel}:{line_no}: {st}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "embed tokens with `self.embed_tokens(&ids)?` — it widens the f16 table's \
+         rows to the f32 the layers read and applies Gemma's scale; a lookup of \
+         its own fails every request on a processor (gotchas #241, #901):\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The scan above must see the two shapes that shipped: a lookup chained off
+/// `.as_ref()` and one bound by `if let Some(ref ..)`, each wrapped by rustfmt.
+#[test]
+fn the_token_lookup_guard_catches_both_shapes_that_shipped() {
+    let planted = "impl SplitModel {\n    fn embed_tokens(&self, input: &Tensor) -> Result<Tensor, SwarmError> {\n        let emb = self\n            .tok_embeddings\n            .as_ref()\n            .unwrap()\n            .forward(input)?;\n        Ok(emb)\n    }\n    fn splice(&self) {\n        let is_first = self.tok_embeddings.is_some();\n        let tok_emb_layer = self\n            .tok_embeddings\n            .as_ref()\n            .unwrap();\n    }\n    fn tp(&mut self) {\n        if let Some(ref emb) = self.tok_embeddings {\n            emb.forward(&input);\n        }\n        let t = self.tok_embeddings.take();\n        self.tok_embeddings = t;\n    }\n}\n";
+    let hits = token_table_reads_outside_embed_tokens(planted);
+    let lines: Vec<usize> = hits.iter().map(|(l, _)| *l).collect();
+    assert_eq!(lines, vec![12, 18], "found {hits:?}");
+}

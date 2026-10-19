@@ -1610,29 +1610,18 @@ impl SplitModel {
                     .and_then(|t| t.to_vec1())
                     .map_err(|e| SwarmError::Internal(format!("image prompt ids: {e}")))?;
                 let merged = {
-                    let tok_emb_layer = self
-                        .tok_embeddings
-                        .as_ref()
-                        .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?;
                     let device = &self.device;
-                    // Gemma's embedding scale, which `forward_inner_impl`
-                    // applies to a token it embeds itself.
-                    let gemma_scale = self
-                        .arch
-                        .use_gemma_norm()
-                        .then(|| (self.hidden_dim as f64).sqrt());
+                    // The text goes through `embed_tokens`, the lookup every
+                    // forward uses: the table is f16 and a processor's norms
+                    // read only f32. A lookup of its own here failed every
+                    // picture on a processor with `attn_norm: unsupported
+                    // dtype for rmsnorm F16` — gotcha #241's batch failure
+                    // again (2026-10-19, #901).
                     crate::inference::vision::splice_image_rows(&token_ids, vision_emb, |run| {
                         let ids = Tensor::new(run, device)
                             .and_then(|t| t.reshape(&[1, run.len()]))
                             .map_err(|e| SwarmError::Internal(format!("text ids: {e}")))?;
-                        let mut emb = tok_emb_layer
-                            .forward(&ids)
-                            .map_err(|e| SwarmError::Internal(format!("text embed: {e}")))?;
-                        if let Some(scale) = gemma_scale {
-                            emb = emb
-                                .affine(scale, 0.0)
-                                .map_err(|e| SwarmError::Internal(format!("gemma scale: {e}")))?;
-                        }
+                        let mut emb = self.embed_tokens(&ids)?;
                         if emb.dims().len() == 2 {
                             emb = emb.unsqueeze(0).map_err(|e| {
                                 SwarmError::Internal(format!("text unsqueeze: {e}"))
@@ -1674,7 +1663,9 @@ impl SplitModel {
     /// (mixed seq_lens or differing index_pos for seq_len > 1).
     /// Embed tokens into the hidden state every downstream layer expects.
     ///
-    /// **Both the single-item and batched forward paths must go through this.**
+    /// **Every lookup goes through this** — the single-item and batched
+    /// forwards, the picture splice, tensor parallelism's embed step (guard
+    /// `every_token_lookup_goes_through_embed_tokens`).
     /// The embedding table is resident at `EMBEDDING_DTYPE` (f16) to keep a
     /// large-vocabulary model inside a modest GPU, while every layer downstream
     /// works in f32 — so the LOOKUP RESULT has to be widened. `forward_batch`
@@ -2364,17 +2355,10 @@ impl SplitModel {
 
         // EmbedOnly: just tokenize + embed, no layer processing
         if *phase == crate::types::TpPhase::EmbedOnly {
-            if let Some(ref emb) = self.tok_embeddings {
-                let mut result = emb
-                    .forward(&input)
-                    .map_err(|e| SwarmError::Internal(format!("tp embed: {e}")))?;
-                if self.arch.use_gemma_norm() {
-                    let scale = (self.hidden_dim as f64).sqrt();
-                    result = result
-                        .affine(scale, 0.0)
-                        .map_err(|e| SwarmError::Internal(format!("tp embed scale: {e}")))?;
-                }
-                return Ok(result);
+            if self.tok_embeddings.is_some() {
+                // The one lookup (`embed_tokens`, gotcha #241): widened to the
+                // f32 the layers read, then Gemma's scale.
+                return self.embed_tokens(&input);
             } else {
                 return Err(SwarmError::Internal(
                     "EmbedOnly requested but model has no tok_embeddings".into(),
