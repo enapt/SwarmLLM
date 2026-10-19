@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #312**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #313**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1977,21 +1977,6 @@ has one). The 31B
 has the 12B's layout (60 layers, 16 / 4 key/value heads) and is unchecked. Gemma 4's reference is llama.cpp MASTER
 (`~/llama.cpp-ref/dump_logits`, `tok_cases`); llama-cpp-python 0.3.16 predates it.
 
-#### #310 — LLaVA's image reader differs from llama.cpp's in three places
-`P3` · model-support · **OPEN** — 2026-10-19 · history: #115 (2a)
-
-Found reading llama.cpp's `tools/mtmd/models/llava.cpp` and `clip.cpp` for #115 (2a); not
-measured against a reply yet. (1) llama.cpp drops the class token for the `mlp` projector (its
-`patches` input starts at 1, `patch_offset`), so an image is 576 rows; here it is 577.
-(2) Its feed-forward activation is read off `clip.use_gelu` / `clip.use_silu` and is quick-GELU
-when neither is set (LLaVA 1.5's mmproj); here it is erf GELU (`vision::Gelu::Erf`). (3) It runs
-the encoder only to the deepest `clip.vision.feature_layer` when the file names one; here every
-layer runs, then `v.post_ln` if present. Fix all three off the file's keys, then judge LLaVA-1.5-7B's
-reply about `~/swarmllm-115/shapes.png` against `llama-mtmd-cli` (built at `~/llama.cpp-ref/build/bin/`).
-`TOKENS_PER_IMAGE` (577, the router's estimate before an image is read) moves with (1). Separately,
-a picture inside an Anthropic `tool_result` block is still dropped (`anthropic::convert`): its
-content becomes text only.
-
 #### #294 — Gemma 4's E2B and E4B run only whole on one computer
 `P3` · model-support · **OPEN** — 2026-10-17 · history: #115 (3c)
 
@@ -2223,6 +2208,20 @@ stall per layer; TP off by default), and `VisionEncodeResponse` has no error fie
 image-encode refusal stays silent.
 
 ### API surface
+
+#### #312 — A Responses tool output that is a list of parts is refused
+`P3` · api · **OPEN** — 2026-10-19 · history: found closing #310
+
+OpenAI's Responses API lets a `function_call_output`'s `output` be a list of `input_text` /
+`input_image` / `input_file` parts as well as a string; `FunctionCallOutputItem::output` is a
+`String`, so such a request is refused with a 400 naming the type (never silently dropped), and a
+tool that returns a screenshot through `/v1/responses` cannot hand it over. Fix: accept both
+shapes, translate the list through `collect_content_parts` into the tool message's parts (the chat
+surface carries a tool message's pictures, the Anthropic one since #310), and the Responses →
+Anthropic bridge (`anthropic_bridge.rs`) the same. Separately, the cloud-provider translation of an
+Anthropic request (`anthropic::handlers::anthropic_messages_to_openai`) writes `[image]` for a tool
+result's picture, because OpenAI's chat API refuses images in a tool turn; a user turn carrying them
+right after the results would hand them over.
 
 #### #185 — Three API surfaces each implement streaming and non-streaming replies separately
 `P3` · api · **OPEN** — 2026-07-26 · history: archive § "Collapse the parallel response paths behind one core loop"
@@ -2742,7 +2741,21 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163; #186 decided)
+**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163, #310; #186 decided)
+- #310 — **LLaVA reads a picture as LLaVA does.** Five differences, measured: the class row reached
+  the model (577 rows, now 576), the feed-forward ran the erf GELU (CLIP's is quick GELU — read off
+  `clip.use_gelu` / `clip.use_silu` as llama.cpp does, `EncoderActivation::from_keys`), a file
+  without `v.post_ln` got a weight-1 norm that still normalised (now none), the picture was
+  stretched and resized bilinear (now letterboxed on the mean colour, bicubic, as LLaVA's
+  `expand2square` and llama.cpp), and the depth is now reasoned (`encoder_depth`: every block the
+  file holds — the 23 LLaVA reads — or its one `feature_layer`). Rows against a float64 numpy reading
+  of the file (`examples/llava_reader_reference.py`): every row at cosine 1.000000 (was median
+  0.917). llama.cpp is not the reference for LLaVA: its graph puts the class token LAST and runs one
+  block fewer (median 0.525 against exact arithmetic); with both patched it agrees with this node at
+  0.99999 but for ~2% of rows it alone makes high-norm (cause undetermined). Gemma 3 unchanged
+  (0.999999). Also: a picture in an Anthropic `tool_result` reaches its tool turn
+  (`tool_result_content`; it became the caption alone). Left: #312. Evidence:
+  `docs/invariants/inference.md` § "LLaVA's image reader is checked against exact arithmetic".
 - #163 — **The .rpm creates the user its service runs as, and does everything else the .deb's
   scripts do.** It shipped no scriptlets: after `rpm -i` the service restarted in a loop for want of
   its user, the node's config was never seeded, an upgrade left the old binary running and removal

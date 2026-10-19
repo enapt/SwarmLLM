@@ -48,11 +48,51 @@ fn decode_image_source(source: &serde_json::Value) -> Result<ImageData, SwarmErr
     }
 }
 
+/// A `tool_result` block's content as the tool turn's text and pictures: a
+/// string as it is, an array's text blocks joined and its image blocks at their
+/// place (`vision::join_content`) — what llama.cpp's server makes of one (a
+/// tool message with image parts), and what the OpenAI surface does with a
+/// tool message's image parts. The pictures were dropped here until #310: a
+/// tool that returned a screenshot reached the model as its caption alone.
+fn tool_result_content(
+    content: Option<&serde_json::Value>,
+) -> Result<(String, Vec<ImageData>), SwarmError> {
+    use crate::inference::vision::{join_content, ContentPiece};
+    let Some(content) = content else {
+        return Ok((String::new(), vec![]));
+    };
+    if let Some(s) = content.as_str() {
+        return Ok((s.to_string(), vec![]));
+    }
+    let mut images = Vec::new();
+    let mut pieces: Vec<Option<&str>> = Vec::new();
+    for item in content.as_array().into_iter().flatten() {
+        match item.get("type").and_then(|v| v.as_str()) {
+            Some("image") => {
+                let source = item.get("source").unwrap_or(&serde_json::Value::Null);
+                images.push(decode_image_source(source)?);
+                pieces.push(None);
+            }
+            _ => {
+                if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
+                    pieces.push(Some(t));
+                }
+            }
+        }
+    }
+    let text = join_content(pieces.into_iter().map(|p| match p {
+        Some(t) => ContentPiece::Text(t),
+        None => ContentPiece::Image,
+    }));
+    Ok((text, images))
+}
+
 /// Convert Anthropic messages to internal ChatMessage format.
 ///
 /// A user's image blocks become images at their place in the text
 /// (`vision::join_content`, the OpenAI surface's rule). They were dropped
-/// here until #115 (2), under a comment saying the OpenAI path handled them.
+/// here until #115 (2), under a comment saying the OpenAI path handled them;
+/// a tool result's until #310 ([`tool_result_content`]).
 pub(super) fn to_internal_messages(req: &MessagesRequest) -> Result<Vec<ChatMessage>, SwarmError> {
     let mut messages = Vec::new();
 
@@ -101,22 +141,11 @@ pub(super) fn to_internal_messages(req: &MessagesRequest) -> Result<Vec<ChatMess
                             content,
                             ..
                         } => {
-                            let mut answer = Vec::new();
-                            if let Some(c) = content {
-                                if let Some(s) = c.as_str() {
-                                    answer.push(s.to_string());
-                                } else if let Some(arr) = c.as_array() {
-                                    for item in arr {
-                                        if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
-                                            answer.push(t.to_string());
-                                        }
-                                    }
-                                }
-                            }
+                            let (answer, result_images) = tool_result_content(content.as_ref())?;
                             messages.push(ChatMessage {
                                 role: Role::Tool,
-                                content: answer.join("\n"),
-                                images: vec![],
+                                content: answer,
+                                images: result_images,
                                 tool: ToolTurn {
                                     tool_call_id: Some(tool_use_id.clone()),
                                     ..Default::default()

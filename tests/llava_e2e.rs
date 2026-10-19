@@ -1,7 +1,7 @@
 //! End-to-end LLaVA multimodal run: image → vision embeddings → tokens.
 //!
 //! `#[ignore]` by design — it needs a ~4 GB text model and a ~600 MB mmproj
-//! that are not committed, and it runs the 7B model on CPU because 7B plus 577
+//! that are not committed, and it runs the 7B model on CPU because 7B plus 576
 //! image tokens does not fit in 8 GB of VRAM. Expect minutes, not seconds.
 //!
 //! Run with:
@@ -141,7 +141,7 @@ fn run_one(
     //
     // The worker's own tokenization (`vision::encode_prompt_with_images`): the
     // text before the marker, a single `-1` standing in for it, then the text
-    // after. `forward_multimodal` replaces that one id with all 577 rows.
+    // after. `forward_multimodal` replaces that one id with all 576 rows.
     let ids = vision::encode_prompt_with_images(
         model.tokenizer().expect("the model's tokenizer"),
         &prompt,

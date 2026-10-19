@@ -1074,6 +1074,34 @@ mod tests {
         assert_eq!(msgs[3].tool.tool_call_id.as_deref(), Some("t2"));
     }
 
+    /// A tool that answers with a picture (a screenshot) hands the model the
+    /// picture, at its place in the tool turn — it reached the model as its
+    /// caption alone until #310.
+    #[test]
+    fn a_tool_result_s_picture_reaches_the_tool_turn() {
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        let req: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "text", "text": "The screen:"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png}},
+                    {"type": "text", "text": "That is all."},
+                ]},
+                {"type": "text", "text": "What does it show?"},
+            ]}],
+        }))
+        .unwrap();
+        let msgs = to_internal_messages(&req).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].content, "The screen:<__media__>That is all.");
+        assert_eq!(msgs[0].images.len(), 1);
+        assert_eq!((msgs[0].images[0].width, msgs[0].images[0].height), (1, 1));
+        assert_eq!(msgs[1].content, "What does it show?");
+        assert!(msgs[1].images.is_empty());
+    }
+
     #[test]
     fn unknown_anthropic_fields_preserved_for_proxy() {
         // Caller-supplied fields our struct doesn't model (service_tier,

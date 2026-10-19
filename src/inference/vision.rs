@@ -30,7 +30,10 @@ const CLIP_MEAN: [f32; 3] = [0.48145466, 0.4578275, 0.40821073];
 const CLIP_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
 
 /// How an image is made the encoder's square, read off the projector the way
-/// llama.cpp's `mtmd_image_preprocessor_fixed_size` does.
+/// llama.cpp's `mtmd_image_preprocessor_fixed_size` does: scaled to fit inside
+/// the square, keeping its shape, and centred on `pad` — `PAD_CEIL`, so the
+/// scaled sides are rounded UP and the offsets are integer halves of what is
+/// left. Neither family stretches a picture.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Preprocess {
     /// The side of the square the encoder reads.
@@ -38,30 +41,37 @@ pub struct Preprocess {
     /// Per-channel mean and spread (`clip.vision.image_mean` / `image_std`).
     pub mean: [f32; 3],
     pub std: [f32; 3],
-    pub fit: Fit,
+    /// The colour around a picture that is not square: LLaVA's `expand2square`
+    /// fills with the mean (llama.cpp's `{122, 116, 104}` for CLIP's), Gemma 3
+    /// with black.
+    pub pad: [u8; 3],
+    pub resample: Resample,
 }
 
-/// Whether an image keeps its shape on the way to the square.
+/// The filter a picture is resized with — both antialiased when shrinking, as
+/// Pillow's are (llama.cpp's `resize_pillow`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fit {
-    /// Stretched to the square (LLaVA here, as before).
-    Stretch,
-    /// Scaled to fit inside the square and centred on black — llama.cpp's
-    /// `PAD_CEIL` resize, which Gemma 3 reads: the scaled sides are rounded UP,
-    /// the offsets are integer halves of what is left.
-    Letterbox,
+pub enum Resample {
+    /// Gemma 3 (`RESIZE_ALGO_BILINEAR`).
+    Bilinear,
+    /// LLaVA (llama.cpp's default, `RESIZE_ALGO_BICUBIC`): Pillow's bicubic is
+    /// Keys' cubic at a = -0.5, which is Catmull-Rom.
+    Bicubic,
 }
 
-impl Preprocess {
-    /// LLaVA's square, with CLIP's published mean and spread.
-    pub fn clip_stretch(size: u32) -> Self {
-        Self {
-            size,
-            mean: CLIP_MEAN,
-            std: CLIP_STD,
-            fit: Fit::Stretch,
+impl Resample {
+    fn filter(self) -> image::imageops::FilterType {
+        match self {
+            Self::Bilinear => image::imageops::FilterType::Triangle,
+            Self::Bicubic => image::imageops::FilterType::CatmullRom,
         }
     }
+}
+
+/// LLaVA's padding colour: the mean as bytes, truncated — LLaVA's
+/// `expand2square(image, tuple(int(x * 255) for x in image_mean))`.
+fn mean_as_bytes(mean: [f32; 3]) -> [u8; 3] {
+    mean.map(|m| (m * 255.0).clamp(0.0, 255.0) as u8)
 }
 
 /// The scaled size and offset of an image letterboxed into a `size` square —
@@ -75,8 +85,8 @@ fn letterbox_geometry(width: u32, height: u32, size: u32) -> (u32, u32, u32, u32
 
 /// Preprocess an image for the vision encoder.
 ///
-/// 1. Resize to `pre.size x pre.size` (antialiased bilinear), stretched or
-///    letterboxed on black as `pre.fit` says
+/// 1. Letterbox into `pre.size x pre.size` on `pre.pad`, resized with
+///    `pre.resample`
 /// 2. Convert to f32 [0, 1]
 /// 3. Normalize with the projector's mean/std
 /// 4. Return tensor of shape (3, H, W)
@@ -104,18 +114,12 @@ fn preprocess_image(
     .ok_or_else(|| SwarmError::Inference("Invalid image dimensions".into()))?;
 
     let size = pre.size;
-    let resized = match pre.fit {
-        Fit::Stretch => {
-            image::imageops::resize(&img_buf, size, size, image::imageops::FilterType::Triangle)
-        }
-        Fit::Letterbox => {
-            let (w, h, x0, y0) = letterbox_geometry(image.width, image.height, size);
-            let scaled =
-                image::imageops::resize(&img_buf, w, h, image::imageops::FilterType::Triangle);
-            let mut canvas = image::ImageBuffer::from_pixel(size, size, image::Rgb([0u8, 0, 0]));
-            image::imageops::replace(&mut canvas, &scaled, x0 as i64, y0 as i64);
-            canvas
-        }
+    let resized = {
+        let (w, h, x0, y0) = letterbox_geometry(image.width, image.height, size);
+        let scaled = image::imageops::resize(&img_buf, w, h, pre.resample.filter());
+        let mut canvas = image::ImageBuffer::from_pixel(size, size, image::Rgb(pre.pad));
+        image::imageops::replace(&mut canvas, &scaled, x0 as i64, y0 as i64);
+        canvas
     };
 
     let (w, h) = (resized.width() as usize, resized.height() as usize);
@@ -269,23 +273,46 @@ impl PatchEmbedding {
     }
 }
 
-/// Which GELU an encoder's feed-forward uses.
-///
-/// llama.cpp reads it off `clip.use_gelu`: true is `ggml_gelu`, the TANH
-/// approximation (Gemma 3's SigLIP, HF's `gelu_pytorch_tanh`). LLaVA's CLIP
-/// keeps the erf form here, as it always has (llama.cpp gives it quick-GELU —
-/// FUTURE_WORK #115's note on LLaVA).
+/// The activation of an encoder's feed-forward, read off the file the way
+/// llama.cpp does (`clip.cpp`, `KEY_USE_GELU` / `KEY_USE_SILU`) by
+/// [`EncoderActivation::from_keys`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Gelu {
-    Erf,
-    Tanh,
+pub enum EncoderActivation {
+    /// The exact, erf form — no file names it; the default of a block built
+    /// in code.
+    GeluErf,
+    /// `clip.use_gelu = true`: `ggml_gelu`, the TANH approximation (Gemma 3's
+    /// SigLIP, HF's `gelu_pytorch_tanh`).
+    GeluTanh,
+    /// Neither key set: `x · sigmoid(1.702 x)` — CLIP's `quick_gelu`, LLaVA's
+    /// encoder (#310: it ran the erf form here before).
+    GeluQuick,
+    /// `clip.use_silu = true`.
+    Silu,
 }
 
-impl Gelu {
+impl EncoderActivation {
+    /// llama.cpp's reading: `use_gelu` → tanh GELU, `use_silu` → SiLU, neither
+    /// → quick GELU, both → refused.
+    pub fn from_keys(use_gelu: bool, use_silu: bool) -> Result<Self, SwarmError> {
+        match (use_gelu, use_silu) {
+            (true, true) => Err(SwarmError::Validation(
+                "This model's image reader sets both clip.use_gelu and clip.use_silu; \
+                 it cannot use both."
+                    .into(),
+            )),
+            (true, false) => Ok(Self::GeluTanh),
+            (false, true) => Ok(Self::Silu),
+            (false, false) => Ok(Self::GeluQuick),
+        }
+    }
+
     fn apply(self, x: &Tensor) -> candle_core::Result<Tensor> {
         match self {
-            Self::Erf => x.gelu_erf(),
-            Self::Tanh => x.gelu(),
+            Self::GeluErf => x.gelu_erf(),
+            Self::GeluTanh => x.gelu(),
+            Self::GeluQuick => x * candle_nn::ops::sigmoid(&(x * 1.702)?)?,
+            Self::Silu => x.silu(),
         }
     }
 }
@@ -300,7 +327,7 @@ pub struct VisionTransformerBlock {
     mlp_fc2: Linear,
     num_heads: usize,
     head_dim: usize,
-    gelu: Gelu,
+    activation: EncoderActivation,
 }
 
 impl VisionTransformerBlock {
@@ -324,13 +351,14 @@ impl VisionTransformerBlock {
             mlp_fc2,
             num_heads,
             head_dim: hidden_dim / num_heads,
-            gelu: Gelu::Erf,
+            activation: EncoderActivation::GeluErf,
         }
     }
 
-    /// The same block with the feed-forward's GELU set (see [`Gelu`]).
-    pub fn with_gelu(mut self, gelu: Gelu) -> Self {
-        self.gelu = gelu;
+    /// The same block with the feed-forward's activation set (see
+    /// [`EncoderActivation`]).
+    pub fn with_activation(mut self, activation: EncoderActivation) -> Self {
+        self.activation = activation;
         self
     }
 
@@ -429,7 +457,7 @@ impl VisionTransformerBlock {
         let residual = &h;
         let ff_in = self.ln2.forward(&h).map_err(map_err("vit_ln2"))?;
         let ff = self.mlp_fc1.forward(&ff_in).map_err(map_err("vit_fc1"))?;
-        let ff = self.gelu.apply(&ff).map_err(map_err("vit_gelu"))?;
+        let ff = self.activation.apply(&ff).map_err(map_err("vit_act"))?;
         let ff = self.mlp_fc2.forward(&ff).map_err(map_err("vit_fc2"))?;
 
         (ff + residual).map_err(map_err("vit_residual2"))
@@ -442,8 +470,13 @@ impl VisionTransformerBlock {
 /// into the LLM's embedding space for multimodal inference.
 pub struct VisionEncoder {
     patch_embed: PatchEmbedding,
+    /// The blocks that run — every one the file holds, or as many as its
+    /// `feature_layer` names (see [`encoder_depth`]).
     blocks: Vec<VisionTransformerBlock>,
-    final_ln: candle_nn::LayerNorm,
+    /// `v.post_ln`, where the file has one. LLaVA's has none — it reads a
+    /// hidden state from INSIDE the encoder — and none means no norm: it was a
+    /// weight-1, bias-0 LayerNorm here, which still normalises (#310).
+    final_ln: Option<candle_nn::LayerNorm>,
     /// Optional pre-layernorm applied after patch embedding, before transformer blocks.
     pub pre_ln: Option<candle_nn::LayerNorm>,
     config: VisionConfig,
@@ -453,7 +486,7 @@ impl VisionEncoder {
     pub fn new(
         patch_embed: PatchEmbedding,
         blocks: Vec<VisionTransformerBlock>,
-        final_ln: candle_nn::LayerNorm,
+        final_ln: Option<candle_nn::LayerNorm>,
         config: VisionConfig,
     ) -> Self {
         Self {
@@ -465,10 +498,13 @@ impl VisionEncoder {
         }
     }
 
-    /// Encode images into vision feature embeddings.
+    /// Encode images into vision feature embeddings: one row per PATCH.
     ///
     /// Input: (B, 3, H, W) preprocessed image tensor
-    /// Output: (B, num_patches + 1, vision_hidden_size) vision features
+    /// Output: (B, num_patches, vision_hidden_size). A `[CLS]` row takes part
+    /// in attention and is then dropped — LLaVA's `select_feature = 'patch'`,
+    /// llama.cpp's `get_rows` from 1 — so a LLaVA picture is 576 rows, not 577
+    /// (#310).
     pub fn forward(&self, images: &Tensor) -> Result<Tensor, SwarmError> {
         let mut x = self.patch_embed.forward(images)?;
 
@@ -485,18 +521,34 @@ impl VisionEncoder {
                 .map_err(|e| SwarmError::Inference(format!("Vision encoder block {i}: {e}")))?;
         }
 
-        self.final_ln
-            .forward(&x)
-            .map_err(|e| SwarmError::Inference(format!("Vision encoder final_ln: {e}")))
+        if let Some(final_ln) = &self.final_ln {
+            x = final_ln
+                .forward(&x)
+                .map_err(|e| SwarmError::Inference(format!("Vision encoder final_ln: {e}")))?;
+        }
+
+        if self.patch_embed.cls_token.is_none() {
+            return Ok(x);
+        }
+        let rows = x
+            .dim(1)
+            .map_err(|e| SwarmError::Inference(format!("Vision encoder rows: {e}")))?;
+        x.narrow(1, 1, rows - 1)
+            .map_err(|e| SwarmError::Inference(format!("Vision encoder CLS drop: {e}")))
     }
 
     pub fn config(&self) -> &VisionConfig {
         &self.config
     }
 
-    /// Number of vision tokens produced per image (num_patches, + 1 for a CLS).
+    /// Rows [`Self::forward`] gives per image: one per patch.
     pub fn num_vision_tokens(&self) -> usize {
-        self.patches_per_side().pow(2) + usize::from(self.patch_embed.cls_token.is_some())
+        self.patches_per_side().pow(2)
+    }
+
+    /// The transformer blocks this encoder runs.
+    pub fn depth(&self) -> usize {
+        self.blocks.len()
     }
 
     /// Patches along one side of the square.
@@ -649,7 +701,7 @@ pub struct VisionModule {
 
 impl VisionModule {
     /// Number of tokens one image becomes in the prompt.
-    /// CLIP ViT-L/14 @ 336px (LLaVA): (336/14)^2 + 1 = 577; Gemma 3: 256.
+    /// CLIP ViT-L/14 @ 336px (LLaVA): (336/14)^2 = 576; Gemma 3: 256.
     pub fn num_image_tokens(&self) -> usize {
         match &self.projection {
             Projector::Llava(_) => self.encoder.num_vision_tokens(),
@@ -669,10 +721,10 @@ impl VisionModule {
         let start = std::time::Instant::now();
         let pixel_values = preprocess_images(images, &self.preprocess, &self.device)?;
 
-        // (B, 3, H, W) → (B, num_patches (+ 1), vision_hidden)
+        // (B, 3, H, W) → (B, num_patches, vision_hidden)
         let vision_features = self.encoder.forward(&pixel_values)?;
 
-        // (B, num_patches (+ 1), vision_hidden) → (B, num_tokens, llm_hidden)
+        // (B, num_patches, vision_hidden) → (B, num_tokens, llm_hidden)
         let projected = match &self.projection {
             Projector::Llava(p) => p.forward(&vision_features)?,
             Projector::Gemma3(p) => p.forward(&vision_features, self.encoder.patches_per_side())?,
@@ -1130,25 +1182,48 @@ pub fn load_from_mmproj_gguf(
             _ => None,
         }
     };
+    let mean = channel_triple("clip.vision.image_mean").unwrap_or(CLIP_MEAN);
     let preprocess = Preprocess {
         size: image_size,
-        mean: channel_triple("clip.vision.image_mean").unwrap_or(CLIP_MEAN),
+        mean,
         std: channel_triple("clip.vision.image_std").unwrap_or(CLIP_STD),
-        fit: match kind {
-            ProjectorKind::Llava => Fit::Stretch,
-            ProjectorKind::Gemma3 => Fit::Letterbox,
+        // llama.cpp's `clip.cpp` per projector: LLaVA pads with the mean and
+        // resizes bicubic (the default), Gemma 3 pads black and resizes
+        // bilinear. LLaVA was stretched and resized bilinear here (#310).
+        pad: match kind {
+            ProjectorKind::Llava => mean_as_bytes(mean),
+            ProjectorKind::Gemma3 => [0, 0, 0],
+        },
+        resample: match kind {
+            ProjectorKind::Llava => Resample::Bicubic,
+            ProjectorKind::Gemma3 => Resample::Bilinear,
         },
     };
-    let gelu = match kind {
-        ProjectorKind::Llava => Gelu::Erf,
-        ProjectorKind::Gemma3 => Gelu::Tanh,
+    let flag = |key: &str| {
+        ct.metadata
+            .get(key)
+            .and_then(|v| v.to_bool().ok())
+            .unwrap_or(false)
     };
+    let activation = EncoderActivation::from_keys(flag("clip.use_gelu"), flag("clip.use_silu"))?;
+    let feature_layers: Option<Vec<i64>> =
+        ct.metadata
+            .get("clip.vision.feature_layer")
+            .map(|v| match v.to_vec() {
+                Ok(items) => items.iter().filter_map(gguf_int).collect(),
+                Err(_) => gguf_int(v).into_iter().collect(),
+            });
+    let depth_rule = match std::env::var("SWARMLLM_LLAVA_DEPTH").as_deref() {
+        Ok("llama-cpp") => DepthRule::LlamaCpp,
+        _ => DepthRule::Llava,
+    };
+    let depth = encoder_depth(kind, num_layers, feature_layers.as_deref(), depth_rule)?;
 
     let config = VisionConfig {
         image_size,
         patch_size,
         vision_hidden_size: hidden_size as u32,
-        vision_num_layers: num_layers as u32,
+        vision_num_layers: depth as u32,
         vision_num_heads: num_heads as u32,
         projection_dim: projection_dim as u32,
     };
@@ -1160,6 +1235,8 @@ pub fn load_from_mmproj_gguf(
         hidden_size,
         num_heads,
         num_layers,
+        depth,
+        ?activation,
         projection_dim,
         llm_hidden_dim,
         "Loading mmproj vision encoder"
@@ -1292,8 +1369,9 @@ pub fn load_from_mmproj_gguf(
         ("ffn_up", "ffn_down")
     };
 
-    let mut blocks = Vec::with_capacity(num_layers);
-    for i in 0..num_layers {
+    // Only the blocks that run are loaded.
+    let mut blocks = Vec::with_capacity(depth);
+    for i in 0..depth {
         // Layer norms
         let ln1_w = load!(&format!("v.blk.{i}.ln1.weight"));
         let ln1_b = load!(&format!("v.blk.{i}.ln1.bias"));
@@ -1354,22 +1432,17 @@ pub fn load_from_mmproj_gguf(
                 num_heads,
                 hidden_size,
             )
-            .with_gelu(gelu),
+            .with_activation(activation),
         );
     }
 
-    // ── Post layer norm (optional — not all CLIP models have it) ──
+    // ── Post layer norm, where the file has one (LLaVA's does not) ──
     let final_ln = if ct.tensor_infos.contains_key("v.post_ln.weight") {
         let post_ln_w = load!("v.post_ln.weight");
         let post_ln_b = load!("v.post_ln.bias");
-        candle_nn::LayerNorm::new(post_ln_w, post_ln_b, ln_eps)
+        Some(candle_nn::LayerNorm::new(post_ln_w, post_ln_b, ln_eps))
     } else {
-        // Identity-like layer norm: weight=1, bias=0
-        let ones = Tensor::ones(&[hidden_size], DType::F32, device)
-            .map_err(|e| SwarmError::Inference(format!("final_ln ones: {e}")))?;
-        let zeros = Tensor::zeros(&[hidden_size], DType::F32, device)
-            .map_err(|e| SwarmError::Inference(format!("final_ln zeros: {e}")))?;
-        candle_nn::LayerNorm::new(ones, zeros, ln_eps)
+        None
     };
 
     tracing::info!(num_blocks = blocks.len(), "Vision encoder blocks loaded");
@@ -1427,6 +1500,68 @@ enum ProjectorKind {
     Gemma3,
 }
 
+/// A GGUF integer of any width, as llama.cpp's `get_arr_int` reads one.
+fn gguf_int(v: &candle_core::quantized::gguf_file::Value) -> Option<i64> {
+    v.to_i32()
+        .map(i64::from)
+        .or_else(|_| v.to_u32().map(i64::from))
+        .or_else(|_| v.to_i64())
+        .or_else(|_| v.to_u64().map(|u| u as i64))
+        .ok()
+}
+
+/// Whose reading of a LLaVA encoder's depth [`encoder_depth`] follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DepthRule {
+    /// LLaVA's own: the hidden state after 23 of CLIP's 24 blocks.
+    Llava,
+    /// llama.cpp's, one block fewer on a file without `feature_layer` —
+    /// `SWARMLLM_LLAVA_DEPTH=llama-cpp`, to compare the rest of the reader with
+    /// llama.cpp's on equal terms (`examples/image_rows_probe.rs`).
+    LlamaCpp,
+}
+
+/// How many of a file's encoder blocks run (#310).
+///
+/// LLaVA 1.5 reads CLIP's hidden state after 23 of its 24 blocks
+/// (`mm_vision_select_layer = -2`), and llama.cpp's converter keeps exactly
+/// those 23: it pops the last block and writes `block_count` 23
+/// (`tools/mtmd/legacy-models/convert_image_encoder_to_gguf.py`). So every
+/// block the file holds runs. A newer conversion names the hidden state it
+/// reads as `clip.vision.feature_layer`, counted in blocks (0 is the
+/// embeddings), and keeps that many; it is honoured when it is one layer, and
+/// several — granite's stacked features — are refused. llama.cpp's LLaVA graph
+/// (`models/llava.cpp`) runs `n_layer - 1` blocks of a file WITHOUT the key:
+/// on the 23-block files LLaVA 1.5 ships as, one block short of LLaVA's own
+/// reading. `DepthRule::LlamaCpp` runs that, for comparison. Gemma 3's SigLIP
+/// runs every block (llama.cpp's `build_vit`).
+fn encoder_depth(
+    kind: ProjectorKind,
+    block_count: usize,
+    feature_layers: Option<&[i64]>,
+    rule: DepthRule,
+) -> Result<usize, SwarmError> {
+    if kind != ProjectorKind::Llava {
+        return Ok(block_count);
+    }
+    match feature_layers {
+        None | Some([]) => Ok(match rule {
+            DepthRule::Llava => block_count,
+            DepthRule::LlamaCpp => block_count.saturating_sub(1),
+        }),
+        Some(&[layer]) if layer >= 0 && layer as usize <= block_count => Ok(layer as usize),
+        Some(&[layer]) => Err(SwarmError::Validation(format!(
+            "This model's image reader names feature layer {layer}, but holds {block_count} \
+             encoder layers."
+        ))),
+        Some(layers) => Err(SwarmError::Validation(format!(
+            "This model's image reader stacks the features of {} encoder layers \
+             (clip.vision.feature_layer {layers:?}); that is not supported yet.",
+            layers.len()
+        ))),
+    }
+}
+
 // ── Tests ──
 
 #[cfg(test)]
@@ -1465,6 +1600,17 @@ mod tests {
         assert!(!clip_ffn_is_swapped(&[], 1024));
     }
 
+    /// LLaVA's square: CLIP's mean and spread, padded with the mean, bicubic.
+    fn llava_square(size: u32) -> Preprocess {
+        Preprocess {
+            size,
+            mean: CLIP_MEAN,
+            std: CLIP_STD,
+            pad: mean_as_bytes(CLIP_MEAN),
+            resample: Resample::Bicubic,
+        }
+    }
+
     #[test]
     fn preprocess_image_creates_correct_shape() {
         let img = ImageData {
@@ -1473,7 +1619,7 @@ mod tests {
             height: 64,
         };
         let device = Device::Cpu;
-        let tensor = preprocess_image(&img, &Preprocess::clip_stretch(224), &device).unwrap();
+        let tensor = preprocess_image(&img, &llava_square(224), &device).unwrap();
         assert_eq!(tensor.dims(), &[3, 224, 224]);
     }
 
@@ -1486,7 +1632,7 @@ mod tests {
             height: 16,
         };
         let device = Device::Cpu;
-        let tensor = preprocess_image(&img, &Preprocess::clip_stretch(16), &device).unwrap();
+        let tensor = preprocess_image(&img, &llava_square(16), &device).unwrap();
 
         // After normalization: (1.0 - mean) / std
         // Channel 0: (1.0 - 0.48145466) / 0.26862954 ≈ 1.93
@@ -1513,14 +1659,14 @@ mod tests {
             },
         ];
         let device = Device::Cpu;
-        let batch = preprocess_images(&images, &Preprocess::clip_stretch(224), &device).unwrap();
+        let batch = preprocess_images(&images, &llava_square(224), &device).unwrap();
         assert_eq!(batch.dims(), &[2, 3, 224, 224]);
     }
 
     #[test]
     fn preprocess_empty_batch_errors() {
         let device = Device::Cpu;
-        let result = preprocess_images(&[], &Preprocess::clip_stretch(224), &device);
+        let result = preprocess_images(&[], &llava_square(224), &device);
         assert!(result.is_err());
     }
 
@@ -1708,7 +1854,7 @@ mod tests {
         let block =
             VisionTransformerBlock::new(ln1, qkv, proj, ln2, fc1, fc2, num_heads, hidden_dim);
 
-        let final_ln = candle_nn::layer_norm(hidden_dim, 1e-5, vb.pp("fln")).unwrap();
+        let final_ln = Some(candle_nn::layer_norm(hidden_dim, 1e-5, vb.pp("fln")).unwrap());
 
         let config = VisionConfig {
             image_size: image_size as u32,
@@ -1720,8 +1866,14 @@ mod tests {
         };
 
         let encoder = VisionEncoder::new(patch_embed, vec![block], final_ln, config);
-        assert_eq!(encoder.num_vision_tokens(), num_patches + 1); // 4 patches + CLS
+        // One row per patch: the CLS row is attention's alone (#310).
+        assert_eq!(encoder.num_vision_tokens(), num_patches);
         assert_eq!(encoder.config().image_size, image_size as u32);
+        let images = Tensor::zeros(&[1, 3, image_size, image_size], DType::F32, &device).unwrap();
+        assert_eq!(
+            encoder.forward(&images).unwrap().dims(),
+            &[1, num_patches, hidden_dim]
+        );
     }
 
     #[test]
@@ -1742,7 +1894,7 @@ mod tests {
             height: size as u32,
         };
         let device = Device::Cpu;
-        let tensor = preprocess_image(&img, &Preprocess::clip_stretch(16), &device).unwrap();
+        let tensor = preprocess_image(&img, &llava_square(16), &device).unwrap();
         assert_eq!(tensor.dims(), &[3, 16, 16]);
 
         // Verify channel statistics differ (gradient creates variation)
@@ -1892,22 +2044,236 @@ mod tests {
             width: 8,
             height: 4,
         };
-        let pre = Preprocess {
-            size: 8,
-            mean: [0.0; 3],
-            std: [1.0; 3],
-            fit: Fit::Letterbox,
-        };
-        let t = preprocess_image(&img, &pre, &Device::Cpu).unwrap();
-        let rows: Vec<Vec<f32>> = t.i(0).unwrap().to_vec2().unwrap();
-        // 8×4 into 8×8: rows 2..6 white, the bands above and below black.
-        for (y, row) in rows.iter().enumerate() {
-            let expect = if (2..6).contains(&y) { 1.0 } else { 0.0 };
-            assert!(
-                row.iter().all(|&v| (v - expect).abs() < 1e-6),
-                "row {y}: {row:?}"
-            );
+        for (pad, resample) in [
+            ([0u8, 0, 0], Resample::Bilinear),
+            (mean_as_bytes(CLIP_MEAN), Resample::Bicubic),
+        ] {
+            let pre = Preprocess {
+                size: 8,
+                mean: [0.0; 3],
+                std: [1.0; 3],
+                pad,
+                resample,
+            };
+            let t = preprocess_image(&img, &pre, &Device::Cpu).unwrap();
+            // 8×4 into 8×8: rows 2..6 white, the bands above and below `pad`.
+            for c in 0..3 {
+                let rows: Vec<Vec<f32>> = t.i(c).unwrap().to_vec2().unwrap();
+                for (y, row) in rows.iter().enumerate() {
+                    let expect = if (2..6).contains(&y) {
+                        1.0
+                    } else {
+                        pad[c] as f32 / 255.0
+                    };
+                    assert!(
+                        row.iter().all(|&v| (v - expect).abs() < 1e-6),
+                        "pad {pad:?} channel {c} row {y}: {row:?}"
+                    );
+                }
+            }
         }
+    }
+
+    /// LLaVA pads with its mean as llama.cpp does: `{122, 116, 104}` for CLIP's.
+    #[test]
+    fn llava_pads_with_the_mean_llama_cpp_names() {
+        assert_eq!(mean_as_bytes(CLIP_MEAN), [122, 116, 104]);
+    }
+
+    // ── An mmproj's keys, read as llama.cpp reads them (#310) ──
+
+    /// A tiny LLaVA-shaped mmproj: an 8-pixel square of 4-pixel patches (four
+    /// patches and a CLS), width 4, three blocks, the legacy FFN naming, no
+    /// `v.post_ln` unless asked — written to a file the loader opens.
+    fn tiny_llava_mmproj(
+        meta: &[(&str, candle_core::quantized::gguf_file::Value)],
+        post_ln: bool,
+    ) -> tempfile::NamedTempFile {
+        use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
+        let device = Device::Cpu;
+        let (hidden, ff, blocks, llm) = (4usize, 8usize, 3usize, 6usize);
+        let mut seed = 0u32;
+        let mut t = |shape: &[usize]| {
+            let n: usize = shape.iter().product();
+            let vals: Vec<f32> = (0..n)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                    ((seed >> 16) % 200) as f32 / 1000.0 - 0.1
+                })
+                .collect();
+            QTensor::quantize(
+                &Tensor::from_vec(vals, shape, &device).unwrap(),
+                GgmlDType::F32,
+            )
+            .unwrap()
+        };
+        let mut tensors: Vec<(String, QTensor)> = vec![
+            ("v.patch_embd.weight".into(), t(&[hidden, 3, 4, 4])),
+            ("v.class_embd".into(), t(&[hidden])),
+            ("v.position_embd.weight".into(), t(&[5, hidden])),
+            ("v.pre_ln.weight".into(), t(&[hidden])),
+            ("v.pre_ln.bias".into(), t(&[hidden])),
+            ("mm.0.weight".into(), t(&[llm, hidden])),
+            ("mm.0.bias".into(), t(&[llm])),
+            ("mm.2.weight".into(), t(&[llm, llm])),
+            ("mm.2.bias".into(), t(&[llm])),
+        ];
+        if post_ln {
+            tensors.push(("v.post_ln.weight".into(), t(&[hidden])));
+            tensors.push(("v.post_ln.bias".into(), t(&[hidden])));
+        }
+        for i in 0..blocks {
+            for (name, shape) in [
+                ("ln1.weight", vec![hidden]),
+                ("ln1.bias", vec![hidden]),
+                ("ln2.weight", vec![hidden]),
+                ("ln2.bias", vec![hidden]),
+                ("attn_q.weight", vec![hidden, hidden]),
+                ("attn_k.weight", vec![hidden, hidden]),
+                ("attn_v.weight", vec![hidden, hidden]),
+                ("attn_out.weight", vec![hidden, hidden]),
+                // The legacy naming: ffn_down is the expansion.
+                ("ffn_down.weight", vec![ff, hidden]),
+                ("ffn_up.weight", vec![hidden, ff]),
+            ] {
+                tensors.push((format!("v.blk.{i}.{name}"), t(&shape)));
+            }
+        }
+        use gguf_file::Value;
+        let mut metadata: Vec<(&str, Value)> = vec![
+            ("clip.vision.image_size", Value::U32(8)),
+            ("clip.vision.patch_size", Value::U32(4)),
+            ("clip.vision.embedding_length", Value::U32(hidden as u32)),
+            ("clip.vision.attention.head_count", Value::U32(1)),
+            ("clip.vision.block_count", Value::U32(blocks as u32)),
+            ("clip.vision.attention.layer_norm_epsilon", Value::F32(1e-5)),
+        ];
+        metadata.extend(meta.iter().cloned());
+        let meta_refs: Vec<(&str, &Value)> = metadata.iter().map(|(k, v)| (*k, v)).collect();
+        let tensor_refs: Vec<(&str, &QTensor)> =
+            tensors.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        gguf_file::write(file.as_file_mut(), &meta_refs, &tensor_refs).unwrap();
+        file
+    }
+
+    /// LLaVA's file names no activation, no feature layer and no post-norm:
+    /// quick GELU, every block it holds, no norm after them, one row per patch,
+    /// and a picture padded with the mean and resized bicubic. Before #310 it
+    /// ran the erf GELU, a weight-1 norm, 577 rows and a bilinear stretch.
+    #[test]
+    fn a_llava_mmproj_is_read_as_llava_reads_it() {
+        use candle_core::quantized::gguf_file::Value;
+        let file = tiny_llava_mmproj(&[("clip.use_gelu", Value::Bool(false))], false);
+        let module = load_from_mmproj_gguf(file.path(), &Device::Cpu).unwrap();
+        assert_eq!(module.encoder.depth(), 3);
+        assert!(module
+            .encoder
+            .blocks
+            .iter()
+            .all(|b| b.activation == EncoderActivation::GeluQuick));
+        assert!(module.encoder.final_ln.is_none());
+        assert_eq!(module.preprocess.pad, [122, 116, 104]);
+        assert_eq!(module.preprocess.resample, Resample::Bicubic);
+        assert_eq!(module.num_image_tokens(), 4);
+        let image = ImageData {
+            rgb_bytes: (0..3 * 12 * 6).map(|i| (i * 7 % 256) as u8).collect(),
+            width: 12,
+            height: 6,
+        };
+        let rows = module.encode_images(std::slice::from_ref(&image)).unwrap();
+        assert_eq!(rows.dims(), &[4, 6]);
+    }
+
+    /// The keys llama.cpp reads, when a file sets them: `use_gelu` is the tanh
+    /// GELU, a post-norm is applied, a single `feature_layer` is how many
+    /// blocks run and several are refused.
+    #[test]
+    fn an_mmproj_s_activation_depth_and_post_norm_come_from_its_keys() {
+        use candle_core::quantized::gguf_file::Value;
+        let file = tiny_llava_mmproj(
+            &[
+                ("clip.use_gelu", Value::Bool(true)),
+                (
+                    "clip.vision.feature_layer",
+                    Value::Array(vec![Value::I32(2)]),
+                ),
+            ],
+            true,
+        );
+        let module = load_from_mmproj_gguf(file.path(), &Device::Cpu).unwrap();
+        assert_eq!(module.encoder.depth(), 2);
+        assert_eq!(module.encoder.config().vision_num_layers, 2);
+        assert!(module
+            .encoder
+            .blocks
+            .iter()
+            .all(|b| b.activation == EncoderActivation::GeluTanh));
+        assert!(module.encoder.final_ln.is_some());
+
+        let stacked = tiny_llava_mmproj(
+            &[(
+                "clip.vision.feature_layer",
+                Value::Array(vec![Value::I32(1), Value::I32(3)]),
+            )],
+            false,
+        );
+        assert!(matches!(
+            load_from_mmproj_gguf(stacked.path(), &Device::Cpu),
+            Err(SwarmError::Validation(_))
+        ));
+        let both = tiny_llava_mmproj(
+            &[
+                ("clip.use_gelu", Value::Bool(true)),
+                ("clip.use_silu", Value::Bool(true)),
+            ],
+            false,
+        );
+        assert!(matches!(
+            load_from_mmproj_gguf(both.path(), &Device::Cpu),
+            Err(SwarmError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn a_llava_encoder_runs_every_block_its_file_holds() {
+        use DepthRule::{LlamaCpp, Llava};
+        use ProjectorKind as K;
+        assert_eq!(encoder_depth(K::Llava, 23, None, Llava).unwrap(), 23);
+        assert_eq!(encoder_depth(K::Llava, 23, None, LlamaCpp).unwrap(), 22);
+        assert_eq!(encoder_depth(K::Llava, 23, Some(&[]), Llava).unwrap(), 23);
+        for rule in [Llava, LlamaCpp] {
+            assert_eq!(encoder_depth(K::Llava, 24, Some(&[23]), rule).unwrap(), 23);
+            assert!(encoder_depth(K::Llava, 23, Some(&[24]), rule).is_err());
+            assert!(encoder_depth(K::Llava, 23, Some(&[-1]), rule).is_err());
+            assert!(encoder_depth(K::Llava, 24, Some(&[3, 7]), rule).is_err());
+            assert_eq!(encoder_depth(K::Gemma3, 27, None, rule).unwrap(), 27);
+        }
+    }
+
+    /// CLIP's quick GELU, `x · sigmoid(1.702 x)` — not the erf form.
+    #[test]
+    fn quick_gelu_is_clips() {
+        let x = Tensor::new(&[-2.0f32, -0.5, 0.0, 1.0, 3.0], &Device::Cpu).unwrap();
+        let got: Vec<f32> = EncoderActivation::GeluQuick
+            .apply(&x)
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        for (v, g) in [-2.0f32, -0.5, 0.0, 1.0, 3.0].iter().zip(&got) {
+            let want = v / (1.0 + (-1.702 * v).exp());
+            assert!((g - want).abs() < 1e-6, "{v}: {g} vs {want}");
+        }
+        // The erf GELU of 1 is 0.8413; quick GELU's is 0.8458.
+        assert!((got[3] - 0.8458).abs() < 1e-3, "{}", got[3]);
+        assert_eq!(
+            EncoderActivation::from_keys(false, false).unwrap(),
+            EncoderActivation::GeluQuick
+        );
+        assert_eq!(
+            EncoderActivation::from_keys(false, true).unwrap(),
+            EncoderActivation::Silu
+        );
     }
 
     /// Gemma 3's pool: token t is the mean of one pool×pool square of the

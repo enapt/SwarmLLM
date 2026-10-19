@@ -588,8 +588,8 @@ fn utf8_char_len(b: u8) -> usize {
 /// template adds.
 ///
 /// Images are counted at a fixed per-image cost: a CLIP-style encoder emits a
-/// fixed number of embeddings regardless of the picture's size, and 577 is what
-/// this project measures for LLaVA (see `inference::vision`).
+/// fixed number of embeddings regardless of the picture's size: 576 for LLaVA
+/// (one per patch, `inference::vision`), the most of the families read here.
 ///
 /// **Tool definitions are part of the prompt.** Chat templates render them into
 /// it — as JSON, one per tool — and an agent harness sends dozens, so they can
@@ -603,7 +603,7 @@ pub fn estimate_prompt_tokens(
 ) -> u32 {
     const BYTES_PER_TOKEN: usize = 4;
     const PER_MESSAGE_OVERHEAD_TOKENS: usize = 4;
-    const TOKENS_PER_IMAGE: usize = 577;
+    const TOKENS_PER_IMAGE: usize = 576;
 
     let mut total = 0usize;
     for m in messages {

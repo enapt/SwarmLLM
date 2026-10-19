@@ -5367,8 +5367,9 @@ API's local shortcut ignored pictures, and on a processor the splice's own table
 the first norm f16.
 
 **Left.** ~~Gemma 3 attends inside an image both ways in llama.cpp; here causally~~ — done the
-same day (#115 (2b), next section). LLaVA's three differences from llama.cpp (#310). An image
-inside an Anthropic `tool_result` is still dropped (#310).
+same day (#115 (2b), next section). ~~LLaVA's three differences from llama.cpp (#310). An image
+inside an Anthropic `tool_result` is still dropped (#310).~~ — both done the same day (#310,
+§ "LLaVA's image reader is checked against exact arithmetic").
 
 ## A picture's rows attend both ways (2026-10-19, FUTURE_WORK #115 (2b))
 
@@ -5442,6 +5443,76 @@ refused), `picture_spans_survive_the_wire_after_the_prompt_span_trailer`,
 `picture_spans_are_sealed_and_survive_the_encrypted_frame`,
 `picture_spans_are_taken_only_where_the_prompt_puts_its_pictures`. The regression check is the
 real request and its score.
+
+## LLaVA's image reader is checked against exact arithmetic (2026-10-19, FUTURE_WORK #310)
+
+**Rule.** `vision::load_from_mmproj_gguf` reads an encoder's activation (`EncoderActivation::from_keys`:
+`clip.use_gelu` → tanh, `clip.use_silu` → SiLU, neither → quick GELU), its post-norm (`v.post_ln`,
+only where present) and its depth (`encoder_depth`) off the file; `VisionEncoder::forward` drops a
+class row; `Preprocess` letterboxes on the projector's pad colour with its resize filter. LLaVA's
+rows are judged against `examples/llava_reader_reference.py`, a float64 numpy reading of the same
+file — not against llama.cpp.
+
+**What it replaced.** Five differences from LLaVA's own reader, found by measuring rather than the
+three FUTURE_WORK #310 named from reading: (1) the class row reached the language model, 577 rows an
+image where LLaVA (`select_feature = 'patch'`) and llama.cpp hand over 576; (2) the feed-forward ran
+the erf GELU where CLIP's is `quick_gelu` (no key set — llama.cpp's reading); (3) a file without
+`v.post_ln` (LLaVA's — it reads a hidden state from inside the encoder) got a weight-1, bias-0
+LayerNorm "identity-like", which still NORMALISES every row; (4) the picture was stretched to the
+square and resized bilinear, where LLaVA's `expand2square` pads with the mean colour (llama.cpp:
+`{122, 116, 104}`, `PAD_CEIL`, Pillow's bicubic — Keys a = -0.5, which is Catmull-Rom); (5) the
+encoder depth was right by accident (every block), now reasoned: LLaVA 1.5 reads CLIP's hidden
+state after 23 of 24 blocks (`mm_vision_select_layer = -2`) and llama.cpp's converter keeps exactly
+those 23 (`convert_image_encoder_to_gguf.py`: `block_count = num_hidden_layers - 1` and the last
+block popped; a newer run writes `clip.vision.feature_layer = [23]`, which `encoder_depth` honours).
+
+**llama.cpp is not the authority here** (master, 2026-10-19). `tools/mtmd/models/llava.cpp`
+concatenates the class token AFTER the patches (`ggml_concat(ctx0, inp, model.class_embedding, 1)`),
+so every patch takes the next one's position, patch 0 is the row dropped and the class row is kept
+as the last; and it runs `n_layer - 1` blocks of a file without `feature_layer` (22 of the 23 this
+file holds). It also refuses a LLaVA 1.5 mmproj with no `clip.projector_type` (the file here; a
+copy with the key added is needed to run it, `add_projector_type.py` in the round's scratch).
+
+**Measured** (2026-10-19, CPU, `llava-v1.5-7b-mmproj-f16.gguf`; `examples/image_rows_probe.rs`
+against `examples/image_rows_reference.cpp` built from llama.cpp master and against the float64
+reference; per-row cosine median / worst, relative error of all rows):
+
+| Reading | `shapes.png` 1200×600 | `test-1.jpeg` 640×488 | 336² copy, vs exact |
+|---|---|---|---|
+| before, vs llama.cpp as shipped (577 vs 576 rows, from our second) | 0.378 / −0.160, 0.991 | 0.393, 1.022 | 0.917, 0.80 |
+| after, vs llama.cpp as shipped (its depth) | 0.951 / −0.167, 0.445 | 0.644, 0.845 | — |
+| after, vs llama.cpp with the class token FIRST (its depth) | 0.999994 / 0.989, 0.0098 | 0.99963 / 0.013, 0.170 | — |
+| after, vs llama.cpp class token first + all 23 blocks | 0.999993 / 0.992, 0.0090 | 0.99951 / 0.115, 0.172 | — |
+| after, vs the float64 reference | — | — | **1.000000 / 1.000000, 0.00005** |
+| llama.cpp as shipped, vs the float64 reference | — | — | 0.525, 1.18 |
+
+The 336² copy (`test-1.jpeg` scaled by ffmpeg) needs no resize, so it judges the reader alone; the
+two other columns include the resize, checked against llama.cpp's own preprocessor. llama.cpp
+patched to the class token first, all 23 blocks AND F32 weights still differs from exact arithmetic
+on 11 of 576 rows (3 below cosine 0.9; row 348: |72.3| where the exact row is |22.6| — high-norm
+tokens that arithmetic does not make). Its f16 quick-GELU table is not why: emulated in the
+float64 reference, the same rows stay where they were. Cause UNDETERMINED; it is llama.cpp's.
+Gemma 3 4B's reader is unchanged (`shapes.png` 0.999999 / 0.99992 against llama.cpp, whose SigLIP
+graph is not `llava.cpp`).
+
+**What a change must keep.** The activation, post-norm and depth are read off the file, never
+chosen per projector kind; a class row never reaches the projector; only the blocks that run are
+loaded; `SWARMLLM_LLAVA_DEPTH=llama-cpp` stays a comparison switch, never a default. Tests:
+`a_llava_mmproj_is_read_as_llava_reads_it` (a tiny synthesised mmproj: quick GELU, 3 blocks, no
+norm, pad `[122, 116, 104]`, 4 rows from 4 patches — red with the class row kept),
+`an_mmproj_s_activation_depth_and_post_norm_come_from_its_keys`,
+`a_llava_encoder_runs_every_block_its_file_holds`, `quick_gelu_is_clips`,
+`vision_encoder_num_tokens`, `a_letterboxed_image_is_centred_on_black` (both pads). The reply-level
+check (LLaVA-1.5-7B describing `shapes.png`) was not run: the 7B text model is not on this machine,
+and llama.cpp's reply would not be the reference.
+
+**A tool result's picture reaches the model** (same day). `anthropic::convert::tool_result_content`
+gives a `tool_result` block's image blocks to its tool turn at their place (`vision::join_content`)
+— llama.cpp's server makes such a block a tool message with image parts, and the OpenAI chat
+surface already kept a tool message's image parts. It became the caption alone before. Test
+`a_tool_result_s_picture_reaches_the_tool_turn` (red with the pictures dropped). The cloud-provider
+translation still writes `[image]` (OpenAI's chat API refuses images in a tool turn) and Responses
+refuses a list-shaped tool output: FUTURE_WORK #312.
 
 ## A model that cannot write replies is refused off its header (2026-10-15)
 

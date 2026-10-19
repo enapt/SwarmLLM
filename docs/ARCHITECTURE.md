@@ -153,6 +153,9 @@ swarmllm/
 │                 peft_lora_to_gguf.py converts from PEFT (with the converter's q/k permute, #110);
 │                 score_image_reply_against_reference.cpp — the same for a reply about a
 │                 picture, through llama.cpp's own image path (libmtmd; built by g++, #115 (2b));
+│                 image_rows_probe.rs — this node's rows for a picture against
+│                 image_rows_reference.cpp (llama.cpp's image reader, built by g++) or
+│                 llava_reader_reference.py (LLaVA's in float64 numpy, the authority, #310);
 │                 release_gate.sh — the release gate on the downloaded artifact, under an hour: smoke_test.sh,
 │                 release_shapes.sh, family_conformance.sh, reply_ab.sh, split_rig.sh, stream_bench.py;
 │                 feature_check.py — every surface a user reaches (OpenAI, Anthropic, Responses,
@@ -894,8 +897,10 @@ Node A (rank 0, coordinator)          Node B (rank 1)
 
 SwarmLLM reads images through `src/inference/vision.rs`, dispatching on the mmproj's
 `clip.projector_type` (anything else is refused with a 400 naming the type):
-- **`mlp` — LLaVA**: CLIP ViT + a 2-layer MLP, the image stretched to a square; 577 rows an image
-  (llama.cpp drops the class token, 576 — `docs/FUTURE_WORK.md` #310).
+- **`mlp` — LLaVA**: CLIP ViT (quick GELU, every block the file holds, no post-norm) + a 2-layer
+  MLP; the image letterboxed onto its mean colour (bicubic); 576 rows an image, the class row
+  dropped. Judged row by row against exact arithmetic (`examples/llava_reader_reference.py`), not
+  llama.cpp, whose LLaVA graph puts the class token last (`docs/FUTURE_WORK.md` #310).
 - **`gemma3` — Gemma 3**: SigLIP (no class token, tanh GELU), the image letterboxed onto black
   (llama.cpp's `PAD_CEIL`), the 64×64 patch grid averaged 4×4 to 256 rows, RMS-normed
   (`mm.soft_emb_norm`) and projected (`mm.input_projection`). Each image is framed
@@ -934,7 +939,7 @@ Router: does any node have mmproj?
     └── Nobody has mmproj → HTTP 503 (VisionEncoderUnavailable)
     │
     ▼
-Pre-computed embeddings (577 × 4096 = ~9.4MB, zstd+FP16 compressed)
+Pre-computed embeddings (576 × 4096 in f16 = ~4.7 MB, then zstd)
     │
     ▼
 Text Pipeline (unchanged): embeddings travel with LayerForward

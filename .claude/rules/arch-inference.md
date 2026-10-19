@@ -237,7 +237,7 @@ Byte-identical replies across releases prove no REGRESSION, never correctness.
 
 ## An image sits at its marker, and its rows are counted as positions (2026-10-19, #115 (2a))
 
-Every surface writes **`vision::MEDIA_MARKER`** where an image was (`vision::join_content`); **`vision::encode_prompt_with_images`** gives each marker one `IMAGE_TOKEN_ID` and the prompt one BOS; **`vision::splice_image_rows`** is the ONE place rows meet text (executor + local embedder) — no marker, or rows the markers do not divide, is REFUSED, never prepended; **`vision::positions_with_images`** is the one position count (rows from `vision::wire_rows`, never a cached module); **`vision::decode_wire_embeddings`** the one payload reader. A failed encode is the request's error. The payload goes only to a first segment advertising `features::IMAGES_AT_MARKERS`. A projector is dispatched on `clip.projector_type` — a new one is read off llama.cpp's `tools/mtmd/models/<type>.cpp`, preprocessing included. Check against `llama-mtmd-cli`.
+Every surface writes **`vision::MEDIA_MARKER`** where an image was (`vision::join_content`); **`vision::encode_prompt_with_images`** gives each marker one `IMAGE_TOKEN_ID` and the prompt one BOS; **`vision::splice_image_rows`** is the ONE place rows meet text (executor + local embedder) — no marker, or rows the markers do not divide, is REFUSED, never prepended; **`vision::positions_with_images`** is the one position count (rows from `vision::wire_rows`, never a cached module); **`vision::decode_wire_embeddings`** the one payload reader. A failed encode is the request's error. The payload goes only to a first segment advertising `features::IMAGES_AT_MARKERS`. A projector is dispatched on `clip.projector_type` — a new one is read off llama.cpp's `tools/mtmd/models/<type>.cpp`, preprocessing included. Check against `llama-mtmd-cli` (LLaVA: against exact arithmetic, § "An image reader is read off its file").
 
 → `docs/invariants/inference.md` § "An image sits at its marker"
 
@@ -246,6 +246,12 @@ Every surface writes **`vision::MEDIA_MARKER`** where an image was (`vision::joi
 **`vision::rows_attend_both_ways`** names the families (llama.cpp's `mtmd_decode_use_non_causal`: Gemma 3). **`PipelineExecutor::image_spans_for`** computes the spans once per request from `encode_prompt_with_images` + `wire_rows`; **`image_spans_from(index_pos)`** is the one answer to what a send carries (every forward reaching into a picture, every segment, stand-ins and chained hops too — each must advertise `features::IMAGES_AT_MARKERS`). The worker takes them only through **`model_worker::image_spans_to_apply`** and applies them with **`SplitModel::with_image_spans`**; the mask is **`causal_mask_with_spans`** / `window_mask(.., spans)`, a forward must hold each picture whole (`spans_in_forward`), and such a forward reads the mask (`ForceStandardAttnGuard`, set INSIDE `forward_inner_body` — `in_phase_pool` may run it on another thread), is never graphed, batched or tensor-parallel. Check against `llama-mtmd-cli` as shipped (non-causal).
 
 → `docs/invariants/inference.md` § "A picture's rows attend both ways"
+
+## An image reader is read off its file, and LLaVA's is judged by exact arithmetic (2026-10-19, #310)
+
+**`vision::load_from_mmproj_gguf`** reads what llama.cpp's `clip.cpp` reads: **`EncoderActivation::from_keys`** (`clip.use_gelu` → tanh, `clip.use_silu`, neither → CLIP's quick GELU), `v.post_ln` only where the file has one (`final_ln: Option` — never a weight-1 norm, which still normalises), **`encoder_depth`** (every block the file holds; one `clip.vision.feature_layer` → that many; several refused), and only those blocks are loaded. **`VisionEncoder::forward`** drops a class row — a LLaVA picture is 576 rows (`TOKENS_PER_IMAGE`). `Preprocess` letterboxes every picture on its projector's `pad` (LLaVA: `mean_as_bytes`, bicubic; Gemma 3: black, bilinear). ⚠ **LLaVA's rows are judged against `examples/llava_reader_reference.py` (float64), not llama.cpp**: its graph puts the class token LAST and runs one block fewer (A/B `SWARMLLM_LLAVA_DEPTH=llama-cpp`). Probe: `examples/image_rows_probe.rs`.
+
+→ `docs/invariants/inference.md` § "LLaVA's image reader is checked against exact arithmetic"
 
 ## A vocabulary piece becomes token ids in exactly one place
 
