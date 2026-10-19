@@ -199,6 +199,8 @@
   "chat.route_local": "na tomto počítači",
   "chat.route_relayed_one": "předáno přes {count} počítač",
   "chat.route_relayed_other": "předáno přes {count} počítače",
+  "chat.route_tried_first_one": "nejdřív zkoušeno na {count} jiném počítači",
+  "chat.route_tried_first_other": "nejdřív zkoušeno na {count} jiných počítačích",
   "chat.send": "Odeslat",
   "chat.session_tokens": "Relace: {input} vstup · {output} výstup",
   "chat.shift_enter": "Shift+Enter pro nový řádek",

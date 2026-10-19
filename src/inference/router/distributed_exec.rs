@@ -906,43 +906,10 @@ pub(super) async fn execute_request(
         );
     }
 
-    // Record the route while the assignment is in hand. Region comes from the
-    // peer's voluntarily-declared `NodeCapability.region`.
-    //
-    // Transport is decided by whether we hold a DIRECT connection, not by
-    // whether the peer is relay-*capable*: `peer_reachable_via_relay` is an
-    // eligibility check that is true for any relay-capable peer, so using it
-    // here labelled directly-connected LAN peers as `relayed` (observed live
-    // 2026-07-26 — a forward that demonstrably went straight out over LAN QUIC
-    // was reported as a relay hop). `connected_node_ids` is the authoritative
-    // direct-connection oracle and is what the scheduler itself filters on; a
-    // holder that got a segment without being in it is only reachable through
-    // the relay tier.
+    // Record the route while the assignment is in hand
+    // (`SharedState::trace_segments` says how each segment is labelled).
     {
-        let segs = crate::inference::trace::segments_from_assignment(
-            assignment.segments.iter(),
-            &local_node_id,
-            |seg| {
-                (
-                    seg.node_id.clone(),
-                    seg.layer_range.0,
-                    seg.layer_range.1,
-                    shared_state
-                        .model_registry
-                        .shards_spanned_by_segment(seg)
-                        .into_iter()
-                        .map(|s| s.index)
-                        .collect(),
-                    !shared_state.connected_node_ids.contains(&seg.node_id),
-                )
-            },
-            |node| {
-                shared_state
-                    .peer_registry
-                    .get(node)
-                    .and_then(|p| p.capability.as_ref().and_then(|c| c.region.clone()))
-            },
-        );
+        let segs = shared_state.trace_segments(&assignment.segments);
         trace.mark_assembled(
             crate::inference::trace::classify_route(&segs),
             segs,

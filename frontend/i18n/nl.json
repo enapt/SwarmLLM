@@ -199,6 +199,8 @@
   "chat.route_local": "op deze computer",
   "chat.route_relayed_one": "doorgestuurd via {count} computer",
   "chat.route_relayed_other": "doorgestuurd via {count} computers",
+  "chat.route_tried_first_one": "eerst geprobeerd op {count} andere computer",
+  "chat.route_tried_first_other": "eerst geprobeerd op {count} andere computers",
   "chat.send": "Verzenden",
   "chat.session_tokens": "Sessie: {input} in · {output} uit",
   "chat.shift_enter": "Shift+Enter voor nieuwe regel",

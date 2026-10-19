@@ -199,6 +199,8 @@
   "chat.route_local": "di komputer ini",
   "chat.route_relayed_one": "diteruskan melalui {count} peer",
   "chat.route_relayed_other": "diteruskan melalui {count} peer",
+  "chat.route_tried_first_one": "sebelumnya dicoba di {count} komputer lain",
+  "chat.route_tried_first_other": "sebelumnya dicoba di {count} komputer lain",
   "chat.send": "Kirim",
   "chat.session_tokens": "Sesi: {input} masuk · {output} keluar",
   "chat.shift_enter": "Shift+Enter untuk baris baru",

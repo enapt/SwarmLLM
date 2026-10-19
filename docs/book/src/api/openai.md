@@ -177,7 +177,8 @@ carries the `x-swarm-route`, `x-swarm-segments`, `x-swarm-peers` (how many
 OTHER computers took part), `x-swarm-nodes` and, where they declared one,
 `x-swarm-regions` headers. The same facts are in the reply itself, as
 `"swarmllm": {"route": {"route": "distributed", "segments": 2, "peers": 1,
-"nodes": ["0718d8b9", "96842635"]}}`: in the body of a chat completion or an
+"nodes": ["0718d8b9", "96842635"], "attempts": 1, "all_nodes": ["0718d8b9",
+"96842635"], "all_peers": 1}}`: in the body of a chat completion or an
 Anthropic reply, in the last chunk of a streamed chat completion (the one with
 `finish_reason`), in a streamed Anthropic reply's `message_delta`, and in the
 response object of `/v1/responses` (also when it is streamed, run in the
@@ -186,6 +187,16 @@ sent before the route exists — so read it there. An MCP tool that asks one mod
 puts it in the result's `_meta["com.swarmllm/route"]`; `compare`, `research` and
 `batch_prompts` give each model's result its own `route`. A reply a cloud
 provider wrote carries none.
+
+`route`, `segments`, `peers` and `nodes` describe the computers the reply
+finished on. When a computer failed or refused part-way and the request was
+planned again (or its reply carried on elsewhere), the computers it was sent to
+first saw it too — so `all_nodes` and `all_peers` name every computer any
+attempt reached, this one included, and `attempts` says how many plans it took
+(headers `x-swarm-all-nodes`, `x-swarm-all-peers`, `x-swarm-attempts`). A reply
+that says `local` with `all_peers` above 0 was answered here after another
+computer had been handed it. The dashboard's chat says so beside the route, as
+"tried 1 other computer first".
 
 To keep a single request on this computer, whatever the model's setting, send
 the header `X-SwarmLLM-Keep-On-This-Computer: true`, or put

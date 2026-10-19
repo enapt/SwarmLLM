@@ -199,6 +199,8 @@
   "chat.route_local": "บนเครื่องนี้",
   "chat.route_relayed_one": "ส่งต่อผ่าน {count} คอมพิวเตอร์",
   "chat.route_relayed_other": "ส่งต่อผ่าน {count} คอมพิวเตอร์",
+  "chat.route_tried_first_one": "ก่อนหน้านี้ลองบนคอมพิวเตอร์อื่น {count} เครื่อง",
+  "chat.route_tried_first_other": "ก่อนหน้านี้ลองบนคอมพิวเตอร์อื่น {count} เครื่อง",
   "chat.send": "ส่ง",
   "chat.session_tokens": "เซสชัน: {input} เข้า · {output} ออก",
   "chat.shift_enter": "Shift+Enter สำหรับบรรทัดใหม่",

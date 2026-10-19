@@ -199,6 +199,8 @@
   "chat.route_local": "이 컴퓨터에서",
   "chat.route_relayed_one": "컴퓨터 {count}개를 통해 중계",
   "chat.route_relayed_other": "컴퓨터 {count}개를 통해 중계",
+  "chat.route_tried_first_one": "먼저 다른 컴퓨터 {count}대에서 시도함",
+  "chat.route_tried_first_other": "먼저 다른 컴퓨터 {count}대에서 시도함",
   "chat.send": "보내기",
   "chat.session_tokens": "세션: {input} 입력 · {output} 출력",
   "chat.shift_enter": "새 줄을 위해 Shift+Enter",

@@ -199,6 +199,8 @@
   "chat.route_local": "trên máy tính này",
   "chat.route_relayed_one": "chuyển tiếp qua {count} máy ngang hàng",
   "chat.route_relayed_other": "chuyển tiếp qua {count} máy ngang hàng",
+  "chat.route_tried_first_one": "đã thử trước trên {count} máy tính khác",
+  "chat.route_tried_first_other": "đã thử trước trên {count} máy tính khác",
   "chat.send": "Gửi",
   "chat.session_tokens": "Phiên: {input} vào · {output} ra",
   "chat.shift_enter": "Shift+Enter để xuống dòng",

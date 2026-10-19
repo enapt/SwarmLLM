@@ -2273,14 +2273,36 @@ impl PipelineExecutor {
     /// loop only gets there if the caller does not RETURN first — which is why
     /// `failover_segment` says whether it finished (`Takeover`) rather than
     /// leaving that to an `is_last` computed before this splice (gotcha #706).
+    ///
+    /// The request's trace follows the splice here, so the route a reply names
+    /// is the one it finished on, the holder it replaced kept among every
+    /// computer it reached (#302) — inside the one install, so no takeover
+    /// path can move the request without the reply saying so.
+    ///
+    /// Takes the two fields rather than `&mut self`, so it can run while a
+    /// waiter guard still borrows `shared_state`.
     fn install_takeover(
         assignment: &mut crate::types::PipelineAssignment,
+        shared_state: &crate::daemon::state::SharedState,
         failed_idx: usize,
         cover: &[crate::types::PipelineSegment],
         request_id: uuid::Uuid,
     ) {
+        if Self::splice_cover(assignment, failed_idx, cover, request_id) {
+            shared_state.note_route_retaken(request_id, &assignment.segments);
+        }
+    }
+
+    /// The splice [`Self::install_takeover`] makes; `false` (nothing changed)
+    /// for an empty cover.
+    fn splice_cover(
+        assignment: &mut crate::types::PipelineAssignment,
+        failed_idx: usize,
+        cover: &[crate::types::PipelineSegment],
+        request_id: uuid::Uuid,
+    ) -> bool {
         if cover.is_empty() {
-            return;
+            return false;
         }
         if cover.len() > 1 {
             tracing::info!(
@@ -2294,6 +2316,7 @@ impl PipelineExecutor {
         assignment
             .segments
             .splice(failed_idx..=failed_idx, cover.iter().cloned());
+        true
     }
 
     /// How far into the conversation a forward's input reaches — `index_pos`
@@ -2696,6 +2719,10 @@ impl PipelineExecutor {
                 total_standbys = self.assignment.standbys.len(),
                 "DIAG: failing over to standby node"
             );
+            // Named before it is sent anything: a stand-in that fails after
+            // being handed the segment has still seen it (#302).
+            self.shared_state
+                .note_request_reached(request_id, &backup.node_id);
 
             // The standby the scheduler most often picks is THIS node, and it
             // was the one case that could not work.
@@ -2736,6 +2763,7 @@ impl PipelineExecutor {
                     Ok(result) => {
                         Self::install_takeover(
                             &mut self.assignment,
+                            &self.shared_state,
                             failed_idx,
                             cover.as_deref().unwrap_or_default(),
                             request_id,
@@ -3014,6 +3042,7 @@ impl PipelineExecutor {
             // directly, avoiding repeated failover + 30s timeout per token.
             Self::install_takeover(
                 &mut self.assignment,
+                &self.shared_state,
                 failed_idx,
                 cover.as_deref().unwrap_or_default(),
                 request_id,
@@ -3899,20 +3928,45 @@ mod composite_takeover_tests {
         }
     }
 
+    /// **A takeover moves the route the reply names** (#302): the stand-in is
+    /// the route it finishes on, and the holder it replaced is still among
+    /// every computer the request reached. Through the one install, with a
+    /// live trace.
+    #[test]
+    fn a_takeover_is_the_route_the_reply_names() {
+        let state = crate::inference::pipeline::tests::make_test_state();
+        let request_id = uuid::Uuid::new_v4();
+        let trace = std::sync::Arc::new(crate::inference::trace::RequestTrace::new(
+            request_id, "m", "chat",
+        ));
+        state.active_traces.insert(request_id, trace.clone());
+        let mut a = assignment(vec![seg(1, (0, 16)), seg(2, (16, 32))]);
+        trace.mark_assembled(
+            crate::inference::trace::Route::Distributed,
+            state.trace_segments(&a.segments),
+            0,
+        );
+        PipelineExecutor::install_takeover(&mut a, &state, 1, &[seg(3, (16, 32))], request_id);
+        let r = trace.snapshot().route_summary();
+        assert_eq!(r.nodes, vec!["01010101", "03030303"], "{r:?}");
+        assert_eq!(r.all_nodes, vec!["01010101", "02020202", "03030303"]);
+        assert_eq!((r.all_peers, r.attempts), (3, 1));
+    }
+
     /// One stand-in rewrites the segment in place; several replace it with one
     /// segment each, in layer order and at the same index.
     #[test]
     fn a_takeover_installs_one_segment_or_the_whole_cover_in_its_place() {
         // The single-stand-in case must be byte-for-byte what it always was.
         let mut a = assignment(vec![seg(1, (0, 8)), seg(2, (8, 32))]);
-        PipelineExecutor::install_takeover(&mut a, 1, &[seg(7, (8, 32))], uuid::Uuid::nil());
+        PipelineExecutor::splice_cover(&mut a, 1, &[seg(7, (8, 32))], uuid::Uuid::nil());
         assert_eq!(a.segments.len(), 2, "one stand-in replaces one segment");
         assert_eq!(a.segments[1].node_id, NodeId([7; 32]));
 
         // The composite case: one segment becomes two, spliced at index 1 so
         // the segment BEFORE it and the segment AFTER it both keep their place.
         let mut a = assignment(vec![seg(1, (0, 8)), seg(2, (8, 24)), seg(3, (24, 32))]);
-        PipelineExecutor::install_takeover(
+        PipelineExecutor::splice_cover(
             &mut a,
             1,
             &[seg(7, (8, 16)), seg(8, (16, 24))],
@@ -3935,7 +3989,7 @@ mod composite_takeover_tests {
 
         // An empty cover is a no-op rather than a segment silently vanishing.
         let mut a = assignment(vec![seg(1, (0, 8)), seg(2, (8, 32))]);
-        PipelineExecutor::install_takeover(&mut a, 1, &[], uuid::Uuid::nil());
+        PipelineExecutor::splice_cover(&mut a, 1, &[], uuid::Uuid::nil());
         assert_eq!(a.segments.len(), 2);
         assert_eq!(a.segments[1].node_id, NodeId([2; 32]));
     }
@@ -3958,7 +4012,7 @@ mod composite_takeover_tests {
         let mut a = assignment(vec![seg(1, (0, 8)), seg(2, (8, 24)), seg(3, (24, 32))]);
         let stale = a.segments.len();
 
-        PipelineExecutor::install_takeover(
+        PipelineExecutor::splice_cover(
             &mut a,
             1,
             &[seg(7, (8, 16)), seg(8, (16, 24))],

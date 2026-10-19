@@ -199,6 +199,8 @@
   "chat.route_local": "på den här datorn",
   "chat.route_relayed_one": "vidarebefordrat via {count} dator",
   "chat.route_relayed_other": "vidarebefordrat via {count} datorer",
+  "chat.route_tried_first_one": "provades först på {count} annan dator",
+  "chat.route_tried_first_other": "provades först på {count} andra datorer",
   "chat.send": "Skicka",
   "chat.session_tokens": "Session: {input} in · {output} ut",
   "chat.shift_enter": "Shift+Enter för ny rad",

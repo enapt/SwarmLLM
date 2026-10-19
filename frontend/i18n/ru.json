@@ -199,6 +199,8 @@
   "chat.route_local": "на этом компьютере",
   "chat.route_relayed_one": "передано через {count} компьютер",
   "chat.route_relayed_other": "передано через {count} компьютера",
+  "chat.route_tried_first_one": "сначала пробовали на {count} другом компьютере",
+  "chat.route_tried_first_other": "сначала пробовали на {count} других компьютерах",
   "chat.send": "Отправить",
   "chat.session_tokens": "Сессия: {input} вход · {output} выход",
   "chat.shift_enter": "Shift+Enter для новой строки",

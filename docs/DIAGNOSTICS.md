@@ -624,8 +624,9 @@ curl -sD- -o /dev/null http://localhost:8800/v1/chat/completions ... | grep x-sw
 Those headers are on a reply that is NOT streamed. A streamed one names its route in the body —
 the finish chunk's (Anthropic: `message_delta`'s) `swarmllm.route`, the same reading — as does
 every other form of reply, MCP results included (`_meta["com.swarmllm/route"]`; #251 (3)). A
-request re-planned after a failure names only the route it finished on (its log line
-`DIAG: request complete` says `assemblies=N` when it was re-planned; FUTURE_WORK #302).
+request re-planned after a failure names the route it finished on AND every computer any
+attempt reached (`all_nodes`, `all_peers`, `attempts`; headers `x-swarm-all-*`; the log line
+`DIAG: request complete` adds `all_nodes=` when it differs from the final route; #302).
 
 Ask for that FIRST on any report from a multi-node setup — model, request body
 and version were all obtained for the report above and none of them

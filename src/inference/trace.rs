@@ -148,6 +148,13 @@ struct TraceInner {
     predicted_terms: Option<PredictedTerms>,
     route: Route,
     segments: Vec<SegmentTrace>,
+    /// Every computer any attempt of this request was planned onto or handed
+    /// over to — `(full node id, is it this one)`, first-seen order (#302).
+    /// `segments` is the route the reply FINISHED on and is replaced by every
+    /// plan; this only grows, so a request re-planned off a peer that failed
+    /// still names that peer, which may have been handed its hidden states
+    /// (or, for a hand-off, its prompt).
+    every_node: Vec<(String, bool)>,
     prompt_tokens: u32,
     completion_tokens: u32,
     outcome: Outcome,
@@ -533,12 +540,32 @@ impl RequestTrace {
         self.decode_rounds.load(Ordering::Relaxed)
     }
 
+    /// A plan for this request was made: it is now the route the reply is on,
+    /// and every computer it names joins [`TraceInner::every_node`].
     pub fn mark_assembled(&self, route: Route, segments: Vec<SegmentTrace>, sched_ms: u64) {
         let mut g = self.lock();
         g.sched_ms_total += sched_ms;
         g.assemblies += 1;
         g.route = route;
+        g.note_nodes(&segments);
         g.segments = segments;
+    }
+
+    /// The running plan changed shape without a new plan — a stand-in took a
+    /// failed segment over (`PipelineExecutor::install_takeover`). The reply
+    /// now finishes on `segments`; not an attempt, so `assemblies` stays.
+    pub fn retake(&self, segments: Vec<SegmentTrace>) {
+        let mut g = self.lock();
+        g.route = classify_route(&segments);
+        g.note_nodes(&segments);
+        g.segments = segments;
+    }
+
+    /// A computer this request was sent to outside any plan's route — a
+    /// stand-in a failover sent the segment to, whether or not it then
+    /// answered.
+    pub fn note_reached(&self, node_id: &NodeId, is_local: bool) {
+        self.lock().note_node(node_id.to_string(), is_local);
     }
 
     /// First token reached the client. Idempotent and lock-free; safe to call
@@ -668,6 +695,26 @@ impl RequestTrace {
             completion_tokens: g.completion_tokens,
             outcome: g.outcome.clone(),
             segments: g.segments.clone(),
+            all_nodes: g
+                .every_node
+                .iter()
+                .map(|(id, _)| id[..id.len().min(8)].to_string())
+                .collect(),
+            all_peers: g.every_node.iter().filter(|(_, local)| !local).count(),
+        }
+    }
+}
+
+impl TraceInner {
+    fn note_nodes(&mut self, segments: &[SegmentTrace]) {
+        for s in segments {
+            self.note_node(s.node_id.clone(), s.is_local);
+        }
+    }
+
+    fn note_node(&mut self, node_id: String, is_local: bool) {
+        if !self.every_node.iter().any(|(id, _)| *id == node_id) {
+            self.every_node.push((node_id, is_local));
         }
     }
 }
@@ -745,7 +792,15 @@ pub struct TraceSnapshot {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub outcome: Outcome,
+    /// The route the request FINISHED on.
     pub segments: Vec<SegmentTrace>,
+    /// Short ids of every computer any attempt was planned onto or handed over
+    /// to, this one included, first-seen order (#302) — a superset of
+    /// `segments`' nodes, different only where a re-plan or a takeover moved
+    /// the request.
+    pub all_nodes: Vec<String>,
+    /// How many of `all_nodes` are OTHER computers.
+    pub all_peers: usize,
 }
 
 impl TraceSnapshot {
@@ -818,6 +873,15 @@ impl TraceSnapshot {
         // than leaving the reader to infer it from an inflated duration.
         if self.assemblies > 1 {
             let _ = write!(s, " assemblies={}", self.assemblies);
+        }
+        // Only where an attempt reached a computer the final route does not
+        // name (#302) — otherwise it repeats `nodes`.
+        if self
+            .all_nodes
+            .iter()
+            .any(|n| !self.segments.iter().any(|seg| seg.short_node() == n))
+        {
+            let _ = write!(s, " all_nodes={}", self.all_nodes.join(","));
         }
         let _ = write!(
             s,
@@ -975,9 +1039,14 @@ where
 /// result's `_meta` — are all built from it, so no surface can describe the
 /// same request differently from another.
 ///
-/// It describes the route the reply was finished on. A request that was
-/// re-planned after a failure reports its last route only (`assemblies` on the
-/// trace says it was re-planned), here and in the headers alike.
+/// `route` … `regions` describe the route the reply FINISHED on; `attempts`,
+/// `all_nodes` and `all_peers` every computer any attempt reached (#302). A
+/// request that failed on a peer and was re-planned onto this computer used
+/// to say only `local` — while that peer had been handed its hidden states,
+/// or had written the first part of a continued reply. The answer #251 (3)
+/// promised is "which computers served this", so both are reported, here and
+/// in the headers alike. (OpenRouter's reply names only the model a fallback
+/// ended on; a swarm's privacy question needs the machines tried too.)
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RouteSummary {
     /// `local`, `distributed`, … — [`Route::as_str`].
@@ -995,6 +1064,20 @@ pub struct RouteSummary {
     /// empty, and left out, when no segment declared one (region is voluntary).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub regions: Vec<String>,
+    /// How many times the request was planned: 1 unless a failure re-planned
+    /// it or a reply was continued elsewhere. A stand-in taking one segment
+    /// over is not a new plan.
+    #[serde(default)]
+    pub attempts: u32,
+    /// Short ids of EVERY computer any attempt was planned onto or handed over
+    /// to, this one included, first-seen order — `nodes` and anything a
+    /// failure moved the request off.
+    #[serde(default)]
+    pub all_nodes: Vec<String>,
+    /// How many of `all_nodes` are OTHER computers: `peers` plus any an
+    /// earlier attempt reached.
+    #[serde(default)]
+    pub all_peers: usize,
 }
 
 impl TraceSnapshot {
@@ -1010,6 +1093,9 @@ impl TraceSnapshot {
                 .map(|s| s.short_node().to_string())
                 .collect(),
             regions: self.regions(),
+            attempts: self.assemblies,
+            all_nodes: self.all_nodes.clone(),
+            all_peers: self.all_peers,
         }
     }
 }
@@ -1042,6 +1128,11 @@ pub fn response_headers(snap: &TraceSnapshot, streaming: bool) -> Vec<(&'static 
     }
     if !summary.regions.is_empty() {
         out.push(("x-swarm-regions", summary.regions.join(",")));
+    }
+    out.push(("x-swarm-attempts", summary.attempts.to_string()));
+    out.push(("x-swarm-all-peers", summary.all_peers.to_string()));
+    if !summary.all_nodes.is_empty() {
+        out.push(("x-swarm-all-nodes", summary.all_nodes.join(",")));
     }
     let timing = snap.server_timing(streaming);
     if !timing.is_empty() {
@@ -1499,6 +1590,9 @@ mod tests {
                 peers: 1,
                 nodes: vec!["0718d8b9".into(), "96842635".into()],
                 regions: vec!["??".into(), "IT".into()],
+                attempts: 1,
+                all_nodes: vec!["0718d8b9".into(), "96842635".into()],
+                all_peers: 1,
             }
         );
         let h: std::collections::HashMap<_, _> = response_headers(&s, false).into_iter().collect();
@@ -1507,6 +1601,9 @@ mod tests {
         assert_eq!(h["x-swarm-peers"], summary.peers.to_string());
         assert_eq!(h["x-swarm-nodes"], summary.nodes.join(","));
         assert_eq!(h["x-swarm-regions"], summary.regions.join(","));
+        assert_eq!(h["x-swarm-attempts"], summary.attempts.to_string());
+        assert_eq!(h["x-swarm-all-peers"], summary.all_peers.to_string());
+        assert_eq!(h["x-swarm-all-nodes"], summary.all_nodes.join(","));
 
         // No region declared anywhere: no regions in either form.
         let quiet = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
@@ -1523,6 +1620,78 @@ mod tests {
         assert!(!response_headers(&qs, false)
             .iter()
             .any(|(n, _)| *n == "x-swarm-regions"));
+    }
+
+    /// **A request re-planned off a peer names that peer** (#302): the route
+    /// it finished on is this computer alone, but the peer the first plan sent
+    /// it to is still among every computer it reached — in the body, the
+    /// headers and the log line.
+    #[test]
+    fn a_request_re_planned_off_a_peer_still_names_the_peer() {
+        let t = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
+        let me = "0718d8b987a4975a";
+        let peer = "9684263580c6660f";
+        t.mark_assembled(
+            Route::Distributed,
+            vec![
+                seg(0, me, true, Transport::Local),
+                seg(1, peer, false, Transport::Direct),
+            ],
+            0,
+        );
+        // The peer failed; the re-plan put every layer here.
+        t.mark_assembled(Route::Local, vec![seg(0, me, true, Transport::Local)], 0);
+        let s = t.snapshot();
+        let r = s.route_summary();
+        assert_eq!((r.route.as_str(), r.peers), ("local", 0), "{r:?}");
+        assert_eq!(r.attempts, 2);
+        assert_eq!(r.all_nodes, vec!["0718d8b9", "96842635"]);
+        assert_eq!(r.all_peers, 1);
+        let h: std::collections::HashMap<_, _> = response_headers(&s, false).into_iter().collect();
+        assert_eq!(h["x-swarm-peers"], "0");
+        assert_eq!(h["x-swarm-all-peers"], "1");
+        assert!(
+            s.log_line().contains("all_nodes=0718d8b9,96842635"),
+            "{}",
+            s.log_line()
+        );
+
+        // Planned once, nothing moved: the log line does not repeat `nodes`.
+        let once = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
+        once.mark_assembled(Route::Local, vec![seg(0, me, true, Transport::Local)], 0);
+        assert!(!once.snapshot().log_line().contains("all_nodes="));
+    }
+
+    /// **A stand-in that took a segment over is the route the reply finished
+    /// on, and the failed holder is still named** (#302) — a takeover is not a
+    /// new attempt. A stand-in sent the segment that failed too is named.
+    #[test]
+    fn a_takeover_moves_the_route_and_keeps_the_holder_it_replaced() {
+        let t = RequestTrace::new(uuid::Uuid::nil(), "m", "chat");
+        let me = "0718d8b987a4975a";
+        t.mark_assembled(
+            Route::Distributed,
+            vec![
+                seg(0, me, true, Transport::Local),
+                seg(1, "9684263580c6660f", false, Transport::Direct),
+            ],
+            0,
+        );
+        // A first stand-in was sent the segment and failed too.
+        t.note_reached(&NodeId([0xaa; 32]), false);
+        t.retake(vec![
+            seg(0, me, true, Transport::Local),
+            seg(1, "bbbbbbbbbbbbbbbb", false, Transport::Direct),
+        ]);
+        let r = t.snapshot().route_summary();
+        assert_eq!(r.nodes, vec!["0718d8b9", "bbbbbbbb"]);
+        assert_eq!(r.attempts, 1);
+        assert_eq!(
+            r.all_nodes,
+            vec!["0718d8b9", "96842635", "aaaaaaaa", "bbbbbbbb"]
+        );
+        assert_eq!(r.all_peers, 3);
+        assert_eq!(r.route, "distributed");
     }
 
     #[test]

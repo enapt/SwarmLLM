@@ -199,6 +199,8 @@
   "chat.route_local": "auf diesem Computer",
   "chat.route_relayed_one": "weitergeleitet über {count} Computer",
   "chat.route_relayed_other": "weitergeleitet über {count} Computer",
+  "chat.route_tried_first_one": "zuerst auf {count} anderem Computer versucht",
+  "chat.route_tried_first_other": "zuerst auf {count} anderen Computern versucht",
   "chat.send": "Senden",
   "chat.session_tokens": "Sitzung: {input} rein · {output} raus",
   "chat.shift_enter": "Umschalt+Enter für neue Zeile",

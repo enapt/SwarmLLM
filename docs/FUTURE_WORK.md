@@ -2236,21 +2236,6 @@ live A/B on every surface (OpenAI stream / non-stream, Anthropic stream / non-st
 foreground / background, MCP). Until then: choke-point helpers (`finalize_reply_text`,
 `strip_prefix_in_body`) and `.claude/rules/architecture.md` § "One invariant, N paths".
 
-#### #302 — A request re-planned after a failure names only the route it finished on
-`P3` · api · privacy · **OPEN** — 2026-10-18 · history: found closing #251 (3)
-
-A reply's route — the `x-swarm-*` headers and the body's `swarmllm.route` — is read from the
-request's trace, and `RequestTrace::mark_assembled` REPLACES the trace's segments on every
-assembly. A request that went to a peer, failed there (the peer went silent, refused, or broke
-mid-reply and was continued) and was re-planned onto this computer reports `route: local`, one
-segment, no peers — while a peer did see that request's hidden states, and a continued reply's
-first part was generated there. Only the `DIAG: request complete` log line (`assemblies=N`) says a
-re-plan happened. The answer #251 promised is "which computers served this", so a re-planned
-request should name every computer any attempt reached: keep the union of the attempts' nodes
-(and peers) beside the final route, and report both — the route the reply finished on, and
-every computer it was sent to. Check `continuation_after`'s path keeps the same trace, and that
-a hand-off (`remote_generate`) and a delegated split record their peer in the trace first.
-
 #### #141 (b) — The Anthropic surface never shows a reasoning model's scratchpad, even when the request enables thinking
 `P4` · api · **OPEN** — 2026-10-19 (the OpenAI half closed) · history: archive row #141
 
@@ -2755,7 +2740,22 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b), #91 (2h), #285, #141, #196; #186 decided)
+**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302; #186 decided)
+- #302 — **A request re-planned after a failure names every computer it reached, not only the
+  route it finished on.** `mark_assembled` replaced the trace's segments per plan, so a request
+  that failed on a peer and was re-planned here said `local`, no peers, while that peer had been
+  handed its hidden states (or wrote a continued reply's first part). The trace keeps the union
+  of every route it was given — each plan, a takeover through `RequestTrace::retake` (installed
+  only by `PipelineExecutor::install_takeover`), each standby tried before it is sent anything —
+  and `RouteSummary` adds `attempts`, `all_nodes`, `all_peers` (headers `x-swarm-attempts`,
+  `-all-peers`, `-all-nodes`); the dashboard's chat says "tried N other computers first". A
+  continuation keeps the same trace (checked). Limits: a chain its head leads that fails over on
+  the head's side reaches computers this node never hears of; a planned node is counted even if
+  it failed before receiving anything (the safe direction). Also fixed: the dashboard's streamed
+  chat never showed a route label (it read headers a stream lacks; now the finish chunk). Tests:
+  3, the takeover one red with `retake` removed; `split_rig.sh continue` live: both peers named,
+  `attempts: 2` — v0.3.244 fails the same check. `docs/invariants/api-surfaces.md` § "A reply
+  says which computers served it".
 - #196 — **An MCP tool that ran and failed answers with a result the model reads (`isError:
   true`), not a protocol error.** MCP 2025-11-25 § "Error Handling" puts input validation, API
   failures and business logic there (SEP-1303: a protocol error may never reach the model); the
@@ -3037,7 +3037,7 @@ grep `^| N |`).
   `active_traces` (racy). A reply with no swarm route (cloud, refused before dispatch) carries no
   `swarmllm`. Research: OpenRouter's extra top-level `provider` field; never a `choices: []`
   chunk (azure-sdk-for-go #21086); Anthropic's Python SDK drops an unknown event NAME; MCP
-  2025-11-25 § `_meta` reverse-DNS keys. A re-planned request names only its last route (#302).
+  2025-11-25 § `_meta` reverse-DNS keys. A re-planned request named only its last route (#302, closed 2026-10-19).
   Tests: 11, 13 mechanisms toggled off and shown red; `split_rig.sh route` live (all eight forms
   named both computers); `docs/invariants/api-surfaces.md` § "A
   reply says which computers served it, in every form it can take".

@@ -574,6 +574,68 @@ impl super::SharedState {
         }
     }
 
+    /// A plan's segments as a request's trace records them — the one builder,
+    /// for a new plan (`distributed_exec`) and a stand-in's takeover alike.
+    ///
+    /// Region comes from the peer's voluntarily-declared
+    /// `NodeCapability.region`. Transport is decided by whether we hold a
+    /// DIRECT connection, not by whether the peer is relay-*capable*:
+    /// `peer_reachable_via_relay` is an eligibility check that is true for any
+    /// relay-capable peer, so using it labelled directly-connected LAN peers as
+    /// `relayed` (observed live 2026-07-26 — a forward that demonstrably went
+    /// straight out over LAN QUIC was reported as a relay hop).
+    /// `connected_node_ids` is the authoritative direct-connection oracle and
+    /// is what the scheduler itself filters on; a holder that got a segment
+    /// without being in it is only reachable through the relay tier.
+    pub fn trace_segments(
+        &self,
+        segments: &[crate::types::PipelineSegment],
+    ) -> Vec<crate::inference::trace::SegmentTrace> {
+        crate::inference::trace::segments_from_assignment(
+            segments.iter(),
+            self.identity.node_id(),
+            |seg| {
+                (
+                    seg.node_id.clone(),
+                    seg.layer_range.0,
+                    seg.layer_range.1,
+                    self.model_registry
+                        .shards_spanned_by_segment(seg)
+                        .into_iter()
+                        .map(|s| s.index)
+                        .collect(),
+                    !self.connected_node_ids.contains(&seg.node_id),
+                )
+            },
+            |node| {
+                self.peer_registry
+                    .get(node)
+                    .and_then(|p| p.capability.as_ref().and_then(|c| c.region.clone()))
+            },
+        )
+    }
+
+    /// A stand-in took a segment of `request_id` over: the reply now finishes
+    /// on `segments` (`RequestTrace::retake`, #302). A no-op without a live
+    /// trace, as `record_segment_timing` is.
+    pub fn note_route_retaken(
+        &self,
+        request_id: uuid::Uuid,
+        segments: &[crate::types::PipelineSegment],
+    ) {
+        if let Some(t) = self.active_traces.get(&request_id) {
+            t.retake(self.trace_segments(segments));
+        }
+    }
+
+    /// A failover sent `request_id` to `node` (`RequestTrace::note_reached`,
+    /// #302), before knowing whether it would answer.
+    pub fn note_request_reached(&self, request_id: uuid::Uuid, node: &crate::types::NodeId) {
+        if let Some(t) = self.active_traces.get(&request_id) {
+            t.note_reached(node, node == self.identity.node_id());
+        }
+    }
+
     /// Record what the scheduler's cost model expected this route to cost, so
     /// the completion line can print it beside what it actually cost.
     ///

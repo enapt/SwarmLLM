@@ -2121,6 +2121,33 @@ router plans even a whole-model holder (`local_fast_path_for`, gotcha #443), so 
 the rig never reaches this path — v0.3.243 PASSED it that way, and FAILS it with the keep (the
 three streamed forms, Responses' included). The fix passes 8/8.
 
+**A re-planned request names every computer it reached** (#302, 2026-10-19). The route was read
+from the trace's segments, and `RequestTrace::mark_assembled` REPLACES them on every assembly —
+so a request that went to a peer, failed there and was re-planned onto this computer said
+`local`, one segment, no peers, while that peer had been handed its hidden states (or, for a
+continued reply, had written its first part). The answer #251 (3) promised is "which computers
+served this", and for a privacy reading the machines TRIED are the question. The trace now keeps
+`every_node`, the union of every route it was given in first-seen order: `mark_assembled` adds
+each plan's nodes, a mid-request takeover (one stand-in or a composite cover) reaches it through
+`RequestTrace::retake`, called only from the one place a takeover is installed
+(`PipelineExecutor::install_takeover`, which keeps the pure splice as `splice_cover`), and each
+standby tried for a failed segment is recorded BEFORE it is sent anything
+(`SharedState::note_request_reached`), so one that fails too is still named.
+`RouteSummary` reports it as `attempts` (assemblies), `all_nodes` and `all_peers`, in the body and
+as `x-swarm-attempts` / `x-swarm-all-peers` / `x-swarm-all-nodes`; the final route's fields keep
+their meaning, so a reader of `nodes` sees no change. OpenRouter's reply names only the model a
+fallback ended on — fine for billing, not for "who saw my prompt". Two limits: a chain led by its
+head that fails over on the head's side reaches computers this node never hears of, and a node is
+counted once it is PLANNED, so one that failed before receiving anything is over-reported — the
+safe direction for this question. Tests `a_request_re_planned_off_a_peer_still_names_the_peer`,
+`a_takeover_moves_the_route_and_keeps_the_holder_it_replaced` (trace),
+`a_takeover_is_the_route_the_reply_names` (through `install_takeover`, red with the `retake` call
+removed); rig `split_rig.sh continue` (`RIG_NETNS=1`, llama-3.2-3b on the processor, B's worker
+killed after 24 chunks): the finish chunk's route named both peers, `attempts: 2`, `all_peers: 2`
+— v0.3.244 named only the one it finished on and fails the same check. Found alongside: the
+dashboard's streamed chat never showed a route label (it read headers a stream does not have);
+it now reads the finish chunk's `swarmllm.route` (`U.routeFromBody`).
+
 **Why these carriers** (researched 2026-10-18, primary sources):
 
 - An extra top-level field on an existing chunk is what OpenRouter (`provider`) and this server

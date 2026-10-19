@@ -199,6 +199,8 @@
   "chat.route_local": "على هذا الحاسوب",
   "chat.route_relayed_one": "مُرحَّل عبر {count} نظير",
   "chat.route_relayed_other": "مُرحَّل عبر {count} نظراء",
+  "chat.route_tried_first_one": "جُرِّب أولاً على {count} حاسوب آخر",
+  "chat.route_tried_first_other": "جُرِّب أولاً على {count} من الحواسيب الأخرى",
   "chat.send": "إرسال",
   "chat.session_tokens": "الجلسة: {input} إدخال · {output} إخراج",
   "chat.shift_enter": "Shift+Enter لسطر جديد",

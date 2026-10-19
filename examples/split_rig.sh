@@ -149,8 +149,11 @@
 #          peer A handed it to is killed. PASS = the stream ends with a finish and
 #          no error, chunks kept arriving after the kill, the reply does not begin
 #          again (its opening appears once), A logged the continuation, and the
-#          other peer served it. BIN_A = v0.3.230 is the control: the stream
-#          ends with an error after the kill.
+#          other peer served it — and the finish chunk's `swarmllm.route` still
+#          names BOTH peers in `all_nodes` (`all_peers` 2, `attempts` 2): the
+#          killed one saw the request too (#302; v0.3.244 named only the peer it
+#          finished on). BIN_A = v0.3.230 is the control: the stream ends with an
+#          error after the kill.
 #          NONSTREAM=1 asks the same question WITHOUT streaming and kills the
 #          worker KILL_AFTER_S (default 8) seconds in. Prints the reply's
 #          seconds, finish reason and length, which recovery A took (a re-plan
@@ -1752,10 +1755,11 @@ if [ "$MODE" = continue ]; then
   wait $CURL
   continued=$(grep -c "continuing it on a fresh route" "$BASE/A/node.log")
   served_by_other=$(grep -a 'remote-generate fast path: request sent' "$BASE/A/node.log" | grep -c "target=${OTHER:-none}")
-  python3 - "$OUT/continue.sse" "$AT_KILL" "$continued" "$served_by_other" "${WPID:-}" <<'PY'
+  python3 - "$OUT/continue.sse" "$AT_KILL" "$continued" "$served_by_other" "${WPID:-}" "$IB" "$IC" <<'PY'
 import json, sys
 path, at_kill, continued, other, wpid = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
-text, chunks, finish, error = "", 0, None, None
+peers = {sys.argv[6][:8], sys.argv[7][:8]}
+text, chunks, finish, error, route = "", 0, None, None, None
 for line in open(path, errors="replace"):
     line = line.strip()
     if not line.startswith("data:") or line == "data: [DONE]":
@@ -1767,6 +1771,7 @@ for line in open(path, errors="replace"):
     if "error" in ev:
         error = ev["error"]
         continue
+    route = (ev.get("swarmllm") or {}).get("route") or route
     for ch in ev.get("choices", []):
         c = (ch.get("delta") or {}).get("content")
         if c:
@@ -1780,7 +1785,10 @@ after = chunks - at_kill
 print(f"continue: {chunks} chunks ({after} after the kill), finish={finish}, error={'yes' if error else 'no'}, opening once={once}")
 print(f"continue: A continued {continued} time(s); the other peer was handed the request {other} time(s)")
 print("continue: reply: " + text[:400].replace("\n", " "))
-ok = bool(wpid) and error is None and finish is not None and after > 0 and once and continued >= 1 and other >= 1
+print(f"continue: route {json.dumps(route)}")
+named_both = bool(route) and peers <= set(route.get("all_nodes") or [])
+print(f"continue: the route names both peers: {named_both}")
+ok = bool(wpid) and error is None and finish is not None and after > 0 and once and continued >= 1 and other >= 1 and named_both
 print("continue: PASS" if ok else "continue: FAIL" + ("" if wpid else " (no worker was killed)"))
 sys.exit(0 if ok else 1)
 PY

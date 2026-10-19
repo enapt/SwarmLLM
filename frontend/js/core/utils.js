@@ -1021,27 +1021,60 @@
     if (!resp || !resp.headers) return null;
     var route = resp.headers.get('x-swarm-route');
     if (!route) return null;
+    var peers = parseInt(resp.headers.get('x-swarm-peers') || '0', 10) || 0;
     return {
       route: route,
       segments: parseInt(resp.headers.get('x-swarm-segments') || '0', 10) || 0,
-      peers: parseInt(resp.headers.get('x-swarm-peers') || '0', 10) || 0,
+      peers: peers,
       nodes: resp.headers.get('x-swarm-nodes') || '',
       regions: resp.headers.get('x-swarm-regions') || '',
+      // Every computer any attempt reached (#302); an older node sends none,
+      // which reads as "the route it finished on" — what it reported then.
+      allPeers: parseInt(resp.headers.get('x-swarm-all-peers') || String(peers), 10) || peers,
       serverTiming: resp.headers.get('server-timing') || '',
+    };
+  }
+
+  // The same object from a reply's BODY — `swarmllm.route`, which a streamed
+  // reply carries on its finish chunk because its headers flushed before a
+  // route existed. Returns null for a reply with none (a cloud model).
+  function routeFromBody(route) {
+    if (!route || !route.route) return null;
+    var peers = route.peers || 0;
+    return {
+      route: route.route,
+      segments: route.segments || 0,
+      peers: peers,
+      nodes: (route.nodes || []).join(','),
+      regions: (route.regions || []).join(','),
+      allPeers: typeof route.all_peers === 'number' ? route.all_peers : peers,
+      serverTiming: '',
     };
   }
 
   // Short human phrase for a route: "on this device", "via 1 peer", "relayed
   // via 2 peers". Uses the peer count the server sends rather than counting
   // node ids, because the node list includes this machine when a local segment
-  // took part.
+  // took part. A request that reached other computers before the route it
+  // finished on says so (#302): "on this computer · tried 1 other computer
+  // first" — a peer that failed may still have been handed the request.
   function routeSummary(info) {
     if (!info || !info.route) return '';
-    if (info.route === 'local' || info.route === 'split') return I18n.t('chat.route_local');
-    if (info.route === 'cloud') return I18n.t('chat.route_cloud');
-    var remote = Math.max(info.peers, 1);
-    var key = info.route === 'relayed' ? 'chat.route_relayed' : 'chat.route_distributed';
-    return I18n.t(remote === 1 ? key + '_one' : key + '_other', { count: remote });
+    var label;
+    if (info.route === 'local' || info.route === 'split') {
+      label = I18n.t('chat.route_local');
+    } else if (info.route === 'cloud') {
+      return I18n.t('chat.route_cloud');
+    } else {
+      var remote = Math.max(info.peers, 1);
+      var key = info.route === 'relayed' ? 'chat.route_relayed' : 'chat.route_distributed';
+      label = I18n.t(remote === 1 ? key + '_one' : key + '_other', { count: remote });
+    }
+    var tried = Math.max(0, (info.allPeers || 0) - (info.peers || 0));
+    if (tried > 0) {
+      label += ' · ' + I18n.t(tried === 1 ? 'chat.route_tried_first_one' : 'chat.route_tried_first_other', { count: tried });
+    }
+    return label;
   }
 
   function metaContent(name) {
@@ -1354,6 +1387,7 @@
     clientTrust: clientTrust,
     isTrustedOrigin: isTrustedOrigin,
     readRouteHeaders: readRouteHeaders,
+    routeFromBody: routeFromBody,
     routeSummary: routeSummary,
     escapeHtml: escapeHtml,
     modelRunsHere: modelRunsHere,

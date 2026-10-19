@@ -199,6 +199,8 @@
   "chat.route_local": "このコンピューターで",
   "chat.route_relayed_one": "{count} 台のコンピューター経由でリレー",
   "chat.route_relayed_other": "{count} 台のコンピューター経由でリレー",
+  "chat.route_tried_first_one": "先に他のコンピューター {count} 台で試行",
+  "chat.route_tried_first_other": "先に他のコンピューター {count} 台で試行",
   "chat.send": "送信",
   "chat.session_tokens": "セッション: {input} 入力 · {output} 出力",
   "chat.shift_enter": "Shift+Enterで改行",

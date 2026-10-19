@@ -300,7 +300,7 @@ recognise and never quiet:
 | Identify protocol version | `/swarmllm/id/1.0.0` |
 | Gossip topics | `swarm/models`, `swarm/credits`, `swarm/health`, `swarm/identity`, `swarm/pools`, `swarm/regions` — each suffixed `/<network_id>` on a private gossip network |
 | Default bootstrap | `swarmllm.duckdns.org` and `212.132.104.177` on TCP 8810 / UDP 8800, peer `12D3KooWNisnVha2jYj1gqqY5WP82vNQbRhFtBcKzj4XrYmGEn8G` |
-| HTTP response headers | `x-swarm-route`, `x-swarm-segments`, `x-swarm-peers`, `x-swarm-nodes`, `x-swarm-regions` |
+| HTTP response headers | `x-swarm-route`, `x-swarm-segments`, `x-swarm-peers`, `x-swarm-nodes`, `x-swarm-regions`, `x-swarm-attempts`, `x-swarm-all-peers`, `x-swarm-all-nodes` |
 | Outbound user agent | `SwarmLLM/<version>` (update checks against GitHub) |
 
 A fork can change every one of these. They identify the official build and

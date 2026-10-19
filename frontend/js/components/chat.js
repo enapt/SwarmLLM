@@ -721,6 +721,13 @@
             return;
           }
           if (chunk.usage) streamUsage = chunk.usage;
+          // A streamed reply names its route on its finish chunk — its
+          // headers flushed before a route existed, so `readRouteHeaders`
+          // finds none and the reply showed no "on this computer" / "via N
+          // other computers" at all.
+          if (chunk.swarmllm && chunk.swarmllm.route) {
+            routeInfo = U.routeFromBody(chunk.swarmllm.route) || routeInfo;
+          }
           if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta) {
             var delta = chunk.choices[0].delta;
             if (delta.reasoning_content) {

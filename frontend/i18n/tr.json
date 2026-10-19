@@ -199,6 +199,8 @@
   "chat.route_local": "bu bilgisayarda",
   "chat.route_relayed_one": "{count} bilgisayar üzerinden aktarıldı",
   "chat.route_relayed_other": "{count} bilgisayar üzerinden aktarıldı",
+  "chat.route_tried_first_one": "önce {count} başka bilgisayarda denendi",
+  "chat.route_tried_first_other": "önce {count} başka bilgisayarda denendi",
   "chat.send": "Gönder",
   "chat.session_tokens": "Oturum: {input} giriş · {output} çıkış",
   "chat.shift_enter": "Yeni satır için Shift+Enter",
