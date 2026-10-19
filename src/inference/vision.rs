@@ -802,6 +802,56 @@ pub fn positions_with_images(ids: &[i64], image_rows: usize) -> usize {
     ids.len() - markers + image_rows
 }
 
+/// Whether a family reads each picture's rows both ways — every row of a
+/// picture attending to every other row of it, the text around it still in
+/// order. llama.cpp's `mtmd_decode_use_non_causal`: Gemma 3's projector
+/// (`LLAMA_NON_CAUSAL_TYPE_ALL`: every layer, the sliding window still
+/// applied). LLaVA reads them in order. Gemma 4's pictures are refused
+/// before this is asked (#115). The ONE answer, asked where a prompt's
+/// spans are computed ([`image_spans`]).
+pub fn rows_attend_both_ways(architecture: Option<&str>) -> bool {
+    matches!(architecture, Some("gemma3"))
+}
+
+/// The most picture spans one prompt may carry. The vision payload is capped
+/// at 50 MB, about 40 of Gemma 3's pictures; a list longer than this is not
+/// a prompt this node built.
+pub const MAX_IMAGE_SPANS: usize = 256;
+
+/// The positions each picture's rows take in a prompt tokenized with its
+/// markers ([`encode_prompt_with_images`]), counted from position 0:
+/// `image_rows` is every picture's rows together ([`wire_rows`]), split
+/// evenly between the markers as [`splice_image_rows`] splits them. Empty
+/// when there is no marker or the rows do not divide — the splice refuses
+/// that prompt.
+pub fn image_spans(ids: &[i64], image_rows: usize) -> Vec<std::ops::Range<usize>> {
+    let markers = ids.iter().filter(|&&id| id == IMAGE_TOKEN_ID).count();
+    if markers == 0 || !image_rows.is_multiple_of(markers) {
+        return Vec::new();
+    }
+    let per_image = image_rows / markers;
+    let mut spans = Vec::with_capacity(markers);
+    let mut position = 0usize;
+    for &id in ids {
+        if id == IMAGE_TOKEN_ID {
+            spans.push(position..position + per_image);
+            position += per_image;
+        } else {
+            position += 1;
+        }
+    }
+    spans
+}
+
+/// Spans a segment may apply: ascending, disjoint, none empty, no more than
+/// [`MAX_IMAGE_SPANS`]. They arrive from the coordinator, so a segment checks
+/// them before it builds a mask from them.
+pub fn spans_are_well_formed(spans: &[std::ops::Range<usize>]) -> bool {
+    spans.len() <= MAX_IMAGE_SPANS
+        && spans.iter().all(|s| s.start < s.end)
+        && spans.windows(2).all(|w| w[0].end <= w[1].start)
+}
+
 /// A tokenized prompt's embeddings with each image's rows where its marker is.
 ///
 /// `embed_text` embeds one run of ordinary ids as `(1, n, hidden)`, scaled as

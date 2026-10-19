@@ -3067,6 +3067,7 @@ fn forward_is_one_decode_step(f: &crate::types::LayerForward) -> bool {
         && f.index_pos != 0
         && f.prompt_cache.is_none()
         && f.prompt_span.is_none()
+        && f.image_spans.is_empty()
         && f.tp_meta.is_none()
         && f.vision_embeddings.is_none()
         && f.adapter_id.is_none()
@@ -3115,6 +3116,11 @@ fn forward_is_schedulable(f: &crate::types::LayerForward) -> bool {
     // A piece of a prompt pass (also `sequence_num` 0): continues a cache the
     // batch path would not know to keep.
     if f.prompt_span.is_some() {
+        return false;
+    }
+    // A forward reaching into a picture whose rows attend both ways (#115
+    // (2b)): its mask is its own, and the batch path builds one causal mask.
+    if !f.image_spans.is_empty() {
         return false;
     }
     true
@@ -8140,6 +8146,7 @@ impl ModelProcessPool {
             chunk_meta: _,
             sampling: _,
             prompt_span,
+            image_spans,
         } = forward;
 
         // Split vision embeddings out of the JSON header into the binary
@@ -8181,6 +8188,7 @@ impl ModelProcessPool {
             truncate_kv_to,
             prompt_cache,
             prompt_span,
+            image_spans,
             for_the_owner: requester == Requester::Owner,
         };
 
@@ -8480,6 +8488,8 @@ impl ModelProcessPool {
                 sampling,
                 // A piece of a prompt pass is never batched either.
                 prompt_span: _,
+                // Nor a forward reaching into a picture (`forward_is_schedulable`).
+                image_spans: _,
             } = f;
             let forward_sampling = sampling.unwrap_or_default();
             activation_lens.push(activations.len() as u32);
@@ -8510,6 +8520,7 @@ impl ModelProcessPool {
                 // owner's mark, if any, was made at the prompt pass.
                 for_the_owner: false,
                 prompt_span: None,
+                image_spans: Vec::new(),
             });
         }
 
@@ -9565,6 +9576,7 @@ mod tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         }
     }
 

@@ -432,6 +432,7 @@ pub(super) fn build_spec_verify_forward(
         chunk_meta: None,
         sampling: walk.map(|w| w.sampling.clone()),
         prompt_span: None,
+        image_spans: Vec::new(),
     }
 }
 
@@ -866,6 +867,7 @@ pub(super) fn build_kv_truncate_forward(
         chunk_meta: None,
         sampling: None,
         prompt_span: None,
+        image_spans: Vec::new(),
     }
 }
 
@@ -1304,6 +1306,11 @@ pub struct PipelineExecutor {
     /// that pass carries. Set and cleared around the pass by
     /// `forward_through_segments`; `None` otherwise.
     pub(super) prompt_cache_hint: Option<crate::types::PromptCacheHint>,
+    /// The positions each picture's rows take in this request's prompt, for a
+    /// family that reads them both ways (`image_spans_for`, #115 (2b)). Set
+    /// once before the prompt pass; every forward of that pass carries it, to
+    /// every segment — each one's layers need it.
+    pub(super) image_spans: Vec<crate::types::PromptSpan>,
 }
 
 impl PipelineExecutor {
@@ -1324,6 +1331,7 @@ impl PipelineExecutor {
             partial_reply: PartialReply::default(),
             hand_off_emitted: 0,
             prompt_cache_hint: None,
+            image_spans: Vec::new(),
         }
     }
 

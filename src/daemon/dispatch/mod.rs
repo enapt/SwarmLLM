@@ -3708,6 +3708,7 @@ mod inbound_forward_slot_tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         }
     }
 

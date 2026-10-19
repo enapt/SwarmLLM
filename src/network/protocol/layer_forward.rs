@@ -122,6 +122,7 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     append_stream_trailer(&mut buf, forward);
     append_prompt_cache_trailer(&mut buf, forward);
     append_prompt_span_trailer(&mut buf, forward);
+    append_image_spans_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -355,6 +356,55 @@ pub(crate) fn read_prompt_span_trailer(
     };
     *cursor += PROMPT_SPAN_TRAILER_LEN;
     Some(span)
+}
+
+/// Write the image-spans trailer: `0x0F | n u16 | n × (start u32, end u32)` —
+/// the prompt pass's pictures whose rows attend both ways
+/// (`LayerForward::image_spans`, #115 (2b)). Last in the chain, by the ONE
+/// function the plaintext frame, the encrypted frame and the AAD all call: the
+/// spans decide which keys a picture's rows see, so a relay must not change
+/// them. Emitted only when the forward carries some, which a coordinator sets
+/// only for a peer advertising `features::IMAGES_AT_MARKERS`.
+pub(crate) fn append_image_spans_trailer(buf: &mut Vec<u8>, forward: &LayerForward) {
+    if forward.image_spans.is_empty() {
+        return;
+    }
+    let n = forward
+        .image_spans
+        .len()
+        .min(crate::inference::vision::MAX_IMAGE_SPANS);
+    buf.push(0x0F);
+    buf.extend_from_slice(&(n as u16).to_le_bytes());
+    for span in &forward.image_spans[..n] {
+        buf.extend_from_slice(&span.start.to_le_bytes());
+        buf.extend_from_slice(&span.end.to_le_bytes());
+    }
+}
+
+/// Read the image-spans trailer (`0x0F`) at `cursor`: empty when absent, or
+/// when it names more spans than `vision::MAX_IMAGE_SPANS` or more than the
+/// frame holds — never a read past the frame.
+pub(crate) fn read_image_spans_trailer(
+    data: &[u8],
+    cursor: &mut usize,
+) -> Vec<crate::types::PromptSpan> {
+    if data.len() < *cursor + 3 || data[*cursor] != 0x0F {
+        return Vec::new();
+    }
+    let n = u16::from_le_bytes([data[*cursor + 1], data[*cursor + 2]]) as usize;
+    let body = *cursor + 3;
+    if n > crate::inference::vision::MAX_IMAGE_SPANS || data.len() < body + 8 * n {
+        return Vec::new();
+    }
+    let word = |at: usize| u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+    let spans = (0..n)
+        .map(|i| crate::types::PromptSpan {
+            start: word(body + 8 * i),
+            end: word(body + 8 * i + 4),
+        })
+        .collect();
+    *cursor = body + 8 * n;
+    spans
 }
 
 /// Write the decoded-so-far trailer: `0x08 | n(2 LE) | n × id(4 LE)`.
@@ -811,6 +861,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
     let stream_seq = read_stream_trailer(data, &mut cursor);
     let prompt_cache = read_prompt_cache_trailer(data, &mut cursor);
     let prompt_span = read_prompt_span_trailer(data, &mut cursor);
+    let image_spans = read_image_spans_trailer(data, &mut cursor);
     let _ = cursor;
 
     Ok(LayerForward {
@@ -839,6 +890,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         chunk_meta,
         sampling,
         prompt_span,
+        image_spans,
     })
 }
 
@@ -882,6 +934,7 @@ mod tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         }
     }
 
@@ -1205,6 +1258,50 @@ mod tests {
         let cut = &bytes[..bytes.len() - 2];
         let mut cursor = plain.len();
         assert_eq!(read_prompt_span_trailer(cut, &mut cursor), None);
+        assert_eq!(cursor, plain.len(), "nothing consumed");
+    }
+
+    /// A prompt pass over pictures whose rows attend both ways (#115 (2b)):
+    /// the spans travel last, after the prompt-span trailer, and read back
+    /// beside it; a frame without any is byte-identical to before; a count
+    /// past `MAX_IMAGE_SPANS` or past the frame reads as none, consuming
+    /// nothing — never a read past the end.
+    #[test]
+    fn picture_spans_survive_the_wire_after_the_prompt_span_trailer() {
+        let spans = vec![
+            crate::types::PromptSpan { start: 5, end: 261 },
+            crate::types::PromptSpan {
+                start: 300,
+                end: 556,
+            },
+        ];
+        let mut f = base_forward();
+        f.prompt_span = Some(crate::types::PromptSpan { start: 0, end: 600 });
+        f.image_spans = spans.clone();
+        let bytes = encode_layer_forward(&f).unwrap();
+        let back = decode_layer_forward(&bytes).unwrap();
+        assert_eq!(back.image_spans, spans);
+        assert_eq!(
+            back.prompt_span, f.prompt_span,
+            "the trailer before it still reads"
+        );
+        f.image_spans.clear();
+        let plain = encode_layer_forward(&f).unwrap();
+        assert_eq!(plain.len(), bytes.len() - (3 + 8 * spans.len()));
+        assert!(decode_layer_forward(&plain).unwrap().image_spans.is_empty());
+
+        let cut = &bytes[..bytes.len() - 1];
+        let mut cursor = plain.len();
+        assert!(read_image_spans_trailer(cut, &mut cursor).is_empty());
+        assert_eq!(cursor, plain.len(), "nothing consumed");
+
+        let mut too_many = plain.clone();
+        too_many.push(0x0F);
+        let n = (crate::inference::vision::MAX_IMAGE_SPANS + 1) as u16;
+        too_many.extend_from_slice(&n.to_le_bytes());
+        too_many.extend(std::iter::repeat_n(0u8, 8 * n as usize));
+        let mut cursor = plain.len();
+        assert!(read_image_spans_trailer(&too_many, &mut cursor).is_empty());
         assert_eq!(cursor, plain.len(), "nothing consumed");
     }
 

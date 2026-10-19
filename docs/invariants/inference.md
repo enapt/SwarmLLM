@@ -5366,9 +5366,82 @@ losses on the way (gotcha #901 (a)-(c)): the node withdrew its claim to the imag
 API's local shortcut ignored pictures, and on a processor the splice's own table lookup handed
 the first norm f16.
 
-**Left.** Gemma 3 attends inside an image both ways in llama.cpp (`mtmd_decode_use_non_causal`);
-here causally, and it changes a reply (#115 (2b)). LLaVA's three differences from llama.cpp
-(#310). An image inside an Anthropic `tool_result` is still dropped (#310).
+**Left.** ~~Gemma 3 attends inside an image both ways in llama.cpp; here causally~~ — done the
+same day (#115 (2b), next section). LLaVA's three differences from llama.cpp (#310). An image
+inside an Anthropic `tool_result` is still dropped (#310).
+
+## A picture's rows attend both ways (2026-10-19, FUTURE_WORK #115 (2b))
+
+**What it replaced.** Every picture's rows were read in order, like text: row 40 saw rows 0-39
+and never row 41. Gemma 3 was trained otherwise — llama.cpp's `mtmd_decode_use_non_causal` is
+true for its projector, and `mtmd_helper_decode_image_chunk` switches causal attention off
+(`llama_set_causal_attn(false)`) for the picture's batch, so in `llama_kv_cache::set_input_kq_mask`
+no key is hidden for being later; Gemma 3 is `LLAMA_NON_CAUSAL_TYPE_ALL` (every layer, the
+sliding window still applied through `is_masked_swa`). HF's Gemma 3 does the same with
+`token_type_ids`. Read in order, `shapes.png` (a red circle, a blue square and a green stripe on
+black) came back as a tricolour flag — llama.cpp forced causal said the same.
+
+**What it is now.**
+- `vision::rows_attend_both_ways(architecture)` names the families (Gemma 3).
+- The coordinator computes each picture's positions once per request
+  (`PipelineExecutor::image_spans_for`: `encode_prompt_with_images` + `vision::image_spans` over
+  the payload's rows; `DIAG: picture rows attend both ways`) and `image_spans_from(index_pos)`
+  is what every send carries: all spans while any ends after the forward's first position (the
+  prompt pass; a stand-in's replay from 0), none past them.
+- The wire: `LayerForward::image_spans`, trailer `0x0F` (`n u16 | n × (start u32, end u32)`, n
+  ≤ `vision::MAX_IMAGE_SPANS` = 256), written by the one function the plaintext frame, the
+  encrypted frame and the AAD call, read bounds-checked (a long count or a short frame reads as
+  none, consuming nothing). Gated at the SENDER on `features::IMAGES_AT_MARKERS` (bit 26, not yet
+  released, so its meaning grew): EVERY segment must advertise it, checked before anything is
+  sent (blacklist + `ServiceUnavailable`, the re-plan signal); a stand-in without it is skipped; a
+  chained hop hands the spans on only to a next hop with the bit. The worker IPC carries them.
+- The worker takes spans only through `model_worker::image_spans_to_apply`: well formed, none past
+  the forward's end, and on the first segment exactly the spans its own markers give (a
+  coordinator that tokenized differently would have one picture's rows read with another's text)
+  — anything else is `Validation`. `SplitModel::with_image_spans` sets them for that forward and
+  restores the field after.
+- The executor: `causal_mask_with_spans` — a query inside a picture sees every key up to the
+  picture's end, any other query keys up to itself (`last_key_seen`); a windowed layer's
+  `window_mask(.., spans)` keeps its window and adds the picture's later rows. `spans_in_forward`
+  refuses a forward that holds part of a picture (`Internal`): `forward_prompt_in_chunks` stretches
+  a chunk to the picture's end. Such a forward builds its masks even where the attention kernel
+  would not read them, and forces mask-driven attention (`ForceStandardAttnGuard`, set inside
+  `forward_inner_body` — `in_phase_pool` may run the layers on another thread, where a guard set
+  by the caller is not seen). It is never captured in a CUDA graph, never batched
+  (`forward_is_schedulable`), never timed as a decode step, and a request with spans uses no
+  tensor-parallel group.
+- `SWARMLLM_IMAGE_BOTH_WAYS=0` is the control arm (every picture in order).
+
+**Verified by the real request** (2026-10-19, `gemma-3-4b-it-q4-k-m` on the processor, the
+llama.cpp mmproj f16, an isolated node; temperature 0, as #115 (2a)): each request logged
+`spans=[(5, 261)]` and one splice at 274 positions. Read with the replies scored by teacher
+forcing through llama.cpp's own image path (`examples/score_image_reply_against_reference.cpp`,
+stock libmtmd, both ways; its prompt also 274 positions):
+
+| reply | shapes.png rank 1 | worst gap | test-1.jpeg rank 1 | worst gap |
+|---|---|---|---|---|
+| llama.cpp's own (control) | 100% | 0 | 100% | 0 |
+| this node, both ways | 95.5% | 0.16 | 97.3% | 0.56 |
+| this node, `SWARMLLM_IMAGE_BOTH_WAYS=0` | 87.3% | 12.0 | 90.7% | 5.7 |
+| llama.cpp forced causal | 88.9% | 15.0 | 93.1% | 7.0 |
+
+Every miss of the both-ways reply is a near-tie (`,` for `.` at p 0.46). The control arm
+reproduced #115 (2a)'s verified reply word for word, so the mask is the only change. Replies:
+"The image depicts the flag of Bosnia and Herzegovina, featuring a red circle on a white field,
+with a blue square above it and a green stripe at the bottom" (llama.cpp: "… Herzegovina. It
+features a red circle, a blue square, and a green horizontal stripe, all set against a black
+background"); the moon page's first sentence is llama.cpp's word for word. On a graphics card
+the same path runs (mask-driven attention on the card); it was measured on the processor only.
+
+**What a change must keep.** One computation of the spans, from the tokenization the first
+segment splices from; every segment, stand-in and chained hop of a forward reaching into a
+picture applies them; a picture is never split between two forwards; the trailer stays in the
+AAD. Tests: `image_span_mask_tests::*` (executor), `split::tests::image_spans::*` (a forward
+with a picture against one without; chunks keep a picture whole; a forward cutting one is
+refused), `picture_spans_survive_the_wire_after_the_prompt_span_trailer`,
+`picture_spans_are_sealed_and_survive_the_encrypted_frame`,
+`picture_spans_are_taken_only_where_the_prompt_puts_its_pictures`. The regression check is the
+real request and its score.
 
 ## A model that cannot write replies is refused off its header (2026-10-15)
 

@@ -220,6 +220,9 @@ impl PipelineExecutor {
             .as_deref()
             .and_then(crate::inference::vision::wire_rows)
             .unwrap_or(0);
+        // Where each picture's rows sit, for a family that reads them both ways
+        // (#115 (2b)): every forward of the prompt pass carries it.
+        self.image_spans = self.image_spans_for(&prompt, image_rows);
 
         // Local embedding privacy: check if we should embed locally before sending
         // activations to the first pipeline segment. This prevents remote nodes from
@@ -1060,6 +1063,27 @@ impl PipelineExecutor {
             } else {
                 &[]
             };
+        // A prompt pass whose pictures attend both ways goes only through
+        // segments that read the spans — all of them, since each one's layers
+        // apply them. Asked before anything is sent; an older peer is barred
+        // from this request and the router plans again (`ServiceUnavailable`
+        // from a remote segment is its re-plan signal, penalty-exempt).
+        if !self.image_spans_from(index_pos).is_empty() {
+            if let Some(older) = self
+                .assignment
+                .segments
+                .iter()
+                .map(|s| s.node_id.clone())
+                .find(|n| !self.may_send_image_prompt_to(n))
+            {
+                self.shared_state
+                    .blacklist_holder_for_request(request_id, &older);
+                return Err(SwarmError::ServiceUnavailable(format!(
+                    "the computer holding part of this model ({older}) runs an older \
+                     version that cannot read a picture as a whole"
+                )));
+            }
+        }
         let mut activations = initial_activations;
         // Read LIVE, never cached across the loop.
         //
@@ -1133,7 +1157,10 @@ impl PipelineExecutor {
                 has_standby && input_is_hidden_state,
             );
 
-            // Check if this segment has a tensor-parallel group
+            // Check if this segment has a tensor-parallel group. Not for a
+            // request whose pictures attend both ways (#115 (2b)), for any of
+            // its forwards: a group's layers read the prompt in order, and its
+            // primary is this node, which runs the range plainly instead.
             let tp_group = self
                 .assignment
                 .tp_groups
@@ -1142,6 +1169,7 @@ impl PipelineExecutor {
                     g.layer_range.0 <= segment.layer_range.0
                         && g.layer_range.1 >= segment.layer_range.1
                 })
+                .filter(|_| self.image_spans.is_empty())
                 .cloned();
 
             // Tensor-parallel execution: layer-by-layer with AllReduce.
@@ -1441,6 +1469,7 @@ impl PipelineExecutor {
                     )));
                 }
                 let hint_for_wire = self.prompt_cache_hint.clone().filter(|_| sequence_num == 0);
+                let spans_for_wire = self.image_spans_from(index_pos);
                 // A closure so the SAME forward can be built again if the peer
                 // refuses it unopened (`ResendOnRefusal`), from what this loop
                 // already holds; called once on every other path.
@@ -1527,6 +1556,7 @@ impl PipelineExecutor {
                         None
                     },
                     prompt_span: None,
+                    image_spans: spans_for_wire.clone(),
                 };
                 let forward = rebuild_forward();
 
@@ -2485,6 +2515,8 @@ impl PipelineExecutor {
             None => (None, index_pos as u32),
         };
         let send_activations: &[u8] = replay_payload.as_deref().unwrap_or(activations);
+        // The picture spans this send reaches into, from where it starts.
+        let replay_spans = self.image_spans_from(replay_index_pos as usize);
 
         // The widest refusal for LENGTH met while placing this segment — the
         // original failure's, a stand-in's, or one a stand-in advertised — so
@@ -2731,9 +2763,11 @@ impl PipelineExecutor {
 
             // An image prompt's first forward goes only to a standby that
             // places the image where the prompt marks it (`IMAGES_AT_MARKERS`).
-            if failed_idx == 0
-                && sequence_num == 0
-                && precomputed_vision.is_some()
+            // A forward reaching into a picture whose rows attend both ways —
+            // the prompt pass, or a replay from 0 — goes to a stand-in for ANY
+            // segment only if it reads the spans (#115 (2b)).
+            if ((failed_idx == 0 && sequence_num == 0 && precomputed_vision.is_some())
+                || !replay_spans.is_empty())
                 && !self.may_send_image_prompt_to(&backup.node_id)
             {
                 tracing::warn!(
@@ -2847,6 +2881,7 @@ impl PipelineExecutor {
                     None
                 },
                 prompt_span: None,
+                image_spans: replay_spans.clone(),
             };
             let forward = rebuild_forward();
 

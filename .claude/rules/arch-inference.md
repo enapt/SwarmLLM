@@ -241,6 +241,12 @@ Every surface writes **`vision::MEDIA_MARKER`** where an image was (`vision::joi
 
 → `docs/invariants/inference.md` § "An image sits at its marker"
 
+## A picture whose rows attend both ways is read whole, by every segment (2026-10-19, #115 (2b))
+
+**`vision::rows_attend_both_ways`** names the families (llama.cpp's `mtmd_decode_use_non_causal`: Gemma 3). **`PipelineExecutor::image_spans_for`** computes the spans once per request from `encode_prompt_with_images` + `wire_rows`; **`image_spans_from(index_pos)`** is the one answer to what a send carries (every forward reaching into a picture, every segment, stand-ins and chained hops too — each must advertise `features::IMAGES_AT_MARKERS`). The worker takes them only through **`model_worker::image_spans_to_apply`** and applies them with **`SplitModel::with_image_spans`**; the mask is **`causal_mask_with_spans`** / `window_mask(.., spans)`, a forward must hold each picture whole (`spans_in_forward`), and such a forward reads the mask (`ForceStandardAttnGuard`, set INSIDE `forward_inner_body` — `in_phase_pool` may run it on another thread), is never graphed, batched or tensor-parallel. Check against `llama-mtmd-cli` as shipped (non-causal).
+
+→ `docs/invariants/inference.md` § "A picture's rows attend both ways"
+
 ## A vocabulary piece becomes token ids in exactly one place
 
 **`inference::tokenizer::BpeTokenizer::push_piece_ids`** is the only way a merged

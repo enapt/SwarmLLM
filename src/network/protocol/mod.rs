@@ -1382,6 +1382,7 @@ mod tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1428,6 +1429,7 @@ mod tests {
                 chunk_meta: None,
                 sampling: None,
                 prompt_span: None,
+                image_spans: Vec::new(),
             };
             let encoded = encode_layer_forward(&forward).unwrap();
             assert_eq!(encoded[25], tag); // tag(1) + uuid(16) + seq(4) + index_pos(4) = 25
@@ -1470,6 +1472,7 @@ mod tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1506,6 +1509,7 @@ mod tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1547,6 +1551,7 @@ mod tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         // Trim to remove the trailer — simulates an old encoder
@@ -1744,6 +1749,7 @@ mod tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         };
         let encoded = encode_layer_forward(&forward).unwrap();
 
@@ -1793,6 +1799,7 @@ mod tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1835,6 +1842,7 @@ mod tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         let decoded = decode_layer_forward(&encoded).unwrap();
@@ -1875,6 +1883,7 @@ mod tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         let decoded = decode_layer_forward(&encoded).unwrap();

@@ -932,6 +932,7 @@ mod tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         };
         let encoded = crate::network::protocol::encode_layer_forward(&forward).unwrap();
         let target_id = target.id();

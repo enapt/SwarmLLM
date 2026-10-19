@@ -159,6 +159,8 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     // The prompt-span trailer (0x0E): whether the receiver starts a prompt
     // pass or continues one.
     super::layer_forward::append_prompt_span_trailer(&mut aad, forward);
+    // The image-spans trailer (0x0F): which keys a picture's rows see.
+    super::layer_forward::append_image_spans_trailer(&mut aad, forward);
 
     aad
 }
@@ -271,6 +273,7 @@ pub fn encode_layer_forward_encrypted(
     super::layer_forward::append_stream_trailer(&mut buf, forward);
     super::layer_forward::append_prompt_cache_trailer(&mut buf, forward);
     super::layer_forward::append_prompt_span_trailer(&mut buf, forward);
+    super::layer_forward::append_image_spans_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -498,6 +501,7 @@ pub fn decode_layer_forward_encrypted(
     let stream_seq = super::layer_forward::read_stream_trailer(data, &mut cursor);
     let prompt_cache = super::layer_forward::read_prompt_cache_trailer(data, &mut cursor);
     let prompt_span = super::layer_forward::read_prompt_span_trailer(data, &mut cursor);
+    let image_spans = super::layer_forward::read_image_spans_trailer(data, &mut cursor);
     let _ = cursor;
 
     let mut forward = LayerForward {
@@ -526,6 +530,7 @@ pub fn decode_layer_forward_encrypted(
         chunk_meta,
         sampling,
         prompt_span,
+        image_spans,
     };
 
     // Reconstruct AAD from the parsed forward via the helper. This MUST
@@ -574,6 +579,7 @@ mod tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         }
     }
 
@@ -807,6 +813,28 @@ mod tests {
         );
         other.prompt_span = None;
         assert_ne!(build_layer_forward_aad(&other), aad);
+    }
+
+    /// A prompt pass over pictures whose rows attend both ways (#115 (2b)):
+    /// the spans survive the encrypted frame and are sealed — a relay that
+    /// moved one would have a picture's rows read with the text beside it.
+    #[test]
+    fn picture_spans_are_sealed_and_survive_the_encrypted_frame() {
+        let mut orig = base_forward();
+        orig.image_spans = vec![crate::types::PromptSpan { start: 5, end: 261 }];
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        let (decoded, _sealed, aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert_eq!(decoded.image_spans, orig.image_spans);
+        assert_eq!(aad, build_layer_forward_aad(&orig));
+        let mut other = orig.clone();
+        other.image_spans[0].end = 262;
+        assert_ne!(
+            build_layer_forward_aad(&other),
+            aad,
+            "a relay must not move a picture's end"
+        );
+        other.image_spans.clear();
+        assert_ne!(build_layer_forward_aad(&other), aad, "nor drop it");
     }
 
     #[test]

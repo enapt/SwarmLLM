@@ -61,9 +61,9 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
-6. **#115** — the rest of Gemma 3/4: Gemma 3's picture attention (2b), Gemma 4's image reader
-   and its drafters, refused by name today, never loaded wrong. (Gemma 3 reads pictures since
-   2026-10-19; its E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
+6. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
+   never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
+   E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
 7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
    (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), v0.3.242). The part
@@ -1947,21 +1947,14 @@ path. Adding only `llama-cpp-2/metal` would fix the DISPLAY while inference stay
 processor, which is worse. GitHub's macOS runners compile but cannot run Metal; it needs a Mac
 to test on (the swarm's Italian M4 peer belongs to a tester).
 
-#### #115 — Gemma 3's and Gemma 4's vision projectors, and Gemma 4's drafters, are unsupported
+#### #115 — Gemma 4's vision projector and its drafters are unsupported
 `P2` · model-support · **PARTIAL** — 2026-09-25 · history: archive row #115
 
 Requested for gemma-4-26B-A4B. Order: ~~(1) Gemma 3 text~~, ~~(3) Gemma 4 dense text~~ (the
 12B and 31B), ~~(3b) the 26B-A4B~~ and ~~(3c) the E2B/E4B~~ (closed 2026-10-16/17, § Closed;
 what (3c) left is #294-#296); ~~(2a) the `gemma3` projector and pictures at their place in the
-prompt~~ (closed 2026-10-19, § Closed); (2b) Gemma 3 reads a picture's 256 rows with attention
-running both ways inside the picture (llama.cpp `mtmd_decode_use_non_causal`, true for `gemma3`;
-HF's `token_type_ids` mask) — here they are causal like text. It matters: llama.cpp forced causal
-(a one-line `mtmd.cpp` patch, `~/swarmllm-115/ab_causal.sh`, greedy, CPU) reads
-`~/swarmllm-115/shapes.png` — a red circle, a blue square and a green stripe on black — as "a flag
-with a green band at the bottom, a white band in the middle, and a red band at the top"; both ways,
-it names the shapes and the black background. The moon-landing front page reads right either way.
-Needs a per-forward flag on the layer request (`#[serde(default)]`) and a
-feature bit, since a peer holding later layers must apply the same mask; (4) `gemma4v`; (5) the `-assistant` drafters
+prompt~~ and ~~(2b) a picture's rows read both ways~~ (both closed 2026-10-19, § Closed);
+(4) `gemma4v`; (5) the `-assistant` drafters
 (`gemma4-assistant` in llama.cpp, an unknown family here). Experts carrying a gate/up scale are
 refused by name (`GgufTensorMeta::unbuilt_gemma4_part`; llama.cpp reads them, no file met so far
 has one). The 31B
@@ -2781,7 +2774,20 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#115 (2a))
+**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b))
+- #115 (2b) — **Gemma 3 reads a picture as a whole, as llama.cpp does.** Its picture rows were
+  read in order like text; Gemma 3 was trained with every row of a picture seeing every other
+  (llama.cpp `mtmd_decode_use_non_causal`), and read in order it called a red circle, a blue
+  square and a green stripe on black "a tricolour flag". The coordinator now works out where each
+  picture's rows sit (`PipelineExecutor::image_spans_for`) and every forward reaching into one
+  carries them to every computer holding part of the model (`LayerForward::image_spans`, trailer
+  `0x0F`, sealed; each must advertise `features::IMAGES_AT_MARKERS`), where the attention mask lets
+  a picture's rows see each other (`causal_mask_with_spans`, the windowed layers keeping their
+  window). Scored by teacher forcing through llama.cpp's own image path
+  (`examples/score_image_reply_against_reference.cpp`): 95.5% / 97.3% of the reply's tokens
+  llama.cpp's first choice, every miss a near-tie, against 87.3% / 90.7% with misses 6-12 logits
+  deep before. A/B `SWARMLLM_IMAGE_BOTH_WAYS=0`. `docs/invariants/inference.md` § "A picture's rows
+  attend both ways".
 - #115 (2a) — **Pictures reach the model where you put them, and Gemma 3 can read images.** Every
   picture used to go in FRONT of the whole prompt, ahead of the chat template's opening: no surface
   marked where it belonged (the OpenAI surface dropped the image part's place, the Anthropic

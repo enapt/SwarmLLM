@@ -1646,6 +1646,52 @@ fn forward_lacks_its_conversation(sequence_num: u32, index_pos: u32, holds_state
     sequence_num > 0 && index_pos > 0 && !holds_state
 }
 
+/// The picture spans a forward applies (#115 (2b)), checked: well formed
+/// (`vision::spans_are_well_formed`), none ending past `forward_end` — the
+/// position after this forward's last — none starting before `forward_start`
+/// and ending after it (a picture cut by the forward's start; one wholly
+/// before it is not read), and, where this is the first segment
+/// splicing the rows itself (`first_segment`: its token ids and every
+/// picture's rows together), exactly the spans its own markers give
+/// (`vision::image_spans`). Anything else is the coordinator's mistake, a 400.
+fn image_spans_to_apply(
+    sent: &[crate::types::PromptSpan],
+    forward_start: usize,
+    forward_end: usize,
+    first_segment: Option<(&candle_core::Tensor, usize)>,
+) -> Result<Vec<std::ops::Range<usize>>, SwarmError> {
+    let spans: Vec<std::ops::Range<usize>> = sent
+        .iter()
+        .map(|s| s.start as usize..s.end as usize)
+        .collect();
+    if spans.is_empty() {
+        return Ok(spans);
+    }
+    if !crate::inference::vision::spans_are_well_formed(&spans)
+        || spans.last().is_some_and(|s| s.end > forward_end)
+        || spans
+            .iter()
+            .any(|s| s.start < forward_start && s.end > forward_start)
+    {
+        return Err(SwarmError::Validation(format!(
+            "the picture positions sent with this prompt ({} of them) do not fit a \
+             forward of positions {forward_start}..{forward_end}",
+            spans.len()
+        )));
+    }
+    if let Some((ids, rows)) = first_segment {
+        let ids: Vec<i64> = ids
+            .flatten_all()
+            .and_then(|t| t.to_vec1())
+            .map_err(|e| SwarmError::Internal(format!("image prompt ids: {e}")))?;
+        if crate::inference::vision::image_spans(&ids, rows) != spans {
+            return Err(SwarmError::Validation(
+                "the picture positions sent with this prompt are not where its pictures are".into(),
+            ));
+        }
+    }
+    Ok(spans)
+}
 /// The refusal for [`forward_lacks_its_conversation`].
 ///
 /// `ServiceUnavailable`, because it is this machine that cannot serve the
@@ -2022,6 +2068,21 @@ async fn handle_forward(
             )));
         }
     }
+    // Where each picture's rows sit, for a family that reads them both ways
+    // (#115 (2b)). They come from the coordinator, so they are checked before
+    // a mask is built from them: well formed, none past the positions this
+    // forward ends at, and on the first segment exactly where this prompt's
+    // own markers put the rows it splices — a coordinator that tokenized
+    // differently would otherwise have one picture's rows read with another's.
+    let image_spans = image_spans_to_apply(
+        &fwd.image_spans,
+        fwd.index_pos as usize,
+        fwd.index_pos as usize + input_positions,
+        match &vision_tensor {
+            Some(rows) if is_first && !pre_embedded => Some((&input_tensor, rows.dims()[0])),
+            _ => None,
+        },
+    )?;
     // The positions this pass will hold once every piece has run: the whole
     // span, admitted at its first piece (gotcha #447 — a pass admitted piece by
     // piece fills a card until attention's transient allocation fails
@@ -2237,57 +2298,62 @@ async fn handle_forward(
                 });
             }
 
-            // TP single-layer forward: process one layer in AttnOnly or FfnOnly phase
-            let output = if let Some(ref tp) = tp_meta {
-                model
-                    .forward_tp_phase(
-                        &input_tensor,
-                        fwd.index_pos as usize,
-                        kv_store,
-                        &req_id_str,
-                        tp.single_layer as usize,
-                        &tp.phase,
-                    )
-                    .map_err(|e| format!("Forward TP phase: {e}"))?
-            } else if pre_embedded {
-                model
-                    .forward_prompt_in_chunks(
-                        &input_tensor,
-                        fwd.index_pos as usize,
-                        kv_store,
-                        &req_id_str,
-                        None,
-                        true,
-                        prefill_chunk_tokens,
-                    )
-                    .map_err(|e| format!("Forward pre-embedded: {e}"))?
-            } else if let Some(ref vis_emb) = vision_tensor {
-                model
-                    .forward_multimodal(
-                        &input_tensor,
-                        fwd.index_pos as usize,
-                        kv_store,
-                        &req_id_str,
-                        Some(vis_emb),
-                    )
-                    .map_err(|e| format!("Forward multimodal: {e}"))?
-            } else {
-                // In chunks when the prompt is longer than one, so a cancelled
-                // request stops at the next boundary even on a one-layer
-                // segment; a decode step is one position and takes the
-                // one-shot path unchanged.
-                model
-                    .forward_prompt_in_chunks(
-                        &input_tensor,
-                        fwd.index_pos as usize,
-                        kv_store,
-                        &req_id_str,
-                        lora_adapter.as_deref(),
-                        false,
-                        prefill_chunk_tokens,
-                    )
-                    .map_err(|e| format!("Forward: {e}"))?
-            };
+            // TP single-layer forward: process one layer in AttnOnly or FfnOnly
+            // phase. Every arm reads a picture's rows as a whole where the
+            // forward carries its span (#115 (2b)); a coordinator never sends
+            // one to a tensor-parallel group.
+            let output = model.with_image_spans(&image_spans, |model| -> Result<_, String> {
+                Ok(if let Some(ref tp) = tp_meta {
+                    model
+                        .forward_tp_phase(
+                            &input_tensor,
+                            fwd.index_pos as usize,
+                            kv_store,
+                            &req_id_str,
+                            tp.single_layer as usize,
+                            &tp.phase,
+                        )
+                        .map_err(|e| format!("Forward TP phase: {e}"))?
+                } else if pre_embedded {
+                    model
+                        .forward_prompt_in_chunks(
+                            &input_tensor,
+                            fwd.index_pos as usize,
+                            kv_store,
+                            &req_id_str,
+                            None,
+                            true,
+                            prefill_chunk_tokens,
+                        )
+                        .map_err(|e| format!("Forward pre-embedded: {e}"))?
+                } else if let Some(ref vis_emb) = vision_tensor {
+                    model
+                        .forward_multimodal(
+                            &input_tensor,
+                            fwd.index_pos as usize,
+                            kv_store,
+                            &req_id_str,
+                            Some(vis_emb),
+                        )
+                        .map_err(|e| format!("Forward multimodal: {e}"))?
+                } else {
+                    // In chunks when the prompt is longer than one, so a cancelled
+                    // request stops at the next boundary even on a one-layer
+                    // segment; a decode step is one position and takes the
+                    // one-shot path unchanged.
+                    model
+                        .forward_prompt_in_chunks(
+                            &input_tensor,
+                            fwd.index_pos as usize,
+                            kv_store,
+                            &req_id_str,
+                            lora_adapter.as_deref(),
+                            false,
+                            prefill_chunk_tokens,
+                        )
+                        .map_err(|e| format!("Forward: {e}"))?
+                })
+            })?;
 
             if is_last && tp_meta.is_none() {
                 let (token_id, token_logprob) = if fwd.sampling.logprobs {
@@ -6393,6 +6459,69 @@ mod served_context_tests {
         assert!(refuse_a_prompt_past_the_served_context(8192, 0, 8192).is_ok());
         assert!(refuse_a_prompt_past_the_served_context(8192, 100, 8092).is_ok());
         assert!(refuse_a_prompt_past_the_served_context(8192, 100, 8093).is_err());
+    }
+}
+
+#[cfg(test)]
+mod image_span_check_tests {
+    use super::image_spans_to_apply;
+    use crate::types::PromptSpan;
+
+    fn span(start: u32, end: u32) -> PromptSpan {
+        PromptSpan { start, end }
+    }
+
+    /// The first segment takes the spans only where its own markers put the
+    /// rows; a later segment takes well-formed spans inside its forward; every
+    /// other list is the coordinator's mistake, refused as one (a 400).
+    #[test]
+    fn picture_spans_are_taken_only_where_the_prompt_puts_its_pictures() {
+        // BOS, text, a marker, text, a marker: 2 pictures of 3 rows each.
+        let ids = candle_core::Tensor::new(
+            &[[
+                2i64,
+                10,
+                crate::inference::vision::IMAGE_TOKEN_ID,
+                11,
+                crate::inference::vision::IMAGE_TOKEN_ID,
+            ]],
+            &candle_core::Device::Cpu,
+        )
+        .unwrap();
+        let right = [span(2, 5), span(6, 9)];
+        assert_eq!(
+            image_spans_to_apply(&right, 0, 9, Some((&ids, 6))).unwrap(),
+            vec![2..5, 6..9]
+        );
+        let shifted = [span(3, 6), span(6, 9)];
+        let err = image_spans_to_apply(&shifted, 0, 9, Some((&ids, 6))).unwrap_err();
+        assert!(
+            matches!(err, crate::error::SwarmError::Validation(_)),
+            "{err}"
+        );
+
+        // A later segment cannot check the markers, only the shape.
+        assert!(image_spans_to_apply(&shifted, 0, 9, None).is_ok());
+        // A forward starting after a picture does not read it; one starting
+        // inside it would read half.
+        assert!(image_spans_to_apply(&right, 5, 12, None).is_ok());
+        let err = image_spans_to_apply(&right, 3, 12, None).unwrap_err();
+        assert!(
+            matches!(err, crate::error::SwarmError::Validation(_)),
+            "{err}"
+        );
+        for bad in [
+            vec![span(6, 9), span(2, 5)],
+            vec![span(4, 4)],
+            vec![span(2, 10)],
+        ] {
+            let err = image_spans_to_apply(&bad, 0, 9, None).unwrap_err();
+            assert!(
+                matches!(err, crate::error::SwarmError::Validation(_)),
+                "{bad:?}: {err}"
+            );
+        }
+        assert!(image_spans_to_apply(&[], 0, 1, None).unwrap().is_empty());
     }
 }
 

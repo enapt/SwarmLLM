@@ -44,7 +44,7 @@ swarmllm/
 │   │   ├── scheduler/    (mod, parallax, parallax_allocator, cached_prefix (how much of a prompt our own worker already holds — a warm prompt is priced warm; a prompt estimated at 1,024 tokens or more, with no images, is rendered and counted exactly before planning, #289), tests)
 │   │   ├── pipeline/     (mod, distributed, dsd, dsd_stream (the continuous stream: the next chunk of guesses goes out while the last is being checked, split_speculation.md § 4b), engine_drafter (speculation across computers guessing with a small model this node holds, run by its own worker — `DaemonMsg::Draft`), handoff_prompt_cache (what a peer's prompt cache holds after a whole-model hand-off, so its next turn is priced warm — FUTURE_WORK #3 (c)), local, local_generate (a plan that names this node is run as the local generation it is), prompt, prompt_admission (each peer of a split asked whether it holds the prompt before the pass, bounded wait — FUTURE_WORK #252 (b)), prompt_chunks (a split reads its prompt in pieces, every segment at once — FUTURE_WORK #171), remote_generate, speculative, split_prompt_cache (a split keeps its conversation's prompt between turns: a keyed block chain, vLLM's rule, and an optimistic belief of what each segment holds — FUTURE_WORK #10), tensor_parallel, vision, ngram_only_spec (R136 L1), tests_sampling)
 │   │   ├── split/        (mod, model, loader, executor, draft (`draft_after`: a small model's guesses for a bigger one's request), kv_cache, kv_write (a step's K/V written into a cache of another dtype — the half cache, one launch on a card), kv_budget, entry, gguf_meta, shard_reader, rope, prefix_cache, hybrid (which layers of a segment go on the card — .145, #431), token_embedding, per_layer (Gemma 4 E2B/E4B's per-layer inputs, #115 (3c)), tests/)
-│   │   │   └── tests/    (mod, common, core, drafting, gqa, gemma2, moe_mla, llama4_glm4, kv_refresh, per_layer_and_shared_kv)
+│   │   │   └── tests/    (mod, common, core, drafting, gqa, gemma2, moe_mla, llama4_glm4, kv_refresh, per_layer_and_shared_kv, image_spans)
 │   │   ├── chat_template/ (mod, fallbacks, tojson (the `transformers` signature, not minijinja's), tool_turns (how a template is shown a conversation's tool calls and answers, #283), tests, fixtures/{llama3_official,qwen3_official,qwen3_gguf_shipped,qwen35_gguf_shipped,glm4_gguf_shipped,gemma4_gguf_shipped}.jinja — rendering is `minijinja` + `minijinja-contrib` pycompat, the engine HF's TGI and SGLang use; the hand-rolled parser/eval subset was retired 2026-09-10)
 │   │   └── layers/       (mod, qwen35, moe_card — the card's grouped mixture-of-experts products and `kernel_type`, the one list of what its kernels read, #292)
 │   ├── credit/    (ledger, transaction, priority, anti_gaming, trust, escrow)
@@ -151,6 +151,8 @@ swarmllm/
 │                 of every token: the test for a split reply where byte-equality is not;
 │                 `--lora` scores against llama.cpp applying an adapter, which
 │                 peft_lora_to_gguf.py converts from PEFT (with the converter's q/k permute, #110);
+│                 score_image_reply_against_reference.cpp — the same for a reply about a
+│                 picture, through llama.cpp's own image path (libmtmd; built by g++, #115 (2b));
 │                 release_gate.sh — the release gate on the downloaded artifact, under an hour: smoke_test.sh,
 │                 release_shapes.sh, family_conformance.sh, reply_ab.sh, split_rig.sh, stream_bench.py;
 │                 feature_check.py — every surface a user reaches (OpenAI, Anthropic, Responses,
@@ -942,6 +944,7 @@ Text Pipeline (unchanged): embeddings travel with LayerForward
 - Sentinel shard index (`u32::MAX`) reuses all ShardId infrastructure (registry, announcements, auto-manage, pruning)
 - `VisionEncodeRequest` / `VisionEncodeResponse` network messages for remote encoding (JPEG-compressed images on wire)
 - `LayerForward.vision_embeddings: Option<Vec<u8>>` carries the embeddings on the first forward: an 8-byte header (rows, hidden — u32 LE) then zstd of the f16 rows, decoded only by `vision::decode_wire_embeddings` (50 MB cap, shape and finiteness checked). Sent only to a first segment that advertises `features::IMAGES_AT_MARKERS` (bit 26) — an older one would prepend the rows; the holder is blacklisted for the request and the router re-plans, and failover skips a standby without the bit
+- Gemma 3 reads each picture's rows both ways (llama.cpp's `mtmd_decode_use_non_causal`; `vision::rows_attend_both_ways`): the coordinator computes where each picture's rows sit (`PipelineExecutor::image_spans_for`, from the same tokenization the first segment uses) and every forward reaching into a picture — the prompt pass, a stand-in's replay from 0 — carries them as `LayerForward::image_spans` (trailer `0x0F`, AAD-bound) to EVERY segment, each of which must advertise bit 26 (else blacklisted, re-plan). A picture's rows see each other and the text before them; text stays causal; Gemma 3's windowed layers keep their window. The worker checks the spans (well formed, inside the forward; on the first segment exactly where its markers put the rows), forces mask-driven attention for that forward, never cuts a picture between prompt chunks, never captures it in a CUDA graph and never batches it; a tensor-parallel group is not used for such a request (#115 (2b))
 - Vision node selection: prefer local → first-segment node → any mmproj holder
 - `precompute_vision_embeddings()` runs once before the token generation loop
 - Auto-manage: 5x priority bonus for mmproj download, higher pruning floor (min 3 replicas), only prunes under extreme pressure (>0.95)
@@ -1068,6 +1071,7 @@ peer advertising its feature bit — gated at the SENDER
 | 0x0C | stream_seq | 5 bytes | Order of a streamed verify chunk (`features::STREAMED_VERIFY`) |
 | 0x0D | prompt_cache | `block_tokens(4)+resume_at(4)+n(4)+n×key(32)` | A split's stored prompt: block keys + where to resume (`features::SPLIT_PROMPT_CACHE`) |
 | 0x0E | prompt_span | `start(4)+end(4)` | The prompt pass this forward is one piece of (`features::PROMPT_CHUNKS`) |
+| 0x0F | image_spans | `n(2)+n×(start(4)+end(4))` | Where each picture's rows sit, for a family reading them both ways; n ≤ 256 (`features::IMAGES_AT_MARKERS`, #115 (2b)) |
 
 All trailers are bound into the encryption AAD via
 `build_layer_forward_aad` (single source of truth in

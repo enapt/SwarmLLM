@@ -577,6 +577,15 @@ pub struct LayerForward {
     /// the `0x0E` trailer, only to a peer advertising `features::PROMPT_CHUNKS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_span: Option<PromptSpan>,
+    /// The pictures in this prompt pass whose rows attend both ways
+    /// (FUTURE_WORK #115 (2b), llama.cpp's non-causal image decode for Gemma
+    /// 3), as absolute positions, ascending — the same list on every segment's
+    /// forward of the pass, computed once by the coordinator
+    /// (`vision::image_spans`). Travels in the `0x0F` trailer, bound into the
+    /// AAD, only to a peer advertising `features::IMAGES_AT_MARKERS`. Empty on
+    /// every other forward.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_spans: Vec<PromptSpan>,
 }
 
 impl LayerForward {
@@ -596,7 +605,8 @@ impl LayerForward {
 }
 
 /// The positions a prompt pass read in pieces covers — see
-/// [`LayerForward::prompt_span`].
+/// [`LayerForward::prompt_span`] — or a picture's rows take
+/// ([`LayerForward::image_spans`]): `start..end`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptSpan {
     /// The pass's first position: 0, or where a resumed pass starts (#10).
@@ -1254,6 +1264,7 @@ mod chunk_assembly_tests {
             // `None`, which is what these round-trip tests assert against.
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         }
     }
 

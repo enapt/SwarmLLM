@@ -115,6 +115,7 @@ impl PipelineExecutor {
                     chunk_meta: None,
                     sampling: None,
                     prompt_span: None,
+                    image_spans: Vec::new(),
                 };
                 self.shared_state
                     .model_process_pool
@@ -160,6 +161,7 @@ impl PipelineExecutor {
                         chunk_meta: None,
                         sampling: None,
                         prompt_span: None,
+                        image_spans: Vec::new(),
                     };
                     let _ = self
                         .network_tx
@@ -202,6 +204,7 @@ impl PipelineExecutor {
                     chunk_meta: None,
                     sampling: None,
                     prompt_span: None,
+                    image_spans: Vec::new(),
                 };
                 let attn_partial = self
                     .shared_state
@@ -291,6 +294,7 @@ impl PipelineExecutor {
                         chunk_meta: None,
                         sampling: None,
                         prompt_span: None,
+                        image_spans: Vec::new(),
                     };
                     let _ = self
                         .network_tx
@@ -333,6 +337,7 @@ impl PipelineExecutor {
                     chunk_meta: None,
                     sampling: None,
                     prompt_span: None,
+                    image_spans: Vec::new(),
                 };
                 let ffn_partial = self
                     .shared_state
@@ -428,6 +433,7 @@ impl PipelineExecutor {
                 chunk_meta: None,
                 sampling: None,
                 prompt_span: None,
+                image_spans: Vec::new(),
             };
             let layer_result = self
                 .shared_state

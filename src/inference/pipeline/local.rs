@@ -459,6 +459,9 @@ impl PipelineExecutor {
             // path, which is every COLD-START request.
             sampling: Some(self.request.sampling_params.clone()),
             prompt_span,
+            // Every segment's layers read a picture whose rows attend both
+            // ways as a whole, this node's included (#115 (2b)).
+            image_spans: self.image_spans_from(index_pos),
         };
         // Watched against the request's cancel flag: a client that leaves
         // during a minutes-long prompt pass on this node's processor ends this
@@ -1905,6 +1908,7 @@ mod segment_budget_tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         }
     }
 

@@ -2936,6 +2936,7 @@ impl SplitModel {
             norm,
             output,
             masks: None,
+            image_spans: Vec::new(),
             kv_budget_bytes,
             kv_growth,
             host_kv_budget_bytes,

@@ -310,7 +310,10 @@ pub mod features {
     /// the image (`<__media__>`, llama.cpp's marker), tokenized as the
     /// coordinator counted it. An older node reads the marker as text and
     /// prepends the rows, so it is sent no image prompt: the coordinator bars
-    /// it from the request and plans again (#115 (2)).
+    /// it from the request and plans again (#115 (2)). It also reads a prompt
+    /// pass's picture spans (`LayerForward::image_spans`, the `0x0F` trailer):
+    /// for a family whose picture rows attend both ways (Gemma 3), EVERY
+    /// segment and stand-in of that pass must advertise it (#115 (2b)).
     pub const IMAGES_AT_MARKERS: u64 = 1 << 26;
 
     /// The full feature set THIS build implements. Advertised by every node,

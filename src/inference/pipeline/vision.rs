@@ -8,16 +8,94 @@ use crate::types::{NetworkCommand, SwarmMessage};
 use super::{PipelineExecutor, VISION_ENCODE_TIMEOUT_SECS};
 
 impl PipelineExecutor {
+    /// The picture spans a forward starting at `index_pos` carries: all of
+    /// them while any picture ends after `index_pos` — the prompt pass, and a
+    /// stand-in's replay from position 0 — none for a forward past every
+    /// picture, which reads in order anyway. The ONE answer for every send of
+    /// this request, local, remote and stand-in.
+    pub(super) fn image_spans_from(&self, index_pos: usize) -> Vec<crate::types::PromptSpan> {
+        if self.image_spans.iter().any(|s| s.end as usize > index_pos) {
+            self.image_spans.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// May an image prompt's first forward go to `node`: this node, or a peer
     /// advertising `features::IMAGES_AT_MARKERS` — one that tokenizes the
     /// prompt with its markers and puts each image's rows there, as this node
     /// counted it. An older peer prepends the rows and reads the markers as
     /// text, so every position after the prompt would be off.
+    ///
+    /// The same bit says a peer reads the picture spans (the `0x0F` trailer,
+    /// #115 (2b)), so where a prompt carries them this is asked of EVERY
+    /// segment and stand-in, not only the first: each one's layers apply them,
+    /// and an older peer would read its part of the picture in order without
+    /// a word.
     pub(super) fn may_send_image_prompt_to(&self, node: &crate::types::NodeId) -> bool {
         node == self.shared_state.identity.node_id()
             || self
                 .shared_state
                 .peer_advertises_feature(node, swarmllm_types::node::features::IMAGES_AT_MARKERS)
+    }
+
+    /// The positions each picture's rows take in `prompt`, for a family whose
+    /// picture rows attend both ways (`vision::rows_attend_both_ways`, #115
+    /// (2b)); empty for every other family and for a prompt with no picture.
+    ///
+    /// Counted from the tokenization the first segment builds its input from
+    /// (`vision::encode_prompt_with_images`) and the rows the payload states,
+    /// so the spans and the splice describe one prompt — the first segment
+    /// checks that it does. Without a tokenizer here the rows are read in
+    /// order, as before, and the log says so. `SWARMLLM_IMAGE_BOTH_WAYS=0` is
+    /// the control arm: every picture read in order, as before #115 (2b).
+    pub(super) fn image_spans_for(
+        &self,
+        prompt: &str,
+        image_rows: usize,
+    ) -> Vec<crate::types::PromptSpan> {
+        static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let switched_off = *OFF.get_or_init(|| {
+            std::env::var("SWARMLLM_IMAGE_BOTH_WAYS")
+                .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+                .unwrap_or(false)
+        });
+        if image_rows == 0 || switched_off {
+            return Vec::new();
+        }
+        let model_id = &self.request.model_id;
+        let architecture = self
+            .shared_state
+            .gguf_meta_for(model_id)
+            .map(|m| m.architecture.clone());
+        if !crate::inference::vision::rows_attend_both_ways(architecture.as_deref()) {
+            return Vec::new();
+        }
+        let Some(tokenizer) = self.shared_state.standalone_tokenizer(model_id) else {
+            tracing::warn!(
+                request_id = %self.request.id,
+                model = %model_id,
+                "no tokenizer for this model here, so its pictures are read in order \
+                 rather than as a whole — the reply may describe them less well"
+            );
+            return Vec::new();
+        };
+        let ids = crate::inference::vision::encode_prompt_with_images(&tokenizer, prompt);
+        let spans: Vec<crate::types::PromptSpan> =
+            crate::inference::vision::image_spans(&ids, image_rows)
+                .into_iter()
+                .map(|s| crate::types::PromptSpan {
+                    start: s.start as u32,
+                    end: s.end as u32,
+                })
+                .collect();
+        tracing::info!(
+            request_id = %self.request.id,
+            pictures = spans.len(),
+            spans = ?spans.iter().map(|s| (s.start, s.end)).collect::<Vec<_>>(),
+            "DIAG: picture rows attend both ways"
+        );
+        spans
     }
 
     /// T14: Pre-compute vision embeddings before the text pipeline.

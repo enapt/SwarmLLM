@@ -129,29 +129,7 @@ impl SplitModel {
     /// positions, so the first `kv_len - query_len` columns are prefix that
     /// every query attends to.
     fn causal_mask(&self, query_len: usize, kv_len: usize) -> CandleResult<Tensor> {
-        // Caller contract: kv_len = prefix_len + query_len, so kv_len >= query_len.
-        // The call sites derive kv_len as kv_offset + seq_len, but assert
-        // defensively in case a future edit changes the math — bare usize
-        // subtraction would silently wrap in release mode.
-        debug_assert!(
-            kv_len >= query_len,
-            "causal_mask contract: kv_len ({}) must be >= query_len ({})",
-            kv_len,
-            query_len
-        );
-        let offset = kv_len - query_len;
-        let mask: Vec<f32> = (0..query_len)
-            .flat_map(|i| {
-                (0..kv_len).map(move |j| {
-                    if j > offset + i {
-                        f32::NEG_INFINITY
-                    } else {
-                        0.0
-                    }
-                })
-            })
-            .collect();
-        Tensor::from_slice(&mask, (query_len, kv_len), &self.device)
+        causal_mask_with_spans(query_len, kv_len, &[], &self.device)
     }
 
     /// Causal mask for a prefill with no cached prefix, cached across calls.
@@ -189,11 +167,21 @@ impl SplitModel {
     /// The masks a forward of `seq_len` positions after `kv_offset` cached
     /// ones reads: none for one position, else the causal mask and — where a
     /// sliding window keeps keys out (#278) — the windowed one beside it.
-    fn attention_masks(&mut self, seq_len: usize, kv_offset: usize) -> CandleResult<ForwardMasks> {
+    /// `spans` are the pictures inside this forward whose rows attend both
+    /// ways ([`Self::spans_in_forward`], #115 (2b)): both masks are built
+    /// for them, never taken from the cached causal one.
+    fn attention_masks(
+        &mut self,
+        seq_len: usize,
+        kv_offset: usize,
+        spans: &[std::ops::Range<usize>],
+    ) -> CandleResult<ForwardMasks> {
         if seq_len == 1 {
             return Ok(ForwardMasks::default());
         }
-        let causal = if kv_offset > 0 {
+        let causal = if !spans.is_empty() {
+            causal_mask_with_spans(seq_len, kv_offset + seq_len, spans, &self.device)?
+        } else if kv_offset > 0 {
             // Prefix cache: suffix query attends to (offset + seq_len) key positions
             self.mask_with_offset(seq_len, kv_offset + seq_len)?
         } else {
@@ -203,13 +191,56 @@ impl SplitModel {
             .sliding_window()
             .and_then(|w| {
                 crate::inference::layers::window_start(w, kv_offset, seq_len)
-                    .map(|start| window_mask(seq_len, kv_offset, w, start, &self.device))
+                    .map(|start| window_mask(seq_len, kv_offset, w, start, spans, &self.device))
             })
             .transpose()?;
         Ok(ForwardMasks {
             causal: Some(causal),
             windowed,
         })
+    }
+
+    /// Run `f` with `spans` — the prompt's pictures, as absolute positions
+    /// (`vision::image_spans`) — attending both ways in every forward it
+    /// makes, then forget them. The one way spans reach a forward; a worker
+    /// wraps the prompt pass of a request that carries them.
+    pub fn with_image_spans<R>(
+        &mut self,
+        spans: &[std::ops::Range<usize>],
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let before = std::mem::replace(&mut self.image_spans, spans.to_vec());
+        let out = f(self);
+        self.image_spans = before;
+        out
+    }
+
+    /// The pictures whose rows fall in a forward of `seq_len` positions from
+    /// `first`. A picture must lie wholly inside the forward that reads it:
+    /// a row cannot attend to a row a later forward has not computed yet, so
+    /// a forward that cuts one in two is refused — the chunking that issues
+    /// forwards keeps each picture in one ([`Self::forward_prompt_in_chunks`]).
+    fn spans_in_forward(
+        &self,
+        first: usize,
+        seq_len: usize,
+    ) -> Result<Vec<std::ops::Range<usize>>, SwarmError> {
+        let end = first + seq_len;
+        let mut inside = Vec::new();
+        for span in self
+            .image_spans
+            .iter()
+            .filter(|s| s.start < end && first < s.end)
+        {
+            if span.start < first || span.end > end {
+                return Err(SwarmError::Internal(format!(
+                    "a forward of positions {first}..{end} cuts the picture at {}..{} in two",
+                    span.start, span.end
+                )));
+            }
+            inside.push(span.clone());
+        }
+        Ok(inside)
     }
 
     /// The sliding window this segment's windowed layers share (#278) — one
@@ -431,7 +462,15 @@ impl SplitModel {
             } else {
                 ceiling(self, index_pos + start)
             };
-            let len = chunk_tokens.min(seq_len - start);
+            // A chunk never ends inside a picture whose rows attend both ways:
+            // it runs on to the picture's end (#115 (2b), `spans_in_forward`).
+            let chunk_end = index_pos + start + chunk_tokens;
+            let len = self
+                .image_spans
+                .iter()
+                .find(|s| s.start < chunk_end && chunk_end < s.end)
+                .map_or(chunk_tokens, |s| s.end - (index_pos + start))
+                .min(seq_len - start);
             let part = input
                 .narrow(1, start, len)
                 .and_then(|t| t.contiguous())
@@ -610,6 +649,7 @@ impl SplitModel {
             // built on the host (`mask_is_read`).
             if seq_len <= crate::inference::cuda_graph::MAX_POSITIONS
                 && (seq_len == 1 || !self.mask_is_read())
+                && self.image_spans.is_empty()
                 && lora_adapter.is_none()
                 && capture_layers.is_none()
                 && skip_mask.is_none()
@@ -1215,10 +1255,19 @@ impl SplitModel {
             .map(|c| c.current_seq_len())
             .unwrap_or(0);
 
+        // The pictures in this forward whose rows attend both ways (#115
+        // (2b)). Their masks are not causal, so they are always built and
+        // every attention call reads them: the card's flash kernel takes
+        // causality as a flag and would read none. The guard is set on the
+        // thread that runs the layers, which `run_attention` asks.
+        let spans_here = self.spans_in_forward(kv_offset, seq_len)?;
+        let _reads_the_mask = (!spans_here.is_empty())
+            .then(|| crate::inference::attn_kernel::ForceStandardAttnGuard::new(true));
+
         // `mut` because a hybrid segment moves it across the device boundary
         // with the activation — see the transition at the head of the loop.
-        let mut masks = if self.mask_is_read() {
-            self.attention_masks(seq_len, kv_offset)
+        let mut masks = if self.mask_is_read() || !spans_here.is_empty() {
+            self.attention_masks(seq_len, kv_offset, &spans_here)
                 .map_err(SwarmError::internal)?
         } else {
             ForwardMasks::default()
@@ -2013,7 +2062,7 @@ impl SplitModel {
         // `mut` for the same reason as the single-request path: a split
         // segment carries the mask across the device boundary with the batch.
         let mut masks = self
-            .attention_masks(seq_len, first_kv_offset)
+            .attention_masks(seq_len, first_kv_offset, &[])
             .map_err(SwarmError::internal)?;
 
         // Stack all hidden states into a single batch tensor:
@@ -2400,7 +2449,7 @@ impl SplitModel {
         })?;
         let kv_offset = layer_slot.as_ref().map_or(0, |c| c.current_seq_len());
         let masks = self
-            .attention_masks(seq_len, kv_offset)
+            .attention_masks(seq_len, kv_offset, &[])
             .map_err(SwarmError::internal)?;
 
         let result = match &self.layers[local_layer_idx] {
@@ -2522,24 +2571,70 @@ impl ForwardMasks {
     }
 }
 
+/// The last key a query at absolute position `query` may see: itself, or —
+/// inside a picture whose rows attend both ways (#115 (2b)) — that picture's
+/// last row. llama.cpp decodes such a picture as one batch with causal
+/// attention off, so each row sees every row of it and everything before it.
+fn last_key_seen(query: usize, spans: &[std::ops::Range<usize>]) -> usize {
+    spans
+        .iter()
+        .find(|s| s.contains(&query))
+        .map_or(query, |s| s.end - 1)
+}
+
+/// The additive causal mask: `0.0` where a query may attend, `-inf` where it
+/// may not, for `query_len` queries that are the LAST of `kv_len` keys (the
+/// first `kv_len - query_len` are prefix every query sees). `spans` are the
+/// pictures whose rows attend both ways ([`last_key_seen`]); empty is the
+/// plain causal mask.
+fn causal_mask_with_spans(
+    query_len: usize,
+    kv_len: usize,
+    spans: &[std::ops::Range<usize>],
+    device: &Device,
+) -> CandleResult<Tensor> {
+    // Caller contract: kv_len = prefix_len + query_len, so kv_len >= query_len.
+    // The call sites derive kv_len as kv_offset + seq_len, but assert
+    // defensively in case a future edit changes the math — bare usize
+    // subtraction would silently wrap in release mode.
+    debug_assert!(
+        kv_len >= query_len,
+        "causal_mask contract: kv_len ({}) must be >= query_len ({})",
+        kv_len,
+        query_len
+    );
+    let offset = kv_len - query_len;
+    let mask: Vec<f32> = (0..query_len)
+        .flat_map(|i| {
+            let last = last_key_seen(offset + i, spans);
+            (0..kv_len).map(move |j| if j > last { f32::NEG_INFINITY } else { 0.0 })
+        })
+        .collect();
+    Tensor::from_slice(&mask, (query_len, kv_len), device)
+}
+
 /// The additive mask of a windowed layer (#278): `query_len` queries after
 /// `offset` cached positions, over the keys from `start`
 /// (`layers::window_start`) to the end. A query at `p` sees a key at `k` when
 /// `k <= p` and `p - k < window` — llama.cpp's `LLAMA_SWA_TYPE_STANDARD`
-/// (`llama_hparams::is_masked_swa`).
+/// (`llama_hparams::is_masked_swa`). Inside a picture in `spans` it also sees
+/// the picture's later rows ([`last_key_seen`]); the window still bounds the
+/// keys before it, as llama.cpp's `LLAMA_NON_CAUSAL_TYPE_ALL` does.
 fn window_mask(
     query_len: usize,
     offset: usize,
     window: usize,
     start: usize,
+    spans: &[std::ops::Range<usize>],
     device: &Device,
 ) -> CandleResult<Tensor> {
     let keys = offset + query_len - start;
     let mask: Vec<f32> = (0..query_len)
         .flat_map(|i| {
             let query = offset + i;
+            let last = last_key_seen(query, spans);
             (start..start + keys).map(move |key| {
-                if key > query || query - key >= window {
+                if key > last || (key <= query && query - key >= window) {
                     f32::NEG_INFINITY
                 } else {
                     0.0
@@ -2835,10 +2930,11 @@ mod window_mask_tests {
                 start == 0 || offset - (start - 1) >= window,
                 "a key cut off is one no query sees"
             );
-            let mask: Vec<Vec<f32>> = window_mask(queries, offset, window, start, &Device::Cpu)
-                .unwrap()
-                .to_vec2()
-                .unwrap();
+            let mask: Vec<Vec<f32>> =
+                window_mask(queries, offset, window, start, &[], &Device::Cpu)
+                    .unwrap()
+                    .to_vec2()
+                    .unwrap();
             assert_eq!(mask.len(), queries);
             for (i, row) in mask.iter().enumerate() {
                 assert_eq!(row.len(), offset + queries - start);
@@ -2852,6 +2948,86 @@ mod window_mask_tests {
                         "({offset}, {queries}) query {query} key {key}: {cell}"
                     );
                     assert!(cell == 0.0 || cell == f32::NEG_INFINITY);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod image_span_mask_tests {
+    use super::{causal_mask_with_spans, window_mask};
+    use crate::inference::layers::window_start;
+    use candle_core::Device;
+
+    /// llama.cpp's rule for a picture read both ways (`mtmd_decode_use_non_causal`,
+    /// `LLAMA_NON_CAUSAL_TYPE_ALL`): a query inside a picture sees every row of
+    /// it and everything before; any other query sees itself and before.
+    fn seen(query: usize, key: usize, spans: &[std::ops::Range<usize>]) -> bool {
+        match spans.iter().find(|s| s.contains(&query)) {
+            Some(s) => key < s.end,
+            None => key <= query,
+        }
+    }
+
+    #[test]
+    fn a_pictures_rows_see_each_other_and_the_text_around_it_stays_in_order() {
+        // Two pictures, text before, between and after; a forward from 0 and
+        // one after a cached prefix.
+        let spans = [2..5, 7..10];
+        for (offset, queries) in [(0, 12), (2, 10), (7, 5)] {
+            let kv = offset + queries;
+            let mask: Vec<Vec<f32>> = causal_mask_with_spans(queries, kv, &spans, &Device::Cpu)
+                .unwrap()
+                .to_vec2()
+                .unwrap();
+            for (i, row) in mask.iter().enumerate() {
+                let query = offset + i;
+                for (key, &cell) in row.iter().enumerate() {
+                    assert_eq!(
+                        cell == 0.0,
+                        seen(query, key, &spans),
+                        "offset {offset}: query {query} key {key}"
+                    );
+                }
+            }
+        }
+        // No spans is the causal mask, cell for cell.
+        let plain: Vec<Vec<f32>> = causal_mask_with_spans(6, 9, &[], &Device::Cpu)
+            .unwrap()
+            .to_vec2()
+            .unwrap();
+        for (i, row) in plain.iter().enumerate() {
+            for (key, &cell) in row.iter().enumerate() {
+                assert_eq!(cell == 0.0, key <= 3 + i);
+            }
+        }
+    }
+
+    /// A windowed layer keeps its window over the keys BEFORE a query; a
+    /// picture's later rows are seen through it, as in llama.cpp, where
+    /// `is_masked_swa` hides only keys a window's length behind.
+    #[test]
+    fn a_windowed_layer_keeps_its_window_and_a_picture_still_sees_its_own_rows() {
+        let window = 4;
+        let spans = vec![std::ops::Range { start: 5, end: 9 }];
+        for (offset, queries) in [(0, 12), (3, 9)] {
+            let start = window_start(window, offset, queries).unwrap_or(0);
+            let mask: Vec<Vec<f32>> =
+                window_mask(queries, offset, window, start, &spans, &Device::Cpu)
+                    .unwrap()
+                    .to_vec2()
+                    .unwrap();
+            for (i, row) in mask.iter().enumerate() {
+                let query = offset + i;
+                for (c, &cell) in row.iter().enumerate() {
+                    let key = start + c;
+                    let in_window = key > query || query - key < window;
+                    assert_eq!(
+                        cell == 0.0,
+                        seen(query, key, &spans) && in_window,
+                        "offset {offset}: query {query} key {key}"
+                    );
                 }
             }
         }

@@ -201,6 +201,13 @@ pub(super) async fn handle_layer_forward(
     let prompt_cache_onward = (!chain.is_empty())
         .then(|| forward.prompt_cache.clone())
         .flatten();
+    // A chained prompt pass over a picture whose rows attend both ways
+    // (#115 (2b)): every hop's layers read them so, so the spans go on.
+    let image_spans_onward = if chain.is_empty() {
+        Vec::new()
+    } else {
+        forward.image_spans.clone()
+    };
     let sequence_num = forward.sequence_num;
     // A speculative CHECK travelling a chain (`features::CHAINED_VERIFY`):
     // what the run's TAIL walks with, handed down beside the activations. This
@@ -478,6 +485,16 @@ pub(super) async fn handle_layer_forward(
                             )
                         }),
                         prompt_span: None,
+                        // Only to a hop that reads the `0x0F` trailer: the
+                        // coordinator sends a prompt with spans only through
+                        // segments that all advertise it, so this filter
+                        // states the rule rather than deciding anything.
+                        image_spans: if next_has(swarmllm_types::node::features::IMAGES_AT_MARKERS)
+                        {
+                            image_spans_onward.clone()
+                        } else {
+                            Vec::new()
+                        },
                     };
                     tracing::info!(
                         request_id = %request_id,
@@ -1090,6 +1107,7 @@ mod chaining_tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         super::handle_layer_forward(state, tx, forward).await;
@@ -1245,6 +1263,7 @@ mod tests {
             chunk_meta: None,
             sampling: None,
             prompt_span: None,
+            image_spans: Vec::new(),
         };
         let (tx, mut rx) = mpsc::channel(4);
         refuse_forward(
@@ -1409,6 +1428,7 @@ mod forward_positions_tests {
                 start: 0,
                 end: 2048,
             }),
+            image_spans: Vec::new(),
         };
         let piece = turn_wait(&f);
         assert_eq!(

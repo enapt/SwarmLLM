@@ -699,6 +699,9 @@ impl PipelineExecutor {
                 None
             },
             prompt_span: Some(span),
+            // A prompt with a picture is never read in pieces
+            // (`prompt_to_read_in_pieces`), so no piece reaches into one.
+            image_spans: Vec::new(),
         };
         if state.pending_layer_results.len() >= super::MAX_PENDING_LAYER_RESULTS {
             return Err(SwarmError::ServiceUnavailable(

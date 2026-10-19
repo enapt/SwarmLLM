@@ -17,6 +17,7 @@ mod core;
 mod drafting;
 pub(crate) mod gemma2;
 mod gqa;
+mod image_spans;
 mod kv_refresh;
 mod llama4_glm4;
 mod moe_mla;

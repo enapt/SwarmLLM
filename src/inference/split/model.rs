@@ -35,6 +35,11 @@ pub struct SplitModel {
     /// Tuple is `(query_len, mask)`; `None` means nothing cached yet. See
     /// `SplitModel::mask` for why this is not a narrowed view of a bigger one.
     pub(super) masks: Option<(usize, Tensor)>,
+    /// The positions of the pictures whose rows attend both ways in the
+    /// forwards running now (`vision::image_spans`, #115 (2b)) — set only for
+    /// the length of one call by `SplitModel::with_image_spans`, empty
+    /// otherwise. Read by `attention_masks`; never cached in `masks`.
+    pub(super) image_spans: Vec<std::ops::Range<usize>>,
     /// Layer range this model covers: [start, end) out of total_layers.
     pub layer_start: usize,
     pub layer_end: usize,
