@@ -60,7 +60,10 @@ pub fn is_force_standard_attn() -> bool {
 /// requested value. Restores the previous value on drop so nested guards
 /// behave correctly. Must be created on the same thread that runs the
 /// forward pass — for tokio code, this means inside the `block_in_place`
-/// closure (not in the surrounding async fn).
+/// closure (not in the surrounding async fn). A forward that
+/// `cpu_pools::in_phase_pool` moves onto a rayon pool takes the caller's value
+/// with it; any other hop to another thread must carry it the same way
+/// (gotcha #902).
 pub struct ForceStandardAttnGuard {
     prev: bool,
 }

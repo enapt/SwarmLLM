@@ -748,6 +748,19 @@ pub(crate) fn in_phase_pool<R: Send>(
     for_the_owner: bool,
     f: impl FnOnce() -> R + Send,
 ) -> R {
+    // A pool runs `f` on ITS thread, which never saw a thread-local the caller
+    // set. The one the layers read is the attention override a speculating
+    // loop sets so its guesses and its check run one kernel
+    // (`attn_kernel::ForceStandardAttnGuard`, "created on the thread that runs
+    // the forward"): it was lost on every decode-shaped forward with processor
+    // layers. Carried across here, the one place a forward changes thread —
+    // tracing's rule for a span entering rayon.
+    let force_standard = crate::inference::attn_kernel::is_force_standard_attn();
+    let f = move || {
+        let _same_kernel =
+            crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_standard);
+        f()
+    };
     if cpu_layers > 0 && seq_len > DECODE_SHAPED_MAX_TOKENS && for_the_owner {
         if let Some(pool) = owner_prefill_pool() {
             return pool.install(f);
@@ -1240,6 +1253,42 @@ mod tests {
         assert!(
             in_phase_pool(1, 9_998, false, || rayon::current_thread_index().is_some()),
             "a decode step with processor layers ran on the calling thread"
+        );
+    }
+
+    /// The attention override a speculating loop sets on its own thread is in
+    /// force on the pool thread the step runs on — it was not, for every
+    /// decode-shaped forward with processor layers.
+    #[test]
+    fn the_callers_attention_override_reaches_the_pool_thread() {
+        assert!(
+            rayon::current_thread_index().is_none(),
+            "the test itself must start outside every pool"
+        );
+        let _forced = crate::inference::attn_kernel::ForceStandardAttnGuard::new(true);
+        // A processor depth no other test uses (calibration state is shared).
+        let (on_a_pool, seen) = in_phase_pool(1, 9_997, false, || {
+            (
+                rayon::current_thread_index().is_some(),
+                crate::inference::attn_kernel::is_force_standard_attn(),
+            )
+        });
+        assert!(
+            on_a_pool,
+            "the step ran on the calling thread: nothing was tested"
+        );
+        assert!(seen, "the caller's override did not reach the pool thread");
+        drop(_forced);
+        assert!(!crate::inference::attn_kernel::is_force_standard_attn());
+        let seen = in_phase_pool(
+            1,
+            9_997,
+            false,
+            crate::inference::attn_kernel::is_force_standard_attn,
+        );
+        assert!(
+            !seen,
+            "an override the caller did not set appeared on the pool thread"
         );
     }
 
