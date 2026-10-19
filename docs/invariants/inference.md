@@ -3037,6 +3037,14 @@ and their tests call `matmul_attention` directly so they keep testing them.
 
 ## Several query positions on the processor: tiled over the keys, the score matrix never written (2026-09-26, #119)
 
+> **Superseded 2026-10-19 (#179)** by § "A row's attention on the processor does not depend on
+> the forward it is in": the tiling below — gemm tiles of 128 keys inside 1,024-key chunks, q
+> pre-scaled, row blocks of 512 — gave a row a different sum with the forward's length and
+> with the decode kernel's, and was replaced by one row arithmetic both kernels share; `gemm` is
+> no longer a dependency. What stays true: why a tiled kernel exists (the score matrix the
+> matmul path writes), the measurements against the matmul path, and that tests of the matmul
+> paths call `matmul_attention`.
+
 **What the matmul path cost.** `attention_scores_block` writes the whole
 `[rows, kv_len]` score matrix, the softmax reads and rewrites it, the second
 matmul reads it again. For a 128-token chunk of llama-3.2-3b (8 groups × 384
@@ -3111,6 +3119,110 @@ and row-block sizes stay constants (result independent of thread count).
 A/B: `SWARMLLM_PREFILL_ATTN=standard`.
 
 → `docs/invariants/inference.md` § "Several query positions on the processor"
+
+## A row's attention on the processor does not depend on the forward it is in (2026-10-19, #179)
+
+**What happened.** Llama-3.2-3B Q4_K_M on the processor, `temperature: 0`, the same
+request four times per round on one isolated node, the node restarted between two rounds: the first reply of each round was one text (md5 `2d85feea`,
+924 chars), every later one another (`f60b97f4`, 913 chars, diverging at char 362) — in both
+rounds. Each repeat was a prompt-cache hit (`prefix-cache HIT matched_tokens=55
+prompt_tokens=56`). **Null control**: `prefix_cache_enabled = false`, same rig — all eight
+replies `2d85feea`, no hit. The cache is the trigger; nothing varied run to run.
+
+**Why.** A hit skips the cached prefix, so the last prompt token runs ALONE — a decode step
+(`decode_attn`) instead of a row of the prompt pass (`prefill_attn`). The two kernels summed
+differently (dot then scale, 256-key chunks, two-pass softmax — against q pre-scaled, gemm
+tiles of 128 inside 1,024-key chunks, an online softmax). And the prompt kernel sized its
+tiles by the FORWARD: a row's scores ran to the forward's last key, masked or not, so the
+vectorised `exp` (`fast_math::exp_inplace`: AVX2 for groups of 8, scalar `exp` for the
+remainder) split the same row's scores differently with the prompt's length.
+`examples/logits_reference_probe.rs` (58 tokens, `LOGITS_PROBE_DECODE` 2 vs 3, i.e. a
+56-token and a 55-token prompt pass): position 0 identical, positions 54-57 all differ (max
+logit difference 0.17-0.28) — position 54 is a PROMPT row in both, reading the same 55 keys.
+With both kernels switched to the matmul path (`SWARMLLM_DECODE_ATTN=standard
+SWARMLLM_PREFILL_ATTN=standard`) the same rows differ too. Position 0 agrees because
+attention over one key is exact.
+
+**What the systems with more scars say.** Thinking Machines, "Defeating Nondeterminism in LLM
+Inference" (2025): a token's reduction order "must be identical regardless of whether 0
+tokens are in the KV cache (prefill)" or many; "instead of fixing the # of splits, we fix the
+size of each split". SGLang's deterministic mode uses batch-invariant attention with a fixed
+split-KV size. llama.cpp documents `cache_prompt` as nondeterministic for the same reason
+(logits not bit-identical across batch sizes). "Same Request, Different Answer" (arXiv
+2609.04748) measured cache-hit vs recompute divergence on llama.cpp: 37.4% of episodes at
+16-bit, 82.5% at 4-bit — quantization widens near-ties. The quantized matmuls here were
+already row-count invariant (`vec_dot_rows_*`, bit-identical to the per-row loop, asserted by
+`examples/qmatmul_bench`), so attention was the whole difference.
+
+**Now**: `inference::attn_rows` is the ONE arithmetic of a row on the processor; both
+kernels call `chunk_partials`, then fold a row's chunks in chunk order through `merge_into`
+and `finish_row`.
+
+- A row reads exactly the keys its mask shows (`visible_range`: first to last finite) — a
+  causal row at `p` reads `0..=p` whether the forward ends there or not.
+- Keys go in fixed 256-key chunks of ABSOLUTE position. A windowed layer hands attention its
+  keys from the first query's window (`LayerWeights::keys_in_window`), which moves with the
+  forward, so `key_origin` (the absolute position of the first key) is a REQUIRED argument
+  through `run_attention_windowed` → `standard_attention` → both kernels.
+- Per chunk and row: scores, then `× scale`, soft-cap, mask; the max (`lane_max`, exact in any
+  order); `exp` over exactly the row's slice; the sum (`lane_sum`); `Σ p·v` as one fused
+  multiply-add per key, in key order (`axpy`).
+- A row's chunks are folded in chunk order by flash-attention's online merge (`merge_into`:
+  `m = max(m_acc, m_p)`, `acc·e^(m_acc−m) + p·e^(m_p−m)`) — a prompt task folds each chunk as
+  it finishes, a decode step computes its chunks side by side and folds them afterwards, the
+  same fold either way.
+- **The arithmetic is defined, not left to the compiler.** A dot product is eight lane
+  accumulators fed by fused multiply-adds over the dimension in order, the lanes added as
+  `((l0+l1)+(l2+l3))+((l4+l5)+(l6+l7))`, then the tail by sequential FMA; `lane_sum` is the
+  same eight lanes and tree. The AVX2+FMA kernels (`attn_rows::avx`, compiled in only where the
+  build targets both — every x86-64 release since v0.3.79) compute exactly that; every other
+  build runs the portable twin, the same definition written out (a plain multiply then add
+  where the processor has no fused one), so every build agrees with itself. The blocked loops
+  (`qk::<R, C>`, `pv::<R>`) change only how many rows and keys share a loaded vector, never one
+  element's operations — `the_vector_kernels_are_the_portable_arithmetic_exactly` compares
+  them bit for bit.
+
+`a_row_s_attention_does_not_depend_on_the_forward_it_is_in` compares bits for a row read in a
+whole prompt, a later piece, a shorter prompt and alone, with GQA, MHA, soft-cap and two windowed
+geometries cut as production cuts them. It fails on the old prompt kernel (position 1 alone), and
+on the windowed case with the origin withheld (position 268 in a later piece).
+
+**What it cost to keep the speed.** The first invariant kernel (one row at a time, scalar) read
+a 6,144-key chunk of 128 rows in 67.5 ms against the old kernel's 27.1 (`examples/attn_bench`,
+8 threads). Blocking four rows × two keys per loaded vector with FMA and a horizontal-add tree:
+38.3. The online merge in place of a stored partial per chunk: 35.5. Vectorising the
+scale/mask/max/sum step — a branch per element and a sequential sum had become the largest
+cost: 26.6-26.8 against 25.2-25.9 for the old kernel at 6,144 keys, 8.1-8.3 against 9.3-9.8 at
+2,048; at 4 threads 41.9-42.1 against 40.1-40.4. A decode step 1.3-1.5 ms both.
+Whole model: `examples/prefill_bench` on Llama-3.2-3B Q4_K_M, 128-token
+pieces as a node reads a prompt, 8 threads for the prompt and 4 for decode, live node stopped,
+the old kernels as an env-switched arm of the SAME binary (removed after), arms interleaved,
+best of 2:
+
+| | old kernels | one row arithmetic |
+|---|---|---|
+| 2,048-token prompt | 63.0 tok/s | 64.2 |
+| decode at ~2,064 cached | 14.1 tok/s | 14.2 |
+| 6,144-token prompt | 56.6 tok/s | 58.2 |
+| decode at ~6,160 cached | 10.5 tok/s | 10.6 |
+
+**Verified on the request**: the release node binary, the rig shape above (one isolated node in its own network
+namespace, Llama-3.2-3B on the processor, the same greedy request four times, the node restarted
+between two rounds, the prompt cache on): all eight replies one text (`ce3aac3a`, 930 chars), with
+prefix-cache hits on every repeat — before, `2d85feea` first and `f60b97f4` after, in both rounds.
+`logits_reference_probe` (58 tokens, a 56-row and a 55-row prompt pass): all 58 rows bit-identical
+(rows 54-57 differed by 0.17-0.28 before); controls in the same build — both kernels on the matmul
+path: rows 48-57 differ (0.20-0.24); only the decode kernel on it: rows 55-57 differ (0.19-0.20).
+Scored against llama.cpp (`score_against_reference.py`), the new reply is the model's as the old
+two were: 197/200 rank 1, worst rank 2, largest gap 0.107 (old: 199/200 and 198/200, gaps 0.158
+and 0.060).
+
+**What a change must keep.** One arithmetic: a new processor attention path calls
+`attn_rows`, never its own loop, and a faster kernel computes the defined arithmetic exactly
+(add it to the bit-for-bit test). Chunk size a constant of absolute position. A row never
+reads past its visible range. The matmul paths (`layers::matmul_attention`) are NOT invariant
+— a kernel that declines (a per-head mask, a non-f32 cache) gives that call the old
+behaviour, and so does every card (FUTURE_WORK #313).
 
 ## A model's RoPE frequency factors are applied — and reach a node without shard 0 (2026-09-27, #124)
 

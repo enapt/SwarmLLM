@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #313**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #314**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -217,17 +217,23 @@ the copy for one pass. **The log now names the rule** (`copy_kept_because`, "DIA
 would keep once it landed — fetching it", and the fallback's pings): read it on the next
 occurrence before changing the rule.
 
-#### #179 — A greedy reply (`temperature: 0`) is not reproducible run to run on the processor
-`P3` · correctness · **OPEN** — 2026-08-18 · history: archive § "`temperature: 0` with a fixed seed is not reproducible", gotcha #327
+#### #313 — A greedy reply on a CARD is not the same with the prompt cache on as off
+`P3` · correctness · **OPEN** — 2026-10-19 · history: #179 (the processor half, closed)
 
-Same binary, node and prompt at `temperature: 0` gave different (coherent, correct) wording on
-two runs; the null control (old code path) was equally non-reproducible. Never investigated:
-a float reduction whose order varies (rayon in the CPU pools) or near-tied logits are the
-suspects. Measure by running greedy twice on one node and diffing logits
-(`examples/logits_reference_probe.rs`). Consequence until then: generated text cannot compare
-two code paths — assert on the tensor a change touches. (Honouring a request's `seed` for
-sampled replies is a separate, deliberately deferred item: `docs/ARCHITECTURE.md` § "Deferred
-Items".)
+#179 found why a `temperature: 0` reply changed after its first run: a prompt-cache hit runs the
+last prompt token as a decode step, and the decode kernel summed a row differently from the
+prompt kernel. On the processor both now share one arithmetic (`inference::attn_rows`). On a
+card they still do not: a decode step is `decode_attn`'s CUDA kernel (`decode_attn::chunk_for`,
+a chunk that follows the cache length), a prompt pass is `layers::matmul_attention` (cuBLAS
+products and a separate softmax), so a hit can still change a card's reply. The fix has
+SGLang's shape — the same split-KV of absolute position in BOTH card paths, which means a card
+prompt kernel that reads a row's keys in the decode kernel's chunks. #309's chunk (16/32/64) can
+stay if it remains a function of the ROW's visible length, the same function in both paths; a
+row's cache length at decode is its visible length at prompt time. Measure as #179 was, on a CUDA build:
+one isolated node, the same request four times with the cache on, restarted between two rounds,
+the replies' md5s compared; and `examples/logits_reference_probe.rs` with
+`LOGITS_PROBE_DECODE` 2 vs 3. Until then: on a card, generated text cannot compare two code
+paths across a cache hit.
 
 ### Reliability and failover
 
@@ -2741,7 +2747,21 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163, #310; #186 decided)
+**Closed 2026-10-19, not yet released** (#179, #115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163, #310; #186 decided)
+- #179 — **A `temperature: 0` reply on the processor is the same every time, prompt cache or
+  not.** The first run of a request and every repeat gave two different texts (Llama-3.2-3B:
+  `2d85feea` then `f60b97f4`, in both rounds of a restart); with the prompt cache off all eight
+  replies agreed. A cache hit runs the last prompt token as a decode step, and the decode and
+  prompt kernels summed a row differently — the prompt kernel even split a row by the
+  FORWARD's length. Both now run one row arithmetic (`inference::attn_rows`): a row reads only
+  its visible keys, in fixed 256-key chunks of absolute position, each chunk scored, softmaxed
+  and summed by one defined order of fused multiply-adds, the chunks folded in order by the
+  online merge (Thinking Machines' batch invariance; SGLang's fixed split-KV). Speed kept:
+  Llama-3.2-3B reads a 6,144-token prompt at 58.2 tok/s (was 56.6) and a 2,048-token one at
+  64.2 (63.0), decode 10.6 / 14.2 (10.5 / 14.1), best of 2 in one binary. Verified on the request: the same greedy request eight times across a restart, prompt cache on,
+  gives one text; a row read alone and inside the prompt are bit-identical, and the reply scores
+  against llama.cpp as before (197/200 rank 1, worst rank 2). Left: the card (#313). Evidence: `docs/invariants/inference.md` §
+  "A row's attention on the processor does not depend on the forward it is in".
 - #310 — **LLaVA reads a picture as LLaVA does.** Five differences, measured: the class row reached
   the model (577 rows, now 576), the feed-forward ran the erf GELU (CLIP's is quick GELU — read off
   `clip.use_gelu` / `clip.use_silu` as llama.cpp does, `EncoderActivation::from_keys`), a file

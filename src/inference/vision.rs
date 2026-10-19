@@ -419,6 +419,7 @@ impl VisionTransformerBlock {
             None,
             1.0 / (self.head_dim as f32).sqrt(),
             None,
+            0,
         )
         .map_err(map_err("vit_attn_tiled"))?;
         let attn_output = match tiled {

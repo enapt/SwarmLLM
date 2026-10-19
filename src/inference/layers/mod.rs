@@ -794,6 +794,7 @@ impl MlaWeights {
             self.n_head,
             self.n_head, // MLA: n_kv_head == n_head (full K/V per head)
             None,        // no softcap for DeepSeek
+            0,           // no window: the keys start at position 0
         )?;
 
         // y: [b, n_head, s, key_length] but we need [b, n_head, s, value_length]
@@ -3079,7 +3080,13 @@ impl LayerWeights {
         v: Tensor,
         mirror: Option<(Tensor, Tensor)>,
         held_from: usize,
-    ) -> CandleResult<(Tensor, Tensor, Option<(Tensor, Tensor)>, Option<usize>)> {
+    ) -> CandleResult<(
+        Tensor,
+        Tensor,
+        Option<(Tensor, Tensor)>,
+        Option<usize>,
+        usize,
+    )> {
         let first_query = held_from + k.dim(2)?.saturating_sub(seq_len);
         let (Some(start), Some(window)) = (
             self.window_start_for(first_query, seq_len),
@@ -3091,7 +3098,7 @@ impl LayerWeights {
                      its whole history (FUTURE_WORK #281)"
                 );
             }
-            return Ok((k, v, mirror, None));
+            return Ok((k, v, mirror, None, 0));
         };
         if start < held_from {
             candle_core::bail!(
@@ -3099,6 +3106,8 @@ impl LayerWeights {
                  cache still holds (FUTURE_WORK #281)"
             );
         }
+        // Absolute, as `held_from` is: the position the handed-over keys start at.
+        let key_origin = start;
         let start = start - held_from;
         // BHSD: positions on dim 2; the f16 mirror is BSHD, positions on dim 1.
         let mirror = match mirror {
@@ -3110,6 +3119,7 @@ impl LayerWeights {
             from_position(&v, 2, start)?,
             mirror,
             Some(window - 1),
+            key_origin,
         ))
     }
 
@@ -3732,6 +3742,7 @@ pub(crate) fn standard_attention(
     n_head: usize,
     n_kv_head: usize,
     attn_logit_softcap: Option<f32>,
+    key_origin: usize,
 ) -> CandleResult<Tensor> {
     // GQA decode: group the query heads instead of expanding the KV heads.
     //
@@ -3821,6 +3832,7 @@ pub(crate) fn standard_attention(
             mask,
             crate::inference::attn_softmax::scale_from_head_dim(head_dim) as f32,
             attn_logit_softcap,
+            key_origin,
         )? {
             return Ok(out);
         }
@@ -3838,6 +3850,7 @@ pub(crate) fn standard_attention(
             mask,
             crate::inference::attn_softmax::scale_from_head_dim(head_dim) as f32,
             attn_logit_softcap,
+            key_origin,
         )? {
             return Ok(out);
         }
@@ -4387,6 +4400,7 @@ pub(crate) fn run_attention(
         attn_logit_softcap,
         flash_kv,
         None,
+        0,
     )
 }
 
@@ -4394,7 +4408,10 @@ pub(crate) fn run_attention(
 /// already start where the FIRST query's window does
 /// (`LayerWeights::keys_in_window`), and `window_left` (the window less one)
 /// bounds each later query's for the flash kernel, which reads no mask. Every
-/// other path reads it from `mask`, built over the same keys.
+/// other path reads it from `mask`, built over the same keys. `key_origin` is
+/// the absolute position of `k`'s first key (`keys_in_window`'s cut; 0 without
+/// one): the processor kernels split keys at fixed ABSOLUTE positions, so a row
+/// reads the same chunks however far back its forward's window starts (#179).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_attention_windowed(
     q: &Tensor,
@@ -4407,6 +4424,7 @@ pub(crate) fn run_attention_windowed(
     attn_logit_softcap: Option<f32>,
     flash_kv: FlashKv<'_>,
     window_left: Option<usize>,
+    key_origin: usize,
 ) -> CandleResult<Tensor> {
     let _ = &flash_kv; // consumed only by the CUDA flash arm below
     let _ = &window_left; // likewise
@@ -4490,6 +4508,7 @@ pub(crate) fn run_attention_windowed(
                     n_head,
                     n_kv_head,
                     attn_logit_softcap,
+                    key_origin,
                 );
             }
 
@@ -4593,6 +4612,7 @@ pub(crate) fn run_attention_windowed(
                     n_head,
                     n_kv_head,
                     attn_logit_softcap,
+                    key_origin,
                 );
             }
 
@@ -4695,6 +4715,7 @@ pub(crate) fn run_attention_windowed(
                 n_head,
                 n_kv_head,
                 attn_logit_softcap,
+                key_origin,
             )
         }
     }
@@ -4923,7 +4944,7 @@ impl LayerWeights {
         // step), cut to the layer's sliding window where it binds. A layer that
         // keeps no cache reads its source's ([`Self::kv_source`]), whose slot
         // the executor handed over as `kv_cache`.
-        let (k, v, mirror, window_left) = match cache_home {
+        let (k, v, mirror, window_left, key_origin) = match cache_home {
             None => {
                 let (k, v) = match kv {
                     Some((k, v)) => append_to_cache(
@@ -4944,10 +4965,10 @@ impl LayerWeights {
                 // (`run_attention`).
                 let mirror = kv_cache.as_ref().and_then(|c| c.flash_operands());
                 let held_from = kv_cache.as_ref().map_or(0, LayerKv::held_from);
-                let (k, v, mirror, window_left) =
+                let (k, v, mirror, window_left, key_origin) =
                     self.keys_in_window(seq_len, k, v, mirror, held_from)?;
                 let (k, v, mirror) = history_beside_queries((k, v, mirror), x.device())?;
-                (k, v, mirror, window_left)
+                (k, v, mirror, window_left, key_origin)
             }
             // The cache stays on its layer's own device: the new rows go down
             // to it, and the history it then holds comes up for the attention.
@@ -4973,12 +4994,14 @@ impl LayerWeights {
                     None => shared_history(kv_cache, index_pos, seq_len)?,
                 };
                 let held_from = kv_cache.as_ref().map_or(0, LayerKv::held_from);
-                let (k, v, _, window_left) = self.keys_in_window(seq_len, k, v, None, held_from)?;
+                let (k, v, _, window_left, key_origin) =
+                    self.keys_in_window(seq_len, k, v, None, held_from)?;
                 (
                     sent_to_card(&k.force_contiguous()?, x.device())?,
                     sent_to_card(&v.force_contiguous()?, x.device())?,
                     None,
                     window_left,
+                    key_origin,
                 )
             }
         };
@@ -4998,6 +5021,7 @@ impl LayerWeights {
                 self.attn_logit_softcap,
                 mirror.as_ref().map(|(k, v)| (k, v)),
                 window_left,
+                key_origin,
             )
         )?;
 
@@ -5164,7 +5188,7 @@ impl LayerWeights {
             };
             let mirror = cache_slot.as_ref().and_then(|c| c.flash_operands());
             let held_from = cache_slot.as_ref().map_or(0, LayerKv::held_from);
-            let (ki, vi, mirror, window_left) =
+            let (ki, vi, mirror, window_left, key_origin) =
                 self.keys_in_window(seq_len, ki, vi, mirror, held_from)?;
             let (ki, vi, mirror) = history_beside_queries((ki, vi, mirror), qi.device())?;
             heads.push(crate::inference::prof::timed!(
@@ -5180,6 +5204,7 @@ impl LayerWeights {
                     self.attn_logit_softcap,
                     mirror.as_ref().map(|(k, v)| (k, v)),
                     window_left,
+                    key_origin,
                 )
             )?);
         }
@@ -5618,14 +5643,16 @@ mod cpu_decode_bench {
 
         // --- warm up standard path ---
         for _ in 0..3 {
-            let _ = super::standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None)
-                .expect("std warm");
+            let _ =
+                super::standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0)
+                    .expect("std warm");
         }
 
         let t0 = std::time::Instant::now();
         for _ in 0..iters {
-            let _ = super::standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None)
-                .expect("std iter");
+            let _ =
+                super::standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0)
+                    .expect("std iter");
         }
         let std_ms = t0.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
@@ -6046,7 +6073,7 @@ mod blocked_attention_tests {
         let q = mk(h, 1, d, 0.0);
         let k = mk(h, k_len, d, 1.3);
         let v = mk(h, k_len, d, 2.9);
-        let got = standard_attention(&q, &k, &v, None, d, h, h, None).unwrap();
+        let got = standard_attention(&q, &k, &v, None, d, h, h, None, 0).unwrap();
         let want =
             attention_scores_block(&q, &k.t().unwrap(), &v.contiguous().unwrap(), None, d, None)
                 .unwrap();
@@ -6311,7 +6338,7 @@ mod cuda_attention_memory_probe {
         let k = mk(n, 1.0);
         let v = mk(n, 2.0);
 
-        let out = standard_attention(&q, &k, &v, None, head_dim, heads, heads, None)
+        let out = standard_attention(&q, &k, &v, None, head_dim, heads, heads, None, 0)
             .expect("attention must complete without exhausting device memory");
         assert_eq!(out.dims(), &[1, heads, n, head_dim]);
         // Force the result to be realised before we claim success.

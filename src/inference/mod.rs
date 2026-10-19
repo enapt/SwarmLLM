@@ -1,5 +1,6 @@
 pub mod allreduce;
 pub mod attn_kernel;
+pub(crate) mod attn_rows;
 pub(crate) mod attn_softmax;
 pub(crate) mod cancel;
 pub(crate) mod card_pace;

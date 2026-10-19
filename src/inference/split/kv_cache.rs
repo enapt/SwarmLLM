@@ -3647,9 +3647,9 @@ mod tests {
             k16.to_dtype(DType::F32).unwrap(),
             v16.to_dtype(DType::F32).unwrap(),
         );
-        let got = standard_attention(&q, &k16, &v16, None, d, n_head, n_kv_head, None).unwrap();
+        let got = standard_attention(&q, &k16, &v16, None, d, n_head, n_kv_head, None, 0).unwrap();
         let want =
-            standard_attention(&q, &k_wide, &v_wide, None, d, n_head, n_kv_head, None).unwrap();
+            standard_attention(&q, &k_wide, &v_wide, None, d, n_head, n_kv_head, None, 0).unwrap();
         assert_eq!(got.dtype(), DType::F32);
         assert_eq!(flat32(&got), flat32(&want));
     }

@@ -5,6 +5,7 @@ paths:
   - "src/inference/executor.rs"
   - "src/inference/attn_kernel.rs"
   - "src/inference/attn_softmax.rs"
+  - "src/inference/attn_rows.rs"
   - "src/inference/decode_attn.rs"
   - "src/inference/fast_math.rs"
   - "src/inference/cpu_pools.rs"
@@ -130,11 +131,11 @@ Test `a_blocked_gqa_call_is_grouped_not_expanded` counts expansions.
 
 → `docs/invariants/inference.md` § "Attention kernel choice and the query-length cliff"
 
-## Several query positions on the processor never write the score matrix (2026-09-26)
+## A row's attention on the processor is ONE arithmetic, whatever forward carries it (2026-10-19, #179)
 
-**`inference::prefill_attn::gqa_prefill_attention_cpu`** answers CPU attention with `q_len >= 2` before any matmul path: key-tiled in fixed 1,024-key chunks, the `[rows, kv_len]` matrix never written. The matmul paths are **`layers::matmul_attention`** — a test of blocking, grouping or in-place V must call it, not `standard_attention`. Sizes stay constants. A/B: `SWARMLLM_PREFILL_ATTN=standard`.
+**`inference::attn_rows`** (`chunk_partials`, then `merge_into` + `finish_row` in chunk order) is how BOTH processor kernels compute a row — `decode_attn::gqa_decode_attention_cpu` (one position) and `prefill_attn::gqa_prefill_attention_cpu` (`q_len >= 2`, before any matmul path; the `[rows, kv_len]` matrix never written). A row reads only its mask's visible keys (`visible_range`), in fixed 256-key chunks of ABSOLUTE position: **`key_origin` is a REQUIRED argument** (a windowed layer's keys start at its window, `keys_in_window`). A prompt-cache hit runs the last prompt token as a decode step, so two arithmetics gave a different greedy reply on every repeat. A new processor attention path calls `attn_rows`; its arithmetic is DEFINED (eight-lane fused multiply-add dot, one add tree, `lane_sum`) and the AVX2+FMA kernels compute it exactly — a faster kernel joins `the_vector_kernels_are_the_portable_arithmetic_exactly`. Guard: `a_row_s_attention_does_not_depend_on_the_forward_it_is_in`. The matmul paths (**`layers::matmul_attention`** — a test of blocking, grouping or in-place V must call it, not `standard_attention`) and every card are NOT invariant (#313). Sizes stay constants. A/B: `SWARMLLM_PREFILL_ATTN=standard`, `SWARMLLM_DECODE_ATTN=standard`.
 
-→ `docs/invariants/inference.md` § "Several query positions on the processor: tiled over the keys, the score matrix never written"
+→ `docs/invariants/inference.md` § "A row's attention on the processor does not depend on the forward it is in" (supersedes § "Several query positions on the processor: tiled over the keys")
 
 ## Local speculative decoding — `inference::model_worker::ngram_spec_eligible`
 
@@ -319,6 +320,7 @@ Each names the ONE place a decision is made (`.claude/rules/architecture.md` § 
 - **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`. Several-row AVX2 kernels for Q4_K, Q6_K, Q2_K, Q3_K, bit-identical to the per-row loop; `k_quants::vec_dot_rows_chosen` is the one call (A/B `SWARMLLM_QMATMUL_ROWS=per-row`). A 2-3 row tail — a speculative check's whole call — goes through ONE pass (`avx.rs::tail_in_one_pass`; A/B `SWARMLLM_QMATMUL_TAIL=per-row`). → § "A 2-3 row tail shares one pass too"
 - **`inference::decode_attn::gqa_decode_attention_cpu`** — each K/V row read ONCE per group. → § "It read the cache once per QUERY head"
 - **`inference::prefill_attn::gqa_prefill_attention_cpu`** — `q_len >= 2`.
+- **`inference::attn_rows::chunk_partials` + `merge_into` / `finish_row`** — the ONE arithmetic of a row's attention on the processor, both kernels. → § "A row's attention on the processor does not depend on the forward it is in"
 - **`inference::fast_math`** — `exp_inplace`, `silu_mul`.
 - **Vendored `rayon-core` (`vendor/rayon-core/src/sleep/mod.rs::spin_budget`)** — every pool's idle workers spin 200 µs before sleeping, so a token's small regions pay no wake per worker (8-thread decode 172 → 123-127 ms); A/B `SWARMLLM_RAYON_SPIN_US=0`; guard `rayon_core_is_the_vendored_copy_that_spins_before_sleeping`. → § "Idle rayon workers spin 200 µs before they sleep"
 - **`inference::cpu_pools::in_phase_pool`** — one choke point. Decode runs INSIDE a pool even at the global pool's width (`pool_for`); from the caller every parallel op is a cross-thread handoff (#137, 3B 111 → 82 ms/token). A bench reproduces a node only at the node's `RAYON_NUM_THREADS`.

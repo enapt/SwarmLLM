@@ -26,8 +26,18 @@ fn gqa_standard_attention_llama3_ratio() {
         .collect();
     let mask = Tensor::from_slice(&mask_data, (seq_len, seq_len), &device).unwrap();
 
-    let out =
-        standard_attention(&q, &k, &v, Some(&mask), head_dim, n_head, n_kv_head, None).unwrap();
+    let out = standard_attention(
+        &q,
+        &k,
+        &v,
+        Some(&mask),
+        head_dim,
+        n_head,
+        n_kv_head,
+        None,
+        0,
+    )
+    .unwrap();
     assert_eq!(out.dims(), &[b, n_head, seq_len, head_dim]);
     let flat: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
     assert!(
@@ -46,7 +56,7 @@ fn gqa_standard_attention_mqa_ratio() {
     let k = Tensor::randn(0f32, 0.1, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
     let v = Tensor::randn(0f32, 0.1, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
 
-    let out = standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None).unwrap();
+    let out = standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0).unwrap();
     assert_eq!(out.dims(), &[b, n_head, seq_len, head_dim]);
 }
 
@@ -65,8 +75,18 @@ fn gqa_flash_vs_standard_llama3_prefill() {
         .collect();
     let mask = Tensor::from_slice(&mask_data, (seq_len, seq_len), &device).unwrap();
 
-    let out_std =
-        standard_attention(&q, &k, &v, Some(&mask), head_dim, n_head, n_kv_head, None).unwrap();
+    let out_std = standard_attention(
+        &q,
+        &k,
+        &v,
+        Some(&mask),
+        head_dim,
+        n_head,
+        n_kv_head,
+        None,
+        0,
+    )
+    .unwrap();
     let out_flash = run_attention(
         &q,
         &k,
@@ -92,7 +112,8 @@ fn gqa_flash_vs_standard_llama3_decode() {
     let k = Tensor::randn(0f32, 0.1, (b, n_kv_head, kv_len, head_dim), &device).unwrap();
     let v = Tensor::randn(0f32, 0.1, (b, n_kv_head, kv_len, head_dim), &device).unwrap();
 
-    let out_std = standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None).unwrap();
+    let out_std =
+        standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0).unwrap();
     let out_flash =
         run_attention(&q, &k, &v, None, n_head, n_kv_head, head_dim, None, None).unwrap();
     assert_tensors_close(&out_std, &out_flash, 1e-4, "GQA decode flash vs standard");

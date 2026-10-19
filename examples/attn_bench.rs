@@ -117,10 +117,32 @@ fn grouped_long_context(kv_lens: &str) {
                     Some(&mask),
                     scale as f32,
                     None,
+                    0,
                 )?
                 .expect("in scope"),
             )
         });
+        // One decode step against the same cache: the single-position kernel
+        // (`decode_attn`), which shares the prompt kernel's per-row arithmetic
+        // (`attn_rows`, #179). Run it at the decode width a node uses
+        // (`RAYON_NUM_THREADS=4` on the Ryzen), not the prompt's.
+        let q_one = Tensor::randn(0f32, 1., (1, groups * 3, 1, d), &dev).unwrap();
+        bench(
+            "decode step (decode_attn)",
+            2.0 * (groups * 3 * kv * d) as f64,
+            || {
+                Ok(swarmllm::inference::decode_attn::gqa_decode_attention_cpu(
+                    &q_one,
+                    &k,
+                    &v,
+                    None,
+                    scale as f32,
+                    None,
+                    0,
+                )?
+                .expect("in scope"))
+            },
+        );
         // What a fresh score-sized buffer costs before any arithmetic: every
         // op above allocates its output anew, and first touch of freshly mapped
         // pages faults once per page.

@@ -47,11 +47,11 @@ fn gemma2_attn_logit_softcap() {
 
     // Without soft-capping
     let out_no_cap =
-        standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None).unwrap();
+        standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0).unwrap();
 
     // With soft-capping (cap=50.0 like Gemma 2)
     let out_capped =
-        standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, Some(50.0)).unwrap();
+        standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, Some(50.0), 0).unwrap();
 
     // Both should produce valid output
     assert_eq!(out_no_cap.shape(), out_capped.shape());

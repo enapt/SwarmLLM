@@ -998,8 +998,18 @@ fn flash_attn_cpu_vs_standard_attention() {
     let mask = Tensor::from_slice(&mask_data, (seq_len, seq_len), &device).unwrap();
 
     // Standard path
-    let out_std =
-        standard_attention(&q, &k, &v, Some(&mask), head_dim, n_head, n_kv_head, None).unwrap();
+    let out_std = standard_attention(
+        &q,
+        &k,
+        &v,
+        Some(&mask),
+        head_dim,
+        n_head,
+        n_kv_head,
+        None,
+        0,
+    )
+    .unwrap();
 
     // Flash path (run_attention dispatches to CPU flash on CPU device)
     let out_flash = run_attention(
@@ -1046,7 +1056,8 @@ fn flash_attn_cpu_decode_no_mask() {
     let v = Tensor::randn(0f32, 0.1, (b, n_kv_head, kv_len, head_dim), &device).unwrap();
 
     // Standard path (no mask for decode)
-    let out_std = standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None).unwrap();
+    let out_std =
+        standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, None, 0).unwrap();
 
     // Flash path
     let out_flash =

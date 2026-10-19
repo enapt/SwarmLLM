@@ -10,8 +10,8 @@
 //! (`[b, kvh, S, d]`, rows contiguous).
 //!
 //! **Each K row and each V row is read ONCE for every query head of its
-//! group**, and the positions are split into fixed [`CHUNK`]s merged by
-//! flash-decoding's reduction. The first version said it read a group's K and V
+//! group**, and the positions are split into fixed [`attn_rows::CHUNK`]s computed
+//! side by side and folded in chunk order (`attn_rows::merge_into`). The first version said it read a group's K and V
 //! once and read them once PER QUERY HEAD — 3x the cache traffic on
 //! llama-3.2-3b, 7x on Qwen2.5-7B — which is why its decode slowed with context
 //! ~2.5x faster than llama.cpp's (#119). Fixed 2026-09-26, A/B inside one
@@ -31,19 +31,17 @@
 //! `SWARMLLM_DECODE_ATTN=standard` disables it for A/B inside one binary, the
 //! same discipline as `SWARMLLM_FORCE_STANDARD_ATTN` and `SWARMLLM_DECODE_THREADS`.
 //!
-//! Numerics: the dot products are summed in a different order than the GEMM's
-//! blocking, so results agree to ~1e-6 relative rather than bit-for-bit; the
-//! softmax is the reference composition (scale → soft-cap → mask → max-shifted
-//! exp → normalise), pinned against the matmul path by
-//! `decode_kernel_matches_the_matmul_path`.
+//! Numerics: a row's arithmetic is [`crate::inference::attn_rows`]', the SAME
+//! the prompt kernel (`prefill_attn`) gives that row, so a position computed
+//! alone (a prompt-cache hit's last token) reads exactly what it would have
+//! read inside the prompt (#179). Against the matmul path it agrees to ~1e-6
+//! (`decode_kernel_matches_the_matmul_path`): the dot products sum in a
+//! different order from the GEMM's blocking.
 
 use candle_core::{CpuStorage, Device, Layout, Result, Storage, Tensor};
 use rayon::prelude::*;
 
-/// Cached positions per task. FIXED — never derived from the pool width — so
-/// the summation order, and with it the result, is the same whatever the
-/// machine's thread count. 256 rows of K is 128 KB at `d = 128`, inside L2.
-const CHUNK: usize = 256;
+use crate::inference::attn_rows::{self, CHUNK};
 
 /// `SWARMLLM_DECODE_ATTN=standard` → never use the kernel (A/B switch).
 pub fn decode_kernel_enabled() -> bool {
@@ -92,7 +90,9 @@ pub(crate) fn f32_planes<'a>(storage: &'a Storage, layout: &Layout) -> Option<Pl
 ///
 /// `q`: `[b, n_head, 1, d]`; `k`, `v`: `[b, n_kv_head, S, d]`; `mask`: an
 /// additive row broadcastable to `[S]` (`0.0` visible, `-inf` masked) or `None`;
-/// `scale` multiplies the raw score; `softcap` is Gemma-2's tanh cap.
+/// `scale` multiplies the raw score; `softcap` is Gemma-2's tanh cap;
+/// `key_origin` is the absolute position of `k`'s first key — 0, except for a
+/// windowed layer, whose keys start at its window ([`attn_rows`]).
 pub fn gqa_decode_attention_cpu(
     q: &Tensor,
     k: &Tensor,
@@ -100,6 +100,7 @@ pub fn gqa_decode_attention_cpu(
     mask: Option<&Tensor>,
     scale: f32,
     softcap: Option<f32>,
+    key_origin: usize,
 ) -> Result<Option<Tensor>> {
     if !decode_kernel_enabled() || !matches!(q.device(), Device::Cpu) {
         return Ok(None);
@@ -159,10 +160,15 @@ pub fn gqa_decode_attention_cpu(
         return Ok(None);
     };
 
+    // The positions this step reads: all of them, unless the mask hides some
+    // at either end — then the ones it shows, as a prompt row would (#179).
+    let seen = vec![attn_rows::visible_range(mask_row.as_deref(), s_len); n_rep];
+    let chunks = attn_rows::chunks_spanned(key_origin, s_len);
+
     // Pass 1, one task per (batch, kv head, chunk of positions): each K row and
     // each V row of the chunk is read ONCE, for every query head of the group.
-    let n_chunks = s_len.div_ceil(CHUNK);
-    let row = d + 2; // per query head: [chunk max, Σ exp, o[0..d]]
+    let n_chunks = chunks.len();
+    let row = attn_rows::partial_len(d);
     let mut partial = vec![0f32; b * n_kv_head * n_chunks * n_rep * row];
     partial
         .par_chunks_mut(n_rep * row)
@@ -170,97 +176,40 @@ pub fn gqa_decode_attention_cpu(
         .for_each(|(t, part)| {
             let g = t / n_chunks;
             let (bi, h) = (g / n_kv_head, g % n_kv_head);
-            let s0 = (t % n_chunks) * CHUNK;
-            let n = CHUNK.min(s_len - s0);
-            let k_base = kp.offset + bi * kp.strides[0] + h * kp.strides[1] + s0 * d;
-            let v_base = vp.offset + bi * vp.strides[0] + h * vp.strides[1] + s0 * d;
-            let k_chunk = &kp.data[k_base..k_base + n * d];
-            let v_chunk = &vp.data[v_base..v_base + n * d];
+            let k_base = kp.offset + bi * kp.strides[0] + h * kp.strides[1];
+            let v_base = vp.offset + bi * vp.strides[0] + h * vp.strides[1];
             let q0 = (bi * n_head + h * n_rep) * d;
-            let q_group = &qv[q0..q0 + n_rep * d];
-
-            // scores[r * n + s] = scale * (q_r · K[s]) → soft-cap → + mask
-            let mut scores = vec![0f32; n_rep * n];
-            for (s, krow) in k_chunk.chunks_exact(d).enumerate() {
-                for (r, qrow) in q_group.chunks_exact(d).enumerate() {
-                    let mut x = dot(qrow, krow) * scale;
-                    if let Some(c) = softcap {
-                        x = c * (x / c).tanh();
-                    }
-                    if let Some(m) = &mask_row {
-                        x += m[s0 + s];
-                    }
-                    scores[r * n + s] = x;
-                }
-            }
-            // Max-shifted exp per query head. A chunk every position of which is
-            // masked for this head contributes nothing: its max stays -inf and
-            // the merge below skips it (-inf - -inf would be NaN).
-            for (r, sc) in scores.chunks_exact_mut(n).enumerate() {
-                let mut max = f32::NEG_INFINITY;
-                for &x in sc.iter() {
-                    if x > max {
-                        max = x;
-                    }
-                }
-                part[r * row] = max;
-                if max == f32::NEG_INFINITY {
-                    sc.iter_mut().for_each(|x| *x = 0.0);
-                    continue;
-                }
-                for x in sc.iter_mut() {
-                    *x -= max;
-                }
-                crate::inference::fast_math::exp_inplace(sc);
-            }
-            // Σ exp · V, one read of each V row for every query head.
-            for (s, vrow) in v_chunk.chunks_exact(d).enumerate() {
-                for r in 0..n_rep {
-                    let p = scores[r * n + s];
-                    if p == 0.0 {
-                        continue;
-                    }
-                    let acc = &mut part[r * row + 1..(r + 1) * row];
-                    acc[0] += p;
-                    axpy(p, vrow, &mut acc[1..]);
-                }
-            }
+            let mut scores = vec![0f32; n_rep * CHUNK];
+            attn_rows::chunk_partials(
+                &qv[q0..q0 + n_rep * d],
+                &seen,
+                &kp.data[k_base..k_base + s_len * d],
+                &vp.data[v_base..v_base + s_len * d],
+                d,
+                key_origin,
+                chunks.start + t % n_chunks,
+                &|_| mask_row.as_deref(),
+                scale,
+                softcap,
+                &mut scores,
+                part,
+            );
         });
 
-    // Pass 2, one task per (batch, kv head): merge the chunks — flash-decoding's
-    // reduction. out = Σ_c e^(m_c - M) o_c / Σ_c e^(m_c - M) l_c. With a single
-    // chunk the weight is exactly 1 and this is the plain o / l.
+    // Pass 2, one task per (batch, kv head): each row folds its chunks in
+    // order, as a prompt task folds them (`attn_rows::merge_into`).
     let mut out = vec![0f32; b * n_head * d];
     out.par_chunks_mut(n_rep * d)
         .enumerate()
         .for_each(|(g, out_g)| {
-            let chunk_at = |c: usize, r: usize| ((g * n_chunks + c) * n_rep + r) * row;
+            let mut acc = vec![0f32; row];
             for (r, o) in out_g.chunks_exact_mut(d).enumerate() {
-                let mut big_m = f32::NEG_INFINITY;
+                attn_rows::empty_partial(&mut acc);
                 for c in 0..n_chunks {
-                    let m = partial[chunk_at(c, r)];
-                    if m > big_m {
-                        big_m = m;
-                    }
+                    let at = ((g * n_chunks + c) * n_rep + r) * row;
+                    attn_rows::merge_into(&mut acc, &partial[at..at + row]);
                 }
-                if big_m == f32::NEG_INFINITY {
-                    continue; // every position masked: leave zeros
-                }
-                let mut denom = 0f32;
-                for c in 0..n_chunks {
-                    let at = chunk_at(c, r);
-                    let m = partial[at];
-                    if m == f32::NEG_INFINITY {
-                        continue;
-                    }
-                    let w = (m - big_m).exp();
-                    denom += w * partial[at + 1];
-                    axpy(w, &partial[at + 2..at + row], o);
-                }
-                if denom > 0.0 {
-                    let inv = 1.0 / denom;
-                    o.iter_mut().for_each(|x| *x *= inv);
-                }
+                attn_rows::finish_row(&acc, o);
             }
         });
 
@@ -789,7 +738,7 @@ mod tests {
                 .to_vec1::<f32>()
                 .unwrap();
 
-            let got = gqa_decode_attention_cpu(&q, &k, &v, mask.as_ref(), scale, softcap)
+            let got = gqa_decode_attention_cpu(&q, &k, &v, mask.as_ref(), scale, softcap, 0)
                 .unwrap()
                 .expect("kernel applies to these inputs")
                 .flatten_all()
@@ -1052,13 +1001,13 @@ mod tests {
         let dev = Device::Cpu;
         let q = Tensor::randn(0f32, 1.0, (1, 8, 2, 64), &dev).unwrap(); // q_len 2
         let k = Tensor::randn(0f32, 1.0, (1, 8, 10, 64), &dev).unwrap();
-        assert!(gqa_decode_attention_cpu(&q, &k, &k, None, 0.1, None)
+        assert!(gqa_decode_attention_cpu(&q, &k, &k, None, 0.1, None, 0)
             .unwrap()
             .is_none());
         let q1 = Tensor::randn(0f32, 1.0, (1, 8, 1, 64), &dev).unwrap();
         // K whose (S, d) plane is not dense: a transposed view.
         let kt = k.transpose(2, 3).unwrap();
-        assert!(gqa_decode_attention_cpu(&q1, &kt, &kt, None, 0.1, None)
+        assert!(gqa_decode_attention_cpu(&q1, &kt, &kt, None, 0.1, None, 0)
             .unwrap()
             .is_none());
     }
