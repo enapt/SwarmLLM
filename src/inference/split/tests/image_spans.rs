@@ -35,7 +35,7 @@ fn a_pictures_rows_see_each_other_and_the_text_before_it_is_untouched() {
         1e-6,
         "the text before the picture sees nothing it did not see before",
     );
-    let differs = |a: &Tensor, b: &Tensor| {
+    let largest_difference = |a: &Tensor, b: &Tensor| {
         (a - b)
             .unwrap()
             .abs()
@@ -44,14 +44,18 @@ fn a_pictures_rows_see_each_other_and_the_text_before_it_is_untouched() {
             .unwrap()
             .to_scalar::<f32>()
             .unwrap()
-            > 1e-4
     };
     assert!(
-        differs(&rows(&both_ways, 3..7), &rows(&causal, 3..7)),
+        largest_difference(&rows(&both_ways, 3..7), &rows(&causal, 3..7)) > 1e-4,
         "a picture's rows before its last see its later rows"
     );
+    // A second-order effect: only the second layer's keys move, and this
+    // model's weights are small (0.02), so it is ~1e-4 (200 runs on
+    // 2026-10-19: 7.4e-5 to 3.0e-4 — a 1e-4 bar failed one run in 33, CI
+    // included). The text before the picture is the noise floor, and it is
+    // exactly 0, so any difference at all is the picture's.
     assert!(
-        differs(&rows(&both_ways, 8..12), &rows(&causal, 8..12)),
+        largest_difference(&rows(&both_ways, 8..12), &rows(&causal, 8..12)) > 1e-6,
         "the text after the picture reads the picture's changed rows"
     );
     assert!(
