@@ -399,7 +399,10 @@ pub(crate) fn request_may_be_led_by_its_head(
         return false;
     }
     let encrypted = state.encrypted_pipeline_for_request(&request.model_id, request.id);
-    if encrypted || state.config.inference.local_embedding_privacy {
+    if state
+        .privacy_refuses_a_whole_hand_off(&request.model_id, encrypted)
+        .is_some()
+    {
         return false;
     }
     // Any restriction on where this request may go (private mode, a model kept
@@ -455,9 +458,11 @@ pub(crate) fn request_may_be_handed_off(
     // peer, and this refused the hand-off, so the request ran one round trip
     // per token instead (2026-09-27, the spread benchmark's peer arm).
     let encrypted_for_model = state.encrypted_pipeline_for_request(model_id, request.id);
-    // `encrypted_pipeline` forces local embedding (no raw tokens on wire).
-    // `local_embedding_privacy` is similar. Both bypass the fast path.
-    !(encrypted_for_model || state.config.inference.local_embedding_privacy)
+    // The peer would render the prompt from its text, which either privacy
+    // setting rules out — the one question every whole hand-off asks.
+    state
+        .privacy_refuses_a_whole_hand_off(model_id, encrypted_for_model)
+        .is_none()
 }
 
 /// Base budget for the first token: connection, queueing and the decode of a

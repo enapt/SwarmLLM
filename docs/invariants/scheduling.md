@@ -1096,6 +1096,102 @@ the cost, and nothing was said. `the_search_s_boomerang_says_what_privacy_costs`
 (red without the call), `a_route_preview_never_announces_a_privacy_cost`,
 `only_a_boomerang_is_priced_for_privacy`.
 
+## Prompt privacy embeds the prompt with the first segment's own loader, or refuses (2026-10-20, #316)
+
+`inference.local_embedding_privacy` promises that a first segment on another
+computer is handed hidden states, never the prompt's token ids. ⚠ It does not
+hide the prompt from that segment: layer 0's input is a row of the model's own
+embedding table per token, which the segment holds and matches back EXACTLY —
+describe it as keeping token ids off the wire, never as hiding the prompt
+(the docs said "harder to invert" until this change). **It had never held on
+a real node.** Found checking a release reviewer's finding (a Gemma 3
+picture's spans dropped on this path) on `split_rig.sh repeat`: the "on" arm's
+node logged `Failed to load local embedder from shard_000 ... unknown magic
+0x3f800000` and its replies were the "off" arm's — the n-gram path had served
+all three.
+
+**Three defects, each enough on its own:**
+
+1. `LocalEmbedder::load` read `shard_000.bin` as a GGUF file. Shards stopped
+   being GGUF files before the feature was written (2026-02-25/28 vs 03-11):
+   a part's first bytes are tensor data (`0000 803f` = 1.0f), the header is
+   `gguf_header.bin`. Every load failed, `local_embedders` stayed empty, and the
+   pipeline's `if local_embedder.is_some()` guard — the only check — never ran.
+2. Had it loaded, the loop set `index_pos = token_count` BEFORE the prompt
+   pass, so the pass went out at the prompt's length. The worker writes its
+   cache at its own length but rotates by `index_pos`: every prompt row was
+   rotated N..2N-1 while decode continued from N — the reply decoded from
+   "before" its prompt. The same value hid a Gemma 3 picture's spans
+   (`image_spans_from(index_pos)` answers nothing once `index_pos` is past
+   every picture) and doubled `advertised_context_refusal`'s count.
+3. The DSD, speculative and n-gram paths never asked the setting; each sends
+   the first segment token ids. The hand-off and the led split did ask it.
+
+**What replaced it.** The embedder is the first segment's loader asked for no
+layers — `daemon::shard_loader::load_model_range` (extracted from the worker,
+so both read a model's weights one way: a reconstructed `model.gguf`, a
+`source_path`, else the parts through `first_header_disagreement` and the
+tensor table), on the processor (the daemon holds no graphics context). Its
+rows go through `SplitModel::embed_ids` → `embed_tokens`, the one lookup —
+equal to a first segment loaded with one layer, bit for bit, on Llama 3.2 3B,
+TinyLlama and Gemma 2 2B (`local_embedder_load_from_real_model`). The table is
+the rows-on-demand quantized one (308 MB for Llama 3.2 3B), where the old
+design dequantized the whole table to f32 (1.5 GB). It loads when a request
+first asks (`local_embedder_for`, on a blocking thread), not at startup, where a
+model fetched later never got one.
+
+**Refuse rather than send.** Where it cannot be built and
+`segment_zero_may_leave_this_node` (the first segment elsewhere, or a stand-in
+elsewhere for layer 0), the request is `EmbeddingPrivacyUnavailable` — nothing
+is sent. Its own variant: `PromptPrivacyUnavailable`'s message and hint name
+"Start and finish on this computer", a dashboard switch that may be off, and
+the way out here is a config-file setting. The fast paths stand aside for such a plan inside
+`fastpath_request_disqualified`, which all of them ask. Failover hands a
+stand-in for segment 0 an embedded prompt only if it advertises
+`FORWARD_PRE_EMBEDDED` (the planned first segment already had to), and never
+token ids under the setting. `SharedState::local_embedding_privacy` is the one,
+live reading (the hand-off read the boot snapshot).
+
+**Only where the first layers may leave (the review, 2026-10-20).** The first
+version embedded whenever the setting was on and the embedder loaded — a
+first segment run HERE too, where the token ids never reach a wire. That input
+skipped everything only the token path does: the worker's pre-embedded branch
+passed no LoRA adapter (a LoRA request, always a whole local plan, answered
+from the base model without a word — it now applies the adapter, which changes
+only the layers' projections, `model::lora`); both tensor-parallel paths read
+their input as the prompt's text (the member's `EmbedOnly` step, the
+non-member's plain forward to its own worker); the split prompt cache and the
+prompt read in pieces both stand aside for `pre_embedded`. Now
+**`PipelineExecutor::prompt_embedder`** embeds only under
+`segment_zero_may_leave_this_node`, and **`tensor_parallel_group_for`** gives
+no group an embedded first segment (it goes the ordinary way, which says the
+input is embedded). The boomerang's read of `local_embedders` is gone: no
+release ever filled the map, and filled now by this setting, an entry left
+after it is turned off would have embedded a boomerang's local first segment.
+
+**A whole hand-off asks too.** The HTTP forward to a pool member
+(`api::openai::resolver::find_peer_with_model`, for a model this node does not
+know) hands the peer the request whole — it renders the prompt from the text —
+and asked neither privacy setting, while the libp2p hand-off and the led split
+asked both. **`SharedState::privacy_refuses_a_whole_hand_off`** is now the one
+question all three ask; the HTTP path answers with the setting's refusal
+(`EmbeddingPrivacyUnavailable` / `PromptPrivacyUnavailable`) when a member
+would have been chosen, never a "no model loaded" after the cold-start wait,
+and only then — a request no member could take goes on to a cloud provider as
+before.
+
+**What a change must keep.** A new path that sends segment 0's input asks
+`segment_zero_may_leave_this_node` under the setting (through
+`prompt_embedder`), or goes through the plain loop. A new path that hands a
+request whole asks `privacy_refuses_a_whole_hand_off`. The prompt pass is read
+from position 0 on every path. The boomerang (`encrypted_pipeline_for`) never
+embeds: its first segment is local by construction. Tests:
+`the_prompt_is_embedded_only_where_the_first_layers_may_leave`,
+`an_embedded_first_segment_is_never_run_by_a_tensor_parallel_group`,
+`the_http_forward_to_a_pool_member_asks_both_privacy_settings`,
+`an_embedding_privacy_refusal_names_the_setting_that_refused` — each red with
+its fix off.
+
 ## A holder's refusal is reported as what it was
 
 **`router::report_after_a_replan`** decides what the caller hears when a holder

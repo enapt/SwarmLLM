@@ -364,15 +364,19 @@ pub struct InferenceConfig {
     #[serde(default)]
     pub privacy_mode: bool,
     /// When true, the requesting node performs token→embedding locally before sending
-    /// activations to the first pipeline segment. Remote nodes never see raw token IDs,
-    /// only hidden-state activation tensors (which are harder to invert).
-    /// Requires the embedding table to be available locally (auto-extracted from shard_000).
-    /// Default: false.
+    /// activations to the first pipeline segment, so no token ids leave this node.
+    /// ⚠ This does NOT hide the prompt from that segment: what it is sent are rows of
+    /// the model's own embedding table, which any holder of the model — that segment
+    /// included — maps back to the tokens exactly. Needs this node to hold the model's
+    /// first part (the embedding table); without it a split whose first layers run
+    /// elsewhere is refused (`local_embedder`, FUTURE_WORK #316). Default: false.
     #[serde(default)]
     pub local_embedding_privacy: bool,
-    /// When true, forces the requesting node to hold the final shard and perform
-    /// token sampling locally. Combined with local_embedding_privacy (auto-enabled),
-    /// this ensures no remote node ever sees plaintext — only intermediate activations.
+    /// When true, forces the requesting node to hold the first and final shards: it
+    /// embeds the prompt and samples the reply itself, so no remote node is handed the
+    /// prompt as text or token ids, or picks the reply's words. STRUCTURAL, not
+    /// cryptographic: the middle nodes compute on hidden states in plaintext, which
+    /// published attacks turn back into much of the text.
     /// The pipeline "boomerangs" through remote nodes and returns to the requester.
     /// Requires the requester to hold both shard 0 (embedding) and the final shard (output head).
     /// Only useful for models with 3+ shards (2-shard = fully local, no distribution).

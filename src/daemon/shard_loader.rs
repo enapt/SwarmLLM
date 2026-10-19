@@ -36,6 +36,58 @@ pub fn force_cpu_for(gpu_layers: i32) -> bool {
     gpu_layers == 0
 }
 
+/// Load `[layer_start, layer_end)` of a model from wherever this node keeps
+/// its weights: a reconstructed `model.gguf`, the owner's own GGUF named by
+/// `source_path`, else its parts ([`try_load_from_shards`]).
+///
+/// The one answer to "open this model's weights", for the model worker and
+/// for the local embedder (prompt privacy), which asks it for the first
+/// segment with NO layers (FUTURE_WORK #316) — so the embedder reads the same
+/// file the first segment would, through the same checks.
+pub fn load_model_range(
+    params: &ShardLoadParams<'_>,
+) -> Result<crate::inference::split::SplitModel, SwarmError> {
+    use crate::inference::split::SplitModel;
+    let gguf_path = params.model_dir.join("model.gguf");
+    if gguf_path.exists() {
+        tracing::info!(
+            model = %params.model_id,
+            layers = format!("[{}..{})", params.layer_start, params.layer_end),
+            "model-worker: Loading from reconstructed GGUF"
+        );
+        return SplitModel::load_from_gguf(
+            &gguf_path,
+            params.layer_start,
+            params.layer_end,
+            params.is_first,
+            params.is_last,
+            params.force_cpu,
+        );
+    }
+    let source_path_file = params.model_dir.join("source_path");
+    if source_path_file.exists() {
+        let p = std::fs::read_to_string(&source_path_file).map_err(SwarmError::Io)?;
+        let p = std::path::PathBuf::from(p.trim());
+        let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
+        if !canonical.starts_with(params.shard_store.models_dir()) {
+            return Err(SwarmError::Validation(
+                "source_path outside data directory".into(),
+            ));
+        }
+        if canonical.exists() {
+            return SplitModel::load_from_gguf(
+                &canonical,
+                params.layer_start,
+                params.layer_end,
+                params.is_first,
+                params.is_last,
+                params.force_cpu,
+            );
+        }
+    }
+    try_load_from_shards(params)
+}
+
 /// Try to load a SplitModel from shard files + gguf_header.bin.
 /// This is the shard-only loading path — no full GGUF needed.
 pub fn try_load_from_shards(

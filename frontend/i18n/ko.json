@@ -534,6 +534,7 @@
   "enc.unprotected_detail": "컴퓨터 간 통신은 암호화되지만, 당신을 처리하는 컴퓨터는 당신의 글과 답변을 읽을 수 있습니다. {missing}을(를) 다운로드하면 이 컴퓨터가 답변의 시작과 끝을 직접 처리할 수 있습니다.",
   "enc.unprotected_tip": "컴퓨터 간 통신은 항상 암호화됩니다. 이 컴퓨터에서 답변의 시작과 끝을 처리하려면 모델의 첫 부분과 마지막 부분도 필요합니다.",
   "error_hint.config": "설정에 문제가 있습니다. 대시보드의 [설정]을 확인하거나 config.toml 파일을 살펴보세요.",
+  "error_hint.embedding_privacy_unavailable": "config.toml의 local_embedding_privacy 설정이 켜져 있습니다. 이 컴퓨터는 모든 프롬프트를 직접 준비하며 다른 방법으로는 보내지 않습니다. 이 모델에서는 그렇게 할 수 없습니다. 모델의 첫 부분이 여기에 없거나, 첫 레이어를 실행하도록 선택된 컴퓨터가 이전 버전의 SwarmLLM을 사용하고 있습니다. `swarmllm privacy <이름>`을 실행해 모델의 첫 부분과 마지막 부분을 내려받거나, config.toml에서 local_embedding_privacy = false로 설정해 다른 컴퓨터가 답변을 시작하도록 하세요.",
   "error_hint.holders_declined": "이 모델의 이 부분을 가진 컴퓨터들은 온라인이지만 요청을 받을 수 없었습니다. 보통 다른 모델을 실행하느라 바빠서 지금은 메모리가 부족하기 때문입니다. 몇 분 뒤에 다시 시도하거나 다른 모델을 고르세요.",
   "error_hint.inference_timeout": "요청 처리가 너무 오래 걸렸습니다. 프롬프트를 줄이거나 최대 토큰 수를 낮추거나, 덜 붐비는 시간에 다시 시도해 보세요.",
   "error_hint.insufficient_capacity": "이 모델에 필요한 부분을 가진 컴퓨터가 부족합니다. 더 많은 컴퓨터가 접속한 뒤 다시 시도하거나, 모델 탭에서 직접 부분을 내려받으세요.",

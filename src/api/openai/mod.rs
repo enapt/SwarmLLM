@@ -433,7 +433,10 @@ pub async fn chat_completions(
         // Priority 2: Forward to a peer that hosts shards for this model.
         // That peer can handle inference locally or build its own pipeline.
         if !is_forwarded {
-            if let Some(peer) = find_peer_with_model(&state, &req.model, req.keep_asked()) {
+            if let Some(peer) =
+                find_peer_with_model(&state.shared_state, &req.model, req.keep_asked())
+                    .map_err(ApiError)?
+            {
                 tracing::info!(
                     request_id = %request_id,
                     peer_url = %peer.url,
@@ -509,7 +512,10 @@ pub async fn chat_completions(
             }
             // Re-check peer forwarding
             if !is_forwarded {
-                if let Some(peer) = find_peer_with_model(&state, &req.model, req.keep_asked()) {
+                if let Some(peer) =
+                    find_peer_with_model(&state.shared_state, &req.model, req.keep_asked())
+                        .map_err(ApiError)?
+                {
                     tracing::info!(
                         request_id = %request_id,
                         peer_url = %peer.url,

@@ -1186,6 +1186,7 @@ pub fn error_kind(err: &crate::error::SwarmError) -> &'static str {
         E::RequestKeptOnThisComputer { .. } => "RequestKeptOnThisComputer",
         E::PromptPrivacyUnavailable { .. } => "PromptPrivacyUnavailable",
         E::PromptPrivacyNeedsFinalShard { .. } => "PromptPrivacyNeedsFinalShard",
+        E::EmbeddingPrivacyUnavailable { .. } => "EmbeddingPrivacyUnavailable",
         E::ModelIncompleteInSwarm { .. } => "ModelIncompleteInSwarm",
         E::SwarmShortOfMemory { .. } => "SwarmShortOfMemory",
         E::HoldersDeclined { .. } => "HoldersDeclined",

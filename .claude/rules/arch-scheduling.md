@@ -83,6 +83,12 @@ The whole-model hand-off waits in `hand_off` when the priced search will run; it
 
 → `docs/invariants/scheduling.md` § "A peer that will read the plaintext prompt clears a trust bar, on every path that can assign it"
 
+## Prompt privacy embeds with the first segment's own loader, or refuses (2026-10-20, #316)
+
+Under `SharedState::local_embedding_privacy` (the one, live reading) token ids never reach another computer: **`PipelineExecutor::prompt_embedder`** embeds ONLY where **`segment_zero_may_leave_this_node`** (a first segment run here reads token ids — embedded, it skipped the adapter, tensor-parallel and prompt-cache paths), with the first segment's loader asked for no layers (`shard_loader::load_model_range`, `SplitModel::embed_ids`, loaded on demand by `local_embedder_for`), else refuses with `EmbeddingPrivacyUnavailable`. The fast paths stand aside in `fastpath_request_disqualified`; a stand-in for segment 0 needs `FORWARD_PRE_EMBEDDED`; no tensor-parallel group takes an embedded first segment (`tensor_parallel_group_for`). Every WHOLE hand-off — the hand-off, a led split, the HTTP forward to a pool member — asks **`SharedState::privacy_refuses_a_whole_hand_off`**. The prompt pass is read from position 0 on every path.
+
+→ `docs/invariants/scheduling.md` § "Prompt privacy embeds the prompt with the first segment's own loader, or refuses"
+
 ## Trust is paid for work that was checked, and the check runs whenever the payment would
 
 `router::spot_check::check_distributed_result` gives a verdict, `settle_participant_trust` applies it, on **every** distributed result: `InferenceSuccess` only for a well-formed result, once per REQUEST; penalty only where a single peer served it. Never sample a check that gates a reward.

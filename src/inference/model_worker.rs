@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::inference::process_pool::IpcWriter;
 
-use crate::daemon::shard_loader::{try_load_from_shards, ShardLoadParams};
+use crate::daemon::shard_loader::{load_model_range, ShardLoadParams};
 
 /// Item 8 Phase 2b: per-probe waiter. `handle_generate` /
 /// `try_register_generate_slot` register a oneshot keyed by a fresh probe
@@ -1162,73 +1162,17 @@ fn ensure_model_loaded(
     // Sampled before the load so the delta is attributable to it.
     let vram_before_mb = current_vram_used_mb();
 
-    // Try loading the split model from available sources
-    let gguf_path = model_dir.join("model.gguf");
-    let source_path_file = model_dir.join("source_path");
-
-    let mut model = if gguf_path.exists() {
-        tracing::info!(
-            model = %model_id,
-            layers = format!("[{layer_start}..{layer_end})"),
-            "model-worker: Loading from reconstructed GGUF"
-        );
-        SplitModel::load_from_gguf(
-            &gguf_path,
-            layer_start,
-            layer_end,
-            is_first,
-            is_last,
-            worker_force_cpu(),
-        )?
-    } else if source_path_file.exists() {
-        match std::fs::read_to_string(&source_path_file) {
-            Ok(p) => {
-                let p = std::path::PathBuf::from(p.trim());
-                let data_models = shard_store.models_dir();
-                let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
-                if !canonical.starts_with(&data_models) {
-                    return Err(SwarmError::Validation(
-                        "source_path outside data directory".into(),
-                    ));
-                }
-                if canonical.exists() {
-                    SplitModel::load_from_gguf(
-                        &canonical,
-                        layer_start,
-                        layer_end,
-                        is_first,
-                        is_last,
-                        worker_force_cpu(),
-                    )?
-                } else {
-                    try_load_from_shards(&ShardLoadParams {
-                        model_dir: &model_dir,
-                        shard_store: &shard_store,
-                        model_id,
-                        layer_start,
-                        layer_end,
-                        is_first,
-                        is_last,
-                        manifest: &manifest,
-                        force_cpu: worker_force_cpu(),
-                    })?
-                }
-            }
-            Err(e) => return Err(SwarmError::Io(e)),
-        }
-    } else {
-        try_load_from_shards(&ShardLoadParams {
-            model_dir: &model_dir,
-            shard_store: &shard_store,
-            model_id,
-            layer_start,
-            layer_end,
-            is_first,
-            is_last,
-            manifest: &manifest,
-            force_cpu: worker_force_cpu(),
-        })?
-    };
+    let mut model = load_model_range(&ShardLoadParams {
+        model_dir: &model_dir,
+        shard_store: &shard_store,
+        model_id,
+        layer_start,
+        layer_end,
+        is_first,
+        is_last,
+        manifest: &manifest,
+        force_cpu: worker_force_cpu(),
+    })?;
 
     // Apply TP weight splitting if this is a TP variant (tp_size > 1)
     if tp_size > 1 {
@@ -2102,9 +2046,7 @@ async fn handle_forward(
             )?;
             // A segment never sees the reply's budget, so it reserves the
             // whole quantum it always did. A resumed prompt holds its restored
-            // opening as well as the positions it computes — only a resumed
-            // one: the local-embedder path sends its prompt pass at a nonzero
-            // position too, with nothing before it.
+            // opening as well as the positions it computes.
             let restoring = restored.as_ref().map_or(0, |s| s.token_count);
             // Admitted up front, for every range of this request at once, before
             // the pipeline sent anything: asking again would weigh the request
@@ -2315,13 +2257,18 @@ async fn handle_forward(
                         )
                         .map_err(|e| format!("Forward TP phase: {e}"))?
                 } else if pre_embedded {
+                    // The adapter as on the token path: an adapter changes the
+                    // layers' projections, never the embedding table
+                    // (`model::lora`), so an input embedded elsewhere is the one
+                    // it expects. `None` here answered a LoRA request from the
+                    // base model, without a word (#316's review).
                     model
                         .forward_prompt_in_chunks(
                             &input_tensor,
                             fwd.index_pos as usize,
                             kv_store,
                             &req_id_str,
-                            None,
+                            lora_adapter.as_deref(),
                             true,
                             prefill_chunk_tokens,
                         )

@@ -15,18 +15,24 @@ pub(super) struct PeerTarget {
 /// Find a peer that hosts shards for this model and return how to reach it.
 /// This is a fallback for when not all layers are covered network-wide — the
 /// peer may be able to handle the request directly or assemble its own pipeline.
+///
+/// `Err` when a peer would be chosen and a privacy setting forbids handing it
+/// the request whole (`SharedState::privacy_refuses_a_whole_hand_off`): the
+/// peer renders the prompt from its text, and this node — which does not know
+/// the model — has no other way to serve it, so the caller hears the setting's
+/// refusal, not a "no model loaded" after the cold-start wait (#316's review).
 pub(super) fn find_peer_with_model(
-    state: &AppState,
+    shared: &crate::daemon::SharedState,
     model: &str,
     asked: crate::types::KeepAsked,
-) -> Option<PeerTarget> {
+) -> Result<Option<PeerTarget>, crate::error::SwarmError> {
+    let model_id = ModelId(model.to_string());
     // The request's scope (#251) — a model kept on this computer, or a request
     // whose caller asked to keep it here, is never forwarded, and private mode
     // bounds the rest. Asked beside the pool check below, never instead of it:
     // no restriction is not trust.
-    let scope =
-        crate::pool::scope::request_scope(&state.shared_state, &ModelId(model.to_string()), asked);
-    for entry in state.shared_state.peer_registry.iter() {
+    let scope = crate::pool::scope::request_scope(shared, &model_id, asked);
+    for entry in shared.peer_registry.iter() {
         if scope.as_ref().is_some_and(|s| !s.contains(entry.key())) {
             continue;
         }
@@ -53,7 +59,7 @@ pub(super) fn find_peer_with_model(
         // crossing the boundary, and is documented as 5-7x faster than the
         // per-token alternative. This HTTP hop is a fallback that was quietly
         // costing more than it bought.
-        if !crate::pool::scope::is_pool_member(&state.shared_state, entry.key()) {
+        if !crate::pool::scope::is_pool_member(shared, entry.key()) {
             continue;
         }
         let peer = entry.value();
@@ -61,17 +67,26 @@ pub(super) fn find_peer_with_model(
             let has_model = cap.hosted_shards.iter().any(|s| s.model_id.0 == model);
             if has_model {
                 if let Some(url) = peer_http_url(peer) {
+                    // No route override applies yet (the router records one),
+                    // and the automatic default needs this node to hold the
+                    // model, which it does not here: the model form is exact.
+                    let start_here = shared.encrypted_pipeline_for(&model_id);
+                    if let Some(refusal) =
+                        shared.privacy_refuses_a_whole_hand_off(&model_id, start_here)
+                    {
+                        return Err(refusal);
+                    }
                     let load = crate::inference::pipeline::LoadAllowance::for_peer(
-                        &state.shared_state,
+                        shared,
                         entry.key(),
-                        &ModelId(model.to_string()),
+                        &model_id,
                     );
-                    return Some(PeerTarget { url, load });
+                    return Ok(Some(PeerTarget { url, load }));
                 }
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// Short-lived per-model TTL for the `all_shards_available` cache. Kept tiny
@@ -641,5 +656,134 @@ mod tests {
             Some("aaa-coder-abliterated-q4"),
             "the owner pinned it: held whole, it is the answer like any other"
         );
+    }
+
+    /// A node whose pool holds one member, `0xC4`, hosting `model` and
+    /// reachable at a public address — the peer the HTTP forward would pick.
+    async fn pool_member_hosting(
+        config: crate::config::Config,
+        model: &str,
+    ) -> std::sync::Arc<crate::daemon::SharedState> {
+        use crate::pool::types::{PoolMembership, PoolState};
+        use crate::types::{NodeCapability, NodeId, PeerInfo, ShardId};
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        let peer = NodeId([0xC4; 32]);
+        *state.credits.pool_state.write().await = Some(PoolState {
+            pool_id: NodeId([0xC0; 32]),
+            name: "home".into(),
+            created_at: chrono::Utc::now(),
+            owner_signature: vec![],
+            members: vec![PoolMembership {
+                node_id: peer.clone(),
+                credits_contributed: 0,
+                joined_at: chrono::Utc::now(),
+                acceptance_signature: vec![],
+                invitation_id: uuid::Uuid::new_v4(),
+                invitation_expires_at: chrono::Utc::now(),
+                device_name: None,
+                last_seen: None,
+                online: false,
+                device_stats: None,
+                contribution_level: 100,
+            }],
+            shard_pins: Default::default(),
+            total_lifetime_credits: 0,
+            member_credit_split_pct: 0,
+            generation: 0,
+        });
+        state.peer_registry.insert(
+            peer.clone(),
+            PeerInfo {
+                node_id: peer.clone(),
+                addresses: vec!["/ip4/203.0.113.7/udp/8800/quic-v1".into()],
+                capability: Some(NodeCapability {
+                    coord: None,
+                    node_id: peer.clone(),
+                    gpu: None,
+                    cpu: None,
+                    ram_total_mb: 0,
+                    ram_available_mb: 0,
+                    ram_model_budget_mb: None,
+                    disk_available_mb: 0,
+                    bandwidth_mbps: 0.0,
+                    hosted_shards: vec![ShardId {
+                        model_id: ModelId(model.into()),
+                        index: 0,
+                    }],
+                    max_contribution: crate::types::ContributionLevel::Moderate,
+                    uptime_seconds: 0,
+                    version: String::new(),
+                    region: None,
+                    est_tokens_per_sec_7b: 0.0,
+                    os: None,
+                    observed_latencies: vec![],
+                    relay_capable: false,
+                    protocol_version: 0,
+                    features: 0,
+                    relay_reservations: vec![],
+                    anchor_mode: false,
+                    can_serve_inference: true,
+                    resident_layers: Vec::new(),
+                    context_ceiling_tokens: None,
+                    model_load_ms_per_gib: None,
+                    model_memory_ceiling_mb: None,
+                }),
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(10),
+                trust_score: 0.9,
+                peer_id_bytes: None,
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        );
+        state
+    }
+
+    /// #316's review: the HTTP forward to a pool member hands the peer the
+    /// request WHOLE, and the peer renders the prompt from its text — so it
+    /// asks the privacy question the libp2p hand-off asks, which it never
+    /// had. With both settings off the member is chosen; under either it is
+    /// refused in that setting's own words, never forwarded.
+    #[tokio::test]
+    async fn the_http_forward_to_a_pool_member_asks_both_privacy_settings() {
+        use crate::error::SwarmError;
+        let model = "m";
+        let pick = |embedding: bool, start_here: bool| async move {
+            let mut config = crate::config::Config::default();
+            config.inference.local_embedding_privacy = embedding;
+            config.inference.encrypted_pipeline = start_here;
+            let state = pool_member_hosting(config, model).await;
+            find_peer_with_model(&state, model, crate::types::KeepAsked::Unasked)
+        };
+
+        let open = pick(false, false).await;
+        assert!(
+            matches!(open, Ok(Some(_))),
+            "control: the member is chosen with both settings off"
+        );
+        assert!(matches!(
+            pick(true, false).await,
+            Err(SwarmError::EmbeddingPrivacyUnavailable { .. })
+        ));
+        assert!(matches!(
+            pick(false, true).await,
+            Err(SwarmError::PromptPrivacyUnavailable { .. })
+        ));
     }
 }

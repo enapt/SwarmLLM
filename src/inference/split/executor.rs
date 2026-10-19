@@ -1751,6 +1751,19 @@ impl SplitModel {
         Ok(emb)
     }
 
+    /// The first layer's input for `ids` — `[1, n, hidden]`, f32, scaled as
+    /// the model scales it — through the one lookup ([`Self::embed_tokens`]).
+    /// For a caller outside the forward: the local embedder (prompt privacy,
+    /// `inference::local_embedder`), whose rows a first segment on another
+    /// computer reads as if it had looked them up itself, so they must be
+    /// this lookup's, bit for bit (FUTURE_WORK #316).
+    pub(crate) fn embed_ids(&self, ids: &[i64]) -> Result<Tensor, SwarmError> {
+        let input = Tensor::new(ids, &self.device)
+            .and_then(|t| t.unsqueeze(0))
+            .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?;
+        self.embed_tokens(&input)
+    }
+
     /// Every layer's per-layer input for this forward (`[b, seq, layers,
     /// width]`), built from the tokens `input` and their embedding — `None`
     /// for a model without them.

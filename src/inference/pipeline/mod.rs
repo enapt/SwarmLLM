@@ -1127,7 +1127,109 @@ pub(super) fn fastpath_request_disqualified(exec: &PipelineExecutor) -> bool {
     if !exec.assignment.tp_groups.is_empty() {
         return true;
     }
+    // Prompt privacy (`inference.local_embedding_privacy`): every fast path
+    // sends the first segment TOKEN IDS — none embeds the prompt here — so
+    // none may run a plan whose first layers another computer may read. Only
+    // the plain loop embeds (`execute_distributed`), and it refuses where it
+    // cannot (#316: the n-gram path served every such request it was offered).
+    if exec.shared_state.local_embedding_privacy() && exec.segment_zero_may_leave_this_node() {
+        return true;
+    }
     request_disqualifies_fast_paths(&exec.request)
+}
+
+impl PipelineExecutor {
+    /// Could the first segment's input — the prompt — be handed to another
+    /// computer under this plan: the first segment runs elsewhere, or a
+    /// stand-in elsewhere could take over layer 0. The question prompt privacy
+    /// (`inference.local_embedding_privacy`) asks before it lets token ids go.
+    pub(super) fn segment_zero_may_leave_this_node(&self) -> bool {
+        let me = self.shared_state.identity.node_id();
+        self.assignment
+            .segments
+            .first()
+            .is_some_and(|first| first.node_id != *me)
+            || self
+                .assignment
+                .standbys
+                .iter()
+                .any(|s| s.layer_range.0 == 0 && s.node_id != *me)
+    }
+
+    /// The embedder the prompt pass uses, if this plan needs one — the one
+    /// answer `execute_distributed` asks (FUTURE_WORK #316).
+    ///
+    /// Only prompt privacy (`inference.local_embedding_privacy`) embeds, and
+    /// only where the first segment's input could reach another computer
+    /// (`segment_zero_may_leave_this_node`). Where every first layer runs
+    /// here, the token ids never reach a wire and the worker reads them as it
+    /// always has: an embedded first segment would skip what only the token
+    /// path does — the split prompt cache, the prompt read in pieces, and,
+    /// before #316's review, a LoRA adapter and the tensor-parallel embed step.
+    /// Where the first layers may leave and the embedder cannot be loaded here
+    /// (this computer does not hold the model's first part), the request is
+    /// refused: sending token ids instead would work perfectly and break the
+    /// one promise the setting makes.
+    ///
+    /// "Start and finish on this computer" never embeds: its first segment is
+    /// this node by construction. It read `local_embedders` until #316, which
+    /// no released build ever filled; filled now by prompt privacy, an entry
+    /// left after that setting is turned off would have embedded a first
+    /// segment running here.
+    pub(super) async fn prompt_embedder(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<Option<std::sync::Arc<crate::inference::local_embedder::LocalEmbedder>>, SwarmError>
+    {
+        if !self.shared_state.local_embedding_privacy() || !self.segment_zero_may_leave_this_node()
+        {
+            return Ok(None);
+        }
+        let model_id = &self.assignment.segments[0].shard_id.model_id;
+        match crate::inference::local_embedder::local_embedder_for(&self.shared_state, model_id)
+            .await
+        {
+            Ok(embedder) => Ok(Some(embedder)),
+            Err(e) => {
+                tracing::warn!(
+                    request_id = %request_id,
+                    model = %model_id,
+                    error = %e,
+                    "Refusing prompt privacy: this computer cannot embed the prompt \
+                     itself, and the model's first layers may run on another computer"
+                );
+                Err(SwarmError::EmbeddingPrivacyUnavailable {
+                    model_id: model_id.0.clone(),
+                })
+            }
+        }
+    }
+
+    /// The tensor-parallel group that runs `segment`, if any. Not for a
+    /// request whose pictures attend both ways (#115 (2b)), for any of its
+    /// forwards: a group's layers read the prompt in order, and its primary is
+    /// this node, which runs the range plainly instead. Not for a first
+    /// segment whose input is already embedded (#316): both of the group's
+    /// paths read their input as the prompt's TEXT — the embed step a member
+    /// runs, and the plain forward a non-member hands its worker — so it goes
+    /// the ordinary way, which says the input is embedded.
+    pub(super) fn tensor_parallel_group_for(
+        &self,
+        segment: &crate::types::PipelineSegment,
+        idx: usize,
+        pre_embedded: bool,
+    ) -> Option<crate::types::TensorParallelGroup> {
+        if !self.image_spans.is_empty() || (idx == 0 && pre_embedded) {
+            return None;
+        }
+        self.assignment
+            .tp_groups
+            .iter()
+            .find(|g| {
+                g.layer_range.0 <= segment.layer_range.0 && g.layer_range.1 >= segment.layer_range.1
+            })
+            .cloned()
+    }
 }
 
 /// [`fastpath_request_disqualified`]'s half that is about the REQUEST, not
@@ -3563,6 +3665,281 @@ mod tests {
             "a batch of drafts is not one decode step; recording it as one \
              overstates ms/layer by roughly the draft width"
         );
+    }
+
+    /// A node with `inference.local_embedding_privacy` on and its data in a
+    /// directory of its own (no model files: an embedder cannot be loaded
+    /// from it, only inserted).
+    fn privacy_state(on: bool) -> (Arc<SharedState>, tempfile::TempDir) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.node.data_dir = temp.path().to_path_buf();
+        config.inference.local_embedding_privacy = on;
+        let db = Database::open(temp.path()).unwrap();
+        let executor = Arc::new(Mutex::new(ModelExecutor::new()));
+        let (state, _, _) = SharedState::new(config, Identity::generate(), db, executor, None);
+        (state, temp)
+    }
+
+    /// One peer, `0xB2`, holding every layer and told embedded prompts apart.
+    fn privacy_peer(state: &SharedState) -> (NodeId, std::collections::HashMap<Vec<u8>, NodeId>) {
+        use swarmllm_types::node::features::FORWARD_PRE_EMBEDDED;
+        let peer = NodeId([0xB2; 32]);
+        state.peer_id_map.insert(peer.clone(), vec![0xB2]);
+        state
+            .peer_registry
+            .insert(peer.clone(), peer_advertising(&peer, FORWARD_PRE_EMBEDDED));
+        let peers = std::collections::HashMap::from([(vec![0xB2], peer.clone())]);
+        (peer, peers)
+    }
+
+    /// FUTURE_WORK #316: under prompt privacy the prompt reaches another
+    /// computer's first segment EMBEDDED, and its pass is read from position
+    /// 0 like every other — it was sent at the prompt's length, so every row
+    /// was rotated that far and the reply decoded from before them.
+    #[tokio::test]
+    async fn a_prompt_embedded_here_is_sent_embedded_and_read_from_position_zero() {
+        let (state, _dir) = privacy_state(true);
+        let (peer, peers) = privacy_peer(&state);
+        // One row per byte: with no tokenizer the embedder reads byte by byte.
+        let table = candle_core::Tensor::arange(0f32, 1024f32, &candle_core::Device::Cpu)
+            .and_then(|t| t.reshape((256, 4)))
+            .unwrap();
+        state.local_embedders.insert(
+            ModelId("test".into()),
+            Arc::new(crate::inference::local_embedder::LocalEmbedder::from_table(
+                table,
+            )),
+        );
+        let (tx, rx) = mpsc::channel::<NetworkCommand>(64);
+        let mut request = make_test_request(&state);
+        request.sampling_params.max_tokens = 2;
+        let assignment = PipelineAssignment {
+            request_id: request.id,
+            segments: vec![remote_segment(&peer, (0, 32))],
+            standbys: vec![],
+            tp_groups: vec![],
+            supports_speculative: false,
+        };
+        let mut executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+        let peers_task = spawn_piece_peers(state.clone(), rx, peers, |_, _| PeerReply::Token(7));
+        let _ = executor.execute(None).await;
+        drop(executor);
+        let sent = peers_task.await.unwrap();
+
+        let (to, prompt) = sent.first().expect("the prompt pass was sent");
+        assert_eq!(*to, peer);
+        assert_eq!(prompt.sequence_num, 0);
+        assert!(
+            prompt.pre_embedded,
+            "the prompt goes embedded, never as text"
+        );
+        assert_eq!(
+            prompt.index_pos, 0,
+            "the prompt pass is read from position 0"
+        );
+        assert!(
+            sent.iter().all(|(_, f)| f.pre_embedded),
+            "every step's token goes embedded too"
+        );
+    }
+
+    /// FUTURE_WORK #316: where this node cannot embed the prompt (it does not
+    /// hold the model's first part) and the first segment is another
+    /// computer's, the request is refused — nothing is sent. It used to go
+    /// out as text: the embedder never loaded, and nothing checked.
+    #[tokio::test]
+    async fn a_prompt_that_cannot_be_embedded_here_is_never_sent_to_another_computer() {
+        let (state, _dir) = privacy_state(true);
+        let (peer, peers) = privacy_peer(&state);
+        let (tx, rx) = mpsc::channel::<NetworkCommand>(64);
+        let mut request = make_test_request(&state);
+        request.sampling_params.max_tokens = 2;
+        let assignment = PipelineAssignment {
+            request_id: request.id,
+            segments: vec![remote_segment(&peer, (0, 32))],
+            standbys: vec![],
+            tp_groups: vec![],
+            supports_speculative: false,
+        };
+        let mut executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+        let peers_task = spawn_piece_peers(state.clone(), rx, peers, |_, _| PeerReply::Token(7));
+        let result = executor.execute(None).await;
+        drop(executor);
+        let sent = peers_task.await.unwrap();
+
+        assert!(
+            matches!(result, Err(SwarmError::EmbeddingPrivacyUnavailable { .. })),
+            "{result:?}"
+        );
+        assert!(sent.is_empty(), "nothing reached the peer: {sent:?}");
+    }
+
+    /// #316's review: the prompt is embedded only where the first segment's
+    /// input could reach another computer. With every first layer here the
+    /// worker reads token ids as it always has — embedding them anyway dropped
+    /// a LoRA adapter, handed the tensor-parallel embed step floats as text and
+    /// skipped the split prompt cache. Where the first layers may leave and
+    /// nothing can be embedded here, the refusal names THIS setting.
+    #[tokio::test]
+    async fn the_prompt_is_embedded_only_where_the_first_layers_may_leave() {
+        async fn embeds(
+            privacy: bool,
+            first_here: bool,
+            remote_standby: bool,
+            loadable: bool,
+        ) -> Result<bool, SwarmError> {
+            let (state, _dir) = privacy_state(privacy);
+            let (peer, _) = privacy_peer(&state);
+            if loadable {
+                let table = candle_core::Tensor::zeros(
+                    (256, 4),
+                    candle_core::DType::F32,
+                    &candle_core::Device::Cpu,
+                )
+                .unwrap();
+                state.local_embedders.insert(
+                    ModelId("test".into()),
+                    Arc::new(crate::inference::local_embedder::LocalEmbedder::from_table(
+                        table,
+                    )),
+                );
+            }
+            let me = state.identity.node_id().clone();
+            let (tx, _rx) = mpsc::channel::<NetworkCommand>(4);
+            let request = make_test_request(&state);
+            let assignment = PipelineAssignment {
+                request_id: request.id,
+                segments: vec![remote_segment(
+                    if first_here { &me } else { &peer },
+                    (0, 32),
+                )],
+                standbys: if remote_standby {
+                    vec![remote_segment(&peer, (0, 16))]
+                } else {
+                    vec![]
+                },
+                tp_groups: vec![],
+                supports_speculative: false,
+            };
+            let executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+            executor
+                .prompt_embedder(uuid::Uuid::new_v4())
+                .await
+                .map(|e| e.is_some())
+        }
+        assert!(
+            matches!(embeds(true, true, false, true).await, Ok(false)),
+            "every first layer here: token ids, as before"
+        );
+        assert!(
+            matches!(embeds(true, false, false, true).await, Ok(true)),
+            "first segment elsewhere"
+        );
+        assert!(
+            matches!(embeds(true, true, true, true).await, Ok(true)),
+            "a stand-in elsewhere for layer 0"
+        );
+        assert!(
+            matches!(embeds(false, false, false, true).await, Ok(false)),
+            "privacy off"
+        );
+        assert!(
+            matches!(embeds(true, true, false, false).await, Ok(false)),
+            "nothing can be embedded and nothing leaves: served"
+        );
+        assert!(
+            matches!(
+                embeds(true, false, false, false).await,
+                Err(SwarmError::EmbeddingPrivacyUnavailable { .. })
+            ),
+            "nothing can be embedded and the first layers leave: refused"
+        );
+    }
+
+    /// #316's review: a tensor-parallel group reads its input as the prompt's
+    /// text on both of its paths, so an embedded first segment goes the
+    /// ordinary way, which says it is embedded. A first segment of token ids,
+    /// and every later segment, keep their group.
+    #[test]
+    fn an_embedded_first_segment_is_never_run_by_a_tensor_parallel_group() {
+        let (state, _dir) = privacy_state(true);
+        let (peer, _) = privacy_peer(&state);
+        let me = state.identity.node_id().clone();
+        let (tx, _rx) = mpsc::channel::<NetworkCommand>(4);
+        let request = make_test_request(&state);
+        let first = remote_segment(&peer, (0, 16));
+        let second = remote_segment(&me, (16, 32));
+        let group = |layer_range: (u32, u32)| crate::types::TensorParallelGroup {
+            nodes: vec![me.clone(), peer.clone()],
+            layer_range,
+            shard_ids: vec![],
+        };
+        let assignment = PipelineAssignment {
+            request_id: request.id,
+            segments: vec![first.clone(), second.clone()],
+            standbys: vec![],
+            tp_groups: vec![group((0, 16)), group((16, 32))],
+            supports_speculative: false,
+        };
+        let executor = PipelineExecutor::new(state.clone(), tx, request, assignment);
+        assert!(
+            executor
+                .tensor_parallel_group_for(&first, 0, true)
+                .is_none(),
+            "an embedded first segment"
+        );
+        assert!(
+            executor
+                .tensor_parallel_group_for(&first, 0, false)
+                .is_some(),
+            "control: token ids, the group runs it"
+        );
+        assert!(
+            executor
+                .tensor_parallel_group_for(&second, 1, true)
+                .is_some(),
+            "a later segment keeps its group"
+        );
+    }
+
+    /// FUTURE_WORK #316: every fast path sends the first segment token ids, so
+    /// under prompt privacy none takes a plan whose first layers another
+    /// computer may read — the first segment, or a stand-in for layer 0.
+    #[test]
+    fn prompt_privacy_keeps_the_fast_paths_off_a_plan_whose_first_layers_may_leave() {
+        let disqualified = |privacy: bool, first_here: bool, remote_standby: bool| {
+            let (state, _dir) = privacy_state(privacy);
+            let (peer, _) = privacy_peer(&state);
+            let me = state.identity.node_id().clone();
+            let first = if first_here {
+                remote_segment(&me, (0, 32))
+            } else {
+                remote_segment(&peer, (0, 32))
+            };
+            let (tx, _rx) = mpsc::channel::<NetworkCommand>(4);
+            let request = make_test_request(&state);
+            let assignment = PipelineAssignment {
+                request_id: request.id,
+                segments: vec![first],
+                standbys: if remote_standby {
+                    vec![remote_segment(&peer, (0, 16))]
+                } else {
+                    vec![]
+                },
+                tp_groups: vec![],
+                supports_speculative: true,
+            };
+            let executor = PipelineExecutor::new(state, tx, request, assignment);
+            fastpath_request_disqualified(&executor)
+        };
+        assert!(disqualified(true, false, false), "first segment elsewhere");
+        assert!(
+            disqualified(true, true, true),
+            "a stand-in elsewhere for layer 0"
+        );
+        assert!(!disqualified(true, true, false), "every first layer here");
+        assert!(!disqualified(false, false, false), "privacy off: as before");
     }
 }
 

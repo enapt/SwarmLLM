@@ -10,7 +10,8 @@ it was trained to, all of it at once: on a test image of three shapes it used to
 striped flag, and it now names the shapes. Scored through llama.cpp's own picture reader, 95-97%
 of its words are llama.cpp's first choice, where 87-91% were before. A picture request split
 across several computers needs every one of them on this release; an older one is left out of
-that request's plan.
+that request's plan. A picture sent to a model that cannot read pictures is now refused with a
+message saying so, as on the OpenAI API; the Anthropic API used to drop it without a word.
 
 **Pictures work on computers without a graphics card.** Every picture request on a processor-only
 computer failed with "attn_norm: unsupported dtype for rmsnorm F16". A picture sent to a model
@@ -47,6 +48,22 @@ and reading a long prompt is slightly faster (6,144 tokens: 58.2 tokens a second
 - With encryption on (the default), a split's forward to a computer that had just reconnected
   could go out without its own per-session seal. The connection itself is always encrypted, so
   no one else could read it. It is now always sealed, or not sent.
+
+**The `local_embedding_privacy` setting works.** This setting, set only in the config file, makes
+this computer turn the prompt into the model's first-layer numbers itself whenever another computer
+may run the model's first part. That computer is then sent those numbers instead of the prompt's
+token ids. It had never worked: this computer could not read its own copy of that part of the
+model, so the prompt went out as token ids as before. It now uses the same code the first part
+runs. Where this computer does not hold that part, the request is refused, with a message naming
+the setting, instead of sent. The quicker ways of running a split step aside under the setting,
+since none of them can do this. The numbers are rows of the model's own table, and that computer
+can turn them back into the prompt exactly, so the setting does not hide the prompt from it.
+
+**Privacy settings now cover the forward to a computer in your pool.** A request for a model this
+computer does not know can be passed whole to a computer in your pool. That forward never asked
+`local_embedding_privacy`, or "Start and finish on this computer" when it is switched on for every
+model in the config file, though the other ways of handing a request to one computer did. Under
+either setting it is now refused with that setting's own message.
 
 **Reasoning models' thinking reaches non-streamed replies.** A streamed reply from a model such as
 Qwen3 carried its thinking as `reasoning_content`; a non-streamed one dropped it. It now carries it

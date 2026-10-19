@@ -1,113 +1,96 @@
-//! Local embedding privacy: performs token→embedding on the requesting node
-//! so remote first-segment nodes never see raw token IDs.
+//! Local embedding privacy (`inference.local_embedding_privacy`): this node
+//! turns the prompt's tokens into the first layer's input itself, so a first
+//! segment on another computer is handed hidden states, never token ids.
+//! ⚠ Those states are rows of the model's own embedding table, which that
+//! segment holds and maps back to the tokens EXACTLY: this keeps token ids off
+//! the wire, it does not hide the prompt from the computer that reads it.
 //!
-//! Loads only the `token_embd.weight` tensor and tokenizer from shard_000.bin,
-//! without any transformer layers. Embedding lookup is a simple matmul (~1ms)
-//! that adds negligible overhead to the inference path.
+//! **The embedder is the first segment's own loader, asked for no layers**: a
+//! processor-only `SplitModel` over this node's copy of the model
+//! (`daemon::shard_loader::load_model_range` — `gguf_header.bin` and
+//! `shard_000.bin` for a model held in parts), which holds the embedding table
+//! — rows read out of the quantized table as they are looked up — and the
+//! tokenizer. Its rows are the first segment's own (`SplitModel::embed_ids` →
+//! `embed_tokens`), bit for bit, and it reads the parts through the same
+//! checks (`first_header_disagreement`, the tensor table).
+//!
+//! Until 2026-10-20 it opened `shard_000.bin` as a whole GGUF file, which a
+//! part is not — its first bytes are tensor data — so every load failed with
+//! "unknown magic", the setting did nothing, and a first segment elsewhere was
+//! sent the token ids it exists to keep here (FUTURE_WORK #316).
 
 use std::path::Path;
+use std::sync::Arc;
 
-use candle_core::{Device, Module, Tensor};
-use candle_nn::Embedding;
+use candle_core::Tensor;
 
 use crate::error::SwarmError;
-use crate::inference::model_arch::ModelArch;
 use crate::inference::split::{tensor_to_bytes, SplitTokenizer};
+use crate::types::ModelId;
 
-/// Lightweight embedding-only model for local privacy.
-/// Holds the dequantized embedding table and tokenizer from GGUF metadata.
 pub struct LocalEmbedder {
-    embeddings: Embedding,
-    tokenizer: Option<SplitTokenizer>,
-    hidden_dim: usize,
-    arch: ModelArch,
+    rows: Rows,
 }
 
-// Safety: candle Tensor = Arc<Tensor_> which is Send + Sync.
-// Embedding is a newtype over Tensor. SplitTokenizer uses Vec/HashMap (Send + Sync).
-// ModelArch is an enum (Send + Sync). All fields are thread-safe.
-unsafe impl Send for LocalEmbedder {}
-unsafe impl Sync for LocalEmbedder {}
+/// Where the rows come from.
+enum Rows {
+    /// The first segment's loader, asked for no layers.
+    FirstSegment(Box<crate::inference::split::SplitModel>),
+    /// A bare table, for the pipeline's tests (which have no model files).
+    #[cfg(test)]
+    Table(candle_nn::Embedding),
+}
 
 impl LocalEmbedder {
-    /// Load the embedding table and tokenizer from a GGUF shard file.
-    ///
-    /// Opens the GGUF file, reads `token_embd.weight`, dequantizes it,
-    /// and builds a tokenizer from GGUF metadata. This is lightweight
-    /// compared to loading a full SplitModel (~64MB for a 7B Q4 model).
-    pub fn load(shard0_path: &Path) -> Result<Self, SwarmError> {
-        // Buffered: the header walk is thousands of tiny reads and each one is
-        // a syscall on a bare `File` (see `split::read_gguf_header`). The
-        // reader is kept because the tensor loads below read through it too.
-        let file = std::fs::File::open(shard0_path)
-            .map_err(|e| SwarmError::Inference(format!("Failed to open shard_000: {e}")))?;
-        let mut file = std::io::BufReader::new(file);
-        let ct = candle_core::quantized::gguf_file::Content::read(&mut file)
-            .map_err(|e| SwarmError::Inference(format!("Failed to read GGUF content: {e}")))?;
-
-        let device = Device::Cpu;
-
-        // Get architecture
-        let arch_str = crate::inference::split::gguf_arch_str(&ct);
-        let arch = ModelArch::from_gguf_arch(&arch_str);
-
-        // Gemma 4 E2B/E4B: every layer reads an input built from the TOKENS
-        // beside their embedding (`split::per_layer`), so a forward handed
-        // hidden states is refused — embedding here would only break the
-        // request. Such a model runs whole on one computer
-        // (`GgufTensorMeta::runs_only_whole`), which never sends the tokens
-        // to a first segment elsewhere.
-        let per_layer_width = ct
-            .metadata
-            .get(&format!("{arch_str}.embedding_length_per_layer_input"))
-            .and_then(|v| v.to_u32().ok())
-            .unwrap_or(0);
-        if per_layer_width > 0
-            || ct
-                .tensor_infos
-                .contains_key(crate::inference::split::PER_LAYER_TOKEN_TABLE)
-        {
-            return Err(SwarmError::Inference(
-                "this model's layers read per-layer inputs built from the tokens; it is not \
-                 embedded ahead of its first layer"
-                    .into(),
-            ));
-        }
-
-        // Get hidden dim
-        let hidden_dim = ct
-            .metadata
-            .get(&format!("{arch_str}.embedding_length"))
-            .and_then(|v| v.to_u32().ok())
-            .unwrap_or(2048) as usize;
-
-        // Load and dequantize the embedding table
-        let tok_embd = ct
-            .tensor(&mut file, "token_embd.weight", &device)
-            .map_err(|e| SwarmError::Inference(format!("Failed to load token_embd.weight: {e}")))?;
-        let tok_embd = tok_embd
-            .dequantize(&device)
-            .map_err(|e| SwarmError::Inference(format!("Dequantize embedding: {e}")))?;
-
-        let embeddings = Embedding::new(tok_embd, hidden_dim);
-
-        // Build tokenizer from GGUF metadata (same logic as SplitModel)
-        let tokenizer = Self::build_tokenizer(&ct);
-
+    /// Load this node's embedder for `model_id`: the model's first segment with
+    /// no layers, on the processor (the daemon holds no graphics context, and
+    /// a lookup is a few rows). Fails where this node does not hold the
+    /// model's first part — the embedding table is in it.
+    pub fn load(data_dir: &Path, model_id: &ModelId) -> Result<Self, SwarmError> {
+        use crate::model::manifest::ModelManifestExt;
+        let model_dir = crate::model::shard::model_dir(data_dir, &model_id.0);
+        let manifest = crate::types::ModelManifest::load_from_dir(&model_dir)?;
+        let shard_store = crate::model::shard::ShardStore::new(data_dir);
+        let model = crate::daemon::shard_loader::load_model_range(
+            &crate::daemon::shard_loader::ShardLoadParams {
+                model_dir: &model_dir,
+                shard_store: &shard_store,
+                model_id,
+                layer_start: 0,
+                layer_end: 0,
+                is_first: true,
+                is_last: false,
+                manifest: &manifest,
+                force_cpu: true,
+            },
+        )?;
         tracing::info!(
-            arch = %arch_str,
-            hidden_dim,
-            has_tokenizer = tokenizer.is_some(),
-            path = %shard0_path.display(),
-            "Loaded local embedding table for privacy mode"
+            model = %model_id,
+            hidden_dim = model.hidden_dim,
+            has_tokenizer = model.tokenizer().is_some(),
+            "Loaded this model's embedding table for prompt privacy"
         );
-
         Ok(Self {
-            embeddings,
-            tokenizer,
-            hidden_dim,
-            arch,
+            rows: Rows::FirstSegment(Box::new(model)),
         })
+    }
+
+    /// An embedder over a bare `[vocab, hidden]` table, with no tokenizer (so
+    /// a prompt is read byte by byte) — for tests with no model files.
+    #[cfg(test)]
+    pub(crate) fn from_table(table: Tensor) -> Self {
+        let hidden = table.dim(1).expect("a [vocab, hidden] table");
+        Self {
+            rows: Rows::Table(candle_nn::Embedding::new(table, hidden)),
+        }
+    }
+
+    fn tokenizer(&self) -> Option<&SplitTokenizer> {
+        match &self.rows {
+            Rows::FirstSegment(model) => model.tokenizer(),
+            #[cfg(test)]
+            Rows::Table(_) => None,
+        }
     }
 
     /// Embed a full prompt string into hidden-state activations.
@@ -118,8 +101,7 @@ impl LocalEmbedder {
     ///
     /// `vision` is the request's image rows, REQUIRED so no caller can leave
     /// them out: before #115 (2) this path tokenized the text alone, and a
-    /// request with a picture that took it — prompt privacy, on by itself
-    /// wherever this node holds both ends — was answered without the picture.
+    /// request with a picture that took it was answered without the picture.
     /// With rows, the prompt is tokenized with its markers and the rows put
     /// there (`vision::splice_image_rows`, the first segment's own splice).
     pub fn embed_prompt(
@@ -127,7 +109,7 @@ impl LocalEmbedder {
         prompt: &str,
         vision: Option<&Tensor>,
     ) -> Result<(Vec<u8>, usize), SwarmError> {
-        let token_ids: Vec<i64> = match (&self.tokenizer, vision) {
+        let token_ids: Vec<i64> = match (self.tokenizer(), vision) {
             (Some(tokenizer), Some(_)) => {
                 crate::inference::vision::encode_prompt_with_images(tokenizer, prompt)
             }
@@ -139,7 +121,7 @@ impl LocalEmbedder {
                         .into(),
                 ))
             }
-            // Fallback: byte-level encoding
+            // The first segment's own fallback (`model_worker`): byte-level.
             (None, None) => prompt.bytes().map(|b| b as i64).collect(),
         };
 
@@ -156,94 +138,118 @@ impl LocalEmbedder {
         Ok((bytes, positions))
     }
 
-    /// `(1, n, hidden)` embeddings of `ids`, scaled as the model scales them.
+    /// `(1, n, hidden)` embeddings of `ids`: the first segment's lookup.
     fn embed_ids(&self, ids: &[i64]) -> Result<Tensor, SwarmError> {
-        let input = Tensor::new(ids, &Device::Cpu)
-            .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?
-            .unsqueeze(0)
-            .map_err(|e| SwarmError::Internal(format!("Unsqueeze: {e}")))?;
-
-        let mut emb = self
-            .embeddings
-            .forward(&input)
-            .map_err(|e| SwarmError::Internal(format!("Embedding forward: {e}")))?;
-
-        // Gemma models scale embeddings by sqrt(hidden_dim)
-        if self.arch.use_gemma_norm() {
-            let scale = (self.hidden_dim as f64).sqrt();
-            emb = emb
-                .affine(scale, 0.0)
-                .map_err(|e| SwarmError::Internal(format!("Embedding scale: {e}")))?;
+        match &self.rows {
+            Rows::FirstSegment(model) => model.embed_ids(ids),
+            #[cfg(test)]
+            Rows::Table(table) => {
+                use candle_core::Module;
+                let input = Tensor::new(ids, &candle_core::Device::Cpu)
+                    .and_then(|t| t.unsqueeze(0))
+                    .map_err(SwarmError::internal)?;
+                table.forward(&input).map_err(SwarmError::internal)
+            }
         }
-        Ok(emb)
     }
 
     /// Embed a single token ID into hidden-state activations.
     ///
     /// Returns serialized tensor bytes with shape `[1, 1, hidden_dim]`.
     pub fn embed_token(&self, token_id: u32) -> Result<Vec<u8>, SwarmError> {
-        let input = Tensor::new(&[token_id as i64][..], &Device::Cpu)
-            .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?
-            .unsqueeze(0)
-            .map_err(|e| SwarmError::Internal(format!("Unsqueeze: {e}")))?;
-
-        let mut emb = self
-            .embeddings
-            .forward(&input)
-            .map_err(|e| SwarmError::Internal(format!("Embedding forward: {e}")))?;
-
-        if self.arch.use_gemma_norm() {
-            let scale = (self.hidden_dim as f64).sqrt();
-            emb = emb
-                .affine(scale, 0.0)
-                .map_err(|e| SwarmError::Internal(format!("Embedding scale: {e}")))?;
-        }
-
-        tensor_to_bytes(&emb)
+        tensor_to_bytes(&self.embed_ids(&[i64::from(token_id)])?)
     }
+}
 
-    /// Build a tokenizer from GGUF metadata.
-    fn build_tokenizer(ct: &candle_core::quantized::gguf_file::Content) -> Option<SplitTokenizer> {
-        use crate::inference::split::GgufTokenizerMeta;
-        GgufTokenizerMeta::from_content(ct).build_tokenizer()
+/// This node's embedder for `model_id`, loaded the first time a request asks
+/// (on a blocking thread — it reads the header and the embedding table) and
+/// kept in `SharedState::local_embedders` until the model is unloaded or
+/// deleted. `Err` where it cannot be built here: the caller refuses rather
+/// than send token ids (`PipelineExecutor::execute_distributed`).
+///
+/// Loaded on demand, not at startup as it was: a model fetched after the node
+/// started never had one.
+pub async fn local_embedder_for(
+    state: &crate::daemon::SharedState,
+    model_id: &ModelId,
+) -> Result<Arc<LocalEmbedder>, SwarmError> {
+    if let Some(found) = state.local_embedders.get(model_id) {
+        return Ok(found.value().clone());
     }
+    let data_dir = state.config.node.data_dir.clone();
+    let id = model_id.clone();
+    let loaded = tokio::task::spawn_blocking(move || LocalEmbedder::load(&data_dir, &id))
+        .await
+        .map_err(|e| SwarmError::Internal(format!("local embedder load panicked: {e}")))??;
+    // Two requests may have loaded it at once; the first one kept is the one
+    // every later request uses.
+    Ok(state
+        .local_embedders
+        .entry(model_id.clone())
+        .or_insert_with(|| Arc::new(loaded))
+        .value()
+        .clone())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Loads `shard_000.bin` from a real on-disk model directory and exercises
-    /// `embed_prompt` + `embed_token`. Gated on `SWARMLLM_TEST_MODEL_DIR`; no
-    /// synthetic fixture is committed (see `docs/ARCHITECTURE.md` § Deferred Items).
+    /// Loads the embedder from a real model directory — the parts as a node
+    /// holds them (`gguf_header.bin` + `shard_000.bin`), never a whole GGUF —
+    /// and checks its rows are the first segment's own: the same ids looked up
+    /// by the first segment loaded with one layer.
     ///
-    /// Run with:
+    /// Red before FUTURE_WORK #316: `unknown magic 0x3f800000` — the part was
+    /// opened as a GGUF file.
+    ///
     /// ```sh
-    /// SWARMLLM_TEST_MODEL_DIR=~/.local/share/swarmllm/models/tinyllama-1.1b-... \
-    ///     cargo test -- --ignored local_embedder_load_from_real_model
+    /// SWARMLLM_TEST_MODEL_DIR=~/.local/share/swarmllm/models/llama-3.2-3b-instruct-q4-k-m \
+    ///     cargo dev-test --lib local_embedder_load_from_real_model -- --ignored
     /// ```
     #[test]
     #[ignore]
     fn local_embedder_load_from_real_model() {
-        let model_dir = match std::env::var("SWARMLLM_TEST_MODEL_DIR") {
-            Ok(d) => std::path::PathBuf::from(d),
-            Err(_) => {
-                panic!("set SWARMLLM_TEST_MODEL_DIR to a model directory containing shard_000.bin")
-            }
-        };
-        let shard0 = model_dir.join("shard_000.bin");
-        assert!(shard0.exists(), "shard_000.bin missing in {model_dir:?}");
+        let model_dir = std::path::PathBuf::from(
+            std::env::var("SWARMLLM_TEST_MODEL_DIR")
+                .expect("set SWARMLLM_TEST_MODEL_DIR to a model directory holding shard_000.bin"),
+        );
+        assert!(model_dir.join("shard_000.bin").exists());
+        assert!(
+            !model_dir.join("model.gguf").exists() && !model_dir.join("source_path").exists(),
+            "the directory must hold the model in parts, or this proves nothing"
+        );
+        let model_id = ModelId(model_dir.file_name().unwrap().to_string_lossy().into());
+        let data_dir = model_dir.parent().unwrap().parent().unwrap();
 
-        let embedder = LocalEmbedder::load(&shard0).expect("Failed to load local embedder");
-        assert!(embedder.hidden_dim > 0);
-
-        let (bytes, num_tokens) = embedder
+        let embedder = LocalEmbedder::load(data_dir, &model_id).expect("the embedder loads");
+        let (bytes, positions) = embedder
             .embed_prompt("Hello world", None)
-            .expect("embed_prompt failed");
-        assert!(num_tokens > 0);
-        assert!(!bytes.is_empty());
+            .expect("embed_prompt");
+        assert!(positions > 0 && !bytes.is_empty());
 
-        let token_bytes = embedder.embed_token(1).expect("embed_token failed");
-        assert!(!token_bytes.is_empty());
+        use crate::model::manifest::ModelManifestExt;
+        let manifest = crate::types::ModelManifest::load_from_dir(&model_dir).unwrap();
+        let first = crate::daemon::shard_loader::load_model_range(
+            &crate::daemon::shard_loader::ShardLoadParams {
+                model_dir: &model_dir,
+                shard_store: &crate::model::shard::ShardStore::new(data_dir),
+                model_id: &model_id,
+                layer_start: 0,
+                layer_end: 1,
+                is_first: true,
+                is_last: false,
+                manifest: &manifest,
+                force_cpu: true,
+            },
+        )
+        .unwrap();
+        let ids = first.tokenizer().unwrap().encode("Hello world");
+        let own = tensor_to_bytes(&first.embed_ids(&ids).unwrap()).unwrap();
+        assert_eq!(bytes, own, "the first segment's own rows, bit for bit");
+        assert_eq!(
+            embedder.embed_token(1).unwrap(),
+            tensor_to_bytes(&first.embed_ids(&[1]).unwrap()).unwrap()
+        );
     }
 }

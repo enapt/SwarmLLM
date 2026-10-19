@@ -165,7 +165,7 @@ Consider a 3-node pipeline: **Requester** → **Node A** (layers 0-10) → **Nod
 
 **Without `local_embedding_privacy`** (default): The first-segment node (Node A) receives the raw prompt text or token IDs to perform the embedding lookup. This means Node A can read the user's prompt in plaintext.
 
-**With `local_embedding_privacy: true`**: The requesting node performs the embedding lookup locally and sends pre-embedded activation tensors. Node A receives floating-point vectors instead of token IDs. This is a significant privacy improvement, but not absolute — see [Activation Inversion Risk](#risk-activation-inversion-attacks) below.
+**With `local_embedding_privacy: true`**: The requesting node performs the embedding lookup locally and sends pre-embedded activation tensors. Node A receives floating-point vectors instead of token IDs — but each vector is a row of the model's own embedding table, which Node A holds, so it can match every one back to its token exactly. This keeps token IDs off the wire; it does **not** hide the prompt from Node A. See [Activation Inversion Risk](#risk-activation-inversion-attacks) below.
 
 ### Risk: Final-segment node sees generated output
 
@@ -184,7 +184,7 @@ All intermediate nodes see hidden-state activation tensors (floating-point matri
 
 **What SwarmLLM does, and what each measure protects:**
 1. Encryption in transit — every peer connection is encrypted (Noise / TLS), and activation forwards are additionally sealed with ChaCha20-Poly1305 (Tier 1). This stops **eavesdroppers on the network**, not the nodes doing the work.
-2. `local_embedding_privacy: true` — the first remote node never receives the raw tokens or the trivially reversible embedding output. It removes the easy case, not the risk.
+2. `local_embedding_privacy: true` — no token IDs leave your machine. The first remote node receives the embedding output instead, which it can reverse exactly, so this does not keep the prompt from that node.
 3. **Private Mode** — the only setting that keeps a request away from strangers' machines: your requests are served by your own devices (and, optionally, your local network) only.
 
 ### Risk: Byzantine tensor manipulation
@@ -202,7 +202,7 @@ you're in. The columns describe what the
 | Configuration | Prompt privacy | Response privacy | Activation risk |
 |---|---|---|---|
 | **Default** (Layer 1 only, no privacy flags) | First segment receives the plaintext prompt | Final segment sees plaintext sampled tokens | Intermediate nodes see encrypted-on-wire activations; can decrypt at their boundary |
-| `local_embedding_privacy: true` | No remote node sees raw token IDs | Final segment sees plaintext | Reduced — no trivial embedding inversion |
+| `local_embedding_privacy: true` | No remote node is sent token IDs — but the first segment is sent embedding rows it reverses exactly | Final segment sees plaintext | Unchanged — the first segment's input is trivially invertible |
 | `encrypted_pipeline: true` ("boomerang") | No remote node receives the prompt text or token IDs | No remote node samples the output | Remote nodes see intermediate activations in plaintext — **partially invertible to your text** |
 | All protections enabled | Best available structurally | Best available structurally | Remote nodes still see activations that published attacks invert to much of the input |
 
@@ -217,11 +217,11 @@ you're in. The columns describe what the
 
 ## Local Embedding Privacy
 
-When `local_embedding_privacy: true` is set in `[inference]` config, the requesting node performs token→embedding lookup locally before sending activations to the first pipeline segment. Remote nodes never see raw token IDs — only hidden-state activation tensors.
+When `local_embedding_privacy: true` is set in `[inference]` config, the requesting node performs token→embedding lookup locally before sending activations to the first pipeline segment. Remote nodes are never sent token IDs — only hidden-state activation tensors. ⚠ Those are rows of the model's own embedding table, which the first segment holds and matches back to the tokens exactly: the setting keeps token IDs off the wire, it does not hide the prompt from that computer. (It never worked before v0.3.245: the embedder could not read the model's first part as nodes store it.)
 
 **How it works:**
-1. On startup, `LocalEmbedder` loads `token_embd.weight` from `shard_000.bin` and dequantizes it to f32 in RAM (vocab × hidden × 4 bytes — far larger than the quantized table on disk)
-2. The requesting node tokenizes the prompt and performs the embedding lookup locally (~1ms)
+1. The first time a request needs it, `LocalEmbedder` loads the embedding table and tokenizer from this computer's own copy of the model's first part — the same loader the first segment uses, asked for no layers, with the table kept quantized and rows read as they are looked up
+2. The requesting node tokenizes the prompt and performs the embedding lookup locally (~1ms). This happens only when the model's first layers may run on another computer; when they run on this one, the token IDs never leave it. If this computer does not hold the model's first part, such a request is refused with a message naming this setting rather than sent as token IDs, and the faster split paths (which send token IDs) stand aside. A request handed whole to another computer — including the forward to a computer in your pool — is refused too
 3. The resulting hidden-state tensor (`[1, seq_len, hidden_dim]`, FP32) is sent as `LayerForward.activations` with `pre_embedded: true`
 4. The receiving first-segment node skips its embedding lookup and processes the pre-embedded activations directly
 
@@ -243,7 +243,7 @@ No remote node handles the raw prompt tokens or samples the generated output —
 
 **Requirements:**
 - The requesting node must hold **shard 0** (embedding table) AND the **final shard** (output head)
-- `local_embedding_privacy` is auto-enabled when this setting is active
+- The first segment runs on your machine, so the prompt is embedded there by construction — `local_embedding_privacy` is not needed alongside it
 - Only useful for models with **3+ shards** (2-shard models = fully local, no distribution)
 
 **Overhead:**

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #316**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #317**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2714,7 +2714,43 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#304, #269, #305, #184, #179, #115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163, #310; #186 decided)
+**Closed 2026-10-19, not yet released** (#316, #304, #269, #305, #184, #179, #115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163, #310; #186 decided)
+- #316 — **`inference.local_embedding_privacy` keeps the prompt's tokens on this computer, as it
+  says.** It had never worked on a real node, three ways at once (found 2026-10-20 checking a
+  release reviewer's finding on a rig): (1) the embedder opened `shard_000.bin` as a whole GGUF —
+  a part is tensor data from its first byte, so every load failed with `unknown magic
+  0x3f800000`, the setting did nothing, and a first segment on another computer was sent the token
+  ids it exists to keep here; (2) had it loaded, the prompt pass went out at `index_pos` = the
+  prompt's length (every row rotated that far, the reply decoded from before them, a picture's
+  spans dropped); (3) the DSD, speculative and n-gram paths never asked the setting — the n-gram
+  path served every such request a rig offered it. Now the embedder IS the first segment's loader
+  asked for no layers (`daemon::shard_loader::load_model_range`, one function with the worker), on
+  the processor, loaded when a request first asks (`local_embedder::local_embedder_for`; it was
+  loaded only at startup); its rows are the first segment's own (`SplitModel::embed_ids` →
+  `embed_tokens`, bit for bit on Llama 3.2 3B, TinyLlama and Gemma 2 2B). The pass is read from 0.
+  Where the embedder cannot be built and the first segment — or a stand-in for layer 0 — is
+  another computer's, the request is refused (`EmbeddingPrivacyUnavailable` — its message and hint
+  name this setting; `PromptPrivacyUnavailable` names "Start and finish on this computer"), never
+  sent; the fast paths stand aside for such a plan (`fastpath_request_disqualified` →
+  `segment_zero_may_leave_this_node`); a stand-in for segment 0 is handed an embedded prompt only
+  if it advertises `FORWARD_PRE_EMBEDDED`. The prompt is embedded ONLY there
+  (`PipelineExecutor::prompt_embedder`): the review found a first segment run HERE embedded too,
+  which dropped a LoRA adapter (the worker's pre-embedded branch passed none — it now does), handed
+  both tensor-parallel paths floats as text (no group takes an embedded first segment now,
+  `tensor_parallel_group_for`) and skipped the split prompt cache. The boomerang's read of
+  `local_embedders` is gone (no release filled it; a stale entry would have embedded a local first
+  segment). The HTTP forward to a pool member asked neither privacy setting; it now asks
+  `SharedState::privacy_refuses_a_whole_hand_off`, as the hand-off and the led split do. The setting has one live reading
+  (`SharedState::local_embedding_privacy`). Tests (each red with its fix off):
+  `a_prompt_embedded_here_is_sent_embedded_and_read_from_position_zero`,
+  `a_prompt_that_cannot_be_embedded_here_is_never_sent_to_another_computer`,
+  `prompt_privacy_keeps_the_fast_paths_off_a_plan_whose_first_layers_may_leave`,
+  `the_prompt_is_embedded_only_where_the_first_layers_may_leave`,
+  `an_embedded_first_segment_is_never_run_by_a_tensor_parallel_group`,
+  `the_http_forward_to_a_pool_member_asks_both_privacy_settings`,
+  `an_embedding_privacy_refusal_names_the_setting_that_refused`; real files:
+  `local_embedder_load_from_real_model` (ignored). Evidence: `docs/invariants/scheduling.md` §
+  "Prompt privacy embeds the prompt with the first segment's own loader".
 - #304 — **A link whose key rotation did not land keeps working.** Every 600 s
   `SessionManager::evict_stale` destroyed each session older than 600 s — which a session reaches
   only when no rotation renewed it — while the peer went on sealing with it: its next message opened

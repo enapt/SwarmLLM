@@ -225,28 +225,11 @@ impl PipelineExecutor {
         // (#115 (2b)): every forward of the prompt pass carries it.
         self.image_spans = self.image_spans_for(&prompt, image_rows);
 
-        // Local embedding privacy: check if we should embed locally before sending
-        // activations to the first pipeline segment. This prevents remote nodes from
-        // seeing raw token IDs — they only receive hidden-state activation tensors.
-        // Auto-enabled when encrypted_pipeline is active (it requires both ends local).
+        // Prompt privacy (`inference.local_embedding_privacy`): embed the prompt
+        // here when the first segment's input could reach another computer, or
+        // refuse (`prompt_embedder`).
         let model_id = &self.assignment.segments[0].shard_id.model_id;
-        // `encrypted_pipeline_for` is the single answer. Deriving it here from
-        // the per-model map plus the global flag implemented two thirds of the
-        // precedence rule and missed the third — `encrypted_pipeline_auto`, on
-        // by default, which switches privacy on wherever this node holds both
-        // ends of the model. This path is defence in depth for exactly that
-        // case, and it was defending less than the scheduler does.
-        let encrypted_for_model = self.shared_state.encrypted_pipeline_for(model_id);
-        let use_local_embedding =
-            self.shared_state.config.inference.local_embedding_privacy || encrypted_for_model;
-        let local_embedder = if use_local_embedding {
-            self.shared_state
-                .local_embedders
-                .get(model_id)
-                .map(|e| e.value().clone())
-        } else {
-            None
-        };
+        let local_embedder = self.prompt_embedder(request_id).await?;
 
         // The node holding segment 0 has to be told that what it is receiving
         // is already embedded, or it takes `String::from_utf8_lossy` to a float
@@ -273,7 +256,10 @@ impl PipelineExecutor {
                     "Refusing prompt privacy: the node holding the first segment \
                      cannot be told the prompt is already embedded"
                 );
-                return Err(SwarmError::PromptPrivacyUnavailable {
+                // Only `local_embedding_privacy` embeds (`prompt_embedder`), so
+                // this is its refusal, named as such — not "Start and finish on
+                // this computer", which may be off (#316).
+                return Err(SwarmError::EmbeddingPrivacyUnavailable {
                     model_id: model_id.0.clone(),
                 });
             }
@@ -320,10 +306,14 @@ impl PipelineExecutor {
                         .map(|payload| crate::inference::vision::decode_wire_embeddings(&payload))
                         .transpose()?;
                     let (bytes, token_count) = embedder.embed_prompt(prompt, vision.as_ref())?;
-                    // Set prompt_token_count from local tokenization
+                    // The prompt pass is read from position 0, like every
+                    // other; `index_pos` becomes the prompt's length only once
+                    // it has been read (below, as on the path without an
+                    // embedder). Setting it here sent the pass at the prompt's
+                    // length: every row rotated that far and the reply decoded
+                    // from before them, a picture's spans dropped (#316).
                     if prompt_token_count.is_none() {
                         prompt_token_count = Some(token_count);
-                        index_pos = token_count;
                     }
                     prompt_bytes_opt.take();
                     (bytes, true)
@@ -1159,20 +1149,9 @@ impl PipelineExecutor {
                 has_standby && input_is_hidden_state,
             );
 
-            // Check if this segment has a tensor-parallel group. Not for a
-            // request whose pictures attend both ways (#115 (2b)), for any of
-            // its forwards: a group's layers read the prompt in order, and its
-            // primary is this node, which runs the range plainly instead.
-            let tp_group = self
-                .assignment
-                .tp_groups
-                .iter()
-                .find(|g| {
-                    g.layer_range.0 <= segment.layer_range.0
-                        && g.layer_range.1 >= segment.layer_range.1
-                })
-                .filter(|_| self.image_spans.is_empty())
-                .cloned();
+            // Check if this segment has a tensor-parallel group (never for
+            // pictures, nor for an embedded first segment: see the method).
+            let tp_group = self.tensor_parallel_group_for(segment, idx, pre_embedded);
 
             // Tensor-parallel execution: layer-by-layer with AllReduce.
             // A `None` outcome means either "no TP group for this segment" or
@@ -2789,6 +2768,34 @@ impl PipelineExecutor {
                         continue;
                     }
                 }
+            }
+
+            // The first segment's input, taken over by another computer: an
+            // embedded prompt goes only to one that is told it is embedded
+            // (`FORWARD_PRE_EMBEDDED`, as the planned first segment must), and
+            // under prompt privacy token ids never go at all — the request
+            // refuses up front where it could not embed (#316).
+            if failed_idx == 0
+                && ((pre_embedded
+                    && !self.shared_state.peer_advertises_feature(
+                        &backup.node_id,
+                        swarmllm_types::node::features::FORWARD_PRE_EMBEDDED,
+                    ))
+                    || (!pre_embedded && self.shared_state.local_embedding_privacy()))
+            {
+                tracing::warn!(
+                    request_id = %request_id,
+                    backup_node = %backup.node_id,
+                    pre_embedded,
+                    "standby cannot be handed this prompt under prompt privacy — trying the next one"
+                );
+                last_failure = Some(format!(
+                    "the standby {} cannot be handed this prompt under prompt privacy",
+                    backup.node_id
+                ));
+                tried.push(backup.node_id.clone());
+                abandoned = backup.node_id;
+                continue;
             }
 
             // An image prompt's first forward goes only to a standby that

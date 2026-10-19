@@ -270,6 +270,20 @@ pub enum SwarmError {
     #[error("“Start and finish on this computer” is on for {model_id}, but this computer does not hold the model's last part (the output head), where every request for it has to finish")]
     PromptPrivacyNeedsFinalShard { model_id: String },
 
+    /// The config-file setting `inference.local_embedding_privacy` is on, and
+    /// this request's prompt cannot be turned into the model's first-layer
+    /// input HERE for the computer that would run the first layers: this
+    /// computer does not hold the model's first part, or that computer cannot
+    /// be told its input is already embedded (`FORWARD_PRE_EMBEDDED`). The
+    /// setting allows no other way to send it, so the request is refused
+    /// (FUTURE_WORK #316).
+    ///
+    /// Its own variant, not `PromptPrivacyUnavailable`: that one's message and
+    /// hint name "Start and finish on this computer", a dashboard switch that
+    /// may well be off here, and the way out is a different setting.
+    #[error("local_embedding_privacy is on, and the prompt for {model_id} cannot be prepared on this computer for the computer chosen to run the model's first layers")]
+    EmbeddingPrivacyUnavailable { model_id: String },
+
     /// No reachable node holds the piece of this model covering `layer` — the
     /// swarm is missing part of it, so no pipeline can be assembled.
     ///
@@ -901,7 +915,8 @@ pub fn classify_error(err: &SwarmError) -> (StatusCode, String, &'static str) {
         // are separate VARIANTS because the piece to fetch differs, and the
         // hint has to name the right one.
         SwarmError::PromptPrivacyUnavailable { .. }
-        | SwarmError::PromptPrivacyNeedsFinalShard { .. } => (
+        | SwarmError::PromptPrivacyNeedsFinalShard { .. }
+        | SwarmError::EmbeddingPrivacyUnavailable { .. } => (
             StatusCode::SERVICE_UNAVAILABLE,
             err.to_string(),
             "prompt_privacy_error",
@@ -1407,6 +1422,17 @@ pub fn error_hint_with_key(err: &SwarmError) -> Option<(&'static str, &'static s
              `swarmllm privacy <name>`), or turn the setting off there to let the swarm \
              run it. Retrying as-is won't help.",
         )),
+        // A different setting, set in a different place: the way out names it.
+        SwarmError::EmbeddingPrivacyUnavailable { .. } => Some((
+            "embedding_privacy_unavailable",
+            "The local_embedding_privacy setting in config.toml is on: this computer \
+             prepares every prompt itself and sends it no other way. For this model it \
+             can't — it doesn't hold the model's first part, or the computer chosen to run \
+             the first layers is on an older SwarmLLM. Run `swarmllm privacy <name>` to \
+             download the model's first and last parts, or set \
+             local_embedding_privacy = false in config.toml to let another computer start \
+             the reply.",
+        )),
         // The only refusal that had no hint, and its message is the least
         // readable of them: "missing shards: [0, 1, 2, 3]" tells a non-technical
         // user nothing, and nothing else on screen says what to do about it.
@@ -1558,6 +1584,9 @@ mod tests {
             SwarmError::PromptPrivacyUnavailable {
                 model_id: "m".into(),
             },
+            SwarmError::EmbeddingPrivacyUnavailable {
+                model_id: "m".into(),
+            },
             SwarmError::KeptOnThisComputer {
                 model_id: "m".into(),
                 missing_shards: vec![],
@@ -1653,6 +1682,9 @@ mod tests {
                 missing_shards: vec![],
             },
             SwarmError::PromptPrivacyUnavailable {
+                model_id: "m".to_string(),
+            },
+            SwarmError::EmbeddingPrivacyUnavailable {
                 model_id: "m".to_string(),
             },
             SwarmError::KeptOnThisComputer {
@@ -1963,6 +1995,9 @@ mod tests {
             SwarmError::PromptPrivacyUnavailable {
                 model_id: "m".into(),
             },
+            SwarmError::EmbeddingPrivacyUnavailable {
+                model_id: "m".into(),
+            },
             SwarmError::KeptOnThisComputer {
                 model_id: "m".into(),
                 missing_shards: vec![],
@@ -2003,6 +2038,28 @@ mod tests {
         })
         .into_response();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// FUTURE_WORK #316: a refusal by `local_embedding_privacy` sends the reader
+    /// to THAT setting, in config.toml — never to "Start and finish on this
+    /// computer", which `PromptPrivacyUnavailable` names and which may be off.
+    /// The same 503 and `error_type` as its siblings: the same situation to a
+    /// caller, a different way out.
+    #[test]
+    fn an_embedding_privacy_refusal_names_the_setting_that_refused() {
+        let err = SwarmError::EmbeddingPrivacyUnavailable {
+            model_id: "m".into(),
+        };
+        let (status, msg, error_type) = classify_error(&err);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error_type, "prompt_privacy_error");
+        let (key, hint) = error_hint_with_key(&err).expect("a hint");
+        assert_eq!(key, "embedding_privacy_unavailable");
+        for text in [msg.as_str(), hint] {
+            assert!(text.contains("local_embedding_privacy"), "{text}");
+            assert!(!text.contains("Start and finish"), "{text}");
+        }
+        assert!(hint.contains("config.toml"), "{hint}");
     }
 
     /// The last-shard half of the same refusal, and the reason it is a separate

@@ -2609,6 +2609,42 @@ impl SharedState {
         holds(0) && holds(manifest.shard_count.saturating_sub(1))
     }
 
+    /// Is `inference.local_embedding_privacy` on — must this node turn every
+    /// prompt into hidden states before another computer's first segment
+    /// reads it (`inference::local_embedder`)? The one reading, live like the
+    /// other privacy switch: the hand-off, the led split, the fast paths and
+    /// the pipeline all ask it, so a reload cannot leave one of them behind.
+    pub fn local_embedding_privacy(&self) -> bool {
+        self.cfg().inference.local_embedding_privacy
+    }
+
+    /// The refusal a privacy setting gives a request about to be handed WHOLE
+    /// to another computer — which then reads the prompt as text — or `None`
+    /// where neither applies: "Start and finish on this computer"
+    /// (`start_here`, resolved by the caller for its request) or
+    /// `local_embedding_privacy`. The one answer for every path that hands a
+    /// request over whole: the hand-off (`request_may_be_handed_off`), a split
+    /// led by its head (`request_may_be_led_by_its_head`) and the HTTP forward
+    /// to a pool member (`api::openai::resolver::find_peer_with_model`), which
+    /// asked neither setting until #316's review.
+    pub fn privacy_refuses_a_whole_hand_off(
+        &self,
+        model_id: &crate::types::ModelId,
+        start_here: bool,
+    ) -> Option<crate::error::SwarmError> {
+        if start_here {
+            Some(crate::error::SwarmError::PromptPrivacyUnavailable {
+                model_id: model_id.0.clone(),
+            })
+        } else if self.local_embedding_privacy() {
+            Some(crate::error::SwarmError::EmbeddingPrivacyUnavailable {
+                model_id: model_id.0.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
     /// Effective prompt-privacy setting for a model.
     ///
     /// Precedence, most explicit first:

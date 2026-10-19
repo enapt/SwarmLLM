@@ -1143,6 +1143,10 @@ pub(super) fn failure_is_penalty_worthy(err: &SwarmError, had_remote_segment: bo
         // Our own setting, refusing because of what is on our own disk. Both
         // ends of it name this machine and nobody else's.
         | SwarmError::PromptPrivacyNeedsFinalShard { .. }
+        // Our own config-file setting (#316). Where it refuses because the
+        // first-layer peer is too old to take an embedded prompt, the peer
+        // did nothing wrong either.
+        | SwarmError::EmbeddingPrivacyUnavailable { .. }
         | SwarmError::ModelIncompleteInSwarm { .. }
         // Raised only when NO node anywhere holds the model's mmproj shard —
         // a swarm-wide gap, the same shape as `InsufficientCapacity` and
@@ -1307,6 +1311,9 @@ mod tests {
                 model_id: "m".into(),
             },
             SwarmError::PromptPrivacyNeedsFinalShard {
+                model_id: "m".into(),
+            },
+            SwarmError::EmbeddingPrivacyUnavailable {
                 model_id: "m".into(),
             },
         ] {

@@ -534,6 +534,7 @@
   "enc.unprotected_detail": "电脑之间的传输是加密的，但为你提供服务的电脑可以看到你的文字和回复。下载 {missing}，本机就能自己开始和结束回复。",
   "enc.unprotected_tip": "电脑之间的传输始终是加密的。要在本机开始和结束回复，本机还需要该模型的第一部分和最后一部分。",
   "error_hint.config": "存在配置问题。请检查控制台中的「设置」，或查看您的 config.toml 文件。",
+  "error_hint.embedding_privacy_unavailable": "config.toml 中的 local_embedding_privacy 设置已开启：本机自行准备每个提示，不会以其他方式发送。此模型无法做到这一点——本机没有模型的第一部分，或被选来运行前几层的计算机使用的是较旧版本的 SwarmLLM。请运行 `swarmllm privacy <名称>` 下载模型的第一部分和最后一部分，或在 config.toml 中设置 local_embedding_privacy = false，让另一台计算机开始回复。",
   "error_hint.holders_declined": "持有此模型这一部分的计算机在线，但无法接下这个请求——通常是因为它们正忙于运行其他模型，暂时内存不足。请过几分钟再试，或选择其他模型。",
   "error_hint.inference_timeout": "请求耗时过长。请尝试更短的提示词、调低最大令牌数，或在系统空闲时再试。",
   "error_hint.insufficient_capacity": "拥有此模型所需部分的电脑太少。请稍后在更多电脑上线时重试，或在「模型」标签页自行下载这些部分。",
