@@ -210,23 +210,35 @@ impl NetworkManager {
         target_peer_bytes: Vec<u8>,
         forward: crate::types::LayerForward,
     ) {
+        let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, "tensor send") else {
+            return;
+        };
+        let step = forward.step();
         // A node that forwards a request id it RECEIVED is handing the run on
         // (direct peer chaining). The request it received was acknowledged on
         // arrival (`requests.rs`), so there is no substream to release here —
         // the predecessor's request is already complete. What a hop DOES owe
         // is a failure report: if this onward forward dies (no receipt ACK,
-        // OutboundFailure) nobody here is waiting, the coordinator is — so
-        // remember whom to tell. The coordinator's own sends name itself and
-        // are skipped.
+        // OutboundFailure) or the next hop refuses it, nobody here is waiting,
+        // the coordinator is — so remember whom to tell, and about which step
+        // (`hop_forwards`). The coordinator's own sends name itself and are
+        // skipped.
         if let Some(requester) = forward.requester_node_id {
             let coordinator = crate::types::NodeId(requester);
             if coordinator != *self.shared_state.identity.node_id() {
-                self.hop_reply_to.insert(forward.request_id, coordinator);
+                if let Some(onward) = crate::network::transport::peer_id_to_node_id(&peer_id) {
+                    self.hop_forwards.record(
+                        forward.request_id,
+                        super::hop_forwards::HopForward {
+                            coordinator,
+                            onward,
+                            step,
+                            sent_at: std::time::Instant::now(),
+                        },
+                    );
+                }
             }
         }
-        let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, "tensor send") else {
-            return;
-        };
 
         // NETWORKING_PLAN tensor relay — when the target is unreachable OR
         // reachable only via a flaky relay *circuit*, route the forward through
@@ -256,7 +268,12 @@ impl NetworkManager {
                     request_id = %forward.request_id,
                     "Peer not connected and no relay path — failing tensor forward"
                 );
-                self.fail_tensor_forward(forward.request_id, &peer_id, "Peer not connected".into());
+                self.fail_tensor_forward(
+                    forward.request_id,
+                    &peer_id,
+                    "Peer not connected".into(),
+                    step,
+                );
                 return;
             }
             // Circuit-only but no relay path — fall through to a best-effort
@@ -277,7 +294,7 @@ impl NetworkManager {
                         "DIAG: the peer's id carries no key to seal for — failing the tensor \
                          forward instead of sending it unsealed"
                     );
-                    self.fail_tensor_forward(forward.request_id, &peer_id, e.to_string());
+                    self.fail_tensor_forward(forward.request_id, &peer_id, e.to_string(), step);
                     return;
                 }
             };
@@ -305,6 +322,7 @@ impl NetworkManager {
                         request_id,
                         &peer_id,
                         "Internal command queue closed",
+                        step,
                     );
                 }
             });
@@ -321,12 +339,12 @@ impl NetworkManager {
                     forward.request_id,
                     &peer_id,
                     format!("Failed to encode tensor forward: {e}"),
+                    step,
                 );
                 return;
             }
         };
 
-        let num_layers = forward.layer_range.1.saturating_sub(forward.layer_range.0);
         let activation_bytes = forward.activations.len();
         let request_id = forward.request_id;
         let sequence_num = forward.sequence_num;
@@ -339,7 +357,7 @@ impl NetworkManager {
             payload,
             request_id,
             Some(sequence_num),
-            num_layers,
+            step,
             activation_bytes,
             /*encrypted*/ false,
         );
@@ -352,13 +370,14 @@ impl NetworkManager {
         &mut self,
         target_peer_bytes: Vec<u8>,
         request_id: uuid::Uuid,
+        step: crate::types::ResultStep,
         reason: String,
     ) {
         let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, "failed tensor encode")
         else {
             return;
         };
-        self.fail_tensor_forward(request_id, &peer_id, reason);
+        self.fail_tensor_forward(request_id, &peer_id, reason, step);
     }
 
     /// Continuation of `handle_send_tensor`'s encryption branch. The spawned
@@ -371,7 +390,7 @@ impl NetworkManager {
         target_peer_bytes: Vec<u8>,
         payload: Vec<u8>,
         request_id: uuid::Uuid,
-        num_layers: u32,
+        step: crate::types::ResultStep,
         activation_bytes: usize,
     ) {
         let Some(peer_id) = Self::resolve_peer_id(&target_peer_bytes, "encoded tensor send") else {
@@ -390,6 +409,7 @@ impl NetworkManager {
                 request_id,
                 &peer_id,
                 "Peer disconnected during encrypt".into(),
+                step,
             );
             return;
         }
@@ -398,7 +418,7 @@ impl NetworkManager {
             payload,
             request_id,
             None,
-            num_layers,
+            step,
             activation_bytes,
             /*encrypted*/ true,
         );
@@ -416,7 +436,7 @@ impl NetworkManager {
         payload: Vec<u8>,
         request_id: uuid::Uuid,
         sequence_num: Option<u32>,
-        num_layers: u32,
+        step: crate::types::ResultStep,
         activation_bytes: usize,
         encrypted: bool,
     ) {
@@ -442,13 +462,13 @@ impl NetworkManager {
             .send_request(&peer_id, req);
         self.pending_tensor_outbound.insert(
             outbound_id,
-            (
+            super::OutboundForward {
                 request_id,
-                std::time::Instant::now(),
-                peer_id,
-                num_layers,
+                sent_at: std::time::Instant::now(),
+                peer: peer_id,
                 activation_bytes,
-            ),
+                step,
+            },
         );
         if tracing::enabled!(tracing::Level::DEBUG) {
             let is_rr_pending = self
@@ -734,8 +754,8 @@ impl NetworkManager {
                             activations_bytes = result.activations.len(),
                             "Decoded tensor LayerResult, dispatching"
                         );
-                        if let Err(e) = self
-                            .dispatch_authenticated(Some(&peer), SwarmMessage::LayerResult(result))
+                        if let Err(e) =
+                            self.dispatch_layer_result(self.peer_to_node_id(&peer), result)
                         {
                             if let Some(burst) = self
                                 .shared_state
@@ -1535,12 +1555,13 @@ pub(super) fn sealed_or_failed(
 ) -> NetworkCommand {
     let request_id = forward.request_id;
     let activation_bytes = forward.activations.len();
+    let step = forward.step();
     match crate::network::pipeline_stream::encode_forward_for_wire(forward, peer_id, shared_state) {
         Ok(payload) => NetworkCommand::SendEncodedTensor {
             target_peer_bytes,
             payload,
             request_id,
-            num_layers: forward.layer_range.1.saturating_sub(forward.layer_range.0),
+            step,
             activation_bytes,
         },
         Err(e) => {
@@ -1555,6 +1576,7 @@ pub(super) fn sealed_or_failed(
             NetworkCommand::FailEncodedTensor {
                 target_peer_bytes,
                 request_id,
+                step,
                 reason: format!("Encryption failed: {e}"),
             }
         }
@@ -1569,14 +1591,16 @@ pub(super) fn sealed_or_failed(
 /// `target_peer` is the peer whose forward failed. The waiter is resolved only
 /// if it is still expecting that peer — a request that has since failed over is
 /// waiting on a standby, and must not be failed by the abandoned forward.
-/// Silently returns when nothing matches.
+/// Silently returns when nothing matches. The failure answers the forward's
+/// `step`, or a streamed wait never finds it.
 pub(crate) fn fail_pending_forward(
     shared_state: &std::sync::Arc<crate::daemon::SharedState>,
     request_id: uuid::Uuid,
     target_peer: &libp2p::PeerId,
     reason: impl Into<String>,
+    step: crate::types::ResultStep,
 ) {
-    let result = crate::types::LayerResult::error(request_id, reason.into());
+    let result = crate::types::LayerResult::error(request_id, reason.into()).answering_step(step);
     let sender = crate::network::transport::peer_id_to_node_id(target_peer);
     shared_state.resolve_pending_layer_result(sender.as_ref(), result);
 }
@@ -2006,10 +2030,16 @@ mod seal_tests {
             NetworkCommand::FailEncodedTensor {
                 target_peer_bytes,
                 request_id,
+                step,
                 reason,
             } => {
                 assert_eq!(target_peer_bytes, peer_id.to_bytes());
                 assert_eq!(request_id, fwd.request_id);
+                assert_eq!(
+                    step,
+                    fwd.step(),
+                    "the failure answers the forward that failed"
+                );
                 assert!(reason.starts_with("Encryption failed"), "{reason}");
             }
             other => panic!("no session, yet the task asked the loop for {other:?}"),
@@ -2024,12 +2054,12 @@ mod seal_tests {
             NetworkCommand::SendEncodedTensor {
                 payload,
                 request_id,
-                num_layers,
+                step,
                 activation_bytes,
                 ..
             } => {
                 assert_eq!(request_id, fwd.request_id);
-                assert_eq!((num_layers, activation_bytes), (4, 64));
+                assert_eq!((step, activation_bytes), (fwd.step(), 64));
                 assert_ne!(
                     payload,
                     crate::network::protocol::encode_layer_forward(&fwd).unwrap(),

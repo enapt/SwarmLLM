@@ -326,7 +326,7 @@ impl NetworkManager {
         let affected_tensors: Vec<_> = self
             .pending_tensor_outbound
             .values()
-            .map(|(u, _, _, _, _)| u.to_string())
+            .map(|f| f.request_id.to_string())
             .collect();
         // Classify the close reason so operators can triage dropouts at a glance
         // without having to parse nested ConnectionError Debug output.

@@ -294,6 +294,20 @@
 #          control: the refusal reaches no wait, A times the piece out twice and
 #          re-plans (503 after 403.8 s on 2026-10-18). PASS = 200, `A took the
 #          refusal: 1`, `A timed out: 0`, `A re-planned: 0`.
+#   refusechain FUTURE_WORK #305: remote's shape with REMOTE_NODES=2 and the loop
+#          kept on A (`SWARMLLM_DELEGATE_SPLIT=0`), so a decode step travels
+#          A → B → C as one chained forward; C alone runs with
+#          SWARMLLM_FAULT_REFUSE_DECRYPT=REFUSE_AT (default 6, past the prompt
+#          pass) and refuses to B, the hop it came from. v0.3.244 is the
+#          control: B holds no wait and drops the refusal, A waits out the
+#          chain's deadline. PASS = `B passed it on: 1`, `A took the refusal: 1`,
+#          `A timed out: 0`; the status and time are printed beside it.
+#   killchain FUTURE_WORK #184: refusechain's topology without the fault — a long
+#          reply whose decode steps travel A → B → C, and C's node is killed
+#          (SIGKILL, workers too) 40 results in. PASS = the reply ends within
+#          KILL_SLACK (default 60) s of the kill and `A timed out: 0` — C held
+#          the last layers alone, so the end is a fast 503 or a salvaged partial,
+#          never the chain's deadline.
 #
 # usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece|owntiming <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
@@ -301,6 +315,9 @@
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
 #   SHARDS_B   shard indices B holds (default: every shard A lacks; kill: all)
 #   GPU_A/B    SWARMLLM_INFERENCE_GPU_LAYERS for each node ("" = auto)
+#   ENV_A/B/…  extra VAR=value words for that node alone (e.g.
+#              ENV_C="SWARMLLM_FAULT_REFUSE_DECRYPT=6"); the caller's environment
+#              reaches every node
 #   CPUS_A/B/… logical CPUs that node runs on (`taskset -c`, e.g. CPUS_A=0-7
 #              CPUS_B=8-15): two nodes on disjoint halves of the machine stand in
 #              for two computers when work across them overlaps (#171)
@@ -337,7 +354,18 @@ fi
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece|owntiming) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, refusepiece or owntiming"; exit 2 ;; esac
+case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece|refusechain|killchain|owntiming) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, refusepiece, refusechain, killchain or owntiming"; exit 2 ;; esac
+# refusechain is remote's topology with one fault on C (#305).
+REFUSECHAIN=""; KILLCHAIN=""
+if [ "$MODE" = killchain ]; then
+  MODE=remote; KILLCHAIN=1; REMOTE_NODES=2
+  export SWARMLLM_DELEGATE_SPLIT=0
+fi
+if [ "$MODE" = refusechain ]; then
+  MODE=remote; REFUSECHAIN=1; REMOTE_NODES=2
+  export SWARMLLM_DELEGATE_SPLIT=0
+  ENV_C="SWARMLLM_FAULT_REFUSE_DECRYPT=${REFUSE_AT:-6}${ENV_C:+ $ENV_C}"
+fi
 if [ -n "${RAM_A:-}${RAM_B:-}" ] && printf '%s' "${EXTRA_TOML:-}" | grep -q '^\[resources\]'; then
   echo "RAM_A/RAM_B are written to that node's [resources]; EXTRA_TOML may not open that table too"; exit 2
 fi
@@ -576,10 +604,13 @@ start() { # dir port bin gpu [memory limit]
   # in for two computers, where work that overlaps does not share cores.
   local cpus_var="CPUS_$(basename "$1")" pin=()
   [ -n "${!cpus_var:-}" ] && pin=(taskset -c "${!cpus_var}")
+  # ENV_A / ENV_B / …: VAR=value words for this node alone (a fault on one hop).
+  local env_var="ENV_$(basename "$1")" own=() words=()
+  if [ -n "${!env_var:-}" ]; then read -r -a words <<< "${!env_var}"; own=(env "${words[@]}"); fi
   if [ -n "$4" ]; then
-    SWARMLLM_INFERENCE_GPU_LAYERS="$4" SWARMLLM_NODE_DATA_DIR="$1" "${scope[@]}" "${pin[@]}" "$3" run -p "$2" > "$1/node.log" 2>&1 &
+    SWARMLLM_INFERENCE_GPU_LAYERS="$4" SWARMLLM_NODE_DATA_DIR="$1" "${own[@]}" "${scope[@]}" "${pin[@]}" "$3" run -p "$2" > "$1/node.log" 2>&1 &
   else
-    SWARMLLM_NODE_DATA_DIR="$1" "${scope[@]}" "${pin[@]}" "$3" run -p "$2" > "$1/node.log" 2>&1 &
+    SWARMLLM_NODE_DATA_DIR="$1" "${own[@]}" "${scope[@]}" "${pin[@]}" "$3" run -p "$2" > "$1/node.log" 2>&1 &
   fi
   echo $!
 }
@@ -737,7 +768,15 @@ if [ "$MODE" = mixed ] || [ "$MODE" = disputed ]; then
   fi
 fi
 if [ "$MODE" = remote ]; then
-  make_node "$BASE/C" "$SHARDS_C" "\"$ADDR\""
+  C_BOOT="\"$ADDR\""
+  if [ -n "$REFUSECHAIN$KILLCHAIN" ]; then
+    # A chained step goes B → C, so B must already be connected to C: C dials
+    # B as well as A (peer exchange alone can take minutes to introduce them).
+    ID_B=$(grep -a -m1 -oE "Initializing network peer_id=12D3Koo[A-Za-z0-9]+" "$BASE/B/node.log" | cut -d= -f2)
+    ADDR_B=$(echo "$ADDR" | sed -E "s#/tcp/[0-9]+/p2p/.*#/tcp/8930/p2p/$ID_B#")
+    [ -n "$ID_B" ] && C_BOOT="\"$ADDR\", \"$ADDR_B\""
+  fi
+  make_node "$BASE/C" "$SHARDS_C" "$C_BOOT"
   PC=$(start "$BASE/C" 8940 "$BIN_A" "${GPU_C:-0}")
   up "$BASE/C" 8940 || exit 1
   PEERS_EXPECTED=2
@@ -1645,8 +1684,53 @@ seg=p.get("segments",[])
 print("  plan on :%s:" % sys.argv[1], " ".join("%s%s" % (s["node_id"][:8], s["layer_range"]) for s in seg), file=sys.stderr)
 sys.exit(0 if len(seg) >= 2 else 1)' "$2"
   }
-  for _ in $(seq 1 60); do covered "$KA" 8900 2>/dev/null && covered "$KB" 8920 2>/dev/null && break; sleep 3; done
-  covered "$KA" 8900 && covered "$KB" 8920 || { echo "remote: A or B never planned the model across the others"; exit 1; }
+  # A drives refusechain and killchain itself: only A's plan matters there.
+  b_plans() { [ -n "$REFUSECHAIN$KILLCHAIN" ] || covered "$KB" 8920; }
+  for _ in $(seq 1 60); do covered "$KA" 8900 2>/dev/null && b_plans 2>/dev/null && break; sleep 3; done
+  covered "$KA" 8900 && b_plans || { echo "remote: A or B never planned the model across the others"; exit 1; }
+  if [ -n "$KILLCHAIN" ]; then
+    ask "Explain in detail how a refrigerator works, step by step." 400 kill > "$OUT/kill.jsonl" &
+    ASK=$!
+    until [ "$(grep -c 'DIAG: segment result received' "$BASE/A/node.log" 2>/dev/null)" -ge 40 ]; do
+      kill -0 $ASK 2>/dev/null || { echo "killchain: the reply finished before the kill point"; break; }
+      sleep 0.5
+    done
+    CW=$(pgrep -P "$PC" | paste -sd' ')
+    echo "killchain: killing C ($PC${CW:+, workers $CW}) after $(grep -c 'DIAG: segment result received' "$BASE/A/node.log") results"
+    TK=$(date +%s.%N)
+    kill -9 "$PC" $CW
+    PC=""
+    wait $ASK
+    secs=$(python3 -c "print(round($(date +%s.%N) - $TK, 1))")
+    status=$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["status"])' "$OUT/kill.jsonl")
+    departed=$(grep -ac 'peer departed with forwards outstanding' "$BASE/A/node.log")
+    hop=$(grep -ac 'passing the next hop' "$BASE/B/node.log")
+    timed=$(grep -ac 'segment TIMED OUT' "$BASE/A/node.log")
+    echo "killchain: ended $secs s after the kill, $status; A failed it on departure: $departed," \
+      "B passed a failure on: $hop, A timed out: $timed"
+    if python3 -c "import sys; sys.exit(0 if $secs <= ${KILL_SLACK:-60} else 1)" && [ "$timed" = 0 ]; then
+      echo "killchain: PASS"; exit 0
+    fi
+    echo "killchain: FAIL"; exit 1
+  fi
+  if [ -n "$REFUSECHAIN" ]; then
+    T0=$(date +%s.%N)
+    ask "Explain in three sentences why the sky is blue." 48 q1 | tee "$OUT/replies.jsonl" | cut -c1-300
+    secs=$(python3 -c "print(round($(date +%s.%N) - $T0, 1))")
+    refused=$(grep -c 'FAULT: treating this forward as undecryptable' "$BASE/C/node.log")
+    at_b=$(grep -a 'dispatcher received LayerResult' "$BASE/B/node.log" | grep -c 'Could not decrypt')
+    passed=$(grep -ac 'passing the next hop' "$BASE/B/node.log")
+    took=$(grep -ac 'LayerResult delivered to pipeline.*Could not decrypt' "$BASE/A/node.log")
+    timed=$(grep -ac 'segment TIMED OUT' "$BASE/A/node.log")
+    unchained=$(grep -ac 'chained run failed' "$BASE/A/node.log")
+    status=$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["status"])' "$OUT/replies.jsonl")
+    echo "refusechain: took $secs s, $status; C refused (fault): $refused, B received it: $at_b," \
+      "B passed it on: $passed, A took the refusal: $took, A timed out: $timed, chained runs abandoned: $unchained"
+    if [ "$refused" = 1 ] && [ "$passed" = 1 ] && [ "$took" = 1 ] && [ "$timed" = 0 ]; then
+      echo "refusechain: PASS"; exit 0
+    fi
+    echo "refusechain: FAIL"; exit 1
+  fi
   printf '%s' "$PROMPT" > "$OUT/prompt.txt"
   : > "$OUT/remote.jsonl"
   : > "$OUT/remote_times.txt"

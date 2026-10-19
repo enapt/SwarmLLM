@@ -288,16 +288,6 @@ visibly instead of moving it. Closing it needs per-hop retention on the peers, o
 chained-run rewind that re-sends from the coordinator. (A middle worker's death with
 chaining on is already recovered by re-running that segment unchained on the same node.)
 
-#### #184 — A chain hop whose onward peer departs waits out the whole segment deadline
-`P3` · reliability · **PARTIAL** — 2026-09-02 · history: archive § "A pipeline whose peer departs with no standby waits the whole segment deadline"
-
-Fixed for the coordinator's own forwards (`schedule_redial_retry` →
-`fail_forwards_awaiting_departed_peer`, gotcha #436). A CHAIN HOP's onward forward is not
-covered: `hop_reply_to` (network manager) does not record the onward peer, so a departed
-onward peer in a 3+-hop chain still costs the ACK deadline. Record it and fail the hop
-promptly; add the no-standby test (connection closed → fails before the deadline) with the
-control that a silent-but-connected peer keeps its full deadline (#386).
-
 #### #161 — Outlier ejection does not count a peer that loses the conversation mid-reply
 `P3` · reliability · **OPEN** — 2026-10-02 · history: archive row #161
 
@@ -1194,21 +1184,6 @@ it recurs. Next: run the rig with B at `-v` past two eviction ticks (> 20 min) a
 `DIAG: key rotation tick (eviction)` `stale_evicted` against the failure; then, if (1), retry an unanswered
 rotation (WireGuard's schedule) and have an age eviction of a CONNECTED peer re-key first rather
 than destroy — `security-reviewer` on the change (key lifetime is a forward-secrecy bound).
-
-#### #305 — A chain hop that cannot open its forward refuses to the hop before it, which is not waiting
-`P3` · network · crypto · **OPEN** — 2026-10-18 · history: found by the security review of #303
-
-`refusal_for_undecryptable`'s two callers answer on the connection the frame came in on. For a
-CHAINED forward (`verify_may_chain`, a chained check) a hop past the head received it from the
-previous HOP, which holds no waiter and does not pass an inbound result on, so the coordinator
-waits out the chain's deadline for a refusal given in milliseconds — the undecryptable twin of
-gotcha #707, which `layer_forward::reply_target` closed for every refusal the DISPATCHER sends.
-Do not answer the frame's `requester_node_id` instead: it is cleartext the seal did not
-authenticate, so a forger could make an honest hop send a refusal for another node's request
-(a chained check resends on nothing, so that refusal would end it). The safe shape: the previous
-hop, which recorded the coordinator when it handed the forward on (`hop_reply_to`), passes an
-inbound refusal from its next hop on to that coordinator — attributed to itself, a chain member
-the waiter already accepts. `security-reviewer` on the change.
 
 #### #191 — A part download that loses its peer restarts from byte 0 on the next one
 `P3` · storage · **OPEN** — 2026-09-03 · history: archive § "A multi-megabyte forward over ONE QUIC stream can kill the connection" (its banner: the cause was quinn-proto, #112)
@@ -2747,7 +2722,32 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-19, not yet released** (#179, #115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163, #310; #186 decided)
+**Closed 2026-10-19, not yet released** (#305, #184, #179, #115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163, #310; #186 decided)
+- #305 — **A machine in the middle of a split passes a refusal from the machine after it on to
+  the computer that is waiting.** A machine that cannot open a forward answers the connection it
+  came in on — in a chain, the machine before it, which was not waiting and dropped it, so the
+  computer driving the request waited out the step's deadline. Every result a node takes in now
+  goes through one intake (`NetworkManager::dispatch_layer_result`); a hop that handed a forward
+  on remembers the coordinator and the step past the next machine's receipt
+  (`network::manager::hop_forwards`, capped, 600 s) and passes on an error from that machine
+  about that step, once, in its own name. A failed forward's error now names its step on every
+  path (`fail_tensor_forward`'s step is required), so a streamed wait hears of it too.
+  `split_rig.sh refusechain` (TinyLlama, B → C, C refusing one chained step): v0.3.244 dropped
+  it at B and took 45.8 s with A timing the step out; now 1.5 s, 200, nothing timed out.
+  security-reviewer: no finding at MEDIUM or above. Evidence: `docs/invariants/network.md` §
+  "A refusal that cannot be addressed past its hop is passed on by that hop".
+- #184 — **A chain whose last machine stops mid-reply ends in seconds, not at the step's
+  deadline — measured, no further change.** `split_rig.sh killchain` (TinyLlama, A driving a
+  decode step over B → C, C's node killed 40 results in), v0.3.244: 6.3 s after the kill, A's own
+  departure check (`fail_forwards_awaiting_departed_peer`, which accepts any chain member) failed
+  the step and the reply came back with what it had (200, `finish_reason: "error"`); with #305: 1.6
+  s, the kill having caught a forward before C's receipt, so B's `OutboundFailure` went through
+  the hop's report. Nothing waited out a deadline either way. Not done, deliberately: a hop does
+  not report its onward machine's departure AFTER that machine acknowledged — the tail answers the
+  coordinator directly, so B losing C says nothing about whether C can still reach A, and
+  reporting it would turn a working reply into a failure (#386's lesson). That leaves a
+  coordinator with no connection of its own to a hop that dies after acknowledging, which the
+  step's deadline still bounds.
 - #179 — **A `temperature: 0` reply on the processor is the same every time, prompt cache or
   not.** The first run of a request and every repeat gave two different texts (Llama-3.2-3B:
   `2d85feea` then `f60b97f4`, in both rounds of a restart); with the prompt cache off all eight

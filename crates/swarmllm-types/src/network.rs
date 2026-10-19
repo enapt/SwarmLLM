@@ -9,8 +9,8 @@ use crate::identity::NicknameGossip;
 use crate::ids::{ModelId, NodeId, ShardId};
 use crate::inference::{
     InferenceError, InferenceRequest, LayerForward, LayerResult, PipelineAssignment,
-    RemoteGenerateRequest, StreamingToken, TpAllReduceRequest, TpAllReduceResponse, TpRingChunk,
-    VisionEncodeRequest, VisionEncodeResponse,
+    RemoteGenerateRequest, ResultStep, StreamingToken, TpAllReduceRequest, TpAllReduceResponse,
+    TpRingChunk, VisionEncodeRequest, VisionEncodeResponse,
 };
 use crate::model::ModelManifest;
 use crate::node::{NodeCapability, PeerExchangeResponse};
@@ -704,7 +704,9 @@ pub enum NetworkCommand {
         target_peer_bytes: Vec<u8>,
         payload: Vec<u8>,
         request_id: uuid::Uuid,
-        num_layers: u32,
+        /// The forward's step (`LayerForward::step`): a failure of this send
+        /// answers it, or a streamed wait never hears of it.
+        step: ResultStep,
         activation_bytes: usize,
     },
     /// Internal: the off-loop encrypt+encode of a `SendTensor` failed (no
@@ -716,6 +718,8 @@ pub enum NetworkCommand {
     FailEncodedTensor {
         target_peer_bytes: Vec<u8>,
         request_id: uuid::Uuid,
+        /// The forward's step, which the failure answers.
+        step: ResultStep,
         reason: String,
     },
     /// Send a tensor result back to a specific peer as a new request.

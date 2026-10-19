@@ -165,7 +165,7 @@ Streamed verify forwards (`LayerForward::stream_seq`, `0x0C`, gated on `features
 
 ## Every reply a serving node sends goes to whoever is WAITING — failures included
 
-**`layer_forward::reply_target`** is the single answer to who is WAITING; it returns a `ReplyTo` nothing else can build, so `send_error_result` cannot be handed the raw sender (the previous hop in a chain). Gotcha #707.
+**`layer_forward::reply_target`** is the single answer to who is WAITING; it returns a `ReplyTo` nothing else can build, so `send_error_result` cannot be handed the raw sender (the previous hop in a chain). Gotcha #707. A refusal that cannot be addressed past the hop it came from (a forward whose seal did not open) is PASSED ON by that hop: every `LayerResult` this node takes in goes through **`NetworkManager::dispatch_layer_result`**, which asks **`hop_forwards::HopForwards::take_onward_failure`** (an error, from the onward peer, about the step handed on, once) and reports it to the coordinator in its own name; `fail_tensor_forward` takes the forward's step as a REQUIRED argument (#305).
 
 → `docs/invariants/network.md` § "A chained hop's refusal goes to the coordinator"
 

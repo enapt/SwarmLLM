@@ -24,6 +24,7 @@ mod commands;
 mod connections;
 mod dht;
 mod events;
+mod hop_forwards;
 /// Shared with `network::peer_cache` so the advertise path and the cache path
 /// apply one reachability predicate rather than two that can drift.
 pub(crate) use events::addr_is_remotely_reachable;
@@ -436,6 +437,19 @@ impl PeerFailureSuppression {
 }
 
 /// NetworkManager owns the libp2p Swarm and is the sole interface to the P2P network.
+/// A tensor forward this node sent and has not seen acknowledged.
+struct OutboundForward {
+    /// The inference request it belongs to.
+    request_id: uuid::Uuid,
+    sent_at: std::time::Instant,
+    peer: libp2p::PeerId,
+    /// Sizes the receipt deadline (`forward_ack_deadline_secs`) and decides
+    /// whether an acknowledgement's time was the peer's or the payload's.
+    activation_bytes: usize,
+    /// The forward's step: a failure of it answers this (`fail_tensor_forward`).
+    step: crate::types::ResultStep,
+}
+
 pub struct NetworkManager {
     shared_state: Arc<SharedState>,
     swarm: Swarm<SwarmBehaviour>,
@@ -479,11 +493,10 @@ pub struct NetworkManager {
     /// succeeds (AutoNAT-unreachable results + the startup fallback both trigger
     /// `try_activate_relay`).
     last_relay_attempt: Option<std::time::Instant>,
-    /// Maps OutboundRequestId → (inference UUID, send time, target PeerId, num_layers, activation_bytes)
-    /// for tensor forwards. Used to notify the pipeline on OutboundFailure.
-    /// The Instant + workload info are used for adaptive stale tensor cleanup.
-    pending_tensor_outbound:
-        HashMap<OutboundRequestId, (uuid::Uuid, std::time::Instant, libp2p::PeerId, u32, usize)>,
+    /// The tensor forwards this node has sent and not yet seen acknowledged,
+    /// by request-response id: what an `OutboundFailure`, the ACK sweep and
+    /// the stale sweep fail, and what an acknowledgement measures.
+    pending_tensor_outbound: HashMap<OutboundRequestId, OutboundForward>,
     /// Per-peer send→ACK latency estimator (RFC 6298). Sets each peer's
     /// receipt-ACK deadline from its OWN observed acknowledgement latency and
     /// its variance, instead of a ping RTT that says nothing about how loaded
@@ -495,13 +508,13 @@ pub struct NetworkManager {
     /// published to `peer_registry` for routing to read.
     peer_goodput: HashMap<libp2p::PeerId, tensors::GoodputEstimator>,
     /// For forwards THIS node sent onward as a chain hop: the coordinator the
-    /// run must answer, by request id. When such a forward fails here — no
-    /// receipt ACK, OutboundFailure — the error is reported to THAT node, not
-    /// only dispatched locally (where no waiter exists): otherwise a dead tail
-    /// is invisible to the coordinator, which waits out the whole chained
-    /// deadline (56 s measured against a 10 s ACK deadline, 2026-08-21).
-    /// Entries clear on the forward's ACK and in the stale sweep.
-    hop_reply_to: HashMap<uuid::Uuid, crate::types::NodeId>,
+    /// run must answer and the step handed on. A failure of that forward —
+    /// this node's own (no receipt ACK, OutboundFailure) or the next hop's
+    /// refusal — is reported to THAT node, not only dispatched locally (where
+    /// no waiter exists): otherwise the coordinator waits out the whole
+    /// chained deadline (56 s measured against a 10 s ACK deadline,
+    /// 2026-08-21; #305). See `hop_forwards`.
+    hop_forwards: hop_forwards::HopForwards,
     /// Tensor *results* in flight to their coordinator, each sent as its own
     /// request (`send_tensor_result_as_request`). On an OutboundFailure the
     /// entry names the result that did not arrive — and, where the coordinator
@@ -975,7 +988,7 @@ impl NetworkManager {
             pending_tensor_outbound: HashMap::new(),
             ack_rtt: HashMap::new(),
             peer_goodput: HashMap::new(),
-            hop_reply_to: HashMap::new(),
+            hop_forwards: hop_forwards::HopForwards::default(),
             pending_tensor_result_outbound: HashMap::new(),
             parked_result_resends: Vec::new(),
             result_fault_fired: false,
@@ -1136,7 +1149,7 @@ impl NetworkManager {
     ) -> bool {
         self.pending_tensor_outbound
             .values()
-            .any(|(u, sent, _, _, _)| *u == inference_uuid && *sent > sent_at)
+            .any(|f| f.request_id == inference_uuid && f.sent_at > sent_at)
     }
 
     /// The receipt-ACK deadline for a forward to `peer`, or `None` if the peer
@@ -1207,34 +1220,69 @@ impl NetworkManager {
         Some(tensors::ack_deadline_with_payload(base, activation_bytes))
     }
 
+    /// Fail a forward this node sent to `peer`: the error answers the
+    /// forward's `step` — a streamed wait is found by its number, and an
+    /// unnamed failure reached no one (#303's shape) — and is taken in as if
+    /// `peer` had sent it, so on a chain hop it goes on to the coordinator
+    /// ([`Self::dispatch_layer_result`]).
     fn fail_tensor_forward(
         &mut self,
         request_id: uuid::Uuid,
         peer: &libp2p::PeerId,
         reason: String,
+        step: crate::types::ResultStep,
     ) {
-        let error_result = crate::types::LayerResult::error(request_id, reason);
-        // A chain hop has no waiter of its own; the node that is waiting is the
-        // coordinator recorded when the forward was handed on. Tell it — that is
-        // what turns a dead tail into a 10 s fail-over instead of a full
-        // chained deadline. The local dispatch below stays: on a coordinator it
-        // IS the waiter, and on a hop it is harmless.
-        if let Some(coordinator) = self.hop_reply_to.remove(&request_id) {
-            if let Some(bytes) = self.shared_state.resolve_peer_id_bytes(&coordinator) {
-                tracing::warn!(
-                    %request_id,
-                    %coordinator,
-                    failed_hop_peer = %peer,
-                    "DIAG: chained hop failed onward — reporting the error to the coordinator"
-                );
-                self.handle_send_tensor_result(bytes, error_result.clone());
-            }
-        }
-        if let Err(e) =
-            self.dispatch_authenticated(Some(peer), SwarmMessage::LayerResult(error_result))
-        {
+        let error_result =
+            crate::types::LayerResult::error(request_id, reason).answering_step(step);
+        let failed = self
+            .peer_to_node_id(peer)
+            .or_else(|| crate::network::transport::peer_id_to_node_id(peer));
+        if let Err(e) = self.dispatch_layer_result(failed, error_result) {
             tracing::warn!(error = %e, "Failed to send error LayerResult to pipeline");
         }
+    }
+
+    /// Take in a `LayerResult` — from a peer, a relayed one from its proven
+    /// origin, or a failure this node manufactured about a forward it sent.
+    /// Every one passes here, so a chain hop passes on a failure of the
+    /// forward it handed on wherever that failure arises (`hop_forwards`,
+    /// #305). The local dispatch stays: on a coordinator it IS the waiter, and
+    /// on a hop it finds none, harmlessly.
+    #[allow(clippy::result_large_err)]
+    fn dispatch_layer_result(
+        &mut self,
+        sender: Option<crate::types::NodeId>,
+        result: crate::types::LayerResult,
+    ) -> Result<(), mpsc::error::TrySendError<crate::types::AuthenticatedMessage>> {
+        if let Some((hop, report)) = self
+            .hop_forwards
+            .take_onward_failure(sender.as_ref(), &result)
+        {
+            let reason = match &report.finish_reason {
+                Some(crate::types::NetworkFinishReason::Error(r)) => r.as_str(),
+                _ => "",
+            };
+            match self.shared_state.resolve_peer_id_bytes(&hop.coordinator) {
+                Some(bytes) => {
+                    tracing::warn!(
+                        request_id = %result.request_id,
+                        coordinator = %hop.coordinator,
+                        onward = %hop.onward,
+                        reason,
+                        "DIAG: chained hop — passing the next hop's failure to the coordinator"
+                    );
+                    self.handle_send_tensor_result(bytes, report);
+                }
+                None => tracing::warn!(
+                    request_id = %result.request_id,
+                    coordinator = %hop.coordinator,
+                    reason,
+                    "DIAG: chained hop — the forward it handed on failed, and the coordinator \
+                     cannot be reached to be told"
+                ),
+            }
+        }
+        self.dispatch_authenticated_as(sender, SwarmMessage::LayerResult(result))
     }
 
     /// Say why UPnP has not made this node reachable — once, when the router
@@ -1830,13 +1878,21 @@ impl NetworkManager {
                             "Swept stale pending_shard_responses tickets"
                         );
                     }
+                    let forgotten = self.hop_forwards.expire(std::time::Instant::now());
+                    if forgotten > 0 {
+                        tracing::debug!(
+                            forgotten,
+                            remaining = self.hop_forwards.len(),
+                            "forgot forwards handed on as a chain hop that are past any deadline"
+                        );
+                    }
                     if !self.pending_tensor_outbound.is_empty() {
                         let now = std::time::Instant::now();
-                        let mut stale: Vec<(OutboundRequestId, uuid::Uuid, libp2p::PeerId)> = Vec::new();
-                        let mut unacked: Vec<(OutboundRequestId, uuid::Uuid, libp2p::PeerId, u64)> = Vec::new();
-                        for (req_id, (uuid, sent_at, target_peer, num_layers, activation_bytes)) in &self.pending_tensor_outbound {
-                            let age = now.duration_since(*sent_at);
-                            let _ = num_layers;
+                        let mut stale: Vec<(OutboundRequestId, uuid::Uuid, libp2p::PeerId, crate::types::ResultStep)> = Vec::new();
+                        let mut unacked: Vec<(OutboundRequestId, uuid::Uuid, libp2p::PeerId, u64, crate::types::ResultStep)> = Vec::new();
+                        for (req_id, f) in &self.pending_tensor_outbound {
+                            let (uuid, target_peer) = (&f.request_id, &f.peer);
+                            let age = now.duration_since(f.sent_at);
                             // This sweep is a BACKSTOP for sends libp2p dropped
                             // silently — not a second, competing deadline. It
                             // must therefore never fire before the pipeline's
@@ -1881,9 +1937,9 @@ impl NetworkManager {
                                 "DIAG: pending tensor forward status"
                             );
                             if age.as_secs() > timeout_secs {
-                                stale.push((*req_id, *uuid, *target_peer));
+                                stale.push((*req_id, *uuid, *target_peer, f.step));
                             } else if let Some(deadline_secs) =
-                                self.forward_ack_deadline_secs(target_peer, *activation_bytes)
+                                self.forward_ack_deadline_secs(target_peer, f.activation_bytes)
                             {
                                 // A peer that acknowledges receipt has not: the
                                 // path is dead, whatever the compute deadline
@@ -1909,12 +1965,12 @@ impl NetworkManager {
                                 if age.as_secs() > deadline_secs
                                     && self.request_has_standby(uuid, target_peer)
                                 {
-                                    unacked.push((*req_id, *uuid, *target_peer, deadline_secs));
+                                    unacked.push((*req_id, *uuid, *target_peer, deadline_secs, f.step));
                                 }
                             }
                         }
-                        for (req_id, uuid, target_peer, deadline_secs) in unacked {
-                            let sent_at = self.pending_tensor_outbound.get(&req_id).map(|e| e.1);
+                        for (req_id, uuid, target_peer, deadline_secs, step) in unacked {
+                            let sent_at = self.pending_tensor_outbound.get(&req_id).map(|e| e.sent_at);
                             self.pending_tensor_outbound.remove(&req_id);
                             // Widen this peer's deadline (RFC 6298 §5.5). The
                             // estimator only ever sees acknowledgements that
@@ -1936,21 +1992,21 @@ impl NetworkManager {
                                 uuid,
                                 &target_peer,
                                 format!("no receipt acknowledgement within {deadline_secs}s"),
+                                step,
                             );
                         }
                         // Collect unique stale peers for disconnection
                         let mut stale_peers: std::collections::HashSet<libp2p::PeerId> = std::collections::HashSet::new();
-                        for (req_id, uuid, target_peer) in stale {
+                        for (req_id, uuid, target_peer, step) in stale {
                             tracing::warn!(
                                 ?req_id,
                                 request_id = %uuid,
                                 %target_peer,
                                 "DIAG: stale tensor forward — notifying pipeline + disconnecting peer"
                             );
-                            let sent_at = self.pending_tensor_outbound.get(&req_id).map(|e| e.1);
+                            let sent_at = self.pending_tensor_outbound.get(&req_id).map(|e| e.sent_at);
                             self.pending_tensor_outbound.remove(&req_id);
                             if sent_at.is_some_and(|s| self.tensor_forward_is_superseded(uuid, s)) {
-                                self.hop_reply_to.remove(&uuid);
                                 // Abandoned attempt with a newer one in flight to
                                 // this peer: neither fail the request nor reset the
                                 // session the new attempt is using.
@@ -1963,7 +2019,7 @@ impl NetworkManager {
                                 continue;
                             }
                             stale_peers.insert(target_peer);
-                            self.fail_tensor_forward(uuid, &target_peer, "Tensor forward timed out".into());
+                            self.fail_tensor_forward(uuid, &target_peer, "Tensor forward timed out".into(), step);
                         }
                         // Disconnect stale peers to reset the yamux session.
                         // The connection task may be stuck (handler not polled, SubstreamRequested

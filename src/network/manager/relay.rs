@@ -544,15 +544,22 @@ impl NetworkManager {
                 immediate_peer,
                 crate::types::features::TENSOR_RELAY,
             );
-            let msg = if rt.is_result {
-                match crate::network::protocol::decode_layer_result(&plaintext) {
-                    Ok(r) => SwarmMessage::LayerResult(r),
+            // A result goes through the one intake for results, so a chain
+            // hop passes a relayed next hop's failure on too (`hop_forwards`).
+            if rt.is_result {
+                let r = match crate::network::protocol::decode_layer_result(&plaintext) {
+                    Ok(r) => r,
                     Err(e) => {
                         tracing::warn!(error = %e, "relayed LayerResult decode failed");
                         return;
                     }
+                };
+                if let Err(e) = self.dispatch_layer_result(Some(rt.origin.clone()), r) {
+                    tracing::warn!(error = %e, "relayed tensor dropped — dispatch backpressured");
                 }
-            } else {
+                return;
+            }
+            let msg = {
                 match crate::network::protocol::decode_layer_forward(&plaintext) {
                     Ok(mut f) => {
                         // Stamp the origin's peer bytes so `handle_layer_forward`

@@ -2555,6 +2555,54 @@ TP forward is never chained.
 
 → `docs/invariants/network.md` § "A chained hop's refusal goes to the coordinator"
 
+### A refusal that cannot be addressed past its hop is passed on by that hop (2026-10-20, #305)
+
+**What happened.** The security review of #303 found the undecryptable twin of gotcha #707: a
+node that cannot open a forward answers the connection the frame came in on
+(`pipeline_stream::refusal_for_undecryptable`), and in a chain that is the PREVIOUS HOP, which
+held no wait and dropped it. It cannot answer the coordinator instead: the frame's
+`requester_node_id` is cleartext the seal did not authenticate, so a forger could make an
+honest hop refuse another node's request — and a chained run resends on nothing, so that
+refusal would end it. Measured with `split_rig.sh refusechain` (TinyLlama, A driving, a decode
+step travelling A → B → C, C alone running `SWARMLLM_FAULT_REFUSE_DECRYPT`): on v0.3.244 C
+refused, B received the refusal and dropped it, A timed the step out — 45.8 s for a request
+whose refusal was given in milliseconds.
+
+**Now.** The hop, which recorded the coordinator from a forward whose seal DID open, passes it
+on:
+
+- **One intake for results.** Every `LayerResult` this node takes in — from a peer
+  (`handle_tensor_payload`), relayed from a proven origin (`handle_relayed_tensor`), or made
+  here about a forward it sent (`fail_tensor_forward`) — goes through
+  `NetworkManager::dispatch_layer_result`, the choke point; the old per-path report in
+  `fail_tensor_forward` is gone.
+- **What a hop remembers.** `network::manager::hop_forwards::HopForwards` (it replaces
+  `hop_reply_to`): coordinator, onward node (derived from the target's key), the step handed
+  on. Kept PAST the next hop's receipt acknowledgement — the refusal comes after it — for
+  `MAX_TENSOR_FORWARD_SECS` (600 s), replaced by a newer forward for the request, at most 1,024
+  (oldest first).
+- **What it passes on.** `take_onward_failure`: an `Error` finish, from the onward node, whose
+  step is the one handed on or none, once. The report is the hop's own: the same reason,
+  answering the recorded step, NO refusal type (the next hop's "send it again" is about the
+  next hop's link, and a chained run resends nothing), attributed to the hop — a chain member
+  the coordinator's wait already accepts (`PendingLayerResult::accepts`).
+- **Every failed forward names its step.** `fail_tensor_forward` takes the forward's step as a
+  REQUIRED argument (`OutboundForward::step` replaces the old tuple; `SendEncodedTensor` /
+  `FailEncodedTensor` carry it), so a streamed wait — keyed by its number — hears of an
+  undeliverable forward too, the same lesson as #303.
+
+With it: 1.5 s, 200, B logging "passing the next hop's failure to the coordinator", A taking it,
+nothing timed out. security-reviewer: nothing at MEDIUM or above — every lever is held already
+by the node that would pull it (the onward node could send the coordinator the same error
+itself; the coordinator accepts the hop only if it planned it into the chain); the report may be
+resent once after an `OutboundFailure` and the second copy is logged as moved on. Before this the
+coordinator's timeout was scored against the HEAD of the chain, an innocent peer; now nothing is.
+
+**What a change must keep.** A new path that takes in a `LayerResult` goes through
+`dispatch_layer_result`. A hop never addresses a refusal by a frame's cleartext; it passes on
+only what came from its onward node. Units: unit tests in `hop_forwards.rs`; the network-level
+check is `split_rig.sh refusechain` against a release that drops it.
+
 ## The caller's sampling reaches a remote sampler (2026-09-25)
 
 **What was wrong.** `LayerForward.sampling` was `#[serde(skip)]`: it carried the

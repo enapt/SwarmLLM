@@ -83,23 +83,24 @@ impl NetworkManager {
                 target_peer_bytes,
                 payload,
                 request_id,
-                num_layers,
+                step,
                 activation_bytes,
             } => {
                 self.handle_send_encoded_tensor(
                     target_peer_bytes,
                     payload,
                     request_id,
-                    num_layers,
+                    step,
                     activation_bytes,
                 );
             }
             NetworkCommand::FailEncodedTensor {
                 target_peer_bytes,
                 request_id,
+                step,
                 reason,
             } => {
-                self.handle_fail_encoded_tensor(target_peer_bytes, request_id, reason);
+                self.handle_fail_encoded_tensor(target_peer_bytes, request_id, step, reason);
             }
             NetworkCommand::SendTensorResult {
                 target_peer_bytes,

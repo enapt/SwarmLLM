@@ -224,8 +224,11 @@ impl NetworkManager {
                     // a peer that answers even one request never accumulates.
                     self.rr_failures.remove(&peer);
                     // Clean up tensor outbound tracking (response received = not a failure)
-                    if let Some((uuid, sent_at, _, _, activation_bytes)) =
-                        self.pending_tensor_outbound.remove(&request_id)
+                    if let Some(super::OutboundForward {
+                        sent_at,
+                        activation_bytes,
+                        ..
+                    }) = self.pending_tensor_outbound.remove(&request_id)
                     {
                         // How long this peer actually took to acknowledge. Feeds
                         // the per-peer deadline, so a peer whose loop is busy
@@ -292,9 +295,9 @@ impl NetworkManager {
                                 }
                             }
                         }
-                        // The onward forward was received; its failure is no
-                        // longer ours to report to the coordinator.
-                        self.hop_reply_to.remove(&uuid);
+                        // A hop's record of this forward stays: the next hop
+                        // refuses one whose seal did not open AFTER it
+                        // acknowledged it, and to this node (`hop_forwards`).
                     }
                     self.pending_tensor_result_outbound.remove(&request_id);
                     // A Response proves the peer received the request — the send was
@@ -360,8 +363,12 @@ impl NetworkManager {
                 }
                 self.note_rr_failure(peer, &error);
                 // Check if this was a pending tensor forward — notify the pipeline
-                if let Some((inference_uuid, sent_at, _target, _, _)) =
-                    self.pending_tensor_outbound.remove(&request_id)
+                if let Some(super::OutboundForward {
+                    request_id: inference_uuid,
+                    sent_at,
+                    step,
+                    ..
+                }) = self.pending_tensor_outbound.remove(&request_id)
                 {
                     let age_ms = sent_at.elapsed().as_millis();
                     if self.tensor_forward_is_superseded(inference_uuid, sent_at) {
@@ -389,6 +396,7 @@ impl NetworkManager {
                             inference_uuid,
                             &peer,
                             format!("OutboundFailure: {error}"),
+                            step,
                         );
                     }
                 }
