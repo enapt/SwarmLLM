@@ -44,8 +44,27 @@ guess set of N rows; P is the time of one pass.
 
 - **P** = the hops + each stage's compute + per-pass overhead. Measured on the 7B
   Thailand↔Belgium: 351 ms a token, of which ~206 ms is the ICMP round trip, ~50 ms
-  is both cards' compute, and **~95 ms is neither**. Where that 95 ms goes has never
-  been broken down (#148 found only 3.6-5.3 ms per segment after its forward).
+  is both cards' compute, and **~95 ms is neither**. #148 found only 3.6-5.3 ms per
+  segment after its forward.
+
+  **Measured 2026-10-20: our path adds one round trip per token and nothing more.** The
+  rig ran the v0.3.245 release binary, both nodes on the processor, Qwen2.5-Coder-7B Q4_K_M,
+  A holding shards 0-3 and B 4-7, 96-token greedy replies to the same prompt. The figures
+  are the warm requests (2 and 3 of 3). Every packet was delayed in the transport
+  (`split_rig.sh` `RIG_RTT_MS`, ping 208.5-213.4 ms):
+
+  | arm | 96 tokens | ms a token |
+  |---|---|---|
+  | whole on one node | 12,526-12,835 ms | ~130 |
+  | split, 0 ms | 13,773-14,996 ms | 143-156 (+13-25: the split's own cost) |
+  | split, 206 ms | 35,414-35,589 ms | 369-371 (+214 over 0 ms: one round trip) |
+
+  So the 95 ms is the real link or the far machine, not a cost that grows with distance in
+  our transport. The live node's peers right after the deploy: two European peers
+  connected directly answer an exchange in 231-236 ms, one reached through a relay circuit
+  in 330 ms (min 220). A relayed hop pays the relay's detour on every token, so a chain's
+  hops must be direct. The arms "with guessing ahead" did not guess: the rig held no
+  drafter, so they ran plain (no `DSD: streamed checks complete` line) and are not counted.
 - **E_N grows about logarithmically with N.** These are measured best-first replays
   (`split_speculation.md` § "Measured"):
 
@@ -67,6 +86,14 @@ guess set of N rows; P is the time of one pass.
 
 ## What is new here
 
+0. **The stream must reach every machine of a chain.** Today the continuous stream runs only
+   where ONE peer holds every layer past this node's (`dsd_stream::shape_of`: "two peers'
+   segments would be two streams to keep in step"). A large model is split across three or more
+   machines, so every large model guesses round by round today, at the rounds' cost. The serving
+   side is already per segment (`forward_streams` is keyed by request, layer range and attempt);
+   what is missing is the coordinator sending each chunk down the chain with the next-hop and
+   reply-to trailers a plain chained forward carries (`layer_forward.rs` 0x06/0x07), the tail
+   answering it, and the order kept at every hop.
 1. **N is bounded by throughput, not by the round.** The round cost model in
    `split_speculation.md` added a tree's compute and transfer to every round, which
    is why tree 64 lost to tree 32 on short links. In the continuous stream (§ 4b,
@@ -142,14 +169,22 @@ These are projections from measured parts, not measurements.
    Run it on the rig with `SWARMLLM_TEST_TENSOR_DELAY_MS` and on one real
    Thailand↔Belgium pass. *Exit:* the 95 ms attributed to named terms within 10 ms.
    Then remove the largest term.
+
+   **Rig half done 2026-10-20** (§ "The formula"): distance costs exactly one round trip,
+   and the split's own cost is 13-25 ms a token on the processor. What is left is the real
+   link: compare each pass with the round trip of the connection it crossed (direct or
+   relayed, QUIC or TCP), on a split to a European peer.
 2. **Tree verification in every segment** (`split_speculation.md` Phase 2, items
    1-3): a tree mask, a gather of the accepted path in the KV cache, and a walk at
    the tail. It is gated on a `features` bit at the sender. *Exit:* greedy replies
    identical to the chain's, and E per pass on the rig within 10% of
    `spec_best_tree.py`'s replay.
-3. **Trees in the continuous stream, plus the verdict sent to every segment.**
-   *Exit:* tok/s on the rig at a 300 ms injected delay, against the chain stream on
-   the same replies (aim ≥ 1.5×).
+3. **The stream through a chain of machines (item 0), then trees in it, plus the verdict sent to
+   every segment.** *Exit for the chain:* a 3-machine split streams (the `DSD: streamed checks
+   complete` line, not the rounds) and its tok/s on the rig at a 300 ms injected delay beats the
+   rounds on the same replies.
+   *Exit for the trees:* tok/s on the rig at a 300 ms injected delay, against the chain stream
+   on the same replies (aim ≥ 1.5×).
 4. **A drafter fed by the model's state.**
    - MTP at the last stage. Qwen 3.5 first needs its recurrent state wound back
      (#228); GLM-4.5 needs family support.

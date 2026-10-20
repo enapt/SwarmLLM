@@ -1742,9 +1742,13 @@ pass time, E_N growing about logarithmically with the rows N a pass carries (mea
 once the ~95 ms per pass that is neither network nor compute is gone, 50-80 inside a region on
 cards, 4-5 on processors for a dense 70B; an opt-in fast mode that checks less strictly ~60-70
 across continents. Build order, each step ending on a measurement: (1) the per-pass breakdown
-and the largest term removed; (2) tree verification in every segment (#134); (3) trees in the
-continuous stream, the verdict sent to every segment so dead rows are dropped before they are
-computed (#149 (b)); (4) a drafter fed by the model's own state: MTP at the last stage (#145),
+and the largest term removed — rig half measured 10-20: with every packet delayed (`split_rig.sh`
+`RIG_RTT_MS`), a 7B split costs exactly one round trip per token more at 206 ms than at 0, and
+13-25 ms a token more than the whole model on one node, so the 95 ms is the real link or the far
+machine (a relayed peer answered in 330 ms against 231-236 direct); left: the real link; (2) tree verification in every segment (#134); (3) the continuous stream
+through a chain of machines — today it runs only where ONE peer holds every layer past this
+node's (`dsd_stream::shape_of`), so every 3+ machine split guesses round by round — then trees in
+it, the verdict sent to every segment so dead rows are dropped before they are computed (#149 (b)); (4) a drafter fed by the model's own state: MTP at the last stage (#145),
 EAGLE-3 taps where a head is published; (5) an MoE tree priced by the experts it touches; (6)
 regional chains (#192); (7) the opt-in fast mode. The plan records one retracted projection
 (~40 tok/s across continents, from treating the miss rate as free).
