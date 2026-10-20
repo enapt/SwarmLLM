@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #318**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #319**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -38,7 +38,10 @@ Re-ranked 2026-10-17 after v0.3.241 (released 2026-10-17), which closed #265, #2
 items it filed (#291, #293-#295, #297, #299) are all P3, so no rank moved. What each release carried
 is in § "Closed" and `CHANGELOG.md`; the running log of re-rankings from 2026-10-02 to this one
 moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed here.
-`docs/plans/` holds the multi-step designs; the entries point at them.
+`docs/plans/` holds the multi-step designs; the entries point at them. **2026-10-20:** #318 goes
+first among P2 by the user's direction: running models too large for any one member at a usable
+speed is what the swarm is for, so split speed for large models is the top track
+(`docs/plans/large_model_splits.md`).
 
 **P0 — wrong answers, silently**
 1. *(none open since #156 closed on 2026-10-03: a mixed copy is refused at load, a part that is
@@ -61,10 +64,14 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
-6. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
+6. **#318** — a large model split across machines is too slow to use: 0.35 tok/s on a 4-segment
+   intercontinental chain, 5-13 tok/s on a 7B Thailand↔Belgium with the stream. Projected
+   lossless 20-31 tok/s across continents and 50-80 inside a region on cards. Step 1 is the
+   per-pass breakdown of the ~95 ms that is neither network nor compute.
+7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
-7. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
+8. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
    (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), v0.3.242). The part
    that is not gossip is 2.5 KB/s on 10-18 (4.1 out), and our own direct messages are only 0.19 of it
@@ -75,7 +82,7 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
    v0.3.244) read on the field 10-19: upload 2.4 KB/s, Kademlia answers 0.51 KB/s, every one a
    `find_node` — peers' routing-table refreshes. (2h) refreshes every 10 min instead of 5 (not yet
    released); next, re-read once the fleet runs it, then the answers' size.
-8. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
+9. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
     ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
     (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
     reply length (160-token replies were 2.5x their price), and a chain its head leads is priced
@@ -86,12 +93,12 @@ moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work 
     rounds it takes, a guessed token not crossing alone (#3 (d), 0.49 → 0.77 of its price on the
     drafter rig), 10-19, all in v0.3.244; next, a chain driven from here (#3 (a2)). Never tune the
     constant.
-9. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
+10. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
-10. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
+11. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
-11. **#228** — Qwen 3.5 without speculation (its state cannot be wound back yet).
-12. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
+12. **#228** — Qwen 3.5 without speculation (its state cannot be wound back yet).
+13. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
     decision, with research, when picked up.
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
@@ -1719,9 +1726,28 @@ Only worth it if concurrent local serving becomes common.
 
 ### Speed across computers (splits)
 
-Designs: `docs/plans/split_speculation.md` (guess-and-check across a split),
+Designs: `docs/plans/large_model_splits.md` (the target, the bound and the build order, #318),
+`docs/plans/split_speculation.md` (guess-and-check across a split),
 `docs/plans/wan_parallel.md` (parallelise the reply, not the token), `docs/plans/regional_pipelines.md`
 (placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
+
+#### #318 — A large model split across machines is too slow to use
+`P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192
+
+The swarm exists to run models no member can hold, and a split of one runs at 0.35 tok/s on a
+4-segment intercontinental chain, 2.85 tok/s plain and 5-13 tok/s with the stream on a 7B
+Thailand↔Belgium. The bound is tok/s = E_N / P: tokens guessed right per ring pass over the
+pass time, E_N growing about logarithmically with the rows N a pass carries (measured replays:
+5.2-8.1 at 64-128 rows). Projected without any loss in quality: 20-31 tok/s across continents
+once the ~95 ms per pass that is neither network nor compute is gone, 50-80 inside a region on
+cards, 4-5 on processors for a dense 70B; an opt-in fast mode that checks less strictly ~60-70
+across continents. Build order, each step ending on a measurement: (1) the per-pass breakdown
+and the largest term removed; (2) tree verification in every segment (#134); (3) trees in the
+continuous stream, the verdict sent to every segment so dead rows are dropped before they are
+computed (#149 (b)); (4) a drafter fed by the model's own state: MTP at the last stage (#145),
+EAGLE-3 taps where a head is published; (5) an MoE tree priced by the experts it touches; (6)
+regional chains (#192); (7) the opt-in fast mode. The plan records one retracted projection
+(~40 tok/s across continents, from treating the miss rate as free).
 
 #### #10 — Conversation prefixes across computers: a cache this node did not fill is invisible
 `P2` · perf-split · **PARTIAL** — 2026-09-07 · absorbs #139 and archive § "Speeding up inference BETWEEN nodes" idea 1 (prefix-keyed remote KV); history: archive row #10 and § "A conversation's later turns do not seek out the peer holding its prefix"
