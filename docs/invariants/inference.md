@@ -4231,6 +4231,29 @@ non-existent temp dir with `CANDLE_FLASH_ATTN_CHECK_ONLY=1`, which exercises thi
 patch in ~50 s on every push — nothing else in CI compiles that crate, because
 compiling it is the cost being avoided.
 
+### A model in shared state is checked on a card build (2026-10-20, gotcha #912)
+
+`SplitModel` is `Send + Sync` on the processor build and `Send` only on a card
+build: its decode graphs (`cuda_graph::DecodeGraphSlot` → `DecodeGraph` →
+`Exec`) hold a raw `CUgraphExec`, and `Exec` has an `unsafe impl Send` and no
+`Sync`. #316's embedder kept a `Box<SplitModel>` in
+`SharedState::local_embedders`, so on every card build `SharedState` lost
+`Send + Sync`: 183 errors in the library, one per axum handler (`AppState` holds
+it) and per `spawn_blocking` closure that captures it. `cargo lint` and
+`dev-test` — the only local builds — passed, since the processor feature set
+compiles no graphs. CI's three card compile-checks failed on the commit meant
+for the v0.3.245 tag, and the tag waited for them.
+
+The holder now keeps `Mutex<SplitModel>` (`Mutex<T: Send>` is `Sync`), which
+costs a lock per lookup of a few rows. A const assertion beside the type
+(`shareable::<LocalEmbedder>()`) makes the next such field fail at its
+definition too, naming the type, beside the errors at every place that shares
+the state (checked with the lock removed: the card check fails at the
+assertion). The check to
+run before pushing such a change is CI's own:
+`CARGO_TARGET_DIR=~/swarm-target-cuda CUDA_COMPUTE_CAP=80 cargo check --locked
+--features candle-cuda --all-targets` with `nvcc` on `PATH`.
+
 ## A model whose state cannot be wound back is never speculated
 
 (2026-10-06, FUTURE_WORK #117.) Qwen 3.5's Gated DeltaNet layers (three of every four) carry a

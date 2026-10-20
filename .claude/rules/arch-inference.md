@@ -51,7 +51,7 @@ measured at, and what a change must keep — lives in `docs/invariants/`.
 
 ## Cross-feature compile checks
 
-`cargo check` with default features compiles NO `cfg`-gated path; only the cache-warm workflow sees the GPU paths. ⚠ **Before removing anything an unused-warning points at, grep the file for `#[cfg(`** (gotcha #264, `DType` in `layers/mod.rs`). Changing a signature callable from gated code: run `cargo check --features llama` and `cargo check --features flash-attn --all-targets` (CI's form) before pushing, then `gh run list --workflow="Cache warm"`.
+`cargo check` with default features compiles NO `cfg`-gated path; only the cache-warm workflow sees the GPU paths. ⚠ **Before removing anything an unused-warning points at, grep the file for `#[cfg(`** (gotcha #264, `DType` in `layers/mod.rs`). Changing a signature callable from gated code: run `cargo check --features llama` and `cargo check --features flash-attn --all-targets` (CI's form) before pushing, then `gh run list --workflow="Cache warm"`. **A card build's `SplitModel` is `Send` but not `Sync`** (its decode graphs hold raw CUDA handles): one kept in `SharedState` must sit behind a `Mutex` with a const `Send + Sync` assertion beside its holder (`local_embedder.rs`), and such a change is checked with `cargo check --locked --features candle-cuda --all-targets` (`CARGO_TARGET_DIR=~/swarm-target-cuda CUDA_COMPUTE_CAP=80`) before the push — the processor build passed while every card build failed (gotcha #912).
 
 ### The CUTLASS kernels live OUTSIDE `target/` (2026-08-17)
 

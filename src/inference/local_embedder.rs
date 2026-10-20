@@ -32,10 +32,24 @@ pub struct LocalEmbedder {
     rows: Rows,
 }
 
+// `SharedState` keeps embedders and every task shares it. A field that cannot
+// be shared fails a card build here, naming this type, as well as at each
+// place that shares the state.
+const _: () = {
+    const fn shareable<T: Send + Sync>() {}
+    shareable::<LocalEmbedder>();
+};
+
 /// Where the rows come from.
 enum Rows {
-    /// The first segment's loader, asked for no layers.
-    FirstSegment(Box<crate::inference::split::SplitModel>),
+    /// The first segment's loader, asked for no layers. Behind a lock because
+    /// the embedder lives in `SharedState`, which every task shares, and a
+    /// card build's `SplitModel` is `Send` but not `Sync` (its decode graphs
+    /// hold raw CUDA handles, `cuda_graph::Exec`). Held bare, it left no card
+    /// build compiling (CI's card compile-check, 2026-10-20) while the
+    /// processor build `cargo lint` checks, which has no graphs, passed. A
+    /// lookup is a few rows, so requests wait on each other for microseconds.
+    FirstSegment(std::sync::Mutex<Box<crate::inference::split::SplitModel>>),
     /// A bare table, for the pipeline's tests (which have no model files).
     #[cfg(test)]
     Table(candle_nn::Embedding),
@@ -71,7 +85,7 @@ impl LocalEmbedder {
             "Loaded this model's embedding table for prompt privacy"
         );
         Ok(Self {
-            rows: Rows::FirstSegment(Box::new(model)),
+            rows: Rows::FirstSegment(std::sync::Mutex::new(Box::new(model))),
         })
     }
 
@@ -85,11 +99,29 @@ impl LocalEmbedder {
         }
     }
 
-    fn tokenizer(&self) -> Option<&SplitTokenizer> {
+    /// Run `f` with the vocabulary (`None` for a bare table) and the row
+    /// lookup, holding the model's lock for the whole of it.
+    fn with_rows<R>(
+        &self,
+        f: impl FnOnce(
+            Option<&SplitTokenizer>,
+            &dyn Fn(&[i64]) -> Result<Tensor, SwarmError>,
+        ) -> Result<R, SwarmError>,
+    ) -> Result<R, SwarmError> {
         match &self.rows {
-            Rows::FirstSegment(model) => model.tokenizer(),
+            Rows::FirstSegment(model) => {
+                // Poisoned only by a panic mid-lookup, which wrote nothing.
+                let model = model.lock().unwrap_or_else(|e| e.into_inner());
+                f(model.tokenizer(), &|ids| model.embed_ids(ids))
+            }
             #[cfg(test)]
-            Rows::Table(_) => None,
+            Rows::Table(table) => f(None, &|ids| {
+                use candle_core::Module;
+                let input = Tensor::new(ids, &candle_core::Device::Cpu)
+                    .and_then(|t| t.unsqueeze(0))
+                    .map_err(SwarmError::internal)?;
+                table.forward(&input).map_err(SwarmError::internal)
+            }),
         }
     }
 
@@ -109,7 +141,25 @@ impl LocalEmbedder {
         prompt: &str,
         vision: Option<&Tensor>,
     ) -> Result<(Vec<u8>, usize), SwarmError> {
-        let token_ids: Vec<i64> = match (self.tokenizer(), vision) {
+        let emb = self.with_rows(|tokenizer, embed_ids| {
+            Self::embed_prompt_with(tokenizer, embed_ids, prompt, vision)
+        })?;
+        let positions = emb
+            .dim(1)
+            .map_err(|e| SwarmError::Internal(format!("Embedding dims: {e}")))?;
+        let bytes = tensor_to_bytes(&emb)?;
+        Ok((bytes, positions))
+    }
+
+    /// `(1, positions, hidden)` embeddings of `prompt`, its pictures' rows
+    /// spliced in where their markers are.
+    fn embed_prompt_with(
+        tokenizer: Option<&SplitTokenizer>,
+        embed_ids: &dyn Fn(&[i64]) -> Result<Tensor, SwarmError>,
+        prompt: &str,
+        vision: Option<&Tensor>,
+    ) -> Result<Tensor, SwarmError> {
+        let token_ids: Vec<i64> = match (tokenizer, vision) {
             (Some(tokenizer), Some(_)) => {
                 crate::inference::vision::encode_prompt_with_images(tokenizer, prompt)
             }
@@ -125,31 +175,9 @@ impl LocalEmbedder {
             (None, None) => prompt.bytes().map(|b| b as i64).collect(),
         };
 
-        let emb = match vision {
-            Some(rows) => crate::inference::vision::splice_image_rows(&token_ids, rows, |run| {
-                self.embed_ids(run)
-            })?,
-            None => self.embed_ids(&token_ids)?,
-        };
-        let positions = emb
-            .dim(1)
-            .map_err(|e| SwarmError::Internal(format!("Embedding dims: {e}")))?;
-        let bytes = tensor_to_bytes(&emb)?;
-        Ok((bytes, positions))
-    }
-
-    /// `(1, n, hidden)` embeddings of `ids`: the first segment's lookup.
-    fn embed_ids(&self, ids: &[i64]) -> Result<Tensor, SwarmError> {
-        match &self.rows {
-            Rows::FirstSegment(model) => model.embed_ids(ids),
-            #[cfg(test)]
-            Rows::Table(table) => {
-                use candle_core::Module;
-                let input = Tensor::new(ids, &candle_core::Device::Cpu)
-                    .and_then(|t| t.unsqueeze(0))
-                    .map_err(SwarmError::internal)?;
-                table.forward(&input).map_err(SwarmError::internal)
-            }
+        match vision {
+            Some(rows) => crate::inference::vision::splice_image_rows(&token_ids, rows, embed_ids),
+            None => embed_ids(&token_ids),
         }
     }
 
@@ -157,7 +185,8 @@ impl LocalEmbedder {
     ///
     /// Returns serialized tensor bytes with shape `[1, 1, hidden_dim]`.
     pub fn embed_token(&self, token_id: u32) -> Result<Vec<u8>, SwarmError> {
-        tensor_to_bytes(&self.embed_ids(&[i64::from(token_id)])?)
+        let emb = self.with_rows(|_, embed_ids| embed_ids(&[i64::from(token_id)]))?;
+        tensor_to_bytes(&emb)
     }
 }
 
