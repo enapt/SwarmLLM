@@ -1,13 +1,12 @@
 //! `swarmllm peers` — list connected peers from a running daemon.
 
-use super::read_api_key;
-
 pub async fn query_peers(
     port: u16,
-    data_dir: &std::path::Path,
+    access: &super::DaemonAccess,
     json_output: bool,
 ) -> anyhow::Result<()> {
-    let api_key = read_api_key(data_dir).unwrap_or_default();
+    let data_dir = access.data_dir.as_path();
+    let api_key = access.api_key.clone().unwrap_or_default();
     if api_key.is_empty() {
         eprintln!(
             "Warning: no API key found at {}",
@@ -15,8 +14,8 @@ pub async fn query_peers(
         );
     }
 
-    let url = format!("http://localhost:{port}/api/admin/peers");
-    let client = reqwest::Client::new();
+    let url = format!("{}/api/admin/peers", super::daemon_base(port));
+    let client = super::daemon_client();
     let mut req = client.get(&url);
     if !api_key.is_empty() {
         req = req.header("Authorization", format!("Bearer {api_key}"));

@@ -14,25 +14,25 @@
 //! `swarmllm diagnostics` and paste the output" is advice that stays safe to
 //! give without a caveat attached.
 
-use super::read_api_key;
-
 pub async fn print_diagnostics(
     port: u16,
-    data_dir: &std::path::Path,
+    access: &super::DaemonAccess,
     full: bool,
 ) -> anyhow::Result<()> {
-    let api_key = read_api_key(data_dir).unwrap_or_default();
+    let data_dir = access.data_dir.as_path();
+    let api_key = access.api_key.clone().unwrap_or_default();
     super::bail_if_no_api_key(&api_key, data_dir)?;
 
     let url = format!(
-        "http://localhost:{port}/api/admin/diagnostics{}",
+        "{}/api/admin/diagnostics{}",
+        super::daemon_base(port),
         if full { "?full=1" } else { "" }
     );
     // Everything explanatory goes to stderr so `swarmllm diagnostics > report.txt`
     // captures the report and nothing else.
     eprintln!("Collecting diagnostics from {url}...");
 
-    let client = reqwest::Client::new();
+    let client = super::daemon_client();
     let resp = match client
         .get(&url)
         .header("Authorization", format!("Bearer {api_key}"))

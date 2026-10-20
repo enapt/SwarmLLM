@@ -147,7 +147,9 @@ AlmaLinux 9) have an older core system library than SwarmLLM needs, so the
 package refuses to install there; use [Docker](#docker) on those.
 
 Either way SwarmLLM runs as a background service that keeps its data in
-`/var/lib/swarmllm` (the access token is in `/var/lib/swarmllm/api_key`).
+`/var/lib/swarmllm` (the access token is in `/var/lib/swarmllm/api_key`). Commands such as
+`swarmllm status` find that folder by asking the running service; only the service and the
+administrator can read the token, so run them with `sudo` (`sudo swarmllm status`).
 Programs installed from a package **do not update themselves** — install the
 next release's package to update. Homebrew and AUR packages are not published
 yet.

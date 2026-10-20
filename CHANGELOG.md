@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+**`swarmllm status` finds a running service.** Commands such as `swarmllm status`, run without
+`-d`, looked for the access key in your home folder. A service installed from the .deb or .rpm
+keeps it in `/var/lib/swarmllm`, so the command said SwarmLLM was not running and to start it. A
+command now asks the running node where its folder is (the node tells only programs on the same
+computer), and sends that folder's key only after the node proves it holds the same key, so
+another program on the port learns nothing. The service's key is readable only by the service
+and the administrator, so run these commands with `sudo`. Every command now reaches the node at
+`127.0.0.1`, the address it listens on, rather than `localhost`, which can lead elsewhere.
+
 ## [0.3.245-alpha] — 2026-10-20
 
 **Gemma 3 can read pictures, and pictures go where you put them.** A picture sent with a message

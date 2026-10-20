@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #317**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #318**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2285,14 +2285,6 @@ disagrees with the id's size and quant tags.
 
 ### Packaging, release and operations
 
-#### #255 — `swarmllm status` reads the default data directory, not the running daemon's
-`P3` · cli · **OPEN** — 2026-10-12 · history: report #035 (a tester)
-
-Without `-d`, the CLI reads `~/.local/share/swarmllm/api_key` and fails against a daemon started
-with `/opt/swarmllm/data` (the error explains it). Next: the CLI asks the daemon on the port for
-its data directory, or the daemon leaves its data directory where the CLI looks first (a runtime
-file), before falling back to the default.
-
 #### #241 — llama-cpp-2 is pinned at 0.1.157; 0.1.158 moved tokenisation onto the vocabulary
 `P4` · build · **OPEN** — 2026-10-08 · history: Dependabot PR #34 (its llama compile-check failed)
 
@@ -2355,6 +2347,18 @@ endpoints. `candle-*` stays on 0.10 deliberately (§ "Decided").
 Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the build if one
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
+
+#### #317 — Another program can hold `[::1]` on the node's port while the node runs
+`P3` · api · **OPEN** — 2026-10-20 · history: found with #255's key proof
+
+The HTTP server binds IPv4 only (`api::server::api_bind_addr`: `127.0.0.1` or `0.0.0.0`), so
+`[::1]:8800` stays free for any local program. A browser opening `http://localhost:8800` usually
+tries `::1` first and would load that program's page under the dashboard's own origin — its
+saved chats (`swarmllm_sessions`) and any key typed in by hand (`swarmllm_manual_api_key`) are
+that origin's storage. The client commands no longer use `localhost` (#255, `cli::daemon_base`).
+Next: also listen on `[::1]:port` (loopback only, IPv6-only socket, best effort where a host has
+no IPv6), never `[::]`, which would newly expose the API on every IPv6 address; check
+`RequestOrigin::is_this_machine` and `dashboard_trust::classify` treat `::1` as this machine.
 
 #### #301 — The router's per-conversation table (`KvCacheManager`) decides nothing
 `P4` · cleanup · **OPEN** — 2026-10-17 · history: found by #251 (2b)'s split rig, whose control turn never reused a route
@@ -2713,6 +2717,40 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-20, not yet released** (#255)
+- #255 — **A command run without `-d` finds the running daemon's data directory, and sends its
+  key only to the node that proves it holds it.** `/health` names the directory (`data_dir`,
+  absolute) to a request from this machine (`RequestOrigin::is_this_machine`) and to no one else;
+  every client command without `-d` or `SWARMLLM_NODE_DATA_DIR` asks the daemon on its port
+  (`cli::client_access`), falling back to the default when nothing answers, an older daemon names
+  none, or the path is not on this machine (a container's). The pre-release review (2026-10-20)
+  found the first version handed the key to a squatter: any local program on the port while the
+  node is down could name `/var/lib/swarmllm`, and `sudo swarmllm status` read the service's key
+  and sent it. So the command sends a fresh 32-byte `nonce` and the node answers `key_proof` =
+  `api::server::health_key_proof` (BLAKE3 keyed hash of the port it serves on and the nonce,
+  under a key derived from the API key and used for nothing else); the command checks it with the
+  port it dialled (`choose_access`) and otherwise refuses, sending nothing. A second review of
+  the proof found three holes, each closed: (1) a command re-read the key file after the check,
+  so a FIFO swapped for a symlink between the reads made root send any one-line file — the key is
+  now read ONCE, by `client_access`, and carried in `DaemonAccess` (guard
+  `no_command_reads_the_key_file_itself`, with a planted self-test); (2) a program on one port
+  could pass the challenge on to a node on another — the port is in the proof; (3) every
+  key-bearing request took `HTTP_PROXY` — all go through `cli::daemon_client` (`no_proxy`). Every
+  command reaches the node at `cli::daemon_base` (`127.0.0.1`, where it listens): six used
+  `localhost`, which resolves to `::1` first, where the node does not listen and any program may.
+  While the node runs, a program on this machine can already be handed its key as the dashboard
+  is, so the proof guards the time it is down. Research: Jupyter's runtime files serve the same
+  user only, the packaged service runs as `swarmllm`; Docker and Tailscale ask the daemon; a
+  challenge over a keyed hash is HTTP Digest's and the SSH agent's shape. Tests:
+  `a_daemon_that_cannot_prove_it_holds_the_key_is_refused` (no proof, garbage, a guessed key, a
+  replayed proof, another port's proof), `health_names_the_data_dir_only_to_this_machine`,
+  `no_command_reads_the_key_file_itself`, each red with its fix off;
+  `a_command_without_a_data_dir_reads_the_running_daemons`,
+  `the_daemons_data_dir_is_used_only_where_it_exists_here`, `no_daemon_leaves_the_default`.
+  Residual: a node that names no directory (0.3.244 and older) is still sent the default
+  directory's key unproven, as every release did; and the dashboard's own `localhost` address can
+  reach a program on `[::1]` → #317.
 
 **Closed 2026-10-19, not yet released** (#316, #304, #269, #305, #184, #179, #115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163, #310; #186 decided)
 - #316 — **`inference.local_embedding_privacy` keeps the prompt's tokens on this computer, as it

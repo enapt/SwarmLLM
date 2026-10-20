@@ -2,8 +2,6 @@
 
 use clap::Subcommand;
 
-use super::read_api_key;
-
 #[derive(Subcommand, Debug)]
 pub enum PoolAction {
     /// Create a new device pool (this node becomes the owner/master)
@@ -91,12 +89,13 @@ async fn wait_until_in_a_pool(client: &reqwest::Client, base: &str, auth: &str) 
 
 pub async fn run_pool_command(
     port: u16,
-    data_dir: &std::path::Path,
+    access: &super::DaemonAccess,
     action: PoolAction,
 ) -> anyhow::Result<()> {
-    let api_key = read_api_key(data_dir);
-    let base = format!("http://127.0.0.1:{port}");
-    let client = reqwest::Client::new();
+    let data_dir = access.data_dir.as_path();
+    let api_key = access.api_key.clone();
+    let base = super::daemon_base(port);
+    let client = super::daemon_client();
 
     let auth_header = api_key.as_deref().unwrap_or("");
 

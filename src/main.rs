@@ -423,10 +423,6 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
         eprintln!("      Use --model-id <id> instead, or results will be for another model.");
     }
 
-    let resolve_data_dir = |cli_data_dir: &Option<PathBuf>| -> PathBuf {
-        swarmllm::config::resolve_data_dir(cli_data_dir.as_deref())
-    };
-
     // CLI client port: CLI flag > SWARMLLM_NODE_LISTEN_PORT > 8800.
     // Without env-var support every client subcommand (status/chat/peers/
     // bench/pool) silently connected to 8800 even when the daemon was
@@ -467,8 +463,8 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
         }
         Commands::Status { json } => {
             let port = resolve_client_port(cli.port);
-            let data_dir = resolve_data_dir(&cli.data_dir);
-            cli::status::query_status(port, &data_dir, json).await
+            let access = cli::client_access(cli.data_dir.as_deref(), port).await;
+            cli::status::query_status(port, &access, json).await
         }
         Commands::Chat {
             model,
@@ -476,38 +472,38 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             temperature,
         } => {
             let port = resolve_client_port(cli.port);
-            let data_dir = resolve_data_dir(&cli.data_dir);
-            cli::chat::run_chat(port, &data_dir, model, max_tokens, temperature).await
+            let access = cli::client_access(cli.data_dir.as_deref(), port).await;
+            cli::chat::run_chat(port, &access, model, max_tokens, temperature).await
         }
         Commands::Peers { json } => {
             let port = resolve_client_port(cli.port);
-            let data_dir = resolve_data_dir(&cli.data_dir);
-            cli::peers::query_peers(port, &data_dir, json).await
+            let access = cli::client_access(cli.data_dir.as_deref(), port).await;
+            cli::peers::query_peers(port, &access, json).await
         }
         Commands::Diagnostics { full } => {
             let port = resolve_client_port(cli.port);
-            let data_dir = resolve_data_dir(&cli.data_dir);
-            cli::diagnostics::print_diagnostics(port, &data_dir, full).await
+            let access = cli::client_access(cli.data_dir.as_deref(), port).await;
+            cli::diagnostics::print_diagnostics(port, &access, full).await
         }
         Commands::GetModel { tier, all } => {
             let port = resolve_client_port(cli.port);
-            let data_dir = resolve_data_dir(&cli.data_dir);
-            cli::get_model::get_model(port, &data_dir, tier, all).await
+            let access = cli::client_access(cli.data_dir.as_deref(), port).await;
+            cli::get_model::get_model(port, &access, tier, all).await
         }
         Commands::RemoveModel { model, yes } => {
             let port = resolve_client_port(cli.port);
-            let data_dir = resolve_data_dir(&cli.data_dir);
-            cli::remove_model::remove_model(port, &data_dir, &model, yes).await
+            let access = cli::client_access(cli.data_dir.as_deref(), port).await;
+            cli::remove_model::remove_model(port, &access, &model, yes).await
         }
         Commands::Unload { model } => {
             let port = resolve_client_port(cli.port);
-            let data_dir = resolve_data_dir(&cli.data_dir);
-            cli::unload_model::unload_model(port, &data_dir, &model).await
+            let access = cli::client_access(cli.data_dir.as_deref(), port).await;
+            cli::unload_model::unload_model(port, &access, &model).await
         }
         Commands::Privacy { model } => {
             let port = resolve_client_port(cli.port);
-            let data_dir = resolve_data_dir(&cli.data_dir);
-            cli::privacy::enable_privacy(port, &data_dir, &model).await
+            let access = cli::client_access(cli.data_dir.as_deref(), port).await;
+            cli::privacy::enable_privacy(port, &access, &model).await
         }
         Commands::ModelWorker {
             socket,
@@ -595,8 +591,8 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
         }
         Commands::Pool { action } => {
             let port = resolve_client_port(cli.port);
-            let data_dir = resolve_data_dir(&cli.data_dir);
-            cli::pool::run_pool_command(port, &data_dir, action).await
+            let access = cli::client_access(cli.data_dir.as_deref(), port).await;
+            cli::pool::run_pool_command(port, &access, action).await
         }
         Commands::Update { check_only } => cli::update::run_update_command(check_only).await,
         Commands::TestSplit {
@@ -625,10 +621,10 @@ async fn async_main(mut cli: Cli) -> anyhow::Result<()> {
             model_id,
         } => {
             let port = resolve_client_port(cli.port);
-            let data_dir = resolve_data_dir(&cli.data_dir);
+            let access = cli::client_access(cli.data_dir.as_deref(), port).await;
             cli::bench::run_bench(
                 port,
-                &data_dir,
+                &access,
                 max_tokens,
                 iterations,
                 concurrency,

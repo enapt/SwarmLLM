@@ -16,6 +16,68 @@ async fn health_endpoint_returns_ok() {
     assert_eq!(body["status"], "ok");
 }
 
+/// `/health` tells a command on this machine where the daemon keeps its data,
+/// and proves it holds the key kept there by answering a challenge — and tells
+/// nobody else either (#255; `cli::client_access` asks and checks it).
+#[tokio::test]
+async fn health_names_the_data_dir_only_to_this_machine() {
+    let (base, key) = spawn_test_server().await;
+    let expected = std::path::absolute(swarmllm::config::Config::default().node.data_dir).unwrap();
+    let nonce = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    let ask = |extra: Option<(&'static str, &'static str)>, query: String| {
+        let mut req = reqwest::Client::new().get(format!("{base}/health{query}"));
+        if let Some((name, value)) = extra {
+            req = req.header(name, value);
+        }
+        async move {
+            req.send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+
+    let here = ask(None, format!("?nonce={nonce}")).await;
+    assert_eq!(here["data_dir"], expected.to_str().unwrap());
+    assert_eq!(
+        here["key_proof"],
+        // The port the node serves on, which the test server's config names
+        // (it listens on a free one; a real node listens on this one).
+        swarmllm::api::server::health_key_proof(
+            &key,
+            swarmllm::config::Config::default().node.listen_port,
+            nonce
+        )
+        .to_hex()
+        .as_str(),
+        "the proof is of this challenge, under this node's key"
+    );
+    let unasked = ask(None, String::new()).await;
+    assert!(
+        unasked.get("key_proof").is_none(),
+        "no challenge, no proof: {unasked}"
+    );
+    let odd = ask(None, "?nonce=zz&probe=1".to_string()).await;
+    assert_eq!(
+        odd["status"], "ok",
+        "an odd query never breaks the liveness probe"
+    );
+    assert!(odd.get("key_proof").is_none(), "{odd}");
+
+    let proxied = ask(
+        Some(("X-Forwarded-For", "198.51.100.4")),
+        format!("?nonce={nonce}"),
+    )
+    .await;
+    assert_eq!(proxied["status"], "ok");
+    assert!(
+        proxied.get("data_dir").is_none() && proxied.get("key_proof").is_none(),
+        "a request through a proxy is not from this machine: {proxied}"
+    );
+}
+
 #[tokio::test]
 async fn status_endpoint_returns_json() {
     let (base, key) = spawn_test_server().await;

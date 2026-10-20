@@ -149,7 +149,7 @@ async fn daemon_is_running() -> bool {
     // client could report a daemon running when all we established is that TLS
     // would not initialise. The question is boolean, so the safe answer is the
     // negative one.
-    let client = match reqwest::Client::builder()
+    let client = match super::daemon_client_builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
     {
@@ -157,7 +157,7 @@ async fn daemon_is_running() -> bool {
         Err(_) => return false,
     };
     client
-        .get(format!("http://127.0.0.1:{port}/health"))
+        .get(format!("{}/health", super::daemon_base(port)))
         .send()
         .await
         .map(|r| r.status().is_success())

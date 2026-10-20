@@ -6,7 +6,7 @@
 //! decode interruption from a long admission, so concurrent TTFT
 //! distributions get tighter).
 
-use super::{discover_model, read_api_key};
+use super::discover_model;
 use futures::StreamExt;
 
 /// Throughput in tokens/sec, guarded against zero-duration division.
@@ -31,7 +31,7 @@ struct BenchResult {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_bench(
     port: u16,
-    data_dir: &std::path::Path,
+    access: &super::DaemonAccess,
     max_tokens: u32,
     iterations: u32,
     concurrency: u32,
@@ -40,11 +40,12 @@ pub async fn run_bench(
     streaming: bool,
     model_override: Option<String>,
 ) -> anyhow::Result<()> {
-    let api_key = read_api_key(data_dir).unwrap_or_default();
+    let data_dir = access.data_dir.as_path();
+    let api_key = access.api_key.clone().unwrap_or_default();
     super::bail_if_no_api_key(&api_key, data_dir)?;
 
-    let base = format!("http://localhost:{port}");
-    let client = reqwest::Client::new();
+    let base = super::daemon_base(port);
+    let client = super::daemon_client();
 
     let model = discover_model(&client, &base, &api_key, model_override, data_dir, port).await?;
 

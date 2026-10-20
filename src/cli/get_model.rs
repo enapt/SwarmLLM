@@ -18,7 +18,7 @@ use swarmllm::model::reference::REFERENCE_MODELS;
 /// this node's fair share of the shards by default, or every shard with `--all`.
 pub async fn get_model(
     port: u16,
-    data_dir: &std::path::Path,
+    access: &super::DaemonAccess,
     tier: Option<String>,
     all: bool,
 ) -> anyhow::Result<()> {
@@ -38,7 +38,8 @@ pub async fn get_model(
         std::process::exit(1);
     };
 
-    let api_key = super::read_api_key(data_dir).unwrap_or_default();
+    let data_dir = access.data_dir.as_path();
+    let api_key = access.api_key.clone().unwrap_or_default();
     super::bail_if_no_api_key(&api_key, data_dir)?;
 
     // Fair-share and explicit-shards are mutually exclusive on the endpoint.
@@ -68,8 +69,8 @@ pub async fn get_model(
     println!("Fetch: {what}");
     println!();
 
-    let base = format!("http://localhost:{port}");
-    let client = reqwest::Client::new();
+    let base = super::daemon_base(port);
+    let client = super::daemon_client();
     let resp = match client
         .post(format!("{base}/api/admin/hf/download-shards"))
         .header("Authorization", format!("Bearer {api_key}"))

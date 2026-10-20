@@ -16,14 +16,18 @@
 /// Ask the daemon to fetch the first and last shard of `model`.
 pub async fn enable_privacy(
     port: u16,
-    data_dir: &std::path::Path,
+    access: &super::DaemonAccess,
     model: &str,
 ) -> anyhow::Result<()> {
-    let api_key = super::read_api_key(data_dir).unwrap_or_default();
+    let data_dir = access.data_dir.as_path();
+    let api_key = access.api_key.clone().unwrap_or_default();
     super::bail_if_no_api_key(&api_key, data_dir)?;
 
-    let client = reqwest::Client::new();
-    let url = format!("http://127.0.0.1:{port}/api/admin/models/{model}/enable-privacy");
+    let client = super::daemon_client();
+    let url = format!(
+        "{}/api/admin/models/{model}/enable-privacy",
+        super::daemon_base(port)
+    );
     let resp = match client.post(&url).bearer_auth(&api_key).send().await {
         Ok(r) => r,
         Err(_) => super::exit_daemon_unreachable(port),

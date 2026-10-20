@@ -1,13 +1,12 @@
 //! `swarmllm status` — query a running daemon's /v1/status endpoint.
 
-use super::read_api_key;
-
 pub async fn query_status(
     port: u16,
-    data_dir: &std::path::Path,
+    access: &super::DaemonAccess,
     as_json: bool,
 ) -> anyhow::Result<()> {
-    let api_key = read_api_key(data_dir).unwrap_or_default();
+    let data_dir = access.data_dir.as_path();
+    let api_key = access.api_key.clone().unwrap_or_default();
 
     if api_key.is_empty() {
         eprintln!(
@@ -17,12 +16,12 @@ pub async fn query_status(
         eprintln!("         (is the daemon running with this data directory?)");
     }
 
-    let url = format!("http://localhost:{port}/v1/status");
+    let url = format!("{}/v1/status", super::daemon_base(port));
     // Progress chatter belongs on stderr, so `swarmllm status --json` can be
     // piped into `jq` without the first line breaking the parse.
     eprintln!("Querying daemon at {url}...");
 
-    let client = reqwest::Client::new();
+    let client = super::daemon_client();
     let mut req = client.get(&url);
     if !api_key.is_empty() {
         req = req.header("Authorization", format!("Bearer {api_key}"));

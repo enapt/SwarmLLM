@@ -693,8 +693,78 @@ async fn wrong_method(method: axum::http::Method, uri: axum::http::Uri) -> impl 
     )
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"status": "ok"}))
+/// `/health` answers anyone without a key, so it says only that the daemon is
+/// up — and, to a request from this machine, where the daemon keeps its data
+/// (#255). A client command started without `-d` asks for it
+/// (`cli::client_access`): a packaged service keeps its data in
+/// `/var/lib/swarmllm`, which is not the default a user's command looks in, so
+/// `swarmllm status` beside a running service reported it "not running" and
+/// said to start it. The path is withheld from anyone else, like every
+/// privilege of this machine (`RequestOrigin::is_this_machine`). The data
+/// directory is fixed at start, so the boot snapshot is its answer; a relative
+/// `-d` is made absolute against the daemon's own working directory, which the
+/// command's is not.
+///
+/// **A command sends a key only to the node that proves it holds it.** Any
+/// local program can listen on the port while the node is down and name a
+/// directory — `/var/lib/swarmllm` — whose key `sudo swarmllm status` can read
+/// and would then hand it (the pre-release review, 2026-10-20). So the command
+/// sends a fresh `nonce` and is answered `key_proof` = [`health_key_proof`] of
+/// it and this node's port under this node's key, which a program without the
+/// key cannot compute; the command compares it with the key it read, once,
+/// before sending that key anywhere. A challenge-response over a keyed hash, as
+/// HTTP Digest and the SSH agent's signatures prove possession without sending
+/// the secret. While the node runs it holds the port, and a program on this
+/// machine can already be handed its key as the dashboard is
+/// (`api::dashboard_trust`): the proof guards the time the node is down.
+async fn health(
+    origin: crate::api::origin::RequestOrigin,
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Json<serde_json::Value> {
+    let mut body = serde_json::json!({"status": "ok"});
+    if !origin.is_this_machine() {
+        return Json(body);
+    }
+    if let Some(dir) = std::path::absolute(&state.shared_state.config.node.data_dir)
+        .ok()
+        .as_deref()
+        .and_then(std::path::Path::to_str)
+    {
+        body["data_dir"] = dir.into();
+    }
+    if let Some(nonce) = query.as_deref().and_then(health_nonce) {
+        let port = state.shared_state.config.node.listen_port;
+        body["key_proof"] = health_key_proof(&state.shared_state.api_key, port, nonce)
+            .to_hex()
+            .as_str()
+            .into();
+    }
+    Json(body)
+}
+
+/// The `nonce` a `/health` query carries, if it is one: 32 to 128 hex
+/// characters. Read by hand, not through `Query`, so an odd query string from
+/// a monitor can never turn the liveness probe into a 400.
+fn health_nonce(query: &str) -> Option<&str> {
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("nonce="))
+        .filter(|n| (32..=128).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// What `/health` answers a `nonce` with: a keyed BLAKE3 hash of the nonce
+/// under a key derived from the API key (sent as hex). The one definition,
+/// for the node that answers and the command that checks
+/// (`cli::client_access`). The derived key is used for nothing else, so
+/// asking the node for proofs teaches nothing about the key it checks.
+///
+/// The port the node serves on is in the message, and the command checks it
+/// against the port it dialled: a program on one port that passes the
+/// challenge on to the node on another cannot hand back its answer.
+pub fn health_key_proof(api_key: &str, port: u16, nonce: &str) -> blake3::Hash {
+    let key = blake3::derive_key("SwarmLLM 2026-10-20 /health key proof", api_key.as_bytes());
+    blake3::keyed_hash(&key, format!("{port} {nonce}").as_bytes())
 }
 
 /// Idle time before the OS starts probing whether an HTTP client is still there.

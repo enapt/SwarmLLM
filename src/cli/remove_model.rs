@@ -14,11 +14,12 @@
 /// Ask the daemon to delete `model` and retract it from the network.
 pub async fn remove_model(
     port: u16,
-    data_dir: &std::path::Path,
+    access: &super::DaemonAccess,
     model: &str,
     yes: bool,
 ) -> anyhow::Result<()> {
-    let api_key = super::read_api_key(data_dir).unwrap_or_default();
+    let data_dir = access.data_dir.as_path();
+    let api_key = access.api_key.clone().unwrap_or_default();
     super::bail_if_no_api_key(&api_key, data_dir)?;
 
     // Deleting a model can mean re-downloading many gigabytes, so it is worth
@@ -37,8 +38,8 @@ pub async fn remove_model(
         }
     }
 
-    let client = reqwest::Client::new();
-    let url = format!("http://127.0.0.1:{port}/api/admin/models/{model}");
+    let client = super::daemon_client();
+    let url = format!("{}/api/admin/models/{model}", super::daemon_base(port));
     let resp = match client.delete(&url).bearer_auth(&api_key).send().await {
         Ok(r) => r,
         Err(_) => super::exit_daemon_unreachable(port),
