@@ -29,6 +29,7 @@ mod hop_forwards;
 /// apply one reachability predicate rather than two that can drift.
 pub(crate) use events::addr_is_remotely_reachable;
 mod identify;
+mod loop_stall;
 mod relay;
 mod requests;
 mod shard_transfer;
@@ -1592,14 +1593,14 @@ impl NetworkManager {
         );
 
         // Set as the first statement of every `select!` arm below; read after it.
-        let mut arm_started: std::time::Instant;
+        let mut arm_started: loop_stall::ArmStart;
         let mut last_arm: std::borrow::Cow<'static, str>;
         loop {
             tokio::select! {
                 // Shutdown signal
                 _ = self.shutdown_rx.changed() => {
                     last_arm = "shutdown".into();
-                    arm_started = std::time::Instant::now();
+                    arm_started = loop_stall::ArmStart::now();
                     if *self.shutdown_rx.borrow() {
                         // Waited for: the cache is what the next start dials.
                         let _ = self.save_peer_cache().await;
@@ -1613,7 +1614,7 @@ impl NetworkManager {
                 // event channel, delaying NotifyHandler delivery for tensor forwards.
                 _ = discovery_interval.tick() => {
                     last_arm = "discovery_interval".into();
-                    arm_started = std::time::Instant::now();
+                    arm_started = loop_stall::ArmStart::now();
                     if !self.pending_tensor_outbound.is_empty() {
                         tracing::debug!(
                             pending = self.pending_tensor_outbound.len(),
@@ -1659,7 +1660,7 @@ impl NetworkManager {
                 // Periodic peer cache save
                 _ = peer_cache_interval.tick() => {
                     last_arm = "peer_cache_interval".into();
-                    arm_started = std::time::Instant::now();
+                    arm_started = loop_stall::ArmStart::now();
                     drop(self.save_peer_cache()); // runs on; nothing waits for it
                 }
                 // Kademlia bootstrap retry with exponential backoff.
@@ -1669,7 +1670,7 @@ impl NetworkManager {
                 // once any peer connects.
                 _ = bootstrap_retry_interval.tick() => {
                     last_arm = "bootstrap_retry_interval".into();
-                    arm_started = std::time::Instant::now();
+                    arm_started = loop_stall::ArmStart::now();
                     let connected = self.swarm.connected_peers().count();
                     if connected > 0 {
                         backoff_idx = 0;
@@ -1707,7 +1708,7 @@ impl NetworkManager {
                 // operator can see *why* no peers are being found.
                 _ = no_peers_interval.tick() => {
                     last_arm = "no_peers_interval".into();
-                    arm_started = std::time::Instant::now();
+                    arm_started = loop_stall::ArmStart::now();
                     let connected = self.swarm.connected_peers().count();
                     if connected == 0 {
                         let cfg = &self.shared_state.config.network;
@@ -1738,7 +1739,7 @@ impl NetworkManager {
                 // connection (no rr / gossip / identify traffic in the window).
                 _ = liveness_interval.tick() => {
                     last_arm = "liveness_interval".into();
-                    arm_started = std::time::Instant::now();
+                    arm_started = loop_stall::ArmStart::now();
                     let connected: Vec<libp2p::PeerId> =
                         self.swarm.connected_peers().cloned().collect();
                     for peer_id in &connected {
@@ -1768,7 +1769,7 @@ impl NetworkManager {
                 // queue backlog can exceed the pipeline timeout (30s).
                 _ = rr_ping_interval.tick() => {
                     last_arm = "rr_ping_interval".into();
-                    arm_started = std::time::Instant::now();
+                    arm_started = loop_stall::ArmStart::now();
                     if !self.pending_tensor_outbound.is_empty() {
                         tracing::debug!(
                             pending = self.pending_tensor_outbound.len(),
@@ -1807,7 +1808,7 @@ impl NetworkManager {
                 // the stale peer to force a fresh TCP+yamux session on the next exchange.
                 _ = stale_tensor_interval.tick() => {
                     last_arm = "stale_tensor_interval".into();
-                    arm_started = std::time::Instant::now();
+                    arm_started = loop_stall::ArmStart::now();
                     // Also sweep the results-in-flight map.
                     self.pending_tensor_result_outbound.retain(|_id, in_flight| {
                         in_flight.sent_at.elapsed().as_secs() < MAX_TENSOR_FORWARD_SECS
@@ -2094,7 +2095,7 @@ impl NetworkManager {
                 // closed. We schedule a re-dial with random jitter (2-5s) so one side wins.
                 _ = redial_interval.tick() => {
                     last_arm = "redial_interval".into();
-                    arm_started = std::time::Instant::now();
+                    arm_started = loop_stall::ArmStart::now();
                     // Cap queue unconditionally — push sites may race past the
                     // soft check or skip it entirely. Truncating before dispatch
                     // evicts oldest (front) first in FIFO fashion: reverse,
@@ -2147,13 +2148,13 @@ impl NetworkManager {
                 // S5: DHT provider queries from scheduler/auto-manage
                 Some(model_id) = self.dht_query_rx.recv() => {
                     last_arm = "dht_query".into();
-                    arm_started = std::time::Instant::now();
+                    arm_started = loop_stall::ArmStart::now();
                     self.handle_dht_provider_query(&model_id);
                 }
                 // Outbound commands from other daemon tasks
                 cmd = self.inbound_rx.recv() => {
                     last_arm = "inbound_cmd".into();
-                    arm_started = std::time::Instant::now();
+                    arm_started = loop_stall::ArmStart::now();
                     match cmd {
                         Some(cmd) => {
                             self.handle_outbound_command(cmd).await;
@@ -2170,14 +2171,14 @@ impl NetworkManager {
                 // fetch has been served by the local worker).
                 Some(cmd) = self.internal_cmd_rx.recv() => {
                     last_arm = "internal_cmd".into();
-                    arm_started = std::time::Instant::now();
+                    arm_started = loop_stall::ArmStart::now();
                     self.handle_outbound_command(cmd).await;
                 }
                 // A tensor send whose test delay has passed
                 // (`SWARMLLM_TEST_TENSOR_DELAY_MS`); never taken otherwise.
                 Some(cmd) = self.delayed_cmd_rx.recv() => {
                     last_arm = "delayed_cmd".into();
-                    arm_started = std::time::Instant::now();
+                    arm_started = loop_stall::ArmStart::now();
                     self.releasing_delayed = true;
                     self.handle_outbound_command(cmd).await;
                     self.releasing_delayed = false;
@@ -2186,7 +2187,7 @@ impl NetworkManager {
                 // blocking pool; registering or rejecting it happens here.
                 Some(verdict) = self.shard_verdict_rx.recv() => {
                     last_arm = "shard_verdict".into();
-                    arm_started = std::time::Instant::now();
+                    arm_started = loop_stall::ArmStart::now();
                     if verdict.another_upload {
                         self.refuse_part_of_another_upload(verdict.shard_id, verdict.peer);
                     } else {
@@ -2204,7 +2205,7 @@ impl NetworkManager {
                 // Swarm events from the network
                 event = self.swarm.select_next_some() => {
                     last_arm = format!("swarm_event:{}", crate::network::helpers::swarm_event_name(&event)).into();
-                    arm_started = std::time::Instant::now();
+                    arm_started = loop_stall::ArmStart::now();
                     self.handle_swarm_event(event).await;
                     // Process any broadcasts queued during event handling
                     if !self.deferred_broadcasts.is_empty() {
@@ -2221,14 +2222,29 @@ impl NetworkManager {
             // not a local curiosity: it is added to every number routing uses.
             // Observed 2026-08-21: idle test nodes measured 2-10 ms to the same
             // LAN peer the live nodes measured at 60-800 ms. Named per arm so
-            // the culprit is in the log, not in a guess.
+            // the culprit is in the log, not in a guess — and with what the
+            // arm's thread was doing, so a stall in an arm that only touches
+            // memory names its cause too (`loop_stall`, #314).
             let took = arm_started.elapsed();
             if took >= NETWORK_LOOP_STALL_WARN {
-                tracing::warn!(
-                    arm = %last_arm,
-                    took_ms = took.as_millis() as u64,
-                    "DIAG: network event loop stalled — every latency this node measures includes this"
-                );
+                match arm_started.thread_spent() {
+                    Some(spent) => tracing::warn!(
+                        arm = %last_arm,
+                        took_ms = took.as_millis() as u64,
+                        on_cpu_ms = spent.on_cpu_ms,
+                        off_cpu_ms = spent.off_cpu_ms,
+                        disk_faults = spent.disk_faults,
+                        waits = spent.waits,
+                        preempted = spent.preempted,
+                        likely = spent.likely(),
+                        "DIAG: network event loop stalled — every latency this node measures includes this"
+                    ),
+                    None => tracing::warn!(
+                        arm = %last_arm,
+                        took_ms = took.as_millis() as u64,
+                        "DIAG: network event loop stalled — every latency this node measures includes this"
+                    ),
+                }
             }
         }
 

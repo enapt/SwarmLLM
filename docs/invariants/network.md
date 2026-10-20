@@ -2757,6 +2757,28 @@ what the next start dials.
 write lock on another thread for 400 ms, wakes a task, and commits: inline, the
 woken task waited 384 ms; with the fix it runs at once (asserted < 200 ms).
 
+**Measured against the log, 2026-10-20.** A tester's node (v0.3.245, without
+this fix) logged 42 stalls (median 289 ms, max 1.7 s) from the moment an
+80 MB/s rsync to its disk began, none in the 26 h before, and asked whether the
+loop writes the log or the database synchronously. The log file IS written by
+whichever thread logs (`logging::write_to_file`), and on ext4 with ordered data a
+small append can wait on the journal (kernel bugzilla 201461). Measured here
+under an rsync of 13 GB of build files (ext4, `data=ordered`): a 200-byte append
+every 5 ms took at most 0.2 ms at 80 MB/s and 77 ms unlimited, never ≥ 190 ms;
+the same append plus `fdatasync` every 200 ms went ≥ 190 ms 6 times in 245 at
+80 MB/s (max 808 ms) and 29 in 202 unlimited (max 1.35 s) — the tester's
+distribution. The commit is the stall; the log is not, and gets no writer thread.
+
+**A stall line says what the arm's thread did.** Some of the tester's stalls
+were in `liveness_interval`, an arm with no `.await` that only writes a map in
+memory: a commit on another task delays such an arm only BEFORE it starts, so
+the thread itself was held. `network::manager::loop_stall::ArmStart` (every
+arm's first statement) records the thread's counters (`getrusage(RUSAGE_THREAD)`,
+Linux) and a slow arm's line adds `on_cpu_ms`, `off_cpu_ms`, `disk_faults`
+(`ru_majflt`), `waits`, `preempted` and a `likely` reading — none where the arm
+ended on another thread. One syscall per arm. Test
+`a_blocked_arm_and_a_busy_arm_read_differently`.
+
 **What a change must keep.** A new database writer needs nothing: the wrapper
 covers it. A new write ON the network loop is the defect — hand it to the
 blocking pool as `CacheWriter` does. Two writes remain on the loop, both rare: the

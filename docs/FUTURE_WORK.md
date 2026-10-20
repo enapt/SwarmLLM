@@ -1222,7 +1222,17 @@ commit (fixed above), and the log file, which whichever thread logs writes itsel
 (`logging::write_to_file`: a `Mutex` and a `write` on the caller). On ext4 with ordered data a
 small append can wait on the journal for 100-700 ms while another writer floods the disk (kernel
 bugzilla 201461, a 6 MB/s logger; Ts'o: the ordered-mode writeback colliding with the flusher).
-Being measured 2026-10-20.
+Measured here 2026-10-20 (ext4, `data=ordered`, an rsync of 13 GB of build files to the same disk,
+`~/swarmllm-318/append_under_rsync.sh`): a 200-byte append every 5 ms took at most 0.2 ms at
+80 MB/s and 77 ms unlimited (260 MB/s), never ≥ 190 ms; the same append followed by `fdatasync`
+every 200 ms — a redb commit's wait — went ≥ 190 ms 6 times in 245 at 80 MB/s (max 808 ms) and 29
+in 202 unlimited (max 1.35 s): the tester's distribution. So the log is not it, and the commit,
+fixed above, is; no writer thread for the log. One thing neither explains: some of the tester's
+stalls were in `liveness_interval`, an arm with no `.await` that only writes a map in memory, and
+a commit elsewhere delays an arm only BEFORE it starts. So each stall line now says what the arm's
+thread was doing (`network::manager::loop_stall`: time on and off the processor, page faults that
+read the disk, waits, preemptions, and a `likely` reading). Next, besides the count above: the
+first stall line from a node on this build under a large copy names its cause.
 
 #### #191 — A part download that loses its peer restarts from byte 0 on the next one
 `P3` · storage · **OPEN** — 2026-09-03 · history: archive § "A multi-megabyte forward over ONE QUIC stream can kill the connection" (its banner: the cause was quinn-proto, #112)

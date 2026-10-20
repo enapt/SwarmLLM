@@ -72,8 +72,8 @@ and the administrator, so run these commands with `sudo`. Every command now reac
 **Your node keeps answering while your computer's disk is busy.** Saving its own records waited
 for the disk on the part of the node that talks to other computers, so while something else on
 your computer wrote a lot (an install, a backup, a big download), your node could go quiet for up
-to 2.6 seconds at a time — 65 times in one day on an idle node. Those saves now wait beside the
-network work instead of in its way.
+to 2.6 seconds at a time — 65 times in one day on an idle node, and 42 times on a tester's node
+during one large file copy. Those saves now wait beside the network work instead of in its way.
 
 **A node holding the start of a model on its graphics card checks every word number it is
 sent.** When another computer passed work to a node holding a model's first layers, the node

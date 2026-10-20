@@ -51,7 +51,7 @@ network manager hashes on the blocking pool and posts the verdict back
 
 ## The network loop never waits for the disk (2026-10-20, #314)
 
-A database commit waits for `fdatasync`. **`storage::Database::with_write_table`** runs every write through `without_starving_the_runtime`, so a task that commits first hands its worker's queue — the LIFO slot the network loop was just woken into, which no other worker may steal — to another thread. The loop's OWN writes go to the blocking pool (`peer_cache::CacheWriter`, newest snapshot wins). Guards `a_commit_does_not_hold_the_task_its_worker_just_woke`, `the_cache_writer_keeps_the_newest_snapshot`.
+A database commit waits for `fdatasync`. **`storage::Database::with_write_table`** runs every write through `without_starving_the_runtime`, so a task that commits first hands its worker's queue — the LIFO slot the network loop was just woken into, which no other worker may steal — to another thread. The loop's OWN writes go to the blocking pool (`peer_cache::CacheWriter`, newest snapshot wins). Every arm starts with **`loop_stall::ArmStart::now()`**, so a stall line says what the arm's THREAD did (on/off the processor, disk page faults, waits, preemptions) — the log append is NOT a stall (measured, 2026-10-20). Guards `a_commit_does_not_hold_the_task_its_worker_just_woke`, `the_cache_writer_keeps_the_newest_snapshot`.
 
 → `docs/invariants/network.md` § "The network loop never waits for the disk"
 
