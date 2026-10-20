@@ -1,0 +1,13 @@
+[package]
+name = "quicprobe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+quinn = { version = "=0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
+rcgen = "=0.13.2"
+tokio = { version = "1", features = ["full"] }
+
+# Standalone (never built by the workspace): `cargo build --release --offline`.
+[workspace]

@@ -88,6 +88,9 @@ swarmllm/
 │   │                          `run_mha` launches on the CALLER's stream, not stream 0 — .199's garbage, #683)
 │   ├── candle-paged-attention/ (kernels only — NOTHING references it; PagedAttention was never wired, #257;
 │   │                          its kernels still hardcode stream 0 — fix before wiring it, see FUTURE_WORK)
+│   ├── libp2p-quic/           (0.13.1 + ONE addition: `Config::congestion` — our QUIC connections run quinn's
+│   │                          BBR, chosen by `network::transport::quic_congestion` (#318); 5 tests,
+│   │                          `--features tokio --lib`, CI `vendored.yml`)
 │   ├── libp2p-request-response/ (12 tests, `--lib`)
 │   └── rayon-core/            (1.13.0 + ONE patch: an idle worker spins 200 µs before it sleeps — `sleep/mod.rs`
 │                              `spin_budget`, `SWARMLLM_RAYON_SPIN_US=0` = upstream; small decode regions stop

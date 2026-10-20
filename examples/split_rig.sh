@@ -218,6 +218,8 @@
 #          greedy runs of the long prompt through A, timed. DELAY_A=ms holds
 #          every tensor A sends that long (`SWARMLLM_TEST_TENSOR_DELAY_MS` on A
 #          only): A far from holders that are close to each other.
+#          C_MEETS_B=1 has C dial B too: without it B may never meet C here
+#          (identify drops a loopback address) and never plans the model.
 #          DELAY_B=ms does the same for B, the delegate: with REMOTE_NODES=3 its
 #          checks either visit C and D one at a time (`SWARMLLM_CHAIN_VERIFY=0`)
 #          or travel B→C→D→B as one trip (the default). The arm is
@@ -365,12 +367,34 @@ fi
 # holds only our tensor messages. RIG_RATE=20mbit caps the link's rate as
 # well. A worker talks to its node over a local socket, which netem never
 # touches. Measured 2026-10-20: delay 50ms gave a 101-104 ms ping.
+# RIG_LOSS=1% drops that share of packets as well (each way).
 if [ -n "${RIG_RTT_MS:-}" ]; then
   [ -n "${RIG_IN_NETNS:-}" ] || { echo "RIG_RTT_MS needs RIG_NETNS=1"; exit 2; }
   tc qdisc add dev lo root netem delay "$((RIG_RTT_MS / 2))ms" ${RIG_RATE:+rate "$RIG_RATE"} \
+    ${RIG_LOSS:+loss "$RIG_LOSS"} \
     || { echo "cannot add the delay to loopback (tc netem)"; exit 2; }
-  echo "rig: loopback round trip ${RIG_RTT_MS} ms${RIG_RATE:+, rate $RIG_RATE}: $(ping -c 2 -q 127.0.0.1 | tail -1)"
+  echo "rig: loopback round trip ${RIG_RTT_MS} ms${RIG_RATE:+, rate $RIG_RATE}${RIG_LOSS:+, loss $RIG_LOSS}: $(ping -c 2 -q 127.0.0.1 | tail -1)"
 fi
+# RIG_TRANSPORT=quic (needs RIG_NETNS=1): the nodes reach each other over QUIC,
+# as the live swarm's connections mostly do (2026-10-20: ~90% of the live
+# node's), not TCP. Bootstrap addresses are QUIC, and every packet to a node's
+# P2P TCP port (its API port + 10) is dropped on the namespace's loopback — the
+# loopback probe (`discovery::probe_loopback_peers`) dials TCP — so a node keeps
+# one connection per peer and it is the QUIC one. The HTTP API stays on TCP.
+if [ "${RIG_TRANSPORT:-tcp}" = quic ]; then
+  [ -n "${RIG_IN_NETNS:-}" ] || { echo "RIG_TRANSPORT=quic needs RIG_NETNS=1"; exit 2; }
+  tc qdisc add dev lo handle ffff: ingress || { echo "cannot add an ingress qdisc to loopback"; exit 2; }
+  for p in 8910 8930 8950 8970; do
+    tc filter add dev lo parent ffff: protocol ip prio 1 u32 match ip protocol 6 0xff \
+      match ip dport "$p" 0xffff action drop || { echo "cannot drop TCP to $p"; exit 2; }
+  done
+  echo "rig: nodes connect over QUIC (TCP to their P2P ports dropped)"
+fi
+# The address a node at API port $1 is dialled on, given its peer id $2.
+rig_addr() {
+  if [ "${RIG_TRANSPORT:-tcp}" = quic ]; then echo "/ip4/127.0.0.1/udp/$1/quic-v1/p2p/$2"
+  else echo "/ip4/127.0.0.1/tcp/$(($1 + 10))/p2p/$2"; fi
+}
 
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
@@ -679,7 +703,11 @@ ADDR=$(echo "$ADDRS" | grep -v "10\.255\.255\.254" | head -1)
 # it there, as ceiling_test.sh does (P2P listens 10 above the API port).
 if [ -z "$ADDR" ] && [ -n "${RIG_IN_NETNS:-}" ]; then
   ID_A=$(grep -a -m1 -oE "Initializing network peer_id=12D3Koo[A-Za-z0-9]+" "$BASE/A/node.log" | cut -d= -f2)
-  [ -n "$ID_A" ] && ADDR="/ip4/127.0.0.1/tcp/8910/p2p/$ID_A"
+  [ -n "$ID_A" ] && ADDR=$(rig_addr 8900 "$ID_A")
+fi
+if [ "${RIG_TRANSPORT:-tcp}" = quic ]; then
+  ID_A=$(grep -a -m1 -oE "Initializing network peer_id=12D3Koo[A-Za-z0-9]+" "$BASE/A/node.log" | cut -d= -f2)
+  ADDR=$(rig_addr 8900 "$ID_A")
 fi
 [ -n "$ADDR" ] || { echo "A published no address to dial"; exit 1; }
 make_node "$BASE/B" "$SHARDS_B" "\"$ADDR\""
@@ -754,7 +782,8 @@ if { [ "$MODE" = splitcache ] && [ -n "${SPARE:-}${SHARDS_C:-}" ]; } \
   C_BOOT="\"$ADDR\""
   if [ "$MODE" = repeat ] && [ -n "${SHARDS_C:-}" ] && [ -n "${C_MEETS_B:-}" ]; then
     ID_B=$(grep -a -m1 -oE "Initializing network peer_id=12D3Koo[A-Za-z0-9]+" "$BASE/B/node.log" | cut -d= -f2)
-    ADDR_B=$(echo "$ADDR" | sed -E "s#/tcp/[0-9]+/p2p/.*#/tcp/8930/p2p/$ID_B#")
+    if [ "${RIG_TRANSPORT:-tcp}" = quic ]; then ADDR_B=$(rig_addr 8920 "$ID_B")
+    else ADDR_B=$(echo "$ADDR" | sed -E "s#/tcp/[0-9]+/p2p/.*#/tcp/8930/p2p/$ID_B#"); fi
     [ -n "$ID_B" ] && C_BOOT="\"$ADDR\", \"$ADDR_B\""
   fi
   make_node "$BASE/C" "${SHARDS_C:-$SHARDS_B}" "$C_BOOT"
@@ -797,11 +826,15 @@ if [ "$MODE" = mixed ] || [ "$MODE" = disputed ]; then
 fi
 if [ "$MODE" = remote ]; then
   C_BOOT="\"$ADDR\""
-  if [ -n "$REFUSECHAIN$KILLCHAIN" ]; then
+  if [ -n "$REFUSECHAIN$KILLCHAIN${C_MEETS_B:-}" ]; then
     # A chained step goes B → C, so B must already be connected to C: C dials
-    # B as well as A (peer exchange alone can take minutes to introduce them).
+    # B as well as A (peer exchange alone can take minutes to introduce them,
+    # and on this loopback rig never does: identify drops a 127.0.0.1 address,
+    # gotcha #165, so B planned nothing across C in 3 minutes, 2026-10-20).
+    # C_MEETS_B=1 asks for the same in the timed arms.
     ID_B=$(grep -a -m1 -oE "Initializing network peer_id=12D3Koo[A-Za-z0-9]+" "$BASE/B/node.log" | cut -d= -f2)
-    ADDR_B=$(echo "$ADDR" | sed -E "s#/tcp/[0-9]+/p2p/.*#/tcp/8930/p2p/$ID_B#")
+    if [ "${RIG_TRANSPORT:-tcp}" = quic ]; then ADDR_B=$(rig_addr 8920 "$ID_B")
+    else ADDR_B=$(echo "$ADDR" | sed -E "s#/tcp/[0-9]+/p2p/.*#/tcp/8930/p2p/$ID_B#"); fi
     [ -n "$ID_B" ] && C_BOOT="\"$ADDR\", \"$ADDR_B\""
   fi
   make_node "$BASE/C" "$SHARDS_C" "$C_BOOT"

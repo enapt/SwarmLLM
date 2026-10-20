@@ -1075,7 +1075,11 @@ The encrypted tensor path logs at multiple levels:
 
 ## Transport Layer
 
-SwarmLLM uses dual transport: **TCP** (primary, Noise+Yamux) and **QUIC** (fallback).
+SwarmLLM uses dual transport: **TCP** (Noise+Yamux) and **QUIC**. A node keeps ONE connection
+per peer and the first established wins — QUIC's handshake is shorter, and the default bootstrap
+anchor is a QUIC address, so ~90% of the live node's connections were QUIC on 2026-10-20
+(`grep "DIAG: connection established" node.log`, count `udp/quic-v1` against `tcp`). The
+"Why TCP Primary" note below predates V1Lazy substream negotiation (2026-09-27).
 
 ### Port Layout
 
@@ -1104,6 +1108,26 @@ swarmllm run -p 8800
 # Node 2 bootstraps to Node 1's TCP P2P address
 swarmllm run -p 8801 --bootstrap /ip4/<node1-ip>/tcp/8810
 ```
+
+### Is the transport pacing a split's bursts? (2026-10-20, #318)
+
+A pass sends each hop ONE burst of hidden states (a 5-token check of a 70B at Q8_0 is 43 KB).
+Both transports can add most of a round trip to it, for different reasons:
+
+- **QUIC** paces each send at window / round trip, and a congestion window that only bursts use
+  never grows past about one burst (Cubic, quinn's default). Our connections run BBR instead
+  (`network::transport::quic_congestion`; A/B `SWARMLLM_QUIC_CC=cubic`). Probe it without the
+  product: `examples/quic_pacing_probe` (`cargo build --release --offline`, then
+  `unshare -rn ./run.sh "rate 20mbit loss 1%"`).
+- **TCP** restarts at its initial window after an idle period longer than its retransmission
+  timeout (`net.ipv4.tcp_slow_start_after_idle`, system-wide, default 1). A plain-socket probe in
+  `unshare -rn` with `ip link set lo mtu 1500` + netem shows it (43 KB after 600 ms idle: 206 ms
+  at 100 ms round trip, 105 ms with the setting 0 — settable inside the namespace).
+
+⚠ **A loopback rig hides both**: loopback's 64 KB packets make TCP's initial window ~640 KB, and
+the rig dials TCP. `split_rig.sh` measures QUIC only with `RIG_TRANSPORT=quic` (needs
+`RIG_NETNS=1`; it drops TCP to the P2P ports so the one connection per peer is QUIC);
+`RIG_LOSS=1%` adds loss. → `docs/invariants/network.md` § "A burst is paced by the link".
 
 ## Connection Diagnostics
 

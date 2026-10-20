@@ -145,6 +145,12 @@ Substreams negotiate with multistream-select V1Lazy (`SWARMLLM_SUBSTREAM_V1=1` r
 
 → `docs/invariants/network.md` § "A substream sends with its protocol proposal; a ping sample is a COST, a distance is converted"
 
+## A burst is paced by the link, not by a window it never fills (2026-10-20, #318)
+
+Every QUIC connection runs quinn's BBR: **`network::transport::quic_congestion`** → the vendored libp2p-quic's ONE addition, `Config::congestion`. Cubic (quinn's default, upstream's) grows its window only while a send fills it, and quinn paces each send at window / round trip — a split's bursts never fill it, so each was spread over ~0.4 of a round trip, and a loss shrank it for good. Sender-side only: no feature bit. A/B `SWARMLLM_QUIC_CC=cubic`; probe `examples/quic_pacing_probe`; a rig measures QUIC only with `RIG_TRANSPORT=quic` (loopback's 64 KB packets also hide TCP's slow start after idle).
+
+→ `docs/invariants/network.md` § "A burst is paced by the link, not by a window it never fills"
+
 ## A speculative verify is walked where the logits are (2026-09-27)
 
 A verify's last segment walks the drafts and answers with token ids (`LayerForward::spec_walk_at_tail`, gated at the SENDER on `features::SPEC_WALK_AT_TAIL`). **`sampling::sampled_accept_reject`** is the one rule; **`pipeline::VerifyReply::accept`** the one place a reply becomes accepted tokens; **`layer_forward::spec_trailer_flags`** the one writer of the flags byte. Shared noise (`coupling_seed`, `0x0B`, `features::COUPLED_SAMPLING`) is keyed by ABSOLUTE position, never relative (`a_drafter_keyed_at_the_samplers_positions_is_accepted_and_one_off_is_not`).

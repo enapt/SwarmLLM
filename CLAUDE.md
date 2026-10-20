@@ -97,8 +97,8 @@ cargo dev-run -- run -p 8800 -v       # start a daemon serving the frontend from
 request-response patch — plus 18 in the `swarmllm` BIN target (`cli::*`, counted
 nowhere else). They are refreshed at release (`memory/release_gate.md`), not
 per change, so a higher count since then is expected. The types crate and the
-vendored patch are **not** run by a bare `cargo test`:
-`cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib`. Two VLM
+vendored patches are **not** run by a bare `cargo test`: `cargo test --manifest-path
+vendor/<crate>/Cargo.toml --lib` (request-response; libp2p-quic adds `--features tokio`). Two VLM
 targets need model files: `llava_e2e` (`#[ignore]`) and `vlm_mmproj_e2e` (skips without an
 mmproj). Never edit a count without the run behind it (`completeness.md`).
 

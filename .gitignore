@@ -7,6 +7,9 @@
 # because a nested workspace member excluded from its parent builds one level
 # deeper, which a single-level rule would miss the same way.
 vendor/**/target/
+# A standalone probe under examples/ (quic_pacing_probe) builds the same way.
+examples/**/target/
+examples/**/Cargo.lock
 **/*.rs.bk
 *.orig
 

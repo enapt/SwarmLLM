@@ -1746,7 +1746,12 @@ across continents. Build order, each step ending on a measurement: (1) the per-p
 and the largest term removed — rig half measured 10-20: with every packet delayed (`split_rig.sh`
 `RIG_RTT_MS`), a 7B split costs exactly one round trip per token more at 206 ms than at 0, and
 13-25 ms a token more than the whole model on one node, so the 95 ms is the real link or the far
-machine (a relayed peer answered in 330 ms against 231-236 direct); left: the real link; (2) tree verification in every segment (#134); (3) the continuous stream
+machine (a relayed peer answered in 330 ms against 231-236 direct). **Found and fixed 10-20:** QUIC
+connections (~90% of the live node's) ran Cubic, whose window a split's bursts never fill, so each
+was spread over ~0.4 of a round trip (43 KB at 100 ms: 142 ms, 107 under BBR; 280 KB over 20 Mbit/s
+with 1% loss: 493, 219) — they now run quinn's BBR (`docs/invariants/network.md` § "A burst is
+paced by the link"); TCP's slow start after idle has the same shape and is a system setting, left.
+Left: the real link; (2) tree verification in every segment (#134); (3) the continuous stream
 through a chain of machines — **built 2026-10-20** (`features::CHAINED_STREAM`, bit 27): 1.24 tok/s
 against 1.07 for chained rounds and 1.03 without guessing, on a 3-machine processor rig at 206 ms
 (the three share one processor, which caps what overlapping their work can win). Building it found

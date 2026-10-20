@@ -874,17 +874,17 @@ impl NetworkManager {
                 // its connection wrapped: QUIC has no multiplexer argument.
                 .with_other_transport(|key| {
                     use libp2p::core::Transport as _;
-                    libp2p::quic::tokio::Transport::new(libp2p::quic::Config::new(key)).map(
-                        move |(peer, connection), _| {
-                            (
-                                peer,
-                                crate::network::protocol_traffic::MeteredMuxer::new(
-                                    connection,
-                                    quic_by_protocol.clone(),
-                                ),
-                            )
-                        },
-                    )
+                    let config = libp2p::quic::Config::new(key)
+                        .congestion(crate::network::transport::quic_congestion());
+                    libp2p::quic::tokio::Transport::new(config).map(move |(peer, connection), _| {
+                        (
+                            peer,
+                            crate::network::protocol_traffic::MeteredMuxer::new(
+                                connection,
+                                quic_by_protocol.clone(),
+                            ),
+                        )
+                    })
                 })
                 .unwrap_or_else(|never| match never {})
                 // Wrap the transports with DNS resolution so `/dns4` / `/dns6` /

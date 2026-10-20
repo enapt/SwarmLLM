@@ -4,6 +4,7 @@ members = [".", "crates/swarmllm-frontend", "crates/swarmllm-types"]
 exclude = [
     "vendor/candle-flash-attn",
     "vendor/candle-paged-attention",
+    "vendor/libp2p-quic",
     "vendor/libp2p-request-response",
     "vendor/rayon-core",
     "vendor/candle",
@@ -433,6 +434,14 @@ path = "examples/swarm_spec_bench.rs"
 
 [patch.crates-io]
 libp2p-request-response = { path = "vendor/libp2p-request-response" }
+# libp2p-quic 0.13.1 with ONE addition: `Config::congestion` (src/config.rs), so
+# our QUIC connections run quinn's BBR instead of the Cubic upstream hard-codes
+# — a split's bursts of hidden states never fill Cubic's window, and quinn paces
+# each at window / round trip (+40 ms a hop at 100 ms; `docs/invariants/
+# network.md` § "A burst is paced by the link"). A libp2p needing a newer
+# libp2p-quic would leave this patch unused, and the build then fails:
+# `network::manager` calls `Config::congestion`, which upstream does not have.
+libp2p-quic = { path = "vendor/libp2p-quic" }
 # rayon-core 1.13.0 with ONE change: an idle worker spins 200 µs before it
 # sleeps (vendor/rayon-core/src/sleep/mod.rs, `spin_budget`), so the small
 # parallel regions of a decoded token stop paying a wake per worker — 8-thread

@@ -20,6 +20,16 @@ batch by batch on the same three-computer test (they shared one processor, which
 overlapping their work can win). Every computer in the chain needs this release; with an older
 one the reply checks batch by batch, as before.
 
+**Long-distance splits send each computer's work at the speed of the link.** The connection
+most computers use to talk to each other spread every batch of a split's work over almost half a
+round trip, on top of the round trip itself, because its speed limit only rises when a sender
+keeps the link full — which a split, sending one batch at a time, never does. It now paces by the
+speed it measures. On a test link with a 0.1-second round trip, a large model's check (43 KB)
+arrived in 107 ms instead of 142, and a batch of 280 KB over a 20 Mbit/s link that loses 1% of its
+packets in 219 ms instead of 493. A three-computer test that shared one processor ran at the same
+speed either way, since its processor was the limit there. Nothing changes for an older
+computer you talk to: each side chooses how it sends.
+
 **`swarmllm status` finds a running service.** Commands such as `swarmllm status`, run without
 `-d`, looked for the access key in your home folder. A service installed from the .deb or .rpm
 keeps it in `/var/lib/swarmllm`, so the command said SwarmLLM was not running and to start it. A

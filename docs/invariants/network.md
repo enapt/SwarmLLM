@@ -3531,6 +3531,86 @@ private mode scopes this node's OWN requests and gates no connection, so diallin
 a next hop crosses no boundary; an address a malicious peer puts in a lookup's
 answer is what every Kademlia walk already dials.
 
+## A burst is paced by the link, not by a window it never fills (2026-10-20, #318)
+
+**What it replaced.** Our QUIC connections ran quinn's default congestion
+controller, Cubic — libp2p-quic 0.13.1 hard-codes quinn's defaults and exposes
+no way to choose. Cubic grows its window only while a send fills it (RFC 9002:
+an application-limited sender does not grow it), and quinn PACES every send at
+1.25 × window / round trip with a 10-packet burst allowance. A split's traffic
+is separate bursts — one hidden-state payload per hop per pass, a 5-token check
+of a 70B at Q8_0 being 43 KB — that never fill the window. So the window settles
+just above one burst, and each burst is then spread over ~0.4 of a round trip on
+top of the round trip itself. A loss shrinks the window (× 0.7) and checks alone
+never grow it back: on a lossy long link it ratchets down for the connection's
+life. A prompt pass, cwnd-limited, does grow it — so the penalty lives where the
+window is small: a fresh connection, a short or cached prompt, after losses, and
+connections that only ever carry checks.
+
+**Measured** (`examples/quic_pacing_probe`, quinn 0.11.11 as our tree resolves
+it, a new stream per message as request-response opens one, a private namespace
+with netem; median of 20, 2026-10-20):
+
+| 100 ms round trip | Cubic | Cubic + 1 MB first window | BBR |
+|---|---|---|---|
+| 43 KB, fresh connection (floor ~102) | 142 ms | 107 | 107 |
+| 280 KB (a guess tree) | 201 | 137 | 112 |
+| 43 KB, 1% loss | 160 | 107 | 108 |
+| 280 KB, 1% loss | 335 | 165 | 165 |
+
+| 100 ms, 20 Mbit/s | Cubic | BBR | floor |
+|---|---|---|---|
+| 43 KB | 154 | 119 | ~119 |
+| 280 KB | 219 | 219 | ~214 |
+| 43 KB, 1% loss | 149 | 119 | |
+| 280 KB, 1% loss | **493** | **219** | |
+
+The pause between bursts does not matter (50 ms and 600 ms gaps: 143 and 144
+ms) — it is the window, not idleness. After a 4 MB prompt pass Cubic's 43 KB
+burst took 105 ms: the window it grew was kept.
+
+**The rule.** `network::transport::quic_congestion` chooses the controller every
+QUIC connection runs — quinn's BBR (v1), which paces by the delivery rate it
+measured, so a burst goes at the link's rate whatever the window. It reaches
+quinn through the vendored libp2p-quic's ONE addition, `Config::congestion`
+(`vendor/libp2p-quic/src/config.rs`, Cubic by default as upstream). Sender-side
+only: a peer on either controller still talks to us, so no feature bit. Rejected:
+a larger first window (Cubic + 1 MB above) — it helps until losses shrink it and
+does nothing for a 280 KB tree under loss. Prior art: moq (Media over QUIC) made
+quinn's BBRv1 its default for the same kind of traffic, reporting a 558 ms median
+round trip for Cubic against ~90 for BBRv1 at equal goodput under bufferbloat
+(moq-dev/moq#2468); quinn marks its BBR experimental. Its subtractions were
+read: monotonic totals, `diff` taken only past a checked comparison, `Instant`
+arithmetic that saturates.
+
+**TCP has the same shape for another reason** — slow start after idle (Linux
+`net.ipv4.tcp_slow_start_after_idle = 1`, the default): a connection idle past
+its retransmission timeout restarts at the initial window. Measured with a
+plain-socket probe at 100 ms, 1500-byte packets: a 43 KB send after a 600 ms
+pause took 206 ms (two round trips), 105 with the setting off. It is a
+system-wide setting a node cannot change, and ~90% of the live node's
+connections are QUIC (2026-10-20 log), so nothing changes for TCP. **The rig
+hides it**: its loopback's 64 KB packets make the initial window ~640 KB —
+`split_rig.sh` measures TCP unless `RIG_TRANSPORT=quic`.
+
+**In the product it changed nothing measurable on the rig** (`split_rig.sh repeat`,
+`RIG_TRANSPORT=quic RIG_RATE=20mbit RIG_LOSS=1% RIG_RTT_MS=206`, the 7B over three machines with
+the stream, one binary, `SWARMLLM_QUIC_CC=cubic` the control; 2026-10-20): a streamed request took
+77.4-79.5 s for 96 tokens under BBR and 78.9 under Cubic, the replies identical, every connection
+QUIC. The rig is bound by its one processor (~800 ms a token) and a 7B row is 3.8 KB, so its
+bursts are a few KB, where the probe's penalty is a few ms. The case the change is for — a 70B on
+cards, a 43 KB check or a 280 KB tree per hop against a ~100 ms pass — the rig cannot reproduce;
+the probe is its measurement. (Two of the Cubic arm's four requests did not stream; nothing ties
+that to the controller, and it is not claimed.)
+
+**What a change must keep:** QUIC connections run BBR unless
+`SWARMLLM_QUIC_CC=cubic`; a re-vendor of libp2p-quic carries `Congestion` over
+(the build fails without it — our transport calls it). Tests:
+`a_connection_runs_the_congestion_controller_its_config_names` (vendored; dials a
+real connection and asks quinn which controller it runs — red with the BBR
+mapping removed), `quic_connections_run_bbr_unless_switched_back_to_cubic` (red
+with the default flipped). A/B `SWARMLLM_QUIC_CC=cubic`.
+
 ## One upload per model id, on every node (2026-10-02, FUTURE_WORK #151)
 
 **What it replaced.** A model id is derived from a GGUF's FILE NAME

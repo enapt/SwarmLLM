@@ -41,9 +41,42 @@ pub fn peer_id_to_node_id(peer_id: &PeerId) -> Option<NodeId> {
     Some(NodeId(bytes))
 }
 
+/// The congestion controller this node's QUIC connections run: quinn's BBR,
+/// which paces a send by the delivery rate it has measured. quinn's default,
+/// Cubic, paces every send at window / round trip, and grows the window only
+/// while a send fills it — a split's traffic is separate bursts (one a hop a
+/// pass) that never do, so each burst was spread over ~0.4 of a round trip, and
+/// a loss shrank the window for good (`docs/invariants/network.md` § "A burst
+/// is paced by the link, not by a window it never fills"). Sender-side only: a
+/// peer running either still talks to us. `SWARMLLM_QUIC_CC=cubic` is the A/B.
+pub fn quic_congestion() -> libp2p::quic::Congestion {
+    congestion_switch(std::env::var("SWARMLLM_QUIC_CC").ok().as_deref())
+}
+
+/// The switch's reading, apart from the environment so a test can ask it.
+fn congestion_switch(v: Option<&str>) -> libp2p::quic::Congestion {
+    match v {
+        Some("cubic") => libp2p::quic::Congestion::Cubic,
+        _ => libp2p::quic::Congestion::Bbr,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quic_connections_run_bbr_unless_switched_back_to_cubic() {
+        assert_eq!(congestion_switch(None), libp2p::quic::Congestion::Bbr);
+        assert_eq!(
+            congestion_switch(Some("bbr")),
+            libp2p::quic::Congestion::Bbr
+        );
+        assert_eq!(
+            congestion_switch(Some("cubic")),
+            libp2p::quic::Congestion::Cubic
+        );
+    }
 
     #[test]
     fn keypair_conversion() {
