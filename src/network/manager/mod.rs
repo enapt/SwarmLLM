@@ -637,6 +637,9 @@ pub struct NetworkManager {
     /// for (`NetworkCommand::DialPeer`): QueryId → the peer, dialled with the
     /// addresses the lookup finds. At most `MAX_NEXT_HOP_LOOKUPS`, one per peer.
     next_hop_lookups: HashMap<libp2p::kad::QueryId, libp2p::PeerId>,
+    /// Next hops a lookup found no address for, and when: not looked up again
+    /// for `NEXT_HOP_MISS_MEMORY` (`commands::NextHopMisses`).
+    next_hop_misses: commands::NextHopMisses,
     /// NETWORKING_PLAN Phase 3 — set once this node has registered as a DHT
     /// relay-service provider (only if it forwards relay traffic). Retried each
     /// discovery tick until Kademlia has peers, then latched.
@@ -1017,6 +1020,7 @@ impl NetworkManager {
             dht_query_rx,
             pending_provider_queries: HashMap::new(),
             next_hop_lookups: HashMap::new(),
+            next_hop_misses: commands::NextHopMisses::default(),
             relay_provider_registered: false,
             upnp_watch: upnp_watch::UpnpWatch::new(enable_upnp, std::time::Instant::now()),
             p2p_listeners: Vec::new(),

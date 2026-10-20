@@ -1017,6 +1017,12 @@ pub struct SharedState {
     /// ask's handler; past it a question is answered "go ahead" unweighed.
     pub(crate) prompt_ask_budget: prompt_admission::AskBudget,
 
+    /// The next-hop dials peers' chained forwards have made this node ask for
+    /// lately, per sending peer and in all: spent ONLY by
+    /// `dispatch::layer_forward::dial_next_hop` (its own limits). A dial with
+    /// no address known is a DHT walk, and a forward names its next hop.
+    pub(crate) next_hop_dial_budget: prompt_admission::AskBudget,
+
     /// The peers each request THIS node led ran segments on, across every
     /// attempt — what it tells, once the request is over, that the request is
     /// over (`router::release_request_on_peers`, #238). A peer serving a segment
@@ -1708,6 +1714,7 @@ impl SharedState {
             peer_prompt_refusals: DashMap::new(),
             pending_prompt_admissions: DashMap::new(),
             prompt_ask_budget: prompt_admission::AskBudget::default(),
+            next_hop_dial_budget: prompt_admission::AskBudget::default(),
             request_peers: dashmap::DashMap::new(),
             planned_past_offered_memory: DashMap::new(),
             route_plan_overrides: DashMap::new(),

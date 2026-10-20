@@ -831,13 +831,24 @@ impl NetworkManager {
                             Ok(ok) => &ok.peers,
                             Err(libp2p::kad::GetClosestPeersError::Timeout { peers, .. }) => peers,
                         };
+                        // Public addresses only: a DHT answer is any peer's
+                        // word, and a private one would point this node at its
+                        // own network for a stranger (security review, 10-20).
+                        // Two machines on one network meet by mDNS, or by the
+                        // hop's own addresses the dial was handed first.
                         let found: Vec<String> = peers
                             .iter()
                             .filter(|p| p.peer_id == target)
-                            .flat_map(|p| p.addrs.iter().map(|a| a.to_string()))
+                            .flat_map(|p| {
+                                p.addrs
+                                    .iter()
+                                    .filter(|a| !crate::network::peer_cache::addr_is_private(a))
+                                    .map(|a| a.to_string())
+                            })
                             .collect();
                         let addrs = self.dialable_from_here(&found);
                         if addrs.is_empty() {
+                            self.next_hop_misses.note(target, std::time::Instant::now());
                             tracing::debug!(peer_id = %target, "Next-hop lookup found no address");
                         } else if !self.swarm.is_connected(&target) {
                             let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(target)

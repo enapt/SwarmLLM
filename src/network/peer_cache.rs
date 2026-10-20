@@ -134,7 +134,7 @@ pub fn filter_dialable(
 /// and IPv6 unique-local. Loopback and link-local are deliberately absent —
 /// [`addr_is_remotely_reachable`] already rejects those outright, whereas
 /// these are reachable *from the right network* and so need context.
-fn addr_is_private(addr: &Multiaddr) -> bool {
+pub(crate) fn addr_is_private(addr: &Multiaddr) -> bool {
     addr.iter().any(|proto| match proto {
         Protocol::Ip4(ip) => {
             ip.is_private() || (ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]))

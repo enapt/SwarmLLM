@@ -7,7 +7,9 @@ computers holding the middle and the end of a model had not yet connected to eac
 for the first minutes after they join — every reply that guessed ahead ended after its first
 token with an error. A check that cannot travel from computer to computer is now sent to each
 in turn, and the reply carries on; the middle computer turns such work away before doing it,
-and tries to connect to the next one, looking its address up on the network if it has to. On a
+and tries to connect to the next one, looking its address up on the network if it has to — at
+most a few times a minute for each computer that passes it work, never over a metered connection,
+and never to a home-network address a lookup answer named. On a
 three-computer test with a 0.2-second round trip between each, every reply came back whole —
 including when the middle and last computers never met, where the reply finished checking
 batch by batch.

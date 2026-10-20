@@ -3460,6 +3460,21 @@ since 2026-08-21. Three changes, each at the place every path crosses:
   `get_closest_peers` lookup whose answer is dialled, at most
   `MAX_NEXT_HOP_LOOKUPS` at once, one per peer), so the swarm's next chained run
   through it can go on.
+- **A next-hop dial is RATIONED, because the sender names the target.** Any peer
+  that forwards to us can name any node id as the next hop, so every forward was
+  a free dial or DHT lookup on its behalf (security review of `9913adf7`, three
+  Lows). Now: `state.next_hop_dial_budget` grants a sender
+  `NEXT_HOP_DIALS_PER_PEER` (4) a minute and the node `NEXT_HOP_DIALS_PER_NODE`
+  (16) in all (`AskBudget::try_spend_within`, the prompt-room ask's window);
+  nothing is dialled on a metered hold (`metered_hold_now`); a DHT answer's
+  private addresses are dropped before they are dialled
+  (`peer_cache::addr_is_private` — a lookup answer is a stranger's claim, and a
+  LAN address in it is a probe of our LAN); and a target the DHT did not know is
+  not looked up again for `NEXT_HOP_MISS_MEMORY` (60 s, at most
+  `MAX_NEXT_HOP_MISSES` remembered — `NextHopMisses`). A rationed dial only
+  delays a chained run: the check still finishes in rounds. Tests:
+  `a_sender_buys_only_a_few_next_hop_dials`, `a_metered_connection_dials_no_next_hop`,
+  `a_next_hop_nobody_knows_is_not_looked_up_again_for_a_while`.
 
 **Measured** (`split_rig.sh repeat`, Qwen2.5-Coder-7B Q4_K_M, A parts 0-1 + the
 0.5B drafter / B 2-4 / C 5-7, all on this machine's processor, `RIG_NETNS=1

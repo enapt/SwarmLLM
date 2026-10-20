@@ -15,6 +15,40 @@ use crate::types::{NetworkCommand, SwarmMessage};
 /// could not hand on; the cap bounds what admitted forwards can ask of it.
 pub(super) const MAX_NEXT_HOP_LOOKUPS: usize = 16;
 
+/// How long a next hop a lookup found no address for is not looked up again.
+/// The hop is named by whoever sent the forward, so a name nobody in the DHT
+/// knows must not buy a walk every time it is named (security review, 10-20).
+pub(super) const NEXT_HOP_MISS_MEMORY: std::time::Duration = std::time::Duration::from_secs(60);
+/// Misses remembered at once; the oldest goes first.
+const MAX_NEXT_HOP_MISSES: usize = 256;
+
+/// Next hops a lookup found nothing for, and when.
+#[derive(Default)]
+pub(super) struct NextHopMisses {
+    at: std::collections::HashMap<libp2p::PeerId, std::time::Instant>,
+}
+
+impl NextHopMisses {
+    /// A lookup for `peer` found no address worth dialling.
+    pub(super) fn note(&mut self, peer: libp2p::PeerId, now: std::time::Instant) {
+        self.at
+            .retain(|_, at| now.saturating_duration_since(*at) < NEXT_HOP_MISS_MEMORY);
+        if self.at.len() >= MAX_NEXT_HOP_MISSES {
+            if let Some(oldest) = self.at.iter().min_by_key(|(_, at)| **at).map(|(p, _)| *p) {
+                self.at.remove(&oldest);
+            }
+        }
+        self.at.insert(peer, now);
+    }
+
+    /// Was `peer` looked up for nothing within [`NEXT_HOP_MISS_MEMORY`]?
+    pub(super) fn recently(&self, peer: &libp2p::PeerId, now: std::time::Instant) -> bool {
+        self.at
+            .get(peer)
+            .is_some_and(|at| now.saturating_duration_since(*at) < NEXT_HOP_MISS_MEMORY)
+    }
+}
+
 use super::{NetworkManager, MAX_BUFFERED_GOSSIP};
 
 impl NetworkManager {
@@ -251,6 +285,9 @@ impl NetworkManager {
                     Err(libp2p::swarm::DialError::NoAddresses) => {
                         if self.next_hop_lookups.len() < MAX_NEXT_HOP_LOOKUPS
                             && !self.next_hop_lookups.values().any(|p| p == &peer_id)
+                            && !self
+                                .next_hop_misses
+                                .recently(&peer_id, std::time::Instant::now())
                         {
                             let query = self
                                 .swarm
@@ -517,6 +554,25 @@ mod tests {
     use tokio::sync::{mpsc, watch};
 
     use super::NetworkManager;
+
+    /// A next hop a lookup found nothing for is not looked up again for
+    /// `NEXT_HOP_MISS_MEMORY` — the name came from whoever sent a forward —
+    /// and the memory holds at most `MAX_NEXT_HOP_MISSES`.
+    #[test]
+    fn a_next_hop_nobody_knows_is_not_looked_up_again_for_a_while() {
+        use super::{NextHopMisses, MAX_NEXT_HOP_MISSES, NEXT_HOP_MISS_MEMORY};
+        let mut misses = NextHopMisses::default();
+        let peer = libp2p::PeerId::random();
+        let t0 = std::time::Instant::now();
+        assert!(!misses.recently(&peer, t0));
+        misses.note(peer, t0);
+        assert!(misses.recently(&peer, t0 + NEXT_HOP_MISS_MEMORY / 2));
+        assert!(!misses.recently(&peer, t0 + NEXT_HOP_MISS_MEMORY));
+        for _ in 0..(MAX_NEXT_HOP_MISSES + 10) {
+            misses.note(libp2p::PeerId::random(), t0);
+        }
+        assert!(misses.at.len() <= MAX_NEXT_HOP_MISSES);
+    }
 
     /// A next hop is dialled only where `filter_dialable` would dial: a node
     /// on a public address is not sent to a private one a lookup answered.

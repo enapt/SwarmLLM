@@ -54,6 +54,20 @@ impl AskBudget {
     /// one of the node's if so. A peer whose questions have all aged out is
     /// forgotten, so the map holds only peers that asked within the window.
     pub(crate) fn try_spend(&self, peer: &NodeId, now: Instant) -> bool {
+        self.try_spend_within(peer, now, ASKS_PER_PEER, ASKS_PER_NODE)
+    }
+
+    /// [`Self::try_spend`] with limits of the caller's own, for another kind
+    /// of peer-triggered work rationed the same way (`layer_forward`'s next-hop
+    /// dials). One budget, one pair of limits: never spend one instance under
+    /// two.
+    pub(crate) fn try_spend_within(
+        &self,
+        peer: &NodeId,
+        now: Instant,
+        per_peer: usize,
+        in_all: usize,
+    ) -> bool {
         let Ok(mut w) = self.windows.lock() else {
             return false;
         };
@@ -67,10 +81,10 @@ impl AskBudget {
             }
             !asks.is_empty()
         });
-        if w.all.len() >= ASKS_PER_NODE
+        if w.all.len() >= in_all
             || w.by_peer
                 .get(peer)
-                .is_some_and(|asks| asks.len() >= ASKS_PER_PEER)
+                .is_some_and(|asks| asks.len() >= per_peer)
         {
             return false;
         }

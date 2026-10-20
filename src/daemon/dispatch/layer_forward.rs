@@ -255,7 +255,12 @@ pub(super) async fn handle_layer_forward(
             stream_seq.is_some(),
         ) {
             if reason == ONWARD_UNREACHABLE {
-                dial_next_hop(&shared_state, &network_tx, &next.node_id);
+                dial_next_hop(
+                    &shared_state,
+                    &network_tx,
+                    &next.node_id,
+                    &sender_peer_bytes,
+                );
             }
             send_error_result(&network_tx, &reply_to(), request_id, answering, reason).await;
             return;
@@ -568,7 +573,12 @@ pub(super) async fn handle_layer_forward(
                         next = %next.node_id,
                         "next hop unreachable — failing the chained run"
                     );
-                    dial_next_hop(&shared_state, &network_tx, &next.node_id);
+                    dial_next_hop(
+                        &shared_state,
+                        &network_tx,
+                        &next.node_id,
+                        &sender_peer_bytes,
+                    );
                     send_error_result(
                         &network_tx,
                         &reply_to(),
@@ -734,17 +744,49 @@ fn chaining_applies(
 /// to — a run of the swarm's own making until its machines have met.
 const ONWARD_UNREACHABLE: &str = "chained run could not reach the next segment";
 
+/// Next-hop dials one peer's forwards may ask for in a minute
+/// ([`dial_next_hop`]).
+const NEXT_HOP_DIALS_PER_PEER: usize = 4;
+/// Next-hop dials every peer's forwards together may ask for in a minute.
+const NEXT_HOP_DIALS_PER_NODE: usize = 16;
+
 /// Ask the network loop to connect to a next hop this node could not reach,
 /// so the next chained run through here can go on: peer exchange alone left
 /// the 3-machine rig's middle and last machines unintroduced for minutes, and
 /// every chained run between them failed (#318). The network loop looks the
 /// peer up in the DHT when nothing here has its address. Best effort — a full
 /// command queue drops it, and the run that asked has already been refused.
+///
+/// The next hop is named by whoever sent the forward, so the dials one sender
+/// can make this node ask for are rationed ([`NEXT_HOP_DIALS_PER_PEER`] a
+/// minute, [`NEXT_HOP_DIALS_PER_NODE`] from everyone): a fresh node id per
+/// forward would otherwise buy a DHT walk each (security review, 10-20). An
+/// honest coordinator names each unmet hop once or twice. A metered connection
+/// dials nobody for another's request (`SharedState::metered_hold_now`).
 fn dial_next_hop(
     state: &SharedState,
     network_tx: &mpsc::Sender<NetworkCommand>,
     next: &crate::types::NodeId,
+    sender_peer_bytes: &[u8],
 ) {
+    if state.metered_hold_now() {
+        return;
+    }
+    let Some(sender) = libp2p::PeerId::from_bytes(sender_peer_bytes)
+        .ok()
+        .and_then(|p| crate::network::transport::peer_id_to_node_id(&p))
+    else {
+        return;
+    };
+    if !state.next_hop_dial_budget.try_spend_within(
+        &sender,
+        std::time::Instant::now(),
+        NEXT_HOP_DIALS_PER_PEER,
+        NEXT_HOP_DIALS_PER_NODE,
+    ) {
+        tracing::debug!(%sender, next = %next, "next-hop dial not asked: the sender's dials are spent");
+        return;
+    }
     // A node this one has never met is in neither list, but its network id
     // is its node id's key.
     let Some(peer_id_bytes) = state
@@ -1306,7 +1348,14 @@ mod chaining_tests {
                 node_id: unmet,
                 layer_range: (16, 24),
             }],
-            sender_peer_bytes: Some(b"previous-hop".to_vec()),
+            // A real key: the dial is rationed per sender, so a sender that is
+            // no peer buys none (`dial_next_hop`).
+            sender_peer_bytes: Some(
+                libp2p::identity::Keypair::generate_ed25519()
+                    .public()
+                    .to_peer_id()
+                    .to_bytes(),
+            ),
             requester_node_id: Some(coordinator.0),
             pre_embedded: false,
             generated_ids: Vec::new(),
@@ -1447,6 +1496,60 @@ mod tests {
             None,
         );
         state
+    }
+
+    fn fresh_peer() -> libp2p::PeerId {
+        libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id()
+    }
+
+    /// A forward names its next hop, so whoever sends forwards chooses what
+    /// this node dials — and a hop nobody here knows costs a DHT walk. One
+    /// sender buys [`NEXT_HOP_DIALS_PER_PEER`] a minute however many names it
+    /// invents; another sender still gets its own (security review, 10-20).
+    #[test]
+    fn a_sender_buys_only_a_few_next_hop_dials() {
+        let state = test_state();
+        let (tx, mut rx) = mpsc::channel(64);
+        let flooder = fresh_peer().to_bytes();
+        for _ in 0..(NEXT_HOP_DIALS_PER_PEER + 3) {
+            let next = crate::network::transport::peer_id_to_node_id(&fresh_peer()).unwrap();
+            dial_next_hop(&state, &tx, &next, &flooder);
+        }
+        let mut asked = 0;
+        while let Ok(NetworkCommand::DialPeer { .. }) = rx.try_recv() {
+            asked += 1;
+        }
+        assert_eq!(asked, NEXT_HOP_DIALS_PER_PEER);
+        let next = crate::network::transport::peer_id_to_node_id(&fresh_peer()).unwrap();
+        dial_next_hop(&state, &tx, &next, &fresh_peer().to_bytes());
+        assert!(
+            matches!(rx.try_recv(), Ok(NetworkCommand::DialPeer { .. })),
+            "another sender's dial is its own"
+        );
+    }
+
+    /// A metered connection dials nobody for another node's request.
+    #[test]
+    fn a_metered_connection_dials_no_next_hop() {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.auto_manage.on_metered_connection = crate::config::MeteredConnection::Pause;
+        let (state, _, _) = SharedState::new(
+            config,
+            Identity::generate(),
+            Database::open(temp.path()).unwrap(),
+            Arc::new(tokio::sync::Mutex::new(ModelExecutor::new())),
+            None,
+        );
+        let (tx, mut rx) = mpsc::channel(4);
+        let next = crate::network::transport::peer_id_to_node_id(&fresh_peer()).unwrap();
+        dial_next_hop(&state, &tx, &next, &fresh_peer().to_bytes());
+        assert!(rx.try_recv().is_err());
     }
 
     /// A forward the dispatcher's caps turned away is ANSWERED, where it used to
