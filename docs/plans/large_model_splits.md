@@ -94,6 +94,33 @@ guess set of N rows; P is the time of one pass.
    what is missing is the coordinator sending each chunk down the chain with the next-hop and
    reply-to trailers a plain chained forward carries (`layer_forward.rs` 0x06/0x07), the tail
    answering it, and the order kept at every hop.
+   **Design (2026-10-20, from the code as it stands):**
+   - A led plan [B, C] already streams: B coordinates and C is its one peer ("peer-last").
+     Only a coordinator with two or more peers falls back to rounds. Those rounds already
+     go machine to machine (`forward_verify_through_segments` → `plan_chain`,
+     `CHAINED_VERIFY`, `SWARMLLM_CHAIN_VERIFY=0` turns it off). So the hops exist; what is
+     missing is the ordering.
+   - **Middle hop.** `layer_forward.rs` builds the onward forward with `stream_seq: None`,
+     so the next hop runs it unordered (`forward_streams::turn` is skipped). Carry the
+     chunk's `stream_seq` onward.
+   - **Failure record.** `hop_forwards` keeps ONE record per request (#305), so a
+     pipelined stream's second chunk replaces the first's. Key it per (request, seq).
+   - **Gaps.** A middle hop that steps over a chunk (superseded by a restart, or refused on
+     arrival) leaves a gap the next hop's `turn()` would wait 60 s for. It must hand the
+     next hop a "stepped over" notice for that turn. A restart chunk's `truncate_kv_to`
+     already raises the next hop's `skip_below`, which covers the superseded case once it
+     arrives; the refused-on-arrival case still needs the notice.
+   - **Coordinator.** `dsd_stream`'s far side becomes the chain: the head peer, then each
+     hop (`plan_chain`). The wait is `WaiterKey::streamed(request, seq)` with
+     `awaiting` = the tail, `chain_members` = every hop and `ExpectedStep` = every hop's
+     range, as the rounds' chained wait already has.
+   - **Wire gate.** One new `features` bit (27), advertised by a node that carries a
+     chunk's number onward, keeps per-chunk onward records and sends the gap notice. The
+     coordinator streams through a chain only when EVERY hop advertises it plus
+     `STREAMED_VERIFY | STREAM_AS_ONE_WORK | CHAINED_VERIFY`; otherwise it keeps the
+     rounds. No existing variant changes shape, so `PROTOCOL_VERSION` stays.
+   - **Rig:** `split_rig.sh remote` with `REMOTE_NODES=3` and a drafter in the rig
+     (gotcha #915), at `RIG_RTT_MS`.
 1. **N is bounded by throughput, not by the round.** The round cost model in
    `split_speculation.md` added a tree's compute and transfer to every round, which
    is why tree 64 lost to tree 32 on short links. In the continuous stream (§ 4b,
