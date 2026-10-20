@@ -142,6 +142,15 @@ impl NetworkManager {
         // A fresh connection starts with a clean slate — the count is about one
         // connection's silence, not the peer's history.
         self.rr_failures.remove(&peer_id);
+        // So is its manifest catch-up (BEP 3's bitfield, per connection): a
+        // peer that restarted is told our versions again and its pulls are
+        // answered again (#91 (2), `ManifestSync::note_new_connection`).
+        if let Some(node) = crate::network::transport::peer_id_to_node_id(&peer_id) {
+            self.shared_state
+                .models
+                .manifest_sync
+                .note_new_connection(&node);
+        }
         // Track which address each connection uses — the Identify handler
         // uses this to add only the connected address to Kademlia.
         // SEC: Cap connection_addrs to prevent unbounded memory growth.
@@ -404,6 +413,18 @@ impl NetworkManager {
             // NET-I3: Clean up peer_shard_downloads for disconnected peer.
             // Entries for peers that disconnect mid-download would otherwise
             // be orphaned permanently, accumulating stale data.
+            // The manifest catch-up's record of this peer's connection goes
+            // with its LAST connection, keyed as it was filed
+            // (`peer_id_to_node_id`) — never through `peer_to_node`, which only
+            // a peer that identified as one of ours enters: a stranger closing
+            // before Identify left its record for ever (security review,
+            // 2026-10-20).
+            if let Some(node) = crate::network::transport::peer_id_to_node_id(&peer_id) {
+                self.shared_state
+                    .models
+                    .manifest_sync
+                    .forget_connection(&node);
+            }
             let node_id_for_cleanup = self.peer_to_node.get(&peer_id).map(|r| r.clone());
             if let Some(ref nid) = node_id_for_cleanup {
                 // Remove from libp2p-connected ground-truth set so HealthMonitor

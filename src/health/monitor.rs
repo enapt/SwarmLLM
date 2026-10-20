@@ -41,9 +41,13 @@ pub struct HealthMonitor {
     /// Counter for the periodic full manifest re-announce, the anti-entropy half
     /// of the same scheme.
     manifest_announce_counter: u64,
-    /// Peers that were connected when manifests last went out. A peer outside
-    /// this set has never been sent our picture, and gets a full round.
-    peers_told_about_manifests: std::collections::HashSet<crate::types::NodeId>,
+    /// Peers caught up on our manifests, each with the number of the connection
+    /// it was told on (`ManifestSync::connection_of`). A peer not here has never
+    /// been sent our picture; a digest-taking peer on a NEWER connection is
+    /// caught up again (BEP 3's bitfield, per connection) — a peer that
+    /// restarted between two rounds was otherwise still "told" and heard
+    /// nothing for up to `MANIFEST_QUIET_WINDOW` (#91 (2), 2026-10-20).
+    peers_told_about_manifests: std::collections::HashMap<crate::types::NodeId, Option<u64>>,
     /// When each connected peer advertising `features::MANIFEST_DIGESTS` was
     /// last sent our `ManifestDigest` — at its catch-up, then every
     /// `MANIFEST_QUIET_WINDOW` (FUTURE_WORK #91 (2)).
@@ -526,7 +530,7 @@ impl HealthMonitor {
             shard_announce_counter: 0,
             last_announced_manifests: std::collections::HashMap::new(),
             manifest_announce_counter: 0,
-            peers_told_about_manifests: std::collections::HashSet::new(),
+            peers_told_about_manifests: std::collections::HashMap::new(),
             digest_sent_at: std::collections::HashMap::new(),
             manifests_heard_stored: 0,
             last_published_capability: None,
@@ -1659,8 +1663,27 @@ impl HealthMonitor {
         // `SwarmMessage` over request_response and the receiver dispatches it
         // exactly as it would a gossiped one, so an older peer needs no new
         // message type and no feature bit to understand this.
+        //
+        // A peer that takes digests is caught up again once it is on a newer
+        // connection than the one it was told on: ~200 bytes a model, and it
+        // pulls only what it lacks. An older peer is sent every manifest in
+        // full, so it keeps the rule of a peer a round found gone.
+        let shared = self.shared_state.clone();
+        let sync = &shared.models.manifest_sync;
+        let to_catch_up: Vec<crate::types::NodeId> = connected
+            .iter()
+            .filter(
+                |node_id| match self.peers_told_about_manifests.get(*node_id) {
+                    None => true,
+                    Some(told_on) => {
+                        takes_digests.contains(*node_id) && *told_on != sync.connection_of(node_id)
+                    }
+                },
+            )
+            .cloned()
+            .collect();
         let mut caught_up = std::collections::HashSet::new();
-        for node_id in connected.difference(&self.peers_told_about_manifests) {
+        for node_id in &to_catch_up {
             let Some(target_peer_bytes) =
                 self.shared_state.resolve_connected_peer_id_bytes(node_id)
             else {
@@ -1740,9 +1763,12 @@ impl HealthMonitor {
             // version as of now, so its first repeat digest is a window away.
             self.digest_sent_at.insert(node_id.clone(), now);
         }
-        self.peers_told_about_manifests.extend(caught_up);
+        for node_id in caught_up {
+            let told_on = sync.connection_of(&node_id);
+            self.peers_told_about_manifests.insert(node_id, told_on);
+        }
         self.peers_told_about_manifests
-            .retain(|node_id| connected.contains(node_id));
+            .retain(|node_id, _| connected.contains(node_id));
         self.digest_sent_at
             .retain(|node_id, _| connected.contains(node_id));
 
@@ -1751,7 +1777,10 @@ impl HealthMonitor {
         // before it was stretched for such peers — so a change lost in flight
         // reaches one no later than it did, at ~200 bytes a model, not ~35 KB.
         let mut repeated = 0usize;
-        for node_id in takes_digests.intersection(&self.peers_told_about_manifests) {
+        for node_id in takes_digests
+            .iter()
+            .filter(|node_id| self.peers_told_about_manifests.contains_key(*node_id))
+        {
             if !digest_due(self.digest_sent_at.get(node_id).copied(), now) {
                 continue;
             }
@@ -3385,6 +3414,59 @@ mod tests {
         assert!(
             !sent.contains_key(&vec![2u8; 4]),
             "a peer without the bit is repaired by the gossip repeat, not a digest"
+        );
+    }
+
+    /// A peer that restarted between two rounds is back on a new connection
+    /// while still in the connected set, so a set of peers told never saw it
+    /// leave: it heard nothing until its repeat digest, up to 2 h later, and
+    /// knew no model it held no part of (a rig's requester, 2026-10-20). A
+    /// digest-taking peer on a newer connection than it was told on is told
+    /// again (BEP 3's bitfield, per connection); a peer sent manifests in full
+    /// keeps the old rule.
+    #[tokio::test]
+    async fn a_peer_back_on_a_new_connection_is_told_the_versions_again() {
+        let (state, mut monitor, mut rx) = monitor_for_test();
+        publish_test_manifest(&state, [5; 32]);
+        let sync = &state.models.manifest_sync;
+        for byte in [1u8, 2] {
+            let features = if byte == 1 {
+                crate::types::features::ALL
+            } else {
+                0
+            };
+            connect_peer(&state, byte, features);
+            sync.note_new_connection(&crate::types::NodeId([byte; 32]));
+        }
+        monitor.broadcast_manifests().await;
+        let sent = direct_sends(&mut rx);
+        assert!(sent.contains_key(&vec![1u8; 4]) && sent.contains_key(&vec![2u8; 4]));
+        monitor.broadcast_manifests().await;
+        assert!(
+            direct_sends(&mut rx).is_empty(),
+            "control: told, owed nothing"
+        );
+
+        // Both restart between rounds: a new connection each, never absent.
+        for byte in [1u8, 2] {
+            sync.note_new_connection(&crate::types::NodeId([byte; 32]));
+        }
+        monitor.broadcast_manifests().await;
+        let sent = direct_sends(&mut rx);
+        assert!(
+            sent.get(&vec![1u8; 4]).is_some_and(|m| m
+                .iter()
+                .any(|m| matches!(m, SwarmMessage::ManifestDigest(_)))),
+            "a peer back on a new connection is told the versions again"
+        );
+        assert!(
+            !sent.contains_key(&vec![2u8; 4]),
+            "a peer sent manifests in full is not sent them again per connection"
+        );
+        monitor.broadcast_manifests().await;
+        assert!(
+            direct_sends(&mut rx).is_empty(),
+            "told on this connection, it is owed nothing more"
         );
     }
 

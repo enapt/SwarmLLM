@@ -56,6 +56,23 @@ serve sends such numbers, but any computer could. Every earlier version is affec
 number is now checked before anything reaches the card, and work that names one outside the
 table is refused.
 
+**A node you restart learns the network's models again within seconds.** Each computer tells
+another the list of models it holds when they first connect. A node restarted on its own — after
+a crash, or to apply a setting — was usually back before the computers it talked to had noticed
+it leave, so they took it for one they had already told and said nothing until their next
+periodic update, up to two hours later. Meanwhile it could not use any model it held no part of:
+on a test, a restarted node heard nothing of the model it was asked for in two tries of two
+minutes each, where a node never seen before heard of it in 15-22 seconds. Every new connection now gets the
+list again, and the models it asks about are sent again too. Restarting every node at once (as an
+update does) was not affected.
+
+**A model another computer holds is no longer "not found" while your node starts.** A node takes
+15-30 seconds after starting to hear about the models other computers hold. In that time, a node
+that held any model of its own answered a request for one of theirs with "Model not found", even
+when a connected computer had just said it holds it. It now waits for the model's details, as it
+already did when it held no model at all — for a model a computer that connected in the last
+three minutes says it holds, by which time its details have arrived.
+
 ## [0.3.245-alpha] — 2026-10-20
 
 **Gemma 3 can read pictures, and pictures go where you put them.** A picture sent with a message

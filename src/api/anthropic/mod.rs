@@ -557,11 +557,7 @@ pub async fn messages(
     // loaded and only the name was off. That surface is what Claude Code talks
     // to, where a model id is typed by hand.
     let model_id = crate::types::ModelId(req.model.clone());
-    if let Some(err) = state
-        .shared_state
-        .model_registry
-        .reject_if_unknown_model(&model_id)
-    {
+    if let Some(err) = state.shared_state.reject_if_unknown_model(&model_id) {
         return Err(ApiError(err));
     }
     Err(ApiError(crate::error::SwarmError::NoModelLoaded))

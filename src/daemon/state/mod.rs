@@ -3587,6 +3587,49 @@ impl SharedState {
             .unwrap_or(0)
     }
 
+    /// `Some(404)` when a request names a model this node has no manifest for
+    /// while it knows others AND no peer whose catch-up may still be on its
+    /// way lists it — the name is wrong, not merely early. The one check every
+    /// API surface asks (`ModelRegistry::reject_if_unknown_model` takes the
+    /// peer half as a required argument). A newcomer is in step with the swarm
+    /// only once its catch-up has landed (Serf's push-pull rule: until then an
+    /// absent entry is unknown, not absent); a peer's capability lands first.
+    /// Only first: a peer is waited for within `CATCH_UP_WITHIN` of its
+    /// connection (`ManifestSync::catching_up`), or one listing popular names
+    /// it never sends would turn every typo here into a 10 s wait (security
+    /// review, 2026-10-20).
+    pub fn reject_if_unknown_model(
+        &self,
+        model_id: &crate::types::ModelId,
+    ) -> Option<crate::error::SwarmError> {
+        self.reject_if_unknown_model_at(model_id, std::time::Instant::now())
+    }
+
+    pub(crate) fn reject_if_unknown_model_at(
+        &self,
+        model_id: &crate::types::ModelId,
+        now: std::time::Instant,
+    ) -> Option<crate::error::SwarmError> {
+        // Collected first: never one map's guard held while taking another's.
+        let connected: Vec<crate::types::NodeId> =
+            self.connected_node_ids.iter().map(|n| n.clone()).collect();
+        let awaited = connected.iter().any(|node| {
+            if !self.models.manifest_sync.catching_up(node, now) {
+                return false;
+            }
+            self.peer_registry
+                .get(node)
+                .and_then(|p| {
+                    p.capability
+                        .as_ref()
+                        .map(|c| c.hosted_shards.iter().any(|s| &s.model_id == model_id))
+                })
+                .unwrap_or(false)
+        });
+        self.model_registry
+            .reject_if_unknown_model(model_id, awaited)
+    }
+
     /// Does `node_id` advertise every bit of `feature`? Unknown counts as no —
     /// the additive-protocol rule: a peer is never sent something it has not
     /// said it understands.

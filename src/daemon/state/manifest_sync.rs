@@ -78,6 +78,14 @@ pub const ANSWER_WINDOW: Duration = Duration::from_secs(60);
 /// retry, so another holder answers it.
 pub const ANSWER_AGAIN_AFTER: Duration = Duration::from_secs(10 * 60);
 
+/// How long after a peer's connection its manifests may still be on their
+/// way: the peer's own round (30-120 s apart) catches a new connection up, and
+/// what its digest names is pulled and answered in seconds. Inside it, a model
+/// the peer's capability lists is "not heard yet", never "unknown"
+/// (`catching_up`); past it, a model it lists and never sent is not one this
+/// node can use.
+pub const CATCH_UP_WITHIN: Duration = Duration::from_secs(3 * 60);
+
 /// How long a pull nobody answered waits for the round that asks every peer
 /// for it, before it is forgotten — a round runs every 30-120 s.
 const RETRY_WAITS_AT_MOST: Duration = Duration::from_secs(5 * 60);
@@ -125,6 +133,16 @@ struct Answered {
     /// Each model answered, and when — not answered again within
     /// [`ANSWER_AGAIN_AFTER`].
     models: HashMap<ModelId, Instant>,
+    /// When a new connection last cleared `models` — at most once per
+    /// [`ANSWER_AGAIN_AFTER`] (`note_new_connection_at`).
+    forgotten_at: Option<Instant>,
+}
+
+/// A connected peer's newest connection.
+#[derive(Clone, Copy)]
+struct Connection {
+    number: u64,
+    since: Instant,
 }
 
 /// The receiving half of announce-then-pull: which versions this node has
@@ -144,6 +162,14 @@ pub struct ManifestSync {
     /// carrying another version than the one named does not end the pull.
     in_flight: DashMap<Version, Pull>,
     answered: DashMap<NodeId, Answered>,
+    /// The newest connection each connected peer opened — its number, from
+    /// one counter that only rises, so a peer back on a new connection is
+    /// never mistaken for one still on the connection it was told on
+    /// (`note_new_connection`, `connection_of`); and when, so a model its
+    /// capability lists is awaited only while its catch-up can still be on
+    /// its way (`catching_up`). Removed with the peer's LAST connection.
+    connections: DashMap<NodeId, Connection>,
+    next_connection: std::sync::atomic::AtomicU64,
 }
 
 impl ManifestSync {
@@ -311,6 +337,7 @@ impl ManifestSync {
                 window_start: now,
                 in_window: 0,
                 models: HashMap::new(),
+                forgotten_at: None,
             });
         let answered = entry.value_mut();
         if now.saturating_duration_since(answered.window_start) >= ANSWER_WINDOW {
@@ -334,19 +361,101 @@ impl ManifestSync {
         models
     }
 
+    /// `peer` opened a new connection — BitTorrent's rule (BEP 3: the bitfield
+    /// goes to the peer that connected, over that connection), which the
+    /// catch-up was written to follow and two memories outlived:
+    ///
+    /// - **It is caught up again.** The health monitor's round sends a digest
+    ///   to a digest-taking peer whose connection number differs from the one
+    ///   it was told on (`connection_of`). The round kept only a set of peers
+    ///   told, cleared of a peer only when a round found it gone — and rounds
+    ///   are 30-120 s apart, so a peer that restarted in seconds stayed "told"
+    ///   and heard nothing until its repeat, up to `MANIFEST_QUIET_WINDOW`
+    ///   (2 h) later.
+    /// - **Its pulls are answered again**, keeping the window's count, so a
+    ///   peer that reconnects is still answered at most
+    ///   [`ANSWERS_PER_WINDOW`] a minute. [`ANSWER_AGAIN_AFTER`] promised "one
+    ///   answer per model per peer, which is what the full catch-up it replaces
+    ///   delivered per reconnect", but outlived the reconnect. The memory is
+    ///   cleared at most once per [`ANSWER_AGAIN_AFTER`]: cleared at every
+    ///   connection, a peer opening one more a minute — beside its first, even
+    ///   — was answered the same models at the full budget, the ~75 KB/s that
+    ///   rule exists to stop (security review, 2026-10-20). A restarted node's
+    ///   pulls land within seconds of its connection, so it loses nothing.
+    ///
+    /// Together they left a node restarted on its own knowing none of the
+    /// models it held no part of — a rig's requester, restarted under the same
+    /// identity, heard nothing of the 7B in two starts of 2 min each, while a
+    /// fresh identity heard it in 15-22 s (2026-10-20). Called by the network
+    /// manager on EVERY connection established: a crashed peer's new connection
+    /// can open before its old one times out, so "connected again" never fires
+    /// for it.
+    pub fn note_new_connection(&self, peer: &NodeId) {
+        self.note_new_connection_at(peer, Instant::now());
+    }
+
+    pub(crate) fn note_new_connection_at(&self, peer: &NodeId, now: Instant) {
+        let number = self
+            .next_connection
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        self.connections
+            .insert(peer.clone(), Connection { number, since: now });
+        if let Some(mut answered) = self.answered.get_mut(peer) {
+            let may_forget = answered
+                .forgotten_at
+                .is_none_or(|at| now.saturating_duration_since(at) >= ANSWER_AGAIN_AFTER);
+            if may_forget {
+                answered.models.clear();
+                answered.forgotten_at = Some(now);
+            }
+        }
+    }
+
+    /// The number of `peer`'s newest connection, `None` once it has none.
+    pub fn connection_of(&self, peer: &NodeId) -> Option<u64> {
+        self.connections.get(peer).map(|c| c.number)
+    }
+
+    /// Could `peer`'s manifests still be on their way at `now` — is its newest
+    /// connection younger than [`CATCH_UP_WITHIN`]? False for a peer with no
+    /// connection on record.
+    pub fn catching_up(&self, peer: &NodeId, now: Instant) -> bool {
+        self.connections
+            .get(peer)
+            .is_some_and(|c| now.saturating_duration_since(c.since) < CATCH_UP_WITHIN)
+    }
+
+    /// `peer`'s last connection closed. Its next one gets a new number anyway;
+    /// this keeps the map to the peers connected now.
+    pub fn forget_connection(&self, peer: &NodeId) {
+        self.connections.remove(peer);
+    }
+
     /// Drop what can no longer change a decision. Called on the health
     /// monitor's round, after `retry_overdue_pulls`, so each map holds at most
     /// a window's worth.
     pub fn forget_stale(&self) {
-        let now = Instant::now();
-        self.seen.retain(|_, (_, at)| at.elapsed() < SEEN_FOR);
+        self.forget_stale_at(Instant::now());
+    }
+
+    fn forget_stale_at(&self, now: Instant) {
+        self.seen
+            .retain(|_, (_, at)| now.saturating_duration_since(*at) < SEEN_FOR);
         self.forget_unanswerable(now);
+        // A record emptied by a reset is kept while the reset is recent: drop
+        // it, and the next connection found no reset to wait out — a peer that
+        // reconnected without pulling was answered three times in ten minutes
+        // instead of twice (security review, 2026-10-20).
         self.answered.retain(|_, answered| {
             answered
                 .models
                 .retain(|_, at| now.saturating_duration_since(*at) < ANSWER_AGAIN_AFTER);
             !answered.models.is_empty()
                 || now.saturating_duration_since(answered.window_start) < ANSWER_WINDOW
+                || answered
+                    .forgotten_at
+                    .is_some_and(|at| now.saturating_duration_since(at) < ANSWER_AGAIN_AFTER)
         });
     }
 
@@ -665,6 +774,130 @@ mod tests {
             "the budget is back"
         );
         assert_eq!(allowed(&peer, 0..10, at + ANSWER_AGAIN_AFTER), 10);
+    }
+
+    /// A peer that restarted within `ANSWER_AGAIN_AFTER` comes back on a new
+    /// connection and pulls the same models: it is answered again, and the
+    /// window's count still holds it. Without the reset a restarted node
+    /// learned none of the swarm's models for 10 minutes (2026-10-20). The
+    /// reset comes at most once per `ANSWER_AGAIN_AFTER`, or one more
+    /// connection a minute bought the same models again at the full budget
+    /// (security review, 2026-10-20).
+    #[test]
+    fn a_peer_that_reconnects_is_answered_again_within_the_window_budget() {
+        let sync = ManifestSync::default();
+        let peer = NodeId([1; 32]);
+        let other = NodeId([2; 32]);
+        let asked = |range: std::ops::Range<usize>| -> Vec<ModelId> {
+            range.map(|i| ModelId(format!("m{i}"))).collect()
+        };
+        let at = Instant::now();
+        assert_eq!(sync.answers_allowed_at(&peer, asked(0..10), at).len(), 10);
+        assert_eq!(sync.answers_allowed_at(&other, asked(0..10), at).len(), 10);
+        assert_eq!(
+            sync.answers_allowed_at(&peer, asked(0..10), at).len(),
+            0,
+            "the same connection is not answered twice"
+        );
+
+        assert_eq!(sync.connection_of(&peer), None);
+        sync.note_new_connection_at(&peer, at);
+        let first = sync.connection_of(&peer).expect("numbered");
+        assert_eq!(
+            sync.answers_allowed_at(&peer, asked(0..10), at).len(),
+            10,
+            "a new connection is a new catch-up"
+        );
+        assert_eq!(
+            sync.answers_allowed_at(&other, asked(0..10), at).len(),
+            0,
+            "another peer's memory is untouched"
+        );
+
+        let soon = at + Duration::from_secs(1);
+        sync.forget_connection(&peer);
+        assert_eq!(sync.connection_of(&peer), None);
+        sync.note_new_connection_at(&peer, soon);
+        assert_ne!(
+            sync.connection_of(&peer),
+            Some(first),
+            "back after a disconnect, it is on a connection it was never told on"
+        );
+        assert_eq!(
+            sync.answers_allowed_at(&peer, asked(0..10), soon).len(),
+            0,
+            "one more connection soon after is not one more fresh memory"
+        );
+        assert_eq!(
+            sync.answers_allowed_at(&peer, asked(10..ANSWERS_PER_WINDOW + 10), soon)
+                .len(),
+            ANSWERS_PER_WINDOW - 20,
+            "reconnecting does not refill the window"
+        );
+
+        // Answered again a minute before the memory may be cleared again: the
+        // next connection after that clears it.
+        let late = at + ANSWER_AGAIN_AFTER.saturating_sub(Duration::from_secs(60));
+        assert_eq!(
+            sync.answers_allowed_at(&peer, asked(500..510), late).len(),
+            10
+        );
+        sync.note_new_connection_at(&peer, at + ANSWER_AGAIN_AFTER);
+        assert_eq!(
+            sync.answers_allowed_at(&peer, asked(500..510), at + ANSWER_AGAIN_AFTER)
+                .len(),
+            10,
+            "a connection after the pause is a new catch-up again"
+        );
+    }
+
+    /// A record a reset emptied outlives the sweep while the reset is recent:
+    /// dropped, the next connection found no reset to wait out, and a peer
+    /// reconnecting without pulling bought a third answer of each model in
+    /// ten minutes (the review's sequence, 2026-10-20).
+    #[test]
+    fn a_swept_answer_record_still_remembers_a_recent_reset() {
+        let sync = ManifestSync::default();
+        let peer = NodeId([1; 32]);
+        let asked = || -> Vec<ModelId> { (0..10).map(|i| ModelId(format!("m{i}"))).collect() };
+        let at = Instant::now();
+        let secs = |s| at + Duration::from_secs(s);
+        assert_eq!(sync.answers_allowed_at(&peer, asked(), at).len(), 10);
+        sync.note_new_connection_at(&peer, secs(60));
+        sync.forget_stale_at(secs(120));
+        assert_eq!(
+            sync.answers_allowed_at(&peer, asked(), secs(121)).len(),
+            10,
+            "the reset was a new catch-up"
+        );
+        sync.note_new_connection_at(&peer, secs(181));
+        assert_eq!(
+            sync.answers_allowed_at(&peer, asked(), secs(181)).len(),
+            0,
+            "a second reset within ANSWER_AGAIN_AFTER is refused, swept or not"
+        );
+    }
+
+    /// A model a peer's capability lists is awaited only while that peer's
+    /// catch-up could still be on its way — a connection younger than
+    /// `CATCH_UP_WITHIN`; past it, a listed model it never sent is no reason
+    /// to hold back a "not found" (security review, 2026-10-20).
+    #[test]
+    fn a_peers_manifests_are_awaited_only_while_its_catch_up_can_be_on_its_way() {
+        let sync = ManifestSync::default();
+        let peer = NodeId([1; 32]);
+        let at = Instant::now();
+        assert!(!sync.catching_up(&peer, at), "no connection on record");
+        sync.note_new_connection_at(&peer, at);
+        assert!(sync.catching_up(&peer, at + Duration::from_secs(30)));
+        assert!(!sync.catching_up(&peer, at + CATCH_UP_WITHIN));
+        sync.note_new_connection_at(&peer, at + CATCH_UP_WITHIN);
+        assert!(
+            sync.catching_up(&peer, at + CATCH_UP_WITHIN),
+            "a new connection is a new catch-up"
+        );
+        sync.forget_connection(&peer);
+        assert!(!sync.catching_up(&peer, at + CATCH_UP_WITHIN));
     }
 
     #[test]

@@ -786,4 +786,44 @@ mod tests {
             Err(SwarmError::PromptPrivacyUnavailable { .. })
         ));
     }
+
+    /// A node learns the swarm's manifests 12-31 s after it starts, and one
+    /// that knew a model of its own answered 404 "not found" for every other
+    /// until then — even one a connected peer said it held (a rig's requester,
+    /// 2026-10-20). A model a CONNECTED peer advertises is early, not a typo —
+    /// while that peer's catch-up can still be on its way; one only a departed
+    /// peer advertised, or one a peer connected minutes ago lists and never
+    /// sent, is still refused.
+    #[tokio::test]
+    async fn a_model_a_connected_peer_holds_is_not_called_unknown_before_its_manifest() {
+        let state = pool_member_hosting(crate::config::Config::default(), "theirs").await;
+        add_model(&state, "ours-q4", Held::WholeHere);
+        let asked = ModelId("theirs".into());
+        let peer = crate::types::NodeId([0xC4; 32]);
+        assert!(
+            matches!(
+                state.reject_if_unknown_model(&asked),
+                Some(crate::error::SwarmError::ModelNotAvailable(_))
+            ),
+            "control: advertised by a peer that is not connected, it is refused"
+        );
+        state.models.manifest_sync.note_new_connection(&peer);
+        state.connected_node_ids.insert(peer);
+        assert!(
+            state.reject_if_unknown_model(&asked).is_none(),
+            "a connected peer holds it: wait for its manifest"
+        );
+        assert!(
+            state
+                .reject_if_unknown_model(&ModelId("typo".into()))
+                .is_some(),
+            "a name no one advertises is still refused at once"
+        );
+        let later =
+            std::time::Instant::now() + crate::daemon::state::manifest_sync::CATCH_UP_WITHIN;
+        assert!(
+            state.reject_if_unknown_model_at(&asked, later).is_some(),
+            "past its catch-up, a model it lists and never sent is not waited for"
+        );
+    }
 }

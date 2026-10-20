@@ -457,16 +457,13 @@ pub async fn chat_completions(
         }
 
         // Fast-reject: if the model has no manifest but other models ARE registered,
-        // the user likely mistyped. Return ModelNotAvailable immediately instead of
-        // wasting 10 seconds on cold-start polling. When NO models are registered,
-        // fall through to the cold-start wait (node may still be starting up).
+        // and no connected peer advertises it, the user likely mistyped. Return
+        // ModelNotAvailable immediately instead of wasting 10 seconds on
+        // cold-start polling. Otherwise fall through to the cold-start wait (the
+        // node may still be starting up, or learning the swarm's manifests).
         {
             let model_id = crate::types::ModelId(req.model.clone());
-            if let Some(err) = state
-                .shared_state
-                .model_registry
-                .reject_if_unknown_model(&model_id)
-            {
+            if let Some(err) = state.shared_state.reject_if_unknown_model(&model_id) {
                 return Err(ApiError(err));
             }
         }

@@ -982,6 +982,24 @@ Carry layers-already-assigned-to-this-node in `route_shortest_path`'s state so t
 the running total; measure on a real two-segment plan first (synthetic tests get the marginal
 case wrong).
 
+#### #319 — A node that just joined cannot plan with a peer whose parts its capability already lists
+`P3` · routing · **OPEN** — 2026-10-20 · found by the real-link rig for #318 (`~/swarmllm-318/rl318.sh`)
+
+A newcomer's planner reads holders only from holder records (`ModelRegistry::shard_holders`).
+Those come from `ShardAnnounce` gossip (dispatch's `ShardAnnounce` arm) and DHT providers
+(`merge_dht_providers`). The `hosted_shards` in a peer's capability, which arrives at identify
+time, is only bounds-checked (`dispatch/mod.rs`, `MAX_HOSTED_SHARDS_IN_CAP`) and recorded
+nowhere. So a fresh requester connected to the machine holding a model's first layers answered
+"No reachable node holds layers 0-13" for 10 s to over 4 min, until an announcement or a DHT
+answer arrived. The rig then kept its requesters running between rounds. The `/v1/chat/completions` "not found" of the same window is fixed
+(`SharedState::reject_if_unknown_model` asks the capabilities of peers connected in the last
+three minutes, `ManifestSync::catching_up`); planning is not.
+Direction: let a connected peer's capability seed holder records it does not contradict, with the
+same build check `shard_holders` applies (`expected_build_tag`), withdrawn when the peer
+disconnects — or have the newcomer's catch-up carry the holdings point to point, as manifests
+are. Either way a capability is a peer's claim, so it may add a holder for planning and never
+remove one. Measure the newcomer's first-plan delay before and after.
+
 ### Network and transport
 
 #### #155 — AutoNAT redials a peer this node is already connected to, and the per-peer cap denies it, every ~5 s
@@ -1059,7 +1077,11 @@ peer takes digests. A change still goes on gossip in full; older peers keep the 
 (`docs/invariants/network.md` § "Announce, then pull"). It replaces the catch-up that sent a probe node
 84 manifests (~2.9 MB) from six peers in 20 s, describing 26 versions. Rig
 `examples/manifest_digest_rig.sh`: a newcomer pulls once, a reconnect pulls nothing, mixed versions
-learn the model in full. **(2b) re-measured 2026-10-17 with the fleet on .241** (release node, 8
+learn the model in full.
+**Corrected 2026-10-20:** the rig's restarted A tells B and C (its round starts empty); it never
+checked what B and C tell A — nothing: their rounds (30-120 s apart) kept a set of peers told and
+dropped one only when a round found it gone, so a node restarted on its own heard nothing for up to
+2 h. A new connection is now a new catch-up (`ManifestSync::note_new_connection`, gotcha #918). **(2b) re-measured 2026-10-17 with the fleet on .241** (release node, 8
 peers all on .241, idle, 1.0 → 2.0 h up, a 60-min window, `/api/admin/stats` twice): **5.5 KB/s out
 (6.7 at .240), 2.1 of it gossip (3.3)**. `ModelManifest` arrived ONCE in the hour (0.83 a minute at
 .240), so the digests hold. `swarm/models` is still 68% of the gossip sent, but at 1.4 KB/s (from
@@ -3266,7 +3288,8 @@ grep `^| N |`).
   (`SharedState::persist_manifests_heard`, by the round, only when it changed) and read back at
   boot on the wall clock (`load_manifests_heard`; a record older than a day, dated in the future
   or unreadable is left out, so a lost one costs a repeat and never holds one back). The digest
-  catch-up already tells every reconnecting peer. Bitcoin Core's unbroadcast set (PR #18038) is the
+  catch-up tells every reconnecting peer — since 2026-10-20 (gotcha #918); before, one back within
+  a round was not told. Bitcoin Core's unbroadcast set (PR #18038) is the
   same split: an item is re-announced until a peer has asked for it, then only a daily repeat. Rig
   `examples/manifest_digest_rig.sh`, B and C's manifests by gossip: first boot 2 → 1, after A's
   restart 3 → 0 (A's first round after it: `suppressed=1`, window 86,400 s). Tests: 3, and 6

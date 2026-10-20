@@ -1646,8 +1646,22 @@ impl ModelRegistry {
     /// the same typo answered 404 with the model list on one endpoint and 503
     /// "No model is loaded yet. Go to the dashboard and select a model" on the
     /// other — advice that is simply wrong when eight models are loaded.
-    pub fn reject_if_unknown_model(&self, model_id: &ModelId) -> Option<SwarmError> {
-        if self.get_manifest(model_id).is_none() && !self.manifests.is_empty() {
+    ///
+    /// `advertised_by_a_peer` is REQUIRED: a name a connected peer says it
+    /// holds is early, never wrong. A node learns the swarm's manifests 12-31 s
+    /// after it starts (measured 2026-10-20 on the live swarm) while a peer's
+    /// capability arrives when it connects, so a node that knew one model of
+    /// its own answered 404 for every other for those seconds. The API surfaces
+    /// call `SharedState::reject_if_unknown_model`, which asks the peers.
+    pub fn reject_if_unknown_model(
+        &self,
+        model_id: &ModelId,
+        advertised_by_a_peer: bool,
+    ) -> Option<SwarmError> {
+        if !advertised_by_a_peer
+            && self.get_manifest(model_id).is_none()
+            && !self.manifests.is_empty()
+        {
             Some(self.model_not_found_error(model_id))
         } else {
             None
@@ -1840,7 +1854,7 @@ mod tests {
         // downloaded, so the caller must fall through to its cold-start wait /
         // NoModelLoaded rather than claim the name is wrong.
         assert!(
-            registry.reject_if_unknown_model(&asked).is_none(),
+            registry.reject_if_unknown_model(&asked, false).is_none(),
             "an empty registry must not accuse the user of a bad model name"
         );
 
@@ -1848,7 +1862,7 @@ mod tests {
 
         // Now the name really is wrong, and the answer must name what IS here.
         let err = registry
-            .reject_if_unknown_model(&asked)
+            .reject_if_unknown_model(&asked, false)
             .expect("a wrong name must be rejected once models are known");
         match err {
             SwarmError::ModelNotAvailable(msg) => {
@@ -1866,8 +1880,15 @@ mod tests {
 
         // A model that IS registered is never rejected here.
         assert!(registry
-            .reject_if_unknown_model(&ModelId("real-model".into()))
+            .reject_if_unknown_model(&ModelId("real-model".into()), false)
             .is_none());
+
+        // A name a connected peer advertises is early, not wrong: this node
+        // has not had its manifest yet (a newcomer learns them 12-31 s in).
+        assert!(
+            registry.reject_if_unknown_model(&asked, true).is_none(),
+            "a model a peer holds must wait for its manifest, not be called a typo"
+        );
     }
 
     /// Holding a shard of a model MUST earn the right to re-gossip its

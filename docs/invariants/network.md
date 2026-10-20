@@ -5227,7 +5227,42 @@ itself is the announcement:
   one peer once per `ANSWER_AGAIN_AFTER` (10 min, what the full catch-up delivered per
   reconnect), and at most `ANSWERS_PER_WINDOW` (128) manifests a minute. Without the first, a
   peer could pull the same few models at the full budget every minute, ~75 KB/s for ~2 KB of
-  asking. A connected peer can name made-up models as fast as it sends digests, so at most
+  asking. **A new connection is a new catch-up** (2026-10-20, BEP 3's bitfield, which the
+  catch-up was written to follow): `handle_connection_established` calls
+  `ManifestSync::note_new_connection` on EVERY connection (a crashed peer's new connection can
+  open before its old one times out, so "connected again" never fires for it), which numbers it
+  and forgets which models the peer was answered — the minute's count is kept — and the monitor's
+  round tells a digest-taking peer again once it is on a newer connection than it was told on
+  (`peers_told_about_manifests` keeps the number; a peer sent manifests in full keeps the old
+  rule). Before, both memories outlived the reconnect they were sized by: rounds are 30-120 s
+  apart and the told set dropped only a peer a round found gone, so a peer restarted in seconds
+  stayed "told" and heard nothing until its repeat digest, up to `MANIFEST_QUIET_WINDOW` (2 h)
+  later — and its pulls met the 10-minute answer memory. A node restarted on its own knew none of
+  the models it held no part of: a rig's requester, restarted under the same identity, heard
+  nothing of the 7B in two starts of 2 min each, while a fresh identity heard it in 15-22 s.
+  The security review of the fix (10-20) bounded it twice. **The answer memory is cleared at
+  most once per `ANSWER_AGAIN_AFTER`** (`Answered::forgotten_at`). Cleared at every connection, a
+  peer that opened one more connection a minute — even beside its first — was answered the same
+  models at the full budget, the ~75 KB/s that rule exists to stop. A restarted node's pulls land
+  within seconds of its connection, so it loses nothing. **The connection record goes with the
+  LAST connection, keyed as it was filed** (`peer_id_to_node_id`), not through `peer_to_node`. Only
+  a peer that identified as one of ours enters `peer_to_node`, so a stranger that closed before
+  Identify left its record for ever. The record also keeps WHEN: a model a peer's capability
+  lists is awaited, not refused as unknown, only within `CATCH_UP_WITHIN` (3 min) of the peer's
+  connection (`ManifestSync::catching_up`, read by `SharedState::reject_if_unknown_model`).
+  Otherwise a peer listing popular names it never sends would turn every typo into a 10 s wait.
+  **Accepted residual** (the review's re-check, Low): a peer that opens one more connection
+  every three minutes stays "catching up" for good. Ending the wait on the peer's digest or
+  manifest would not stop it either: every signal that the catch-up landed is one the peer
+  sends or withholds. What it buys is bounded: a request for a name on its list waits the 10 s
+  cold-start poll, behind the API key, and is answered as before. The answer memory is cleared
+  at most once per `ANSWER_AGAIN_AFTER` even when the sweep empties the record
+  (`Answered::forgotten_at` keeps it, test `a_swept_answer_record_still_remembers_a_recent_reset`):
+  at most two answers of a model to one identity in ten minutes.
+  (Tests `a_peer_that_reconnects_is_answered_again_within_the_window_budget`,
+  `a_peer_back_on_a_new_connection_is_told_the_versions_again`,
+  `a_peers_manifests_are_awaited_only_while_its_catch_up_can_be_on_its_way`.) A connected peer can
+  name made-up models as fast as it sends digests, so at most
   `MAX_PULLS_IN_FLIGHT` (1024) pulls are out at once. One peer may hold no more of them than it
   would answer in a window (128), so it cannot fill the bound and starve every other peer. At most
   `MAX_SEEN_VERSIONS` (16,384) versions are remembered as seen, and `MAX_MANIFESTS_HEARD`
