@@ -106,10 +106,21 @@ guess set of N rows; P is the time of one pass.
    - **Failure record.** `hop_forwards` keeps ONE record per request (#305), so a
      pipelined stream's second chunk replaces the first's. Key it per (request, seq).
    - **Gaps.** A middle hop that steps over a chunk (superseded by a restart, or refused on
-     arrival) leaves a gap the next hop's `turn()` would wait 60 s for. It must hand the
-     next hop a "stepped over" notice for that turn. A restart chunk's `truncate_kv_to`
-     already raises the next hop's `skip_below`, which covers the superseded case once it
-     arrives; the refused-on-arrival case still needs the notice.
+     arrival) leaves a hole at the next hop. A restart does NOT close it: `turn()` makes
+     the restart wait until every earlier turn has arrived and taken its turn
+     (`next >= turn`), and the stepped-over one never comes, so it waits
+     `STREAM_TURN_WAIT` (60 s). Letting a restart jump `next` forward is unsafe, because
+     the turn before it may be running (`next` equals a RUNNING turn, so a jump would put
+     two forwards of one request at the worker, gotcha #180).
+     **The fix:** the middle hop hands the next hop a "stepped over" notice for that
+     turn: a `LayerForward` with the chunk's `stream_seq`, the rest of the chain, no
+     activations and a flag bit (`spec_trailer_flags`, the one writer of that byte). The
+     next hop records it with the existing `ForwardStreams::refused_on_arrival` (the
+     mechanism that already closes a hole left by an admission refusal), passes it on if
+     it has a chain onward, and answers nobody, since the coordinator was already
+     answered. It travels the chunk's own path (encryption, AAD, admission), so it is
+     exactly as trusted as a chunk: a node that knows the request id could already send
+     one.
    - **Coordinator.** `dsd_stream`'s far side becomes the chain: the head peer, then each
      hop (`plan_chain`). The wait is `WaiterKey::streamed(request, seq)` with
      `awaiting` = the tail, `chain_members` = every hop and `ExpectedStep` = every hop's
