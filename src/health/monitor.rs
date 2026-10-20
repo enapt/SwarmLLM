@@ -241,6 +241,30 @@ fn speed_within_deadband(now: u32, sent: u32) -> bool {
     f64::from(high) < f64::from(low) * CAPABILITY_SPEED_DEADBAND
 }
 
+/// The feature bits this node advertises: what this build implements
+/// (`features::ALL`), plus the statements only its settings make true — it
+/// takes a requester's guesses (#318: none is offered by a head that would
+/// check none), it keeps the half KV cache on its card, and only a window in a
+/// sliding-window layer's cache (so a coordinator prices its room for a prompt
+/// as it will be held).
+fn advertised_features(shared: &SharedState) -> u64 {
+    use swarmllm_types::features;
+    let cfg = shared.cfg();
+    let mut bits = features::ALL;
+    if crate::daemon::state::requester_guesses::takes_guesses(&cfg.inference) {
+        bits |= features::REQUESTER_GUESSES;
+    }
+    if crate::inference::layers::kv_half_on_card_enabled() {
+        bits |= features::KV_HALF_ON_CARD;
+    }
+    if crate::inference::split::kv_budget::windows_advertised(
+        cfg.inference.prefill_chunk_tokens as usize,
+    ) {
+        bits |= features::KV_WINDOW_SLIDES;
+    }
+    bits
+}
+
 /// Does `now` tell the swarm anything `sent` — the capability as last
 /// PUBLISHED — did not?
 ///
@@ -1354,24 +1378,9 @@ impl HealthMonitor {
                 &self.shared_state,
             ),
             // Advertise the protocol epoch + the optional features this build
-            // implements, so peers negotiate new message types additively —
-            // and whether this node keeps the half KV cache on its card and
-            // only a window in a sliding-window layer's cache, so a
-            // coordinator prices its room for a prompt as it will be held.
+            // implements, so peers negotiate new message types additively.
             protocol_version: swarmllm_types::PROTOCOL_VERSION,
-            features: swarmllm_types::features::ALL
-                | if crate::inference::layers::kv_half_on_card_enabled() {
-                    swarmllm_types::features::KV_HALF_ON_CARD
-                } else {
-                    0
-                }
-                | if crate::inference::split::kv_budget::windows_advertised(
-                    self.shared_state.cfg().inference.prefill_chunk_tokens as usize,
-                ) {
-                    swarmllm_types::features::KV_WINDOW_SLIDES
-                } else {
-                    0
-                },
+            features: advertised_features(&self.shared_state),
             // NETWORKING_PLAN Phase 3 — advertise the relay-capable peers we are
             // connected to, so a peer that can't reach us directly can pick a
             // relay we share. Bounded to keep the capability gossip small.
@@ -3415,6 +3424,43 @@ mod tests {
             !sent.contains_key(&vec![2u8; 4]),
             "a peer without the bit is repaired by the gossip repeat, not a digest"
         );
+    }
+
+    /// A head advertises that it takes a requester's guesses only where its
+    /// owner leaves speculation on (#318) — the same answer that opens a
+    /// hand-off's slot — so a requester never loads a drafter and reads the
+    /// prompt ahead for a head that would check none.
+    #[tokio::test]
+    async fn a_head_with_speculation_off_does_not_advertise_taking_guesses() {
+        use swarmllm_types::features;
+        let temp = tempfile::tempdir().unwrap();
+        let state_with = |speculate: bool, dir: &std::path::Path| {
+            std::fs::create_dir_all(dir).unwrap();
+            let mut config = crate::config::Config::default();
+            config.inference.speculative_decoding = speculate;
+            SharedState::new(
+                config,
+                crate::identity::Identity::generate(),
+                crate::storage::db::Database::open(dir).unwrap(),
+                Arc::new(tokio::sync::Mutex::new(
+                    crate::inference::executor::ModelExecutor::new(),
+                )),
+                None,
+            )
+            .0
+        };
+        let on = state_with(true, &temp.path().join("on"));
+        let off = state_with(false, &temp.path().join("off"));
+        assert!(features::supports(
+            advertised_features(&on),
+            features::REQUESTER_GUESSES
+        ));
+        assert!(!features::supports(
+            advertised_features(&off),
+            features::REQUESTER_GUESSES
+        ));
+        // Everything this build implements goes out either way.
+        assert!(features::supports(advertised_features(&off), features::ALL));
     }
 
     /// A peer that restarted between two rounds is back on a new connection

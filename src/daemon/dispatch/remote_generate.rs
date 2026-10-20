@@ -144,6 +144,7 @@ async fn send_refusal(
         usage: None,
         matched_stop_sequence: None,
         logprob: None,
+        reply_ids: None,
     };
     resend_terminal_token(network_tx.clone(), sender_bytes.clone(), refusal.clone());
     if let Err(e) = network_tx
@@ -295,6 +296,8 @@ pub(super) async fn handle_remote_generate_request(
         gen_fut,
         layer_range.1.saturating_sub(layer_range.0),
         serve_start,
+        // A whole model run here: its requester sends no guesses.
+        None,
     )
     .await;
 }
@@ -308,7 +311,9 @@ pub(super) async fn handle_remote_generate_request(
 /// whichever it asked for: content tokens numbered in order, every one
 /// retained for a resend, a terminal frame carrying the content-token count
 /// and usage, sent more than once. `gen_fut` is the reply's producer; aborting
-/// it is how an inbound `CancelInference` stops it.
+/// it is how an inbound `CancelInference` stops it. `guess_slot` is the slot
+/// `handle_delegated_split` opened for this reply, handed over and never
+/// looked up by `request_id` — the requester chose that id (#318).
 #[allow(clippy::too_many_arguments)]
 async fn stream_reply_to_requester(
     shared_state: Arc<SharedState>,
@@ -321,6 +326,7 @@ async fn stream_reply_to_requester(
     >,
     served_layers: u32,
     serve_start: std::time::Instant,
+    guess_slot: Option<Arc<crate::daemon::state::requester_guesses::GuessSlot>>,
 ) {
     // Register the abort handle so an inbound `SwarmMessage::CancelInference`
     // can stop this decode before it streams more wasted tokens back to the
@@ -353,6 +359,9 @@ async fn stream_reply_to_requester(
     let stream_seq = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let forward_seq = stream_seq.clone();
     let retain_state = shared_state.clone();
+    // A requester that guesses for a split led here is sent the reply's token
+    // ids beside its text (#318): its drafter reads ids, and the loop leading
+    // the reply records them in the slot before it emits each token.
     let forward_task = tokio::spawn(async move {
         while let Some(evt) = token_rx.recv().await {
             // Skip events that carry a `finish_reason` — those are the
@@ -373,6 +382,7 @@ async fn stream_reply_to_requester(
                 usage: None,
                 matched_stop_sequence: None,
                 logprob: None,
+                reply_ids: guess_slot.as_ref().and_then(|slot| slot.take_unsent()),
             };
             // Remembered BEFORE it is queued, so an ask that races the send
             // still finds it.
@@ -450,6 +460,7 @@ async fn stream_reply_to_requester(
             }),
             matched_stop_sequence: out.matched_stop_sequence,
             logprob: None,
+            reply_ids: None,
         },
         Ok(Err(e)) => {
             tracing::warn!(%request_id, error = %e, "remote-generate worker error");
@@ -463,6 +474,7 @@ async fn stream_reply_to_requester(
                 usage: None,
                 matched_stop_sequence: None,
                 logprob: None,
+                reply_ids: None,
             }
         }
         Err(e) => {
@@ -475,6 +487,7 @@ async fn stream_reply_to_requester(
                 usage: None,
                 matched_stop_sequence: None,
                 logprob: None,
+                reply_ids: None,
             }
         }
     };
@@ -633,9 +646,28 @@ pub(super) async fn handle_delegated_split(
     request.cancel = Some(cancel.clone());
     request.route_override = Some(crate::inference::route_override::RoutePlanOverride::lead_here());
     let led_id = request.id;
+    // Open while the reply runs, on every way it ends (the guard drops with
+    // this handler, aborted or not). None where the requester's id is already
+    // open here, or where this node's owner turned speculation off — checking
+    // guesses costs this machine and its peers rows. Either way the reply goes
+    // on without guesses, and its first token reaches the requester without
+    // ids, which stops its drafting (`GuessingAhead::hear`).
+    let guesses_asked = delegation.guesses.is_some();
+    let takes_guesses =
+        crate::daemon::state::requester_guesses::takes_guesses(&shared_state.cfg().inference);
+    let guess_slot = delegation
+        .guesses
+        .filter(|_| takes_guesses)
+        .and_then(|asked| {
+            shared_state
+                .requester_guesses
+                .open(request_id, led_id, sender_bytes.clone(), asked)
+        });
     tracing::info!(
         %request_id,
         %led_id,
+        guesses_asked,
+        guesses_taken = guess_slot.is_some(),
         "delegated split: submitted to this node's router"
     );
     let gen_fut = tokio::spawn(async move {
@@ -667,8 +699,10 @@ pub(super) async fn handle_delegated_split(
         gen_fut,
         layer_range.1.saturating_sub(layer_range.0),
         serve_start,
+        guess_slot.as_ref().map(|open| open.slot().clone()),
     )
     .await;
+    drop(guess_slot);
 }
 
 /// May this node lead a split of `model_id` — does it hold the model's first

@@ -27,10 +27,10 @@ pub use identity::{NicknameGossip, NicknameRecord, SealedPrompt};
 pub use ids::{Blake3Hash, ModelId, NodeId, ShardId, MMPROJ_SHARD_INDEX};
 pub use inference::{
     AllReduceOp, ChainHop, ChatMessage, ChunkAssemblyState, ChunkMeta, DelegatedSplit,
-    ForwardRefusal, GenerateUsage, ImageData, InferenceError, InferenceRequest, KeepAsked,
-    LayerForward, LayerResult, NetworkFinishReason, PipelineAssignment, PipelineSegment,
-    PromptCacheHint, PromptSpan, RemoteGenerateRequest, ReplyContinuation, ResultStep, Role,
-    SamplingParams, StreamingToken, TensorFormat, TensorParallelGroup, TensorParallelMeta,
+    ForwardRefusal, GenerateUsage, GuessesAsked, ImageData, InferenceError, InferenceRequest,
+    KeepAsked, LayerForward, LayerResult, NetworkFinishReason, PipelineAssignment, PipelineSegment,
+    PromptCacheHint, PromptSpan, RemoteGenerateRequest, ReplyContinuation, ReplyIds, ResultStep,
+    Role, SamplingParams, StreamingToken, TensorFormat, TensorParallelGroup, TensorParallelMeta,
     TokenLogProbEntry, ToolCallFunction, ToolCallTurn, ToolTurn, TpAllReduceRequest,
     TpAllReduceResponse, TpPhase, TpRingChunk, VisionEncodeRequest, VisionEncodeResponse,
     DEFAULT_REPLY_BUDGET,
@@ -44,9 +44,10 @@ pub use network::{
     EphemeralKeyExchange, HfSourceGossip, ManifestDigest, ManifestPull, ManifestVersion,
     MessageTransport, ModelDemandGossip, NetworkCommand, PoolModelAvailability, PrefixBlockEntry,
     PrefixCacheAnnounce, PromptAdmissionAnswer, PromptAdmissionAsk, PromptAdmissionVerdict,
-    PruneEvent, RebalanceEvent, RegionShardSummary, RelayedEnvelope, ResendTokens,
-    SessionKeyConfirm, ShardAnnounce, ShardDownloadProgress, ShardRequest, ShardResponse,
-    SwarmMessage, WishlistAnnouncement, WishlistAnnouncementEntry, BUILD_TAG_UNKNOWN,
+    PruneEvent, RebalanceEvent, RegionShardSummary, RelayedEnvelope, RequesterGuesses,
+    ResendTokens, SessionKeyConfirm, ShardAnnounce, ShardDownloadProgress, ShardRequest,
+    ShardResponse, SwarmMessage, WishlistAnnouncement, WishlistAnnouncementEntry,
+    BUILD_TAG_UNKNOWN, MAX_REQUESTER_GUESSES,
 };
 pub use node::{
     features, ContributionLevel, CpuInfo, GpuInfo, LatencyObservation, NodeCapability, NodeStats,

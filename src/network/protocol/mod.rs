@@ -241,6 +241,7 @@ fn counts_as_inference(req: &SwarmRequest) -> bool {
             crate::types::SwarmMessage::StreamingToken(_)
                 | crate::types::SwarmMessage::RemoteGenerateRequest(_)
                 | crate::types::SwarmMessage::ResendTokens(_)
+                | crate::types::SwarmMessage::RequesterGuesses(_)
                 | crate::types::SwarmMessage::CancelInference(_)
         ),
         SwarmRequest::ShardTransfer(_)

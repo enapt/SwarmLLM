@@ -1783,9 +1783,22 @@ rounds, and the middle machine refuses before working and dials its next hop
 (`docs/invariants/network.md` § "A stream of checks travels a chain"). Left in this step: the dial
 after a DHT lookup is unverified on a real link (the loopback rig's DHT holds no address for a node
 that only connected inbound), and a next hop reachable only through a relay is never dialled, so its
-run stays unchained; a user
-who holds NONE of the model guesses nothing — the head leads without the drafter (the plan's
-"Found while building it"; next) — then trees in
+run stays unchained. A user who holds NONE of the model now guesses for the head that leads it —
+**built 2026-10-20** (`features::REQUESTER_GUESSES`, bit 28; `docs/invariants/scheduling.md` §
+"A requester guesses for the split its head leads"). *Real link, one run* (this machine in
+Thailand holding layers 0-13 of a 7B on its processor, a peer's RTX 3060 in Australia the rest,
+~420 ms apart, the requester on the Thailand machine): led with guesses 2.5 tok/s over 160 tokens
+(109 passes: 39 checked guesses, 49 of 86 kept, 65 one-token passes) against 2.27-2.38 driven
+from the requester (α 0.66, γ 2); the whole model on the Australian card alone writes 56.6. The 65
+one-token passes are passes no fresh window was ready for — the requester's drafter shared the
+head's busy processor and took 200-450 ms after a miss, and the head never waits. Left in it:
+(a) a head that waits a bounded time for a window it expects, where the wait pays (w < P·(E − 1),
+~700 ms on this link); (b) a route override switches delegation off
+(`request_may_be_led_by_its_head`), so a led split cannot be tested through `swarm_route` — the
+run above was led only because the requester did not yet trust the Australian peer with the
+prompt (once it did, it handed that peer the whole model), and its "without guesses" arm, sent
+with an override, measured the driven path again; carrying a shrink-only override to the head is
+wire work; (c) both halves on cards. Then trees in
 it, the verdict sent to every segment so dead rows are dropped before they are computed (#149 (b)); (4) a drafter fed by the model's own state: MTP at the last stage (#145),
 EAGLE-3 taps where a head is published; (5) an MoE tree priced by the experts it touches; (6)
 regional chains (#192); (7) the opt-in fast mode. The plan records one retracted projection
@@ -1910,7 +1923,12 @@ heads at the last stage (Qwen 3.5 runs since v0.3.229 but without speculation, #
 unsupported), a stage batching forwards of several streams into one
 visit, multi-block attention for workers sharing a cache, outline-then-expand with a
 classifier router. Research-grade; the largest multiplier on the list
-(`wan_parallel.md` § 6 has the projection).
+(`wan_parallel.md` § 6 has the projection). Prior art read 2026-10-20 (github.com/JustVugg/colibri,
+a single-machine MoE engine with MTP drafting; its docs, not reproduced here): an MTP head cut to
+int4 collapsed to 0-4% acceptance and is shipped at int8 (its `docs/tuning.md`) — a head we load
+keeps at least Q8 — and drafting ran at half the speed of plain decoding on GLM-5.2 because the
+checked rows pulled in extra experts (its `docs/experiments/glm52-4xa6000-2026-08-02.md` § 9), the
+cost #318's step (5) prices.
 
 #### #182 — SWARM-SPEC Layer 3 (conversation prefetch) is observation-only code in the request path
 `P3` · perf-split · **OPEN** — since R136 · history: archive § "R136: SWARM-SPEC — proposal…" → "Layer 3 — Conversation-level: predictive prefetch (NOVEL)"

@@ -52,6 +52,7 @@ use crate::error::SwarmError;
 use crate::inference::router::{InferenceOutput, StreamingTokenEvent, StreamingTokenTx};
 
 use super::PipelineExecutor;
+use crate::daemon::state::requester_guesses::GuessSlot;
 
 /// Observed payoff of this loop, as accepted tokens per round x 100.
 /// `0` means unknown — nothing has run yet and the next request finds out.
@@ -157,14 +158,90 @@ fn record_payoff(accepted_tokens: u32, rounds: u32) {
     DIST_SPEC_PAYOFF_X100.store(blended.max(1), std::sync::atomic::Ordering::Relaxed);
 }
 
+/// The requester's guesses for this reply (#318): a split a peer handed over
+/// asking to guess for it (`daemon::state::requester_guesses`), led here from
+/// its first token. A continued reply takes none — its positions are not the
+/// ones the requester follows. (A node whose owner turned speculation off opens
+/// no slot: `dispatch::remote_generate::handle_delegated_split`.)
+fn requester_guess_slot(exec: &PipelineExecutor) -> Option<std::sync::Arc<GuessSlot>> {
+    if exec.request.continuation.is_some() {
+        return None;
+    }
+    exec.shared_state
+        .requester_guesses
+        .for_led(&exec.request.id)
+}
+
+/// How many of the requester's guesses the next check takes: the measured
+/// choice (`dsd_controller::best_gamma_for_check`) over this reply's checks,
+/// with no drafting cost — the requester drafted them — and
+/// `guesses_per_check` as the ceiling.
+fn choose_guess_gamma(
+    acceptance: &crate::inference::dsd_controller::AcceptanceEstimate,
+    check: &crate::inference::dsd_controller::CheckCost,
+    current: u32,
+    cfg: &crate::config::InferenceConfig,
+) -> u32 {
+    next_guess_gamma(
+        acceptance,
+        check,
+        current,
+        cfg.guesses_per_check(),
+        fixed_guess_gamma(),
+    )
+}
+
+fn next_guess_gamma(
+    acceptance: &crate::inference::dsd_controller::AcceptanceEstimate,
+    check: &crate::inference::dsd_controller::CheckCost,
+    current: u32,
+    max: u32,
+    fixed: bool,
+) -> u32 {
+    if fixed {
+        return max;
+    }
+    crate::inference::dsd_controller::best_gamma_for_check(
+        acceptance.alpha(),
+        check,
+        0.0,
+        current,
+        max,
+    )
+}
+
+/// `SWARMLLM_HEAD_GUESS_GAMMA=fixed` checks as many of the requester's guesses
+/// as `guesses_per_check` allows every time — the rule before the head chose
+/// (#318) — for A/B inside one binary.
+fn fixed_guess_gamma() -> bool {
+    static FIXED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FIXED.get_or_init(|| std::env::var("SWARMLLM_HEAD_GUESS_GAMMA").as_deref() == Ok("fixed"))
+}
+
+/// Up to `max` of the requester's guesses that go on from `generated`, cut at
+/// the first id outside the model's vocabulary: a window comes off the wire,
+/// and an id this node cannot embed would fail the reply.
+fn requester_drafts(slot: &GuessSlot, generated: &[u32], max: usize, vocab: usize) -> Vec<u32> {
+    let mut guesses = slot.guesses(generated, max);
+    if let Some(bad) = guesses.iter().position(|&t| t as usize >= vocab) {
+        guesses.truncate(bad);
+    }
+    guesses
+}
+
 /// Fast-path preconditions for the draft-free n-gram-only spec loop.
-pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
+///
+/// `guessed`: the requester guesses for this reply ([`requester_guess_slot`]).
+/// Its guesses are checked whether or not prompt lookup is switched on, and
+/// whatever prompt lookup has been earning: the payoff below measures prompt
+/// lookup's guesses, not a model's.
+pub(super) fn eligible(exec: &PipelineExecutor, guessed: bool) -> bool {
     // The LIVE config, not the boot snapshot. Every read here used to come from
     // `shared_state.config`, so turning n-gram lookup off in Settings changed
     // nothing until the daemon was restarted (gotcha #281).
     let live = exec.shared_state.cfg();
     let cfg = &live.inference;
-    if !cfg.ngram_lookup_enabled {
+    if !cfg.ngram_lookup_enabled && !guessed {
         return false;
     }
     // Only when no draft model is configured — when one IS configured,
@@ -237,7 +314,7 @@ pub(super) fn eligible(exec: &PipelineExecutor) -> bool {
     })();
 
     let seen = DIST_SPEC_PAYOFF_X100.load(std::sync::atomic::Ordering::Relaxed);
-    if !payoff_justifies_the_wire(seen, required) {
+    if !guessed && !payoff_justifies_the_wire(seen, required) {
         tracing::debug!(
             seen_x100 = seen,
             required_x100 = ?required,
@@ -275,7 +352,8 @@ impl PipelineExecutor {
             num_segments = self.assignment.segments.len(),
             "DIAG: try_ngram_only_distributed entry"
         );
-        if !eligible(self) {
+        let guess_slot = requester_guess_slot(self);
+        if !eligible(self, guess_slot.is_some()) {
             tracing::debug!(
                 request_id = %self.request.id,
                 "DIAG: try_ngram_only_distributed ineligible — skipping"
@@ -349,6 +427,34 @@ impl PipelineExecutor {
         // same gguf_header.bin). extract_model_cache may estimate when
         // the local split_model entry isn't populated (all-remote pipelines).
         let prompt_token_count = prompt_tokens.len();
+        let vocab = tokenizer.vocab_size();
+
+        // The requester's shared noise (`inference::coupled_noise`): its
+        // drafter draws each guess with the noise this reply's every sample is
+        // drawn with here, so at a temperature above zero a close drafter
+        // reproduces the SAMPLE (dsd.rs measured 92.5% against 71.3% fixed at
+        // 1.0). Keyed by absolute position, so only where both tokenized the
+        // prompt alike; otherwise its guesses are checked uncoupled — still
+        // exact, agreeing less often. Prompt lookup's fixed guesses lose
+        // nothing to it: each is kept with its probability either way.
+        let noise = guess_slot.as_ref().and_then(|slot| {
+            let asked = slot.asked();
+            let seed = asked.coupling_seed?;
+            if self.request.sampling_params.temperature <= 0.0 {
+                return None;
+            }
+            if asked.prompt_tokens as usize != prompt_token_count {
+                tracing::info!(
+                    %request_id,
+                    requester_prompt_tokens = asked.prompt_tokens,
+                    prompt_tokens = prompt_token_count,
+                    "requester guesses: the requester read the prompt as another length — \
+                     its guesses are checked without shared noise"
+                );
+                return None;
+            }
+            Some(crate::inference::coupled_noise::CoupledNoise::new(seed))
+        });
 
         // ── Phase 2: decode loop ──
         let mut generated: Vec<u32> = vec![first_token];
@@ -361,7 +467,17 @@ impl PipelineExecutor {
         let mut finish_reason = String::new();
         let mut ngram_rounds: u32 = 0;
         let mut fallback_rounds: u32 = 0;
+        // Rounds that checked the requester's guesses, the guesses they
+        // checked and the ones they kept.
+        let mut guess_rounds: u32 = 0;
+        let mut guesses_checked: u32 = 0;
+        let mut guesses_kept: u32 = 0;
 
+        // Every token goes into the slot BEFORE it is emitted, so the task
+        // streaming the reply finds its id beside its text.
+        if let Some(slot) = &guess_slot {
+            slot.record(0, &[first_token]);
+        }
         // Stream first token
         super::emit_first_streaming_token(
             &self.partial_reply,
@@ -378,6 +494,18 @@ impl PipelineExecutor {
         let live = self.shared_state.cfg();
         let cfg = &live.inference;
         let max_draft = cfg.ngram_num_pred_tokens.min(cfg.guesses_per_check());
+        // How many of the requester's guesses a check takes (#318): the choice
+        // the requester makes when it drives (`dsd_controller::best_gamma_for_check`),
+        // from this reply's own checks — what one costs by the positions it
+        // reads (every check feeds the line, prompt lookup's and one-token
+        // checks too) and how often a guess is kept. Guesses drafted on the
+        // requester cost this node nothing, so only the check is priced. Zero
+        // is an answer: on processors each position a check reads cost about
+        // half a one-token pass, and guesses kept 59% of the time won nothing
+        // (`~/swarmllm-318/guess318.sh`, 10-20).
+        let mut guess_gamma = cfg.guesses_per_check();
+        let mut check_cost = crate::inference::dsd_controller::CheckCost::default();
+        let mut guess_acceptance = crate::inference::dsd_controller::AcceptanceEstimate::new();
         // SWARM-SPEC L1: pending truncate carries over to the NEXT verify
         // call. When a verify round partially rejects drafts, the remote
         // KV still holds k+1 positions from this round, but only
@@ -394,13 +522,21 @@ impl PipelineExecutor {
             let remaining = max_tokens - generated.len() as u32;
             let this_gamma = max_draft.min(remaining).max(1);
 
-            // ── N-gram cascade ──
-            let drafts = super::speculative::ngram_lookup_drafts(
-                cfg,
-                &prompt_tokens,
-                &generated,
-                this_gamma,
-            );
+            // ── The requester's guesses, then the n-gram cascade ──
+            let guessed = guess_slot
+                .as_deref()
+                .map(|slot| {
+                    requester_drafts(slot, &generated, guess_gamma.min(remaining) as usize, vocab)
+                })
+                .unwrap_or_default();
+            let from_requester = !guessed.is_empty();
+            let drafts = if from_requester {
+                guessed
+            } else if cfg.ngram_lookup_enabled {
+                super::speculative::ngram_lookup_drafts(cfg, &prompt_tokens, &generated, this_gamma)
+            } else {
+                Vec::new()
+            };
 
             if drafts.is_empty() {
                 // ── Fallback: single-token verify (γ=0 batch = 1 position) ──
@@ -413,6 +549,7 @@ impl PipelineExecutor {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let verify_tokens = vec![last_token];
                 let truncate_for_this_round = pending_truncate.take();
+                let checked_at = std::time::Instant::now();
                 // Sample, not argmax: this is an ordinary decode step that
                 // happens to have gone through the verify wire, and it must
                 // honour the same sampling parameters every other step does.
@@ -430,7 +567,7 @@ impl PipelineExecutor {
                         drafts: &[],
                         sampling: &self.request.sampling_params,
                         generated: &generated,
-                        coupling: None,
+                        coupling: noise.map(|n| n.seed()),
                     }),
                     super::worker_requester(&self.request),
                     self.verify_may_chain(),
@@ -448,7 +585,7 @@ impl PipelineExecutor {
                     &[],
                     &self.request.sampling_params,
                     &generated,
-                    None,
+                    noise.as_ref().map(|n| (n, current_pos as u64 + 1)),
                 ) {
                     Ok(decided) => decided,
                     Err(e) => {
@@ -456,7 +593,15 @@ impl PipelineExecutor {
                         return Err(e);
                     }
                 };
+                if guess_slot.is_some() {
+                    check_cost.record(1, checked_at.elapsed().as_secs_f64() * 1000.0);
+                    guess_gamma =
+                        choose_guess_gamma(&guess_acceptance, &check_cost, guess_gamma, cfg);
+                }
                 last_token = bonus;
+                if let Some(slot) = &guess_slot {
+                    slot.record(generated.len(), &[bonus]);
+                }
                 generated.push(bonus);
                 current_pos += 1;
                 // Through the shared helper rather than a direct send, so this
@@ -479,19 +624,25 @@ impl PipelineExecutor {
                 continue;
             }
 
-            // ── N-gram HIT path ──
-            ngram_rounds += 1;
-            // R137: bump lifetime hit counter (counts hit-rounds, not
-            // accepted tokens — accept count is in the spec_logits result).
-            self.shared_state
-                .metrics
-                .ngram_hits
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // ── HIT path: the requester's guesses or the n-gram's ──
+            if from_requester {
+                guess_rounds += 1;
+                guesses_checked += drafts.len() as u32;
+            } else {
+                ngram_rounds += 1;
+                // R137: bump lifetime hit counter (counts hit-rounds, not
+                // accepted tokens — accept count is in the spec_logits result).
+                self.shared_state
+                    .metrics
+                    .ngram_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             let mut verify_tokens: Vec<u32> = Vec::with_capacity(drafts.len() + 1);
             verify_tokens.push(last_token);
             verify_tokens.extend_from_slice(&drafts);
 
             let truncate_for_this_round = pending_truncate.take();
+            let checked_at = std::time::Instant::now();
             let reply = super::forward_verify_through_segments(
                 &self.shared_state,
                 &self.network_tx,
@@ -504,7 +655,7 @@ impl PipelineExecutor {
                     drafts: &drafts,
                     sampling: &self.request.sampling_params,
                     generated: &generated,
-                    coupling: None,
+                    coupling: noise.map(|n| n.seed()),
                 }),
                 super::worker_requester(&self.request),
                 self.verify_may_chain(),
@@ -515,7 +666,7 @@ impl PipelineExecutor {
                 &drafts,
                 &self.request.sampling_params,
                 &generated,
-                None,
+                noise.as_ref().map(|n| (n, current_pos as u64 + 1)),
             ) {
                 Ok(decided) => decided,
                 Err(e) => {
@@ -529,6 +680,20 @@ impl PipelineExecutor {
                 &eos_tokens,
                 (max_tokens as usize).saturating_sub(generated.len()),
             );
+            if from_requester {
+                guesses_kept += accepted.len() as u32;
+                guess_acceptance.record(accepted.len() as u32, drafts.len() as u32);
+            }
+            if guess_slot.is_some() {
+                check_cost.record(
+                    verify_tokens.len() as u32,
+                    checked_at.elapsed().as_secs_f64() * 1000.0,
+                );
+                guess_gamma = choose_guess_gamma(&guess_acceptance, &check_cost, guess_gamma, cfg);
+            }
+            if let Some(slot) = &guess_slot {
+                slot.record(generated.len(), &emitted);
+            }
 
             // Emit (stream + accumulate). The EOS token stays in `emitted` so
             // the accumulator below still sees it and stops; `emit_streaming_batch`
@@ -576,13 +741,24 @@ impl PipelineExecutor {
             finish_reason = "length".into();
         }
 
-        record_payoff(generated.len() as u32, ngram_rounds + fallback_rounds);
+        // The payoff is prompt lookup's: a reply the requester guessed for
+        // says nothing about what prompt lookup earns the next one.
+        if guess_rounds == 0 {
+            record_payoff(generated.len() as u32, ngram_rounds + fallback_rounds);
+        }
 
         tracing::info!(
             request_id = %request_id,
             generated_tokens = generated.len(),
             ngram_rounds,
             fallback_rounds,
+            requester_guesses = guess_slot.is_some(),
+            guess_rounds,
+            guesses_checked,
+            guesses_kept,
+            guess_gamma,
+            check_fit = ?check_cost.fit().map(|(fixed, per)| (fixed.round(), per.round())),
+            coupled = noise.is_some(),
             payoff_x100 = DIST_SPEC_PAYOFF_X100.load(std::sync::atomic::Ordering::Relaxed),
             ngram_hit_rate = format!(
                 "{:.1}%",
@@ -742,6 +918,98 @@ mod link_price_tests {
         assert!(
             !payoff_justifies_the_wire(400, required),
             "4 tokens a round cannot pay for 513 KB on a 1 Mbps link"
+        );
+    }
+}
+
+#[cfg(test)]
+mod requester_guess_tests {
+    use super::*;
+    use crate::daemon::state::requester_guesses::RequesterGuessSlots;
+    use crate::types::{GuessesAsked, RequesterGuesses};
+
+    /// A guess the model has no row for is never sent through the layers: the
+    /// window is cut there, and what precedes it is still checked.
+    #[test]
+    fn a_guess_outside_the_vocabulary_is_never_checked() {
+        let slots = std::sync::Arc::new(RequesterGuessSlots::default());
+        let (wire, led) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let _open = slots.open(
+            wire,
+            led,
+            vec![1],
+            GuessesAsked {
+                coupling_seed: None,
+                prompt_tokens: 3,
+            },
+        );
+        let slot = slots.for_led(&led).unwrap();
+        slot.record(0, &[5]);
+        assert!(slot.take_unsent().is_some());
+        slots.offer_from(
+            &[1],
+            RequesterGuesses {
+                request_id: wire,
+                after: 1,
+                tokens: vec![7, 8, 99_999, 9],
+            },
+        );
+        assert_eq!(requester_drafts(&slot, &[5], 8, 1000), vec![7, 8]);
+        assert_eq!(requester_drafts(&slot, &[5], 1, 1000), vec![7]);
+        assert_eq!(requester_drafts(&slot, &[5, 7], 8, 1000), vec![8]);
+    }
+
+    /// The head checks as many of the requester's guesses as pay for their
+    /// positions. A check that grows with every position it reads — a
+    /// processor's, as the 10-20 rig measured (~0.84 s at one position,
+    /// ~1.95 s at four) — with guesses kept less than half the time takes
+    /// none; a check that costs the same at any length (a card's, a long
+    /// link) takes all it may.
+    #[test]
+    fn the_head_checks_as_many_guesses_as_pay_for_their_positions() {
+        use crate::inference::dsd_controller::{AcceptanceEstimate, CheckCost};
+        let mut seldom = AcceptanceEstimate::new();
+        for i in 0..20 {
+            seldom.record(u32::from(i % 2 == 0), 4);
+        }
+        let mut processor = CheckCost::default();
+        for i in 0..8 {
+            if i % 2 == 0 {
+                processor.record(1, 840.0);
+            } else {
+                processor.record(4, 1950.0);
+            }
+        }
+        let mut gamma = 4;
+        for _ in 0..4 {
+            gamma = next_guess_gamma(&seldom, &processor, gamma, 4, false);
+        }
+        assert_eq!(gamma, 0, "guessing that does not pay steps aside");
+
+        let mut often = AcceptanceEstimate::new();
+        for _ in 0..20 {
+            often.record(3, 4);
+        }
+        let mut card = CheckCost::default();
+        for i in 0..8 {
+            if i % 2 == 0 {
+                card.record(1, 450.0);
+            } else {
+                card.record(5, 470.0);
+            }
+        }
+        let mut gamma = 2;
+        for _ in 0..4 {
+            gamma = next_guess_gamma(&often, &card, gamma, 4, false);
+        }
+        assert_eq!(
+            gamma, 4,
+            "a check that costs the same at any length takes all it may"
+        );
+        assert_eq!(
+            next_guess_gamma(&seldom, &processor, 0, 4, true),
+            4,
+            "the A/B switch keeps the old rule"
         );
     }
 }

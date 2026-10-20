@@ -328,9 +328,19 @@ pub mod features {
     /// otherwise the checks go round by round.
     pub const CHAINED_STREAM: u64 = 1 << 27;
 
+    /// Takes a requester's guesses for a split it leads (#318): a request
+    /// handed over with `DelegatedSplit::guesses` gets the ids of its reply
+    /// beside the text (`StreamingToken::reply_ids`), and the requester's
+    /// [`RequesterGuesses`](crate::RequesterGuesses) are checked in its passes
+    /// — never waited for. A requester asks, and sends windows, only to a head
+    /// advertising it; a head attaches ids only to a reply that asked. NOT in
+    /// [`ALL`]: a head advertises it only where its owner leaves speculation
+    /// on, so a requester never loads a drafter for a head that checks none.
+    pub const REQUESTER_GUESSES: u64 = 1 << 28;
+
     /// The full feature set THIS build implements. Advertised by every node,
-    /// with [`KV_HALF_ON_CARD`] and [`KV_WINDOW_SLIDES`] beside it where they
-    /// apply.
+    /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`] and
+    /// [`REQUESTER_GUESSES`] beside it where they apply.
     pub const ALL: u64 = RELAY
         | TENSOR_RELAY
         | PIPELINE_CHAIN

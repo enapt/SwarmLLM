@@ -146,6 +146,38 @@ guess set of N rows; P is the time of one pass.
      Driving from here wins wherever compute dominates the pass (every processor ring)
      or E_N exceeds P_user / P_head; leading wins across an ocean with no drafter. Next
      after the chain stream's rig.
+   - **Built instead (2026-10-20): guesses from the requester — both, not a choice.** Measured
+     first (`~/swarmllm-318/drive318.sh`, a 7B over two processor nodes, the requester holding
+     none of it and the 0.5B whole, every link 206 ms): led without guesses 1.27-1.31 tok/s,
+     driven with the drafter 1.10 — the user↔head trip in every pass cost more than the
+     guesses won. So the head keeps leading and NEVER waits, and the user's machine guesses for
+     it: it follows the reply as it streams in (it receives it anyway), drafts ahead of it, and
+     sends each window (`SwarmMessage::RequesterGuesses { request_id, after, tokens }`). Each
+     pass the head checks the newest window's guesses past its reply where the window agrees
+     with what it produced since `after`, else prompt lookup, else one token. A late window
+     costs rows, never a token (a guess is kept only where the target's own sample equals it);
+     a window stays good across passes while the reply agrees with it, so the user drafts up to
+     four checks ahead. Pieces: the reply's ids beside its text (`StreamingToken::reply_ids`,
+     recorded by the head's loop before it emits each token); the user's seed for shared noise
+     in the hand-off, used by every sample the head draws for the reply where both read the
+     prompt as the same length; windows taken only from the peer that handed the reply over,
+     ≤ 64 ids, each checked against the vocabulary; bit 28 `REQUESTER_GUESSES` at both ends.
+     No published system does this; its parts are AMUSD's rollback, PEARL's post-verify
+     drafting and PipeInfer's stale-run handling. What it gives up against a drafter beside
+     the head ("Speculation at a Distance", arXiv 2606.25091): the window is a round trip
+     user↔head late, so the reply must agree with the window's first tokens before its later
+     ones are any use. A/B `SWARMLLM_REQUESTER_GUESSES=0`; rig `~/swarmllm-318/guess318.sh`.
+   - **On a real link (2026-10-20, one run, `~/swarmllm-318/rl318.sh`).** This machine
+     (Thailand, layers 0-13 of the 7B on its processor) led for a requester on the same machine;
+     a peer's RTX 3060 in Australia, ~420 ms away, held the rest. Led with guesses: 2.5 tok/s
+     over 160 tokens. Of 109 passes, 39 checked guesses (49 of 86 kept), 5 prompt lookup, 65
+     one token. Driven from the requester: 2.27-2.38 (α 0.66, γ 2). The 65 one-token passes had
+     no fresh window: the requester's drafter shared the head's busy processor and took
+     200-450 ms after a miss. **The next step is a bounded wait for an expected window.** Waiting
+     w turns a one-token pass into a guessed one when w < P·(E − 1), ~700 ms here — about 1.3x on
+     this link. Not testable through `swarm_route`: any override switches delegation off
+     (`request_may_be_led_by_its_head`), so the run above was led only because the requester did
+     not yet trust the far peer with the prompt.
    - **Rig:** `split_rig.sh repeat` with `SHARDS_C` (A holds the first parts and the
      drafter, gotcha #915), `RIG_NETNS=1 RIG_RTT_MS=206`; `C_MEETS_B=1` has C dial B.
    - **Built and measured (2026-10-20).** The stream through the chain: 1.24 tok/s

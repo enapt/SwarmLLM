@@ -1157,6 +1157,11 @@ pub struct StreamingToken {
     /// request or when the remote worker doesn't compute logprobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logprob: Option<TokenLogProbEntry>,
+    /// The reply's token ids accepted since the last token sent, for a
+    /// requester that guesses (`DelegatedSplit::guesses`, #318). `None`
+    /// everywhere else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_ids: Option<ReplyIds>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -1213,6 +1218,34 @@ pub struct DelegatedSplit {
     pub messages: Vec<ChatMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<serde_json::Value>>,
+    /// The requester will send guesses for this reply (#318). Set only for a
+    /// head advertising `features::REQUESTER_GUESSES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guesses: Option<GuessesAsked>,
+}
+
+/// What a requester that will guess for a split's head tells it (#318).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuessesAsked {
+    /// The shared noise the requester's drafter draws with
+    /// (`inference::coupled_noise`), so at a temperature above zero a close
+    /// drafter reproduces the target's SAMPLE. `None` for a greedy reply,
+    /// where both sides take the argmax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coupling_seed: Option<u64>,
+    /// How many tokens the requester's tokenizer made of the prompt. The noise
+    /// is keyed by absolute position, so the head draws with it only where its
+    /// own prompt is as long; otherwise guesses are still checked, uncoupled.
+    pub prompt_tokens: u32,
+}
+
+/// Reply token ids a head attaches to its text stream for a requester that
+/// guesses (#318): `ids` are the reply's tokens from position `from` (0 is
+/// the reply's first token), in the target's own vocabulary.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplyIds {
+    pub from: u32,
+    pub ids: Vec<u32>,
 }
 
 /// Finish reason for network protocol messages (distinct from inference::executor::FinishReason).
@@ -1542,6 +1575,10 @@ mod delegated_split_wire_tests {
                 tool: Default::default(),
             }],
             tools: Some(vec![serde_json::json!({"type": "function"})]),
+            guesses: Some(GuessesAsked {
+                coupling_seed: Some(7),
+                prompt_tokens: 12,
+            }),
         }));
         let bytes = serde_json::to_vec(&sent).unwrap();
         let back: RemoteGenerateRequest = serde_json::from_slice(&bytes).unwrap();
@@ -1549,5 +1586,57 @@ mod delegated_split_wire_tests {
         assert_eq!(d.messages.len(), 1);
         assert_eq!(d.messages[0].content, "hello");
         assert_eq!(d.tools.map(|t| t.len()), Some(1));
+        assert_eq!(
+            d.guesses,
+            Some(GuessesAsked {
+                coupling_seed: Some(7),
+                prompt_tokens: 12,
+            })
+        );
+    }
+
+    /// A delegation that will not guess, and a token carrying no ids, are
+    /// encoded exactly as before the fields existed (#318) — an older peer
+    /// reads them unchanged, and one from it decodes as "no guesses".
+    #[test]
+    fn a_reply_with_no_guesses_is_encoded_as_before() {
+        let sent = request(Some(DelegatedSplit {
+            messages: vec![],
+            tools: None,
+            guesses: None,
+        }));
+        let json = serde_json::to_value(&sent).unwrap();
+        assert!(json["delegation"].get("guesses").is_none(), "{json}");
+        let token = StreamingToken {
+            request_id: uuid::Uuid::nil(),
+            token_id: 3,
+            finish_reason: None,
+            text: "x".into(),
+            usage: None,
+            matched_stop_sequence: None,
+            logprob: None,
+            reply_ids: None,
+        };
+        let json = serde_json::to_value(&token).unwrap();
+        assert!(json.get("reply_ids").is_none(), "{json}");
+        let older = serde_json::json!({"request_id": uuid::Uuid::nil(), "token_id": 3, "finish_reason": null});
+        let back: StreamingToken = serde_json::from_value(older).unwrap();
+        assert!(back.reply_ids.is_none());
+        let with = StreamingToken {
+            reply_ids: Some(ReplyIds {
+                from: 4,
+                ids: vec![9, 8],
+            }),
+            ..token
+        };
+        let back: StreamingToken =
+            serde_json::from_slice(&serde_json::to_vec(&with).unwrap()).unwrap();
+        assert_eq!(
+            back.reply_ids,
+            Some(ReplyIds {
+                from: 4,
+                ids: vec![9, 8]
+            })
+        );
     }
 }

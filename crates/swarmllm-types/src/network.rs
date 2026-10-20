@@ -188,6 +188,10 @@ pub enum SwarmMessage {
     // `features::PROMPT_ADMISSION` at the sender.
     PromptAdmissionAsk(PromptAdmissionAsk),
     PromptAdmissionAnswer(PromptAdmissionAnswer),
+
+    // A requester's guesses for a split its head leads (#318). Point to point,
+    // gated on `features::REQUESTER_GUESSES` at the sender.
+    RequesterGuesses(RequesterGuesses),
 }
 
 impl SwarmMessage {
@@ -239,6 +243,7 @@ impl SwarmMessage {
             Self::ManifestPull(_) => "ManifestPull",
             Self::PromptAdmissionAsk(_) => "PromptAdmissionAsk",
             Self::PromptAdmissionAnswer(_) => "PromptAdmissionAnswer",
+            Self::RequesterGuesses(_) => "RequesterGuesses",
         }
     }
 }
@@ -297,6 +302,44 @@ pub struct ResendTokens {
     pub from_token_id: u32,
     /// One past the last content token wanted. Bounded by the serving node.
     pub to_token_id: u32,
+}
+
+/// The most guesses one [`RequesterGuesses`] may carry; a head drops a larger
+/// window unread.
+pub const MAX_REQUESTER_GUESSES: usize = 64;
+
+/// A requester's guesses at how a reply its split's head leads goes on (#318):
+/// `tokens` follow the reply's first `after` tokens. The head never waits for
+/// one; each pass it checks those of the newest window that go past its reply
+/// ([`Self::guesses_after`]). A guess is kept only where the target's own
+/// sample equals it, so a late or wrong window costs rows, never a token.
+/// Gated on `features::REQUESTER_GUESSES` at the sender.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequesterGuesses {
+    /// The hand-off's id on the wire (`RemoteGenerateRequest::request_id`).
+    pub request_id: uuid::Uuid,
+    /// How many reply tokens the guesses follow.
+    pub after: u32,
+    pub tokens: Vec<u32>,
+}
+
+impl RequesterGuesses {
+    /// The guesses that go on from `reply` — the reply as the head has it — at
+    /// most `max` of them: none where the window's overlap with `reply`
+    /// disagrees with it (the target wrote something else), where the reply has
+    /// gone past the window, or where the window claims more of the reply than
+    /// there is.
+    pub fn guesses_after(&self, reply: &[u32], max: usize) -> &[u32] {
+        let after = self.after as usize;
+        let Some(overlap) = reply.len().checked_sub(after) else {
+            return &[];
+        };
+        if overlap >= self.tokens.len() || self.tokens[..overlap] != reply[after..] {
+            return &[];
+        }
+        let rest = &self.tokens[overlap..];
+        &rest[..rest.len().min(max)]
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1014,5 +1057,53 @@ mod manifest_digest_tests {
         }))
         .expect("a version without a context must decode");
         assert_eq!(bare.context_length, None);
+    }
+}
+
+#[cfg(test)]
+mod requester_guesses_tests {
+    use super::RequesterGuesses;
+
+    fn window(after: u32, tokens: &[u32]) -> RequesterGuesses {
+        RequesterGuesses {
+            request_id: uuid::Uuid::nil(),
+            after,
+            tokens: tokens.to_vec(),
+        }
+    }
+
+    /// A window drafted after the reply's first two tokens, while the head
+    /// has written one more: the guesses past it are the ones to check, as
+    /// many as the pass takes.
+    #[test]
+    fn a_window_is_checked_from_where_the_reply_has_reached() {
+        let w = window(2, &[30, 40, 50, 60]);
+        assert_eq!(w.guesses_after(&[10, 20], 8), &[30, 40, 50, 60]);
+        assert_eq!(w.guesses_after(&[10, 20, 30], 8), &[40, 50, 60]);
+        assert_eq!(w.guesses_after(&[10, 20, 30], 2), &[40, 50]);
+    }
+
+    /// Where the target wrote something else, or has written past the window,
+    /// nothing of it is checked — and a window claiming more of the reply than
+    /// the head has (a forged or confused one) gives nothing either.
+    #[test]
+    fn a_window_the_reply_has_left_behind_gives_nothing() {
+        let w = window(2, &[30, 40, 50]);
+        assert!(
+            w.guesses_after(&[10, 20, 31], 8).is_empty(),
+            "the target disagreed"
+        );
+        assert!(
+            w.guesses_after(&[10, 20, 30, 40, 50], 8).is_empty(),
+            "all used"
+        );
+        assert!(
+            w.guesses_after(&[10, 20, 30, 40, 50, 60], 8).is_empty(),
+            "passed"
+        );
+        assert!(
+            window(5, &[1, 2]).guesses_after(&[10, 20], 8).is_empty(),
+            "ahead of the reply"
+        );
     }
 }

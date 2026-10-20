@@ -64,9 +64,10 @@ pub(crate) struct RetainedReply {
 pub(crate) enum ResendOutcome {
     /// Tokens to send, in order, followed by the terminal token when the
     /// reply has finished. May be empty if the range named nothing we hold.
+    /// The terminal is boxed: a token is large and the other outcomes empty.
     Send {
         tokens: Vec<StreamingToken>,
-        terminal: Option<StreamingToken>,
+        terminal: Option<Box<StreamingToken>>,
     },
     /// No reply retained under that id: it expired, was evicted, or was never
     /// ours.
@@ -161,7 +162,7 @@ impl RetainedReplies {
         let tokens = r.tokens[start as usize..end as usize].to_vec();
         ResendOutcome::Send {
             tokens,
-            terminal: r.terminal.clone(),
+            terminal: r.terminal.clone().map(Box::new),
         }
     }
 
@@ -193,6 +194,7 @@ mod tests {
             usage: None,
             matched_stop_sequence: None,
             logprob: None,
+            reply_ids: None,
         }
     }
 

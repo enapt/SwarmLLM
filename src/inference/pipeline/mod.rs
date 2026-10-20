@@ -19,6 +19,7 @@ mod prompt;
 mod prompt_admission;
 mod prompt_chunks;
 pub(crate) mod remote_generate;
+mod requester_guesses;
 mod speculative;
 mod split_prompt_cache;
 pub(crate) use split_prompt_cache::{believes_any_of, held_openings, HeldOpening};

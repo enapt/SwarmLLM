@@ -22,6 +22,17 @@ batch by batch on the same three-computer test (they shared one processor, which
 overlapping their work can win). Every computer in the chain needs this release; with an older
 one the reply checks batch by batch, as before.
 
+**Your computer can guess ahead for a model it holds none of.** When your computer holds none
+of a large model, it hands your request to the computer holding the model's first part, which
+writes the reply — and usually has no small model to guess the next words with. If yours holds a
+small model of the same family, it now follows the reply as it arrives, guesses ahead and sends
+the guesses on; the other computer checks them as it goes and never waits for them. A guess never
+changes the reply: only one the model would have written itself is kept. In one test between
+Thailand and Australia (0.4 seconds apart), a 7B model split over two computers wrote 2.5 tokens a
+second this way, against 2.3 with your computer driving the split itself. Both computers need
+this release, and a computer whose owner turned guessing off (`speculative_decoding = false`)
+is never sent guesses.
+
 **Long-distance splits send each computer's work at the speed of the link.** The connection
 most computers use to talk to each other spread every batch of a split's work over almost half a
 round trip, on top of the round trip itself, because its speed limit only rises when a sender

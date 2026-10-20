@@ -282,7 +282,7 @@ mod tests {
             vec![segment(local, (0, 16)), segment(peer.clone(), (16, 32))],
         );
         assert!(
-            crate::inference::pipeline::ngram_only_spec::eligible(&split),
+            crate::inference::pipeline::ngram_only_spec::eligible(&split, false),
             "fixture: the n-gram loop's own preconditions are met"
         );
 
@@ -314,7 +314,7 @@ mod tests {
              scheduler that planned it assumed"
         );
         assert!(
-            !crate::inference::pipeline::ngram_only_spec::eligible(&exec),
+            !crate::inference::pipeline::ngram_only_spec::eligible(&exec, false),
             "a plan the hand-off takes is never the per-round-trip loop's"
         );
     }

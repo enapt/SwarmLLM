@@ -3208,7 +3208,7 @@ pub(crate) async fn dispatch_network_messages(
                                                 );
                                                 let ntx = network_tx.clone();
                                                 tokio::spawn(async move {
-                                                    for token in tokens.into_iter().chain(terminal) {
+                                                    for token in tokens.into_iter().chain(terminal.map(|t| *t)) {
                                                         if ntx
                                                             .send(NetworkCommand::SendStreamingToken {
                                                                 target_peer_bytes: asker_bytes.clone(),
@@ -3228,6 +3228,39 @@ pub(crate) async fn dispatch_network_messages(
                                                     sender = %sender,
                                                     ?refused,
                                                     "ResendTokens refused"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    // A requester's guesses for a split this node leads for it
+                                    // (#318). Taken only from the peer that handed the reply
+                                    // over, only while it runs; see `state::requester_guesses`.
+                                    SwarmMessage::RequesterGuesses(window) => {
+                                        let Some(ref sender) = authenticated_sender else {
+                                            tracing::debug!("Dropping unauthenticated RequesterGuesses");
+                                            continue;
+                                        };
+                                        let Some(sender_bytes) = shared_state
+                                            .peer_id_map
+                                            .get(sender)
+                                            .map(|r| r.value().clone())
+                                        else {
+                                            tracing::debug!(sender = %sender, "RequesterGuesses from a peer with no known peer id — dropping");
+                                            continue;
+                                        };
+                                        let request_id = window.request_id;
+                                        use crate::daemon::state::requester_guesses::Offer;
+                                        match shared_state
+                                            .requester_guesses
+                                            .offer_from(&sender_bytes, window)
+                                        {
+                                            Offer::Taken | Offer::Stale => {}
+                                            Offer::Refused(why) => {
+                                                tracing::debug!(
+                                                    request_id = %request_id,
+                                                    sender = %sender,
+                                                    why,
+                                                    "RequesterGuesses refused"
                                                 );
                                             }
                                         }

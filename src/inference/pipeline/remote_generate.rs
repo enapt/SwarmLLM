@@ -780,6 +780,28 @@ impl PipelineExecutor {
         let load = super::LoadAllowance::for_segments(&self.shared_state, waited_on);
         let first_token_budget = first_token_timeout(prompt_tokens_est, load);
 
+        // A head leading a split for us guesses with what IT holds; this node
+        // may hold a small model of the family whole. Where the head takes
+        // them, it is sent guesses drafted from the reply as it streams in
+        // (#318). Dropped with this function, on every way it ends.
+        let (guesses_asked, mut guessing) = match hand_off {
+            HandOff::DelegatedSplit => super::requester_guesses::start(
+                &self.shared_state,
+                &self.network_tx,
+                &segment.node_id,
+                &target_peer_bytes,
+                wire_id,
+                &self.request.model_id,
+                prompt_ids.as_deref(),
+                &sampling,
+                super::worker_requester(&self.request),
+            ),
+            HandOff::WholeModel => None,
+        }
+        .map_or((None, None), |(asked, guessing)| {
+            (Some(asked), Some(guessing))
+        });
+
         // Register an inbound StreamingToken channel before sending the
         // request so we never miss an early token.
         let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<crate::types::StreamingToken>(
@@ -814,6 +836,7 @@ impl PipelineExecutor {
                 Some(crate::types::DelegatedSplit {
                     messages: self.request.messages.clone(),
                     tools: self.request.tools.clone(),
+                    guesses: guesses_asked,
                 }),
             ),
         };
@@ -1245,6 +1268,16 @@ impl PipelineExecutor {
             for t in stream.push_content(tok) {
                 if let Some(lp) = t.logprob.clone() {
                     token_logprobs.push(lp);
+                }
+                if guessing
+                    .as_mut()
+                    .is_some_and(|g| !g.hear(t.reply_ids.as_ref()))
+                {
+                    tracing::info!(
+                        %request_id,
+                        "requester guesses: the head's first token came without ids — it takes no guesses, stopping"
+                    );
+                    guessing = None;
                 }
                 if t.text.is_empty() {
                     continue;
@@ -1682,6 +1715,7 @@ mod stream_reassembly_tests {
             usage: None,
             matched_stop_sequence: None,
             logprob: None,
+            reply_ids: None,
         }
     }
 

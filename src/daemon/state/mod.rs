@@ -35,6 +35,7 @@ mod relay;
 mod removed_shards;
 mod repair;
 pub(crate) mod reply_lengths;
+pub(crate) mod requester_guesses;
 pub(crate) mod retained_activations;
 pub(crate) mod retained_replies;
 pub(crate) mod split_rounds;
@@ -1023,6 +1024,13 @@ pub struct SharedState {
     /// no address known is a DHT walk, and a forward names its next hop.
     pub(crate) next_hop_dial_budget: prompt_admission::AskBudget,
 
+    /// The guesses requesters send for the splits this node leads for them,
+    /// and the reply ids streamed back to them (#318): opened ONLY by
+    /// `dispatch::remote_generate::handle_delegated_split` (closed when its
+    /// guard drops), offered to only by dispatch's `RequesterGuesses` arm with
+    /// the authenticated sender.
+    pub(crate) requester_guesses: Arc<requester_guesses::RequesterGuessSlots>,
+
     /// The peers each request THIS node led ran segments on, across every
     /// attempt — what it tells, once the request is over, that the request is
     /// over (`router::release_request_on_peers`, #238). A peer serving a segment
@@ -1715,6 +1723,7 @@ impl SharedState {
             pending_prompt_admissions: DashMap::new(),
             prompt_ask_budget: prompt_admission::AskBudget::default(),
             next_hop_dial_budget: prompt_admission::AskBudget::default(),
+            requester_guesses: Arc::default(),
             request_peers: dashmap::DashMap::new(),
             planned_past_offered_memory: DashMap::new(),
             route_plan_overrides: DashMap::new(),

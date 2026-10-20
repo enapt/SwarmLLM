@@ -43,6 +43,7 @@ impl NetworkManager {
                 | SwarmMessage::StreamingToken(_)
                 | SwarmMessage::CancelInference(_)
                 | SwarmMessage::ResendTokens(_)
+                | SwarmMessage::RequesterGuesses(_)
         )
     }
 
@@ -53,6 +54,7 @@ impl NetworkManager {
             SwarmMessage::StreamingToken(t) => t.request_id,
             SwarmMessage::CancelInference(c) => c.request_id,
             SwarmMessage::ResendTokens(r) => r.request_id,
+            SwarmMessage::RequesterGuesses(g) => g.request_id,
             _ => uuid::Uuid::new_v4(),
         }
     }

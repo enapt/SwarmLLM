@@ -4223,6 +4223,105 @@ the same plan runs here instead.
 
 → `docs/invariants/scheduling.md` § "A split none of which is ours is LED by its head"
 
+## A requester guesses for the split its head leads (2026-10-20, #318)
+
+**The gap.** A led split guesses with what the HEAD holds — usually nothing better than prompt
+lookup — while the user's machine, which handed it over, often holds a small model of the family
+whole. Driving the split from the user instead uses that drafter but puts the user↔head trip into
+every pass. Measured on the remote rig (`~/swarmllm-318/drive318.sh`: Qwen2.5-Coder-7B over two
+processor nodes, the requester holding none of it and Qwen2.5-0.5B whole, every link 206 ms):
+led without guesses 1.27-1.31 tok/s, driven with the drafter (α 0.65-0.67, γ 2) 1.10. The trip
+cost more than the guesses earned.
+
+**The design.** The head leads and NEVER waits for a guess. The requester follows the reply as it
+streams in — it receives it anyway — and drafts ahead of it with its own drafter
+(`pipeline::requester_guesses`: `EngineDrafter::follow` + `draft`, a chunk of `guesses_per_check`
+at a time, kept up to four checks' worth ahead), sending each window to the head
+(`SwarmMessage::RequesterGuesses { request_id: the hand-off's wire id, after, tokens }`). Each
+pass the head's loop (`ngram_only_spec`) takes the newest window's guesses past its reply where
+the window's overlap equals what it produced since `after` (`RequesterGuesses::guesses_after`),
+else prompt lookup, else a one-token check. A late window costs rows, never a token: a guess is
+kept only where the target's own sample equals it (SpecExec), at any temperature. A window stays
+good across passes while the reply agrees with it, so the requester drafts past the reply rather
+than once per pass. No published system does this (prior-art search 10-20); its parts are AMUSD's
+rollback, PEARL's post-verify drafting and PipeInfer's handling of a stale run. "Speculation at a
+Distance" (arXiv 2606.25091) prefers a drafter beside the target over a client's — the
+alternative here is a head with none.
+
+**What a change must keep:**
+- **Never wait for a window.** The loop asks the slot and moves on; a stall waiting on the
+  requester would put its trip back into the pass.
+- **The reply's ids.** The head's stream carries text; a drafter reads ids. The loop records each
+  token in the request's slot BEFORE it emits it (`GuessSlot::record`, the first token too), and
+  the task streaming the reply attaches the new ones to the next `StreamingToken`
+  (`reply_ids: Option<ReplyIds{from, ids}>`, `take_unsent`) — retained with it, so a resend
+  carries them. The requester puts them together in order and drops ids past a gap
+  (`ReplyIdFeed`): it follows the reply whole or not at all.
+- **Shared noise.** The requester picks the seed and sends it with the hand-off
+  (`DelegatedSplit::guesses = GuessesAsked { coupling_seed, prompt_tokens }`); every sample the
+  head's loop draws for the reply — prompt lookup's rounds and one-token checks included — uses
+  it, keyed by absolute position, so a close drafter reproduces the SAMPLE. Only where the head
+  read the prompt as the same number of tokens; otherwise the guesses are checked uncoupled.
+  Fixed guesses lose nothing to coupling: each is kept with its probability either way.
+- **Trust.** A window is taken ONLY from the peer that handed the reply over (its authenticated
+  peer id, recorded when the slot is opened) and only while the reply runs (the slot's guard drops
+  with `handle_delegated_split`); at most `MAX_REQUESTER_GUESSES` (64) ids; never one that claims
+  to follow more of the reply than was sent; a window that crossed a newer one does not replace it;
+  each id is checked against the vocabulary before it is embedded (`requester_drafts`). A forged or
+  wrong window can waste rows, never change a token — and only the requester's own reply's. The
+  requester in turn takes no more ids than the reply's `max_tokens` (`ReplyIdFeed`), and its
+  drafter refuses an id outside its own vocabulary (`EngineDrafter::draft`), which ends the
+  guessing — a lying head only slows itself. Behind the head's vocabulary cut, every first
+  segment refuses an id its embedding table has no row for (`model_worker::wire_token_ids`, the
+  one reading of a forward's ids, single and batched): a card's row gather checks nothing, and
+  its kernel's assert ends the worker for everyone on it. That gap predates the guesses — any
+  coordinator chooses the ids it sends a first segment (security review of #318, 10-20).
+- **The stream is HANDED its slot.** The requester chooses the wire id, so a second hand-off can
+  name one already open here: `RequesterGuessSlots::open` refuses an open id (that reply goes on
+  without guesses) and `stream_reply_to_requester` takes the slot as a required argument, never
+  looking one up by the wire id — a lookup would hand the second requester the first reply's ids
+  (found in the in-session review, 10-20). The loop finds its slot by the head's OWN fresh id
+  (`for_led`).
+- **Wire.** Bit 28 `REQUESTER_GUESSES`: the requester offers guesses and sends windows only to a
+  head advertising it; the head attaches ids only to a reply that asked. The bit is NOT in
+  `features::ALL`: a head advertises it only where it would open a slot —
+  `daemon::state::requester_guesses::takes_guesses`, the one answer both ask
+  (`health::monitor::advertised_features`). Advertised unconditionally, a head with speculation
+  off made every requester load a drafter and read the prompt ahead for nothing (security review
+  of #318, 10-20; test `a_head_with_speculation_off_does_not_advertise_taking_guesses`). New fields are
+  `skip_serializing_if`, so an older peer sees the bytes it always did. The message is relayable
+  like the hand-off it belongs to.
+- **The head checks only as many guesses as pay for their positions.** A guess is free to
+  the requester and NOT to the head: each checked position is a row through every segment. On
+  processors a row costs about half a one-token pass (the 10-20 rig: one-token checks ~0.84 s a
+  pass, checks of 3-4 guesses ~2 s, 59% kept — the guesses broke even with none). So the loop
+  fits the check's cost to the positions it carried (`dsd_controller::CheckCost`, the line DSD's
+  own controller fits) and the guesses' acceptance (`AcceptanceEstimate`), and asks
+  `best_gamma_for_check` how many to check next — zero is an answer, and then the reply runs as
+  a led split with none. Where the tail is a graphics card a row is nearly free and the count
+  climbs to `guesses_per_check`. The fit is the head's own measurement, so the requester cannot
+  push it. A/B `SWARMLLM_HEAD_GUESS_GAMMA=fixed` (always `guesses_per_check`); test
+  `the_head_checks_as_many_guesses_as_pay_for_their_positions`.
+- **Where it stands aside.** A continued reply (`InferenceRequest::continuation`) takes no
+  guesses — its positions are not the ones the requester follows. A head whose owner turned
+  speculation off opens no slot, and a head that takes none (that, or one running DSD with its
+  own drafter) records no ids: the reply's first token reaches the requester without any, and
+  the requester stops drafting there (`GuessingAhead::hear`) — a head that takes guesses records
+  every token before it emits it, so its first always carries one. A head with its own drafter runs DSD first, as before. The
+  prompt-lookup payoff gate is bypassed for a reply with guesses and the reply's result is not
+  recorded into it: the payoff measures prompt lookup, not a model.
+
+**Tests**: `a_window_is_taken_only_from_the_peer_the_reply_is_for`,
+`an_oversized_or_impossible_window_is_refused`, `a_window_that_crossed_a_newer_one_does_not_replace_it`,
+`the_reply_ids_go_out_once_in_order`, `a_slot_closes_when_its_reply_ends`,
+`a_second_reply_under_an_open_id_gets_no_slot` (`daemon::state::requester_guesses`); `a_guess_outside_the_vocabulary_is_never_checked`
+(`ngram_only_spec`); `the_reply_ids_are_put_together_in_order`, `the_reply_ids_stop_at_the_replys_length`,
+`guesses_the_reply_agrees_with_are_kept_and_the_rest_dropped`, `a_window_is_cut_to_what_a_head_takes`,
+`a_head_that_does_not_take_guesses_is_never_offered_them`, `a_head_whose_first_token_carries_no_ids_is_not_guessed_for`
+(`pipeline::requester_guesses`); `a_forward_naming_a_token_the_table_has_no_row_for_is_refused`
+(`model_worker`); the wire
+pair in `swarmllm-types`. A/B in one binary: `SWARMLLM_REQUESTER_GUESSES=0` on the requester.
+
 ## A peer that fails a model on every request is left out of its plans for a while (2026-10-02)
 
 **What it replaced.** Field report (2026-10-01, v0.3.218): peer `bf7b3263`, a
