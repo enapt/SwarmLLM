@@ -351,6 +351,20 @@ if [ -n "${RIG_IN_NETNS:-}" ]; then
   ip link set lo up || { echo "cannot bring up loopback"; exit 2; }
 fi
 
+# RIG_RTT_MS=n (needs RIG_NETNS=1): every packet between the rig's nodes waits
+# n/2 ms each way (netem on the namespace's own loopback), so a pass pays a
+# real round trip in the transport itself: handshakes, acknowledgements and
+# libp2p's own frames included. SWARMLLM_TEST_TENSOR_DELAY_MS (DELAY_A/B)
+# holds only our tensor messages. RIG_RATE=20mbit caps the link's rate as
+# well. A worker talks to its node over a local socket, which netem never
+# touches. Measured 2026-10-20: delay 50ms gave a 101-104 ms ping.
+if [ -n "${RIG_RTT_MS:-}" ]; then
+  [ -n "${RIG_IN_NETNS:-}" ] || { echo "RIG_RTT_MS needs RIG_NETNS=1"; exit 2; }
+  tc qdisc add dev lo root netem delay "$((RIG_RTT_MS / 2))ms" ${RIG_RATE:+rate "$RIG_RATE"} \
+    || { echo "cannot add the delay to loopback (tc netem)"; exit 2; }
+  echo "rig: loopback round trip ${RIG_RTT_MS} ms${RIG_RATE:+, rate $RIG_RATE}: $(ping -c 2 -q 127.0.0.1 | tail -1)"
+fi
+
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"

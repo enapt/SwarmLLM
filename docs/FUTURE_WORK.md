@@ -80,8 +80,8 @@ speed is what the swarm is for, so split speed for large models is the top track
    instead of 20 min (v0.3.243). Field re-read 10-18: upload 2.7 KB/s, but the Kademlia answers
    fell to 0.90 KB/s, 2.3x, not the 12x the republication alone predicted. `kad_inbound` ((2g),
    v0.3.244) read on the field 10-19: upload 2.4 KB/s, Kademlia answers 0.51 KB/s, every one a
-   `find_node` — peers' routing-table refreshes. (2h) refreshes every 10 min instead of 5 (not yet
-   released); next, re-read once the fleet runs it, then the answers' size.
+   `find_node` — peers' routing-table refreshes. (2h) refreshes every 10 min instead of 5 (released in
+   v0.3.245); next, re-read once the fleet runs it, then the answers' size.
 9. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
     ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
     (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
@@ -1114,8 +1114,8 @@ within that interval (`RoutingTable.RefreshInterval`, `rtrefresh/rt_refresh_mana
 re-read 10-19 06:10-07:12Z** (`~/swarmllm-91/out_244/r1,r2`, 3714 s, the live node up 32 min at r1):
 upload 2410 B/s = gossip 1340 (message data), kad `peer` 509 B/s on 8.3 streams a minute, relay hop
 195, our direct messages 157. `kad_inbound`: 516 `find_node`, 0 `get_provider`, 0 `add_provider` —
-the whole row is peers' refreshes, each answer ~3.7 KB listing 17 peers. **(2h) 2026-10-19, not yet
-released**: libp2p's refresh runs every 10 min (`behaviour::KAD_REFRESH_SECS`, go-libp2p-kad-dht's
+the whole row is peers' refreshes, each answer ~3.7 KB listing 17 peers. **(2h) 2026-10-19, released in
+v0.3.245**: libp2p's refresh runs every 10 min (`behaviour::KAD_REFRESH_SECS`, go-libp2p-kad-dht's
 interval), and the discovery tick no longer starts one of its own. That call ran every ~295 s, just
 inside libp2p's 300 s, so it only pushed libp2p's timer back: the old cadence was ONE refresh per
 5 min, not two (each joiner's log, `kad_refresh_rig.sh` on v0.3.244). Rig (`examples/kad_refresh_rig.sh`,
@@ -2773,7 +2773,7 @@ grep `^| N |`).
   directory's key unproven, as every release did; and the dashboard's own `localhost` address can
   reach a program on `[::1]` → #317.
 
-**Closed 2026-10-19, not yet released** (#316, #304, #269, #305, #184, #179, #115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163, #310; #186 decided)
+**Closed 2026-10-19, released in v0.3.245** (#316, #304, #269, #305, #184, #179, #115 (2a), #115 (2b), #91 (2h), #285, #141, #196, #302, #163, #310; #186 decided)
 - #316 — **`inference.local_embedding_privacy` keeps the prompt's tokens on this computer, as it
   says.** It had never worked on a real node, three ways at once (found 2026-10-20 checking a
   release reviewer's finding on a rig): (1) the embedder opened `shard_000.bin` as a whole GGUF —

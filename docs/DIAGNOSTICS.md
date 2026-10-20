@@ -1204,9 +1204,14 @@ For per-token decode analysis, combine the forward pass timing with the decode l
 
 **Emulating a link on one machine**: `SWARMLLM_TEST_TENSOR_DELAY_MS=N` holds every outbound
 tensor forward and result N ms in the network manager, so two nodes on one box see a round trip
-2N longer (`tc netem` needs root). The split's speed at a same-city or same-country distance is
-measured this way (`~/swarmllm-link-0930/sweep.sh`); it delays each message once — an encrypted
-forward re-enters the handler as `SendEncodedTensor`, which is not delayed again.
+2N longer. The split's speed at a same-city or same-country distance was measured this way
+(`~/swarmllm-link-0930/sweep.sh`); it delays each message once — an encrypted forward re-enters
+the handler as `SendEncodedTensor`, which is not delayed again. It delays ONLY our tensor
+messages: the transport's handshakes and acknowledgements, libp2p's own frames and the forward
+ACK cross at once. **To delay every packet, `split_rig.sh` with `RIG_NETNS=1 RIG_RTT_MS=N`**
+(2026-10-20): `tc netem` needs no root inside the private network namespace `unshare -rn` gives
+the rig, so netem goes on that namespace's loopback (`RIG_RATE=20mbit` caps the rate too; a 50 ms
+delay each way read a 101-104 ms ping). A worker's socket to its node is untouched.
 
 **Split speculation's continuous stream** (`pipeline::dsd_stream`, ON by default on the coordinator since
 v0.3.216 — `SWARMLLM_SPEC_STREAM=0` keeps the rounds; it streams only to a node on v0.3.216 or later, `features::STREAM_AS_ONE_WORK`): `SWARMLLM_SPEC_STREAM_GUESSES` guesses per
