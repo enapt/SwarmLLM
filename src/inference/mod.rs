@@ -1122,7 +1122,8 @@ mod finalize_reply_text_tests {
 #[cfg(test)]
 mod qmatmul_exactness_tests {
     use candle_core::quantized::k_quants::{
-        matmul, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ6K, GgmlType,
+        matmul, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ4_1, BlockQ5_0, BlockQ5_1, BlockQ6K,
+        BlockQ8_0, GgmlType,
     };
 
     /// The upstream algorithm: batch row outer, one `vec_dot` per element.
@@ -1186,6 +1187,51 @@ mod qmatmul_exactness_tests {
         check::<BlockQ6K>("Q6_K");
         check::<BlockQ2K>("Q2_K");
         check::<BlockQ3K>("Q3_K");
+        check::<BlockQ8_0>("Q8_0");
+        check::<BlockQ4_0>("Q4_0");
+        check::<BlockQ5_0>("Q5_0");
+        check::<BlockQ4_1>("Q4_1");
+        check::<BlockQ5_1>("Q5_1");
+    }
+
+    /// The 32-value formats' SIMD dot products (Q5_0, Q4_1 and Q5_1 had none
+    /// before 2026-10-20) against the scalar loop over the same blocks. Not
+    /// bit-identical — eight lanes sum in another order — but a misread fifth
+    /// bit or offset misses by whole units of the block scale, not by rounding.
+    fn agrees_with_the_scalar_loop<T: GgmlType>(label: &str) {
+        let k = 896usize; // 28 blocks: the 0.5B drafter's width
+        let kb = k / T::BLCK_SIZE;
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut noise = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as f32 / (1u64 << 31) as f32 - 0.5) * 2.0
+        };
+        for trial in 0..64 {
+            let w: Vec<f32> = (0..k).map(|_| noise()).collect();
+            let a: Vec<f32> = (0..k)
+                .map(|_| noise() + if trial % 2 == 0 { 0.3 } else { 0.0 })
+                .collect();
+            let mut col = vec![T::zeros(); kb];
+            T::from_float(&w, &mut col);
+            let mut row = vec![T::VecDotType::zeros(); kb];
+            T::VecDotType::from_float(&a, &mut row);
+            let (got, want) = (T::vec_dot(k, &col, &row), T::vec_dot_unopt(k, &col, &row));
+            assert!(
+                (got - want).abs() <= 1e-4 * (1.0 + want.abs()),
+                "{label} trial {trial}: SIMD {got} against scalar {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_32_value_dot_products_agree_with_the_scalar_loop() {
+        agrees_with_the_scalar_loop::<BlockQ8_0>("Q8_0");
+        agrees_with_the_scalar_loop::<BlockQ4_0>("Q4_0");
+        agrees_with_the_scalar_loop::<BlockQ5_0>("Q5_0");
+        agrees_with_the_scalar_loop::<BlockQ4_1>("Q4_1");
+        agrees_with_the_scalar_loop::<BlockQ5_1>("Q5_1");
     }
 }
 

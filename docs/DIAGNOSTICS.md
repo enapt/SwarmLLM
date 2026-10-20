@@ -1891,8 +1891,12 @@ card (prompt)` — part of the projection stages' time, left out of their sum.
 so the line reads high and the stage after a copy reads low: read the split
 between copy and product from a `SWARMLLM_PROFILE_SYNC=1` run only (#138 (1d)).
 Under every quantized product on the processor, `SWARMLLM_QMATMUL_ROWS=per-row`
-sends the several-row kernels (Q4_K, Q6_K, Q2_K, Q3_K) through the per-row loop —
-bit-identical replies, so any difference is the kernels' time.
+sends the several-row kernels (Q4_K, Q6_K, Q2_K, Q3_K, Q8_0, Q4_0, Q5_0, Q4_1, Q5_1)
+through the per-row loop — bit-identical replies, so any difference is the kernels' time.
+`SWARMLLM_QDOT_32=scalar` puts Q5_0 / Q4_1 / Q5_1 back on upstream's scalar loop (replies
+may move by a near-tie). **A kernel whose cost per row changes with the row count or the
+inlining site** is a dependency, not arithmetic: time it alone (`qmatmul_bench
+--kernel-only`) and read its loop compiled on its own (gotcha #920).
 `SWARMLLM_QMATMUL_TAIL=per-row` turns off only the 2-3 row tail's shared pass — the
 whole call of a speculative check of 1-2 guesses (`--prompt-chunk 2` / `3` prices it).
 `SWARMLLM_RAYON_SPIN_US=0` puts every rayon pool back on upstream's idle loop (workers

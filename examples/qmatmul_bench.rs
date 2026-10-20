@@ -7,7 +7,9 @@
 //! ```bash
 //! cargo run --release --no-default-features --features dev --example qmatmul_bench
 //! ```
-use candle_core::quantized::k_quants::{matmul, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ6K, GgmlType};
+use candle_core::quantized::k_quants::{
+    matmul, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ5_0, BlockQ6K, BlockQ8_0, GgmlType,
+};
 use rayon::prelude::*;
 
 /// Reproduces the ORIGINAL upstream algorithm (batch row outer, full weight
@@ -270,7 +272,59 @@ fn dequant_split() {
     }
 }
 
+/// One column against 1-8 rows, single-threaded, everything in L1: the
+/// several-row kernel's own cost per row and block, with no matmul, pool or
+/// memory around it. `--kernel-only` runs just this.
+fn kernel_sweep<T: GgmlType>(label: &str, k: usize) {
+    let kb = k / T::BLCK_SIZE;
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut noise = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((seed >> 33) as f32 / (1u64 << 31) as f32 - 0.5) * 2.0
+    };
+    let w: Vec<f32> = (0..k).map(|_| noise()).collect();
+    let mut col = vec![T::zeros(); kb];
+    T::from_float(&w, &mut col);
+    let a: Vec<f32> = (0..8 * k).map(|_| noise()).collect();
+    let mut ys = vec![T::VecDotType::zeros(); 8 * kb];
+    for r in 0..8 {
+        T::VecDotType::from_float(&a[r * k..(r + 1) * k], &mut ys[r * kb..(r + 1) * kb]);
+    }
+    let mut out = [0f32; 8];
+    print!("  {label:<6} k={k}  ns per row-block by rows a call:");
+    for rows in 1..=8usize {
+        let calls = 200_000;
+        let mut best = f64::INFINITY;
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            for _ in 0..calls {
+                T::vec_dot_rows(
+                    k,
+                    std::hint::black_box(&col),
+                    std::hint::black_box(&ys[..rows * kb]),
+                    rows,
+                    &mut out,
+                );
+                std::hint::black_box(&out);
+            }
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        print!("  {rows}:{:.2}", best * 1e9 / (calls * rows * kb) as f64);
+    }
+    println!();
+}
+
 fn main() {
+    if std::env::args().any(|a| a == "--kernel-only") {
+        kernel_sweep::<BlockQ8_0>("Q8_0", 896);
+        kernel_sweep::<BlockQ4_0>("Q4_0", 896);
+        kernel_sweep::<BlockQ5_0>("Q5_0", 896);
+        kernel_sweep::<BlockQ4K>("Q4_K", 3072);
+        kernel_sweep::<BlockQ6K>("Q6_K", 3072);
+        return;
+    }
     println!("candle quantized matmul (Q4_K)");
     // llama-3.2-3b shapes: attention projection and FFN up.
     // m = 2..7 are a speculative check's shapes (1-6 guesses): a full pass of
@@ -299,6 +353,15 @@ fn main() {
     // in Q2_K, its down in Q3_K; a prompt gives each expert ~8-40 rows (#138).
     bench::<BlockQ2K>("expert gate Q2_K", 2048, 768, &[1, 2, 3, 4, 7, 8, 32, 128]);
     bench::<BlockQ3K>("expert down Q3_K", 768, 2048, &[1, 2, 3, 4, 7, 8, 32, 128]);
+    // The 32-value formats: a Qwen2.5-0.5B drafter's shapes (896 wide, too
+    // narrow for a K-quant, so its Q4_K_M is mostly Q5_0) and its tied output
+    // head in Q8_0, which a tree step runs for every row.
+    let rows = [1, 2, 3, 4, 7, 8, 16, 64];
+    bench::<BlockQ8_0>("ffn up Q8_0", 896, 4864, &rows);
+    bench::<BlockQ8_0>("ffn down Q8_0", 4864, 896, &rows);
+    bench::<BlockQ5_0>("ffn up Q5_0", 896, 4864, &rows);
+    bench::<BlockQ4_0>("ffn up Q4_0", 896, 4864, &rows);
+    bench::<BlockQ8_0>("output head Q8_0", 896, 151936, &[1, 2, 4, 8]);
     if std::env::args().any(|a| a == "--rows-only") {
         return;
     }

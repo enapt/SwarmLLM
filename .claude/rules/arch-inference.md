@@ -109,6 +109,12 @@ A forward of up to `cuda_graph::MAX_POSITIONS` (8) positions is captured when no
 
 → `docs/invariants/inference.md` § "A speculative check is captured too, and a layout is uploaded once"
 
+## A tree of guesses is read through ONE wrapper, each row at its own depth (2026-10-20, #134)
+
+**`SplitModel::with_draft_tree`** is the one way a tree reaches a forward — the worker's check and each step of the drafter's growth (`draft_tree_after`). Each row is rotated at `base + depth` (`layers::RowPositions`, set on the thread that runs the layers — and SET for every job a pool runs, `None` included, by `cpu_pools::with_the_callers_scope`: a pool thread waiting in a tree's forward runs other forwards, which read its positions) and reads the context plus its own ancestors (`DraftTree::rows_for`'s mask), on standard attention, never as a graph. A tree whose rows do not end where the cache does is refused with the caches put back. A layer that keeps keys by position or one state per request (window, shared cache, MLA, recurrent) refuses up front (`draft_tree_refusal`). Tests: `split/tests/draft_trees.rs` (each row equals its own path read fresh; a chain over the same rows must differ).
+
+→ `docs/invariants/scheduling.md` § "A split checks a tree of guesses"
+
 ## Attention kernel choice and the query-length cliff (2026-08-23)
 
 Every CPU decode fast path was once gated on `q_len == 1` exactly, so a 2-token
@@ -317,7 +323,7 @@ REQUIRED `KeepAsked` argument of `insert_from_kv`, #251 (2b)).
 
 Each names the ONE place a decision is made (`.claude/rules/architecture.md` § "One invariant, N paths"). **Read the topic file before changing one.**
 
-- **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`. Several-row AVX2 kernels for Q4_K, Q6_K, Q2_K, Q3_K, bit-identical to the per-row loop; `k_quants::vec_dot_rows_chosen` is the one call (A/B `SWARMLLM_QMATMUL_ROWS=per-row`). A 2-3 row tail — a speculative check's whole call — goes through ONE pass (`avx.rs::tail_in_one_pass`; A/B `SWARMLLM_QMATMUL_TAIL=per-row`). → § "A 2-3 row tail shares one pass too"
+- **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`. Several-row AVX2 kernels for Q4_K, Q6_K, Q2_K, Q3_K and the 32-value formats (Q8_0, Q4_0, Q5_0, Q4_1, Q5_1 — `avx.rs::rows_of_a_32_value_format`, the column unpacked by the one-row kernel's own function), bit-identical to the per-row loop; `k_quants::vec_dot_rows_chosen` is the one call (A/B `SWARMLLM_QMATMUL_ROWS=per-row`). A 2-3 row tail — a speculative check's whole call — goes through ONE pass (`avx.rs::tail_in_one_pass`; A/B `SWARMLLM_QMATMUL_TAIL=per-row`). Q5_0/Q4_1/Q5_1 have AVX2 one-row kernels (llama.cpp's; upstream ran the scalar loop — A/B `SWARMLLM_QDOT_32=scalar`). ⚠ **No scalar `f16::to_f32` in a loop carrying a vector accumulator**: it compiles to a `vpinsrw` that merges into whatever register the allocator picks — the accumulator, measured, ~15 cycles a block (gotcha #920); build the input in a general register (`avx.rs::scale_product` / `block_scale_products`, bit-identical). → § "A 2-3 row tail shares one pass too", § "The 32-value formats run on AVX2"
 - **`inference::decode_attn::gqa_decode_attention_cpu`** — each K/V row read ONCE per group. → § "It read the cache once per QUERY head"
 - **`inference::prefill_attn::gqa_prefill_attention_cpu`** — `q_len >= 2`.
 - **`inference::attn_rows::chunk_partials` + `merge_into` / `finish_row`** — the ONE arithmetic of a row's attention on the processor, both kernels. → § "A row's attention on the processor does not depend on the forward it is in"

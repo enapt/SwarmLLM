@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+**Many models answer faster on the processor.** Model files keep some of their weights in
+formats called Q5_0, Q4_1 and Q5_1 wherever a layer's size does not suit the usual 4- and 5-bit
+formats — about half of a small Qwen 2.5 file, an eighth of GLM-4 9B, and the expert layers of
+Gemma 4's 26B model. On Intel and AMD processors those weights were worked through one number at
+a time; they now use the processor's wide instructions, as llama.cpp does. Working on several
+tokens at once — reading a prompt, or checking guessed words — is also faster for these formats
+and for Q8_0 and Q4_0. GLM-4 9B on a laptop processor now writes 5.9 tokens a second instead
+of 4.5 and reads a prompt twice as fast; the small model a split uses to guess
+ahead makes a guess in 15 milliseconds instead of 26, and checks eight guesses at once in 53
+instead of 183. Replies from Q8_0 and Q4_0 files are unchanged; the other three formats now add
+their numbers up in llama.cpp's order, which can change a word where two were almost equally
+likely.
+
 **A computer that holds all but a few parts of a model fetches the rest, and runs it on its own.**
 A computer that had lost one part of a model to an older release's clean-up never fetched it
 back: the network already had enough copies of that part, so every request went through another

@@ -360,6 +360,85 @@ small Q2_K/Q3_K expert shapes (768 × 2048) are dispatch-bound at m = 2-3 either
 (0.15 ms a call against 0.04 at m = 1) — a mixture-of-experts check goes through
 `matmul_many` instead.
 
+### The 32-value formats run on AVX2, one row and several, and a scale never waits on the accumulator (2026-10-20, #323)
+
+**What was wrong — three things, found profiling the drafter's tree step (#134).** A tree step
+forwards ~8 rows with logits at every row; it cost 7.1× one row (141.6 against 19.5 ms,
+Qwen2.5-0.5B Q8_0, 4 threads, release), and a 64-token prompt read at 13 ms a token against
+20.7 ms a decoded one — the rows shared nothing.
+
+1. **Q5_0, Q4_1 and Q5_1 had no SIMD kernel on x86**: upstream candle's `vec_dot` was the
+   scalar `vec_dot_unopt`. llama.cpp writes them wherever a row is too narrow for a K-quant (a
+   length not a multiple of 256: Q4_K → Q5_0, Q5_K → Q5_1, Q6_K → Q8_0), so the 0.5B's Q4_K_M
+   (896 wide) is 44% Q5_0 by bytes, GLM-4-9B's (feed-forward 13,696) 12.5%, and every Gemma 4
+   26B-A4B's down experts are one (#292). Now llama.cpp's `ggml_vec_dot_q5_0_q8_0` /
+   `_q4_1_q8_1` / `_q5_1_q8_1` (`ggml-cpu/arch/x86/quants.c`), operation for operation.
+2. **None of the five 32-value formats had a several-row kernel**, so an R-row product was R
+   one-row products. `avx.rs::rows_of_a_32_value_format` gives each one: the column unpacked
+   once (`q8_0_bytes` … `q5_1_bytes` — the functions the one-row kernels unpack through, so the
+   two cannot drift), four rows a pass with four independent accumulator chains (llamafile's
+   `tinyBLAS_Q0_AVX`, `ggml-cpu/llamafile/sgemm.cpp`, tiles the same per-block sequence 4×2 on
+   AVX2 for this reason), a 2-3 row tail in one pass (`tail_in_one_pass`), bit-identical to the
+   per-row loop.
+3. **A scalar `f16::to_f32` merged into the accumulator.** It compiles to `vpinsrw $0, mem,
+   %xmmN, %xmmM` — LLVM treats the vector's other lanes as unused, so the load MERGES into
+   whatever register the allocator picks for N. Where that was the accumulator, every block's
+   scale waited for the previous block's FMA (insert → convert → multiply → broadcast → FMA,
+   ~15 cycles a block against ~4), and which kernel paid moved with register allocation: in the
+   crate Q8_0's 2- and 3-row passes (3.69 / 2.84 ns a row-block, against 1.27 at four rows and
+   1.59 for ONE), in a standalone copy of the same source its one-row loop (3.50 against 1.54).
+   **`avx.rs::scale_product`** (one row) and **`block_scale_products`** (a pass: the column's
+   scale and every row's in ONE eight-lane conversion, `row_lane` to pick one) pack the halves
+   in a general register and move them with `vmovd` / `vmovq`, which write the whole vector
+   register. Bit-identical: each lane is one f16 → f32 conversion and one IEEE product, and
+   multiplication commutes exactly. Found with `qmatmul_bench --kernel-only` (one thread, one
+   column against 1-8 rows, all in L1) and read off the kernel compiled alone (`rustc -O -C
+   target-cpu=native --emit asm`; gotcha #920).
+
+**Measured** (Ryzen 7 5800H, 4 threads, live node idle, release; "before" is the same bench on
+the morning's binary):
+
+| Qwen2.5-0.5B (`prefill_bench`, logits at every row) | Q8_0 before | after | Q4_K_M before | after |
+|---|---|---|---|---|
+| one row (a guess) | 20.7 ms | **16.0** | 26.3 | **14.7** |
+| 2 rows | 37.3 | **18.9** | 48.2 | **19.5** |
+| 8 rows (a tree step) | 141.6 | **55.8** | 182.7 | **53.0** |
+| 64-token prompt | 76 tok/s | **185** | 51 | **182** |
+
+GLM-4-9B Q4_K_M on the processor (12.5% Q5_0, its feed-forward down), ABBA in one binary
+(`SWARMLLM_QDOT_32=scalar` the old arm, so the Q8_0 changes are in both): decode 220-223 →
+167-173 ms a token (4.5 → 5.8-6.0 tok/s), a 64-token prompt 7.1-7.3 → 13.9-14.0 tok/s
+(`~/swarmllm-318/glm4_speed.sh`).
+
+In process (`qmatmul_bench --rows-only`): the Q8_0 output head (896 × 151,936) 4.05 → 1.66 ms
+a row at 8 rows; the Q8_0 feed-forward up (896 × 4,864) 0.160 → 0.081 ms at ONE row, the scale
+fix alone (upstream's kernel was the one paying). Per row-block on one thread, every row count
+now lands at 1.3-1.8 ns for Q8_0 / Q4_0 / Q5_0; the four-row pass gave back ~10% (1.27 → 1.40)
+for its permute a row, in exchange for no row count being pathological.
+
+**A/B inside one binary**: `SWARMLLM_QDOT_32=scalar` puts Q5_0 / Q4_1 / Q5_1 back on the
+scalar loop, one row and several (`k_quants::simd_32_value_dots`) — the Q4_K_M drafter is back
+at 25.5 ms a guess and 51 tok/s. `SWARMLLM_QMATMUL_ROWS=per-row` still turns off every
+several-row kernel. The scale fix has no switch: it changes no bits. Tests:
+`multi_row_kernels_are_bit_identical_to_the_per_row_ordering` (all nine types) and
+`the_32_value_dot_products_agree_with_the_scalar_loop` (hashed data, a NaN-failing tolerance —
+gotcha #882).
+
+**Replies.** Q8_0 and Q4_0 are bit-identical to before. Q5_0 / Q4_1 / Q5_1 now sum as
+llama.cpp's AVX2 does (eight lanes, one horizontal sum) instead of block by block, which moves a
+precision-sensitive model's near-ties: GLM-4-9B on the processor, 73 tokens of English (65
+prompt + 8 decode) against llama-cpp-python 0.3.16 — median cosine 0.999610 (scalar 0.999633),
+worst 0.998282 (0.998265), top-1 67 against 71 of 73; all six positions either arm misses are
+the same two candidates within 0.017-0.19 logits of each other. The two arms differ from EACH
+OTHER by as much as from llama.cpp (median 0.99964): our activations quantize differently
+(`BlockQ8_0::from_float` rounds half away from zero with `1/d`; llama.cpp's AVX2
+`quantize_row_q8_0` rounds to even with `127/max`), which swamps the summation order.
+
+**What a change must keep.** A several-row kernel unpacks through its one-row sibling's
+function. No scalar `f16::to_f32` inside a loop that carries a vector accumulator — build the
+conversion's input in a general register (`scale_product`). The K-quant kernels still convert
+their scales with `to_f32` (once per 256 values, so a stall costs less) — unmeasured.
+
 ## Idle rayon workers spin 200 µs before they sleep — the vendored `rayon-core` (2026-10-14)
 
 **The rule**: every rayon pool in the binary runs on `vendor/rayon-core` (1.13.0 + one patch,
@@ -5778,7 +5857,7 @@ them is this codebase's most-repeated defect — see `.claude/rules/architecture
 
 Full evidence: `docs/invariants/inference.md`
 
-- **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`.
+- **Vendored `GgmlType::vec_dot_rows` + the row-blocked tiled matmul** — `vendor/candle/candle-core/src/quantized/{k_quants,avx}.rs`. The 32-value formats' kernels and their scale conversion (`scale_product`, `block_scale_products`) → § "The 32-value formats run on AVX2".
 - **`inference::decode_attn::gqa_decode_attention_cpu`** — single-position attention straight over the KV cache in its stored `[b, kvh, S, d]` layout. **Each K/V row is read ONCE per group, never once per query head** (the per-head version was #119's long-context slowdown); tasks are (batch, kv head, fixed 256-position chunk) merged by flash-decoding's reduction — the chunk is a constant so the result never depends on the thread count. → `docs/invariants/inference.md` § "It read the cache once per QUERY head".
 - **`inference::prefill_attn::gqa_prefill_attention_cpu`** — the same idea for `q_len >= 2`: key-tiled, the score matrix never written out; the matmul paths it replaces on the CPU live on as `layers::matmul_attention`.
 - **`inference::fast_math`** — eight-lane AVX2 `expf` (`exp_inplace`, Cephes polynomial, ~2 ulp vs libm, pinned by `vectorised_exp_tracks_libm` over [-80, 80]) and the fused `silu_mul` CustomOp2. A new elementwise pass that calls `f32::exp` in a loop routes through here instead.

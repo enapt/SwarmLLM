@@ -106,6 +106,17 @@ pub(crate) fn vec_dot_rows_chosen<T: GgmlType>(
     }
 }
 
+/// SwarmLLM patch: `SWARMLLM_QDOT_32=scalar` sends Q5_0, Q4_1 and Q5_1 — one
+/// row and several — back through the scalar loop upstream ran on x86, the A/B
+/// that prices their AVX2 kernels inside one binary. The two answers differ by
+/// summation order only. Read once.
+#[cfg(target_feature = "avx2")]
+#[inline(always)]
+fn simd_32_value_dots() -> bool {
+    static SCALAR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*SCALAR.get_or_init(|| std::env::var("SWARMLLM_QDOT_32").is_ok_and(|v| v == "scalar"))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[repr(C)]
 pub struct BlockQ4_0 {
@@ -302,6 +313,15 @@ impl GgmlType for BlockQ4_0 {
         Self::vec_dot_unopt(n, xs, ys)
     }
 
+    // SwarmLLM patch: AVX2 multi-row kernel (see `avx::rows_of_a_32_value_format`).
+    #[allow(unreachable_code)]
+    fn vec_dot_rows(n: usize, xs: &[Self], ys: &[Self::VecDotType], rows: usize, out: &mut [f32]) {
+        #[cfg(target_feature = "avx2")]
+        return super::avx::vec_dot_rows_q4_0_q8_0(n, xs, ys, rows, out);
+
+        vec_dot_rows_generic::<Self>(n, xs, ys, rows, out)
+    }
+
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
         debug_assert!(
             n.is_multiple_of(QK8_0),
@@ -327,8 +347,24 @@ impl GgmlType for BlockQ4_1 {
     const BLCK_SIZE: usize = QK4_1;
     type VecDotType = BlockQ8_1;
 
+    // SwarmLLM patch: AVX2 (upstream ran the scalar loop on every x86 build).
     fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
+        #[cfg(target_feature = "avx2")]
+        if simd_32_value_dots() {
+            return super::avx::vec_dot_q4_1_q8_1(n, xs, ys);
+        }
+
         Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    // SwarmLLM patch: AVX2 multi-row kernel (see `avx::rows_of_a_32_value_format`).
+    fn vec_dot_rows(n: usize, xs: &[Self], ys: &[Self::VecDotType], rows: usize, out: &mut [f32]) {
+        #[cfg(target_feature = "avx2")]
+        if simd_32_value_dots() {
+            return super::avx::vec_dot_rows_q4_1_q8_1(n, xs, ys, rows, out);
+        }
+
+        vec_dot_rows_generic::<Self>(n, xs, ys, rows, out)
     }
 
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
@@ -428,6 +464,7 @@ impl GgmlType for BlockQ5_0 {
     const BLCK_SIZE: usize = QK5_0;
     type VecDotType = BlockQ8_0;
 
+    // SwarmLLM patch: AVX2 (upstream ran the scalar loop on every x86 build).
     fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
         let qk = Self::BLCK_SIZE;
 
@@ -435,11 +472,22 @@ impl GgmlType for BlockQ5_0 {
             n.is_multiple_of(qk),
             "vec_dot_q5_0_q8_0: {n} is not divisible by {qk}"
         );
-        debug_assert!(
-            (n / qk).is_multiple_of(2),
-            "vec_dot_q5_0_q8_0: {n}, nb is not divisible by 2"
-        );
+        #[cfg(target_feature = "avx2")]
+        if simd_32_value_dots() {
+            return super::avx::vec_dot_q5_0_q8_0(n, xs, ys);
+        }
+
         Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    // SwarmLLM patch: AVX2 multi-row kernel (see `avx::rows_of_a_32_value_format`).
+    fn vec_dot_rows(n: usize, xs: &[Self], ys: &[Self::VecDotType], rows: usize, out: &mut [f32]) {
+        #[cfg(target_feature = "avx2")]
+        if simd_32_value_dots() {
+            return super::avx::vec_dot_rows_q5_0_q8_0(n, xs, ys, rows, out);
+        }
+
+        vec_dot_rows_generic::<Self>(n, xs, ys, rows, out)
     }
 
     fn vec_dot_unopt(_n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
@@ -534,8 +582,24 @@ impl GgmlType for BlockQ5_1 {
     const BLCK_SIZE: usize = QK5_1;
     type VecDotType = BlockQ8_1;
 
+    // SwarmLLM patch: AVX2 (upstream ran the scalar loop on every x86 build).
     fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
+        #[cfg(target_feature = "avx2")]
+        if simd_32_value_dots() {
+            return super::avx::vec_dot_q5_1_q8_1(n, xs, ys);
+        }
+
         Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    // SwarmLLM patch: AVX2 multi-row kernel (see `avx::rows_of_a_32_value_format`).
+    fn vec_dot_rows(n: usize, xs: &[Self], ys: &[Self::VecDotType], rows: usize, out: &mut [f32]) {
+        #[cfg(target_feature = "avx2")]
+        if simd_32_value_dots() {
+            return super::avx::vec_dot_rows_q5_1_q8_1(n, xs, ys, rows, out);
+        }
+
+        vec_dot_rows_generic::<Self>(n, xs, ys, rows, out)
     }
 
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {
@@ -709,6 +773,15 @@ impl GgmlType for BlockQ8_0 {
         return super::simd128::vec_dot_q8_0_q8_0(n, xs, ys);
 
         Self::vec_dot_unopt(n, xs, ys)
+    }
+
+    // SwarmLLM patch: AVX2 multi-row kernel (see `avx::rows_of_a_32_value_format`).
+    #[allow(unreachable_code)]
+    fn vec_dot_rows(n: usize, xs: &[Self], ys: &[Self::VecDotType], rows: usize, out: &mut [f32]) {
+        #[cfg(target_feature = "avx2")]
+        return super::avx::vec_dot_rows_q8_0_q8_0(n, xs, ys, rows, out);
+
+        vec_dot_rows_generic::<Self>(n, xs, ys, rows, out)
     }
 
     fn vec_dot_unopt(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32 {

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #323**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #324**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2837,7 +2837,23 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-20, not yet released** (#255, #320, #321)
+**Closed 2026-10-20, not yet released** (#255, #320, #321, #323)
+- #323 — **Q5_0, Q4_1 and Q5_1 run on AVX2, and the five 32-value formats share a pass over
+  several rows.** Found profiling the drafter's tree step (#134): 8 rows of Qwen2.5-0.5B cost
+  7.1× one row. Upstream candle ran Q5_0 / Q4_1 / Q5_1 through the scalar loop on x86 (llama.cpp
+  writes them wherever a row is too narrow for a K-quant: 44% of the 0.5B's Q4_K_M, 12.5% of
+  GLM-4-9B's, every Gemma 4 26B-A4B's down experts); none of Q8_0 / Q4_0 / Q5_0 / Q4_1 / Q5_1 had
+  a several-row kernel; and a scalar `f16::to_f32` compiled to a `vpinsrw` that merged into the
+  accumulator, serialising every block (gotcha #920). Now llama.cpp's AVX2 kernels,
+  `avx.rs::rows_of_a_32_value_format` (bit-identical to the per-row loop) and
+  `scale_product` / `block_scale_products`. 0.5B Q4_K_M, 4 threads: a guess 26.3 → 14.7 ms, 8
+  rows 182.7 → 53.0, a prompt 51 → 182 tok/s (Q8_0: 20.7 → 16.0, 141.6 → 55.8, 76 → 185);
+  GLM-4-9B on the processor: decode 220 → 170 ms a token, a prompt 7.2 → 13.9 tok/s. Q8_0 and
+  Q4_0 replies are bit-identical; the other three sum as llama.cpp does (GLM-4 against llama.cpp:
+  median cosine 0.999610 vs 0.999633 before, the misses near-ties). A/B `SWARMLLM_QDOT_32=scalar`;
+  `docs/invariants/inference.md` § "The 32-value formats run on AVX2". Left: the K-quant kernels
+  still convert scales with `to_f32` (unmeasured), and our Q8_0 activation rounding is not
+  llama.cpp's (half away from zero with `1/d` against to-even with `127/max`).
 - #320 — **A node holding all but a few parts of a model fetches the rest, past the replica
   target, and keeps them.** Field report 2026-10-19 (a tester, RTX 3060 12 GB, v0.3.244):
   Qwen3-30B-A3B sat at 33/34 parts since a prune before #286 took part 20 (`holders=4 target=3`).

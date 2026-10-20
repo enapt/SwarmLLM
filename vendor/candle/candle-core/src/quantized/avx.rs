@@ -1,5 +1,6 @@
 use super::k_quants::{
-    BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ5K, BlockQ6K, BlockQ8K, BlockQ8_0, QK8_0, QK_K,
+    BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ4_1, BlockQ5K, BlockQ5_0, BlockQ5_1, BlockQ6K,
+    BlockQ8K, BlockQ8_0, BlockQ8_1, QK8_0, QK_K,
 };
 use byteorder::{ByteOrder, LittleEndian};
 use half::f16;
@@ -55,10 +56,8 @@ pub(crate) fn vec_dot_q4_0_q8_0(n: usize, xs: &[BlockQ4_0], ys: &[BlockQ8_0]) ->
     unsafe {
         let mut acc = _mm256_setzero_ps();
         for (x, y) in xs.iter().zip(ys.iter()) {
-            let d = _mm256_set1_ps(f16::to_f32(x.d) * f16::to_f32(y.d));
-            let bx = bytes_from_nibbles_32(x.qs.as_ptr());
-            let off = _mm256_set1_epi8(8);
-            let bx = _mm256_sub_epi8(bx, off);
+            let d = scale_product(x.d, y.d);
+            let bx = q4_0_bytes(x);
             let by = _mm256_loadu_si256(y.qs.as_ptr() as *const __m256i);
             let q = mul_sum_i8_pairs_float(bx, by);
             acc = _mm256_fmadd_ps(d, q, acc);
@@ -76,14 +75,281 @@ pub(crate) fn vec_dot_q8_0_q8_0(n: usize, xs: &[BlockQ8_0], ys: &[BlockQ8_0]) ->
     unsafe {
         let mut acc = _mm256_setzero_ps();
         for (x, y) in xs.iter().zip(ys.iter()) {
-            let d = _mm256_set1_ps(f16::to_f32(x.d) * f16::to_f32(y.d));
-            let bx = _mm256_loadu_si256(x.qs.as_ptr() as *const __m256i);
+            let d = scale_product(x.d, y.d);
+            let bx = q8_0_bytes(x);
             let by = _mm256_loadu_si256(y.qs.as_ptr() as *const __m256i);
             let q = mul_sum_i8_pairs_float(bx, by);
             acc = _mm256_fmadd_ps(d, q, acc);
         }
         hsum_float_8(acc)
     }
+}
+
+/// SwarmLLM patch: Q5_0 against Q8_0 on AVX2 — upstream candle had no SIMD
+/// kernel for Q5_0, Q4_1 or Q5_1 and ran the scalar `vec_dot_unopt`, though
+/// llama.cpp writes Q5_0 wherever a row is too narrow for Q4_K (a Q4_K_M of a
+/// model 896 wide is 44% Q5_0 by bytes). llama.cpp's `ggml_vec_dot_q5_0_q8_0`
+/// (`ggml-cpu/arch/x86/quants.c`), operation for operation, so the result is
+/// llama.cpp's arithmetic rather than the scalar loop's.
+#[inline(always)]
+pub(crate) fn vec_dot_q5_0_q8_0(n: usize, xs: &[BlockQ5_0], ys: &[BlockQ8_0]) -> f32 {
+    debug_assert!(
+        n.is_multiple_of(QK8_0),
+        "vec_dot_q5_0_q8_0: {n} is not divisible by {QK8_0}"
+    );
+    unsafe {
+        let mut acc = _mm256_setzero_ps();
+        for (x, y) in xs.iter().zip(ys.iter()) {
+            let d = scale_product(x.d, y.d);
+            let bx = q5_0_bytes(x);
+            let by = _mm256_loadu_si256(y.qs.as_ptr() as *const __m256i);
+            let q = mul_sum_i8_pairs_float(bx, by);
+            acc = _mm256_fmadd_ps(d, q, acc);
+        }
+        hsum_float_8(acc)
+    }
+}
+
+/// SwarmLLM patch: Q4_1 against Q8_1 on AVX2 — llama.cpp's
+/// `ggml_vec_dot_q4_1_q8_1`: the products in eight lanes, the minimum's term
+/// (`m * s`) summed apart and added at the end.
+#[inline(always)]
+pub(crate) fn vec_dot_q4_1_q8_1(n: usize, xs: &[BlockQ4_1], ys: &[BlockQ8_1]) -> f32 {
+    debug_assert!(
+        n.is_multiple_of(QK8_0),
+        "vec_dot_q4_1_q8_1: {n} is not divisible by {QK8_0}"
+    );
+    unsafe {
+        let mut acc = _mm256_setzero_ps();
+        let mut summs = 0f32;
+        for (x, y) in xs.iter().zip(ys.iter()) {
+            summs += _mm256_cvtss_f32(scale_product(x.m, y.s));
+            let d = scale_product(x.d, y.d);
+            let bx = q4_1_bytes(x);
+            let by = _mm256_loadu_si256(y.qs.as_ptr() as *const __m256i);
+            let q = mul_sum_us8_pairs_float(bx, by);
+            acc = _mm256_fmadd_ps(d, q, acc);
+        }
+        hsum_float_8(acc) + summs
+    }
+}
+
+/// SwarmLLM patch: Q5_1 against Q8_1 on AVX2 — llama.cpp's
+/// `ggml_vec_dot_q5_1_q8_1`, as `vec_dot_q4_1_q8_1` with the fifth bit (its
+/// `fmadd(q, dx * dy, acc)` is this one's: the two factors of an FMA commute
+/// exactly).
+#[inline(always)]
+pub(crate) fn vec_dot_q5_1_q8_1(n: usize, xs: &[BlockQ5_1], ys: &[BlockQ8_1]) -> f32 {
+    debug_assert!(
+        n.is_multiple_of(QK8_0),
+        "vec_dot_q5_1_q8_1: {n} is not divisible by {QK8_0}"
+    );
+    unsafe {
+        let mut acc = _mm256_setzero_ps();
+        let mut summs = 0f32;
+        for (x, y) in xs.iter().zip(ys.iter()) {
+            summs += _mm256_cvtss_f32(scale_product(x.m, y.s));
+            let d = scale_product(x.d, y.d);
+            let bx = q5_1_bytes(x);
+            let by = _mm256_loadu_si256(y.qs.as_ptr() as *const __m256i);
+            let q = mul_sum_us8_pairs_float(bx, by);
+            acc = _mm256_fmadd_ps(d, q, acc);
+        }
+        hsum_float_8(acc) + summs
+    }
+}
+
+/// SwarmLLM patch: `x × y` of two f16 scales, as f32, broadcast — the
+/// single-row kernels' `f16::to_f32(x) * f16::to_f32(y)`, bit for bit, built
+/// so it cannot wait on the accumulator. A scalar `f16::to_f32` compiles to
+/// `vpinsrw $0, mem, %xmmN, %xmmM` (LLVM treats the other lanes as unused), and
+/// that MERGES into whichever register the allocator picks for `N`: when it
+/// picked the accumulator (2026-10-20, measured), every block's scale waited
+/// for the previous block's FMA and the chain ran ~15 cycles a block instead of
+/// ~4 — a Q8_0 row 3.5 against 1.5 ns a block, and which kernel was hit moved
+/// with register allocation. Both halves are packed in a general register and
+/// moved with `vmovd`, which writes the whole vector register.
+#[inline(always)]
+unsafe fn scale_product(x: f16, y: f16) -> __m256 {
+    let halves = x.to_bits() as u32 | (y.to_bits() as u32) << 16;
+    let both = _mm_cvtph_ps(_mm_cvtsi32_si128(halves as i32));
+    _mm256_broadcastss_ps(_mm_mul_ss(both, _mm_movehdup_ps(both)))
+}
+
+/// SwarmLLM patch: a several-row pass's `scale_product`s for one block, in one
+/// conversion — lane `1 + r` is `x × y_of(r)` for row `r < R` (lane 0 is `x × x`,
+/// unused). Same bits as `scale_product` per row: each lane is one f16 → f32
+/// conversion and one IEEE product, and multiplication commutes exactly.
+#[inline(always)]
+unsafe fn block_scale_products<const R: usize>(x: f16, y_of: impl Fn(usize) -> f16) -> __m256 {
+    const { assert!(R <= 7, "eight lanes: the column's scale and seven rows") };
+    let mut lanes = [x.to_bits() as u64, 0u64];
+    for r in 0..R {
+        let slot = r + 1;
+        lanes[slot / 4] |= (y_of(r).to_bits() as u64) << (16 * (slot % 4));
+    }
+    let s = _mm256_cvtph_ps(_mm_set_epi64x(lanes[1] as i64, lanes[0] as i64));
+    _mm256_mul_ps(_mm256_permutevar8x32_ps(s, _mm256_setzero_si256()), s)
+}
+
+/// Lane `1 + r` of a `block_scale_products` result, broadcast.
+#[inline(always)]
+unsafe fn row_lane(v: __m256, r: usize) -> __m256 {
+    _mm256_permutevar8x32_ps(v, _mm256_set1_epi32(r as i32 + 1))
+}
+
+/// Spreads 32 bits to 32 bytes, 0xFF where a bit is set — llama.cpp's
+/// `bytes_from_bits_32`: the fifth bit of Q5_0 / Q5_1, bit `j` to byte `j`.
+#[inline(always)]
+unsafe fn bytes_from_bits_32(bits: &[u8; 4]) -> __m256i {
+    let x32 = u32::from_le_bytes(*bits) as i32;
+    let shuf_mask = _mm256_set_epi64x(
+        0x0303030303030303,
+        0x0202020202020202,
+        0x0101010101010101,
+        0x0000000000000000,
+    );
+    let bytes = _mm256_shuffle_epi8(_mm256_set1_epi32(x32), shuf_mask);
+    let bytes = _mm256_or_si256(bytes, _mm256_set1_epi64x(0x7fbfdfeff7fbfdfe));
+    _mm256_cmpeq_epi8(bytes, _mm256_set1_epi64x(-1))
+}
+
+// A weight block's 32 values as bytes — the column side of the kernels below.
+// The single-row and several-row kernels unpack through the same function, so
+// they cannot drift apart.
+
+/// Q8_0: the bytes as stored.
+#[inline(always)]
+unsafe fn q8_0_bytes(x: &BlockQ8_0) -> __m256i {
+    _mm256_loadu_si256(x.qs.as_ptr() as *const __m256i)
+}
+
+/// Q4_0: the nibbles less 8, in -8..=7.
+#[inline(always)]
+unsafe fn q4_0_bytes(x: &BlockQ4_0) -> __m256i {
+    _mm256_sub_epi8(bytes_from_nibbles_32(x.qs.as_ptr()), _mm256_set1_epi8(8))
+}
+
+/// Q5_0: nibble plus fifth bit, less 16, in -16..=15 (a clear fifth bit ORs in
+/// 0xF0, which is the nibble less 16 in two's complement).
+#[inline(always)]
+unsafe fn q5_0_bytes(x: &BlockQ5_0) -> __m256i {
+    let high = _mm256_andnot_si256(bytes_from_bits_32(&x.qh), _mm256_set1_epi8(0xF0u8 as i8));
+    _mm256_or_si256(bytes_from_nibbles_32(x.qs.as_ptr()), high)
+}
+
+/// Q5_1: nibble plus fifth bit, in 0..=31 (the minimum is added apart).
+#[inline(always)]
+unsafe fn q5_1_bytes(x: &BlockQ5_1) -> __m256i {
+    let high = _mm256_and_si256(bytes_from_bits_32(&x.qh), _mm256_set1_epi8(0x10));
+    _mm256_or_si256(bytes_from_nibbles_32(x.qs.as_ptr()), high)
+}
+
+/// SwarmLLM patch: the several-row kernels of the 32-value formats. A Q8_0 /
+/// Q4_0 / Q5_0 column has little to unpack, so what one call per row wastes is
+/// its single accumulator: every block's product waits on the one before it.
+/// `R` rows a pass keep `R` independent chains in flight — llamafile's tinyBLAS
+/// (`ggml-cpu/llamafile/sgemm.cpp`, `tinyBLAS_Q0_AVX`) tiles the same per-block
+/// sequence 4×2 on AVX2 for this reason. Bit-identical to the per-row loop:
+/// each row keeps its own `acc` (and `summs`), sees the single-row kernel's
+/// operations in its order, and the column is unpacked by the same function.
+macro_rules! rows_of_a_32_value_format {
+    ($rows_fn:ident, $pass:ident, $single:ident, $block:ty, $vec_dot_ty:ty, $unpack:ident, signed) => {
+        rows_of_a_32_value_format!(@wrapper $rows_fn, $pass, $single, $block, $vec_dot_ty);
+
+        /// `R` rows of the single-row kernel sharing one pass over the column.
+        #[inline(always)]
+        unsafe fn $pass<const R: usize>(xs: &[$block], ys: &[$vec_dot_ty], kb: usize, out: &mut [f32]) {
+            let mut acc = [_mm256_setzero_ps(); R];
+            for (bi, x) in xs.iter().enumerate() {
+                let d_all = block_scale_products::<R>(x.d, |r| ys[r * kb + bi].d);
+                let bx = $unpack(x);
+                let ax = _mm256_sign_epi8(bx, bx);
+                for r in 0..R {
+                    let y = &ys[r * kb + bi];
+                    let d = row_lane(d_all, r);
+                    let by = _mm256_loadu_si256(y.qs.as_ptr() as *const __m256i);
+                    let q = mul_sum_us8_pairs_float(ax, _mm256_sign_epi8(by, bx));
+                    acc[r] = _mm256_fmadd_ps(d, q, acc[r]);
+                }
+            }
+            for r in 0..R {
+                out[r] = hsum_float_8(acc[r]);
+            }
+        }
+    };
+    ($rows_fn:ident, $pass:ident, $single:ident, $block:ty, $vec_dot_ty:ty, $unpack:ident, with_minimum) => {
+        rows_of_a_32_value_format!(@wrapper $rows_fn, $pass, $single, $block, $vec_dot_ty);
+
+        /// `R` rows of the single-row kernel sharing one pass over the column.
+        #[inline(always)]
+        unsafe fn $pass<const R: usize>(xs: &[$block], ys: &[$vec_dot_ty], kb: usize, out: &mut [f32]) {
+            let mut acc = [_mm256_setzero_ps(); R];
+            // Lane `1 + r` is row r's `summs`: the same f32 additions, in the
+            // same order, as the single-row kernel's scalar.
+            let mut summs = _mm256_setzero_ps();
+            for (bi, x) in xs.iter().enumerate() {
+                let d_all = block_scale_products::<R>(x.d, |r| ys[r * kb + bi].d);
+                summs = _mm256_add_ps(summs, block_scale_products::<R>(x.m, |r| ys[r * kb + bi].s));
+                let bx = $unpack(x);
+                for r in 0..R {
+                    let y = &ys[r * kb + bi];
+                    let d = row_lane(d_all, r);
+                    let by = _mm256_loadu_si256(y.qs.as_ptr() as *const __m256i);
+                    let q = mul_sum_us8_pairs_float(bx, by);
+                    acc[r] = _mm256_fmadd_ps(d, q, acc[r]);
+                }
+            }
+            for r in 0..R {
+                out[r] = hsum_float_8(acc[r]) + _mm256_cvtss_f32(row_lane(summs, r));
+            }
+        }
+    };
+    (@wrapper $rows_fn:ident, $pass:ident, $single:ident, $block:ty, $vec_dot_ty:ty) => {
+        /// One column against `rows` activation rows — passes of four rows, a
+        /// 2-3 row tail in one pass ([`tail_in_one_pass`]), a lone row through
+        /// the single-row kernel.
+        #[inline(always)]
+        pub(crate) fn $rows_fn(n: usize, xs: &[$block], ys: &[$vec_dot_ty], rows: usize, out: &mut [f32]) {
+            let kb = xs.len();
+            debug_assert!(n.is_multiple_of(QK8_0), "{}: {n} is not divisible by {QK8_0}", stringify!($rows_fn));
+            debug_assert_eq!(ys.len(), rows * kb, "{}: rows × blocks", stringify!($rows_fn));
+            debug_assert!(out.len() >= rows);
+            const R: usize = 4;
+            let mut r0 = 0;
+            while r0 + R <= rows {
+                unsafe { $pass::<R>(xs, &ys[r0 * kb..(r0 + R) * kb], kb, &mut out[r0..r0 + R]) };
+                r0 += R;
+            }
+            let left = rows - r0;
+            if tail_in_one_pass(left) {
+                let (ys, out) = (&ys[r0 * kb..rows * kb], &mut out[r0..rows]);
+                unsafe {
+                    if left == 3 {
+                        $pass::<3>(xs, ys, kb, out)
+                    } else {
+                        $pass::<2>(xs, ys, kb, out)
+                    }
+                }
+                return;
+            }
+            for r in r0..rows {
+                out[r] = $single(n, xs, &ys[r * kb..(r + 1) * kb]);
+            }
+        }
+    };
+}
+
+rows_of_a_32_value_format!(vec_dot_rows_q8_0_q8_0, dot_q8_0_q8_0_rows, vec_dot_q8_0_q8_0, BlockQ8_0, BlockQ8_0, q8_0_bytes, signed);
+rows_of_a_32_value_format!(vec_dot_rows_q4_0_q8_0, dot_q4_0_q8_0_rows, vec_dot_q4_0_q8_0, BlockQ4_0, BlockQ8_0, q4_0_bytes, signed);
+rows_of_a_32_value_format!(vec_dot_rows_q5_0_q8_0, dot_q5_0_q8_0_rows, vec_dot_q5_0_q8_0, BlockQ5_0, BlockQ8_0, q5_0_bytes, signed);
+rows_of_a_32_value_format!(vec_dot_rows_q4_1_q8_1, dot_q4_1_q8_1_rows, vec_dot_q4_1_q8_1, BlockQ4_1, BlockQ8_1, q4_1_bytes, with_minimum);
+rows_of_a_32_value_format!(vec_dot_rows_q5_1_q8_1, dot_q5_1_q8_1_rows, vec_dot_q5_1_q8_1, BlockQ5_1, BlockQ8_1, q5_1_bytes, with_minimum);
+
+/// Q4_1: the nibbles, in 0..=15 (the minimum is added apart).
+#[inline(always)]
+unsafe fn q4_1_bytes(x: &BlockQ4_1) -> __m256i {
+    bytes_from_nibbles_32(x.qs.as_ptr())
 }
 
 #[inline(always)]
