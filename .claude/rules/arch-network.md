@@ -49,6 +49,12 @@ network manager hashes on the blocking pool and posts the verdict back
 
 → `docs/invariants/network.md` § "A downloaded shard is hashed off the event loop"
 
+## The network loop never waits for the disk (2026-10-20, #314)
+
+A database commit waits for `fdatasync`. **`storage::Database::with_write_table`** runs every write through `without_starving_the_runtime`, so a task that commits first hands its worker's queue — the LIFO slot the network loop was just woken into, which no other worker may steal — to another thread. The loop's OWN writes go to the blocking pool (`peer_cache::CacheWriter`, newest snapshot wins). Guards `a_commit_does_not_hold_the_task_its_worker_just_woke`, `the_cache_writer_keeps_the_newest_snapshot`.
+
+→ `docs/invariants/network.md` § "The network loop never waits for the disk"
+
 ## One writer per shard file, and finishing one shard says nothing about the others
 
 One writer per `shard_NNN.bin.tmp`: **`ModelMgmt::claim_shard_download`** is the RAII exclusion; **`SharedState::remove_acquisition_if_idle`** is the only tidy-up removal of a progress entry (`a_finished_download_does_not_delete_the_progress_of_one_still_running`); **`ModelMgmt::live_cancel_flag`** is the one source of a cancel flag. Only a download itself deletes its partial file (`cleanup_tmp_files_no_one_is_writing` skips claimed shards).
@@ -279,7 +285,7 @@ Single sources of truth for invariants that silently break at the wire if duplic
 - **`daemon::dispatch::timestamp_fresh_one_sided`** — the staleness primitive; `gossip_timestamp_fresh` wraps it.
 - **`credit::ledger::check_signed_freshness`** — staleness for signed `DateTime<Utc>` messages.
 - **`pipeline::pack_verify_tokens_to_le_bytes`**, **`pipeline::build_spec_verify_forward`**, **`pipeline::build_kv_truncate_forward`**, **`pipeline::register_pending_layer_result`** — the shared builders for verify/truncate forwards and waiter registration.
-- **`storage::Database::with_write_table`** — the write-transaction wrapper.
+- **`storage::Database::with_write_table`** — the write-transaction wrapper; it hands the worker off before it blocks (#314).
 - **`swarmllm_types::ShardResponse::empty()`**, **`swarmllm_types::LayerResult::error(request_id, reason)`** — canonical refusal/error replies.
 - **`network/manager/connections::try_enqueue_redial`** — dedup + cap + push for `pending_redial`.
 - **`responses::types::raw_tool_kind_or_unknown`**, **`cli::bail_if_no_api_key` / `cli::exit_daemon_unreachable`** — shared error wording.

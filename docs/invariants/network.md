@@ -2718,6 +2718,52 @@ came last is what the next write reads. With no runtime (a synchronous caller)
 it still writes inline — there is no loop to stall. The same shape as the
 nickname persist on 2026-09-24.
 
+## The network loop never waits for the disk (2026-10-20, #314)
+
+**What was wrong.** The live node (v0.3.244, serving nothing) logged 65 `DIAG:
+network event loop stalled` lines on 10-19, 190 ms to 2.6 s, 43 of them in
+`swarm_event:RequestResponse`, 7 in `peer_cache_interval`, and most while this
+machine's disk was busy (builds, benches, rigs). Sampling every thread of the
+live node every 50 ms across a full `cargo dev-test` (`examples/thread_sample.py`)
+caught 8 stalls; in 6 of them a Tokio runtime worker sat in syscall 75,
+`fdatasync`, in the kernel's `blk_mq_get_tag` — waiting for a free slot in the
+disk's queue. Nothing in the repo calls `fdatasync`: our own syncs are
+`sync_all` (`fsync`, 74). redb's commit is `sync_data`
+(`file_backend/optimized.rs`), so every stall in a sync was a database commit.
+
+**Two ways a commit stalled the loop.** (1) The loop committed itself:
+`peer_cache_interval` replaced the peer-cache tree every save, inline. (2)
+Another task committed on a worker that had just woken the loop — the waker's
+worker puts the woken task in its LIFO slot, and tokio 1.53 lets no other worker
+steal that slot, so the loop waited out the other task's commit. That is gotcha
+#831's mechanism (`nvidia-smi` polled on a worker, #244), where the fix was
+`without_starving_the_runtime` (`block_in_place`); tokio's `block_in_place`
+moves the LIFO task to the stealable queue before it hands the worker's core to
+another thread (`scheduler/multi_thread/worker.rs`, "Except for the task in the
+lifo_slot, all tasks can be stolen").
+
+**The shape.** At the one choke point every write goes through,
+`Database::with_write_table` runs the transaction under
+`without_starving_the_runtime` — `begin_write` too, since it waits for the
+previous writer. That covers every task without a list of callers to keep up.
+A task that commits still waits for its own commit, so the loop must not commit:
+`NetworkManager::save_peer_cache` takes its snapshot of the connected peers and
+hands the merge and the write to `peer_cache::CacheWriter` on the blocking pool;
+each save is numbered and one older than the last written is dropped, since two
+in flight may start in either order. The shutdown save is awaited — the cache is
+what the next start dials.
+
+**Measured.** `a_commit_does_not_hold_the_task_its_worker_just_woke` holds redb's
+write lock on another thread for 400 ms, wakes a task, and commits: inline, the
+woken task waited 384 ms; with the fix it runs at once (asserted < 200 ms).
+
+**What a change must keep.** A new database writer needs nothing: the wrapper
+covers it. A new write ON the network loop is the defect — hand it to the
+blocking pool as `CacheWriter` does. Two writes remain on the loop, both rare: the
+first inbound connection a machine ever sees (`record_inbound_connection_observed`,
+once per machine) and a peer-served part that hashes wrong (`update_trust`, once
+per bad part).
+
 ## A result names the step it answers (2026-09-25, #113)
 
 **The failure.** A serving node computed a 28.8 MB prompt-pass result and its send

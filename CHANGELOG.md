@@ -11,6 +11,12 @@ another program on the port learns nothing. The service's key is readable only b
 and the administrator, so run these commands with `sudo`. Every command now reaches the node at
 `127.0.0.1`, the address it listens on, rather than `localhost`, which can lead elsewhere.
 
+**Your node keeps answering while your computer's disk is busy.** Saving its own records waited
+for the disk on the part of the node that talks to other computers, so while something else on
+your computer wrote a lot (an install, a backup, a big download), your node could go quiet for up
+to 2.6 seconds at a time — 65 times in one day on an idle node. Those saves now wait beside the
+network work instead of in its way.
+
 ## [0.3.245-alpha] — 2026-10-20
 
 **Gemma 3 can read pictures, and pictures go where you put them.** A picture sent with a message

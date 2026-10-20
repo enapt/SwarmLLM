@@ -452,6 +452,8 @@ struct OutboundForward {
 
 pub struct NetworkManager {
     shared_state: Arc<SharedState>,
+    /// Writes the peer cache on the blocking pool (#314).
+    peer_cache_writer: crate::network::peer_cache::CacheWriter,
     swarm: Swarm<SwarmBehaviour>,
     /// Receives commands from daemon tasks (broadcast, send tensor, etc.)
     inbound_rx: mpsc::Receiver<NetworkCommand>,
@@ -969,6 +971,7 @@ impl NetworkManager {
 
         Ok(Self {
             shared_state,
+            peer_cache_writer: Default::default(),
             swarm,
             inbound_rx,
             self_command_tx,
@@ -1589,7 +1592,8 @@ impl NetworkManager {
                     last_arm = "shutdown".into();
                     arm_started = std::time::Instant::now();
                     if *self.shutdown_rx.borrow() {
-                        self.save_peer_cache();
+                        // Waited for: the cache is what the next start dials.
+                        let _ = self.save_peer_cache().await;
                         tracing::info!(target: "swarmllm::network::manager", "NetworkManager shutting down");
                         self.release_upnp_mappings().await;
                         break;
@@ -1647,7 +1651,7 @@ impl NetworkManager {
                 _ = peer_cache_interval.tick() => {
                     last_arm = "peer_cache_interval".into();
                     arm_started = std::time::Instant::now();
-                    self.save_peer_cache();
+                    drop(self.save_peer_cache()); // runs on; nothing waits for it
                 }
                 // Kademlia bootstrap retry with exponential backoff.
                 // Checks every 5s whether we've passed the next retry deadline
@@ -2146,7 +2150,7 @@ impl NetworkManager {
                             self.handle_outbound_command(cmd).await;
                         },
                         None => {
-                            self.save_peer_cache();
+                            let _ = self.save_peer_cache().await;
                             tracing::info!("Inbound channel closed, shutting down");
                             break;
                         }
@@ -2256,7 +2260,9 @@ impl NetworkManager {
         )
     }
 
-    fn save_peer_cache(&self) {
+    /// Save the peer cache, off this loop: the commit waits for the disk
+    /// (`peer_cache::CacheWriter`, #314).
+    fn save_peer_cache(&self) -> tokio::task::JoinHandle<()> {
         let addrs: Vec<String> = self
             .shared_state
             .peer_registry
@@ -2296,20 +2302,8 @@ impl NetworkManager {
         // not live ones. `filter_storable` still runs over the union, so a bad
         // address is evicted on the next save exactly as before — merging keeps
         // stale-but-valid entries, it does not make the cache unpurgeable.
-        let merged = crate::network::peer_cache::merge_for_save(
-            addrs,
-            crate::network::peer_cache::load_peer_cache(&self.shared_state.db),
-        );
-        // Filter before persisting so the cache never grows entries the read
-        // path would just discard.
-        // Storable, not dialable: keep a peer's LAN addresses even when this
-        // node currently has no use for them. Whether they are worth dialling
-        // is a question about where we are now, and that is asked on read.
-        let addrs =
-            crate::network::peer_cache::filter_storable(&merged, self.swarm.local_peer_id());
-        if !addrs.is_empty() {
-            crate::network::peer_cache::save_peer_cache(&self.shared_state.db, &addrs);
-        }
+        self.peer_cache_writer
+            .save(&self.shared_state.db, addrs, *self.swarm.local_peer_id())
     }
 }
 

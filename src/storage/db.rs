@@ -310,19 +310,33 @@ impl Database {
                 )));
             }
         }
-        let txn = self
-            .inner
-            .begin_write()
-            .map_err(|e| SwarmError::Database(e.to_string()))?;
-        let result = {
-            let mut table = txn
-                .open_table(DATA_TABLE)
+        // A commit waits for the disk (redb syncs it with `fdatasync`), and a
+        // write transaction waits for the one before it: both block the
+        // thread. On a Tokio worker that held whichever task the worker had
+        // just woken — the network loop, typically — in the worker's LIFO
+        // slot, which no other worker may steal, for as long as the disk took:
+        // 0.2-2.6 s stalls of the network loop while this machine's disk was
+        // busy (#314; sampled, a runtime worker in syscall 75 through 6 of 8
+        // stalls). `block_in_place` hands that queue, the LIFO slot included,
+        // to another thread first — tokio 1.53's `block_in_place` moves the
+        // slot's task to the stealable queue. Gotcha #831 was the same
+        // mechanism with `nvidia-smi`. A task that commits still waits for its
+        // own commit; the network loop must not commit at all (`peer_cache`).
+        crate::inference::executor::without_starving_the_runtime(|| {
+            let txn = self
+                .inner
+                .begin_write()
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
-            f(&mut table)?
-        };
-        txn.commit()
-            .map_err(|e| SwarmError::Database(e.to_string()))?;
-        Ok(result)
+            let result = {
+                let mut table = txn
+                    .open_table(DATA_TABLE)
+                    .map_err(|e| SwarmError::Database(e.to_string()))?;
+                f(&mut table)?
+            };
+            txn.commit()
+                .map_err(|e| SwarmError::Database(e.to_string()))?;
+            Ok(result)
+        })
     }
 
     /// Store a JSON-serializable value.
@@ -769,6 +783,47 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #314: a commit waits for the disk; the task its worker had just woken
+    /// must not wait with it. The commit here waits for a write lock held on
+    /// another thread for 400 ms, as a commit waits for a busy disk. Without
+    /// `block_in_place` the woken task sat in that worker's LIFO slot, which
+    /// no other worker may steal, for the whole 400 ms.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_commit_does_not_hold_the_task_its_worker_just_woke() {
+        use std::time::{Duration, Instant};
+        let db = Database::open_temp().unwrap();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                let txn = db.inner.begin_write().unwrap();
+                held_tx.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(400));
+                drop(txn);
+            })
+        };
+        held_rx.recv().unwrap();
+
+        let (wake_tx, wake_rx) = tokio::sync::oneshot::channel::<Instant>();
+        let woken = tokio::spawn(async move { wake_rx.await.unwrap().elapsed() });
+        tokio::time::sleep(Duration::from_millis(50)).await; // `woken` is waiting
+        let committer = {
+            let db = db.clone();
+            tokio::spawn(async move {
+                // Wakes `woken` into this worker's LIFO slot, then commits.
+                wake_tx.send(Instant::now()).unwrap();
+                db.put_json("t", "k", &1u32).unwrap();
+            })
+        };
+        let waited = woken.await.unwrap();
+        committer.await.unwrap();
+        holder.join().unwrap();
+        assert!(
+            waited < Duration::from_millis(200),
+            "a task woken just before another task's commit waited {waited:?} for it"
+        );
+    }
 
     #[test]
     fn put_and_get_json() {

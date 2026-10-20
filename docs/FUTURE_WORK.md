@@ -1171,23 +1171,18 @@ secret and drop an answer that names another (`EphemeralKeyExchange` carries a `
 check the answer echoes the initiator's), or skip a new exchange while one is pending for the peer.
 
 #### #314 — The network event loop stalls 0.2-2.6 s, most often while this machine is busy
-`P3` · network · **OPEN** — 2026-10-20 · history: the live node's log, 10-19
+`P3` · network · **NARROWED** — 2026-10-20 · history: the live node's log, 10-19; `docs/invariants/network.md` § "The network loop never waits for the disk"
 
-`docs/DIAGNOSTICS.md` calls zero `DIAG: network event loop stalled` lines the normal reading; the
-live node (v0.3.244, serving nothing) logged 65 on 10-19 (190 ms-2.6 s: 43 in
-`swarm_event:RequestResponse`, 15 `Identify`, 7 `peer_cache_interval`) and some on most days since
-09-17 (1-112 a day, 774 on 10-16). The gaps between them cluster at ~29 s and ~58 s — the health
-monitor's 30 s tick, whose ping replies land in the RequestResponse arm — and they bunch while this
-machine runs builds, benches and rigs. Not reproduced, with `examples/thread_sample.py` on the live
-node: 4.5 GB of synced writes, 16 cores saturated for 90 s, an incremental test build. An Explore
-search of the RequestResponse path found no database access and no awaited bounded send; inline
-there: `shard_store.write_chunk` on a `ShardData` response, the log file's global mutex, relay
-opening of large payloads. The monitor's tick does synchronous database commits on a runtime
-worker (`persist_manifests_heard`, `persist_served_lifetime`, `persist_load_rate` — each a synced
-redb commit when its figure changed), which can hold the network task in that worker's LIFO slot
-(#244's mechanism). Next: sample the threads across a FULL `cargo dev-test` (the 19:12Z stall fell
-inside one) and read the stalled window's runtime workers; if one sits in a commit, move the tick's
-writes off the runtime.
+The live node (v0.3.244, serving nothing) logged 65 `DIAG: network event loop stalled` lines on
+10-19 (190 ms-2.6 s: 43 in `swarm_event:RequestResponse`, 15 `Identify`, 7 `peer_cache_interval`),
+bunched while this machine's disk was busy. Sampled across a full `cargo dev-test`, 6 of 8 stalls
+had a runtime worker in `fdatasync` — a redb commit, which is the only caller of it. Fixed
+(2026-10-20, not yet released): every commit hands its worker's queue off first
+(`Database::with_write_table` → `without_starving_the_runtime`), so another task's commit no longer
+holds the loop in that worker's LIFO slot, and the loop's own peer-cache save runs on the blocking
+pool (`peer_cache::CacheWriter`). What remains: the 2 sampled stalls with no worker in a sync, and
+whether the daily count falls. Next: once deployed, count the stall lines on the live node over a
+day of ordinary use (10-19: 65) and sample the next one that comes while the disk is idle.
 
 #### #191 — A part download that loses its peer restarts from byte 0 on the next one
 `P3` · storage · **OPEN** — 2026-09-03 · history: archive § "A multi-megabyte forward over ONE QUIC stream can kill the connection" (its banner: the cause was quinn-proto, #112)

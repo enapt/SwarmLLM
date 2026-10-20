@@ -3,6 +3,7 @@ use libp2p::{Multiaddr, PeerId};
 
 use crate::network::manager::addr_is_remotely_reachable;
 use crate::storage::db::Database;
+use std::sync::Arc;
 
 /// Database tree name for cached peer addresses.
 const TREE_PEER_CACHE: &str = "peer_cache";
@@ -207,6 +208,56 @@ pub fn save_peer_cache(db: &Database, addrs: &[String]) {
     tracing::debug!(count, "DIAG: peer cache saved");
 }
 
+/// Writes the peer cache OFF the network loop, newest snapshot last (#314).
+///
+/// The save is a database commit, which waits for the disk; on the network
+/// loop it stalled every ping, gossip message and tensor forward for as long
+/// as the disk took (`DIAG: network event loop stalled`, arm
+/// `peer_cache_interval`, 0.2-2.6 s while this machine's disk was busy). So the
+/// loop takes its snapshot of the connected peers and hands the merge and the
+/// commit to the blocking pool. Two saves in flight may start in either
+/// order, and the later snapshot must win: each takes a number, and a save
+/// whose number is not newer than the last one written is dropped.
+#[derive(Clone, Default)]
+pub struct CacheWriter {
+    issued: Arc<std::sync::atomic::AtomicU64>,
+    written: Arc<std::sync::Mutex<u64>>,
+}
+
+impl CacheWriter {
+    /// Merge `connected` (the connected peers' addresses, first) with the cache
+    /// as stored, keep what is storable, and write it — on the blocking pool.
+    /// The handle finishes when the save has been written or dropped.
+    pub fn save(
+        &self,
+        db: &Database,
+        connected: Vec<String>,
+        local_peer_id: PeerId,
+    ) -> tokio::task::JoinHandle<()> {
+        let number = self
+            .issued
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let (db, written) = (db.clone(), self.written.clone());
+        tokio::task::spawn_blocking(move || {
+            let mut last = written.lock().unwrap_or_else(|e| e.into_inner());
+            if number <= *last {
+                return; // a newer snapshot is already written
+            }
+            let merged = merge_for_save(connected, load_peer_cache(&db));
+            // Storable, not dialable: keep a peer's LAN addresses even when this
+            // node currently has no use for them. Whether they are worth
+            // dialling is a question about where we are now, and that is asked
+            // on read.
+            let addrs = filter_storable(&merged, &local_peer_id);
+            if !addrs.is_empty() {
+                save_peer_cache(&db, &addrs);
+            }
+            *last = number;
+        })
+    }
+}
+
 /// Load cached peer multiaddrs from the database.
 ///
 /// Returns addresses from the last session for immediate reconnection.
@@ -239,6 +290,46 @@ pub fn load_peer_cache(db: &Database) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #314: the network loop hands its save to `CacheWriter`, which writes on
+    /// the blocking pool; a save older than one already written is dropped, so
+    /// two in flight cannot leave the older snapshot behind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_cache_writer_keeps_the_newest_snapshot() {
+        let db = Database::open_temp().unwrap();
+        let me = pid(1);
+        let older = format!("/ip4/1.1.1.1/udp/8800/quic-v1/p2p/{}", pid(2));
+        let newer = format!("/ip4/2.2.2.2/udp/8800/quic-v1/p2p/{}", pid(3));
+        let writer = CacheWriter::default();
+
+        writer.save(&db, vec![older.clone()], me).await.unwrap();
+        assert_eq!(
+            load_peer_cache(&db),
+            vec![older.clone()],
+            "a save is written"
+        );
+
+        // The older of two saves in flight starts last: numbered first, run second.
+        let first = writer
+            .issued
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        writer.save(&db, vec![newer.clone()], me).await.unwrap();
+        let late = CacheWriter {
+            issued: Arc::new(std::sync::atomic::AtomicU64::new(first - 1)),
+            written: writer.written.clone(),
+        };
+        late.save(&db, vec!["/ip4/3.3.3.3/udp/8800/quic-v1".into()], me)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_peer_cache(&db).first(),
+            Some(&newer),
+            "the newer snapshot's peers stay first: {:?}",
+            load_peer_cache(&db)
+        );
+        assert!(!load_peer_cache(&db).iter().any(|a| a.contains("3.3.3.3")));
+    }
 
     fn pid(seed: u8) -> PeerId {
         libp2p::identity::Keypair::ed25519_from_bytes([seed; 32])
