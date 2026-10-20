@@ -107,6 +107,25 @@ pub(super) fn every_holder_would_refuse(
     }
 }
 
+/// Why a CHAINED run of a check failed, from what its wait came back with —
+/// `None` for an unchained forward, or an answer. Any failure counts: the tail
+/// answers for the whole run, so none of them says which hop it was.
+fn chained_run_failure(
+    chain: &[crate::types::ChainHop],
+    waited: &Result<LayerResult, SwarmError>,
+) -> Option<String> {
+    if chain.is_empty() {
+        return None;
+    }
+    match waited {
+        Err(e) => Some(e.to_string()),
+        Ok(result) => match &result.finish_reason {
+            Some(NetworkFinishReason::Error(msg)) => Some(msg.clone()),
+            _ => None,
+        },
+    }
+}
+
 pub(super) fn peer_error_from_result(result: &LayerResult) -> Option<SwarmError> {
     match &result.finish_reason {
         Some(NetworkFinishReason::Error(msg)) => Some(
@@ -481,9 +500,17 @@ pub(super) async fn forward_verify_through_segments(
     // (`PipelineExecutor::verify_may_chain`)? Each hop must also advertise
     // `features::CHAINED_VERIFY`; anything else is sent the old way.
     may_chain: bool,
+    // Set when a chained run of this check failed. The check is re-run
+    // unchained here, and the caller passes its `chaining_disabled` so the
+    // rest of the request is not chained again.
+    chain_failed: &mut bool,
 ) -> Result<VerifyReply, SwarmError> {
     let num_segments = segments.len();
     let local_node_id = shared_state.identity.node_id().clone();
+    let mut may_chain = may_chain;
+    // Segments up to this index re-run a chained run that failed: the hops
+    // that ran wrote this check's rows, so each is cut back to `index_pos`.
+    let mut rerun_through: Option<usize> = None;
     // A guess check — or an n-gram miss's one-token step — is one round of
     // the reply (FUTURE_WORK #3 (d)).
     if !verify_tokens.is_empty() {
@@ -559,6 +586,11 @@ pub(super) async fn forward_verify_through_segments(
                 ..w
             });
 
+        let truncate_here = if rerun_through.is_some_and(|end| idx <= end) {
+            Some(index_pos)
+        } else {
+            truncate_kv_to
+        };
         // Rebuildable: a peer that refuses this unopened is sent it again once
         // the link is re-keyed (`local::ResendOnRefusal`).
         let rebuild_forward = || {
@@ -567,7 +599,7 @@ pub(super) async fn forward_verify_through_segments(
                 index_pos,
                 activation_bytes.clone(),
                 segment,
-                truncate_kv_to,
+                truncate_here,
                 tail_walk.as_ref(),
                 None,
             );
@@ -648,7 +680,7 @@ pub(super) async fn forward_verify_through_segments(
                 },
             );
             let seg_start = std::time::Instant::now();
-            let result = PipelineExecutor::wait_for_result(
+            let waited = PipelineExecutor::wait_for_result(
                 shared_state,
                 rx,
                 request_id,
@@ -674,7 +706,30 @@ pub(super) async fn forward_verify_through_segments(
                     )
                 },
             )
-            .await?;
+            .await;
+            // A chained run that failed is re-run unchained, as the plain decode
+            // loop re-runs a chained step (`distributed.rs`): it does not say
+            // WHICH hop failed — a middle one not yet connected to the next is
+            // the common case, before the swarm has introduced them — and
+            // unchained, each segment answers for itself. The run consumed
+            // nothing here: `activation_bytes` is still its input. Ending the
+            // reply instead lost every chained check's request to a missing
+            // connection (the 3-machine rig, 2026-10-20, #318).
+            if let Some(reason) = chained_run_failure(&chain, &waited) {
+                drop(pending_guard);
+                tracing::warn!(
+                    %request_id,
+                    segment = idx,
+                    hops = chain.len(),
+                    error = %reason,
+                    "chained check failed — re-running it unchained for the rest of the request"
+                );
+                *chain_failed = true;
+                may_chain = false;
+                rerun_through = Some(run_end);
+                continue;
+            }
+            let result = waited?;
             pending_guard.disarm();
             // A SINGLE-token verify is an ordinary decode step wearing a
             // verify's name — `ngram_only_spec` sends `vec![last_token]` on a
@@ -3339,6 +3394,7 @@ mod tests {
             None,
             crate::inference::process_pool::Requester::Owner,
             false,
+            &mut false,
         )
         .await;
         assert!(result.is_err(), "closed-channel send must surface as Err");
@@ -3432,6 +3488,7 @@ mod tests {
                 None,
                 crate::inference::process_pool::Requester::Owner,
                 false,
+                &mut false,
             ),
         )
         .await
@@ -3543,6 +3600,7 @@ mod tests {
                 None,
                 crate::inference::process_pool::Requester::Owner,
                 false,
+                &mut false,
             )
             .await
         });
@@ -4002,6 +4060,7 @@ mod failover_retarget_tests {
                 None,
                 crate::inference::process_pool::Requester::Owner,
                 false,
+                &mut false,
             )
             .await;
         });
@@ -4052,6 +4111,7 @@ mod failover_retarget_tests {
                 }),
                 crate::inference::process_pool::Requester::Owner,
                 false,
+                &mut false,
             )
             .await;
         });
@@ -4115,6 +4175,7 @@ mod failover_retarget_tests {
                 }),
                 crate::inference::process_pool::Requester::Owner,
                 may_chain,
+                &mut false,
             )
             .await;
         });
@@ -4221,6 +4282,115 @@ mod failover_retarget_tests {
             !fwd.spec_walk_at_tail,
             "and the head, not being the last segment, is not asked to walk"
         );
+    }
+
+    /// **A chained check that fails is re-run unchained, not the reply's end**
+    /// (#318): the 3-machine rig's middle machine had not met the last, every
+    /// chained check came back refused, and every reply ended after its first
+    /// token. The re-run goes to the run's head alone, cuts back the rows the
+    /// hops that ran wrote, and tells the caller to chain no more.
+    #[tokio::test]
+    async fn a_chained_check_that_fails_is_re_run_unchained() {
+        use swarmllm_types::node::features::{
+            CHAINED_VERIFY, FORWARD_SAMPLING, PIPELINE_CHAIN, PIPELINE_CHAIN_V2,
+        };
+        let every = PIPELINE_CHAIN | PIPELINE_CHAIN_V2 | FORWARD_SAMPLING | CHAINED_VERIFY;
+        let (b, c) = (NodeId([0x2b; 32]), NodeId([0x2c; 32]));
+        let state = super::tests::make_test_state();
+        for (node, peer) in [(&b, 0xB2u8), (&c, 0xC2)] {
+            state
+                .peer_registry
+                .insert(node.clone(), super::tests::peer_advertising(node, every));
+            state.peer_id_map.insert(node.clone(), vec![peer]);
+            state.connected_node_ids.insert(node.clone());
+        }
+        let segments = vec![
+            PipelineSegment {
+                node_id: b.clone(),
+                shard_id: ShardId {
+                    model_id: ModelId("m".into()),
+                    index: 0,
+                },
+                layer_range: (0, 14),
+            },
+            PipelineSegment {
+                node_id: c.clone(),
+                shard_id: ShardId {
+                    model_id: ModelId("m".into()),
+                    index: 2,
+                },
+                layer_range: (14, 28),
+            },
+        ];
+        let request_id = uuid::Uuid::new_v4();
+        let (tx, mut rx) = mpsc::channel::<NetworkCommand>(8);
+        let checking = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let mut chain_failed = false;
+                let _ = forward_verify_through_segments(
+                    &state,
+                    &tx,
+                    request_id,
+                    5,
+                    &segments,
+                    &[7u32],
+                    None,
+                    None,
+                    crate::inference::process_pool::Requester::Owner,
+                    true,
+                    &mut chain_failed,
+                )
+                .await;
+                chain_failed
+            })
+        };
+        async fn wait_for_send(
+            rx: &mut mpsc::Receiver<NetworkCommand>,
+        ) -> (Vec<u8>, crate::types::LayerForward) {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("a forward must be dispatched")
+            {
+                Some(NetworkCommand::SendTensor {
+                    target_peer_bytes,
+                    forward,
+                }) => (target_peer_bytes, forward),
+                other => panic!("expected SendTensor, got {other:?}"),
+            }
+        }
+        let (to, chained) = wait_for_send(&mut rx).await;
+        assert_eq!(to, vec![0xB2]);
+        assert_eq!(chained.chain.len(), 1, "precondition: the check chained");
+        // The middle machine cannot reach the last.
+        let refused = crate::types::LayerResult::error(
+            request_id,
+            "chained run could not reach the next segment",
+        )
+        .answering_step(chained.step());
+        assert!(state.resolve_pending_layer_result(Some(&b), refused));
+
+        let (to, rerun) = wait_for_send(&mut rx).await;
+        assert_eq!(to, vec![0xB2], "the run's head again");
+        assert!(rerun.chain.is_empty(), "unchained");
+        assert_eq!(rerun.index_pos, 5);
+        assert_eq!(
+            rerun.truncate_kv_to,
+            Some(5),
+            "the head ran the chained check: its rows are cut back"
+        );
+        // Unchained, the head's own failure is the check's.
+        let failed = crate::types::LayerResult::error(request_id, "worker gone")
+            .answering_step(rerun.step());
+        assert!(state.resolve_pending_layer_result(Some(&b), failed));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), checking)
+                .await
+                .expect("the check ends")
+                .unwrap(),
+            "the caller is told to chain no more"
+        );
+        assert!(rx.try_recv().is_err(), "and nothing is re-run twice");
     }
 
     /// Only a peer that reads the walk flag AND the trailers the walk samples

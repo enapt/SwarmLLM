@@ -820,6 +820,44 @@ impl NetworkManager {
                         tracing::debug!(error = ?e, "DHT provider query failed — cleaning up");
                         self.pending_provider_queries.remove(&id);
                     }
+                    // A chained run's next hop this node had no address for
+                    // (`NetworkCommand::DialPeer`): dialled with what the DHT
+                    // answered, a lookup that timed out included.
+                    QueryResult::GetClosestPeers(ref closest)
+                        if self.next_hop_lookups.contains_key(&id) =>
+                    {
+                        let target = self.next_hop_lookups.remove(&id).expect("checked above");
+                        let peers = match closest {
+                            Ok(ok) => &ok.peers,
+                            Err(libp2p::kad::GetClosestPeersError::Timeout { peers, .. }) => peers,
+                        };
+                        let found: Vec<String> = peers
+                            .iter()
+                            .filter(|p| p.peer_id == target)
+                            .flat_map(|p| p.addrs.iter().map(|a| a.to_string()))
+                            .collect();
+                        let addrs = self.dialable_from_here(&found);
+                        if addrs.is_empty() {
+                            tracing::debug!(peer_id = %target, "Next-hop lookup found no address");
+                        } else if !self.swarm.is_connected(&target) {
+                            let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(target)
+                                .addresses(addrs.clone())
+                                .condition(
+                                    libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing,
+                                )
+                                .build();
+                            match self.dial_checked(opts, "next_hop_lookup") {
+                                Ok(()) => tracing::info!(
+                                    peer_id = %target,
+                                    addrs = addrs.len(),
+                                    "Dialing a chained run's next hop the DHT found"
+                                ),
+                                Err(e) => {
+                                    tracing::debug!(peer_id = %target, error = %e, "Next-hop dial skipped")
+                                }
+                            }
+                        }
+                    }
                     _ => {
                         tracing::debug!(?result, "Kademlia query progressed");
                     }

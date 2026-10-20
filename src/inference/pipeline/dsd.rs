@@ -391,8 +391,9 @@ impl PipelineExecutor {
             finish_reason = "stop".to_string();
         }
 
-        // The continuous stream (`dsd_stream`): where every segment but one is
-        // this node's own and that peer serves a stream, the next chunk of
+        // The continuous stream (`dsd_stream`): where the peers' segments are
+        // one run between this node's — one peer, or a chain of them (#318) —
+        // and they serve a stream, the next chunk of
         // guesses goes out while the last is still being checked, instead of
         // the rounds below waiting a whole round trip between them — the peer
         // last, first, or in the middle of a boomerang, where the walk is ours.
@@ -403,45 +404,77 @@ impl PipelineExecutor {
         if let Drafter::Engine(engine) = &mut drafter {
             let shape = super::dsd_stream::stream_requested()
                 .then(|| {
-                    super::dsd_stream::stream_shape(&self.shared_state, &self.assignment.segments)
+                    super::dsd_stream::stream_shape(
+                        &self.shared_state,
+                        &self.assignment.segments,
+                        self.verify_may_chain(),
+                    )
                 })
                 .flatten();
             if let Some(shape) = shape.filter(|_| finish_reason.is_empty()) {
-                self.stream_checks(
-                    shape,
-                    engine,
-                    current_pos as u32,
-                    super::dsd_stream::StreamIo {
-                        token_tx: &token_tx,
-                        decoder: &decoder,
-                        eos: &eos_set,
-                        noise,
-                        max_tokens,
-                    },
-                    super::dsd_stream::StreamReply {
-                        generated: &mut generated,
-                        finish_reason: &mut finish_reason,
-                        acceptance: &mut acceptance,
-                        check: &mut check,
-                        draft_cost: &mut draft_cost,
-                        proposed: &mut acceptance_proposed,
-                        accepted: &mut acceptance_accepted,
-                    },
-                )
-                .await?;
-                streamed = true;
-                // The stream guesses a fixed chunk and walks no γ, so what the
-                // next request on these machines starts from is the rounds'
-                // verdict on the costs it measured — zero steps it aside, as
-                // for rounds ("Speculation that does not pay steps aside").
-                if let Some(each) = draft_cost.median() {
-                    gamma_now = best_gamma_overall(
-                        acceptance.alpha(),
-                        &check,
-                        each,
-                        gamma_now,
-                        BEST_GAMMA_MAX,
-                    );
+                let chained = shape.chained();
+                let streamed_through = self
+                    .stream_checks(
+                        shape,
+                        engine,
+                        current_pos as u32,
+                        super::dsd_stream::StreamIo {
+                            token_tx: &token_tx,
+                            decoder: &decoder,
+                            eos: &eos_set,
+                            noise,
+                            max_tokens,
+                        },
+                        super::dsd_stream::StreamReply {
+                            generated: &mut generated,
+                            finish_reason: &mut finish_reason,
+                            acceptance: &mut acceptance,
+                            check: &mut check,
+                            draft_cost: &mut draft_cost,
+                            proposed: &mut acceptance_proposed,
+                            accepted: &mut acceptance_accepted,
+                        },
+                    )
+                    .await;
+                match streamed_through {
+                    Ok(()) => {
+                        streamed = true;
+                        // The stream guesses a fixed chunk and walks no γ, so
+                        // what the next request on these machines starts from
+                        // is the rounds' verdict on the costs it measured —
+                        // zero steps it aside, as for rounds ("Speculation
+                        // that does not pay steps aside").
+                        if let Some(each) = draft_cost.median() {
+                            gamma_now = best_gamma_overall(
+                                acceptance.alpha(),
+                                &check,
+                                each,
+                                gamma_now,
+                                BEST_GAMMA_MAX,
+                            );
+                        }
+                    }
+                    // A chain that failed says nothing about which hop it was
+                    // (`forward_verify_through_segments`' re-run): the rounds
+                    // below finish the reply unchained from the last token it
+                    // emitted, every segment cut back to it — the stream
+                    // answered every chunk it had out before it returned, so
+                    // none is still on its way.
+                    Err(e) if chained => {
+                        tracing::warn!(
+                            %request_id,
+                            error = %e,
+                            emitted = generated.len(),
+                            "DSD: the chained stream failed — finishing the reply in rounds, unchained"
+                        );
+                        self.chaining_disabled = true;
+                        last_token = *generated.last().expect("the prompt pass's token");
+                        current_pos = prompt_token_count + generated.len() - 1;
+                        expected_kv_len = current_pos as u32;
+                        pending_truncate = Some(expected_kv_len);
+                        engine.follow(prompt_token_count, &generated);
+                    }
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -590,6 +623,7 @@ impl PipelineExecutor {
                 }),
                 super::worker_requester(&self.request),
                 self.verify_may_chain(),
+                &mut self.chaining_disabled,
             )
             .await
             {

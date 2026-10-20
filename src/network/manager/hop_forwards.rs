@@ -35,9 +35,13 @@
 //!
 //! A record is kept past the next hop's receipt acknowledgement (a refusal
 //! comes after it) for as long as a forward may run, and then forgotten; a
-//! newer forward for the same request replaces it. At most
-//! [`MAX_HOP_FORWARDS`] are held: a peer choosing request ids cannot grow
-//! this without bound.
+//! newer forward for the same request replaces it. A streamed check
+//! (`LayerForward::stream_seq`, handed down a chain since #318) is the one
+//! exception: several of one request are out at once, each with its own
+//! record, so a failure of the first is not lost when the second is handed on
+//! — at most [`MAX_STREAM_RECORDS`] of one request, the newest. At most
+//! [`MAX_HOP_FORWARDS`] are held in all: a peer choosing request ids cannot
+//! grow this without bound.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -54,6 +58,17 @@ pub(super) const HOP_FORWARD_KEEP: Duration = Duration::from_secs(super::MAX_TEN
 /// coordinator learns of a failure at its own deadline, as before #305.
 pub(super) const MAX_HOP_FORWARDS: usize = 1024;
 
+/// The most streamed checks of one request a hop remembers: as many as one
+/// stream may hold at a node (`forward_streams::MAX_STREAM_CHUNKS_HERE`). A
+/// coordinator keeps at most half that out, so an older record's check has
+/// been answered or abandoned.
+pub(super) const MAX_STREAM_RECORDS: usize =
+    crate::daemon::state::forward_streams::MAX_STREAM_CHUNKS_HERE;
+
+/// A record's key: the request, and the check's number in its stream (`None`
+/// for every forward that is not a streamed check).
+type HopKey = (uuid::Uuid, Option<u32>);
+
 /// One forward this node handed on as a hop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct HopForward {
@@ -67,28 +82,46 @@ pub(super) struct HopForward {
     pub sent_at: Instant,
 }
 
-/// The forwards this node handed on as a hop, by request id.
+/// The forwards this node handed on as a hop, by request id and stream number.
 #[derive(Debug, Default)]
 pub(super) struct HopForwards {
-    by_request: HashMap<uuid::Uuid, HopForward>,
+    by_request: HashMap<HopKey, HopForward>,
 }
 
 impl HopForwards {
     /// Remember a forward handed on. A newer forward for the same request
-    /// replaces the older one's record: a chained run sends its next step only
-    /// once the last was answered.
+    /// replaces the older one's record — a chained run sends its next step
+    /// only once the last was answered — except a streamed check's, which is
+    /// kept beside the others of its stream (module doc).
     pub(super) fn record(&mut self, request_id: uuid::Uuid, hop: HopForward) {
-        if !self.by_request.contains_key(&request_id) && self.by_request.len() >= MAX_HOP_FORWARDS {
-            let oldest = self
+        let key = (request_id, hop.step.stream_seq);
+        if hop.step.stream_seq.is_some() && !self.by_request.contains_key(&key) {
+            let streamed: Vec<HopKey> = self
                 .by_request
-                .iter()
-                .min_by_key(|(_, h)| h.sent_at)
-                .map(|(id, _)| *id);
-            if let Some(id) = oldest {
-                self.by_request.remove(&id);
+                .keys()
+                .filter(|(id, seq)| *id == request_id && seq.is_some())
+                .copied()
+                .collect();
+            if streamed.len() >= MAX_STREAM_RECORDS {
+                self.forget_oldest(|k| streamed.contains(k));
             }
         }
-        self.by_request.insert(request_id, hop);
+        if !self.by_request.contains_key(&key) && self.by_request.len() >= MAX_HOP_FORWARDS {
+            self.forget_oldest(|_| true);
+        }
+        self.by_request.insert(key, hop);
+    }
+
+    fn forget_oldest(&mut self, among: impl Fn(&HopKey) -> bool) {
+        let oldest = self
+            .by_request
+            .iter()
+            .filter(|(k, _)| among(k))
+            .min_by_key(|(_, h)| h.sent_at)
+            .map(|(k, _)| *k);
+        if let Some(k) = oldest {
+            self.by_request.remove(&k);
+        }
     }
 
     /// If `result`, received from `sender`, is a failure of a forward this
@@ -102,7 +135,13 @@ impl HopForwards {
         let Some(NetworkFinishReason::Error(reason)) = &result.finish_reason else {
             return None;
         };
-        let hop = self.by_request.get(&result.request_id)?;
+        // A streamed check's failure names its number; anything else is
+        // about the request's one unstreamed record.
+        let key = (
+            result.request_id,
+            result.answers_step.and_then(|s| s.stream_seq),
+        );
+        let hop = self.by_request.get(&key)?;
         if sender != Some(&hop.onward) {
             return None;
         }
@@ -111,7 +150,7 @@ impl HopForwards {
         if result.answers_step.is_some_and(|s| s != hop.step) {
             return None;
         }
-        let hop = self.by_request.remove(&result.request_id)?;
+        let hop = self.by_request.remove(&key)?;
         let report = LayerResult::error(result.request_id, reason.clone()).answering_step(hop.step);
         Some((hop, report))
     }
@@ -152,6 +191,60 @@ mod tests {
             step: step(40),
             sent_at: at,
         }
+    }
+
+    fn streamed(turn: u32) -> ResultStep {
+        ResultStep {
+            index_pos: 40 + turn * 3,
+            layer_range: (14, 28),
+            stream_seq: Some(turn),
+        }
+    }
+
+    /// #318: a chain hop hands on several checks of one stream before the
+    /// first is answered. The next hop refusing the FIRST still reaches the
+    /// coordinator — with one record per request, handing on the second had
+    /// replaced it and the refusal reached nobody.
+    #[test]
+    fn each_streamed_check_handed_on_keeps_its_own_record() {
+        let mut hops = HopForwards::default();
+        let rid = uuid::Uuid::new_v4();
+        let t0 = Instant::now();
+        for turn in 0..3 {
+            hops.record(
+                rid,
+                HopForward {
+                    step: streamed(turn),
+                    sent_at: t0 + Duration::from_millis(turn as u64),
+                    ..hop(t0)
+                },
+            );
+        }
+        let refusal =
+            LayerResult::error(rid, "streamed check 0 was refused").answering_step(streamed(0));
+        let (_, report) = hops
+            .take_onward_failure(Some(&node(3)), &refusal)
+            .expect("the first check's record is still there");
+        assert_eq!(report.answers_step, Some(streamed(0)));
+        assert_eq!(hops.len(), 2, "the others wait for their own answers");
+
+        // One stream holds at most its window of records, the newest.
+        for turn in 3..(3 + MAX_STREAM_RECORDS as u32) {
+            hops.record(
+                rid,
+                HopForward {
+                    step: streamed(turn),
+                    sent_at: t0 + Duration::from_millis(turn as u64),
+                    ..hop(t0)
+                },
+            );
+        }
+        assert_eq!(hops.len(), MAX_STREAM_RECORDS);
+        let oldest = LayerResult::error(rid, "x").answering_step(streamed(1));
+        assert!(hops.take_onward_failure(Some(&node(3)), &oldest).is_none());
+        let newest =
+            LayerResult::error(rid, "x").answering_step(streamed(2 + MAX_STREAM_RECORDS as u32));
+        assert!(hops.take_onward_failure(Some(&node(3)), &newest).is_some());
     }
 
     /// The refusal the next hop sends back on the connection it came in on

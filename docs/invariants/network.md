@@ -3082,9 +3082,16 @@ silently. A hop that finds the next one without the bit fails the run out loud
 ("the next segment cannot carry it") rather than forwarding it. The waiter pins
 the tail and lists every hop in `chain_members` (any may refuse), and a chained
 check passes `ResendOnRefusal::Never` — the refusal may be any hop's. A failed
-chained check fails the request exactly as a failed star check did; nothing
+chained check ~~fails the request exactly as a failed star check did; nothing
 re-runs it unchained mid-round (the earlier hops' caches already hold the
-positions).
+positions)~~ — **superseded 2026-10-20 (#318):** is re-run UNCHAINED by
+`forward_verify_through_segments` itself, the run's segments cut back to
+`index_pos` (the same answer to "the hops' caches already hold the positions"
+the plain decode loop's chained re-run has given since 2026-08-21), and the
+caller chains no more for that request (`chain_failed` → `chaining_disabled`).
+Failing the request ended every reply after its first token on the 3-machine
+rig, where the middle machine had not yet met the last (§ "A stream of checks
+travels a chain").
 
 **Measured** (rig, 2026-10-02, `split_rig.sh remote REMOTE_NODES=3 DELAY_B=150`, A/B by
 `SWARMLLM_CHAIN_VERIFY=0`, one binary): the n-gram request 2.03 → **2.66 tok/s**
@@ -3339,8 +3346,9 @@ of 1-4 tokens beat large ones once several are in flight.
   failure, B wrote 38 warnings in one arm for the stream working as designed.
 
 **What a change must keep:**
-- A plan streams with exactly ONE peer segment (`dsd_stream::stream_shape`); the
-  peer is asked to walk only where it holds the last layers, and in any other
+- A plan streams with ONE RUN of peer segments (`dsd_stream::stream_shape`) —
+  one peer, or since 2026-10-20 a chain of them (§ "A stream of checks travels a
+  chain"); the run's tail is asked to walk only where it holds the last layers, and in any other
   shape it is sent no guess, history or sampler. This node's segments after the
   peer's run in `take_answer`'s order, never in the waits. Pinned by
   `every_plan_with_one_peer_segment_streams` and
@@ -3388,6 +3396,140 @@ hole waited 60 s — a restart skips only turns that ARRIVE. A coordinator strea
 only to a peer advertising `features::STREAM_AS_ONE_WORK`.
 
 → `docs/invariants/network.md` § "A stream of verifies runs in its order"
+
+## A stream of checks travels a chain, and a chain that fails finishes unchained (2026-10-20, #318)
+
+**What it replaced.** The continuous stream streamed only where the plan had ONE
+peer segment; a large model split over a RUN of peers (A → B → C) went back to
+rounds, each waiting a whole trip around the ring. A run is now one stream:
+`dsd_stream::stream_shape` takes a run of distinct machines that every hop can
+carry (`plan_chain` over `CHAINED_VERIFY | CHAINED_STREAM`, plus
+`STREAMED_VERIFY`, `STREAM_AS_ONE_WORK` and `peer_supports_pipeline_chain`), the
+head is sent each chunk with the rest of the run as its chain, and the TAIL
+answers. Each hop runs the chunks in their numbered order and hands the number
+on (`features::CHAINED_STREAM`, bit 27: without it the next hop would run them
+in arrival order and write rows into the wrong positions).
+
+**What assumed one hop, and what each became:**
+- **A hop's record of a forward it handed on was one per request**
+  (`network::manager::hop_forwards`, #305): a stream has several out at once, so
+  the record is keyed by (request, stream number), at most
+  `MAX_STREAM_CHUNKS_HERE` per request, and a failure names the number it
+  answers.
+- **A restart waited for the superseded turns to come.** Superseded chunks the
+  coordinator dropped may never reach a middle hop at all (the head skipped
+  them), so `forward_streams` now lets a restart go the moment nothing runs
+  (`Order { refused, running }`, one lock): a superseded turn arriving later is
+  `Skipped`. Safe because a restart follows a check the TAIL answered — that
+  check ran on every hop — and the worker refuses a streamed forward whose
+  `index_pos` is not its cache's length after the cut.
+- **A refused copy of the running turn was a gap** (security review 2026-10-20,
+  finding 1): recording it stepped `next` past a turn still at the worker and
+  refused the honest one after it. It is recorded as nothing.
+
+**What the rig found first: a chained CHECK failed the whole reply when the
+middle machine had not met the last.** `split_rig.sh repeat` with
+`SHARDS_C`: C bootstraps to A only, and peer exchange took minutes to introduce
+B and C. Every chained check B could not hand on came back "chained run could
+not reach the next segment", `dsd` returned it, and every reply ended after its
+first token (`finish_reason: error`) — the stream AND the rounds (chained checks
+since 2026-10-02), at 206 ms and at 0 ms. The plain decode loop survived the
+same failure (0.94 tok/s, 96 tokens): it has re-run a chained step unchained
+since 2026-08-21. Three changes, each at the place every path crosses:
+- **`forward_verify_through_segments` re-runs a failed chained run unchained**
+  (all three check callers: `dsd`'s rounds and both `ngram_only_spec` arms), the
+  run's segments cut back to `index_pos`, and sets its REQUIRED `chain_failed`
+  (`PipelineExecutor::chaining_disabled`). Any failure counts: the tail answers
+  for the whole run, so none of them names a hop; a second failure, unchained,
+  is the check's own.
+- **A chained stream that fails is finished in rounds**, unchained, from the last
+  token it emitted (`dsd`: every segment cut back to it,
+  `EngineDrafter::follow` keeping the drafter's cache as far as it agrees). The
+  stream first awaits every chunk still out (`StreamRun::run`): an unchained
+  forward is not held to the stream's order, so a chunk still on its way could
+  otherwise run after the rounds' first check and write into rows it had cut.
+  A wait ends on its own deadline, so the drain is bounded; one peer's stream
+  that fails still ends the reply, as before.
+- **A middle hop refuses a forward it cannot hand on BEFORE its worker runs it**
+  (`layer_forward::onward_refusal`, asked again after the worker since the
+  connection can drop meanwhile) — run, its rows are written and lost, and a
+  stream's queued chunks would each be run and lost the same way — **and dials
+  the next hop** (`NetworkCommand::DialPeer`, through `dial_checked` by peer id
+  with `DisconnectedAndNotDialing` — gotchas #404/#405 — the registry's
+  addresses as hints, plus Kademlia's and identify's; with none, a
+  `get_closest_peers` lookup whose answer is dialled, at most
+  `MAX_NEXT_HOP_LOOKUPS` at once, one per peer), so the swarm's next chained run
+  through it can go on.
+
+**Measured** (`split_rig.sh repeat`, Qwen2.5-Coder-7B Q4_K_M, A parts 0-1 + the
+0.5B drafter / B 2-4 / C 5-7, all on this machine's processor, `RIG_NETNS=1
+RIG_RTT_MS=206`, 96 greedy tokens, warm requests 2 and 3, one binary,
+2026-10-20; first build of the day before these fixes: every reply 1 token, in
+every arm):
+
+| arm | s per reply | tok/s |
+|---|---|---|
+| stream through the chain (`C_MEETS_B=1`) | 78.2 / 77.5 | **1.24** |
+| chained rounds (`SWARMLLM_SPEC_STREAM=0`) | 89.6 / 89.6 | 1.07 |
+| star rounds (`SWARMLLM_CHAIN_VERIFY=0`) | 97.7 / 91.9 | 1.04 |
+| no guessing, chained decode | 93.0 / 92.9 | 1.03 |
+| stream, C never met B → finished in rounds, unchained | 97.5 / 95.2 | 1.01 |
+
+The mechanism fired: `peers=2 chunks=45 kept_whole=24 restarts=20` per reply, C
+ran 180 numbered checks; replies identical in every arm. The stream's +16% over
+chained rounds is small because the three "machines" share ONE 8-core
+processor: a stream overlaps the hops' compute, and here there is one compute
+to overlap. In the unmet arm B refused "cannot carry it" — it held no
+capability for C (a `NodeCapabilityUpdate` only updates a peer already in the
+registry, `dispatch/mod.rs`), so it never dialled; `onward_refusal` now asks
+the connection FIRST and `dial_next_hop` derives an unmet node's peer id from
+its key (`network::transport::node_id_to_peer_id`).
+
+Re-run with that build (4 requests, 95.7 / 93.7 / 97.7 s): B refused
+"unreachable" before working and started a lookup each time ("Looking up a
+chained run's next hop"), every reply was whole, and every stream finished in
+rounds — **the lookup never found C**. Not a defect of the lookup: on the
+loopback rig C's connection to A is INBOUND (`is_dialer=false`) and C advertises
+only `127.0.0.1`, which identify keeps out of Kademlia on purpose
+(`addr_is_remotely_reachable`, gotcha #165 — a loopback entry would be served
+to remote peers), so the DHT holds no address for C. A node with a public
+address is found; a node reachable only through a relay is not, and its run
+stays unchained. **So the dial after a lookup is unverified on a real link** —
+FUTURE_WORK #318.
+
+**What a change must keep:** every check caller passes `chain_failed` (a dummy
+would re-chain every check of the request and pay the failure each time); the
+drain stays before the rounds take over; a new refusal of a chained forward goes
+through `onward_refusal`. Pinned by `a_chained_check_that_fails_is_re_run_unchained`,
+`a_chained_forward_that_cannot_go_on_is_refused_before_the_work`,
+`rounds_taking_over_a_stream_follow_the_reply_not_its_chunks`,
+`a_refused_copy_of_the_running_turn_does_not_refuse_the_next`,
+`a_restart_does_not_wait_for_superseded_turns_that_never_come`,
+`each_streamed_check_handed_on_keeps_its_own_record` and
+`a_run_of_peers_streams_as_a_chain` — each red with its fix toggled off
+(2026-10-20).
+
+**Security review (2026-10-20, Mythos).** Finding 1 is fixed above. Not new and
+not changed: a stream and a request's cache are keyed by request id with no
+binding to the sender of its first chunk (a registry peer that learns a request
+id could already truncate that request's cache with an unstreamed forward — the
+restart jump adds no lever), and any `chain_members` hop may resolve a chained
+wait with a success, as on the chained rounds since 2026-10-02 (outcome-equivalent
+to the activations a hop already controls). The trailers bind in the AAD in
+one order on every encoder.
+
+**The next-hop dial** was reviewed in the session itself (the Mythos review hit
+its weekly limit before reporting). One finding, fixed: both dials took their
+addresses unfiltered, and a lookup's answer is any peer's word — they now go
+through `peer_cache::filter_dialable` like every other dial
+(`NetworkManager::dialable_from_here`; test
+`a_next_hop_is_dialled_only_at_addresses_worth_dialling_from_here`, red without
+it). Checked and left: the lookup cap cannot leak — libp2p-kad 0.48 ends a
+`get_closest_peers` query with exactly one event, finished or timed out
+(`query_finished` / `query_timeout`), and no earlier arm of the match takes it;
+private mode scopes this node's OWN requests and gates no connection, so dialling
+a next hop crosses no boundary; an address a malicious peer puts in a lookup's
+answer is what every Kademlia walk already dials.
 
 ## One upload per model id, on every node (2026-10-02, FUTURE_WORK #151)
 

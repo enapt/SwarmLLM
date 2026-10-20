@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+**A model split over three or more computers no longer stops after its first token.** When the
+computers holding the middle and the end of a model had not yet connected to each other — usual
+for the first minutes after they join — every reply that guessed ahead ended after its first
+token with an error. A check that cannot travel from computer to computer is now sent to each
+in turn, and the reply carries on; the middle computer turns such work away before doing it,
+and tries to connect to the next one, looking its address up on the network if it has to. On a
+three-computer test with a 0.2-second round trip between each, every reply came back whole —
+including when the middle and last computers never met, where the reply finished checking
+batch by batch.
+
+**Splits over three or more computers keep several guesses in flight.** The guess-checking
+stream, which sends the next batch of guesses while the last is still being checked, used to
+run only where one other computer held the rest of the model. It now runs through a chain of
+computers, each passing the guesses on in order: 1.24 tokens a second against 1.07 checking
+batch by batch on the same three-computer test (they shared one processor, which limits what
+overlapping their work can win). Every computer in the chain needs this release; with an older
+one the reply checks batch by batch, as before.
+
 **`swarmllm status` finds a running service.** Commands such as `swarmllm status`, run without
 `-d`, looked for the access key in your home folder. A service installed from the .deb or .rpm
 keeps it in `/var/lib/swarmllm`, so the command said SwarmLLM was not running and to start it. A

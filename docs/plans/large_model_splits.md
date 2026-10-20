@@ -105,33 +105,61 @@ guess set of N rows; P is the time of one pass.
      chunk's `stream_seq` onward.
    - **Failure record.** `hop_forwards` keeps ONE record per request (#305), so a
      pipelined stream's second chunk replaces the first's. Key it per (request, seq).
-   - **Gaps.** A middle hop that steps over a chunk (superseded by a restart, or refused on
-     arrival) leaves a hole at the next hop. A restart does NOT close it: `turn()` makes
-     the restart wait until every earlier turn has arrived and taken its turn
-     (`next >= turn`), and the stepped-over one never comes, so it waits
-     `STREAM_TURN_WAIT` (60 s). Letting a restart jump `next` forward is unsafe, because
-     the turn before it may be running (`next` equals a RUNNING turn, so a jump would put
-     two forwards of one request at the worker, gotcha #180).
-     **The fix:** the middle hop hands the next hop a "stepped over" notice for that
-     turn: a `LayerForward` with the chunk's `stream_seq`, the rest of the chain, no
-     activations and a flag bit (`spec_trailer_flags`, the one writer of that byte). The
-     next hop records it with the existing `ForwardStreams::refused_on_arrival` (the
-     mechanism that already closes a hole left by an admission refusal), passes it on if
-     it has a chain onward, and answers nobody, since the coordinator was already
-     answered. It travels the chunk's own path (encryption, AAD, admission), so it is
-     exactly as trusted as a chunk: a node that knows the request id could already send
-     one.
+   - **Gaps.** A middle hop that steps over a chunk (superseded by a restart) leaves a
+     hole at the next hop. A restart did NOT close it: `turn()` made the restart wait
+     until every earlier turn had arrived and taken its turn (`next >= turn`), and the
+     stepped-over one never comes, so it waited `STREAM_TURN_WAIT` (60 s).
+     **Built (2026-10-20): a restart goes the moment nothing runs.** The stream now
+     records whether a turn is RUNNING, under the lock that moves `next`; when nothing
+     runs, `next` jumps straight to the restart, and a superseded turn that turns up
+     later is answered unrun. A turn is claimed under that lock, so a jump can never put
+     two forwards of one request at the worker (gotcha #180), and a second copy of a
+     running turn no longer runs beside it. Safe because every turn a restart builds on
+     ran on every hop: the coordinator restarts only after the check before it was
+     answered, and that check went through every hop to the tail; the worker refuses a
+     forward whose position is not its cache's length after the cut. A first draft
+     here had the middle hop send a "stepped over" notice per skipped turn; the jump
+     needs no message at all. A hole a hop leaves by REFUSING a chunk (an admission
+     cap, a failure) ends the stream at the coordinator, which re-plans under a new
+     attempt number; the next hop's queued turns of the dead attempt wait out their
+     60 s holding one stream slot, never a newer attempt's.
    - **Coordinator.** `dsd_stream`'s far side becomes the chain: the head peer, then each
      hop (`plan_chain`). The wait is `WaiterKey::streamed(request, seq)` with
      `awaiting` = the tail, `chain_members` = every hop and `ExpectedStep` = every hop's
      range, as the rounds' chained wait already has.
-   - **Wire gate.** One new `features` bit (27), advertised by a node that carries a
-     chunk's number onward, keeps per-chunk onward records and sends the gap notice. The
-     coordinator streams through a chain only when EVERY hop advertises it plus
-     `STREAMED_VERIFY | STREAM_AS_ONE_WORK | CHAINED_VERIFY`; otherwise it keeps the
-     rounds. No existing variant changes shape, so `PROTOCOL_VERSION` stays.
-   - **Rig:** `split_rig.sh remote` with `REMOTE_NODES=3` and a drafter in the rig
-     (gotcha #915), at `RIG_RTT_MS`.
+   - **Wire gate.** One new `features` bit, `CHAINED_STREAM` (27), advertised by a node
+     that carries a chunk's number onward, keeps per-chunk onward records and lets a
+     restart pass superseded turns. The coordinator streams through a chain only when
+     EVERY hop advertises it plus `STREAMED_VERIFY | STREAM_AS_ONE_WORK | CHAINED_VERIFY`,
+     and each machine appears once in the run; otherwise it keeps the rounds. No
+     existing variant changes shape, so `PROTOCOL_VERSION` stays.
+   - **Found while building it: a user who holds NONE of the model guesses nothing.**
+     That is the usual way to run a large model, and the request is handed to the
+     machine holding its first layers, which leads it (`delegation_eligible`,
+     `try_delegated_split` runs first). The small model that guesses lives on the
+     user's machine, which the hand-off leaves behind, so the head leads with no
+     drafter: one token a pass, or prompt lookup at best. The fix is a priced choice
+     between two loops: led by the head with no drafter, at the head's ring
+     (tok/s ≈ 1 / P_head), or driven from the user's machine with its drafter through
+     the whole chain, today excluded because "a plan that is the peers' alone is a
+     hand-off" (`dsd_stream::shape_of`), at the longer ring (tok/s ≈ E_N / P_user).
+     Driving from here wins wherever compute dominates the pass (every processor ring)
+     or E_N exceeds P_user / P_head; leading wins across an ocean with no drafter. Next
+     after the chain stream's rig.
+   - **Rig:** `split_rig.sh repeat` with `SHARDS_C` (A holds the first parts and the
+     drafter, gotcha #915), `RIG_NETNS=1 RIG_RTT_MS=206`; `C_MEETS_B=1` has C dial B.
+   - **Built and measured (2026-10-20).** The stream through the chain: 1.24 tok/s
+     against 1.07 for chained rounds, 1.04 star rounds, 1.03 without guessing (7B,
+     96 greedy tokens, replies identical; C ran 180 numbered checks). The gain is small
+     because the rig's three machines share one processor: a stream overlaps the hops'
+     compute, and here there is one compute. **The rig found an older defect first:**
+     wherever the middle machine had not met the last — the first minutes of any new
+     swarm — every chained check failed and every reply ended after one token, the
+     rounds' too (gotcha #916). Fixed in the same change: the check is re-run unchained,
+     a failed chained stream finishes in rounds, and the middle machine refuses before
+     working and dials its next hop, looking it up in the DHT when it has no address
+     (on the loopback rig the DHT has none, so the run stays unchained: the dial after
+     a lookup waits for a real link).
 1. **N is bounded by throughput, not by the round.** The round cost model in
    `split_speculation.md` added a tree's compute and transfer to every round, which
    is why tree 64 lost to tree 32 on short links. In the continuous stream (§ 4b,

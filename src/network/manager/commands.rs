@@ -10,7 +10,27 @@ use libp2p::gossipsub::IdentTopic;
 use crate::network::protocol::{self, PrefixKvDataResp, SwarmRequest, SwarmResponse, TOPIC_MODELS};
 use crate::types::{NetworkCommand, SwarmMessage};
 
+/// Next-hop lookups in flight at once (`NetworkCommand::DialPeer`). Each costs
+/// a few Kademlia requests and is asked for only by a chained run this node
+/// could not hand on; the cap bounds what admitted forwards can ask of it.
+pub(super) const MAX_NEXT_HOP_LOOKUPS: usize = 16;
+
 use super::{NetworkManager, MAX_BUFFERED_GOSSIP};
+
+impl NetworkManager {
+    /// Of `addrs`, those worth dialling from here — `peer_cache::filter_dialable`,
+    /// the rule every dial path follows. A chained run's next hop is dialled
+    /// with what this node's registry holds and with what a DHT lookup
+    /// answered, and a lookup's answer is any peer's word: unfiltered, it could
+    /// point this node at a private address on a network it is not on.
+    pub(super) fn dialable_from_here(&self, addrs: &[String]) -> Vec<libp2p::Multiaddr> {
+        let local_addrs = self.shared_state.listen_multiaddrs.load();
+        crate::network::peer_cache::filter_dialable(addrs, self.swarm.local_peer_id(), &local_addrs)
+            .iter()
+            .filter_map(|a| a.parse().ok())
+            .collect()
+    }
+}
 
 /// `SWARMLLM_TEST_TENSOR_DELAY_MS=N` holds every outbound tensor message — a
 /// forward or a result — N ms before it is sent, so a split
@@ -62,6 +82,7 @@ impl NetworkManager {
             NetworkCommand::SendRingChunk { .. } => "SendRingChunk",
             NetworkCommand::SendDirectMessage { .. } => "SendDirectMessage",
             NetworkCommand::DialAddress(_) => "DialAddress",
+            NetworkCommand::DialPeer { .. } => "DialPeer",
             NetworkCommand::StartProviding(_) => "StartProviding",
             NetworkCommand::StopProviding(_) => "StopProviding",
             NetworkCommand::SendPrefixKvFetch { .. } => "SendPrefixKvFetch",
@@ -199,6 +220,48 @@ impl NetworkManager {
                     Err(e) => {
                         tracing::warn!(addr = %addr_str, error = %e, "Invalid multiaddr in DialAddress");
                     }
+                }
+            }
+            NetworkCommand::DialPeer {
+                peer_id_bytes,
+                hints,
+            } => {
+                let Ok(peer_id) = libp2p::PeerId::from_bytes(&peer_id_bytes) else {
+                    tracing::debug!("DialPeer: not a peer id");
+                    return;
+                };
+                if self.swarm.is_connected(&peer_id) {
+                    return;
+                }
+                let addrs = self.dialable_from_here(&hints);
+                let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
+                    .addresses(addrs.clone())
+                    .condition(libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing)
+                    .extend_addresses_through_behaviour()
+                    .build();
+                match self.dial_checked(opts, "next_hop") {
+                    Ok(()) => tracing::info!(
+                        %peer_id,
+                        hints = addrs.len(),
+                        "Dialing a chained run's next hop"
+                    ),
+                    // Nothing knows where it is: a node the swarm has not
+                    // introduced to this one is in no routing table here. Ask
+                    // the DHT, and dial what it answers (`events.rs`).
+                    Err(libp2p::swarm::DialError::NoAddresses) => {
+                        if self.next_hop_lookups.len() < MAX_NEXT_HOP_LOOKUPS
+                            && !self.next_hop_lookups.values().any(|p| p == &peer_id)
+                        {
+                            let query = self
+                                .swarm
+                                .behaviour_mut()
+                                .kademlia
+                                .get_closest_peers(peer_id);
+                            self.next_hop_lookups.insert(query, peer_id);
+                            tracing::info!(%peer_id, "Looking up a chained run's next hop");
+                        }
+                    }
+                    Err(e) => tracing::debug!(%peer_id, error = %e, "Next-hop dial skipped"),
                 }
             }
             NetworkCommand::StartProviding(shards) => {
@@ -444,5 +507,61 @@ impl NetworkManager {
                 tracing::warn!(error = %e, "Failed to encode outbound message");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::{mpsc, watch};
+
+    use super::NetworkManager;
+
+    /// A next hop is dialled only where `filter_dialable` would dial: a node
+    /// on a public address is not sent to a private one a lookup answered.
+    #[tokio::test]
+    async fn a_next_hop_is_dialled_only_at_addresses_worth_dialling_from_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(dir.path()).unwrap();
+        let config = crate::config::Config::default();
+        let (state, _, _) = crate::daemon::SharedState::new(
+            config.clone(),
+            crate::identity::Identity::generate(),
+            db,
+            Arc::new(tokio::sync::Mutex::new(
+                crate::inference::executor::ModelExecutor::new(),
+            )),
+            None,
+        );
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let (out_tx, _dispatched) = mpsc::channel(8);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (_dht_tx, dht_rx) = mpsc::channel(8);
+        let manager = NetworkManager::new(
+            state.clone(),
+            &state.identity,
+            &config,
+            command_rx,
+            command_tx,
+            out_tx,
+            shutdown_rx,
+            None,
+            dht_rx,
+        )
+        .unwrap();
+        state
+            .listen_multiaddrs
+            .store(Arc::new(vec!["/ip4/203.0.113.5/tcp/8810".to_string()]));
+        let answered = [
+            "/ip4/192.168.1.1/tcp/22".to_string(),
+            "/ip4/198.51.100.7/tcp/8810".to_string(),
+        ];
+        let dialled: Vec<String> = manager
+            .dialable_from_here(&answered)
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        assert_eq!(dialled, vec!["/ip4/198.51.100.7/tcp/8810".to_string()]);
     }
 }

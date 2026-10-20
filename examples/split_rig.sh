@@ -51,6 +51,13 @@
 #          client's 900 s and the run sees one request boundary, not REPEAT.
 #          RIG_TEMPERATURE=0.7 asks every question at that temperature (default 0,
 #          greedy) — for speculation that must hold at the temperatures clients send.
+#          SHARDS_C=… (set SHARDS_B too) adds C holding those parts: a three-machine
+#          split, A → B → C, B handing C its output — with DRAFTER, the guess-checking
+#          stream through a chain (#318). The summary counts A's streamed replies by
+#          how many peers each crossed (`peers=`). C dials only A, as a node new to
+#          the swarm would: B meets C when a chained run it cannot hand on makes it
+#          dial (`layer_forward::dial_next_hop`), and the runs before that finish
+#          unchained. C_MEETS_B=1 has C dial B as well, so the chain runs at once.
 #   (any mode) DRAFTER=<model id> also gives A that model WHOLE, from the same
 #          models directory — the small model speculation across computers guesses
 #          with (`pipeline::engine_drafter`). Pair it with EXTRA_TOML switching
@@ -739,11 +746,18 @@ if [ "$MODE" = continue ]; then
   up "$BASE/C" 8940 || exit 1
   PEERS_EXPECTED=2
 fi
-if [ "$MODE" = splitcache ] && [ -n "${SPARE:-}${SHARDS_C:-}" ]; then
+if { [ "$MODE" = splitcache ] && [ -n "${SPARE:-}${SHARDS_C:-}" ]; } \
+  || { [ "$MODE" = repeat ] && [ -n "${SHARDS_C:-}" ]; }; then
   # SPARE: a second peer that could run B's segment — what the plan chooses
   # between. SHARDS_C: a third machine with parts of its own, so the plan is
   # A → B → C and B hands C its output (a boundary between two peers, #171).
-  make_node "$BASE/C" "${SHARDS_C:-$SHARDS_B}" "\"$ADDR\""
+  C_BOOT="\"$ADDR\""
+  if [ "$MODE" = repeat ] && [ -n "${SHARDS_C:-}" ] && [ -n "${C_MEETS_B:-}" ]; then
+    ID_B=$(grep -a -m1 -oE "Initializing network peer_id=12D3Koo[A-Za-z0-9]+" "$BASE/B/node.log" | cut -d= -f2)
+    ADDR_B=$(echo "$ADDR" | sed -E "s#/tcp/[0-9]+/p2p/.*#/tcp/8930/p2p/$ID_B#")
+    [ -n "$ID_B" ] && C_BOOT="\"$ADDR\", \"$ADDR_B\""
+  fi
+  make_node "$BASE/C" "${SHARDS_C:-$SHARDS_B}" "$C_BOOT"
   PC=$(start "$BASE/C" 8940 "$BIN_A" "${GPU_C:-0}")
   up "$BASE/C" 8940 || exit 1
   PEERS_EXPECTED=2
@@ -1679,6 +1693,10 @@ if [ "$MODE" = repeat ]; then
   # not a vocabulary) the payoff gate keeps the loop on while rounds average past its
   # bar — llama-3.2-3b on this prompt reads 1.30 tokens/round, all 3 of 3 on .218 too.
   echo "repeat: n-gram path taken by $(grep -c 'try_ngram_only_distributed ELIGIBLE' "$BASE/A/node.log") of ${REPEAT:-3} requests (payoff_x100: $(grep -a -o 'payoff_x100=[0-9]*' "$BASE/A/node.log" | tail -1))"
+  echo "repeat: streamed replies by peers crossed: $(grep -a 'DSD: streamed checks complete' "$BASE/A/node.log" | grep -o 'peers=[0-9]*' | sort | uniq -c | paste -sd' ')"
+  if [ -n "${SHARDS_C:-}" ]; then
+    echo "repeat: chains that failed and finished unchained: checks $(grep -ac 'chained check failed — re-running it unchained' "$BASE/A/node.log"), streams $(grep -ac 'the chained stream failed — finishing the reply in rounds' "$BASE/A/node.log"); B dialled its next hop $(grep -ac "Dialing a chained run's next hop" "$BASE/B/node.log")x"
+  fi
   echo "repeat: score with examples/score_against_reference.py <model.gguf> $OUT/repeat.jsonl $OUT/prompt.txt"
   exit 0
 fi

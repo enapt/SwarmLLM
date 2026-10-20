@@ -614,6 +614,26 @@ impl EngineDrafter {
         self.open = None;
     }
 
+    /// Take the sequence to the prompt's first `prompt_len` tokens followed by
+    /// `reply` — the rounds taking a reply over from a stream that ended
+    /// (`dsd`), whose sequence may run chunks past it — keeping the cache as
+    /// far as it agrees. The reply's last token is always left to be read:
+    /// the next call must have something new to read, and that token's row
+    /// is the one it guesses from.
+    pub(super) fn follow(&mut self, prompt_len: usize, reply: &[u32]) {
+        let agree = self
+            .seq
+            .get(prompt_len..)
+            .unwrap_or(&[])
+            .iter()
+            .zip(reply)
+            .take_while(|(held, said)| held == said)
+            .count()
+            .min(reply.len().saturating_sub(1));
+        self.rewind(prompt_len + agree);
+        self.push(&reply[agree..]);
+    }
+
     #[cfg(test)]
     pub(super) fn valid(&self) -> usize {
         self.valid
@@ -710,6 +730,33 @@ mod tests {
             "the cache is trusted only up to the refused guess"
         );
         assert_eq!(&d.seq[d.valid..], &[20]);
+    }
+
+    /// Rounds taking over from a stream that failed: the sequence becomes the
+    /// prompt and the reply so far, whatever chunks the stream drafted past
+    /// it, and the cache is kept only where it agrees.
+    #[test]
+    fn rounds_taking_over_a_stream_follow_the_reply_not_its_chunks() {
+        let mut d = drafter(&[1, 2, 3]);
+        d.push(&[10]);
+        d.open = Some((4, 3));
+        d.settle(3);
+        d.push(&[11, 12, 13]);
+        d.open = Some((7, 2));
+        d.settle(2);
+        d.push(&[14, 15]);
+        // The reply kept 11 and 12, and its check sampled 30.
+        d.follow(3, &[10, 11, 12, 30]);
+        assert_eq!(d.seq, vec![1, 2, 3, 10, 11, 12, 30]);
+        assert_eq!(d.valid(), 6, "kept as far as it agrees");
+        assert_eq!(&d.seq[d.valid..], &[30]);
+        // A reply the sequence holds whole still leaves its last token to read.
+        let mut d = drafter(&[1, 2, 3]);
+        d.push(&[10, 11, 12]);
+        d.valid = 6;
+        d.follow(3, &[10, 11, 12]);
+        assert_eq!(d.seq, vec![1, 2, 3, 10, 11, 12]);
+        assert_eq!(&d.seq[d.valid..], &[12]);
     }
 
     fn spec(name: &str) -> DrafterSpec {

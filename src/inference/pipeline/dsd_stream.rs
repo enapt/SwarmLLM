@@ -22,16 +22,25 @@
 //! chunks first, since it runs a stream in order (`daemon::state::forward_streams`),
 //! and they cost it work, never a wrong cache.
 //!
-//! **Where the guesses are walked.** A plan streams when ONE of its segments is
-//! a peer's and every other is this node's ([`stream_shape`]). Where the peer
-//! holds the model's last layers it walks each chunk, as above. Where this node
-//! does — the boomerang a node holding both ends of a model runs by default
-//! ("Start and finish on this computer"), or a peer holding the first layers —
-//! the peer answers each chunk with hidden states and this node's last segment
-//! walks it, as each answer is taken in order (FUTURE_WORK #152); the peer is
-//! sent no guess, history or sampler, as on any other step of such a reply. A
-//! chunk a restart drops is then never run on this side at all. PipeInfer's
-//! head node samples the same way: the logits come back to it.
+//! **Where the guesses are walked.** A plan streams when its peers' segments are
+//! ONE run between this node's ([`stream_shape`]): one peer, or a chain of them
+//! each handing the chunk to the next (#318 — a model too large for any two
+//! machines is split across three or more, and before this every such reply
+//! was checked round by round). Where the run holds the model's last layers its
+//! tail walks each chunk, as above. Where this node does — the boomerang a node
+//! holding both ends of a model runs by default ("Start and finish on this
+//! computer"), or peers holding the first layers — the run answers each chunk
+//! with hidden states and this node's last segment walks it, as each answer is
+//! taken in order (FUTURE_WORK #152); the peers are sent no guess, history or
+//! sampler, as on any other step of such a reply. A chunk a restart drops is
+//! then never run on this side at all. PipeInfer's head node samples the same
+//! way: the logits come back to it.
+//!
+//! **Through a chain** every hop runs the stream in its order: the chunk's
+//! number travels with the activations (`features::CHAINED_STREAM`), so each
+//! hop's `forward_streams` orders its own layers' turns, and a restart passes
+//! the turns a hop before it skipped and so never handed on. The tail answers
+//! here, as a chained check's does (`forward_verify_through_segments`).
 //!
 //! PipeInfer (arXiv 2407.11798, SC'24) runs this scheme across MPI nodes; it
 //! found small chunks (1-4 tokens) better than large ones once several are in
@@ -56,7 +65,7 @@ use crate::inference::coupled_noise::CoupledNoise;
 use crate::inference::dsd_controller::{AcceptanceEstimate, CheckCost, RecentMedian};
 use crate::inference::router::StreamingTokenTx;
 use crate::types::inference::stream_seq;
-use crate::types::{LayerResult, NetworkCommand, NetworkFinishReason, PipelineSegment};
+use crate::types::{ChainHop, LayerResult, NetworkCommand, NetworkFinishReason, PipelineSegment};
 
 use super::engine_drafter::EngineDrafter;
 use super::local::{ActivationUnits, ResendOnRefusal, SegmentBudget};
@@ -115,26 +124,54 @@ fn stream_switch(v: Option<&str>) -> bool {
     !matches!(v, Some("0") | Some("off") | Some("false"))
 }
 
-/// A plan a stream can run on: ONE segment on a peer, every other one this
-/// node's own. Their forwards then leave here one at a time, in order, and the
-/// one peer runs the stream in that order (`daemon::state::forward_streams`).
+/// A plan a stream can run on: ONE run of peers' segments, every other segment
+/// this node's own. Their forwards then leave here one at a time, in order, and
+/// every peer of the run runs the stream in that order
+/// (`daemon::state::forward_streams`).
 pub(super) struct StreamShape {
-    /// This node's segments before the peer's — none when the peer holds the
+    /// This node's segments before the peers' — none when they hold the
     /// model's first layers.
     near: Vec<PipelineSegment>,
-    /// The peer's segment.
+    /// The first peer's segment: each chunk is sent to it.
     far: PipelineSegment,
-    /// This node's segments after the peer's — the boomerang's tail. When there
-    /// are any, the guesses are walked HERE, by the last of them, and the peer
-    /// answers each chunk with hidden states (FUTURE_WORK #152).
+    /// The peers after it, each handed the chunk by the one before (#318) —
+    /// empty where one peer holds every layer between this node's.
+    chain: Vec<ChainHop>,
+    /// This node's segments after the peers' — the boomerang's tail. When there
+    /// are any, the guesses are walked HERE, by the last of them, and the peers
+    /// answer each chunk with hidden states (FUTURE_WORK #152).
     after: Vec<PipelineSegment>,
 }
 
 impl StreamShape {
-    /// Whether the peer samples, and so walks each chunk's guesses: only when
-    /// it holds the model's last layers.
+    /// Whether the run's tail samples, and so walks each chunk's guesses: only
+    /// when it holds the model's last layers.
     fn far_walks(&self) -> bool {
         self.after.is_empty()
+    }
+
+    /// The peer that answers each chunk: the run's last.
+    fn tail(&self) -> &crate::types::NodeId {
+        self.chain.last().map_or(&self.far.node_id, |h| &h.node_id)
+    }
+
+    /// The layer ranges of the run, in order — every hop's, since any may
+    /// refuse with its own.
+    fn far_ranges(&self) -> Vec<(u32, u32)> {
+        std::iter::once(self.far.layer_range)
+            .chain(self.chain.iter().map(|h| h.layer_range))
+            .collect()
+    }
+
+    /// The peers of the run.
+    fn peers(&self) -> usize {
+        1 + self.chain.len()
+    }
+
+    /// Does the run travel as a chain? A chain that fails is finished in
+    /// rounds, unchained (`dsd`); one peer's stream that fails ends the reply.
+    pub(super) fn chained(&self) -> bool {
+        !self.chain.is_empty()
     }
 
     /// For the log line that says which shape a request streamed on.
@@ -150,51 +187,107 @@ impl StreamShape {
 
 /// The shape a request's checks stream on, or `None` to keep the rounds.
 ///
-/// The peer must serve a stream as one piece of work: `STREAMED_VERIFY` alone
+/// Every peer must serve a stream as one piece of work: `STREAMED_VERIFY` alone
 /// is not enough — v0.3.213-v0.3.215 serve a stream but count each chunk
 /// against their per-peer cap of 4, and a chunk refused there stalled the rest
-/// of the stream for 60 s (`features::STREAM_AS_ONE_WORK`). And where the peer
-/// holds the last layers it must walk a check; where this node does, the walk
-/// is ours and the peer only computes its layers, which every streaming peer
-/// does — the serving side has never cared which segment a stream is
+/// of the stream for 60 s (`features::STREAM_AS_ONE_WORK`). And where the run
+/// holds the last layers its tail must walk a check; where this node does, the
+/// walk is ours and the peers only compute their layers, which every streaming
+/// peer does — the serving side has never cared which segment a stream is
 /// (`forward_streams` is keyed by request, layer range and attempt).
+///
+/// A run of several peers streams only as a chain a check may travel
+/// (`may_chain`: `PipelineExecutor::verify_may_chain`), every hop of it — the
+/// first too, which hands the number on — advertising `CHAINED_STREAM` beside
+/// what a chained check needs (`plan_chain`'s rule, as in
+/// `forward_verify_through_segments`). Anything less keeps the rounds.
 pub(super) fn stream_shape(
     state: &SharedState,
     segments: &[PipelineSegment],
+    may_chain: bool,
 ) -> Option<StreamShape> {
-    use swarmllm_types::node::features::{STREAMED_VERIFY, STREAM_AS_ONE_WORK};
-    shape_of(segments, state.identity.node_id(), |peer, last| {
-        state.peer_advertises_feature(peer, STREAMED_VERIFY | STREAM_AS_ONE_WORK)
-            && (!last || super::peer_walks_at_tail(state, peer))
-    })
+    use swarmllm_types::node::features::{
+        CHAINED_STREAM, CHAINED_VERIFY, STREAMED_VERIFY, STREAM_AS_ONE_WORK,
+    };
+    let me = state.identity.node_id();
+    shape_of(
+        segments,
+        me,
+        |peer, last| {
+            state.peer_advertises_feature(peer, STREAMED_VERIFY | STREAM_AS_ONE_WORK)
+                && (!last || super::peer_walks_at_tail(state, peer))
+        },
+        |at| {
+            if !may_chain {
+                return Vec::new();
+            }
+            super::plan_chain(
+                segments,
+                at,
+                me,
+                |n| {
+                    state.peer_supports_pipeline_chain(n)
+                        && state.peer_advertises_feature(n, CHAINED_VERIFY | CHAINED_STREAM)
+                },
+                state.cfg().inference.max_chain_hops as usize,
+            )
+        },
+    )
 }
 
 /// [`stream_shape`]'s decision, apart from the state it asks: `serves(peer,
 /// last)` — does that peer serve a stream, and walk one when it holds the last
-/// layers.
+/// layers; `chain_from(at)` — the hops a check sent to segment `at` may be
+/// handed down (`plan_chain`).
 fn shape_of(
     segments: &[PipelineSegment],
     me: &crate::types::NodeId,
     serves: impl Fn(&crate::types::NodeId, bool) -> bool,
+    chain_from: impl FnOnce(usize) -> Vec<ChainHop>,
 ) -> Option<StreamShape> {
-    let mut peers = segments
+    let at = segments.iter().position(|s| s.node_id != *me)?;
+    let run = segments[at..]
         .iter()
-        .enumerate()
-        .filter(|(_, s)| s.node_id != *me);
-    let (at, far) = peers.next()?;
-    // Two peers' segments would be two streams to keep in step, and a chunk
-    // forwarded from one to the other would leave this node's order.
-    if peers.next().is_some() {
+        .take_while(|s| s.node_id != *me)
+        .count();
+    // Peers' segments on both sides of one of ours would be two streams to
+    // keep in step, and a chunk handed from one run to the other would leave
+    // this node's order.
+    if segments[at + run..].iter().any(|s| s.node_id != *me) {
         return None;
     }
+    let peers = &segments[at..at + run];
+    let chain = if run > 1 {
+        // Each machine once: two segments of one machine would put two chunks
+        // of one request at its worker at once, crossing their replies
+        // (gotcha #180).
+        let mut seen = HashSet::new();
+        if !peers.iter().all(|s| seen.insert(&s.node_id)) {
+            return None;
+        }
+        // The whole run, or the rounds.
+        let chain = chain_from(at);
+        if chain.len() != run - 1 {
+            return None;
+        }
+        chain
+    } else {
+        Vec::new()
+    };
     let shape = StreamShape {
         near: segments[..at].to_vec(),
-        far: far.clone(),
-        after: segments[at + 1..].to_vec(),
+        far: peers[0].clone(),
+        chain,
+        after: segments[at + run..].to_vec(),
     };
-    // A plan that is the peer's alone is a hand-off, never driven from here.
+    // A plan that is the peers' alone is a hand-off, never driven from here.
     let ours = !shape.near.is_empty() || !shape.after.is_empty();
-    (ours && serves(&far.node_id, shape.far_walks())).then_some(shape)
+    let walks = shape.far_walks();
+    let served = peers
+        .iter()
+        .enumerate()
+        .all(|(i, s)| serves(&s.node_id, walks && i == run - 1));
+    (ours && served).then_some(shape)
 }
 
 /// Each stream's attempt tag: the high bits of its numbers
@@ -329,11 +422,12 @@ impl PipelineExecutor {
         let coupling = io.noise.map(|n| n.seed()).filter(|_| {
             !shape.far_walks()
                 || state.peer_advertises_feature(
-                    &shape.far.node_id,
+                    shape.tail(),
                     swarmllm_types::node::features::COUPLED_SAMPLING,
                 )
         });
         let shape_name = shape.name();
+        let peers = shape.peers();
         let history = reply.generated.clone();
         let mut run = StreamRun {
             exec: self,
@@ -361,6 +455,7 @@ impl PipelineExecutor {
         tracing::info!(
             request_id = %self.request.id,
             shape = shape_name,
+            peers,
             chunks = run.chunks,
             kept_whole = run.kept_whole,
             restarts = run.restarts,
@@ -374,8 +469,22 @@ impl PipelineExecutor {
 
 impl StreamRun<'_, '_> {
     async fn run(&mut self) -> Result<(), SwarmError> {
-        let window = chunks_in_flight();
         let mut out: FuturesOrdered<Waiting> = FuturesOrdered::new();
+        let outcome = self.run_with(&mut out).await;
+        // A chain that failed is finished in rounds, unchained (`dsd`), and an
+        // unchained forward is not held to the stream's order on the peers:
+        // a chunk still on its way could run after the rounds' first check
+        // and write into the rows it just cut back. Every chunk still out is
+        // answered first — refused at a hop that cannot hand it on, or run
+        // to the tail — so none is left on the way.
+        if outcome.is_err() && self.shape.chained() {
+            while out.next().await.is_some() {}
+        }
+        outcome
+    }
+
+    async fn run_with(&mut self, out: &mut FuturesOrdered<Waiting>) -> Result<(), SwarmError> {
+        let window = chunks_in_flight();
         loop {
             if self.exec.request.is_cancelled() {
                 tracing::info!(
@@ -414,7 +523,7 @@ impl StreamRun<'_, '_> {
                 Taken::Continue => {}
                 // Dropping them withdraws their waits; their late answers
                 // find none.
-                Taken::Restart => out = FuturesOrdered::new(),
+                Taken::Restart => *out = FuturesOrdered::new(),
                 Taken::Done => return Ok(()),
             }
         }
@@ -534,7 +643,7 @@ impl StreamRun<'_, '_> {
         };
         let far = &self.shape.far;
         let far_input = (!self.shape.far_walks()).then(|| activations.clone());
-        let forward = super::build_spec_verify_forward(
+        let mut forward = super::build_spec_verify_forward(
             request_id,
             index_pos,
             activations,
@@ -543,6 +652,12 @@ impl StreamRun<'_, '_> {
             self.shape.far_walks().then_some(&walk),
             Some(seq),
         );
+        if !self.shape.chain.is_empty() {
+            // Handed down the run, and answered by its tail: the reply-to it
+            // answers (the `0x07` trailer), as on a chained check.
+            forward.chain = self.shape.chain.clone();
+            forward.requester_node_id = Some(self.state.identity.node_id().0);
+        }
         let Some(peer) = self.state.resolve_peer_id_bytes(&far.node_id) else {
             return Err(SwarmError::Inference(format!(
                 "streamed check: no route to segment holder {} — it left mid-request",
@@ -556,13 +671,25 @@ impl StreamRun<'_, '_> {
         }
         let key = WaiterKey::streamed(request_id, seq);
         let (tx, rx) = tokio::sync::oneshot::channel();
+        // The tail answers for the run's layers; any hop may refuse with its
+        // own range — the rounds' chained wait (`forward_verify_through_segments`).
+        let chain_members: Vec<crate::types::NodeId> = if self.shape.chain.is_empty() {
+            Vec::new()
+        } else {
+            std::iter::once(far.node_id.clone())
+                .chain(self.shape.chain.iter().map(|h| h.node_id.clone()))
+                .collect()
+        };
         self.state.pending_layer_results.insert(
             key,
             PendingLayerResult {
                 tx,
-                awaiting: Some(far.node_id.clone()),
-                chain_members: Vec::new(),
-                expects_step: Some(ExpectedStep::one(index_pos, far.layer_range)),
+                awaiting: Some(self.shape.tail().clone()),
+                chain_members,
+                expects_step: Some(ExpectedStep {
+                    index_pos,
+                    layer_ranges: self.shape.far_ranges(),
+                }),
             },
         );
         let waiter = StreamWaiter {
@@ -581,7 +708,13 @@ impl StreamRun<'_, '_> {
         {
             return Err(SwarmError::Network("streamed check: send dropped".into()));
         }
-        let num_layers = far.layer_range.1 - far.layer_range.0;
+        // The whole run's layers: its tail answers for all of them.
+        let num_layers = self
+            .shape
+            .far_ranges()
+            .iter()
+            .map(|(a, b)| b - a)
+            .sum::<u32>();
         let budget = SegmentBudget::for_forward(
             &self.state,
             &far.node_id,
@@ -622,6 +755,7 @@ impl StreamRun<'_, '_> {
         let node = far.node_id.clone();
         let cancel = exec.request.cancel.clone();
         let segment_idx = self.shape.near.len();
+        let chained = !self.shape.chain.is_empty();
         Ok(Box::pin(async move {
             let _waiter = waiter;
             let rebuild = move || forward.clone();
@@ -635,10 +769,17 @@ impl StreamRun<'_, '_> {
                 activation_bytes,
                 budget,
                 cancel.as_ref(),
-                ResendOnRefusal::SameForward {
-                    network_tx: &network_tx,
-                    target_peer_bytes: &peer,
-                    rebuild: &rebuild,
+                if chained {
+                    // `arch-scheduling.md` § "A forward the peer could not open".
+                    ResendOnRefusal::Never(
+                        "a chained check's refusal may be any hop's, and the run is not re-sent",
+                    )
+                } else {
+                    ResendOnRefusal::SameForward {
+                        network_tx: &network_tx,
+                        target_peer_bytes: &peer,
+                        rebuild: &rebuild,
+                    }
                 },
             )
             .await;
@@ -854,8 +995,15 @@ mod tests {
         !last
     }
 
+    /// Every run of peers chains, hop for hop (`plan_chain` with every hop
+    /// able to carry a streamed check).
+    fn every_hop_chains(segments: &[PipelineSegment]) -> impl FnOnce(usize) -> Vec<ChainHop> + '_ {
+        move |at| super::super::plan_chain(segments, at, &ME, |_| true, 8)
+    }
+
     fn shape(nodes: &[NodeId], serves: impl Fn(&NodeId, bool) -> bool) -> Option<&'static str> {
-        shape_of(&plan(nodes), &ME, serves).map(|s| s.name())
+        let segments = plan(nodes);
+        shape_of(&segments, &ME, serves, every_hop_chains(&segments)).map(|s| s.name())
     }
 
     /// FUTURE_WORK #152: the shapes the swarm makes stream — the boomerang
@@ -868,7 +1016,8 @@ mod tests {
         assert_eq!(shape(&[ME, PEER, ME], every), Some("boomerang"));
         assert_eq!(shape(&[PEER, ME], every), Some("peer-first"));
         assert_eq!(shape(&[ME, ME, PEER, ME], every), Some("boomerang"));
-        let s = shape_of(&plan(&[ME, ME, PEER, ME]), &ME, every).unwrap();
+        let segments = plan(&[ME, ME, PEER, ME]);
+        let s = shape_of(&segments, &ME, every, every_hop_chains(&segments)).unwrap();
         assert_eq!(s.near.len(), 2);
         assert_eq!(s.far.layer_range, (8, 12));
         assert_eq!(s.after.len(), 1);
@@ -895,14 +1044,61 @@ mod tests {
         assert_eq!(shape(&[ME, PEER, ME], |_, _| false), None);
     }
 
-    /// Two peers' segments, a plan that is one peer's alone, or no peer at all:
-    /// the rounds (or the hand-off, or local generation) run it.
+    /// #318: a model across three or more machines streams too — the peers'
+    /// run as a chain the chunk is handed down, answered by its tail, which
+    /// walks where it holds the last layers.
     #[test]
-    fn a_plan_that_is_not_one_peer_segment_beside_ours_does_not_stream() {
+    fn a_run_of_peers_streams_as_a_chain() {
         let every = |_: &NodeId, _: bool| true;
-        assert_eq!(shape(&[ME, PEER, OTHER], every), None);
+        let segments = plan(&[ME, PEER, OTHER]);
+        let s = shape_of(&segments, &ME, every, every_hop_chains(&segments)).unwrap();
+        assert_eq!(s.name(), "peer-last");
+        assert_eq!(s.far.node_id, PEER);
+        assert_eq!(s.chain.len(), 1);
+        assert_eq!(s.tail(), &OTHER, "the chain's tail answers");
+        assert_eq!(s.far_ranges(), vec![(4, 8), (8, 12)]);
+        assert!(s.far_walks());
+        // The tail is the one asked to walk; the head only computes.
+        let walker = |n: &NodeId, last: bool| !last || *n == OTHER;
+        assert_eq!(shape(&[ME, PEER, OTHER], walker), Some("peer-last"));
+        let wrong_walker = |n: &NodeId, last: bool| !last || *n == PEER;
+        assert_eq!(shape(&[ME, PEER, OTHER], wrong_walker), None);
+        // A chain in the middle of a boomerang: the walk is ours.
+        assert_eq!(
+            shape(&[ME, PEER, OTHER, ME], serves_without_walking),
+            Some("boomerang")
+        );
+    }
+
+    /// A run that cannot be chained whole — a hop without the bits, or past
+    /// `max_chain_hops` — keeps the rounds, as does one machine twice in it.
+    #[test]
+    fn a_run_that_cannot_travel_as_one_chain_keeps_the_rounds() {
+        let every = |_: &NodeId, _: bool| true;
+        let segments = plan(&[ME, PEER, OTHER]);
+        let unchained = |_| Vec::new();
+        assert!(shape_of(&segments, &ME, every, unchained).is_none());
+        let partly = |at| super::super::plan_chain(&segments, at, &ME, |n| *n != OTHER, 8);
+        assert!(shape_of(&segments, &ME, every, partly).is_none());
+        let three = plan(&[ME, PEER, OTHER, NodeId([4; 32])]);
+        let short = |at| super::super::plan_chain(&three, at, &ME, |_| true, 1);
+        assert!(shape_of(&three, &ME, every, short).is_none());
+        assert_eq!(
+            shape(&[ME, PEER, OTHER, PEER], every),
+            None,
+            "one machine twice"
+        );
+    }
+
+    /// Peers on both sides of one of ours, a plan that is the peers' alone, or
+    /// no peer at all: the rounds (or the hand-off, or local generation) run it.
+    #[test]
+    fn a_plan_that_is_not_one_run_of_peers_beside_ours_does_not_stream() {
+        let every = |_: &NodeId, _: bool| true;
         assert_eq!(shape(&[PEER, ME, PEER], every), None);
+        assert_eq!(shape(&[PEER, ME, OTHER], every), None);
         assert_eq!(shape(&[PEER], every), None);
+        assert_eq!(shape(&[PEER, OTHER], every), None);
         assert_eq!(shape(&[ME, ME], every), None);
     }
 

@@ -434,6 +434,7 @@ impl PipelineExecutor {
                     }),
                     super::worker_requester(&self.request),
                     self.verify_may_chain(),
+                    &mut self.chaining_disabled,
                 )
                 .await?;
                 // An unusable reply fails the request, exactly as the hit arm
@@ -507,6 +508,7 @@ impl PipelineExecutor {
                 }),
                 super::worker_requester(&self.request),
                 self.verify_may_chain(),
+                &mut self.chaining_disabled,
             )
             .await?;
             let (accepted, bonus, _all) = match reply.accept(

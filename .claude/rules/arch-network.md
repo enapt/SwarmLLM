@@ -153,7 +153,7 @@ A verify's last segment walks the drafts and answers with token ids (`LayerForwa
 
 ## A check travels a chain like a decode step does (2026-10-02)
 
-**`PipelineExecutor::verify_may_chain`** decides whether `forward_verify_through_segments` sends a run of remote segments ONE forward (every hop advertising `features::CHAINED_VERIFY`, gated at the coordinator); a chained check resends on nothing (`ResendOnRefusal::Never`). `SWARMLLM_CHAIN_VERIFY=0` is the control arm.
+**`PipelineExecutor::verify_may_chain`** decides whether `forward_verify_through_segments` sends a run of remote segments ONE forward (every hop advertising `features::CHAINED_VERIFY`, gated at the coordinator); a chained check resends on nothing (`ResendOnRefusal::Never`). **A chained run that fails is re-run UNCHAINED there** (segments cut back to `index_pos`) and sets the REQUIRED `chain_failed` — every caller passes `&mut self.chaining_disabled` (#318). A middle hop refuses what it cannot hand on BEFORE its worker (`layer_forward::onward_refusal`) and dials an unmet next hop (`NetworkCommand::DialPeer`, via `dial_checked`, its addresses — a DHT answer's too — through `filter_dialable`). `SWARMLLM_CHAIN_VERIFY=0` is the control arm.
 
 → `docs/invariants/network.md` § "A check travels a chain like a decode step does"
 
@@ -165,7 +165,7 @@ A verify's last segment walks the drafts and answers with token ids (`LayerForwa
 
 ## A stream of verifies runs in its order, and its answers are found by number (2026-09-30)
 
-Streamed verify forwards (`LayerForward::stream_seq`, `0x0C`, gated on `features::STREAMED_VERIFY`) run in number order via **`daemon::state::forward_streams`**; `pending_layer_results` is keyed by `WaiterKey` and an answer echoes its number (`0x08`). A stream is ONE piece of its sender's work (`dispatch::StreamWorkSlot`, `MAX_STREAM_CHUNKS_HERE`); every admission refusal goes through `refuse_forward`. Stream only to a peer advertising `features::STREAM_AS_ONE_WORK`. **`dsd_stream::stream_shape`** takes any plan with ONE peer segment (the boomerang too, #152): where this node holds the last layers the walk is ours and those segments run as each answer is TAKEN, never as it arrives (#180).
+Streamed verify forwards (`LayerForward::stream_seq`, `0x0C`, gated on `features::STREAMED_VERIFY`) run in number order via **`daemon::state::forward_streams`**; `pending_layer_results` is keyed by `WaiterKey` and an answer echoes its number (`0x08`). A stream is ONE piece of its sender's work (`dispatch::StreamWorkSlot`, `MAX_STREAM_CHUNKS_HERE`); every admission refusal goes through `refuse_forward`. Stream only to a peer advertising `features::STREAM_AS_ONE_WORK`. **`dsd_stream::stream_shape`** takes any plan whose peers' segments are ONE run (the boomerang too, #152): where this node holds the last layers the walk is ours and those segments run as each answer is TAKEN, never as it arrives (#180). A run of several peers streams as a CHAIN (#318) only when every hop advertises `features::CHAINED_STREAM` (bit 27) and each machine appears once: a hop hands the number on (`layer_forward`), keeps a failure record per check (`hop_forwards`), and a restart goes once nothing runs, never waiting for a superseded turn (a hop before may have skipped it). A chained stream that fails awaits every chunk still out, then `dsd` finishes the reply in rounds, unchained (`EngineDrafter::follow`). → § "A stream of checks travels a chain"
 
 → `docs/invariants/network.md` § "A stream of verifies runs in its order, and each answer names its number"
 

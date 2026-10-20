@@ -66,8 +66,9 @@ speed is what the swarm is for, so split speed for large models is the top track
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
 6. **#318** — a large model split across machines is too slow to use: 0.35 tok/s on a 4-segment
    intercontinental chain, 5-13 tok/s on a 7B Thailand↔Belgium with the stream. Projected
-   lossless 20-31 tok/s across continents and 50-80 inside a region on cards. Step 1 is the
-   per-pass breakdown of the ~95 ms that is neither network nor compute.
+   lossless 20-31 tok/s across continents and 50-80 inside a region on cards. The stream
+   through a chain of machines is built (2026-10-20); next, guessing for a user who holds none
+   of the model, then trees in every segment (#134).
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
@@ -1746,8 +1747,18 @@ and the largest term removed — rig half measured 10-20: with every packet dela
 `RIG_RTT_MS`), a 7B split costs exactly one round trip per token more at 206 ms than at 0, and
 13-25 ms a token more than the whole model on one node, so the 95 ms is the real link or the far
 machine (a relayed peer answered in 330 ms against 231-236 direct); left: the real link; (2) tree verification in every segment (#134); (3) the continuous stream
-through a chain of machines — today it runs only where ONE peer holds every layer past this
-node's (`dsd_stream::shape_of`), so every 3+ machine split guesses round by round — then trees in
+through a chain of machines — **built 2026-10-20** (`features::CHAINED_STREAM`, bit 27): 1.24 tok/s
+against 1.07 for chained rounds and 1.03 without guessing, on a 3-machine processor rig at 206 ms
+(the three share one processor, which caps what overlapping their work can win). Building it found
+that a chained CHECK failed the whole reply after one token wherever the middle machine had not
+met the last: a failed chained check is now re-run unchained, a failed chained stream finished in
+rounds, and the middle machine refuses before working and dials its next hop
+(`docs/invariants/network.md` § "A stream of checks travels a chain"). Left in this step: the dial
+after a DHT lookup is unverified on a real link (the loopback rig's DHT holds no address for a node
+that only connected inbound), and a next hop reachable only through a relay is never dialled, so its
+run stays unchained; a user
+who holds NONE of the model guesses nothing — the head leads without the drafter (the plan's
+"Found while building it"; next) — then trees in
 it, the verdict sent to every segment so dead rows are dropped before they are computed (#149 (b)); (4) a drafter fed by the model's own state: MTP at the last stage (#145),
 EAGLE-3 taps where a head is published; (5) an MoE tree priced by the experts it touches; (6)
 regional chains (#192); (7) the opt-in fast mode. The plan records one retracted projection

@@ -316,6 +316,18 @@ pub mod features {
     /// segment and stand-in of that pass must advertise it (#115 (2b)).
     pub const IMAGES_AT_MARKERS: u64 = 1 << 26;
 
+    /// Serves a streamed check (`LayerForward::stream_seq`) as one hop of a
+    /// CHAIN (#318): it hands the check's number on with the activations, so
+    /// the next hop runs the stream in its order too; it keeps what it owes
+    /// the coordinator for each check it handed on, not only the newest; and a
+    /// check that restarts the stream here goes as soon as nothing runs,
+    /// without waiting for the checks it replaced — a hop before this one may
+    /// have stepped over them, so they may never come. The coordinator
+    /// streams through a chain only when EVERY hop advertises it, beside
+    /// [`STREAMED_VERIFY`], [`STREAM_AS_ONE_WORK`] and [`CHAINED_VERIFY`];
+    /// otherwise the checks go round by round.
+    pub const CHAINED_STREAM: u64 = 1 << 27;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`] and [`KV_WINDOW_SLIDES`] beside it where they
     /// apply.
@@ -343,7 +355,8 @@ pub mod features {
         | MANIFEST_DIGESTS
         | RELAY_SIGNED
         | PROMPT_ADMISSION
-        | IMAGES_AT_MARKERS;
+        | IMAGES_AT_MARKERS
+        | CHAINED_STREAM;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

@@ -633,6 +633,10 @@ pub struct NetworkManager {
     dht_query_rx: mpsc::Receiver<crate::types::ModelId>,
     /// S5: Maps Kademlia QueryId → ShardId for routing GetProviders results.
     pending_provider_queries: HashMap<libp2p::kad::QueryId, crate::types::ShardId>,
+    /// Kademlia lookups for a chained run's next hop this node had no address
+    /// for (`NetworkCommand::DialPeer`): QueryId → the peer, dialled with the
+    /// addresses the lookup finds. At most `MAX_NEXT_HOP_LOOKUPS`, one per peer.
+    next_hop_lookups: HashMap<libp2p::kad::QueryId, libp2p::PeerId>,
     /// NETWORKING_PLAN Phase 3 — set once this node has registered as a DHT
     /// relay-service provider (only if it forwards relay traffic). Retried each
     /// discovery tick until Kademlia has peers, then latched.
@@ -1012,6 +1016,7 @@ impl NetworkManager {
             rr_failures: HashMap::new(),
             dht_query_rx,
             pending_provider_queries: HashMap::new(),
+            next_hop_lookups: HashMap::new(),
             relay_provider_registered: false,
             upnp_watch: upnp_watch::UpnpWatch::new(enable_upnp, std::time::Instant::now()),
             p2p_listeners: Vec::new(),

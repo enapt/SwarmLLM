@@ -766,6 +766,15 @@ pub enum NetworkCommand {
     },
     /// Dial a multiaddr to connect to a new peer.
     DialAddress(String),
+    /// Connect to a peer this node knows of but is not connected to: the next
+    /// hop of a chained run handed here, which it could not hand on. Its
+    /// addresses are `hints` (what the peer registry heard) plus what Kademlia
+    /// and identify know; a peer already connected or being dialled is left
+    /// alone.
+    DialPeer {
+        peer_id_bytes: Vec<u8>,
+        hints: Vec<String>,
+    },
     /// S5: Register as a Kademlia provider for the given shards.
     /// Called on shard acquisition (download complete, startup scan).
     StartProviding(Vec<ShardId>),

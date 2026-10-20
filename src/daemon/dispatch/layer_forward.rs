@@ -104,6 +104,9 @@ pub(super) async fn handle_layer_forward(
         estimated_tokens,
         model_id = %forward.model_id,
         layer_range = ?forward.layer_range,
+        // A streamed check's place in its stream: in a chain, a hop past the
+        // first shows the number reached it (#318).
+        stream_seq = ?forward.stream_seq,
         "DIAG: processing LayerForward locally"
     );
 
@@ -209,6 +212,9 @@ pub(super) async fn handle_layer_forward(
         forward.image_spans.clone()
     };
     let sequence_num = forward.sequence_num;
+    // A streamed check's number, handed on with it so the next hop runs the
+    // stream in its order too (`features::CHAINED_STREAM`, #318).
+    let stream_seq = forward.stream_seq;
     // A speculative CHECK travelling a chain (`features::CHAINED_VERIFY`):
     // what the run's TAIL walks with, handed down beside the activations. This
     // hop's own worker reads none of it unless it is the model's last segment
@@ -233,6 +239,29 @@ pub(super) async fn handle_layer_forward(
     // the whole swarm and still advertise a load of zero, so every coordinator
     // kept sending it more.
     //
+    // A chained forward this hop cannot hand on is refused BEFORE the worker:
+    // run, it writes this hop's rows and then fails anyway, and a stream's
+    // checks queued behind it would each be run and lost the same way. The
+    // coordinator re-runs a failed chain unchained (`distributed.rs`,
+    // `forward_verify_through_segments`, `dsd`).
+    if let Some(next) = chain
+        .first()
+        .filter(|_| chaining_applies(&chain, tp_meta.is_some(), forward.activations.is_empty()))
+    {
+        if let Some(reason) = onward_refusal(
+            &shared_state,
+            next,
+            verify_onward.is_some(),
+            stream_seq.is_some(),
+        ) {
+            if reason == ONWARD_UNREACHABLE {
+                dial_next_hop(&shared_state, &network_tx, &next.node_id);
+            }
+            send_error_result(&network_tx, &reply_to(), request_id, answering, reason).await;
+            return;
+        }
+    }
+
     // RAII, so the count survives the several early returns below (worker
     // failure, and the TP branch's encoding failures).
     let _serving_guard = crate::daemon::state::ServingGuard::new(&shared_state, model_id.clone());
@@ -384,25 +413,18 @@ pub(super) async fn handle_layer_forward(
     // request costs what it used to.
     if chaining_applies(&chain, tp_meta.is_some(), result.activations.is_empty()) {
         if let Some(next) = chain.first() {
-            // A check handed to a hop that cannot carry it on would reach the
-            // tail as a plain decode step and come back as the wrong answer.
-            // The coordinator chains only through hops that can; one that
-            // changed build since is told so, and the check fails like any
-            // other chained run that cannot continue.
-            if verify_onward.is_some()
-                && !shared_state.peer_advertises_feature(
-                    &next.node_id,
-                    swarmllm_types::node::features::CHAINED_VERIFY,
-                )
+            // Asked before the worker too (below the turn); again here, since
+            // the next hop's connection or build can change while it ran.
+            // Unreachable is the `None` arm below, with its own reasoning.
+            if let Some(reason) = onward_refusal(
+                &shared_state,
+                next,
+                verify_onward.is_some(),
+                stream_seq.is_some(),
+            )
+            .filter(|&r| r != ONWARD_UNREACHABLE)
             {
-                send_error_result(
-                    &network_tx,
-                    &reply_to(),
-                    request_id,
-                    answering,
-                    "chained check: the next segment cannot carry it",
-                )
-                .await;
+                send_error_result(&network_tx, &reply_to(), request_id, answering, reason).await;
                 return;
             }
             let (draft_tokens, spec_walk_at_tail, coupling_seed, truncate_kv_to, verify_ids) =
@@ -463,7 +485,8 @@ pub(super) async fn handle_layer_forward(
                         coupling_seed: coupling_seed
                             .filter(|_| next_has(swarmllm_types::node::features::COUPLED_SAMPLING)),
                         draft_tokens,
-                        stream_seq: None,
+                        // Checked above: only to a hop that runs it in order.
+                        stream_seq,
                         truncate_kv_to,
                         // Only to a hop that reads the `0x0D` trailer: the
                         // coordinator puts a hint on a plan only when EVERY
@@ -545,12 +568,13 @@ pub(super) async fn handle_layer_forward(
                         next = %next.node_id,
                         "next hop unreachable — failing the chained run"
                     );
+                    dial_next_hop(&shared_state, &network_tx, &next.node_id);
                     send_error_result(
                         &network_tx,
                         &reply_to(),
                         request_id,
                         answering,
-                        "chained run could not reach the next segment",
+                        ONWARD_UNREACHABLE,
                     )
                     .await;
                     return;
@@ -704,6 +728,73 @@ fn chaining_applies(
         return false;
     }
     true
+}
+
+/// The refusal of a chained forward whose next hop this node is not connected
+/// to — a run of the swarm's own making until its machines have met.
+const ONWARD_UNREACHABLE: &str = "chained run could not reach the next segment";
+
+/// Ask the network loop to connect to a next hop this node could not reach,
+/// so the next chained run through here can go on: peer exchange alone left
+/// the 3-machine rig's middle and last machines unintroduced for minutes, and
+/// every chained run between them failed (#318). The network loop looks the
+/// peer up in the DHT when nothing here has its address. Best effort — a full
+/// command queue drops it, and the run that asked has already been refused.
+fn dial_next_hop(
+    state: &SharedState,
+    network_tx: &mpsc::Sender<NetworkCommand>,
+    next: &crate::types::NodeId,
+) {
+    // A node this one has never met is in neither list, but its network id
+    // is its node id's key.
+    let Some(peer_id_bytes) = state
+        .resolve_peer_id_bytes(next)
+        .or_else(|| crate::network::transport::node_id_to_peer_id(next).map(|p| p.to_bytes()))
+    else {
+        return;
+    };
+    let hints = state
+        .peer_registry
+        .get(next)
+        .map(|p| p.addresses.clone())
+        .unwrap_or_default();
+    let _ = network_tx.try_send(NetworkCommand::DialPeer {
+        peer_id_bytes,
+        hints,
+    });
+}
+
+/// Why this hop cannot hand a chained forward on to `next`, or `None`. A check
+/// handed to a hop without `CHAINED_VERIFY` would reach the tail as a plain
+/// decode step and come back as the wrong answer; a streamed one handed to a
+/// hop without `CHAINED_STREAM` would lose its number, run out of order and
+/// write its rows into the wrong positions. The coordinator chains only
+/// through hops that can (`plan_chain`, `dsd_stream::stream_shape`); one that
+/// changed build since, or that this node has not met, is told so.
+fn onward_refusal(
+    state: &SharedState,
+    next: &crate::types::ChainHop,
+    check: bool,
+    streamed: bool,
+) -> Option<&'static str> {
+    use swarmllm_types::node::features::{CHAINED_STREAM, CHAINED_VERIFY};
+    // First: a next hop this node has not met is in no list here, so its
+    // features are unknown too — that is "dial it", not "it cannot carry it"
+    // (the rig's middle machine, 2026-10-20, refused every check that way and
+    // so never dialled).
+    if state
+        .resolve_connected_peer_id_bytes(&next.node_id)
+        .is_none()
+    {
+        return Some(ONWARD_UNREACHABLE);
+    }
+    if check && !state.peer_advertises_feature(&next.node_id, CHAINED_VERIFY) {
+        return Some("chained check: the next segment cannot carry it");
+    }
+    if streamed && !state.peer_advertises_feature(&next.node_id, CHAINED_STREAM) {
+        return Some("streamed check: the next segment cannot carry it");
+    }
+    None
 }
 
 /// Send a sanitized error `LayerResult` back to the originating peer when
@@ -1131,6 +1222,142 @@ mod chaining_tests {
                 );
             }
             _ => panic!("a failed forward must be answered"),
+        }
+    }
+
+    /// A chained forward whose next hop this node has not met is refused
+    /// before the worker runs it, naming why — the 3-machine rig's middle
+    /// machine ran every check of a stream and lost each answer (#318).
+    #[tokio::test]
+    async fn a_chained_forward_that_cannot_go_on_is_refused_before_the_work() {
+        let identity = crate::identity::Identity::generate();
+        let me = identity.node_id().clone();
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            crate::config::Config::default(),
+            identity,
+            db,
+            executor,
+            None,
+        );
+        let model_id = crate::types::ModelId("held-here".into());
+        let shards: Vec<_> = [(0u32, 0u32, 8u32), (1, 8, 16), (2, 16, 24)]
+            .iter()
+            .map(|&(index, a, b)| crate::types::ShardInfo {
+                index,
+                layer_range: (a, b),
+                size_bytes: 1,
+                hash: [0u8; 32],
+                tensors: vec![],
+            })
+            .collect();
+        state
+            .model_registry
+            .register_manifest(crate::types::ModelManifest {
+                id: model_id.clone(),
+                name: "m".into(),
+                architecture: crate::types::ModelArchitecture::Llama,
+                num_layers: 24,
+                num_params_billions: 1.0,
+                quantization: crate::types::Quantization::Q4KM,
+                total_size_bytes: 3,
+                shard_count: 3,
+                shards,
+                tokenizer_hash: [0u8; 32],
+                manifest_hash: [0u8; 32],
+                publisher: me.clone(),
+                publish_date: chrono::Utc::now(),
+                license: String::new(),
+                mmproj: None,
+                context_length: None,
+            });
+        state.model_registry.record_shard_holder(
+            crate::types::ShardId {
+                model_id: model_id.clone(),
+                index: 1,
+            },
+            me,
+        );
+        let coordinator = NodeId([9u8; 32]);
+        state
+            .peer_id_map
+            .insert(coordinator.clone(), b"coordinator".to_vec());
+        state.connected_node_ids.insert(coordinator.clone());
+        // A machine this one has never met: in no list here, features unknown.
+        let unmet = crate::identity::Identity::generate().node_id().clone();
+        let unmet_peer = crate::network::transport::node_id_to_peer_id(&unmet)
+            .unwrap()
+            .to_bytes();
+        let forward = crate::types::LayerForward {
+            request_id: uuid::Uuid::from_u128(8),
+            sequence_num: 1,
+            index_pos: 40,
+            activations: vec![0u8; 16],
+            format: crate::types::TensorFormat::FP32,
+            model_id,
+            layer_range: (8, 16),
+            tp_meta: None,
+            vision_embeddings: None,
+            chain: vec![crate::types::ChainHop {
+                node_id: unmet,
+                layer_range: (16, 24),
+            }],
+            sender_peer_bytes: Some(b"previous-hop".to_vec()),
+            requester_node_id: Some(coordinator.0),
+            pre_embedded: false,
+            generated_ids: Vec::new(),
+            adapter_id: None,
+            draft_tokens: Vec::new(),
+            // A check: its next hop's features are unknown, which must read as
+            // "not met", not "cannot carry it".
+            spec_logits_requested: true,
+            spec_walk_at_tail: false,
+            coupling_seed: None,
+            stream_seq: None,
+            truncate_kv_to: None,
+            prompt_cache: None,
+            chunk_meta: None,
+            sampling: None,
+            prompt_span: None,
+            image_spans: Vec::new(),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            super::handle_layer_forward(state.clone(), tx, forward),
+        )
+        .await
+        .expect("answered without waiting on a worker");
+        match rx.recv().await {
+            Some(crate::types::NetworkCommand::DialPeer { peer_id_bytes, .. }) => {
+                assert_eq!(
+                    peer_id_bytes, unmet_peer,
+                    "the hop it could not reach, by its key"
+                );
+            }
+            other => panic!("the next hop must be dialled, got {other:?}"),
+        }
+        match rx.recv().await {
+            Some(crate::types::NetworkCommand::SendTensorResult {
+                target_peer_bytes,
+                result,
+            }) => {
+                assert_eq!(target_peer_bytes, b"coordinator".to_vec());
+                assert!(
+                    matches!(
+                        &result.finish_reason,
+                        Some(crate::types::NetworkFinishReason::Error(reason))
+                            if reason == super::ONWARD_UNREACHABLE
+                    ),
+                    "refused for the hop it cannot reach, not for what a worker said: {:?}",
+                    result.finish_reason
+                );
+            }
+            _ => panic!("a chained forward that cannot go on must be answered"),
         }
     }
 

@@ -26,9 +26,14 @@
 //! cache back (`truncate_kv_to`) starts its stream over: the coordinator sends
 //! one only after a check refused a guess, so every earlier turn of the stream
 //! that has not yet run here was built on that guess and its answer will be
-//! thrown away. Those are skipped — each still takes its turn, in order, and
-//! gives it straight back, so nothing ever runs beside the forward before it
-//! (the worker routes replies by request id, gotcha #180). PipeInfer's early
+//! thrown away. Those are skipped, and the restart goes the moment nothing
+//! runs — never beside the turn running before it (the worker routes replies
+//! by request id, gotcha #180), and never waiting for a superseded turn to
+//! ARRIVE. In a chain the hop before this one may have skipped it already and
+//! will never hand it on (#318); a skipped turn that turns up later is
+//! answered unrun. Safe because every turn the restart builds on ran here: the
+//! coordinator sends a restart only after the check it follows was answered,
+//! and that check ran on every hop on its way to the tail. PipeInfer's early
 //! inference cancellation, done without a message of its own: the restart is
 //! the signal. It matters where this node is busy — the work skipped is work
 //! the restart would otherwise wait behind.
@@ -107,12 +112,22 @@ struct Stream {
     next: tokio::sync::watch::Sender<u32>,
     /// Turns below this were superseded by a restart and are skipped.
     skip_below: AtomicU32,
-    /// Turns this node refused on arrival, not yet due: stepped over when
-    /// `next` reaches them. Every advance of `next` happens under this lock, so
-    /// a refusal recorded just as the turn before it ends is never missed.
-    refused: parking_lot::Mutex<BTreeSet<u32>>,
+    /// What decides how far `next` may move. Every change to `next` happens
+    /// under this lock, so a refusal recorded, or a restart arriving, just as
+    /// the turn before it ends is never missed.
+    order: parking_lot::Mutex<Order>,
     /// Epoch milliseconds of the last turn taken or ended, for the sweep.
     touched_ms: AtomicU64,
+}
+
+#[derive(Default)]
+struct Order {
+    /// Turns this node refused on arrival, not yet due: stepped over when
+    /// `next` reaches them.
+    refused: BTreeSet<u32>,
+    /// A turn is held — its forward is at the worker. While it is, `next`
+    /// names it and nothing may jump past it.
+    running: bool,
 }
 
 impl Stream {
@@ -121,7 +136,7 @@ impl Stream {
         let stream = Self {
             next,
             skip_below: AtomicU32::new(0),
-            refused: parking_lot::Mutex::new(BTreeSet::new()),
+            order: parking_lot::Mutex::new(Order::default()),
             touched_ms: AtomicU64::new(0),
         };
         stream.touch();
@@ -133,13 +148,25 @@ impl Stream {
     }
 
     /// Let the stream reach at least `after`, stepping over every turn refused
-    /// on arrival that then comes due.
+    /// on arrival that then comes due and — while nothing runs — every turn a
+    /// restart superseded, whether or not it has arrived.
     fn advance_to(&self, after: u32) {
-        let mut refused = self.refused.lock();
+        let mut order = self.order.lock();
+        self.advance_locked(&mut order, after);
+    }
+
+    fn advance_locked(&self, order: &mut Order, after: u32) {
+        let skip_below = self.skip_below.load(Ordering::Acquire);
         self.next.send_modify(|n| {
             let mut next = (*n).max(after);
-            while refused.remove(&next) {
-                next = next.saturating_add(1);
+            loop {
+                if order.refused.remove(&next) {
+                    next = next.saturating_add(1);
+                } else if !order.running && next < skip_below {
+                    next = skip_below;
+                } else {
+                    break;
+                }
             }
             *n = next;
         });
@@ -166,7 +193,12 @@ pub(crate) struct Turn {
 
 impl Drop for Turn {
     fn drop(&mut self) {
-        self.stream.advance_to(self.turn.saturating_add(1));
+        {
+            let mut order = self.stream.order.lock();
+            order.running = false;
+            self.stream
+                .advance_locked(&mut order, self.turn.saturating_add(1));
+        }
         self.stream.touch();
     }
 }
@@ -225,6 +257,9 @@ impl ForwardStreams {
         stream.touch();
         if restarts {
             stream.skip_below.fetch_max(turn, Ordering::AcqRel);
+            // Past the superseded turns at once if nothing runs; otherwise
+            // the running turn's end does it.
+            stream.advance_to(0);
         }
         let mut rx = stream.next.subscribe();
         let reached = tokio::time::timeout(wait, async {
@@ -232,17 +267,30 @@ impl ForwardStreams {
         })
         .await;
         match reached {
-            Ok(Ok(n)) if n == turn => {
+            // Claimed under the lock: the stream may have moved past this turn
+            // since the wait saw it (a restart arriving), and a second copy of
+            // the turn must not run beside the first.
+            Ok(Ok(_)) => {
+                let mut order = stream.order.lock();
+                let next = *stream.next.borrow();
                 let superseded = turn < stream.skip_below.load(Ordering::Acquire);
-                let held = Turn { stream, turn };
-                if superseded {
-                    // Given straight back: the next turn goes at once.
-                    drop(held);
-                    return Err(TurnRefused::Skipped);
+                if next == turn && !order.running {
+                    if superseded {
+                        // Due, with nothing running: stepped over now, which
+                        // lets the restart go.
+                        stream.advance_locked(&mut order, turn.saturating_add(1));
+                        return Err(TurnRefused::Skipped);
+                    }
+                    order.running = true;
+                    drop(order);
+                    return Ok(Turn { stream, turn });
                 }
-                Ok(held)
+                if superseded {
+                    Err(TurnRefused::Skipped)
+                } else {
+                    Err(TurnRefused::AlreadyRan { next })
+                }
             }
-            Ok(Ok(n)) => Err(TurnRefused::AlreadyRan { next: n }),
             // The sender lives in `stream`, which this holds, so the channel
             // cannot close; a timeout is the only way here.
             Ok(Err(_)) | Err(_) => Err(TurnRefused::Waited),
@@ -270,17 +318,19 @@ impl ForwardStreams {
         if restarts {
             stream.skip_below.fetch_max(turn, Ordering::AcqRel);
         }
-        {
-            let mut refused = stream.refused.lock();
-            // Already past it (a second copy), or a sender far ahead of what
-            // any coordinator keeps out: nothing to record.
-            if turn < *stream.next.borrow() || refused.len() >= MAX_REFUSED_TURNS {
-                return;
-            }
-            refused.insert(turn);
+        let mut order = stream.order.lock();
+        let next = *stream.next.borrow();
+        // Already past it, a copy of the turn running now (recording it would
+        // step `next` past a turn still at the worker and refuse the honest
+        // one after it), or a sender far ahead of what any coordinator keeps
+        // out: nothing to record — but a restart refused here still lets the
+        // stream past what it superseded.
+        let copy_of_the_running_turn = turn == next && order.running;
+        if turn >= next && !copy_of_the_running_turn && order.refused.len() < MAX_REFUSED_TURNS {
+            order.refused.insert(turn);
         }
         // Due now if the turn before it has already ended.
-        stream.advance_to(0);
+        stream.advance_locked(&mut order, 0);
     }
 
     /// Forget streams idle for `idle` that no forward is waiting in or
@@ -422,7 +472,9 @@ mod tests {
         assert!(!restart.is_finished(), "never beside the running turn");
         drop(running);
         assert_eq!(stale.await.unwrap().err(), Some(TurnRefused::Skipped));
-        // Turn 2 arrives late: skipped too, which lets the restart go.
+        let restart = restart.await.unwrap();
+        assert!(restart.is_ok(), "the restart runs, turn 2 or no turn 2");
+        // Turn 2 arrives late: answered unrun.
         assert_eq!(
             streams
                 .turn(id, RANGE, 2, false, STREAM_TURN_WAIT)
@@ -430,7 +482,7 @@ mod tests {
                 .err(),
             Some(TurnRefused::Skipped)
         );
-        assert!(restart.await.unwrap().is_ok(), "the restart runs");
+        drop(restart);
         assert!(
             streams
                 .turn(id, RANGE, 4, false, STREAM_TURN_WAIT)
@@ -438,6 +490,83 @@ mod tests {
                 .is_ok(),
             "and what follows it"
         );
+    }
+
+    /// #318: in a chain, the hop before this one skipped turns 1 and 2 when
+    /// the restart reached it, so they never come here. The restart goes as
+    /// soon as turn 0 ends — before the fix it waited [`STREAM_TURN_WAIT`] for
+    /// them and was refused.
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_does_not_wait_for_superseded_turns_that_never_come() {
+        let streams = Arc::new(ForwardStreams::default());
+        let id = uuid::Uuid::new_v4();
+        let running = streams
+            .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+            .await
+            .unwrap();
+        let restart = {
+            let streams = streams.clone();
+            tokio::spawn(async move { streams.turn(id, RANGE, 3, true, STREAM_TURN_WAIT).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!restart.is_finished(), "never beside the running turn");
+        let started = tokio::time::Instant::now();
+        drop(running);
+        let restart = restart.await.unwrap();
+        assert!(restart.is_ok(), "the restart runs: {:?}", restart.err());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "without waiting for turns 1 and 2"
+        );
+        drop(restart);
+        // And with nothing running when it arrives, it goes at once.
+        let again = streams.turn(id, RANGE, 6, true, STREAM_TURN_WAIT).await;
+        assert!(again.is_ok(), "{:?}", again.err());
+        drop(again);
+        assert!(streams
+            .turn(id, RANGE, 7, false, STREAM_TURN_WAIT)
+            .await
+            .is_ok());
+    }
+
+    /// A second copy of a turn that is running never runs beside it.
+    #[tokio::test(start_paused = true)]
+    async fn a_second_copy_of_a_running_turn_does_not_run_beside_it() {
+        let streams = ForwardStreams::default();
+        let id = uuid::Uuid::new_v4();
+        let _running = streams
+            .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+            .await
+            .unwrap();
+        assert_eq!(
+            streams
+                .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+                .await
+                .err(),
+            Some(TurnRefused::AlreadyRan { next: 0 })
+        );
+    }
+
+    /// A refused copy of the turn running now is not a gap to step over: the
+    /// turn after it must still run once the running one ends (the 10-20
+    /// security review's finding 1).
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_copy_of_the_running_turn_does_not_refuse_the_next() {
+        let streams = Arc::new(ForwardStreams::default());
+        let id = uuid::Uuid::new_v4();
+        let running = streams
+            .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+            .await
+            .unwrap();
+        streams.refused_on_arrival(id, RANGE, 0, false);
+        let waiting = {
+            let streams = streams.clone();
+            tokio::spawn(async move { streams.turn(id, RANGE, 1, false, STREAM_TURN_WAIT).await })
+        };
+        tokio::task::yield_now().await;
+        drop(running);
+        let next = waiting.await.unwrap();
+        assert!(next.is_ok(), "turn 1 runs: {:?}", next.err());
     }
 
     /// The .215 gate's stall: check 20 refused on arrival, then the restart
