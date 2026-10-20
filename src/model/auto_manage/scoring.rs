@@ -328,6 +328,21 @@ impl AutoShardManager {
                      parts of it to carry it (#231)"
                 );
             }
+            // The parts that complete a model this node holds all but a few of
+            // (`coverage::parts_completing_model_here`): they skip the replica
+            // target too — it counts the swarm's copies, and says nothing about
+            // the one computer that would answer with no hop. Prune keeps them
+            // once here (`completes_model_here_counting`); every guard after the
+            // target (budget, disk, metered connection) still applies.
+            let completing_parts = self.parts_completing_model_here(&manifest);
+            if !completing_parts.is_empty() {
+                tracing::info!(
+                    model = %manifest.id,
+                    parts = completing_parts.len(),
+                    "DIAG: this computer holds all but a few parts of this model — \
+                     fetching them so it runs here whole"
+                );
+            }
 
             // -- Spread bonus: deprioritize models we already have many shards of --
             let local_fraction = if manifest.shard_count > 0 {
@@ -440,7 +455,12 @@ impl AutoShardManager {
                 // Using >= target_replicas (not > 0) ensures min_replicas drives
                 // replication: each shard is spread across target_replicas nodes.
                 let carried_part = carry_parts.contains(&shard.index);
-                if holder_count >= target_replicas && !in_configured_range && !carried_part {
+                let completing_part = completing_parts.contains(&shard.index);
+                if holder_count >= target_replicas
+                    && !in_configured_range
+                    && !carried_part
+                    && !completing_part
+                {
                     tracing::debug!(
                         model = %manifest.id,
                         shard = shard.index,
@@ -1578,6 +1598,71 @@ mod fetch_what_prune_keeps {
         assert!(
             manager.would_shed_copy(&part(1), &holders, 0.85, &[]),
             "control: holding part of the model, the copy is surplus as before"
+        );
+    }
+
+    /// A model this node holds all but one part of is completed though the
+    /// swarm holds that part often enough (field report 2026-10-19: a 30B one
+    /// part short — taken by the pruner before #286 — went through a peer
+    /// abroad in 121 s where all its parts here answered in 2.3 s, and the
+    /// part's three other holders met the target, so it never came back). And
+    /// prune keeps what completes it, or the next pass would shed it again.
+    #[test]
+    fn the_part_a_model_held_but_for_it_lacks_is_fetched_past_the_target() {
+        let (state, manager) = manager_with(Config::default());
+        let ranges: Vec<(u32, u32)> = (0..8).map(|i| (i * 4, i * 4 + 4)).collect();
+        let mid = register_manifest_with_sized_shards(&state, "nearly-whole", 32, &ranges, PART);
+        let local = state.identity.node_id().clone();
+        let part = |index| ShardId {
+            model_id: mid.clone(),
+            index,
+        };
+        let hold = |indices: &[u32]| {
+            for &index in indices {
+                state
+                    .model_registry
+                    .record_shard_holder(part(index), local.clone());
+            }
+            write_sparse_shards(&state, &mid, indices.iter().copied(), PART);
+        };
+        hold(&[0, 1, 2, 4, 5, 6, 7]);
+        for byte in [7, 8, 9] {
+            close_peer_holding(&state, byte, &mid, 3);
+        }
+        let target =
+            manager.geo_target_replicas(&mid, 2, crate::pool::scope::effective_pool_size(&state));
+        assert!(
+            target <= 3,
+            "fixture: part 3's three other holders meet the target ({target})"
+        );
+        assert_eq!(
+            fetched(&manager, &state, 3_500),
+            vec![(mid.clone(), 3)],
+            "the one part this computer lacks is fetched, though the swarm holds it enough"
+        );
+
+        hold(&[3]);
+        let holders = [
+            local.clone(),
+            NodeId([7; 32]),
+            NodeId([8; 32]),
+            NodeId([9; 32]),
+        ];
+        assert!(
+            !manager.would_shed_copy(&part(3), &holders, 0.85, &[]),
+            "…and prune keeps it there: this computer answers the model with no hop"
+        );
+
+        // Control: two parts of eight missing is the swarm's spread to keep —
+        // part 3's holders meet the target and part 4 is somebody else's.
+        state.model_registry.remove_shard_holder(&part(3), &local);
+        state.model_registry.remove_shard_holder(&part(4), &local);
+        for byte in [7, 8, 9] {
+            close_peer_holding(&state, byte, &mid, 4);
+        }
+        assert!(
+            fetched(&manager, &state, 3_000).is_empty(),
+            "two of eight parts short, nothing is fetched past the target"
         );
     }
 

@@ -318,6 +318,14 @@ impl SnapshotHome {
             _ => Self::BesideLive,
         }
     }
+
+    /// May a snapshot of a model on `device` go to host RAM when the card has
+    /// no room for it beside the live cache (`model_worker::snapshot_room`)?
+    /// A card's only, and not under `SWARMLLM_PREFIX_CACHE_HOME=card`, the arm
+    /// that keeps every copy on the card.
+    pub fn may_leave_the_card(device: &Device) -> bool {
+        device.is_cuda() && home_override() != Some(Self::BesideLive)
+    }
 }
 
 /// `SWARMLLM_PREFIX_CACHE_HOME=card` keeps a card's snapshots on the card (the

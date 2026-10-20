@@ -822,7 +822,8 @@ after the fetch is unchanged.
 
 **A model held whole is not holed by the count.** Below urgent disk pressure,
 a part is not surplus when this node holds every part of its model counting
-that part (`holds_whole_model_counting`, through `parts_missing_here`).
+that part — or all but one in eight of them, #320 below
+(`completes_model_here_counting`, through `parts_missing_here`).
 Shedding it frees one part and turns the one computer answering the model with
 no hop into a split. Counting the part makes the download pass's question
 ("would prune shed it once landed?") the same as prune's, so a part that
@@ -830,8 +831,18 @@ completes a model is fetched at the pressure prune keeps it at
 (`a_part_of_a_model_held_whole_here_is_not_shed_by_the_count`, a MIDDLE part:
 a whole model's ends are already held by prompt privacy, which passed the first
 draft of that test without the rule). It is asked after the count says shed,
-so the files are read only for the few parts the count would delete. It adds no
-fetch: the download pass still offers a part only below the raw target.
+so the files are read only for the few parts the count would delete.
+
+**A model held all but a few parts is completed (2026-10-20, #320).** Until then the keep added
+no fetch, so a model a pre-#286 prune had holed stayed holed: a tester's Qwen3-30B-A3B sat at
+33/34 parts for three days with part 20 held by three others, and every request went through a
+peer in Belgium — 120.7 s warm against 2.3 s with 34/34. Now the download pass fetches past the
+target every part a model lacks when this node holds all but ≤ 1 in 8 of its parts
+(`coverage::parts_completing_model_here`, judged before any lands), and the keep covers such a
+model too, counting the part (`short_of_whole_by_few`): each fetch lands in a state prune keeps
+(gotcha #795). One in eight leaves a model in fewer than eight parts to the replica spread and
+never completes a model this node holds by half — the spread the target exists for. Test
+`the_part_a_model_held_but_for_it_lacks_is_fetched_past_the_target` (with a 2-of-8 control).
 
 **And a part that has just arrived waits.** `SHARD_RECENTLY_ACQUIRED_SECS`
 (30 min) lowered the score by 0.2 and nothing else — the tester's 28 s prune
@@ -2891,6 +2902,16 @@ evicts only the home that needs the room. A/B `SWARMLLM_PREFIX_CACHE_HOME=card|h
   `a_snapshot_in_host_ram_is_neither_charged_to_nor_evicted_for_the_card`).
 - **Still owed:** the end-to-end figure at ≥ 48 h of uptime.
 
+**Elsewhere, a card with no room beside its live cache keeps the copy in host RAM (2026-10-20,
+#321).** Outside WSL2 the copy stays beside the live cache, cut to what fits. A tester's 12 GB card
+holding two segments of a 30B had ~190 MB left for caches; the cut copy did not cover the next
+turn's opening, and the whole split read a 3,718-token prompt again (103 s on the peer abroad). A
+card's copy that does not fit whole now goes to host RAM when that holds more
+(`model_worker::room_off_the_card_if_more`; `SnapshotHome::may_leave_the_card`: a card, not under
+`SWARMLLM_PREFIX_CACHE_HOME=card`). Host RAM is asked only when the card falls short. The "not on
+native Linux" bullet above is about the DEFAULT home; this fallback is for a copy the card cannot
+hold. Test `a_snapshot_the_card_cannot_hold_whole_goes_to_host_memory`.
+
 ## A split's stored prompt lives in the worker's prefix cache, under its one budget (2026-10-09, FUTURE_WORK #10)
 
 A segment keeps its part of a split's prompt between turns
@@ -2984,6 +3005,16 @@ The conversation is noted on the worker (`note_conversation`) only on a "yes". T
 
 **Worker IPC compatibility.** A worker can be newer than its daemon, never the reverse in one
 binary; the worker sends `PromptAdmitted` / `PromptRefused` only in answer to `AdmitPrompt`.
+
+**Up front, nothing is evicted (2026-10-20, #321).** The up-front admission runs before any
+segment has looked its saved opening up, so a prompt that fit only once saved prompts went
+evicted the least recently used ones — on a tester's node, the very opening the pass was about to
+resume from, and every segment then read the whole prompt again. `Admitting::UpFront` (a
+REQUIRED argument, beside `Record` and `OnlyWeigh`) answers such a prompt
+`Admitted::LeftToTheForwards`: nothing evicted, no ranges recorded, and each segment admits
+itself after its lookup — the order § "A split's stored prompt lives in the worker's prefix
+cache" requires. A refusal and a plain fit are unchanged. Test
+`an_up_front_admission_leaves_saved_prompts_to_the_forwards`.
 
 **Residuals.** A PEER's segments are weighed before the pass too since 2026-10-18 (#252 (b), the
 next section). The planner itself does not yet ask our cache

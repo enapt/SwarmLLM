@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #319**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #323**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1214,6 +1214,16 @@ pool (`peer_cache::CacheWriter`). What remains: the 2 sampled stalls with no wor
 whether the daily count falls. Next: once deployed, count the stall lines on the live node over a
 day of ordinary use (10-19: 65) and sample the next one that comes while the disk is idle.
 
+A tester's node (field report 2026-10-20, v0.3.245, which lacks the fix) logged 42 stalls (median
+289 ms, max 1.7 s; arms `RequestResponse`, `liveness_interval`, `Identify`) from the moment an
+80 MB/s rsync to the same NVMe began, with no forward in flight, and none in the 26 h before.
+Their question — is the loop doing synchronous disk I/O, log or redb? — has two answers: redb's
+commit (fixed above), and the log file, which whichever thread logs writes itself
+(`logging::write_to_file`: a `Mutex` and a `write` on the caller). On ext4 with ordered data a
+small append can wait on the journal for 100-700 ms while another writer floods the disk (kernel
+bugzilla 201461, a 6 MB/s logger; Ts'o: the ordered-mode writeback colliding with the flusher).
+Being measured 2026-10-20.
+
 #### #191 — A part download that loses its peer restarts from byte 0 on the next one
 `P3` · storage · **OPEN** — 2026-09-03 · history: archive § "A multi-megabyte forward over ONE QUIC stream can kill the connection" (its banner: the cause was quinn-proto, #112)
 
@@ -2096,6 +2106,24 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
+#### #322 — A cold load's first request was refused for a 9-token prompt, its card cache budget 0
+`P3` · memory · **OPEN** — 2026-10-20 · history: field report 2026-10-19 (a tester, RTX 3060 12 GB, v0.3.244), request `3acb5624`
+
+The first request after a cold load of Qwen3-30B-A3B (this node L0-14 and L42-48, a peer
+L14-42) failed after 46 s. The second local range (L42-48, 2,262 MB) was admitted to the card
+with `headroom_mb=114` (`committed_mb=5595 budget_mb=7971`), and its worker's cache budget then
+read 0 (`budget_mb=0 load_time_budget_mb=187 short_by_mb=40`); the re-plan found
+`layers_that_fit=0`, and the owner was told to close other programs though nothing else held
+the card. The same plan answered 49 s later, in 1.3 s; in the cold run after it the range was
+admitted with `headroom_mb=385` and answered. Lead, UNDETERMINED: the pool admits a range
+(`card_verdict`) without the worker's own cache margin (`device_free_margin_bytes`: the larger of
+5% of the card and 256 MB, ~600 MB on 12 GB), so a range admitted with less headroom than that
+loads with no room for any cache; why the headroom was 114 MB once and 385 MB a minute later is
+not known. Next: log the card reading (`device_free_and_total_bytes`, the pool's reusable bytes)
+at the refusal at `info`, then decide whether `card_verdict` charges the margin (the spawn's
+ladder would split the range instead of loading it with no cache). The refusal's advice also
+blames other programs when this node's own weights fill the card.
+
 #### #297 — Auto-manage prices a card by the file's size, so Gemma 4's E2B/E4B read heavier than they run
 `P3` · memory · **OPEN** — 2026-10-17 · history: #296's review
 
@@ -2799,7 +2827,45 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-20, not yet released** (#255)
+**Closed 2026-10-20, not yet released** (#255, #320, #321)
+- #320 — **A node holding all but a few parts of a model fetches the rest, past the replica
+  target, and keeps them.** Field report 2026-10-19 (a tester, RTX 3060 12 GB, v0.3.244):
+  Qwen3-30B-A3B sat at 33/34 parts since a prune before #286 took part 20 (`holders=4 target=3`).
+  The download pass offers a part only below its replica target, and #286's keep protected only a
+  model already whole, so the part never came back and every request went through a peer in
+  Belgium: 120.7 s warm, against 2.3 s with 34/34 on 10-16. Now
+  `coverage::parts_completing_model_here` names the parts such a model lacks — one held all but
+  ≤ 1 in 8 of (`COMPLETE_WHEN_SHORT_BY_ONE_PART_IN`), judged BEFORE any lands, so never a model
+  in fewer than 8 parts and never one held by half — the replica skip in `scoring.rs` lets them
+  through, and prune keeps every part of such a model below urgent pressure
+  (`coverage::completes_model_here_counting`, which replaced `holds_whole_model_counting`), so each
+  fetch lands in a state prune keeps (gotcha #795). Disk pressure, scope and the metered hold
+  still apply: the fetch asks `would_shed_copy` as every fetch does. Test
+  `the_part_a_model_held_but_for_it_lacks_is_fetched_past_the_target` (8 parts, part 3 held by
+  three close peers: fetched, then kept; control, 2 of 8 missing: nothing fetched), red with the
+  skip's exemption off. "Keep on this computer" still fetches nothing itself (its words say the
+  rest comes from the model card); a model it keeps is completed by this rule when short by few.
+- #321 — **A split's saved prompt opening survives a full card and the up-front admission.**
+  Field report 2026-10-19: the same 3,718-token prompt, warm, over the same three segments (this
+  node L0-14 and L42-48 on a 12 GB card, Belgium L14-42) went out whole again
+  (`activation_bytes=16,180,776` = 2 × 3,718 × 2,176 + 40: every segment from 0, since the
+  coordinator resumes from the least any segment holds) and Belgium read it for 103 s; with the
+  local segments on the processor (Ollama holding the card) it sent 26,152 bytes and Belgium took
+  1.0 s. Two causes on this node. (a) A card outside WSL2 keeps a snapshot beside its live cache,
+  and with ~190 MB left for caches beside two segments of a 30B the copy was cut to what fit
+  (`snapshot_room`). A card's copy that does not fit whole now goes to host RAM when that holds
+  more (`model_worker::room_off_the_card_if_more`, `SnapshotHome::may_leave_the_card`; never
+  under `SWARMLLM_PREFIX_CACHE_HOME=card`) — #257's copy, 59-169 ms per 264 MB, against a whole
+  prompt read again on every segment. (b) The up-front admission (#263) runs before any segment's
+  `lookup_chain`, so a prompt that fit only once saved prompts went evicted the least recently
+  used ones — the opening the pass was about to resume from. Up front (`Admitting::UpFront`) it
+  now evicts nothing: such a prompt is `Admitted::LeftToTheForwards`, no ranges are recorded,
+  and each segment admits itself after its lookup, as before #263; a refusal and a plain fit are
+  unchanged. Tests `an_up_front_admission_leaves_saved_prompts_to_the_forwards` (tight room: up
+  front keeps the snapshot, a forward's own admission evicts it; room for both; no room: refused,
+  nothing evicted) and `a_snapshot_the_card_cannot_hold_whole_goes_to_host_memory`, each red with
+  its half off. Not run on a card: this machine's card is reached through WSL2, where every copy
+  already goes to host RAM.
 - #255 — **A command run without `-d` finds the running daemon's data directory, and sends its
   key only to the node that proves it holds it.** `/health` names the directory (`data_dir`,
   absolute) to a request from this machine (`RequestOrigin::is_this_machine`) and to no one else;
@@ -3536,7 +3602,7 @@ grep `^| N |`).
   24 h (`auto_manage::target_hold`, Kubernetes HPA's scale-down stabilization, kept in redb
   `measured_here` across restarts) while the download pass reads it as it is; a part of a model
   this node holds whole (counting the part, so both passes agree) is kept below urgent disk
-  pressure (`holds_whole_model_counting`); a part that arrived within 30 min is not pruned below
+  pressure (`holds_whole_model_counting`, now `completes_model_here_counting`, #320); a part that arrived within 30 min is not pruned below
   eager pressure (it only lowered the score). Disk pressure still lowers the held target, so a
   filling disk frees space as before. Tests `a_part_fetched_on_demand_is_kept_once_the_demand_decays`,
   `a_part_of_a_model_held_whole_here_is_not_shed_by_the_count`,

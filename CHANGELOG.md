@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+**A computer that holds all but a few parts of a model fetches the rest, and runs it on its own.**
+A computer that had lost one part of a model to an older release's clean-up never fetched it
+back: the network already had enough copies of that part, so every request went through another
+computer for it. A computer holding all but one in eight of a model's parts now fetches the
+missing ones and keeps them. In the report that found it, one missing part of a 30B model made a
+reply take 121 seconds through a computer in another country, against 2.3 seconds with every
+part at home.
+
+**A split remembers your conversation's opening even when the graphics card is full.** When the
+computer leading a split had no room on its graphics card for a copy of the prompt it had just
+read, it kept only part of it, and the next turn sent the whole prompt to every computer in the
+split again. It now keeps that copy in the computer's main memory instead. The check made before
+a split starts also no longer throws a saved conversation away to make room: each part of the
+split first takes back the opening it can reuse. In the report that found it, the computer
+abroad spent 103 seconds reading a 3,718-token prompt again; when the opening was kept, it
+took 1 second.
+
 **A model split over three or more computers no longer stops after its first token.** When the
 computers holding the middle and the end of a model had not yet connected to each other — usual
 for the first minutes after they join — every reply that guessed ahead ended after its first

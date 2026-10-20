@@ -440,29 +440,66 @@ impl AutoShardManager {
         without < manifest.num_layers && with > without
     }
 
-    /// Does this node hold every part of `shard_id`'s model once `shard_id`
-    /// itself is counted as held? Prune keeps such a part below urgent disk
-    /// pressure (`copy_kept_because`, #286): it is the one computer answering
-    /// the model with no hop. Asked of a part held (prune) and of one about to
-    /// be fetched (the download pass) alike — the state after the fetch, as
-    /// gotcha #795 requires. Read through `parts_missing_here`, the one count
-    /// of what this computer holds (registry and files); a model with no
-    /// manifest here is not held whole.
-    pub(super) fn holds_whole_model_counting(&self, shard_id: &ShardId) -> bool {
-        if shard_id.index == MMPROJ_SHARD_INDEX
-            || self
-                .shared_state
-                .model_registry
-                .get_manifest(&shard_id.model_id)
-                .is_none_or(|m| m.shards.is_empty())
-        {
+    /// Does this node hold `shard_id`'s model whole — or all but a few of its
+    /// parts ([`short_of_whole_by_few`]) — once `shard_id` itself is counted as
+    /// held? Prune keeps such a part below urgent disk pressure
+    /// (`copy_kept_because`, #286): it is the one computer answering the model
+    /// with no hop, or about to be. Asked of a part held (prune) and of one
+    /// about to be fetched (the download pass, [`Self::parts_completing_model_here`])
+    /// alike — the state after the fetch, as gotcha #795 requires. Read through
+    /// `parts_missing_here`, the one count of what this computer holds
+    /// (registry and files); a model with no manifest here is not held whole.
+    pub(super) fn completes_model_here_counting(&self, shard_id: &ShardId) -> bool {
+        if shard_id.index == MMPROJ_SHARD_INDEX {
             return false;
         }
-        self.shared_state
+        let Some(manifest) = self
+            .shared_state
+            .model_registry
+            .get_manifest(&shard_id.model_id)
+            .filter(|m| !m.shards.is_empty())
+        else {
+            return false;
+        };
+        let others = self
+            .shared_state
             .parts_missing_here(&shard_id.model_id)
             .iter()
-            .all(|&index| index == shard_id.index)
+            .filter(|&&index| index != shard_id.index)
+            .count();
+        short_of_whole_by_few(others, manifest.shards.len())
     }
+
+    /// The parts this node lacks of a model it already holds all but a few of
+    /// — fetched to complete it, past the replica target (field report
+    /// 2026-10-19: a 30B one part short since the pruner before #286 took it
+    /// went through a peer abroad in 121 s, where all 34 parts here answered
+    /// in 2.3 s, and the target never let the part back: it had three other
+    /// holders). Only while the model is short by few parts BEFORE any of them
+    /// lands — so never a model in fewer than eight parts, and never how a
+    /// node starts on one. Each part lands in a state
+    /// [`Self::completes_model_here_counting`] keeps, as does every part
+    /// already held meanwhile, so prune and this pass agree (gotcha #795).
+    pub(super) fn parts_completing_model_here(&self, manifest: &ModelManifest) -> HashSet<u32> {
+        let missing = self.shared_state.parts_missing_here(&manifest.id);
+        if missing.is_empty() || !short_of_whole_by_few(missing.len(), manifest.shards.len()) {
+            return HashSet::new();
+        }
+        missing.into_iter().collect()
+    }
+}
+
+/// One part in this many may be missing from a model this node still counts
+/// as whole-or-completing ([`AutoShardManager::completes_model_here_counting`]):
+/// one part of an 8-part 7B, four of a 34-part 30B, none of a model in fewer
+/// than eight parts — a small model keeps the replica spread, and a node never
+/// completes one it holds half of.
+const COMPLETE_WHEN_SHORT_BY_ONE_PART_IN: usize = 8;
+
+/// Is a model of `total` parts with `missing` of them absent here whole, or
+/// short of whole by few enough to complete?
+fn short_of_whole_by_few(missing: usize, total: usize) -> bool {
+    missing * COMPLETE_WHEN_SHORT_BY_ONE_PART_IN <= total
 }
 
 /// The layer ranges of `parts` of `manifest`.

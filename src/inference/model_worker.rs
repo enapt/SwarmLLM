@@ -3125,6 +3125,14 @@ fn prefix_cache_charged() -> bool {
 /// A card's snapshot goes to host RAM (#257) and is sized against the
 /// machine (`kv_budget::host_snapshot_budget`); one kept beside the live
 /// cache is sized against that device's KV budget (gotcha #440).
+///
+/// **A card with no room for the copy beside the live cache keeps it in host
+/// RAM instead of keeping less of it** (field report 2026-10-19): a 12 GB card
+/// holding two segments of a 30B had ~190 MB left for caches, the next turn's
+/// prompt opening was not kept whole beside its live cache, and the whole
+/// split read the 3,718-token prompt again — 103 s on the peer abroad that had
+/// kept its part. The copy off the card costs 59-145 ms per 264 MB (#257's
+/// measurement); the turn it saves costs the whole prompt on every segment.
 fn snapshot_room(
     model: &SplitModel,
     kv_store: &KvCacheStore,
@@ -3132,15 +3140,56 @@ fn snapshot_room(
     prompt_tokens: usize,
 ) -> SnapshotRoom {
     let home = SnapshotHome::for_device(model.device());
-    let max_positions = match home {
-        SnapshotHome::HostRam => host_ram_positions(model, prefix_cache, prompt_tokens),
-        SnapshotHome::BesideLive => {
-            positions_beside_live(model, kv_store, prefix_cache, prompt_tokens)
-        }
+    if home == SnapshotHome::HostRam {
+        return SnapshotRoom {
+            home,
+            max_positions: host_ram_positions(model, prefix_cache, prompt_tokens),
+        };
+    }
+    let beside = positions_beside_live(model, kv_store, prefix_cache, prompt_tokens);
+    let room = room_off_the_card_if_more(
+        beside,
+        prompt_tokens,
+        SnapshotHome::may_leave_the_card(model.device()),
+        || host_ram_positions(model, prefix_cache, prompt_tokens),
+    );
+    if room.home == SnapshotHome::HostRam {
+        tracing::info!(
+            prompt_tokens,
+            beside_live = beside,
+            in_host_memory = room.max_positions.min(prompt_tokens),
+            "DIAG: prefix-cache snapshot kept in host memory — the card has no room for it \
+             beside the live cache"
+        );
+    }
+    room
+}
+
+/// [`snapshot_room`]'s choice for a card's snapshot: beside the live cache
+/// when `beside` holds the whole prompt or the copy may not leave the card,
+/// else host RAM where it holds more there (`host`, asked only then — it may
+/// evict older host copies).
+fn room_off_the_card_if_more(
+    beside: usize,
+    prompt_tokens: usize,
+    may_leave_the_card: bool,
+    host: impl FnOnce() -> usize,
+) -> SnapshotRoom {
+    let on_the_card = SnapshotRoom {
+        home: SnapshotHome::BesideLive,
+        max_positions: beside,
     };
-    SnapshotRoom {
-        home,
-        max_positions,
+    if beside >= prompt_tokens || !may_leave_the_card {
+        return on_the_card;
+    }
+    let host = host();
+    if host > beside {
+        SnapshotRoom {
+            home: SnapshotHome::HostRam,
+            max_positions: host,
+        }
+    } else {
+        on_the_card
     }
 }
 
@@ -3369,16 +3418,27 @@ fn ensure_room_for_prompt(
         forward_width,
         Admitting::Record,
     )
+    .map(|_| ())
     .map_err(|refused| refused.error)
 }
 
 /// What an admission may change. A REQUIRED argument of [`admit_prompt_over`]:
-/// the one decision answers both, and only one of them may write.
+/// the one decision answers all three, and a peer's question writes nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Admitting {
     /// This worker will run the prompt: record its reservation and promise,
     /// end finished conversations and evict saved prompts to make the room.
     Record,
+    /// Up front, for every range at once, BEFORE any forward has looked up the
+    /// prompt opening it will restore (`DaemonMsg::AdmitPrompt`, #263): as
+    /// `Record`, except that a prompt fitting only once saved prompts go is
+    /// left to its forwards' own admissions (`Admitted::LeftToTheForwards`).
+    /// Evicting here took the very opening the pass was about to resume from —
+    /// it had not been looked up, so it was the least recently used — and the
+    /// miss sent the whole prompt to every segment again (field report
+    /// 2026-10-19: 103 s on a peer that had kept its part). A forward looks its
+    /// opening up first and holds it, so its eviction cannot take it.
+    UpFront,
     /// A PEER asks whether it would fit (`PromptAdmissionAsk`, FUTURE_WORK
     /// #252 (b)): the same arithmetic, counting the room the release and the
     /// eviction WOULD free, and nothing written — vLLM's `can_allocate`, not an
@@ -3386,6 +3446,35 @@ enum Admitting {
     /// was a reservation any peer could take for the cache TTL (security
     /// review, 2026-10-18).
     OnlyWeigh,
+}
+
+impl Admitting {
+    /// Does this admission record what it admits (a reservation, a promise)
+    /// and make room (finished conversations, saved prompts)?
+    fn writes(self) -> bool {
+        self != Self::OnlyWeigh
+    }
+}
+
+/// What [`admit_prompt_over`] did with a prompt it did not refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admitted {
+    /// Weighed, and — for a writing admission — promised and recorded.
+    Recorded,
+    /// Up front (`Admitting::UpFront`), a prompt that fits only once saved
+    /// prompts go: nothing promised, nothing evicted, and each forward admits
+    /// itself after looking its opening up.
+    LeftToTheForwards,
+}
+
+/// [`admit_prompt_in`]'s answer in one memory.
+enum Room {
+    /// Fits: the bytes promised there.
+    Promised(u64),
+    /// No range keeps a budget there.
+    Unbudgeted,
+    /// Fits once saved prompts go — answered only up front, which evicts none.
+    AfterEvicting,
 }
 
 /// A prompt [`admit_prompt_over`] would not take: the cache it `needed`, in
@@ -3444,9 +3533,9 @@ fn admit_prompt_over(
     reply_positions: usize,
     forward_width: usize,
     admitting: Admitting,
-) -> Result<(), PromptRefusal> {
+) -> Result<Admitted, PromptRefusal> {
     let Some(context_window) = ranges.iter().map(|(m, _)| m.context_window()).min() else {
-        return Ok(());
+        return Ok(Admitted::Recorded);
     };
     // The prompt plus the reply's reserve, rounded to whole quanta, so an
     // admitted request can decode its whole reply (or its first quantum, for
@@ -3464,11 +3553,11 @@ fn admit_prompt_over(
     // a copy of everything so far at each step (FUTURE_WORK #32). Recorded
     // before any budget question, because a node with no budget to check
     // still pays for the growth.
-    if admitting == Admitting::Record {
+    if admitting.writes() {
         kv_store.set_reserved_positions(request_id, positions.min(context_window));
     }
     if !prefix_cache_charged() {
-        return Ok(());
+        return Ok(Admitted::Recorded);
     }
     let mut homes: Vec<KvHome> = Vec::new();
     for &(model, _) in ranges {
@@ -3479,6 +3568,7 @@ fn admit_prompt_over(
         }
     }
     let mut promises: Vec<(KvHome, u64)> = Vec::new();
+    let mut after_evicting = false;
     for (i, &home) in homes.iter().enumerate() {
         // A range not loaded yet is charged where the loaded ones keep their
         // primary caches — the first memory asked.
@@ -3500,10 +3590,17 @@ fn admit_prompt_over(
             forward_width,
             admitting,
         )?;
-        promises.extend(promise.map(|bytes| (home, bytes)));
+        match promise {
+            Room::Promised(bytes) => promises.push((home, bytes)),
+            Room::Unbudgeted => {}
+            Room::AfterEvicting => after_evicting = true,
+        }
     }
-    if admitting == Admitting::OnlyWeigh {
-        return Ok(());
+    if !admitting.writes() {
+        return Ok(Admitted::Recorded);
+    }
+    if after_evicting {
+        return Ok(Admitted::LeftToTheForwards);
     }
     // Record what this prompt has been promised, so the NEXT one is weighed
     // against it rather than against memory it is about to take. Released by
@@ -3512,11 +3609,11 @@ fn admit_prompt_over(
     for (home, bytes) in promises {
         kv_store.record_prompt_admission(request_id, home, bytes);
     }
-    Ok(())
+    Ok(Admitted::Recorded)
 }
 
-/// [`admit_prompt_over`]'s decision in ONE memory: `Ok(Some(bytes))` promised
-/// there, `Ok(None)` when no range keeps a budget there, else the refusal.
+/// [`admit_prompt_over`]'s decision in ONE memory: the room there, else the
+/// refusal.
 #[allow(clippy::too_many_arguments)]
 fn admit_prompt_in(
     home: KvHome,
@@ -3530,7 +3627,7 @@ fn admit_prompt_in(
     positions: usize,
     forward_width: usize,
     admitting: Admitting,
-) -> Result<Option<u64>, PromptRefusal> {
+) -> Result<Room, PromptRefusal> {
     let occupancy = kv_store.occupancy();
     let in_home = occupancy.allocated_in(home);
     // Prompts already admitted whose prefill has not written its cache yet.
@@ -3579,10 +3676,10 @@ fn admit_prompt_in(
     }
     let growth = growth.widened_to(forward_width);
     let Some(budget) = budget else {
-        return Ok(None);
+        return Ok(Room::Unbudgeted);
     };
     if growth.per_position() == 0 {
-        return Ok(None);
+        return Ok(Room::Unbudgeted);
     }
     let load_time_budget = load_time_budget.unwrap_or(budget);
     let mb = |b: u64| b / (1024 * 1024);
@@ -3618,12 +3715,15 @@ fn admit_prompt_in(
     let promise = claim;
     let short_by = match verdict {
         PromptAdmission::Fits => {
-            return Ok(Some(promise));
+            return Ok(Room::Promised(promise));
         }
         // `admit_prompt` asks for an eviction only when the saved prompts cover
         // the excess, and `release` can free every one of them.
         PromptAdmission::EvictBytes(_) if admitting == Admitting::OnlyWeigh => {
-            return Ok(Some(promise));
+            return Ok(Room::Promised(promise));
+        }
+        PromptAdmission::EvictBytes(_) if admitting == Admitting::UpFront => {
+            return Ok(Room::AfterEvicting);
         }
         PromptAdmission::EvictBytes(needed) => {
             let freed = prefix_cache.release(needed as usize, SnapshotHome::BesideLive) as u64;
@@ -3643,13 +3743,13 @@ fn admit_prompt_in(
                 "DIAG: KV admission — evicted cached prompts so this prompt's cache fits on the device"
             );
             if freed >= needed {
-                return Ok(Some(promise));
+                return Ok(Room::Promised(promise));
             }
             needed - freed
         }
         PromptAdmission::Refuse { short_by } => short_by,
     };
-    if admitting == Admitting::Record {
+    if admitting.writes() {
         tracing::warn!(
             request_id,
             prompt_tokens,
@@ -3713,7 +3813,7 @@ fn admit_prompt_up_front(
     let admitting = if admit.only_weigh {
         Admitting::OnlyWeigh
     } else {
-        Admitting::Record
+        Admitting::UpFront
     };
     // Each range: the loaded model holding it (a plan's range may sit inside a
     // loaded one) and the layers of it the prompt uses.
@@ -3752,7 +3852,7 @@ fn admit_prompt_up_front(
     // caches for this request (a re-plan keeps the request's id) are not
     // weighed against it; the forwards would clear them anyway. A peer's
     // question names a fresh id and clears nothing.
-    if admitting == Admitting::Record {
+    if admitting.writes() {
         kv_store.cleanup_request_id(&request_id);
     }
     match admit_prompt_over(
@@ -3766,17 +3866,26 @@ fn admit_prompt_up_front(
         0,
         admitting,
     ) {
-        Ok(()) => {
-            if admitting == Admitting::Record {
+        Ok(Admitted::Recorded) => {
+            if admitting.writes() {
                 kv_store.record_ranges_admitted(&request_id, admit.layer_ranges.clone());
             }
+            Ok(())
+        }
+        Ok(Admitted::LeftToTheForwards) => {
+            tracing::info!(
+                request_id,
+                prompt_tokens = admit.prompt_tokens,
+                "DIAG: KV admission up front — the prompt fits once saved prompts go; each \
+                 segment admits itself after looking up the opening it restores"
+            );
             Ok(())
         }
         Err(refused) => {
             // Nothing of this attempt runs here now: the reservation the
             // admission recorded before it weighed would hold room against
             // every other conversation until the re-plan's own admission.
-            if admitting == Admitting::Record {
+            if admitting.writes() {
                 kv_store.cleanup_request_id(&request_id);
             }
             Err((
@@ -7138,6 +7247,152 @@ mod forward_width_tests {
         assert!(
             !admitted(prompt),
             "control: charged the whole forward, the same prompt does not"
+        );
+    }
+}
+
+#[cfg(test)]
+mod up_front_admission_tests {
+    use super::*;
+    use crate::inference::split::kv_budget::KvGrowth;
+    use crate::inference::split::kv_cache::LayerKv;
+    use crate::inference::split::tests::gemma2::windowed_model_with_budget;
+    use crate::inference::split::SnapshotRoom;
+    use candle_core::{DType, Device, Tensor};
+
+    /// A saved split prompt of `positions` positions, 1 KiB each, kept beside
+    /// the live cache — the opening a pass resumes from next turn.
+    fn saved_prompt(kv: &KvCacheStore, pc: &PrefixCache, positions: usize) -> usize {
+        let mut entry = kv.get_or_create("m", "earlier", 2);
+        for slot in entry.layers.iter_mut() {
+            let k = Tensor::zeros((1usize, 1, positions, 64), DType::F32, &Device::Cpu).unwrap();
+            let mut layer = LayerKv::with_capacity(2, 4096, 4096);
+            layer.append(&k, &k).unwrap();
+            *slot = Some(layer);
+        }
+        drop(entry);
+        let room = SnapshotRoom {
+            home: SnapshotHome::BesideLive,
+            max_positions: usize::MAX,
+        };
+        let keys = vec![[7u8; 32]; positions / 8];
+        assert_eq!(
+            pc.insert_chain_from_kv("m", "earlier", kv, 8, &keys, room) as usize,
+            positions / 8
+        );
+        kv.cleanup_request_id("earlier");
+        pc.bytes_in(SnapshotHome::BesideLive)
+    }
+
+    /// **Up front, a prompt that fits only once saved prompts go evicts none
+    /// of them** (field report 2026-10-19): the eviction took the opening the
+    /// pass was about to resume from — not looked up yet, so the least
+    /// recently used — and the miss sent a 3,718-token prompt to every segment
+    /// again, 103 s on a peer abroad. Each forward then admits itself after
+    /// its lookup. Neither a refusal nor a fit changes.
+    #[test]
+    fn an_up_front_admission_leaves_saved_prompts_to_the_forwards() {
+        let prompt = 100;
+        let per_position = 1000;
+        let claim = per_position
+            * crate::inference::layers::kv_cache_reservation(prompt + REPLY_RESERVE_POSITIONS)
+                as u64;
+        let admit = |budget: u64, admitting: Admitting| {
+            let model = windowed_model_with_budget(
+                8192,
+                &[None, None],
+                KvGrowth::flat(per_position),
+                budget,
+            );
+            let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+            let pc = PrefixCache::new(true, 8, 0, 4, 8192, 0);
+            let saved = saved_prompt(&kv, &pc, 128);
+            assert!(saved > 0, "fixture: a saved prompt beside the live cache");
+            let width = model.layer_end.saturating_sub(model.layer_start) as u32;
+            let outcome = admit_prompt_over(
+                &[(&model, width)],
+                KvGrowth::default(),
+                &kv,
+                &pc,
+                "r",
+                prompt,
+                REPLY_RESERVE_POSITIONS,
+                0,
+                admitting,
+            )
+            .map_err(|refused| refused.short_by);
+            (outcome, pc.bytes_in(SnapshotHome::BesideLive) == saved)
+        };
+        // Room for this prompt's cache, but not beside the saved one.
+        let tight = claim + 1024;
+        let (outcome, kept) = admit(tight, Admitting::UpFront);
+        assert_eq!(outcome, Ok(Admitted::LeftToTheForwards));
+        assert!(
+            kept,
+            "up front, the saved prompt stays for the forward to restore"
+        );
+        let (outcome, kept) = admit(tight, Admitting::Record);
+        assert_eq!(outcome, Ok(Admitted::Recorded));
+        assert!(
+            !kept,
+            "control: a forward's own admission makes the room, as it always has"
+        );
+        // Room for both: promised up front, nothing evicted.
+        let (outcome, kept) = admit(claim * 4, Admitting::UpFront);
+        assert_eq!(outcome, Ok(Admitted::Recorded));
+        assert!(kept);
+        // No room even with the saved prompt gone: refused up front, as before.
+        let (outcome, kept) = admit(claim / 2, Admitting::UpFront);
+        assert!(
+            outcome.is_err(),
+            "a prompt that cannot fit is refused up front"
+        );
+        assert!(kept, "and its refusal evicted nothing");
+    }
+
+    /// **A card with no room for a prompt's copy beside its live cache keeps
+    /// the copy in host RAM, not a cut of it** (field report 2026-10-19: ~190 MB
+    /// left for caches on a 12 GB card holding two segments of a 30B, and the
+    /// next turn read the whole prompt again on every segment). Host memory is
+    /// asked only when the card falls short, and never under
+    /// `SWARMLLM_PREFIX_CACHE_HOME=card`.
+    #[test]
+    fn a_snapshot_the_card_cannot_hold_whole_goes_to_host_memory() {
+        let asked = std::cell::Cell::new(false);
+        let host = |positions: usize| {
+            let asked = &asked;
+            move || {
+                asked.set(true);
+                positions
+            }
+        };
+        let room = room_off_the_card_if_more(3718, 3718, true, host(9000));
+        assert_eq!(room.home, SnapshotHome::BesideLive);
+        assert_eq!(room.max_positions, 3718);
+        assert!(
+            !asked.get(),
+            "a card holding the whole copy never asks host memory"
+        );
+
+        let room = room_off_the_card_if_more(640, 3718, true, host(9000));
+        assert_eq!(room.home, SnapshotHome::HostRam);
+        assert_eq!(room.max_positions, 9000);
+
+        let room = room_off_the_card_if_more(640, 3718, true, host(100));
+        assert_eq!(
+            (room.home, room.max_positions),
+            (SnapshotHome::BesideLive, 640),
+            "host memory holding less than the card keeps the card's cut"
+        );
+        asked.set(false);
+        let room = room_off_the_card_if_more(640, 3718, false, host(9000));
+        assert_eq!(
+            (room.home, room.max_positions),
+            (SnapshotHome::BesideLive, 640)
+        );
+        assert!(
+            !asked.get(),
+            "a copy that may not leave the card never asks"
         );
     }
 }

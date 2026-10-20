@@ -1426,7 +1426,8 @@ impl AutoShardManager {
         ) {
             return Some("not more copies than the target");
         }
-        // A part of a model this node holds WHOLE — counting this part, so the
+        // A part of a model this node holds WHOLE, or all but a few parts of
+        // (the download pass completes those) — counting this part, so the
         // download pass asking before the part is here gets the same answer —
         // is not surplus by the count: shedding it frees one part and turns the
         // one computer that answers with no hop into a split, the hole a
@@ -1435,8 +1436,8 @@ impl AutoShardManager {
         // locally). Copies of partial holders go first; only an urgent disk
         // takes one. After the count, so the files are read only for a part
         // the count would shed (`parts_missing_here` stats each part).
-        if pressure < PRESSURE_URGENT && self.holds_whole_model_counting(shard_id) {
-            return Some("this computer holds the whole model");
+        if pressure < PRESSURE_URGENT && self.completes_model_here_counting(shard_id) {
+            return Some("this computer holds the whole model, or completes it");
         }
         // Region-aware: never the last holder in our region.
         self.would_eliminate_region(shard_id, local_node_id, holders)
