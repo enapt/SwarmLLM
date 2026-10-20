@@ -884,6 +884,12 @@ impl SplitModel {
         self.tok_embeddings.is_some()
     }
 
+    /// The token ids this segment can look up — `0..n`, the embedding table's
+    /// rows — or `None` where it holds no table (not the first segment).
+    pub(crate) fn embedding_rows(&self) -> Option<usize> {
+        self.tok_embeddings.as_ref().map(TokenEmbedding::rows)
+    }
+
     /// Whether this segment has the output projection (last segment).
     pub fn is_last(&self) -> bool {
         self.output.is_some()

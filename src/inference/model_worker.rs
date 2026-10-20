@@ -1441,18 +1441,7 @@ async fn run_fused_batch_forward(
 
         let tensor = if is_first {
             // Decode step on first segment: i64 token IDs (8 bytes LE each).
-            if slice.is_empty() || slice.len() % 8 != 0 {
-                return Err(SwarmError::Internal(format!(
-                    "Fused batch decode payload must be a non-empty multiple of 8 bytes (got {})",
-                    slice.len()
-                )));
-            }
-            let token_ids: Vec<i64> = slice
-                .as_chunks::<8>()
-                .0
-                .iter()
-                .map(|c| i64::from_le_bytes(*c))
-                .collect();
+            let token_ids = wire_token_ids(slice, model.embedding_rows(), "Fused batch decode")?;
             let seq_len = token_ids.len();
             candle_core::Tensor::from_vec(token_ids, &[1, seq_len], &candle_core::Device::Cpu)
                 .map_err(|e| SwarmError::Internal(format!("Tensor: {e}")))?
@@ -1588,6 +1577,43 @@ async fn run_fused_batch_forward(
 /// single and the fused batch path ask this, and only this.
 fn forward_lacks_its_conversation(sequence_num: u32, index_pos: u32, holds_state: bool) -> bool {
     sequence_num > 0 && index_pos > 0 && !holds_state
+}
+
+/// A first segment's token ids, read off a decode or check forward's bytes (8
+/// bytes little-endian each) — the ONE reading, for the single and the fused
+/// batch forward. `rows` is the embedding table's (`SplitModel::embedding_rows`).
+///
+/// An id the table has no row for is refused HERE, on the host. Whoever sent
+/// the forward chose these ids — a peer coordinating a split, a requester's
+/// guesses — and a card's row gather does not check them (the vendored
+/// `quantized/cuda.rs` gather; its kernel's assert is a sticky device error,
+/// which ends the worker for every request on it). The processor's gather
+/// refused them already. Security review of #318, 2026-10-20.
+fn wire_token_ids(bytes: &[u8], rows: Option<usize>, what: &str) -> Result<Vec<i64>, SwarmError> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(8) {
+        return Err(SwarmError::Internal(format!(
+            "{what} payload must be a non-empty multiple of 8 bytes (got {})",
+            bytes.len()
+        )));
+    }
+    let rows = rows.ok_or_else(|| {
+        SwarmError::Internal(format!("{what}: this segment holds no embedding table"))
+    })?;
+    let ids: Vec<i64> = bytes
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| i64::from_le_bytes(*c))
+        .collect();
+    if let Some(bad) = ids
+        .iter()
+        .find(|&&id| usize::try_from(id).map_or(true, |id| id >= rows))
+    {
+        return Err(SwarmError::Internal(format!(
+            "{what}: token id {bad} is outside the model's {rows} embedding rows"
+        )));
+    }
+    Ok(ids)
 }
 
 /// The picture spans a forward applies (#115 (2b)), checked: well formed
@@ -1892,18 +1918,11 @@ async fn handle_forward(
             // is shape-polymorphic in the seq_len dim and will write KV at
             // positions `[index_pos..index_pos+γ]`, so no other layer changes
             // are needed.
-            if activation_bytes.is_empty() || !activation_bytes.len().is_multiple_of(8) {
-                return Err(SwarmError::Internal(format!(
-                    "Decode step activation payload must be a non-empty multiple of 8 bytes (got {})",
-                    activation_bytes.len()
-                )));
-            }
-            let token_ids: Vec<i64> = activation_bytes
-                .as_chunks::<8>()
-                .0
-                .iter()
-                .map(|c| i64::from_le_bytes(*c))
-                .collect();
+            let token_ids = wire_token_ids(
+                &activation_bytes,
+                model.embedding_rows(),
+                "Decode step activation",
+            )?;
             let seq_len = token_ids.len();
             candle_core::Tensor::from_vec(token_ids, &[1, seq_len], &candle_core::Device::Cpu)
                 .map_err(|e| SwarmError::Internal(format!("Tensor: {e}")))?
@@ -6897,7 +6916,7 @@ mod spec_payoff_tests {
 
 #[cfg(test)]
 mod lost_conversation_tests {
-    use super::{forward_lacks_its_conversation, lost_conversation_error};
+    use super::{forward_lacks_its_conversation, lost_conversation_error, wire_token_ids};
     use crate::error::{reclassify_flattened_error, SwarmError};
 
     /// The rule that stops a reply being decoded from nothing
@@ -6916,6 +6935,34 @@ mod lost_conversation_tests {
         // A replay to a stand-in is one forward at position 0 by design
         // (`pipeline::distributed::assemble_replay`): it rebuilds the cache.
         assert!(!forward_lacks_its_conversation(3, 0, false));
+    }
+
+    #[test]
+    fn a_forward_naming_a_token_the_table_has_no_row_for_is_refused() {
+        let bytes = |ids: &[i64]| {
+            ids.iter()
+                .flat_map(|id| id.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        // Every row of a 100-row table is an id it can look up.
+        assert_eq!(
+            wire_token_ids(&bytes(&[0, 5, 99]), Some(100), "t").unwrap(),
+            vec![0, 5, 99]
+        );
+        // One past the last row, a negative id, and one far past are refused
+        // before anything reaches the gather.
+        for bad in [100, -1, i64::MAX] {
+            let err = wire_token_ids(&bytes(&[5, bad]), Some(100), "t").unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("outside the model's 100 embedding rows"),
+                "{err}"
+            );
+        }
+        // A payload that is not whole ids, and a segment with no table.
+        assert!(wire_token_ids(&[], Some(100), "t").is_err());
+        assert!(wire_token_ids(&[0; 7], Some(100), "t").is_err());
+        assert!(wire_token_ids(&bytes(&[1]), None, "t").is_err());
     }
 
     /// The refusal crosses the worker IPC hop and the network hop as TEXT, and

@@ -100,6 +100,15 @@ impl TokenEmbedding {
         }
     }
 
+    /// How many rows the table holds: the ids it can look up are `0..rows`.
+    pub(crate) fn rows(&self) -> usize {
+        let dims = match self {
+            Self::Dense(e) => e.embeddings().dims().to_vec(),
+            Self::Quantized(q) => q.table.shape().dims().to_vec(),
+        };
+        dims.first().copied().unwrap_or(0)
+    }
+
     /// Bytes this table holds resident, for the log line that reports placement.
     pub(crate) fn resident_bytes(&self) -> usize {
         match self {

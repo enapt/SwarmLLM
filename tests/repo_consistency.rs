@@ -13976,7 +13976,9 @@ fn the_capacity_snapshot_built_on_the_network_loop_reads_nothing_from_the_card()
 /// `every_token_lookup_goes_through_embed_tokens`.
 ///
 /// Outside that one method the table may only be asked about (`is_some`,
-/// `is_none`), set aside (`take`) or put back (`=`). Anything else reads it.
+/// `is_none`, how many rows it has — `SplitModel::embedding_rows`, which a
+/// forward's token ids are checked against), set aside (`take`) or put back
+/// (`=`). Anything else reads it.
 fn token_table_reads_outside_embed_tokens(text: &str) -> Vec<(usize, String)> {
     let body = method_body(text, "fn embed_tokens(").unwrap_or("");
     // Blank the one method out, keeping its line breaks so a reported line
@@ -13992,9 +13994,15 @@ fn token_table_reads_outside_embed_tokens(text: &str) -> Vec<(usize, String)> {
         let mut rest = st.as_str();
         while let Some(at) = rest.find("self.tok_embeddings") {
             let after = &rest[at + "self.tok_embeddings".len()..];
-            let allowed = [".is_some()", ".is_none()", ".take()", " = "]
-                .iter()
-                .any(|ok| after.starts_with(ok));
+            let allowed = [
+                ".is_some()",
+                ".is_none()",
+                ".take()",
+                " = ",
+                ".as_ref().map(TokenEmbedding::rows)",
+            ]
+            .iter()
+            .any(|ok| after.starts_with(ok));
             if !allowed {
                 out.push((line_no, st.trim().to_string()));
                 break;
@@ -14046,10 +14054,11 @@ fn every_token_lookup_goes_through_embed_tokens() {
 
 /// The scan above must see the two shapes that shipped: a lookup chained off
 /// `.as_ref()` and one bound by `if let Some(ref ..)`, each wrapped by rustfmt.
+/// Asking the row count is not a lookup; a lookup through `.map` still is.
 #[test]
 fn the_token_lookup_guard_catches_both_shapes_that_shipped() {
-    let planted = "impl SplitModel {\n    fn embed_tokens(&self, input: &Tensor) -> Result<Tensor, SwarmError> {\n        let emb = self\n            .tok_embeddings\n            .as_ref()\n            .unwrap()\n            .forward(input)?;\n        Ok(emb)\n    }\n    fn splice(&self) {\n        let is_first = self.tok_embeddings.is_some();\n        let tok_emb_layer = self\n            .tok_embeddings\n            .as_ref()\n            .unwrap();\n    }\n    fn tp(&mut self) {\n        if let Some(ref emb) = self.tok_embeddings {\n            emb.forward(&input);\n        }\n        let t = self.tok_embeddings.take();\n        self.tok_embeddings = t;\n    }\n}\n";
+    let planted = "impl SplitModel {\n    fn embed_tokens(&self, input: &Tensor) -> Result<Tensor, SwarmError> {\n        let emb = self\n            .tok_embeddings\n            .as_ref()\n            .unwrap()\n            .forward(input)?;\n        Ok(emb)\n    }\n    fn splice(&self) {\n        let is_first = self.tok_embeddings.is_some();\n        let tok_emb_layer = self\n            .tok_embeddings\n            .as_ref()\n            .unwrap();\n    }\n    fn tp(&mut self) {\n        if let Some(ref emb) = self.tok_embeddings {\n            emb.forward(&input);\n        }\n        let t = self.tok_embeddings.take();\n        self.tok_embeddings = t;\n    }\n    fn rows(&self) -> Option<usize> {\n        self.tok_embeddings\n            .as_ref()\n            .map(TokenEmbedding::rows)\n    }\n    fn mapped(&self) {\n        let e = self.tok_embeddings.as_ref().map(|t| t.forward(&input));\n    }\n}\n";
     let hits = token_table_reads_outside_embed_tokens(planted);
     let lines: Vec<usize> = hits.iter().map(|(l, _)| *l).collect();
-    assert_eq!(lines, vec![12, 18], "found {hits:?}");
+    assert_eq!(lines, vec![12, 18, 30], "found {hits:?}");
 }

@@ -45,6 +45,15 @@ your computer wrote a lot (an install, a backup, a big download), your node coul
 to 2.6 seconds at a time — 65 times in one day on an idle node. Those saves now wait beside the
 network work instead of in its way.
 
+**A node holding the start of a model on its graphics card checks every word number it is
+sent.** When another computer passed work to a node holding a model's first layers, the node
+looked each word up in the model's table without checking the number was in it. On the
+processor a wrong number was refused; on a graphics card it stopped the model's process, and
+every reply that process was serving with it, until the node started it again. No model we
+serve sends such numbers, but any computer could. Every earlier version is affected; the
+number is now checked before anything reaches the card, and work that names one outside the
+table is refused.
+
 ## [0.3.245-alpha] — 2026-10-20
 
 **Gemma 3 can read pictures, and pictures go where you put them.** A picture sent with a message

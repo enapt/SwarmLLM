@@ -5796,3 +5796,25 @@ Full evidence: `docs/invariants/inference.md`
 - **`inference::split::token_embedding::rows_on_demand_eligible`** — the single answer to "is this model's `token_embd.weight` held quantized with its rows dequantized on lookup, or dequantized whole at load?".
 - **`inference::split::read_gguf_header`** — the single way to parse a GGUF header off a PATH, and the buffering is the entire reason it exists.
 - **`inference::split::GgufTensorMeta::tied_output_location`** — the single definition of "is this model weight-tied", i.e. does it reuse `token_embd.weight` as the LM head instead of shipping an `output.weight`. Both sidecar writers and the reader go through it.
+
+### A forward's token ids are checked against the table (2026-10-20)
+
+**What it replaced.** A first segment read a decode or check forward's ids straight off its bytes
+(8 bytes little-endian each) in two places — `handle_forward` and the fused batch — and handed
+them to the lookup unchecked. Whoever sent the forward chose them: the peer coordinating a split,
+and since #318 a requester's guesses (the head cuts those at the tokenizer's vocabulary, which is
+not the table's row count). On the processor the quantized gather refuses an id past the table
+(vendored `quantized/mod.rs`); on a card it checks only the buffer's size
+(`quantized/cuda.rs` `gather_rows`) and the kernel asserts `ids[i] < src_dim_size`
+(`candle-kernels/src/indexing.cu`) — a sticky device error, which ends the worker and every
+request on it. So any computer that could send a node a forward could stop its card serving.
+Found by the security review of #318 (2026-10-20, Low: no real model's table is shorter than
+its vocabulary, but the ids never had to come from a vocabulary).
+
+**Now.** `model_worker::wire_token_ids` is the one reading for both paths: whole ids only, and
+every id in `0..SplitModel::embedding_rows()` (the table's first dimension,
+`TokenEmbedding::rows`), checked on the host before a tensor is built — so before anything
+reaches a card, and outside any capture (a device read there would be a driver call,
+`arch-inference.md` § CUDA graphs). A refusal is the forward's error, worded as the malformed
+payloads beside it are. Test `a_forward_naming_a_token_the_table_has_no_row_for_is_refused`
+(red with the range check off).
