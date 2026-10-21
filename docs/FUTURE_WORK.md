@@ -2016,8 +2016,15 @@ if trees lose. **Built 2026-10-22: a split with no drafter fetches one** — the
 target's family the swarm holds that can draft, ≤ 2 GiB, trusted, through the shard system, kept
 while splits want it (`docs/invariants/memory.md` § "A split with no drafter fetches one"). Left
 of it: a fetched drafter refused for memory at request time does not lead to a smaller one; a
-family the swarm holds no small model of is not looked for on HuggingFace; the real-link run
-(the fetch DIAG, then a split's `drafter=`) is owed on a CUDA build (gotcha #849). The pipelined
+family the swarm holds no small model of is not looked for on HuggingFace; end to end on the rig it
+fetched the 0.5B from its one holder and the next split guessed with it (`split_rig.sh repeat` + `FETCH_DRAFTER`,
+`docs/invariants/memory.md`); the real-link run on a CUDA build is owed (gotcha #849). **The largest
+is chosen (and fetched) whatever device it drafts on** — right on a card, marginally wrong on a
+processor. Leviathan et al.'s speedup (1−α^(γ+1)) / ((1−α)(γc+1)) at a 400 ms round, c = the
+drafter's step over the round: on a processor (0.5B q8 ~16 ms a step, α ~0.75; 1.7B ~50 ms, α
+~0.85; γ 6) 2.80 vs 2.59 — the 0.5B by 7%; on a card (c ~0.01-0.02) 3.27 vs 4.04 — the 1.7B by
+24%. Choose by expected tokens per ms on the drafter's own device once the per-pair α is
+measured (`dsd_controller` keeps it per model and machines); estimate, 2026-10-21. The pipelined
 prompt pass (Phase 3) is #171. The
 same-model-at-fewer-bits drafter is decided against as a default (#144, § "Decided").
 

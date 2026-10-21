@@ -58,6 +58,15 @@
 #          the swarm would: B meets C when a chained run it cannot hand on makes it
 #          dial (`layer_forward::dial_next_hop`), and the runs before that finish
 #          unchained. C_MEETS_B=1 has C dial B as well, so the chain runs at once.
+#   repeat FETCH_DRAFTER=<model id>: a split with no drafter fetches one (#134). B holds
+#          that model WHOLE; A only its manifest and header (no origin file, so nothing
+#          comes from HuggingFace) and runs its download pass every 30 s with prune off
+#          and MODEL's own policy off (A must not fetch the target and end the split).
+#          The first reply guesses with nothing; then A should log the two #134 DIAG
+#          lines and hold the model, and a later reply's DSD line names it. Pair with
+#          REPEAT=4 REPEAT_GAP=300: a model is trusted (here: one holder) only by the trust
+#          update every 10 min, the first 10 min after start. MODEL must share its vocabulary, e.g.
+#          MODEL=qwen2.5-coder-7b-instruct-q4-k-m FETCH_DRAFTER=qwen2.5-0.5b-instruct-q8-0.
 #   (any mode) DRAFTER=<model id> also gives A that model WHOLE, from the same
 #          models directory — the small model speculation across computers guesses
 #          with (`pipeline::engine_drafter`). Pair it with EXTRA_TOML switching
@@ -600,6 +609,8 @@ make_node() { # dir shards bootstrap
   local am=$'enabled = false\nprune_enabled = false'
   [ "$MODE" = softunload ] && [ "$(basename "$d")" = A ] \
     && am=$'enabled = true\nprune_enabled = true\ninterval_seconds = 30\nhf_watcher_enabled = false'
+  [ -n "${FETCH_DRAFTER:-}" ] && [ "$(basename "$d")" = A ] \
+    && am=$'enabled = true\nprune_enabled = false\ninterval_seconds = 30\nhf_watcher_enabled = false\n\n[auto_manage.model_policies."'"$MODEL"$'"]\nenabled = false'
   # The shard-0 sidecars travel with the header, as on a real node that fetched
   # any shard from HuggingFace: a later-layer node needs rope_freqs.bin on a
   # Llama 3 model (#124) and tied_output_weight.bin on a weight-tied one.
@@ -689,6 +700,16 @@ cleanup() {
 trap cleanup EXIT
 
 make_node "$BASE/A" "$SHARDS_A" ""
+if [ -n "${FETCH_DRAFTER:-}" ]; then
+  FSRC="$MODELS_DIR/$FETCH_DRAFTER"
+  [ -f "$FSRC/manifest.json" ] || { echo "no manifest for $FETCH_DRAFTER in $MODELS_DIR"; exit 2; }
+  mkdir -p "$BASE/A/models/$FETCH_DRAFTER"
+  # COPIES, never links: A writes into this directory as the parts arrive, and
+  # a write through a hard link would land in the live node's own file.
+  for f in manifest.json gguf_header.bin; do
+    cp "$FSRC/$f" "$BASE/A/models/$FETCH_DRAFTER/" || { echo "cannot copy $f"; exit 2; }
+  done
+fi
 if [ -n "${DRAFTER:-}" ]; then
   DSRC="$MODELS_DIR/$DRAFTER"
   [ -f "$DSRC/manifest.json" ] || { echo "no manifest for drafter $DRAFTER in $MODELS_DIR"; exit 2; }
@@ -723,6 +744,10 @@ if [ "${RIG_TRANSPORT:-tcp}" = quic ]; then
 fi
 [ -n "$ADDR" ] || { echo "A published no address to dial"; exit 1; }
 make_node "$BASE/B" "$SHARDS_B" "\"$ADDR\""
+if [ -n "${FETCH_DRAFTER:-}" ]; then
+  mkdir -p "$BASE/B/models/$FETCH_DRAFTER"
+  for f in "$FSRC"/*; do ln "$f" "$BASE/B/models/$FETCH_DRAFTER/" || { echo "cannot link $f"; exit 2; }; done
+fi
 if [ "$MODE" = mixed ]; then
   # Unlink first: B's header is a hard link to the live node's file, and
   # writing through it would plant the bad header THERE.
@@ -1739,6 +1764,19 @@ if [ "$MODE" = repeat ]; then
   # bar — llama-3.2-3b on this prompt reads 1.30 tokens/round, all 3 of 3 on .218 too.
   echo "repeat: n-gram path taken by $(grep -c 'try_ngram_only_distributed ELIGIBLE' "$BASE/A/node.log") of ${REPEAT:-3} requests (payoff_x100: $(grep -a -o 'payoff_x100=[0-9]*' "$BASE/A/node.log" | tail -1))"
   echo "repeat: streamed replies by peers crossed: $(grep -a 'DSD: streamed checks complete' "$BASE/A/node.log" | grep -o 'peers=[0-9]*' | sort | uniq -c | paste -sd' ')"
+  if [ -n "${FETCH_DRAFTER:-}" ]; then
+    held=$(ls "$BASE/A/models/$FETCH_DRAFTER" | grep -c '^shard_')
+    want=$(ls "$FSRC" | grep -c '^shard_')
+    echo "fetchdrafter: A noted a split with none $(grep -ac 'ran with no model here to guess ahead' "$BASE/A/node.log")x," \
+      "fetched for it $(grep -ac 'fetching a model to guess ahead for a split that had none' "$BASE/A/node.log")x," \
+      "holds $held of $want parts; target parts fetched by A: $(ls "$BASE/A/models/$MODEL" | grep -c '^shard_') (gave it ${SHARDS_A})"
+    echo "fetchdrafter: drafters named by A's requests: $(grep -a 'DSD: request complete' "$BASE/A/node.log" | grep -o 'drafter=[^ ]*' | paste -sd' ')"
+    if [ "$held" = "$want" ] && grep -a 'DSD: request complete' "$BASE/A/node.log" | grep -q "drafter=$FETCH_DRAFTER"; then
+      echo "fetchdrafter: PASS"
+    else
+      echo "fetchdrafter: FAIL"
+    fi
+  fi
   if [ -n "${SHARDS_C:-}" ]; then
     echo "repeat: chains that failed and finished unchained: checks $(grep -ac 'chained check failed — re-running it unchained' "$BASE/A/node.log"), streams $(grep -ac 'the chained stream failed — finishing the reply in rounds' "$BASE/A/node.log"); B dialled its next hop $(grep -ac "Dialing a chained run's next hop" "$BASE/B/node.log")x"
   fi

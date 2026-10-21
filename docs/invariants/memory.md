@@ -2568,6 +2568,13 @@ a split wanted a drafter (control: nothing offered), a MIDDLE part is kept at 0.
 0.9 once nothing wants it — with the download rule off nothing is offered, with prune's rule off
 nothing is started (the download pass fetches only what prune keeps).
 `a_split_using_its_drafter_keeps_it_wanted`, `a_model_the_owner_deleted_a_part_of_is_not_fetched_to_draft`.
+**End to end** (`split_rig.sh repeat` with `FETCH_DRAFTER`, dev build, both nodes on the processor, 2026-10-21): A held
+part 0 of Qwen2.5-Coder-7B and only the 0.5B Q8's manifest and header, B parts 1-7 and the 0.5B whole. 18:59:07 the
+first split noted it had none; 19:08:36 the trust update promoted the 0.5B (one holder in a two-node swarm); 19:09:53
+the download pass fetched it; both parts over P2P from B by 19:14:00; the 19:17:29 split ran
+`drafter=qwen2.5-0.5b-instruct-q8-0`, 39 of 51 guesses kept. A fetched no part of the target (its policy off). The first
+run FAILED for the trust floor alone: a model is trusted only by the update every 10 min, the first 10 min after start
+(gotcha #930) — that run lasted 8.
 `only_a_small_model_is_ever_fetched_to_draft`: a 4 GiB candidate of the family is not even
 named for its header (red without the cap). `engine_drafter::tests::a_drafter_is_fetched_only_once_every_likely_header_is_here`
 (red with the header rule off).
