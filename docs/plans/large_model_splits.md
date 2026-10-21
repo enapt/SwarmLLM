@@ -379,7 +379,9 @@ until the bytes or a processor stage say otherwise.
 6. **Regional chains** (#192). *Exit:* a split coordinated inside the region runs
    at that region's P. **Placement built 2026-10-21** (Stage 3 phase 1,
    `regional_pipelines.md`): nearby machines fetch complementary parts of a model none
-   of them can run whole; `examples/near_chain_rig.sh` checks it end to end.
+   of them can run whole, and give back layers they hold loaded outside their segment so a
+   router can plan the chain; `examples/near_chain_rig.sh` (2026-10-21): the next 160-token
+   reply over the two near machines in 13.9 s against 36.8-41.4 s split with a far one.
 7. **The opt-in fast mode.** *Exit:* a quality report scored against llama.cpp.
 
 ## Traps already known

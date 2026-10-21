@@ -82,6 +82,14 @@ const EXTRA_SEGMENTS: usize = 1;
 /// The most headers one pass learns for near chains.
 const MOST_HEADERS_A_PASS: usize = 2;
 
+/// After this node gives back memory holding layers outside its segment, how
+/// long that model is left to the ordinary idle rule. A router that still
+/// prefers the old route (a far card faster than the near processors) loads
+/// the range again, and is not fought every conversation — the hysteresis
+/// Petals' servers keep before moving to other blocks
+/// (`block_selection.py::should_choose_other_blocks`).
+const OFF_SEGMENT_RELEASE_HOLD: Duration = NEAR_GRACE;
+
 /// What the near chain remembers between passes. Each entry is a DEADLINE,
 /// so nothing needs a clock set in the past.
 #[derive(Default)]
@@ -97,6 +105,9 @@ pub(in crate::model::auto_manage) struct NearChainBook {
     leases: DashMap<(ModelId, NodeId), (Instant, u32)>,
     /// Until when a machine whose lease lapsed is left out of a model's chain.
     passed_over_until: DashMap<(ModelId, NodeId), Instant>,
+    /// Until when a model whose layers outside this node's segment were given
+    /// back is left to the ordinary idle rule ([`OFF_SEGMENT_RELEASE_HOLD`]).
+    off_segment_released_until: DashMap<ModelId, Instant>,
 }
 
 /// The chain a neighbourhood plans for a model.
@@ -356,6 +367,18 @@ impl Planner<'_> {
 }
 
 /// Does `machine` lack any part `[x, e)` touches?
+/// `SWARMLLM_NEAR_CHAIN=0` plans no near chain, so nothing is fetched or kept
+/// for one: the control arm of `examples/near_chain_rig.sh`, in the same
+/// binary as the change it measures.
+fn near_chains_switched_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| {
+        std::env::var("SWARMLLM_NEAR_CHAIN")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+    })
+}
+
 fn lacks_any(parts: &[Part], machine: &Machine, x: u32, e: u32) -> bool {
     parts
         .iter()
@@ -541,7 +564,7 @@ impl AutoShardManager {
     /// could not carry it between them, or a ceiling is unknown.
     fn compute_near_chain(&self, manifest: &ModelManifest) -> Option<NearChain> {
         let layers = manifest.num_layers;
-        if layers == 0 || !self.asked_for(&manifest.id) {
+        if layers == 0 || near_chains_switched_off() || !self.asked_for(&manifest.id) {
             return None;
         }
         let curve = self.carry_curve(&manifest.id)?;
@@ -681,6 +704,70 @@ impl AutoShardManager {
             .named_until
             .get(shard_id)
             .is_some_and(|until| Instant::now() < *until)
+    }
+
+    /// Does this node hold `model_id` loaded over layers OUTSIDE its segment of
+    /// a complete near chain, with every part of that segment here? Then the
+    /// idle-unload pass gives that memory back once the conversation using it
+    /// is over, not after the idle window.
+    ///
+    /// The router holds a peer to its room BESIDE the layers it has loaded
+    /// (`scheduler::PublishedRoom`), and an idle worker is retired only when
+    /// asked for a range it cannot add. So a near machine still holding the
+    /// range a far-reaching route gave it is never planned its own segment:
+    /// in the rig, B held layers 0-12 of a chain it was named 12-22 in, and
+    /// the next request went B + a far machine rather than A + B. Kept busy,
+    /// the idle window never came and the chain never formed. A Petals server
+    /// serves only the span it chose, and clients route over what is served;
+    /// here the routers price the cold load the chain then costs.
+    pub(in crate::model::auto_manage) fn loaded_outside_near_segment(
+        &self,
+        model_id: &ModelId,
+    ) -> bool {
+        let held: Vec<(u32, u32)> = self
+            .shared_state
+            .model_process_pool
+            .held_layer_ranges_for_planning(model_id)
+            .iter()
+            .map(|held| held.range)
+            .collect();
+        self.held_outside_near_segment(model_id, &held)
+    }
+
+    /// [`Self::loaded_outside_near_segment`] for the ranges `held`.
+    fn held_outside_near_segment(&self, model_id: &ModelId, held: &[(u32, u32)]) -> bool {
+        let book = &self.near_chain_book;
+        if book
+            .off_segment_released_until
+            .get(model_id)
+            .is_some_and(|until| Instant::now() < *until)
+        {
+            return false;
+        }
+        let Some(manifest) = self.shared_state.model_registry.get_manifest(model_id) else {
+            return false;
+        };
+        let local = self.shared_state.identity.node_id();
+        let Some(segment) = self
+            .near_chain(&manifest)
+            .filter(|chain| chain.complete)
+            .and_then(|chain| chain.segment_of(local))
+        else {
+            return false;
+        };
+        if !self.parts_this_node_plans(&manifest).is_empty() {
+            return false;
+        }
+        held.iter()
+            .any(|&(start, end)| start < segment.0 || end > segment.1)
+    }
+
+    /// `model_id`'s layers outside this node's segment were given back: leave
+    /// it to the ordinary idle rule for [`OFF_SEGMENT_RELEASE_HOLD`].
+    pub(in crate::model::auto_manage) fn note_off_segment_release(&self, model_id: &ModelId) {
+        self.near_chain_book
+            .off_segment_released_until
+            .insert(model_id.clone(), Instant::now() + OFF_SEGMENT_RELEASE_HOLD);
     }
 
     /// The models whose header this node should learn so it can plan their
@@ -948,6 +1035,73 @@ mod tests {
         assert!(
             s.sheds(1, &three, 0.99),
             "an urgent disk takes it: a near chain makes a split fast, not possible"
+        );
+    }
+
+    /// Memory holding layers outside this node's segment of a COMPLETE chain,
+    /// with the segment's parts here, is given back early — once, then the
+    /// model is left to the ordinary idle rule for the hold. Layers inside the
+    /// segment, an incomplete chain or a segment still being fetched change
+    /// nothing.
+    #[test]
+    fn layers_loaded_outside_this_computers_segment_are_given_back() {
+        let s = fleet(4.0);
+        let local = s.local();
+        holds(&s.state, &s.mid, &local, &[0, 1, 2]);
+        let chain = s.chain().expect("a near chain");
+        assert!(!chain.complete, "the peer lacks part 7");
+        s.later();
+        assert!(
+            !s.manager.held_outside_near_segment(&s.mid, &[(12, 20)]),
+            "an incomplete chain cannot be routed over yet"
+        );
+
+        holds(&s.state, &s.mid, &s.near, &[7]);
+        assert!(s.chain().expect("a near chain").complete);
+        for inside in [vec![], vec![(0, 12)], vec![(4, 12)]] {
+            s.later();
+            assert!(
+                !s.manager.held_outside_near_segment(&s.mid, &inside),
+                "{inside:?} is this node's segment, or nothing"
+            );
+        }
+        for outside in [vec![(12, 20)], vec![(8, 16)], vec![(0, 12), (12, 16)]] {
+            s.later();
+            assert!(
+                s.manager.held_outside_near_segment(&s.mid, &outside),
+                "{outside:?} reaches outside 0-12"
+            );
+        }
+
+        s.manager.note_off_segment_release(&s.mid);
+        s.later();
+        assert!(
+            !s.manager.held_outside_near_segment(&s.mid, &[(12, 20)]),
+            "loaded again after a release: the ordinary idle rule, for the hold"
+        );
+    }
+
+    /// The segment's parts must be HERE: a node still fetching its segment
+    /// keeps what it has loaded.
+    #[test]
+    fn a_segment_still_being_fetched_keeps_what_is_loaded() {
+        let s = fleet(4.0);
+        let local = s.local();
+        holds(&s.state, &s.mid, &local, &[0, 1]);
+        holds(&s.state, &s.mid, &s.near, &[7]);
+        let _downloading = s
+            .state
+            .models
+            .claim_shard_download(&s.part(2))
+            .expect("nobody else is writing part 2");
+        assert!(
+            s.chain().expect("a near chain").complete,
+            "the chain counts part 2, on its way, as held"
+        );
+        s.later();
+        assert!(
+            !s.manager.held_outside_near_segment(&s.mid, &[(12, 20)]),
+            "part 2 of this node's segment is not here yet"
         );
     }
 

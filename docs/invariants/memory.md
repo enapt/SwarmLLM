@@ -2481,6 +2481,32 @@ until its day lapses; a stalled machine is passed over and one that gained a par
 mode; an unknown ceiling; the header rule; and the planner alone — two machines moving at once,
 a split inside a part, a machine without the disk for its segment.
 
+**Layers LOADED outside the segment are given back (2026-10-21).** The rig's third run: the
+near machine named 12-22 still held layers 0-12 loaded from the first request (it had led a split
+with a far machine), and a router holds a peer to its room BESIDE what it has loaded
+(`scheduler::PublishedRoom`: 2.4 layers) — so the chain was never planned and the second request
+went B + far again. A machine kept busy never reaches the 5-minute idle window. A Petals server
+serves only the span it chose (`block_selection.py`) and clients route over what is served; here
+a near machine whose loaded layers reach outside its segment of a COMPLETE chain, with every part
+of that segment here (fetches not counted), gives them back once idle past the conversation gap
+(`CONVERSATION_GAP_SECS`, 120 s) — `near_chain::loaded_outside_near_segment`, asked by
+`try_idle_vram_unload` — then leaves the model to the ordinary rule for 30 min, Petals'
+hysteresis, so a router that still prefers the old route (a far card faster than the near
+processors) is not fought every conversation. Never over a deliberate hold. Tests
+`layers_loaded_outside_this_computers_segment_are_given_back`,
+`a_segment_still_being_fetched_keeps_what_is_loaded`; each of the four conditions toggled off →
+red.
+
+**End to end** (`examples/near_chain_rig.sh`, 2026-10-21; TinyLlama capped at 735 of its 980 MB on
+every holder; two far holders 200 ms away by netem on their QUIC ports — with ONE, a single request
+raised the routine replica target to 2 and the control fetched the part too; 160-token replies,
+because for nine tokens the router rightly keeps a warm far route over a near cold load):
+
+| Run | Part 1 fetched | Second request | 160 tokens |
+|---|---|---|---|
+| near chains on | by one near machine (score 4500; replication at target 1), which then gave back its idle 0-12 | the two near machines (TH,TH) | 13.9 s (first, with a far machine: 40.0 s) |
+| control, `SWARMLLM_NEAR_CHAIN=0` on the near machines, same binary | by nobody in 1512 s | a near and a far machine (TH,AU) | 36.8 s (first: 41.4 s) |
+
 **A change must keep**: both passes ask the one chain; in-flight counted as held; the holds
 deadlines, never an `Instant` set in the past (a just-booted host cannot represent one).
 

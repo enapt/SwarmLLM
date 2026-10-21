@@ -916,11 +916,14 @@ beyond the delegated split (#143, shipped); revisit only with measured peer-to-p
 **Placement by distance — phase 1 built 2026-10-21** (`auto_manage/coverage/near_chain.rs`,
 plan § Stage 3): nearby machines (measured ≤ 30 ms) plan one chain alike for an asked-for model
 none of them can run whole, and each fetches and keeps its segment; chosen by simulation
-(`examples/placement_sim.py`). Residual: `examples/near_chain_rig.sh` end to end (four nodes, a
-far whole-model holder, two near ones), then the field read on this machine + the LAN box (the
-`DIAG: fetching this computer's part of a chain of nearby machines` line, then a split over
-them), and phase 2 — published near lists — only if the field shows neighbourhoods that overlap
-without coinciding.
+(`examples/placement_sim.py`). **Verified end to end 2026-10-21** (`examples/near_chain_rig.sh`):
+a near machine fetched its part and, once it gave back the layers it held loaded outside its
+segment (`near_chain::loaded_outside_near_segment` — routers price a peer's room beside what it
+has loaded), the next 160-token reply ran over the two near machines in 13.9 s against 36.8-41.4 s
+split with a far one; the control (`SWARMLLM_NEAR_CHAIN=0`) fetched nothing. Residual: the field
+read on this machine + the LAN box (the `DIAG: fetching this computer's part of a chain of nearby
+machines` line, then a split over them), and phase 2 — published near lists — only if the field
+shows neighbourhoods that overlap without coinciding.
 
 #### #166 — A verify round that carries several guessed tokens never teaches routing what the peer costs
 `P3` · routing · **PARTIAL** — 2026-08-30 · history: archive § "Routing never learns a peer is slow on the speculative path"

@@ -1670,12 +1670,25 @@ impl AutoShardManager {
                 worker_idle.get(&model_id).copied(),
                 residency.get(&model_id).copied(),
             );
-            if stays_loaded_while_idle(since_any, deliberately_held, idle_unload_secs) {
+            // Layers outside this node's segment of a complete near chain go
+            // once the conversation using them is over, so the router can plan
+            // the chain (Stage 3, `coverage::near_chain`). Never over a
+            // deliberate hold.
+            let off_segment = !deliberately_held && self.loaded_outside_near_segment(&model_id);
+            let window = if off_segment {
+                idle_unload_secs.min(crate::inference::process_pool::CONVERSATION_GAP_SECS)
+            } else {
+                idle_unload_secs
+            };
+            if stays_loaded_while_idle(since_any, deliberately_held, window) {
                 continue;
             }
 
             // Free the VRAM; shards remain on disk for a fast re-spawn.
             pool.unload_and_clear_window(&model_id).await;
+            if off_segment {
+                self.note_off_segment_release(&model_id);
+            }
             let mname = self
                 .shared_state
                 .model_registry
@@ -1695,7 +1708,8 @@ impl AutoShardManager {
             tracing::info!(
                 model = %model_id,
                 idle_secs = since_any.unwrap_or(-1),
-                threshold_secs = idle_unload_secs,
+                threshold_secs = window,
+                outside_near_chain_segment = off_segment,
                 device,
                 "Idle unload — freed model (shards kept on disk)"
             );

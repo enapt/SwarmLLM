@@ -162,10 +162,11 @@ swarmllm/
 │                 placement_sim.py — which parts of a large model nearby machines fetch, simulated
 │                 over 48 h per policy: does a near chain complete, without a herd or a
 │                 fetch/prune loop (regional_pipelines.md § Stage 3; pure Python, no node);
-│                 near_chain_rig.sh — the same end to end: four nodes in a network namespace,
-│                 one far (netem on its QUIC port) holding the model whole, two near ones that
-│                 cannot run it alone fetch complementary parts, a client's request then
-│                 routes over the near two;
+│                 near_chain_rig.sh — the same end to end: five nodes in a network namespace,
+│                 two far (netem on their QUIC ports) holding every part, none able to run the
+│                 model whole; the two near ones fetch complementary parts and a client's
+│                 request then routes over them instead of a split with a far one
+│                 (NEAR_CHAIN_AB=0 is the control: SWARMLLM_NEAR_CHAIN=0, same binary);
 │                 release_gate.sh — the release gate on the downloaded artifact, under an hour: smoke_test.sh,
 │                 release_shapes.sh, family_conformance.sh, reply_ab.sh, split_rig.sh, stream_bench.py;
 │                 feature_check.py — every surface a user reaches (OpenAI, Anthropic, Responses,

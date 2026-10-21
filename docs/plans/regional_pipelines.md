@@ -311,6 +311,13 @@ decision decidable rather than guessed.
 
 ### Stage 3 — Placement: regional chain-completeness
 
+> **Phase 1 BUILT and verified end to end, 2026-10-21** (`auto_manage/coverage/near_chain.rs`,
+> `examples/near_chain_rig.sh`): the next 160-token reply ran over the two near machines in
+> 13.9 s against 36.8-41.4 s split with a far one; the control fetched nothing. It needed one
+> more rule than this design had: a near machine gives back layers it holds LOADED outside its
+> segment, or the router (which prices a peer's room beside what it has loaded) never plans the
+> chain. Evidence: `docs/invariants/memory.md` § "Nearby machines hold complementary parts".
+
 Change the acquisition objective from "this shard is rare in my region" to
 **"acquiring this shard shortens or completes a chain for a model in demand,
 within my latency neighbourhood"**.
