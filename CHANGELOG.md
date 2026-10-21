@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.3.247-alpha] — 2026-10-22
+
+**A large model can be split over computers near each other instead of one far away.** A split
+is only fast when its computers are close: a 7B model split between two machines 18 ms apart
+wrote 6.76 tokens a second, against 0.35 across continents. When computers within 30 ms of each
+other each hold part of a model none of them can run alone, they now fetch the parts that
+complete a chain between them — at most ten computers, each fetching only its own share — and a
+computer in such a chain lets go of layers it had loaded outside its share once it has been idle
+a while, so the chain can be used. On a test of five computers, two of them 0.2 seconds away,
+the second 160-token reply came back in 13.9 seconds over the two nearby computers, against 40.0
+seconds through a far one; with the change switched off, nobody fetched the missing part in 25
+minutes and replies took 36.8-41.4 seconds. A model you pinned is never touched, and a computer
+outside your pool or private-mode set is never part of a chain. `SWARMLLM_NEAR_CHAIN=0` turns it
+off.
+
+**Graphics cards check guesses and read prompts faster.** On NVIDIA cards, a split now checks
+batches of guessed words, and reads prompts, with llama.cpp's current tensor-core kernel. On an
+RTX 3070 laptop with a 7B model, checking 16 guesses took 28.2 ms instead of 87.3, 64 guesses
+46.7 instead of 113.4, and a 300-token prompt was read at 1,745 tokens a second instead of 1,310.
+Of 18 test replies, 13 were word for word the same as before; the other 5 differ where two words
+were almost equally likely. `SWARMLLM_QMATMUL_MMQ=dp4a` restores the old kernel.
+
+**Graphics cards newer than the release build — the RTX 50-series and Hopper — now give correct
+answers with flash attention, and can run mixture-of-experts models.** Only cards of compute
+capability 9 or 12 were affected, on every release up to v0.3.246; RTX 30 and 40-series cards
+and computers that run models on the processor were not. The release builds its card code for
+the RTX 30 and 40 generation, and that code does not run on a newer one: flash attention then did
+nothing and reported success, so its results were wrong, and the mixture-of-experts code never
+wrote its output. Both now also carry a portable form that the card's driver translates for
+itself, and a flash-attention launch that fails is now reported as an error. The first time, the
+translation takes about two minutes for flash attention before the first reply (measured by
+forcing it on an RTX 3070); after that it is cached.
+
+**Guess trees are used only where they pay, and regrow faster.** A split that guesses ahead can
+check a tree of guessed words — several possible continuations at once — instead of one chain.
+Trees are now the default only where every computer of the split, and the small model guessing
+ahead, run on a graphics card, and the farthest computer is at least 0.3 seconds away. Over a
+Thailand–Australia link with the guessing model on the card, a 7B split checking trees wrote
+7.1-8.8 tokens a second over 160-token replies. With the guessing model on the processor the
+chain used today stays faster (6.0-6.2 tokens a second over 400-token replies, against 4.8-6.4
+for trees), so that shape keeps it. When a tree did not cover where the reply went, the next one
+used to wait for eight guessing steps; it now waits for only as many as pay. On a test link with
+a 20 ms round trip, a split made to check trees wrote 11.1-11.9 tokens a second instead of
+7.3-7.5. A guessing model on a graphics card also ranks its guesses there: growing a 64-word tree
+took 155 ms instead of 208. `SWARMLLM_DRAFT_TREES=1` or `=0` forces trees on or off.
+
+**The computer leading a split waits for your computer's guesses only when waiting pays**, and a
+route you chose with `swarm_route` now reaches the computer leading the split. Both need this
+release.
+
+**A node holding models no longer tells you to download one** when its queue for finding models
+on the network is full; it answers that the model was not found and names the models it has
+(#324).
+
 ## [0.3.246-alpha] — 2026-10-21
 
 **Many models answer faster on the processor.** Model files keep some of their weights in

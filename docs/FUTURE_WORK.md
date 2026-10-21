@@ -2942,7 +2942,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-21, not yet released** (#324, #325)
+**Closed 2026-10-21, released in v0.3.247** (#324, #325)
 - #325 — **A card multiplies a split's check rows and a prompt with llama.cpp's current
   tensor-core kernel.** A tree check carries 16-64 rows through every machine of a split; the
   vendored candle sent 9-63 rows to llama.cpp's OLD dp4a MMQ (fixed 64-column tile, no tensor
