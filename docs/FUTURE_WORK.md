@@ -1223,6 +1223,9 @@ holds the loop in that worker's LIFO slot, and the loop's own peer-cache save ru
 pool (`peer_cache::CacheWriter`). What remains: the 2 sampled stalls with no worker in a sync, and
 whether the daily count falls. Next: once deployed, count the stall lines on the live node over a
 day of ordinary use (10-19: 65) and sample the next one that comes while the disk is idle.
+*Interim, v0.3.246, 03:27-06:50Z 10-21 (four restarts for rigs, no build on the disk):* 4 stalls,
+every one the first `swarm_event:Identify` within 2 s of a start, 165-225 ms with 151-190 of it on
+the processor — none in `RequestResponse`, none while running. The day's count is still owed.
 
 A tester's node (field report 2026-10-20, v0.3.245, which lacks the fix) logged 42 stalls (median
 289 ms, max 1.7 s; arms `RequestResponse`, `liveness_interval`, `Identify`) from the moment an
@@ -1953,7 +1956,8 @@ rig) 4.75-5.06 against 5.03-5.52 (`docs/invariants/scheduling.md` § "A split ch
 guesses", Measured). Left for trees: (a) **the drafter's wait after a missed seed** — the tree
 grown beside a check held its outcome in only 3-10 of ~30 rounds, and each miss grows the next
 tree from nothing before the check: 327-416 ms of a ~0.95 s round with the drafter on the
-processor, the usual case for a large model, whose layers fill the head's card. It is also why a
+processor, as that run kept it (a processor head's case; a card head's planner leaves its drafter
+room on the card, #275, where a growth step costs a fraction of this). It is also why a
 28-token reply ran ~10% slower than the stream (3.42-3.99 vs 3.78-4.54). The drafter's processor
 width is the contribution's (4 of 8 threads on that run: 16 ms a single-row step); (b) a stream
 of trees (several in flight); (c) a drafter on a card, measured (this boot keeps one CUDA process

@@ -3640,6 +3640,13 @@ cards, a 43 KB check or a 280 KB tree per hop against a ~100 ms pass — the rig
 the probe is its measurement. (Two of the Cubic arm's four requests did not stream; nothing ties
 that to the controller, and it is not claimed.)
 
+**What is left of the burst on a long link is the link** (2026-10-21, the probe at a 405 ms round
+trip, no rate cap, BBR, a burst every 500 ms, median of 20): 4 KB 412 ms, 38 KB 421, 114 KB 437,
+240 KB 453 — ~0.17 ms a KB over the round trip. A 7B tree check on the real TH↔AU link paid
+2.3-3.2 ms a row (3.8 KB), ~0.7 ms a KB, so pacing is at most a quarter of it. The rest is the
+path's rate or the two cards reading the row (~7 GFLOP over 14 layers each side); the run logged
+no per-forward times at INFO to tell them apart. Either way a controller will not recover it.
+
 **What a change must keep:** QUIC connections run BBR unless
 `SWARMLLM_QUIC_CC=cubic`; a re-vendor of libp2p-quic carries `Congestion` over
 (the build fails without it — our transport calls it). Tests:

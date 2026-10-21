@@ -4503,9 +4503,11 @@ different shape of the same arithmetic (gotcha #370), not a different reply; the
 — a live worker not short of the card — a peer by `NodeCapability::models_run_on_card`), and the
 stream elsewhere; `SWARMLLM_DRAFT_TREES=1` / `=0` forces either (`dsd_tree::trees_wanted`). Every
 node has advertised bit 29 and read a tree since v0.3.246, so the default needs no peer to update.
-What could widen it, untested: a drafter on a card (a growth step is a forward of the drafter; a
-large model's head card is usually full, so a processor drafter is the common case), fewer seed
-misses, a tree STREAM (several trees in flight, as the stream keeps chains).
+What could widen it, untested: a drafter on a card (a growth step is a forward of the drafter —
+and a card head's drafter is normally there, the planner leaving it room beside the layers it
+places, #275; this run kept it on the processor only for this boot's one-process rule), fewer seed
+misses, a tree STREAM (several trees in flight, as the stream keeps chains; weighed in
+`docs/plans/large_model_splits.md` § "Draft trees").
 
 **What a change must keep:**
 - **The shape is bound in the AAD and refused malformed** — a relay reshaping a tree changes
@@ -4548,7 +4550,11 @@ control, which must differ), `a_kept_path_read_again_continues_as_if_read_alone`
 binary: `SWARMLLM_DRAFT_TREES=1` / `=0` (trees forced on / off; by default on where every segment
 runs on a card, above), `SWARMLLM_TREE_GROW_BESIDE=0` (each tree grown only before its check),
 `SWARMLLM_PROCESSOR_MODELS=<id,…>` (those models' workers kept on the processor — the drafter
-here). Tests for the default: `trees_are_wanted_on_cards_unless_the_setting_says_otherwise`,
+here). **Under failure** (2026-10-21, `~/swarmllm-318/treekill.sh`: `split_rig.sh kill`, a 7B split
+on the processor, trees forced, the tail's worker killed after 42 results): the attempt ended at a
+check (`DSD: pipeline verify failed … worker closed connection`), the router re-planned once, and
+the retry checked trees for the whole reply (177 rounds) — 200, 400 tokens, the opening once.
+Tests for the default: `trees_are_wanted_on_cards_unless_the_setting_says_otherwise`,
 `a_plan_is_on_cards_only_where_every_segment_is`,
 `only_a_worker_wholly_on_the_card_runs_whole_on_the_card`. Rigs: `~/swarmllm-318/cardtree.sh` (the
 real link, above), `~/swarmllm-318/trees318.sh` (both halves on the

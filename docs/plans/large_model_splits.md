@@ -320,8 +320,23 @@ until the bytes or a processor stage say otherwise.
   first rounds waiting for the drafter (`docs/invariants/scheduling.md` § "A
   split checks a tree of guesses"). `SWARMLLM_DRAFT_TREES=1` / `=0` forces
   either way. Next: the drafter's wait after a missed seed (327-416 ms of a
-  ~0.95 s round with the drafter on a processor — the usual case, since a large
-  model fills the head's card), a stream of trees.
+  ~0.95 s round with the drafter on a processor, as this run kept it; a card
+  head's planner leaves its drafter room on the card (#275), where a growth
+  step is a fraction of that — unmeasured, this boot allows one process on the
+  card), a stream of trees.
+- **A stream of trees, weighed 2026-10-21.** FlowSpec (arXiv 2507.02620) and
+  SpecPipe (2504.04104) keep tree pieces flowing through a pipeline: rows go
+  out best-first as the drafter grows them, each stage prunes against the
+  last verdict, and a verdict whose path the rows sent do not hold discards
+  everything in flight — our seed miss. Both are LAN designs (transfer under a
+  stage's compute); neither measured a long link. What a stream would change
+  here: a hit saves a whole round trip (the follow-on rows are already at the
+  tail), where a seed only saves the growth wait. What it would not: the law
+  above — rows per pass still buy E_N logarithmically. Its cost: every
+  segment's cache would hold unverified rows from earlier forwards, which
+  breaks "the cache after a check is a prefix of the forward's rows" and
+  needs a pruned tree cache in every worker. Not started; the drafter's wait
+  comes first.
 
 ## Build order (each step ends on a measurement)
 
