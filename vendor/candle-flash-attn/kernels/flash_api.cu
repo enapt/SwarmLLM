@@ -12,7 +12,13 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream) {
   });
 }
 
-extern "C" void run_mha(
+// SwarmLLM patch: returns the launch's CUDA status (0 = launched), where
+// upstream returned nothing. Every check in these kernels is
+// `C10_CUDA_CHECK`, a no-op here (`error.h`), so a launch the driver refused —
+// no image of the kernel for this card, too much shared memory — left the
+// output unwritten and said nothing. The caller turns a non-zero status
+// into an error.
+extern "C" int run_mha(
     void *q_ptr,
     void *k_ptr,
     void *v_ptr,
@@ -165,5 +171,9 @@ extern "C" void run_mha(
     // stream the caller hands in null — the default build launches exactly
     // where it always did.
     cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+    // The launch is judged by the thread's last runtime error, so first take
+    // any error an earlier, unrelated runtime call left behind.
+    (void) cudaGetLastError();
     run_mha_fwd(params, stream);
+    return static_cast<int>(cudaGetLastError());
 }

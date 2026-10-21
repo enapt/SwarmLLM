@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #326**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #327**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -107,6 +107,9 @@ speed is what the swarm is for, so split speed for large models is the top track
     decision, with research, when picked up.
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
+14. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
+    the first reply waits ~2 min while the driver compiles flash attention's PTX (MMQ's ~8 s a
+    weight type), then it is cached. Correct since the PTX went in (before: wrong output).
 maintenance or an idea with no user waiting on it.
 
 ## Open items
@@ -2041,6 +2044,26 @@ released in v0.3.235**: the loader already read its layout (the dense loop with 
 popular unsloth Qwen3.5-35B-A3B Q4_K_M header, read by range request, names exactly those tensors —
 separate gate/up/down expert stacks, a sigmoid-gated shared expert, no fused `ffn_gate_up_exps`), so
 the change is `is_supported`, `supported_list` and `arch_supports_hybrid`. Checked against llama.cpp
+#### #326 — A card newer than the release's machine code waits minutes for its first reply
+`P2` · platform · **OPEN** — 2026-10-21 · history: gotcha #928, #325 (closed)
+
+The vendored kernel libraries (MoE, MMQ, flash attention) carry machine code for the release's
+`CUDA_COMPUTE_CAP` (80, which runs on 8.x cards only) and, since 2026-10-21, its PTX. A Hopper or
+Blackwell card (9.0, 12.0: the RTX 50-series) runs the PTX, which the driver compiles on first
+use. Measured with `CUDA_FORCE_PTX_JIT=1` on this RTX 3070 and an empty cache
+(`~/swarmllm-318/jittime.sh`; `docs/invariants/inference.md` § "A card multiplies several rows"):
+flash attention's first non-causal call 66.7 s and first causal call 45.2 s at one head width,
+MMQ 7.3 s (Q4_K) and 8.6 s (Q6_K) per weight type; with the cache filled, tens of ms. So a new
+user's first reply on such a card waits ~2 min before a token, with nothing on screen saying why;
+later replies, and later runs, read the driver's cache (34 MB for flash at one head width; the
+driver's cache size limit is not checked). Before the PTX went in, the same calls ran nothing
+and answered garbage. Untested: what the node's own deadlines do with a 1-2 min first forward (a
+peer's segment is timed by the coordinator), and candle's own PTX modules' JIT time. Options:
+machine code for 9.0 and 12.0 beside 8.0 in the release build (nvcc 12.8 builds sm_120; the
+flash kernels are cached across releases, so the cost is one cold build and the binary's size),
+or a warm-up at worker start that says what it is doing. No such card is here to check either
+on.
+
 master on a real file (`Flexan/kshitijthakkar-qwen3.5-moe-0.87B-d0.8B-GGUF`, 24 layers, 8 experts,
 top-2; `~/swarmllm-228/card{,2}.sh`, live node stopped, safety kit, 0 driver events): the f16 file
 agrees at every position on the processor (worst cos 0.999999, top-1 24/24), split at layer 13 and
@@ -2924,7 +2947,9 @@ grep `^| N |`).
   (`docs/invariants/inference.md` § "A card multiplies several rows with llama.cpp's int8
   tensor-core MMQ"). Found on the way: the vendored kernel LIBRARIES are machine code for the
   release's floor (8.x) only, so a Hopper or Blackwell card had no image of the MoE kernels, whose
-  launches check nothing — their output was never written. The MoE and MMQ libraries now carry
+  launches check nothing — their output was never written; flash attention's library likewise
+  (its checks are no-ops), and its `run_mha` now returns its launch status. The MoE, MMQ and
+  flash-attention libraries now carry
   the floor's PTX too, which such a card compiles on first use; MMQ also probes for an image before
   its first launch. A/B `SWARMLLM_QMATMUL_MMQ=dp4a`.
 - #324 — **A request that finds every cold-start wait place taken is answered as the wait would

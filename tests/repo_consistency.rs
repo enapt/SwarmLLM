@@ -945,6 +945,122 @@ fn the_mmq_namespace_guard_catches_code_outside_it() {
     assert!(mmq_namespace_violation("mmq_type_q4_k.cu", bare).is_some());
 }
 
+/// Where a build script builds a CUDA kernel LIBRARY (cudaforge `build_lib`)
+/// with a builder never given the floor's PTX (`.arg(&ptx_beside)`), or
+/// where `ptx_beside` is not `code=compute_…` PTX. Per library, not per file:
+/// candle-kernels builds two.
+fn kernel_library_without_ptx(src: &str) -> Option<String> {
+    let stmts = statements(src);
+    let defined = stmts
+        .iter()
+        .any(|(_, s)| s.starts_with("let ptx_beside = "))
+        && join_statement(src).contains("code=compute_{compute_cap}");
+    let mut libraries = 0;
+    for (line, s) in &stmts {
+        let Some(at) = s.find(".build_lib(") else {
+            continue;
+        };
+        libraries += 1;
+        let receiver: String = s[..at]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let given = stmts.iter().any(|(_, t)| {
+            t.contains(".arg(&ptx_beside)")
+                && [
+                    format!("{receiver} = "),
+                    format!("let mut {receiver} = "),
+                    format!("let {receiver} = "),
+                ]
+                .iter()
+                .any(|p| t.starts_with(p.as_str()))
+        });
+        if !defined || !given {
+            return Some(format!(
+                "line {line}: `{receiver}` builds a kernel library without the floor's PTX"
+            ));
+        }
+    }
+    (libraries == 0).then(|| "no `build_lib` call found".to_string())
+}
+
+/// cudaforge's `build_lib` compiles machine code for ONE major version
+/// (`code=sm_80`), and a release is built at 80: a Hopper or Blackwell card
+/// had no image of a vendored kernel library, and its launches failed without
+/// a word — the MoE kernels and flash attention check nothing (gotcha #928).
+/// Every library carries the floor's PTX, which a newer card compiles on
+/// first use. Any vendored build script that builds a library is checked, so
+/// a new one is covered.
+#[test]
+fn every_vendored_kernel_library_carries_ptx() {
+    let root = repo_root();
+    let mut checked = Vec::new();
+    for parent in ["vendor", "vendor/candle"] {
+        let dir = root.join(parent);
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {dir:?}: {e}")) {
+            let script = entry.expect("dir entry").path().join("build.rs");
+            let Ok(src) = std::fs::read_to_string(&script) else {
+                continue;
+            };
+            if !src.contains(".build_lib(") {
+                continue;
+            }
+            if let Some(why) = kernel_library_without_ptx(&src) {
+                panic!(
+                    "{}: {why}. Give the builder `.arg(&ptx_beside)` (see \
+                     vendor/candle/candle-kernels/build.rs), or a Hopper/Blackwell card \
+                     gets no image of it.",
+                    script.strip_prefix(&root).unwrap_or(&script).display()
+                );
+            }
+            checked.push(script);
+        }
+    }
+    // candle-kernels (MoE + MMQ) and candle-flash-attn.
+    assert!(
+        checked.len() >= 2,
+        "found {} build scripts building a kernel library: {checked:?}",
+        checked.len()
+    );
+}
+
+/// The PTX guard sees a library built without it, ONE of two libraries built
+/// without it, a commented-out argument and machine code posing as PTX
+/// (gotcha #413).
+#[test]
+fn the_kernel_library_ptx_guard_catches_a_library_without_it() {
+    let def = "    let ptx_beside = format!(\"-gencode=arch=compute_{compute_cap},code=compute_{compute_cap}\");\n";
+    let good = format!(
+        "fn main() {{\n{def}    let mut moe_builder = KernelBuilder::default()\n        \
+         .arg(\"-O3\");\n    moe_builder = moe_builder.arg(&ptx_beside);\n    \
+         moe_builder.build_lib(out_dir.join(\"libmoe.a\"))?;\n    \
+         let mut mmq_builder = KernelBuilder::default()\n        .arg(\"-O3\")\n        \
+         .arg(&ptx_beside);\n    mmq_builder.build_lib(out_dir.join(\"libggml_mmq.a\"))?;\n}}\n"
+    );
+    assert_eq!(kernel_library_without_ptx(&good), None);
+    let one_bare = good.replace(
+        "        .arg(\"-O3\")\n        .arg(&ptx_beside);",
+        "        .arg(\"-O3\");",
+    );
+    assert_ne!(one_bare, good);
+    assert!(kernel_library_without_ptx(&one_bare).is_some());
+    let commented = good.replace(
+        "    moe_builder = moe_builder.arg(&ptx_beside);",
+        "    // moe_builder = moe_builder.arg(&ptx_beside);",
+    );
+    assert_ne!(commented, good);
+    assert!(kernel_library_without_ptx(&commented).is_some());
+    let sass = good.replace("code=compute_{compute_cap}", "code=sm_{compute_cap}");
+    assert!(kernel_library_without_ptx(&sass).is_some());
+    let undefined = good.replace(def, "");
+    assert!(kernel_library_without_ptx(&undefined).is_some());
+    assert!(kernel_library_without_ptx("fn main() {}").is_some());
+}
+
 /// The numbers `pattern` (`"case "`, `"gguf_type == "`) is followed by in the
 /// live code of `region` — `//` comments dropped.
 fn kernel_ids_after(region: &str, pattern: &str) -> std::collections::BTreeSet<i32> {

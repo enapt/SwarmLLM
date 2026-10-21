@@ -32,6 +32,14 @@ pub const MIN_COMPUTE_CAP: (u32, u32) = (8, 0);
 /// Forward compatibility is real: PTX compiled for `compute_80` is JIT-compiled
 /// by the driver onto any newer architecture, so Ada, Hopper and Blackwell all
 /// pass. Only *older* cards fail, and they fail hard rather than degrading.
+///
+/// It holds only because EVERY kernel ships PTX: candle's own are PTX, and the
+/// vendored kernel LIBRARIES (MoE, llama.cpp's MMQ, flash attention) carry it
+/// beside their 8.x machine code, which a 9.x or 12.x card cannot run. Until
+/// 2026-10-21 those libraries had none, and their launches on a Hopper or
+/// Blackwell card failed without a word (gotcha #928; guard
+/// `every_vendored_kernel_library_carries_ptx`). Such a card compiles them on
+/// first use and keeps the result in the driver's cache.
 pub fn compute_cap_supported(cap: (u32, u32)) -> bool {
     cap >= MIN_COMPUTE_CAP
 }

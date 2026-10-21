@@ -90,7 +90,8 @@ swarmllm/
 │   │                          their floor's PTX beside the machine code, for cards newer than it)
 │   ├── candle-flash-attn/     (cudart linked STATICALLY so the binary needs only the display driver;
 │   │                          18 bf16 kernels + the FP16_SWITCH bf16 branch dropped — unreachable, 37→19;
-│   │                          `run_mha` launches on the CALLER's stream, not stream 0 — .199's garbage, #683)
+│   │                          `run_mha` launches on the CALLER's stream, not stream 0 — .199's garbage, #683;
+│   │                          `run_mha` returns its launch status + the library carries compute_80 PTX, #928)
 │   ├── candle-paged-attention/ (kernels only — NOTHING references it; PagedAttention was never wired, #257;
 │   │                          its kernels still hardcode stream 0 — fix before wiring it, see FUTURE_WORK)
 │   ├── libp2p-quic/           (0.13.1 + ONE addition: `Config::congestion` — our QUIC connections run quinn's
@@ -1203,7 +1204,12 @@ itemised shortfall is returned rather than the re-plan's routing error.
 CUDA builds compile kernels for **compute capability 8.0** (Ampere: RTX 30-series
 and newer). This is FlashAttention's own requirement — every `candle-flash-attn`
 kernel source is `_sm80` and uses Ampere async-copy — and `flash-attn` is part of
-both the `cuda` and `windows-gpu` features.
+both the `cuda` and `windows-gpu` features. A NEWER card runs them from PTX:
+candle's own kernels are PTX, and the vendored kernel libraries (MoE, MMQ, flash
+attention) carry the floor's PTX beside their 8.x machine code, which the driver
+compiles for a 9.x or 12.x card on first use (gotcha #928, guard
+`every_vendored_kernel_library_carries_ptx`) — ~2 min for flash attention the
+first time, then cached (FUTURE_WORK #326).
 
 The floor is stated in four places that must agree, enforced by
 `compute_cap_matches_release_workflow` in `tests/repo_consistency.rs`:
@@ -1237,7 +1243,7 @@ fails everything. So:
   `model_cpu_fallback` and `model_cpu_fallback_gpu_too_old` — because the
   frontend translates by kind, and one message must not be shown for the other.
 
-`vendor/candle-flash-attn` carries three patches: static `cudart_static`
+`vendor/candle-flash-attn` carries four patches: static `cudart_static`
 (upstream links it dynamically, which would put a hard `libcudart` dependency on
 a binary that today needs only the display driver), the 18 bf16 kernels removed
 (`run_attention` casts to f16 before every call), and **`run_mha` launches on
@@ -1246,7 +1252,15 @@ the caller's stream** (2026-09-23). Upstream 0.10.x hardcoded
 non-blocking stream — the cause of v0.3.199-alpha's garbage output (gotcha
 #683); upstream fixed the same race in 0.11.0 (huggingface/candle #3596/#3655).
 `the_vendored_attention_kernels_launch_on_the_devices_stream` in
-`tests/repo_consistency.rs` keeps a re-vendor from dropping it.
+`tests/repo_consistency.rs` keeps a re-vendor from dropping it. The fourth
+(2026-10-21): **the library carries the floor's PTX beside its sm_80 machine
+code, and `run_mha` returns its launch status**. Machine code runs only within
+its own major version, so a 9.x (Hopper) or 12.x (Blackwell) card had no image
+of these kernels; every check in them is a no-op (`kernels/error.h`), so the
+launch failed and the output was never written, without a word (gotcha #928).
+The driver now compiles the PTX for such a card on first use, and a launch that
+still fails is an error (`launched` in `src/lib.rs`). Guard:
+`every_vendored_kernel_library_carries_ptx`.
 
 ### Attention Kernel Selection
 

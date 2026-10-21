@@ -55,6 +55,8 @@ extern "C" {
         // non-blocking stream: v0.3.199-alpha's garbage output. Same signature
         // as upstream's fix in 0.11.0 (PR #3655).
         stream_ptr: *mut c_void,
-    );
+        // SwarmLLM patch: the launch's CUDA status, 0 = launched (see
+        // `flash_api.cu`); `launched` in lib.rs reads it.
+    ) -> c_int;
 
 }

@@ -3574,12 +3574,27 @@ reads (D4 / DS4 / D2S6). Below 8 rows llama.cpp keeps its vector kernel (MMVQ) f
   section, and the serious half: the MoE kernels check no launch error, and a launch with no image
   fails without a word — the next synchronize reports nothing and the output is never written (a
   kernel built for sm_90 alone, on this sm_86 card). MMQ alone would only have fallen back.
+  candle-flash-attn's `libflashattention.a` had the same gap (19 machine-code images, no PTX) and
+  checks nothing either (`C10_CUDA_CHECK` is a no-op, `kernels/error.h`): it carries the PTX too,
+  and `run_mha` now returns its launch status, an error in `launched` (`src/lib.rs`). Guard
+  `every_vendored_kernel_library_carries_ptx` checks every vendored build script that builds a
+  library, per library.
 - Checked (`~/swarmllm-318/jitprobe.sh`, the entry points in a harness built for sm_86, run under
   `CUDA_FORCE_PTX_JIT=1` — which makes the driver ignore machine code, as a newer card must): probe
   cut out, machine code alone → `swarm_mmq_available() = 1`, the quantizer's launch fails (status 3,
   then the old kernels); as shipped → 0, nothing launched; as shipped with the PTX → 1, the launch
   runs. Candle itself cannot open a device under that switch here, so the whole stack is not
   reproducible this way.
+- Flash attention, the same way (`~/swarmllm-318/jittime.sh`, 2026-10-21; a 128-wide head, the
+  library before and after against an f32 reference): the release's library (19 machine-code
+  images, 1 stray PTX) under the switch answered status 0, synchronize "no error", and an output
+  off by **1000** — garbage, without a word. With its PTX: 0.00016, as on machine code.
+- **What a newer card pays the FIRST time** (the switch, an empty `CUDA_CACHE_PATH`): the driver
+  compiles flash attention's PTX on its first call — **66.7 s** (non-causal) and **45.2 s**
+  (causal) — and MMQ's per weight type, 7.3 s (Q4_K) and 8.6 s (Q6_K); `swarm_mmq_available`
+  0.4 s. With the cache filled: 92 / 47 ms and 22 / 26 ms; the cache took 34 MB (flash) and 12 MB
+  (two MMQ types). Correct at first use, then cached — but a first reply on such a card waits on
+  it (FUTURE_WORK #326).
 - `mmq_mma_products()` counts what it ran — the check that it fired, never a decision.
 - A/B in one binary: `SWARMLLM_QMATMUL_MMQ=dp4a` (or `0`/`off`) = the old kernels;
   `SWARMLLM_QMATMUL_MMQ_MAX_ROWS` caps its rows for a measurement.

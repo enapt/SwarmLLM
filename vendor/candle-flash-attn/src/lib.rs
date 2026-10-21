@@ -18,6 +18,18 @@ fn round_multiple(x: usize, m: usize) -> usize {
     (x + m - 1) / m * m
 }
 
+/// SwarmLLM patch: what `ffi::run_mha` answered — an error where the launch
+/// did not happen. Before, a refused launch (no image of the kernel for this
+/// card) left the output unwritten without a word: the kernels' own checks
+/// are no-ops (`kernels/error.h`).
+fn launched(status: core::ffi::c_int) -> Result<()> {
+    if status == 0 {
+        Ok(())
+    } else {
+        candle::bail!("flash attention could not run on this graphics card (CUDA error {status})")
+    }
+}
+
 impl FlashAttn {
     fn cuda_fwd_t<
         T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
@@ -172,7 +184,7 @@ impl FlashAttn {
             window_size_right = seqlen_k as i32;
         }
 
-        unsafe {
+        let status = unsafe {
             let (q_ptr, _guard) = q.device_ptr(&stream);
             let (k_ptr, _guard) = k.device_ptr(&stream);
             let (v_ptr, _guard) = v.device_ptr(&stream);
@@ -222,7 +234,8 @@ impl FlashAttn {
                 /* stream_ptr */
                 stream.cu_stream() as *mut core::ffi::c_void,
             )
-        }
+        };
+        launched(status)?;
 
         let dst = candle::CudaStorage::wrap_cuda_slice(dst, dev.clone());
         Ok((dst, out_shape))
@@ -648,7 +661,7 @@ impl FlashAttnVarLen {
             window_size_right = self.max_seqlen_k as i32;
         }
 
-        unsafe {
+        let status = unsafe {
             let (q_ptr, _guard) = q.device_ptr(&stream);
             let (k_ptr, _guard) = k.device_ptr(&stream);
             let (v_ptr, _guard) = v.device_ptr(&stream);
@@ -698,7 +711,8 @@ impl FlashAttnVarLen {
                 /* stream_ptr */
                 stream.cu_stream() as *mut core::ffi::c_void,
             )
-        }
+        };
+        launched(status)?;
 
         let dst = candle::CudaStorage::wrap_cuda_slice(dst, dev.clone());
         Ok((dst, out_shape))

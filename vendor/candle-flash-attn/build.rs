@@ -189,6 +189,22 @@ fn main() -> Result<()> {
         // should check that variable before concluding this line is the cause.
         .thread_percentage(0.5);
 
+    // SwarmLLM patch: the library carries its floor's PTX beside the machine
+    // code, as candle-kernels' MoE and MMQ libraries do. cudaforge's
+    // `build_lib` compiles `code=sm_NN` alone, and machine code runs only
+    // within its own major version: a release built at 80 had NO image of
+    // these kernels for a Hopper (9.0) or Blackwell (12.0) card, which
+    // `gpu_support::compute_cap_supported` admits — and every check in them is
+    // a no-op (`kernels/error.h`), so the output was never written and nothing
+    // said so (gotcha #928). With the PTX the driver compiles them for such a
+    // card on first use and caches the result. `run_mha` now also returns its
+    // launch status (`flash_api.cu`).
+    let compute_cap = cudaforge::detect_compute_cap()
+        .map(|arch| arch.base())
+        .unwrap_or(80);
+    let ptx_beside = format!("-gencode=arch=compute_{compute_cap},code=compute_{compute_cap}");
+    builder = builder.arg(&ptx_beside);
+
     let mut is_target_msvc = false;
     if let Ok(target) = std::env::var("TARGET") {
         if target.contains("msvc") {
