@@ -122,7 +122,39 @@ pub fn resolve_data_dir(cli_data_dir: Option<&std::path::Path>) -> PathBuf {
     default_data_dir()
 }
 
+#[cfg(not(test))]
 fn default_data_dir() -> PathBuf {
+    platform_data_dir()
+}
+
+/// A unit-test build never names the user's own data directory: every
+/// `Config::default()` here points at one directory of this test process's
+/// own instead. A test that built a node from the default config and wrote
+/// files wrote them into the live node's directory — the API key (gotcha #226,
+/// fixed at that one writer), a 33 GB disk reading taken from the real models
+/// (fixed 2026-09-17 in the auto-manage fixture), then two one-byte "shards"
+/// of a model `ours-q4` that the live node logged as a stray directory on every
+/// scan (2026-10-21, gotcha #924). Fixed here, where the path is chosen, so a
+/// new test helper cannot bring it back by forgetting to override it.
+///
+/// ONE directory per process, not per call: `to_minimal_toml` writes only what
+/// differs from `Config::default()`, so two defaults must agree. Integration
+/// tests link the library without `cfg(test)` and set their own directory
+/// (guard `every_integration_test_node_has_a_data_dir_of_its_own`).
+#[cfg(test)]
+fn default_data_dir() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        std::env::temp_dir()
+            .join(format!("swarmllm-unit-test-{}", std::process::id()))
+            .join("swarmllm")
+    })
+    .clone()
+}
+
+/// Where this platform keeps an application's data — `~/.local/share` on
+/// Linux — joined with `swarmllm`.
+fn platform_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| {
             // Fallback to a well-known path instead of "." (current directory)
@@ -546,5 +578,30 @@ impl Default for ResourceConfig {
             max_cpu_threads: 0,
             schedule: ResourceSchedule::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A test's node never names the directory the live node uses, however
+    /// the config was made (gotcha #924).
+    #[test]
+    fn a_test_build_never_names_the_users_data_directory() {
+        let real = platform_data_dir();
+        let default = crate::config::Config::default().node.data_dir;
+        assert!(
+            !default.starts_with(&real),
+            "{} is the user's own data directory",
+            default.display()
+        );
+        let parsed: NodeConfig = toml::from_str("listen_port = 1").unwrap();
+        assert!(!parsed.data_dir.starts_with(&real));
+        assert_eq!(
+            default,
+            crate::config::Config::default().node.data_dir,
+            "two defaults must agree, or every saved config writes the path"
+        );
     }
 }

@@ -5,7 +5,7 @@
 
 #[path = "test_server_common.rs"]
 mod test_server_common;
-use test_server_common::{auth_client, spawn_test_server};
+use test_server_common::{auth_client, spawn_test_server, spawn_test_server_with_data_dir};
 
 #[tokio::test]
 async fn health_endpoint_returns_ok() {
@@ -21,8 +21,8 @@ async fn health_endpoint_returns_ok() {
 /// nobody else either (#255; `cli::client_access` asks and checks it).
 #[tokio::test]
 async fn health_names_the_data_dir_only_to_this_machine() {
-    let (base, key) = spawn_test_server().await;
-    let expected = std::path::absolute(swarmllm::config::Config::default().node.data_dir).unwrap();
+    let (base, key, data_dir) = spawn_test_server_with_data_dir().await;
+    let expected = std::path::absolute(data_dir).unwrap();
     let nonce = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     let ask = |extra: Option<(&'static str, &'static str)>, query: String| {
         let mut req = reqwest::Client::new().get(format!("{base}/health{query}"));

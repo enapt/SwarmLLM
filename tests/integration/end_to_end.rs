@@ -25,7 +25,9 @@ use tokio::sync::Mutex;
 async fn daemon_lifecycle_serves_health_then_shuts_down() {
     // Spin up SharedState exactly like api_test.rs but watch the shutdown
     // channel from outside so we can assert it propagates.
-    let config = swarmllm::config::Config::default();
+    let mut config = swarmllm::config::Config::default();
+    // Never the user's own data directory (gotcha #924).
+    config.node.data_dir = tempfile::tempdir().expect("tempdir").keep();
     let identity = swarmllm::identity::Identity::generate();
     let db = swarmllm::storage::db::Database::open_temp().expect("temp db");
     let executor = Arc::new(Mutex::new(

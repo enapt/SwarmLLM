@@ -24,7 +24,17 @@ use tokio::sync::Mutex;
 /// Returns `(base_url, api_key)`. The server task is detached and lives until
 /// the test binary exits.
 pub async fn spawn_test_server() -> (String, String) {
-    let config = swarmllm::config::Config::default();
+    let (base, key, _) = spawn_test_server_with_data_dir().await;
+    (base, key)
+}
+
+/// [`spawn_test_server`], also returning the data directory the node was
+/// given — a temporary one, never the user's own: this build has no
+/// `cfg(test)`, so `Config::default()` names the live node's (gotcha #924).
+pub async fn spawn_test_server_with_data_dir() -> (String, String, std::path::PathBuf) {
+    let mut config = swarmllm::config::Config::default();
+    config.node.data_dir = tempfile::tempdir().expect("tempdir").keep();
+    let data_dir = config.node.data_dir.clone();
     let identity = swarmllm::identity::Identity::generate();
     let db = swarmllm::storage::db::Database::open_temp().expect("temp db");
     let executor = Arc::new(Mutex::new(
@@ -82,7 +92,7 @@ pub async fn spawn_test_server() -> (String, String) {
         }
     }
 
-    (format!("http://127.0.0.1:{port}"), api_key)
+    (format!("http://127.0.0.1:{port}"), api_key, data_dir)
 }
 
 /// Create a reqwest client with the Bearer token pre-configured.

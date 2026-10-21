@@ -85,3 +85,11 @@ zero for its actual subject — a check that could not see what it checks (#748)
 **Read the step's own `A.log` placement lines** (`Model will run on the CPU` +
 `reason=`) before trusting a count of zero.
 
+
+## A test's node never names the user's data directory (2026-10-21, gotcha #924)
+
+In a unit-test build `config::node::default_data_dir()` is one temp directory per process; never read
+`platform_data_dir` from a test. **`tests/` links the library WITHOUT `cfg(test)`**, so every function there that
+builds a `SharedState` sets `config.node.data_dir` to a temporary one first (`spawn_test_server_with_data_dir` says
+which); guard `every_integration_test_node_has_a_data_dir_of_its_own`. Three leaks before it: the API key (#226), a
+33 GB disk reading (09-17), two "shards" of a model `ours-q4` the live node logged on every scan.

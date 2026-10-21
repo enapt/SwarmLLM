@@ -14062,3 +14062,59 @@ fn the_token_lookup_guard_catches_both_shapes_that_shipped() {
     let lines: Vec<usize> = hits.iter().map(|(l, _)| *l).collect();
     assert_eq!(lines, vec![12, 18, 30], "found {hits:?}");
 }
+
+/// Every node an integration test builds names a data directory of its own.
+///
+/// `tests/` links the library WITHOUT `cfg(test)`, so `Config::default()` there
+/// names the user's real `~/.local/share/swarmllm` — where a live node on the
+/// same machine keeps its API key (gotcha #226) and its models (#924: two
+/// one-byte "shards" a test wrote showed up as a stray model directory). Unit
+/// tests are covered where the path is chosen (`config::node::default_data_dir`).
+#[test]
+fn every_integration_test_node_has_a_data_dir_of_its_own() {
+    let mut found = Vec::new();
+    for path in walk_rs_files("tests") {
+        if path.ends_with("repo_consistency.rs") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).unwrap();
+        found.extend(
+            nodes_without_a_data_dir(&src)
+                .into_iter()
+                .map(|line| format!("{path}:{line}")),
+        );
+    }
+    assert!(
+        found.is_empty(),
+        "these build a node on the user's own data directory — set \
+         `config.node.data_dir` to a temporary one: {found:?}"
+    );
+}
+
+/// The line of every function in `src` that builds a `SharedState` without
+/// setting `node.data_dir` first.
+fn nodes_without_a_data_dir(src: &str) -> Vec<usize> {
+    fn_bodies(src)
+        .into_iter()
+        .filter(|&(start, end)| {
+            let body = &src[start..end];
+            body.contains("SharedState::new(")
+                && !statements(body)
+                    .iter()
+                    .any(|(_, s)| s.contains(".node.data_dir ="))
+        })
+        .map(|(start, _)| src[..start].lines().count() + 1)
+        .collect()
+}
+
+#[test]
+fn the_data_dir_guard_catches_a_node_on_the_default_directory() {
+    let planted = "fn spawn() {\n    let config = Config::default();\n    \
+                   let (s, _, _) = swarmllm::daemon::SharedState::new(\n        \
+                   config, id, db, ex, None,\n    );\n}\n";
+    assert_eq!(nodes_without_a_data_dir(planted).len(), 1);
+    let wrapped = "fn spawn() {\n    let mut config = Config::default();\n    \
+                   config\n        .node\n        .data_dir = dir;\n    \
+                   let (s, _, _) = SharedState::new(config, id, db, ex, None);\n}\n";
+    assert!(nodes_without_a_data_dir(wrapped).is_empty());
+}

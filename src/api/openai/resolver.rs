@@ -470,9 +470,10 @@ mod tests {
         );
     }
 
-    /// A node whose data directory is its OWN. `Config::default()` points at the
-    /// real `~/.local/share/swarmllm`, and "does this node hold the model whole"
-    /// looks for shard files there.
+    /// A node whose data directory is its OWN, not the one every
+    /// `Config::default()` in this test process shares
+    /// (`config::node::default_data_dir`): "does this node hold the model
+    /// whole" looks for shard files there.
     fn node_with(
         configure: impl FnOnce(&mut crate::config::Config),
     ) -> std::sync::Arc<crate::daemon::SharedState> {

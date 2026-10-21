@@ -87,7 +87,9 @@ async fn test_config_reload_invalid_rejected() {
 /// Test that apply_config_reload notifies subscribers via the watch channel.
 #[tokio::test]
 async fn test_config_reload_notifies_subscribers() {
-    let config = Config::default();
+    let mut config = Config::default();
+    // Never the user's own data directory (gotcha #924).
+    config.node.data_dir = tempfile::tempdir().expect("tempdir").keep();
     let identity = Identity::generate();
     let db = Database::open_temp().unwrap();
     let executor = Arc::new(Mutex::new(ModelExecutor::new()));
