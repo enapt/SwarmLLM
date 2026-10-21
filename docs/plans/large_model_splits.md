@@ -339,8 +339,42 @@ until the bytes or a processor stage say otherwise.
   above — rows per pass still buy E_N logarithmically. Its cost: every
   segment's cache would hold unverified rows from earlier forwards, which
   breaks "the cache after a check is a prefix of the forward's rows" and
-  needs a pruned tree cache in every worker. Not started; the drafter's wait
-  comes first.
+  needs a pruned tree cache in every worker. A self-contained variant avoids
+  that: every check rooted at the confirmed reply, carrying `truncate_kv_to`
+  at the oldest root still in flight, so each one is a restart and
+  `forward_streams` skips the ones a later check overtook. Priced below; not
+  started.
+- **The schedule, priced (2026-10-21, `examples/tree_schedule_sim.py`).** One
+  round is priced by `spec_best_tree.py`; this prices the schedule around it,
+  with Sequoia's positional acceptance and the costs measured on TH↔AU. It
+  reproduces that link within ~10%. tok/s over 400 tokens, mean of 20 replies:
+
+  | link, drafter | tree rounds (today) | regrow sized by what it buys | stream of trees | chain stream |
+  |---|---|---|---|---|
+  | 425 ms, card | 7.18 | 7.06 | 8.00 | 7.32 |
+  | 425 ms, processor | 5.76 | 5.99 | 6.54 | 6.61 |
+  | 20 ms, card | 21.66 | 40.98 | 33.86 | 47.61 |
+  | 20 ms, processor | 11.41 | 29.34 | 13.97 | 21.13 |
+
+  Three things follow. **On a long link the schedule is not the lever**: every
+  shape lands within ~15% of the others, because confirmation advances about
+  one tree depth per round trip whatever is in flight. Speed there comes from
+  what a round keeps (a better drafter, build-order step 4) and from not crossing the
+  long link (#192). **On a short link today's regrow halves trees**: a missed
+  seed waits for eight drafter forwards before a check that itself costs
+  ~30 ms, so trees run at 0.45× the chain stream. Sizing the regrow by what it
+  buys (one, two, four or eight steps, whichever gives the most tokens per ms
+  of the round) recovers most of it. **So trees are worth their default only
+  on a long link** until a rig says otherwise: the near chains placement builds
+  (#192) are exactly the short links where they lose. The model is optimistic
+  for the chain stream (it leaves out each chunk's fixed cost and a restart's
+  thrown-away work), so the crossover is measured, not taken from it: rig at
+  20 and 300 ms. The stream of trees waits behind both; it pays only where
+  the drafter is on a card and the link is long. **Measured 2026-10-21**
+  (drafter on the processor, trees forced, 160 tokens): the sized regrow
+  11.1-11.9 tok/s against eight forwards' 7.3-7.5 at 20 ms, 5.4-5.5 against
+  5.1-5.3 at 300 ms; the chain stream 15.8-16.2 and 6.0 — built as the
+  default with the 300 ms gate (`docs/invariants/scheduling.md`).
 
 ## Build order (each step ends on a measurement)
 

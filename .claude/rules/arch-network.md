@@ -338,7 +338,7 @@ Each names the ONE place a decision is made; a second implementation is this cod
 - **`inference::pipeline::remote_generate::StreamReassembler`** — puts a remote reply's token stream back in order.
 - **A hole in a peer-served reply is FILLED, not waited out** — `RetainedReplies`, `SwarmMessage::ResendTokens`.
 - **`NodeCapability.cpu`** — a processor described like a graphics card.
-- **`PeerInfo::ack_srtt_ms` is what routing prices a peer by** — capped at `ACK_SRTT_ROUTING_CAP_MS`.
+- **`PeerInfo::ack_srtt_ms` is what routing prices a peer by** — capped at `ACK_SRTT_ROUTING_CAP_MS`. **`PeerInfo::round_trip_ms`** is the one COST reading (it, else the ping) for routing and a wait; a DISTANCE is the windowed minimum (`metrics.network_coord_samples` → `LatencyFilter::min`: the coordinate, near chains, `trees_wanted`) — the smoothed cost read 2.5-5 s on a 20 ms link through a first request.
 - **`mem_bandwidth::remeasure_keeping_the_best`** — may rise, never fall.
 - **A peer's advertised version may bring the update check FORWARD and may do nothing else** — `update::PeerVersionWatch`.
 - **`update::SelfUpdateBlocker` — "this node cannot update itself" carries WHY** — `key()` / `advice()`.

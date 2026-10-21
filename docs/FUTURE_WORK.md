@@ -71,8 +71,11 @@ speed is what the swarm is for, so split speed for large models is the top track
    every segment are built (2026-10-20); the head's bounded wait and a route carried to the head
    (10-21); trees the default where every segment runs on a card (5.33-5.74 vs the stream's
    5.01-5.05 on a real ~405 ms link, #134); a card multiplies a check's rows with llama.cpp's
-   tensor-core MMQ (#325, 10-21: 2.4-3.2× faster at 9-64 rows). Next: several trees in flight
-   (#134 (b)); the drafter's wait after a missed seed; near peers over far ones (#192).
+   tensor-core MMQ (#325, 10-21: 2.4-3.2× faster at 9-64 rows). The regrow after a missed seed
+   is sized by what it buys, and trees are on only past 300 ms (#134 (a), 10-21: +57% at 20 ms,
+   +4% at 300 on the rig). Next: near peers over far ones (#192); a drafter fed by the model's
+   own state (`large_model_splits.md` build-order step 4); several trees in flight last (#134
+   (b), +11% on a long link in the schedule model).
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
@@ -105,11 +108,11 @@ speed is what the swarm is for, so split speed for large models is the top track
 12. **#228** — Qwen 3.5 without speculation (its state cannot be wound back yet).
 13. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
     decision, with research, when picked up.
-
-Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 14. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
     the first reply waits ~2 min while the driver compiles flash attention's PTX (MMQ's ~8 s a
     weight type), then it is cached. Correct since the PTX went in (before: wrong output).
+
+Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
 
 ## Open items
@@ -1985,13 +1988,23 @@ ranks its followers on the card (`draft::likeliest_rows_where_they_are`): a 64-r
 nothing 208 → 155 ms, a seed read 100 → 35 ms (`SWARM_BENCH_GROW`, min of N). What is left of a
 regrow is the tree steps' standard attention (~40 ms; a chain step on flash is 11.9 ms at 8 rows,
 on standard attention 16.5, as a tree 18.2) and the rows' quantized matmul on both machines (#325,
-closed 2026-10-21: llama.cpp's tensor-core MMQ, 9-64 rows 2.4-3.2× faster);
-(b) a stream of trees (several in flight); (c) **owed before the release that carries the
-default: a card head with its drafter on the card, against the stream, at 160 and 400 tokens** —
-at 160 it ran once by accident on 2026-10-21 (the pool gave the drafter a card worker of its own
-beside the head's half): 7.14 / 8.31 / 8.78 tok/s against the stream's 5.01-5.05 earlier that day;
-400 is still owed, and this boot keeps one CUDA process on the card. If trees do not win there,
-the default goes off. Remaining from the plan: acquiring a drafter a node does not already hold (today it
+closed 2026-10-21: llama.cpp's tensor-core MMQ, 9-64 rows 2.4-3.2× faster). **Built 2026-10-21:
+the regrow is sized by what it buys** (`TreeRounds::grow_size`, 1/2/4/8 forwards, the most tokens
+per ms of the round; A/B `SWARMLLM_TREE_REGROW=fixed`) — on the rig (7B, the drafter on the
+processor, trees forced) 11.12-11.90 tok/s against 7.33-7.48 at 20 ms and 5.40-5.54 against
+5.12-5.34 at 300 ms; the chain stream still led both (15.84-16.24, 6.00-6.03), and **trees are
+the default only where the farthest peer segment is a measured 300 ms or more away**, read as the
+least round trip measured (the smoothed cost read 2.5-5 s on a 20 ms link through a first
+request) — `docs/invariants/scheduling.md` § "A missed seed is regrown only as deep as pays".
+Left of (a): the drafter's own speed on the processor; (b) a stream of trees (several in
+flight) — priced by the same model at +11% over tree rounds with a card drafter on a 425 ms link,
+behind the chain stream with a processor drafter and on short links: after (a); (c) **a card head with its drafter on the card,
+against the stream with its drafter on the card, at 160 and 400 tokens** — at 160 trees ran once
+by accident on 2026-10-21 (the pool gave the drafter a card worker of its own beside the head's
+half): 7.14 / 8.31 / 8.78 tok/s, above every stream figure on that link (5.01-6.18, drafter on
+the processor). v0.3.247 keeps the default on that evidence (this boot allows one CUDA process);
+the apples-to-apples run is owed at the first boot that allows two, and turns the default off
+if trees lose. Remaining from the plan: acquiring a drafter a node does not already hold (today it
 chooses only among held models); the pipelined prompt pass (Phase 3) is #171. The
 same-model-at-fewer-bits drafter is decided against as a default (#144, § "Decided").
 
@@ -2036,14 +2049,6 @@ deleting.)
 
 ### Model families and platforms
 
-#### #228 — Qwen 3.5: what the first version leaves out (speculation, and the 4B's decode speed)
-`P2` · model-support · **PARTIAL** — 2026-10-06 · history: #117 (closed); plan: `docs/plans/qwen35_support.md`
-
-Dense Qwen 3.5 runs since #117. Still out: (1) ~~`qwen35moe` refused~~ — **runs since 2026-10-11,
-released in v0.3.235**: the loader already read its layout (the dense loop with `load_moe_ffn`; the
-popular unsloth Qwen3.5-35B-A3B Q4_K_M header, read by range request, names exactly those tensors —
-separate gate/up/down expert stacks, a sigmoid-gated shared expert, no fused `ffn_gate_up_exps`), so
-the change is `is_supported`, `supported_list` and `arch_supports_hybrid`. Checked against llama.cpp
 #### #326 — A card newer than the release's machine code waits minutes for its first reply
 `P2` · platform · **OPEN** — 2026-10-21 · history: gotcha #928, #325 (closed)
 
@@ -2064,6 +2069,14 @@ flash kernels are cached across releases, so the cost is one cold build and the 
 or a warm-up at worker start that says what it is doing. No such card is here to check either
 on.
 
+#### #228 — Qwen 3.5: what the first version leaves out (speculation, and the 4B's decode speed)
+`P2` · model-support · **PARTIAL** — 2026-10-06 · history: #117 (closed); plan: `docs/plans/qwen35_support.md`
+
+Dense Qwen 3.5 runs since #117. Still out: (1) ~~`qwen35moe` refused~~ — **runs since 2026-10-11,
+released in v0.3.235**: the loader already read its layout (the dense loop with `load_moe_ffn`; the
+popular unsloth Qwen3.5-35B-A3B Q4_K_M header, read by range request, names exactly those tensors —
+separate gate/up/down expert stacks, a sigmoid-gated shared expert, no fused `ffn_gate_up_exps`), so
+the change is `is_supported`, `supported_list` and `arch_supports_hybrid`. Checked against llama.cpp
 master on a real file (`Flexan/kshitijthakkar-qwen3.5-moe-0.87B-d0.8B-GGUF`, 24 layers, 8 experts,
 top-2; `~/swarmllm-228/card{,2}.sh`, live node stopped, safety kit, 0 driver events): the f16 file
 agrees at every position on the processor (worst cos 0.999999, top-1 24/24), split at layer 13 and

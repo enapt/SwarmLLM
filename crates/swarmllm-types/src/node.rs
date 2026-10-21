@@ -897,6 +897,20 @@ pub struct PeerInfo {
     pub is_lan_peer: bool,
 }
 
+impl PeerInfo {
+    /// What one exchange with this peer costs (ms): forwarding to it
+    /// (`ack_srtt_ms`, taken on real work, so it sees a loaded peer's
+    /// queueing), else the health ping (`latency_ms`, taken idle). `None`
+    /// before either was measured. A COST — what routing or a wait prices —
+    /// read as the sample is. Never a DISTANCE: the smoothed figure carries
+    /// transfer and a starting peer's queueing (2.5-5 s on a 20 ms link through
+    /// a first request); distance is the least round trip measured, the
+    /// daemon's `LatencyFilter` window.
+    pub fn round_trip_ms(&self) -> Option<u32> {
+        self.ack_srtt_ms.or(self.latency_ms)
+    }
+}
+
 /// Peer Exchange response — a list of known peer multiaddrs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerExchangeResponse {

@@ -411,6 +411,8 @@ impl PipelineExecutor {
         // The drafter's worker is live here: its prompt read above loaded it.
         let drafter_on_card = matches!(&drafter, Drafter::Engine(e)
             if self.shared_state.model_process_pool.runs_whole_on_the_card(e.model_id()));
+        let farthest_round_trip_ms =
+            super::farthest_segment_round_trip_ms(&self.shared_state, &self.assignment.segments);
         let trees_for_this_reply = super::dsd_tree::trees_wanted(
             super::every_segment_runs_on_a_card(
                 &self.shared_state,
@@ -418,6 +420,7 @@ impl PipelineExecutor {
                 &self.request.model_id,
             ),
             drafter_on_card,
+            farthest_round_trip_ms,
         ) && matches!(&drafter, Drafter::Engine(e) if reads_trees(e.model_id()))
             && reads_trees(&self.request.model_id);
         let mut trees = super::dsd_tree::TreeRounds::new();
@@ -562,7 +565,7 @@ impl PipelineExecutor {
                     Drafter::Engine(e) if !drafting_off && remaining > 1 => {
                         let seed = trees.take_seed();
                         if trees.grow_before_the_check(&seed, check.fit()) {
-                            let (rows, per_step) = trees.grow_size();
+                            let (rows, per_step) = trees.grow_size(check.fit());
                             let started = std::time::Instant::now();
                             match e
                                 .draft_tree(
@@ -581,6 +584,7 @@ impl PipelineExecutor {
                                 Ok(grown) => {
                                     trees.note_grown_before(
                                         started.elapsed().as_secs_f64() * 1000.0,
+                                        rows.div_ceil(per_step),
                                     );
                                     grown
                                 }
@@ -1044,6 +1048,7 @@ impl PipelineExecutor {
             checks_held_back = check.held_back().saturating_sub(held_back_before),
             draft_ms_each = format_args!("{:.1}", draft_cost.median().unwrap_or(0.0)),
             drafter_on_card,
+            ?farthest_round_trip_ms,
             tree_rounds = trees.rounds,
             tree_guesses_a_round = format_args!(
                 "{:.1}",
@@ -1069,6 +1074,11 @@ impl PipelineExecutor {
                 "{:.1}",
                 trees.draft_ms_beside / f64::from(trees.rounds.max(1))
             ),
+            tree_steps_grown_before_each = format_args!(
+                "{:.1}",
+                f64::from(trees.steps_grown_before) / f64::from(trees.grown_before.max(1))
+            ),
+            tree_level_acceptance = format_args!("{:.2}", trees.level_acceptance()),
             "DSD: request complete"
         );
 

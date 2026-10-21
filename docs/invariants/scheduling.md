@@ -4538,6 +4538,45 @@ tokens; if trees do not win there, the default goes off.** ⚠ Correction (the s
 leave the card room — a CARD plan is never cut to make it some
 (`max_hostable_layers_beside_guest` returns `None` under `planning_on_card`, #275 (4)) — so with a
 large model filling the head's card it runs on the processor, and that reply takes the stream.
+
+**A missed seed is regrown only as deep as pays, and trees are the default only over a long
+link (2026-10-21, #134 (a)).** The schedule model (`examples/tree_schedule_sim.py`, Sequoia's
+positional acceptance, within ~10% of TH↔AU) priced each shape at 400 tokens: over 425 ms every
+schedule lands within ~15% of the others (card drafter: tree rounds 7.18, chain stream 7.32,
+stream of trees 8.00), but over 20 ms eight drafter forwards before a ~30 ms check put tree rounds
+at 0.45× the chain stream (21.7 vs 47.6), and a regrow sized by what it buys recovered most of it
+(41.0). `TreeRounds::grow_size` sizes it (1, 2, 4 or 8 forwards: the most tokens per ms of the
+round, from the check's fitted price, the drafter's measured forward and `level_acceptance`, a
+censored geometric estimate in which a walk that stopped at a leaf is no miss). Rig
+`~/swarmllm-318/regrow318.sh` (QUIC netns, B: 7B parts 1-7 on this card, A: part 0 + the Q4
+0.5B drafter on the processor, trees forced, 160 tokens; tok/s of the 2nd and 3rd replies, the
+1st carries the load):
+
+| link | sized regrow | eight forwards (`SWARMLLM_TREE_REGROW=fixed`) | chain stream |
+|---|---|---|---|
+| 20 ms | 11.90 / 11.12 (3.2 / 3.0 forwards a regrow) | 7.33 / 7.48 (8.0) | 15.84 / 16.24 |
+| 300 ms | 5.54 / 5.40 (5.5 / 5.6) | 5.12 / 5.34 (8.0) | 6.00 / 6.03 |
+
++57% over the short link, +4% over the long one, and with the drafter on the processor the
+stream still wins both — as the default already had it. Each new test fails with its mechanism
+removed (no deepest-first choice, a leaf counted as a miss, no distance gate). **Trees are
+therefore the default only where the farthest peer segment is `TREES_LEAST_ROUND_TRIP_MS` (300)
+or more away** — near chains (#192) are exactly the short links where they lose. **The distance
+is the least round trip measured** (`metrics.network_coord_samples`'s window minimum, as the
+coordinate and the near chains read it), never `PeerInfo::round_trip_ms`: on the rig's first
+request that smoothed COST read 2,500-5,000 ms on a 20 ms link (forwards up to 256 KB feed it,
+transfer and a loading peer included, gotcha #446), so the first request of a short link would
+have taken trees (`a_plan_is_as_far_as_the_least_round_trip_measured_not_its_smoothed_cost`, red
+on the cost reading). Re-run on the rig (`~/swarmllm-318/distance318.sh`, default settings): the
+first request read 22 ms over the 20 ms link (2,500 before), and nothing over the 300 ms link —
+no sample yet, so not far — then 21 and 301. **The owed card-drafter rig, decided without it for v0.3.247**: this boot
+allows no two card processes. The evidence: on the real TH↔AU link with the drafter on the card
+(two card processes by accident, 10-21 11:13Z, `rlreceipts_drafter_on_card/`) trees ran 7.14 /
+8.31 / 8.78 tok/s at 160 tokens, above every stream figure measured on that link (5.01-6.18, its
+drafter on the processor); the model puts the card-drafter stream at 7.32 at 400, and it is
+optimistic for streams. The default keeps trees there; the apples-to-apples run (stream and
+trees, drafter on the card, 160 and 400 tokens) is owed at the first boot that allows it, and
+turns the default off if trees lose.
 What could widen trees, untested: #275 (4) (a card plan leaving its drafter room), fewer seed
 misses, a tree STREAM (several trees in flight; weighed in `docs/plans/large_model_splits.md` §
 "Draft trees").

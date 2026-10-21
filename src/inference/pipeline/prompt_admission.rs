@@ -185,7 +185,7 @@ pub(super) async fn ask_peers(
             shared_state
                 .peer_registry
                 .get(&node_id)
-                .and_then(|p| p.ack_srtt_ms.or(p.latency_ms)),
+                .and_then(|p| p.round_trip_ms()),
         );
         pending.push((node_id, rx));
     }

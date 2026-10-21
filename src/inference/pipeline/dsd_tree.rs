@@ -21,7 +21,9 @@ use crate::inference::draft_tree::{
 
 /// May a reply's rounds check trees? Where every segment runs its layers on a
 /// card (`pipeline::every_segment_runs_on_a_card`) AND so does the drafter
-/// (`ModelProcessPool::runs_whole_on_the_card`), and anywhere with
+/// (`ModelProcessPool::runs_whole_on_the_card`) AND the farthest peer segment
+/// is a measured [`TREES_LEAST_ROUND_TRIP_MS`] or more away
+/// (`pipeline::farthest_segment_round_trip_ms`), and anywhere with
 /// `SWARMLLM_DRAFT_TREES=1`; never with `=0`.
 ///
 /// A tree's rows are what it costs a check, so it needs them cheap: with the
@@ -41,23 +43,51 @@ use crate::inference::draft_tree::{
 /// decided on (two processes on one card were barred), so it is the default by
 /// projection and owes a rig. Every node advertises `features::DRAFT_TREES`
 /// and checks a tree it is sent, so a peer needs no update for this to change.
-pub(super) fn trees_wanted(every_segment_on_a_card: bool, drafter_on_a_card: bool) -> bool {
+///
+/// The round trip: trees were measured winning only over 385-425 ms links,
+/// and a short link is where they lose most. There a check costs ~30 ms, and
+/// a missed seed's regrow (eight drafter forwards, ~155 ms on a card) is most
+/// of the round. The schedule model (`examples/tree_schedule_sim.py`,
+/// 2026-10-21, calibrated to TH↔AU within ~10%) puts tree rounds at 21.7
+/// tok/s against the chain stream's 47.6 at 20 ms with the drafter on a card.
+/// Sizing the regrow ([`TreeRounds::grow_size`]) brings that to 41.0. Unknown
+/// is short: the chain stream was measured on every link it runs on.
+pub(super) fn trees_wanted(
+    every_segment_on_a_card: bool,
+    drafter_on_a_card: bool,
+    farthest_round_trip_ms: Option<u32>,
+) -> bool {
     trees_wanted_given(
         std::env::var("SWARMLLM_DRAFT_TREES").ok().as_deref(),
         every_segment_on_a_card,
         drafter_on_a_card,
+        farthest_round_trip_ms,
     )
 }
+
+/// The shortest round trip to the farthest peer segment at which trees are
+/// the default. Between ~150 and ~400 ms the schedule model puts tree rounds
+/// within its own error of the chain stream (−6% at 300 ms, against a chain
+/// stream it prices 25-50% fast on a long link, where it leaves out each
+/// chunk's fixed cost and a restart's thrown-away work). So the line is at
+/// 300 ms, under the shortest link trees were measured winning on (385 ms),
+/// until a rig at 20 and 300 ms with the drafter on a card moves it.
+pub(super) const TREES_LEAST_ROUND_TRIP_MS: u32 = 300;
 
 fn trees_wanted_given(
     setting: Option<&str>,
     every_segment_on_a_card: bool,
     drafter_on_a_card: bool,
+    farthest_round_trip_ms: Option<u32>,
 ) -> bool {
     match setting.map(str::trim) {
         Some("1") => true,
         Some("0") => false,
-        _ => every_segment_on_a_card && drafter_on_a_card,
+        _ => {
+            every_segment_on_a_card
+                && drafter_on_a_card
+                && farthest_round_trip_ms.is_some_and(|ms| ms >= TREES_LEAST_ROUND_TRIP_MS)
+        }
     }
 }
 
@@ -88,10 +118,13 @@ const BESIDE_LEAST_MS: f64 = 15.0;
 /// "Projections"); the check keeps only the rows that pay.
 const MOST_ROWS_GROWN: u32 = 64;
 const FEWEST_ROWS_GROWN: u32 = 16;
-/// Drafter forwards a tree is grown in — the deepest path it can hold. Each
-/// forward reads `rows / STEPS` guesses at once, which costs a card little
-/// more than one.
+/// Drafter forwards a tree is grown in at most — the deepest path it can
+/// hold. Each forward reads `rows / STEPS` guesses at once, which costs a card
+/// little more than one.
 const STEPS: u32 = 8;
+/// The depths a tree grown before its check may be given
+/// ([`TreeRounds::grow_size`]): fewer forwards where the check is short.
+const STEP_CHOICES: [u32; 4] = [1, 2, 4, STEPS];
 
 /// One reply's tree rounds.
 #[derive(Debug)]
@@ -112,8 +145,19 @@ pub(super) struct TreeRounds {
     /// The next check's tree, grown while the last check was on its way and
     /// cut to the part under that check's outcome (`GrownTree::after`).
     seed: Option<GrownTree>,
-    /// What growing a tree before its check took, recently (ms).
-    grow_ms: Option<f64>,
+    /// What one drafter forward of a tree grown before its check took,
+    /// recently (ms): the growth's time over its steps and one more, the
+    /// call's read of what came before.
+    forward_ms: Option<f64>,
+    /// Levels of the checked trees that held the reply's token, and walks that
+    /// stopped where the tree had followers and none was the reply's, both
+    /// recently: [`Self::level_acceptance`]'s two counts.
+    level_hits: f64,
+    level_misses: f64,
+    /// Is a growth before the check sized by what it buys, or always
+    /// [`STEPS`] deep? `SWARMLLM_TREE_REGROW=fixed` for an A/B inside one
+    /// binary.
+    sized_growth: bool,
     /// How far a call grown beside a check ran past the check's answer,
     /// recently (ms) — taken off the next one's time.
     beside_overrun_ms: f64,
@@ -129,6 +173,10 @@ pub(super) struct TreeRounds {
     /// Drafting the rounds waited for, and drafting beside their checks (ms).
     pub draft_ms_waited: f64,
     pub draft_ms_beside: f64,
+    /// Trees grown before their check, and the drafter forwards they were
+    /// given in all ([`Self::grow_size`]).
+    pub grown_before: u32,
+    pub steps_grown_before: u32,
 }
 
 /// One tree check, ready to send.
@@ -168,7 +216,14 @@ impl TreeRounds {
             recent_sent: f64::from(MOST_ROWS_GROWN),
             recent_kept: 0.0,
             seed: None,
-            grow_ms: None,
+            forward_ms: None,
+            // A drafter's likeliest guess is the reply's about three times in
+            // four (Sequoia's positional figures, as
+            // `examples/tree_schedule_sim.py` takes them): a = 0.75 until
+            // walks say otherwise.
+            level_hits: 3.0,
+            level_misses: 1.0,
+            sized_growth: std::env::var("SWARMLLM_TREE_REGROW").as_deref() != Ok("fixed"),
             beside_overrun_ms: 0.0,
             rounds: 0,
             guesses_sent: 0,
@@ -178,6 +233,8 @@ impl TreeRounds {
             seed_misses: 0,
             draft_ms_waited: 0.0,
             draft_ms_beside: 0.0,
+            grown_before: 0,
+            steps_grown_before: 0,
         }
     }
 
@@ -203,14 +260,18 @@ impl TreeRounds {
     /// grow) > (1 + seed) / check`, each side's tokens the check's sample plus
     /// the guesses expected kept (the calibrated ratings' sum, the same
     /// reading [`worth_checking`] prices rows by; a grown tree is expected to
-    /// keep what rounds have recently kept). An empty seed, or one with no
-    /// measured check or growth to weigh it by, is grown.
+    /// keep what rounds have recently kept), the growth the one
+    /// [`Self::grow_size`] would give. An empty seed, or one with no measured
+    /// check or growth to weigh it by, is grown.
     pub(super) fn grow_before_the_check(
         &self,
         seed: &GrownTree,
         price: Option<(f64, f64)>,
     ) -> bool {
-        let (Some((fixed_ms, per_row_ms)), Some(grow_ms)) = (price, self.grow_ms) else {
+        let (rows, per_step) = self.grow_size(price);
+        let (Some((fixed_ms, per_row_ms)), Some(grow_ms)) =
+            (price, self.growth_ms(rows.div_ceil(per_step)))
+        else {
             return true;
         };
         if seed.tokens.is_empty() {
@@ -228,10 +289,33 @@ impl TreeRounds {
         (1.0 + from_growth) / (check_ms + grow_ms) > (1.0 + from_seed) / check_ms
     }
 
-    /// Record a tree grown before its check (`ms` waited for it).
-    pub(super) fn note_grown_before(&mut self, ms: f64) {
+    /// Record a tree grown before its check in `steps` drafter forwards
+    /// (`ms` waited for it).
+    pub(super) fn note_grown_before(&mut self, ms: f64, steps: u32) {
         self.draft_ms_waited += ms;
-        self.grow_ms = Some(self.grow_ms.map_or(ms, |g| 0.7 * g + 0.3 * ms));
+        self.grown_before += 1;
+        self.steps_grown_before += steps;
+        let per_forward = ms / f64::from(steps + 1);
+        self.forward_ms = Some(
+            self.forward_ms
+                .map_or(per_forward, |f| 0.7 * f + 0.3 * per_forward),
+        );
+    }
+
+    /// What growing a tree in `steps` forwards should take (ms), from what
+    /// the drafter's recent forwards took: `steps` and one more, the call's
+    /// read of what came before. `None` before any growth was timed.
+    fn growth_ms(&self, steps: u32) -> Option<f64> {
+        self.forward_ms.map(|f| f * f64::from(steps + 1))
+    }
+
+    /// How often a level of a checked tree held the reply's token, recently:
+    /// kept guesses over kept guesses plus the walks that stopped with
+    /// followers to choose from (a geometric run's estimate where some runs
+    /// are cut short — a walk that reached a leaf saw the tree end, not a
+    /// miss, so a shallow tree does not teach that the drafter is poor).
+    pub(super) fn level_acceptance(&self) -> f64 {
+        (self.level_hits / (self.level_hits + self.level_misses)).clamp(0.0, 0.99)
     }
 
     /// The time a call growing beside a check of `rows` rows is given (ms):
@@ -242,7 +326,7 @@ impl TreeRounds {
     pub(super) fn beside_budget_ms(&self, price: Option<(f64, f64)>, rows: usize) -> Option<u32> {
         let predicted = match price {
             Some((fixed_ms, per_row_ms)) => fixed_ms + per_row_ms * rows as f64,
-            None => self.grow_ms?,
+            None => self.growth_ms(STEPS)?,
         };
         let given = BESIDE_SHARE * predicted - self.beside_overrun_ms;
         (given >= BESIDE_LEAST_MS).then_some(given as u32)
@@ -278,13 +362,49 @@ impl TreeRounds {
         self.rounds_seeded += 1;
     }
 
-    /// The tree the drafter grows next, `(rows, per_step)`: twice what checks
-    /// have recently kept a place for, between [`FEWEST_ROWS_GROWN`] and
-    /// [`MOST_ROWS_GROWN`], in [`STEPS`] forwards.
-    pub(super) fn grow_size(&self) -> (u32, u32) {
-        let rows =
+    /// The tree the drafter grows before a check, `(rows, per_step)`: as wide
+    /// a forward as twice what checks have recently kept a place for, between
+    /// [`FEWEST_ROWS_GROWN`] and [`MOST_ROWS_GROWN`] over [`STEPS`] forwards,
+    /// and as many forwards of the [`STEP_CHOICES`] as buy the most tokens per
+    /// ms of the round (#134 (a)): `(1 + E(s)) / (check(s) + grow(s))`, with
+    /// E(s) = a + a² + … + aˢ at [`Self::level_acceptance`]'s a, the check at
+    /// its fitted `price` for the rows grown, the growth at the drafter's
+    /// measured forward. Sequoia's size rule (arXiv 2402.12374) over the
+    /// round's measured terms. On a long link the check outweighs any growth
+    /// and the deepest tree is grown; on a short one a missed seed waited for
+    /// eight forwards before a ~30 ms check, and tree rounds ran at half the
+    /// chain stream (`examples/tree_schedule_sim.py`, 2026-10-21: 21.7 tok/s
+    /// against 47.6 at 20 ms with the drafter on a card; sized, 41.0). With
+    /// no check or growth measured yet, or `SWARMLLM_TREE_REGROW=fixed`,
+    /// [`STEPS`].
+    pub(super) fn grow_size(&self, price: Option<(f64, f64)>) -> (u32, u32) {
+        let wanted =
             ((2.0 * self.recent_sent).ceil() as u32).clamp(FEWEST_ROWS_GROWN, MOST_ROWS_GROWN);
-        (rows, rows.div_ceil(STEPS).max(1))
+        let per_step = wanted.div_ceil(STEPS).max(1);
+        let steps = match (price, self.forward_ms) {
+            (Some((fixed_ms, per_row_ms)), Some(forward_ms)) if self.sized_growth => {
+                let a = self.level_acceptance();
+                let lead = (self.reread.len() + 1) as f64;
+                let value = |s: u32| {
+                    let kept: f64 = (1..=s).map(|i| a.powi(i as i32)).sum();
+                    let check_ms =
+                        (fixed_ms + per_row_ms * (lead + f64::from(per_step * s))).max(1.0);
+                    (1.0 + kept) / (check_ms + forward_ms * f64::from(s + 1))
+                };
+                // Deepest first, so a tie keeps the deeper tree.
+                STEP_CHOICES
+                    .iter()
+                    .rev()
+                    .map(|&s| (s, value(s)))
+                    .fold(
+                        (STEPS, f64::MIN),
+                        |best, (s, v)| if v > best.1 { (s, v) } else { best },
+                    )
+                    .0
+            }
+            _ => STEPS,
+        };
+        (per_step * steps, per_step)
     }
 
     /// The check for this round: the rows read again, `last`, then the guesses
@@ -400,6 +520,18 @@ impl TreeRounds {
             .enumerate()
             .take_while(|&(i, &r)| r == check.guessed_from + i)
             .count();
+        // Each kept guess is a level that held the reply's token; a walk that
+        // stopped where the tree had followers is one that did not. One that
+        // stopped at a leaf saw the tree end, and says nothing.
+        let stopped_at = rows
+            .last()
+            .copied()
+            .unwrap_or(check.guessed_from.saturating_sub(1));
+        let missed = tree
+            .children(Some(stopped_at))
+            .any(|c| c >= check.guessed_from);
+        self.level_hits = 0.7 * self.level_hits + 0.3 * kept.len() as f64;
+        self.level_misses = 0.7 * self.level_misses + 0.3 * f64::from(u8::from(missed));
         self.reread = kept[in_place..].to_vec();
         if check.rated > 0.05 {
             let held = kept.len() as f64 / check.rated;
@@ -441,18 +573,20 @@ mod tests {
         }
     }
 
+    const FAR: Option<u32> = Some(420);
+
     /// Trees by default where every segment runs on a card; the setting
     /// forces them on (`1`) or off (`0`) whatever the plan, and anything else
     /// leaves the choice to the plan.
     #[test]
     fn trees_are_wanted_on_cards_unless_the_setting_says_otherwise() {
-        assert!(trees_wanted_given(None, true, true));
-        assert!(!trees_wanted_given(None, false, true));
-        assert!(trees_wanted_given(Some("1"), false, false));
-        assert!(trees_wanted_given(Some(" 1 "), false, false));
-        assert!(!trees_wanted_given(Some("0"), true, true));
-        assert!(trees_wanted_given(Some("yes"), true, true));
-        assert!(!trees_wanted_given(Some("yes"), false, true));
+        assert!(trees_wanted_given(None, true, true, FAR));
+        assert!(!trees_wanted_given(None, false, true, FAR));
+        assert!(trees_wanted_given(Some("1"), false, false, None));
+        assert!(trees_wanted_given(Some(" 1 "), false, false, None));
+        assert!(!trees_wanted_given(Some("0"), true, true, FAR));
+        assert!(trees_wanted_given(Some("yes"), true, true, FAR));
+        assert!(!trees_wanted_given(Some("yes"), false, true, FAR));
     }
 
     /// The segments on cards are not enough: a drafter on the processor
@@ -460,9 +594,35 @@ mod tests {
     /// over 400-token replies on the real link (2026-10-21).
     #[test]
     fn trees_are_not_the_default_where_the_drafter_runs_on_the_processor() {
-        assert!(!trees_wanted_given(None, true, false));
+        assert!(!trees_wanted_given(None, true, false, FAR));
         assert!(
-            trees_wanted_given(Some("1"), true, false),
+            trees_wanted_given(Some("1"), true, false, FAR),
+            "the switch still forces them"
+        );
+    }
+
+    /// Cards everywhere are not enough either: over a short link a check
+    /// costs ~30 ms and the chain stream beat tree rounds two to one in the
+    /// schedule model, so trees are the default only where the farthest
+    /// segment is measured far away, and an unmeasured one is not.
+    #[test]
+    fn trees_are_the_default_only_over_a_long_measured_link() {
+        assert!(!trees_wanted_given(None, true, true, Some(20)));
+        assert!(!trees_wanted_given(
+            None,
+            true,
+            true,
+            Some(TREES_LEAST_ROUND_TRIP_MS - 1)
+        ));
+        assert!(trees_wanted_given(
+            None,
+            true,
+            true,
+            Some(TREES_LEAST_ROUND_TRIP_MS)
+        ));
+        assert!(!trees_wanted_given(None, true, true, None), "unmeasured");
+        assert!(
+            trees_wanted_given(Some("1"), true, true, Some(20)),
             "the switch still forces them"
         );
     }
@@ -547,7 +707,7 @@ mod tests {
     fn a_call_beside_a_check_is_given_the_time_the_check_takes() {
         let mut t = TreeRounds::new();
         assert_eq!(t.beside_budget_ms(None, 20), None, "nothing measured yet");
-        t.note_grown_before(200.0);
+        t.note_grown_before(200.0, STEPS);
         assert_eq!(t.beside_budget_ms(None, 20), Some(170));
         assert_eq!(t.beside_budget_ms(Some((400.0, 5.0)), 20), Some(425));
         assert_eq!(t.beside_budget_ms(Some((10.0, 0.0)), 20), None);
@@ -571,11 +731,70 @@ mod tests {
         }
         t.calibration = 1.0;
         // A drafter on a card grows in 50 ms beside a 900 ms check: grow.
-        t.note_grown_before(50.0);
+        t.note_grown_before(50.0, STEPS);
         assert!(t.grow_before_the_check(&seed, Some((900.0, 0.0))));
         // One on the processor takes 1500 ms: check the seed as it is.
-        t.grow_ms = Some(1500.0);
+        t.forward_ms = Some(1500.0 / f64::from(STEPS + 1));
         assert!(!t.grow_before_the_check(&seed, Some((900.0, 0.0))));
+    }
+
+    /// A missed seed is regrown only as deep as pays (#134 (a)). A card
+    /// drafter's forward is ~19 ms (a 64-row tree from nothing in 155-171
+    /// ms): before a ~30 ms check on a short link one forward buys the most
+    /// tokens per ms of the round, and eight cost the round six times the
+    /// check; before a ~425 ms check all eight do. Unmeasured, eight.
+    #[test]
+    fn a_missed_seed_is_regrown_only_as_deep_as_pays() {
+        let mut t = TreeRounds::new();
+        assert_eq!(t.grow_size(Some((10.0, 0.3))), (64, 8), "no growth timed");
+        t.note_grown_before(171.0, STEPS);
+        assert_eq!(t.grow_size(None), (64, 8), "no check priced");
+        assert_eq!(t.grow_size(Some((10.0, 0.3))), (8, 8), "a short link");
+        assert_eq!(t.grow_size(Some((425.0, 0.3))), (64, 8), "a long link");
+        assert_eq!(t.grown_before, 1);
+        assert_eq!(t.steps_grown_before, STEPS);
+    }
+
+    /// A level's acceptance is learned from where walks stopped: at a miss
+    /// (the tree had followers there, none the reply's) it falls; at a leaf
+    /// it does not, or a shallow tree would teach that the drafter is poor
+    /// and the next tree be grown shallower still.
+    #[test]
+    fn a_walk_that_reaches_a_leaf_is_not_a_miss() {
+        let prior = TreeRounds::new().level_acceptance();
+        assert!((prior - 0.75).abs() < 1e-9);
+        // Kept the whole trunk 10 → 12 → 13, a leaf: no miss, three levels held.
+        let mut t = TreeRounds::new();
+        for _ in 0..20 {
+            let c = t.check(7, &grown(), None, 100).unwrap();
+            t.settle(&c, &[10, 12, 13, 1]).unwrap();
+        }
+        assert!(t.level_acceptance() > 0.9, "{}", t.level_acceptance());
+        // Kept 11, a leaf too.
+        let mut t = TreeRounds::new();
+        for _ in 0..20 {
+            let c = t.check(7, &grown(), None, 100).unwrap();
+            t.settle(&c, &[11, 1]).unwrap();
+        }
+        assert!(t.level_acceptance() > prior, "{}", t.level_acceptance());
+        // Kept 10, then 12 was not the reply's though 10 had followers: a miss.
+        let mut t = TreeRounds::new();
+        for _ in 0..20 {
+            let c = t.check(7, &grown(), None, 100).unwrap();
+            t.settle(&c, &[10, 1]).unwrap();
+        }
+        assert!(
+            (t.level_acceptance() - 0.5).abs() < 0.05,
+            "{}",
+            t.level_acceptance()
+        );
+        // Nothing kept with followers to choose from.
+        let mut t = TreeRounds::new();
+        for _ in 0..20 {
+            let c = t.check(7, &grown(), None, 100).unwrap();
+            t.settle(&c, &[1]).unwrap();
+        }
+        assert!(t.level_acceptance() < 0.3, "{}", t.level_acceptance());
     }
 
     #[test]

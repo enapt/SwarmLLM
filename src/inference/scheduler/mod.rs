@@ -5147,7 +5147,7 @@ impl PipelineScheduler {
         // The ping is a request_response round trip too, but taken when the
         // peer is idle — it cannot see the queueing a loaded event loop adds
         // to every forward (gotcha #386), which is the figure routing prices.
-        let measured = entry.as_ref().and_then(|p| p.ack_srtt_ms.or(p.latency_ms));
+        let measured = entry.as_ref().and_then(|p| p.round_trip_ms());
         let trust = entry.as_ref().map(|p| p.trust_score).unwrap_or(0.3);
         let direct = self.shared_state.connected_node_ids.contains(node_id);
 

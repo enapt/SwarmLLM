@@ -960,6 +960,45 @@ fn every_segment_on_a_card(
         })
 }
 
+/// How far away the farthest peer segment of a plan is (ms): the least round
+/// trip recently measured to each peer — the window's minimum
+/// (`metrics.network_coord_samples`, as the network coordinate and the near
+/// chains read distance), never `PeerInfo::round_trip_ms`, which is a COST:
+/// its smoothed figure (fed forwards up to 256 KB, transfer included, gotcha
+/// #446) read 2,500-5,000 ms on a 20 ms rig link through a node's first
+/// request, and a short link would have been taken for a long one.
+/// `dsd_tree::trees_wanted` reads it — trees pay over a long link and lose
+/// over a short one. `None` where the plan has no peer segment, or any peer
+/// segment is unmeasured: unknown is neither near nor far.
+pub(super) fn farthest_segment_round_trip_ms(
+    shared_state: &SharedState,
+    segments: &[crate::types::PipelineSegment],
+) -> Option<u32> {
+    farthest_round_trip(segments, shared_state.identity.node_id(), |node| {
+        let least_ms = shared_state
+            .metrics
+            .network_coord_samples
+            .get(node)
+            .and_then(|samples| samples.min())?;
+        Some(least_ms.round() as u32)
+    })
+}
+
+/// [`farthest_segment_round_trip_ms`] over its one reading.
+fn farthest_round_trip(
+    segments: &[crate::types::PipelineSegment],
+    local: &crate::types::NodeId,
+    round_trip: impl Fn(&crate::types::NodeId) -> Option<u32>,
+) -> Option<u32> {
+    segments
+        .iter()
+        .filter(|s| s.node_id != *local)
+        .try_fold(None, |farthest: Option<u32>, s| {
+            Some(farthest.max(Some(round_trip(&s.node_id)?)))
+        })
+        .flatten()
+}
+
 fn peer_walks_at_tail(shared_state: &SharedState, node_id: &crate::types::NodeId) -> bool {
     use swarmllm_types::node::features::{
         FORWARD_GENERATED_IDS, FORWARD_SAMPLING, SPEC_WALK_AT_TAIL,
@@ -2281,6 +2320,88 @@ mod tests {
             !every_segment_on_a_card(&[], &here, || true, peer_on_card),
             "no plan, no trees"
         );
+    }
+
+    /// The link a plan's checks cross is its FARTHEST peer's: a check reaches
+    /// every segment, so the near one's 20 ms does not make a 420 ms plan
+    /// near. This node's own segment is no exchange at all, and one unmeasured
+    /// peer leaves the whole plan unknown — never read as near or far.
+    #[test]
+    fn a_plan_is_as_far_as_its_farthest_peer() {
+        let here = NodeId([1; 32]);
+        let near = NodeId([2; 32]);
+        let far = NodeId([3; 32]);
+        let unmeasured = NodeId([4; 32]);
+        let rtt = |n: &NodeId| match n.0[0] {
+            2 => Some(20),
+            3 => Some(420),
+            _ => None,
+        };
+        let plan = |nodes: &[&NodeId]| -> Vec<PipelineSegment> {
+            nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| remote_segment(n, (i as u32 * 7, (i as u32 + 1) * 7)))
+                .collect()
+        };
+        assert_eq!(
+            farthest_round_trip(&plan(&[&here, &near, &far]), &here, rtt),
+            Some(420)
+        );
+        assert_eq!(
+            farthest_round_trip(&plan(&[&far, &near]), &here, rtt),
+            Some(420),
+            "the order of the hops does not matter"
+        );
+        assert_eq!(
+            farthest_round_trip(&plan(&[&here, &near]), &here, rtt),
+            Some(20)
+        );
+        assert_eq!(
+            farthest_round_trip(&plan(&[&here, &far, &unmeasured]), &here, rtt),
+            None,
+            "one unmeasured peer"
+        );
+        assert_eq!(
+            farthest_round_trip(&plan(&[&here]), &here, rtt),
+            None,
+            "no peer at all"
+        );
+    }
+
+    /// The rig's first request on a 20 ms link (2026-10-21): the smoothed
+    /// forwarding cost read 2,500 ms while the far machine loaded the model,
+    /// and a gate reading it took the short link for a long one. The distance
+    /// is the least round trip measured, whatever the cost reads.
+    #[test]
+    fn a_plan_is_as_far_as_the_least_round_trip_measured_not_its_smoothed_cost() {
+        let state = make_test_state();
+        let here = state.identity.node_id().clone();
+        let peer = NodeId([7; 32]);
+        let mut info = peer_advertising(&peer, 0);
+        info.ack_srtt_ms = Some(2_500);
+        info.latency_ms = Some(2_400);
+        state.peer_registry.insert(peer.clone(), info);
+        let segments = vec![
+            remote_segment(&here, (0, 14)),
+            remote_segment(&peer, (14, 28)),
+        ];
+        assert_eq!(
+            farthest_segment_round_trip_ms(&state, &segments),
+            None,
+            "a peer with no round trip measured is unknown, not 2.5 s away"
+        );
+        {
+            let mut samples = state
+                .metrics
+                .network_coord_samples
+                .entry(peer.clone())
+                .or_default();
+            for (at, ms) in [(1_000, 2_600.0), (2_000, 20.6), (3_000, 31.0)] {
+                samples.observe(at, ms);
+            }
+        }
+        assert_eq!(farthest_segment_round_trip_ms(&state, &segments), Some(21));
     }
 
     /// Play every peer as a SERVING NODE answers a piece of a prompt pass:
