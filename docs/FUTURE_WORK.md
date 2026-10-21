@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #325**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #326**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -70,8 +70,9 @@ speed is what the swarm is for, so split speed for large models is the top track
    through a chain of machines, guessing for a user who holds none of the model and trees in
    every segment are built (2026-10-20); the head's bounded wait and a route carried to the head
    (10-21); trees the default where every segment runs on a card (5.33-5.74 vs the stream's
-   5.01-5.05 on a real ~405 ms link, #134). Next: the drafter's wait after a missed seed, near
-   peers over far ones (#192).
+   5.01-5.05 on a real ~405 ms link, #134). Next: the card's 9-63-row matmul, 3.3-3.6× llama.cpp's
+   time at 16-32 rows on every machine of a split (#325); the drafter's wait after a missed seed;
+   near peers over far ones (#192).
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
@@ -1955,6 +1956,27 @@ measure unbatched aggregate against forced batching before changing anything. A 
 segment still ends the chain when the requester holds the tail (the delegated split #143
 covers only requesters holding nothing).
 
+#### #325 — A card multiplies 9-63 rows with llama.cpp's OLD kernel: 3.3-3.6× llama.cpp's time at 16-32 rows
+`P2` · perf-split · **OPEN** — 2026-10-21 · history: this entry
+
+A tree check carries 16-64 rows through every machine of a split, and a prompt chunk hundreds.
+Vendored `quantized/cuda.rs::dequantize_matmul` sends 2-8 rows to `mul_mat_vec_via_q8_1`, 9-63 to
+`mul_mat_via_q8_1` — llama.cpp's old dp4a MMQ with a fixed 64-column tile, no tensor cores — and
+64+ to a dequantize + cuBLAS f16 GEMM. Current llama.cpp runs its int8 tensor-core MMQ (`mma.cuh`,
+tile width chosen per batch, stream-k) for every batch above 8 rows on a card that has them
+(`ggml_cuda_should_use_mmq` → `turing_mma_available`). Measured 2026-10-21 on this RTX 3070, Qwen2.5
+Coder 7B Q4_K_M whole, at a 300-token depth, one CUDA process (`~/swarmllm-318/rowcost.sh`; ours:
+`prefill_bench` width sweep, min of pairs; llama.cpp: `llama-bench -fa 1 -r 10`, mean):
+
+| rows | 1 | 2 | 4 | 8 | 16 | 32 | 64 |
+|---|---|---|---|---|---|---|---|
+| ours, ms | 14.6 | 16.7 | 25.8 | 46.7 | 83.3 | 84.4 | 107.8 |
+| llama.cpp, ms | 16.4 | 16.3 | 21.6 | 35.2 | 22.9 | 25.8 | 37.4 |
+
+Next: port llama.cpp's MMQ (its `mmq.cuh` + `mma.cuh` + the activation's `block_q8_1_mmq`
+quantizer) into the vendored candle-kernels as a library launched on the device's one stream,
+for 9+ rows on cards with int8 tensor cores; A/B in one binary; replies judged against llama.cpp.
+
 #### #134 — Split decode: draft trees wait for their drafter, and a drafter the node does not hold is unbuilt (the pipelined prompt pass is #171)
 `P3` · perf-split · **PARTIAL** — 2026-10-21 · history: archive row #134; plan: `split_speculation.md`, `large_model_splits.md` § "Draft trees"
 
@@ -1973,11 +1995,20 @@ tree from nothing before the check: 289-416 ms of a ~0.85-0.95 s round with the 
 processor. A card head's drafter is there whenever the target fills the card (a card plan is
 not cut for it, #275 (4) — corrected 2026-10-21, an earlier line here said otherwise), which is
 why the default now needs the drafter on the card. The drafter's processor width is the
-contribution's (4 of 8 threads on that run: 16 ms a single-row step); (b) a stream of trees
-(several in flight); (c) **owed before the release that carries the default: a card head with
-its drafter on the card, against the stream, at 160 and 400 tokens** — the default there is a
-projection (~40 ms per regrow instead of ~300); this boot keeps one CUDA process on the card. If
-trees do not win there, the default goes off. Remaining from the plan: acquiring a drafter a node does not already hold (today it
+contribution's (4 of 8 threads on that run: 16 ms a single-row step). **On the card
+(2026-10-21, TH↔AU, receipt DIAG):** a round of ~760-820 ms was the network's ~425 ms (minimum
+RTT 419), the regrow after a missed seed 172-211 ms (10-15 of 24-29 rounds), the head's tree
+forward ~100 ms received→computed beside the drafter's call, the far side 59 ms. The drafter now
+ranks its followers on the card (`draft::likeliest_rows_where_they_are`): a 64-row growth from
+nothing 208 → 155 ms, a seed read 100 → 35 ms (`SWARM_BENCH_GROW`, min of N). What is left of a
+regrow is the tree steps' standard attention (~40 ms; a chain step on flash is 11.9 ms at 8 rows,
+on standard attention 16.5, as a tree 18.2) and the rows' quantized matmul on both machines (#325);
+(b) a stream of trees (several in flight); (c) **owed before the release that carries the
+default: a card head with its drafter on the card, against the stream, at 160 and 400 tokens** —
+at 160 it ran once by accident on 2026-10-21 (the pool gave the drafter a card worker of its own
+beside the head's half): 7.14 / 8.31 / 8.78 tok/s against the stream's 5.01-5.05 earlier that day;
+400 is still owed, and this boot keeps one CUDA process on the card. If trees do not win there,
+the default goes off. Remaining from the plan: acquiring a drafter a node does not already hold (today it
 chooses only among held models); the pipelined prompt pass (Phase 3) is #171. The
 same-model-at-fewer-bits drafter is decided against as a default (#144, § "Decided").
 

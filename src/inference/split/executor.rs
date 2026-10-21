@@ -221,7 +221,7 @@ impl SplitModel {
     /// a forward; the worker wraps a check that carries one, the drafter each
     /// step of the tree it grows. Refused, before `f` runs, by a model whose
     /// layers cannot read one ([`Self::draft_tree_refusal`]).
-    pub(crate) fn with_draft_tree<R>(
+    pub fn with_draft_tree<R>(
         &mut self,
         tree: crate::inference::draft_tree::DraftTree,
         f: impl FnOnce(&mut Self) -> R,

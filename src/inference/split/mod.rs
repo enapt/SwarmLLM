@@ -42,7 +42,7 @@ pub use super::tensor_util::{
 pub use super::tokenizer::{BpeTokenizer, SplitTokenizer, SpmTokenizer};
 
 // Re-export from submodules so that `crate::inference::split::SplitModel` etc. continue to work.
-pub(crate) use self::draft::TreeGrowth;
+pub use self::draft::TreeGrowth;
 pub use self::entry::BatchItem;
 pub use self::entry::{trim_split_model_cache, SplitModelEntry, SplitModelKey};
 pub(crate) use self::gguf_meta::tensor_byte_size;

@@ -10,7 +10,7 @@ pub(crate) mod cpu_pools;
 pub(crate) mod cuda_graph;
 pub(crate) mod cuda_pool;
 pub mod decode_attn;
-pub(crate) mod draft_tree;
+pub mod draft_tree;
 pub mod dsd_controller;
 pub mod executor;
 pub mod fast_math;

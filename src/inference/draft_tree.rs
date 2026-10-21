@@ -18,7 +18,7 @@ pub(crate) const MAX_TREE_ROWS: usize = 512;
 /// The shape of a tree of guesses: for every row, in the order the rows are
 /// written to the cache, the row it follows.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DraftTree {
+pub struct DraftTree {
     /// Where the tree's first row sits in the cache: everything before it is
     /// confirmed context, and every row reads all of it.
     base: usize,
@@ -33,7 +33,7 @@ impl DraftTree {
     /// A tree from its parents, refused when a row names a parent that does not
     /// come before it — the shape a cache written in row order could not hold —
     /// or when it is past [`MAX_TREE_ROWS`].
-    pub(crate) fn new(base: usize, parents: Vec<Option<u16>>) -> Result<Self, String> {
+    pub fn new(base: usize, parents: Vec<Option<u16>>) -> Result<Self, String> {
         // A forward at position 0 empties the cache it writes
         // (`layers::append_to_cache`), so a tree always follows something.
         if base == 0 {
@@ -257,7 +257,7 @@ pub(crate) fn reorder<T: Copy>(
 /// under the drafter. A path's rating never rises along it, so the guesses
 /// rated above any bar form a tree too ([`worth_checking`]).
 #[derive(Debug, Clone, PartialEq, Default)]
-pub(crate) struct GrownTree {
+pub struct GrownTree {
     pub tokens: Vec<u32>,
     pub parents: Vec<Option<u16>>,
     pub path_logp: Vec<f32>,

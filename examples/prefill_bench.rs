@@ -26,6 +26,11 @@
 //! `SWARM_BENCH_CHUNK=128` reads the prompt in chunks the way a node's prefill
 //! pacer does — compare a node against the bench with it set, since one
 //! forward over the whole prompt is a different attention shape.
+//! `SWARM_BENCH_SPEC_TREE=1` adds the same K rows as a tree of guesses (#134),
+//! `SWARM_BENCH_LAYERS=0-14` loads one segment of a split (a split's head,
+//! whose tree check is a forward like this), and `SWARM_BENCH_GROW=64,8` times
+//! a drafter growing a tree of 64 rows 8 at a time, its rows ranked on the
+//! host against where its logits are (`SWARMLLM_TREE_RANK`).
 //!
 //! **Min of N, not mean** — see the note on `bench` in
 //! `src/inference/layers/mod.rs`. Every source of error here is additive, so
@@ -67,6 +72,22 @@ fn load(model_dir: &Path) -> anyhow::Result<SplitModel> {
         shard_files.len(),
         manifest.shards.len()
     );
+    // `SWARM_BENCH_LAYERS=0-14` loads one segment of a split, as a node holding
+    // that part does: the first returns hidden states, not logits.
+    let layers = manifest.num_layers as usize;
+    let (start, end) = match std::env::var("SWARM_BENCH_LAYERS") {
+        Ok(range) => {
+            let (a, b) = range
+                .split_once('-')
+                .ok_or_else(|| anyhow::anyhow!("SWARM_BENCH_LAYERS is start-end"))?;
+            (
+                a.trim().parse::<usize>()?,
+                b.trim().parse::<usize>()?.min(layers),
+            )
+        }
+        Err(_) => (0, layers),
+    };
+    anyhow::ensure!(start < end, "SWARM_BENCH_LAYERS names no layers");
 
     let tensor_entries: Vec<Vec<ShardTensorEntry>> = shard_files
         .iter()
@@ -95,10 +116,10 @@ fn load(model_dir: &Path) -> anyhow::Result<SplitModel> {
         shard_files,
         &tensor_entries,
         manifest.total_size_bytes,
-        0,
-        manifest.num_layers as usize,
-        true,
-        true,
+        start,
+        end,
+        start == 0,
+        end == layers,
     )
     .map_err(|e| anyhow::anyhow!("load: {e}"))
 }
@@ -325,6 +346,92 @@ fn main() -> anyhow::Result<()> {
     if let Ok(widths) = std::env::var("SWARM_BENCH_SPEC_WIDTHS") {
         spec_width_sweep(&mut model, &device, &widths, prompt_tokens, decode_tokens)?;
     }
+    if let Ok(grow) = std::env::var("SWARM_BENCH_GROW") {
+        tree_growth(&mut model, &device, &grow, prompt_tokens)?;
+    }
+    Ok(())
+}
+
+/// `SWARM_BENCH_GROW=rows,per_step`: what a drafter's tree costs to grow
+/// (`SplitModel::draft_tree_after`, the call a split's round waits for after
+/// a missed seed, #134) — from nothing, and from a seed of that size (the call
+/// grown beside a check starts by reading one). Each is timed with the rows
+/// ranked on the host (`SWARMLLM_TREE_RANK=host`) and where they are,
+/// interleaved, min of `SWARM_BENCH_SPEC_REPS`. Needs a whole model (a
+/// drafter): the growth reads logits.
+fn tree_growth(
+    model: &mut SplitModel,
+    device: &Device,
+    grow: &str,
+    prompt_tokens: usize,
+) -> anyhow::Result<()> {
+    use swarmllm::inference::draft_tree::GrownTree;
+    use swarmllm::inference::split::TreeGrowth;
+    let mut parts = grow.split(',').map(|p| p.trim().parse::<usize>());
+    let (Some(Ok(rows)), Some(Ok(per_step))) = (parts.next(), parts.next()) else {
+        anyhow::bail!("SWARM_BENCH_GROW is rows,per_step");
+    };
+    let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let req = "grow".to_string();
+    let ids: Vec<i64> = (0..prompt_tokens).map(|i| (i % 20000) as i64 + 1).collect();
+    let input = Tensor::from_vec(ids, &[1, prompt_tokens], &Device::Cpu)?;
+    model
+        .forward(&input, 0, &store, &req)
+        .map_err(|e| anyhow::anyhow!("growth prefill: {e}"))?;
+    sync(device);
+    // Greedy, as the 10-21 real-link runs: a sampled request draws with shared
+    // noise and reads every row whole either way.
+    let sampling = swarmllm::types::SamplingParams {
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let mut grow_once = |seed: &GrownTree, rows: usize| -> anyhow::Result<(f64, GrownTree)> {
+        let t = Instant::now();
+        let grown = model
+            .draft_tree_after(
+                &store,
+                &req,
+                prompt_tokens,
+                &[7],
+                TreeGrowth {
+                    seed,
+                    rows,
+                    per_step,
+                    grow_for: None,
+                },
+                &sampling,
+                &[],
+                None,
+                512,
+            )
+            .map_err(|e| anyhow::anyhow!("grow: {e}"))?;
+        sync(device);
+        Ok((t.elapsed().as_secs_f64(), grown))
+    };
+    let reps = env_usize("SWARM_BENCH_SPEC_REPS", 5);
+    println!("\nTREE GROWTH: {rows} rows, {per_step} a step, after {prompt_tokens} positions");
+    for (label, seeded) in [("from nothing", false), ("on a seed", true)] {
+        let mut best = [f64::MAX; 2];
+        for _ in 0..reps {
+            for (arm, rank) in ["host", "card"].iter().enumerate() {
+                std::env::set_var("SWARMLLM_TREE_RANK", rank);
+                let seed = if seeded {
+                    grow_once(&GrownTree::default(), rows)?.1
+                } else {
+                    GrownTree::default()
+                };
+                // On a seed, one step more: the read of the seed is the cost.
+                let (dt, _) = grow_once(&seed, if seeded { per_step } else { rows })?;
+                best[arm] = best[arm].min(dt);
+            }
+        }
+        std::env::remove_var("SWARMLLM_TREE_RANK");
+        println!(
+            "  {label:<14} ranked on the host {:>7.1} ms   where the logits are {:>7.1} ms",
+            best[0] * 1000.0,
+            best[1] * 1000.0
+        );
+    }
     Ok(())
 }
 
@@ -364,21 +471,44 @@ fn spec_width_sweep(
     // and each step of a draft tree's growth read them — the output head then
     // runs K times, not once.
     let all_rows = std::env::var("SWARM_BENCH_SPEC_ALL_ROWS").as_deref() == Ok("1");
-    let one_forward = |model: &mut SplitModel, pos: &mut usize, k: usize| -> anyhow::Result<f64> {
-        let step = Tensor::from_vec(vec![7i64; k], &[1, k], &Device::Cpu)?;
-        let t = Instant::now();
-        let out = if all_rows && k > 1 {
-            model.forward_verify_all_positions(&step, *pos, &store, &req)
-        } else {
-            model.forward(&step, *pos, &store, &req)
-        }
-        .map_err(|e| anyhow::anyhow!("spec sweep forward: {e}"))?;
-        sync(device);
-        let dt = t.elapsed().as_secs_f64();
-        drop(out);
-        *pos += k;
-        Ok(dt)
-    };
+    // `SWARM_BENCH_SPEC_TREE=1` adds a third arm: the same K rows as a TREE of
+    // guesses (#134), each row at its depth and reading only its ancestors
+    // (`SplitModel::with_draft_tree`), as a split's tree check and the
+    // drafter's growth read them. A heap-shaped tree: row i follows row (i-1)/2.
+    let tree_arm = std::env::var("SWARM_BENCH_SPEC_TREE").as_deref() == Ok("1");
+    let one_forward =
+        |model: &mut SplitModel, pos: &mut usize, k: usize, as_tree: bool| -> anyhow::Result<f64> {
+            let step = Tensor::from_vec(vec![7i64; k], &[1, k], &Device::Cpu)?;
+            let tree = as_tree
+                .then(|| {
+                    let parents = (0..k)
+                        .map(|i| (i > 0).then(|| ((i - 1) / 2) as u16))
+                        .collect();
+                    swarmllm::inference::draft_tree::DraftTree::new(*pos, parents)
+                })
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("tree: {e}"))?;
+            let t = Instant::now();
+            let run = |m: &mut SplitModel| {
+                if all_rows && k > 1 {
+                    m.forward_verify_all_positions(&step, *pos, &store, &req)
+                } else {
+                    m.forward(&step, *pos, &store, &req)
+                }
+            };
+            let out = match tree {
+                Some(tree) => model
+                    .with_draft_tree(tree, run)
+                    .map_err(|e| anyhow::anyhow!("tree forward: {e}"))?,
+                None => run(model),
+            }
+            .map_err(|e| anyhow::anyhow!("spec sweep forward: {e}"))?;
+            sync(device);
+            let dt = t.elapsed().as_secs_f64();
+            drop(out);
+            *pos += k;
+            Ok(dt)
+        };
 
     println!(
         "\nSPEC WIDTH SWEEP at ~{} KV (interleaved 1-vs-K, min of pairs{})",
@@ -390,7 +520,8 @@ fn spec_width_sweep(
         }
     );
     println!(
-        "  width   ms/forward   vs width 1   ms/token if all K accepted   break-even acceptance"
+        "  width   ms/forward   vs width 1   ms/token if all K accepted   break-even acceptance{}",
+        if tree_arm { "   as a tree, ms" } else { "" }
     );
     let reps = env_usize("SWARM_BENCH_SPEC_REPS", 5);
     for w in widths
@@ -400,21 +531,29 @@ fn spec_width_sweep(
         if w == 0 {
             continue;
         }
-        let (mut best_one, mut best_k) = (f64::MAX, f64::MAX);
+        let (mut best_one, mut best_k, mut best_tree) = (f64::MAX, f64::MAX, f64::MAX);
         for _ in 0..reps {
-            best_one = best_one.min(one_forward(model, &mut pos, 1)?);
-            best_k = best_k.min(one_forward(model, &mut pos, w)?);
+            best_one = best_one.min(one_forward(model, &mut pos, 1, false)?);
+            best_k = best_k.min(one_forward(model, &mut pos, w, false)?);
+            if tree_arm && w > 1 {
+                best_tree = best_tree.min(one_forward(model, &mut pos, w, true)?);
+            }
         }
         // Tokens a round must land for the width to beat plain decode.
         let breakeven = best_k / best_one;
         println!(
-            "  {:>5}   {:>10.1}   {:>10.2}x   {:>26.1}   {:>21.2} of {}",
+            "  {:>5}   {:>10.1}   {:>10.2}x   {:>26.1}   {:>21.2} of {}{}",
             w,
             best_k * 1000.0,
             best_k / best_one,
             best_k * 1000.0 / w as f64,
             breakeven,
-            w
+            w,
+            if best_tree < f64::MAX {
+                format!("   {:>14.1}", best_tree * 1000.0)
+            } else {
+                String::new()
+            }
         );
     }
     Ok(())

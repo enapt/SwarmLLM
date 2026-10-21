@@ -4424,7 +4424,13 @@ the same round trip (SpecInfer, SpecExec, Sequoia, EAGLE-2).
   log-probability in `dsd_tree::STEPS` (8) forwards of the drafter, each expanding the best
   `per_step` unexpanded nodes and queueing their `TREE_CHILDREN` (8) likeliest followers; then its
   cache is cut back to the context. It answers tokens, parents and each node's path
-  log-probability (`WorkerMsg::Drafted::scores`).
+  log-probability (`WorkerMsg::Drafted::scores`). **On a card it ranks the followers where the
+  logits are** (`draft::likeliest_rows_where_they_are`, 2026-10-21): `k` picks of each row's
+  maximum, each written over with −∞, and only those pairs come back — a Qwen step had read 8 ×
+  152K logits (4.9 MB) to the host and scanned each row three times. Measured on the 0.5B drafter
+  (`prefill_bench` `SWARM_BENCH_GROW=64,8`, one CUDA process): 64 rows from nothing 208 → 155 ms,
+  on a seed 100 → 35 ms. Not where the noise is drawn per row (`coupled`, a sampled reply), nor on
+  the processor, where one pass over a row is cheaper than `k`. A/B `SWARMLLM_TREE_RANK=host`.
 - **The next tree grows while the check is on its way** (2026-10-20). Grown only before its check,
   a tree put the drafter on every round's path: on the rig, a processor drafter's ~1 s a round
   made trees 0.86× the stream, though they kept twice the tokens a round. So `dsd`'s tree round
