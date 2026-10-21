@@ -1268,14 +1268,17 @@ SHARDS_A=0,1,2,3 SHARDS_B=4,5,6,7 EXTRA_TOML=<DSD on> REPEAT=3 examples/split_ri
 refused 19 chunks and cut 3 of 3 replies short; v0.3.216 refused none.
 
 **Trees of guesses** (`pipeline::dsd_tree`, #134 — the default since 2026-10-21 where every segment
-runs whole on a card, the stream elsewhere; `SWARMLLM_DRAFT_TREES=1` / `=0` forces either): the
-coordinator's `DSD: request complete` carries `tree_rounds`, `tree_kept_a_round`,
-`tree_rows_a_round`, `tree_calibration`, `tree_rounds_seeded`, `tree_seed_misses`,
-`tree_draft_ms_waited_a_round` and `tree_draft_ms_beside_a_round`. `tree_rounds=0` on a split
-whose machines all run on cards means a segment does not read trees (`tree_check_possible`) or
-the target's or drafter's family does not (`reads_draft_trees`). A `tree_draft_ms_waited_a_round`
-near half of `check_fixed_ms` is the drafter holding each round up after a missed seed (#134 (a);
-327-416 ms against ~500 on the TH↔AU link). `SWARMLLM_PROCESSOR_MODELS=<id,…>` keeps those
+AND the drafter run whole on a card, the stream elsewhere; `SWARMLLM_DRAFT_TREES=1` / `=0` forces
+either): the coordinator's `DSD: request complete` carries `drafter_on_card`, `tree_rounds`,
+`tree_kept_a_round`, `tree_rows_a_round`, `tree_calibration`, `tree_rounds_seeded`,
+`tree_seed_misses`, `tree_draft_ms_waited_a_round` and `tree_draft_ms_beside_a_round`.
+`tree_rounds=0` with `drafter_on_card=false` is the default choosing the stream (a card head whose
+target fills the card keeps its drafter on the processor, #275 (4)); with `drafter_on_card=true` on
+a split whose machines all run on cards it means a segment does not read trees
+(`tree_check_possible`) or the target's or drafter's family does not (`reads_draft_trees`). A
+`tree_draft_ms_waited_a_round` near half of `check_fixed_ms` is the drafter holding each round up
+after a missed seed (#134 (a); 289-416 ms against ~430-500 on the TH↔AU link, drafter on the
+processor). `SWARMLLM_PROCESSOR_MODELS=<id,…>` keeps those
 models' workers on the processor (`Model will run on the CPU … reason="configured_cpu_only"`) —
 a rig's way to keep a drafter off a card that must serve one process, as llama.cpp's
 `--gpu-layers-draft 0`.

@@ -20,30 +20,44 @@ use crate::inference::draft_tree::{
 };
 
 /// May a reply's rounds check trees? Where every segment runs its layers on a
-/// card (`pipeline::every_segment_runs_on_a_card`), and anywhere with
+/// card (`pipeline::every_segment_runs_on_a_card`) AND so does the drafter
+/// (`ModelProcessPool::runs_whole_on_the_card`), and anywhere with
 /// `SWARMLLM_DRAFT_TREES=1`; never with `=0`.
 ///
-/// A tree's rows are what it costs a check, so it wins where they are cheap:
-/// on the TH↔AU link (2026-10-21, a 7B split, the head's layers on this
-/// machine's card, the Q4 drafter on its processor, the tail an RTX 3060
-/// ~410 ms away) rows cost 2-3 ms, trees kept 4.1-4.3 guesses a round and
-/// ran 5.66-5.74 tok/s against the continuous stream's 5.01-5.05. With the
+/// A tree's rows are what it costs a check, so it needs them cheap: with the
 /// head's part on its processor (the 385 ms rig, 2026-10-20) rows cost 4-18
-/// ms, trees kept 2.9-3.3 and ran 4.75-5.06 against the stream's 5.03-5.09.
-/// Every node advertises `features::DRAFT_TREES` and checks a tree it is
-/// sent, so a peer needs no update for this to change.
-pub(super) fn trees_wanted(every_segment_on_a_card: bool) -> bool {
+/// ms, trees kept 2.9-3.3 and ran 4.75-5.06 tok/s against the stream's
+/// 5.03-5.09. And it needs the drafter fast, because a check whose outcome the
+/// tree grown beside it did not hold (most of them: 40-52 of 59-78 rounds)
+/// waits for a fresh tree, eight drafter forwards. On the TH↔AU link
+/// (2026-10-21, a 7B split, the head's layers on this machine's card, the tail
+/// an RTX 3060 ~410 ms away) with the Q4 drafter kept on the PROCESSOR that
+/// wait was 289-331 ms of a ~850 ms round, and trees won at 160 tokens
+/// (5.33-5.74 against the stream's 5.01-5.05, four replies each) but lost at
+/// 400 (4.82/5.05/6.40 against 5.97/6.04/6.18) and at 28. A card head's
+/// drafter is on the processor whenever the target fills the card: a card
+/// plan is not cut to leave it room (#275 (4)). On a card the same eight
+/// forwards take ~40 ms; that shape was not measurable on the boot this was
+/// decided on (two processes on one card were barred), so it is the default by
+/// projection and owes a rig. Every node advertises `features::DRAFT_TREES`
+/// and checks a tree it is sent, so a peer needs no update for this to change.
+pub(super) fn trees_wanted(every_segment_on_a_card: bool, drafter_on_a_card: bool) -> bool {
     trees_wanted_given(
         std::env::var("SWARMLLM_DRAFT_TREES").ok().as_deref(),
         every_segment_on_a_card,
+        drafter_on_a_card,
     )
 }
 
-fn trees_wanted_given(setting: Option<&str>, every_segment_on_a_card: bool) -> bool {
+fn trees_wanted_given(
+    setting: Option<&str>,
+    every_segment_on_a_card: bool,
+    drafter_on_a_card: bool,
+) -> bool {
     match setting.map(str::trim) {
         Some("1") => true,
         Some("0") => false,
-        _ => every_segment_on_a_card,
+        _ => every_segment_on_a_card && drafter_on_a_card,
     }
 }
 
@@ -432,13 +446,25 @@ mod tests {
     /// leaves the choice to the plan.
     #[test]
     fn trees_are_wanted_on_cards_unless_the_setting_says_otherwise() {
-        assert!(trees_wanted_given(None, true));
-        assert!(!trees_wanted_given(None, false));
-        assert!(trees_wanted_given(Some("1"), false));
-        assert!(trees_wanted_given(Some(" 1 "), false));
-        assert!(!trees_wanted_given(Some("0"), true));
-        assert!(trees_wanted_given(Some("yes"), true));
-        assert!(!trees_wanted_given(Some("yes"), false));
+        assert!(trees_wanted_given(None, true, true));
+        assert!(!trees_wanted_given(None, false, true));
+        assert!(trees_wanted_given(Some("1"), false, false));
+        assert!(trees_wanted_given(Some(" 1 "), false, false));
+        assert!(!trees_wanted_given(Some("0"), true, true));
+        assert!(trees_wanted_given(Some("yes"), true, true));
+        assert!(!trees_wanted_given(Some("yes"), false, true));
+    }
+
+    /// The segments on cards are not enough: a drafter on the processor
+    /// regrows a missed tree in ~300 ms, and trees lost to the stream that way
+    /// over 400-token replies on the real link (2026-10-21).
+    #[test]
+    fn trees_are_not_the_default_where_the_drafter_runs_on_the_processor() {
+        assert!(!trees_wanted_given(None, true, false));
+        assert!(
+            trees_wanted_given(Some("1"), true, false),
+            "the switch still forces them"
+        );
     }
 
     #[test]

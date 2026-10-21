@@ -1949,19 +1949,23 @@ covers only requesters holding nothing).
 Shipped: guessing ahead on by default (v0.3.213), the continuous stream (v0.3.216, #149), walk
 at the tail, γ control, the engine drafter; **draft trees** (v0.3.246: trailer `0x10`, bit 29,
 tree masks in every segment, the next tree grown beside its check). **Since 2026-10-21 trees are
-the default where every segment runs whole on a card** (`dsd_tree::trees_wanted`), the stream
-elsewhere: on the real TH↔AU link (~405 ms, both halves on cards) trees ran 5.33-5.74 tok/s
-against the stream's 5.01-5.05 over 160 tokens; with the head's part on a processor (385 ms
+the default only where every segment AND the drafter run whole on a card**
+(`dsd_tree::trees_wanted`, `drafter_on_card` on `DSD: request complete`), the stream elsewhere:
+on the real TH↔AU link (~405 ms, both halves on cards, the drafter on the head's processor) trees
+ran 5.33-5.74 tok/s against the stream's 5.01-5.05 over 160 tokens but 4.82/5.05/6.40 against
+5.97/6.04/6.18 over 400 and ~10% slower over 28; with the head's part on a processor (385 ms
 rig) 4.75-5.06 against 5.03-5.52 (`docs/invariants/scheduling.md` § "A split checks a tree of
 guesses", Measured). Left for trees: (a) **the drafter's wait after a missed seed** — the tree
-grown beside a check held its outcome in only 3-10 of ~30 rounds, and each miss grows the next
-tree from nothing before the check: 327-416 ms of a ~0.95 s round with the drafter on the
-processor, as that run kept it (a processor head's case; a card head's planner leaves its drafter
-room on the card, #275, where a growth step costs a fraction of this). It is also why a
-28-token reply ran ~10% slower than the stream (3.42-3.99 vs 3.78-4.54). The drafter's processor
-width is the contribution's (4 of 8 threads on that run: 16 ms a single-row step); (b) a stream
-of trees (several in flight); (c) a drafter on a card, measured (this boot keeps one CUDA process
-on the card). Remaining from the plan: acquiring a drafter a node does not already hold (today it
+grown beside a check held its outcome in only 3-30 of 59-95 rounds, and each miss grows the next
+tree from nothing before the check: 289-416 ms of a ~0.85-0.95 s round with the drafter on the
+processor. A card head's drafter is there whenever the target fills the card (a card plan is
+not cut for it, #275 (4) — corrected 2026-10-21, an earlier line here said otherwise), which is
+why the default now needs the drafter on the card. The drafter's processor width is the
+contribution's (4 of 8 threads on that run: 16 ms a single-row step); (b) a stream of trees
+(several in flight); (c) **owed before the release that carries the default: a card head with
+its drafter on the card, against the stream, at 160 and 400 tokens** — the default there is a
+projection (~40 ms per regrow instead of ~300); this boot keeps one CUDA process on the card. If
+trees do not win there, the default goes off. Remaining from the plan: acquiring a drafter a node does not already hold (today it
 chooses only among held models); the pipelined prompt pass (Phase 3) is #171. The
 same-model-at-fewer-bits drafter is decided against as a default (#144, § "Decided").
 

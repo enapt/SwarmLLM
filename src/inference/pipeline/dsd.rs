@@ -394,8 +394,9 @@ impl PipelineExecutor {
         // Trees of guesses (#134, `dsd_tree`): where every segment reads one
         // and the tail walks it, each round checks a tree from our own drafter
         // instead of a chain — the longest run along whichever branch the
-        // model takes, for the same round trip. Where every segment runs on a
-        // card — a row then costs a check almost nothing (`trees_wanted`) —
+        // model takes, for the same round trip. Where every segment AND the
+        // drafter run on a card — a row then costs a check almost nothing, and
+        // a missed tree regrows in ~40 ms rather than ~300 (`trees_wanted`) —
         // they take the reply from the continuous stream below, which
         // pipelines chains.
         // The drafter grows its tree by reading it too, so its family is asked
@@ -407,13 +408,18 @@ impl PipelineExecutor {
                     .reads_draft_trees()
             })
         };
-        let trees_for_this_reply =
-            super::dsd_tree::trees_wanted(super::every_segment_runs_on_a_card(
+        // The drafter's worker is live here: its prompt read above loaded it.
+        let drafter_on_card = matches!(&drafter, Drafter::Engine(e)
+            if self.shared_state.model_process_pool.runs_whole_on_the_card(e.model_id()));
+        let trees_for_this_reply = super::dsd_tree::trees_wanted(
+            super::every_segment_runs_on_a_card(
                 &self.shared_state,
                 &self.assignment.segments,
                 &self.request.model_id,
-            )) && matches!(&drafter, Drafter::Engine(e) if reads_trees(e.model_id()))
-                && reads_trees(&self.request.model_id);
+            ),
+            drafter_on_card,
+        ) && matches!(&drafter, Drafter::Engine(e) if reads_trees(e.model_id()))
+            && reads_trees(&self.request.model_id);
         let mut trees = super::dsd_tree::TreeRounds::new();
         let trees_from_the_start = trees_for_this_reply
             && super::tree_check_possible(&self.shared_state, &self.assignment.segments);
@@ -1037,6 +1043,7 @@ impl PipelineExecutor {
             check_ms_per_position = format_args!("{:.1}", check.fit().map_or(0.0, |f| f.1)),
             checks_held_back = check.held_back().saturating_sub(held_back_before),
             draft_ms_each = format_args!("{:.1}", draft_cost.median().unwrap_or(0.0)),
+            drafter_on_card,
             tree_rounds = trees.rounds,
             tree_guesses_a_round = format_args!(
                 "{:.1}",

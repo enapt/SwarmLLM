@@ -4498,16 +4498,43 @@ other token llama.cpp's second choice at a near-tie (largest gap 0.076 logits, o
 different shape of the same arithmetic (gotcha #370), not a different reply; the short replies
 28 of 28 rank 1 in every arm (`score_notes.out`; prompt tokens 42 and 555, as the node counted).
 
-**So trees are the default where every segment runs whole on a card**
+Then LONGER replies on the same shape the same day (`~/swarmllm-318/longtree.sh`, one 400-token
+reply of the open prompt, three per arm, the arms one after the other; results in
+`~/swarmllm-318/longtree/`). A 1500-token ask was refused by the Australian peer before any of it
+ran — "0 MB available for conversations… short by 14 MB": a reply's reserve is its prompt plus up
+to 512 positions (`model_worker::REPLY_RESERVE_POSITIONS`), 1024 for that ask, and the peer's card
+had room for one quantum only (warm-ups of 8 tokens passed; `longtree_1500/`). At 400:
+
+| tok/s, 400-token reply | 1 | 2 | 3 |
+|---|---|---|---|
+| continuous stream (α 0.745) | 6.18 | 6.04 | 5.97 |
+| trees | 5.05 | 6.40 | 4.82 |
+
+The trees' replies kept 3.20 / 4.62 / 3.24 guesses a round over 95 / 71 / 94 rounds, 19-30 of
+them seeded and 40-52 seed misses, waiting 289-331 ms a round for the processor drafter. The
+stream grew with the reply (5.01-5.05 at 160 tokens → ~6.06 at 400; its first chunks are its
+cost) and trees did not (~5.5 at both). Scored against llama.cpp (`replies400.jsonl` →
+`score_open.out`): the stream 398 of 400 rank 1, trees 395-396, every other token a rank-2 near-tie
+(largest gaps 0.191 and 0.121 logits).
+
+**So trees are the default only where every segment AND the drafter run whole on a card**
 (`pipeline::every_segment_runs_on_a_card`: this node by `ModelProcessPool::runs_whole_on_the_card`
-— a live worker not short of the card — a peer by `NodeCapability::models_run_on_card`), and the
-stream elsewhere; `SWARMLLM_DRAFT_TREES=1` / `=0` forces either (`dsd_tree::trees_wanted`). Every
-node has advertised bit 29 and read a tree since v0.3.246, so the default needs no peer to update.
-What could widen it, untested: a drafter on a card (a growth step is a forward of the drafter —
-and a card head's drafter is normally there, the planner leaving it room beside the layers it
-places, #275; this run kept it on the processor only for this boot's one-process rule), fewer seed
-misses, a tree STREAM (several trees in flight, as the stream keeps chains; weighed in
-`docs/plans/large_model_splits.md` § "Draft trees").
+— a live worker not short of the card — a peer by `NodeCapability::models_run_on_card`; the
+drafter by `runs_whole_on_the_card` on its own worker, live once its prompt is read; logged as
+`drafter_on_card` on `DSD: request complete`), and the stream elsewhere;
+`SWARMLLM_DRAFT_TREES=1` / `=0` forces either (`dsd_tree::trees_wanted`). With the drafter on a
+processor trees won at 160 tokens and lost at 28 and 400 — not a default. On a card the eight
+forwards a missed seed waits for take ~40 ms instead of ~300; that shape is the default by
+PROJECTION, unmeasured: this boot barred two processes on one card. **Owed before the release
+that carries it: a card head with its drafter on the card, against the stream, at 160 and 400
+tokens; if trees do not win there, the default goes off.** ⚠ Correction (the same day,
+6057274f said otherwise): a card head's drafter is on the card only where the target's layers
+leave the card room — a CARD plan is never cut to make it some
+(`max_hostable_layers_beside_guest` returns `None` under `planning_on_card`, #275 (4)) — so with a
+large model filling the head's card it runs on the processor, and that reply takes the stream.
+What could widen trees, untested: #275 (4) (a card plan leaving its drafter room), fewer seed
+misses, a tree STREAM (several trees in flight; weighed in `docs/plans/large_model_splits.md` §
+"Draft trees").
 
 **What a change must keep:**
 - **The shape is bound in the AAD and refused malformed** — a relay reshaping a tree changes

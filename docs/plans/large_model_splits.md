@@ -310,20 +310,24 @@ until the bytes or a processor stage say otherwise.
 - **Fallback.** The request keeps today's chain loop when any of these happens:
   a peer lacks bit 29, the model's layers refuse a tree, or a tree forward is
   refused.
-- **Measured: trees win where every segment runs on a card, so they are the
-  default there (2026-10-21) and the stream elsewhere.** With the head's part on
-  a processor (2026-10-20, 385 ms emulated) a row cost the check 10-19 ms; trees
-  grown beside their check ran 4.75-5.06 tok/s against the stream's 5.03-5.52.
-  On the real Thailand↔Australia link (~405 ms) with both halves on cards a row
-  cost 2-3 ms, a tree kept 4.1-4.5 guesses a round, and trees ran 5.33-5.74
-  against 5.01-5.05 over 160 tokens; a 28-token reply ran ~10% slower, its
-  first rounds waiting for the drafter (`docs/invariants/scheduling.md` § "A
-  split checks a tree of guesses"). `SWARMLLM_DRAFT_TREES=1` / `=0` forces
-  either way. Next: the drafter's wait after a missed seed (327-416 ms of a
-  ~0.95 s round with the drafter on a processor, as this run kept it; a card
-  head's planner leaves its drafter room on the card (#275), where a growth
-  step is a fraction of that — unmeasured, this boot allows one process on the
-  card), a stream of trees.
+- **Measured: trees need the segments AND the drafter on cards, so they are the
+  default only there (2026-10-21) and the stream elsewhere.** With the head's
+  part on a processor (2026-10-20, 385 ms emulated) a row cost the check 10-19
+  ms; trees grown beside their check ran 4.75-5.06 tok/s against the stream's
+  5.03-5.52. On the real Thailand↔Australia link (~405 ms) with both halves on
+  cards and the drafter on the head's PROCESSOR, a row cost 2-3 ms and a tree
+  kept 3.2-4.6 guesses a round; trees ran 5.33-5.74 against 5.01-5.05 over 160
+  tokens, but 4.82/5.05/6.40 against 5.97/6.04/6.18 over 400 and ~10% slower
+  over 28 — each missed seed waits ~300 ms for eight processor forwards, and
+  the stream gains with length where trees do not (`docs/invariants/scheduling.md`
+  § "A split checks a tree of guesses"). With the drafter on a card those eight
+  forwards are ~40 ms: the default there is a projection, owed a rig before the
+  release that carries it. ⚠ A card head's drafter is on the card only where
+  the target leaves room — a card plan is not cut for it (#275 (4)) — so a
+  large model filling the head's card puts it on the processor (corrected
+  2026-10-21; an earlier line here said the planner leaves it room on the
+  card). `SWARMLLM_DRAFT_TREES=1` / `=0` forces either way. Next: #275 (4), a
+  stream of trees.
 - **A stream of trees, weighed 2026-10-21.** FlowSpec (arXiv 2507.02620) and
   SpecPipe (2504.04104) keep tree pieces flowing through a pipeline: rows go
   out best-first as the drafter grows them, each stage prunes against the
