@@ -3742,6 +3742,7 @@ mod inbound_forward_slot_tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         }
     }
 

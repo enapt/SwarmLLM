@@ -391,6 +391,29 @@ impl PipelineExecutor {
             finish_reason = "stop".to_string();
         }
 
+        // Trees of guesses (#134, `dsd_tree`): where every segment reads one
+        // and the tail walks it, each round checks a tree from our own drafter
+        // instead of a chain — the longest run along whichever branch the
+        // model takes, for the same round trip. Asked for (`SWARMLLM_DRAFT_TREES=1`,
+        // off by default: no faster than the stream on the rig, `trees_requested`),
+        // they take the reply from the continuous stream below, which pipelines
+        // chains.
+        // The drafter grows its tree by reading it too, so its family is asked
+        // as well: a drafter that cannot would fail its first tree and end the
+        // reply's guessing, where a chain would have kept it.
+        let reads_trees = |model: &crate::types::ModelId| {
+            self.shared_state.gguf_meta_for(model).is_some_and(|m| {
+                crate::inference::model_arch::ModelArch::from_gguf_arch(&m.architecture)
+                    .reads_draft_trees()
+            })
+        };
+        let trees_for_this_reply = super::dsd_tree::trees_requested()
+            && matches!(&drafter, Drafter::Engine(e) if reads_trees(e.model_id()))
+            && reads_trees(&self.request.model_id);
+        let mut trees = super::dsd_tree::TreeRounds::new();
+        let trees_from_the_start = trees_for_this_reply
+            && super::tree_check_possible(&self.shared_state, &self.assignment.segments);
+
         // The continuous stream (`dsd_stream`): where the peers' segments are
         // one run between this node's — one peer, or a chain of them (#318) —
         // and they serve a stream, the next chunk of
@@ -402,7 +425,7 @@ impl PipelineExecutor {
         // rounds.
         let mut streamed = false;
         if let Drafter::Engine(engine) = &mut drafter {
-            let shape = super::dsd_stream::stream_requested()
+            let shape = (super::dsd_stream::stream_requested() && !trees_from_the_start)
                 .then(|| {
                     super::dsd_stream::stream_shape(
                         &self.shared_state,
@@ -505,6 +528,223 @@ impl PipelineExecutor {
             // more than the round trips it saves (`best_gamma_for_check`).
             let gamma = gamma_now.min(remaining);
             let round_start = std::time::Instant::now();
+
+            // A tree round (`dsd_tree`). Kept guesses waiting to be read again
+            // can only be carried by one, so it is a tree round whatever else
+            // has changed — or the reply cannot go on.
+            if !trees.reread.is_empty()
+                || (trees_for_this_reply
+                    && !trees.refused
+                    && super::tree_check_possible(&self.shared_state, &self.assignment.segments))
+            {
+                if !super::tree_check_possible(&self.shared_state, &self.assignment.segments) {
+                    return Err(SwarmError::Inference(
+                        "the guesses this reply kept can no longer be checked: a segment stopped \
+                         reading trees of guesses"
+                            .into(),
+                    ));
+                }
+                // The tree: what the drafter grew beside the last check, under
+                // its outcome (the seed), checked as it is where growing it
+                // further would cost the round more than it adds — else grown
+                // now, on the seed.
+                let grown = match &mut drafter {
+                    Drafter::Engine(e) if !drafting_off && remaining > 1 => {
+                        let seed = trees.take_seed();
+                        if trees.grow_before_the_check(&seed, check.fit()) {
+                            let (rows, per_step) = trees.grow_size();
+                            let started = std::time::Instant::now();
+                            match e
+                                .draft_tree(
+                                    &self.shared_state,
+                                    &seed,
+                                    rows,
+                                    per_step,
+                                    None,
+                                    &self.request.sampling_params,
+                                    &generated,
+                                    noise.map(|n| n.seed()),
+                                    self.request.cancel.clone(),
+                                )
+                                .await
+                            {
+                                Ok(grown) => {
+                                    trees.note_grown_before(
+                                        started.elapsed().as_secs_f64() * 1000.0,
+                                    );
+                                    grown
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        %request_id,
+                                        drafter = %drafter_name,
+                                        error = %e,
+                                        "DSD: the drafter failed — finishing this reply without guessing ahead"
+                                    );
+                                    drafting_off = true;
+                                    Default::default()
+                                }
+                            }
+                        } else {
+                            trees.note_seeded();
+                            seed
+                        }
+                    }
+                    _ => Default::default(),
+                };
+                let tree_check =
+                    trees.check(last_token, &grown, check.fit(), remaining as usize)?;
+                let index_pos = current_pos as u32 - trees.reread.len() as u32;
+                // While the check is on its way the drafter keeps growing the
+                // tree it went out in — off the round's path, the tree version
+                // of Speculative Speculative Decoding (arXiv 2603.03251), for
+                // as long as the check is expected to take.
+                let beside_ms = (!drafting_off
+                    && remaining > 1
+                    && !grown.tokens.is_empty()
+                    && super::dsd_tree::grow_beside_requested())
+                .then(|| trees.beside_budget_ms(check.fit(), tree_check.verify_tokens.len()))
+                .flatten();
+                let beside = match (&mut drafter, beside_ms) {
+                    (Drafter::Engine(e), Some(ms)) => Some(e.draft_tree(
+                        &self.shared_state,
+                        &grown,
+                        super::dsd_tree::BESIDE_ROWS,
+                        super::dsd_tree::BESIDE_PER_STEP,
+                        Some(ms),
+                        &self.request.sampling_params,
+                        &generated,
+                        noise.map(|n| n.seed()),
+                        self.request.cancel.clone(),
+                    )),
+                    _ => None,
+                };
+                let verify = super::forward_verify_through_segments(
+                    &self.shared_state,
+                    &self.network_tx,
+                    request_id,
+                    index_pos,
+                    &self.assignment.segments,
+                    &tree_check.verify_tokens,
+                    pending_truncate,
+                    Some(super::TailWalk {
+                        drafts: &tree_check.guesses,
+                        sampling: &self.request.sampling_params,
+                        generated: &generated,
+                        coupling: noise.map(|n| n.seed()),
+                        parents: &tree_check.parents,
+                    }),
+                    super::worker_requester(&self.request),
+                    self.verify_may_chain(),
+                    &mut self.chaining_disabled,
+                );
+                let ((reply, check_ms), beside) = tokio::join!(
+                    async move {
+                        let sent = std::time::Instant::now();
+                        let reply = verify.await;
+                        (reply, sent.elapsed().as_secs_f64() * 1000.0)
+                    },
+                    async move {
+                        let f = beside?;
+                        let sent = std::time::Instant::now();
+                        let grown = f.await;
+                        Some((grown, sent.elapsed().as_secs_f64() * 1000.0))
+                    }
+                );
+                let walked = match reply {
+                    Ok(super::VerifyReply::Walked(walked)) => walked,
+                    Ok(super::VerifyReply::Logits(_)) => {
+                        return Err(SwarmError::Inference(
+                            "tree check: the last segment answered logits, not a walk".into(),
+                        ));
+                    }
+                    // A segment whose layers cannot read a tree refuses before
+                    // it runs anything (`model_worker::draft_tree_to_apply`).
+                    // With nothing waiting to be read again, the reply goes on
+                    // in chains, every segment cut back to where it was.
+                    Err(SwarmError::Validation(why)) if trees.reread.is_empty() => {
+                        tracing::warn!(
+                            %request_id,
+                            reason = %why,
+                            "DSD: a segment cannot check a tree of guesses — checking chains for the rest of the reply"
+                        );
+                        trees.refused = true;
+                        trees.drop_seed();
+                        pending_truncate = Some(expected_kv_len);
+                        if let Drafter::Engine(e) = &mut drafter {
+                            e.read_last_again();
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(%request_id, error = %e, "DSD: pipeline verify failed");
+                        return Err(e);
+                    }
+                };
+                let kv_after_forward = index_pos + tree_check.verify_tokens.len() as u32;
+                let outcome = trees.settle(&tree_check, &walked).inspect_err(|e| {
+                    tracing::warn!(%request_id, error = %e, "DSD: unusable tree check reply");
+                })?;
+                acceptance_proposed += tree_check.guesses.len() as u32;
+                acceptance_accepted += outcome.kept.len() as u32;
+
+                let emitted = super::round_tokens_for_reply(
+                    &outcome.kept,
+                    outcome.next,
+                    &eos_set,
+                    (max_tokens as usize).saturating_sub(generated.len()),
+                );
+                super::emit_streaming_batch(
+                    &self.partial_reply,
+                    &token_tx,
+                    &decoder,
+                    &emitted,
+                    &eos_set,
+                    &mut finish_reason,
+                )
+                .await;
+                if !finish_reason.is_empty() {
+                    break;
+                }
+                generated.extend(&emitted);
+
+                // Every segment's cache holds the rows before the guesses and
+                // the kept path's rows that sit in place after them; the rest
+                // of the forward is cut next time, and the kept tokens past it
+                // are read again (`trees.reread`).
+                let new_expected_kv = index_pos + outcome.rows_in_place as u32;
+                pending_truncate = (new_expected_kv < kv_after_forward).then_some(new_expected_kv);
+                expected_kv_len = new_expected_kv;
+                // The check's own time: a call beside it that ran past its
+                // answer is the drafter's cost, not the check's.
+                check.record(tree_check.verify_tokens.len() as u32, check_ms);
+                match beside {
+                    Some((Ok(more), call_ms)) => {
+                        trees.note_grown_beside(&more, &emitted, call_ms, check_ms)
+                    }
+                    Some((Err(e), _)) => {
+                        tracing::warn!(
+                            %request_id,
+                            drafter = %drafter_name,
+                            error = %e,
+                            "DSD: the drafter failed — finishing this reply without guessing ahead"
+                        );
+                        drafting_off = true;
+                        trees.drop_seed();
+                    }
+                    None => trees.drop_seed(),
+                }
+                if let Drafter::Engine(e) = &mut drafter {
+                    e.push(&emitted);
+                }
+                current_pos += emitted.len();
+                last_token = *emitted.last().expect("a round emits its sample");
+                if eos_set.contains(&last_token) {
+                    finish_reason = "stop".to_string();
+                    break;
+                }
+                continue;
+            }
 
             // Guess k lands at absolute position current_pos + 1 + k: the verify
             // writes `last_token` at `current_pos`, and its row k predicts the
@@ -620,6 +860,7 @@ impl PipelineExecutor {
                     sampling: &self.request.sampling_params,
                     generated: &generated,
                     coupling: noise.map(|n| n.seed()),
+                    parents: &[],
                 }),
                 super::worker_requester(&self.request),
                 self.verify_may_chain(),
@@ -792,6 +1033,31 @@ impl PipelineExecutor {
             check_ms_per_position = format_args!("{:.1}", check.fit().map_or(0.0, |f| f.1)),
             checks_held_back = check.held_back().saturating_sub(held_back_before),
             draft_ms_each = format_args!("{:.1}", draft_cost.median().unwrap_or(0.0)),
+            tree_rounds = trees.rounds,
+            tree_guesses_a_round = format_args!(
+                "{:.1}",
+                f64::from(trees.guesses_sent) / f64::from(trees.rounds.max(1))
+            ),
+            tree_kept_a_round = format_args!(
+                "{:.2}",
+                f64::from(trees.guesses_kept) / f64::from(trees.rounds.max(1))
+            ),
+            tree_rows_a_round = format_args!(
+                "{:.1}",
+                f64::from(trees.rows_carried) / f64::from(trees.rounds.max(1))
+            ),
+            tree_calibration = format_args!("{:.2}", trees.calibration()),
+            trees_refused = trees.refused,
+            tree_rounds_seeded = trees.rounds_seeded,
+            tree_seed_misses = trees.seed_misses,
+            tree_draft_ms_waited_a_round = format_args!(
+                "{:.1}",
+                trees.draft_ms_waited / f64::from(trees.rounds.max(1))
+            ),
+            tree_draft_ms_beside_a_round = format_args!(
+                "{:.1}",
+                trees.draft_ms_beside / f64::from(trees.rounds.max(1))
+            ),
             "DSD: request complete"
         );
 

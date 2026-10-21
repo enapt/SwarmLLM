@@ -63,6 +63,14 @@ second this way, against 2.3 with your computer driving the split itself. Both c
 this release, and a computer whose owner turned guessing off (`speculative_decoding = false`)
 is never sent guesses.
 
+**Groundwork for faster splits: a computer can check a tree of guesses.** A split that guesses
+ahead sends a chain of guessed words to be checked, and keeps the ones before the first wrong
+guess. A computer on this release can also check a tree — several possible continuations at
+once, keeping the longest one the model agrees with — for the same round trip. It is off by
+default: on a test with 0.4 seconds between two computers it wrote 4.8-5.1 tokens a second,
+against 5.0-5.5 for the stream of chains used today. Because every computer on this release can
+check one, a later release can turn trees on without waiting for anyone to update.
+
 **Long-distance splits send each computer's work at the speed of the link.** The connection
 most computers use to talk to each other spread every batch of a split's work over almost half a
 round trip, on top of the round trip itself, because its speed limit only rises when a sender

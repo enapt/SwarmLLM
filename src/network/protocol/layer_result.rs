@@ -286,9 +286,8 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
                 .map_err(|_| SwarmError::Network("Invalid spec_logits count".into()))?,
         ) as usize;
         pos += 2;
-        // SEC: hard cap on attacker-controlled position count. γ in speculative
-        // decoding is ≤ 8 in practice; 32 is a generous ceiling.
-        const MAX_SPEC_LOGITS_POSITIONS: usize = 32;
+        // SEC: hard cap on attacker-controlled position count.
+        use super::MAX_SPEC_LOGITS_POSITIONS;
         if num_positions > MAX_SPEC_LOGITS_POSITIONS {
             return Err(SwarmError::Network(format!(
                 "spec_logits num_positions {num_positions} > {MAX_SPEC_LOGITS_POSITIONS}"

@@ -469,6 +469,7 @@ impl PipelineExecutor {
             // Every segment's layers read a picture whose rows attend both
             // ways as a whole, this node's included (#115 (2b)).
             image_spans: self.image_spans_from(index_pos),
+            draft_parents: Vec::new(),
         };
         // Watched against the request's cancel flag: a client that leaves
         // during a minutes-long prompt pass on this node's processor ends this
@@ -1916,6 +1917,7 @@ mod segment_budget_tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         }
     }
 

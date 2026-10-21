@@ -8,6 +8,7 @@
 pub(crate) mod distributed;
 mod dsd;
 mod dsd_stream;
+mod dsd_tree;
 mod engine_drafter;
 pub(crate) mod handoff_prompt_cache;
 pub(crate) use engine_drafter::drafter_to_leave_room_for;
@@ -323,6 +324,12 @@ pub(super) struct TailWalk<'a> {
     /// (`inference::coupled_noise`); only a tail advertising
     /// `features::COUPLED_SAMPLING` is sent it.
     pub coupling: Option<u64>,
+    /// A tree of guesses' shape (#134): each row's parent in the wire form of
+    /// `LayerForward::draft_parents`, one per row of the forward; empty for a
+    /// chain. It travels with the walk because only a tail that walks may be
+    /// sent a tree (a vocabulary per row would be tens of megabytes), and
+    /// every segment is sent it, since every segment's layers read the shape.
+    pub parents: &'a [u16],
 }
 
 /// What a verify round came back with. A tail that could walk answers with
@@ -453,6 +460,7 @@ pub(super) fn build_spec_verify_forward(
         sampling: walk.map(|w| w.sampling.clone()),
         prompt_span: None,
         image_spans: Vec::new(),
+        draft_parents: Vec::new(),
     }
 }
 
@@ -516,6 +524,15 @@ pub(super) async fn forward_verify_through_segments(
     // the reply (FUTURE_WORK #3 (d)).
     if !verify_tokens.is_empty() {
         shared_state.note_decode_round(request_id);
+    }
+    // A tree of guesses goes to every segment, so every one must read it and
+    // the tail must walk it (`tree_check_possible`, which the caller asked
+    // before growing one): refused here, before anything is sent, if not.
+    let tree_parents: &[u16] = walk.map_or(&[], |w| w.parents);
+    if !tree_parents.is_empty() && !tree_check_possible(shared_state, segments) {
+        return Err(SwarmError::Validation(
+            "a tree of guesses was asked of segments that cannot all check one".into(),
+        ));
     }
 
     let mut activation_bytes: Vec<u8> = pack_verify_tokens_to_le_bytes(verify_tokens);
@@ -604,6 +621,7 @@ pub(super) async fn forward_verify_through_segments(
                 tail_walk.as_ref(),
                 None,
             );
+            forward.draft_parents = tree_parents.to_vec();
             if !chain.is_empty() {
                 forward.chain = chain.clone();
                 // The reply-to the tail answers (the `0x07` trailer), as on a
@@ -870,6 +888,28 @@ pub(super) fn check_intermediate_activations(
 /// walk flag, and the trailers the walk samples with — the caller's sampling
 /// and the penalties' history. A peer with the walk bit is newer than both, but
 /// the three are asked together so no reading of this depends on that order.
+/// May a check of a tree of guesses (#134) go through these segments? Every
+/// peer's segment must read the tree (`features::DRAFT_TREES`) and the last
+/// must walk it — this node's own segments always can (this build). The one
+/// answer the round loop asks before growing a tree and
+/// `forward_verify_through_segments` asks before sending one; the family is
+/// asked separately (`ModelArch::reads_draft_trees`), and a segment whose
+/// layers still cannot read one refuses before it runs anything.
+pub(super) fn tree_check_possible(
+    shared_state: &SharedState,
+    segments: &[crate::types::PipelineSegment],
+) -> bool {
+    let local = shared_state.identity.node_id();
+    let Some(last) = segments.last() else {
+        return false;
+    };
+    segments.iter().all(|s| {
+        s.node_id == *local
+            || shared_state
+                .peer_advertises_feature(&s.node_id, swarmllm_types::node::features::DRAFT_TREES)
+    }) && (last.node_id == *local || peer_walks_at_tail(shared_state, &last.node_id))
+}
+
 fn peer_walks_at_tail(shared_state: &SharedState, node_id: &crate::types::NodeId) -> bool {
     use swarmllm_types::node::features::{
         FORWARD_GENERATED_IDS, FORWARD_SAMPLING, SPEC_WALK_AT_TAIL,
@@ -924,6 +964,7 @@ pub(super) fn build_kv_truncate_forward(
         sampling: None,
         prompt_span: None,
         image_spans: Vec::new(),
+        draft_parents: Vec::new(),
     }
 }
 
@@ -4109,6 +4150,7 @@ mod failover_retarget_tests {
                     sampling: &sampling,
                     generated: &[3, 7],
                     coupling: Some(0x5EED),
+                    parents: &[],
                 }),
                 crate::inference::process_pool::Requester::Owner,
                 false,
@@ -4173,6 +4215,7 @@ mod failover_retarget_tests {
                     sampling: &sampling,
                     generated: &[3, 7],
                     coupling: Some(0x5EED),
+                    parents: &[],
                 }),
                 crate::inference::process_pool::Requester::Owner,
                 may_chain,

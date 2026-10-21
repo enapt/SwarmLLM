@@ -20,6 +20,9 @@
 //! `inference.max_seq_len_override`; default the shipped 8192). The prompt's
 //! cache is reserved whole, as a worker reserves an admitted prompt;
 //! `SWARM_BENCH_RESERVE=0` grows it a quantum at a time instead.
+//! `SWARM_BENCH_SPEC_WIDTHS=1,2,4,8` prices a K-row forward against a 1-row
+//! one at the same cache depth; `SWARM_BENCH_SPEC_ALL_ROWS=1` makes it a
+//! check's forward (logits at every row, as a draft tree's growth reads).
 //! `SWARM_BENCH_CHUNK=128` reads the prompt in chunks the way a node's prefill
 //! pacer does — compare a node against the bench with it set, since one
 //! forward over the whole prompt is a different attention shape.
@@ -356,12 +359,20 @@ fn spec_width_sweep(
     sync(device);
     let mut pos = prompt_tokens;
 
+    // `SWARM_BENCH_SPEC_ALL_ROWS=1` makes the K-wide forward a CHECK's: logits
+    // for every row (`forward_verify_all_positions`), as a speculative check
+    // and each step of a draft tree's growth read them — the output head then
+    // runs K times, not once.
+    let all_rows = std::env::var("SWARM_BENCH_SPEC_ALL_ROWS").as_deref() == Ok("1");
     let one_forward = |model: &mut SplitModel, pos: &mut usize, k: usize| -> anyhow::Result<f64> {
         let step = Tensor::from_vec(vec![7i64; k], &[1, k], &Device::Cpu)?;
         let t = Instant::now();
-        let out = model
-            .forward(&step, *pos, &store, &req)
-            .map_err(|e| anyhow::anyhow!("spec sweep forward: {e}"))?;
+        let out = if all_rows && k > 1 {
+            model.forward_verify_all_positions(&step, *pos, &store, &req)
+        } else {
+            model.forward(&step, *pos, &store, &req)
+        }
+        .map_err(|e| anyhow::anyhow!("spec sweep forward: {e}"))?;
         sync(device);
         let dt = t.elapsed().as_secs_f64();
         drop(out);
@@ -370,8 +381,13 @@ fn spec_width_sweep(
     };
 
     println!(
-        "\nSPEC WIDTH SWEEP at ~{} KV (interleaved 1-vs-K, min of pairs)",
-        prompt_tokens + decode_tokens
+        "\nSPEC WIDTH SWEEP at ~{} KV (interleaved 1-vs-K, min of pairs{})",
+        prompt_tokens + decode_tokens,
+        if all_rows {
+            ", logits at every row"
+        } else {
+            ""
+        }
     );
     println!(
         "  width   ms/forward   vs width 1   ms/token if all K accepted   break-even acceptance"

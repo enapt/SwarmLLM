@@ -257,6 +257,59 @@ These are projections from measured parts, not measurements.
 - **MoE models make processor rings viable**: gpt-oss-120b has 5.1B active
   parameters and GLM-4.5-Air 12B. Their ceiling is set by item 4, not by the bytes.
 
+## Draft trees (#134): the design, 2026-10-20
+
+A chain's pass keeps at most the run of guesses before its first miss; a tree
+keeps the longest run along whichever branch the model takes. Over a long link
+the pass costs a round trip whatever it carries, so rows are nearly free there
+until the bytes or a processor stage say otherwise.
+
+- **What a pass carries.** Rows are `[kept tokens re-read, the token the last
+  check chose, tree nodes]`. `draft_parents[i]` names row i's parent among the
+  forward's rows, or none for the first row (its parent is the cache's last
+  position). A chain is `parents[i] = i - 1`. It is one new `LayerForward`
+  trailer (`0x10`), bound in the AAD and sent only to a peer advertising
+  `features::DRAFT_TREES` (bit 29). Every hop carries it onward.
+- **Every segment.** Row i sits at `index_pos + depth(i)` for RoPE and sees the
+  whole cache plus its own ancestors in the forward. Standard attention is forced,
+  because the card's flash kernel takes causality as a flag, and CUDA graphs are
+  skipped. Only dense attention layers take a tree: a sliding window, Qwen 3.5's
+  recurrent layers and DeepSeek's MLA refuse, and the request keeps the chain.
+- **The tail's walk.** Sample at the first row and descend to the child whose
+  token is the sample. Repeat until no child matches, then answer the kept tokens
+  plus that last sample. This is exact at any temperature. A node's children
+  carry distinct tokens, so "keep the child equal to the target's own draw" is
+  `sampled_accept_reject`'s n-gram rule applied along one path (SpecExec §3).
+  The shared noise is keyed by absolute position, `index_pos + depth + 1`.
+- **The cache after a check: re-read, never gather.** The drafter's most likely
+  chain is laid out first (rows 1..D), so the kept path is usually a prefix of
+  the rows. The next forward cuts every cache to that prefix (`truncate_kv_to`,
+  as today) and re-reads only the kept tokens past it, as a chain at the head of
+  its rows. That costs a few rows a pass. It saves a second trailer and a gather
+  in every segment: FlowSpec broadcasts a retain set instead, which costs more
+  wire.
+- **The drafter builds the tree in its own worker, in one call.** The search is
+  best-first over cumulative log-probability (SpecExec's parallel search,
+  EAGLE-2's global rerank). Each step expands the M best unexpanded nodes in one
+  tree forward of the drafter, with the same mask and positions, and queues their
+  top-k children. It stops at N nodes, then cuts the drafter's cache back to the
+  confirmed context.
+- **Size, from the measured pass.** `P(N) = check_fixed + N·row + ⌈N/M⌉·step`.
+  Pick the N that maximises `(E_N + 1) / P(N)`, with E_N read from this request's
+  own record of kept rows: Sequoia's rule over our measured terms. A processor
+  stage's large `row` cost keeps its trees small with no special case.
+- **Fallback.** The request keeps today's chain loop when any of these happens:
+  a peer lacks bit 29, the model's layers refuse a tree, or a tree forward is
+  refused.
+- **Measured 2026-10-20: trees lose to the stream, so they are off by default.**
+  A 7B over a 385 ms round trip, the far half on a card, the drafter on the
+  requester's processor: trees grown beside their check 4.75-5.06 tok/s, the
+  continuous stream of chains 5.03-5.52 (`docs/invariants/scheduling.md` § "A
+  split checks a tree of guesses"). A tree round keeps 3 guesses for one round
+  trip; the stream keeps several chains in flight. `SWARMLLM_DRAFT_TREES=1`
+  asks for trees; every node reads them, so a later default needs no peer to
+  update. Next to try: a stream of trees, a drafter on a card.
+
 ## Build order (each step ends on a measurement)
 
 1. **Per-pass breakdown.** Per hop and in both directions, record:

@@ -3115,6 +3115,7 @@ fn forward_is_one_decode_step(f: &crate::types::LayerForward) -> bool {
         && f.prompt_cache.is_none()
         && f.prompt_span.is_none()
         && f.image_spans.is_empty()
+        && f.draft_parents.is_empty()
         && f.tp_meta.is_none()
         && f.vision_embeddings.is_none()
         && f.adapter_id.is_none()
@@ -3138,7 +3139,7 @@ fn forward_is_schedulable(f: &crate::types::LayerForward) -> bool {
     if f.adapter_id.is_some() {
         return false;
     }
-    if !f.draft_tokens.is_empty() {
+    if !f.draft_tokens.is_empty() || !f.draft_parents.is_empty() {
         return false;
     }
     if f.spec_logits_requested {
@@ -8203,6 +8204,7 @@ impl ModelProcessPool {
             sampling: _,
             prompt_span,
             image_spans,
+            draft_parents,
         } = forward;
 
         // Split vision embeddings out of the JSON header into the binary
@@ -8245,6 +8247,7 @@ impl ModelProcessPool {
             prompt_cache,
             prompt_span,
             image_spans,
+            draft_parents,
             for_the_owner: requester == Requester::Owner,
         };
 
@@ -8368,7 +8371,7 @@ impl ModelProcessPool {
         &self,
         d: IpcDraft,
         cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
-    ) -> Result<Vec<u32>, SwarmError> {
+    ) -> Result<crate::inference::worker_ipc::Drafted, SwarmError> {
         let model_id = d.model_id.clone();
         let request_id = d.request_id;
         crate::inference::cancel::bail_if_cancelled(cancel.as_ref())?;
@@ -8403,11 +8406,17 @@ impl ModelProcessPool {
                         WorkerMsg::Drafted {
                             request_id: rid,
                             tokens,
+                            parents,
+                            scores,
                         },
                         _,
                     )) if rid == request_id => {
                         guard.disarm();
-                        return Ok(tokens);
+                        return Ok(crate::inference::worker_ipc::Drafted {
+                            tokens,
+                            parents,
+                            scores,
+                        });
                     }
                     Some((
                         WorkerMsg::Error {
@@ -8546,6 +8555,8 @@ impl ModelProcessPool {
                 prompt_span: _,
                 // Nor a forward reaching into a picture (`forward_is_schedulable`).
                 image_spans: _,
+                // Nor a tree of guesses.
+                draft_parents: _,
             } = f;
             let forward_sampling = sampling.unwrap_or_default();
             activation_lens.push(activations.len() as u32);
@@ -8577,6 +8588,7 @@ impl ModelProcessPool {
                 for_the_owner: false,
                 prompt_span: None,
                 image_spans: Vec::new(),
+                draft_parents: Vec::new(),
             });
         }
 
@@ -9670,6 +9682,7 @@ mod tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         }
     }
 
@@ -10992,6 +11005,7 @@ mod tests {
             coupling_seed: None,
             for_the_owner: true,
             stop_below: None,
+            tree: None,
         };
         let pool = Arc::new(pool);
         let first = tokio::spawn({

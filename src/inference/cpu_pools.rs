@@ -742,25 +742,40 @@ fn owner_prefill_pool() -> Option<Arc<rayon::ThreadPool>> {
 /// global pool and is never timed: it has nothing to calibrate and its tokens
 /// would mislead the calibration for a forward that does. See
 /// [`Calibrations`] for the case that made this a parameter.
+/// `f`, to run on a pool's thread with the thread-locals the layers read set
+/// as they are on THIS thread — `None` included.
+///
+/// A pool runs `f` on ITS thread, which never saw a thread-local the caller
+/// set. The layers read two: the attention override a speculating loop sets
+/// so its guesses and its check run one kernel
+/// (`attn_kernel::ForceStandardAttnGuard`, "created on the thread that runs
+/// the forward" — it was lost on every decode-shaped forward with processor
+/// layers), and a tree's row positions (`layers::RowPositions`, #134).
+/// Carried across here, the one place a forward changes thread — tracing's
+/// rule for a span entering rayon. Each is SET for the job, never left as the
+/// pool thread has it: a thread waiting in one forward's parallel work runs
+/// other jobs meanwhile — a second forward too — and a tree's positions left
+/// in place refused that forward or, at the tree's length, turned it wrong
+/// (seen as "a forward of 1 rows inside a tree of 4 positions" between tests
+/// sharing the decode pool).
+fn with_the_callers_scope<R>(f: impl FnOnce() -> R + Send) -> impl FnOnce() -> R + Send {
+    let force_standard = crate::inference::attn_kernel::is_force_standard_attn();
+    let rows = crate::inference::layers::row_positions_now();
+    move || {
+        let _same_kernel =
+            crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_standard);
+        let _same_rows = crate::inference::layers::RowPositions::carried(rows);
+        f()
+    }
+}
+
 pub(crate) fn in_phase_pool<R: Send>(
     seq_len: usize,
     cpu_layers: usize,
     for_the_owner: bool,
     f: impl FnOnce() -> R + Send,
 ) -> R {
-    // A pool runs `f` on ITS thread, which never saw a thread-local the caller
-    // set. The one the layers read is the attention override a speculating
-    // loop sets so its guesses and its check run one kernel
-    // (`attn_kernel::ForceStandardAttnGuard`, "created on the thread that runs
-    // the forward"): it was lost on every decode-shaped forward with processor
-    // layers. Carried across here, the one place a forward changes thread —
-    // tracing's rule for a span entering rayon.
-    let force_standard = crate::inference::attn_kernel::is_force_standard_attn();
-    let f = move || {
-        let _same_kernel =
-            crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_standard);
-        f()
-    };
+    let f = with_the_callers_scope(f);
     if cpu_layers > 0 && seq_len > DECODE_SHAPED_MAX_TOKENS && for_the_owner {
         if let Some(pool) = owner_prefill_pool() {
             return pool.install(f);
@@ -1253,6 +1268,33 @@ mod tests {
         assert!(
             in_phase_pool(1, 9_998, false, || rayon::current_thread_index().is_some()),
             "a decode step with processor layers ran on the calling thread"
+        );
+    }
+
+    /// A job handed to a pool thread reads its CALLER's tree positions — none,
+    /// for an ordinary forward — whatever the thread running it has set: a
+    /// thread waiting inside a tree's forward may run another forward, and it
+    /// read the tree's positions ("a forward of 1 rows inside a tree of 4
+    /// positions" between tests sharing the decode pool, #134).
+    #[test]
+    fn a_job_reads_its_callers_tree_positions_not_the_threads_it_runs_on() {
+        use crate::inference::layers::{row_positions_now, RowPositions};
+        let plain = std::thread::spawn(|| with_the_callers_scope(row_positions_now))
+            .join()
+            .unwrap();
+        let tree = RowPositions::new(vec![5, 6, 6, 7]);
+        assert_eq!(plain(), None, "the tree on this thread reached the job");
+        assert_eq!(
+            row_positions_now(),
+            Some(vec![5, 6, 6, 7]),
+            "the thread's own positions are put back after the job"
+        );
+        let carried = with_the_callers_scope(row_positions_now);
+        drop(tree);
+        assert_eq!(
+            std::thread::spawn(carried).join().unwrap(),
+            Some(vec![5, 6, 6, 7]),
+            "a tree's forward handed to a pool keeps its positions"
         );
     }
 

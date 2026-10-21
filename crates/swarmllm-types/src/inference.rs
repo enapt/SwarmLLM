@@ -586,6 +586,16 @@ pub struct LayerForward {
     /// every other forward.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_spans: Vec<PromptSpan>,
+    /// The shape of a tree of guesses (#134): one entry per row of this
+    /// forward, `0` for a row that follows the position before the forward and
+    /// `k` for one whose parent is row `k - 1`. Each segment gives a row the
+    /// position `index_pos + depth` and lets it read only the cache and its own
+    /// ancestors; the last segment walks the tree. Empty on a chain — every
+    /// check before trees, and every other forward. Travels in the `0x10`
+    /// trailer, bound into the AAD, only to a peer advertising
+    /// `features::DRAFT_TREES`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub draft_parents: Vec<u16>,
 }
 
 impl LayerForward {
@@ -1298,6 +1308,7 @@ mod chunk_assembly_tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         }
     }
 

@@ -40,6 +40,11 @@ pub struct SplitModel {
     /// the length of one call by `SplitModel::with_image_spans`, empty
     /// otherwise. Read by `attention_masks`; never cached in `masks`.
     pub(super) image_spans: Vec<std::ops::Range<usize>>,
+    /// The tree of guesses the forwards running now read (`inference::draft_tree`,
+    /// #134) — set only for the length of one call by
+    /// `SplitModel::with_draft_tree`, `None` otherwise. Read by
+    /// `forward_inner_body`, which gives each row its tree position and mask.
+    pub(super) draft_tree: Option<crate::inference::draft_tree::DraftTree>,
     /// Layer range this model covers: [start, end) out of total_layers.
     pub layer_start: usize,
     pub layer_end: usize,

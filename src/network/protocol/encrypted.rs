@@ -161,6 +161,8 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     super::layer_forward::append_prompt_span_trailer(&mut aad, forward);
     // The image-spans trailer (0x0F): which keys a picture's rows see.
     super::layer_forward::append_image_spans_trailer(&mut aad, forward);
+    // The draft-tree trailer (0x10): which rows each guess reads.
+    super::layer_forward::append_draft_tree_trailer(&mut aad, forward);
 
     aad
 }
@@ -274,6 +276,7 @@ pub fn encode_layer_forward_encrypted(
     super::layer_forward::append_prompt_cache_trailer(&mut buf, forward);
     super::layer_forward::append_prompt_span_trailer(&mut buf, forward);
     super::layer_forward::append_image_spans_trailer(&mut buf, forward);
+    super::layer_forward::append_draft_tree_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -502,6 +505,7 @@ pub fn decode_layer_forward_encrypted(
     let prompt_cache = super::layer_forward::read_prompt_cache_trailer(data, &mut cursor);
     let prompt_span = super::layer_forward::read_prompt_span_trailer(data, &mut cursor);
     let image_spans = super::layer_forward::read_image_spans_trailer(data, &mut cursor);
+    let draft_parents = super::layer_forward::read_draft_tree_trailer(data, &mut cursor)?;
     let _ = cursor;
 
     let mut forward = LayerForward {
@@ -531,6 +535,7 @@ pub fn decode_layer_forward_encrypted(
         sampling,
         prompt_span,
         image_spans,
+        draft_parents,
     };
 
     // Reconstruct AAD from the parsed forward via the helper. This MUST
@@ -580,6 +585,7 @@ mod tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         }
     }
 
@@ -834,6 +840,31 @@ mod tests {
             "a relay must not move a picture's end"
         );
         other.image_spans.clear();
+        assert_ne!(build_layer_forward_aad(&other), aad, "nor drop it");
+    }
+
+    /// A tree's shape (#134) decides which rows each guess reads, so it is
+    /// sealed like the guesses: reshaped or dropped on the way, the frame no
+    /// longer opens — a tree read as a chain answers plausibly and wrongly.
+    #[test]
+    fn a_tree_shape_is_sealed_and_survives_the_encrypted_frame() {
+        let mut orig = base_forward();
+        orig.draft_tokens = vec![7, 8, 9];
+        orig.spec_walk_at_tail = true;
+        orig.draft_parents = vec![0, 1, 1, 2];
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        let (decoded, _sealed, aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert_eq!(decoded.draft_parents, orig.draft_parents);
+        assert_eq!(decoded.draft_tokens, orig.draft_tokens);
+        assert_eq!(aad, build_layer_forward_aad(&orig));
+        let mut other = orig.clone();
+        other.draft_parents = vec![0, 1, 2, 3];
+        assert_ne!(
+            build_layer_forward_aad(&other),
+            aad,
+            "a relay must not reshape the tree"
+        );
+        other.draft_parents.clear();
         assert_ne!(build_layer_forward_aad(&other), aad, "nor drop it");
     }
 

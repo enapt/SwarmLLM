@@ -135,13 +135,23 @@ pub(super) const MAX_ACTIVATION_SIZE: usize = 128 * 1024 * 1024;
 pub(super) const MAX_RESULT_TOKENS: usize = 65536;
 
 /// Maximum number of speculative draft tokens accepted in a `LayerForward`
-/// 0x03 trailer. Defended in both the plaintext (`layer_forward.rs`) and
-/// encrypted (`encrypted.rs`) decoders; mirrored on the receive side by
-/// `layer_result.rs::MAX_SPEC_LOGITS_POSITIONS = 32`. Speculative γ is
-/// bounded by `dsd_controller::BEST_GAMMA_MAX = 16`; the cap leaves
-/// generous headroom while keeping `Vec::with_capacity(num_drafts)`
-/// bounded against malicious peers (R107).
-pub(super) const MAX_DRAFT_TOKENS: usize = 32;
+/// 0x03 trailer: the rows of the largest tree of guesses
+/// (`draft_tree::MAX_TREE_ROWS`, #134), 2 KB of ids. Defended in both the
+/// plaintext (`layer_forward.rs`) and encrypted (`encrypted.rs`) decoders so
+/// `Vec::with_capacity(num_drafts)` stays bounded against malicious peers
+/// (R107). A CHAIN still carries at most
+/// `config::inference::MAX_GUESSES_PER_CHECK` (16) — what a release before
+/// trees accepts (32) — and only a peer advertising `features::DRAFT_TREES`
+/// is sent more. A tree's tail walks it, so the logits reply stays under
+/// [`MAX_SPEC_LOGITS_POSITIONS`].
+pub(super) const MAX_DRAFT_TOKENS: usize = crate::inference::draft_tree::MAX_TREE_ROWS;
+
+/// The most positions a check answered with logits may carry: what a
+/// coordinator decodes (`layer_result.rs`) and what a tail runs before it
+/// computes them (`model_worker::spec_rows_fit_the_answer`) — one figure, so a
+/// holder never builds a reply no coordinator reads. An honest chain is at most
+/// `config::MAX_GUESSES_PER_CHECK` (16) guesses + 1 row.
+pub(crate) const MAX_SPEC_LOGITS_POSITIONS: usize = 32;
 
 /// Codec for SwarmLLM request/response protocol using serde_json.
 ///
@@ -1384,6 +1394,7 @@ mod tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1431,6 +1442,7 @@ mod tests {
                 sampling: None,
                 prompt_span: None,
                 image_spans: Vec::new(),
+                draft_parents: Vec::new(),
             };
             let encoded = encode_layer_forward(&forward).unwrap();
             assert_eq!(encoded[25], tag); // tag(1) + uuid(16) + seq(4) + index_pos(4) = 25
@@ -1474,6 +1486,7 @@ mod tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1511,6 +1524,7 @@ mod tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1553,6 +1567,7 @@ mod tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         // Trim to remove the trailer — simulates an old encoder
@@ -1751,6 +1766,7 @@ mod tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         };
         let encoded = encode_layer_forward(&forward).unwrap();
 
@@ -1801,6 +1817,7 @@ mod tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1844,6 +1861,7 @@ mod tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         let decoded = decode_layer_forward(&encoded).unwrap();
@@ -1885,6 +1903,7 @@ mod tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         let decoded = decode_layer_forward(&encoded).unwrap();

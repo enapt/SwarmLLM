@@ -421,6 +421,117 @@ pub(crate) fn walk_verified_positions(
     Ok(kept)
 }
 
+/// [`walk_verified_positions`] for a tree of guesses (#134,
+/// `inference::draft_tree`): sample at the row before the first guess, keep
+/// the guess following it that carries the sample, sample there, and so on
+/// until no guess carries it. Answers the kept tokens, then that last sample.
+///
+/// Exact at any temperature, for the reason the chain's rule is: a row's
+/// guesses carry distinct tokens, so "keep the guess equal to the model's own
+/// draw" is [`sampled_accept_reject`]'s rule along whichever path the draws
+/// take (SpecExec, arXiv 2406.02532 §3). A draw is keyed by the absolute
+/// position it fills, `first + depth`, so a drafter holding the same seed
+/// reproduces it on every branch.
+///
+/// `tree` holds every row of the forward; the rows from `guessed_from` are the
+/// guesses, `drafts` their tokens; the rows before are tokens already kept.
+/// Each row the walk reads is checked finite, as the chain's are.
+pub(crate) fn walk_verified_tree(
+    tree: &crate::inference::draft_tree::DraftTree,
+    drafts: &[u32],
+    rows: &[Vec<f32>],
+    params: &SamplingParams,
+    generated: &[u32],
+    coupling: Option<(&CoupledNoise, u64)>,
+) -> Result<Vec<u32>, String> {
+    let guessed_from = tree_guesses_from(tree, drafts.len(), rows.len())?;
+    let vocab = rows.first().map_or(0, Vec::len);
+    let mut ctx = SamplingContext::new(vocab);
+    let mut history = generated.to_vec();
+    let mut walked = Vec::new();
+    let mut at = guessed_from - 1;
+    loop {
+        if !rows[at].iter().all(|v| v.is_finite()) {
+            return Err("spec walk: non-finite logits".into());
+        }
+        let mut row = rows[at].clone();
+        let pick = match coupling {
+            Some((noise, first)) => sample_token_coupled(
+                &mut row,
+                params,
+                &history,
+                &mut ctx,
+                noise,
+                first + tree.depth(at) as u64,
+            ),
+            None => sample_token_with_history(&mut row, params, &history, &mut ctx),
+        };
+        walked.push(pick);
+        match tree
+            .children(Some(at))
+            .find(|&c| c >= guessed_from && drafts[c - guessed_from] == pick)
+        {
+            Some(next) => {
+                history.push(pick);
+                at = next;
+            }
+            None => return Ok(walked),
+        }
+    }
+}
+
+/// [`walk_verified_tree`] for a greedy request with no penalties, from each
+/// row's argmax alone — what a card answers instead of every row's vocabulary.
+pub(crate) fn argmax_walk_tree(
+    tree: &crate::inference::draft_tree::DraftTree,
+    drafts: &[u32],
+    picks: &[u32],
+) -> Result<Vec<u32>, String> {
+    let guessed_from = tree_guesses_from(tree, drafts.len(), picks.len())?;
+    let mut walked = Vec::new();
+    let mut at = guessed_from - 1;
+    loop {
+        let pick = picks[at];
+        walked.push(pick);
+        match tree
+            .children(Some(at))
+            .find(|&c| c >= guessed_from && drafts[c - guessed_from] == pick)
+        {
+            Some(next) => at = next,
+            None => return Ok(walked),
+        }
+    }
+}
+
+/// The first guessed row of a tree check of `rows` rows carrying `drafts`
+/// guesses, refused where no honest coordinator sends it: rows that are not
+/// the tree's, no row before the guesses, kept rows that are not a chain from
+/// the cache, or a guess hanging off a kept row other than the last.
+fn tree_guesses_from(
+    tree: &crate::inference::draft_tree::DraftTree,
+    drafts: usize,
+    rows: usize,
+) -> Result<usize, String> {
+    if rows != tree.len() || drafts >= rows {
+        return Err(format!(
+            "spec walk: {rows} positions verified for a tree of {} rows and {drafts} guesses",
+            tree.len()
+        ));
+    }
+    let guessed_from = rows - drafts;
+    for r in 0..guessed_from {
+        if tree.parent(r) != r.checked_sub(1) {
+            return Err("spec walk: the kept rows of a tree are not a chain".into());
+        }
+    }
+    for r in guessed_from..rows {
+        if tree.parent(r).is_none_or(|p| p + 1 < guessed_from) {
+            return Err("spec walk: a guess follows a row that is already kept".into());
+        }
+    }
+    Ok(guessed_from)
+}
+
 /// Accept-reject for a DRAFT THAT CARRIES NO DISTRIBUTION, honouring the
 /// caller's sampling parameters.
 ///
@@ -1891,5 +2002,127 @@ mod coupled_sampling_tests {
             sampled_accept_reject(&[1, 0, 1], &rows, &params, &[], None),
             (Vec::new(), 0, false)
         );
+    }
+}
+
+#[cfg(test)]
+mod tree_walk_tests {
+    use super::*;
+    use crate::inference::draft_tree::DraftTree;
+
+    fn rows(n: usize, vocab: usize, seed: u64) -> Vec<Vec<f32>> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                (0..vocab)
+                    .map(|_| {
+                        s = s
+                            .wrapping_mul(6364136223846793005)
+                            .wrapping_add(1442695040888963407);
+                        ((s >> 33) as f32 / (1u64 << 31) as f32) * 6.0 - 3.0
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn argmax(row: &[f32]) -> u32 {
+        row.iter()
+            .enumerate()
+            .fold((0usize, f32::NEG_INFINITY), |b, (i, &x)| {
+                if x > b.1 {
+                    (i, x)
+                } else {
+                    b
+                }
+            })
+            .0 as u32
+    }
+
+    /// A tree that is a chain walks exactly as the chain's walk does, greedy
+    /// and drawn with shared noise — the tree's rule IS the chain's rule.
+    #[test]
+    fn a_chain_shaped_tree_walks_as_the_chain_does() {
+        let noise = CoupledNoise::new(7);
+        for (seed, temperature) in [(1u64, 0.0f32), (2, 0.8), (3, 1.0)] {
+            let r = rows(5, 40, seed);
+            let params = SamplingParams {
+                temperature,
+                ..Default::default()
+            };
+            // Drafts: what the rows pick at the first two positions, then a miss.
+            let mut drafts = Vec::new();
+            let mut history = Vec::new();
+            let mut ctx = SamplingContext::new(40);
+            for (i, row) in r.iter().take(2).enumerate() {
+                let mut row = row.clone();
+                let t = sample_token_coupled(
+                    &mut row,
+                    &params,
+                    &history,
+                    &mut ctx,
+                    &noise,
+                    11 + i as u64,
+                );
+                drafts.push(t);
+                history.push(t);
+            }
+            drafts.extend([39, 38]);
+            let chain =
+                walk_verified_positions(&drafts, &r, &params, &[], Some((&noise, 11))).unwrap();
+            let tree = DraftTree::new(10, vec![None, Some(0), Some(1), Some(2), Some(3)]).unwrap();
+            let walked =
+                walk_verified_tree(&tree, &drafts, &r, &params, &[], Some((&noise, 11))).unwrap();
+            assert_eq!(walked, chain, "temperature {temperature}");
+            assert!(walked.len() >= 3, "kept the two drafts that were the draws");
+        }
+    }
+
+    /// Branches: the walk follows the guess carrying the model's own pick at
+    /// each row, whichever sibling it is, and stops with the pick no guess carries.
+    #[test]
+    fn the_walk_follows_the_branch_that_carries_each_pick() {
+        // Row 0 kept; rows 1, 2 follow it; row 3 follows 2; row 4 follows 3.
+        let tree = DraftTree::new(20, vec![None, Some(0), Some(0), Some(2), Some(3)]).unwrap();
+        let r = rows(5, 50, 9);
+        let picks: Vec<u32> = r.iter().map(|row| argmax(row)).collect();
+        // Row 1 carries something else; row 2 carries row 0's pick; row 3 row
+        // 2's; row 4 does NOT carry row 3's.
+        let other = |t: u32| (t + 1) % 50;
+        let drafts = vec![other(picks[0]), picks[0], picks[2], other(picks[3])];
+        let greedy = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let walked = walk_verified_tree(&tree, &drafts, &r, &greedy, &[], None).unwrap();
+        assert_eq!(walked, vec![picks[0], picks[2], picks[3]]);
+        assert_eq!(argmax_walk_tree(&tree, &drafts, &picks).unwrap(), walked);
+        // The coordinator reads the same path back as rows.
+        let mut tokens = vec![0u32];
+        tokens.extend(&drafts);
+        assert_eq!(
+            crate::inference::draft_tree::kept_rows(&tree, 1, &tokens, &walked[..2]),
+            Some(vec![2, 3])
+        );
+    }
+
+    #[test]
+    fn a_tree_no_honest_coordinator_sends_is_refused() {
+        let r = rows(3, 10, 4);
+        let greedy = SamplingParams::default();
+        // A guess hanging off a kept row that is not the last.
+        let t = DraftTree::new(5, vec![None, Some(0), Some(0)]).unwrap();
+        assert!(walk_verified_tree(&t, &[1], &r, &greedy, &[], None).is_err());
+        // Kept rows that are not a chain.
+        let t = DraftTree::new(5, vec![None, None, Some(1)]).unwrap();
+        assert!(walk_verified_tree(&t, &[1], &r, &greedy, &[], None).is_err());
+        // Rows that are not the tree's.
+        let t = DraftTree::new(5, vec![None, Some(0)]).unwrap();
+        assert!(walk_verified_tree(&t, &[1], &r, &greedy, &[], None).is_err());
+        // A non-finite row the walk reads.
+        let t = DraftTree::new(5, vec![None, Some(0), Some(1)]).unwrap();
+        let mut bad = r.clone();
+        bad[0][3] = f32::NAN;
+        assert!(walk_verified_tree(&t, &[1, 2], &bad, &greedy, &[], None).is_err());
     }
 }

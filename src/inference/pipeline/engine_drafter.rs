@@ -372,10 +372,17 @@ pub(super) fn read_ahead(
         coupling_seed: None,
         for_the_owner: true,
         stop_below: None,
+        tree: None,
     };
     let release = release_of(state.clone(), key);
     ReadAhead::new(
-        tokio::spawn(async move { state.model_process_pool.draft(d, cancel).await }),
+        tokio::spawn(async move {
+            state
+                .model_process_pool
+                .draft(d, cancel)
+                .await
+                .map(|drafted| drafted.tokens)
+        }),
         release,
     )
 }
@@ -560,6 +567,29 @@ impl EngineDrafter {
         coupling_seed: Option<u64>,
         cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<Vec<u32>, SwarmError> {
+        self.before_a_call()?;
+        let d = IpcDraft {
+            request_id: self.key,
+            model_id: self.spec.model_id.clone(),
+            layer_range: self.spec.layer_range,
+            keep: self.valid as u32,
+            append: self.seq[self.valid..].to_vec(),
+            gamma,
+            sampling: sampling.clone(),
+            history: history.to_vec(),
+            coupling_seed,
+            for_the_owner: true,
+            stop_below: draft_confidence_floor(),
+            tree: None,
+        };
+        let guesses = state.model_process_pool.draft(d, cancel).await?.tokens;
+        self.open = Some((self.seq.len(), guesses.len()));
+        Ok(guesses)
+    }
+
+    /// The checks every call makes before asking the worker: the fault switch,
+    /// something new to read, and every token inside the drafter's vocabulary.
+    fn before_a_call(&mut self) -> Result<(), SwarmError> {
         self.calls += 1;
         if fault_draft_fail_at() == Some(self.calls) {
             return Err(SwarmError::ServiceUnavailable(
@@ -576,22 +606,85 @@ impl EngineDrafter {
                 "the reply holds a token the drafter's vocabulary has no row for".into(),
             ));
         }
+        Ok(())
+    }
+
+    /// Ask the drafter's worker for a TREE of guesses following the sequence
+    /// so far (#134, `SplitModel::draft_tree_after`): `seed` (a tree already
+    /// grown after the sequence's last token; empty for none) and `rows` more,
+    /// `per_step` read a forward, fewer once `grow_for_ms` has passed. Answers
+    /// each guess's token, its parent among them (`None`: it follows the
+    /// sequence's last token) and its path's rating, likeliest path first.
+    /// The drafter's cache holds the sequence afterwards and no guess, so the
+    /// next call reads exactly what the check kept and the token it chose.
+    ///
+    /// A tree's guesses are rated from the last token's logits, so a call
+    /// with nothing new to read — the second call on one sequence, growing
+    /// beside a check the first call's tree went out in — reads that token
+    /// again.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn draft_tree(
+        &mut self,
+        state: &SharedState,
+        seed: &crate::inference::draft_tree::GrownTree,
+        rows: u32,
+        per_step: u32,
+        grow_for_ms: Option<u32>,
+        sampling: &SamplingParams,
+        history: &[u32],
+        coupling_seed: Option<u64>,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<crate::inference::draft_tree::GrownTree, SwarmError> {
+        if self.seq.len() <= self.valid {
+            self.read_last_again();
+        }
+        self.before_a_call()?;
         let d = IpcDraft {
             request_id: self.key,
             model_id: self.spec.model_id.clone(),
             layer_range: self.spec.layer_range,
             keep: self.valid as u32,
             append: self.seq[self.valid..].to_vec(),
-            gamma,
+            gamma: 0,
             sampling: sampling.clone(),
             history: history.to_vec(),
             coupling_seed,
             for_the_owner: true,
-            stop_below: draft_confidence_floor(),
+            stop_below: None,
+            tree: Some(crate::inference::worker_ipc::TreeAsk {
+                rows,
+                per_step,
+                grow_for_ms,
+                seed: crate::inference::worker_ipc::TreeSeed::of(seed),
+            }),
         };
-        let guesses = state.model_process_pool.draft(d, cancel).await?;
-        self.open = Some((self.seq.len(), guesses.len()));
-        Ok(guesses)
+        let drafted = state.model_process_pool.draft(d, cancel).await?;
+        if drafted.parents.len() != drafted.tokens.len()
+            || drafted.scores.len() != drafted.tokens.len()
+        {
+            return Err(SwarmError::Internal(format!(
+                "the drafter grew {} guesses with {} parents and {} ratings",
+                drafted.tokens.len(),
+                drafted.parents.len(),
+                drafted.scores.len()
+            )));
+        }
+        self.valid = self.seq.len();
+        self.open = None;
+        Ok(crate::inference::draft_tree::GrownTree {
+            parents: drafted.parents.iter().map(|&w| w.checked_sub(1)).collect(),
+            tokens: drafted.tokens,
+            path_logp: drafted.scores,
+        })
+    }
+
+    /// The last token of the sequence is read again by the next call — after a
+    /// tree whose check was refused, so a chain can follow it: the tree's call
+    /// left the cache holding the whole sequence, and a call must have
+    /// something new to read.
+    pub(super) fn read_last_again(&mut self) {
+        self.valid = self.valid.min(self.seq.len().saturating_sub(1));
+        self.open = None;
     }
 
     /// The pending call's check kept `kept` of its guesses. The drafter's cache

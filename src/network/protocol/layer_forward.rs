@@ -123,6 +123,7 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     append_prompt_cache_trailer(&mut buf, forward);
     append_prompt_span_trailer(&mut buf, forward);
     append_image_spans_trailer(&mut buf, forward);
+    append_draft_tree_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -405,6 +406,57 @@ pub(crate) fn read_image_spans_trailer(
         .collect();
     *cursor = body + 8 * n;
     spans
+}
+
+/// Write the draft-tree trailer: `0x10 | n u16 | n × parent u16` — the shape
+/// of a tree of guesses (`LayerForward::draft_parents`, #134). Last in the
+/// chain, by the ONE function the plaintext frame, the encrypted frame and the
+/// AAD all call: the shape decides which rows a guess reads, so a relay must
+/// not change it. Emitted only when the forward carries one, which a
+/// coordinator sets only for a peer advertising `features::DRAFT_TREES`.
+pub(crate) fn append_draft_tree_trailer(buf: &mut Vec<u8>, forward: &LayerForward) {
+    if forward.draft_parents.is_empty() {
+        return;
+    }
+    // Never past what a receiver reads: a longer shape would be refused there
+    // anyway, and a u16 count cannot hold more.
+    let n = forward
+        .draft_parents
+        .len()
+        .min(crate::inference::draft_tree::MAX_TREE_ROWS);
+    buf.push(0x10);
+    buf.extend_from_slice(&(n as u16).to_le_bytes());
+    for parent in &forward.draft_parents[..n] {
+        buf.extend_from_slice(&parent.to_le_bytes());
+    }
+}
+
+/// Read the draft-tree trailer (`0x10`) at `cursor`: empty when absent.
+/// A trailer that names more rows than `draft_tree::MAX_TREE_ROWS` or more than
+/// the frame holds is REFUSED, never read as absent: a tree read as a chain
+/// would attend every row to its siblings and answer plausibly and wrongly.
+pub(crate) fn read_draft_tree_trailer(
+    data: &[u8],
+    cursor: &mut usize,
+) -> Result<Vec<u16>, SwarmError> {
+    if data.len() <= *cursor || data[*cursor] != 0x10 {
+        return Ok(Vec::new());
+    }
+    if data.len() < *cursor + 3 {
+        return Err(SwarmError::Network("draft-tree trailer truncated".into()));
+    }
+    let n = u16::from_le_bytes([data[*cursor + 1], data[*cursor + 2]]) as usize;
+    let body = *cursor + 3;
+    if n == 0 || n > crate::inference::draft_tree::MAX_TREE_ROWS || data.len() < body + 2 * n {
+        return Err(SwarmError::Network(format!(
+            "draft-tree trailer of {n} rows refused"
+        )));
+    }
+    let parents = (0..n)
+        .map(|i| u16::from_le_bytes([data[body + 2 * i], data[body + 2 * i + 1]]))
+        .collect();
+    *cursor = body + 2 * n;
+    Ok(parents)
 }
 
 /// Write the decoded-so-far trailer: `0x08 | n(2 LE) | n × id(4 LE)`.
@@ -862,6 +914,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
     let prompt_cache = read_prompt_cache_trailer(data, &mut cursor);
     let prompt_span = read_prompt_span_trailer(data, &mut cursor);
     let image_spans = read_image_spans_trailer(data, &mut cursor);
+    let draft_parents = read_draft_tree_trailer(data, &mut cursor)?;
     let _ = cursor;
 
     Ok(LayerForward {
@@ -891,6 +944,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         sampling,
         prompt_span,
         image_spans,
+        draft_parents,
     })
 }
 
@@ -935,6 +989,7 @@ mod tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         }
     }
 
@@ -1648,6 +1703,68 @@ mod tests {
         assert!(
             redirected.ends_with(&wire_tail),
             "AAD must end with exactly the chain+reply-to bytes the frame carries"
+        );
+    }
+
+    /// A tree's shape (#134) travels last, after the picture spans; a forward
+    /// without one is byte-identical to before; and a trailer naming no rows,
+    /// more than `MAX_TREE_ROWS`, or more than the frame holds is REFUSED —
+    /// never read as absent, which would check the tree as a chain.
+    #[test]
+    fn a_tree_shape_survives_the_wire_and_a_malformed_one_is_refused() {
+        let mut f = base_forward();
+        f.image_spans = vec![crate::types::PromptSpan { start: 1, end: 4 }];
+        f.draft_tokens = vec![7, 8, 9];
+        f.spec_walk_at_tail = true;
+        f.draft_parents = vec![0, 1, 1, 2];
+        let bytes = encode_layer_forward(&f).unwrap();
+        let back = decode_layer_forward(&bytes).unwrap();
+        assert_eq!(back.draft_parents, f.draft_parents);
+        assert_eq!(
+            back.image_spans, f.image_spans,
+            "the trailer before it reads"
+        );
+        assert_eq!(back.draft_tokens, f.draft_tokens);
+
+        let mut chain = f.clone();
+        chain.draft_parents.clear();
+        let plain = encode_layer_forward(&chain).unwrap();
+        assert_eq!(plain.len(), bytes.len() - (3 + 2 * f.draft_parents.len()));
+        assert!(decode_layer_forward(&plain)
+            .unwrap()
+            .draft_parents
+            .is_empty());
+
+        let with_trailer = |n: u16, rows: usize| {
+            let mut b = plain.clone();
+            b.push(0x10);
+            b.extend_from_slice(&n.to_le_bytes());
+            b.extend(std::iter::repeat_n(0u8, 2 * rows));
+            b
+        };
+        let most = crate::inference::draft_tree::MAX_TREE_ROWS;
+        assert!(
+            decode_layer_forward(&with_trailer(0, 0)).is_err(),
+            "no rows"
+        );
+        assert!(
+            decode_layer_forward(&with_trailer(most as u16 + 1, most + 1)).is_err(),
+            "more rows than a tree may have"
+        );
+        assert!(
+            decode_layer_forward(&with_trailer(4, 3)).is_err(),
+            "more rows than the frame holds"
+        );
+        assert!(
+            decode_layer_forward(&bytes[..bytes.len() - 1]).is_err(),
+            "cut short"
+        );
+        assert_eq!(
+            decode_layer_forward(&with_trailer(most as u16, most))
+                .unwrap()
+                .draft_parents
+                .len(),
+            most
         );
     }
 }

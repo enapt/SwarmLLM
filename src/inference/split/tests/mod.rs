@@ -14,6 +14,7 @@
 
 mod common;
 mod core;
+mod draft_trees;
 mod drafting;
 pub(crate) mod gemma2;
 mod gqa;

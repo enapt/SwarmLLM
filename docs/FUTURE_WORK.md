@@ -67,8 +67,9 @@ speed is what the swarm is for, so split speed for large models is the top track
 6. **#318** — a large model split across machines is too slow to use: 0.35 tok/s on a 4-segment
    intercontinental chain, 5-13 tok/s on a 7B Thailand↔Belgium with the stream. Projected
    lossless 20-31 tok/s across continents and 50-80 inside a region on cards. The stream
-   through a chain of machines is built (2026-10-20); next, guessing for a user who holds none
-   of the model, then trees in every segment (#134).
+   through a chain of machines, guessing for a user who holds none of the model and trees in
+   every segment are built (2026-10-20; trees off by default, no faster than the stream, #134);
+   next, the head's bounded wait for a requester's guesses and a led split on chosen peers.
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
@@ -760,6 +761,13 @@ Qwen3-30B-A3B at 16/64; peers AU, IT, BE; `split_cost_terms.py --rows`):
   priced 20.2 s of prompt and the whole request took 7.1 s (0.25x, twice).
 - The first request for qwen3.5-9b split it across AU (room for 9 layers) and IT (26) although
   both hold all 32 — capacity, not price: neither could take the whole model at that moment.
+
+**(g) A cold prompt priced 3.6x its time** (field report 2026-10-19, a tester, v0.3.244,
+`e736f3cc`): 3,718 tokens over their node (L0-14 and L42-48, on a 12 GB card) and BE (L14-42),
+predicted 549 s with `prompt:498030`, took 137.7 s — BE's segment 116.5 s of it. The warm repeat's
+gap (29.3 s predicted, 120.7 s taken) is #321's re-sent prompt, fixed; this one is not. Unread:
+which segment's prompt figure was high — a prior, or a rate taken from one small forward. Next: a
+cold request's per-segment prompt terms at `info`, then compare each with its segment's time.
 
 #### #180 — A node holding the whole model takes every request for it; partial ranges stay off by default
 `P2` · routing · **PARTIAL** — 2026-07-28 · history: archive § "A node holding every shard monopolises the model"
@@ -1793,7 +1801,8 @@ connections (~90% of the live node's) ran Cubic, whose window a split's bursts n
 was spread over ~0.4 of a round trip (43 KB at 100 ms: 142 ms, 107 under BBR; 280 KB over 20 Mbit/s
 with 1% loss: 493, 219) — they now run quinn's BBR (`docs/invariants/network.md` § "A burst is
 paced by the link"); TCP's slow start after idle has the same shape and is a system setting, left.
-Left: the real link; (2) tree verification in every segment (#134); (3) the continuous stream
+Left: the real link; (2) tree verification in every segment (#134) — **built 2026-10-20, off by
+default**: 4.75-5.06 tok/s against the stream's 5.03-5.52 on the 385 ms rig; (3) the continuous stream
 through a chain of machines — **built 2026-10-20** (`features::CHAINED_STREAM`, bit 27): 1.24 tok/s
 against 1.07 for chained rounds and 1.03 without guessing, on a 3-machine processor rig at 206 ms
 (the three share one processor, which caps what overlapping their work can win). Building it found
@@ -1912,16 +1921,19 @@ measure unbatched aggregate against forced batching before changing anything. A 
 segment still ends the chain when the requester holds the tail (the delegated split #143
 covers only requesters holding nothing).
 
-#### #134 — Split decode: draft trees and a drafter the node does not hold are unbuilt (the pipelined prompt pass is #171)
-`P3` · perf-split · **PARTIAL** — 2026-09-27 · history: archive row #134; plan: `split_speculation.md`
+#### #134 — Split decode: draft trees lose to the stream, and a drafter the node does not hold is unbuilt (the pipelined prompt pass is #171)
+`P3` · perf-split · **PARTIAL** — 2026-10-20 · history: archive row #134; plan: `split_speculation.md`, `large_model_splits.md` § "Draft trees"
 
 Shipped: guessing ahead on by default (v0.3.213), the continuous stream (v0.3.216, #149), walk
-at the tail, γ control, the engine drafter. Remaining from the plan: acquiring a drafter a
-node does not already hold (today it chooses only among held models); draft TREES (Phase 2,
-projected ~10-15 tok/s at 300 ms; needs a `LayerForward` trailer gated on a feature bit and
-tree attention masks in the worker — absorbs the old survey's Tier 2D); the pipelined prompt
-pass (Phase 3) is #171. The same-model-at-fewer-bits drafter is decided against as a default
-(#144, § "Decided").
+at the tail, γ control, the engine drafter; **draft trees** (v0.3.246: trailer `0x10`, bit 29,
+tree masks in every segment, the next tree grown beside its check) — every node reads one, but
+they are OFF by default (`SWARMLLM_DRAFT_TREES=1`): on the 385 ms rig, trees beside 4.75-5.06
+tok/s against the stream's 5.03-5.52 (`docs/invariants/scheduling.md` § "A split checks a tree
+of guesses", Measured). Next for trees, each measured against the stream before a default flips:
+a drafter on a card, a stream of trees (several in flight), the real TH↔AU link (both halves on
+cards). Remaining from the plan: acquiring a drafter a node does not already hold (today it
+chooses only among held models); the pipelined prompt pass (Phase 3) is #171. The
+same-model-at-fewer-bits drafter is decided against as a default (#144, § "Decided").
 
 #### #275 — A target already loaded keeps its layers, and only processor plans leave the drafter room
 `P3` · perf-split · **PARTIAL** — 2026-10-15 · history: § Closed 2026-10-14 (#275's first half), 2026-10-15 (the reply's charge; judged beside the plan)

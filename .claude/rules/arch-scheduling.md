@@ -6,6 +6,7 @@ paths:
   - "src/inference/segment_latency.rs"
   - "src/inference/prefetch.rs"
   - "src/inference/dsd_controller.rs"
+  - "src/inference/draft_tree.rs"
   - "src/inference/trace.rs"
   - "src/inference/ngram_lookup.rs"
   - "src/inference/cancel.rs"
@@ -344,6 +345,12 @@ Each names the ONE place a decision is made; a second implementation of any is t
 **A requester holding a drafter guesses for it, and the head never waits (2026-10-20, #318).** `pipeline::requester_guesses::start` offers guesses (`DelegatedSplit::guesses`) only to a head advertising `features::REQUESTER_GUESSES` (bit 28) — NOT in `ALL`: advertised only where `requester_guesses::takes_guesses` says the head would open a slot, the one answer both ask. The head's slot (`daemon::state::requester_guesses`) is opened ONLY by `handle_delegated_split` and offered to ONLY by dispatch's `RequesterGuesses` arm, for the authenticated peer that handed the reply over. The n-gram loop checks the newest window before prompt lookup and records every token BEFORE emitting it (the stream carries the ids, `StreamingToken::reply_ids`). A continued reply takes none. The head checks only as many guesses as its own fitted check cost says pay (`ngram_only_spec::choose_guess_gamma` → `dsd_controller::best_gamma_for_check`; zero is an answer). The stream is HANDED its slot (`OpenSlot::slot`), never finds one by the requester-chosen wire id. A/B `SWARMLLM_REQUESTER_GUESSES=0` (requester), `SWARMLLM_HEAD_GUESS_GAMMA=fixed` (head).
 
 → `docs/invariants/scheduling.md` § "A requester guesses for the split its head leads"
+
+## A split can check a TREE of guesses, and each row is checked only while it pays (2026-10-20, #134)
+
+**`pipeline::tree_check_possible` is the one answer to "may this check carry a tree"** — every peer segment advertises `features::DRAFT_TREES` (bit 29, in `ALL`) and the tail walks; the round loop asks it before growing one, `forward_verify_through_segments` before sending one. The families come first (`ModelArch::reads_draft_trees`, the target's AND the drafter's); each worker's layers have the last word (`SplitModel::draft_tree_refusal` → `Validation` before anything runs; the reply goes on in chains, possible only while nothing waits to be read again). **`draft_tree::worth_checking`** chooses the rows: the drafter's path probability × the calibration (`dsd_tree::TreeRounds`, kept ÷ rated) against the check's fitted cost per row (`CheckCost::fit`) — never a fixed size; on a long link a row is the hidden state crossing it. **A kept path is cut and read again, never gathered** (`TreeOutcome::rows_in_place` → `TreeRounds::reread`, the next check's first rows). The noise is keyed by depth (`index_pos + 1 + depth`), as the drafter grew it. **The next tree grows while the check is on its way**: the round joins the check with a drafter call growing ON the tree it carries (`TreeAsk::seed`, the queue one call would have had), for `TreeRounds::beside_budget_ms` of the check's predicted time; the part under what the round emitted (`GrownTree::after`) is the next tree, grown further first only where `grow_before_the_check` says it pays. `CheckCost` is fed the check's own time, never the round's. **Off by default** — no faster than the continuous stream on the rig (4.75-5.06 vs 5.03-5.52 tok/s, 2026-10-20); `SWARMLLM_DRAFT_TREES=1` asks for them (`dsd_tree::trees_requested`), and every node still advertises bit 29 and reads a tree, so turning them on needs no peer to update. `SWARMLLM_TREE_GROW_BESIDE=0` grows each only before its check.
+
+→ `docs/invariants/scheduling.md` § "A split checks a tree of guesses"
 
 ## A chain its head will lead is priced as its head leading it (2026-10-18, #3 (a))
 

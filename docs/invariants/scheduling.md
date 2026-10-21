@@ -4322,6 +4322,143 @@ alternative here is a head with none.
 (`model_worker`); the wire
 pair in `swarmllm-types`. A/B in one binary: `SWARMLLM_REQUESTER_GUESSES=0` on the requester.
 
+## A split checks a tree of guesses (2026-10-20, #134)
+
+**The gap.** Over a long link a check costs a round trip whatever it carries, and a chain keeps
+only the guesses before its first miss. Measured TH↔AU (2026-10-20, a 7B split between this
+machine's RTX 3070 and a peer's RTX 3060, ~385 ms apart): no guessing 1.96-2.29 tok/s, rounds of
+chains 3.6-8.9, the continuous stream 5.0-12.6 — every pass paid ~400-465 ms fixed and 4-18 ms
+for each row it carried. A tree keeps the longest run along whichever branch the model takes, for
+the same round trip (SpecInfer, SpecExec, Sequoia, EAGLE-2).
+
+**The design.**
+- **What a check carries.** Rows are `[kept tokens read again, the token the last check chose,
+  the guesses]`; `LayerForward::draft_parents` gives each row's parent among the forward's rows
+  (0 = the cache's last position, k = row k − 1). Trailer `0x10`, last in the frame, bound in
+  the AAD, at most `draft_tree::MAX_TREE_ROWS` (512); a malformed one is REFUSED, never read as a
+  chain — a tree read as a chain attends every row to its siblings and answers plausibly and
+  wrongly. Sent only where `pipeline::tree_check_possible`: every peer segment advertises
+  `features::DRAFT_TREES` (bit 29, in `ALL`) and the tail walks. A chained hop hands the shape on.
+- **Every segment** reads it through `SplitModel::with_draft_tree`: row i rotated at
+  `index_pos + depth(i)` (`layers::RowPositions`), attending the cache plus its own ancestors
+  (`DraftTree::rows_for`), on standard attention (the card's flash kernel takes causality as a
+  flag), never as a CUDA graph. A layer keeping keys by position or one state per request — a
+  sliding window, another layer's cache, MLA, a recurrent state, a picture's spans — refuses it
+  up front (`SplitModel::draft_tree_refusal` → `Validation` from `draft_tree_to_apply`), and the
+  coordinator checks chains for the rest of the reply, every segment cut back to where it was.
+  The families are asked first (`ModelArch::reads_draft_trees`, an allowlist: Llama, Qwen2,
+  Phi3, Mistral, Glm4 — the target's and the drafter's, which grows its tree the same way).
+- **The tail walks it** (`sampling::walk_verified_tree`): sample at the row before the guesses,
+  descend to the child carrying the sample, repeat. A node's children carry distinct tokens, so
+  "keep the child equal to the target's own draw" is SpecExec's rule along one path — exact at
+  any temperature. Shared noise is keyed `index_pos + 1 + depth(row)`, as the drafter grew it
+  (`base + depth(parent) + 1`).
+- **After a check: cut and read again, never gather.** The drafter lays its likeliest path out
+  first (`draft_tree::trunk_first`), so the kept path usually IS the first rows: every cache keeps
+  the lead rows and the kept rows sitting in place after them (`TreeOutcome::rows_in_place`), is
+  cut there by the next forward's `truncate_kv_to`, and the rest of the kept tokens head the next
+  check (`TreeRounds::reread`). A gather would need a second trailer and a KV copy in every
+  segment (FlowSpec broadcasts a retain set; more wire). While anything waits to be read again,
+  the next round MUST be a tree round — a segment that stops reading trees then fails the reply.
+- **The drafter grows it in one call** (`SplitModel::draft_tree_after`, the worker's
+  `TreeAsk { rows, per_step, grow_for_ms, seed }` → `split::TreeGrowth`): best-first over path
+  log-probability in `dsd_tree::STEPS` (8) forwards of the drafter, each expanding the best
+  `per_step` unexpanded nodes and queueing their `TREE_CHILDREN` (8) likeliest followers; then its
+  cache is cut back to the context. It answers tokens, parents and each node's path
+  log-probability (`WorkerMsg::Drafted::scores`).
+- **The next tree grows while the check is on its way** (2026-10-20). Grown only before its check,
+  a tree put the drafter on every round's path: on the rig, a processor drafter's ~1 s a round
+  made trees 0.86× the stream, though they kept twice the tokens a round. So `dsd`'s tree round
+  joins the check with a second drafter call (`tokio::join!`) that GROWS ON the tree the check
+  carries (`TreeAsk::seed`: the seed's rows read in one forward, their followers queued without
+  the children it holds — the queue one call would have had), best-first by path probability from
+  the same root: a guess's chance of lying on the reply's path, in this check if it went out, else
+  in the next. When the check answers, the part under what the round emitted
+  (`GrownTree::after(kept, next, SEED_MOST)`, re-rated from its new root) is the next check's
+  tree — with no drafting in its way. It is grown further first only where
+  `TreeRounds::grow_before_the_check` says the tokens added outweigh the time added
+  (`(1 + grown)/(check + grow) > (1 + seed)/check`). The call beside is given
+  `BESIDE_SHARE` (0.85) of the check's predicted time less its recent overrun
+  (`beside_budget_ms`); past it a step's guesses are added unread. The check's own time feeds
+  `CheckCost`, never the round's. This is the tree version of Speculative Speculative Decoding
+  (Saguaro, arXiv 2603.03251), which caches outcomes of a CHAIN and falls back to drafting on a
+  miss; a tree holds the outcomes as its branches, and a miss (`seed_misses`) just grows.
+- **What is sent is priced, row by row** (`draft_tree::worth_checking`): expected kept =
+  Σ calibration · exp(path log-probability) over the top-n guesses by rating (closed under
+  parents, so still a tree); cost = the check's fitted `fixed + (lead + n) · per_row`
+  (`dsd_controller::CheckCost`, the line chain checks fit); the n maximising (E + 1) / cost is
+  sent — none is an answer. The calibration is kept ÷ rated, an EWMA clamped to [0.05, 2], so a
+  drafter that over-promises is trusted less. With no slope measured yet, every other round is
+  capped at a quarter of the rows so the fit sees two sizes. The tree grown is
+  `2 × recent sent`, in [16, 64]. A guess that would run past the reply's room is never sent.
+
+**Measured — and why trees are off by default** (2026-10-20, `~/swarmllm-318/drafter318.sh`: a
+7B split, B's parts 1-7 on this machine's RTX 3070, A's part 0 and the 0.5B drafter on its
+processor, QUIC, every packet delayed for a 385 ms round trip; one CUDA release build per row,
+three requests of 160 tokens, the second and third warm):
+
+| tok/s, warm | 4-bit drafter | 8-bit drafter |
+|---|---|---|
+| tree grown only before its check | 4.20, 4.50 | 4.00, 4.10 |
+| tree grown beside its check | 4.86, 5.06 | 4.88, 4.75 |
+| continuous stream of chains | 5.03, 5.09 | 5.51, 5.52 |
+
+Before #323's kernels (the drafter's steps 2.5-3.4x dearer) trees beside were 2.81 / 2.74 against
+the stream's 4.12 / 4.09. The cheaper drafter gained trees ~80% and the stream ~10-24%, and the
+stream still wins: a tree grown beside its check kept 2.9-3.3 guesses a round (warm; 3.5-4.0
+grown before it) for one round trip, and still waited 180-245 ms a round for the drafter (385-494
+before it), where the stream keeps several chains in flight and never waits for one. **So the stream is the default and trees are asked
+for with `SWARMLLM_DRAFT_TREES=1`.** Every node advertises bit 29 and reads a tree it is sent, so
+a release that turns them on needs no peer to update. What could flip it, untested: a drafter on
+a card (a growth step costs a forward of the drafter), prompts where chains keep less (α well
+below 0.7), a tree STREAM (several trees in flight, as the stream keeps chains). Replies scored
+against llama.cpp (`score_trees.out` beside the rig): the stream arms 154-158 of 160 rank 1,
+worst rank 2.
+
+**What a change must keep:**
+- **The shape is bound in the AAD and refused malformed** — a relay reshaping a tree changes
+  which rows a guess reads.
+- **One wrapper reads it** (`with_draft_tree`): the worker's check and every step of the
+  drafter's growth go through it, so both see the same positions and mask.
+- **Never a gather.** The cache after a check is a prefix of the forward's rows; anything else
+  is read again.
+- **The refusal is a type, and the fallback only where it can go on**: `Validation` before any
+  layer runs, and chains only while `reread` is empty.
+- **Priced from this request's measurements**, never a fixed size: on the real link a row is the
+  hidden state crossing it (~3.8 KB at Q8 for a 7B), and on a processor stage a row is compute.
+- **A tree's row positions are set on the thread that runs the layers, and SET — `None`
+  included — for every job a pool runs** (`cpu_pools::with_the_callers_scope`, beside the
+  attention override): a pool thread waiting inside one forward's parallel work runs other jobs,
+  a second forward too, which read the first one's tree ("a forward of 1 rows inside a tree of 4
+  positions" between tests sharing the decode pool; at the tree's own length it would have been
+  rotated wrong, silently).
+
+**Tests**: `a_row_reads_the_context_and_its_ancestors_only`, `a_chain_is_the_causal_mask`,
+`a_tree_grown_over_several_forwards_reads_its_cached_rows`,
+`a_parent_after_its_child_or_a_tree_too_large_is_refused`, `the_kept_tokens_are_read_back_as_rows`,
+`the_likeliest_path_is_laid_out_first`, `a_guess_is_checked_only_while_it_pays_for_its_row`,
+`the_guesses_worth_checking_are_a_tree` (`draft_tree`);
+`every_row_of_a_tree_reads_what_its_own_path_reads` (with a chain over the same rows as the
+control, which must differ), `a_kept_path_read_again_continues_as_if_read_alone`,
+`a_tree_grown_a_step_at_a_time_reads_its_earlier_rows`,
+`a_model_whose_layers_cannot_read_a_tree_refuses_it_before_running`,
+`a_tree_that_does_not_fit_the_cache_is_refused_and_the_cache_kept` (`split/tests/draft_trees.rs`);
+`a_grown_tree_guesses_after_each_path_what_a_fresh_read_guesses`,
+`a_tree_grown_on_an_earlier_one_is_the_tree_one_call_grows`,
+`a_call_out_of_time_adds_one_step_it_does_not_read` (`split/tests/drafting.rs`);
+`the_tree_grown_on_gives_the_next_check_the_part_under_its_outcome` (`draft_tree`);
+`a_job_reads_its_callers_tree_positions_not_the_threads_it_runs_on` (`cpu_pools`);
+`a_chain_shaped_tree_walks_as_the_chain_does`, `the_walk_follows_the_branch_that_carries_each_pick`,
+`a_tree_no_honest_coordinator_sends_is_refused` (`sampling`); the eight `dsd_tree` tests;
+`a_tree_of_guesses_is_applied_only_to_a_check_it_fits` (`model_worker`);
+`a_tree_shape_survives_the_wire_and_a_malformed_one_is_refused`,
+`a_tree_shape_is_sealed_and_survives_the_encrypted_frame` (`network::protocol`). A/B in one
+binary: `SWARMLLM_DRAFT_TREES=1` (trees; off by default, above), `SWARMLLM_TREE_GROW_BESIDE=0`
+(each tree grown only before its check). Rigs: `~/swarmllm-318/trees318.sh` (both halves on the
+card — two CUDA processes, the FECS shape: one came at its 5th arm, 10:36Z 10-20),
+`~/swarmllm-318/overlap318.sh` (the far half on the card, the requester's part and drafter on its
+processor, QUIC, every packet delayed).
+
 ## A peer that fails a model on every request is left out of its plans for a while (2026-10-02)
 
 **What it replaced.** Field report (2026-10-01, v0.3.218): peer `bf7b3263`, a

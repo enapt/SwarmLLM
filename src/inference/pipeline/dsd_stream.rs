@@ -640,6 +640,7 @@ impl StreamRun<'_, '_> {
             sampling,
             generated: &self.frontier.history,
             coupling: self.coupling,
+            parents: &[],
         };
         let far = &self.shape.far;
         let far_input = (!self.shape.far_walks()).then(|| activations.clone());
@@ -812,6 +813,7 @@ impl StreamRun<'_, '_> {
             sampling: &exec.request.sampling_params,
             generated: &sent.history,
             coupling: self.coupling,
+            parents: &[],
         };
         let mut activations = far.activations;
         // Not empty: only a shape with segments after the peer's feeds on.

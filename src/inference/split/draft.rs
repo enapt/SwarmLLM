@@ -12,6 +12,104 @@ use super::model::SplitModel;
 /// wins even against captured steps.
 const SINGLE_STEP_READ_MAX: usize = 4;
 
+/// How many followers of each guess a tree considers ([`SplitModel::draft_tree_after`]):
+/// SpecExec's branching factor is 16; past ~8 the extra followers of a node
+/// are rarely likelier than a deeper guess elsewhere.
+const TREE_CHILDREN: usize = 8;
+
+use crate::inference::draft_tree::GrownTree;
+
+/// What one tree-growing call adds to ([`SplitModel::draft_tree_after`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TreeGrowth<'a> {
+    /// The tree grown so far after the same token, rated from it: read again
+    /// in one forward, then added to. An empty one grows from nothing.
+    pub seed: &'a GrownTree,
+    /// Guesses to add.
+    pub rows: usize,
+    /// Guesses read in one forward while it grows.
+    pub per_step: usize,
+    /// Stop adding guesses once the call has run this long — a tree grown
+    /// while a check is on its way is wanted when the check's answer is
+    /// (`pipeline::dsd_tree`). `None` adds all `rows`.
+    pub grow_for: Option<std::time::Duration>,
+}
+
+/// A guess waiting for a place in the tree, rated by its path's log-probability.
+struct Candidate {
+    score: f32,
+    own: f32,
+    parent: Option<usize>,
+    token: u32,
+}
+
+impl PartialEq for Candidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.score.total_cmp(&other.score).is_eq()
+    }
+}
+impl Eq for Candidate {}
+impl PartialOrd for Candidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Candidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.score.total_cmp(&other.score)
+    }
+}
+
+/// The `k` likeliest tokens of `logits` at `temperature` (1 for a greedy
+/// request) with their log-probabilities, likeliest first; `drawn`, when given,
+/// is rated first whatever its probability — the coupled draw is the
+/// drafter's best guess at what the target's sampler picks.
+fn likeliest(logits: &[f32], temperature: f32, k: usize, drawn: Option<u32>) -> Vec<(u32, f32)> {
+    let t = if temperature > 0.0 { temperature } else { 1.0 };
+    let finite = logits.iter().copied().filter(|x| x.is_finite());
+    let max = finite.clone().fold(f32::NEG_INFINITY, f32::max);
+    if !max.is_finite() {
+        return Vec::new();
+    }
+    let log_sum = max / t + finite.map(|x| ((x - max) / t).exp()).sum::<f32>().ln();
+    let logp = |i: usize| logits[i] / t - log_sum;
+    let mut best: Vec<usize> = Vec::with_capacity(k + 1);
+    for (i, &x) in logits.iter().enumerate() {
+        if !x.is_finite() {
+            continue;
+        }
+        if best.len() < k {
+            best.push(i);
+            if best.len() == k {
+                best.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+            }
+        } else if x > logits[best[k - 1]] {
+            best[k - 1] = i;
+            let mut j = k - 1;
+            while j > 0 && logits[best[j]] > logits[best[j - 1]] {
+                best.swap(j, j - 1);
+                j -= 1;
+            }
+        }
+    }
+    if best.len() < k {
+        best.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+    }
+    let mut out: Vec<(u32, f32)> = Vec::with_capacity(k + 1);
+    if let Some(d) = drawn.filter(|&d| (d as usize) < logits.len()) {
+        // Rated as the likeliest sibling: ahead of every other follower.
+        let top = best.first().map_or(0.0, |&i| logp(i));
+        out.push((d, top.max(logp(d as usize))));
+    }
+    out.extend(
+        best.into_iter()
+            .filter(|&i| Some(i as u32) != drawn)
+            .map(|i| (i as u32, logp(i)))
+            .take(k.saturating_sub(usize::from(drawn.is_some()))),
+    );
+    out
+}
+
 impl SplitModel {
     /// Read `append` into this request's cache from position `keep`, then guess
     /// `gamma` tokens, reading each back in so the next can follow it — all but
@@ -55,45 +153,8 @@ impl SplitModel {
         prefill_chunk_tokens: usize,
         stop_below: Option<f32>,
     ) -> Result<Vec<u32>, SwarmError> {
-        let held = kv.request_positions(self.kv_model_key(), request_id);
-        if held < keep {
-            return Err(SwarmError::ServiceUnavailable(format!(
-                "the guessing model holds {held} positions of this reply, not the {keep} \
-                 this call continues from — its cache expired or its worker was replaced"
-            )));
-        }
-        // Also empties a first read's cache (`keep` 0) of whatever an earlier
-        // call that failed part-way left in it.
-        kv.truncate_request_to(self.kv_model_key(), request_id, keep)?;
+        let mut logits = self.read_after(kv, request_id, keep, append, prefill_chunk_tokens)?;
         let first = keep + append.len();
-        // A short read that continues the reply goes through as single
-        // positions on a card: each is a decode step, sent as a CUDA graph at
-        // ~3 ms on a 0.5B, where ONE multi-position forward of the same 2-4
-        // tokens takes the uncaptured prompt path at 12-17 ms (measured on the
-        // split rig, 2026-09-30). Most calls read two — the guess the last call
-        // never fed back, and the check's own token — so this was most of a
-        // call's cost. On the processor one pass reads the weights once and
-        // stays cheaper; the prompt's first read is a prompt pass either way.
-        let mut logits =
-            if keep > 0 && append.len() <= SINGLE_STEP_READ_MAX && self.runs_entirely_on_card() {
-                let mut last = None;
-                for (i, &id) in append.iter().enumerate() {
-                    let step = self.token_tensor(id)?;
-                    last = Some(self.forward(&step, keep + i, kv, request_id)?);
-                }
-                last.expect("append is not empty — the worker refuses an empty draft call")
-            } else {
-                let input = self.tensor_from_ids(append)?;
-                self.forward_prompt_in_chunks(
-                    &input,
-                    keep,
-                    kv,
-                    request_id,
-                    None,
-                    false,
-                    prefill_chunk_tokens,
-                )?
-            };
         if noise.is_none() && self.device.is_cuda() {
             return self.argmax_guesses_on_card(
                 kv,
@@ -152,6 +213,288 @@ impl SplitModel {
             }
         }
         Ok(guesses)
+    }
+
+    /// Cut this request's cache back to `keep` and read `append` into it,
+    /// answering the last position's logits — the start of every drafting call
+    /// ([`Self::draft_after`], [`Self::draft_tree_after`]). A cache holding
+    /// fewer than `keep` positions is refused (see `draft_after`).
+    fn read_after(
+        &mut self,
+        kv: &KvCacheStore,
+        request_id: &str,
+        keep: usize,
+        append: &[u32],
+        prefill_chunk_tokens: usize,
+    ) -> Result<candle_core::Tensor, SwarmError> {
+        let held = kv.request_positions(self.kv_model_key(), request_id);
+        if held < keep {
+            return Err(SwarmError::ServiceUnavailable(format!(
+                "the guessing model holds {held} positions of this reply, not the {keep} \
+                 this call continues from — its cache expired or its worker was replaced"
+            )));
+        }
+        // Also empties a first read's cache (`keep` 0) of whatever an earlier
+        // call that failed part-way left in it.
+        kv.truncate_request_to(self.kv_model_key(), request_id, keep)?;
+        // A short read that continues the reply goes through as single
+        // positions on a card: each is a decode step, sent as a CUDA graph at
+        // ~3 ms on a 0.5B, where ONE multi-position forward of the same 2-4
+        // tokens takes the uncaptured prompt path at 12-17 ms (measured on the
+        // split rig, 2026-09-30). Most calls read two — the guess the last call
+        // never fed back, and the check's own token — so this was most of a
+        // call's cost. On the processor one pass reads the weights once and
+        // stays cheaper; the prompt's first read is a prompt pass either way.
+        let logits =
+            if keep > 0 && append.len() <= SINGLE_STEP_READ_MAX && self.runs_entirely_on_card() {
+                let mut last = None;
+                for (i, &id) in append.iter().enumerate() {
+                    let step = self.token_tensor(id)?;
+                    last = Some(self.forward(&step, keep + i, kv, request_id)?);
+                }
+                last.expect("append is not empty — the worker refuses an empty draft call")
+            } else {
+                let input = self.tensor_from_ids(append)?;
+                self.forward_prompt_in_chunks(
+                    &input,
+                    keep,
+                    kv,
+                    request_id,
+                    None,
+                    false,
+                    prefill_chunk_tokens,
+                )?
+            };
+        Ok(logits)
+    }
+
+    /// Grow a tree of guesses after reading `append` from position `keep`
+    /// (#134, `docs/plans/large_model_splits.md` § "Draft trees"): the call
+    /// [`Self::draft_after`] makes for a chain, for a check that keeps the
+    /// longest run along whichever branch the target takes.
+    ///
+    /// Best-first over cumulative log-probability, as SpecExec (arXiv
+    /// 2406.02532) and EAGLE-2's rerank grow theirs: each step adds the
+    /// `per_step` likeliest guesses not yet in the tree, reads them in ONE tree
+    /// forward of this model (`with_draft_tree`), and queues each one's
+    /// [`TREE_CHILDREN`] likeliest followers. The last step's guesses are not
+    /// read — nothing follows them yet. A guess's rating is its probability at
+    /// the request's temperature (1 for a greedy request); with `noise` the
+    /// draw the target's sampler will make there is rated first among its
+    /// siblings, as `draft_after` guesses it.
+    ///
+    /// `growth.seed` is a tree already grown after the same token, rated from
+    /// it — what a check's outcome left of the last one (`GrownTree::after`).
+    /// Its rows are read in one forward and their followers queued without the
+    /// children it holds, so the call goes on where that growth stopped: the
+    /// queue is the one a single call would have had. `growth.rows` more are
+    /// added, fewer once `growth.grow_for` has passed. A seed whose rows do
+    /// not come after their parents, or name a token past the vocabulary, is
+    /// refused.
+    ///
+    /// The tree is laid out with its likeliest path first
+    /// (`draft_tree::trunk_first`), so a check that keeps that path keeps a
+    /// prefix of the rows. Returns each guess's token, parent among the
+    /// guesses (`None`: it follows `append`'s last token) and path rating
+    /// ([`GrownTree`]), the seed's among them. The cache is cut back to
+    /// `keep + append.len()` afterwards: it holds what the check will
+    /// confirm, never a guess.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draft_tree_after(
+        &mut self,
+        kv: &KvCacheStore,
+        request_id: &str,
+        keep: usize,
+        append: &[u32],
+        growth: TreeGrowth<'_>,
+        sampling: &crate::types::SamplingParams,
+        history: &[u32],
+        noise: Option<&crate::inference::coupled_noise::CoupledNoise>,
+        prefill_chunk_tokens: usize,
+    ) -> Result<GrownTree, SwarmError> {
+        use crate::inference::draft_tree::{reorder, trunk_first, DraftTree, MAX_TREE_ROWS};
+        let started = std::time::Instant::now();
+        let seed = growth.seed;
+        let seeded = seed.tokens.len();
+        if seed.parents.len() != seeded || seed.path_logp.len() != seeded {
+            return Err(SwarmError::Validation(
+                "a tree to grow on has tokens, parents and ratings of different lengths".into(),
+            ));
+        }
+        if seeded > MAX_TREE_ROWS {
+            return Err(SwarmError::Validation(format!(
+                "a tree to grow on of {seeded} rows is past the {MAX_TREE_ROWS} one may hold"
+            )));
+        }
+        if let Some(vocab) = self.embedding_rows() {
+            if seed.tokens.iter().any(|&t| t as usize >= vocab) {
+                return Err(SwarmError::Validation(
+                    "a tree to grow on names a token past the vocabulary".into(),
+                ));
+            }
+        }
+        let rows = seeded.saturating_add(growth.rows).min(MAX_TREE_ROWS);
+        let per_step = growth.per_step.max(1);
+        let out_of_time = || {
+            growth
+                .grow_for
+                .is_some_and(|limit| started.elapsed() >= limit)
+        };
+        // A seed row's children, by its index (0: the rows that follow the
+        // last token read): already in the tree, so never queued again.
+        let mut held: Vec<Vec<u32>> = vec![Vec::new(); seeded + 1];
+        for (i, parent) in seed.parents.iter().enumerate() {
+            match parent {
+                None => held[0].push(seed.tokens[i]),
+                Some(p) if usize::from(*p) < i => held[usize::from(*p) + 1].push(seed.tokens[i]),
+                Some(_) => {
+                    return Err(SwarmError::Validation(format!(
+                        "row {i} of a tree to grow on comes before its parent"
+                    )));
+                }
+            }
+        }
+        let logits = self.read_after(kv, request_id, keep, append, prefill_chunk_tokens)?;
+        let base = keep + append.len();
+        let root: Vec<f32> = logits
+            .flatten_all()
+            .and_then(|t| t.to_dtype(candle_core::DType::F32))
+            .and_then(|t| t.to_vec1())
+            .map_err(SwarmError::internal)?;
+        let mut tree = DraftTree::new(base, Vec::new()).map_err(SwarmError::Internal)?;
+        let mut tokens: Vec<u32> = Vec::with_capacity(rows);
+        // Each guess's log-probability among its siblings, and along its path.
+        let mut own: Vec<f32> = Vec::with_capacity(rows);
+        let mut path: Vec<f32> = Vec::with_capacity(rows);
+        let mut queue = std::collections::BinaryHeap::new();
+        let mut ctx = crate::inference::sampling::SamplingContext::new(0);
+        let path_tokens = |tree: &DraftTree, tokens: &[u32], row: Option<usize>| -> Vec<u32> {
+            let mut out: Vec<u32> = std::iter::successors(row, |&r| tree.parent(r))
+                .map(|r| tokens[r])
+                .collect();
+            out.reverse();
+            out
+        };
+        let mut queue_followers = |queue: &mut std::collections::BinaryHeap<Candidate>,
+                                   tree: &DraftTree,
+                                   tokens: &[u32],
+                                   parent: Option<usize>,
+                                   so_far: f32,
+                                   logits: &[f32],
+                                   held: &[u32]| {
+            let drawn = noise.map(|noise| {
+                let mut seen = history.to_vec();
+                seen.extend(path_tokens(tree, tokens, parent));
+                let position = base + parent.map_or(0, |p| tree.depth(p) + 1);
+                let mut row = logits.to_vec();
+                crate::inference::sampling::sample_token_coupled(
+                    &mut row,
+                    sampling,
+                    &seen,
+                    &mut ctx,
+                    noise,
+                    position as u64,
+                )
+            });
+            for (token, logp) in likeliest(logits, sampling.temperature, TREE_CHILDREN, drawn) {
+                if held.contains(&token) {
+                    continue;
+                }
+                queue.push(Candidate {
+                    score: so_far + logp,
+                    own: logp,
+                    parent,
+                    token,
+                });
+            }
+        };
+        queue_followers(&mut queue, &tree, &tokens, None, 0.0, &root, &held[0]);
+        let outcome = (|| -> Result<(), SwarmError> {
+            // The seed's rows go in first, parents first as it lists them, and
+            // are read in one forward so their followers can be queued.
+            for i in 0..seeded {
+                tree.push(seed.parents[i].map(usize::from))
+                    .map_err(SwarmError::Internal)?;
+                let parent_rating = seed.parents[i].map_or(0.0, |p| seed.path_logp[usize::from(p)]);
+                tokens.push(seed.tokens[i]);
+                own.push(seed.path_logp[i] - parent_rating);
+                path.push(seed.path_logp[i]);
+            }
+            if seeded > 0 && seeded < rows {
+                let input = self.tensor_from_ids(&tokens)?;
+                let out = self.with_draft_tree(tree.clone(), |m| {
+                    m.forward_verify_all_positions(&input, base, kv, request_id)
+                })??;
+                let read: Vec<Vec<f32>> = out
+                    .squeeze(0)
+                    .and_then(|t| t.to_dtype(candle_core::DType::F32))
+                    .and_then(|t| t.to_vec2())
+                    .map_err(SwarmError::internal)?;
+                for (row, logits) in read.iter().enumerate() {
+                    queue_followers(
+                        &mut queue,
+                        &tree,
+                        &tokens,
+                        Some(row),
+                        path[row],
+                        logits,
+                        &held[row + 1],
+                    );
+                }
+            }
+            // A step's guesses are rated before it starts, so each is added
+            // whatever the time; only reading them — for their followers —
+            // waits on it.
+            while tokens.len() < rows {
+                let mut added = Vec::with_capacity(per_step);
+                while added.len() < per_step && tokens.len() < rows {
+                    let Some(c) = queue.pop() else { break };
+                    let row = tree.push(c.parent).map_err(SwarmError::Internal)?;
+                    tokens.push(c.token);
+                    own.push(c.own);
+                    path.push(c.score);
+                    added.push(row);
+                }
+                // Past the time given, the step's guesses are kept unread.
+                if added.is_empty() || tokens.len() >= rows || out_of_time() {
+                    break;
+                }
+                let input = self.tensor_from_ids(&tokens[added[0]..])?;
+                let out = self.with_draft_tree(tree.clone(), |m| {
+                    m.forward_verify_all_positions(&input, base + added[0], kv, request_id)
+                })??;
+                let read: Vec<Vec<f32>> = out
+                    .squeeze(0)
+                    .and_then(|t| t.to_dtype(candle_core::DType::F32))
+                    .and_then(|t| t.to_vec2())
+                    .map_err(SwarmError::internal)?;
+                for (i, &row) in added.iter().enumerate() {
+                    queue_followers(
+                        &mut queue,
+                        &tree,
+                        &tokens,
+                        Some(row),
+                        path[row],
+                        &read[i],
+                        &[],
+                    );
+                }
+            }
+            Ok(())
+        })();
+        // Whatever happened, the cache holds the confirmed context only.
+        kv.truncate_request_to(self.kv_model_key(), request_id, base)?;
+        outcome?;
+        let order = trunk_first(&tree, &own);
+        let rated: Vec<(u32, f32)> = tokens.iter().copied().zip(path.iter().copied()).collect();
+        let (laid, rated) = reorder(&tree, &rated, &order).map_err(SwarmError::Internal)?;
+        Ok(GrownTree {
+            parents: (0..laid.len())
+                .map(|r| laid.parent(r).map(|p| p as u16))
+                .collect(),
+            tokens: rated.iter().map(|&(t, _)| t).collect(),
+            path_logp: rated.iter().map(|&(_, s)| s).collect(),
+        })
     }
 
     /// Argmax guesses that never leave the card between steps: each step's

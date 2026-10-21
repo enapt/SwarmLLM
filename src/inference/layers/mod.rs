@@ -3257,6 +3257,68 @@ impl LayerWeights {
 /// typical chat by 8x.
 pub(crate) const KV_CACHE_GROWTH_TOKENS: usize = 512;
 
+thread_local! {
+    /// The positions of the rows of the forward running on this thread, when
+    /// they are not consecutive: a tree of guesses, whose rows sit at
+    /// `base + depth` (`inference::draft_tree`). Set only by [`RowPositions`].
+    static ROW_POSITIONS: std::cell::RefCell<Option<Vec<u32>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// While alive, every RoPE on this thread rotates row `i` by `positions[i]`
+/// rather than `index_pos + i` (`SplitModel::with_draft_tree`, the one place
+/// that makes one). Set on the thread that runs the layers, as
+/// `attn_kernel::ForceStandardAttnGuard` is.
+pub(crate) struct RowPositions {
+    before: Option<Vec<u32>>,
+}
+
+impl RowPositions {
+    pub(crate) fn new(positions: Vec<u32>) -> Self {
+        Self::carried(Some(positions))
+    }
+
+    /// Set this thread's positions to what another thread had
+    /// ([`row_positions_now`]) — `None` included, which a forward a pool runs
+    /// must set too: a pool thread waiting inside one forward's parallel work
+    /// may run another forward meanwhile (rayon steals any job it holds), and
+    /// that forward would otherwise read the first one's tree
+    /// (`cpu_pools::in_phase_pool`).
+    pub(crate) fn carried(positions: Option<Vec<u32>>) -> Self {
+        Self {
+            before: ROW_POSITIONS.with(|p| p.replace(positions)),
+        }
+    }
+}
+
+/// The positions [`RowPositions`] has set on this thread, if any.
+pub(crate) fn row_positions_now() -> Option<Vec<u32>> {
+    ROW_POSITIONS.with(|p| p.borrow().clone())
+}
+
+impl Drop for RowPositions {
+    fn drop(&mut self) {
+        let before = self.before.take();
+        ROW_POSITIONS.with(|p| *p.borrow_mut() = before);
+    }
+}
+
+/// The rows to read from a RoPE table for a forward of `seq_len` rows, as an
+/// index on `device`, while [`RowPositions`] is set; `None` reads the table's
+/// consecutive rows from `index_pos`. A forward of any other length inside the
+/// scope is refused — rotating it by a tree's positions would be wrong with
+/// nothing failing.
+fn row_positions_on(seq_len: usize, device: &Device) -> CandleResult<Option<Tensor>> {
+    ROW_POSITIONS.with(|p| match p.borrow().as_ref() {
+        None => Ok(None),
+        Some(rows) if rows.len() == seq_len => Tensor::new(rows.as_slice(), device).map(Some),
+        Some(rows) => candle_core::bail!(
+            "a forward of {seq_len} rows inside a tree of {} positions",
+            rows.len()
+        ),
+    })
+}
+
 /// RoPE over a tensor of heads, `[b, n_head, seq, head_dim]`, with the
 /// rotary tables already narrowed to this call's positions.
 ///
@@ -4760,8 +4822,16 @@ impl LayerWeights {
         }
 
         let (_b_sz, _n_head, seq_len, _head_dim) = x.dims4()?;
-        let cos = self.cos.narrow(0, index_pos, seq_len)?;
-        let sin = self.sin.narrow(0, index_pos, seq_len)?;
+        let (cos, sin) = match row_positions_on(seq_len, self.cos.device())? {
+            Some(rows) => (
+                self.cos.index_select(&rows, 0)?,
+                self.sin.index_select(&rows, 0)?,
+            ),
+            None => (
+                self.cos.narrow(0, index_pos, seq_len)?,
+                self.sin.narrow(0, index_pos, seq_len)?,
+            ),
+        };
         let roped = rope_over_heads(x, &cos, &sin, self.rope_dim, self.use_rope_contiguous)?;
         // Here, not in the attention paths, so every path that ropes Q and K
         // — prefill, decode, batched — also normalises them.

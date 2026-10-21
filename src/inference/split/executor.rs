@@ -215,6 +215,57 @@ impl SplitModel {
         out
     }
 
+    /// Run `f` with `tree` — a tree of guesses (`inference::draft_tree`, #134) —
+    /// shaping every forward it makes: each row at its tree position, reading
+    /// the confirmed context and its own ancestors. The one way a tree reaches
+    /// a forward; the worker wraps a check that carries one, the drafter each
+    /// step of the tree it grows. Refused, before `f` runs, by a model whose
+    /// layers cannot read one ([`Self::draft_tree_refusal`]).
+    pub(crate) fn with_draft_tree<R>(
+        &mut self,
+        tree: crate::inference::draft_tree::DraftTree,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> Result<R, SwarmError> {
+        if let Some(why) = self.draft_tree_refusal() {
+            return Err(SwarmError::Inference(format!(
+                "this model cannot check a tree of guesses: {why}"
+            )));
+        }
+        let before = self.draft_tree.replace(tree);
+        let out = f(self);
+        self.draft_tree = before;
+        Ok(out)
+    }
+
+    /// Why this segment's layers cannot read a tree of guesses, if they cannot.
+    /// A tree's rows sit at positions that are not consecutive and attend a
+    /// mask that is not causal, which only plain attention over a full cache
+    /// takes: a sliding window keeps keys by position, a layer reading another
+    /// layer's cache must reach exactly the forward's end, MLA ropes on its own
+    /// path, and a recurrent layer keeps one state, not one per branch (#228).
+    /// The coordinator asks the same question of the model's family first
+    /// (`ModelArch::reads_draft_trees`); this is the answer that holds.
+    pub(crate) fn draft_tree_refusal(&self) -> Option<&'static str> {
+        for layer in &self.layers {
+            match layer {
+                LayerVariant::Dense(lw) => {
+                    if lw.sliding_window.is_some() {
+                        return Some("its layers attend a sliding window");
+                    }
+                    if lw.kv_source.is_some() {
+                        return Some("its layers share another layer's cache");
+                    }
+                }
+                LayerVariant::DeepSeek { .. } => return Some("its attention is MLA"),
+                _ => return Some("its layers keep a recurrent state"),
+            }
+        }
+        if !self.image_spans.is_empty() {
+            return Some("it is reading a picture");
+        }
+        None
+    }
+
     /// The pictures whose rows fall in a forward of `seq_len` positions from
     /// `first`. A picture must lie wholly inside the forward that reads it:
     /// a row cannot attend to a row a later forward has not computed yet, so
@@ -431,7 +482,13 @@ impl SplitModel {
         };
         let first_chunk = ceiling(self, index_pos);
         let seq_len = input.dim(1).map_err(SwarmError::internal)?;
-        if first_chunk == 0 || seq_len <= first_chunk {
+        // A tree of guesses is read in ONE forward: its mask and positions
+        // cover the whole tree (`DraftTree::rows_for` refuses a part), and a
+        // tree is at most `draft_tree::MAX_TREE_ROWS` rows — a card's prompt
+        // chunk. Cut at a smaller `prefill_chunk_tokens`, a middle segment
+        // refused every honest tree and failed the reply (security review of
+        // #134).
+        if first_chunk == 0 || seq_len <= first_chunk || self.draft_tree.is_some() {
             let (out, _) = self.forward_inner_impl(
                 input,
                 index_pos,
@@ -650,6 +707,7 @@ impl SplitModel {
             if seq_len <= crate::inference::cuda_graph::MAX_POSITIONS
                 && (seq_len == 1 || !self.mask_is_read())
                 && self.image_spans.is_empty()
+                && self.draft_tree.is_none()
                 && lora_adapter.is_none()
                 && capture_layers.is_none()
                 && skip_mask.is_none()
@@ -1261,17 +1319,44 @@ impl SplitModel {
         // causality as a flag and would read none. The guard is set on the
         // thread that runs the layers, which `run_attention` asks.
         let spans_here = self.spans_in_forward(kv_offset, seq_len)?;
-        let _reads_the_mask = (!spans_here.is_empty())
+        // A tree of guesses (#134): each row at its tree position, reading the
+        // context and its own ancestors through the mask. A shape that does not
+        // match the cache is refused with the caches put back as they were —
+        // nothing has been written yet — so the conversation survives it.
+        let tree_rows = match self.draft_tree.as_ref() {
+            None => None,
+            Some(tree) => match tree.rows_for(kv_offset, seq_len) {
+                Ok(rows) => Some(rows),
+                Err(e) => {
+                    let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
+                    entry.layers = layer_kv_caches;
+                    entry.ssm_states = layer_ssm_states;
+                    return Err(SwarmError::Inference(format!("a tree of guesses: {e}")));
+                }
+            },
+        };
+        let _reads_the_mask = (!spans_here.is_empty() || tree_rows.is_some())
             .then(|| crate::inference::attn_kernel::ForceStandardAttnGuard::new(true));
 
         // `mut` because a hybrid segment moves it across the device boundary
         // with the activation — see the transition at the head of the loop.
-        let mut masks = if self.mask_is_read() || !spans_here.is_empty() {
+        let mut masks = if let Some((_, mask)) = &tree_rows {
+            ForwardMasks {
+                causal: Some(
+                    Tensor::from_slice(mask, (seq_len, kv_offset + seq_len), &self.device)
+                        .map_err(SwarmError::internal)?,
+                ),
+                windowed: None,
+            }
+        } else if self.mask_is_read() || !spans_here.is_empty() {
             self.attention_masks(seq_len, kv_offset, &spans_here)
                 .map_err(SwarmError::internal)?
         } else {
             ForwardMasks::default()
         };
+        // Set here, on the thread that runs the layers, like the guard above.
+        let _row_positions =
+            tree_rows.map(|(positions, _)| crate::inference::layers::RowPositions::new(positions));
 
         let max_seq_len = self.max_seq_len;
         let mut captured: HashMap<usize, Tensor> = HashMap::new();

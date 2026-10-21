@@ -1240,7 +1240,7 @@ fn batch_eligible(requests: &[IpcForward]) -> bool {
         if r.adapter_id.is_some() {
             return false;
         }
-        if !r.draft_tokens.is_empty() {
+        if !r.draft_tokens.is_empty() || !r.draft_parents.is_empty() {
             return false;
         }
         if r.spec_logits_requested {
@@ -1614,6 +1614,81 @@ fn wire_token_ids(bytes: &[u8], rows: Option<usize>, what: &str) -> Result<Vec<i
         )));
     }
     Ok(ids)
+}
+
+/// The tree of guesses a forward applies (#134), checked: a decode-side check
+/// (never a prompt pass), well formed (`DraftTree::from_wire`: parents before
+/// children, at most `draft_tree::MAX_TREE_ROWS`), one entry per row this
+/// forward reads, and — on the segment that answers — walked here
+/// (`unwalked_answer`): a tree's every row back as a vocabulary would be tens
+/// of megabytes, so a coordinator asks for one only from a tail that walks.
+/// Anything else is the coordinator's mistake, a 400 — a segment whose layers
+/// cannot read a tree (`layers_refuse`, `SplitModel::draft_tree_refusal`)
+/// included, refused before anything runs so the coordinator can check the
+/// same guesses as a chain.
+fn draft_tree_to_apply(
+    wire: &[u16],
+    index_pos: usize,
+    positions: usize,
+    sequence_num: u32,
+    unwalked_answer: bool,
+    layers_refuse: Option<&'static str>,
+) -> Result<Option<crate::inference::draft_tree::DraftTree>, SwarmError> {
+    if wire.is_empty() {
+        return Ok(None);
+    }
+    if let Some(why) = layers_refuse {
+        return Err(SwarmError::Validation(format!(
+            "this model cannot check a tree of guesses: {why}"
+        )));
+    }
+    if sequence_num == 0 {
+        return Err(SwarmError::Validation(
+            "a prompt pass cannot carry a tree of guesses".into(),
+        ));
+    }
+    if unwalked_answer {
+        return Err(SwarmError::Validation(
+            "a tree of guesses is walked by the segment that answers it".into(),
+        ));
+    }
+    let tree = crate::inference::draft_tree::DraftTree::from_wire(index_pos, wire)
+        .map_err(SwarmError::Validation)?;
+    if tree.len() != positions {
+        return Err(SwarmError::Validation(format!(
+            "a tree of {} rows sent with {positions} positions to read",
+            tree.len()
+        )));
+    }
+    Ok(Some(tree))
+}
+
+/// The rows a check's answer is made from, checked before the forward: the
+/// tail computes the vocabulary over every row it is sent (608 KB a row at a
+/// 152K vocabulary), so a coordinator naming thousands of positions had a
+/// holder build gigabytes before the length was looked at, after the work
+/// (security review of #134). A chain walked here reads one row per guess and
+/// the row after the last; one answered with logits carries no more rows than
+/// a coordinator reads back (`MAX_SPEC_LOGITS_POSITIONS`) — an honest check is
+/// at most `config::MAX_GUESSES_PER_CHECK` + 1. A tree is checked by
+/// [`draft_tree_to_apply`]. Anything else is the coordinator's mistake, a 400.
+fn spec_rows_fit_the_answer(
+    positions: usize,
+    drafts: usize,
+    walked_here: bool,
+) -> Result<(), SwarmError> {
+    let most = crate::network::protocol::MAX_SPEC_LOGITS_POSITIONS;
+    if walked_here && positions != drafts + 1 {
+        return Err(SwarmError::Validation(format!(
+            "a check of {drafts} guesses sent with {positions} positions to read"
+        )));
+    }
+    if !walked_here && positions > most {
+        return Err(SwarmError::Validation(format!(
+            "a check answered with logits reads at most {most} positions, not {positions}"
+        )));
+    }
+    Ok(())
 }
 
 /// The picture spans a forward applies (#115 (2b)), checked: well formed
@@ -2046,6 +2121,23 @@ async fn handle_forward(
             _ => None,
         },
     )?;
+    // A tree of guesses (#134): its shape comes from the coordinator, so it is
+    // checked against the rows it shapes before any forward reads it.
+    let draft_tree = draft_tree_to_apply(
+        &fwd.draft_parents,
+        fwd.index_pos as usize,
+        input_positions,
+        fwd.sequence_num,
+        is_last && !fwd.spec_walk_at_tail,
+        model.draft_tree_refusal(),
+    )?;
+    if want_spec_output && draft_tree.is_none() {
+        spec_rows_fit_the_answer(
+            input_positions,
+            fwd.draft_tokens.len(),
+            fwd.spec_walk_at_tail,
+        )?;
+    }
     // The positions this pass will hold once every piece has run: the whole
     // span, admitted at its first piece (gotcha #447 — a pass admitted piece by
     // piece fills a card until attention's transient allocation fails
@@ -2114,134 +2206,88 @@ async fn handle_forward(
         }
     }
 
-    // Run forward pass — CPU-bound, use block_in_place
-    let compute_result =
-        tokio::task::block_in_place(|| -> Result<crate::types::LayerResult, String> {
-            // Speculative verify: multi-position forward returning per-position
-            // logits. In the single-segment Item 2 case (is_first && is_last)
-            // the input is raw token IDs and we use the embedding-applying
-            // path. In the DSD multi-segment case (!is_first && is_last) the
-            // input is hidden state from the previous segment and we skip
-            // embedding via the *_pre_embedded variant.
-            if want_spec_output {
-                let output_t = if is_first {
-                    model
-                        .forward_verify_all_positions(
-                            &input_tensor,
-                            fwd.index_pos as usize,
-                            kv_store,
-                            &req_id_str,
-                        )
-                        .map_err(|e| format!("Forward speculative verify: {e}"))?
-                } else {
-                    model
-                        .forward_verify_all_positions_pre_embedded(
-                            &input_tensor,
-                            fwd.index_pos as usize,
-                            kv_store,
-                            &req_id_str,
-                        )
-                        .map_err(|e| format!("Forward speculative verify (pre-embedded): {e}"))?
-                };
-                // output_t shape is [1, seq_len, vocab_size]. Flatten + dtype-cast +
-                // to_vec1 in one shot (rather than per-position tensor slicing) so a
-                // 151K-vocab model at γ=4 doesn't pay seq_len intermediate tensor
-                // views + casts. Then split into per-position rows by vocab_size.
-                let dims = output_t.dims();
-                if dims.len() != 3 {
-                    return Err(format!("spec verify unexpected shape: {dims:?}"));
-                }
-                let seq_len = dims[1];
-                let vocab_size = dims[2];
-                // A pure-argmax walk — greedy, no penalties, no shared noise —
-                // is chosen on the card: the row's argmax IS what the sampler
-                // would pick (`sample_token_with_ctx`, temperature 0, penalties
-                // off), so only γ+1 token ids come back instead of every row
-                // (2.4 MB for four at a 152K vocabulary, plus a copy per row
-                // and a scan of each on the processor). The non-finite guard
-                // stays: one summed scalar, which any NaN or ±inf poisons.
-                if fwd.spec_walk_at_tail
-                    && output_t.device().is_cuda()
-                    && fwd.sampling.temperature <= 0.0
-                    && fwd.sampling.frequency_penalty == 0.0
-                    && fwd.sampling.presence_penalty == 0.0
-                    && fwd.coupling_seed.is_none()
-                {
-                    let total: f32 = output_t
-                        .sum_all()
-                        .and_then(|t| t.to_dtype(candle_core::DType::F32))
-                        .and_then(|t| t.to_scalar())
-                        .map_err(|e| format!("spec walk on the card: {e}"))?;
-                    if !total.is_finite() {
-                        return Err("spec walk: non-finite logits".into());
-                    }
-                    let picks: Vec<u32> = output_t
-                        .squeeze(0)
-                        .and_then(|t| t.argmax(candle_core::D::Minus1))
-                        .and_then(|t| t.to_vec1())
-                        .map_err(|e| format!("spec walk on the card: {e}"))?;
-                    if picks.len() != fwd.draft_tokens.len() + 1 {
-                        return Err(format!(
-                            "spec walk: {} positions verified for {} drafts",
-                            picks.len(),
-                            fwd.draft_tokens.len()
-                        ));
-                    }
-                    let token_ids = argmax_walk(&fwd.draft_tokens, &picks);
-                    return Ok(crate::types::LayerResult {
-                        request_id,
-                        token_ids,
-                        finish_reason: None,
-                        activations: vec![],
-                        sealed_token_ids: None,
-                        spec_logits: Vec::new(),
-                        matched_stop_sequence: None,
-                        token_logprobs: Vec::new(),
-                        locally_constructed: false,
-                        refusal: None,
-                        answers_step: None,
-                        prompt_blocks_stored: None,
-                    });
-                }
-                let flat: Vec<f32> = output_t
-                    .flatten_all()
+    // Run forward pass — CPU-bound, use block_in_place. A tree of guesses
+    // shapes every forward the pass makes (`SplitModel::with_draft_tree`).
+    let compute = |model: &mut SplitModel| -> Result<crate::types::LayerResult, String> {
+        // Speculative verify: multi-position forward returning per-position
+        // logits. In the single-segment Item 2 case (is_first && is_last)
+        // the input is raw token IDs and we use the embedding-applying
+        // path. In the DSD multi-segment case (!is_first && is_last) the
+        // input is hidden state from the previous segment and we skip
+        // embedding via the *_pre_embedded variant.
+        if want_spec_output {
+            let output_t = if is_first {
+                model
+                    .forward_verify_all_positions(
+                        &input_tensor,
+                        fwd.index_pos as usize,
+                        kv_store,
+                        &req_id_str,
+                    )
+                    .map_err(|e| format!("Forward speculative verify: {e}"))?
+            } else {
+                model
+                    .forward_verify_all_positions_pre_embedded(
+                        &input_tensor,
+                        fwd.index_pos as usize,
+                        kv_store,
+                        &req_id_str,
+                    )
+                    .map_err(|e| format!("Forward speculative verify (pre-embedded): {e}"))?
+            };
+            // output_t shape is [1, seq_len, vocab_size]. Flatten + dtype-cast +
+            // to_vec1 in one shot (rather than per-position tensor slicing) so a
+            // 151K-vocab model at γ=4 doesn't pay seq_len intermediate tensor
+            // views + casts. Then split into per-position rows by vocab_size.
+            let dims = output_t.dims();
+            if dims.len() != 3 {
+                return Err(format!("spec verify unexpected shape: {dims:?}"));
+            }
+            let seq_len = dims[1];
+            let vocab_size = dims[2];
+            // A pure-argmax walk — greedy, no penalties, no shared noise —
+            // is chosen on the card: the row's argmax IS what the sampler
+            // would pick (`sample_token_with_ctx`, temperature 0, penalties
+            // off), so only γ+1 token ids come back instead of every row
+            // (2.4 MB for four at a 152K vocabulary, plus a copy per row
+            // and a scan of each on the processor). The non-finite guard
+            // stays: one summed scalar, which any NaN or ±inf poisons.
+            if fwd.spec_walk_at_tail
+                && output_t.device().is_cuda()
+                && fwd.sampling.temperature <= 0.0
+                && fwd.sampling.frequency_penalty == 0.0
+                && fwd.sampling.presence_penalty == 0.0
+                && fwd.coupling_seed.is_none()
+            {
+                let total: f32 = output_t
+                    .sum_all()
                     .and_then(|t| t.to_dtype(candle_core::DType::F32))
-                    .and_then(|t| t.to_vec1::<f32>())
-                    .map_err(|e| format!("spec verify flatten/to_vec1: {e}"))?;
-                if flat.len() != seq_len * vocab_size {
-                    return Err(format!(
-                        "spec verify flat len {} ≠ seq_len({seq_len}) * vocab({vocab_size})",
-                        flat.len()
-                    ));
+                    .and_then(|t| t.to_scalar())
+                    .map_err(|e| format!("spec walk on the card: {e}"))?;
+                if !total.is_finite() {
+                    return Err("spec walk: non-finite logits".into());
                 }
-                let spec_logits: Vec<Vec<f32>> =
-                    flat.chunks_exact(vocab_size).map(<[f32]>::to_vec).collect();
-                // Walk the drafts HERE when asked: the coordinator gets the
-                // tokens it would have derived — by the same function — for a
-                // few bytes instead of a vocabulary per position (608 KB each at
-                // 152K), which on a long link cost more than the round trips
-                // speculation saved (`docs/plans/split_speculation.md`).
-                let token_ids = if fwd.spec_walk_at_tail {
-                    // Row i predicts the token at `index_pos + 1 + i` (the
-                    // verify's first token is written at `index_pos`) — the
-                    // absolute position the shared noise is keyed by.
-                    let noise = fwd
-                        .coupling_seed
-                        .map(crate::inference::coupled_noise::CoupledNoise::new);
-                    crate::inference::sampling::walk_verified_positions(
+                let picks: Vec<u32> = output_t
+                    .squeeze(0)
+                    .and_then(|t| t.argmax(candle_core::D::Minus1))
+                    .and_then(|t| t.to_vec1())
+                    .map_err(|e| format!("spec walk on the card: {e}"))?;
+                let token_ids = match draft_tree.as_ref() {
+                    Some(tree) => crate::inference::sampling::argmax_walk_tree(
+                        tree,
                         &fwd.draft_tokens,
-                        &spec_logits,
-                        &fwd.sampling,
-                        &fwd.generated_ids,
-                        noise.as_ref().map(|n| (n, u64::from(fwd.index_pos) + 1)),
-                    )?
-                } else {
-                    Vec::new()
-                };
-                let spec_logits = if fwd.spec_walk_at_tail {
-                    Vec::new()
-                } else {
-                    spec_logits
+                        &picks,
+                    )?,
+                    None => {
+                        if picks.len() != fwd.draft_tokens.len() + 1 {
+                            return Err(format!(
+                                "spec walk: {} positions verified for {} drafts",
+                                picks.len(),
+                                fwd.draft_tokens.len()
+                            ));
+                        }
+                        argmax_walk(&fwd.draft_tokens, &picks)
+                    }
                 };
                 return Ok(crate::types::LayerResult {
                     request_id,
@@ -2249,7 +2295,7 @@ async fn handle_forward(
                     finish_reason: None,
                     activations: vec![],
                     sealed_token_ids: None,
-                    spec_logits,
+                    spec_logits: Vec::new(),
                     matched_stop_sequence: None,
                     token_logprobs: Vec::new(),
                     locally_constructed: false,
@@ -2258,145 +2304,221 @@ async fn handle_forward(
                     prompt_blocks_stored: None,
                 });
             }
-
-            // TP single-layer forward: process one layer in AttnOnly or FfnOnly
-            // phase. Every arm reads a picture's rows as a whole where the
-            // forward carries its span (#115 (2b)); a coordinator never sends
-            // one to a tensor-parallel group.
-            let output = model.with_image_spans(&image_spans, |model| -> Result<_, String> {
-                Ok(if let Some(ref tp) = tp_meta {
-                    model
-                        .forward_tp_phase(
-                            &input_tensor,
-                            fwd.index_pos as usize,
-                            kv_store,
-                            &req_id_str,
-                            tp.single_layer as usize,
-                            &tp.phase,
-                        )
-                        .map_err(|e| format!("Forward TP phase: {e}"))?
-                } else if pre_embedded {
-                    // The adapter as on the token path: an adapter changes the
-                    // layers' projections, never the embedding table
-                    // (`model::lora`), so an input embedded elsewhere is the one
-                    // it expects. `None` here answered a LoRA request from the
-                    // base model, without a word (#316's review).
-                    model
-                        .forward_prompt_in_chunks(
-                            &input_tensor,
-                            fwd.index_pos as usize,
-                            kv_store,
-                            &req_id_str,
-                            lora_adapter.as_deref(),
-                            true,
-                            prefill_chunk_tokens,
-                        )
-                        .map_err(|e| format!("Forward pre-embedded: {e}"))?
-                } else if let Some(ref vis_emb) = vision_tensor {
-                    model
-                        .forward_multimodal(
-                            &input_tensor,
-                            fwd.index_pos as usize,
-                            kv_store,
-                            &req_id_str,
-                            Some(vis_emb),
-                        )
-                        .map_err(|e| format!("Forward multimodal: {e}"))?
-                } else {
-                    // In chunks when the prompt is longer than one, so a cancelled
-                    // request stops at the next boundary even on a one-layer
-                    // segment; a decode step is one position and takes the
-                    // one-shot path unchanged.
-                    model
-                        .forward_prompt_in_chunks(
-                            &input_tensor,
-                            fwd.index_pos as usize,
-                            kv_store,
-                            &req_id_str,
-                            lora_adapter.as_deref(),
-                            false,
-                            prefill_chunk_tokens,
-                        )
-                        .map_err(|e| format!("Forward: {e}"))?
-                })
-            })?;
-
-            if is_last && tp_meta.is_none() {
-                let (token_id, token_logprob) = if fwd.sampling.logprobs {
-                    crate::inference::tensor_util::sample_token_with_logprob_history(
-                        &output,
-                        &fwd.sampling,
-                        &fwd.generated_ids,
-                    )
-                    .map_err(|e| format!("Sample: {e}"))?
-                } else {
-                    let tid = split::sample_token_with_params_history(
-                        &output,
-                        &fwd.sampling,
-                        &fwd.generated_ids,
-                    )
-                    .map_err(|e| format!("Sample: {e}"))?;
-                    (tid, None)
-                };
-                let eos_tokens = model.eos_tokens();
-                let finish = if eos_tokens.contains(&token_id) {
-                    Some(NetworkFinishReason::Stop)
-                } else {
-                    None
-                };
-                // When the request asked for logprobs, package the per-token
-                // entry so the coordinator's `collected_logprobs` accumulates
-                // it and the final `InferenceOutput.token_logprobs` is
-                // populated for the distributed-pipeline path too.
-                let token_logprobs = match token_logprob {
-                    Some(lp) => vec![swarmllm_types::TokenLogProbEntry {
-                        // Per-token text decoding happens at the coordinator
-                        // (which holds the tokenizer); leave empty here and
-                        // let the API layer fill it if needed. OpenAI clients
-                        // expect the `token` string but distributed-pipeline
-                        // logprobs are an opt-in compatibility feature.
-                        token: String::new(),
-                        logprob: lp,
-                        top_logprobs: Vec::new(),
-                    }],
-                    None => Vec::new(),
-                };
-                Ok(crate::types::LayerResult {
-                    request_id,
-                    token_ids: vec![token_id],
-                    finish_reason: finish,
-                    activations: vec![],
-                    sealed_token_ids: None,
-                    spec_logits: Vec::new(),
-                    matched_stop_sequence: None,
-                    token_logprobs,
-                    locally_constructed: false,
-                    refusal: None,
-                    answers_step: None,
-                    prompt_blocks_stored: None,
-                })
-            } else {
-                let activation_bytes = if activation_compression {
-                    split::tensor_to_bytes_q8_0(&output).map_err(|e| format!("Encode Q8_0: {e}"))?
-                } else {
-                    split::tensor_to_bytes(&output).map_err(|e| format!("Encode: {e}"))?
-                };
-                Ok(crate::types::LayerResult {
-                    request_id,
-                    token_ids: vec![],
-                    finish_reason: None,
-                    activations: activation_bytes,
-                    sealed_token_ids: None,
-                    spec_logits: Vec::new(),
-                    matched_stop_sequence: None,
-                    token_logprobs: Vec::new(),
-                    locally_constructed: false,
-                    refusal: None,
-                    answers_step: None,
-                    prompt_blocks_stored: None,
-                })
+            let flat: Vec<f32> = output_t
+                .flatten_all()
+                .and_then(|t| t.to_dtype(candle_core::DType::F32))
+                .and_then(|t| t.to_vec1::<f32>())
+                .map_err(|e| format!("spec verify flatten/to_vec1: {e}"))?;
+            if flat.len() != seq_len * vocab_size {
+                return Err(format!(
+                    "spec verify flat len {} ≠ seq_len({seq_len}) * vocab({vocab_size})",
+                    flat.len()
+                ));
             }
-        });
+            let spec_logits: Vec<Vec<f32>> =
+                flat.chunks_exact(vocab_size).map(<[f32]>::to_vec).collect();
+            // Walk the drafts HERE when asked: the coordinator gets the
+            // tokens it would have derived — by the same function — for a
+            // few bytes instead of a vocabulary per position (608 KB each at
+            // 152K), which on a long link cost more than the round trips
+            // speculation saved (`docs/plans/split_speculation.md`).
+            let token_ids = if fwd.spec_walk_at_tail {
+                // Row i predicts the token at `index_pos + 1 + i` (the
+                // verify's first token is written at `index_pos`) — the
+                // absolute position the shared noise is keyed by.
+                let noise = fwd
+                    .coupling_seed
+                    .map(crate::inference::coupled_noise::CoupledNoise::new);
+                let coupling = noise.as_ref().map(|n| (n, u64::from(fwd.index_pos) + 1));
+                match draft_tree.as_ref() {
+                    Some(tree) => crate::inference::sampling::walk_verified_tree(
+                        tree,
+                        &fwd.draft_tokens,
+                        &spec_logits,
+                        &fwd.sampling,
+                        &fwd.generated_ids,
+                        coupling,
+                    )?,
+                    None => crate::inference::sampling::walk_verified_positions(
+                        &fwd.draft_tokens,
+                        &spec_logits,
+                        &fwd.sampling,
+                        &fwd.generated_ids,
+                        coupling,
+                    )?,
+                }
+            } else {
+                Vec::new()
+            };
+            let spec_logits = if fwd.spec_walk_at_tail {
+                Vec::new()
+            } else {
+                spec_logits
+            };
+            return Ok(crate::types::LayerResult {
+                request_id,
+                token_ids,
+                finish_reason: None,
+                activations: vec![],
+                sealed_token_ids: None,
+                spec_logits,
+                matched_stop_sequence: None,
+                token_logprobs: Vec::new(),
+                locally_constructed: false,
+                refusal: None,
+                answers_step: None,
+                prompt_blocks_stored: None,
+            });
+        }
+
+        // TP single-layer forward: process one layer in AttnOnly or FfnOnly
+        // phase. Every arm reads a picture's rows as a whole where the
+        // forward carries its span (#115 (2b)); a coordinator never sends
+        // one to a tensor-parallel group.
+        let output = model.with_image_spans(&image_spans, |model| -> Result<_, String> {
+            Ok(if let Some(ref tp) = tp_meta {
+                model
+                    .forward_tp_phase(
+                        &input_tensor,
+                        fwd.index_pos as usize,
+                        kv_store,
+                        &req_id_str,
+                        tp.single_layer as usize,
+                        &tp.phase,
+                    )
+                    .map_err(|e| format!("Forward TP phase: {e}"))?
+            } else if pre_embedded {
+                // The adapter as on the token path: an adapter changes the
+                // layers' projections, never the embedding table
+                // (`model::lora`), so an input embedded elsewhere is the one
+                // it expects. `None` here answered a LoRA request from the
+                // base model, without a word (#316's review).
+                model
+                    .forward_prompt_in_chunks(
+                        &input_tensor,
+                        fwd.index_pos as usize,
+                        kv_store,
+                        &req_id_str,
+                        lora_adapter.as_deref(),
+                        true,
+                        prefill_chunk_tokens,
+                    )
+                    .map_err(|e| format!("Forward pre-embedded: {e}"))?
+            } else if let Some(ref vis_emb) = vision_tensor {
+                model
+                    .forward_multimodal(
+                        &input_tensor,
+                        fwd.index_pos as usize,
+                        kv_store,
+                        &req_id_str,
+                        Some(vis_emb),
+                    )
+                    .map_err(|e| format!("Forward multimodal: {e}"))?
+            } else {
+                // In chunks when the prompt is longer than one, so a cancelled
+                // request stops at the next boundary even on a one-layer
+                // segment; a decode step is one position and takes the
+                // one-shot path unchanged.
+                model
+                    .forward_prompt_in_chunks(
+                        &input_tensor,
+                        fwd.index_pos as usize,
+                        kv_store,
+                        &req_id_str,
+                        lora_adapter.as_deref(),
+                        false,
+                        prefill_chunk_tokens,
+                    )
+                    .map_err(|e| format!("Forward: {e}"))?
+            })
+        })?;
+
+        if is_last && tp_meta.is_none() {
+            let (token_id, token_logprob) = if fwd.sampling.logprobs {
+                crate::inference::tensor_util::sample_token_with_logprob_history(
+                    &output,
+                    &fwd.sampling,
+                    &fwd.generated_ids,
+                )
+                .map_err(|e| format!("Sample: {e}"))?
+            } else {
+                let tid = split::sample_token_with_params_history(
+                    &output,
+                    &fwd.sampling,
+                    &fwd.generated_ids,
+                )
+                .map_err(|e| format!("Sample: {e}"))?;
+                (tid, None)
+            };
+            let eos_tokens = model.eos_tokens();
+            let finish = if eos_tokens.contains(&token_id) {
+                Some(NetworkFinishReason::Stop)
+            } else {
+                None
+            };
+            // When the request asked for logprobs, package the per-token
+            // entry so the coordinator's `collected_logprobs` accumulates
+            // it and the final `InferenceOutput.token_logprobs` is
+            // populated for the distributed-pipeline path too.
+            let token_logprobs = match token_logprob {
+                Some(lp) => vec![swarmllm_types::TokenLogProbEntry {
+                    // Per-token text decoding happens at the coordinator
+                    // (which holds the tokenizer); leave empty here and
+                    // let the API layer fill it if needed. OpenAI clients
+                    // expect the `token` string but distributed-pipeline
+                    // logprobs are an opt-in compatibility feature.
+                    token: String::new(),
+                    logprob: lp,
+                    top_logprobs: Vec::new(),
+                }],
+                None => Vec::new(),
+            };
+            Ok(crate::types::LayerResult {
+                request_id,
+                token_ids: vec![token_id],
+                finish_reason: finish,
+                activations: vec![],
+                sealed_token_ids: None,
+                spec_logits: Vec::new(),
+                matched_stop_sequence: None,
+                token_logprobs,
+                locally_constructed: false,
+                refusal: None,
+                answers_step: None,
+                prompt_blocks_stored: None,
+            })
+        } else {
+            let activation_bytes = if activation_compression {
+                split::tensor_to_bytes_q8_0(&output).map_err(|e| format!("Encode Q8_0: {e}"))?
+            } else {
+                split::tensor_to_bytes(&output).map_err(|e| format!("Encode: {e}"))?
+            };
+            Ok(crate::types::LayerResult {
+                request_id,
+                token_ids: vec![],
+                finish_reason: None,
+                activations: activation_bytes,
+                sealed_token_ids: None,
+                spec_logits: Vec::new(),
+                matched_stop_sequence: None,
+                token_logprobs: Vec::new(),
+                locally_constructed: false,
+                refusal: None,
+                answers_step: None,
+                prompt_blocks_stored: None,
+            })
+        }
+    };
+    // A chain-shaped tree — a check of no guesses after kept tokens read again
+    // — reads what an ordinary forward does, and runs as one (captured, flash);
+    // its walk still starts where its guesses would have.
+    let compute_result = tokio::task::block_in_place(|| match draft_tree.clone() {
+        Some(tree) if !tree.is_chain() => model
+            .with_draft_tree(tree, compute)
+            .map_err(|e| e.to_string())
+            .and_then(|r| r),
+        _ => compute(model),
+    });
 
     let mut result = compute_result.map_err(SwarmError::Internal)?;
     // Keep this segment's part of a split's prompt for the next turn
@@ -4835,32 +4957,74 @@ async fn handle_draft(
             prefix_cache,
             &req,
             d.append.len(),
-            reply_reserve_positions(d.sampling.max_tokens, gamma.saturating_add(1)),
+            // A tree's guesses sit in the cache while it grows, a chain's
+            // after the call.
+            reply_reserve_positions(
+                d.sampling.max_tokens,
+                gamma
+                    .max(
+                        d.tree
+                            .as_ref()
+                            .map_or(0, |t| (t.rows as usize).saturating_add(t.seed.tokens.len())),
+                    )
+                    .saturating_add(1),
+            ),
             0,
         )?;
     }
     let noise = d
         .coupling_seed
         .map(crate::inference::coupled_noise::CoupledNoise::new);
-    let tokens = tokio::task::block_in_place(|| {
-        model.draft_after(
-            kv_store,
-            &req,
-            keep,
-            &d.append,
-            gamma,
-            &d.sampling,
-            &d.history,
-            noise.as_ref(),
-            prefill_chunk_tokens,
-            d.stop_below,
-        )
+    let (tokens, parents, scores) = tokio::task::block_in_place(|| match &d.tree {
+        Some(tree) => model
+            .draft_tree_after(
+                kv_store,
+                &req,
+                keep,
+                &d.append,
+                crate::inference::split::TreeGrowth {
+                    seed: &tree.seed.grown(),
+                    rows: tree.rows as usize,
+                    per_step: tree.per_step as usize,
+                    grow_for: tree
+                        .grow_for_ms
+                        .map(|ms| std::time::Duration::from_millis(u64::from(ms))),
+                },
+                &d.sampling,
+                &d.history,
+                noise.as_ref(),
+                prefill_chunk_tokens,
+            )
+            .map(|grown| {
+                let wire = grown
+                    .parents
+                    .iter()
+                    .map(|p| p.map_or(0, |p| p + 1))
+                    .collect();
+                (grown.tokens, wire, grown.path_logp)
+            }),
+        None => model
+            .draft_after(
+                kv_store,
+                &req,
+                keep,
+                &d.append,
+                gamma,
+                &d.sampling,
+                &d.history,
+                noise.as_ref(),
+                prefill_chunk_tokens,
+                d.stop_below,
+            )
+            .map(|tokens| (tokens, Vec::new(), Vec::new())),
     })?;
     send_worker(
         writer,
         &WorkerMsg::Drafted {
             request_id: d.request_id,
             tokens,
+            parents,
+            scores,
         },
         &[],
     )
@@ -6539,7 +6703,7 @@ mod served_context_tests {
 
 #[cfg(test)]
 mod image_span_check_tests {
-    use super::image_spans_to_apply;
+    use super::{draft_tree_to_apply, image_spans_to_apply, spec_rows_fit_the_answer};
     use crate::types::PromptSpan;
 
     fn span(start: u32, end: u32) -> PromptSpan {
@@ -6597,6 +6761,63 @@ mod image_span_check_tests {
             );
         }
         assert!(image_spans_to_apply(&[], 0, 1, None).unwrap().is_empty());
+    }
+
+    /// A tree of guesses (#134) is applied only to a decode-side check it fits
+    /// and that this segment walks or hands on; any other shape is the
+    /// coordinator's mistake (a 400), and so is a tree sent to a segment whose
+    /// layers cannot read one — refused before anything runs, so the
+    /// coordinator can check the same guesses as a chain.
+    #[test]
+    fn a_tree_of_guesses_is_applied_only_to_a_check_it_fits() {
+        // Row 0 follows the cache; rows 1 and 2 follow row 0; row 3 row 1.
+        let wire = [0u16, 1, 1, 2];
+        let tree = draft_tree_to_apply(&wire, 10, 4, 3, false, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tree.len(), 4);
+        assert!(draft_tree_to_apply(&[], 10, 4, 0, true, None)
+            .unwrap()
+            .is_none());
+        // (wire, positions, seq, unwalked, the layers' refusal)
+        type Shape<'a> = (&'a [u16], usize, u32, bool, Option<&'static str>);
+        let refusals: [Shape<'_>; 5] = [
+            (&wire, 4, 0, false, None),             // a prompt pass
+            (&wire, 4, 3, true, None),              // an answer nobody walks
+            (&wire, 5, 3, false, None),             // rows and positions disagree
+            (&[0, 2], 2, 3, false, None),           // a row its own parent
+            (&wire, 4, 3, false, Some("a window")), // layers that cannot read it
+        ];
+        for (wire, positions, seq, unwalked, layers_refuse) in refusals {
+            let err =
+                draft_tree_to_apply(wire, 10, positions, seq, unwalked, layers_refuse).unwrap_err();
+            assert!(
+                matches!(err, crate::error::SwarmError::Validation(_)),
+                "{wire:?} {positions} {seq}: {err}"
+            );
+        }
+    }
+
+    /// A check's rows are bounded before the tail computes a vocabulary over
+    /// each: a chain walked here reads one row per guess and one after; one
+    /// answered with logits no more than a coordinator reads back.
+    #[test]
+    fn a_check_names_no_more_rows_than_its_answer_reads() {
+        let most = crate::network::protocol::MAX_SPEC_LOGITS_POSITIONS;
+        assert!(spec_rows_fit_the_answer(5, 4, true).is_ok());
+        assert!(
+            spec_rows_fit_the_answer(1, 0, true).is_ok(),
+            "a one-token check"
+        );
+        assert!(spec_rows_fit_the_answer(17, 0, false).is_ok());
+        assert!(spec_rows_fit_the_answer(most, 0, false).is_ok());
+        for (positions, drafts, walked) in [(8192, 4, true), (4, 4, true), (most + 1, 0, false)] {
+            let err = spec_rows_fit_the_answer(positions, drafts, walked).unwrap_err();
+            assert!(
+                matches!(err, crate::error::SwarmError::Validation(_)),
+                "{positions} {drafts} {walked}: {err}"
+            );
+        }
     }
 }
 

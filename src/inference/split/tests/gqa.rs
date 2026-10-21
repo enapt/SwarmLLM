@@ -264,6 +264,7 @@ fn qwen2_forward_with_biases() {
         output: None,
         masks: None,
         image_spans: Vec::new(),
+        draft_tree: None,
         kv_budget_bytes: None,
         kv_growth: crate::inference::split::kv_budget::KvGrowth::default(),
         host_kv_budget_bytes: None,

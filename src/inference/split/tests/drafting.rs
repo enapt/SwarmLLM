@@ -51,6 +51,23 @@ fn fresh(model: &mut SplitModel, seq: &[u32], gamma: usize) -> Vec<u32> {
         .unwrap()
 }
 
+/// No tree to grow on.
+static NO_SEED: crate::inference::draft_tree::GrownTree = crate::inference::draft_tree::GrownTree {
+    tokens: Vec::new(),
+    parents: Vec::new(),
+    path_logp: Vec::new(),
+};
+
+/// `rows` guesses grown from nothing, `per_step` a forward, with no time limit.
+fn grow(rows: usize, per_step: usize) -> TreeGrowth<'static> {
+    TreeGrowth {
+        seed: &NO_SEED,
+        rows,
+        per_step,
+        grow_for: None,
+    }
+}
+
 fn cache_len(model: &SplitModel, kv: &KvCacheStore, req: &str) -> usize {
     kv.get_or_create_keyed(&KvCacheStore::cache_key(model.kv_model_key(), req), 3)
         .layers[0]
@@ -298,4 +315,219 @@ fn a_read_ahead_asks_the_card_path_for_nothing_and_gets_nothing() {
         seq.len(),
         "the prompt stays in the cache for the first round"
     );
+}
+
+/// A tree of guesses (#134, `draft_tree_after`): every guess is read along its
+/// own path, so the followers it is given are the ones the model guesses after
+/// that path read from nothing; its likeliest path is laid out first and is
+/// the chain `draft_after` guesses; ratings never rise along a path; and the
+/// cache keeps the context alone.
+#[test]
+fn a_grown_tree_guesses_after_each_path_what_a_fresh_read_guesses() {
+    let mut model = whole_model();
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let prompt: Vec<u32> = vec![3, 17, 99, 250, 7, 41, 12, 5];
+    let grown = model
+        .draft_tree_after(&kv, "t", 0, &prompt, grow(24, 4), &greedy(), &[], None, 0)
+        .unwrap();
+    assert_eq!(grown.tokens.len(), 24);
+    assert_eq!(grown.parents.len(), 24);
+    assert_eq!(
+        kv.request_positions(model.kv_model_key(), "t"),
+        prompt.len()
+    );
+
+    let path_to = |row: usize| -> Vec<u32> {
+        let mut path = vec![grown.tokens[row]];
+        let mut at = grown.parents[row];
+        while let Some(p) = at {
+            path.push(grown.tokens[usize::from(p)]);
+            at = grown.parents[usize::from(p)];
+        }
+        path.reverse();
+        path
+    };
+    // The likeliest path: row 0, then each row the one before's child.
+    let trunk = 1
+        + (1..24)
+            .take_while(|&r| grown.parents[r] == Some(r as u16 - 1))
+            .count();
+    assert!(trunk >= 2, "a trunk of {trunk}");
+    assert_eq!(
+        &grown.tokens[..trunk],
+        &fresh(&mut model, &prompt, trunk)[..],
+        "the trunk is the greedy chain"
+    );
+    for row in 0..24 {
+        if let Some(p) = grown.parents[row] {
+            assert!(grown.path_logp[row] <= grown.path_logp[usize::from(p)] + 1e-6);
+        }
+        // The likeliest of the followers it was given is what a fresh read of
+        // its path guesses next.
+        let best_child = (0..24)
+            .filter(|&c| grown.parents[c] == Some(row as u16))
+            .max_by(|&a, &b| grown.path_logp[a].total_cmp(&grown.path_logp[b]));
+        if let Some(c) = best_child {
+            let mut seq = prompt.clone();
+            seq.extend(path_to(row));
+            assert_eq!(
+                grown.tokens[c],
+                fresh(&mut model, &seq, 1)[0],
+                "row {row}'s likeliest follower"
+            );
+        }
+    }
+    // The same call again, from the cache it left, grows the same tree.
+    let again = model
+        .draft_tree_after(
+            &kv,
+            "t",
+            prompt.len() - 1,
+            &prompt[prompt.len() - 1..],
+            grow(24, 4),
+            &greedy(),
+            &[],
+            None,
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        (&again.tokens, &again.parents),
+        (&grown.tokens, &grown.parents)
+    );
+    // The last token read alone rather than in the prompt's batch: the same
+    // ratings to rounding.
+    for (a, b) in again.path_logp.iter().zip(&grown.path_logp) {
+        assert!((a - b).abs() < 1e-4, "{a} vs {b}");
+    }
+}
+
+/// Every row's path from the last token read, as a set: two trees holding
+/// the same guesses in another order are the same tree.
+fn paths_of(
+    tree: &crate::inference::draft_tree::GrownTree,
+) -> std::collections::BTreeSet<Vec<u32>> {
+    (0..tree.tokens.len())
+        .map(|row| {
+            let mut path = vec![tree.tokens[row]];
+            let mut at = tree.parents[row];
+            while let Some(p) = at {
+                path.push(tree.tokens[usize::from(p)]);
+                at = tree.parents[usize::from(p)];
+            }
+            path.reverse();
+            path
+        })
+        .collect()
+}
+
+/// A call growing on the tree an earlier call grew (the round loop's growth
+/// beside a check, `pipeline::dsd_tree`) goes on where that one stopped: six
+/// guesses, then six more on them, are the twelve one call grows — none of
+/// the seed's guesses is queued again, and none it left out is lost.
+#[test]
+fn a_tree_grown_on_an_earlier_one_is_the_tree_one_call_grows() {
+    let mut model = whole_model();
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let prompt: Vec<u32> = vec![3, 17, 99, 250, 7, 41, 12, 5];
+    let last = prompt.len() - 1;
+    let whole = model
+        .draft_tree_after(&kv, "s", 0, &prompt, grow(12, 1), &greedy(), &[], None, 0)
+        .unwrap();
+    let first = model
+        .draft_tree_after(
+            &kv,
+            "s",
+            last,
+            &prompt[last..],
+            grow(6, 1),
+            &greedy(),
+            &[],
+            None,
+            0,
+        )
+        .unwrap();
+    let more = model
+        .draft_tree_after(
+            &kv,
+            "s",
+            last,
+            &prompt[last..],
+            TreeGrowth {
+                seed: &first,
+                rows: 6,
+                per_step: 1,
+                grow_for: None,
+            },
+            &greedy(),
+            &[],
+            None,
+            0,
+        )
+        .unwrap();
+    assert_eq!(more.tokens.len(), 12);
+    assert_eq!(paths_of(&more), paths_of(&whole));
+    assert!(paths_of(&first).is_subset(&paths_of(&more)));
+    assert_eq!(
+        kv.request_positions(model.kv_model_key(), "s"),
+        prompt.len(),
+        "the cache holds the context alone"
+    );
+    // A seed whose row names a later row as its parent is refused, and the
+    // cache is left as it was.
+    let mut backwards = first.clone();
+    backwards.parents[0] = Some(1);
+    let refused = model.draft_tree_after(
+        &kv,
+        "s",
+        last,
+        &prompt[last..],
+        TreeGrowth {
+            seed: &backwards,
+            rows: 6,
+            per_step: 1,
+            grow_for: None,
+        },
+        &greedy(),
+        &[],
+        None,
+        0,
+    );
+    assert!(matches!(
+        refused,
+        Err(crate::error::SwarmError::Validation(_))
+    ));
+    assert_eq!(
+        kv.request_positions(model.kv_model_key(), "s"),
+        prompt.len()
+    );
+}
+
+/// Past the time it was given, a call adds the guesses already rated and
+/// reads nothing more: with no time at all, one step of the root's likeliest
+/// followers.
+#[test]
+fn a_call_out_of_time_adds_one_step_it_does_not_read() {
+    let mut model = whole_model();
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let prompt: Vec<u32> = vec![3, 17, 99, 250, 7, 41, 12, 5];
+    let grown = model
+        .draft_tree_after(
+            &kv,
+            "o",
+            0,
+            &prompt,
+            TreeGrowth {
+                grow_for: Some(std::time::Duration::ZERO),
+                ..grow(24, 4)
+            },
+            &greedy(),
+            &[],
+            None,
+            0,
+        )
+        .unwrap();
+    assert_eq!(grown.tokens.len(), 4);
+    assert!(grown.parents.iter().all(Option::is_none));
+    assert_eq!(grown.tokens[0], fresh(&mut model, &prompt, 1)[0]);
 }

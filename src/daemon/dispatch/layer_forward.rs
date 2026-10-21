@@ -211,6 +211,13 @@ pub(super) async fn handle_layer_forward(
     } else {
         forward.image_spans.clone()
     };
+    // A chained check of a tree of guesses (#134): every hop's layers read the
+    // shape, so it goes on — only to a hop that reads it (`onward_refusal`).
+    let draft_parents_onward = if chain.is_empty() {
+        Vec::new()
+    } else {
+        forward.draft_parents.clone()
+    };
     let sequence_num = forward.sequence_num;
     // A streamed check's number, handed on with it so the next hop runs the
     // stream in its order too (`features::CHAINED_STREAM`, #318).
@@ -253,6 +260,7 @@ pub(super) async fn handle_layer_forward(
             next,
             verify_onward.is_some(),
             stream_seq.is_some(),
+            !draft_parents_onward.is_empty(),
         ) {
             if reason == ONWARD_UNREACHABLE {
                 dial_next_hop(
@@ -426,6 +434,7 @@ pub(super) async fn handle_layer_forward(
                 next,
                 verify_onward.is_some(),
                 stream_seq.is_some(),
+                !draft_parents_onward.is_empty(),
             )
             .filter(|&r| r != ONWARD_UNREACHABLE)
             {
@@ -523,6 +532,10 @@ pub(super) async fn handle_layer_forward(
                         } else {
                             Vec::new()
                         },
+                        // `onward_refusal` stopped a tree bound for a hop that
+                        // cannot read one: dropped, its rows would attend their
+                        // siblings and the tail would walk a wrong answer.
+                        draft_parents: draft_parents_onward.clone(),
                     };
                     tracing::info!(
                         request_id = %request_id,
@@ -810,16 +823,19 @@ fn dial_next_hop(
 /// handed to a hop without `CHAINED_VERIFY` would reach the tail as a plain
 /// decode step and come back as the wrong answer; a streamed one handed to a
 /// hop without `CHAINED_STREAM` would lose its number, run out of order and
-/// write its rows into the wrong positions. The coordinator chains only
-/// through hops that can (`plan_chain`, `dsd_stream::stream_shape`); one that
+/// write its rows into the wrong positions; a tree of guesses handed to a hop
+/// without `DRAFT_TREES` would have its rows attend their siblings and come
+/// back walked wrong. The coordinator chains only through hops that can
+/// (`plan_chain`, `dsd_stream::stream_shape`, the tree's own check); one that
 /// changed build since, or that this node has not met, is told so.
 fn onward_refusal(
     state: &SharedState,
     next: &crate::types::ChainHop,
     check: bool,
     streamed: bool,
+    tree: bool,
 ) -> Option<&'static str> {
-    use swarmllm_types::node::features::{CHAINED_STREAM, CHAINED_VERIFY};
+    use swarmllm_types::node::features::{CHAINED_STREAM, CHAINED_VERIFY, DRAFT_TREES};
     // First: a next hop this node has not met is in no list here, so its
     // features are unknown too — that is "dial it", not "it cannot carry it"
     // (the rig's middle machine, 2026-10-20, refused every check that way and
@@ -835,6 +851,9 @@ fn onward_refusal(
     }
     if streamed && !state.peer_advertises_feature(&next.node_id, CHAINED_STREAM) {
         return Some("streamed check: the next segment cannot carry it");
+    }
+    if tree && !state.peer_advertises_feature(&next.node_id, DRAFT_TREES) {
+        return Some("tree of guesses: the next segment cannot carry it");
     }
     None
 }
@@ -1241,6 +1260,7 @@ mod chaining_tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         super::handle_layer_forward(state, tx, forward).await;
@@ -1373,6 +1393,7 @@ mod chaining_tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         tokio::time::timeout(
@@ -1594,6 +1615,7 @@ mod tests {
             sampling: None,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         };
         let (tx, mut rx) = mpsc::channel(4);
         refuse_forward(
@@ -1759,6 +1781,7 @@ mod forward_positions_tests {
                 end: 2048,
             }),
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         };
         let piece = turn_wait(&f);
         assert_eq!(

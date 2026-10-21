@@ -165,8 +165,20 @@ pub enum WorkerMsg {
         results: Vec<IpcLayerResult>,
         activation_lens: Vec<u32>,
     },
-    /// The guesses a `DaemonMsg::Draft` asked for, in order.
-    Drafted { request_id: Uuid, tokens: Vec<u32> },
+    /// The guesses a `DaemonMsg::Draft` asked for, in order. For a tree
+    /// (`IpcDraft::tree`), each guess's parent among them in the wire form of
+    /// `LayerForward::draft_parents` (0: it follows the last token read);
+    /// empty for a chain.
+    Drafted {
+        request_id: Uuid,
+        tokens: Vec<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        parents: Vec<u16>,
+        /// For a tree, each guess's path log-probability under the drafter
+        /// (`split::draft::GrownTree::path_logp`); empty for a chain.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        scores: Vec<f32>,
+    },
     /// A `DaemonMsg::AdmitPrompt` fitted: the request's cache is promised over
     /// every range it named, and their forwards ask nothing more. Sent only in
     /// answer to that message, so only to a daemon that reads it.
@@ -450,6 +462,9 @@ pub struct IpcForward {
     /// (`LayerForward::image_spans`, #115 (2b)).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_spans: Vec<crate::types::PromptSpan>,
+    /// The shape of a tree of guesses (`LayerForward::draft_parents`, #134).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub draft_parents: Vec<u16>,
     /// This forward belongs to a request THIS machine's owner sent — the
     /// segment of it this node runs inside a pipeline it coordinates — so its
     /// prompt pass may read on the owner's width (`process_pool::Requester`).
@@ -627,6 +642,78 @@ pub struct IpcDraft {
     /// (`SplitModel::draft_after`). `None` guesses all `gamma`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_below: Option<f32>,
+    /// Grow a TREE of guesses instead of a chain (`SplitModel::draft_tree_after`,
+    /// #134); `gamma` and `stop_below` are unused then. Afterwards the cache
+    /// holds `keep + append.len()` positions — no guess; while it grows, the
+    /// seed's rows and the ones added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<TreeAsk>,
+}
+
+/// The tree of guesses a drafting call grows (`IpcDraft::tree`,
+/// `split::draft::TreeGrowth`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct TreeAsk {
+    /// Guesses the call adds to `seed`.
+    pub rows: u32,
+    /// Guesses read in one forward of the drafter while it grows.
+    pub per_step: u32,
+    /// Stop adding guesses once the call has run this long: a tree grown while
+    /// a check is on its way is wanted when the check's answer is. `None` adds
+    /// all `rows`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grow_for_ms: Option<u32>,
+    /// The tree grown so far after the same token, to grow on (empty: grow
+    /// from nothing) — in `Drafted`'s form.
+    #[serde(default, skip_serializing_if = "TreeSeed::is_empty")]
+    pub seed: TreeSeed,
+}
+
+/// A tree of guesses handed to a drafting call to grow on (`TreeAsk::seed`):
+/// each guess's token, its parent in `LayerForward::draft_parents`' wire form
+/// (0: it follows the last token read; `k`: row `k - 1`) and its path's
+/// log-probability.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct TreeSeed {
+    pub tokens: Vec<u32>,
+    pub parents: Vec<u16>,
+    pub scores: Vec<f32>,
+}
+
+impl TreeSeed {
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty() && self.parents.is_empty() && self.scores.is_empty()
+    }
+
+    pub(crate) fn of(tree: &crate::inference::draft_tree::GrownTree) -> Self {
+        Self {
+            tokens: tree.tokens.clone(),
+            parents: tree
+                .parents
+                .iter()
+                .map(|p| p.map_or(0, |p| p + 1))
+                .collect(),
+            scores: tree.path_logp.clone(),
+        }
+    }
+
+    pub(crate) fn grown(&self) -> crate::inference::draft_tree::GrownTree {
+        crate::inference::draft_tree::GrownTree {
+            tokens: self.tokens.clone(),
+            parents: self.parents.iter().map(|&w| w.checked_sub(1)).collect(),
+            path_logp: self.scores.clone(),
+        }
+    }
+}
+
+/// What a drafting call answered (`WorkerMsg::Drafted`): the guesses, and for
+/// a tree each one's parent in `LayerForward::draft_parents`' wire form and
+/// its path's log-probability. `parents` and `scores` are empty for a chain.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Drafted {
+    pub tokens: Vec<u32>,
+    pub parents: Vec<u16>,
+    pub scores: Vec<f32>,
 }
 
 impl IpcDraft {
@@ -1030,6 +1117,8 @@ mod tests {
             WorkerMsg::Drafted {
                 request_id: Uuid::nil(),
                 tokens: vec![],
+                parents: vec![],
+                scores: vec![],
             },
             WorkerMsg::PromptAdmitted {
                 request_id: Uuid::nil(),
@@ -1257,6 +1346,7 @@ mod tests {
             for_the_owner: false,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         };
         let json = serde_json::to_string(&fwd).unwrap();
         // When no vision payload, the field is elided to match pre-fix wire
@@ -1299,6 +1389,7 @@ mod tests {
             for_the_owner,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         };
         let owners = serde_json::to_string(&fwd(true)).unwrap();
         let back: IpcForward = serde_json::from_str(&owners).unwrap();
@@ -1343,6 +1434,7 @@ mod tests {
             for_the_owner: false,
             prompt_span: None,
             image_spans: Vec::new(),
+            draft_parents: Vec::new(),
         };
         let json = serde_json::to_string(&fwd).unwrap();
         assert!(json.contains("\"vision_embeddings_len\":12345"));

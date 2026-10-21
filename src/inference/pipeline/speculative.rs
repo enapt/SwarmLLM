@@ -172,6 +172,7 @@ impl PipelineExecutor {
                 sampling: None,
                 prompt_span: None,
                 image_spans: Vec::new(),
+                draft_parents: Vec::new(),
             };
             let forward = rebuild_forward();
             if self

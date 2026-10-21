@@ -338,6 +338,16 @@ pub mod features {
     /// on, so a requester never loads a drafter for a head that checks none.
     pub const REQUESTER_GUESSES: u64 = 1 << 28;
 
+    /// Checks a TREE of guesses in one pass (#134): a forward carrying
+    /// `LayerForward::draft_parents` (the `0x10` trailer, up to 512 rows
+    /// where a chain's check carries 32 guesses) gives each row its
+    /// tree position and lets it read only its ancestors, a chained hop hands
+    /// the shape on, and a last segment walks the tree. A coordinator sends a
+    /// tree only when every segment advertises it, and only for a family whose
+    /// layers read one; a segment whose layers cannot refuses it, and the
+    /// request goes on with chains.
+    pub const DRAFT_TREES: u64 = 1 << 29;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`] and
     /// [`REQUESTER_GUESSES`] beside it where they apply.
@@ -366,7 +376,8 @@ pub mod features {
         | RELAY_SIGNED
         | PROMPT_ADMISSION
         | IMAGES_AT_MARKERS
-        | CHAINED_STREAM;
+        | CHAINED_STREAM
+        | DRAFT_TREES;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

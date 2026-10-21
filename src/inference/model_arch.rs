@@ -252,6 +252,24 @@ impl ModelArch {
         matches!(self, ModelArch::Qwen35 | ModelArch::Qwen35Moe)
     }
 
+    /// Whether a split of this family is sent trees of guesses (#134): plain
+    /// attention over a full cache on every layer. An allowlist, so a new
+    /// family checks chains until someone has run a tree on it. Gemma 2-4 keep
+    /// sliding windows, DeepSeek-2 attends with MLA, Qwen 3.5 keeps a recurrent
+    /// state, Llama 4 skips RoPE on some layers and Starcoder2 declares a
+    /// window. Each worker asks its own layers too
+    /// (`SplitModel::draft_tree_refusal`), which is the answer that holds.
+    pub fn reads_draft_trees(&self) -> bool {
+        matches!(
+            self,
+            ModelArch::Llama
+                | ModelArch::Qwen2
+                | ModelArch::Phi3
+                | ModelArch::Mistral
+                | ModelArch::Glm4
+        )
+    }
+
     /// Map to the coarser `ModelArchitecture` variant used by `ModelManifest`.
     ///
     /// Most arches share the standard llama-compatible manifest layout, so they

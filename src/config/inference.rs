@@ -1158,17 +1158,18 @@ impl InferenceConfig {
     ///
     /// **The single answer for every path that sends guesses to another
     /// computer** — the n-gram loop, the draft-model loop and the split
-    /// drafter all read it, never the field. A check carrying more than
-    /// `network::protocol::MAX_DRAFT_TOKENS` is refused by the computer it is
-    /// sent to, so a configured value past the cap would fail every such
-    /// request; clamping here means no path can forget to.
+    /// drafter all read it, never the field. A chain carrying more than 32
+    /// guesses is refused by a computer on a release before trees, so a
+    /// configured value past the cap would fail every such request; clamping
+    /// here means no path can forget to.
     pub fn guesses_per_check(&self) -> u32 {
         self.speculative_gamma.clamp(1, MAX_GUESSES_PER_CHECK)
     }
 }
 
 /// The most guesses one check may carry, whatever `speculative_gamma` says —
-/// half of what a peer accepts on the wire (`protocol::MAX_DRAFT_TOKENS` = 32),
+/// half of what a release before trees accepts on the wire (32; a tree of
+/// guesses, #134, goes only to a peer advertising `features::DRAFT_TREES`),
 /// and the ceiling of the split drafter's own choice
 /// (`dsd_controller::BEST_GAMMA_MAX`).
 pub const MAX_GUESSES_PER_CHECK: u32 = 16;
