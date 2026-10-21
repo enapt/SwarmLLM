@@ -124,6 +124,13 @@ all — for a model a computer that connected in the last three minutes says it 
 time its details have usually arrived. If they have not, the answer says the model is not
 available yet; it no longer tells a node that holds models to go and download one.
 
+The certificate library inside the connections between computers moves to rustls-webpki
+0.103.16 for an advisory filed on 20 October (RUSTSEC-2026-0382): checking a certificate could
+accept an intermediate certificate that should no longer be trusted. SwarmLLM's connections never
+rely on that check — each computer presents exactly one certificate of its own, and a connection
+offering an intermediate is refused before it is read. A patch-level update with no configuration
+or protocol change; nodes do not need to update together.
+
 ## [0.3.245-alpha] — 2026-10-20
 
 **Gemma 3 can read pictures, and pictures go where you put them.** A picture sent with a message
