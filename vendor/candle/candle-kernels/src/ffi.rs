@@ -54,3 +54,48 @@ extern "C" {
         stream: i64,
     );
 }
+
+// SwarmLLM patch: llama.cpp's int8 tensor-core quantized matmul, built from
+// `src/ggml_mmq` (see `swarm_mmq.cuh` there). `ggml_type` is the GGUF type id;
+// `stream` the caller's `CUstream`. Every status is `swarm_mmq_status`: 0 ok,
+// 1 unsupported, 2 fixup buffer too small, 3 CUDA error, 4 no tile fits.
+#[allow(dead_code)]
+extern "C" {
+    /// 1 where the kernel runs on the current device (int8 tensor cores and
+    /// 48 KiB of shared memory a block).
+    pub fn swarm_mmq_available() -> i32;
+
+    /// The activation scale layout a weight type reads (0/1/2), -1 if the
+    /// type is not covered. Equal layouts can share a quantized activation.
+    pub fn swarm_mmq_q8_1_layout(ggml_type: i32) -> i32;
+
+    /// Bytes of a quantized activation of `ncols_y` rows of `ncols_x` values.
+    pub fn swarm_mmq_q8_1_bytes(ncols_x: i64, ncols_y: i64) -> usize;
+
+    pub fn swarm_mmq_quantize(
+        y: *const f32,
+        vy: *mut c_void,
+        ggml_type: i32,
+        ncols_x: i64,
+        ncols_y: i64,
+        stride_y: i64,
+        stream: i64,
+    ) -> i32;
+
+    /// `dst[ncols_y][nrows_x] = vy · xᵀ`. `launch == 0` only sets `need` (the
+    /// floats of fixup buffer the launch will want).
+    pub fn swarm_mmq_matmul(
+        ggml_type: i32,
+        x: *const c_void,
+        vy: *const c_void,
+        dst: *mut f32,
+        fixup: *mut f32,
+        fixup_floats: usize,
+        need: *mut usize,
+        ncols_x: i64,
+        nrows_x: i64,
+        ncols_y: i64,
+        launch: i32,
+        stream: i64,
+    ) -> i32;
+}

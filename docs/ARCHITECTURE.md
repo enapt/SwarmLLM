@@ -78,11 +78,16 @@ swarmllm/
 │   │                          without it a GPU node loaded such a model then failed every
 │   │                          request, gotcha #288; a card-to-card `transfer_to_device` ordered on
 │   │                          BOTH streams — each device has its own and nothing else orders it, #138)
-│   │   └── candle-kernels/    (TWO patches: the barrier the GGUF MoE prompt kernel `moe_wmma_gguf.cu`
+│   │   └── candle-kernels/    (THREE patches: the barrier the GGUF MoE prompt kernel `moe_wmma_gguf.cu`
 │   │                          lacked — a mixture-of-experts reply on a card changed run to run, #138;
-│   │                          guard `the_vendored_moe_prompt_kernel_keeps_its_barrier`; and Q4_0, Q4_1,
+│   │                          guard `the_vendored_moe_prompt_kernel_keeps_its_barrier`; Q4_0, Q4_1,
 │   │                          Q5_0, Q5_1 in both GGUF MoE kernels — a row too narrow for a K-quant is
-│   │                          stored in one, #292; guard `every_type_the_card_moe_kernels_are_handed_is_launched`)
+│   │                          stored in one, #292; guard `every_type_the_card_moe_kernels_are_handed_is_launched`;
+│   │                          and src/ggml_mmq/ — llama.cpp's int8 tensor-core MMQ, its headers verbatim
+│   │                          in `namespace swarm_ggml` + a launcher on the caller's stream, built as
+│   │                          libggml_mmq.a for every card product of ≥ 9 rows (5-8 uncaptured), #325;
+│   │                          guard `the_vendored_mmq_keeps_its_own_namespace`. Both libraries carry
+│   │                          their floor's PTX beside the machine code, for cards newer than it)
 │   ├── candle-flash-attn/     (cudart linked STATICALLY so the binary needs only the display driver;
 │   │                          18 bf16 kernels + the FP16_SWITCH bf16 branch dropped — unreachable, 37→19;
 │   │                          `run_mha` launches on the CALLER's stream, not stream 0 — .199's garbage, #683)
@@ -181,7 +186,8 @@ swarmllm/
 │                 kv_append.cu — a step's f32 K or V written into the half cache in ONE
 │                 launch (cast + copy); delta_rule.cu — Qwen 3.5's gated delta rule,
 │                 every token of a layer in one launch, NOT bit-identical. A NEW kernel goes here, not into
-│                 vendor/candle/candle-kernels — that copy exists for two patches to upstream kernels)
+│                 vendor/candle/candle-kernels — that copy exists for patches to upstream kernels and
+│                 for llama.cpp's MMQ, which is copied verbatim and must stay so)
 └── tests/         (integration tests)
 ```
 

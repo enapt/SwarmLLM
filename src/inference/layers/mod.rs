@@ -7561,3 +7561,93 @@ mod flash_vs_standard {
         println!("softcap changed the standard result by {cap_effect:.3e} (guard: check is live)");
     }
 }
+
+/// llama.cpp's int8 tensor-core MMQ, which a card runs for every quantized
+/// product of more than eight rows (vendored candle `quantized/cuda.rs`,
+/// `mul_mat_via_mmq_mma`; FUTURE_WORK #325). ⚠ Gated, so no default build runs
+/// it: `cargo test --release --features cuda --lib card_quantized_products`,
+/// with nothing else on the card, and look for SKIPPED before believing a pass.
+#[cfg(all(test, feature = "candle-cuda"))]
+mod card_quantized_products {
+    use candle_core::quantized::{GgmlDType, QMatMul, QTensor};
+    use candle_core::{Device, Module, Tensor};
+
+    /// Every type it covers, both tile paths (rows of the weight a multiple of
+    /// 128, and not) and the widths a tree check, a drafter's tree step (5-8
+    /// rows, taken from the vector kernel outside a CUDA graph capture) and a
+    /// prompt chunk send, against the f32 product of the SAME quantized weight. The activation is
+    /// quantized to 8 bits on the way in, so the bound is relative to the
+    /// largest product; a layout or stride mistake is off by far more. Each
+    /// product must have gone through the new kernel (its counter moved).
+    #[test]
+    fn many_rows_on_the_card_match_the_f32_product_of_the_same_weight() {
+        let Ok(card) = Device::new_cuda(0) else {
+            eprintln!("SKIPPED: no card");
+            return;
+        };
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut values = |n: usize| -> Vec<f32> {
+            (0..n)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    ((seed >> 40) as f32 / (1u64 << 24) as f32) - 0.5
+                })
+                .collect()
+        };
+        let k = 512;
+        let types = [
+            GgmlDType::Q4_0,
+            GgmlDType::Q4_1,
+            GgmlDType::Q5_0,
+            GgmlDType::Q5_1,
+            GgmlDType::Q8_0,
+            GgmlDType::Q2K,
+            GgmlDType::Q3K,
+            GgmlDType::Q4K,
+            GgmlDType::Q5K,
+            GgmlDType::Q6K,
+        ];
+        for dtype in types {
+            for n in [256usize, 200] {
+                let w = Tensor::from_vec(values(n * k), (n, k), &card).unwrap();
+                let q = QTensor::quantize(&w, dtype).unwrap();
+                let wq = q
+                    .dequantize(&Device::Cpu)
+                    .unwrap()
+                    .to_vec2::<f32>()
+                    .unwrap();
+                let mm = QMatMul::from_qtensor(q).unwrap();
+                for rows in [5usize, 8, 9, 16, 33, 64, 300] {
+                    let a = values(rows * k);
+                    let x = Tensor::from_vec(a.clone(), (rows, k), &card).unwrap();
+                    let before = candle_core::quantized::cuda::mmq_mma_products();
+                    let got = mm.forward(&x).unwrap().to_vec2::<f32>().unwrap();
+                    let fired = candle_core::quantized::cuda::mmq_mma_products() > before;
+                    assert!(
+                        fired,
+                        "{dtype:?} n={n} rows={rows}: the product did not go through \
+                         llama.cpp's MMQ (SWARMLLM_QMATMUL_MMQ set, or no int8 tensor cores?)"
+                    );
+                    let mut scale = 0f64;
+                    let mut worst = 0f64;
+                    for r in 0..rows {
+                        for (o, wrow) in wq.iter().enumerate() {
+                            let want: f64 = (0..k)
+                                .map(|i| f64::from(a[r * k + i]) * f64::from(wrow[i]))
+                                .sum();
+                            scale = scale.max(want.abs());
+                            worst = worst.max((f64::from(got[r][o]) - want).abs());
+                        }
+                    }
+                    let err = worst / scale;
+                    assert!(
+                        err < 0.02,
+                        "{dtype:?} n={n} rows={rows}: off by {err:.4} of the largest product"
+                    );
+                }
+            }
+        }
+    }
+}

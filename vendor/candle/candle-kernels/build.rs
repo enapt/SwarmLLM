@@ -21,7 +21,8 @@ fn main() -> Result<()> {
     let bindings = KernelBuilder::new()
         .source_dir("src") // Scan src/ for .cu files
         .watch(&headers)
-        .exclude(&["moe_*.cu"]) // Exclude moe kernels for ptx build
+        .exclude(&["moe_*.cu", "ggml_mmq/*"]) // Exclude moe kernels for ptx build
+        // SwarmLLM patch: llama.cpp's MMQ (`ggml_mmq/`) is a library, below.
         .arg("--expt-relaxed-constexpr")
         .arg("-std=c++17")
         .arg("-O3")
@@ -48,6 +49,18 @@ fn main() -> Result<()> {
     if compute_cap < 80 {
         moe_builder = moe_builder.arg("-DNO_BF16_KERNEL");
     }
+    // SwarmLLM patch: a library carries its floor's PTX beside the machine
+    // code. cudaforge's `build_lib` compiles `code=sm_NN` alone, and machine
+    // code runs only within its own major version: a release built at 80 had
+    // NO image of these kernels for a Hopper (9.0) or Blackwell (12.0) card,
+    // which `gpu_support::compute_cap_supported` admits. The MoE launches
+    // check no error, so their output was never written there. With the PTX
+    // the driver compiles them for the card on first use, as it does
+    // candle's own kernels (the PTX build above; gotcha #159). A newer card
+    // is reproduced on any card by `CUDA_FORCE_PTX_JIT=1` — in a program
+    // that loads nothing else: candle cannot open a device under it.
+    let ptx_beside = format!("-gencode=arch=compute_{compute_cap},code=compute_{compute_cap}");
+    moe_builder = moe_builder.arg(&ptx_beside);
 
     let mut is_target_msvc = false;
     if let Ok(target) = std::env::var("TARGET") {
@@ -62,8 +75,37 @@ fn main() -> Result<()> {
     }
 
     moe_builder.build_lib(out_dir.join("libmoe.a"))?;
+
+    // SwarmLLM patch: llama.cpp's int8 tensor-core quantized matmul
+    // (`src/ggml_mmq`: its ggml sources verbatim plus a launcher that takes
+    // the caller's stream — see `src/ggml_mmq/swarm_mmq.cuh`). A library, as
+    // the MoE kernels are: its templates are reached through C entry points
+    // (`ffi.rs`), never loaded by name from PTX.
+    let mmq_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("src/ggml_mmq");
+    let mmq_includes: Vec<String> = ["include", "src", "src/ggml-cuda"]
+        .iter()
+        .map(|d| format!("-I{}", mmq_dir.join(d).display()))
+        .collect();
+    let mut mmq_builder = KernelBuilder::default()
+        .source_dir("src/ggml_mmq")
+        .watch(&headers)
+        .arg("--expt-relaxed-constexpr")
+        .arg("-std=c++17")
+        .arg("-O3")
+        .arg(&ptx_beside);
+    for include in &mmq_includes {
+        mmq_builder = mmq_builder.arg(include);
+    }
+    if is_target_msvc {
+        mmq_builder = mmq_builder.arg("-D_USE_MATH_DEFINES");
+    } else {
+        mmq_builder = mmq_builder.arg("-Xcompiler").arg("-fPIC");
+    }
+    mmq_builder.build_lib(out_dir.join("libggml_mmq.a"))?;
+
     println!("cargo:rustc-link-search={}", out_dir.display());
     println!("cargo:rustc-link-lib=moe");
+    println!("cargo:rustc-link-lib=ggml_mmq");
     println!("cargo:rustc-link-lib=dylib=cudart");
     if !is_target_msvc {
         println!("cargo:rustc-link-lib=stdc++");
@@ -71,13 +113,17 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// SwarmLLM patch: every `.cuh` under `dir`, recursively — see `main`.
+/// SwarmLLM patch: every header under `dir`, recursively — see `main`. `.h`
+/// and `.inc` too: llama.cpp's ggml headers and its quantizer (`ggml_mmq/`).
 fn cuda_headers(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("read the kernel sources").flatten() {
         let path = entry.path();
         if path.is_dir() {
             cuda_headers(&path, out);
-        } else if path.extension().is_some_and(|ext| ext == "cuh") {
+        } else if path
+            .extension()
+            .is_some_and(|ext| ext == "cuh" || ext == "h" || ext == "inc")
+        {
             out.push(path);
         }
     }

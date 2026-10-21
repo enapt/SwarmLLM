@@ -3507,6 +3507,145 @@ would name.
 
 → `docs/invariants/inference.md` § "A prompt pass on the card multiplies quantized weights on the tensor cores"
 
+**Superseded where it runs (2026-10-21, #325):** on a card with int8 tensor cores every product
+above the vector kernel's rows now goes to llama.cpp's CURRENT MMQ — § "A card multiplies several
+rows with llama.cpp's int8 tensor-core MMQ" below. The cuBLAS rule above (and its f16 accumulate
+and f32 marks) still answers where that kernel does not run: a card below 7.5, a type it does not
+cover, `SWARMLLM_QMATMUL_MMQ=dp4a`, or after a failed launch.
+
+## A card multiplies several rows with llama.cpp's int8 tensor-core MMQ (2026-10-21, #325)
+
+**What it replaced.** A tree check carries 16-64 rows through every machine of a split, a prompt
+chunk hundreds. Vendored `quantized/cuda.rs::dequantize_matmul` sent 2-8 rows to the vector kernel
+(`mul_mat_vec_via_q8_1`), 9-63 to `mul_mat_via_q8_1` — llama.cpp's OLD dp4a MMQ, a fixed 64-column
+tile, no tensor cores — and 64+ to a dequantize + cuBLAS f16 GEMM (§ above). Measured before it
+(RTX 3070 Laptop, Qwen2.5-Coder-7B Q4_K_M whole, 300-token depth, one CUDA process,
+`~/swarmllm-318/rowcost.sh`; ours `prefill_bench`'s width sweep, llama.cpp `llama-bench -fa 1 -r
+10`), ms a forward:
+
+| rows | 1 | 2 | 4 | 8 | 16 | 32 | 64 |
+|---|---|---|---|---|---|---|---|
+| ours | 14.6 | 16.7 | 25.8 | 46.7 | 83.3 | 84.4 | 107.8 |
+| llama.cpp | 16.4 | 16.3 | 21.6 | 35.2 | 22.9 | 25.8 | 37.4 |
+
+**Research.** Current llama.cpp sends every batch above 8 rows to MMQ on a card with int8 tensor
+cores — `ggml_cuda_should_use_mmq` returns true on `turing_mma_available(cc)` before it asks about
+the batch — and its MMQ is no longer the dp4a kernel candle vendored: `mmq.cuh` + `mma.cuh` (int8
+`mma.sync`), a tile width J of 8-128 chosen per batch (`mul_mat_q_switch_J`: fewest tiles), stream-k
+with a fixup pass, the activation quantized once into `block_q8_1_mmq` in the layout each weight type
+reads (D4 / DS4 / D2S6). Below 8 rows llama.cpp keeps its vector kernel (MMVQ) for one row and, at
+2-8 rows, chooses per card; its `MMQ_DP4A_MAX_BATCH_SIZE` (64) concerns only the dp4a kernel.
+
+**The rule.**
+- `vendor/candle/candle-kernels/src/ggml_mmq/`: llama.cpp `4b1a27fa0eb8`'s headers verbatim
+  (`ggml-cuda/{common,mma,mmq,mmq-*,vecdotq,quantize}.cuh`, `quantize.cu.inc`, `ggml-common.h`,
+  `include/`, LICENSE) plus `swarm_mmq.cuh` (a launcher taking the caller's stream and buffers —
+  `launch_mul_mat_q` without ggml's pool and device table), `mmq_entry.cu` (five `extern "C"` entry
+  points, `ffi.rs`) and one `mmq_type_*.cu` per type (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K-Q6_K). Built
+  as `libggml_mmq.a` by candle-kernels' `build.rs`, beside `libmoe.a`.
+- ⛔ **Everything of it lives in `namespace swarm_ggml`** (`ggml_abort` is `#define`d to
+  `swarm_ggml_abort`): a `cuda` build links llama.cpp's own ggml too (`cuda = ["llama", …]`), and
+  every strong symbol both define collided at link — while a weak template kernel would have merged
+  SILENTLY with the other copy's (gotcha #927). Guard `the_vendored_mmq_keeps_its_own_namespace`.
+- `dequantize_matmul` asks `mmq_mma_layout(dev, dtype, rows)` first: llama.cpp's MMQ wherever
+  `swarm_mmq_available()` (int8 `mma`, 48 KiB opt-in shared memory, and an image of the library
+  for this card — probed with an empty kernel) and the type is one of the ten; else cuBLAS (≥ 64
+  rows) or the old dp4a kernel, exactly as before.
+- 5-8 rows go to it too, instead of the vector kernel — but never inside a CUDA graph capture
+  (`mmq_takes_few_rows`: the stream's `capture_status()`), since MMQ's first launch of a tile width
+  raises that kernel's shared-memory limit, a driver call a capture must not see (gotcha #841's
+  class). The forwards that gain are never captured anyway: a tree check and the drafter's tree
+  steps. `SWARMLLM_QMATMUL_MMQ_MIN_ROWS` (default 5, `MMQ_FEW_ROWS_DEFAULT`; above 8 = never) moves
+  the line. The activation is quantized once per group of
+  weights sharing it AND its layout (`SharedQ8::layout`). Every buffer comes from the device's pool
+  on its one stream, uninitialised (the quantizer writes every row, the kernel every element, each
+  fixup slot is written before it is read).
+- A failed launch turns it off for the process (`MMQ_MMA_FAILED`, one stderr line) and that call
+  runs the old kernels. The launcher returns a status where llama.cpp's `launch_mul_mat_q` would
+  `CUDA_CHECK` or assert (both abort); each launch is judged by the thread's last runtime error, so
+  each entry point first clears one an earlier, unrelated call left (`swarm_mmq_clear_stale_error`).
+  `swarm_mmq_available` probes for an image of the library (an empty kernel): llama.cpp's own
+  `turing_mma_available` reads the COMPILED architectures and says no to a card older than the
+  build, but yes to a newer one whose machine code the library lacks.
+- ⛔ **The library carries its floor's PTX** (`build.rs` `ptx_beside`, beside the MoE library):
+  cudaforge's `build_lib` compiles `code=sm_NN` alone, machine code runs only within its major
+  version, and a release is built at 80 — so a Hopper or Blackwell card, which
+  `gpu_support::compute_cap_supported` admits, had no image of either library. Found writing this
+  section, and the serious half: the MoE kernels check no launch error, and a launch with no image
+  fails without a word — the next synchronize reports nothing and the output is never written (a
+  kernel built for sm_90 alone, on this sm_86 card). MMQ alone would only have fallen back.
+- Checked (`~/swarmllm-318/jitprobe.sh`, the entry points in a harness built for sm_86, run under
+  `CUDA_FORCE_PTX_JIT=1` — which makes the driver ignore machine code, as a newer card must): probe
+  cut out, machine code alone → `swarm_mmq_available() = 1`, the quantizer's launch fails (status 3,
+  then the old kernels); as shipped → 0, nothing launched; as shipped with the PTX → 1, the launch
+  runs. Candle itself cannot open a device under that switch here, so the whole stack is not
+  reproducible this way.
+- `mmq_mma_products()` counts what it ran — the check that it fired, never a decision.
+- A/B in one binary: `SWARMLLM_QMATMUL_MMQ=dp4a` (or `0`/`off`) = the old kernels;
+  `SWARMLLM_QMATMUL_MMQ_MAX_ROWS` caps its rows for a measurement.
+
+**Measured 2026-10-21** (same card, model and depth, live node stopped, one CUDA process, A/B
+`SWARMLLM_QMATMUL_MMQ=dp4a` in ONE binary, two rounds agreeing; `~/swarmllm-318/mmqcheck.sh`), ms a
+forward, MMQ / old:
+
+| rows | 9 | 16 | 32 | 64 |
+|---|---|---|---|---|
+| whole 7B | 26.9-27.9 / 86.5-86.7 | 27.8-28.6 / 87.2-87.4 | 34.2-35.2 / 89.6-89.7 | 46.0-47.4 / 113.3-113.4 |
+| head (layers 0-14), chain | — | 12.8 / 41.6 | 15.5 / 42.6 | 20.8 / 55.2 |
+| head (layers 0-14), tree | — | 15.7 / 43.7 | 19.5 / 46.3 | 30.8 / 65.4 |
+
+3.1-3.2× faster at 9-16 rows, 2.6× at 32, 2.4× at 64; against llama.cpp 1.23-1.34× its time at
+16-64 rows, from 2.9-3.6×. A prompt: 300 tokens 1,744-1,746 tok/s against 1,306-1,317, 512 tokens 2,108-2,127
+against 1,677-1,698 (MMQ beats the cuBLAS path at 512 too, as in llama.cpp); the head alone 3,598
+against 2,655. Decode does not reach it: 63.4-64.3 tok/s against 61.4-63.8 at 300 deep, 62.2 against
+61.6-61.9 at 512. The card test (`card_quantized_products`) checks every type at rows 5-300
+against the f32 product of the same dequantized weight, and that the kernel ran (run with
+`--nocapture`: without a card it prints `SKIPPED: no card` and passes).
+
+**5-8 rows, measured 2026-10-21** (same card, model and depth; `~/swarmllm-318/fewrows.sh`, A/B
+`SWARMLLM_QMATMUL_MMQ_MIN_ROWS=2` against `=9` in ONE binary; `prefill_bench`'s width sweep, best of
+7 interleaved pairs), ms a forward, MMQ from 2 rows / the vector kernel:
+
+| rows | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|
+| head (layers 0-14), tree, 2 rounds | 7.9-8.2 / 8.4-8.5 | 8.8-8.9 / 9.0-10.0 | 10.5-11.4 / 10.4-10.7 | 12.1-14.0 / 15.3-15.4 | 11.9-13.1 / 18.1-18.4 | 12.3-12.5 / 19.8-20.0 | 12.1-12.3 / 23.5-23.6 |
+| whole 7B, graphs off | 23.9 / 21.8 | 24.2 / 24.7 | 24.7 / 29.8 | 24.1 / 35.3 | 24.5 / 41.9 | 25.2 / 46.6 | 25.0 / 52.8 |
+| whole 7B, graphs on | 17.3 / 18.9 | 22.4 / 23.1 | 25.8 / 26.0 | 27.7 / 33.0 | 26.6 / 39.7 | 28.3 / 43.6 | 27.4 / 49.3 |
+
+From 5 rows MMQ wins everywhere (1.3-1.9× on the head's tree, up to 2.1× whole); at 2-4 it ties or
+loses, so the line is at 5. Not explained: with graphs on, the best 5-8-row step (26.6-28.3) sits
+between the uncaptured MMQ figure and the captured vector kernel's — the bench does not say which
+steps were captured. The gate itself asks the driver (`cuStreamIsCapturing`) about the stream the
+capture runs on, as candle's own `layout_params` does.
+
+**Replies.** 18 replies (`mmqcheck.sh`, greedy, both arms): 13 byte-identical; the other 5 — Phi-3.5,
+Phi-4-mini, Qwen2.5-Coder-7B, GLM-4-9B, Mistral-7B, all on one prompt — fork mid-reply. Scored against
+llama.cpp (`score_against_reference.py`, `~/swarmllm-318/mmqscore.out`; tokens llama.cpp ranks
+first / reply tokens, worst rank, largest logit gap):
+
+| model | MMQ | old kernels |
+|---|---|---|
+| Qwen2.5-Coder-7B | 159/160, 2, 0.126 | 160/160, 1, 0 |
+| Phi-4-mini | 94/95, 2, 0.075 | 71/72, 2, 0.164 |
+| Mistral-7B (SentencePiece: near-ties only) | 144/148, 3, 1.311 | 155/160, 3, 1.311 |
+| Phi-3.5 (SentencePiece) | 149/160, 16, 19.27 | 150/160, 16, 19.27 |
+| GLM-4-9B | 101/110, 3, 17.77 | 135/145, 3, 17.77 |
+
+Phi-3.5's and GLM-4's large gaps are the same figure in both arms, to the third decimal — the
+SentencePiece reading and #147 item 6, older than either kernel. Both kernels round the activation to 8 bits; each fork
+is a near-tie.
+
+**What a change must keep.**
+- The namespace (above). A new ggml header goes inside it; `swarm_mmq.cuh`'s system and CUDA
+  includes stay outside, before it opens.
+- No launch that can abort: anything reaching llama.cpp's `CUDA_CHECK` / `GGML_ASSERT` is checked
+  by the launcher first and answered as a status.
+- The PTX beside the machine code, for every vendored kernel LIBRARY — check the path with
+  `CUDA_FORCE_PTX_JIT=1` in a harness, as above.
+- Replies are judged against llama.cpp, never byte-equality with the old kernels.
+- A llama.cpp update re-copies the headers verbatim and re-reads `launch_mul_mat_q` /
+  `mul_mat_q_switch_J` against `swarm_mmq.cuh`.
+
 ## A decode step can go to the card as one CUDA graph (2026-09-29; on by default since v0.3.213)
 
 **What.** (Written when it was opt-in via `SWARMLLM_CUDA_OWN_STREAM=1 SWARMLLM_CUDA_GRAPH=1`; both are now on unless set to `0`.) It sends a one-position forward

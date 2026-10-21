@@ -857,6 +857,94 @@ fn the_moe_prompt_kernel_guard_catches_the_pre_fix_loop() {
     assert!(moe_prompt_kernel_barrier_violation("no loop here").is_some());
 }
 
+/// Where a file of the vendored llama.cpp MMQ (`candle-kernels/src/ggml_mmq/`)
+/// puts llama.cpp code outside `namespace swarm_ggml`, or where `swarm_mmq.cuh`
+/// stops renaming `ggml_abort` before the namespace opens.
+fn mmq_namespace_violation(name: &str, src: &str) -> Option<String> {
+    let code: Vec<&str> = src
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or("").trim())
+        .collect();
+    let opened = code
+        .iter()
+        .position(|l| l.starts_with("namespace swarm_ggml {"));
+    for (i, l) in code.iter().enumerate() {
+        let llama_cpp_code = (l.starts_with("#include \"") && !l.contains("\"swarm_mmq.cuh\""))
+            || l.starts_with("SWARM_MMQ_DECL(")
+            || l.starts_with("extern SWARM_MMQ_DECL(");
+        if llama_cpp_code && opened.is_none_or(|o| i < o) {
+            return Some(format!(
+                "line {}: `{l}` is outside `namespace swarm_ggml`",
+                i + 1
+            ));
+        }
+    }
+    if name == "swarm_mmq.cuh" {
+        let renamed = code
+            .iter()
+            .position(|l| *l == "#define ggml_abort swarm_ggml_abort");
+        if renamed.is_none_or(|r| opened.is_none_or(|o| r > o)) {
+            return Some(
+                "`ggml_abort` is not renamed before the namespace opens — C linkage \
+                 ignores namespaces"
+                    .into(),
+            );
+        }
+    }
+    None
+}
+
+/// A `cuda` build links llama.cpp's ggml-cuda TWICE: llama-cpp-sys-2's (the
+/// `llama` feature) and the MMQ copy candle-kernels carries (#325), from
+/// different llama.cpp commits. Outside a namespace of its own the copy's
+/// quantizers and `ggml_abort` collide as strong symbols (the 2026-10-21 link
+/// failure) and its kernel templates as WEAK ones, which the linker merges
+/// without a word — one copy's launch could then run the other's device code.
+/// No CI job links a card build, so the source is what is checked.
+#[test]
+fn the_vendored_mmq_keeps_its_own_namespace() {
+    let dir = repo_root().join("vendor/candle/candle-kernels/src/ggml_mmq");
+    let mut files = 0;
+    for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {dir:?}: {e}")) {
+        let path = entry.expect("dir entry").path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if !(name.ends_with(".cu") || name.ends_with(".cuh")) {
+            continue;
+        }
+        files += 1;
+        let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
+        if let Some(why) = mmq_namespace_violation(&name, &src) {
+            panic!(
+                "ggml_mmq/{name}: {why}. Two llama.cpp copies share this binary; \
+                 keep this one in `swarm_ggml`."
+            );
+        }
+    }
+    // swarm_mmq.cuh, mmq_entry.cu and one file per type.
+    assert!(files >= 12, "found {files} MMQ sources in {dir:?}");
+}
+
+/// The namespace guard sees a header outside it, an instantiation outside it
+/// and a missing rename (gotcha #413).
+#[test]
+fn the_mmq_namespace_guard_catches_code_outside_it() {
+    let header = "#pragma once\n#define ggml_abort swarm_ggml_abort\n\
+                  namespace swarm_ggml {\n#include \"ggml-cuda/mmq.cuh\"\n}\n";
+    assert_eq!(mmq_namespace_violation("swarm_mmq.cuh", header), None);
+    let before = "#pragma once\n#include \"ggml-cuda/mmq.cuh\"\n\
+                  #define ggml_abort swarm_ggml_abort\nnamespace swarm_ggml {\n}\n";
+    assert!(mmq_namespace_violation("swarm_mmq.cuh", before).is_some());
+    let unrenamed = header.replace("#define ggml_abort swarm_ggml_abort\n", "");
+    assert!(mmq_namespace_violation("swarm_mmq.cuh", &unrenamed).is_some());
+    let commented = header.replace("#define ggml_abort", "// #define ggml_abort");
+    assert!(mmq_namespace_violation("swarm_mmq.cuh", &commented).is_some());
+    let typed = "#include \"swarm_mmq.cuh\"\n\nnamespace swarm_ggml {\n\
+                 SWARM_MMQ_DECL(GGML_TYPE_Q4_K);\n}\n";
+    assert_eq!(mmq_namespace_violation("mmq_type_q4_k.cu", typed), None);
+    let bare = "#include \"swarm_mmq.cuh\"\n\nSWARM_MMQ_DECL(GGML_TYPE_Q4_K);\n";
+    assert!(mmq_namespace_violation("mmq_type_q4_k.cu", bare).is_some());
+}
+
 /// The numbers `pattern` (`"case "`, `"gguf_type == "`) is followed by in the
 /// live code of `region` — `//` comments dropped.
 fn kernel_ids_after(region: &str, pattern: &str) -> std::collections::BTreeSet<i32> {

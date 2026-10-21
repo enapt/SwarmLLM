@@ -551,13 +551,13 @@ fn mul_mat_vec_via_q8_1(
     // SwarmLLM patch: reuse ONE quantization across weight matrices that share
     // this activation — see `shared_activation`. Outside such a group this is
     // exactly the old behaviour.
-    let y_q8_1: std::sync::Arc<CudaSlice<u8>> = match shared_take(ncols, b_size) {
+    let y_q8_1: std::sync::Arc<CudaSlice<u8>> = match shared_take(ncols, b_size, Q8_1_ROWS) {
         Some(existing) => existing,
         None => {
             let mut buf = dev.alloc_fully_overwritten::<u8>(y_size_in_bytes)?;
             quantize_q8_1(y, &mut buf, ncols, b_size, dev)?;
             let buf = std::sync::Arc::new(buf);
-            shared_put(ncols, b_size, &buf);
+            shared_put(ncols, b_size, Q8_1_ROWS, &buf);
             buf
         }
     };
@@ -642,8 +642,16 @@ fn mul_mat_vec_via_q8_1(
 struct SharedQ8 {
     ncols: usize,
     b_size: usize,
+    /// Which arrangement `buf` is in: [`Q8_1_ROWS`] for candle's own kernels,
+    /// else the `block_q8_1_mmq` scale layout llama.cpp's MMQ reads
+    /// ([`mul_mat_via_mmq_mma`]). A Q4_K weight and a Q6_K one read the same
+    /// activation in different layouts, so the layout is part of the key.
+    layout: i32,
     buf: std::sync::Arc<CudaSlice<u8>>,
 }
+
+/// [`SharedQ8::layout`] of the plain `block_q8_1` rows candle's kernels read.
+const Q8_1_ROWS: i32 = -1;
 
 std::thread_local! {
     /// `Some` only while [`shared_activation`] is on the stack.
@@ -652,11 +660,17 @@ std::thread_local! {
 }
 
 /// The quantized activation for this group, if one has been built and matches.
-fn shared_take(ncols: usize, b_size: usize) -> Option<std::sync::Arc<CudaSlice<u8>>> {
+fn shared_take(
+    ncols: usize,
+    b_size: usize,
+    layout: i32,
+) -> Option<std::sync::Arc<CudaSlice<u8>>> {
     SHARED_Q8.with(|s| {
         let slot = s.borrow();
         match &*slot {
-            Some(Some(sh)) if sh.ncols == ncols && sh.b_size == b_size => Some(sh.buf.clone()),
+            Some(Some(sh)) if sh.ncols == ncols && sh.b_size == b_size && sh.layout == layout => {
+                Some(sh.buf.clone())
+            }
             _ => None,
         }
     })
@@ -664,13 +678,14 @@ fn shared_take(ncols: usize, b_size: usize) -> Option<std::sync::Arc<CudaSlice<u
 
 /// Record the quantization so the rest of the group can reuse it. A no-op
 /// unless a group is active, which is what keeps the non-grouped path identical.
-fn shared_put(ncols: usize, b_size: usize, buf: &std::sync::Arc<CudaSlice<u8>>) {
+fn shared_put(ncols: usize, b_size: usize, layout: i32, buf: &std::sync::Arc<CudaSlice<u8>>) {
     SHARED_Q8.with(|s| {
         let mut slot = s.borrow_mut();
         if let Some(inner @ None) = slot.as_mut() {
             *inner = Some(SharedQ8 {
                 ncols,
                 b_size,
+                layout,
                 buf: buf.clone(),
             });
         }
@@ -696,6 +711,230 @@ pub(crate) fn with_shared_activation<T>(f: impl FnOnce() -> T) -> T {
     SHARED_Q8.with(|s| *s.borrow_mut() = Some(None));
     let _clear = Clear;
     f()
+}
+
+/// SwarmLLM patch: whether a product of `rows` activation rows against a
+/// weight of `dtype` goes to llama.cpp's int8 tensor-core MMQ
+/// ([`mul_mat_via_mmq_mma`]), and if so in which activation layout.
+///
+/// **llama.cpp's rule**: on a card with int8 tensor cores
+/// (`turing_mma_available`) every batch above the vector kernel's eight rows
+/// takes MMQ — `ggml_cuda_should_use_mmq` returns true before it asks about
+/// batch size. This repo's [`CUBLAS_MIN_ROWS`] rule was llama.cpp's for the
+/// OLD dp4a MMQ candle vendored, and now applies only where this kernel does
+/// not run.
+///
+/// Measured before it (RTX 3070, Qwen2.5 Coder 7B Q4_K_M whole, 300-token
+/// depth; SwarmLLM FUTURE_WORK #325): 16 rows 83.3 ms here against 22.9 in
+/// llama.cpp, 32 rows 84.4 vs 25.8, 64 rows 107.8 (cuBLAS) vs 37.4.
+///
+/// `SWARMLLM_QMATMUL_MMQ=dp4a` keeps the old kernels (the A/B in one
+/// binary); `SWARMLLM_QMATMUL_MMQ_MAX_ROWS` caps the rows it takes, for a
+/// measurement. After a launch fails it is off for the process: the old
+/// kernels answer, once with a line on stderr. A card the library has no
+/// image for is told no before any launch (`swarm_mmq_available` probes for
+/// one). The library carries its floor's PTX, so a card newer than the
+/// build's CUDA_COMPUTE_CAP has one (candle-kernels `build.rs`).
+fn mmq_mma_layout(dev: &CudaDevice, dtype: GgmlDType, rows: usize) -> Option<i32> {
+    static ON: std::sync::OnceLock<(bool, usize)> = std::sync::OnceLock::new();
+    let (on, max_rows) = *ON.get_or_init(|| {
+        let off = matches!(
+            std::env::var("SWARMLLM_QMATMUL_MMQ").ok().as_deref(),
+            Some("dp4a") | Some("0") | Some("off") | Some("false")
+        );
+        let max_rows = std::env::var("SWARMLLM_QMATMUL_MMQ_MAX_ROWS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(usize::MAX);
+        // The runtime API asks the CURRENT context's device: bind this one.
+        let bound = dev.cuda_stream().context().bind_to_thread().is_ok();
+        // SAFETY: a query of the current device; no pointers.
+        let available =
+            !off && bound && unsafe { candle_kernels::ffi::swarm_mmq_available() } == 1;
+        (available, max_rows)
+    });
+    if !on || rows > max_rows || MMQ_MMA_FAILED.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    // SAFETY: a table lookup.
+    let layout = unsafe { candle_kernels::ffi::swarm_mmq_q8_1_layout(dtype.to_u32() as i32) };
+    (layout >= 0).then_some(layout)
+}
+
+/// The fewest rows below the vector kernel's limit (8) that llama.cpp's MMQ
+/// takes instead, where [`mmq_takes_few_rows`] allows it.
+const MMQ_FEW_ROWS_DEFAULT: usize = 5;
+
+/// SwarmLLM patch: whether a product of `rows` ≤ 8 activation rows goes to
+/// llama.cpp's MMQ rather than the vector kernel — from
+/// `SWARMLLM_QMATMUL_MMQ_MIN_ROWS` rows ([`MMQ_FEW_ROWS_DEFAULT`]; above 8 =
+/// never), and NEVER while the device's stream is being captured. A CUDA
+/// graph records checks of up to 8 positions, and MMQ's first launch of a
+/// tile width raises that kernel's shared-memory limit — a driver call a
+/// capture must not see (gotcha #841's class). The forwards that gain are
+/// never captured: a tree check and the drafter's tree steps (8 rows a step).
+fn mmq_takes_few_rows(dev: &CudaDevice, dtype: GgmlDType, rows: usize) -> bool {
+    static MIN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let min = *MIN.get_or_init(|| {
+        std::env::var("SWARMLLM_QMATMUL_MMQ_MIN_ROWS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(MMQ_FEW_ROWS_DEFAULT)
+    });
+    if rows < min.max(2) {
+        return false;
+    }
+    let capturing = !matches!(
+        dev.cuda_stream().capture_status(),
+        Ok(cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE)
+    );
+    !capturing && mmq_mma_layout(dev, dtype, rows).is_some()
+}
+
+/// Set after an MMQ launch fails; see [`mmq_mma_layout`].
+static MMQ_MMA_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Products [`mul_mat_via_mmq_mma`] has enqueued in this process.
+static MMQ_MMA_PRODUCTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// SwarmLLM patch: how many quantized products llama.cpp's tensor-core MMQ
+/// has run in this process — the check that it fired, for a test or a bench
+/// (SwarmLLM's diagnosis rule 4), never a decision.
+pub fn mmq_mma_products() -> usize {
+    MMQ_MMA_PRODUCTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// SwarmLLM patch: `dst[y_cols][x_rows] = y · xᵀ` with llama.cpp's int8
+/// tensor-core MMQ (candle-kernels `src/ggml_mmq`, its `mmq.cuh` verbatim,
+/// launched on this device's stream). Same result layout as
+/// [`mul_mat_via_q8_1`]. The activation is quantized ONCE per group of
+/// weights reading it in the same `layout` ([`shared_take`]).
+///
+/// Every buffer is uninitialised, as llama.cpp's pool hands them out: the
+/// quantizer writes every row it is given (the tail past the last row is read
+/// only into tile rows the write-back skips), the kernel assigns every element
+/// of `dst`, and each fixup slot is written by the block that leaves a tile
+/// unfinished before the fixup kernel reads it.
+#[allow(clippy::too_many_arguments)]
+fn mul_mat_via_mmq_mma(
+    data: &PaddedCudaSlice,
+    y: &CudaView<f32>,
+    dtype: GgmlDType,
+    layout: i32,
+    x_rows: usize,
+    x_cols: usize,
+    y_cols: usize,
+    dev: &CudaDevice,
+) -> Result<CudaStorage> {
+    use cudarc::driver::DevicePtr;
+    let data_elems = data.len / dtype.type_size() * dtype.block_size();
+    if data_elems < x_rows * x_cols {
+        crate::bail!("unexpected lhs size {}, {x_rows} {x_cols}", data_elems)
+    }
+    if y.len() != x_cols * y_cols {
+        crate::bail!("unexpected y size {}, {x_cols} {y_cols}", y.len())
+    }
+    let stream = dev.cuda_stream();
+    stream.context().bind_to_thread().w()?;
+    let raw_stream = stream.cu_stream() as i64;
+    let ggml_type = dtype.to_u32() as i32;
+    let status = |what: &str, code: i32| -> Result<()> {
+        if code == 0 {
+            Ok(())
+        } else {
+            crate::bail!("llama.cpp MMQ: {what} failed with status {code}")
+        }
+    };
+
+    let y_mmq: std::sync::Arc<CudaSlice<u8>> = match shared_take(x_cols, y_cols, layout) {
+        Some(existing) => existing,
+        None => {
+            // SAFETY: a size computation.
+            let bytes =
+                unsafe { candle_kernels::ffi::swarm_mmq_q8_1_bytes(x_cols as i64, y_cols as i64) };
+            let buf = dev.alloc_fully_overwritten::<u8>(bytes)?;
+            {
+                let (y_ptr, _y_guard) = y.device_ptr(&stream);
+                let (buf_ptr, _buf_guard) = buf.device_ptr(&stream);
+                // SAFETY: `y` holds `y_cols` rows of `x_cols` floats and `buf`
+                // the bytes `swarm_mmq_q8_1_bytes` asked for, both on `stream`.
+                let code = unsafe {
+                    candle_kernels::ffi::swarm_mmq_quantize(
+                        y_ptr as *const f32,
+                        buf_ptr as *mut core::ffi::c_void,
+                        ggml_type,
+                        x_cols as i64,
+                        y_cols as i64,
+                        x_cols as i64,
+                        raw_stream,
+                    )
+                };
+                status("quantizing the activation", code)?;
+            }
+            let buf = std::sync::Arc::new(buf);
+            shared_put(x_cols, y_cols, layout, &buf);
+            buf
+        }
+    };
+
+    let (x_ptr, _x_guard) = data.inner.device_ptr(&stream);
+    let (y_ptr, _y_guard) = y_mmq.device_ptr(&stream);
+    let mut need: usize = 0;
+    // SAFETY: `launch == 0` only computes the fixup size; nothing is read.
+    let code = unsafe {
+        candle_kernels::ffi::swarm_mmq_matmul(
+            ggml_type,
+            x_ptr as *const core::ffi::c_void,
+            y_ptr as *const core::ffi::c_void,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+            &mut need,
+            x_cols as i64,
+            x_rows as i64,
+            y_cols as i64,
+            0,
+            raw_stream,
+        )
+    };
+    status("planning the product", code)?;
+    let dst = dev.alloc_fully_overwritten::<f32>(x_rows * y_cols)?;
+    let fixup = if need > 0 {
+        Some(dev.alloc_fully_overwritten::<f32>(need)?)
+    } else {
+        None
+    };
+    {
+        let (dst_ptr, _dst_guard) = dst.device_ptr(&stream);
+        let fixup_ptr = fixup
+            .as_ref()
+            .map(|f| f.device_ptr(&stream).0 as *mut f32)
+            .unwrap_or(std::ptr::null_mut());
+        // SAFETY: every pointer is a live allocation on `stream` of the size
+        // the planning call and the shapes above give; the kernels are
+        // enqueued on `stream`, which orders the frees of `fixup` and of a
+        // dropped `y_mmq` after them (stream-ordered allocation).
+        let code = unsafe {
+            candle_kernels::ffi::swarm_mmq_matmul(
+                ggml_type,
+                x_ptr as *const core::ffi::c_void,
+                y_ptr as *const core::ffi::c_void,
+                dst_ptr as *mut f32,
+                fixup_ptr,
+                need,
+                &mut need,
+                x_cols as i64,
+                x_rows as i64,
+                y_cols as i64,
+                1,
+                raw_stream,
+            )
+        };
+        status("the product", code)?;
+    }
+    drop(fixup);
+    MMQ_MMA_PRODUCTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(CudaStorage::wrap_cuda_slice(dst, dev.clone()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -738,13 +977,13 @@ fn mul_mat_via_q8_1(
     // It matters MORE here than at decode: the redundant quantization covers
     // every row of the prompt chunk rather than one position, so it is real
     // work and not a bare submission. It pays into time-to-first-token.
-    let y_q8_1: std::sync::Arc<CudaSlice<u8>> = match shared_take(k, y_cols) {
+    let y_q8_1: std::sync::Arc<CudaSlice<u8>> = match shared_take(k, y_cols, Q8_1_ROWS) {
         Some(existing) => existing,
         None => {
             let mut buf = dev.alloc_fully_overwritten::<u8>(y_size_in_bytes)?;
             quantize_q8_1(y, &mut buf, k, y_cols, dev)?;
             let buf = std::sync::Arc::new(buf);
-            shared_put(k, y_cols, &buf);
+            shared_put(k, y_cols, Q8_1_ROWS, &buf);
             buf
         }
     };
@@ -1212,11 +1451,13 @@ impl QCudaStorage {
         } else {
             8
         };
-        let use_vec_kernel = match layout.shape().dims() {
-            [b, m, _k] => b * m <= max_bm,
-            [b, _k] => *b <= max_bm,
-            _ => false,
+        let rows = match layout.shape().dims() {
+            [b, m, _k] => b * m,
+            [b, _k] => *b,
+            _ => usize::MAX,
         };
+        let use_vec_kernel =
+            rows <= max_bm && !mmq_takes_few_rows(self.device(), self.dtype, rows);
         if use_vec_kernel {
             self.dequantize_matmul_vec(self_shape, storage, layout)
         } else {
@@ -1308,7 +1549,35 @@ impl QCudaStorage {
                 }
                 .bt())?,
             };
-            if cublas_min_rows(self.device()).is_some_and(|min| b * m >= min) {
+            // SwarmLLM patch: llama.cpp's tensor-core MMQ first, where it runs
+            // ([`mmq_mma_layout`]); a failed launch turns it off and falls
+            // through to the old kernels for this and every later call.
+            let mma = match mmq_mma_layout(self.device(), self.dtype, b * m) {
+                Some(layout) => match mul_mat_via_mmq_mma(
+                    &self.data,
+                    &storage,
+                    self.dtype,
+                    layout,
+                    /* x_rows */ n,
+                    /* x_cols */ k,
+                    /* y_cols */ b * m,
+                    self.device(),
+                ) {
+                    Ok(out) => Some(out),
+                    Err(e) => {
+                        if !MMQ_MMA_FAILED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            eprintln!(
+                                "llama.cpp MMQ unavailable, using the older kernels from now on: {e}"
+                            );
+                        }
+                        None
+                    }
+                },
+                None => None,
+            };
+            if let Some(out) = mma {
+                out
+            } else if cublas_min_rows(self.device()).is_some_and(|min| b * m >= min) {
                 mul_mat_via_f16_cublas(
                     &self.data,
                     &storage,

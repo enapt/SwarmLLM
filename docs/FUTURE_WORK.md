@@ -70,9 +70,9 @@ speed is what the swarm is for, so split speed for large models is the top track
    through a chain of machines, guessing for a user who holds none of the model and trees in
    every segment are built (2026-10-20); the head's bounded wait and a route carried to the head
    (10-21); trees the default where every segment runs on a card (5.33-5.74 vs the stream's
-   5.01-5.05 on a real ~405 ms link, #134). Next: the card's 9-63-row matmul, 3.3-3.6× llama.cpp's
-   time at 16-32 rows on every machine of a split (#325); the drafter's wait after a missed seed;
-   near peers over far ones (#192).
+   5.01-5.05 on a real ~405 ms link, #134); a card multiplies a check's rows with llama.cpp's
+   tensor-core MMQ (#325, 10-21: 2.4-3.2× faster at 9-64 rows). Next: several trees in flight
+   (#134 (b)); the drafter's wait after a missed seed; near peers over far ones (#192).
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
@@ -1956,27 +1956,6 @@ measure unbatched aggregate against forced batching before changing anything. A 
 segment still ends the chain when the requester holds the tail (the delegated split #143
 covers only requesters holding nothing).
 
-#### #325 — A card multiplies 9-63 rows with llama.cpp's OLD kernel: 3.3-3.6× llama.cpp's time at 16-32 rows
-`P2` · perf-split · **OPEN** — 2026-10-21 · history: this entry
-
-A tree check carries 16-64 rows through every machine of a split, and a prompt chunk hundreds.
-Vendored `quantized/cuda.rs::dequantize_matmul` sends 2-8 rows to `mul_mat_vec_via_q8_1`, 9-63 to
-`mul_mat_via_q8_1` — llama.cpp's old dp4a MMQ with a fixed 64-column tile, no tensor cores — and
-64+ to a dequantize + cuBLAS f16 GEMM. Current llama.cpp runs its int8 tensor-core MMQ (`mma.cuh`,
-tile width chosen per batch, stream-k) for every batch above 8 rows on a card that has them
-(`ggml_cuda_should_use_mmq` → `turing_mma_available`). Measured 2026-10-21 on this RTX 3070, Qwen2.5
-Coder 7B Q4_K_M whole, at a 300-token depth, one CUDA process (`~/swarmllm-318/rowcost.sh`; ours:
-`prefill_bench` width sweep, min of pairs; llama.cpp: `llama-bench -fa 1 -r 10`, mean):
-
-| rows | 1 | 2 | 4 | 8 | 16 | 32 | 64 |
-|---|---|---|---|---|---|---|---|
-| ours, ms | 14.6 | 16.7 | 25.8 | 46.7 | 83.3 | 84.4 | 107.8 |
-| llama.cpp, ms | 16.4 | 16.3 | 21.6 | 35.2 | 22.9 | 25.8 | 37.4 |
-
-Next: port llama.cpp's MMQ (its `mmq.cuh` + `mma.cuh` + the activation's `block_q8_1_mmq`
-quantizer) into the vendored candle-kernels as a library launched on the device's one stream,
-for 9+ rows on cards with int8 tensor cores; A/B in one binary; replies judged against llama.cpp.
-
 #### #134 — Split decode: draft trees wait for their drafter, and a drafter the node does not hold is unbuilt (the pipelined prompt pass is #171)
 `P3` · perf-split · **PARTIAL** — 2026-10-21 · history: archive row #134; plan: `split_speculation.md`, `large_model_splits.md` § "Draft trees"
 
@@ -2002,7 +1981,8 @@ forward ~100 ms received→computed beside the drafter's call, the far side 59 m
 ranks its followers on the card (`draft::likeliest_rows_where_they_are`): a 64-row growth from
 nothing 208 → 155 ms, a seed read 100 → 35 ms (`SWARM_BENCH_GROW`, min of N). What is left of a
 regrow is the tree steps' standard attention (~40 ms; a chain step on flash is 11.9 ms at 8 rows,
-on standard attention 16.5, as a tree 18.2) and the rows' quantized matmul on both machines (#325);
+on standard attention 16.5, as a tree 18.2) and the rows' quantized matmul on both machines (#325,
+closed 2026-10-21: llama.cpp's tensor-core MMQ, 9-64 rows 2.4-3.2× faster);
 (b) a stream of trees (several in flight); (c) **owed before the release that carries the
 default: a card head with its drafter on the card, against the stream, at 160 and 400 tokens** —
 at 160 it ran once by accident on 2026-10-21 (the pool gave the drafter a card worker of its own
@@ -2926,7 +2906,27 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-21, not yet released** (#324)
+**Closed 2026-10-21, not yet released** (#324, #325)
+- #325 — **A card multiplies a split's check rows and a prompt with llama.cpp's current
+  tensor-core kernel.** A tree check carries 16-64 rows through every machine of a split; the
+  vendored candle sent 9-63 rows to llama.cpp's OLD dp4a MMQ (fixed 64-column tile, no tensor
+  cores) and 64+ to dequantize + cuBLAS — 3.3-3.6× llama.cpp's time at 16-32 rows (RTX 3070,
+  Qwen2.5-Coder-7B Q4_K_M, 300 deep: 16 rows 83.3 ms against 22.9). Now llama.cpp's int8 `mma`
+  MMQ (commit 4b1a27fa0eb8, its headers verbatim in `candle-kernels/src/ggml_mmq`, in a namespace
+  of its own — a `cuda` build links llama.cpp's ggml too, gotcha #927) takes every product of ≥ 9
+  rows wherever the card has int8 tensor cores, and 5-8 rows outside a CUDA graph capture (a tree
+  check, the drafter's tree steps: 8 rows 12.1-12.3 ms against 23.5-23.6 on the 7B's first 15
+  layers, 25.0 against 52.8 whole). Measured in one binary against the old kernels:
+  9/16/32/64 rows 27.4/28.2/34.7/46.7 ms against 86.6/87.3/89.7/113.4 (1.23-1.34× llama.cpp's
+  time); the 7B's first 15 layers as a tree of 16/32/64 rows 15.7/19.5/30.8 against
+  43.7/46.3/65.4; a 512-token prompt 2,108-2,127 tok/s against 1,677-1,698; decode unchanged.
+  Replies: 13 of 18 identical, the 5 forks near-ties against llama.cpp
+  (`docs/invariants/inference.md` § "A card multiplies several rows with llama.cpp's int8
+  tensor-core MMQ"). Found on the way: the vendored kernel LIBRARIES are machine code for the
+  release's floor (8.x) only, so a Hopper or Blackwell card had no image of the MoE kernels, whose
+  launches check nothing — their output was never written. The MoE and MMQ libraries now carry
+  the floor's PTX too, which such a card compiles on first use; MMQ also probes for an image before
+  its first launch. A/B `SWARMLLM_QMATMUL_MMQ=dp4a`.
 - #324 — **A request that finds every cold-start wait place taken is answered as the wait would
   answer it.** Found by v0.3.246's pre-release review: the early return said `NoModelLoaded` ("no
   model is loaded yet, download one") on every node, holding models or not. Now

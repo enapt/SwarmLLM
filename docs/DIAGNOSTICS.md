@@ -1317,8 +1317,15 @@ sends each projection alone):
 switches FIRST, in one binary, at the SAME prompt and keep-last settings as the failing run (a "clean"
 arm at other settings is no baseline): `SWARMLLM_FLASH_OFFSET_CAUSAL=0` sends a chunk landing on a
 warm cache to standard attention, `SWARMLLM_PROMPT_CARD_LAYERS=0` / `SWARMLLM_PROMPT_CARD_PROJECTIONS=0`
-keep a split's processor layers there, `SWARMLLM_QMATMUL_CUBLAS=0` / `SWARMLLM_QMATMUL_CUBLAS_ACC=32`
-the projections' kernel, `SWARMLLM_SLIDING_WINDOW=0` the window. A kernel switch that clears it then
+keep a split's processor layers there, `SWARMLLM_QMATMUL_MMQ=dp4a` (llama.cpp's tensor-core MMQ off:
+the older kernels below; `SWARMLLM_QMATMUL_MMQ_MIN_ROWS=9` keeps it off 5-8 rows only) and
+`SWARMLLM_QMATMUL_CUBLAS=0` / `SWARMLLM_QMATMUL_CUBLAS_ACC=32` the projections' kernel,
+`SWARMLLM_SLIDING_WINDOW=0` the window. A worker whose stderr says `llama.cpp MMQ unavailable, using
+the older kernels from now on` ran its first several-row product on the card and the launch failed —
+every product since went the old way; a card the library has no image for never tries (a card newer
+than the build's `CUDA_COMPUTE_CAP` runs it from its PTX, compiled by the driver on first use;
+`CUDA_FORCE_PTX_JIT=1` imitates that in a harness, never under candle, which cannot open a device
+with it). A kernel switch that clears it then
 gets a direct check: `examples/flash_reference_check.rs` runs the vendored flash kernel against f32
 softmax attention at every head width a family uses (128, 256, 512) and the query shapes production
 sends — the 512-wide heads read 0.23-3.6 off at EVERY shape before 2026-10-16, the others ~1e-3. A
