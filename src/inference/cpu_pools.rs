@@ -718,32 +718,8 @@ fn owner_prefill_pool() -> Option<Arc<rayon::ThreadPool>> {
         .clone()
 }
 
-/// Run one forward pass on the pool that suits its phase — and its owner.
-///
-/// `seq_len` is the number of query positions: `1` is decode (one new token
-/// against the cache), anything more is prompt processing. That is the same
-/// predicate the attention dispatch uses to pick a kernel, and for the same
-/// underlying reason — the two phases are different shapes of work.
-///
-/// Prefill returns `f()` directly, so it keeps the global pool and pays
-/// nothing — UNLESS `for_the_owner`: a prompt this machine's owner sent is
-/// read on every physical core ([`owner_prefill_pool`]). The contribution
-/// level is "how much of your computer SwarmLLM may use to answer requests
-/// from the swarm" (the Settings page), and it had been capping the owner's
-/// own prompts too: a default node read them on half its cores, where
-/// llama.cpp uses all of them — most of a reported 3x gap (FUTURE_WORK #119:
-/// 28.8 → 41.6 tok/s at 6,911 tokens on a Ryzen 7 5800H). Decode is left
-/// alone: it is bandwidth-bound and its calibrated optimum sits at or below
-/// the cap. It is REQUIRED so no caller can forget whose request it is.
-///
-/// `cpu_layers` is how many of the forward's layers run on the processor. It is
-/// what the decode pool is FOR — the quantized matmuls of those layers — so a
-/// forward with none (a segment placed entirely on the card) runs on the
-/// global pool and is never timed: it has nothing to calibrate and its tokens
-/// would mislead the calibration for a forward that does. See
-/// [`Calibrations`] for the case that made this a parameter.
-/// `f`, to run on a pool's thread with the thread-locals the layers read set
-/// as they are on THIS thread — `None` included.
+/// Wrap `f` to run on a pool's thread with the thread-locals the layers read
+/// set as they are on THIS thread — `None` included.
 ///
 /// A pool runs `f` on ITS thread, which never saw a thread-local the caller
 /// set. The layers read two: the attention override a speculating loop sets
@@ -769,6 +745,30 @@ fn with_the_callers_scope<R>(f: impl FnOnce() -> R + Send) -> impl FnOnce() -> R
     }
 }
 
+/// Run one forward pass on the pool that suits its phase — and its owner.
+///
+/// `seq_len` is the number of query positions: `1` is decode (one new token
+/// against the cache), anything more is prompt processing. That is the same
+/// predicate the attention dispatch uses to pick a kernel, and for the same
+/// underlying reason — the two phases are different shapes of work.
+///
+/// Prefill returns `f()` directly, so it keeps the global pool and pays
+/// nothing — UNLESS `for_the_owner`: a prompt this machine's owner sent is
+/// read on every physical core ([`owner_prefill_pool`]). The contribution
+/// level is "how much of your computer SwarmLLM may use to answer requests
+/// from the swarm" (the Settings page), and it had been capping the owner's
+/// own prompts too: a default node read them on half its cores, where
+/// llama.cpp uses all of them — most of a reported 3x gap (FUTURE_WORK #119:
+/// 28.8 → 41.6 tok/s at 6,911 tokens on a Ryzen 7 5800H). Decode is left
+/// alone: it is bandwidth-bound and its calibrated optimum sits at or below
+/// the cap. It is REQUIRED so no caller can forget whose request it is.
+///
+/// `cpu_layers` is how many of the forward's layers run on the processor. It is
+/// what the decode pool is FOR — the quantized matmuls of those layers — so a
+/// forward with none (a segment placed entirely on the card) runs on the
+/// global pool and is never timed: it has nothing to calibrate and its tokens
+/// would mislead the calibration for a forward that does. See
+/// [`Calibrations`] for the case that made this a parameter.
 pub(crate) fn in_phase_pool<R: Send>(
     seq_len: usize,
     cpu_layers: usize,
