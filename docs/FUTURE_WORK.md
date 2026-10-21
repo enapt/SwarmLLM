@@ -930,7 +930,15 @@ has loaded), the next 160-token reply ran over the two near machines in 13.9 s a
 split with a far one; the control (`SWARMLLM_NEAR_CHAIN=0`) fetched nothing. Residual: the field
 read on this machine + the LAN box (the `DIAG: fetching this computer's part of a chain of nearby
 machines` line, then a split over them), and phase 2 — published near lists — only if the field
-shows neighbourhoods that overlap without coinciding.
+shows neighbourhoods that overlap without coinciding. **Security review 2026-10-21 (v0.3.247)**:
+two of four findings fixed in v0.3.247 — loaded layers are given back early only once every
+machine HOLDS its segment (a peer's fetch is its own word, `chain_held_by_its_machines`), and an
+unchosen model with its safety training removed is planned no chain and no header
+(`may_plan_a_near_chain`). Open, both Low: (a) a peer within 30 ms can steer which of an asked-for
+model's parts this node fetches, inside the owner's disk budget — the plan trusts its
+neighbours' holdings as every router does; (b) ten near machines (`MOST_MACHINES`) make the
+exact plan up to ~10^7 memo steps, once a `CHAIN_ANSWERS_FOR` minute per model, on the
+download pass — measure it before bounding it.
 
 #### #166 — A verify round that carries several guessed tokens never teaches routing what the peer costs
 `P3` · routing · **PARTIAL** — 2026-08-30 · history: archive § "Routing never learns a peer is slow on the speculative path"

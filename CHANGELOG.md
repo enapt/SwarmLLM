@@ -8,11 +8,12 @@ wrote 6.76 tokens a second, against 0.35 across continents. When computers withi
 other each hold part of a model none of them can run alone, they now fetch the parts that
 complete a chain between them — at most ten computers, each fetching only its own share — and a
 computer in such a chain lets go of layers it had loaded outside its share once it has been idle
-a while, so the chain can be used. On a test of five computers, two of them 0.2 seconds away,
+a while and every computer of the chain holds its share, so the chain can be used. On a test of five computers, two of them 0.2 seconds away,
 the second 160-token reply came back in 13.9 seconds over the two nearby computers, against 40.0
 seconds through a far one; with the change switched off, nobody fetched the missing part in 25
-minutes and replies took 36.8-41.4 seconds. A model you pinned is never touched, and a computer
-outside your pool or private-mode set is never part of a chain. `SWARMLLM_NEAR_CHAIN=0` turns it
+minutes and replies took 36.8-41.4 seconds. A model you pinned is never touched, a computer
+outside your pool or private-mode set is never part of a chain, and a model with its safety
+training removed that you did not choose is never planned one. `SWARMLLM_NEAR_CHAIN=0` turns it
 off.
 
 **Graphics cards check guesses and read prompts faster.** On NVIDIA cards, a split now checks
@@ -20,7 +21,8 @@ batches of guessed words, and reads prompts, with llama.cpp's current tensor-cor
 RTX 3070 laptop with a 7B model, checking 16 guesses took 28.2 ms instead of 87.3, 64 guesses
 46.7 instead of 113.4, and a 300-token prompt was read at 1,745 tokens a second instead of 1,310.
 Of 18 test replies, 13 were word for word the same as before; the other 5 differ where two words
-were almost equally likely. `SWARMLLM_QMATMUL_MMQ=dp4a` restores the old kernel.
+were almost equally likely. A step that finds no card memory for the new kernel uses the old
+one for that step alone. `SWARMLLM_QMATMUL_MMQ=dp4a` restores the old kernel.
 
 **Graphics cards newer than the release build — the RTX 50-series and Hopper — now give correct
 answers with flash attention, and can run mixture-of-experts models.** Only cards of compute

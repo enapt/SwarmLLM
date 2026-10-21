@@ -3560,8 +3560,15 @@ reads (D4 / DS4 / D2S6). Below 8 rows llama.cpp keeps its vector kernel (MMVQ) f
   weights sharing it AND its layout (`SharedQ8::layout`). Every buffer comes from the device's pool
   on its one stream, uninitialised (the quantizer writes every row, the kernel every element, each
   fixup slot is written before it is read).
-- A failed launch turns it off for the process (`MMQ_MMA_FAILED`, one stderr line) and that call
-  runs the old kernels. The launcher returns a status where llama.cpp's `launch_mul_mat_q` would
+- A refused or failed launch turns it off for the process (`MMQ_MMA_FAILED`, one stderr line) and
+  that call runs the old kernels. **A product that finds no card memory for one of its buffers is
+  not a failed launch** (`MmqFailure::NoRoom`, every allocation through `mmq_alloc`): the old
+  kernels run that product and MMQ stays on (`mmq_mma_no_room()` counts them, one stderr line the
+  first time). Until the v0.3.247 pre-release review any error latched it, so a card full of a
+  split's layers that once failed an allocation ran every later check 2-3x slower until a restart
+  — gotcha #647's recovery half, a latch one transient condition must not set for the process's
+  life. Test `card_quantized_products::a_product_that_finds_no_room_leaves_mmq_on` (injects one
+  with `fail_the_next_mmq_allocation`, a test hook nothing in a node calls). The launcher returns a status where llama.cpp's `launch_mul_mat_q` would
   `CUDA_CHECK` or assert (both abort); each launch is judged by the thread's last runtime error, so
   each entry point first clears one an earlier, unrelated call left (`swarm_mmq_clear_stale_error`).
   `swarm_mmq_available` probes for an image of the library (an empty kernel): llama.cpp's own

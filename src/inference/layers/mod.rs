@@ -7572,6 +7572,70 @@ mod card_quantized_products {
     use candle_core::quantized::{GgmlDType, QMatMul, QTensor};
     use candle_core::{Device, Module, Tensor};
 
+    /// One card test at a time: [`a_product_that_finds_no_room_leaves_mmq_on`]
+    /// arms a process-wide fault the next product takes, whichever test runs it.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn values(seed: &mut u64, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|_| {
+                *seed ^= *seed << 13;
+                *seed ^= *seed >> 7;
+                *seed ^= *seed << 17;
+                ((*seed >> 40) as f32 / (1u64 << 24) as f32) - 0.5
+            })
+            .collect()
+    }
+
+    /// A product that finds no card memory for MMQ's buffers goes to the older
+    /// kernels for ITSELF, and the next product runs MMQ again. Before the
+    /// v0.3.247 pre-release review any failure — a transient allocation on a
+    /// card full of a split's layers included — turned MMQ off for the
+    /// process's life, and every later check ran 2-3x slower.
+    #[test]
+    fn a_product_that_finds_no_room_leaves_mmq_on() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(card) = Device::new_cuda(0) else {
+            eprintln!("SKIPPED: no card");
+            return;
+        };
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let (n, k, rows) = (256usize, 512usize, 16usize);
+        let w = Tensor::from_vec(values(&mut seed, n * k), (n, k), &card).unwrap();
+        let mm = QMatMul::from_qtensor(QTensor::quantize(&w, GgmlDType::Q4K).unwrap()).unwrap();
+        let x = Tensor::from_vec(values(&mut seed, rows * k), (rows, k), &card).unwrap();
+        let first = candle_core::quantized::cuda::mmq_mma_products();
+        let want = mm.forward(&x).unwrap().to_vec2::<f32>().unwrap();
+        assert!(
+            candle_core::quantized::cuda::mmq_mma_products() > first,
+            "the first product did not go through MMQ — nothing below means anything"
+        );
+        let no_room = candle_core::quantized::cuda::mmq_mma_no_room();
+        candle_core::quantized::cuda::fail_the_next_mmq_allocation();
+        let fell_back = mm.forward(&x).unwrap().to_vec2::<f32>().unwrap();
+        assert!(
+            candle_core::quantized::cuda::mmq_mma_no_room() > no_room,
+            "the injected failure was never taken"
+        );
+        let scale = want.iter().flatten().fold(0f32, |m, v| m.max(v.abs()));
+        let worst = want
+            .iter()
+            .flatten()
+            .zip(fell_back.iter().flatten())
+            .fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+        assert!(
+            worst / scale < 0.02,
+            "the older kernels answered off by {} of the largest product",
+            worst / scale
+        );
+        let before = candle_core::quantized::cuda::mmq_mma_products();
+        mm.forward(&x).unwrap();
+        assert!(
+            candle_core::quantized::cuda::mmq_mma_products() > before,
+            "MMQ stayed off after one product found no room for its buffers"
+        );
+    }
+
     /// Every type it covers, both tile paths (rows of the weight a multiple of
     /// 128, and not) and the widths a tree check, a drafter's tree step (5-8
     /// rows, taken from the vector kernel outside a CUDA graph capture) and a
@@ -7581,6 +7645,7 @@ mod card_quantized_products {
     /// product must have gone through the new kernel (its counter moved).
     #[test]
     fn many_rows_on_the_card_match_the_f32_product_of_the_same_weight() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         let Ok(card) = Device::new_cuda(0) else {
             eprintln!("SKIPPED: no card");
             return;

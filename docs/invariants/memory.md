@@ -873,6 +873,9 @@ the owner chose it: downloaded or pinned it (`pinned_by_user`), kept it on this
 computer, made it the default model, or gave it prompt privacy by hand.
 `SharedState::unchosen_uncensored_model` is the one answer. It is asked:
 
+- in `near_chain::may_plan_a_near_chain`, so this node plans such a model no
+  near chain and fetches no header for one (security review, v0.3.247; test
+  `an_unchosen_uncensored_model_is_planned_no_near_chain`);
 - in `copy_kept_because`, so `would_shed_copy` sheds such a copy and both
   download passes refuse to fetch it — one place, not a gate per adoption
   path (trust has four writers: `NetworkPopular`, quant siblings, the trusted
@@ -2487,15 +2490,20 @@ with a far machine), and a router holds a peer to its room BESIDE what it has lo
 (`scheduler::PublishedRoom`: 2.4 layers) — so the chain was never planned and the second request
 went B + far again. A machine kept busy never reaches the 5-minute idle window. A Petals server
 serves only the span it chose (`block_selection.py`) and clients route over what is served; here
-a near machine whose loaded layers reach outside its segment of a COMPLETE chain, with every part
-of that segment here (fetches not counted), gives them back once idle past the conversation gap
+a near machine whose loaded layers reach outside its segment of a chain every machine HOLDS — each
+part of each segment on its machine's disk, this node's included, fetches not counted
+(`chain_held_by_its_machines`) — gives them back once idle past the conversation gap
 (`CONVERSATION_GAP_SECS`, 120 s) — `near_chain::loaded_outside_near_segment`, asked by
 `try_idle_vram_unload` — then leaves the model to the ordinary rule for 30 min, Petals'
 hysteresis, so a router that still prefers the old route (a far card faster than the near
 processors) is not fought every conversation. Never over a deliberate hold. Tests
 `layers_loaded_outside_this_computers_segment_are_given_back`,
 `a_segment_still_being_fetched_keeps_what_is_loaded`; each of the four conditions toggled off →
-red.
+red. **A peer's segment counted only once HELD** (security review, v0.3.247): the chain had been
+read complete with a PEER's parts in flight, and `peer_shard_downloads` is only that peer's word —
+any near machine could have this node give its layers back at 120 s instead of the idle window,
+and no router plans a part still on its way either. Test
+`a_peer_segment_still_being_fetched_keeps_what_is_loaded` (red with the old check).
 
 **End to end** (`examples/near_chain_rig.sh`, 2026-10-21; TinyLlama capped at 735 of its 980 MB on
 every holder; two far holders 200 ms away by netem on their QUIC ports — with ONE, a single request

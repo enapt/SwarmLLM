@@ -559,12 +559,21 @@ impl AutoShardManager {
         !lapsed
     }
 
+    /// May this node plan `model_id`'s near chain — asked for, and a model it
+    /// would host? One the owner did not choose with its safety training
+    /// removed (`SharedState::unchosen_uncensored_model`) is never fetched
+    /// here, so it is planned no chain and its header is not fetched for one
+    /// (the v0.3.247 security review). The chain and the header ask this.
+    fn may_plan_a_near_chain(&self, model_id: &ModelId) -> bool {
+        self.asked_for(model_id) && !self.shared_state.unchosen_uncensored_model(model_id)
+    }
+
     /// `manifest`'s near chain, computed now. `None`: nobody asked for it,
     /// no header here, a near machine could run it whole, the near machines
     /// could not carry it between them, or a ceiling is unknown.
     fn compute_near_chain(&self, manifest: &ModelManifest) -> Option<NearChain> {
         let layers = manifest.num_layers;
-        if layers == 0 || near_chains_switched_off() || !self.asked_for(&manifest.id) {
+        if layers == 0 || near_chains_switched_off() || !self.may_plan_a_near_chain(&manifest.id) {
             return None;
         }
         let curve = self.carry_curve(&manifest.id)?;
@@ -707,9 +716,10 @@ impl AutoShardManager {
     }
 
     /// Does this node hold `model_id` loaded over layers OUTSIDE its segment of
-    /// a complete near chain, with every part of that segment here? Then the
-    /// idle-unload pass gives that memory back once the conversation using it
-    /// is over, not after the idle window.
+    /// a near chain whose every machine holds its segment, this one included
+    /// ([`Self::chain_held_by_its_machines`])? Then the idle-unload pass gives
+    /// that memory back once the conversation using it is over, not after the
+    /// idle window.
     ///
     /// The router holds a peer to its room BESIDE the layers it has loaded
     /// (`scheduler::PublishedRoom`), and an idle worker is retired only when
@@ -748,18 +758,39 @@ impl AutoShardManager {
             return false;
         };
         let local = self.shared_state.identity.node_id();
-        let Some(segment) = self
-            .near_chain(&manifest)
-            .filter(|chain| chain.complete)
-            .and_then(|chain| chain.segment_of(local))
-        else {
+        let Some(chain) = self.near_chain(&manifest) else {
             return false;
         };
-        if !self.parts_this_node_plans(&manifest).is_empty() {
+        let Some(segment) = chain.segment_of(local) else {
+            return false;
+        };
+        if !self.chain_held_by_its_machines(&manifest, &chain) {
             return false;
         }
         held.iter()
             .any(|&(start, end)| start < segment.0 || end > segment.1)
+    }
+
+    /// Does every machine of `chain` HOLD its segment — each part touching it
+    /// on that machine's disk, as the routers read holdings? Then the chain
+    /// can be routed over now. A part being fetched counts toward PLANNING a
+    /// chain (`NearChain::complete`), never toward this: no router plans a
+    /// part still on its way, and a peer's fetch is only its own word
+    /// (`peer_shard_downloads`) — taken here, any near peer could have this
+    /// node give back loaded layers after the conversation gap instead of the
+    /// idle window (the v0.3.247 security review).
+    fn chain_held_by_its_machines(&self, manifest: &ModelManifest, chain: &NearChain) -> bool {
+        let registry = &self.shared_state.model_registry;
+        chain.segments.iter().all(|(node, segment)| {
+            parts_touching(manifest, *segment).into_iter().all(|index| {
+                registry
+                    .shard_holders(&ShardId {
+                        model_id: manifest.id.clone(),
+                        index,
+                    })
+                    .contains(node)
+            })
+        })
     }
 
     /// `model_id`'s layers outside this node's segment were given back: leave
@@ -788,7 +819,7 @@ impl AutoShardManager {
             if wanted.len() >= MOST_HEADERS_A_PASS {
                 break;
             }
-            if !self.asked_for(&manifest.id)
+            if !self.may_plan_a_near_chain(&manifest.id)
                 || !self
                     .shared_state
                     .models
@@ -1105,6 +1136,37 @@ mod tests {
         );
     }
 
+    /// A chain is routed over only once every machine HOLDS its segment: a
+    /// PEER still fetching its part — by its own word, which is all
+    /// `peer_shard_downloads` is — leaves this node's layers loaded.
+    #[test]
+    fn a_peer_segment_still_being_fetched_keeps_what_is_loaded() {
+        let s = fleet(4.0);
+        let local = s.local();
+        holds(&s.state, &s.mid, &local, &[0, 1, 2]);
+        s.state
+            .models
+            .peer_shard_downloads
+            .insert(s.part(7), vec![(s.near.clone(), 50)]);
+        assert!(
+            s.chain().expect("a near chain").complete,
+            "the chain counts the peer's part 7, on its way, as held"
+        );
+        s.later();
+        assert!(
+            !s.manager.held_outside_near_segment(&s.mid, &[(12, 20)]),
+            "the peer says it is fetching part 7; nobody can route over it yet"
+        );
+
+        s.state.models.peer_shard_downloads.clear();
+        holds(&s.state, &s.mid, &s.near, &[7]);
+        s.later();
+        assert!(
+            s.manager.held_outside_near_segment(&s.mid, &[(12, 20)]),
+            "control: the peer holds part 7"
+        );
+    }
+
     /// A chain the near machines already complete is never rebalanced, even
     /// where fetching would shorten it: nothing is offered.
     #[test]
@@ -1280,6 +1342,40 @@ mod tests {
             .manager
             .models_a_near_chain_needs_a_header_for()
             .is_empty());
+
+        // A model with its safety training removed that the owner did not
+        // choose is never hosted here: no chain, no header for one.
+        s.state.models.hf_sources.insert(
+            s.mid.clone(),
+            crate::daemon::state::HfSource {
+                repo_id: "someone/near-me-abliterated-GGUF".into(),
+                filename: "near-me.gguf".into(),
+                mmproj_filename: None,
+            },
+        );
+        assert!(s.state.unchosen_uncensored_model(&s.mid));
+        assert!(s
+            .manager
+            .models_a_near_chain_needs_a_header_for()
+            .is_empty());
+    }
+
+    /// A model the owner did not choose with its safety training removed is
+    /// planned no near chain here: this node would never fetch its parts.
+    #[test]
+    fn an_unchosen_uncensored_model_is_planned_no_near_chain() {
+        let s = fleet(4.0);
+        assert!(s.chain().is_some(), "control: an ordinary model");
+        s.state.models.hf_sources.insert(
+            s.mid.clone(),
+            crate::daemon::state::HfSource {
+                repo_id: "someone/near-me-abliterated-GGUF".into(),
+                filename: "near-me.gguf".into(),
+                mmproj_filename: None,
+            },
+        );
+        assert!(s.chain().is_none());
+        assert!(s.offered().is_empty());
     }
 
     fn machine(byte: u8, ceiling: u32, has: &[bool]) -> Machine {

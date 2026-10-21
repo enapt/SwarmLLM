@@ -804,6 +804,52 @@ pub fn mmq_mma_products() -> usize {
     MMQ_MMA_PRODUCTS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// SwarmLLM patch: why [`mul_mat_via_mmq_mma`] ran no product.
+enum MmqFailure {
+    /// The kernels refused or failed — a status, a launch, a shape they do not
+    /// take. MMQ is not tried again in this process ([`MMQ_MMA_FAILED`]).
+    Refused(crate::Error),
+    /// This call found no card memory for one of its buffers. The older
+    /// kernels are tried for this product and MMQ stays on: a card full of a
+    /// split's layers fails an allocation now and then, and turning MMQ off for
+    /// good on one left every later check 2-3x slower until a restart (the
+    /// v0.3.247 pre-release review; gotcha #647's recovery half — a latch one
+    /// transient condition must not set for the process's life).
+    NoRoom(crate::Error),
+}
+
+/// Products [`mul_mat_via_mmq_mma`] found no card memory for, in this process.
+static MMQ_MMA_NO_ROOM: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// SwarmLLM patch: how many products found no card memory for MMQ's buffers
+/// and went to the older kernels instead ([`MmqFailure::NoRoom`]) — for a test
+/// or a bench, never a decision.
+pub fn mmq_mma_no_room() -> usize {
+    MMQ_MMA_NO_ROOM.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set by [`fail_the_next_mmq_allocation`]; taken by the next product.
+static MMQ_FAULT_NO_ROOM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// SwarmLLM patch, a TEST hook: the next MMQ product's first allocation
+/// fails as if the card had no room. Nothing in a running node calls it.
+pub fn fail_the_next_mmq_allocation() {
+    MMQ_FAULT_NO_ROOM.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// An allocation for MMQ: a failure is [`MmqFailure::NoRoom`].
+fn mmq_alloc<T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits>(
+    dev: &CudaDevice,
+    len: usize,
+) -> std::result::Result<CudaSlice<T>, MmqFailure> {
+    if MMQ_FAULT_NO_ROOM.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        return Err(MmqFailure::NoRoom(crate::Error::Msg(
+            "an injected allocation failure (fail_the_next_mmq_allocation)".into(),
+        )));
+    }
+    dev.alloc_fully_overwritten::<T>(len).map_err(MmqFailure::NoRoom)
+}
+
 /// SwarmLLM patch: `dst[y_cols][x_rows] = y · xᵀ` with llama.cpp's int8
 /// tensor-core MMQ (candle-kernels `src/ggml_mmq`, its `mmq.cuh` verbatim,
 /// launched on this device's stream). Same result layout as
@@ -825,24 +871,36 @@ fn mul_mat_via_mmq_mma(
     x_cols: usize,
     y_cols: usize,
     dev: &CudaDevice,
-) -> Result<CudaStorage> {
+) -> std::result::Result<CudaStorage, MmqFailure> {
     use cudarc::driver::DevicePtr;
+    let refused = |e: String| MmqFailure::Refused(crate::Error::Msg(e));
     let data_elems = data.len / dtype.type_size() * dtype.block_size();
     if data_elems < x_rows * x_cols {
-        crate::bail!("unexpected lhs size {}, {x_rows} {x_cols}", data_elems)
+        return Err(refused(format!(
+            "unexpected lhs size {data_elems}, {x_rows} {x_cols}"
+        )));
     }
     if y.len() != x_cols * y_cols {
-        crate::bail!("unexpected y size {}, {x_cols} {y_cols}", y.len())
+        return Err(refused(format!(
+            "unexpected y size {}, {x_cols} {y_cols}",
+            y.len()
+        )));
     }
     let stream = dev.cuda_stream();
-    stream.context().bind_to_thread().w()?;
+    stream
+        .context()
+        .bind_to_thread()
+        .w()
+        .map_err(MmqFailure::Refused)?;
     let raw_stream = stream.cu_stream() as i64;
     let ggml_type = dtype.to_u32() as i32;
-    let status = |what: &str, code: i32| -> Result<()> {
+    let status = |what: &str, code: i32| -> std::result::Result<(), MmqFailure> {
         if code == 0 {
             Ok(())
         } else {
-            crate::bail!("llama.cpp MMQ: {what} failed with status {code}")
+            Err(refused(format!(
+                "llama.cpp MMQ: {what} failed with status {code}"
+            )))
         }
     };
 
@@ -852,7 +910,7 @@ fn mul_mat_via_mmq_mma(
             // SAFETY: a size computation.
             let bytes =
                 unsafe { candle_kernels::ffi::swarm_mmq_q8_1_bytes(x_cols as i64, y_cols as i64) };
-            let buf = dev.alloc_fully_overwritten::<u8>(bytes)?;
+            let buf = mmq_alloc::<u8>(dev, bytes)?;
             {
                 let (y_ptr, _y_guard) = y.device_ptr(&stream);
                 let (buf_ptr, _buf_guard) = buf.device_ptr(&stream);
@@ -898,9 +956,9 @@ fn mul_mat_via_mmq_mma(
         )
     };
     status("planning the product", code)?;
-    let dst = dev.alloc_fully_overwritten::<f32>(x_rows * y_cols)?;
+    let dst = mmq_alloc::<f32>(dev, x_rows * y_cols)?;
     let fixup = if need > 0 {
-        Some(dev.alloc_fully_overwritten::<f32>(need)?)
+        Some(mmq_alloc::<f32>(dev, need)?)
     } else {
         None
     };
@@ -1550,8 +1608,10 @@ impl QCudaStorage {
                 .bt())?,
             };
             // SwarmLLM patch: llama.cpp's tensor-core MMQ first, where it runs
-            // ([`mmq_mma_layout`]); a failed launch turns it off and falls
-            // through to the old kernels for this and every later call.
+            // ([`mmq_mma_layout`]); a refused or failed launch turns it off and
+            // falls through to the old kernels for this and every later call,
+            // a call that found no card memory for its buffers only for itself
+            // ([`MmqFailure`]).
             let mma = match mmq_mma_layout(self.device(), self.dtype, b * m) {
                 Some(layout) => match mul_mat_via_mmq_mma(
                     &self.data,
@@ -1564,7 +1624,17 @@ impl QCudaStorage {
                     self.device(),
                 ) {
                     Ok(out) => Some(out),
-                    Err(e) => {
+                    Err(MmqFailure::NoRoom(e)) => {
+                        if MMQ_MMA_NO_ROOM.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0
+                        {
+                            eprintln!(
+                                "llama.cpp MMQ found no card memory for one product; the older \
+                                 kernels ran it and MMQ stays on: {e}"
+                            );
+                        }
+                        None
+                    }
+                    Err(MmqFailure::Refused(e)) => {
                         if !MMQ_MMA_FAILED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                             eprintln!(
                                 "llama.cpp MMQ unavailable, using the older kernels from now on: {e}"
