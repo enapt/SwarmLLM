@@ -170,6 +170,12 @@ impl Stream {
             }
             *n = next;
         });
+        // A jump to `skip_below` passes refused turns it never stepped onto.
+        // Kept, they filled `MAX_REFUSED_TURNS`, and a later refusal went
+        // unrecorded: the forward behind it waited out the gap (pre-release
+        // review, 2026-10-20). A record below `next` is never read again.
+        let next = *self.next.borrow();
+        order.refused = order.refused.split_off(&next);
     }
 
     fn idle_for(&self) -> Duration {
@@ -597,6 +603,41 @@ mod tests {
             .turn(id, RANGE, 22, false, STREAM_TURN_WAIT)
             .await
             .is_ok());
+    }
+
+    /// A restart that jumps the stream past turns refused on arrival forgets
+    /// them: kept, they filled [`MAX_REFUSED_TURNS`] and a later refusal went
+    /// unrecorded, so the forward behind it waited out the gap (pre-release
+    /// review, 2026-10-20).
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_forgets_the_refusals_it_jumped_past() {
+        let streams = Arc::new(ForwardStreams::default());
+        let id = uuid::Uuid::new_v4();
+        drop(
+            streams
+                .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+                .await
+                .unwrap(),
+        );
+        for seq in 2..2 + MAX_REFUSED_TURNS as u32 {
+            streams.refused_on_arrival(id, RANGE, seq, false);
+        }
+        drop(
+            streams
+                .turn(id, RANGE, 100, true, STREAM_TURN_WAIT)
+                .await
+                .unwrap(),
+        );
+        streams.refused_on_arrival(id, RANGE, 101, false);
+        let started = tokio::time::Instant::now();
+        assert!(streams
+            .turn(id, RANGE, 102, false, STREAM_TURN_WAIT)
+            .await
+            .is_ok());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the refused turn is stepped over, not waited for"
+        );
     }
 
     /// Refused while the turn before it is still running: the stream steps

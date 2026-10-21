@@ -826,4 +826,38 @@ mod tests {
             "past its catch-up, a model it lists and never sent is not waited for"
         );
     }
+
+    /// Once every way to serve a request has been tried, a node that knows
+    /// models answers a name it holds no details for with 404 and the list of
+    /// what can answer — one a connected peer advertises too, whose wait is
+    /// over. "No model is loaded yet. Go to the dashboard…" is only for a node
+    /// that knows none (pre-release review, 2026-10-20: both surfaces said it
+    /// to a node holding models while a peer's catch-up was awaited).
+    #[tokio::test]
+    async fn the_last_answer_tells_a_node_holding_models_the_name_is_unavailable() {
+        let state = pool_member_hosting(crate::config::Config::default(), "theirs").await;
+        let asked = ModelId("theirs".into());
+        assert!(
+            matches!(
+                state.no_route_error(&asked),
+                crate::error::SwarmError::NoModelLoaded
+            ),
+            "a node that knows no model is told to get one"
+        );
+        add_model(&state, "ours-q4", Held::WholeHere);
+        let peer = crate::types::NodeId([0xC4; 32]);
+        state.models.manifest_sync.note_new_connection(&peer);
+        state.connected_node_ids.insert(peer);
+        assert!(
+            state.reject_if_unknown_model(&asked).is_none(),
+            "control: a connected peer's catch-up is waited for"
+        );
+        assert!(
+            matches!(
+                state.no_route_error(&asked),
+                crate::error::SwarmError::ModelNotAvailable(_)
+            ),
+            "after the wait, a node holding models is told the name is unavailable"
+        );
+    }
 }

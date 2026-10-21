@@ -533,7 +533,11 @@ pub async fn chat_completions(
             return Ok(response);
         }
 
-        return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
+        return Err(ApiError(
+            state
+                .shared_state
+                .no_route_error(&crate::types::ModelId(req.model.clone())),
+        ));
     }
 
     // Past every cloud-provider and peer-forwarding path, so this request is

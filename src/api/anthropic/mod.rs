@@ -555,12 +555,11 @@ pub async fn messages(
     // misspelled model with 503 and "No model is loaded yet. Go to the
     // dashboard and select a model", advice that is wrong when eight models are
     // loaded and only the name was off. That surface is what Claude Code talks
-    // to, where a model id is typed by hand.
+    // to, where a model id is typed by hand. `no_route_error` is the one
+    // answer for both surfaces; it does not wait for a peer's catch-up, which
+    // this surface has no cold-start loop to do.
     let model_id = crate::types::ModelId(req.model.clone());
-    if let Some(err) = state.shared_state.reject_if_unknown_model(&model_id) {
-        return Err(ApiError(err));
-    }
-    Err(ApiError(crate::error::SwarmError::NoModelLoaded))
+    Err(ApiError(state.shared_state.no_route_error(&model_id)))
 }
 
 /// Split a requested model name into the name to send upstream and whether an

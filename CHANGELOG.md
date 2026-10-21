@@ -110,9 +110,11 @@ update does) was not affected.
 **A model another computer holds is no longer "not found" while your node starts.** A node takes
 15-30 seconds after starting to hear about the models other computers hold. In that time, a node
 that held any model of its own answered a request for one of theirs with "Model not found", even
-when a connected computer had just said it holds it. It now waits for the model's details, as it
-already did when it held no model at all — for a model a computer that connected in the last
-three minutes says it holds, by which time its details have arrived.
+when a connected computer had just said it holds it. A chat request (`/v1/chat/completions`) now
+waits up to 10 seconds for the model's details, as it already did when the node held no model at
+all — for a model a computer that connected in the last three minutes says it holds, by which
+time its details have usually arrived. If they have not, the answer says the model is not
+available yet; it no longer tells a node that holds models to go and download one.
 
 ## [0.3.245-alpha] — 2026-10-20
 

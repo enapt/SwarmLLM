@@ -3639,6 +3639,20 @@ impl SharedState {
             .reject_if_unknown_model(model_id, awaited)
     }
 
+    /// The answer once every way to serve a request has been tried — a cold-start
+    /// wait included, where the surface has one. A model this node holds no
+    /// details for while it knows others is `ModelNotAvailable` (404, with the
+    /// list of what can answer), whoever advertises it: a peer's catch-up was
+    /// waited for (`reject_if_unknown_model`), and "No model is loaded yet. Go to
+    /// the dashboard…" is wrong advice to a node holding models — both surfaces
+    /// gave it once a waited-for catch-up had not landed (pre-release review,
+    /// 2026-10-20). Only a node that knows no model gets `NoModelLoaded` (503).
+    pub fn no_route_error(&self, model_id: &crate::types::ModelId) -> crate::error::SwarmError {
+        self.model_registry
+            .reject_if_unknown_model(model_id, false)
+            .unwrap_or(crate::error::SwarmError::NoModelLoaded)
+    }
+
     /// Does `node_id` advertise every bit of `feature`? Unknown counts as no —
     /// the additive-protocol rule: a peer is never sent something it has not
     /// said it understands.

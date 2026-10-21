@@ -31,9 +31,13 @@ use crate::types::{GuessesAsked, ReplyIds, RequesterGuesses, MAX_REQUESTER_GUESS
 /// advertises `features::REQUESTER_GUESSES` (`health::monitor`). Where its
 /// owner turned speculation off it checks none — each costs this machine and
 /// its peers rows — and a head advertising the bit anyway made every
-/// requester load a drafter and read the whole prompt ahead for nothing.
+/// requester load a drafter and read the whole prompt ahead for nothing. A head
+/// with a draft model of its own (`draft_model_path`) guesses with it and never
+/// reaches the loop that reads a requester's guesses
+/// (`ngram_only_spec::eligible`), so it takes none either (pre-release review,
+/// 2026-10-20).
 pub(crate) fn takes_guesses(cfg: &crate::config::InferenceConfig) -> bool {
-    cfg.speculative_decoding
+    cfg.speculative_decoding && cfg.draft_model_path.is_none()
 }
 
 /// One reply's guesses and ids.
@@ -241,6 +245,20 @@ impl RequesterGuessSlots {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_head_guessing_with_its_own_draft_model_takes_no_requester_guesses() {
+        let mut cfg = crate::config::InferenceConfig {
+            speculative_decoding: true,
+            ..Default::default()
+        };
+        assert!(takes_guesses(&cfg), "control: speculation on, no drafter");
+        cfg.draft_model_path = Some("/models/drafter.gguf".into());
+        assert!(!takes_guesses(&cfg), "its own drafter guesses instead");
+        cfg.draft_model_path = None;
+        cfg.speculative_decoding = false;
+        assert!(!takes_guesses(&cfg), "speculation off");
+    }
 
     fn asked() -> GuessesAsked {
         GuessesAsked {
