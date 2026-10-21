@@ -575,6 +575,18 @@ if [ -n "$OTHERS" ] && [ -z "${RIG_IN_NETNS:-}" ]; then
   echo "     any node on this machine finds the rig through its loopback probe."
   exit 2
 fi
+# A node asked onto the card needs a binary built with CUDA. A dev build has none, and every
+# log line still reads as card placement (gotcha #379): on 2026-10-20 a 2.3 h drafter A/B ran
+# its far node on the processor this way and was thrown away. A/C/D run BIN_A, B runs BIN_B.
+has_cuda() { grep -q -a -m1 ggml_cuda_init "$1"; }
+for pair in "A:${GPU_A:-0}:$BIN_A" "B:${GPU_B:-0}:$BIN_B" "C:${GPU_C:-0}:$BIN_A" "D:${GPU_D:-0}:$BIN_A"; do
+  node=${pair%%:*}; rest=${pair#*:}; gpu=${rest%%:*}; bin=${rest#*:}
+  if [ "$gpu" != 0 ] && [ -n "$gpu" ] && ! has_cuda "$bin"; then
+    echo "rig: GPU_$node=$gpu asks for the card, but $bin has no CUDA (gotcha #379) —"
+    echo "     build it with --features cuda, or set GPU_$node=0."
+    exit 2
+  fi
+done
 BASE=$(mktemp -d "$HOME/.split-rig.XXXXXX")
 OUT="${OUT:-$BASE/out}"
 mkdir -p "$OUT"
