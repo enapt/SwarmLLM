@@ -2332,20 +2332,6 @@ image-encode refusal stays silent.
 
 ### API surface
 
-#### #324 — A node holding models is told to download one when every cold-start wait slot is taken
-`P3` · api · **OPEN** — 2026-10-21 · history: found by v0.3.246's pre-release review
-
-A chat request for a model this node does not hold waits up to `COLD_START_WAIT_SECS` for the
-model's details to arrive from its peers, and the number of requests waiting at once is capped. A
-request that finds every wait slot taken is answered at once with `SwarmError::NoModelLoaded`
-(`src/api/openai/mod.rs`, "Cold-start wait slots full"), whose hint says no model is loaded and
-to download one from the dashboard. On a node that holds models that advice is wrong; v0.3.246
-fixed the same advice at the end of the wait (`SharedState::no_route_error`: 404 naming the
-models it knows, 503 only when it knows none) but left this early return as it was. It predates
-v0.3.246, so it is not a regression. The fix is to answer it through the same helper, or with a
-"busy, retry shortly" class if a full wait queue should read as load rather than absence —
-decide which by what a retry a second later would find.
-
 #### #312 — A Responses tool output that is a list of parts is refused
 `P3` · api · **OPEN** — 2026-10-19 · history: found closing #310
 
@@ -2869,6 +2855,16 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-21, not yet released** (#324)
+- #324 — **A request that finds every cold-start wait place taken is answered as the wait would
+  answer it.** Found by v0.3.246's pre-release review: the early return said `NoModelLoaded` ("no
+  model is loaded yet, download one") on every node, holding models or not. Now
+  `api::openai::resolver::cold_start_slot` answers through `SharedState::no_route_error`, the
+  end-of-wait answer — a 404 naming the models the node knows, `NoModelLoaded` only for a node
+  that knows none. Not a "busy, retry" class: only a model with no manifest here reaches the wait
+  (a known one goes straight to the router), and a retry after its manifest lands skips the wait
+  altogether, so a full wait is not load. Test `a_full_cold_start_wait_answers_as_the_wait_would`.
 
 **Closed 2026-10-20, released in v0.3.246** (#255, #320, #321, #323)
 - #323 — **Q5_0, Q4_1 and Q5_1 run on AVX2, and the five 32-value formats share a pass over

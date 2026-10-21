@@ -12,6 +12,22 @@ pub(super) struct PeerTarget {
     pub(super) load: crate::inference::pipeline::LoadAllowance,
 }
 
+/// A place in the cold-start wait, or — for a request that finds every place
+/// taken — the answer the wait gives when nothing arrives
+/// (`SharedState::no_route_error`): a 404 naming the models this node knows,
+/// `NoModelLoaded` only for a node that knows none. It was `NoModelLoaded` for
+/// every node, which told one holding models to go and download one (#324).
+/// Not a "busy" class: only a model with no manifest here reaches the wait (a
+/// known one goes to the router), and a retry after its manifest lands skips
+/// the wait altogether.
+pub(super) fn cold_start_slot<'a>(
+    state: &crate::daemon::SharedState,
+    model: &ModelId,
+    slots: &'a tokio::sync::Semaphore,
+) -> Result<tokio::sync::SemaphorePermit<'a>, crate::error::SwarmError> {
+    slots.try_acquire().map_err(|_| state.no_route_error(model))
+}
+
 /// Find a peer that hosts shards for this model and return how to reach it.
 /// This is a fallback for when not all layers are covered network-wide — the
 /// peer may be able to handle the request directly or assemble its own pipeline.
@@ -826,6 +842,36 @@ mod tests {
             state.reject_if_unknown_model_at(&asked, later).is_some(),
             "past its catch-up, a model it lists and never sent is not waited for"
         );
+    }
+
+    /// A request that finds every cold-start place taken is answered as the
+    /// wait would answer it: a node holding models is never told to download
+    /// one (#324).
+    #[tokio::test]
+    async fn a_full_cold_start_wait_answers_as_the_wait_would() {
+        let state = pool_member_hosting(crate::config::Config::default(), "theirs").await;
+        let asked = ModelId("theirs".into());
+        let full = tokio::sync::Semaphore::new(0);
+        assert!(
+            matches!(
+                super::cold_start_slot(&state, &asked, &full),
+                Err(crate::error::SwarmError::NoModelLoaded)
+            ),
+            "a node that knows no model is told to get one"
+        );
+        add_model(&state, "ours-q4", Held::WholeHere);
+        let peer = crate::types::NodeId([0xC4; 32]);
+        state.models.manifest_sync.note_new_connection(&peer);
+        state.connected_node_ids.insert(peer);
+        assert!(
+            matches!(
+                super::cold_start_slot(&state, &asked, &full),
+                Err(crate::error::SwarmError::ModelNotAvailable(_))
+            ),
+            "a node holding models is told the name is unavailable, not to download one"
+        );
+        let free = tokio::sync::Semaphore::new(1);
+        assert!(super::cold_start_slot(&state, &asked, &free).is_ok());
     }
 
     /// Once every way to serve a request has been tried, a node that knows

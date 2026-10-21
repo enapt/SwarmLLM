@@ -471,15 +471,19 @@ pub async fn chat_completions(
         // Cold-start wait: shard announcements may still be propagating.
         // Poll for up to 10 seconds before giving up.
         // Semaphore prevents unbounded pile-up under burst traffic.
-        let _cold_permit = match COLD_START_SEMAPHORE.try_acquire() {
+        let _cold_permit = match resolver::cold_start_slot(
+            &state.shared_state,
+            &crate::types::ModelId(req.model.clone()),
+            &COLD_START_SEMAPHORE,
+        ) {
             Ok(permit) => permit,
-            Err(_) => {
+            Err(answer) => {
                 tracing::warn!(
                     request_id = %request_id,
                     model = %req.model,
-                    "Cold-start wait slots full — returning 503 immediately"
+                    "Cold-start wait slots full — answering as the wait would"
                 );
-                return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
+                return Err(ApiError(answer));
             }
         };
         let max_polls = COLD_START_WAIT_SECS * 2; // 500ms intervals
