@@ -332,7 +332,7 @@ oscillate or herd. The existing `shard_download_claims` and backoff machinery
 are the obvious damping, and this needs a simulation before it touches the
 fleet.
 
-#### The design, simulated 2026-10-21 (not built)
+#### The design, simulated 2026-10-21 (phase 1 built the same day)
 
 **One plan per neighbourhood, computed alike by every machine in it.** For a
 model that (a) somebody asked for (`coverage::asked_for`), (b) no near machine
@@ -409,17 +409,29 @@ matched the plan elsewhere, but needs each machine's near list published — a n
 optional `NodeCapability` field. That is phase 2, if the field shows
 overlapping neighbourhoods; phase 1 needs nothing on the wire.
 
-**Where it goes** (the shard manager's map, 2026-10-21):
-- `auto_manage/coverage.rs`: the near machines (with the 30-minute grace), the
-  chain plan over `ceiling_layers` and the holdings, and the parts THIS machine's
-  segment lacks — fetched ahead of routine replication with a bonus like
-  `CARRY_BONUS`, inside `select_within_budget`'s cap.
-- `auto_manage/prune.rs`: a `copy_kept_because` rule beside `copy_carries_model`
-  for a part of this machine's planned segment, asked by `would_shed_once_fetched`
-  too, so the passes agree.
-- `NEAR_RTT_MS`: 30 ms to start. At 18 ms the network was 17% of a token (§ "The
-  premise is validated"); a chain of three near machines led by its head pays
-  three legs a pass.
+**Built (phase 1, 2026-10-21)** in `auto_manage/coverage/near_chain.rs`, where
+`coverage`'s rule about which copies matter already lived:
+- The near machines (`NEAR_RTT_MS` 30: at 18 ms the network was 17% of a token, §
+  "The premise is validated", and a chain of three near machines led by its head
+  pays three legs a pass), each keeping its place 30 minutes after it was last
+  measured near. The chain is exact over (layer, machines used), at LAYER
+  granularity — the router splits inside a part, and a chain of a 12- and a
+  20-layer machine over 8-layer parts exists only that way — with in-flight
+  downloads counted as held, at most 10 machines. A machine named for parts it
+  never fetches is passed over by #231's lease.
+- The download pass (`scoring.rs`) fetches this node's segment's missing parts
+  past the replica target and the hash ring, at `CARRY_BONUS`, inside
+  `select_within_budget`'s cap; `prune.rs`'s `copy_kept_because` keeps a part
+  named now or within 24 h, below urgent pressure, asked by
+  `would_shed_once_fetched` too.
+- **Found while building**: the cost curve every ceiling is weighed with comes
+  from the model's HEADER, and a node fetches one only to route the model or
+  fetch a part of it — so a near machine holding none of a model would never
+  compute the plan naming it. Each pass now learns the header of an asked-for
+  model a near machine holds part of (two at most, from HuggingFace, not
+  offline or metered).
+- Owed: the field read on this machine + the LAN box, and phase 2 if the field
+  shows overlapping neighbourhoods.
 
 ### Stage 4 — Speculation, to amortise whatever distance remains
 

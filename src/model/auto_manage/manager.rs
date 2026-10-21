@@ -178,6 +178,10 @@ pub struct AutoShardManager {
     /// Carriers passed over for a model after their lease lapsed, and when.
     pub(super) carriers_passed_over:
         dashmap::DashMap<(ModelId, crate::types::NodeId), std::time::Instant>,
+    /// What the near chain remembers between passes (`coverage::near_chain`,
+    /// Stage 3): which machines are near, each model's chain, the parts this
+    /// node was named for, and the named machines' leases.
+    pub(super) near_chain_book: super::coverage::NearChainBook,
     /// Each model's replica targets over the last day, kept across restarts:
     /// prune sheds against the highest (`target_hold`, FUTURE_WORK #286).
     pub(super) targets_seen: super::target_hold::TargetsSeen,
@@ -235,6 +239,7 @@ impl AutoShardManager {
             carry_curves: dashmap::DashMap::new(),
             carrier_leases: dashmap::DashMap::new(),
             carriers_passed_over: dashmap::DashMap::new(),
+            near_chain_book: Default::default(),
             targets_seen,
         }
     }
@@ -937,6 +942,10 @@ impl AutoShardManager {
             );
             return;
         }
+
+        // A model a chain of nearby machines may name this node for is planned
+        // from its header; learn the few that are missing first.
+        self.learn_headers_near_chains_need().await;
 
         // 2. Gather candidate shards across all known models (VRAM-aware scoring)
         let candidates = self.gather_candidates(&local_node_id, pool_vram);

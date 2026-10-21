@@ -1559,6 +1559,10 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | WARN  | `HfSourceGossip dropped — hf_sources at capacity` | `model`, `cap` (R141 — fires alongside `activity.hf_sources_cap_reached`) |
 | WARN  | `Auto-manage: released stalled P2P download permit; the next pass fetches it from the model's origin` | `model`, `shard`, `stall_secs` (R141 — `P2P_PERMIT_STALL_SECS = 180`). With no origin to ask (none recorded, or offline mode) the next pass logs `No origin to fetch this part from` and the part goes back to its peers (gotcha #797's residual, 2026-10-07) |
 | INFO  | `On-demand loading: model has shards on disk but not loaded` | `request_id`, `model` |
+| INFO  | `DIAG: fetching this computer's part of a chain of nearby machines for a model none of them can run whole (Stage 3)` | `model`, `parts` — each download pass while this node's segment lacks parts (`coverage/near_chain.rs`); the `requesting shard download … score=` line carries the ×50 bonus. No line: nobody asked, a near machine runs it whole, the near machines' ceilings fall short, a ceiling is unknown, or no header here yet |
+| INFO  | `DIAG: a nearby machine named for part of this model has fetched none of it — planning the chain without it for a while (Stage 3)` | `model`, `machine` — no part gained or fetching for 20 min; left out 2 h |
+| DEBUG | `near chain planned (Stage 3)` | `model`, `machines`, `segments`, `complete` — once a minute at most per model; `complete=true` means nothing is fetched |
+| DEBUG | `DIAG: a part prune would keep once it landed — fetching it` with `rule="this copy is this computer's part of a chain of nearby machines"` | the prune side of the same chain (gotcha #795) |
 
 `DIAG:` **Is a node deleting and re-fetching the same parts?** It cannot be seen
 from that node's activity feed, but every peer logs it. Count, per peer, the two

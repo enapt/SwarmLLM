@@ -2434,6 +2434,56 @@ asserts it.
 BOTH passes; carrying never bypasses the trust gate, the storage budget or `would_shed_copy`, and
 never asks a machine for more than the shortfall.
 
+## Nearby machines hold complementary parts of a model none of them can run whole (2026-10-21, Stage 3)
+
+**Why.** A split is only fast when its machines are close (6.76 tok/s at 18 ms, 0.35
+Thailand↔Italy), and placement ignored distance: replication counts copies, carrying (#231)
+asks whether SOME holders could run the model, wherever they are. So whether a large model had a
+chain of nearby machines was luck. Design, simulation and the alternatives (Petals'
+`block_selection.py`, one-at-a-time carrying, each machine closing its own gap):
+`docs/plans/regional_pipelines.md` § "The design, simulated 2026-10-21".
+
+**The rule** (`auto_manage/coverage/near_chain.rs`). For a model somebody asked for that no near
+machine can run whole and whose near machines' ceilings could carry it between them, every near
+machine computes the SAME chain — each machine used once for one run of at most its ceiling, the
+fewest segments (within one of the least the ceilings allow), then the fewest parts fetched, ties
+in rendezvous order — and fetches its own segment's missing parts:
+
+- **One predicate for both passes, judged after the fetch** (gotcha #795): the download pass
+  fetches `parts_this_node_plans` and `copy_kept_because` keeps `copy_in_near_chain`, both from
+  the one chain, which counts in-flight downloads as held — the chosen chain's cost falls by all
+  this machine fetches, any other's by no more, so the chain a fetch starts under is the chain it
+  lands under.
+- **A complete chain is never rebalanced**: while one exists over what is held, only such a
+  chain is chosen.
+- **Moving inputs are held** (gotcha #876): a near machine keeps its place, and its parts count,
+  30 min after it was last measured near; a part this node was named for is kept 24 h after it
+  was last named. In simulation a neighbour off 15 minutes in every three hours made the other
+  policies fetch, shed and fetch back 15-27 parts in two days; with both holds, none.
+- **Near is MEASURED**: the windowed-minimum round trip PEX keeps per peer (≤ 30 ms), never the
+  coordinate. In scope only (private mode's pool).
+- **Progress keeps a place**: a machine named for parts it never fetches (its own budget, disk
+  or metered link refuses, and nothing gossiped says so) is passed over after #231's patience.
+- **The header is the plan's input**: ceilings are weighed with the model's cost curve, read
+  from its header, which a node fetches only to route the model or fetch a part — so a near
+  machine holding none of it never planned at all. Each pass learns the header of an asked-for
+  model a near machine holds part of (at most two, HuggingFace, not offline or metered).
+- Below urgent disk pressure only: a near chain makes a split fast, carrying makes it possible.
+
+**Evidence.** `coverage::near_chain::tests::*` — the reported fleet shape (this node 16 layers,
+the LAN box 20 holding parts 2-6, a far peer holding everything): the chain is this node 0-12 and
+the box 12-32, and parts 0-2 are offered and started where routine replication offers nothing;
+nothing with the box far or nobody asking; prune keeps a MIDDLE part of the segment (an end is
+kept by prompt privacy anyway — #876's first test passed without its rule that way) and sheds one
+outside it, and an urgent disk takes it; a complete three-segment chain is not rebalanced into
+two; a neighbour that drops off keeps its place until its 30 minutes lapse; a named part is kept
+until its day lapses; a stalled machine is passed over and one that gained a part is not; private
+mode; an unknown ceiling; the header rule; and the planner alone — two machines moving at once,
+a split inside a part, a machine without the disk for its segment.
+
+**A change must keep**: both passes ask the one chain; in-flight counted as held; the holds
+deadlines, never an `Instant` set in the past (a just-booted host cannot represent one).
+
 ## A model's weights are its header's, on every node (2026-10-07)
 
 **What happened.** `ModelProcessPool::footprint_inputs` — the one source of a model's memory

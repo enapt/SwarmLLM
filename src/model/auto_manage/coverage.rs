@@ -42,6 +42,9 @@ use crate::types::{ModelId, ModelManifest, NodeId, ShardId, MMPROJ_SHARD_INDEX};
 
 use super::AutoShardManager;
 
+mod near_chain;
+pub(super) use near_chain::NearChainBook;
+
 /// How long a model's cost curve is kept. It changes only with the node's own
 /// context override; the header behind it never changes.
 const CARRY_CURVE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
@@ -299,12 +302,7 @@ impl AutoShardManager {
                         .is_some_and(|(_, disk_mb)| disk_mb.saturating_mul(1024 * 1024) > bytes)
             })
             .collect();
-        ranked.sort_by_key(|node| {
-            let mut h = blake3::Hasher::new();
-            h.update(manifest.id.0.as_bytes());
-            h.update(&node.0);
-            std::cmp::Reverse(*h.finalize().as_bytes())
-        });
+        ranked.sort_by_key(|node| std::cmp::Reverse(rendezvous(&manifest.id, node)));
         ranked
             .into_iter()
             .find(|node| self.carrier_keeps_its_lease(manifest, node, &holdings))
@@ -502,6 +500,16 @@ fn short_of_whole_by_few(missing: usize, total: usize) -> bool {
     missing * COMPLETE_WHEN_SHORT_BY_ONE_PART_IN <= total
 }
 
+/// `node`'s rendezvous weight for `model`, `blake3(model ‖ node)`: the order
+/// every node ranks machines in for a model, so they choose alike from the
+/// same gossip — the carrier (#231) and the near chain's ties.
+fn rendezvous(model: &ModelId, node: &NodeId) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(model.0.as_bytes());
+    h.update(&node.0);
+    *h.finalize().as_bytes()
+}
+
 /// The layer ranges of `parts` of `manifest`.
 fn ranges_of(manifest: &ModelManifest, parts: &HashSet<u32>) -> Vec<(u32, u32)> {
     manifest
@@ -517,14 +525,14 @@ mod tests {
     use std::sync::atomic::Ordering::Relaxed;
     use std::sync::Arc;
 
-    use super::super::scoring::BudgetReport;
     use super::super::test_support::{
-        make_test_manager_with_config, register_manifest_with_sized_shards, write_sparse_shards,
+        capability, fetched, holds, make_test_manager_with_config, offered, peer_with_disk,
+        register_manifest_with_sized_shards, write_sparse_shards,
     };
-    use super::super::{AutoShardManager, DiskSpace, StorageReading};
+    use super::super::AutoShardManager;
     use crate::config::Config;
     use crate::daemon::SharedState;
-    use crate::types::{ContributionMode, ModelId, NodeCapability, NodeId, ShardId};
+    use crate::types::{ModelId, NodeId, ShardId};
 
     const MIB: u64 = 1024 * 1024;
     const PART: u64 = 500 * MIB;
@@ -536,82 +544,8 @@ mod tests {
         CURVE.0 + CURVE.1 * layers
     }
 
-    fn capability(ceiling_mb: Option<u64>, disk_mb: u64) -> NodeCapability {
-        NodeCapability {
-            coord: None,
-            node_id: NodeId([0u8; 32]),
-            gpu: None,
-            cpu: None,
-            ram_total_mb: 0,
-            ram_available_mb: 0,
-            ram_model_budget_mb: None,
-            disk_available_mb: disk_mb,
-            bandwidth_mbps: 0.0,
-            hosted_shards: vec![],
-            max_contribution: crate::types::ContributionLevel::Moderate,
-            uptime_seconds: 0,
-            version: String::new(),
-            region: None,
-            est_tokens_per_sec_7b: 0.0,
-            os: None,
-            observed_latencies: vec![],
-            relay_capable: false,
-            protocol_version: 0,
-            features: 0,
-            relay_reservations: vec![],
-            anchor_mode: false,
-            can_serve_inference: true,
-            resident_layers: Vec::new(),
-            context_ceiling_tokens: None,
-            model_load_ms_per_gib: None,
-            model_memory_ceiling_mb: ceiling_mb,
-        }
-    }
-
     fn peer(state: &Arc<SharedState>, byte: u8, ceiling_mb: Option<u64>) -> NodeId {
         peer_with_disk(state, byte, ceiling_mb, 100_000)
-    }
-
-    fn peer_with_disk(
-        state: &Arc<SharedState>,
-        byte: u8,
-        ceiling_mb: Option<u64>,
-        disk_mb: u64,
-    ) -> NodeId {
-        let id = NodeId([byte; 32]);
-        state.peer_registry.insert(
-            id.clone(),
-            crate::types::PeerInfo {
-                node_id: id.clone(),
-                addresses: vec![],
-                capability: Some(capability(ceiling_mb, disk_mb)),
-                last_seen: chrono::Utc::now(),
-                latency_ms: Some(10),
-                trust_score: 0.8,
-                peer_id_bytes: None,
-                ack_srtt_ms: None,
-                active_request_count: 0,
-                first_seen: 0,
-                verified_transaction_count: 0,
-                is_lan_peer: false,
-                goodput_bytes_per_sec: None,
-                goodput_samples: 0,
-            },
-        );
-        state.connected_node_ids.insert(id.clone());
-        id
-    }
-
-    fn holds(state: &Arc<SharedState>, mid: &ModelId, node: &NodeId, parts: &[u32]) {
-        for &index in parts {
-            state.model_registry.record_shard_holder(
-                ShardId {
-                    model_id: mid.clone(),
-                    index,
-                },
-                node.clone(),
-            );
-        }
     }
 
     /// The report's shape: a 32-layer model in four 8-layer parts, held whole by
@@ -654,46 +588,6 @@ mod tests {
         trust.trust_level = crate::types::ModelTrustLevel::DemandVerified;
         state.models.model_trust.insert(mid.clone(), trust);
         (state, manager, mid, small)
-    }
-
-    /// The parts the download pass offers, in index order.
-    fn offered(manager: &AutoShardManager, state: &Arc<SharedState>) -> Vec<u32> {
-        let local = state.identity.node_id().clone();
-        let mut parts: Vec<u32> = manager
-            .gather_candidates(&local, 0)
-            .into_iter()
-            .map(|c| c.shard_index)
-            .collect();
-        parts.sort_unstable();
-        parts
-    }
-
-    /// The parts one cycle of the download pass actually starts.
-    fn fetched(manager: &AutoShardManager, state: &Arc<SharedState>) -> Vec<u32> {
-        let reading = StorageReading {
-            max_storage_mb: 100_000,
-            max_disk_mb: 500_000,
-            contribution: ContributionMode::Maximum,
-            disk: Some(DiskSpace {
-                free_bytes: 400_000 * MIB,
-                total_bytes: 1_000_000 * MIB,
-            }),
-            held_bytes: 0,
-        };
-        let report = BudgetReport {
-            held_bytes: 0,
-            held_shards: 0,
-            budget: reading.budget(),
-            max_shards: 0,
-            max_shards_reached: false,
-            reading,
-        };
-        let local = state.identity.node_id().clone();
-        manager
-            .select_within_budget(manager.gather_candidates(&local, 0), &report, 0)
-            .into_iter()
-            .map(|c| c.shard_index)
-            .collect()
     }
 
     /// The machine that can carry more of the model is the one chosen — not

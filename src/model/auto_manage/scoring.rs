@@ -343,6 +343,19 @@ impl AutoShardManager {
                      fetching them so it runs here whole"
                 );
             }
+            // Stage 3: this node's segment of the chain its NEARBY machines
+            // plan alike for a model none of them can run whole
+            // (`coverage::near_chain`) — the parts of it this node lacks. Like
+            // carried parts they skip the replica target and the hash ring, and
+            // nothing else; prune keeps them (`copy_in_near_chain`).
+            let near_parts = self.parts_this_node_plans(&manifest);
+            if !near_parts.is_empty() {
+                tracing::info!(
+                    model = %manifest.id,
+                    parts = near_parts.len(),
+                    "DIAG: fetching this computer's part of a chain of nearby machines for a model none of them can run whole (Stage 3)"
+                );
+            }
 
             // -- Spread bonus: deprioritize models we already have many shards of --
             let local_fraction = if manifest.shard_count > 0 {
@@ -456,10 +469,12 @@ impl AutoShardManager {
                 // replication: each shard is spread across target_replicas nodes.
                 let carried_part = carry_parts.contains(&shard.index);
                 let completing_part = completing_parts.contains(&shard.index);
+                let near_part = near_parts.contains(&shard.index);
                 if holder_count >= target_replicas
                     && !in_configured_range
                     && !carried_part
                     && !completing_part
+                    && !near_part
                 {
                     tracing::debug!(
                         model = %manifest.id,
@@ -485,6 +500,7 @@ impl AutoShardManager {
                     && !in_configured_range
                     && !already_hosting_model
                     && !carried_part
+                    && !near_part
                 {
                     let replicas_needed =
                         (target_replicas as u32).saturating_sub(holder_count as u32);
@@ -711,7 +727,10 @@ impl AutoShardManager {
                     1.0
                 };
 
-                let carry_bonus = if carried_part {
+                // A part fetched for what the copies can DO — carry the model
+                // (#231) or complete a near chain (Stage 3) — goes ahead of
+                // routine replication within the budget.
+                let carry_bonus = if carried_part || near_part {
                     super::coverage::CARRY_BONUS
                 } else {
                     1.0

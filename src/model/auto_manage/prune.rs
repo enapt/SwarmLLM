@@ -1408,6 +1408,14 @@ impl AutoShardManager {
         if self.copy_carries_model(shard_id, local_node_id) {
             return Some("this copy carries the model");
         }
+        // This computer's segment of the chain its NEARBY machines plan alike
+        // for a model none of them can run whole — named now, or within the
+        // day (`coverage::near_chain`, Stage 3). Below urgent pressure only: a
+        // near chain makes a split fast, it does not make the model runnable,
+        // which carrying above does at any pressure.
+        if pressure < PRESSURE_URGENT && self.copy_in_near_chain(shard_id) {
+            return Some("this copy is this computer's part of a chain of nearby machines");
+        }
         let pool_size = crate::pool::scope::effective_pool_size(&self.shared_state);
         // The highest target of the last day, not this instant's: demand and
         // the peer count move it while nothing about the part changes, and the

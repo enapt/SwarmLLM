@@ -377,7 +377,9 @@ until the bytes or a processor stage say otherwise.
 5. **The MoE cost curve in the tree-size rule.** *Exit:* the chosen N within 10% of
    the measured best on an MoE rig.
 6. **Regional chains** (#192). *Exit:* a split coordinated inside the region runs
-   at that region's P.
+   at that region's P. **Placement built 2026-10-21** (Stage 3 phase 1,
+   `regional_pipelines.md`): nearby machines fetch complementary parts of a model none
+   of them can run whole; `examples/near_chain_rig.sh` checks it end to end.
 7. **The opt-in fast mode.** *Exit:* a quality report scored against llama.cpp.
 
 ## Traps already known
@@ -398,6 +400,24 @@ until the bytes or a processor stage say otherwise.
   env switch.
 
 ## Sources
+
+**Surveyed again 2026-10-21** (two web surveys and a ledger of this repo's own attempts, after
+the user asked for "much much better" than 6 tok/s and to build on what was ALREADY tried). What
+it changed: nothing in the build order, one emphasis.
+- **No published system speculates over a link of 400 ms or more.** The WAN-like ones (Petals,
+  BloomBee 2604.21072) report no absolute tok/s at that distance; PipeDec/SpecPipe 2504.04104
+  (54.7 ms a token, 70B, 8 stages on 10 GbE), FlowSpec 2507.02620 and PipeInfer are LAN or
+  datacenter. TH↔AU's ~6 tok/s is already past the published WAN figures, and the far ring's
+  ceiling is still E_N/P: at ~405 ms and the 0.5B's E_128 ≈ 5.7, ~13 tok/s even with P at the
+  bare round trip.
+- **In one region the same papers project 40-60 tok/s for a 70B on two cards at 5-25 ms**
+  (pipelined speculation with chunks in flight; tree width 32-64 was SpecPipe's best). That
+  is this plan's "one region" row, so **placement (item 6) is the order-of-magnitude lever**,
+  and the far ring's levers (items 1, 3, 4) are each worth well under 2×.
+- **Whole-model hand-off already gives near-local speed where one machine can run the model**:
+  the router prices a far whole-model holder's network once, a split's per token
+  (`parallax::vertex_cost_as`), so a split only serves when nobody can run the model whole —
+  the case this plan is for.
 
 PipeInfer 2407.11798 · SpecPipe 2504.04104 · Judge Decoding 2501.19309 · EAGLE-3
 2503.01840 · MoE-Spec 2602.16052 · cost-aware MoE speculation 2607.12696 ·
