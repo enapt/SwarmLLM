@@ -30,6 +30,7 @@ mod hop_forwards;
 pub(crate) use events::addr_is_remotely_reachable;
 mod identify;
 mod loop_stall;
+mod receipts;
 mod relay;
 mod requests;
 mod shard_transfer;
@@ -505,6 +506,9 @@ pub struct NetworkManager {
     /// its variance, instead of a ping RTT that says nothing about how loaded
     /// the peer's event loop is. See `tensors::AckRttEstimator`.
     ack_rtt: HashMap<libp2p::PeerId, tensors::AckRttEstimator>,
+    /// Acknowledged forwards awaiting their results, so each result's time can
+    /// be cut at its receipt: the network, then the far side (`receipts`).
+    forward_receipts: receipts::ForwardReceipts,
     /// What throughput we actually get to each peer. Sibling of `ack_rtt` and
     /// held the same way — in the manager rather than in `SharedState` — so the
     /// per-forward update costs no lock, and only the resulting figure is
@@ -998,6 +1002,7 @@ impl NetworkManager {
             last_relay_attempt: None,
             pending_tensor_outbound: HashMap::new(),
             ack_rtt: HashMap::new(),
+            forward_receipts: receipts::ForwardReceipts::default(),
             peer_goodput: HashMap::new(),
             hop_forwards: hop_forwards::HopForwards::default(),
             pending_tensor_result_outbound: HashMap::new(),
@@ -1267,6 +1272,21 @@ impl NetworkManager {
         sender: Option<crate::types::NodeId>,
         result: crate::types::LayerResult,
     ) -> Result<(), mpsc::error::TrySendError<crate::types::AuthenticatedMessage>> {
+        if let Some(split) = result
+            .answers_step
+            .and_then(|step| self.forward_receipts.take(result.request_id, step))
+        {
+            tracing::debug!(
+                request_id = %result.request_id,
+                acked_by = %split.acked_by,
+                answered_by = %sender.as_ref().map(|n| n.to_string()).unwrap_or_default(),
+                bytes = split.bytes,
+                ack_ms = split.ack_ms.round() as u64,
+                answer_ms = split.answer_ms.round() as u64,
+                after_receipt_ms = split.after_receipt_ms().round() as u64,
+                "DIAG: a forward's round trip, split at its receipt"
+            );
+        }
         if let Some((hop, report)) = self
             .hop_forwards
             .take_onward_failure(sender.as_ref(), &result)

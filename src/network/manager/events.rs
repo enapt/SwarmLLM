@@ -225,11 +225,24 @@ impl NetworkManager {
                     self.rr_failures.remove(&peer);
                     // Clean up tensor outbound tracking (response received = not a failure)
                     if let Some(super::OutboundForward {
+                        request_id: forward_of,
                         sent_at,
                         activation_bytes,
+                        step,
                         ..
                     }) = self.pending_tensor_outbound.remove(&request_id)
                     {
+                        // Kept until the forward's result comes, so its time can
+                        // be cut at this receipt (`receipts`): any size — a
+                        // large forward's ACK carries its transfer, and says so.
+                        self.forward_receipts.note_ack(
+                            forward_of,
+                            step,
+                            sent_at,
+                            sent_at.elapsed(),
+                            peer,
+                            activation_bytes,
+                        );
                         // How long this peer actually took to acknowledge. Feeds
                         // the per-peer deadline, so a peer whose loop is busy
                         // widens its own window instead of being declared dead

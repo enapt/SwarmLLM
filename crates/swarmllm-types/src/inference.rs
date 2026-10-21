@@ -1012,7 +1012,7 @@ pub mod stream_seq {
 }
 
 /// Which forward a [`LayerResult`] answers — see `LayerResult::answers_step`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ResultStep {
     /// The forward's `index_pos`: the position its first token occupies.
     pub index_pos: u32,
