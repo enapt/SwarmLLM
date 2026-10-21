@@ -1820,14 +1820,21 @@ Thailand holding layers 0-13 of a 7B on its processor, a peer's RTX 3060 in Aust
 (109 passes: 39 checked guesses, 49 of 86 kept, 65 one-token passes) against 2.27-2.38 driven
 from the requester (α 0.66, γ 2); the whole model on the Australian card alone writes 56.6. The 65
 one-token passes are passes no fresh window was ready for — the requester's drafter shared the
-head's busy processor and took 200-450 ms after a miss, and the head never waits. Left in it:
-(a) a head that waits a bounded time for a window it expects, where the wait pays (w < P·(E − 1),
-~700 ms on this link); (b) a route override switches delegation off
-(`request_may_be_led_by_its_head`), so a led split cannot be tested through `swarm_route` — the
-run above was led only because the requester did not yet trust the Australian peer with the
-prompt (once it did, it handed that peer the whole model), and its "without guesses" arm, sent
-with an override, measured the driven path again; carrying a shrink-only override to the head is
-wire work; (c) both halves on cards. Then trees in
+head's busy processor and took 200-450 ms after a miss, and the head never waited. **(a) Built
+2026-10-21**: the head waits for a window it expects, only where the wait pays
+(`ngram_only_spec::worth_waiting_ms`, `docs/invariants/scheduling.md` § "A requester guesses for
+the split its head leads"). The rule first written here, w < P·(E − 1) (~700 ms on this link), was
+too eager — a one-token pass does not throw the window away, it lands during it and still counts at
+probability α — and the derived bound is ~220 ms on this link's figures, so the gain is smaller
+than the 1.3x first projected. Unmeasured on a rig: on the processor rig a guessed check costs
+~half a pass a row and the rule seldom waits; the A/B wants the tail on a card. **(b) Built
+2026-10-21**: a `swarm_route` instruction goes with the hand-off to a head advertising
+`features::CARRIED_ROUTE` (bit 30), which plans under it from its own side, only ever shrinking
+(§ "A route instruction goes to the head with the request"); before, any instruction kept the split
+driven from the requester, so the run above was led only because the requester did not yet trust
+the Australian peer with the prompt. Left: (c) both halves on cards on a real link; (d) a requester
+still loads its drafter and reads the prompt for a head that then guesses with its own (DSD runs
+first there) — bounded: it stops at the first token, which carries no ids. Then trees in
 it, the verdict sent to every segment so dead rows are dropped before they are computed (#149 (b)); (4) a drafter fed by the model's own state: MTP at the last stage (#145),
 EAGLE-3 taps where a head is published; (5) an MoE tree priced by the experts it touches; (6)
 regional chains (#192); (7) the opt-in fast mode. The plan records one retracted projection

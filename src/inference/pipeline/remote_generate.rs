@@ -369,7 +369,26 @@ pub(crate) fn delegation_eligible(exec: &PipelineExecutor) -> bool {
         return false;
     }
     exec.shared_state
-        .peer_advertises_feature(&head.node_id, crate::types::features::DELEGATED_SPLIT)
+        .peer_advertises_feature(&head.node_id, features_a_head_needs(&exec.request))
+}
+
+/// What a head must advertise to lead this request: `DELEGATED_SPLIT`, and
+/// `CARRIED_ROUTE` where the request carries a `swarm_route` instruction —
+/// an older head would plan without it (#318 (b)). The one answer, asked by
+/// the hand-off ([`delegation_eligible`]) and by the planner pricing a chain
+/// as led (`PromptPlan::head_features` → `RingFacts::leads_splits`), so a
+/// chain is never priced as led by a head the hand-off then passes over.
+pub(crate) fn features_a_head_needs(request: &crate::types::InferenceRequest) -> u64 {
+    use crate::types::features::{CARRIED_ROUTE, DELEGATED_SPLIT};
+    if request
+        .route_override
+        .as_ref()
+        .is_some_and(|o| !o.is_noop())
+    {
+        DELEGATED_SPLIT | CARRIED_ROUTE
+    } else {
+        DELEGATED_SPLIT
+    }
 }
 
 /// [`delegation_eligible`]'s conditions on the REQUEST — everything but the
@@ -389,7 +408,11 @@ pub(crate) fn request_may_be_led_by_its_head(
         return false;
     }
     // A peer delegated to us carries `lead_here`, so it is never handed on.
-    if request.route_override.is_some() {
+    // Any other instruction goes to the head with the request, for a head
+    // that plans under it (`features_a_head_needs`, #318 (b)) — before that,
+    // any instruction kept the request here, so a led split could not be
+    // tested on chosen peers.
+    if request.route_override.as_ref().is_some_and(|o| o.lead_here) {
         return false;
     }
     // The delegate renders the conversation itself from `messages`, so a
@@ -837,6 +860,14 @@ impl PipelineExecutor {
                     messages: self.request.messages.clone(),
                     tools: self.request.tools.clone(),
                     guesses: guesses_asked,
+                    // Only to a head advertising `CARRIED_ROUTE`
+                    // (`delegation_eligible` asked `features_a_head_needs`).
+                    route: self
+                        .request
+                        .route_override
+                        .as_ref()
+                        .filter(|o| !o.is_noop())
+                        .map(crate::inference::route_override::carried),
                 }),
             ),
         };

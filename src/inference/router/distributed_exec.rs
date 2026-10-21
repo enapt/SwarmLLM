@@ -839,6 +839,7 @@ pub(super) async fn execute_request(
                     &shared_state,
                     &request,
                 ),
+                crate::inference::pipeline::remote_generate::features_a_head_needs(&request),
             )
             // A split driven from here crosses its hops once a ROUND, and a
             // round may carry several guessed tokens (FUTURE_WORK #3 (d)).

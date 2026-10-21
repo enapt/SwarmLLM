@@ -20,11 +20,14 @@
 //! # What it deliberately cannot do
 //!
 //! It only ever makes this node's candidate set SMALLER. It cannot invent a
-//! holder, cannot make a peer accept work it would otherwise refuse, and never
-//! leaves this machine — a peer is not told that the coordinator was pretending.
-//! So the worst a caller can do with it is make their own request slower or
-//! fail, which is why it needs no permission beyond the API key every request
-//! already carries.
+//! holder and cannot make a peer accept work it would otherwise refuse. It
+//! leaves this machine in ONE case: a split handed to its head to lead
+//! (#318 (b)) carries it (`DelegatedSplit::route`, only to a head advertising
+//! `features::CARRIED_ROUTE`), and the head plans under it read from its own
+//! side ([`led_override`]) — again only ever shrinking its candidates, for that
+//! request alone. So the worst a caller can do with it is make their own
+//! request slower or fail, which is why it needs no permission beyond the API
+//! key every request already carries.
 //!
 //! It also carries no "at least N segments" knob. How many segments a route has
 //! is decided by the priced search over the candidates, not by the candidate set
@@ -44,6 +47,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::SwarmError;
+use crate::types::NodeId;
 
 pub use swarmllm_types::inference::{PretendLocalHolds, RoutePlanOverride};
 
@@ -162,6 +166,101 @@ fn parse_holdings(s: &str, field: &str) -> Result<PretendLocalHolds, SwarmError>
         "swarm_route.{field}: '{s}' is not one of 'all', 'none', a shard index \
          such as '2', or an inclusive range such as '0-3'"
     )))
+}
+
+/// Most entries a head takes in each list of a carried route. The API body's
+/// size bounds what a client sends; this bounds what a peer makes the head
+/// match every candidate against.
+const MAX_CARRIED_ENTRIES: usize = 64;
+
+/// The instruction a request is handed to its head with (#318 (b)): what the
+/// requester was told, unchanged — the head reads it from its own side
+/// ([`led_override`]).
+pub(crate) fn carried(o: &RoutePlanOverride) -> swarmllm_types::CarriedRoute {
+    swarmllm_types::CarriedRoute {
+        requester_holds: o.pretend_local_holds,
+        exclude_node_prefixes: o.exclude_node_prefixes.clone(),
+        peer_holds: o.peer_holds.clone(),
+    }
+}
+
+/// The plan instruction a head leads a handed-over split under (#318 (b)):
+/// lead it here, and keep to what the requester asked, read from here.
+///
+/// Every part only SHRINKS the head's candidates, as it shrank the
+/// requester's:
+/// - an entry of `peer_holds` naming this node (the first, as everywhere) is
+///   what this node pretends to hold. The entry stays in `peer_holds` too: a
+///   prefix may name other machines as well, and dropping it would lift their
+///   restriction;
+/// - `requester_holds` — what the requester pretended about ITSELF — applies
+///   to `requester` (the AUTHENTICATED sender), ahead of every other entry, so
+///   it decides for the requester as it did there;
+/// - exclusions go on as they are.
+///
+/// Refused — the head then declines the hand-off, and the requester leads the
+/// plan it already has — where the route is malformed, excludes this node,
+/// or leaves it nothing to hold: the requester planned none of that.
+pub(crate) fn led_override(
+    route: Option<&swarmllm_types::CarriedRoute>,
+    me: &NodeId,
+    requester: &NodeId,
+) -> Result<RoutePlanOverride, &'static str> {
+    let Some(route) = route else {
+        return Ok(RoutePlanOverride::lead_here());
+    };
+    if route.exclude_node_prefixes.len() > MAX_CARRIED_ENTRIES
+        || route.peer_holds.len() > MAX_CARRIED_ENTRIES
+    {
+        return Err("the route names more nodes than a head takes");
+    }
+    let well_formed = |p: &String| {
+        (MIN_PREFIX_HEX..=MAX_PREFIX_HEX).contains(&p.len())
+            && p.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+    };
+    if !route.exclude_node_prefixes.iter().all(well_formed)
+        || !route.peer_holds.iter().all(|(p, _)| well_formed(p))
+    {
+        return Err("the route names a node by something other than a hex prefix");
+    }
+    // The request API refuses an inverted range; the wire does not, and one
+    // naming this node would read as "holds nothing" past the check below.
+    let inverted = |h: &PretendLocalHolds| matches!(h, PretendLocalHolds::Shards(a, b) if a > b);
+    if route.requester_holds.as_ref().is_some_and(inverted)
+        || route.peer_holds.iter().any(|(_, h)| inverted(h))
+    {
+        return Err("the route names a range of shards that ends before it starts");
+    }
+    let mine = hex::encode(me.0);
+    if route
+        .exclude_node_prefixes
+        .iter()
+        .any(|p| mine.starts_with(p.as_str()))
+    {
+        return Err("the route excludes this node");
+    }
+    let pretend_local_holds = route
+        .peer_holds
+        .iter()
+        .find(|(p, _)| mine.starts_with(p.as_str()))
+        .map(|(_, holds)| *holds);
+    if pretend_local_holds == Some(PretendLocalHolds::Nothing) {
+        return Err("the route leaves this node none of the model to lead with");
+    }
+    let mut peer_holds = Vec::with_capacity(route.peer_holds.len() + 1);
+    peer_holds.push((
+        hex::encode(requester.0),
+        route
+            .requester_holds
+            .unwrap_or(PretendLocalHolds::Everything),
+    ));
+    peer_holds.extend(route.peer_holds.iter().cloned());
+    Ok(RoutePlanOverride {
+        pretend_local_holds,
+        exclude_node_prefixes: route.exclude_node_prefixes.clone(),
+        peer_holds,
+        lead_here: true,
+    })
 }
 
 #[cfg(test)]
@@ -320,5 +419,115 @@ mod tests {
         // No exclusions means no work and no exclusion.
         let none = req(None, &[]).parse().unwrap();
         assert!(!none.excludes_peer(&peer));
+    }
+
+    fn node(first: u8) -> NodeId {
+        let mut bytes = [0x11u8; 32];
+        bytes[0] = first;
+        bytes[1] = 0x7b;
+        NodeId(bytes)
+    }
+
+    /// The route a requester planned under reaches its head read from the
+    /// head's side (#318 (b)): the head holds what the requester pretended
+    /// it held, the requester holds what it pretended about itself, and every
+    /// other machine is held to what it was held to there.
+    #[test]
+    fn a_head_plans_a_carried_route_from_its_own_side() {
+        let (head, requester, tail, other) = (node(0xaa), node(0xbb), node(0xcc), node(0xdd));
+        let mut asked = SwarmRouteRequest {
+            pretend_local_holds: Some("none".into()),
+            exclude_nodes: vec!["dd7b".into()],
+            pretend_peer_holds: Default::default(),
+        };
+        asked.pretend_peer_holds.insert("aa7b".into(), "0-3".into());
+        asked.pretend_peer_holds.insert("cc7b".into(), "4-7".into());
+        let at_requester = asked.parse().unwrap();
+        let o = led_override(Some(&carried(&at_requester)), &head, &requester).unwrap();
+        assert!(o.lead_here && !o.lets_peer_lead());
+        assert!(o.local_holds(3) && !o.local_holds(4), "the head holds 0-3");
+        assert!(
+            !o.peer_holds_shard(&requester, 0),
+            "the requester pretended to hold nothing, and still does"
+        );
+        assert!(o.peer_holds_shard(&tail, 5) && !o.peer_holds_shard(&tail, 2));
+        assert!(o.excludes_peer(&other));
+        // Nothing carried: lead here, change nothing else.
+        assert_eq!(
+            led_override(None, &head, &requester).unwrap(),
+            RoutePlanOverride::lead_here()
+        );
+    }
+
+    /// A carried route only shrinks: an entry naming the head AND other
+    /// machines still holds the others to it, and a requester that said
+    /// nothing about itself is planned as it really is.
+    #[test]
+    fn a_carried_route_never_lifts_a_restriction() {
+        let (head, requester, twin) = (node(0xaa), node(0xbb), node(0xaa));
+        let mut twin_bytes = twin.0;
+        twin_bytes[31] = 0x99;
+        let twin = NodeId(twin_bytes);
+        let route = swarmllm_types::CarriedRoute {
+            requester_holds: None,
+            exclude_node_prefixes: vec![],
+            peer_holds: vec![("aa7b".into(), PretendLocalHolds::Shards(0, 1))],
+        };
+        let o = led_override(Some(&route), &head, &requester).unwrap();
+        assert!(o.local_holds(1) && !o.local_holds(2));
+        assert!(
+            !o.peer_holds_shard(&twin, 2),
+            "another machine under the same prefix keeps its restriction"
+        );
+        assert!(o.peer_holds_shard(&requester, 9));
+    }
+
+    /// What the requester could not have planned is refused, and the head
+    /// declines the hand-off: a route excluding the head, leaving it nothing,
+    /// naming nodes by anything but a hex prefix, or naming too many.
+    #[test]
+    fn a_route_the_requester_could_not_have_planned_is_refused() {
+        let (head, requester) = (node(0xaa), node(0xbb));
+        let refuse = |route: swarmllm_types::CarriedRoute| {
+            led_override(Some(&route), &head, &requester).is_err()
+        };
+        assert!(refuse(swarmllm_types::CarriedRoute {
+            exclude_node_prefixes: vec!["aa7b".into()],
+            ..Default::default()
+        }));
+        assert!(refuse(swarmllm_types::CarriedRoute {
+            peer_holds: vec![("aa7b".into(), PretendLocalHolds::Nothing)],
+            ..Default::default()
+        }));
+        assert!(refuse(swarmllm_types::CarriedRoute {
+            exclude_node_prefixes: vec!["AA7B".into()],
+            ..Default::default()
+        }));
+        assert!(refuse(swarmllm_types::CarriedRoute {
+            exclude_node_prefixes: vec!["cc".into()],
+            ..Default::default()
+        }));
+        assert!(refuse(swarmllm_types::CarriedRoute {
+            exclude_node_prefixes: vec!["cc7b".into(); MAX_CARRIED_ENTRIES + 1],
+            ..Default::default()
+        }));
+        assert!(!refuse(swarmllm_types::CarriedRoute {
+            exclude_node_prefixes: vec!["cc7b".into(); MAX_CARRIED_ENTRIES],
+            ..Default::default()
+        }));
+        // An inverted range naming the head read as "holds nothing" past the
+        // check for `Nothing` (security review, 2026-10-21).
+        assert!(refuse(swarmllm_types::CarriedRoute {
+            peer_holds: vec![("aa7b".into(), PretendLocalHolds::Shards(3, 1))],
+            ..Default::default()
+        }));
+        assert!(refuse(swarmllm_types::CarriedRoute {
+            requester_holds: Some(PretendLocalHolds::Shards(3, 1)),
+            ..Default::default()
+        }));
+        assert!(!refuse(swarmllm_types::CarriedRoute {
+            peer_holds: vec![("aa7b".into(), PretendLocalHolds::Shards(1, 1))],
+            ..Default::default()
+        }));
     }
 }

@@ -178,6 +178,15 @@ guess set of N rows; P is the time of one pass.
      this link. Not testable through `swarm_route`: any override switches delegation off
      (`request_may_be_led_by_its_head`), so the run above was led only because the requester did
      not yet trust the far peer with the prompt.
+     **Correction (2026-10-21), recorded here so nobody builds on the rule above:** `w < P·(E − 1)`
+     prices the one-token pass as if it threw the window away. It does not: the window lands during
+     that pass and still counts at probability α (its first guess equals the token the pass chose).
+     Comparing the two as rates, `E / (w + P_g)` against `(1 + α·E) / (P_1 + α·P_g)`, waiting pays
+     only while `w < E·(P_1 + α·P_g)/(1 + α·E) − P_g` — ~220 ms on this link's figures (`P_1` 550,
+     `P_g` 600, α 0.6, γ 2), not ~700, so the 1.3x was too high. **Built 2026-10-21** with the
+     derived bound (`ngram_only_spec::worth_waiting_ms`), and the route instruction now goes with
+     the hand-off (`features::CARRIED_ROUTE`, bit 30), so a led split can be measured through
+     chosen peers.
    - **Rig:** `split_rig.sh repeat` with `SHARDS_C` (A holds the first parts and the
      drafter, gotcha #915), `RIG_NETNS=1 RIG_RTT_MS=206`; `C_MEETS_B=1` has C dial B.
    - **Built and measured (2026-10-20).** The stream through the chain: 1.24 tok/s

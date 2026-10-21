@@ -5,11 +5,14 @@
 //! leads it here with what THIS node holds — usually no small model to guess
 //! with. The requester often holds one. It follows the reply as it streams in
 //! and sends windows of guesses (`types::RequesterGuesses`); the loop leading
-//! the reply checks those that go past it each pass and never waits for one
-//! (`pipeline::ngram_only_spec`). Both ends meet here:
+//! the reply checks those that go past it each pass, and waits for the next
+//! only where it is due soon enough to pay (#318 (a),
+//! `pipeline::ngram_only_spec::worth_waiting_ms`). Both ends meet here:
 //!
 //! - the newest window, taken ONLY from the peer that handed the reply over,
 //!   only while the reply runs ([`RequesterGuessSlots::offer_from`]);
+//! - when the reply reached each length, and how long the requester takes
+//!   to answer it ([`GuessSlot::window_due_in`]) — what a wait is judged on;
 //! - the reply's token ids, recorded by the loop as it accepts them
 //!   ([`GuessSlot::record`]) and handed to the task streaming the reply
 //!   ([`GuessSlot::take_unsent`]) — the stream carries text, and a drafter
@@ -47,6 +50,9 @@ pub(crate) struct GuessSlot {
     from: Vec<u8>,
     asked: GuessesAsked,
     inner: Mutex<SlotInner>,
+    /// Woken by every window taken, for a loop waiting on one
+    /// ([`GuessSlot::wait_for_window`]).
+    arrived: tokio::sync::Notify,
 }
 
 #[derive(Default)]
@@ -56,6 +62,21 @@ struct SlotInner {
     reply: Vec<u32>,
     /// How many of them have gone out with the stream.
     sent: usize,
+    /// When the reply reached each length: `(length after a record, when)`,
+    /// one entry per [`GuessSlot::record`] that added tokens.
+    reached: Vec<(usize, std::time::Instant)>,
+    /// The requester's turnaround, ms: from the reply reaching a length to the
+    /// window drafted from it arriving here — the stream's trip out, the
+    /// drafting call and the window's trip back.
+    turnaround: crate::inference::dsd_controller::RecentMedian,
+}
+
+impl SlotInner {
+    /// When the reply reached `len` tokens.
+    fn reached_at(&self, len: usize) -> Option<std::time::Instant> {
+        let i = self.reached.partition_point(|(l, _)| *l < len);
+        self.reached.get(i).map(|(_, at)| *at)
+    }
 }
 
 /// What became of a window.
@@ -73,6 +94,7 @@ impl GuessSlot {
             from,
             asked,
             inner: Mutex::new(SlotInner::default()),
+            arrived: tokio::sync::Notify::new(),
         }
     }
 
@@ -102,9 +124,43 @@ impl GuessSlot {
         let Ok(mut inner) = self.inner.lock() else {
             return;
         };
-        if from == inner.reply.len() {
+        if from == inner.reply.len() && !tokens.is_empty() {
             inner.reply.extend_from_slice(tokens);
+            let len = inner.reply.len();
+            inner.reached.push((len, std::time::Instant::now()));
         }
+    }
+
+    /// How long until the requester's window drafted from the first
+    /// `reply_len` tokens should arrive, from its turnaround so far this reply
+    /// (#318 (a)) — zero when it is already due. `None` where none is coming
+    /// that can be timed: no window has arrived yet (nothing to time, and a
+    /// requester that never sends one must not be waited for), or the newest
+    /// already answers this much of the reply (the requester drafted what it
+    /// would from here, and drafts again only when the reply moves).
+    pub(crate) fn window_due_in(
+        &self,
+        reply_len: usize,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        let inner = self.inner.lock().ok()?;
+        let answered = inner.window.as_ref()?.after as usize;
+        if answered >= reply_len {
+            return None;
+        }
+        let turnaround = inner.turnaround.median()?;
+        let since = now.saturating_duration_since(inner.reached_at(reply_len)?);
+        let due = std::time::Duration::from_secs_f64(turnaround.max(0.0) / 1000.0);
+        Some(due.saturating_sub(since))
+    }
+
+    /// Wait until a window is taken or `deadline` passes; `false` on the
+    /// deadline. A window taken while nobody waited leaves one wake-up behind,
+    /// so the caller re-reads [`Self::guesses`] after every return.
+    pub(crate) async fn wait_for_window(&self, deadline: tokio::time::Instant) -> bool {
+        tokio::time::timeout_at(deadline, self.arrived.notified())
+            .await
+            .is_ok()
     }
 
     /// The ids recorded since the last call, for the next token streamed.
@@ -138,7 +194,18 @@ impl GuessSlot {
         {
             return Offer::Stale;
         }
+        // Timed from the moment the reply reached what the window follows.
+        // A requester drafts only once it holds part of the reply, so `after`
+        // is at least 1 from an honest one; 0 is not timed.
+        if window.after > 0 {
+            if let Some(reached) = inner.reached_at(window.after as usize) {
+                let ms = reached.elapsed().as_secs_f64() * 1000.0;
+                inner.turnaround.record(ms);
+            }
+        }
         inner.window = Some(window);
+        drop(inner);
+        self.arrived.notify_one();
         Offer::Taken
     }
 }

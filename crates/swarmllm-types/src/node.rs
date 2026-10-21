@@ -348,6 +348,13 @@ pub mod features {
     /// request goes on with chains.
     pub const DRAFT_TREES: u64 = 1 << 29;
 
+    /// Leads a split under the requester's `swarm_route` instruction (#318
+    /// (b)): a hand-off carrying `DelegatedSplit::route` is planned with it,
+    /// read from the head's side, every part of it only shrinking the plan's
+    /// candidates. A requester hands a request with an instruction only to a
+    /// head advertising this; an older head would plan without it.
+    pub const CARRIED_ROUTE: u64 = 1 << 30;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`] and
     /// [`REQUESTER_GUESSES`] beside it where they apply.
@@ -377,7 +384,8 @@ pub mod features {
         | PROMPT_ADMISSION
         | IMAGES_AT_MARKERS
         | CHAINED_STREAM
-        | DRAFT_TREES;
+        | DRAFT_TREES
+        | CARRIED_ROUTE;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

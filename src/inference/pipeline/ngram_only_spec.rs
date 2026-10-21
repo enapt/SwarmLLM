@@ -218,6 +218,109 @@ fn fixed_guess_gamma() -> bool {
     *FIXED.get_or_init(|| std::env::var("SWARMLLM_HEAD_GUESS_GAMMA").as_deref() == Ok("fixed"))
 }
 
+/// `SWARMLLM_HEAD_GUESS_WAIT=0`: never wait for the requester's next window —
+/// the rule before #318 (a), for A/B inside one binary.
+fn guess_wait_switched_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("SWARMLLM_HEAD_GUESS_WAIT").as_deref() == Ok("0"))
+}
+
+/// How long the head may wait for the requester's next window before a pass
+/// with nothing to check (#318 (a)), or `None` where waiting does not pay.
+///
+/// The choice is between two ways to spend the next moments, from a pass that
+/// would check one position:
+///
+/// - **Wait** `W` (`due_in_ms`) for the window, then check `γ` of its guesses:
+///   `E = expected_tokens_per_round(α, γ)` tokens in `W + P_g`.
+/// - **Go now** with a one-token pass, `P_1`. The window lands during it — `W`
+///   is under `P_1` wherever waiting can pay, see below — and with
+///   probability `α` its first guess is the token that pass chose, so the next
+///   pass checks the rest: `1 + E` tokens in `P_1 + P_g`. Otherwise the window
+///   is dead and the head is back where it started, one token on, in `P_1`.
+///
+/// Both end on the same state (a pass that checked a window), so they compare
+/// as rates: waiting wins while `E / (W + P_g) > (1 + α·E) / (P_1 + α·P_g)`,
+/// i.e. while `W < E·(P_1 + α·P_g) / (1 + α·E) − P_g`. That bound is under
+/// `P_1` for every `α < 1`, which is what lets "go now" assume the window
+/// lands during its pass.
+///
+/// **The plan's first rule, `W < P·(E − 1)`, was too eager** — it counted the
+/// one-token pass as if it threw the window away, where the window usually
+/// arrives during it and still counts at probability `α`. On the TH↔AU run
+/// (`P ≈ 550` ms, `α ≈ 0.6`, `γ = 2`) it allowed ~530 ms where this allows
+/// ~220. No published system waits for a drafter a round trip away: AMUSD,
+/// PEARL and SwiftSpec keep the drafter on the same machine or NVLink, where
+/// the checker never waits (searched 2026-10-21).
+///
+/// Returns the most the head should wait — a window arriving any time before
+/// it still pays — and `None` where the window is due later than that, where
+/// `γ` is zero (the head chose to check no guesses), or where a cost is
+/// unknown: unknown must not become a wait.
+fn worth_waiting_ms(
+    due_in_ms: f64,
+    one_token_ms: Option<f64>,
+    guessed_ms: Option<f64>,
+    alpha: f64,
+    gamma: u32,
+) -> Option<f64> {
+    if gamma == 0 {
+        return None;
+    }
+    let (p1, pg) = (one_token_ms?, guessed_ms?);
+    if !(p1.is_finite() && pg.is_finite() && p1 > 0.0 && pg > 0.0 && due_in_ms.is_finite()) {
+        return None;
+    }
+    let alpha = alpha.clamp(0.0, 0.999_999);
+    let e = crate::inference::dsd_controller::expected_tokens_per_round(alpha, gamma);
+    let bound = e * (p1 + alpha * pg) / (1.0 + alpha * e) - pg;
+    (bound > 0.0 && due_in_ms < bound).then_some(bound)
+}
+
+/// What this reply's waits for a window came to, for the reply's last line
+/// and for stopping: a requester whose windows keep missing the deadline is
+/// not waited for again this reply.
+#[derive(Default)]
+struct GuessWaits {
+    waits: u32,
+    paid: u32,
+    waited_ms: f64,
+}
+
+impl GuessWaits {
+    /// Waits that ran out with nothing to check outnumber the ones that paid
+    /// by more than two: the requester's windows are not coming in time.
+    fn given_up(&self) -> bool {
+        self.waits - self.paid > self.paid + 2
+    }
+}
+
+/// Wait up to `wait_ms` for a window that goes on from `generated`, and return
+/// its guesses (empty if none came in time).
+async fn guesses_after_waiting(
+    slot: &GuessSlot,
+    generated: &[u32],
+    take: usize,
+    vocab: usize,
+    wait_ms: f64,
+    waits: &mut GuessWaits,
+) -> Vec<u32> {
+    let started = tokio::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs_f64(wait_ms / 1000.0);
+    let mut guesses = Vec::new();
+    while guesses.is_empty() && slot.wait_for_window(deadline).await {
+        guesses = requester_drafts(slot, generated, take, vocab);
+    }
+    if guesses.is_empty() {
+        // The deadline passed; a window may have landed with it.
+        guesses = requester_drafts(slot, generated, take, vocab);
+    }
+    waits.waits += 1;
+    waits.paid += u32::from(!guesses.is_empty());
+    waits.waited_ms += started.elapsed().as_secs_f64() * 1000.0;
+    guesses
+}
+
 /// Up to `max` of the requester's guesses that go on from `generated`, cut at
 /// the first id outside the model's vocabulary: a window comes off the wire,
 /// and an id this node cannot embed would fail the reply.
@@ -506,6 +609,7 @@ impl PipelineExecutor {
         let mut guess_gamma = cfg.guesses_per_check();
         let mut check_cost = crate::inference::dsd_controller::CheckCost::default();
         let mut guess_acceptance = crate::inference::dsd_controller::AcceptanceEstimate::new();
+        let mut waits = GuessWaits::default();
         // SWARM-SPEC L1: pending truncate carries over to the NEXT verify
         // call. When a verify round partially rejects drafts, the remote
         // KV still holds k+1 positions from this round, but only
@@ -523,20 +627,46 @@ impl PipelineExecutor {
             let this_gamma = max_draft.min(remaining).max(1);
 
             // ── The requester's guesses, then the n-gram cascade ──
-            let guessed = guess_slot
+            let take = guess_gamma.min(remaining);
+            let mut guessed = guess_slot
                 .as_deref()
-                .map(|slot| {
-                    requester_drafts(slot, &generated, guess_gamma.min(remaining) as usize, vocab)
-                })
+                .map(|slot| requester_drafts(slot, &generated, take as usize, vocab))
                 .unwrap_or_default();
-            let from_requester = !guessed.is_empty();
-            let drafts = if from_requester {
-                guessed
-            } else if cfg.ngram_lookup_enabled {
+            let looked_up = if guessed.is_empty() && cfg.ngram_lookup_enabled {
                 super::speculative::ngram_lookup_drafts(cfg, &prompt_tokens, &generated, this_gamma)
             } else {
                 Vec::new()
             };
+            // Nothing to check but one position: wait for the requester's next
+            // window where it is due soon enough to pay (#318 (a)).
+            if guessed.is_empty() && looked_up.is_empty() && !guess_wait_switched_off() {
+                if let Some(slot) = guess_slot.as_deref().filter(|_| !waits.given_up()) {
+                    let wait_ms = slot
+                        .window_due_in(generated.len(), std::time::Instant::now())
+                        .and_then(|due| {
+                            worth_waiting_ms(
+                                due.as_secs_f64() * 1000.0,
+                                check_cost.predict(1),
+                                check_cost.predict(take + 1),
+                                guess_acceptance.alpha(),
+                                take,
+                            )
+                        });
+                    if let Some(wait_ms) = wait_ms {
+                        guessed = guesses_after_waiting(
+                            slot,
+                            &generated,
+                            take as usize,
+                            vocab,
+                            wait_ms,
+                            &mut waits,
+                        )
+                        .await;
+                    }
+                }
+            }
+            let from_requester = !guessed.is_empty();
+            let drafts = if from_requester { guessed } else { looked_up };
 
             if drafts.is_empty() {
                 // ── Fallback: single-token verify (γ=0 batch = 1 position) ──
@@ -759,6 +889,9 @@ impl PipelineExecutor {
             guesses_checked,
             guesses_kept,
             guess_gamma,
+            guess_waits = waits.waits,
+            guess_waits_paid = waits.paid,
+            guess_waited_ms = waits.waited_ms.round(),
             check_fit = ?check_cost.fit().map(|(fixed, per)| (fixed.round(), per.round())),
             coupled = noise.is_some(),
             payoff_x100 = DIST_SPEC_PAYOFF_X100.load(std::sync::atomic::Ordering::Relaxed),
@@ -1013,5 +1146,214 @@ mod requester_guess_tests {
             4,
             "the A/B switch keeps the old rule"
         );
+    }
+}
+
+#[cfg(test)]
+mod guess_wait_tests {
+    use super::*;
+    use crate::daemon::state::requester_guesses::RequesterGuessSlots;
+    use crate::types::{GuessesAsked, RequesterGuesses};
+    use rand::{Rng, SeedableRng};
+
+    /// The TH↔AU run's figures (10-20): a one-token pass ~550 ms, a guessed
+    /// one ~600, guesses kept ~60% of the time, two a check. A window due in
+    /// 100 ms is worth waiting for, up to ~220 ms; one due in 300 ms is not —
+    /// the plan's first rule, `W < P·(E − 1)`, would have waited for it
+    /// (~530 ms allowed).
+    #[test]
+    fn the_head_waits_only_for_a_window_due_soon_enough_to_pay() {
+        let bound = worth_waiting_ms(100.0, Some(550.0), Some(600.0), 0.6, 2)
+            .expect("a window due in 100 ms pays");
+        assert!((bound - 219.7).abs() < 1.0, "bound {bound}");
+        assert_eq!(
+            worth_waiting_ms(300.0, Some(550.0), Some(600.0), 0.6, 2),
+            None
+        );
+        let e = crate::inference::dsd_controller::expected_tokens_per_round(0.6, 2);
+        assert!(300.0 < 550.0 * (e - 1.0), "the old rule would have waited");
+    }
+
+    /// Unknown must not become a wait, and a head that chose to check no
+    /// guesses has nothing to wait for.
+    #[test]
+    fn no_wait_on_an_unknown_cost_or_no_guesses() {
+        assert_eq!(worth_waiting_ms(10.0, None, Some(600.0), 0.6, 2), None);
+        assert_eq!(worth_waiting_ms(10.0, Some(550.0), None, 0.6, 2), None);
+        assert_eq!(
+            worth_waiting_ms(10.0, Some(550.0), Some(600.0), 0.6, 0),
+            None
+        );
+        assert_eq!(
+            worth_waiting_ms(f64::NAN, Some(550.0), Some(600.0), 0.6, 2),
+            None
+        );
+    }
+
+    /// The bound is under a one-token pass for every acceptance — the
+    /// assumption "go now" is priced on (the window lands during that pass).
+    #[test]
+    fn the_wait_is_always_shorter_than_a_one_token_pass() {
+        for alpha in [0.05, 0.3, 0.6, 0.9, 0.99] {
+            for gamma in 1..=8 {
+                for (p1, pg) in [
+                    (550.0, 600.0),
+                    (40.0, 41.0),
+                    (800.0, 2000.0),
+                    (100.0, 100.0),
+                ] {
+                    if let Some(bound) = worth_waiting_ms(0.0, Some(p1), Some(pg), alpha, gamma) {
+                        assert!(bound < p1, "α {alpha} γ {gamma}: {bound} ≥ {p1}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Run the two policies the rule compares — wait for the window, or run a
+    /// one-token pass and use the window after it if its first guess matches —
+    /// and check the measured rates cross where the bound says.
+    #[test]
+    fn the_bound_is_where_waiting_stops_beating_a_one_token_pass() {
+        let (p1, pg, alpha, gamma) = (550.0, 600.0, 0.6, 2u32);
+        let bound = worth_waiting_ms(0.0, Some(p1), Some(pg), alpha, gamma).unwrap();
+        // Tokens a second over many passes. A guessed pass keeps each of `gamma`
+        // guesses while every one before it was kept, plus the target's own
+        // token; the window it used is then spent and the next is due `w` later.
+        let rate = |w: f64, wait: bool| -> f64 {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+            let guessed = |rng: &mut rand::rngs::StdRng| {
+                let mut kept = 0;
+                while kept < gamma && rng.gen::<f64>() < alpha {
+                    kept += 1;
+                }
+                f64::from(kept + 1)
+            };
+            let (mut tokens, mut ms) = (0.0, 0.0);
+            for _ in 0..200_000 {
+                if wait {
+                    tokens += guessed(&mut rng);
+                    ms += w + pg;
+                } else {
+                    tokens += 1.0;
+                    ms += p1;
+                    if rng.gen::<f64>() < alpha {
+                        tokens += guessed(&mut rng);
+                        ms += pg;
+                    }
+                }
+            }
+            tokens / ms
+        };
+        assert!(rate(bound * 0.8, true) > rate(bound * 0.8, false));
+        assert!(rate(bound * 1.2, true) < rate(bound * 1.2, false));
+    }
+
+    fn open_slot() -> (
+        std::sync::Arc<RequesterGuessSlots>,
+        crate::daemon::state::requester_guesses::OpenSlot,
+        uuid::Uuid,
+    ) {
+        let slots = std::sync::Arc::new(RequesterGuessSlots::default());
+        let wire = uuid::Uuid::new_v4();
+        let open = slots
+            .open(
+                wire,
+                uuid::Uuid::new_v4(),
+                vec![1],
+                GuessesAsked {
+                    coupling_seed: None,
+                    prompt_tokens: 3,
+                },
+            )
+            .unwrap();
+        (slots, open, wire)
+    }
+
+    fn window(wire: uuid::Uuid, after: u32, tokens: &[u32]) -> RequesterGuesses {
+        RequesterGuesses {
+            request_id: wire,
+            after,
+            tokens: tokens.to_vec(),
+        }
+    }
+
+    /// A window is due only from a requester that has sent one, and only
+    /// while the newest does not already answer the reply as it stands.
+    #[test]
+    fn a_window_is_due_only_from_a_requester_that_sends_them() {
+        let (slots, open, wire) = open_slot();
+        let slot = open.slot();
+        slot.record(0, &[5, 6]);
+        let _ = slot.take_unsent();
+        let now = std::time::Instant::now();
+        assert_eq!(slot.window_due_in(2, now), None, "nothing heard yet");
+        assert_eq!(
+            slots.offer_from(&[1], window(wire, 2, &[7])),
+            crate::daemon::state::requester_guesses::Offer::Taken
+        );
+        assert_eq!(
+            slot.window_due_in(2, std::time::Instant::now()),
+            None,
+            "the newest window already answers this much of the reply"
+        );
+        slot.record(2, &[9]);
+        let due = slot
+            .window_due_in(3, std::time::Instant::now())
+            .expect("the reply moved past the window: the next is due");
+        assert!(
+            due < std::time::Duration::from_secs(1),
+            "timed from the first window: {due:?}"
+        );
+    }
+
+    /// The wait ends when a window arrives, and at its deadline when none does.
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_ends_on_a_window_or_its_deadline() {
+        let (slots, open, wire) = open_slot();
+        let slot = open.slot().clone();
+        slot.record(0, &[5]);
+        let _ = slot.take_unsent();
+        let mut waits = GuessWaits::default();
+        let got = guesses_after_waiting(&slot, &[5], 2, 1000, 200.0, &mut waits).await;
+        assert!(got.is_empty());
+        assert_eq!((waits.waits, waits.paid), (1, 0));
+        assert!(
+            waits.waited_ms >= 199.0,
+            "ran to its deadline: {}",
+            waits.waited_ms
+        );
+
+        let sender = tokio::spawn({
+            let slots = slots.clone();
+            async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                slots.offer_from(&[1], window(wire, 1, &[7, 8, 9]));
+            }
+        });
+        let started = tokio::time::Instant::now();
+        let got = guesses_after_waiting(&slot, &[5], 2, 1000, 200.0, &mut waits).await;
+        sender.await.unwrap();
+        assert_eq!(got, vec![7, 8]);
+        assert_eq!((waits.waits, waits.paid), (2, 1));
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    /// Waits that keep running out stop: the requester is not keeping up.
+    #[test]
+    fn a_requester_whose_windows_keep_missing_is_not_waited_for() {
+        let mut waits = GuessWaits {
+            waits: 2,
+            paid: 0,
+            waited_ms: 0.0,
+        };
+        assert!(!waits.given_up(), "two misses is still trying");
+        waits.waits = 3;
+        assert!(waits.given_up(), "three misses and nothing paid");
+        waits.paid = 1;
+        waits.waits = 4;
+        assert!(!waits.given_up(), "one paid buys another try");
+        waits.waits = 5;
+        assert!(waits.given_up());
     }
 }

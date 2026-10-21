@@ -4233,7 +4233,8 @@ processor nodes, the requester holding none of it and Qwen2.5-0.5B whole, every 
 led without guesses 1.27-1.31 tok/s, driven with the drafter (α 0.65-0.67, γ 2) 1.10. The trip
 cost more than the guesses earned.
 
-**The design.** The head leads and NEVER waits for a guess. The requester follows the reply as it
+**The design.** The head leads, and waits for a guess only where the wait pays (below, 2026-10-21).
+The requester follows the reply as it
 streams in — it receives it anyway — and drafts ahead of it with its own drafter
 (`pipeline::requester_guesses`: `EngineDrafter::follow` + `draft`, a chunk of `guesses_per_check`
 at a time, kept up to four checks' worth ahead), sending each window to the head
@@ -4249,8 +4250,30 @@ Distance" (arXiv 2606.25091) prefers a drafter beside the target over a client's
 alternative here is a head with none.
 
 **What a change must keep:**
-- **Never wait for a window.** The loop asks the slot and moves on; a stall waiting on the
-  requester would put its trip back into the pass.
+- **Wait for a window only where it pays** (2026-10-21, #318 (a); it was "never wait"). On the
+  real TH↔AU run 65 of 109 passes checked one token: no fresh window was there, because the
+  requester's drafter took 200-450 ms after a miss. Where neither the requester's window nor
+  prompt lookup has anything to check, the loop asks the slot when the next window is due
+  (`GuessSlot::window_due_in`: the requester's turnaround this reply — from the reply reaching a
+  length to the window drafted from it arriving, the median of the last 8 — less the time since
+  the reply reached its current length; `None` before any window arrived, or while the newest
+  already answers the reply) and waits for it only while `W < E·(P_1 + α·P_g)/(1 + α·E) − P_g`
+  (`ngram_only_spec::worth_waiting_ms`; `P_1`, `P_g` the fitted check cost at 1 and γ+1
+  positions, `E = expected_tokens_per_round(α, γ)`), up to that bound, waking on the window
+  (`GuessSlot::wait_for_window`, a `Notify` the offer wakes). The derivation: going now runs a
+  one-token pass, during which the window lands, and it still counts at probability α (its
+  first guess = the token that pass chose) — so the two choices compare as `E / (W + P_g)`
+  against `(1 + α·E) / (P_1 + α·P_g)`. **The plan's first rule, `W < P·(E − 1)`, was too eager**:
+  it treated the one-token pass as throwing the window away. TH↔AU's figures (`P_1` 550, `P_g`
+  600, α 0.6, γ 2): ~220 ms allowed, not ~530. The bound is always under `P_1` (tested), which
+  is what "the window lands during it" rests on. Unknown cost, γ = 0, or a requester whose waits
+  ran out three more times than they paid (`GuessWaits::given_up`): no wait. No published
+  system waits for a drafter a round trip away (AMUSD, PEARL, SwiftSpec keep it beside the
+  checker; searched 2026-10-21). The completion line reports `guess_waits`, `guess_waits_paid`,
+  `guess_waited_ms`. A/B `SWARMLLM_HEAD_GUESS_WAIT=0`; tests
+  `the_head_waits_only_for_a_window_due_soon_enough_to_pay`,
+  `the_bound_is_where_waiting_stops_beating_a_one_token_pass` (both policies simulated: waiting
+  wins at 0.8× the bound and loses at 1.2×), `the_wait_ends_on_a_window_or_its_deadline`.
 - **The reply's ids.** The head's stream carries text; a drafter reads ids. The loop records each
   token in the request's slot BEFORE it emits it (`GuessSlot::record`, the first token too), and
   the task streaming the reply attaches the new ones to the next `StreamingToken`
@@ -4321,6 +4344,36 @@ alternative here is a head with none.
 (`pipeline::requester_guesses`); `a_forward_naming_a_token_the_table_has_no_row_for_is_refused`
 (`model_worker`); the wire
 pair in `swarmllm-types`. A/B in one binary: `SWARMLLM_REQUESTER_GUESSES=0` on the requester.
+
+### A route instruction goes to the head with the request (2026-10-21, #318 (b))
+
+**The gap.** Any `swarm_route` instruction switched the hand-off off
+(`request_may_be_led_by_its_head`: "a peer delegated to us carries `lead_here`"), so a led split
+could not be measured through chosen peers — the TH↔AU run above was led only because the
+requester did not yet trust the far peer with the prompt, and its "driven" arm, sent with an
+override, measured the driven path again.
+
+**The design.** Only `lead_here` keeps a request here now. Any other instruction travels with the
+hand-off (`DelegatedSplit::route` = `route_override::carried`, unchanged) to a head advertising
+`features::CARRIED_ROUTE` (bit 30, in `ALL`), which plans under it read from its own side
+(`route_override::led_override`): a `peer_holds` entry naming the head (the first, as everywhere) is
+what the head pretends to hold; `requester_holds` — what the requester pretended about itself —
+goes FIRST in the head's `peer_holds`, for the authenticated sender's id, so it decides for the
+requester as it did there (a requester that said nothing is `Everything`); exclusions go on as
+they are. **Every part only shrinks**: the entry naming the head stays in `peer_holds` too, since
+a short prefix may name other machines, and dropping it would lift their restriction (test
+`a_carried_route_never_lifts_a_restriction`). A route excluding the head, leaving it nothing,
+naming a node by anything but a 4-64 character lowercase hex prefix, naming more than 64 per
+list, or a range of shards that ends before it starts (the request API refuses one; the wire does
+not, and one naming the head read as "holds nothing" — security review, 2026-10-21) is refused before the reply is registered (`DELEGATED_SPLIT_ROUTE_REFUSED`), and the
+requester runs the plan it has, as for any refusal before a token. **One answer for "may this head
+lead it"**: `remote_generate::features_a_head_needs` (`DELEGATED_SPLIT`, plus `CARRIED_ROUTE` for a
+request with an instruction), asked by `delegation_eligible` AND by the planner pricing a chain as
+led (`PromptPlan::head_features` → `RingFacts::leads_splits`), so a chain is never priced as led by
+a head the hand-off then passes over. The head's `delegation: submitted` line says
+`route_carried`. What it cannot do: make a head lead a model whose first layers it does not hold,
+or reach any request but the one it came with. Tests `a_head_plans_a_carried_route_from_its_own_side`,
+`a_route_the_requester_could_not_have_planned_is_refused`, the wire pair in `swarmllm-types`.
 
 ## A split checks a tree of guesses (2026-10-20, #134)
 

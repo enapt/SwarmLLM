@@ -91,6 +91,11 @@ pub struct PromptPlan {
     /// `false` where no request is behind the plan: priced as driven from
     /// here, exactly as before.
     pub(crate) head_may_lead: bool,
+    /// The features a head must advertise to lead this request
+    /// (`remote_generate::features_a_head_needs`, #318 (b)). The planner asks
+    /// for `DELEGATED_SPLIT` beside it whatever it holds, so the default (0)
+    /// asks for nothing more.
+    pub(crate) head_features: u64,
     /// The peers believed to hold the opening of this prompt for a WHOLE-MODEL
     /// run, with how many tokens of it: what this node handed each in the
     /// last few minutes (`pipeline::handoff_prompt_cache`, FUTURE_WORK #3 (c)).
@@ -137,8 +142,9 @@ impl PromptPlan {
     /// This plan, for a request the delegated split would take
     /// (`remote_generate::request_may_be_led_by_its_head`). Set where
     /// [`Self::with_reply_of_at_most`] is.
-    pub(crate) fn with_head_leading(mut self, may_lead: bool) -> Self {
+    pub(crate) fn with_head_leading(mut self, may_lead: bool, head_features: u64) -> Self {
         self.head_may_lead = may_lead;
+        self.head_features = head_features;
         self
     }
 
@@ -262,6 +268,7 @@ pub(crate) fn plan_prompt(state: &SharedState, request: &InferenceRequest) -> Op
         // `with_guessing_ahead`, beside the fallback plan.
         reply_tokens_at_most: None,
         head_may_lead: false,
+        head_features: 0,
         may_guess_ahead: false,
         handed_off: if crate::inference::pipeline::remote_generate::request_may_be_handed_off(
             state, request,

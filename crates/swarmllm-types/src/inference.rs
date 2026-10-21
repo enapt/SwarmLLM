@@ -1232,6 +1232,28 @@ pub struct DelegatedSplit {
     /// head advertising `features::REQUESTER_GUESSES`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guesses: Option<GuessesAsked>,
+    /// The requester's `swarm_route` instruction, for the head to plan under
+    /// (#318 (b)). Set only for a head advertising `features::CARRIED_ROUTE`;
+    /// a request with an instruction is never handed to one that does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<CarriedRoute>,
+}
+
+/// A requester's `swarm_route` instruction as its head receives it (#318 (b)).
+/// Every part of it only SHRINKS the head's candidate set, as it shrank the
+/// requester's; the head reads it from where it stands
+/// (`route_override::led_override`): an entry naming the head is what the
+/// head pretends to hold, and `requester_holds` applies to the peer that
+/// handed the request over.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CarriedRoute {
+    /// The requester's `pretend_local_holds` — about the requester itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_holds: Option<PretendLocalHolds>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_node_prefixes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peer_holds: Vec<(String, PretendLocalHolds)>,
 }
 
 /// What a requester that will guess for a split's head tells it (#318).
@@ -1590,6 +1612,11 @@ mod delegated_split_wire_tests {
                 coupling_seed: Some(7),
                 prompt_tokens: 12,
             }),
+            route: Some(CarriedRoute {
+                requester_holds: Some(PretendLocalHolds::Nothing),
+                exclude_node_prefixes: vec!["abcd".into()],
+                peer_holds: vec![("bf7b".into(), PretendLocalHolds::Shards(4, 7))],
+            }),
         }));
         let bytes = serde_json::to_vec(&sent).unwrap();
         let back: RemoteGenerateRequest = serde_json::from_slice(&bytes).unwrap();
@@ -1604,6 +1631,13 @@ mod delegated_split_wire_tests {
                 prompt_tokens: 12,
             })
         );
+        let route = d.route.expect("the route survives the wire");
+        assert_eq!(route.requester_holds, Some(PretendLocalHolds::Nothing));
+        assert_eq!(route.exclude_node_prefixes, vec!["abcd".to_string()]);
+        assert_eq!(
+            route.peer_holds,
+            vec![("bf7b".to_string(), PretendLocalHolds::Shards(4, 7))]
+        );
     }
 
     /// A delegation that will not guess, and a token carrying no ids, are
@@ -1615,9 +1649,11 @@ mod delegated_split_wire_tests {
             messages: vec![],
             tools: None,
             guesses: None,
+            route: None,
         }));
         let json = serde_json::to_value(&sent).unwrap();
         assert!(json["delegation"].get("guesses").is_none(), "{json}");
+        assert!(json["delegation"].get("route").is_none(), "{json}");
         let token = StreamingToken {
             request_id: uuid::Uuid::nil(),
             token_id: 3,

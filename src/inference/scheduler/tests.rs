@@ -5067,6 +5067,7 @@ fn the_next_turn_of_a_split_goes_to_the_peer_holding_its_opening() {
                     split_openings,
                     reply_tokens_at_most: None,
                     head_may_lead: false,
+                    head_features: 0,
                     handed_off: Vec::new(),
                     may_guess_ahead: false,
                 },

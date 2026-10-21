@@ -541,6 +541,13 @@ async fn stream_reply_to_requester(
 pub(crate) const DELEGATED_SPLIT_NOT_LED: &str =
     "this node cannot lead a split of that model: it does not hold its first layers";
 
+/// A delegated split whose carried route this node will not plan under
+/// (`route_override::led_override`, #318 (b)). Like [`DELEGATED_SPLIT_NOT_LED`],
+/// it reaches the requester before any token, and the requester runs its own
+/// plan.
+pub(crate) const DELEGATED_SPLIT_ROUTE_REFUSED: &str =
+    "this node cannot lead that split under the route it came with";
+
 /// Sets a request's cancel flag when dropped — on an abort as much as on
 /// completion.
 ///
@@ -622,6 +629,38 @@ pub(super) async fn handle_delegated_split(
         return;
     }
 
+    // Lead it here, under what the requester asked for, read from this side
+    // (#318 (b)). A route it could not have planned is declined, and the
+    // requester leads the plan it has.
+    let requester = libp2p::PeerId::from_bytes(&sender_bytes)
+        .ok()
+        .and_then(|p| crate::network::transport::peer_id_to_node_id(&p));
+    let route_carried = delegation.route.is_some();
+    let route = match requester.as_ref().map(|requester| {
+        crate::inference::route_override::led_override(
+            delegation.route.as_ref(),
+            shared_state.identity.node_id(),
+            requester,
+        )
+    }) {
+        Some(Ok(route)) => route,
+        refused => {
+            let why = match refused {
+                Some(Err(why)) => why,
+                _ => "its sender is not a node id",
+            };
+            tracing::warn!(%request_id, why, "delegated split: refusing the route it came with");
+            send_refusal(
+                &network_tx,
+                sender_bytes,
+                request_id,
+                format!("{DELEGATED_SPLIT_ROUTE_REFUSED}: {why}"),
+            )
+            .await;
+            return;
+        }
+    };
+
     shared_state
         .retained_replies
         .start(request_id, sender_bytes.clone());
@@ -644,7 +683,7 @@ pub(super) async fn handle_delegated_split(
         crate::types::KeepAsked::Unasked,
     );
     request.cancel = Some(cancel.clone());
-    request.route_override = Some(crate::inference::route_override::RoutePlanOverride::lead_here());
+    request.route_override = Some(route);
     let led_id = request.id;
     // Open while the reply runs, on every way it ends (the guard drops with
     // this handler, aborted or not). None where the requester's id is already
@@ -668,6 +707,7 @@ pub(super) async fn handle_delegated_split(
         %led_id,
         guesses_asked,
         guesses_taken = guess_slot.is_some(),
+        route_carried,
         "delegated split: submitted to this node's router"
     );
     let gen_fut = tokio::spawn(async move {

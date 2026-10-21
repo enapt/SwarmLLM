@@ -8,9 +8,10 @@
 //! family whole. It follows the reply as its ids stream in
 //! (`StreamingToken::reply_ids`), drafts ahead of it, and sends each window to
 //! the head (`SwarmMessage::RequesterGuesses`). The head checks those that go
-//! past its reply each pass and never waits for one; a guess is kept only
-//! where the target's own sample equals it, so a late or wrong window costs
-//! rows, never a token.
+//! past its reply each pass, and waits for the next window only where it is
+//! due soon enough to pay (`ngram_only_spec::worth_waiting_ms`, #318 (a)); a
+//! guess is kept only where the target's own sample equals it, so a late or
+//! wrong window costs rows, never a token.
 //!
 //! No published system does this (prior-art search, 2026-10-20); its parts
 //! are AMUSD's rollback, PEARL's post-verify drafting and PipeInfer's handling
