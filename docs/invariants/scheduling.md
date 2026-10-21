@@ -4270,7 +4270,13 @@ alternative here is a head with none.
   ran out three more times than they paid (`GuessWaits::given_up`): no wait. No published
   system waits for a drafter a round trip away (AMUSD, PEARL, SwiftSpec keep it beside the
   checker; searched 2026-10-21). The completion line reports `guess_waits`, `guess_waits_paid`,
-  `guess_waited_ms`. A/B `SWARMLLM_HEAD_GUESS_WAIT=0`; tests
+  `guess_waited_ms`, and why it did not wait: `guess_wait_asked` (passes with nothing to check),
+  `guess_wait_untimed` (no window to time), and the recent medians `guess_due_ms` /
+  `guess_bound_ms`. **It pays only with the requester NEAR the head and the tail far**: on the
+  card-tail rig (10-21, every packet 206 ms, the requester as far as the tail) it never waited in
+  ~60 one-token passes a reply — the bound was ~160-175 ms (`P_1` ≈ 348, a 4-guess check ≈ 440,
+  α 0.62-0.68) and a window cannot come back sooner than a round trip. A/B
+  `SWARMLLM_HEAD_GUESS_WAIT=0`; tests
   `the_head_waits_only_for_a_window_due_soon_enough_to_pay`,
   `the_bound_is_where_waiting_stops_beating_a_one_token_pass` (both policies simulated: waiting
   wins at 0.8× the bound and loses at 1.2×), `the_wait_ends_on_a_window_or_its_deadline`.

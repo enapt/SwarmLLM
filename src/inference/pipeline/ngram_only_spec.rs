@@ -264,27 +264,51 @@ fn worth_waiting_ms(
     alpha: f64,
     gamma: u32,
 ) -> Option<f64> {
+    wait_bound_ms(one_token_ms, guessed_ms, alpha, gamma)
+        .filter(|&bound| due_in_ms.is_finite() && due_in_ms < bound)
+}
+
+/// The bound of [`worth_waiting_ms`] — the latest a window may land and still
+/// pay — whatever the window's due time; `None` where no wait can pay.
+fn wait_bound_ms(
+    one_token_ms: Option<f64>,
+    guessed_ms: Option<f64>,
+    alpha: f64,
+    gamma: u32,
+) -> Option<f64> {
     if gamma == 0 {
         return None;
     }
     let (p1, pg) = (one_token_ms?, guessed_ms?);
-    if !(p1.is_finite() && pg.is_finite() && p1 > 0.0 && pg > 0.0 && due_in_ms.is_finite()) {
+    if !(p1.is_finite() && pg.is_finite() && p1 > 0.0 && pg > 0.0) {
         return None;
     }
     let alpha = alpha.clamp(0.0, 0.999_999);
     let e = crate::inference::dsd_controller::expected_tokens_per_round(alpha, gamma);
     let bound = e * (p1 + alpha * pg) / (1.0 + alpha * e) - pg;
-    (bound > 0.0 && due_in_ms < bound).then_some(bound)
+    (bound > 0.0).then_some(bound)
 }
 
 /// What this reply's waits for a window came to, for the reply's last line
 /// and for stopping: a requester whose windows keep missing the deadline is
 /// not waited for again this reply.
+///
+/// It also says why the head did NOT wait — how often there was nothing to
+/// check, how often no window could be timed, and the recent due times against
+/// the recent bounds — so a run that never waits shows whether the windows
+/// came too late or the rule never had a figure (gotcha #146: a mechanism with
+/// no trigger reads exactly like no mechanism).
 #[derive(Default)]
 struct GuessWaits {
     waits: u32,
     paid: u32,
     waited_ms: f64,
+    /// Passes with nothing to check while a requester was sending windows.
+    asked: u32,
+    /// Of those, the ones with no window to time (`GuessSlot::window_due_in`).
+    untimed: u32,
+    due_ms: crate::inference::dsd_controller::RecentMedian,
+    bound_ms: crate::inference::dsd_controller::RecentMedian,
 }
 
 impl GuessWaits {
@@ -292,6 +316,18 @@ impl GuessWaits {
     /// by more than two: the requester's windows are not coming in time.
     fn given_up(&self) -> bool {
         self.waits - self.paid > self.paid + 2
+    }
+
+    /// One pass with nothing to check: when the window was due, and the bound.
+    fn note(&mut self, due_ms: Option<f64>, bound_ms: Option<f64>) {
+        self.asked += 1;
+        match due_ms {
+            Some(due) => self.due_ms.record(due),
+            None => self.untimed += 1,
+        }
+        if let Some(bound) = bound_ms {
+            self.bound_ms.record(bound);
+        }
     }
 }
 
@@ -641,17 +677,18 @@ impl PipelineExecutor {
             // window where it is due soon enough to pay (#318 (a)).
             if guessed.is_empty() && looked_up.is_empty() && !guess_wait_switched_off() {
                 if let Some(slot) = guess_slot.as_deref().filter(|_| !waits.given_up()) {
-                    let wait_ms = slot
+                    let due_ms = slot
                         .window_due_in(generated.len(), std::time::Instant::now())
-                        .and_then(|due| {
-                            worth_waiting_ms(
-                                due.as_secs_f64() * 1000.0,
-                                check_cost.predict(1),
-                                check_cost.predict(take + 1),
-                                guess_acceptance.alpha(),
-                                take,
-                            )
-                        });
+                        .map(|due| due.as_secs_f64() * 1000.0);
+                    let (one_token, guessed_check, alpha) = (
+                        check_cost.predict(1),
+                        check_cost.predict(take + 1),
+                        guess_acceptance.alpha(),
+                    );
+                    waits.note(due_ms, wait_bound_ms(one_token, guessed_check, alpha, take));
+                    let wait_ms = due_ms.and_then(|due| {
+                        worth_waiting_ms(due, one_token, guessed_check, alpha, take)
+                    });
                     if let Some(wait_ms) = wait_ms {
                         guessed = guesses_after_waiting(
                             slot,
@@ -892,6 +929,10 @@ impl PipelineExecutor {
             guess_waits = waits.waits,
             guess_waits_paid = waits.paid,
             guess_waited_ms = waits.waited_ms.round(),
+            guess_wait_asked = waits.asked,
+            guess_wait_untimed = waits.untimed,
+            guess_due_ms = ?waits.due_ms.median().map(f64::round),
+            guess_bound_ms = ?waits.bound_ms.median().map(f64::round),
             check_fit = ?check_cost.fit().map(|(fixed, per)| (fixed.round(), per.round())),
             coupled = noise.is_some(),
             payoff_x100 = DIST_SPEC_PAYOFF_X100.load(std::sync::atomic::Ordering::Relaxed),
@@ -1344,8 +1385,7 @@ mod guess_wait_tests {
     fn a_requester_whose_windows_keep_missing_is_not_waited_for() {
         let mut waits = GuessWaits {
             waits: 2,
-            paid: 0,
-            waited_ms: 0.0,
+            ..GuessWaits::default()
         };
         assert!(!waits.given_up(), "two misses is still trying");
         waits.waits = 3;
@@ -1355,5 +1395,25 @@ mod guess_wait_tests {
         assert!(!waits.given_up(), "one paid buys another try");
         waits.waits = 5;
         assert!(waits.given_up());
+    }
+
+    /// A reply that never waited says why: the windows came later than the
+    /// bound, or none could be timed (card-tail rig, 10-21: 0 waits in 60
+    /// one-token passes, with the requester as far away as the tail).
+    #[test]
+    fn a_reply_that_did_not_wait_says_why() {
+        let mut waits = GuessWaits::default();
+        waits.note(Some(300.0), Some(160.0));
+        waits.note(Some(320.0), Some(170.0));
+        waits.note(None, None);
+        assert_eq!((waits.asked, waits.untimed, waits.waits), (3, 1, 0));
+        assert_eq!(waits.due_ms.median(), Some(300.0));
+        assert_eq!(waits.bound_ms.median(), Some(160.0));
+        assert!(wait_bound_ms(Some(348.0), Some(440.0), 0.62, 4)
+            .is_some_and(|b| (b - 157.9).abs() < 1.0));
+        assert_eq!(
+            worth_waiting_ms(300.0, Some(348.0), Some(440.0), 0.62, 4),
+            None
+        );
     }
 }
