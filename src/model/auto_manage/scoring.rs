@@ -356,6 +356,19 @@ impl AutoShardManager {
                     "DIAG: fetching this computer's part of a chain of nearby machines for a model none of them can run whole (Stage 3)"
                 );
             }
+            // A split driven from here ran with nothing to guess for it: this
+            // model is the drafter it lacked (`coverage::drafter`, #134). Its
+            // parts skip the replica target and the hash ring — a drafter must
+            // be HERE — and nothing else; prune keeps them
+            // (`copy_drafts_for_a_split`).
+            let drafter_parts = self.parts_of_a_drafter_to_fetch(&manifest);
+            if !drafter_parts.is_empty() {
+                tracing::info!(
+                    model = %manifest.id,
+                    parts = drafter_parts.len(),
+                    "DIAG: fetching a model to guess ahead for a split that had none (#134)"
+                );
+            }
 
             // -- Spread bonus: deprioritize models we already have many shards of --
             let local_fraction = if manifest.shard_count > 0 {
@@ -470,11 +483,13 @@ impl AutoShardManager {
                 let carried_part = carry_parts.contains(&shard.index);
                 let completing_part = completing_parts.contains(&shard.index);
                 let near_part = near_parts.contains(&shard.index);
+                let drafter_part = drafter_parts.contains(&shard.index);
                 if holder_count >= target_replicas
                     && !in_configured_range
                     && !carried_part
                     && !completing_part
                     && !near_part
+                    && !drafter_part
                 {
                     tracing::debug!(
                         model = %manifest.id,
@@ -501,6 +516,7 @@ impl AutoShardManager {
                     && !already_hosting_model
                     && !carried_part
                     && !near_part
+                    && !drafter_part
                 {
                     let replicas_needed =
                         (target_replicas as u32).saturating_sub(holder_count as u32);
@@ -730,7 +746,7 @@ impl AutoShardManager {
                 // A part fetched for what the copies can DO — carry the model
                 // (#231) or complete a near chain (Stage 3) — goes ahead of
                 // routine replication within the budget.
-                let carry_bonus = if carried_part || near_part {
+                let carry_bonus = if carried_part || near_part || drafter_part {
                     super::coverage::CARRY_BONUS
                 } else {
                     1.0

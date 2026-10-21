@@ -11,7 +11,11 @@ mod dsd_stream;
 mod dsd_tree;
 mod engine_drafter;
 pub(crate) mod handoff_prompt_cache;
-pub(crate) use engine_drafter::drafter_to_leave_room_for;
+#[cfg(test)]
+pub(crate) use engine_drafter::note_split_wanting_a_drafter;
+pub(crate) use engine_drafter::{
+    drafter_to_acquire, drafter_to_leave_room_for, DrafterToAcquire, DRAFTER_WANTED_FOR,
+};
 mod local;
 pub(crate) use local::LoadAllowance;
 mod local_generate;

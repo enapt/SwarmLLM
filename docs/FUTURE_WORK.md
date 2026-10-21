@@ -2012,8 +2012,13 @@ by accident on 2026-10-21 (the pool gave the drafter a card worker of its own be
 half): 7.14 / 8.31 / 8.78 tok/s, above every stream figure on that link (5.01-6.18, drafter on
 the processor). v0.3.247 keeps the default on that evidence (this boot allows one CUDA process);
 the apples-to-apples run is owed at the first boot that allows two, and turns the default off
-if trees lose. Remaining from the plan: acquiring a drafter a node does not already hold (today it
-chooses only among held models); the pipelined prompt pass (Phase 3) is #171. The
+if trees lose. **Built 2026-10-22: a split with no drafter fetches one** — the largest of the
+target's family the swarm holds that can draft, ≤ 2 GiB, trusted, through the shard system, kept
+while splits want it (`docs/invariants/memory.md` § "A split with no drafter fetches one"). Left
+of it: a fetched drafter refused for memory at request time does not lead to a smaller one; a
+family the swarm holds no small model of is not looked for on HuggingFace; the real-link run
+(the fetch DIAG, then a split's `drafter=`) is owed on a CUDA build (gotcha #849). The pipelined
+prompt pass (Phase 3) is #171. The
 same-model-at-fewer-bits drafter is decided against as a default (#144, § "Decided").
 
 #### #275 — A target already loaded keeps its layers, and only processor plans leave the drafter room

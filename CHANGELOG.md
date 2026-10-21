@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+**A computer that splits a model with no smaller model to guess with now fetches one.** Across
+the internet a split's speed is the words each round trip keeps: with a small model of the same
+family guessing ahead, a round keeps 3-6 words, without one it keeps one. That guess was made
+only with a small model the computer already held, so a computer that had never downloaded one
+never guessed at all. Now the first split that runs without one makes the computer fetch one —
+the largest small model of the same family that other computers already share and that can guess
+for it (a 1.5B kept 20% more of each round than a 0.5B in a replay on Qwen2.5-Coder-7B's own
+replies), never more than 2 GiB on disk, never one that is not trusted, never on a metered
+connection — and keep it while splits keep using it, and for a week after the last.
+
 ## [0.3.247-alpha] — 2026-10-22
 
 **A large model can be split over computers near each other instead of one far away.** A split

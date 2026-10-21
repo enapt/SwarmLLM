@@ -1566,6 +1566,7 @@ impl SharedState {
                 model_auto_manage_policies,
                 hf_probe_cache: DashMap::new(),
                 peer_shard_downloads: DashMap::new(),
+                drafters_wanted: DashMap::new(),
                 download_cancel_flags: DashMap::new(),
                 model_trust: {
                     let map = DashMap::new();

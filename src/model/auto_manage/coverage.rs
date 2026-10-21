@@ -42,7 +42,9 @@ use crate::types::{ModelId, ModelManifest, NodeId, ShardId, MMPROJ_SHARD_INDEX};
 
 use super::AutoShardManager;
 
+mod drafter;
 mod near_chain;
+pub(super) use drafter::DrafterBook;
 pub(super) use near_chain::NearChainBook;
 
 /// How long a model's cost curve is kept. It changes only with the node's own

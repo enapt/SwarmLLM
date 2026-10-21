@@ -1416,6 +1416,12 @@ impl AutoShardManager {
         if pressure < PRESSURE_URGENT && self.copy_in_near_chain(shard_id) {
             return Some("this copy is this computer's part of a chain of nearby machines");
         }
+        // The drafter a split here guesses with, or is fetching to (#134):
+        // below urgent pressure, like a near chain — it makes a split fast,
+        // not possible.
+        if pressure < PRESSURE_URGENT && self.copy_drafts_for_a_split(shard_id) {
+            return Some("this copy guesses ahead for a split this computer runs");
+        }
         let pool_size = crate::pool::scope::effective_pool_size(&self.shared_state);
         // The highest target of the last day, not this instant's: demand and
         // the peer count move it while nothing about the part changes, and the

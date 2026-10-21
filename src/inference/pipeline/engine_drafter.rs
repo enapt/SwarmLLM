@@ -169,7 +169,17 @@ const DRAFTER_MAX_FRACTION: u64 = 4;
 /// the target, no recurrent state (a guess that is refused must be taken back,
 /// and a DeltaNet layer's state cannot be), and the target's vocabulary.
 fn spec_for(state: &SharedState, target: &ModelId, drafter: ModelId) -> Option<DrafterSpec> {
-    if drafter == *target || !state.has_complete_split_model(&drafter) {
+    if !state.has_complete_split_model(&drafter) {
+        return None;
+    }
+    could_draft(state, target, drafter)
+}
+
+/// [`spec_for`] without asking that the model be held: what its header says —
+/// not the target, no recurrent state, the target's vocabulary. The download
+/// pass asks it of a model it may fetch ([`drafter_to_acquire`]).
+fn could_draft(state: &SharedState, target: &ModelId, drafter: ModelId) -> Option<DrafterSpec> {
+    if drafter == *target {
         return None;
     }
     let (layers, recurrent) = {
@@ -228,6 +238,162 @@ pub(crate) fn drafter_to_leave_room_for(
     target: &ModelId,
 ) -> Option<DrafterSpec> {
     chosen(state, target, |_| true)
+}
+
+/// How long a split wants a drafter after it last ran
+/// ([`note_split_wanting_a_drafter`]): the download pass fetches it meanwhile and
+/// prune keeps it. A week — a model split now and then still finds it held.
+pub(crate) const DRAFTER_WANTED_FOR: std::time::Duration =
+    std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+/// A split of `target` driven from here is about to guess, with the drafter
+/// `drafter_found` says it found or with nothing. With nothing — no model held
+/// here can draft for it — it is recorded for the download pass
+/// (`ModelMgmt::drafters_wanted`), which fetches the one [`drafter_to_acquire`]
+/// names: a split with no drafter checks one token a round trip where one with
+/// a drafter keeps 3-6 (`docs/plans/large_model_splits.md`). With one held —
+/// found, or held but with no room this time (memory, not a missing model) — a
+/// target already recorded is recorded again, so prune keeps the drafter while
+/// splits keep using it, not for a week after the last one that had none.
+/// Nothing where the owner named the drafter (`inference.draft_model`).
+pub(crate) fn note_split_wanting_a_drafter(
+    state: &SharedState,
+    target: &ModelId,
+    drafter_found: bool,
+) {
+    if state.cfg().inference.draft_model.is_some() {
+        return;
+    }
+    let now = std::time::Instant::now();
+    if drafter_found || drafter_to_leave_room_for(state, target).is_some() {
+        if let Some(mut at) = state.models.drafters_wanted.get_mut(target) {
+            *at = now;
+        }
+        return;
+    }
+    let before = state.models.drafters_wanted.insert(target.clone(), now);
+    if before.is_none_or(|at| now.duration_since(at) > NOTE_AGAIN_AFTER) {
+        tracing::info!(
+            target_model = %target,
+            "DIAG: a split of this model ran with no model here to guess ahead for it — \
+             the download pass looks for one"
+        );
+        state.models.auto_manage_notify.notify_one();
+    }
+}
+
+/// How often a split without a drafter wakes the download pass again.
+const NOTE_AGAIN_AFTER: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Candidates whose header the download pass learns for one target in a pass —
+/// a few MB each.
+pub(crate) const MOST_DRAFTER_HEADERS_A_PASS: usize = 2;
+
+/// The most a drafter fetched on its own may take on disk: a small thing (a
+/// 3B at Q4, a 1.5B at Q8). A design for split speed may need a user to hold
+/// a 0.5B model, never a large one (`memory/feedback_no_full_model_copies.md`,
+/// user 2026-09-28) — and a quarter of a 70B target would be a 17B. A drafter
+/// the owner holds already is chosen at any size.
+pub(crate) const MOST_DRAFTER_BYTES_TO_FETCH: u64 = 2 * 1024 * 1024 * 1024;
+
+/// What the download pass does so a split of `target` can guess
+/// ([`drafter_to_acquire`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DrafterToAcquire {
+    /// Fetch this model's parts: the drafter [`chosen`] would pick were it held.
+    Fetch(ModelId),
+    /// Learn these candidates' headers first — the vocabulary and the size are
+    /// read from them.
+    LearnHeaders(Vec<ModelId>),
+    /// A drafter for it is held here already — prune keeps this one.
+    Held(ModelId),
+    /// No model the swarm knows could draft for it.
+    Nothing,
+}
+
+/// The model to fetch so `target` has a drafter here (or the one held, which
+/// [`chosen`] picks): of the models the swarm
+/// knows that this node does not hold whole, the one [`chosen`] would pick were
+/// it held — the largest that can draft for it, a quarter of its size at most
+/// ([`largest_that_can_draft`]) — among those `may_fetch` accepts (the download
+/// pass's own gates: trust, refusals, the canonical upload, an uncensored model
+/// nobody chose). Only once every likely candidate's header is here, so a later
+/// header cannot turn up a better one after the parts were fetched: a likely
+/// candidate is a model of the target's family (the manifest's architecture —
+/// the vocabulary check on the header is the final word) no larger on disk
+/// than the target or [`MOST_DRAFTER_BYTES_TO_FETCH`].
+/// Their headers are named for learning first, [`MOST_DRAFTER_HEADERS_A_PASS`]
+/// at a time, largest first.
+pub(crate) fn drafter_to_acquire(
+    state: &SharedState,
+    target: &ModelId,
+    may_fetch: impl Fn(&crate::types::ModelManifest) -> bool,
+) -> DrafterToAcquire {
+    if let Some(held) = drafter_to_leave_room_for(state, target) {
+        return DrafterToAcquire::Held(held.model_id);
+    }
+    let registry = &state.model_registry;
+    let Some(target_manifest) = registry.get_manifest(target) else {
+        return DrafterToAcquire::Nothing;
+    };
+    let family = std::mem::discriminant(&target_manifest.architecture);
+    let mut likely: Vec<crate::types::ModelManifest> = registry
+        .models()
+        .into_iter()
+        .filter(|m| {
+            m.id != *target
+                && std::mem::discriminant(&m.architecture) == family
+                && m.total_size_bytes <= target_manifest.total_size_bytes
+                && m.total_size_bytes <= MOST_DRAFTER_BYTES_TO_FETCH
+                && !state.has_complete_split_model(&m.id)
+                && may_fetch(m)
+        })
+        .collect();
+    likely.sort_by(|a, b| {
+        b.total_size_bytes
+            .cmp(&a.total_size_bytes)
+            .then_with(|| a.id.0.cmp(&b.id.0))
+    });
+    acquisition_among(
+        likely.into_iter().map(|m| m.id).collect(),
+        |m| state.gguf_meta_for(m).is_some(),
+        || size_proxy(state, target).map(|s| s.size),
+        |m| size_proxy(state, m),
+        |m| could_draft(state, target, m),
+    )
+}
+
+/// [`drafter_to_acquire`]'s decision over the `likely` candidates, largest on
+/// disk first: their missing headers first ([`MOST_DRAFTER_HEADERS_A_PASS`] of
+/// them), then the largest that can draft ([`largest_that_can_draft`]) against
+/// the target's size, which needs only the target's own header.
+fn acquisition_among(
+    likely: Vec<ModelId>,
+    has_header: impl Fn(&ModelId) -> bool,
+    target_size: impl FnOnce() -> Option<u64>,
+    size: impl Fn(&ModelId) -> Option<DrafterSize>,
+    can_draft: impl FnMut(ModelId) -> Option<DrafterSpec>,
+) -> DrafterToAcquire {
+    let headerless: Vec<ModelId> = likely
+        .iter()
+        .filter(|m| !has_header(m))
+        .take(MOST_DRAFTER_HEADERS_A_PASS)
+        .cloned()
+        .collect();
+    if !headerless.is_empty() {
+        return DrafterToAcquire::LearnHeaders(headerless);
+    }
+    let Some(target_size) = target_size() else {
+        return DrafterToAcquire::Nothing;
+    };
+    let sized: Vec<(DrafterSize, ModelId)> = likely
+        .into_iter()
+        .filter_map(|m| size(&m).map(|s| (s, m)))
+        .collect();
+    match largest_that_can_draft(target_size, sized, can_draft) {
+        Some(spec) => DrafterToAcquire::Fetch(spec.model_id),
+        None => DrafterToAcquire::Nothing,
+    }
 }
 
 /// The one choice behind both: the named drafter, else the largest that can
@@ -1092,5 +1258,64 @@ mod tests {
     #[test]
     fn every_attempt_gets_its_own_drafter_key() {
         assert_ne!(draft_key(), draft_key());
+    }
+
+    /// The fetch is decided only once every likely candidate's header is
+    /// here — two learned a pass, largest first — and then it is the largest
+    /// that can draft, within a quarter of the target: a 1.5B before a 0.5B, a
+    /// model the vocabulary check refuses passed over, one too big skipped.
+    #[test]
+    fn a_drafter_is_fetched_only_once_every_likely_header_is_here() {
+        let id = |s: &str| ModelId(s.into());
+        let likely = || vec![id("3b"), id("1.5b"), id("0.5b"), id("other-vocab")];
+        let size = |m: &ModelId| {
+            let size = match m.0.as_str() {
+                "3b" => 264,
+                "1.5b" => 50,
+                "0.5b" => 19,
+                "other-vocab" => 60,
+                _ => return None,
+            };
+            Some(DrafterSize { size, reads: size })
+        };
+        let can_draft = |m: ModelId| {
+            (m.0 != "other-vocab").then_some(DrafterSpec {
+                model_id: m,
+                layer_range: (0, 24),
+                reads: 151_936,
+            })
+        };
+        let only = |have: &'static [&'static str]| move |m: &ModelId| have.contains(&m.0.as_str());
+        assert_eq!(
+            acquisition_among(likely(), only(&[]), || Some(360), size, can_draft),
+            DrafterToAcquire::LearnHeaders(vec![id("3b"), id("1.5b")]),
+            "the largest two first"
+        );
+        assert_eq!(
+            acquisition_among(
+                likely(),
+                only(&["3b", "1.5b"]),
+                || Some(360),
+                size,
+                can_draft
+            ),
+            DrafterToAcquire::LearnHeaders(vec![id("0.5b"), id("other-vocab")]),
+            "a later header could still name a better one: not yet"
+        );
+        let every = only(&["3b", "1.5b", "0.5b", "other-vocab"]);
+        assert_eq!(
+            acquisition_among(likely(), every, || Some(360), size, can_draft),
+            DrafterToAcquire::Fetch(id("1.5b")),
+            "the 3B is more than a quarter; the other vocabulary cannot draft"
+        );
+        assert_eq!(
+            acquisition_among(likely(), every, || None, size, can_draft),
+            DrafterToAcquire::Nothing,
+            "no header for the target: no size to judge against"
+        );
+        assert_eq!(
+            acquisition_among(vec![id("3b")], only(&["3b"]), || Some(360), size, can_draft),
+            DrafterToAcquire::Nothing
+        );
     }
 }

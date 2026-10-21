@@ -182,6 +182,9 @@ pub struct AutoShardManager {
     /// Stage 3): which machines are near, each model's chain, the parts this
     /// node was named for, and the named machines' leases.
     pub(super) near_chain_book: super::coverage::NearChainBook,
+    /// Which drafter each split lacking one should fetch (`coverage::drafter`,
+    /// FUTURE_WORK #134), kept a minute.
+    pub(super) drafter_book: super::coverage::DrafterBook,
     /// Each model's replica targets over the last day, kept across restarts:
     /// prune sheds against the highest (`target_hold`, FUTURE_WORK #286).
     pub(super) targets_seen: super::target_hold::TargetsSeen,
@@ -240,6 +243,7 @@ impl AutoShardManager {
             carrier_leases: dashmap::DashMap::new(),
             carriers_passed_over: dashmap::DashMap::new(),
             near_chain_book: Default::default(),
+            drafter_book: Default::default(),
             targets_seen,
         }
     }
@@ -946,6 +950,9 @@ impl AutoShardManager {
         // A model a chain of nearby machines may name this node for is planned
         // from its header; learn the few that are missing first.
         self.learn_headers_near_chains_need().await;
+        // So is the drafter a split here lacked: its candidates' headers say
+        // which can guess for it (`coverage::drafter`).
+        self.learn_headers_drafters_need().await;
 
         // 2. Gather candidate shards across all known models (VRAM-aware scoring)
         let candidates = self.gather_candidates(&local_node_id, pool_vram);

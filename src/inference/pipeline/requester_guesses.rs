@@ -202,6 +202,11 @@ pub(super) fn start(
             )
         })
         .flatten();
+    if head_takes_them && on {
+        // A split led by its head guesses with what this node offers: with no
+        // drafter here, fetch one for the next; with one, keep it (#134).
+        engine_drafter::note_split_wanting_a_drafter(state, target, spec.is_some());
+    }
     if !offers(head_takes_them, on, spec.is_some()) {
         return None;
     }

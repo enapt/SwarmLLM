@@ -2518,6 +2518,69 @@ because for nine tokens the router rightly keeps a warm far route over a near co
 **A change must keep**: both passes ask the one chain; in-flight counted as held; the holds
 deadlines, never an `Instant` set in the past (a just-booted host cannot represent one).
 
+## A split with no drafter fetches one (2026-10-22, #134)
+
+**Why.** On a long link a split's speed is the tokens each round keeps, and the round costs
+about the round trip whatever it carries (TH↔AU receipts: ack 417 ms median against a minimum
+RTT of ~395-411 ms). With a same-family small model guessing, a round keeps 3-6 tokens; with
+none, one. `engine_drafter::chosen` picks only among models held WHOLE here, so a node that had
+never fetched a small model never guessed with one. Replayed on Qwen2.5-Coder-7B's own replies
+(`examples/spec_coverage.py`, `spec_best_tree.py`, 2026-10-22): the 1.5B's top-1 coverage 0.793
+against the 0.5B's 0.735, a chain of 4 kept 3.21 tokens against 2.81, a best tree of 64 6.24
+against 5.18 — the larger drafter keeps ~20% more, so the largest that can draft is fetched.
+
+**The rule** (`pipeline::engine_drafter`, `auto_manage/coverage/drafter.rs`):
+
+- **The trigger is a split that found none**: `note_split_wanting_a_drafter` (DSD, before its
+  rounds; a led split's requester when the head would take guesses) records the target in
+  `state.models.drafters_wanted` and wakes the download pass when none is held. Not where the
+  owner named a drafter; where one is held (found, or refused for memory — the room rule's
+  business, #275) a target already recorded is refreshed, so the drafter is kept while splits
+  keep USING it, not 7 days after the last miss (review, 2026-10-22).
+- **One choice**: `drafter_to_acquire` is `chosen`'s own size rule (`largest_that_can_draft`,
+  a quarter of the target) and vocabulary check (`could_draft`), over the registry's models of
+  the target's manifest family that this node does not hold whole — but only once every likely
+  candidate's header is here (`LearnHeaders`, two a pass, largest first, through
+  `ensure_model_geometry`'s cooldown), so a header learned later cannot turn up a better drafter
+  after the parts were fetched.
+- **Small things only**: ≤ `MOST_DRAFTER_BYTES_TO_FETCH` (2 GiB — a 3B at Q4, a 1.5B at Q8).
+  A quarter of a 70B target is a 17B, and no design for split speed may need a user to hold a
+  large model (user, 2026-09-28). A drafter the owner holds is still chosen at any size.
+- **The download pass's own gates** (`may_fetch_as_a_drafter`): not a backup artifact, not a
+  refused family, the canonical upload settled, not off by policy, no part the owner deleted
+  (scoring never fetches one back, so such a model would be named and never come), trust ≥
+  `DemandVerified` or pinned (what adopting a model requires), not an uncensored model nobody
+  chose; offline and metered connections fetch nothing (the pass's own `metered_hold`).
+- **Both passes ask one answer** (gotcha #795): the download pass fetches
+  `parts_of_a_drafter_to_fetch` past the replica target and the ring (a drafter must be HERE;
+  the target counts the swarm's copies) with `CARRY_BONUS`; prune keeps `copy_drafts_for_a_split`
+  below urgent pressure — the held chosen drafter (`DrafterToAcquire::Held`) or the one being
+  fetched, for any target wanted within `DRAFTER_WANTED_FOR` (7 days). Each target's answer is
+  cached 60 s (`DrafterBook`) and prune reads only that: it asks of every part it holds.
+- **Known cost**: the manifest's family is coarse (`ModelArchitecture::Llama` covers several
+  vocabularies), so for a Llama target every small Llama-tagged model with an origin is a likely
+  candidate whose header (a few MB) is learned, two a pass, before the first fetch. The
+  vocabulary check stays the final word.
+
+**Evidence.** `coverage::drafter::tests::the_drafter_a_split_lacked_is_fetched_and_kept`: a
+three-part model two nearby peers hold, its replica target met, is offered and started only once
+a split wanted a drafter (control: nothing offered), a MIDDLE part is kept at 0.9 and shed at 0.99, and shed at
+0.9 once nothing wants it — with the download rule off nothing is offered, with prune's rule off
+nothing is started (the download pass fetches only what prune keeps).
+`a_split_using_its_drafter_keeps_it_wanted`, `a_model_the_owner_deleted_a_part_of_is_not_fetched_to_draft`.
+`only_a_small_model_is_ever_fetched_to_draft`: a 4 GiB candidate of the family is not even
+named for its header (red without the cap). `engine_drafter::tests::a_drafter_is_fetched_only_once_every_likely_header_is_here`
+(red with the header rule off).
+
+**A change must keep**: one choice with `chosen`; the byte cap; both passes asking
+`copy_drafts_for_a_split`'s answer; the parts through the shard system like any other part
+(from peers, or the origin's byte ranges where the shard system already allows them), never a
+whole file.
+
+**Left** (FUTURE_WORK #134): a fetched drafter later refused for memory at request time does not
+lead to a smaller one; a family the swarm holds no small model of (the HuggingFace catalog) is
+not looked for.
+
 ## A model's weights are its header's, on every node (2026-10-07)
 
 **What happened.** `ModelProcessPool::footprint_inputs` — the one source of a model's memory
