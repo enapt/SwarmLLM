@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.246-alpha] — 2026-10-21
 
 **Many models answer faster on the processor.** Model files keep some of their weights in
 formats called Q5_0, Q4_1 and Q5_1 wherever a layer's size does not suit the usual 4- and 5-bit
