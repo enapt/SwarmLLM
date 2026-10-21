@@ -546,6 +546,15 @@ jobs:
           # seconds instead of tens of minutes. Empty everywhere else, which
           # the build script reads as off.
           CANDLE_FLASH_ATTN_CHECK_ONLY: ${{ matrix.check_only && '1' || '' }}
+          # Every cell: skips llama.cpp's MMQ library in candle-kernels
+          # (`src/ggml_mmq`, a SwarmLLM patch) and still emits its link
+          # directives, as the flash switch above does. Its copied
+          # `common.cuh` names cuBLAS types, and `cuda-nvcc` alone ships no
+          # `cublas_v2.h` — all three cells failed on it (2026-10-21) — and
+          # its eleven template objects are kernels, which this job does not
+          # build. They are built by cache-warm.yml on every `vendor/**`
+          # push and by every release, both on the full toolkit.
+          CANDLE_KERNELS_MMQ_CHECK_ONLY: "1"
           # Points the flash-attn build script at an out-of-`target/` directory
           # that DOES NOT EXIST yet, which is the only cheap coverage of the
           # SwarmLLM patch that makes such a directory usable

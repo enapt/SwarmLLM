@@ -101,7 +101,25 @@ fn main() -> Result<()> {
     } else {
         mmq_builder = mmq_builder.arg("-Xcompiler").arg("-fPIC");
     }
-    mmq_builder.build_lib(out_dir.join("libggml_mmq.a"))?;
+    // SwarmLLM patch: `CANDLE_KERNELS_MMQ_CHECK_ONLY=1` skips this library and
+    // still emits its link directives, as `CANDLE_FLASH_ATTN_CHECK_ONLY` does
+    // for flash attention. CI's `cargo check` cells install `cuda-nvcc` alone,
+    // and the copied `common.cuh` names cuBLAS types (`cublas_v2.h`): all
+    // three failed on it (2026-10-21, gotcha #929). A check never links. A
+    // build with it set must fail to link rather than ship without MMQ, so a
+    // library an earlier build left here is deleted (`build_lib` archives
+    // again when its file is missing, even with every object up to date).
+    println!("cargo::rerun-if-env-changed=CANDLE_KERNELS_MMQ_CHECK_ONLY");
+    let mmq_lib = out_dir.join("libggml_mmq.a");
+    if env::var("CANDLE_KERNELS_MMQ_CHECK_ONLY").as_deref() == Ok("1") {
+        println!(
+            "cargo::warning=CANDLE_KERNELS_MMQ_CHECK_ONLY=1: llama.cpp's MMQ was NOT compiled. \
+             This tree is valid for `cargo check` only; a build will fail to link."
+        );
+        let _ = std::fs::remove_file(&mmq_lib);
+    } else {
+        mmq_builder.build_lib(mmq_lib)?;
+    }
 
     println!("cargo:rustc-link-search={}", out_dir.display());
     println!("cargo:rustc-link-lib=moe");
