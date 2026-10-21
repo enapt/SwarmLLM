@@ -332,6 +332,95 @@ oscillate or herd. The existing `shard_download_claims` and backoff machinery
 are the obvious damping, and this needs a simulation before it touches the
 fleet.
 
+#### The design, simulated 2026-10-21 (not built)
+
+**One plan per neighbourhood, computed alike by every machine in it.** For a
+model that (a) somebody asked for (`coverage::asked_for`), (b) no near machine
+can run whole (then today's rules hold it whole; Stage 3 is for the models that
+need a split), (c) the near machines' ceilings could carry between them, and
+(d) whose near holders do not already form a complete chain: each near machine
+computes the same chain over the near machines — each used once, for one
+contiguous run of at most its ceiling (`coverage::ceiling_layers`) — with the
+FEWEST SEGMENTS (within one of the least the ceilings allow), then the fewest
+parts to fetch, ties broken by a fixed rendezvous order (`blake3(model ‖
+node)`, #231's), and fetches the parts of ITS segment it lacks. Prune keeps a
+machine's planned segment — the same predicate the download pass asks (gotcha
+#795). A complete chain is never rebalanced: hops are fixed by placement only
+while a gap remains. "Near" is a connected machine in scope whose measured
+windowed-minimum round trip (`metrics.network_coord_samples[..].min()`) is at
+most `NEAR_RTT_MS` — the measurement, never the coordinate, which orders near
+peers worst (§ "The soak reading").
+
+**The simulator** (`examples/placement_sim.py --scenario <case> --policy <list>`;
+seconds per policy and seed, `metro` ~15-35 s): it models only this decision — gossiped holdings and
+in-flight downloads after a lag, each machine's ceiling and disk, its own
+measured round trips, a five-minute evaluation per machine at its own phase, two
+parts started a cycle, 2-6 minutes a part. 48 simulated hours, means over seeds:
+
+| case | greedy (each machine closes its gap) | carrier (#231 scoped near, one at a time) | **plan** |
+|---|---|---|---|
+| fleet: this machine + the LAN box, ceilings 7 + 10 of 16 parts | never completes | never completes | **25 min, 2 segments, 11 parts** |
+| city: 6 machines ≤ 35 ms, ceilings 3-8 | 25 min, 4 segments, 33.7 parts | 45 min, 4.8-5.3 segments, 11-12 parts | **15-20 min, 3 segments, 11-12 parts** |
+| metro: 60 machines in 6 cities, a 34-part model | 1 of 2 runs complete, 9.4 segments, 184 parts | 118 min, 8.5 segments, 122 parts | **30 min, 5.0 segments, 109 parts** |
+| lonely: no near chain possible | 0 parts | 0 parts | 0 parts |
+
+The carrier cannot finish the fleet case: the LAN box takes parts 4-13 (its
+ceiling), parts 14-15 then need THIS machine to extend to 6 and the box to shift
+to 7 — two moves, neither of which closes anything alone. Petals has no such
+case because its span is its capacity; here holdings and run capacity differ.
+Greedy's 3× download is the herd. The plan fixes both because every machine
+seeing the same holdings computes the same assignment.
+
+**The flap loop** (#876's shape, which the simulator reproduces before any fix):
+a neighbour holding 6 parts drops off 15 minutes every 3 hours, prune on.
+Re-fetches in 48 h:
+
+| | no hysteresis | its parts count 30 min after it leaves | a needed copy kept 24 h | both |
+|---|---|---|---|---|
+| greedy | 26.7 | 0 | 2.3 | 0 |
+| carrier | 15.3 | 0 | 0 | 0 |
+| plan | 0 (keeps its segment) | 0 | 0 | 0 |
+
+The plan still fetches 8 parts there that the 30-minute grace saves (2). So
+both stay: **a peer's holdings count for 30 minutes after it disconnects** —
+today `coverage::holdings` and `prune::live_holders_with_us` drop them at once,
+the loop's input — and **a planned copy is kept 24 hours after it was last
+planned**, held at the window maximum the way `target_hold.rs` holds the replica
+target (#876).
+
+**Why not Petals' rule** (`petals/server/block_selection.py`, read 2026-10-21):
+`choose_best_blocks` takes the window whose sorted per-block throughput is
+lexicographically smallest, `should_choose_other_blocks` simulates every server
+re-choosing and moves only below 75% balance quality, at random intervals. It
+fits a server whose span IS its capacity and whose move is a reload; here a part
+is a download of hundreds of megabytes. It also places by throughput only —
+latency enters Petals at ROUTING (pings between servers, a shortest path), never
+placement — and its open issue #389 (servers reloading the same span, start
+positions flipping, operators switching rebalancing off) is the oscillation the
+grace and the hold exist for.
+
+**What is left: neighbourhoods that only overlap.** A row of towns 20 ms apart,
+or a city at a radius tighter than its spread, gives each machine a different
+neighbourhood and so a different plan: the line completed 1.2 of 8
+neighbourhoods. Planning over GROUPS every machine derives the same way
+(`plan+groups`: in rendezvous order, each unplaced machine starts a group with
+the unplaced machines on its near list) completed a group in every run and
+matched the plan elsewhere, but needs each machine's near list published — a new
+optional `NodeCapability` field. That is phase 2, if the field shows
+overlapping neighbourhoods; phase 1 needs nothing on the wire.
+
+**Where it goes** (the shard manager's map, 2026-10-21):
+- `auto_manage/coverage.rs`: the near machines (with the 30-minute grace), the
+  chain plan over `ceiling_layers` and the holdings, and the parts THIS machine's
+  segment lacks — fetched ahead of routine replication with a bonus like
+  `CARRY_BONUS`, inside `select_within_budget`'s cap.
+- `auto_manage/prune.rs`: a `copy_kept_because` rule beside `copy_carries_model`
+  for a part of this machine's planned segment, asked by `would_shed_once_fetched`
+  too, so the passes agree.
+- `NEAR_RTT_MS`: 30 ms to start. At 18 ms the network was 17% of a token (§ "The
+  premise is validated"); a chain of three near machines led by its head pays
+  three legs a pass.
+
 ### Stage 4 — Speculation, to amortise whatever distance remains
 
 > ⚠ **Corrected 2026-09-27 — superseded by `docs/plans/split_speculation.md`.**

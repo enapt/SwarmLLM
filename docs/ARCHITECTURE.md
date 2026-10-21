@@ -159,6 +159,9 @@ swarmllm/
 │                 image_rows_probe.rs — this node's rows for a picture against
 │                 image_rows_reference.cpp (llama.cpp's image reader, built by g++) or
 │                 llava_reader_reference.py (LLaVA's in float64 numpy, the authority, #310);
+│                 placement_sim.py — which parts of a large model nearby machines fetch, simulated
+│                 over 48 h per policy: does a near chain complete, without a herd or a
+│                 fetch/prune loop (regional_pipelines.md § Stage 3; pure Python, no node);
 │                 release_gate.sh — the release gate on the downloaded artifact, under an hour: smoke_test.sh,
 │                 release_shapes.sh, family_conformance.sh, reply_ab.sh, split_rig.sh, stream_bench.py;
 │                 feature_check.py — every surface a user reaches (OpenAI, Anthropic, Responses,
