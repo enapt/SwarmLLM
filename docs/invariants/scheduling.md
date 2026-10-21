@@ -4451,7 +4451,8 @@ the same round trip (SpecInfer, SpecExec, Sequoia, EAGLE-2).
   capped at a quarter of the rows so the fit sees two sizes. The tree grown is
   `2 × recent sent`, in [16, 64]. A guess that would run past the reply's room is never sent.
 
-**Measured — and why trees are off by default** (2026-10-20, `~/swarmllm-318/drafter318.sh`: a
+**Measured — and why trees are on only where every segment runs on a card.** First with the
+head's part on a processor (2026-10-20, `~/swarmllm-318/drafter318.sh`: a
 7B split, B's parts 1-7 on this machine's RTX 3070, A's part 0 and the 0.5B drafter on its
 processor, QUIC, every packet delayed for a 385 ms round trip; one CUDA release build per row,
 three requests of 160 tokens, the second and third warm):
@@ -4466,13 +4467,45 @@ Before #323's kernels (the drafter's steps 2.5-3.4x dearer) trees beside were 2.
 the stream's 4.12 / 4.09. The cheaper drafter gained trees ~80% and the stream ~10-24%, and the
 stream still wins: a tree grown beside its check kept 2.9-3.3 guesses a round (warm; 3.5-4.0
 grown before it) for one round trip, and still waited 180-245 ms a round for the drafter (385-494
-before it), where the stream keeps several chains in flight and never waits for one. **So the stream is the default and trees are asked
-for with `SWARMLLM_DRAFT_TREES=1`.** Every node advertises bit 29 and reads a tree it is sent, so
-a release that turns them on needs no peer to update. What could flip it, untested: a drafter on
-a card (a growth step costs a forward of the drafter), prompts where chains keep less (α well
-below 0.7), a tree STREAM (several trees in flight, as the stream keeps chains). Replies scored
-against llama.cpp (`score_trees.out` beside the rig): the stream arms 154-158 of 160 rank 1,
-worst rank 2.
+before it), where the stream keeps several chains in flight and never waits for one. A row
+there cost the check 10-19 ms on the head's processor. Replies scored against llama.cpp
+(`score_trees.out` beside the rig): the stream arms 154-158 of 160 rank 1, worst rank 2.
+
+Then on the REAL link with the head's part on a card (2026-10-21, `~/swarmllm-318/cardtree.sh`,
+results in `~/swarmllm-318/cardtree/`): a 7B split, H on this machine (Thailand) holding parts
+0-3 on its RTX 3070 and the 0.5B Q4 drafter kept on its processor
+(`SWARMLLM_PROCESSOR_MODELS`, this boot's one-CUDA-process rule), the far half on a swarm peer's
+RTX 3060 in Australia ~405-409 ms away, direct QUIC; R, a second node here holding only the
+header, hands the split to H with the route pinned to those two machines (`R: nodes
+970194f1,aa3d1e66` on every arm, the instruction carried, #318 (b)). One binary, the arms
+interleaved over two rounds, two replies each:
+
+| tok/s | continuous stream | trees (`SWARMLLM_DRAFT_TREES=1`) |
+|---|---|---|
+| 160-token reply | 5.05, 5.01, 5.02, 5.05 | 5.66, 5.74, 5.33, 5.59 |
+| 28-token reply (ends at its stop) | 4.54, 3.78, 3.82, 3.81 | 3.99, 3.45, 3.52, 3.42 |
+
+A row cost the check 2.3-3.2 ms over a 477-520 ms fixed cost, so a tree carried 28-37 rows
+and kept 4.1-4.5 guesses a round (3.68 in one reply), against the stream's α 0.69-0.70.
+Weighted by tokens (one long and one short reply) trees are ~6% ahead; over long replies ~11%.
+**What still costs a tree round** is the drafter: a seed held the check's outcome in only 3-10
+of 29-34 rounds (`tree_seed_misses` 17-20), and a miss grows the next tree from nothing before
+the check goes out — 327-416 ms a round waited on the processor drafter, of a ~0.95 s round. A
+short reply pays it from its first round, with no seed and an uncalibrated drafter
+(`tree_calibration` 0.64-0.87 there against 1.20-1.48 over long replies): that is its loss. Replies
+scored against llama.cpp (`score_open.out`): the stream 160 of 160 rank 1; trees 157-158, every
+other token llama.cpp's second choice at a near-tie (largest gap 0.076 logits, once 0.345) — the
+different shape of the same arithmetic (gotcha #370), not a different reply; the short replies
+28 of 28 rank 1 in every arm (`score_notes.out`; prompt tokens 42 and 555, as the node counted).
+
+**So trees are the default where every segment runs whole on a card**
+(`pipeline::every_segment_runs_on_a_card`: this node by `ModelProcessPool::runs_whole_on_the_card`
+— a live worker not short of the card — a peer by `NodeCapability::models_run_on_card`), and the
+stream elsewhere; `SWARMLLM_DRAFT_TREES=1` / `=0` forces either (`dsd_tree::trees_wanted`). Every
+node has advertised bit 29 and read a tree since v0.3.246, so the default needs no peer to update.
+What could widen it, untested: a drafter on a card (a growth step is a forward of the drafter; a
+large model's head card is usually full, so a processor drafter is the common case), fewer seed
+misses, a tree STREAM (several trees in flight, as the stream keeps chains).
 
 **What a change must keep:**
 - **The shape is bound in the AAD and refused malformed** — a relay reshaping a tree changes
@@ -4512,8 +4545,13 @@ control, which must differ), `a_kept_path_read_again_continues_as_if_read_alone`
 `a_tree_of_guesses_is_applied_only_to_a_check_it_fits` (`model_worker`);
 `a_tree_shape_survives_the_wire_and_a_malformed_one_is_refused`,
 `a_tree_shape_is_sealed_and_survives_the_encrypted_frame` (`network::protocol`). A/B in one
-binary: `SWARMLLM_DRAFT_TREES=1` (trees; off by default, above), `SWARMLLM_TREE_GROW_BESIDE=0`
-(each tree grown only before its check). Rigs: `~/swarmllm-318/trees318.sh` (both halves on the
+binary: `SWARMLLM_DRAFT_TREES=1` / `=0` (trees forced on / off; by default on where every segment
+runs on a card, above), `SWARMLLM_TREE_GROW_BESIDE=0` (each tree grown only before its check),
+`SWARMLLM_PROCESSOR_MODELS=<id,…>` (those models' workers kept on the processor — the drafter
+here). Tests for the default: `trees_are_wanted_on_cards_unless_the_setting_says_otherwise`,
+`a_plan_is_on_cards_only_where_every_segment_is`,
+`only_a_worker_wholly_on_the_card_runs_whole_on_the_card`. Rigs: `~/swarmllm-318/cardtree.sh` (the
+real link, above), `~/swarmllm-318/trees318.sh` (both halves on the
 card — two CUDA processes, the FECS shape: one came at its 5th arm, 10:36Z 10-20),
 `~/swarmllm-318/overlap318.sh` (the far half on the card, the requester's part and drafter on its
 processor, QUIC, every packet delayed).

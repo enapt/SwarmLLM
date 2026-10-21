@@ -2785,6 +2785,30 @@ impl CpuReason {
     }
 }
 
+/// Models whose workers this node keeps on the processor whatever the card has
+/// room for: `SWARMLLM_PROCESSOR_MODELS=a,b`, read once. A rig's switch, the
+/// shape of llama.cpp's `--gpu-layers-draft 0` — a split's drafter on the
+/// processor beside a head on the card, so the card serves ONE process (two
+/// sharing it tracked the FECS bursts, gotcha #755). [`ModelProcessPool::cpu_reason`]
+/// asks it, so the planner's prediction and the spawn agree.
+fn kept_on_the_processor(model_id: &ModelId) -> bool {
+    static KEPT: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    KEPT.get_or_init(|| {
+        models_named(&std::env::var("SWARMLLM_PROCESSOR_MODELS").unwrap_or_default())
+    })
+    .contains(&model_id.0)
+}
+
+/// The model ids in a comma-separated list, blanks dropped.
+fn models_named(list: &str) -> std::collections::HashSet<String> {
+    list.split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Whether loading a model may take memory from other models, and how long a
 /// conversation its cache is charged for — a REQUIRED argument of
 /// `ModelProcessPool::get_or_spawn`, so no load can leave either out.
@@ -3771,7 +3795,9 @@ impl ModelProcessPool {
                 None => {}
             }
         }
-        if self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        if self.gpu_layers.load(std::sync::atomic::Ordering::Relaxed) == 0
+            || kept_on_the_processor(model_id)
+        {
             return Some(CpuReason::Configured);
         }
         None
@@ -4420,6 +4446,18 @@ impl ModelProcessPool {
     /// reachability, trust, room or a wide speed margin) are unchanged.
     pub fn serves_on_cpu(&self, model_id: &ModelId) -> bool {
         !self.card_in_play() || self.is_cpu_bound_for_lack_of_vram(model_id)
+    }
+
+    /// Does `model_id`'s LIVE worker here run its layers whole on the
+    /// graphics card — none on the processor? A fact about the worker running
+    /// now, so a split asks it after its prompt pass loaded the layers
+    /// (`pipeline::every_segment_runs_on_a_card`). No worker, no card in play,
+    /// a processor placement or a card/processor split: false.
+    pub fn runs_whole_on_the_card(&self, model_id: &ModelId) -> bool {
+        self.card_in_play()
+            && self
+                .live_worker(model_id)
+                .is_some_and(|h| !h.short_of_the_card())
     }
 
     /// Can any model use this node's graphics card at all: one detected, one
@@ -9555,6 +9593,18 @@ impl ModelProcessPool {
 mod tests {
     use super::*;
 
+    /// `SWARMLLM_PROCESSOR_MODELS` names whole model ids; a blank entry or a
+    /// trailing comma names nothing, so it cannot keep every model off the card.
+    #[test]
+    fn a_processor_list_names_whole_model_ids_and_nothing_for_a_blank() {
+        let named = models_named(" qwen2.5-0.5b-instruct-q4-k-m, ,llama-3.2-1b ,");
+        assert_eq!(named.len(), 2, "{named:?}");
+        assert!(named.contains("qwen2.5-0.5b-instruct-q4-k-m"));
+        assert!(named.contains("llama-3.2-1b"));
+        assert!(!named.contains(""), "a blank entry names nothing");
+        assert!(models_named("").is_empty());
+    }
+
     /// A worker that ends while the node runs is news; one that ends because
     /// the node is stopping — asked before, or within the window after, the
     /// same signal reached both (#269) — is not.
@@ -11966,6 +12016,54 @@ mod tests {
                 summary.expert_layers_in_ram
             ),
             (Some(48), Some(48), Some(23))
+        );
+    }
+
+    /// A split asks whether this node's part runs whole on the card before it
+    /// checks trees of guesses (`pipeline::every_segment_runs_on_a_card`):
+    /// only a live worker wholly on the card says yes.
+    #[tokio::test]
+    async fn only_a_worker_wholly_on_the_card_runs_whole_on_the_card() {
+        let p = test_pool();
+        p.test_card_in_play.store(true, Ordering::Relaxed);
+        let now = std::time::Instant::now();
+        let whole = ModelId("whole-on-card".into());
+        p.workers.insert(
+            whole.clone(),
+            fake_worker_handle_spawned(false, None, false, now).await,
+        );
+        assert!(p.runs_whole_on_the_card(&whole));
+
+        let cpu = ModelId("on-the-processor".into());
+        p.workers.insert(
+            cpu.clone(),
+            fake_worker_handle_on(false, Some(CpuReason::Configured), true).await,
+        );
+        assert!(!p.runs_whole_on_the_card(&cpu), "a processor placement");
+
+        let split = ModelId("split-14b".into());
+        let layers = Some(CardSplit::Layers {
+            on_card: 13,
+            total: 28,
+        });
+        p.workers.insert(
+            split.clone(),
+            fake_worker_handle_split(false, None, false, now, layers).await,
+        );
+        assert!(!p.runs_whole_on_the_card(&split), "a card/processor split");
+
+        let dead = ModelId("dead-on-card".into());
+        p.workers.insert(
+            dead.clone(),
+            fake_worker_handle_spawned(true, None, false, now).await,
+        );
+        assert!(!p.runs_whole_on_the_card(&dead), "a dead worker");
+        assert!(!p.runs_whole_on_the_card(&ModelId("not-loaded".into())));
+
+        p.test_card_in_play.store(false, Ordering::Relaxed);
+        assert!(
+            !p.runs_whole_on_the_card(&whole),
+            "no card in play: a build without one, or `gpu_layers = 0`"
         );
     }
 

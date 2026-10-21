@@ -1267,6 +1267,19 @@ stepped over, never waited for. Reproduce with a window over an old node's cap o
 SHARDS_A=0,1,2,3 SHARDS_B=4,5,6,7 EXTRA_TOML=<DSD on> REPEAT=3 examples/split_rig.sh repeat <binary>` — v0.3.215
 refused 19 chunks and cut 3 of 3 replies short; v0.3.216 refused none.
 
+**Trees of guesses** (`pipeline::dsd_tree`, #134 — the default since 2026-10-21 where every segment
+runs whole on a card, the stream elsewhere; `SWARMLLM_DRAFT_TREES=1` / `=0` forces either): the
+coordinator's `DSD: request complete` carries `tree_rounds`, `tree_kept_a_round`,
+`tree_rows_a_round`, `tree_calibration`, `tree_rounds_seeded`, `tree_seed_misses`,
+`tree_draft_ms_waited_a_round` and `tree_draft_ms_beside_a_round`. `tree_rounds=0` on a split
+whose machines all run on cards means a segment does not read trees (`tree_check_possible`) or
+the target's or drafter's family does not (`reads_draft_trees`). A `tree_draft_ms_waited_a_round`
+near half of `check_fixed_ms` is the drafter holding each round up after a missed seed (#134 (a);
+327-416 ms against ~500 on the TH↔AU link). `SWARMLLM_PROCESSOR_MODELS=<id,…>` keeps those
+models' workers on the processor (`Model will run on the CPU … reason="configured_cpu_only"`) —
+a rig's way to keep a drafter off a card that must serve one process, as llama.cpp's
+`--gpu-layers-draft 0`.
+
 **CUDA-graph decode** (on by default since 2026-09-30; `SWARMLLM_CUDA_GRAPH=0` or `SWARMLLM_CUDA_OWN_STREAM=0` turns it off; recorded in groups of `SWARMLLM_CUDA_GRAPH_GROUP` layers, default 2, `0` = one graph per step):
 
 | Level | What | Where |

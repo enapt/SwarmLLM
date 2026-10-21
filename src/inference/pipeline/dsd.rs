@@ -394,10 +394,10 @@ impl PipelineExecutor {
         // Trees of guesses (#134, `dsd_tree`): where every segment reads one
         // and the tail walks it, each round checks a tree from our own drafter
         // instead of a chain — the longest run along whichever branch the
-        // model takes, for the same round trip. Asked for (`SWARMLLM_DRAFT_TREES=1`,
-        // off by default: no faster than the stream on the rig, `trees_requested`),
-        // they take the reply from the continuous stream below, which pipelines
-        // chains.
+        // model takes, for the same round trip. Where every segment runs on a
+        // card — a row then costs a check almost nothing (`trees_wanted`) —
+        // they take the reply from the continuous stream below, which
+        // pipelines chains.
         // The drafter grows its tree by reading it too, so its family is asked
         // as well: a drafter that cannot would fail its first tree and end the
         // reply's guessing, where a chain would have kept it.
@@ -407,9 +407,13 @@ impl PipelineExecutor {
                     .reads_draft_trees()
             })
         };
-        let trees_for_this_reply = super::dsd_tree::trees_requested()
-            && matches!(&drafter, Drafter::Engine(e) if reads_trees(e.model_id()))
-            && reads_trees(&self.request.model_id);
+        let trees_for_this_reply =
+            super::dsd_tree::trees_wanted(super::every_segment_runs_on_a_card(
+                &self.shared_state,
+                &self.assignment.segments,
+                &self.request.model_id,
+            )) && matches!(&drafter, Drafter::Engine(e) if reads_trees(e.model_id()))
+                && reads_trees(&self.request.model_id);
         let mut trees = super::dsd_tree::TreeRounds::new();
         let trees_from_the_start = trees_for_this_reply
             && super::tree_check_possible(&self.shared_state, &self.assignment.segments);

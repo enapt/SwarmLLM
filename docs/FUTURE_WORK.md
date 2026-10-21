@@ -68,8 +68,10 @@ speed is what the swarm is for, so split speed for large models is the top track
    intercontinental chain, 5-13 tok/s on a 7B Thailand↔Belgium with the stream. Projected
    lossless 20-31 tok/s across continents and 50-80 inside a region on cards. The stream
    through a chain of machines, guessing for a user who holds none of the model and trees in
-   every segment are built (2026-10-20; trees off by default, no faster than the stream, #134);
-   next, the head's bounded wait for a requester's guesses and a led split on chosen peers.
+   every segment are built (2026-10-20); the head's bounded wait and a route carried to the head
+   (10-21); trees the default where every segment runs on a card (5.33-5.74 vs the stream's
+   5.01-5.05 on a real ~405 ms link, #134). Next: the drafter's wait after a missed seed, near
+   peers over far ones (#192).
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
@@ -1801,8 +1803,10 @@ connections (~90% of the live node's) ran Cubic, whose window a split's bursts n
 was spread over ~0.4 of a round trip (43 KB at 100 ms: 142 ms, 107 under BBR; 280 KB over 20 Mbit/s
 with 1% loss: 493, 219) — they now run quinn's BBR (`docs/invariants/network.md` § "A burst is
 paced by the link"); TCP's slow start after idle has the same shape and is a system setting, left.
-Left: the real link; (2) tree verification in every segment (#134) — **built 2026-10-20, off by
-default**: 4.75-5.06 tok/s against the stream's 5.03-5.52 on the 385 ms rig; (3) the continuous stream
+Left: the real link; (2) tree verification in every segment (#134) — **built 2026-10-20, the
+default since 10-21 where every segment runs on a card**: 5.33-5.74 tok/s against the stream's
+5.01-5.05 on the real TH↔AU link with both halves on cards, 4.75-5.06 against 5.03-5.52 with the
+head's part on a processor (385 ms rig); (3) the continuous stream
 through a chain of machines — **built 2026-10-20** (`features::CHAINED_STREAM`, bit 27): 1.24 tok/s
 against 1.07 for chained rounds and 1.03 without guessing, on a 3-machine processor rig at 206 ms
 (the three share one processor, which caps what overlapping their work can win). Building it found
@@ -1826,13 +1830,21 @@ head's busy processor and took 200-450 ms after a miss, and the head never waite
 the split its head leads"). The rule first written here, w < P·(E − 1) (~700 ms on this link), was
 too eager — a one-token pass does not throw the window away, it lands during it and still counts at
 probability α — and the derived bound is ~220 ms on this link's figures, so the gain is smaller
-than the 1.3x first projected. Unmeasured on a rig: on the processor rig a guessed check costs
-~half a pass a row and the rule seldom waits; the A/B wants the tail on a card. **(b) Built
+than the 1.3x first projected. *Real link, 2026-10-21* (the same two machines, the route pinned,
+160-token replies): waiting 3.54 / 3.13 / 3.26 / 3.20 tok/s against 3.21 / 3.18 / 3.17 / 3.25
+not waiting (`SWARMLLM_HEAD_GUESS_WAIT=0`) — +2.5%, inside the noise: the requester's windows were
+due 315-346 ms out against a bound of 261-292 with the head's part on its processor, so the rule
+seldom waited, as it should. **(b) Built
 2026-10-21**: a `swarm_route` instruction goes with the hand-off to a head advertising
 `features::CARRIED_ROUTE` (bit 30), which plans under it from its own side, only ever shrinking
 (§ "A route instruction goes to the head with the request"); before, any instruction kept the split
 driven from the requester, so the run above was led only because the requester did not yet trust
-the Australian peer with the prompt. Left: (c) both halves on cards on a real link; (d) a requester
+the Australian peer with the prompt. Verified on the real-link runs: every led reply logged
+`route_carried=true` and ran on exactly the two pinned machines. **(c) Measured 2026-10-21** with
+the head's part on this machine's card: requester guesses 3.33-3.72 tok/s (the head's first token
+2.6-2.7 s, against 15.4-17.1 s on its processor), and the head's own drafter 5.01-5.05 (stream) /
+5.33-5.74 (trees, now the default there, #134). The whole model on the Australian card alone
+writes 56.6-59.1: a ~405 ms round trip a pass caps a split there, whatever guesses it. Left: (d) a requester
 still loads its drafter and reads the prompt for a head that then guesses with its own (DSD runs
 first there) — bounded: it stops at the first token, which carries no ids. Then trees in
 it, the verdict sent to every segment so dead rows are dropped before they are computed (#149 (b)); (4) a drafter fed by the model's own state: MTP at the last stage (#145),
@@ -1928,17 +1940,24 @@ measure unbatched aggregate against forced batching before changing anything. A 
 segment still ends the chain when the requester holds the tail (the delegated split #143
 covers only requesters holding nothing).
 
-#### #134 — Split decode: draft trees lose to the stream, and a drafter the node does not hold is unbuilt (the pipelined prompt pass is #171)
-`P3` · perf-split · **PARTIAL** — 2026-10-20 · history: archive row #134; plan: `split_speculation.md`, `large_model_splits.md` § "Draft trees"
+#### #134 — Split decode: draft trees wait for their drafter, and a drafter the node does not hold is unbuilt (the pipelined prompt pass is #171)
+`P3` · perf-split · **PARTIAL** — 2026-10-21 · history: archive row #134; plan: `split_speculation.md`, `large_model_splits.md` § "Draft trees"
 
 Shipped: guessing ahead on by default (v0.3.213), the continuous stream (v0.3.216, #149), walk
 at the tail, γ control, the engine drafter; **draft trees** (v0.3.246: trailer `0x10`, bit 29,
-tree masks in every segment, the next tree grown beside its check) — every node reads one, but
-they are OFF by default (`SWARMLLM_DRAFT_TREES=1`): on the 385 ms rig, trees beside 4.75-5.06
-tok/s against the stream's 5.03-5.52 (`docs/invariants/scheduling.md` § "A split checks a tree
-of guesses", Measured). Next for trees, each measured against the stream before a default flips:
-a drafter on a card, a stream of trees (several in flight), the real TH↔AU link (both halves on
-cards). Remaining from the plan: acquiring a drafter a node does not already hold (today it
+tree masks in every segment, the next tree grown beside its check). **Since 2026-10-21 trees are
+the default where every segment runs whole on a card** (`dsd_tree::trees_wanted`), the stream
+elsewhere: on the real TH↔AU link (~405 ms, both halves on cards) trees ran 5.33-5.74 tok/s
+against the stream's 5.01-5.05 over 160 tokens; with the head's part on a processor (385 ms
+rig) 4.75-5.06 against 5.03-5.52 (`docs/invariants/scheduling.md` § "A split checks a tree of
+guesses", Measured). Left for trees: (a) **the drafter's wait after a missed seed** — the tree
+grown beside a check held its outcome in only 3-10 of ~30 rounds, and each miss grows the next
+tree from nothing before the check: 327-416 ms of a ~0.95 s round with the drafter on the
+processor, the usual case for a large model, whose layers fill the head's card. It is also why a
+28-token reply ran ~10% slower than the stream (3.42-3.99 vs 3.78-4.54). The drafter's processor
+width is the contribution's (4 of 8 threads on that run: 16 ms a single-row step); (b) a stream
+of trees (several in flight); (c) a drafter on a card, measured (this boot keeps one CUDA process
+on the card). Remaining from the plan: acquiring a drafter a node does not already hold (today it
 chooses only among held models); the pipelined prompt pass (Phase 3) is #171. The
 same-model-at-fewer-bits drafter is decided against as a default (#144, § "Decided").
 

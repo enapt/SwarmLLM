@@ -19,15 +19,32 @@ use crate::inference::draft_tree::{
     keep_rows, kept_rows, worth_checking, CheckPrice, DraftTree, GrownTree,
 };
 
-/// May a reply's rounds check trees? Only with `SWARMLLM_DRAFT_TREES=1`: on the
-/// rig (a 7B split over a 385 ms round trip, the far half on a card, the
-/// drafter on this machine's processor, 2026-10-20, with #323's kernels),
-/// trees grown beside their checks ran 4.75-5.06 tok/s against the continuous
-/// stream's 5.03-5.09 — no win, so the stream stays the default. Every node
-/// still advertises `features::DRAFT_TREES` and checks a tree it is sent, so
-/// a release that turns trees on needs no peer to update.
-pub(super) fn trees_requested() -> bool {
-    std::env::var("SWARMLLM_DRAFT_TREES").as_deref() == Ok("1")
+/// May a reply's rounds check trees? Where every segment runs its layers on a
+/// card (`pipeline::every_segment_runs_on_a_card`), and anywhere with
+/// `SWARMLLM_DRAFT_TREES=1`; never with `=0`.
+///
+/// A tree's rows are what it costs a check, so it wins where they are cheap:
+/// on the TH↔AU link (2026-10-21, a 7B split, the head's layers on this
+/// machine's card, the Q4 drafter on its processor, the tail an RTX 3060
+/// ~410 ms away) rows cost 2-3 ms, trees kept 4.1-4.3 guesses a round and
+/// ran 5.66-5.74 tok/s against the continuous stream's 5.01-5.05. With the
+/// head's part on its processor (the 385 ms rig, 2026-10-20) rows cost 4-18
+/// ms, trees kept 2.9-3.3 and ran 4.75-5.06 against the stream's 5.03-5.09.
+/// Every node advertises `features::DRAFT_TREES` and checks a tree it is
+/// sent, so a peer needs no update for this to change.
+pub(super) fn trees_wanted(every_segment_on_a_card: bool) -> bool {
+    trees_wanted_given(
+        std::env::var("SWARMLLM_DRAFT_TREES").ok().as_deref(),
+        every_segment_on_a_card,
+    )
+}
+
+fn trees_wanted_given(setting: Option<&str>, every_segment_on_a_card: bool) -> bool {
+    match setting.map(str::trim) {
+        Some("1") => true,
+        Some("0") => false,
+        _ => every_segment_on_a_card,
+    }
 }
 
 /// Does the drafter keep growing a tree while its check is on the way?
@@ -408,6 +425,20 @@ mod tests {
                 .map(|p| p.ln() as f32)
                 .collect(),
         }
+    }
+
+    /// Trees by default where every segment runs on a card; the setting
+    /// forces them on (`1`) or off (`0`) whatever the plan, and anything else
+    /// leaves the choice to the plan.
+    #[test]
+    fn trees_are_wanted_on_cards_unless_the_setting_says_otherwise() {
+        assert!(trees_wanted_given(None, true));
+        assert!(!trees_wanted_given(None, false));
+        assert!(trees_wanted_given(Some("1"), false));
+        assert!(trees_wanted_given(Some(" 1 "), false));
+        assert!(!trees_wanted_given(Some("0"), true));
+        assert!(trees_wanted_given(Some("yes"), true));
+        assert!(!trees_wanted_given(Some("yes"), false));
     }
 
     #[test]

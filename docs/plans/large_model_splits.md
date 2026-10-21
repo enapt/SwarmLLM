@@ -310,14 +310,18 @@ until the bytes or a processor stage say otherwise.
 - **Fallback.** The request keeps today's chain loop when any of these happens:
   a peer lacks bit 29, the model's layers refuse a tree, or a tree forward is
   refused.
-- **Measured 2026-10-20: trees lose to the stream, so they are off by default.**
-  A 7B over a 385 ms round trip, the far half on a card, the drafter on the
-  requester's processor: trees grown beside their check 4.75-5.06 tok/s, the
-  continuous stream of chains 5.03-5.52 (`docs/invariants/scheduling.md` § "A
-  split checks a tree of guesses"). A tree round keeps 3 guesses for one round
-  trip; the stream keeps several chains in flight. `SWARMLLM_DRAFT_TREES=1`
-  asks for trees; every node reads them, so a later default needs no peer to
-  update. Next to try: a stream of trees, a drafter on a card.
+- **Measured: trees win where every segment runs on a card, so they are the
+  default there (2026-10-21) and the stream elsewhere.** With the head's part on
+  a processor (2026-10-20, 385 ms emulated) a row cost the check 10-19 ms; trees
+  grown beside their check ran 4.75-5.06 tok/s against the stream's 5.03-5.52.
+  On the real Thailand↔Australia link (~405 ms) with both halves on cards a row
+  cost 2-3 ms, a tree kept 4.1-4.5 guesses a round, and trees ran 5.33-5.74
+  against 5.01-5.05 over 160 tokens; a 28-token reply ran ~10% slower, its
+  first rounds waiting for the drafter (`docs/invariants/scheduling.md` § "A
+  split checks a tree of guesses"). `SWARMLLM_DRAFT_TREES=1` / `=0` forces
+  either way. Next: the drafter's wait after a missed seed (327-416 ms of a
+  ~0.95 s round with the drafter on a processor — the usual case, since a large
+  model fills the head's card), a stream of trees.
 
 ## Build order (each step ends on a measurement)
 

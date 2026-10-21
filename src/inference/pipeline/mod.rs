@@ -910,6 +910,56 @@ pub(super) fn tree_check_possible(
     }) && (last.node_id == *local || peer_walks_at_tail(shared_state, &last.node_id))
 }
 
+/// Does every machine of this plan run its layers of `model_id` whole on a
+/// graphics card? There a row of a check costs almost nothing beside the
+/// round trip, so a tree's extra rows are nearly free: on the TH↔AU link
+/// (2026-10-21) a check cost 497-520 ms plus 2-3 ms a row with the head's
+/// layers on its card, against 10-19 ms a row on its processor.
+/// `dsd_tree::trees_wanted` reads it. This node answers from its live worker
+/// (`ModelProcessPool::runs_whole_on_the_card`), a peer from what it
+/// advertises (`NodeCapability::models_run_on_card`); a peer that says
+/// nothing is not on a card.
+pub(super) fn every_segment_runs_on_a_card(
+    shared_state: &SharedState,
+    segments: &[crate::types::PipelineSegment],
+    model_id: &crate::types::ModelId,
+) -> bool {
+    every_segment_on_a_card(
+        segments,
+        shared_state.identity.node_id(),
+        || {
+            shared_state
+                .model_process_pool
+                .runs_whole_on_the_card(model_id)
+        },
+        |node| {
+            shared_state.peer_registry.get(node).is_some_and(|p| {
+                p.capability
+                    .as_ref()
+                    .is_some_and(|c| c.models_run_on_card())
+            })
+        },
+    )
+}
+
+/// [`every_segment_runs_on_a_card`] over its two readings: this node's part
+/// and each peer's.
+fn every_segment_on_a_card(
+    segments: &[crate::types::PipelineSegment],
+    local: &crate::types::NodeId,
+    local_on_card: impl Fn() -> bool,
+    peer_on_card: impl Fn(&crate::types::NodeId) -> bool,
+) -> bool {
+    !segments.is_empty()
+        && segments.iter().all(|s| {
+            if s.node_id == *local {
+                local_on_card()
+            } else {
+                peer_on_card(&s.node_id)
+            }
+        })
+}
+
 fn peer_walks_at_tail(shared_state: &SharedState, node_id: &crate::types::NodeId) -> bool {
     use swarmllm_types::node::features::{
         FORWARD_GENERATED_IDS, FORWARD_SAMPLING, SPEC_WALK_AT_TAIL,
@@ -2185,6 +2235,52 @@ mod tests {
             },
             layer_range: range,
         }
+    }
+
+    /// Trees are wanted only where EVERY machine of the plan runs on a card:
+    /// one segment on a processor makes each row of a check cost what that
+    /// processor takes to read it.
+    #[test]
+    fn a_plan_is_on_cards_only_where_every_segment_is() {
+        let here = NodeId([1; 32]);
+        let card_peer = NodeId([2; 32]);
+        let processor_peer = NodeId([3; 32]);
+        let peer_on_card = |n: &NodeId| *n == card_peer;
+        let plan = |nodes: &[&NodeId]| -> Vec<PipelineSegment> {
+            nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| remote_segment(n, (i as u32 * 14, (i as u32 + 1) * 14)))
+                .collect()
+        };
+
+        assert!(every_segment_on_a_card(
+            &plan(&[&here, &card_peer]),
+            &here,
+            || true,
+            peer_on_card
+        ));
+        assert!(
+            !every_segment_on_a_card(&plan(&[&here, &card_peer]), &here, || false, peer_on_card),
+            "this node's part on its processor"
+        );
+        assert!(
+            !every_segment_on_a_card(
+                &plan(&[&here, &processor_peer]),
+                &here,
+                || true,
+                peer_on_card
+            ),
+            "a peer's part on its processor"
+        );
+        assert!(
+            every_segment_on_a_card(&plan(&[&card_peer]), &here, || false, peer_on_card),
+            "a led plan this node is not in is judged by its peers alone"
+        );
+        assert!(
+            !every_segment_on_a_card(&[], &here, || true, peer_on_card),
+            "no plan, no trees"
+        );
     }
 
     /// Play every peer as a SERVING NODE answers a piece of a prompt pass:
