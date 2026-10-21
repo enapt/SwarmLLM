@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #324**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #325**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1215,7 +1215,7 @@ The live node (v0.3.244, serving nothing) logged 65 `DIAG: network event loop st
 10-19 (190 ms-2.6 s: 43 in `swarm_event:RequestResponse`, 15 `Identify`, 7 `peer_cache_interval`),
 bunched while this machine's disk was busy. Sampled across a full `cargo dev-test`, 6 of 8 stalls
 had a runtime worker in `fdatasync` — a redb commit, which is the only caller of it. Fixed
-(2026-10-20, not yet released): every commit hands its worker's queue off first
+(2026-10-20, released in v0.3.246): every commit hands its worker's queue off first
 (`Database::with_write_table` → `without_starving_the_runtime`), so another task's commit no longer
 holds the loop in that worker's LIFO slot, and the loop's own peer-cache save runs on the blocking
 pool (`peer_cache::CacheWriter`). What remains: the 2 sampled stalls with no worker in a sync, and
@@ -2325,6 +2325,20 @@ image-encode refusal stays silent.
 
 ### API surface
 
+#### #324 — A node holding models is told to download one when every cold-start wait slot is taken
+`P3` · api · **OPEN** — 2026-10-21 · history: found by v0.3.246's pre-release review
+
+A chat request for a model this node does not hold waits up to `COLD_START_WAIT_SECS` for the
+model's details to arrive from its peers, and the number of requests waiting at once is capped. A
+request that finds every wait slot taken is answered at once with `SwarmError::NoModelLoaded`
+(`src/api/openai/mod.rs`, "Cold-start wait slots full"), whose hint says no model is loaded and
+to download one from the dashboard. On a node that holds models that advice is wrong; v0.3.246
+fixed the same advice at the end of the wait (`SharedState::no_route_error`: 404 naming the
+models it knows, 503 only when it knows none) but left this early return as it was. It predates
+v0.3.246, so it is not a regression. The fix is to answer it through the same helper, or with a
+"busy, retry shortly" class if a full wait queue should read as load rather than absence —
+decide which by what a retry a second later would find.
+
 #### #312 — A Responses tool output that is a list of parts is refused
 `P3` · api · **OPEN** — 2026-10-19 · history: found closing #310
 
@@ -2849,7 +2863,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-20, not yet released** (#255, #320, #321, #323)
+**Closed 2026-10-20, released in v0.3.246** (#255, #320, #321, #323)
 - #323 — **Q5_0, Q4_1 and Q5_1 run on AVX2, and the five 32-value formats share a pass over
   several rows.** Found profiling the drafter's tree step (#134): 8 rows of Qwen2.5-0.5B cost
   7.1× one row. Upstream candle ran Q5_0 / Q4_1 / Q5_1 through the scalar loop on x86 (llama.cpp
