@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.248-alpha] — 2026-10-23
 
 **A split across a long link can now keep its guesses flowing instead of waiting on each
 check.** Until now a split across a long link sent a tree of guesses, waited the whole round trip
@@ -14,6 +14,15 @@ replies came at 9.0-9.4 tokens a second against 8.0-8.3 for trees checked one ro
 time. If anything goes wrong mid-reply, the reply is finished the old way. `SWARMLLM_TREE_FLOW=0`
 turns it off.
 
+**A split writes text it has seen before about twice as fast.** When a reply repeats something
+already in the conversation — code you asked to have edited, a document being quoted, a list
+being rewritten — your computer now looks up what came next the last time those words appeared
+and sends that whole run to the far computer to check, alongside the small model's own guesses.
+The far computer still decides every word, so the reply is exactly what it would have been. On
+the test split at a 385 ms round trip, asking for an edit of a 135-line file wrote 42-47 tokens a
+second instead of 23-24, and an ordinary chat reply, which copies little, ran as before. It
+follows the existing "n-gram lookup" setting; `SWARMLLM_FLOW_COPY=0` turns just this off.
+
 **On a slow upload, the flowing guesses now hold back instead of clogging the line.** Every
 guess the far computer checks has to cross your upload first, and most guesses are thrown away
 once the reply takes another path — with eight guesses a step, about 26 crossed for each word
@@ -23,15 +32,6 @@ it guesses narrower and keeps fewer guesses ahead, and widens again when the lin
 test split at a 385 ms round trip, a 5 Mbit/s upload went from 4.7-4.8 to 7.4-7.5 words a second
 (the old way ran 6.8-7.1), 10 Mbit/s from 8.2 to 8.5-8.8, and an unlimited one stayed wide.
 `SWARMLLM_FLOW_GUARD=0` turns it off.
-
-**A split writes text it has seen before about twice as fast.** When a reply repeats something
-already in the conversation — code you asked to have edited, a document being quoted, a list
-being rewritten — your computer now looks up what came next the last time those words appeared
-and sends that whole run to the far computer to check, alongside the small model's own guesses.
-The far computer still decides every word, so the reply is exactly what it would have been. On
-the test split at a 385 ms round trip, asking for an edit of a 135-line file wrote 42-47 tokens a
-second instead of 23-24, and an ordinary chat reply, which copies little, ran as before. It
-follows the existing "n-gram lookup" setting; `SWARMLLM_FLOW_COPY=0` turns just this off.
 
 **The small model guessing for a split now hands each step to your graphics card in one piece.**
 A flowing tree asks it for three levels of eight guesses at a time. Each level used to be some

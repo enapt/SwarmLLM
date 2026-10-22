@@ -2016,14 +2016,14 @@ grown from nothing 118.5 against 145.7 ms) — **and a call beside a check grows
 up to 416** (was 8 and 128; the real-link A/B is owed: the far peer had no conversation room at
 04:44Z) — `docs/invariants/scheduling.md` § "A tree step pays for its tree once". The wait it
 targets: per reply the seed missed on 32-51% of rounds and was grown ~8 forwards before the check
-on most others, 145-163 ms a round. (b) **a tree that FLOWS — built 2026-10-22, unreleased**:
+on most others, 145-163 ms a round. (b) **a tree that FLOWS — built 2026-10-22, released in v0.3.248**:
 rows streamed as grown, the far end appending them to the tree it holds and answering each row
 with its draw, the requester walking the draws (`pipeline::dsd_flow`, trailer `0x11`, bit 31),
 three levels of 8 rows a drafter call; on the card rig (385 ms, all three processes on one card)
 8.99-9.44 tok/s against tree rounds' 8.03-8.27 over 400 tokens, replies scored against llama.cpp
 — +11-14%, short of the 1.3× exit (`docs/invariants/scheduling.md` § "A tree that flows",
 Measured). Left of (b): the real link (the far peer must advertise bit 31 — after a release);
-the drafter's level, ~72% of the requester's time — **built 2026-10-22, unreleased: a level of
+the drafter's level, ~72% of the requester's time — **built 2026-10-22, released in v0.3.248: a level of
 ≤ 8 rows is one tree kernel and one captured graph** (`decode_attn::gqa_tree_attention_cuda`, a
 bitmask per row; `cuda_graph::StepShape`; `docs/invariants/inference.md` § "A tree level on a
 card") — on an idle card a flow call's three levels take 26.5 ms against 36.0 (−26%); on the
@@ -2039,7 +2039,7 @@ uplink that lost to rounds (5 Mbit: 4.5-4.8 vs 6.8-7.1 tok/s), so **since 2026-1
 it down** (`FlowGuard`, LEDBAT++-shaped, answers timed on arrival: 5 Mbit 7.44-7.50 vs 4.73-4.80
 unguarded, 10 Mbit 8.52-8.82 vs 8.23; `docs/invariants/scheduling.md` § "A tree that flows") —
 its alternating check with no rate limit found no cost (guard on 8.83-9.58, off 8.79-9.82) — left of
-it: the guard on the real link and on a busy peer. **Built 2026-10-22, unreleased: copied runs**
+it: the guard on the real link and on a busy peer. **Built 2026-10-22, released in v0.3.248: copied runs**
 (`FlowRun::copy_ahead`, SuffixDecoding-shaped: the n-gram lookup's continuation pushed under the
 walk's row as `FlowOp::Copy`, rated by the drafter's own guess) — a code edit that copies a file
 23-24 → 42-47 tok/s, chat unchanged (§ "A tree that flows", Copied runs); left of it: a copy
@@ -3000,7 +3000,7 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-22, unreleased** (#275 (4); #134 (c))
+**Closed 2026-10-22, released in v0.3.248** (#275 (4); #134 (c))
 - #275 (4) — **A large model filling the head's card leaves its drafter room there**, so the
   split's trees of guesses run. A card plan was not cut: the target's layers filled the card, the
   drafter went to the processor, and trees — which pay only with the drafter on a card — stood
