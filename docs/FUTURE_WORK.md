@@ -2041,8 +2041,9 @@ guesses 21-23 ms against 27-32 (§ "A few rows: the line per type and size, insi
 § "A narrow row is normed by 1024 threads on a card"). **Built 2026-10-22: every tree over the
 half cache is read by a TILED kernel** (`decode_attn::tree_tiles`, `tree_attn_tiled_f16kv_*`: a
 block stages one KV head's chunk and serves a tile of rows × query heads — FlashInfer's query
-tile on CUDA cores, f32 sums): the 7B near half's 24-row check forward 19.0-19.2 → 16.0-16.3 ms,
-32 rows 23.7 → 19.8, the 0.5B drafter's 8-row level 600 deep 6.6-6.8 → 5.1-5.2 ms (§ "A tree's
+tile on CUDA cores, f32 sums, every load in flight at once): the 7B near half's 24-row check
+forward 19.2-19.4 → 15.6-16.0 ms, 32 rows 23.8-24.4 → 18.7-19.4, 64 rows 38.1-39.6 → 30.3-31.4,
+the 0.5B drafter's 8-row level 600 deep 6.7-6.8 → 5.1 ms (§ "A tree's
 rows are read TILED over the half cache"). Left of it: the q/k/v bias adds (~5% of a
 level, llama.cpp fuses them into its vector kernel) and the copies before attention (~4%); the flow
 on the one-card rig after it. Left of the level: a whole drafter call

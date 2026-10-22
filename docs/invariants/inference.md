@@ -4367,25 +4367,35 @@ layer) — the cost was the re-reads and the launches, not arithmetic.
 
 **Measured** (RTX 3070 Laptop, idle, live node stopped; `~/swarmllm-318/tiled_check.sh`).
 *The op* (`tree_attention_timing`, µs a call each synchronised, min of 30 — a ~60 µs floor of
-launch + sync in every figure), per-row / tiled / matmul path:
+launch + sync in every figure), per-row / tiled / matmul path, with the batched staging (below):
 
 | heads, keys | 2 rows | 8 rows | 24 rows | 64 rows |
 |---|---|---|---|---|
-| 0.5B (14/2, d 64), 300 | 78 / 69 / 142 | 99 / 74 / 195 | 176 / 90 / 247 | 315 / 128 / 243 |
-| 0.5B, 900 | 107 / 80 / 567 | 234 / 146 / 680 | 378 / 180 / 659 | 735 / 207 / 431 |
-| 7B (28/4, d 128), 300 | 77 / 68 / 149 | 124 / 81 / 168 | 236 / 109 / 192 | 513 / 197 / 283 |
-| 7B, 900 | 108 / 82 / 185 | 242 / 110 / 311 | 591 / 217 / 403 | 1447 / 417 / 2431 |
+| 0.5B (14/2, d 64), 300 | 75 / 66 / 153 | 99 / 71 / 192 | 170 / 83 / 197 | 313 / 116 / 244 |
+| 0.5B, 900 | 108 / 72 / 145 | 177 / 89 / 308 | 281 / 103 / 280 | 626 / 160 / 381 |
+| 7B (28/4, d 128), 300 | 77 / 62 / 137 | 115 / 69 / 170 | 233 / 95 / 198 | 511 / 147 / 267 |
+| 7B, 900 | 108 / 80 / 184 | 243 / 93 / 317 | 598 / 174 / 399 | 1443 / 341 / 2304 |
+
+**Its loads are issued before any is waited on.** The first build staged with loops bounded by
+`d` — one 4-byte load, a wait, a store, again — and nsys of the near half's 24-row forwards
+(`~/swarmllm-318/headprof2.sh`) put a block at ~37 µs against the few its arithmetic needs: 236 µs a
+layer at ~600 keys, the block waiting on memory. K and V now go 16 bytes a load (the caller checks
+every row starts on 16 bytes: offsets and strides multiples of 8 halves), a fixed count a thread,
+unrolled, all in flight at once; V waits in registers while the scores are summed; the queries'
+starts are worked out once a block. The arithmetic is unchanged, sum for sum. Op at 900 keys: 7B
+24 rows 217 → 174 µs, 64 rows 417 → 341; 0.5B 8 rows 146 → 89, 24 rows 180 → 103.
 
 *Whole forwards* (`prefill_bench SWARM_BENCH_SPEC_TREE=1`, min of 7, two passes, ms a tree
-forward). The 7B's near half (layers 0-14, 600 deep), tiled / per-row ≤ 8 + standard attention
-past it (`SWARMLLM_TREE_ATTN_TILED=0`): 8 rows 10.6-10.9 / 11.9-12.1, 16 rows 13.8 / 16.5-16.6,
-24 rows 16.0-16.3 / 19.0-19.2, 32 rows 19.8-20.1 / 23.7-23.9, 64 rows 32.9-33.4 / 36.4-38.3 — a
-chain of the same width 10.3-10.6 / 13.2-13.7 / 14.3-14.7 / 16.3-16.6 / 22.3-23.4, so a tree now
-costs a chain's time plus ~10%. The 0.5B drafter (600 deep): 2 rows 3.9-4.0 / 4.1-4.2, 4 rows
-4.3-4.4 / 5.1-5.2, 8 rows 5.1-5.2 / 6.6-6.8 (−23%).
+forward). The 7B's near half (layers 0-14, 600 deep), tiled with the batched staging / per-row ≤ 8
++ standard attention past it (`SWARMLLM_TREE_ATTN_TILED=0`): 8 rows 10.7-10.8 / 11.2-12.1, 16
+rows 13.6-13.8 / 16.5-16.6, 24 rows 15.6-16.0 / 19.2-19.4, 32 rows 18.7-19.4 / 23.8-24.4, 64 rows
+30.3-31.4 / 38.1-39.6 — a chain of the same width 9.7-10.6 / 13.2-13.5 / 14.5-15.1 / 16.3-17.0 /
+22.6-23.6, so a tree costs a chain's time plus ~5-15% (the first build, before the batched
+staging: 24 rows 16.0-16.3, 32 rows 19.8-20.1, 64 rows 32.9-33.4). The 0.5B drafter (600 deep):
+4 rows 4.0-4.3 / 5.1, 8 rows 5.1 / 6.7-6.8 (−24%).
 
 *The flow on the one-card rig* (`flow318c.sh LEN=400`, 385 ms, both halves and the drafter on ONE
-card, tiled against `SWARMLLM_TREE_ATTN_TILED=0`, two passes, warm replies;
+card, the first build tiled against `SWARMLLM_TREE_ATTN_TILED=0`, two passes, warm replies;
 `~/swarmllm-318/flowtiled.out`): this node's half per check forward 29.7-34.6 ms against
 35.1-38.8 (`near_ms` / `forwards`, 14.5-18.8 rows a forward against 12.9-18.6) — ~11% with three
 processes time-slicing the card. The reply's speed, 9.0-12.9 tok/s against 9.4-11.0, is inside the

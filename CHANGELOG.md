@@ -65,7 +65,8 @@ about twenty guesses at a time, and each guess has to look back over the whole c
 Past eight guesses that went a slow, general way that copied the conversation's memory into a
 wider format on every check; now one job reads each piece of that memory once and serves every
 guess from it. On a laptop RTX 3070 the first half of a 7B model checks 24 guesses in 16 ms
-instead of 19, and 32 in 20 instead of 24; the small model's own steps of eight guesses, 600
+instead of 19, 32 in 19 instead of 24, and 64 in 31 instead of 39 — about what a plain row of
+that many guesses costs; the small model's own steps of eight guesses, 600
 words into a conversation, take 5.1 ms instead of 6.7. On the test split, where both halves and
 the small model shared one graphics card, each check took 30-35 ms instead of 35-39; the reply's
 overall speed stayed within its usual run-to-run spread there. `SWARMLLM_TREE_ATTN_TILED=0`

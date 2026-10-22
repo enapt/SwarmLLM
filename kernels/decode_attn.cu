@@ -303,7 +303,7 @@ DA_ENTRY(decode_attn_f16kv, __half)
 // weight; positions past the cache are staged as zeros and masked.
 //
 // The cache must be the half cache, its rows dense and every row starting on
-// a 4-byte boundary (the caller checks the offset and the strides are even).
+// 16 bytes (the caller checks the offset and the strides are multiples of 8).
 // d % 32 == 0, d <= DMAX. Not bit-identical to the kernel above (each score is
 // summed in order where that one sums lanes and shuffles); pinned against the
 // matmul path by `cuda_tree_kernel_matches_the_masked_matmul_path`, replies
@@ -361,27 +361,69 @@ static __device__ __forceinline__ void tree_attn_tiled_body(
     const int dw = d >> 1;
     const int tid = threadIdx.x;
 
-    // The tile's queries; vector `q0 + i` is row (q0 + i) / n_rep, query head
-    // h * n_rep + (q0 + i) % n_rep. A vector past the tree's is zeros.
-    for (int i = tid; i < QT * d; i += THREADS) {
-        const int qi = i / d;
-        const int j = i - qi * d;
-        float x = 0.0f;
-        if (qi < nq) {
-            const int qg = q0 + qi;
+    // Every load of the block is issued before the first is waited on: a
+    // fixed count a thread, unrolled (a loop bounded by `d` issued one load,
+    // waited, stored, and the block sat on memory — 37 µs a block against the
+    // few its arithmetic needs, nsys 2026-10-22). K and V go 16 bytes a load
+    // (eight halves; the caller checks every row starts on 16 bytes), the
+    // queries 4 (their view's offset is not checked), and V waits in registers
+    // until the scores are done.
+    constexpr int C8 = DMAX / 8;
+    constexpr int KV_LOADS = CH * C8 / THREADS;
+    constexpr int Q_LOADS = QT * DMAX / THREADS;
+    static_assert(KV_LOADS * THREADS == CH * C8 && Q_LOADS * THREADS == QT * DMAX, "staging shape");
+    __shared__ long long q_at[QT];
+
+    // Where each query vector of the tile starts; vector `q0 + i` is row
+    // (q0 + i) / n_rep, query head h * n_rep + (q0 + i) % n_rep. −1: past the tree's.
+    if (tid < QT) {
+        long long at = -1;
+        if (tid < nq) {
+            const int qg = q0 + tid;
             const int row = qg / n_rep;
             const int r = qg - row * n_rep;
-            x = q[((long long)(kv_bi * rows + row) * n_head + h * n_rep + r) * d + j];
+            at = ((long long)(kv_bi * rows + row) * n_head + h * n_rep + r) * d;
         }
-        q_sh[qi * QS + j] = x;
+        q_at[tid] = at;
     }
-    // The chunk's K rows, two halves a word; rows past the cache are zeros.
     const __half *kb = k + kv_bi * k_sb + h * k_sh + (long long)s0 * d;
     const __half *vb = v + kv_bi * v_sb + h * v_sh + (long long)s0 * d;
-    for (int i = tid; i < CH * dw; i += THREADS) {
-        const int p = i / dw;
-        const int w = i - p * dw;
-        kv_sh[p * KW + w] = p < n ? reinterpret_cast<const unsigned int *>(kb + (long long)p * d)[w] : 0u;
+    const int d8 = d >> 3;
+    uint4 kreg[KV_LOADS];
+    uint4 vreg[KV_LOADS];
+#pragma unroll
+    for (int t = 0; t < KV_LOADS; t++) {
+        const int i = tid + t * THREADS;
+        const int p = i / C8;
+        const int c8 = i % C8;
+        const bool in = p < n && c8 < d8;
+        kreg[t] = in ? reinterpret_cast<const uint4 *>(kb + (long long)p * d)[c8] : make_uint4(0u, 0u, 0u, 0u);
+        vreg[t] = in ? reinterpret_cast<const uint4 *>(vb + (long long)p * d)[c8] : make_uint4(0u, 0u, 0u, 0u);
+    }
+    __syncthreads();
+    float qreg[Q_LOADS];
+#pragma unroll
+    for (int t = 0; t < Q_LOADS; t++) {
+        const int i = tid + t * THREADS;
+        const int qi = i / DMAX;
+        const int j = i % DMAX;
+        const long long at = q_at[qi];
+        qreg[t] = at >= 0 && j < d ? q[at + j] : 0.0f;
+    }
+    // Rows past the cache, and words past `d`, are zeros.
+#pragma unroll
+    for (int t = 0; t < KV_LOADS; t++) {
+        const int i = tid + t * THREADS;
+        unsigned int *dst = &kv_sh[(i / C8) * KW + 4 * (i % C8)];
+        dst[0] = kreg[t].x;
+        dst[1] = kreg[t].y;
+        dst[2] = kreg[t].z;
+        dst[3] = kreg[t].w;
+    }
+#pragma unroll
+    for (int t = 0; t < Q_LOADS; t++) {
+        const int i = tid + t * THREADS;
+        q_sh[(i / DMAX) * QS + i % DMAX] = qreg[t];
     }
     __syncthreads();
 
@@ -396,6 +438,8 @@ static __device__ __forceinline__ void tree_attn_tiled_body(
                 acc[a][m] = 0.0f;
             }
         }
+        // `dw` is a multiple of 16 (d % 32 == 0).
+#pragma unroll 8
         for (int w = 0; w < dw; w++) {
             float2 kk[KM];
 #pragma unroll
@@ -436,10 +480,14 @@ static __device__ __forceinline__ void tree_attn_tiled_body(
 
     // V over K's staging (every score is written, so every K read is done),
     // then each query's max-shifted exp and its sum, a warp a query.
-    for (int i = tid; i < CH * dw; i += THREADS) {
-        const int p = i / dw;
-        const int w = i - p * dw;
-        kv_sh[p * KW + w] = p < n ? reinterpret_cast<const unsigned int *>(vb + (long long)p * d)[w] : 0u;
+#pragma unroll
+    for (int t = 0; t < KV_LOADS; t++) {
+        const int i = tid + t * THREADS;
+        unsigned int *dst = &kv_sh[(i / C8) * KW + 4 * (i % C8)];
+        dst[0] = vreg[t].x;
+        dst[1] = vreg[t].y;
+        dst[2] = vreg[t].z;
+        dst[3] = vreg[t].w;
     }
     {
         const int lane = tid & 31;
@@ -476,6 +524,7 @@ static __device__ __forceinline__ void tree_attn_tiled_body(
                 o[a][w] = make_float2(0.0f, 0.0f);
             }
         }
+#pragma unroll 4
         for (int p = 0; p < n; p++) {
             float2 vv[DW];
 #pragma unroll

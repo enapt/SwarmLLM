@@ -527,7 +527,7 @@ pub(crate) fn tiled_tree_calls() -> u64 {
 }
 
 /// Does the TILED tree kernel read this call? A half cache whose rows start on
-/// a word (the kernel stages two halves a load), at least
+/// 16 bytes (the kernel stages eight halves a load), at least
 /// [`tree_tiled_from_rows`] rows. The geometry and the visibility's reach are
 /// [`gqa_tree_attention_cuda`]'s, checked before.
 fn tree_tiles(rows: usize, k: &Tensor, v: &Tensor) -> bool {
@@ -538,8 +538,8 @@ fn tree_tiles(rows: usize, k: &Tensor, v: &Tensor) -> bool {
         && k.dtype() == candle_core::DType::F16
         && v.dtype() == candle_core::DType::F16
         && [k, v].into_iter().all(|t| {
-            t.layout().start_offset().is_multiple_of(2)
-                && t.stride()[..2].iter().all(|s| s.is_multiple_of(2))
+            t.layout().start_offset().is_multiple_of(8)
+                && t.stride()[..2].iter().all(|s| s.is_multiple_of(8))
         })
 }
 
@@ -840,11 +840,11 @@ mod cuda {
                         "decode-attention: the tiled tree kernel reads a half cache"
                     );
                 };
-                // Two halves a load: every row the kernel reads starts on a word.
+                // Eight halves a load: every row the kernel reads starts on 16 bytes.
                 if [l2.start_offset(), l3.start_offset()]
                     .into_iter()
                     .chain([ks[0], ks[1], vs[0], vs[1]])
-                    .any(|x| !x.is_multiple_of(2))
+                    .any(|x| !x.is_multiple_of(8))
                     || d > 256
                     || !d.is_multiple_of(32)
                 {
