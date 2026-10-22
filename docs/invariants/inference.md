@@ -4124,6 +4124,94 @@ decode step's graphs. The drafter reads a short catch-up as single captured step
 
 → `docs/invariants/inference.md` § "A speculative check is captured too"
 
+## A tree level on a card: one tree kernel, captured as a graph (2026-10-22, #134 (b))
+
+**What it replaced.** A tree's rows were read on standard attention on every node: the half
+cache widened to f32, two cuBLAS products, an additive `[rows, kv_len]` mask uploaded inside the
+forward, a softmax — and never captured, because a forward that reads a mask is never captured
+(`SplitModel::mask_is_read`) and that mask was uploaded mid-forward. The drafter's 8-row level of a
+tree that flows (0.5B Q8_0, 24 layers) was ~530 launches, launch-bound: ~12 ms on an idle card,
+~27 ms with both halves of the split on the same card — the drafter was ~72% of the requester's
+time (§ "A tree that flows", `docs/invariants/scheduling.md`).
+
+**The rule.**
+- **`decode_attn::gqa_tree_attention_cuda`** reads a tree's attention on the card: the decode
+  kernel (`kernels/decode_attn.cu`) with each row a query batch element over the SAME cache (the
+  K/V batch is the query batch over `rows`) and a packed visibility bitmask per row over the
+  positions from the tree's start — a masked score is −∞, a chunk a row sees nothing of weighs 0
+  in the combine. Without a tree (`vis` null) the kernel is the decode kernel bit for bit.
+  FlashInfer's packed custom mask is the same idea (SGLang's and vLLM's tree drafts under CUDA
+  graphs read one).
+- **`draft_tree::RowVisibility` is the ONE statement of what a row sees**: `rows_for` builds the
+  bits, and the additive mask the matmul path reads is made FROM them (`RowVisibility::mask`), so
+  the two paths cannot disagree. 16 words a row = `MAX_TREE_ROWS` / 32.
+- **At most 8 rows (`TREE_KERNEL_MOST_ROWS` = `cuda_graph::MAX_POSITIONS`, const-asserted).** One
+  block per row × KV head × chunk reads the cache once per ROW — the lesson of #119 and gotcha
+  #725 again: it beats the matmul path at ≤ 8 rows everywhere and loses past ~12 on a 7B's heads
+  (table below). More rows go to standard attention as before.
+- **A tree level of ≤ 8 rows is captured** (`SplitModel::tree_steps_may_be_captured`: on a card,
+  an unsplit segment, every layer dense and covered by the kernel). Graph state is keyed by
+  **`cuda_graph::StepShape`** (positions + tree), so a tree level and a chain check of the same
+  width never churn each other's graphs. **Everything a captured tree level reads is made BEFORE
+  the capture** (`layers::stage_tree_forward`: the visibility on the card and every rope table's
+  rows gathered) — a pageable upload inside a capture is replayed from the host address (gotcha
+  #758), and memory one group allocates that a later group reads costs a remap at every launch
+  (#295). A staged forward builds no mask and checks its scope's positions are the staged ones;
+  in a tree's scope a call with no mask that the kernel does not take — of ANY row count, or one
+  the scope does not describe — fails the capture loudly ("no mask and the card's tree kernel
+  declined it"; the first version asked for more than one row and a matching scope, so a one-row
+  call over other keys would have read its siblings), and a refused capture puts the caches back
+  and runs the level the ordinary way.
+- A/B: `SWARMLLM_TREE_ATTN=standard` (no kernel, no capture), `SWARMLLM_TREE_GRAPH=0` (the kernel,
+  never captured).
+
+**Measured.** *The kernel against the matmul path* (`tree_attention_timing`, `#[ignore]`, µs a
+call, min of 30, half cache, RTX 3070 Laptop):
+
+| heads, keys | 8 rows | 25 rows | 32 rows |
+|---|---|---|---|
+| 0.5B (14/2, d 64), 300 | 88 / 199 | 166 / 199 | 182 / 198 |
+| 0.5B, 900 | 188 / 477 | 380 / 473 | 456 / 431 |
+| 7B (28/4, d 128), 300 | 130 / 423 | 257 / 419 | 301 / 195 |
+| 7B, 900 | 235 / 305 | 597 / 394 | 750 / 419 |
+
+(7B at 900 keys: 12 rows 328 / 318, 16 rows 403 / 331 — the crossing.) Uncapped, the kernel took
+the 7B head's ~25-row forwards too and the tree rounds lost 8.51/8.16 → 7.61/7.62 tok/s; capped,
+8.58/8.38.
+
+*Idle card* (`prefill_bench SWARM_BENCH_GROW=64,8`, the 0.5B drafter growing 64 rows 8 a level,
+min of 7, two passes, live node stopped; `~/swarmllm-318/treegraph_bench.sh`): a flow call's three
+levels of 8 rows take 26.5-26.6 ms captured, 29.2-31.8 with the kernel uncaptured, 35.9-36.0 on
+the old path (−26%); 64 rows grown 8 a level from nothing 73.9-79.7 / 90.4-96.1 / 107.0-108.4
+(−31%, ~9 ms a level against ~13). A seed's read (64 rows, past the cap) is unchanged (23-26 ms).
+Rows ranked where the logits are, the default; ranked on the host the call is 40.0 / 44.2-50.5 /
+48.7-55.9 ms.
+
+*The flow on the card rig* (`flow318.sh LEN=400`, 385 ms, the drafter, both halves on ONE card,
+warm replies): captured 8.93-9.55 tok/s (4), drafting 26.0-28.6 s, this node's half 13.6-14.8 s;
+`SWARMLLM_TREE_GRAPH=0` 8.71-9.42 (4), drafting 28.8-32.3, half 11.5-12.7; `SWARMLLM_TREE_ATTN=standard`
+9.28-9.38 (2), drafting 29.8-29.9, half 10.5-11.3. The capture cuts the drafter's time ~9% and the
+half's grows by about as much: three processes time-slice one card (gotcha #759), so a drafter
+that submits faster holds the card when this node's half wants it. In the field the far half is
+on another machine. Replies against llama.cpp (`score_against_reference.py`, every reply of each
+arm, cold and warm): every token rank 1 or a near-tie — worst rank 3, largest logit gap 0.244 in
+every arm, the captured one no worse than the old path (0.201 there).
+
+**What a change must keep**: the bits are the only statement of what a row sees (the mask is made
+from them); nothing a captured level reads is uploaded inside the capture; a tree level's graph is
+never keyed like a chain check's; the row cap is not raised past `MAX_POSITIONS` without a kernel
+that shares K/V loads across rows (FlashInfer's query tile).
+
+**Tests**: `cuda_tree_kernel_matches_the_masked_matmul_path` (`decode_attn`: seven shapes, f32 and
+f16 caches, against `matmul_attention` with `RowVisibility::mask` — red with the visibility
+dropped, worst abs 1.27; a 9-row forward declined); `a_captured_tree_level_reads_as_the_ordinary_one`
+(`split/tests/draft_trees.rs`, card: four 8-row levels captured equal the ordinary ones within
+1e-3 — red with `SWARMLLM_TREE_GRAPH=0`, 0 launched; run with `--test-threads=1` beside other card
+tests); `a_tree_call_the_kernel_cannot_take_without_a_mask_fails` (`decode_attn`, card: past the
+row cap and a one-row call the scope does not describe, both with no mask — red with the first
+version's check, at the one-row call); `a_trees_visibility_reaches_its_last_row` (`draft_tree`); the pool scope carries the
+visibility (`cpu_pools`); a tree shape's graph state is untouched by a chain's rest (`cuda_graph`).
+
 ## A graph pays only when it is updated — a shape that keeps being rebuilt rests (2026-10-05)
 
 **What was seen.** The 60-second `decode graph` line counts launches that updated every group's

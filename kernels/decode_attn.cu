@@ -39,6 +39,17 @@
 // #309). One kernel at every chunk, so a captured step only updates its
 // arguments as the chunk grows with the cache.
 //
+// A TREE of guesses (#134) runs through the same kernel: each of its `rows`
+// query rows is a batch element of its own over the SAME cache (the K/V batch
+// is `batch / rows`), and reads a key only where its visibility says so —
+// every position before `tree_base` (the confirmed context), and the tree's
+// own rows its ancestors and itself, one bit each (`vis`, `vis_words` words a
+// row; `draft_tree::RowVisibility`). FlashInfer's packed custom mask, the shape
+// SGLang's and vLLM's tree drafts run under CUDA graphs. A masked score is −∞,
+// and a chunk whose every score is masked contributes nothing (the combine
+// skips its −∞ max). Without a tree (`vis` null, `rows` 1) every line reads
+// what it read before, bit for bit.
+//
 // Built WITHOUT `-use_fast_math`, like every kernel here (`build.rs`).
 
 #include <cuda_runtime.h>
@@ -79,6 +90,11 @@ static __device__ __forceinline__ float da_warp_max(float x) {
 //          (`decode_attn::combine_every_length`). One chunk merged is
 //          bit-identical to the direct write (its weight is expf(0) = 1).
 // softcap: Gemma-2's tanh cap on the scaled score, 0 = none.
+// rows: query rows a K/V batch serves (a tree's rows; 1 = a decode step) — q,
+//       out and partial are indexed by `batch * rows + row`, K/V by `batch`.
+// vis:  null, or `[rows, vis_words]` bits: row t reads cache position p where
+//       p < tree_base, or bit (p - tree_base) of its words is set. The caller
+//       keeps s_len - tree_base <= 32 * vis_words.
 // Requires d % 32 == 0, d <= DA_MAX_D, n_rep <= DA_MAX_REP (checked by the caller).
 //
 // `KV` is the cache's element type: `float`, or `__half` for the half cache a
@@ -107,7 +123,11 @@ static __device__ __forceinline__ void decode_attn_body(
     const long long v_sh,
     const float scale,
     const float softcap,
-    const int chunk
+    const int chunk,
+    const int rows,
+    const unsigned int *__restrict__ vis,
+    const int vis_words,
+    const int tree_base
 ) {
     __shared__ float q_sh[DA_MAX_REP * DA_MAX_D];
     __shared__ float sc[DA_MAX_REP * DA_CHUNK];
@@ -115,8 +135,12 @@ static __device__ __forceinline__ void decode_attn_body(
     __shared__ float red_l[DA_MAX_REP];
 
     const int g = blockIdx.x;
+    // `bi` numbers query rows (a batch's tree rows one after another); the
+    // cache is the batch's.
     const int bi = g / n_kv_head;
     const int h = g % n_kv_head;
+    const int kv_bi = bi / rows;
+    const unsigned int *vis_row = vis == nullptr ? nullptr : vis + (long long)(bi % rows) * vis_words;
     const int c = blockIdx.y;
     const int n_chunks = gridDim.y;
     const int s0 = c * chunk;
@@ -133,12 +157,20 @@ static __device__ __forceinline__ void decode_attn_body(
     }
     __syncthreads();
 
-    const KV *kb = k + bi * k_sb + h * k_sh + (long long)s0 * d;
-    const KV *vb = v + bi * v_sb + h * v_sh + (long long)s0 * d;
+    const KV *kb = k + kv_bi * k_sb + h * k_sh + (long long)s0 * d;
+    const KV *vb = v + kv_bi * v_sb + h * v_sh + (long long)s0 * d;
 
     // Scores: one warp per position; its K row is read once, for every head
-    // of the group.
+    // of the group. A position this row does not see is −∞ and its K row is
+    // never read (the test is the same for the whole warp).
     for (int p = warp; p < n; p += DA_WARPS) {
+        const int t = s0 + p - tree_base;
+        if (vis_row != nullptr && t >= 0 && !((vis_row[t >> 5] >> (t & 31)) & 1u)) {
+            for (int r = lane; r < n_rep; r += 32) {
+                sc[r * DA_CHUNK + p] = -INFINITY;
+            }
+            continue;
+        }
         float kr[DA_MAX_D / 32];
 #pragma unroll
         for (int i = 0; i < DA_MAX_D / 32; i++) {
@@ -173,7 +205,8 @@ static __device__ __forceinline__ void decode_attn_body(
         m = da_warp_max(m);
         float l = 0.0f;
         for (int p = lane; p < n; p += 32) {
-            const float e = expf(sc[r * DA_CHUNK + p] - m);
+            // A chunk this row sees nothing of: no weight, not expf(NaN).
+            const float e = m == -INFINITY ? 0.0f : expf(sc[r * DA_CHUNK + p] - m);
             sc[r * DA_CHUNK + p] = e;
             l += e;
         }
@@ -206,7 +239,7 @@ static __device__ __forceinline__ void decode_attn_body(
         for (int r = 0; r < DA_MAX_REP; r++) {
             if (r < n_rep) {
                 if (partial == nullptr) {
-                    out[((long long)g * n_rep + r) * d + j] = acc[r] / red_l[r];
+                    out[((long long)g * n_rep + r) * d + j] = red_l[r] == 0.0f ? 0.0f : acc[r] / red_l[r];
                 } else {
                     float *part = partial + (((long long)g * n_chunks + c) * n_rep + r) * (d + 2);
                     part[2 + j] = acc[r];
@@ -227,9 +260,12 @@ static __device__ __forceinline__ void decode_attn_body(
         float *__restrict__ partial, const int n_kv_head, const int n_rep,      \
         const int d, const int s_len, const long long k_sb,                     \
         const long long k_sh, const long long v_sb, const long long v_sh,       \
-        const float scale, const float softcap, const int chunk) {              \
+        const float scale, const float softcap, const int chunk,               \
+        const int rows, const unsigned int *__restrict__ vis,                   \
+        const int vis_words, const int tree_base) {                             \
         decode_attn_body<KV>(q, k, v, out, partial, n_kv_head, n_rep, d, s_len, \
-                             k_sb, k_sh, v_sb, v_sh, scale, softcap, chunk);    \
+                             k_sb, k_sh, v_sb, v_sh, scale, softcap, chunk,     \
+                             rows, vis, vis_words, tree_base);                  \
     }
 
 // The f32 cache (the processor's layout, and a card's where the half cache does
@@ -239,7 +275,9 @@ DA_ENTRY(decode_attn_f32, float)
 DA_ENTRY(decode_attn_f16kv, __half)
 
 // Merge the chunks: out = Σ_c e^(m_c - M) o_c / Σ_c e^(m_c - M) l_c — the CPU
-// kernel's pass 2, in the same order.
+// kernel's pass 2, in the same order. A tree's rows are batch elements here
+// too (`b * rows` of them), and a chunk a row saw nothing of (max −∞) is
+// skipped.
 extern "C" __global__ void decode_attn_combine_f32(
     const float *__restrict__ partial,
     float *__restrict__ out,

@@ -3279,25 +3279,46 @@ thread_local! {
 /// every layer's rope reads it; so here, once per forward per device, and a
 /// table's rows once per forward ([`tree_rope_rows`]). The upload is a
 /// pageable copy, which a CUDA graph capture would replay from the host
-/// address (gotcha #758): a tree's forward is never captured, and one that is
-/// must make its index before the capture. `SWARMLLM_TREE_ROPE=per-call`
+/// address (gotcha #758): a captured tree level makes its index, visibility
+/// and rope rows before the capture ([`stage_tree_forward`]). `SWARMLLM_TREE_ROPE=per-call`
 /// uploads and gathers in every call, as before.
+///
+/// The keys each row reads go the same way: on a card a tree's attention
+/// reads them as bits (`decode_attn::gqa_tree_attention_cuda`), uploaded once
+/// per forward per device ([`tree_visibility_on`]).
 struct TreeRows {
     positions: Vec<u32>,
+    /// Which keys each row reads; `None` in a scope that sets positions only.
+    visibility: Option<std::sync::Arc<crate::inference::draft_tree::RowVisibility>>,
     /// The positions as an index, on each device a forward has asked for.
     index_on: Vec<(candle_core::DeviceLocation, Tensor)>,
     /// A table's rows at those positions: (cos's id, sin's id, cos rows, sin rows).
     gathered: Vec<(candle_core::TensorId, candle_core::TensorId, Tensor, Tensor)>,
+    /// The visibility's words as `[rows, VISIBILITY_WORDS]` u32, on each
+    /// device a forward has asked for.
+    visibility_on: Vec<(candle_core::DeviceLocation, Tensor)>,
 }
 
 impl TreeRows {
-    fn new(positions: Vec<u32>) -> Self {
+    fn new(scope: TreeScope) -> Self {
         Self {
-            positions,
+            positions: scope.positions,
+            visibility: scope.visibility,
             index_on: Vec::new(),
             gathered: Vec::new(),
+            visibility_on: Vec::new(),
         }
     }
+}
+
+/// What a tree's forward sets on the thread that runs its layers, and what a
+/// pool job is handed of it ([`RowPositions::carried`]): each row's position
+/// and which keys it reads. What a thread has made of them on its devices is
+/// never carried — the job makes its own.
+#[derive(Clone, Debug)]
+pub(crate) struct TreeScope {
+    pub(crate) positions: Vec<u32>,
+    pub(crate) visibility: Option<std::sync::Arc<crate::inference::draft_tree::RowVisibility>>,
 }
 
 /// While alive, every RoPE on this thread rotates row `i` by `positions[i]`
@@ -3309,8 +3330,25 @@ pub(crate) struct RowPositions {
 }
 
 impl RowPositions {
+    /// Positions alone — a test's scope; a forward sets [`Self::for_tree`].
+    #[cfg(test)]
     pub(crate) fn new(positions: Vec<u32>) -> Self {
-        Self::carried(Some(positions))
+        Self::carried(Some(TreeScope {
+            positions,
+            visibility: None,
+        }))
+    }
+
+    /// A tree's forward: each row at its position, reading the keys
+    /// `visibility` says (`DraftTree::rows_for`).
+    pub(crate) fn for_tree(
+        positions: Vec<u32>,
+        visibility: crate::inference::draft_tree::RowVisibility,
+    ) -> Self {
+        Self::carried(Some(TreeScope {
+            positions,
+            visibility: Some(std::sync::Arc::new(visibility)),
+        }))
     }
 
     /// Set this thread's positions to what another thread had
@@ -3321,16 +3359,108 @@ impl RowPositions {
     /// (`cpu_pools::in_phase_pool`, gotcha #919). What the other thread made of
     /// them is not carried — this thread makes its own — and the waiting
     /// forward's comes back with its positions when this is dropped.
-    pub(crate) fn carried(positions: Option<Vec<u32>>) -> Self {
+    pub(crate) fn carried(scope: Option<TreeScope>) -> Self {
         Self {
-            before: ROW_POSITIONS.with(|p| p.replace(positions.map(TreeRows::new))),
+            before: ROW_POSITIONS.with(|p| p.replace(scope.map(TreeRows::new))),
         }
     }
 }
 
+/// What [`RowPositions`] has set on this thread, if anything.
+pub(crate) fn tree_scope_now() -> Option<TreeScope> {
+    ROW_POSITIONS.with(|p| {
+        p.borrow().as_ref().map(|t| TreeScope {
+            positions: t.positions.clone(),
+            visibility: t.visibility.clone(),
+        })
+    })
+}
+
 /// The positions [`RowPositions`] has set on this thread, if any.
+#[cfg(test)]
 pub(crate) fn row_positions_now() -> Option<Vec<u32>> {
-    ROW_POSITIONS.with(|p| p.borrow().as_ref().map(|t| t.positions.clone()))
+    tree_scope_now().map(|s| s.positions)
+}
+
+/// Make, before a CUDA graph's capture, what a tree's forward would make
+/// inside it: the rows' visibility on `device` and each of `tables`' rows at
+/// the tree's positions (every layer's `(cos, sin)`; one table, shared, on a
+/// model held on one device). False outside a tree, or when a tree's rows are
+/// uploaded per call (`SWARMLLM_TREE_ROPE=per-call`) — then nothing may be
+/// captured.
+pub(crate) fn stage_tree_forward(
+    device: &Device,
+    tables: &[(&Tensor, &Tensor)],
+) -> CandleResult<bool> {
+    let shape = ROW_POSITIONS.with(|p| {
+        p.borrow()
+            .as_ref()
+            .and_then(|t| t.visibility.as_ref().map(|v| (t.positions.len(), v.kv_len)))
+    });
+    let Some((rows, kv_len)) = shape else {
+        return Ok(false);
+    };
+    if tree_rope_per_call() || tree_visibility_on(device, rows, kv_len)?.is_none() {
+        return Ok(false);
+    }
+    for (cos, sin) in tables {
+        tree_rope_rows(rows, cos, sin)?;
+    }
+    Ok(true)
+}
+
+/// Is this thread inside a tree's forward that carries its visibility? Every
+/// attention call there is one of the tree's.
+fn tree_visibility_in_scope() -> bool {
+    ROW_POSITIONS.with(|p| p.borrow().as_ref().is_some_and(|t| t.visibility.is_some()))
+}
+
+/// Does a tree's scope describe an attention call of `q_len` rows over
+/// `kv_len` keys — one its visibility answers, with or without a mask? Read
+/// only by the flash build's routing (`run_attention`).
+#[cfg(feature = "flash-attn")]
+fn tree_rows_in_scope(q_len: usize, kv_len: usize) -> bool {
+    ROW_POSITIONS.with(|p| {
+        p.borrow()
+            .as_ref()
+            .and_then(|t| t.visibility.as_ref())
+            .is_some_and(|v| v.rows() == q_len && v.kv_len == kv_len)
+    })
+}
+
+/// A tree's visibility on `device` for an attention call of `q_len` query
+/// rows over `kv_len` keys, and the tree's base — uploaded once per forward
+/// and device ([`TreeRows`]); `None` outside a tree, or for a call the tree
+/// does not describe (the caller then reads the mask).
+fn tree_visibility_on(
+    device: &Device,
+    q_len: usize,
+    kv_len: usize,
+) -> CandleResult<Option<(Tensor, usize)>> {
+    ROW_POSITIONS.with(|p| {
+        let mut p = p.borrow_mut();
+        let Some(tree) = p.as_mut() else {
+            return Ok(None);
+        };
+        let Some(seen) = tree.visibility.as_ref() else {
+            return Ok(None);
+        };
+        if seen.rows() != q_len || seen.kv_len != kv_len {
+            return Ok(None);
+        }
+        let at = device.location();
+        if let Some((_, words)) = tree.visibility_on.iter().find(|(on, _)| *on == at) {
+            return Ok(Some((words.clone(), seen.base)));
+        }
+        let words = Tensor::from_slice(
+            &seen.words,
+            (q_len, crate::inference::draft_tree::VISIBILITY_WORDS),
+            device,
+        )?;
+        let base = seen.base;
+        tree.visibility_on.push((at, words.clone()));
+        Ok(Some((words, base)))
+    })
 }
 
 impl Drop for RowPositions {
@@ -3940,6 +4070,40 @@ pub(crate) fn standard_attention(
     // cache. Same switch, same fallback.
     //
     // The card kernel reads the half cache as it is stored (FUTURE_WORK #194).
+    //
+    // A tree of guesses on a card (#134) goes through the same kernel, each
+    // row reading the keys its visibility bits say — the tree's own mask, made
+    // once a forward ([`tree_visibility_on`]). The matmul path below sized two
+    // cuBLAS products and the `[rows, kv_len]` mask by the tree and the cache,
+    // and widened a half cache whole on every call. `SWARMLLM_TREE_ATTN=standard`
+    // keeps it for an A/B.
+    if q.device().is_cuda() {
+        if let Some((seen, base)) = tree_visibility_on(q.device(), q.dim(2)?, k.dim(2)?)? {
+            if let Some(out) = crate::inference::decode_attn::gqa_tree_attention_cuda(
+                q,
+                k,
+                v,
+                &seen,
+                base,
+                crate::inference::attn_softmax::scale_from_head_dim(head_dim) as f32,
+                attn_logit_softcap,
+            )? {
+                return Ok(out);
+            }
+        }
+        // A captured tree's forward builds no mask (`RecordedStep::tree_staged`):
+        // a call its kernel declined — or one the scope does not describe, of
+        // ANY row count — would read every row unmasked, siblings included. An
+        // ordinary tree forward always carries its mask, so in a tree's scope
+        // no mask means the kernel had to take it.
+        if mask.is_none() && tree_visibility_in_scope() {
+            candle_core::bail!(
+                "a tree's attention over {} rows has no mask and the card's tree kernel \
+                 declined it",
+                q.dim(2)?
+            );
+        }
+    }
     if q.dim(2)? == 1 && q.device().is_cuda() {
         if let Some(out) = crate::inference::decode_attn::gqa_decode_attention_cuda(
             q,
@@ -4739,7 +4903,9 @@ pub(crate) fn run_attention_windowed(
                 // answer with no error. The executor leaves the mask out only
                 // when flash will take the call (`SplitModel::mask_is_read`);
                 // reaching here without one means those two disagree.
-                if q_len > 1 && mask.is_none() {
+                // A tree's rows carry their own visibility, which the card's
+                // tree attention reads in place of a mask.
+                if q_len > 1 && mask.is_none() && !tree_rows_in_scope(q_len, k_len) {
                     candle_core::bail!(
                         "standard attention over {q_len} positions without a causal mask — \
                          the executor expected flash to take this call"
@@ -7859,7 +8025,10 @@ mod tree_rope_rows_tests {
         );
         {
             // A stolen job with a tree of its own: its own rows, not these.
-            let _job = RowPositions::carried(Some(vec![1, 2, 3]));
+            let _job = RowPositions::carried(Some(TreeScope {
+                positions: vec![1, 2, 3],
+                visibility: None,
+            }));
             let (cj, _) = tree_rope_rows(3, &cos, &sin).unwrap().unwrap();
             assert_ne!(cj.id(), c1.id());
             assert_eq!(

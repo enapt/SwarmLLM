@@ -79,10 +79,58 @@ pub(crate) fn requested() -> bool {
     *ON.get_or_init(|| std::env::var("SWARMLLM_CUDA_GRAPH").as_deref() != Ok("0"))
 }
 
-/// The most positions one captured forward may carry: a decode step (1) or a
-/// speculative check (the token plus its guesses). Up to 8 rows the quantized
-/// matmuls stay on the vector kernel; past it they switch to the prompt path.
+/// The most positions one captured forward may carry: a decode step (1), a
+/// speculative check (the token plus its guesses) or a level of a drafter's
+/// tree (#134). Up to 8 rows the quantized matmuls stay on the vector kernel;
+/// past it they switch to the prompt path.
 pub(crate) const MAX_POSITIONS: usize = 8;
+
+/// On unless `SWARMLLM_TREE_GRAPH=0`: a forward of a tree's rows may be
+/// captured where the card's tree attention takes every layer
+/// (`SplitModel::tree_steps_may_be_captured`). Off, a tree's forward runs op
+/// by op, as before.
+pub(crate) fn tree_steps_requested() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_TREE_GRAPH").as_deref() != Ok("0"))
+}
+
+/// What a forward's graph state is kept under: its number of positions, and
+/// whether it reads a tree of guesses (#134). A tree's step runs the card's
+/// tree attention where a check of as many positions runs flash, so one graph
+/// for both would be refused an update at every switch between them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct StepShape {
+    pub(crate) positions: usize,
+    pub(crate) tree: bool,
+}
+
+impl StepShape {
+    /// A decode step, or a check of consecutive positions.
+    pub(crate) fn chain(positions: usize) -> Self {
+        Self {
+            positions,
+            tree: false,
+        }
+    }
+
+    /// A forward of a tree's rows (`SplitModel::with_draft_tree`).
+    pub(crate) fn tree(positions: usize) -> Self {
+        Self {
+            positions,
+            tree: true,
+        }
+    }
+}
+
+impl std::fmt::Display for StepShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.tree {
+            write!(f, "{} (a tree's rows)", self.positions)
+        } else {
+            write!(f, "{}", self.positions)
+        }
+    }
+}
 
 /// How many conversations' last decode step a model remembers. A worker
 /// serves a handful at once; past this the map is simply cleared, which costs
@@ -424,13 +472,14 @@ struct Stats {
 /// and what the caller needs to decide whether a step may be captured.
 #[derive(Default)]
 pub(crate) struct DecodeGraph {
-    /// One instantiated graph per layer GROUP ([`group_layers`]), per number
-    /// of positions: the same group covers the same layers every token, so
-    /// each updates in place. Keyed by positions because a speculative check
-    /// of 3 runs other kernels than a step of 1 — one shared graph would be
-    /// rebuilt every time a round alternated between them.
+    /// One instantiated graph per layer GROUP ([`group_layers`]), per
+    /// [`StepShape`]: the same group covers the same layers every token, so
+    /// each updates in place. Keyed by the shape because a speculative check
+    /// of 3 runs other kernels than a step of 1, and a tree level of 8 other
+    /// kernels than a chain check of 8 — one shared graph would be rebuilt
+    /// every time a round alternated between them.
     #[cfg(feature = "candle-cuda")]
-    execs: HashMap<usize, Vec<Option<cuda::Exec>>>,
+    execs: HashMap<StepShape, Vec<Option<cuda::Exec>>>,
     /// Where the residual stream crosses from one group's graph to the next,
     /// per number of positions: made OUTSIDE every capture and reused every
     /// token (two, alternating, so a group never writes the buffer its own
@@ -442,20 +491,20 @@ pub(crate) struct DecodeGraph {
     /// conversation's first decode step allocates, loaded every kernel module
     /// the step uses, and left the output shape in `templates`.
     last_step: HashMap<String, usize>,
-    /// The output's shape and type, by (`all_positions`, positions) — the
+    /// The output's shape and type, by (`all_positions`, shape) — the
     /// tensor a capture copies its result into has to exist before the capture
     /// starts.
-    templates: HashMap<(bool, usize), (Vec<usize>, DType)>,
-    /// Refusals that were the capture's fault, per number of positions — see
-    /// [`DEFECTS_BEFORE_GIVING_UP`]. Per positions because a defect of the
+    templates: HashMap<(bool, StepShape), (Vec<usize>, DType)>,
+    /// Refusals that were the capture's fault, per [`StepShape`] — see
+    /// [`DEFECTS_BEFORE_GIVING_UP`]. Per shape because a defect of the
     /// several-position check (22 host copies, 2026-09-30) said nothing about
     /// the one-position step, and giving the whole model up threw away the
     /// decode graphs with it.
-    defects: HashMap<usize, u32>,
-    /// Rebuilds and rests, per number of positions — see
-    /// [`REBUILDS_BEFORE_RESTING`]. Per positions for the same reason as
+    defects: HashMap<StepShape, u32>,
+    /// Rebuilds and rests, per [`StepShape`] — see
+    /// [`REBUILDS_BEFORE_RESTING`]. Per shape for the same reason as
     /// `defects`: the checks churned while the one-position step updated.
-    churn: HashMap<usize, Churn>,
+    churn: HashMap<StepShape, Churn>,
     stats: Stats,
     /// Times steps on the card (`cuda::StepClock`); made at the first step, never
     /// again once the driver would not make its events.
@@ -487,33 +536,40 @@ impl DecodeGraph {
         false
     }
 
+    /// Captures launched and refused so far — what a test reads to know a
+    /// step it ran was captured (a card test's).
+    #[cfg(all(test, feature = "candle-cuda"))]
+    pub(crate) fn launches(&self) -> (u64, u64) {
+        (self.stats.launched, self.stats.refused)
+    }
+
     /// True when forwards of `positions` are not to be captured now: they were
     /// refused often enough, for reasons of the program's making, to be given
     /// up for good — or their graphs kept having to be rebuilt and they are
     /// resting ([`REBUILDS_BEFORE_RESTING`]).
-    pub(crate) fn declines(&self, positions: usize) -> bool {
-        self.defects.get(&positions).copied().unwrap_or(0) >= DEFECTS_BEFORE_GIVING_UP
-            || self.resting(positions)
+    pub(crate) fn declines(&self, shape: StepShape) -> bool {
+        self.defects.get(&shape).copied().unwrap_or(0) >= DEFECTS_BEFORE_GIVING_UP
+            || self.resting(shape)
     }
 
-    fn resting(&self, positions: usize) -> bool {
-        self.churn.get(&positions).is_some_and(|c| c.rest_left > 0)
+    fn resting(&self, shape: StepShape) -> bool {
+        self.churn.get(&shape).is_some_and(|c| c.rest_left > 0)
     }
 
-    /// Begin a step of `positions`: first read the previous step's time if the
+    /// Begin a step of `shape`: first read the previous step's time if the
     /// card has finished it — never waiting for it — then mark where this one
     /// begins on the card's timeline. Only a shape with something to weigh is
     /// timed — rebuilt within [`SHARE_WINDOW`] launches, or resting — since
     /// every event is a driver call, the thing a graph exists to save. The
     /// answer goes to whichever of [`Self::capture`] and
     /// [`Self::note_uncaptured`] the step ends in.
-    pub(crate) fn begin_step(&mut self, device: &Device, positions: usize) -> StepBegun {
+    pub(crate) fn begin_step(&mut self, device: &Device, shape: StepShape) -> StepBegun {
         for (timed_positions, ran, ms) in self.finished_steps() {
             self.record_step_ms(timed_positions, ran, ms);
         }
         let weighing = self
             .churn
-            .get(&positions)
+            .get(&shape)
             .is_some_and(|c| c.share_bits != 0 || c.rest_left > 0);
         StepBegun {
             timed: weighing && self.start_clock(device),
@@ -521,7 +577,7 @@ impl DecodeGraph {
     }
 
     /// Every timed step the card has finished since the last look.
-    fn finished_steps(&mut self) -> Vec<(usize, StepRan, f64)> {
+    fn finished_steps(&mut self) -> Vec<(StepShape, StepRan, f64)> {
         #[cfg(feature = "candle-cuda")]
         {
             self.clock
@@ -550,19 +606,19 @@ impl DecodeGraph {
     }
 
     /// Mark where a step ended, when it is one the weighing reads (`ran`).
-    fn end_step(&mut self, began: StepBegun, positions: usize, ran: Option<StepRan>) {
+    fn end_step(&mut self, began: StepBegun, shape: StepShape, ran: Option<StepRan>) {
         let Some(ran) = ran.filter(|_| began.timed) else {
             return;
         };
         #[cfg(feature = "candle-cuda")]
         if let Some(clock) = self.clock.as_mut() {
-            clock.stop(positions, ran);
+            clock.stop(shape, ran);
         }
-        let _ = (positions, ran);
+        let _ = (shape, ran);
     }
 
-    fn record_step_ms(&mut self, positions: usize, ran: StepRan, ms: f64) {
-        let churn = self.churn.entry(positions).or_default();
+    fn record_step_ms(&mut self, shape: StepShape, ran: StepRan, ms: f64) {
+        let churn = self.churn.entry(shape).or_default();
         match ran {
             StepRan::Ordinary => churn.ordinary_ms.record(ms),
             StepRan::Updated => churn.updated_ms.record(ms),
@@ -593,9 +649,9 @@ impl DecodeGraph {
     pub(crate) fn template(
         &self,
         all_positions: bool,
-        positions: usize,
+        shape: StepShape,
     ) -> Option<&(Vec<usize>, DType)> {
-        self.templates.get(&(all_positions, positions))
+        self.templates.get(&(all_positions, shape))
     }
 
     /// A step that ran the ordinary way: remember its output's shape, and count
@@ -608,18 +664,16 @@ impl DecodeGraph {
     pub(crate) fn note_uncaptured(
         &mut self,
         all_positions: bool,
-        positions: usize,
+        shape: StepShape,
         out: &Tensor,
         began: StepBegun,
         could_capture: bool,
     ) {
-        let timed = could_capture && self.resting(positions);
-        self.end_step(began, positions, timed.then_some(StepRan::Ordinary));
-        self.templates.insert(
-            (all_positions, positions),
-            (out.dims().to_vec(), out.dtype()),
-        );
-        if let Some(churn) = self.churn.get_mut(&positions) {
+        let timed = could_capture && self.resting(shape);
+        self.end_step(began, shape, timed.then_some(StepRan::Ordinary));
+        self.templates
+            .insert((all_positions, shape), (out.dims().to_vec(), out.dtype()));
+        if let Some(churn) = self.churn.get_mut(&shape) {
             if churn.rest_left > 0 {
                 churn.rest_left -= 1;
                 let weighed = (rest_weighs_cost() && churn.ordinary_ms.len() >= SAMPLES_TO_JUDGE)
@@ -631,7 +685,7 @@ impl DecodeGraph {
                     churn.rests = churn.rests.saturating_sub(1);
                     self.stats.rests_declined += 1;
                     tracing::info!(
-                        positions,
+                        positions = %shape,
                         rebuilt_share = format!("{:.2}", w.rebuilt_share),
                         graph_ms = format!("{:.1}", w.graph_ms),
                         ordinary_ms = format!("{:.1}", w.ordinary_ms),
@@ -645,11 +699,11 @@ impl DecodeGraph {
         self.report();
     }
 
-    /// A launched capture: count its rebuilds, and put its number of positions
+    /// A launched capture: count its rebuilds, and put its shape
     /// to rest once the driver has refused to update it
     /// [`REBUILDS_BEFORE_RESTING`] times among its last [`CHURN_WINDOW`] launches.
-    fn note_launched(&mut self, positions: usize, refused_updates: &[String]) {
-        let churn = self.churn.entry(positions).or_default();
+    fn note_launched(&mut self, shape: StepShape, refused_updates: &[String]) {
+        let churn = self.churn.entry(shape).or_default();
         let rebuilt = !refused_updates.is_empty();
         let window = (1u16 << CHURN_WINDOW) - 1;
         churn.recent = (((u16::from(churn.recent) << 1) | u16::from(rebuilt)) & window) as u8;
@@ -667,7 +721,7 @@ impl DecodeGraph {
         for refused in refused_updates {
             if !self.stats.update_refusals_seen.contains(refused) {
                 tracing::info!(
-                    positions,
+                    positions = %shape,
                     why = %refused,
                     "DIAG: decode graph could not be updated in place — rebuilt (first of this kind)"
                 );
@@ -688,7 +742,7 @@ impl DecodeGraph {
             if !churn.told_still_pays {
                 churn.told_still_pays = true;
                 tracing::info!(
-                    positions,
+                    positions = %shape,
                     rebuilt_share = format!("{:.2}", w.rebuilt_share),
                     graph_ms = format!("{:.1}", w.graph_ms),
                     ordinary_ms = format!("{:.1}", w.ordinary_ms),
@@ -704,15 +758,15 @@ impl DecodeGraph {
         self.stats.rested += 1;
         if churn.rests == 1 {
             tracing::info!(
-                positions,
+                positions = %shape,
                 rest_steps = churn.rest_left,
                 figures = %churn.figures(),
-                "DIAG: decode graph: forwards of this many positions keep being rebuilt — they \
+                "DIAG: decode graph: forwards of this shape keep being rebuilt — they \
                  run the ordinary way for a while, then capture is tried again"
             );
         } else {
             tracing::debug!(
-                positions,
+                positions = %shape,
                 rest_steps = churn.rest_left,
                 rests = churn.rests,
                 figures = %churn.figures(),
@@ -733,7 +787,7 @@ impl DecodeGraph {
     pub(crate) fn capture(
         &mut self,
         device: &Device,
-        positions: usize,
+        shape: StepShape,
         began: StepBegun,
         forward: impl FnOnce(&mut Cutter<'_>) -> Result<(), SwarmError>,
     ) -> Result<(), Refusal> {
@@ -741,7 +795,7 @@ impl DecodeGraph {
         #[cfg(feature = "candle-cuda")]
         let outcome = match device {
             Device::Cuda(dev) => {
-                cuda::capture_in_groups(dev, self.execs.entry(positions).or_default(), forward)
+                cuda::capture_in_groups(dev, self.execs.entry(shape).or_default(), forward)
             }
             _ => Err(Refusal {
                 kind: "not on a graphics card",
@@ -752,7 +806,7 @@ impl DecodeGraph {
         let outcome: Result<Launched, Refusal> = {
             let _ = (
                 device,
-                positions,
+                shape,
                 forward,
                 Cutter {
                     _never: std::marker::PhantomData,
@@ -769,7 +823,7 @@ impl DecodeGraph {
             Ok((false, refused)) if !refused.is_empty() => Some(StepRan::Rebuilt),
             _ => None,
         };
-        self.end_step(began, positions, ran);
+        self.end_step(began, shape, ran);
         match &outcome {
             Ok((all_updated, refused_updates)) => {
                 self.stats.launched += 1;
@@ -779,20 +833,20 @@ impl DecodeGraph {
                 } else {
                     self.stats.instantiated += 1;
                 }
-                self.note_launched(positions, refused_updates);
+                self.note_launched(shape, refused_updates);
             }
             Err(refusal) => {
                 self.stats.refused += 1;
                 if refusal.kind != FORWARD_FAILED {
-                    let defects = self.defects.entry(positions).or_insert(0);
+                    let defects = self.defects.entry(shape).or_insert(0);
                     *defects += 1;
                     if *defects == DEFECTS_BEFORE_GIVING_UP {
                         tracing::warn!(
-                            positions,
+                            positions = %shape,
                             refused = self.stats.refused,
                             kinds = ?self.stats.reasons_seen,
                             last = refusal.kind,
-                            "decode graph: this model's forwards of this many positions kept \
+                            "decode graph: this model's forwards of this shape kept \
                              being refused — they run the ordinary way from now on"
                         );
                     }
@@ -900,7 +954,7 @@ mod cuda {
         start: CudaEvent,
         end: CudaEvent,
         /// The step the two events bracket, until its time is read.
-        pending: Option<(usize, StepRan)>,
+        pending: Option<(super::StepShape, StepRan)>,
     }
 
     impl EventPair {
@@ -949,22 +1003,22 @@ mod cuda {
             true
         }
 
-        pub(super) fn stop(&mut self, positions: usize, ran: StepRan) {
+        pub(super) fn stop(&mut self, shape: super::StepShape, ran: StepRan) {
             let Some(i) = self.armed.take() else {
                 return;
             };
             let pair = &mut self.pairs[i];
             if pair.end.record(&self.stream).is_ok() {
-                pair.pending = Some((positions, ran));
+                pair.pending = Some((shape, ran));
             }
         }
 
         /// Every bracketed step the card has passed the end of; one still
         /// running keeps its pair for a later look.
-        pub(super) fn take_finished(&mut self) -> Vec<(usize, StepRan, f64)> {
+        pub(super) fn take_finished(&mut self) -> Vec<(super::StepShape, StepRan, f64)> {
             let mut done = Vec::new();
             for pair in &mut self.pairs {
-                let Some((positions, ran)) = pair.pending else {
+                let Some((shape, ran)) = pair.pending else {
                     continue;
                 };
                 match pair.end.try_is_complete() {
@@ -972,7 +1026,7 @@ mod cuda {
                     Ok(true) => {
                         pair.pending = None;
                         if let Ok(ms) = pair.start.elapsed_ms(&pair.end) {
-                            done.push((positions, ran, f64::from(ms)));
+                            done.push((shape, ran, f64::from(ms)));
                         }
                     }
                     Err(_) => pair.pending = None,
@@ -1346,63 +1400,79 @@ mod tests {
         let step = Tensor::zeros((1, 3, 4), DType::F32, &Device::Cpu).unwrap();
         let clean = |graph: &mut DecodeGraph, n: u32| {
             for _ in 0..n {
-                graph.note_launched(3, &[]);
+                graph.note_launched(StepShape::chain(3), &[]);
             }
         };
         let ordinary = |graph: &mut DecodeGraph| {
-            let began = graph.begin_step(&Device::Cpu, 3);
-            graph.note_uncaptured(false, 3, &step, began, true);
+            let began = graph.begin_step(&Device::Cpu, StepShape::chain(3));
+            graph.note_uncaptured(false, StepShape::chain(3), &step, began, true);
         };
 
         // Two rebuilds, then one more after the window has moved past them.
-        graph.note_launched(3, &refused);
-        graph.note_launched(3, &refused);
+        graph.note_launched(StepShape::chain(3), &refused);
+        graph.note_launched(StepShape::chain(3), &refused);
         clean(&mut graph, CHURN_WINDOW - 2);
-        graph.note_launched(3, &refused);
-        assert!(!graph.declines(3), "rebuilds spread wider than the window");
+        graph.note_launched(StepShape::chain(3), &refused);
+        assert!(
+            !graph.declines(StepShape::chain(3)),
+            "rebuilds spread wider than the window"
+        );
         clean(&mut graph, CHURN_WINDOW);
 
         // Every other launch rebuilt: rests on the third.
         for _ in 0..REBUILDS_BEFORE_RESTING {
-            assert!(!graph.declines(3));
-            graph.note_launched(3, &refused);
+            assert!(!graph.declines(StepShape::chain(3)));
+            graph.note_launched(StepShape::chain(3), &refused);
             clean(&mut graph, 1);
         }
-        assert!(graph.declines(3), "rebuilt on half its launches: resting");
         assert!(
-            !graph.declines(1),
+            graph.declines(StepShape::chain(3)),
+            "rebuilt on half its launches: resting"
+        );
+        assert!(
+            !graph.declines(StepShape::chain(1)),
             "another number of positions is untouched"
+        );
+        assert!(
+            !graph.declines(StepShape::tree(3)),
+            "a tree of as many rows is another shape, untouched"
         );
 
         for _ in 0..REST_STEPS {
-            assert!(graph.declines(3));
+            assert!(graph.declines(StepShape::chain(3)));
             ordinary(&mut graph);
         }
         assert!(
-            !graph.declines(3),
+            !graph.declines(StepShape::chain(3)),
             "the rest is over: capture is tried again"
         );
 
         for _ in 0..REBUILDS_BEFORE_RESTING {
-            graph.note_launched(3, &refused);
+            graph.note_launched(StepShape::chain(3), &refused);
         }
         for _ in 0..2 * REST_STEPS - 1 {
             ordinary(&mut graph);
         }
-        assert!(graph.declines(3), "the second rest is twice as long");
+        assert!(
+            graph.declines(StepShape::chain(3)),
+            "the second rest is twice as long"
+        );
         ordinary(&mut graph);
-        assert!(!graph.declines(3));
+        assert!(!graph.declines(StepShape::chain(3)));
         assert_eq!(graph.stats.rested, 2);
 
         // A long clean stretch: the next rest is the first length again.
         clean(&mut graph, CLEAN_LAUNCHES_TO_FORGET);
         for _ in 0..REBUILDS_BEFORE_RESTING {
-            graph.note_launched(3, &refused);
+            graph.note_launched(StepShape::chain(3), &refused);
         }
         for _ in 0..REST_STEPS {
             ordinary(&mut graph);
         }
-        assert!(!graph.declines(3), "a settled shape's rests start over");
+        assert!(
+            !graph.declines(StepShape::chain(3)),
+            "a settled shape's rests start over"
+        );
     }
 
     /// A rest is a trade: steps the ordinary way instead of a graph whose
@@ -1418,54 +1488,61 @@ mod tests {
         let refused = vec!["CU_GRAPH_EXEC_UPDATE_ERROR_TOPOLOGY_CHANGED".to_string()];
         let churn = |graph: &mut DecodeGraph, positions: usize, rebuilt: f64, updated: f64| {
             for _ in 0..REBUILDS_BEFORE_RESTING {
-                graph.record_step_ms(positions, StepRan::Rebuilt, rebuilt);
-                graph.note_launched(positions, &refused);
-                graph.record_step_ms(positions, StepRan::Updated, updated);
-                graph.note_launched(positions, &[]);
+                graph.record_step_ms(StepShape::chain(positions), StepRan::Rebuilt, rebuilt);
+                graph.note_launched(StepShape::chain(positions), &refused);
+                graph.record_step_ms(StepShape::chain(positions), StepRan::Updated, updated);
+                graph.note_launched(StepShape::chain(positions), &[]);
             }
         };
         let ordinary = |graph: &mut DecodeGraph, positions: usize, ms: f64| {
             let step = Tensor::zeros((1, positions, 4), DType::F32, &Device::Cpu).unwrap();
-            graph.record_step_ms(positions, StepRan::Ordinary, ms);
-            let began = graph.begin_step(&Device::Cpu, positions);
-            graph.note_uncaptured(false, positions, &step, began, true);
+            graph.record_step_ms(StepShape::chain(positions), StepRan::Ordinary, ms);
+            let began = graph.begin_step(&Device::Cpu, StepShape::chain(positions));
+            graph.note_uncaptured(false, StepShape::chain(positions), &step, began, true);
         };
 
         // The drafter: rebuilt on every other launch. Nothing the ordinary way
         // has been timed, so the count decides, and it rests.
         churn(&mut graph, 1, 6.0, 3.0);
         assert!(
-            graph.declines(1),
+            graph.declines(StepShape::chain(1)),
             "nothing to weigh yet: the count rests it"
         );
         for _ in 0..SAMPLES_TO_JUDGE {
-            assert!(graph.declines(1), "too few ordinary steps timed to judge");
+            assert!(
+                graph.declines(StepShape::chain(1)),
+                "too few ordinary steps timed to judge"
+            );
             ordinary(&mut graph, 1, 12.0);
         }
         assert!(
-            !graph.declines(1),
+            !graph.declines(StepShape::chain(1)),
             "a graph at 4.5 ms a step beats 12 ms the ordinary way: capturing again"
         );
         churn(&mut graph, 1, 6.0, 3.0);
-        assert!(!graph.declines(1), "the same churn again is not rested");
+        assert!(
+            !graph.declines(StepShape::chain(1)),
+            "the same churn again is not rested"
+        );
         assert_eq!(graph.stats.rested, 1);
         assert_eq!(
-            graph.churn[&1].rests, 0,
+            graph.churn[&StepShape::chain(1)].rests,
+            0,
             "a rest that was a loss does not lengthen the next"
         );
 
         // A 7B check whose rebuilds cost more than the ordinary way: rests in full.
         churn(&mut graph, 5, 80.0, 18.0);
-        assert!(graph.declines(5));
+        assert!(graph.declines(StepShape::chain(5)));
         for _ in 0..REST_STEPS - 1 {
             ordinary(&mut graph, 5, 20.0);
         }
         assert!(
-            graph.declines(5),
+            graph.declines(StepShape::chain(5)),
             "a graph at 49 ms against 20: the rest holds"
         );
         ordinary(&mut graph, 5, 20.0);
-        assert!(!graph.declines(5));
+        assert!(!graph.declines(StepShape::chain(5)));
     }
 
     /// The switch is off unless asked for, and a model that is not on a card

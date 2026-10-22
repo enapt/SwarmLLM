@@ -54,6 +54,11 @@ struct RecordedStep<'a> {
     at_layer_end: &'a mut dyn FnMut(usize, Residual) -> Result<Residual, SwarmError>,
     /// What the step's forward is handed already built, outside the capture.
     prepared: Prepared<'a>,
+    /// A tree's rows are set on this thread already, their visibility and
+    /// rope rows made before the capture (`layers::stage_tree_forward`): the
+    /// forward keeps that scope and builds no mask — the card's tree
+    /// attention reads the bits.
+    tree_staged: bool,
 }
 
 /// What a recorded decode step's forward is handed already built — before
@@ -703,11 +708,16 @@ impl SplitModel {
             // which may go to the card as one CUDA graph.
             // A decode step, or a speculative check of a few positions — the
             // latter only where no causal mask is read, since the mask is
-            // built on the host (`mask_is_read`).
+            // built on the host (`mask_is_read`) — or a level of a tree's rows
+            // where the card's tree attention reads their visibility on every
+            // layer (#134).
+            let shape_may_be_captured = match &self.draft_tree {
+                None => seq_len == 1 || !self.mask_is_read(),
+                Some(_) => self.tree_steps_may_be_captured(),
+            };
             if seq_len <= crate::inference::cuda_graph::MAX_POSITIONS
-                && (seq_len == 1 || !self.mask_is_read())
+                && shape_may_be_captured
                 && self.image_spans.is_empty()
-                && self.draft_tree.is_none()
                 && lora_adapter.is_none()
                 && capture_layers.is_none()
                 && skip_mask.is_none()
@@ -767,6 +777,27 @@ impl SplitModel {
         {
             true
         }
+    }
+
+    /// Whether a forward of a tree's rows may be captured like a check (#134):
+    /// held whole on the card, every layer a dense one whose attention the
+    /// card's tree kernel takes (`decode_attn::card_kernel_covers`, the kernel
+    /// on). Its attention then reads the tree's visibility bits — made before
+    /// the capture with the rope rows (`layers::stage_tree_forward`) — and no
+    /// mask, which would be a host copy inside it. Uncaptured, a level of the
+    /// 0.5B drafter's tree was ~530 launches, nearly all host time (~12 ms on
+    /// an idle card). `SWARMLLM_TREE_GRAPH=0` keeps it op by op.
+    fn tree_steps_may_be_captured(&self) -> bool {
+        crate::inference::cuda_graph::tree_steps_requested()
+            && crate::inference::decode_attn::tree_kernel_enabled()
+            && self.device.is_cuda()
+            && self.layer_devices.is_empty()
+            && self.layers.iter().all(|layer| {
+                matches!(layer, LayerVariant::Dense(lw)
+                if crate::inference::decode_attn::card_kernel_covers(
+                    lw.n_head, lw.n_kv_head, lw.head_dim,
+                ))
+            })
     }
 
     /// Why this model's decode steps may NOT be captured, if they may not. The
@@ -857,15 +888,22 @@ impl SplitModel {
         let follows = graph.follows_previous_step(request_id, index_pos);
         let cache_key = KvCacheStore::cache_key(&self.kv_model_key, request_id);
         let positions = input.dim(1).map_err(SwarmError::internal)?;
+        // A tree's rows run other kernels than a check of as many positions,
+        // so they keep a graph of their own.
+        let shape = if self.draft_tree.is_some() {
+            crate::inference::cuda_graph::StepShape::tree(positions)
+        } else {
+            crate::inference::cuda_graph::StepShape::chain(positions)
+        };
         // Every step is timed on the card, so a shape's rest is weighed against
         // what its graph measurably costs (`DecodeGraph::note_uncaptured`).
-        let began = graph.begin_step(&self.device, positions);
+        let began = graph.begin_step(&self.device, shape);
         // A step that grows a KV buffer frees memory allocated outside the
         // capture and keeps memory allocated inside it — never captured. Nor
         // is a conversation's first decode step: it is the one that may shed a
         // hydrated snapshot's mirror, and it loads the kernel modules.
         let ready = graph
-            .template(all_positions, positions)
+            .template(all_positions, shape)
             .filter(|_| {
                 follows
                     && kv_cache_store.every_cache_holds(&cache_key, index_pos + positions, |slot| {
@@ -874,7 +912,7 @@ impl SplitModel {
             })
             .cloned();
         let template = match ready {
-            Some(t) if !graph.declines(positions) => t,
+            Some(t) if !graph.declines(shape) => t,
             ready => {
                 let (out, _) = self.forward_inner_body(
                     input,
@@ -888,8 +926,53 @@ impl SplitModel {
                     None,
                     None,
                 )?;
-                graph.note_uncaptured(all_positions, positions, &out, began, ready.is_some());
+                graph.note_uncaptured(all_positions, shape, &out, began, ready.is_some());
                 return Ok(out);
+            }
+        };
+        // A tree's rows (#134): set on this thread, with their visibility on
+        // the card and every layer's rope rows gathered, BEFORE the capture —
+        // a pageable upload inside it is replayed from the host address
+        // (gotcha #758), and memory one group makes and a later group reads
+        // costs a remap at every launch (#295's 5.8 ms a step). The forward
+        // keeps this scope and builds no mask (`RecordedStep::tree_staged`).
+        let staged_tree = match &self.draft_tree {
+            None => None,
+            Some(tree) => {
+                let (rows, seen) = tree
+                    .rows_for(index_pos, positions)
+                    .map_err(|e| SwarmError::Inference(format!("a tree of guesses: {e}")))?;
+                let scope = crate::inference::layers::RowPositions::for_tree(rows, seen);
+                let tables: Vec<(&Tensor, &Tensor)> = self
+                    .layers
+                    .iter()
+                    .filter_map(|layer| match layer {
+                        LayerVariant::Dense(lw) => Some((&lw.cos, &lw.sin)),
+                        _ => None,
+                    })
+                    .collect();
+                if !crate::inference::layers::stage_tree_forward(&self.device, &tables)
+                    .map_err(SwarmError::internal)?
+                {
+                    // Nothing to stage it with (`SWARMLLM_TREE_ROPE=per-call`):
+                    // the ordinary way.
+                    drop(scope);
+                    let (out, _) = self.forward_inner_body(
+                        input,
+                        index_pos,
+                        kv_cache_store,
+                        request_id,
+                        None,
+                        None,
+                        skip_embedding,
+                        all_positions,
+                        None,
+                        None,
+                    )?;
+                    graph.note_uncaptured(all_positions, shape, &out, began, false);
+                    return Ok(out);
+                }
+                Some(scope)
             }
         };
         // Everything that crosses from the host happens BEFORE the capture:
@@ -936,8 +1019,8 @@ impl SplitModel {
             }
             _ => Staged::Nothing,
         };
-        let (shape, dtype) = template;
-        let out = Tensor::zeros(shape, dtype, &device).map_err(SwarmError::internal)?;
+        let (dims, dtype) = template;
+        let out = Tensor::zeros(dims, dtype, &device).map_err(SwarmError::internal)?;
         let boundaries = graph.boundaries(&device, positions, self.hidden_dim)?;
         // A multi-position step catches the f16 mirror up before appending to
         // it; done inside the capture, a refusal leaves the mirror claiming
@@ -948,7 +1031,7 @@ impl SplitModel {
         }
         let per_group = crate::inference::cuda_graph::group_layers();
         let num_layers = self.layers.len();
-        let captured = graph.capture(&device, positions, began, |cutter| {
+        let captured = graph.capture(&device, shape, began, |cutter| {
             // Every `per_group` layers: park the residual stream in memory
             // made outside the capture, launch what is recorded, and carry on
             // recording from the parked copy — so the card runs this group
@@ -982,6 +1065,7 @@ impl SplitModel {
                 Some(RecordedStep {
                     at_layer_end: &mut at_layer_end,
                     prepared: staged.prepared(),
+                    tree_staged: staged_tree.is_some(),
                 }),
             )?;
             // The step's own output is graph memory, freed inside the graph
@@ -992,11 +1076,13 @@ impl SplitModel {
         if captured.is_ok() {
             return Ok(out);
         }
+        // The ordinary way below sets the tree's scope itself.
+        drop(staged_tree);
         // Refused: nothing the capture recorded will run, but the forward
         // still moved each layer's cache length on by one on the host. Put it
         // back, then take the step the ordinary way.
         kv_cache_store.truncate_request_to(&self.kv_model_key, request_id, index_pos)?;
-        let began = graph.begin_step(&device, positions);
+        let began = graph.begin_step(&device, shape);
         let (out, _) = self.forward_inner_body(
             &input,
             index_pos,
@@ -1010,7 +1096,7 @@ impl SplitModel {
             None,
         )?;
         // Not a step of its own: the refused capture's time is in it.
-        graph.note_uncaptured(all_positions, positions, &out, began, false);
+        graph.note_uncaptured(all_positions, shape, &out, began, false);
         Ok(out)
     }
 
@@ -1337,13 +1423,29 @@ impl SplitModel {
         };
         let _reads_the_mask = (!spans_here.is_empty() || tree_rows.is_some())
             .then(|| crate::inference::attn_kernel::ForceStandardAttnGuard::new(true));
+        // A captured level of a tree: its scope is set and staged already
+        // (`decode_step_with_graph`), the same rows as these.
+        let tree_staged = recording.as_ref().is_some_and(|r| r.tree_staged);
+        if tree_staged {
+            let staged = crate::inference::layers::tree_scope_now().map(|s| s.positions);
+            if staged.as_ref() != tree_rows.as_ref().map(|(positions, _)| positions) {
+                return Err(SwarmError::Internal(
+                    "a captured tree's staged rows are not the forward's".into(),
+                ));
+            }
+        }
 
         // `mut` because a hybrid segment moves it across the device boundary
         // with the activation — see the transition at the head of the loop.
-        let mut masks = if let Some((_, mask)) = &tree_rows {
+        let mut masks = if tree_staged {
+            // The card's tree attention reads the staged bits on every layer
+            // (`tree_steps_may_be_captured`); a call it declined fails loudly
+            // (`layers::standard_attention`), never runs unmasked.
+            ForwardMasks::default()
+        } else if let Some((_, seen)) = &tree_rows {
             ForwardMasks {
                 causal: Some(
-                    Tensor::from_slice(mask, (seq_len, kv_offset + seq_len), &self.device)
+                    Tensor::from_slice(&seen.mask(), (seq_len, kv_offset + seq_len), &self.device)
                         .map_err(SwarmError::internal)?,
                 ),
                 windowed: None,
@@ -1355,8 +1457,9 @@ impl SplitModel {
             ForwardMasks::default()
         };
         // Set here, on the thread that runs the layers, like the guard above.
-        let _row_positions =
-            tree_rows.map(|(positions, _)| crate::inference::layers::RowPositions::new(positions));
+        let _row_positions = tree_rows.filter(|_| !tree_staged).map(|(positions, seen)| {
+            crate::inference::layers::RowPositions::for_tree(positions, seen)
+        });
 
         let max_seq_len = self.max_seq_len;
         let mut captured: HashMap<usize, Tensor> = HashMap::new();

@@ -75,8 +75,8 @@ speed is what the swarm is for, so split speed for large models is the top track
    is sized by what it buys, and trees are on only past 300 ms (#134 (a), 10-21: +57% at 20 ms,
    +4% at 300 on the rig). Next: near peers over far ones (#192); a drafter fed by the model's
    own state (`large_model_splits.md` build-order step 4); a tree that flows (#134 (b), built
-   10-22: +11-14% over tree rounds on the card rig; next its drafter's tree steps as CUDA graphs,
-   then the real link).
+   10-22: +11-14% over tree rounds on the card rig; its drafter's tree levels are one kernel and
+   one CUDA graph since 10-22; next the real link and a thin uplink).
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
@@ -2021,11 +2021,17 @@ three levels of 8 rows a drafter call; on the card rig (385 ms, all three proces
 8.99-9.44 tok/s against tree rounds' 8.03-8.27 over 400 tokens, replies scored against llama.cpp
 — +11-14%, short of the 1.3× exit (`docs/invariants/scheduling.md` § "A tree that flows",
 Measured). Left of (b): the real link (the far peer must advertise bit 31 — after a release);
-the drafter's level, ~72% of the requester's time — a tree step is never captured as a CUDA
-graph (its mask and rope index are uploaded inside the forward, and the mask is a `[rows,
-kv_len]` tensor between two cuBLAS matmuls whose shapes change every call: capture needs both
-made before it and an attention whose launches do not change with the cache's length, as
-`decode_attn`'s do); misses (16-24 a reply, each about a round trip); the flow sends ~25 rows a
+the drafter's level, ~72% of the requester's time — **built 2026-10-22, unreleased: a level of
+≤ 8 rows is one tree kernel and one captured graph** (`decode_attn::gqa_tree_attention_cuda`, a
+bitmask per row; `cuda_graph::StepShape`; `docs/invariants/inference.md` § "A tree level on a
+card") — on an idle card a flow call's three levels take 26.5 ms against 36.0 (−26%); on the
+one-card rig the drafter's time fell ~9% and this node's half rose
+about as much (three processes on one card, gotcha #759), so the reply's speed did not move
+there. Left of it: a whole drafter call as ONE graph with its rows chosen on the card (SGLang's
+EAGLE captures its draft levels and the top-k between them; ours chooses on the host between
+levels, a sync each); a kernel sharing K/V loads across rows (FlashInfer's query tile) to lift
+the 8-row cap off the head's ~25-row forwards; how many levels a call pays once a level is
+cheap (re-measure the 2/3/4-level table off the one-card rig); misses (16-24 a reply, each about a round trip); the flow sends ~25 rows a
 token against rounds' ~6 (~0.8 MB/s up at 9 tok/s, and four times the far peer's work) — a thin
 uplink or a busy peer may run it slower than rounds, unmeasured and unguarded; the drafter's call
 beside this node's layers is a loss while they are two processes on one card (gotcha #759) and

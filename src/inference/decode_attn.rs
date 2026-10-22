@@ -43,6 +43,21 @@ use rayon::prelude::*;
 
 use crate::inference::attn_rows::{self, CHUNK};
 
+/// `SWARMLLM_TREE_ATTN=standard` → a tree of guesses on a card is read by the
+/// matmul path over its `[rows, kv_len]` mask, as before
+/// [`gqa_tree_attention_cuda`] (A/B switch). `SWARMLLM_DECODE_ATTN=standard`
+/// turns this off too.
+pub(crate) fn tree_kernel_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        decode_kernel_enabled()
+            && !matches!(
+                std::env::var("SWARMLLM_TREE_ATTN").as_deref(),
+                Ok("standard") | Ok("off") | Ok("0")
+            )
+    })
+}
+
 /// `SWARMLLM_DECODE_ATTN=standard` → never use the kernel (A/B switch).
 pub fn decode_kernel_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -418,6 +433,7 @@ pub fn gqa_decode_attention_cuda(
             softcap: softcap.unwrap_or(0.0),
             combine_one_chunk: combine_every_length(),
             chunk: fixed_chunk(),
+            tree: None,
         };
         Ok(Some(q.apply_op3_no_bwd(k, v, &op)?))
     }
@@ -428,9 +444,151 @@ pub fn gqa_decode_attention_cuda(
     }
 }
 
+/// The most rows of a tree [`gqa_tree_attention_cuda`] reads. Each row
+/// re-reads the cache — one block per (row, KV head, chunk) — so its time
+/// grows with rows × keys, where the matmul path pays a near-fixed cost
+/// (widening a half cache, two cuBLAS products): on the RTX 3070 Laptop
+/// (`tree_attention_timing`, min of 30 calls each synchronised, half cache,
+/// 2026-10-22) the kernel against the matmul path, µs a call — the 0.5B
+/// drafter's heads (14/2, d 64) at 900 keys: 8 rows 188 / 477, 25 rows 380 /
+/// 473, 32 rows 456 / 431; a 7B's (28/4, d 128) at 900 keys: 8 rows 235 / 305,
+/// 12 rows 328 / 318, 25 rows 597 / 394. On the rig a 7B's 25-row tree
+/// forwards on the kernel took this node's half 30% longer (near 14.4-15.3 s
+/// a 400-token reply against 10.1-12.6) while the drafter's 8-row levels
+/// gained 9%. At 8 rows it wins at every shape measured — and 8 is what a
+/// captured forward may carry ([`crate::inference::cuda_graph::MAX_POSITIONS`]),
+/// the place a mask cannot be. Rows sharing each block's K/V reads (FlashInfer's
+/// query tile) would lift the cap: FUTURE_WORK #134 (b).
+pub(crate) const TREE_KERNEL_MOST_ROWS: usize = 8;
+
+// A captured tree's forward builds no mask, so the kernel must take every row
+// count a capture may carry (`SplitModel::tree_steps_may_be_captured`).
+const _: () = assert!(crate::inference::cuda_graph::MAX_POSITIONS <= TREE_KERNEL_MOST_ROWS);
+
+/// A TREE of guesses' attention on a card (#134): every row of the forward
+/// reads the confirmed context and its own ancestors, through `visibility` —
+/// `[rows, VISIBILITY_WORDS]` u32 on the card, a bit per tree row
+/// (`draft_tree::RowVisibility`, made once a forward by `layers::TreeRows`) —
+/// over the cache as it is stored, f32 or half.
+///
+/// The decode kernel with each row a batch element of its own over the same
+/// cache (`kernels/decode_attn.cu`): its launches are the same two whatever
+/// the tree or the cache length, where the matmul path it replaces sized two
+/// cuBLAS products and a `[rows, kv_len]` mask by both — and, over the half
+/// cache a card keeps, widened the whole history to f32 every call. That is
+/// FlashInfer's packed custom mask, the shape SGLang's and vLLM's tree drafts
+/// run under CUDA graphs. Each row re-reads the cache, so the work grows with
+/// rows × history — hence [`TREE_KERNEL_MOST_ROWS`]: a drafter's level of 8.
+///
+/// Scope: the decode kernel's ([`gqa_decode_attention_cuda`]), at most
+/// [`TREE_KERNEL_MOST_ROWS`] query rows, a cache of `tree_base` context
+/// positions plus at most `32 * VISIBILITY_WORDS` tree rows. Anything else `Ok(None)` — the caller
+/// keeps the matmul path over the mask. `SWARMLLM_TREE_ATTN=standard` for an
+/// A/B. Not bit-identical to that path; pinned against it by
+/// `cuda_tree_kernel_matches_the_masked_matmul_path`, replies judged against
+/// llama.cpp.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gqa_tree_attention_cuda(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    visibility: &Tensor,
+    tree_base: usize,
+    scale: f32,
+    softcap: Option<f32>,
+) -> Result<Option<Tensor>> {
+    use crate::inference::draft_tree::VISIBILITY_WORDS;
+    if !tree_kernel_enabled() || !q.device().is_cuda() {
+        return Ok(None);
+    }
+    let cache_dtype = k.dtype();
+    if q.dtype() != candle_core::DType::F32
+        || !matches!(
+            cache_dtype,
+            candle_core::DType::F32 | candle_core::DType::F16
+        )
+        || v.dtype() != cache_dtype
+        || visibility.dtype() != candle_core::DType::U32
+        || !visibility.device().same_device(q.device())
+    {
+        return Ok(None);
+    }
+    let (b, n_head, rows, d) = q.dims4()?;
+    let (kb, n_kv_head, s_len, kd) = k.dims4()?;
+    if rows == 0
+        || rows > TREE_KERNEL_MOST_ROWS
+        || kb != b
+        || kd != d
+        || !card_kernel_covers(n_head, n_kv_head, d)
+        || s_len <= tree_base
+        || s_len - tree_base > 32 * VISIBILITY_WORDS
+        || v.dims4()? != (b, n_kv_head, s_len, d)
+        || visibility.dims() != [rows, VISIBILITY_WORDS]
+    {
+        return Ok(None);
+    }
+    for t in [k, v] {
+        let st = t.stride();
+        if st[3] != 1 || st[2] != d {
+            return Ok(None);
+        }
+    }
+    #[cfg(feature = "candle-cuda")]
+    {
+        // Each row a batch element: `[b * rows, n_head, 1, d]`, rows of a
+        // batch one after another, as the kernel numbers them.
+        let q_rows = q
+            .transpose(1, 2)?
+            .contiguous()?
+            .reshape((b * rows, n_head, 1, d))?;
+        let op = cuda::DecodeAttn {
+            scale,
+            softcap: softcap.unwrap_or(0.0),
+            combine_one_chunk: combine_every_length(),
+            chunk: fixed_chunk(),
+            tree: Some(cuda::TreeOperands {
+                visibility: visibility.clone(),
+                rows,
+                base: tree_base,
+            }),
+        };
+        let out = q_rows.apply_op3_no_bwd(k, v, &op)?;
+        // What a rig greps to know the kernel ran (an A/B whose arms measure
+        // alike proves nothing without it).
+        static RAN: std::sync::Once = std::sync::Once::new();
+        RAN.call_once(|| {
+            tracing::debug!(
+                target: "swarmllm::inference::decode_attn",
+                rows,
+                s_len,
+                "a tree's attention runs on the card's tree kernel"
+            )
+        });
+        // Back to `[b, n_head, rows, d]` — a view of the kernel's
+        // `[b, rows, n_head, d]`, which the caller's `transpose(1, 2)` reads
+        // in place.
+        Ok(Some(out.reshape((b, rows, n_head, d))?.transpose(1, 2)?))
+    }
+    #[cfg(not(feature = "candle-cuda"))]
+    {
+        let _ = (scale, softcap);
+        Ok(None)
+    }
+}
+
 #[cfg(feature = "candle-cuda")]
 mod cuda {
-    use candle_core::{CpuStorage, CustomOp3, Layout, Result, Shape};
+    use candle_core::{CpuStorage, CustomOp3, Layout, Result, Shape, Tensor};
+
+    /// A tree's rows ([`super::gqa_tree_attention_cuda`]).
+    pub(super) struct TreeOperands {
+        /// `[rows, VISIBILITY_WORDS]` u32 on the card.
+        pub(super) visibility: Tensor,
+        /// Query rows a K/V batch serves.
+        pub(super) rows: usize,
+        /// The cache position of the tree's first row.
+        pub(super) base: usize,
+    }
 
     pub(super) struct DecodeAttn {
         pub(super) scale: f32,
@@ -442,6 +600,8 @@ mod cuda {
         /// Positions per block, one of [`super::CARD_CHUNKS`]; `None` =
         /// [`super::chunk_for`] the call's shape ([`super::fixed_chunk`]).
         pub(super) chunk: Option<usize>,
+        /// `None`: one query row a batch, every position read (a decode step).
+        pub(super) tree: Option<TreeOperands>,
     }
 
     /// The cache's K and V as the kernel reads them — f32, or the half cache
@@ -493,12 +653,47 @@ mod cuda {
             let Some((qo, qe)) = l1.contiguous_offsets() else {
                 candle_core::bail!("decode-attention: q must be contiguous");
             };
+            // `b` counts query rows: a tree's rows are batch elements of
+            // their own over their batch's cache (`kv_b`).
             let (b, n_head, _, d) = l1.shape().dims4()?;
-            let (_, n_kv_head, s_len, _) = l2.shape().dims4()?;
+            let (kv_b, n_kv_head, s_len, _) = l2.shape().dims4()?;
             let (ks, vs) = (l2.stride(), l3.stride());
             if ks[3] != 1 || ks[2] != d || vs[3] != 1 || vs[2] != d || qe - qo != b * n_head * d {
                 candle_core::bail!("decode-attention: unexpected layout");
             }
+            let rows = self.tree.as_ref().map_or(1, |t| t.rows);
+            if b != kv_b * rows {
+                candle_core::bail!(
+                    "decode-attention: {b} query rows over {kv_b} caches of {rows} rows"
+                );
+            }
+            // The visibility's view, held for the launch.
+            let vis_storage = self
+                .tree
+                .as_ref()
+                .map(|t| t.visibility.storage_and_layout());
+            let vis = match &vis_storage {
+                None => None,
+                Some((storage, layout)) => {
+                    let candle_core::Storage::Cuda(c) = &**storage else {
+                        candle_core::bail!("decode-attention: a tree's visibility off the card");
+                    };
+                    let Some((o, e)) = layout.contiguous_offsets() else {
+                        candle_core::bail!(
+                            "decode-attention: a tree's visibility must be contiguous"
+                        );
+                    };
+                    let words = crate::inference::draft_tree::VISIBILITY_WORDS;
+                    if e - o != rows * words
+                        || s_len > self.tree.as_ref().map_or(0, |t| t.base) + 32 * words
+                    {
+                        candle_core::bail!(
+                            "decode-attention: a tree's visibility does not cover the cache"
+                        );
+                    }
+                    Some(c.as_cuda_slice::<u32>()?.slice(o..e))
+                }
+            };
             let n_rep = n_head / n_kv_head;
             let chunk = self
                 .chunk
@@ -559,7 +754,13 @@ mod cuda {
                 chunk as i32,
             );
             let (k_sb, k_sh, v_sb, v_sh) = (ks[0] as i64, ks[1] as i64, vs[0] as i64, vs[1] as i64);
-            // A null pointer for whichever output this launch does not write.
+            let (rows_i, vis_words_i, base_i) = (
+                rows as i32,
+                crate::inference::draft_tree::VISIBILITY_WORDS as i32,
+                self.tree.as_ref().map_or(0, |t| t.base) as i32,
+            );
+            // A null pointer for whichever output this launch does not write,
+            // and for the visibility of a call with no tree.
             let null: u64 = 0;
             {
                 let mut builder = func.builder();
@@ -595,10 +796,19 @@ mod cuda {
                 builder.arg(&self.scale);
                 builder.arg(&self.softcap);
                 builder.arg(&chunk_i);
+                builder.arg(&rows_i);
+                match &vis {
+                    Some(v) => builder.arg(v),
+                    None => builder.arg(&null),
+                };
+                builder.arg(&vis_words_i);
+                builder.arg(&base_i);
                 // SAFETY: ffi. Shapes, strides and scope (d % 32 == 0, d <= 256,
                 // n_rep <= 16, chunk <= 64) are checked by the caller and above; the kernel
-                // reads within the views and writes `out` or `partial`, each
-                // sized for exactly what it assigns.
+                // reads within the views (a tree's visibility: `rows` rows of
+                // its words, the cache past its base within them, checked
+                // above) and writes `out` or `partial`, each sized for exactly
+                // what it assigns.
                 unsafe { builder.launch(cfg) }.w()?;
             }
             if let Some(p) = partial.as_ref() {
@@ -661,6 +871,16 @@ pub(crate) fn axpy(a: f32, x: &[f32], y: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The largest gap, NaN if any gap is: `f32::max` drops a NaN, so a kernel
+    /// answering NaN would pass a tolerance folded with it (gotcha #882).
+    fn nan_max(worst: f32, gap: f32) -> f32 {
+        if worst.is_nan() || gap.is_nan() {
+            f32::NAN
+        } else {
+            worst.max(gap)
+        }
+    }
 
     /// The kernel against the exact composition it replaces: grouped matmul →
     /// scaled softmax → matmul, on the shapes llama-3.2-3b decodes with.
@@ -754,12 +974,12 @@ mod tests {
                 .iter()
                 .zip(&want)
                 .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
+                .fold(0f32, nan_max);
             let worst_rel = got
                 .iter()
                 .zip(&want)
                 .map(|(a, b)| (a - b).abs() / a.abs().max(b.abs()).max(0.05))
-                .fold(0f32, f32::max);
+                .fold(0f32, nan_max);
             assert!(
                 worst_abs < 1e-5 && worst_rel < 1e-4,
                 "b={b} heads {n_head}/{n_kv_head} S={s_len} softcap={softcap:?} masked={masked:?}: worst abs {worst_abs} rel {worst_rel}"
@@ -868,6 +1088,7 @@ mod tests {
                     softcap: softcap.unwrap_or(0.0),
                     combine_one_chunk: true,
                     chunk: Some(chunk),
+                    tree: None,
                 };
                 arms.push((
                     format!("{chunk}-position chunks"),
@@ -880,16 +1101,395 @@ mod tests {
                     .iter()
                     .zip(&want)
                     .map(|(a, b)| (a - b).abs())
-                    .fold(0f32, f32::max);
+                    .fold(0f32, nan_max);
                 let worst_rel = got
                     .iter()
                     .zip(&want)
                     .map(|(a, b)| (a - b).abs() / a.abs().max(b.abs()).max(0.05))
-                    .fold(0f32, f32::max);
+                    .fold(0f32, nan_max);
                 assert!(
                     worst_abs < 1e-5 && worst_rel < 1e-4,
                     "{arm}: b={b} heads {n_head}/{n_kv_head} S={s_len} d={d} softcap={softcap:?} cache {cache_dtype:?}: worst abs {worst_abs} rel {worst_rel}"
                 );
+            }
+        }
+    }
+
+    /// A tree of guesses' attention on the card (#134) against the path it
+    /// replaces: the matmul composition over the tree's additive mask
+    /// (`RowVisibility::mask`, the processor's `matmul_attention`), from the
+    /// same numbers. Drafter and 7B head layouts, a later level of a tree whose
+    /// first rows are cached, the last level of a tree of every row one may
+    /// hold (bits in every word), a one-row tree, a soft cap, a long context;
+    /// the f32 and the half cache; the query as the transposed view a layer
+    /// hands over. A forward past [`TREE_KERNEL_MOST_ROWS`] is declined. The entry
+    /// point `standard_attention` reaches under a tree's scope must be the
+    /// kernel's own answer BIT FOR BIT — the matmul path on the card would
+    /// pass the tolerance too, so only that proves the kernel ran.
+    ///
+    /// ⚠ Gated: run it on a card with `--nocapture` and look for the SKIPPED
+    /// line before believing a pass.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn cuda_tree_kernel_matches_the_masked_matmul_path() {
+        use crate::inference::draft_tree::{DraftTree, MAX_TREE_ROWS};
+        let card = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIPPED cuda tree attention: no CUDA device ({e})");
+                return;
+            }
+        };
+        let cpu = Device::Cpu;
+        // (n_head, n_kv_head, d, base, tree rows, rows already cached, softcap)
+        for case in [
+            (14usize, 2usize, 64usize, 37usize, 8usize, 0usize, None),
+            (14, 2, 64, 300, 40, 32, None),
+            (28, 4, 128, 600, 8, 0, None),
+            (8, 4, 256, 100, 7, 0, Some(50.0f32)),
+            (14, 2, 64, 5, MAX_TREE_ROWS, MAX_TREE_ROWS - 8, None),
+            (14, 2, 64, 20, 1, 0, None),
+            (32, 8, 128, 2000, 8, 0, None),
+        ]
+        .into_iter()
+        .flat_map(|case| {
+            [
+                (case, candle_core::DType::F32),
+                (case, candle_core::DType::F16),
+            ]
+        }) {
+            let ((n_head, n_kv_head, d, base, tree_rows, before, softcap), cache_dtype) = case;
+            // A branching tree, the same every run: every fifth row starts
+            // afresh, the rest follow an earlier row.
+            let mut seed = 0x9e37_79b9u64 ^ (tree_rows as u64);
+            let parents = (0..tree_rows)
+                .map(|i| {
+                    seed = seed
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    (i % 5 != 0).then(|| ((seed >> 33) as usize % i) as u16)
+                })
+                .collect();
+            let tree = DraftTree::new(base, parents).unwrap();
+            let seq = tree_rows - before;
+            let (positions, seen) = tree.rows_for(base + before, seq).unwrap();
+            let kv_len = base + tree_rows;
+            let mask = Tensor::from_slice(&seen.mask(), (seq, kv_len), &cpu).unwrap();
+
+            let q = Tensor::randn(0f32, 1.0, (1, seq, n_head, d), &cpu)
+                .unwrap()
+                .transpose(1, 2)
+                .unwrap();
+            let as_stored = |t: Tensor| {
+                t.to_dtype(cache_dtype)
+                    .unwrap()
+                    .to_dtype(candle_core::DType::F32)
+                    .unwrap()
+            };
+            let kbuf =
+                as_stored(Tensor::randn(0f32, 1.0, (1, n_kv_head, kv_len + 17, d), &cpu).unwrap());
+            let vbuf =
+                as_stored(Tensor::randn(0f32, 1.0, (1, n_kv_head, kv_len + 17, d), &cpu).unwrap());
+            let (k, v) = (
+                kbuf.narrow(2, 0, kv_len).unwrap(),
+                vbuf.narrow(2, 0, kv_len).unwrap(),
+            );
+            let want = crate::inference::layers::matmul_attention(
+                &q,
+                &k,
+                &v,
+                Some(&mask),
+                d,
+                n_head,
+                n_kv_head,
+                softcap,
+            )
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+
+            let on_card = |t: &Tensor| {
+                t.to_dtype(cache_dtype)
+                    .unwrap()
+                    .to_device(&card)
+                    .unwrap()
+                    .narrow(2, 0, kv_len)
+                    .unwrap()
+            };
+            let (qc, kc, vc) = (q.to_device(&card).unwrap(), on_card(&kbuf), on_card(&vbuf));
+            let vis = Tensor::from_slice(
+                &seen.words,
+                (seq, crate::inference::draft_tree::VISIBILITY_WORDS),
+                &card,
+            )
+            .unwrap();
+            let scale = 1.0 / (d as f32).sqrt();
+            let flat = |t: Tensor| t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            let entry = flat(
+                gqa_tree_attention_cuda(&qc, &kc, &vc, &vis, base, scale, softcap)
+                    .unwrap()
+                    .expect("the tree kernel applies to these inputs"),
+            );
+            if seq == TREE_KERNEL_MOST_ROWS {
+                // One row more is the matmul path's.
+                let wider = Tensor::randn(0f32, 1.0, (1, n_head, seq + 1, d), &card).unwrap();
+                let wider_vis = Tensor::zeros(
+                    (seq + 1, crate::inference::draft_tree::VISIBILITY_WORDS),
+                    candle_core::DType::U32,
+                    &card,
+                )
+                .unwrap();
+                assert!(gqa_tree_attention_cuda(
+                    &wider,
+                    &kc,
+                    &vc,
+                    &wider_vis,
+                    base.saturating_sub(1),
+                    scale,
+                    softcap
+                )
+                .unwrap()
+                .is_none());
+            }
+            let through_attention = {
+                let _tree = crate::inference::layers::RowPositions::for_tree(positions, seen);
+                flat(
+                    crate::inference::layers::standard_attention(
+                        &qc,
+                        &kc,
+                        &vc,
+                        Some(&mask.to_device(&card).unwrap()),
+                        d,
+                        n_head,
+                        n_kv_head,
+                        softcap,
+                        0,
+                    )
+                    .unwrap(),
+                )
+            };
+            assert!(
+                entry
+                    .iter()
+                    .zip(&through_attention)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "standard_attention under a tree's scope is not the tree kernel's answer \
+                 (heads {n_head}/{n_kv_head} d={d} base {base} rows {tree_rows} cache {cache_dtype:?})"
+            );
+            let mut arms = vec![("entry point".to_string(), entry)];
+            for chunk in CARD_CHUNKS {
+                let op = cuda::DecodeAttn {
+                    scale,
+                    softcap: softcap.unwrap_or(0.0),
+                    combine_one_chunk: true,
+                    chunk: Some(chunk),
+                    tree: Some(cuda::TreeOperands {
+                        visibility: vis.clone(),
+                        rows: seq,
+                        base,
+                    }),
+                };
+                let q_rows = qc
+                    .transpose(1, 2)
+                    .unwrap()
+                    .contiguous()
+                    .unwrap()
+                    .reshape((seq, n_head, 1, d))
+                    .unwrap();
+                let got = q_rows
+                    .apply_op3_no_bwd(&kc, &vc, &op)
+                    .unwrap()
+                    .reshape((1, seq, n_head, d))
+                    .unwrap()
+                    .transpose(1, 2)
+                    .unwrap();
+                arms.push((format!("{chunk}-position chunks"), flat(got)));
+            }
+            for (arm, got) in arms {
+                assert_eq!(got.len(), want.len());
+                let worst_abs = got
+                    .iter()
+                    .zip(&want)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0f32, nan_max);
+                let worst_rel = got
+                    .iter()
+                    .zip(&want)
+                    .map(|(a, b)| (a - b).abs() / a.abs().max(b.abs()).max(0.05))
+                    .fold(0f32, nan_max);
+                assert!(
+                    worst_abs < 1e-5 && worst_rel < 1e-4,
+                    "{arm}: heads {n_head}/{n_kv_head} d={d} base {base} rows {tree_rows} after {before} softcap={softcap:?} cache {cache_dtype:?}: worst abs {worst_abs} rel {worst_rel}"
+                );
+            }
+        }
+    }
+
+    /// A tree's call with NO mask that the tree kernel cannot take fails —
+    /// never runs as an ordinary decode or matmul call over every cached row.
+    /// A captured tree level builds no mask (`RecordedStep::tree_staged`), so
+    /// such a call would read its siblings: a one-row call the scope does not
+    /// describe passed the first version of the check (it asked for more than
+    /// one row and a scope that matched the call). With the mask given, both
+    /// calls run.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn a_tree_call_the_kernel_cannot_take_without_a_mask_fails() {
+        use crate::inference::draft_tree::DraftTree;
+        let card = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIPPED a tree's unmasked call: no CUDA device ({e})");
+                return;
+            }
+        };
+        let (n_head, n_kv_head, d, base) = (14usize, 2usize, 64usize, 20usize);
+        let call = |rows: usize, keys: usize, scope_rows: usize, with_mask: bool| {
+            let parents = (0..scope_rows)
+                .map(|i| i.checked_sub(1).map(|p| p as u16))
+                .collect();
+            let tree = DraftTree::new(base, parents).unwrap();
+            let (positions, seen) = tree.rows_for(base, scope_rows).unwrap();
+            let mask = with_mask.then(|| {
+                let line: Vec<f32> = (0..rows * keys).map(|_| 0.0).collect();
+                Tensor::from_slice(&line, (rows, keys), &card).unwrap()
+            });
+            let q = Tensor::randn(0f32, 1.0, (1, n_head, rows, d), &card).unwrap();
+            let cache = || {
+                Tensor::randn(0f32, 1.0, (1, n_kv_head, keys, d), &card)
+                    .unwrap()
+                    .to_dtype(candle_core::DType::F16)
+                    .unwrap()
+            };
+            let (k, v) = (cache(), cache());
+            let _tree = crate::inference::layers::RowPositions::for_tree(positions, seen);
+            crate::inference::layers::standard_attention(
+                &q,
+                &k,
+                &v,
+                mask.as_ref(),
+                d,
+                n_head,
+                n_kv_head,
+                None,
+                0,
+            )
+        };
+        let wide = TREE_KERNEL_MOST_ROWS + 1;
+        // Past the kernel's rows, its scope matching the call.
+        assert!(call(wide, base + wide, wide, false).is_err());
+        assert!(call(wide, base + wide, wide, true).is_ok());
+        // One row over more keys than the scope's tree ends at.
+        assert!(call(1, base + 3, 1, false).is_err());
+        assert!(call(1, base + 3, 1, true).is_ok());
+        // The kernel's own call runs without one.
+        assert!(call(1, base + 1, 1, false).is_ok());
+    }
+
+    /// What a tree's attention costs on the card, the tree kernel against the
+    /// matmul path over its mask (`standard_attention` under
+    /// `SWARMLLM_TREE_ATTN=standard`'s branch: widen a half cache, two cuBLAS
+    /// products, the mask, a softmax), by rows, for the 0.5B drafter's heads
+    /// (14/2, d 64) and a 7B's (28/4, d 128), over a half cache. Min of 30
+    /// calls, each synchronised. Where the kernel's per-row re-read of the
+    /// cache overtakes the matmul path's fixed cost sets the kernel's row cap.
+    /// `cargo test --release --features cuda --lib tree_attention_timing --
+    /// --ignored --nocapture`.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    #[ignore]
+    fn tree_attention_timing() {
+        let card = Device::new_cuda(0).expect("a card");
+        for (n_head, n_kv_head, d) in [(14usize, 2usize, 64usize), (28, 4, 128)] {
+            for s_len in [300usize, 900] {
+                for rows in [1usize, 4, 8, 12, 16, 25, 32] {
+                    let base = s_len - rows;
+                    let q = Tensor::randn(0f32, 1.0, (1, rows, n_head, d), &card)
+                        .unwrap()
+                        .transpose(1, 2)
+                        .unwrap();
+                    let cache = || {
+                        Tensor::randn(0f32, 1.0, (1, n_kv_head, s_len + 64, d), &card)
+                            .unwrap()
+                            .to_dtype(candle_core::DType::F16)
+                            .unwrap()
+                            .narrow(2, 0, s_len)
+                            .unwrap()
+                    };
+                    let (k, v) = (cache(), cache());
+                    let parents = (0..rows)
+                        .map(|i| i.checked_sub(1).map(|p| p as u16))
+                        .collect();
+                    let tree = crate::inference::draft_tree::DraftTree::new(base, parents).unwrap();
+                    let (_, seen) = tree.rows_for(base, rows).unwrap();
+                    let vis = Tensor::from_slice(
+                        &seen.words,
+                        (rows, crate::inference::draft_tree::VISIBILITY_WORDS),
+                        &card,
+                    )
+                    .unwrap();
+                    let mask = Tensor::from_slice(&seen.mask(), (rows, s_len), &card).unwrap();
+                    let scale = 1.0 / (d as f32).sqrt();
+                    let time = |f: &dyn Fn() -> Tensor| {
+                        let mut best = f64::MAX;
+                        for i in 0..33 {
+                            card.synchronize().unwrap();
+                            let t = std::time::Instant::now();
+                            let out = f();
+                            card.synchronize().unwrap();
+                            drop(out);
+                            if i >= 3 {
+                                best = best.min(t.elapsed().as_secs_f64() * 1e6);
+                            }
+                        }
+                        best
+                    };
+                    // The op itself, past the entry point's row cap.
+                    let kernel = time(&|| {
+                        let op = cuda::DecodeAttn {
+                            scale,
+                            softcap: 0.0,
+                            combine_one_chunk: true,
+                            chunk: None,
+                            tree: Some(cuda::TreeOperands {
+                                visibility: vis.clone(),
+                                rows,
+                                base,
+                            }),
+                        };
+                        q.transpose(1, 2)
+                            .unwrap()
+                            .contiguous()
+                            .unwrap()
+                            .reshape((rows, n_head, 1, d))
+                            .unwrap()
+                            .apply_op3_no_bwd(&k, &v, &op)
+                            .unwrap()
+                    });
+                    let matmul = time(&|| {
+                        let (kw, vw) = (
+                            k.to_dtype(candle_core::DType::F32).unwrap(),
+                            v.to_dtype(candle_core::DType::F32).unwrap(),
+                        );
+                        crate::inference::layers::matmul_attention(
+                            &q,
+                            &kw,
+                            &vw,
+                            Some(&mask),
+                            d,
+                            n_head,
+                            n_kv_head,
+                            None,
+                        )
+                        .unwrap()
+                    });
+                    eprintln!(
+                        "TIMING heads {n_head}/{n_kv_head} d {d} keys {s_len} rows {rows}: \
+                         kernel {kernel:.1} us, matmul path {matmul:.1} us"
+                    );
+                }
             }
         }
     }
@@ -938,6 +1538,7 @@ mod tests {
                             softcap: softcap.unwrap_or(0.0),
                             combine_one_chunk,
                             chunk: Some(CUDA_CHUNK),
+                            tree: None,
                         };
                         q.apply_op3_no_bwd(&k, &v, &op)
                             .unwrap()

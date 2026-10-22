@@ -13,14 +13,18 @@ const VOCAB: usize = 256;
 
 /// A whole model with random weights on the processor (`drafting.rs`'s).
 fn whole_model() -> SplitModel {
+    whole_model_on(&Device::Cpu)
+}
+
+fn whole_model_on(device: &Device) -> SplitModel {
     let hidden = 128;
-    let mut m = make_test_split_model(3, hidden);
-    let table = Tensor::randn(0f32, 1.0, (VOCAB, hidden), &Device::Cpu).unwrap();
+    let mut m = make_test_split_model_on(3, hidden, device.clone());
+    let table = Tensor::randn(0f32, 1.0, (VOCAB, hidden), device).unwrap();
     m.tok_embeddings = Some(TokenEmbedding::Dense(candle_nn::Embedding::new(
         table, hidden,
     )));
-    m.norm = Some(make_rms_norm_dim(hidden, &Device::Cpu));
-    let w = (Tensor::randn(0f32, 1.0, (VOCAB, hidden), &Device::Cpu).unwrap() * 0.5).unwrap();
+    m.norm = Some(make_rms_norm_dim(hidden, device));
+    let w = (Tensor::randn(0f32, 1.0, (VOCAB, hidden), device).unwrap() * 0.5).unwrap();
     m.output = Some(
         QMatMul::from_qtensor(
             candle_core::quantized::QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32)
@@ -48,12 +52,22 @@ fn read_fresh(model: &mut SplitModel, seq: &[u32]) -> Vec<f32> {
     rows_of(&out).pop().unwrap()
 }
 
+/// The largest gap, NaN if any gap is: `f32::max` drops a NaN, so a kernel
+/// answering NaN would pass a tolerance folded with it (gotcha #882).
+fn nan_max(worst: f32, gap: f32) -> f32 {
+    if worst.is_nan() || gap.is_nan() {
+        f32::NAN
+    } else {
+        worst.max(gap)
+    }
+}
+
 fn assert_close(a: &[f32], b: &[f32], what: &str) {
     let worst = a
         .iter()
         .zip(b)
         .map(|(x, y)| (x - y).abs())
-        .fold(0f32, f32::max);
+        .fold(0f32, nan_max);
     assert!(worst < 1e-4, "{what}: max abs diff {worst}");
 }
 
@@ -155,6 +169,83 @@ fn a_kept_path_read_again_continues_as_if_read_alone() {
     let mut seq = PROMPT.to_vec();
     seq.extend([5, 11, 15]);
     assert_close(&last, &read_fresh(&mut model, &seq), "after the re-read");
+}
+
+/// A level of a drafter's tree captured as a CUDA graph (#134) reads what the
+/// same level read op by op does — and WAS captured, the decode graph's own
+/// count says so: a conversation's first step and the first forward of a
+/// shape never are, so only the tree's later levels can be. Four levels of 8
+/// rows (each row a child of a row of the level before), the model held on the
+/// card, run with capture off and then on.
+///
+/// ⚠ Gated: run it on a card with `--nocapture` and look for the SKIPPED line
+/// before believing a pass — and with `--test-threads=1` beside other card
+/// tests: another test's card calls during a capture refuse it (seen once in
+/// a parallel run; alone it passed 3 of 3).
+#[cfg(feature = "candle-cuda")]
+#[test]
+fn a_captured_tree_level_reads_as_the_ordinary_one() {
+    use crate::inference::cuda_graph::DecodeGraphSlot;
+    let card = match Device::new_cuda(0) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIPPED captured tree level: no CUDA device ({e})");
+            return;
+        }
+    };
+    let mut model = whole_model_on(&card);
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    const LEVEL: usize = crate::inference::cuda_graph::MAX_POSITIONS;
+    let run = |model: &mut SplitModel, rid: &str| -> Vec<Vec<f32>> {
+        let prompt = model.tensor_from_ids(&PROMPT).unwrap();
+        model.forward(&prompt, 0, &kv, rid).unwrap();
+        let step = model.tensor_from_ids(&[42]).unwrap();
+        model.forward(&step, PROMPT.len(), &kv, rid).unwrap();
+        let base = PROMPT.len() + 1;
+        let mut parents: Vec<Option<u16>> = Vec::new();
+        let mut rows = Vec::new();
+        for level in 0..4 {
+            let before = parents.len();
+            for i in 0..LEVEL {
+                parents.push((level > 0).then(|| (before - LEVEL + i) as u16));
+            }
+            let tokens: Vec<u32> = (0..LEVEL)
+                .map(|i| (level * 31 + i * 7 + 1) as u32)
+                .collect();
+            let tree = DraftTree::new(base, parents.clone()).unwrap();
+            let input = model.tensor_from_ids(&tokens).unwrap();
+            let out = model
+                .with_draft_tree(tree, |m| {
+                    m.forward_verify_all_positions(&input, base + before, &kv, rid)
+                })
+                .unwrap()
+                .unwrap();
+            rows.extend(rows_of(&out.to_device(&Device::Cpu).unwrap()));
+        }
+        rows
+    };
+    model.decode_graph = DecodeGraphSlot::Off;
+    let ordinary = run(&mut model, "op-by-op");
+    model.decode_graph = DecodeGraphSlot::Unchecked;
+    let captured = run(&mut model, "captured");
+    let DecodeGraphSlot::On(graph) = &model.decode_graph else {
+        panic!("the card model's decode steps were not to be captured");
+    };
+    let (launched, refused) = graph.launches();
+    assert_eq!(refused, 0, "a captured tree level was refused");
+    assert!(
+        launched >= 2,
+        "the tree's later levels were not captured ({launched} launched)"
+    );
+    assert_eq!(ordinary.len(), captured.len());
+    for (i, (a, b)) in ordinary.iter().zip(&captured).enumerate() {
+        let worst = a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0f32, nan_max);
+        assert!(worst < 1e-3, "row {i}: captured differs by {worst}");
+    }
 }
 
 /// A tree grown over several forwards — the drafter's way — reads its cached

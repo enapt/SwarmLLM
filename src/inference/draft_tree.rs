@@ -15,6 +15,56 @@
 /// doubling (`docs/plans/large_model_splits.md` § "Projections").
 pub(crate) const MAX_TREE_ROWS: usize = 512;
 
+/// The u32 words of one row's [`RowVisibility`]: a bit for every row a tree
+/// may hold.
+pub(crate) const VISIBILITY_WORDS: usize = MAX_TREE_ROWS / 32;
+
+/// Which keys each row of a tree's forward reads: every position before the
+/// tree's base, and of the tree's own rows its ancestors and itself — a bit
+/// per tree row ([`VISIBILITY_WORDS`] words a forward row). The ONE statement
+/// of what a row sees: the card's tree attention reads the bits as they are
+/// (`decode_attn::gqa_tree_attention_cuda`, FlashInfer's packed custom mask),
+/// and the additive mask every other path reads is made from them
+/// ([`Self::mask`]), so the two cannot disagree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RowVisibility {
+    /// The cache position of the tree's first row.
+    pub(crate) base: usize,
+    /// The cache's length after the forward: `base` plus the tree's rows.
+    pub(crate) kv_len: usize,
+    /// `[forward rows, VISIBILITY_WORDS]`, row-major: bit `j % 32` of word
+    /// `j / 32` is set where the row reads tree row `j`.
+    pub(crate) words: Vec<u32>,
+}
+
+impl RowVisibility {
+    pub(crate) fn rows(&self) -> usize {
+        self.words.len() / VISIBILITY_WORDS
+    }
+
+    /// Does forward row `q` read cache position `key`?
+    pub(crate) fn sees(&self, q: usize, key: usize) -> bool {
+        match key.checked_sub(self.base) {
+            None => true,
+            Some(j) => self.words[q * VISIBILITY_WORDS + j / 32] >> (j % 32) & 1 == 1,
+        }
+    }
+
+    /// The additive mask `[rows, kv_len]`, row-major: 0 where a row reads a
+    /// key, −∞ where it does not — what the matmul path adds to its scores.
+    pub(crate) fn mask(&self) -> Vec<f32> {
+        let mut mask = vec![f32::NEG_INFINITY; self.rows() * self.kv_len];
+        for (q, line) in mask.chunks_mut(self.kv_len).enumerate() {
+            for (key, m) in line.iter_mut().enumerate() {
+                if self.sees(q, key) {
+                    *m = 0.0;
+                }
+            }
+        }
+        mask
+    }
+}
+
 /// The shape of a tree of guesses: for every row, in the order the rows are
 /// written to the cache, the row it follows.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,17 +175,16 @@ impl DraftTree {
         std::iter::successors(Some(row), move |&r| self.parent(r))
     }
 
-    /// The positions and the additive mask of a forward of `seq_len` rows
-    /// written after `kv_offset` cached ones — the tree's LAST `seq_len` rows,
-    /// those before them already in the cache from an earlier forward of the
-    /// same tree (the drafter grows its tree that way). The mask is
-    /// `[seq_len, kv_offset + seq_len]`, row-major: 0 where a row reads a key,
-    /// −∞ where it does not.
+    /// The positions and the keys each row reads ([`RowVisibility`]; its
+    /// [`RowVisibility::mask`] is the additive mask) of a forward of `seq_len`
+    /// rows written after `kv_offset` cached ones — the tree's LAST `seq_len`
+    /// rows, those before them already in the cache from an earlier forward of
+    /// the same tree (the drafter grows its tree that way).
     pub(crate) fn rows_for(
         &self,
         kv_offset: usize,
         seq_len: usize,
-    ) -> Result<(Vec<u32>, Vec<f32>), String> {
+    ) -> Result<(Vec<u32>, RowVisibility), String> {
         let before = kv_offset.checked_sub(self.base).ok_or_else(|| {
             format!(
                 "a tree from position {} read after only {kv_offset} cached positions",
@@ -148,19 +197,23 @@ impl DraftTree {
                 self.len()
             ));
         }
-        let kv_len = kv_offset + seq_len;
-        let mut mask = vec![f32::NEG_INFINITY; seq_len * kv_len];
+        let mut words = vec![0u32; seq_len * VISIBILITY_WORDS];
         let mut positions = Vec::with_capacity(seq_len);
-        for q in 0..seq_len {
+        for (q, line) in words.chunks_mut(VISIBILITY_WORDS).enumerate() {
             let row = before + q;
             positions.push((self.base + self.depth(row)) as u32);
-            let line = &mut mask[q * kv_len..(q + 1) * kv_len];
-            line[..self.base].fill(0.0);
             for seen in self.ancestors_and_self(row) {
-                line[self.base + seen] = 0.0;
+                line[seen / 32] |= 1 << (seen % 32);
             }
         }
-        Ok((positions, mask))
+        Ok((
+            positions,
+            RowVisibility {
+                base: self.base,
+                kv_len: kv_offset + seq_len,
+                words,
+            },
+        ))
     }
 
     /// The rows that follow `row` (`None`: the rows with no parent).
@@ -681,7 +734,8 @@ mod tests {
     #[test]
     fn a_row_reads_the_context_and_its_ancestors_only() {
         let t = sample();
-        let (positions, mask) = t.rows_for(10, 5).unwrap();
+        let (positions, seen) = t.rows_for(10, 5).unwrap();
+        let mask = seen.mask();
         assert_eq!(positions, vec![10, 10, 11, 12, 11]);
         let kv = 15;
         let reads = |q: usize| -> Vec<usize> {
@@ -708,7 +762,8 @@ mod tests {
     fn a_chain_is_the_causal_mask() {
         let t = DraftTree::new(4, vec![None, Some(0), Some(1)]).unwrap();
         assert!(t.is_chain());
-        let (positions, mask) = t.rows_for(4, 3).unwrap();
+        let (positions, seen) = t.rows_for(4, 3).unwrap();
+        let mask = seen.mask();
         assert_eq!(positions, vec![4, 5, 6]);
         for q in 0..3 {
             for k in 0..7 {
@@ -724,7 +779,8 @@ mod tests {
     #[test]
     fn a_tree_grown_over_several_forwards_reads_its_cached_rows() {
         let t = sample();
-        let (positions, mask) = t.rows_for(13, 2).unwrap();
+        let (positions, seen) = t.rows_for(13, 2).unwrap();
+        let mask = seen.mask();
         assert_eq!(positions, vec![12, 11]);
         let kv = 15;
         let tree_keys = |q: usize| -> Vec<usize> {
@@ -740,6 +796,31 @@ mod tests {
             t.rows_for(9, 6).is_err(),
             "a cache short of the tree's base"
         );
+    }
+
+    /// The bits of a row past the first word: a chain of every row a tree may
+    /// hold reads, at its last row, every row before it — and its mask is the
+    /// causal one, the bits in every word set where they should be.
+    #[test]
+    fn a_trees_visibility_reaches_its_last_row() {
+        let parents = (0..MAX_TREE_ROWS)
+            .map(|i| i.checked_sub(1).map(|p| p as u16))
+            .collect();
+        let t = DraftTree::new(3, parents).unwrap();
+        let (_, seen) = t.rows_for(3, MAX_TREE_ROWS).unwrap();
+        assert_eq!(seen.rows(), MAX_TREE_ROWS);
+        let last = MAX_TREE_ROWS - 1;
+        assert!(seen.words[last * VISIBILITY_WORDS..]
+            .iter()
+            .all(|&w| w == u32::MAX));
+        let mask = seen.mask();
+        let kv = 3 + MAX_TREE_ROWS;
+        for q in [0, 31, 32, 33, 300, last] {
+            for k in 0..kv {
+                let want = if k <= 3 + q { 0.0 } else { f32::NEG_INFINITY };
+                assert_eq!(mask[q * kv + k], want, "q {q} k {k}");
+            }
+        }
     }
 
     #[test]

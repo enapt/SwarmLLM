@@ -4816,7 +4816,10 @@ drafting 31 → 46-49 s, near 10-11 → 19-21 s): two processes on one card time
 arm still finished in rounds (11 tokens read again, every reply whole). Short of the 1.3× exit;
 what is left is the drafter's level — a graph saves ~9 ms of a 0.5B's decode step (gotcha #233),
 and an 8-row tree step costs ~12 ms uncaptured on an idle card (§ "A tree step pays for its tree
-once") — and the real link, where the far half is not on this card.
+once") — and the real link, where the far half is not on this card. **The level is one kernel and
+one CUDA graph since 2026-10-22** (`docs/invariants/inference.md` § "A tree level on a card"): on
+this rig the drafter's time fell ~9% and this node's half rose by about as much, the three
+processes sharing one card.
 
 **What a change must keep.** The draw at a row must not depend on the forward that carried it
 (noise by position, the row's own ancestors in its mask); the three trees change only by the

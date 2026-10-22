@@ -726,7 +726,8 @@ fn owner_prefill_pool() -> Option<Arc<rayon::ThreadPool>> {
 /// so its guesses and its check run one kernel
 /// (`attn_kernel::ForceStandardAttnGuard`, "created on the thread that runs
 /// the forward" — it was lost on every decode-shaped forward with processor
-/// layers), and a tree's row positions (`layers::RowPositions`, #134).
+/// layers), and a tree's row positions and visibility (`layers::RowPositions`,
+/// #134).
 /// Carried across here, the one place a forward changes thread — tracing's
 /// rule for a span entering rayon. Each is SET for the job, never left as the
 /// pool thread has it: a thread waiting in one forward's parallel work runs
@@ -736,7 +737,7 @@ fn owner_prefill_pool() -> Option<Arc<rayon::ThreadPool>> {
 /// sharing the decode pool).
 fn with_the_callers_scope<R>(f: impl FnOnce() -> R + Send) -> impl FnOnce() -> R + Send {
     let force_standard = crate::inference::attn_kernel::is_force_standard_attn();
-    let rows = crate::inference::layers::row_positions_now();
+    let rows = crate::inference::layers::tree_scope_now();
     move || {
         let _same_kernel =
             crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_standard);
@@ -1295,6 +1296,18 @@ mod tests {
             std::thread::spawn(carried).join().unwrap(),
             Some(vec![5, 6, 6, 7]),
             "a tree's forward handed to a pool keeps its positions"
+        );
+        // And which keys each row reads, which a card's tree attention reads.
+        let t = crate::inference::draft_tree::DraftTree::new(4, vec![None, Some(0), None]).unwrap();
+        let (positions, seen) = t.rows_for(4, 3).unwrap();
+        let _tree = RowPositions::for_tree(positions, seen.clone());
+        let carried = with_the_callers_scope(|| {
+            crate::inference::layers::tree_scope_now().and_then(|s| s.visibility)
+        });
+        assert_eq!(
+            std::thread::spawn(carried).join().unwrap().as_deref(),
+            Some(&seen),
+            "a tree's forward handed to a pool keeps its rows' visibility"
         );
     }
 

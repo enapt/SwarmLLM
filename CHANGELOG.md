@@ -14,6 +14,15 @@ replies came at 9.0-9.4 tokens a second against 8.0-8.3 for trees checked one ro
 time. If anything goes wrong mid-reply, the reply is finished the old way. `SWARMLLM_TREE_FLOW=0`
 turns it off.
 
+**The small model guessing for a split now hands each step to your graphics card in one piece.**
+A flowing tree asks it for three levels of eight guesses at a time. Each level used to be some
+500 small jobs sent to the card one by one; now the attention over a level's guesses is one job,
+and the whole level is recorded once and replayed. On an idle card three levels take 26.5 ms
+instead of 36.0. On the test split, where every part shared one graphics card, the guessing took
+9% less time and the reply's speed did not change; across a real link the far half runs on
+another computer, so the card's time saved is the guesser's. `SWARMLLM_TREE_GRAPH=0` turns the
+replay off, and `SWARMLLM_TREE_ATTN=standard` turns off both.
+
 **A split across a long link spends less of each round waiting for its guesses.** While the far
 computer checks one tree of guesses, the small model on your graphics card grows the next one.
 Each of its steps now costs less: the positions of the guesses go to the card once per step, not
