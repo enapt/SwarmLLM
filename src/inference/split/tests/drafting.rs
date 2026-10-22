@@ -592,6 +592,92 @@ fn take_flow_proposals(
 /// after live rows; one call grows a branch as many rows deep as it has
 /// levels; its cache holds exactly the rows it has read; and a cache that no
 /// longer holds them is refused.
+/// A copied row (`FlowOp::Copy`) is a row as a push is, but rated by the
+/// drafter's own guess once its parent is read. Copied with a token the
+/// drafter does not list after the root, its followers come after every one of
+/// the root's own; a push — as sure as its parent — would put its followers
+/// among them.
+#[test]
+fn a_copied_row_is_rated_by_the_drafters_own_guess() {
+    use super::super::draft::TREE_CHILDREN;
+    use crate::inference::draft_tree::FlowOp;
+    let mut model = whole_model();
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let prompt: Vec<u32> = vec![3, 17, 99, 250, 7, 41, 12, 5];
+    let context = prompt[..7].to_vec();
+    let grow_flow =
+        |model: &mut SplitModel, session: &mut FlowGrowth, ops: &[FlowOp], rows: usize| {
+            model
+                .grow_flow(
+                    &kv,
+                    "c",
+                    session,
+                    FlowStep {
+                        ops,
+                        rows,
+                        levels: 1,
+                        live_most: 128,
+                    },
+                    &greedy(),
+                    None,
+                    0,
+                )
+                .unwrap()
+        };
+    // The root's own followers, from a session of their own.
+    let mut probe = model
+        .start_flow(&kv, "c-probe", 0, &context, prompt[7], 0)
+        .unwrap();
+    let listed: Vec<u32> = model
+        .grow_flow(
+            &kv,
+            "c-probe",
+            &mut probe,
+            FlowStep {
+                ops: &[],
+                rows: TREE_CHILDREN,
+                levels: 1,
+                live_most: 128,
+            },
+            &greedy(),
+            None,
+            0,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|(_, t)| t)
+        .collect();
+    assert_eq!(listed.len(), TREE_CHILDREN);
+    let unlisted = (0..VOCAB as u32).find(|t| !listed.contains(t)).unwrap();
+
+    // The first call reads the root and proposes nothing; then a copied row
+    // the drafter does not list, and a call taking as many rows as the root has
+    // followers.
+    let mut session = model
+        .start_flow(&kv, "c", 0, &context, prompt[7], 0)
+        .unwrap();
+    assert!(grow_flow(&mut model, &mut session, &[], 0).is_empty());
+    let grown = grow_flow(
+        &mut model,
+        &mut session,
+        &[FlowOp::Copy {
+            parent: 0,
+            token: unlisted,
+        }],
+        TREE_CHILDREN,
+    );
+    assert_eq!(grown.len(), TREE_CHILDREN);
+    assert!(
+        grown.iter().all(|&(parent, _)| parent == 0),
+        "the copied row's followers came before the root's own: {grown:?}"
+    );
+    let mut theirs: Vec<u32> = grown.iter().map(|&(_, t)| t).collect();
+    let mut listed = listed;
+    theirs.sort_unstable();
+    listed.sort_unstable();
+    assert_eq!(theirs, listed);
+}
+
 #[test]
 fn a_tree_that_flows_proposes_what_a_fresh_read_of_each_path_ranks_likeliest() {
     use crate::inference::draft_tree::{FlowOp, FlowTree};

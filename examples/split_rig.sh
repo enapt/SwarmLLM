@@ -1753,7 +1753,13 @@ if [ "$MODE" = fetch ]; then
 fi
 
 if [ "$MODE" = repeat ]; then
-  printf '%s' "$PROMPT" > "$OUT/prompt.txt"
+  # The prompt the replies are scored under: a RIG_BODY carrying its own messages replaces
+  # $PROMPT, so its last user message is what was asked (scored under $PROMPT, a copied
+  # file's edit read as 185 of 400 rank-1, 2026-10-22).
+  RIG_BODY="${RIG_BODY:-}" python3 -c 'import json,os,sys
+b=json.loads(os.environ["RIG_BODY"] or "{}")
+users=[m["content"] for m in b.get("messages",[]) if m.get("role")=="user" and isinstance(m.get("content"),str)]
+sys.stdout.write(users[-1] if users else sys.argv[1])' "$PROMPT" > "$OUT/prompt.txt"
   : > "$OUT/repeat.jsonl"
   for i in $(seq 1 "${REPEAT:-3}"); do
     [ "$i" -gt 1 ] && sleep "${REPEAT_GAP:-0}"

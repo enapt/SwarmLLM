@@ -83,13 +83,27 @@ impl Default for NgramLookupConfig {
 /// Time complexity: O(searchable.len() × max_ngram_size) worst case.
 /// Practical cost on typical 2K-prompt + 100-token tail: <1ms.
 pub fn find_candidate(context: &[u32], searchable: &[u32], cfg: NgramLookupConfig) -> Vec<u32> {
+    find_match(context, searchable, cfg)
+        .map(|(from, _)| {
+            searchable[from..(from + cfg.num_pred_tokens).min(searchable.len())].to_vec()
+        })
+        .unwrap_or_default()
+}
+
+/// Where [`find_candidate`] finds `context`'s tail in `searchable`: the index
+/// in `searchable` its continuation starts at, and the n-gram that matched.
+fn find_match(
+    context: &[u32],
+    searchable: &[u32],
+    cfg: NgramLookupConfig,
+) -> Option<(usize, usize)> {
     if context.is_empty() || searchable.is_empty() {
-        return Vec::new();
+        return None;
     }
     let max_n = cfg.max_ngram_size.min(context.len()).min(searchable.len());
     let min_n = cfg.min_ngram_size.max(1);
     if max_n < min_n {
-        return Vec::new();
+        return None;
     }
 
     for n in (min_n..=max_n).rev() {
@@ -121,11 +135,10 @@ pub fn find_candidate(context: &[u32], searchable: &[u32], cfg: NgramLookupConfi
             if candidate_start >= searchable.len() {
                 continue;
             }
-            let candidate_end = (candidate_start + cfg.num_pred_tokens).min(searchable.len());
-            return searchable[candidate_start..candidate_end].to_vec();
+            return Some((candidate_start, n));
         }
     }
-    Vec::new()
+    None
 }
 
 /// Cascade entry point used by the speculative loop: try prompt lookup
@@ -146,32 +159,84 @@ pub fn cascade_find_candidate(
     recent_gen_window: usize,
     cfg: NgramLookupConfig,
 ) -> (Vec<u32>, NgramHitSource) {
+    match copied_run(
+        prompt_tokens,
+        prompt_len,
+        recent_gen_window,
+        cfg,
+        cfg.num_pred_tokens,
+    ) {
+        Some(run) => (run.tokens, run.source),
+        None => (Vec::new(), NgramHitSource::None),
+    }
+}
+
+/// How far back a match is measured ([`CopiedRun::matched`]).
+pub const MATCHED_MOST: usize = 64;
+
+/// A run of tokens that followed an earlier occurrence of the context's tail
+/// ([`copied_run`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopiedRun {
+    /// The tokens after the occurrence, at most the count asked for.
+    pub tokens: Vec<u32>,
+    /// How many of the context's last tokens equal the ones before the run:
+    /// the n-gram that found it, measured back while they go on matching, up
+    /// to [`MATCHED_MOST`]. The longer the match, the likelier the copy goes
+    /// on — SuffixDecoding (arXiv 2411.04975) sizes its guess by it (α·p).
+    pub matched: usize,
+    pub source: NgramHitSource,
+}
+
+/// The cascade [`cascade_find_candidate`] runs — the prompt first, then the
+/// last `recent_gen_window` tokens of the reply — with up to `most` tokens of
+/// the run and how far its match goes back.
+pub fn copied_run(
+    context: &[u32],
+    prompt_len: usize,
+    recent_gen_window: usize,
+    cfg: NgramLookupConfig,
+    most: usize,
+) -> Option<CopiedRun> {
     // Pass 1: search the prompt for matches of the recent context tail.
     // Searches the prompt slice only — the most common "input-grounded"
     // case (copying from prompt to output).
-    if prompt_len > 0 && prompt_len <= prompt_tokens.len() {
-        let cand = find_candidate(prompt_tokens, &prompt_tokens[..prompt_len], cfg);
-        if !cand.is_empty() {
-            return (cand, NgramHitSource::Prompt);
-        }
-    }
-
+    let prompt = (prompt_len > 0 && prompt_len <= context.len())
+        .then_some((0..prompt_len, NgramHitSource::Prompt));
     // Pass 2: search the recent generation tail for self-matches. Useful
     // when the model is enumerating a list or applying a repeating
     // transformation. Searching too large a window slows the lookup
     // without adding hit rate, so we cap.
-    if prompt_tokens.len() > prompt_len {
-        let gen_start = prompt_tokens.len().saturating_sub(recent_gen_window);
-        let gen_start = gen_start.max(prompt_len);
-        if gen_start < prompt_tokens.len() {
-            let cand = find_candidate(prompt_tokens, &prompt_tokens[gen_start..], cfg);
-            if !cand.is_empty() {
-                return (cand, NgramHitSource::Generation);
+    let gen_start = context
+        .len()
+        .saturating_sub(recent_gen_window)
+        .max(prompt_len);
+    let reply = (gen_start < context.len())
+        .then_some((gen_start..context.len(), NgramHitSource::Generation));
+    [prompt, reply]
+        .into_iter()
+        .flatten()
+        .find_map(|(range, source)| {
+            let searchable = &context[range];
+            let (from, n) = find_match(context, searchable, cfg)?;
+            let tokens = searchable[from..(from + most).min(searchable.len())].to_vec();
+            if tokens.is_empty() {
+                return None;
             }
-        }
-    }
-
-    (Vec::new(), NgramHitSource::None)
+            let mut matched = n;
+            while matched < MATCHED_MOST
+                && matched < from
+                && matched < context.len()
+                && searchable[from - matched - 1] == context[context.len() - matched - 1]
+            {
+                matched += 1;
+            }
+            Some(CopiedRun {
+                tokens,
+                matched,
+                source,
+            })
+        })
 }
 
 /// Where the lookup hit fired — for telemetry / cascade-decision logging.
@@ -300,6 +365,40 @@ mod tests {
         let (cand, source) = cascade_find_candidate(&full, prompt_len, 10, cfg);
         assert_eq!(cand, vec![99]);
         assert_eq!(source, NgramHitSource::Generation);
+    }
+
+    #[test]
+    fn a_copied_run_measures_how_far_back_its_match_goes() {
+        // The reply's last four tokens occur in the prompt; the token before
+        // them (12) matches too, the one before that (77 against 11) does not.
+        let prompt: Vec<u32> = (10..20).collect();
+        let mut context = prompt.clone();
+        context.extend([77u32, 12, 13, 14, 15, 16]);
+        let run = copied_run(&context, prompt.len(), 500, NgramLookupConfig::default(), 3).unwrap();
+        assert_eq!(run.tokens, vec![17, 18, 19]);
+        assert_eq!(run.matched, 5);
+        assert_eq!(run.source, NgramHitSource::Prompt);
+        // The cascade it serves still answers as before.
+        let (cand, source) =
+            cascade_find_candidate(&context, prompt.len(), 500, NgramLookupConfig::default());
+        assert_eq!(cand, vec![17, 18, 19]);
+        assert_eq!(source, NgramHitSource::Prompt);
+
+        // A reply copying the prompt from its start matches as far back as it
+        // has copied, measured no further than MATCHED_MOST.
+        let prompt: Vec<u32> = (0..100).collect();
+        let mut context = prompt.clone();
+        context.extend(0u32..80);
+        let run = copied_run(
+            &context,
+            prompt.len(),
+            500,
+            NgramLookupConfig::default(),
+            32,
+        )
+        .unwrap();
+        assert_eq!(run.tokens, (80u32..100).collect::<Vec<_>>());
+        assert_eq!(run.matched, MATCHED_MOST);
     }
 
     #[test]

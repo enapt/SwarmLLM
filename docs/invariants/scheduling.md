@@ -4738,14 +4738,27 @@ round costs one per check.
   carries the whole tree's shape (`0x10`), so a row reads the context and its own ancestors and a
   lost branch stays in the caches, read by nothing. This node's `FlowTree` and the drafter's
   worker (`SplitModel::grow_flow`, a `FlowSession` per attempt) change the rows only by `FlowOp`s
-  (Push — a miss's row —, Advance, Rebase), applied alike, and by the drafter's proposals: a row
-  of its tree the moment it is made (its next level reads it), pushed here in its order, no op.
+  (Push — a miss's row —, Copy — a copied run's row —, Advance, Rebase), applied alike, and by the
+  drafter's proposals: a row of its tree the moment it is made (its next level reads it), pushed
+  here in its order, no op.
 - **The tail DRAWS, it does not walk.** One draw per row (`sampling::draw_each_row`), its noise
   keyed by `tree_start + 1 + depth` — the draw at a row does not depend on which forward carried
   it, so the walk is exact at any temperature. A sampler reading history (penalties) cannot be
   drawn so and keeps the rounds (`flow_possible`, `refuse_draws_with_penalties`).
 - **A miss is a row of its own.** The draw no child carries is pushed as a row under the walk's
   row, the walk moves onto it, and the drafter grows under it with its next call.
+- **A copied run is depth the drafter does not pay for** (`FlowRun::copy_ahead`). Where the
+  reply's last tokens occurred before — in the prompt, then the reply's last 500 tokens, the
+  n-gram lookup's own cascade (`ngram_lookup::copied_run`) — what followed them is pushed under
+  the walk's row: through the rows the tree already holds (`copy_under`), new rows for the rest,
+  once a walk position, sent before the drafter's next call and within the guard's live budget.
+  Its length is how far back the match goes, at least the lookup's `num_pred_tokens` and at most
+  `COPY_LEAD_MOST` (32) — SuffixDecoding's (2411.04975) α·p with α = 1: a copy the walk keeps
+  following runs further ahead each time. Its rows reach the drafter's worker as `FlowOp::Copy`,
+  which rates each by the drafter's OWN log-probability of that token there (the least it listed
+  when it did not list it), so a wrong copy's followers rank where the drafter would have put
+  them and never crowd out its own guesses. Between this node and its own worker only — no wire
+  change. Off with `inference.ngram_lookup_enabled` (read live); A/B `SWARMLLM_FLOW_COPY=0`.
 - **Several levels a drafter call** (`levels_a_call` 3 × `rows_a_level` 8): each level reads the
   last one's proposals in one forward and proposes after them. At ONE level a call a branch grew
   one row deeper a call and the walk with it — 0.63-0.74 tokens a call whatever the rows a call
@@ -4855,8 +4868,25 @@ arrival timing (`guardrig2.sh`, one binary, A/B `SWARMLLM_FLOW_GUARD=0`, two war
 | none | 9.02-9.12 | 9.59-10.19 | 8×128; one reply cut 6 times in bursts of the far half's own queue (answers at 630-820 ms against a least of 462: the far half shares this rig's card), the other never |
 
 With no limit, the reply that never cut ran 9.12 against 9.59-10.19 guard-off — the guard's code
-did nothing there, so that gap is the arms (the guard-on arm always ran first) — an alternating
-check is owed (FUTURE_WORK #134 (b)).
+did nothing there, so that gap is the arms (the guard-on arm always ran first). The alternating
+check (`copyrig.sh`'s chat pass, below; copied runs on in both arms) found no gap: guard off
+9.19-9.82 then 8.79-9.41, guard on 9.09-9.58 then 8.83-8.98 tok/s, the guard-off arm first in
+one pair and second in the other.
+
+**Copied runs** (2026-10-22, `~/swarmllm-318/copyrig.sh`, one binary, 385 ms, no rate limit, A/B
+`SWARMLLM_FLOW_COPY=0`, arms alternating, two warm 400-token replies an arm, request-level tok/s):
+
+| prompt | copy on | copy off | copied rows → walked a reply | the drafter's time a reply |
+|---|---|---|---|---|
+| a code edit whose reply copies a 135-line file | **43.5-46.7, 42.1-42.4** (flowed 47.5-53.2) | 22.6-24.5, 23.3-24.1 | 259-291 → 232-263 of 400 | 3.4-4.4 s vs 8.9-10.2 |
+| the rig's chat prompt | 9.09-9.58, 8.83-8.98 | 9.20-9.66, 8.72-9.00 | 292-369 → 1-6 | 24.6-27.6 s vs 26.0-28.5 |
+
+Every edit reply was the same text with copies on and off — a copy changes what is checked,
+never what the tail draws — and llama.cpp ranks it first at all 400 tokens
+(`score_against_reference.py`, the 1,513-token prompt the node counted). On chat almost every copy was wrong and cost nothing measurable: its
+rows die like any unread branch, and the drafter ranks their followers by its own guesses. With
+the far half on this rig's card, the edit's denser forwards queued the far half's answers
+(200-360 ms over the least) and the guard narrowed to 3-6×128 with copies on and off alike.
 
 **What a change must keep.** The draw at a row must not depend on the forward that carried it
 (noise by position, the row's own ancestors in its mask); the three trees change only by the

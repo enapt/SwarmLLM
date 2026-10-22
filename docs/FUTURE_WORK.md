@@ -77,7 +77,8 @@ speed is what the swarm is for, so split speed for large models is the top track
    own state (`large_model_splits.md` build-order step 4); a tree that flows (#134 (b), built
    10-22: +11-14% over tree rounds on the card rig; its drafter's tree levels are one kernel and
    one CUDA graph since 10-22; on a thin uplink a guard holds its rows down — 5 Mbit 7.44-7.50 vs
-   4.73-4.80 tok/s unguarded; next the real link).
+   4.73-4.80 tok/s unguarded; copied runs from the conversation give it free depth — a code edit
+   23-24 → 42-47 tok/s; next the real link).
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
@@ -2037,8 +2038,13 @@ token against rounds' ~6 (~0.8 MB/s up at 9 tok/s, and four times the far peer's
 uplink that lost to rounds (5 Mbit: 4.5-4.8 vs 6.8-7.1 tok/s), so **since 2026-10-22 a guard holds
 it down** (`FlowGuard`, LEDBAT++-shaped, answers timed on arrival: 5 Mbit 7.44-7.50 vs 4.73-4.80
 unguarded, 10 Mbit 8.52-8.82 vs 8.23; `docs/invariants/scheduling.md` § "A tree that flows") —
-left of it: an arm-alternating check with no rate limit (the guard-on arm ran first and 5-10% slower
-with zero cuts in one of its replies), the guard on the real link and on a busy peer; the drafter's call
+its alternating check with no rate limit found no cost (guard on 8.83-9.58, off 8.79-9.82) — left of
+it: the guard on the real link and on a busy peer. **Built 2026-10-22, unreleased: copied runs**
+(`FlowRun::copy_ahead`, SuffixDecoding-shaped: the n-gram lookup's continuation pushed under the
+walk's row as `FlowOp::Copy`, rated by the drafter's own guess) — a code edit that copies a file
+23-24 → 42-47 tok/s, chat unchanged (§ "A tree that flows", Copied runs); left of it: a copy
+source beyond this conversation (SuffixDecoding's global tree of earlier replies), and the
+copies through the tree ROUNDS, which still guess with the drafter alone; the drafter's call
 beside this node's layers is a loss while they are two processes on one card (gotcha #759) and
 needs them in one; (c) closed
 2026-10-22 — with the drafter on the card trees beat the stream 8.41 vs 5.95 tok/s at 160

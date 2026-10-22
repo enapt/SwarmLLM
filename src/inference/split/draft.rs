@@ -52,6 +52,11 @@ pub struct FlowGrowth {
     read: usize,
     rating: Vec<f32>,
     queue: std::collections::BinaryHeap<Candidate>,
+    /// Each read row's likeliest followers and their log-probabilities —
+    /// what a copied row under it is rated by (`FlowOp::Copy`).
+    followers: Vec<Vec<(u32, f32)>>,
+    /// A copied row not yet rated: its rating waits for its parent's read.
+    unrated: Vec<bool>,
 }
 
 impl FlowGrowth {
@@ -727,6 +732,8 @@ impl SplitModel {
             read: 0,
             rating: vec![0.0],
             queue: std::collections::BinaryHeap::new(),
+            followers: Vec::new(),
+            unrated: vec![false],
         })
     }
 
@@ -763,21 +770,23 @@ impl SplitModel {
         let vocab = self.embedding_rows();
         for &op in step.ops {
             match op {
-                FlowOp::Push { parent, token } => {
+                FlowOp::Push { parent, token } | FlowOp::Copy { parent, token } => {
                     if vocab.is_some_and(|v| token as usize >= v) {
                         return Err(SwarmError::Validation(
                             "a tree that flows names a token past the vocabulary".into(),
                         ));
                     }
                     let parent = usize::from(parent);
-                    // A row the model drew that no row carried — the one push
-                    // the requester sends — is as sure as its parent.
+                    // A row the model drew that no row carried is as sure as
+                    // its parent. A copied one is rated by this model's own
+                    // guess once its parent is read (`read_flow_rows`).
                     let rating = session.rating.get(parent).copied().unwrap_or(0.0);
                     session
                         .flow
                         .push(parent, token)
                         .map_err(SwarmError::Validation)?;
                     session.rating.push(rating);
+                    session.unrated.push(matches!(op, FlowOp::Copy { .. }));
                 }
                 FlowOp::Advance { row } => session
                     .flow
@@ -794,6 +803,13 @@ impl SplitModel {
                         .iter()
                         .map(|&old| session.rating[old])
                         .collect();
+                    session.unrated = rebased
+                        .kept
+                        .iter()
+                        .map(|&old| session.unrated[old])
+                        .collect();
+                    // Every row kept is read again, from the start.
+                    session.followers.clear();
                     session.queue = std::mem::take(&mut session.queue)
                         .into_iter()
                         .filter_map(|c| {
@@ -849,6 +865,7 @@ impl SplitModel {
                     .push(parent, c.token)
                     .map_err(SwarmError::Internal)?;
                 session.rating.push(c.score);
+                session.unrated.push(false);
                 out.push((parent as u16, c.token));
                 live += 1;
             }
@@ -885,9 +902,11 @@ impl SplitModel {
             .map_err(SwarmError::internal)
             .and_then(|t| StepScores::read(&t, sampling.temperature, coupled))?;
         let mut ctx = crate::inference::sampling::SamplingContext::new(0);
+        session.followers.resize(from, Vec::new());
         for (i, row) in (from..flow.len()).enumerate() {
             // A lost branch's followers could never be proposed.
             if !flow.is_live(row) {
+                session.followers.push(Vec::new());
                 continue;
             }
             let followers = match read.row(i) {
@@ -907,7 +926,25 @@ impl SplitModel {
                     likeliest(logits, sampling.temperature, TREE_CHILDREN, drawn)
                 }
             };
-            for (token, logp) in followers {
+            if session.unrated[row] {
+                // A copied row is as likely as this model guesses its token
+                // after its parent — no likelier than the least of the
+                // parent's own followers where they do not list it — so a
+                // wrong copy's followers do not crowd out its own guesses.
+                if let Some(parent) = flow.tree().parent(row) {
+                    if let Some(listed) = session.followers.get(parent) {
+                        let token = flow.tokens()[row];
+                        let logp = listed
+                            .iter()
+                            .find(|&&(t, _)| t == token)
+                            .or_else(|| listed.iter().min_by(|a, b| a.1.total_cmp(&b.1)))
+                            .map_or(0.0, |&(_, logp)| logp);
+                        session.rating[row] = session.rating[parent] + logp;
+                    }
+                }
+                session.unrated[row] = false;
+            }
+            for &(token, logp) in &followers {
                 if flow.has_child(row, token) {
                     continue;
                 }
@@ -918,6 +955,7 @@ impl SplitModel {
                     token,
                 });
             }
+            session.followers.push(followers);
         }
         session.read = flow.len();
         Ok(())

@@ -710,6 +710,18 @@ impl EngineDrafter {
         &self.spec.model_id
     }
 
+    /// The request's tokens so far: the prompt, then the reply — what a copied
+    /// run is looked up in (`dsd_flow`).
+    pub(super) fn tokens(&self) -> &[u32] {
+        &self.seq
+    }
+
+    /// Token ids below this are the drafter's own: a row it is handed must
+    /// carry one.
+    pub(super) fn reads(&self) -> u32 {
+        self.spec.reads
+    }
+
     /// Tokens the reply now contains, in order — what a round emitted.
     pub(super) fn push(&mut self, tokens: &[u32]) {
         self.seq.extend_from_slice(tokens);
@@ -878,7 +890,7 @@ impl EngineDrafter {
         }
         let pushed_past_vocab = ops
             .iter()
-            .any(|op| matches!(op, FlowOp::Push { token, .. } if *token >= self.spec.reads));
+            .any(|op| matches!(op, FlowOp::Push { token, .. } | FlowOp::Copy { token, .. } if *token >= self.spec.reads));
         let (keep, append, root) = if start {
             let Some((&root, before)) = self.seq.split_last() else {
                 return Err(SwarmError::Internal(

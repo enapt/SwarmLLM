@@ -103,6 +103,43 @@ fn guard_on() -> bool {
     })
 }
 
+/// `SWARMLLM_FLOW_COPY=0|off|false`: no copied runs (`FlowRun::copy_ahead`),
+/// for an A/B inside one binary. Read once.
+fn copy_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_FLOW_COPY").ok().as_deref(),
+            Some("0") | Some("off") | Some("false")
+        )
+    })
+}
+
+/// The most rows of a copied run kept ahead of the walk. A run the walk keeps
+/// following is extended as it goes, so a round trip carries at most this many
+/// copied tokens: 32 a 385 ms trip is ~83 a second, past what this node's own
+/// layers keep up with.
+const COPY_LEAD_MOST: usize = 32;
+
+/// Where a copied run leaves the tree: it follows the rows after `at` that
+/// already carry its tokens — the drafter's own included — and the rest, at
+/// most `room` of them, are new rows in a line after the row it reached.
+fn copy_under<'r>(flow: &FlowTree, at: usize, run: &'r [u32], room: usize) -> (usize, &'r [u32]) {
+    let mut row = at;
+    let mut held = 0;
+    for &token in run {
+        match flow.child_carrying(row, token) {
+            Some(child) => {
+                row = child;
+                held += 1;
+            }
+            None => break,
+        }
+    }
+    let rest = &run[held..];
+    (row, &rest[..rest.len().min(room)])
+}
+
 /// LEDBAT++'s queueing-delay target (draft-irtf-iccrg-ledbat-plus-plus-06
 /// § 4.5, 60 ms against RFC 6817's 100): the flow is narrowed while the
 /// forwards' answers come back later than this past the least delay seen.
@@ -547,6 +584,16 @@ struct FlowRun<'a, 'r> {
     /// The rows a level and the live rows the drafter may keep ahead of the
     /// walk, held down while the forwards queue.
     guard: FlowGuard,
+    /// Each row was copied (`copy_ahead`), beside `draws`.
+    copied: Vec<bool>,
+    /// The lookup's shape; `None` where copied runs are off.
+    copy: Option<crate::inference::ngram_lookup::NgramLookupConfig>,
+    /// The walk's row, by epoch, a run was last looked up from.
+    copied_from: Option<(u32, usize)>,
+    copied_runs: u32,
+    copied_rows: u32,
+    /// Copied rows the walk went through: drawn there as copied.
+    copied_walked: u32,
 }
 
 impl PipelineExecutor {
@@ -627,6 +674,13 @@ impl PipelineExecutor {
             unsettled: false,
             bonus_waiting: None,
             guard,
+            copied: vec![false],
+            copy: super::speculative::ngram_lookup_config(&self.shared_state.cfg().inference)
+                .filter(|_| copy_on()),
+            copied_from: None,
+            copied_runs: 0,
+            copied_rows: 0,
+            copied_walked: 0,
         };
         let started = std::time::Instant::now();
         let emitted_before = run.reply.generated.len();
@@ -675,6 +729,10 @@ impl PipelineExecutor {
             guard_cuts = run.guard.cuts,
             least_answer_ms = format_args!("{:.0}", run.guard.least_delay_ms.unwrap_or(0.0)),
             queue_ms_most = format_args!("{:.0}", run.guard.queue_ms_most),
+            copy = run.copy.is_some(),
+            copied_runs = run.copied_runs,
+            copied_rows = run.copied_rows,
+            copied_walked = run.copied_walked,
             window = forwards_in_flight(chained),
             "DSD: a tree that flowed is complete"
         );
@@ -759,6 +817,13 @@ impl FlowRun<'_, '_> {
             }
             self.rebase().await?;
         }
+        // A copied run goes out at once, the drafter's call after it; it
+        // leaves that call room in the tree.
+        let room = ((guard.live - live) as usize)
+            .min(MAX_TREE_ROWS.saturating_sub(self.flow.len() + (rows * levels) as usize + 1));
+        if self.copy_ahead(room) {
+            return Ok(true);
+        }
         let exec = self.exec;
         let started = std::time::Instant::now();
         let asked = self
@@ -807,6 +872,7 @@ impl FlowRun<'_, '_> {
                 .push(usize::from(parent), token)
                 .map_err(|e| SwarmError::Internal(format!("a drafter's proposal: {e}")))?;
             self.draws.push(None);
+            self.copied.push(false);
         }
         *self.reply.proposed += pushed;
         Ok(pushed > 0)
@@ -825,6 +891,7 @@ impl FlowRun<'_, '_> {
             new_index[old] = Some(new);
         }
         self.draws = rebased.kept.iter().map(|&old| self.draws[old]).collect();
+        self.copied = rebased.kept.iter().map(|&old| self.copied[old]).collect();
         self.remap = Some((self.epoch, new_index));
         self.epoch += 1;
         self.rebases += 1;
@@ -857,12 +924,93 @@ impl FlowRun<'_, '_> {
         self.push_bonus(token)
     }
 
+    /// Grow a copied run under the walk's row: what followed the reply's last
+    /// tokens where they occurred before, in the prompt or the reply
+    /// (`ngram_lookup::copied_run`, the n-gram lookup's own cascade), through
+    /// the rows the tree already holds and new rows for the rest — sent with
+    /// the next forward, before the drafter's next call. The run is as long as
+    /// its match goes back, at least the lookup's own width and at most
+    /// `COPY_LEAD_MOST` (SuffixDecoding's α·p, α = 1): a copy the walk keeps
+    /// following runs further ahead. Looked up once a walk position; `true`
+    /// when rows were added. The drafter rates each copied row by its own
+    /// guess (`FlowOp::Copy`), so a wrong copy's followers do not crowd out
+    /// its own.
+    fn copy_ahead(&mut self, room: usize) -> bool {
+        let Some(cfg) = self.copy else {
+            return false;
+        };
+        let at = self.flow.at();
+        if room == 0 || self.bonus_waiting.is_some() || self.copied_from == Some((self.epoch, at)) {
+            return false;
+        }
+        self.copied_from = Some((self.epoch, at));
+        let seq = self.drafter.tokens();
+        // The walk's row carries the reply's last token: the run follows it.
+        if seq.last() != Some(&self.flow.tokens()[at]) {
+            return false;
+        }
+        let prompt_len = seq.len().saturating_sub(self.reply.generated.len());
+        let Some(run) = crate::inference::ngram_lookup::copied_run(
+            seq,
+            prompt_len,
+            super::speculative::NGRAM_RECENT_REPLY,
+            cfg,
+            COPY_LEAD_MOST,
+        ) else {
+            return false;
+        };
+        let lead = run.matched.max(cfg.num_pred_tokens).min(COPY_LEAD_MOST);
+        // A row the drafter has no embedding for would end its tree.
+        let reads = self.drafter.reads();
+        let usable = run
+            .tokens
+            .iter()
+            .take(lead)
+            .take_while(|&&t| t < reads)
+            .count();
+        let (mut parent, new) = copy_under(&self.flow, at, &run.tokens[..usable], room);
+        let mut added = 0;
+        for &token in new {
+            let Ok(row) = self.flow.push(parent, token) else {
+                break;
+            };
+            self.draws.push(None);
+            self.copied.push(true);
+            self.ops.push(FlowOp::Copy {
+                parent: parent as u16,
+                token,
+            });
+            parent = row;
+            added += 1;
+        }
+        if added > 0 {
+            self.copied_runs += 1;
+            self.copied_rows += added;
+        }
+        added > 0
+    }
+
+    /// The copied rows on the walk's path after `from`, down to `to`.
+    fn copied_between(&self, from: usize, to: usize) -> u32 {
+        let mut copied = 0;
+        let mut row = to;
+        while row != from {
+            copied += u32::from(self.copied.get(row).copied().unwrap_or(false));
+            match self.flow.tree().parent(row) {
+                Some(parent) => row = parent,
+                None => break,
+            }
+        }
+        copied
+    }
+
     /// The draw no row carried, a row of its own under the walk's row, and the
     /// walk on it; sent with the drafter's next rows after it.
     fn push_bonus(&mut self, token: u32) -> Result<(), SwarmError> {
         let at = self.flow.at();
         let row = self.flow.push(at, token).map_err(SwarmError::Internal)?;
         self.draws.push(None);
+        self.copied.push(false);
         self.ops.push(FlowOp::Push {
             parent: at as u16,
             token,
@@ -1210,6 +1358,8 @@ impl FlowRun<'_, '_> {
         if emitted.is_empty() {
             return Ok(Taken::Continue);
         }
+        let (WalkEnd::Waiting { row: reached } | WalkEnd::Missed { row: reached, .. }) = end;
+        self.copied_walked += self.copied_between(self.flow.at(), reached);
         let carried = emitted.len() - usize::from(matches!(end, WalkEnd::Missed { .. }));
         *self.reply.accepted += carried as u32;
         self.reply
@@ -1472,6 +1622,28 @@ mod tests {
             }
         );
         assert_eq!(g.cuts, 0);
+    }
+
+    #[test]
+    fn a_copied_run_goes_through_the_rows_the_tree_holds_and_adds_the_rest() {
+        // The walk's row 0 carries 5; the drafter grew 6 then 7 after it, and 9.
+        let mut flow = FlowTree::new(100, 5).unwrap();
+        let six = flow.push(0, 6).unwrap();
+        let seven = flow.push(six, 7).unwrap();
+        flow.push(0, 9).unwrap();
+        // The run 6 7 8 4 goes through rows 6 and 7, and adds 8 and 4 after 7.
+        assert_eq!(
+            copy_under(&flow, 0, &[6, 7, 8, 4], 10),
+            (seven, &[8u32, 4][..])
+        );
+        // At most `room` new rows.
+        assert_eq!(copy_under(&flow, 0, &[6, 7, 8, 4], 1), (seven, &[8u32][..]));
+        // A run the tree holds whole adds nothing.
+        assert_eq!(copy_under(&flow, 0, &[6, 7], 10), (seven, &[][..]));
+        // One the tree does not start is every row of it, after the walk's.
+        assert_eq!(copy_under(&flow, 0, &[3, 6], 10), (0, &[3u32, 6][..]));
+        // From a row further down, only what follows that row counts.
+        assert_eq!(copy_under(&flow, six, &[9, 1], 10), (six, &[9u32, 1][..]));
     }
 
     #[test]

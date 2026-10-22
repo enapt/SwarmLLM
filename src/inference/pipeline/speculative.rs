@@ -997,6 +997,26 @@ pub(super) fn draft_next_gamma(
     ))
 }
 
+/// The reply's last tokens a lookup searches after the prompt — captures "the
+/// model is in a repeating-pattern groove" without slowing the lookup on long
+/// conversations.
+pub(super) const NGRAM_RECENT_REPLY: usize = 500;
+
+/// The lookup's shape from the settings, `None` where it is off
+/// (`inference.ngram_lookup_enabled`, or no tokens to guess). Read it from the
+/// LIVE config (`SharedState::cfg`).
+pub(super) fn ngram_lookup_config(
+    cfg: &crate::config::InferenceConfig,
+) -> Option<crate::inference::ngram_lookup::NgramLookupConfig> {
+    (cfg.ngram_lookup_enabled && cfg.ngram_num_pred_tokens > 0).then_some(
+        crate::inference::ngram_lookup::NgramLookupConfig {
+            max_ngram_size: cfg.ngram_max_size as usize,
+            min_ngram_size: crate::inference::ngram_lookup::DEFAULT_MIN_NGRAM_SIZE,
+            num_pred_tokens: cfg.ngram_num_pred_tokens as usize,
+        },
+    )
+}
+
 /// SWARM-SPEC Layer 1 helper: try n-gram lookup for the next γ draft tokens.
 /// Returns an empty Vec when no match is found OR when n-gram lookup is
 /// disabled. Caps the returned candidate at `this_gamma` so the cascading
@@ -1011,23 +1031,16 @@ pub(super) fn ngram_lookup_drafts(
     generated: &[u32],
     this_gamma: u32,
 ) -> Vec<u32> {
-    use crate::inference::ngram_lookup::{cascade_find_candidate, NgramLookupConfig};
-    if !cfg.ngram_lookup_enabled {
+    use crate::inference::ngram_lookup::cascade_find_candidate;
+    let Some(lookup_cfg) = ngram_lookup_config(cfg) else {
         return Vec::new();
-    }
+    };
     let mut context: Vec<u32> = Vec::with_capacity(prompt_tokens.len() + generated.len());
     context.extend_from_slice(prompt_tokens);
     context.extend_from_slice(generated);
     let prompt_len = prompt_tokens.len();
-    let lookup_cfg = NgramLookupConfig {
-        max_ngram_size: cfg.ngram_max_size as usize,
-        min_ngram_size: crate::inference::ngram_lookup::DEFAULT_MIN_NGRAM_SIZE,
-        num_pred_tokens: cfg.ngram_num_pred_tokens as usize,
-    };
-    // Recent-generation window is the last 500 generated tokens — captures
-    // "model is in a repeating-pattern groove" without slowing the lookup
-    // on long conversations.
-    let (cand, _source) = cascade_find_candidate(&context, prompt_len, 500, lookup_cfg);
+    let (cand, _source) =
+        cascade_find_candidate(&context, prompt_len, NGRAM_RECENT_REPLY, lookup_cfg);
     // Cap at this_gamma so the verify wire format stays sized as expected.
     if cand.len() <= this_gamma as usize {
         cand

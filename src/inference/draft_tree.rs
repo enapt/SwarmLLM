@@ -316,6 +316,11 @@ pub enum FlowOp {
     /// A row carrying `token` after row `parent`: the model's draw no row
     /// carried (`WalkEnd::Missed`).
     Push { parent: u16, token: u32 },
+    /// A row carrying `token` after row `parent`, copied from what followed
+    /// the reply's last tokens earlier in the prompt or the reply (`dsd_flow`'s
+    /// copied runs). A row as a push is, but no surer than the drafter's own
+    /// guess: it is rated by that once its parent is read.
+    Copy { parent: u16, token: u32 },
     /// The walk now stands on `row`, the rows before it on its path emitted.
     Advance { row: u16 },
     /// Cut the tree to the walk's row and the rows following it
@@ -407,9 +412,14 @@ impl FlowTree {
 
     /// Does a row following `parent` carry `token` already?
     pub(crate) fn has_child(&self, parent: usize, token: u32) -> bool {
+        self.child_carrying(parent, token).is_some()
+    }
+
+    /// The row following `parent` that carries `token`, if one does.
+    pub(crate) fn child_carrying(&self, parent: usize, token: u32) -> Option<usize> {
         self.tree
             .children(Some(parent))
-            .any(|c| self.tokens[c] == token)
+            .find(|&c| self.tokens[c] == token)
     }
 
     /// Add a row carrying `token` after `parent`. Refused where a row
@@ -508,7 +518,9 @@ impl FlowTree {
     #[cfg(test)]
     pub(crate) fn apply(&mut self, op: FlowOp) -> Result<Option<Rebased>, String> {
         match op {
-            FlowOp::Push { parent, token } => self.push(usize::from(parent), token).map(|_| None),
+            FlowOp::Push { parent, token } | FlowOp::Copy { parent, token } => {
+                self.push(usize::from(parent), token).map(|_| None)
+            }
             FlowOp::Advance { row } => self.advance(usize::from(row)).map(|()| None),
             FlowOp::Rebase => self.rebase().map(Some),
         }
