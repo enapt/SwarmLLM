@@ -645,6 +645,46 @@ fn a_refused_plan_past_the_holders_offers_is_a_swarm_short_of_memory() {
     );
 }
 
+/// **A re-plan's "short of memory" describes the re-plan, not the swarm**
+/// (2026-10-22). A peer refused a 42-token prompt up front (`layers_that_fit`
+/// 0, a busy moment); the re-plan held it to 0 layers, the planner found no
+/// plan within the holders' ceilings and said the swarm could never hold the
+/// model — "trying again won't help". The next request, 10 s later, ran. The
+/// first plan had stayed within what the holders offered, so the holders
+/// declined, in their own words; past those offers it is the swarm's shortfall,
+/// at the FIRST plan's figure.
+#[test]
+fn a_re_plans_shortfall_after_a_peer_said_no_is_the_holders_declining() {
+    use crate::error::SwarmError;
+    let refusal = || {
+        SwarmError::ServiceUnavailable(
+            "the prompt's cache does not fit beside the conversations held here".into(),
+        )
+    };
+    let re_plan = || SwarmError::SwarmShortOfMemory {
+        model_id: "m".into(),
+        room: crate::error::describe_offered_room(None, 28),
+    };
+    let reported = super::report_after_a_replan(refusal(), re_plan(), "m", None);
+    let SwarmError::HoldersDeclined { reason, .. } = &reported else {
+        panic!("got {reported}");
+    };
+    assert!(reason.contains("does not fit beside"), "{reason}");
+    let (key, hint) = crate::error::error_hint_with_key(&reported).expect("a hint");
+    assert_ne!(key, "swarm_short_of_memory");
+    assert!(!hint.contains("won't help"), "{hint}");
+
+    let offered = crate::daemon::state::OfferedMemory {
+        layers: Some(17),
+        num_layers: 28,
+    };
+    let reported = super::report_after_a_replan(refusal(), re_plan(), "m", Some(offered));
+    assert!(
+        reported.to_string().contains("about 17 of its 28 layers"),
+        "{reported}"
+    );
+}
+
 /// The controls: what is not a holder saying no keeps its own report.
 #[test]
 fn a_re_plan_that_failed_another_way_is_reported_as_itself() {

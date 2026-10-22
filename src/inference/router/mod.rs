@@ -293,9 +293,10 @@ fn refusal_in_the_holders_words(err: &SwarmError) -> String {
 /// gone past the memory the holders OFFER (`offered`), the swarm has no room
 /// for this model and retrying will not find any: `SwarmShortOfMemory`, with
 /// their figure. Otherwise the holders were there and declined, usually for
-/// memory they will have again: `HoldersDeclined`, in the last one's words. A
-/// re-plan that failed some OTHER way (a peer went silent) is a different
-/// failure and is reported as itself.
+/// memory they will have again: `HoldersDeclined`, in the last one's words —
+/// the re-plan's own `SwarmShortOfMemory` included, which weighs the refusing
+/// holder at what fit that one prompt. A re-plan that failed some OTHER way
+/// (a peer went silent) is a different failure and is reported as itself.
 fn report_after_a_replan(
     first: SwarmError,
     later: SwarmError,
@@ -315,9 +316,18 @@ fn report_after_a_replan(
         return later;
     }
     let declined_again = message_means_peer_cannot_serve(&later.to_string());
+    // The re-plan's own "short of memory" (`scheduler::short_of_memory`) is
+    // no route too: it weighs the refusing holder at what fit THIS prompt as
+    // it was asked — a peer that refused the prompt up front is held to its
+    // `layers_that_fit`, 0 on a busy moment — never at what it could ever
+    // hold. Read as itself, one peer's moment told the caller the swarm could
+    // never run the model and that retrying would not help (2026-10-22: the
+    // next request, 10 s later, ran).
     let no_route = matches!(
         later,
-        SwarmError::ModelIncompleteInSwarm { .. } | SwarmError::InsufficientCapacity(_)
+        SwarmError::ModelIncompleteInSwarm { .. }
+            | SwarmError::InsufficientCapacity(_)
+            | SwarmError::SwarmShortOfMemory { .. }
     );
     if !(declined_again || no_route) {
         return later;
