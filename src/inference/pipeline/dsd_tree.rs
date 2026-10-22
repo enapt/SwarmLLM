@@ -36,13 +36,17 @@ use crate::inference::draft_tree::{
 /// an RTX 3060 ~410 ms away) with the Q4 drafter kept on the PROCESSOR that
 /// wait was 289-331 ms of a ~850 ms round, and trees won at 160 tokens
 /// (5.33-5.74 against the stream's 5.01-5.05, four replies each) but lost at
-/// 400 (4.82/5.05/6.40 against 5.97/6.04/6.18) and at 28. A card head's
-/// drafter is on the processor whenever the target fills the card: a card
-/// plan is not cut to leave it room (#275 (4)). On a card the same eight
-/// forwards take ~40 ms; that shape was not measurable on the boot this was
-/// decided on (two processes on one card were barred), so it is the default by
-/// projection and owes a rig. Every node advertises `features::DRAFT_TREES`
-/// and checks a tree it is sent, so a peer needs no update for this to change.
+/// 400 (4.82/5.05/6.40 against 5.97/6.04/6.18) and at 28. On a card the same
+/// eight forwards take ~40 ms, and on the same link with the 0.5B drafter on
+/// this machine's card (2026-10-22, `cardrig247.sh`: arms alternating by node
+/// start, four replies a length each) trees ran 8.41 tok/s mean at 160 tokens
+/// against the stream's 5.95 and 9.36 at 400 against 6.48 (+41-44%; 26-70
+/// rounds, 4.7-5.3 kept a round), every reply rank-1 against llama.cpp at
+/// 394-397 of 400 tokens with near-ties only (largest gap 0.21). A plan that
+/// fills the head's card leaves the drafter room there for this (#275 (4),
+/// `ModelProcessPool::max_hostable_layers_beside_guest`). Every node
+/// advertises `features::DRAFT_TREES` and checks a tree it is sent, so a peer
+/// needs no update for this to change.
 ///
 /// The round trip: trees were measured winning only over 385-425 ms links,
 /// and a short link is where they lose most. There a check costs ~30 ms, and

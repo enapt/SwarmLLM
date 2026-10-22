@@ -411,11 +411,31 @@ loaded layers and refuse alike: 2.65-2.93 tok/s in every arm.
   on a rung or pass that relaxes a peer's bound.
 - Not applied where this node runs the whole model (`local_runs_whole_model`),
   so a cut can never turn a local generation into a split.
+- **On a card the room is left on the card** (#275 (4), 2026-10-22). Until
+  then a card plan was not cut: the target's layers filled the card, the guest
+  went to the processor, and a split's trees — which pay only with the drafter
+  on a card (+41-44% on the real link, § "A split checks a tree of guesses") —
+  stood aside. `max_hostable_layers_beside_guest` now leaves the guest's CARD
+  footprint free on a card plan (`local_layers_leaving(.., true, .., Some(mb))`:
+  what stands free after the layers, no reclaim counted, as the guest's own
+  `card_verdict` will weigh it), where the guest may use the card at all
+  (`guest_may_take_the_card`, the room-free half of `guest_charges_ram`). A
+  fresh worker's card/processor split (`fresh_run_layers`) fills the card
+  whatever the room, so its offer alone calls for the cut and the cut withdraws
+  it (`leaving_room_here`, which now decides and builds the cut, never raising
+  this node's room). A card plan past the room still has a drafter where system
+  memory takes it (`guest_would_be_admitted_beside`), as every card plan did
+  before. SpecExec (arXiv 2406.02532) makes the same trade on consumer cards:
+  the drafter keeps the card, the target's layers go elsewhere. Tests:
+  `room_is_left_on_the_card_beside_the_layers_for_their_drafter`,
+  `a_fresh_card_split_gives_way_to_the_drafters_room`.
 - Residuals: a target worker that already HOLDS the layers keeps them (held
   layers cost the plan nothing), so the room appears from the next cold load;
-  card plans are not cut (a guest goes to the processor there); a swarm whose
-  peers offer too little for any strict plan gets no room, by design (the
-  drafter is then not chosen where the plan leaves it none).
+  the drafter is chosen largest-by-bytes, so a card leaves room for the 0.5B
+  fp16 (~1 GB) where a Q8 copy (~0.65 GB) would cost it less — whether it
+  guesses as well is unmeasured (#134 item 3, a device-aware choice); a swarm whose peers offer too little for any strict
+  plan gets no room, by design (the drafter is then not chosen where the plan
+  leaves it none).
 - Tests: `whether_a_drafter_would_load_is_asked_without_loading_it` (the probe
   and the spawn's guest admission agree, beside 6,967 MB and 3,000 MB),
   `a_loaded_drafter_is_asked_about_its_own_range`,
@@ -1240,6 +1260,13 @@ Four things a change here must keep:
   silent, our own loader's shortfall (actionable on this machine), any 4xx.
 - **A peer that DIED did not say no.** `SegmentFailoverExhausted` with "connection
   closed" is not kept, and "has gone" is then the right answer.
+- **The re-plan's own `SwarmShortOfMemory` is no route, like "has gone"** (2026-10-22,
+  gotcha #931). A peer that refused a prompt up front (#252 (b)) is held on the re-plan to
+  its `layers_that_fit` — 0 on a busy moment — so the planner's "no plan fits the holders'
+  ceilings" (`scheduler::short_of_memory`) described that one prompt's moment, and was
+  passed through as the swarm's verdict: "trying again won't help", on the card rig's first
+  request, with the next one 10 s later running. It now joins `no_route`, so the first
+  plan's offers decide. Test `a_re_plans_shortfall_after_a_peer_said_no_is_the_holders_declining`.
 - **Neither variant docks a peer** (`failure_is_penalty_worthy`): a holder's
   admission check refusing is that check doing its job.
 
@@ -4569,17 +4596,22 @@ transfer and a loading peer included, gotcha #446), so the first request of a sh
 have taken trees (`a_plan_is_as_far_as_the_least_round_trip_measured_not_its_smoothed_cost`, red
 on the cost reading). Re-run on the rig (`~/swarmllm-318/distance318.sh`, default settings): the
 first request read 22 ms over the 20 ms link (2,500 before), and nothing over the 300 ms link —
-no sample yet, so not far — then 21 and 301. **The owed card-drafter rig, decided without it for v0.3.247**: this boot
-allows no two card processes. The evidence: on the real TH↔AU link with the drafter on the card
-(two card processes by accident, 10-21 11:13Z, `rlreceipts_drafter_on_card/`) trees ran 7.14 /
-8.31 / 8.78 tok/s at 160 tokens, above every stream figure measured on that link (5.01-6.18, its
-drafter on the processor); the model puts the card-drafter stream at 7.32 at 400, and it is
-optimistic for streams. The default keeps trees there; the apples-to-apples run (stream and
-trees, drafter on the card, 160 and 400 tokens) is owed at the first boot that allows it, and
-turns the default off if trees lose.
-What could widen trees, untested: #275 (4) (a card plan leaving its drafter room), fewer seed
-misses, a tree STREAM (several trees in flight; weighed in `docs/plans/large_model_splits.md` §
-"Draft trees").
+no sample yet, so not far — then 21 and 301. **The card-drafter rig (2026-10-22, the first boot
+that allowed two card processes; `~/swarmllm-318/cardrig247.sh` on the v0.3.247 release binary)**:
+a 7B split over the real TH↔AU link (shards 0-3 and the 0.5B fp16 drafter on this machine's card,
+layers 14-27 on an RTX 3060 ~405 ms away), arms alternating by node start — stream
+(`SWARMLLM_DRAFT_TREES=0`), trees (the default), stream, trees — four replies a length each,
+`drafter_on_card=true` on every line. Trees: 8.80 / 9.53 / 6.68 / 8.63 tok/s at 160 tokens (mean
+8.41; the 6.68 a first request) and 9.95 / 9.05 / 9.69 / 8.76 at 400 (9.36); the stream: 5.88 /
+5.92 / 6.05 (5.95; its first request refused — gotcha #931) and 6.42 / 6.59 / 6.58 / 6.32
+(6.48). **+41% and +44%: the default stands.** Tree rounds 26-70 a reply, 4.7-5.3 tokens kept a
+round, 33-49 rows. The replies differ (trees "a device that maintains…", the stream "a household
+appliance designed…") at a near-tie: scored against llama.cpp
+(`examples/score_against_reference.py`), every reply is rank-1 at 394-397 of 400 tokens, worst
+rank 4, largest gap 0.21 (trees) / 0.05 (stream). What could widen trees further: fewer seed
+misses (10-35 a reply), a tree STREAM (several trees in flight; weighed in
+`docs/plans/large_model_splits.md` § "Draft trees"). #275 (4) — a card plan leaving its drafter
+room on the card — is built (§ "A split leaves room for the model that guesses for it").
 
 **What a change must keep:**
 - **The shape is bound in the AAD and refused malformed** — a relay reshaping a tree changes

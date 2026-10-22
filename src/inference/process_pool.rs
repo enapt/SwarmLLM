@@ -5233,36 +5233,63 @@ impl ModelProcessPool {
         )
     }
 
-    /// Would a guest's spawn of `segment` land in system memory — no card for
-    /// it as the card stands, or none at all? `get_or_spawn_once`'s placement
-    /// for a guest, which is offered neither a reclaim nor a card/processor
-    /// split.
-    fn guest_charges_ram(&self, model_id: &ModelId, segment: (u32, u32), kv: KvCharge) -> bool {
-        let going_to_cpu = self.cpu_reason(model_id).is_some()
-            || matches!(
-                self.card_verdict(self.estimate_gpu_footprint_mb(model_id, Some(segment), kv)),
-                Verdict::Refused { .. }
-            );
-        charges_ram(
-            going_to_cpu,
+    /// May a guest's spawn use the card at all, room aside — a card, a build that
+    /// can drive it, and nothing sending this model to the processor
+    /// ([`Self::cpu_reason`]: a setting, a failed or too-old card)? The part of
+    /// [`Self::guest_charges_ram`] that does not depend on the card's room.
+    fn guest_may_take_the_card(&self, model_id: &ModelId) -> bool {
+        #[cfg(test)]
+        if self
+            .test_card_in_play
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return self.cpu_reason(model_id).is_none();
+        }
+        !charges_ram(
+            self.cpu_reason(model_id).is_some(),
             self.gpu_detected.load(std::sync::atomic::Ordering::Relaxed),
             cfg!(feature = "candle-cuda"),
         )
     }
 
+    /// Would a guest's spawn of `segment` land in system memory — no card for
+    /// it as the card stands, or none at all? `get_or_spawn_once`'s placement
+    /// for a guest, which is offered neither a reclaim nor a card/processor
+    /// split.
+    fn guest_charges_ram(&self, model_id: &ModelId, segment: (u32, u32), kv: KvCharge) -> bool {
+        !self.guest_may_take_the_card(model_id)
+            || matches!(
+                self.card_verdict(self.estimate_gpu_footprint_mb(model_id, Some(segment), kv)),
+                Verdict::Refused { .. }
+            )
+    }
+
     /// [`Self::max_hostable_layers_for_planning`] with room left beside the
     /// layers for `guest`'s `guest_range` — the split drafter (#275) — weighed as
-    /// that guest's own spawn will weigh it ([`Self::guest_would_be_admitted`]):
-    /// in system memory, against [`DRAFTER_REQUESTER`]'s cap, after the layers
-    /// are loaded. `None` when nothing need be left, or this cannot say: the
-    /// layers are planned on the card, the guest is already loaded for its range
-    /// (its memory is charged, and so already counted), it would go to the card,
-    /// or a size or budget cannot be read.
+    /// that guest's own spawn will weigh it ([`Self::guest_would_be_admitted`]),
+    /// after the layers are loaded, in the memory the layers are planned in: on
+    /// the card against what then stands free there ([`Self::card_verdict`]),
+    /// else in system memory against [`DRAFTER_REQUESTER`]'s cap. `None` when
+    /// nothing need be left, or this cannot say: the guest is already loaded for
+    /// its range (its memory is charged, and so already counted), it would not
+    /// share the layers' memory (a card plan whose guest may not use the card,
+    /// a processor plan whose guest goes to the card), or a size or budget
+    /// cannot be read.
     ///
     /// Measured with a node holding no card: 28 layers of Qwen3-30B-A3B left no
     /// room for Qwen3-1.7B and the split ran 2.68-2.99 tok/s; holding fewer
     /// layers with the drafter beside them it ran 3.98-6.32, and fewer layers
     /// alone 2.45-2.78 — the room, not the smaller share, is the gain.
+    ///
+    /// **On a card (#275 (4), 2026-10-22).** A card plan was not cut: the guest
+    /// found the card full of the target's layers and went to the processor —
+    /// and a split's trees of guesses pay only with the drafter on a card
+    /// (`dsd_tree::trees_wanted`). On the real Thailand↔Australia link (a 7B,
+    /// the head's half and the 0.5B drafter on this machine's card, ~405 ms)
+    /// trees ran 8.80-9.95 tok/s against the chain stream's 5.88-6.59 beside
+    /// the same card drafter, and the stream with the drafter on the processor
+    /// 5.01-6.18. SpecExec (arXiv 2406.02532) makes the same trade for consumer
+    /// cards: the drafter keeps the card, the target's layers go elsewhere.
     ///
     /// `kv` is the conversation the guest's cache is left room for: this
     /// request's, as its spawn will be charged (#275) — at 4,096 positions
@@ -5275,12 +5302,23 @@ impl ModelProcessPool {
         guest_range: (u32, u32),
         kv: KvCharge,
     ) -> Option<u32> {
-        if self.planning_on_card(model_id)
-            || self
-                .live_worker(guest)
-                .is_some_and(|h| h.segment_is_charged(guest_range))
-            || !self.guest_charges_ram(guest, guest_range, kv)
+        if self
+            .live_worker(guest)
+            .is_some_and(|h| h.segment_is_charged(guest_range))
         {
+            return None;
+        }
+        if self.planning_on_card(model_id) {
+            if !self.guest_may_take_the_card(guest) {
+                return None;
+            }
+            let guest_mb = self.estimate_gpu_footprint_mb(guest, Some(guest_range), kv);
+            if guest_mb == 0 {
+                return None;
+            }
+            return self.local_layers_leaving(model_id, true, requester, Some(guest_mb));
+        }
+        if !self.guest_charges_ram(guest, guest_range, kv) {
             return None;
         }
         let guest_mb = self.estimate_cpu_footprint_mb(guest, Some(guest_range), kv);
@@ -5323,6 +5361,27 @@ impl ModelProcessPool {
             return true;
         }
         match self.max_hostable_layers_beside_guest(target, requester, guest, guest_range, kv) {
+            // A card plan loading past the card's room beside the guest leaves
+            // it none THERE: its spawn goes to system memory, as every card
+            // plan's did before #275 (4), and is admitted if that has room.
+            Some(room) if adds > room && self.planning_on_card(target) => {
+                let in_ram = !matches!(
+                    self.ram_verdict(
+                        self.estimate_cpu_footprint_mb(guest, Some(guest_range), kv),
+                        DRAFTER_REQUESTER
+                    ),
+                    Verdict::Refused { .. }
+                );
+                tracing::debug!(
+                    target_model = %target,
+                    drafter = %guest,
+                    layers_to_load = adds,
+                    room_on_the_card_beside_drafter = room,
+                    in_system_memory = in_ram,
+                    "the layers this plan loads here leave the drafter no room on the card"
+                );
+                in_ram
+            }
             Some(room) if adds > room => {
                 tracing::debug!(
                     target_model = %target,
@@ -6100,10 +6159,11 @@ impl ModelProcessPool {
         self.local_layers_leaving(model_id, on_gpu, requester, None)
     }
 
-    /// [`Self::max_local_hostable_layers`], leaving `guest_mb` free in system
-    /// memory for a guest weighed against [`DRAFTER_REQUESTER`]'s cap
-    /// ([`Self::max_hostable_layers_beside_guest`]). A guest is never planned on
-    /// the card, so `on_gpu` ignores it.
+    /// [`Self::max_local_hostable_layers`], leaving `guest_mb` free for a guest
+    /// ([`Self::max_hostable_layers_beside_guest`]) in the memory the layers are
+    /// weighed in: on the card (`on_gpu`) what its spawn's [`Self::card_verdict`]
+    /// will find standing free, else in system memory against
+    /// [`DRAFTER_REQUESTER`]'s cap.
     fn local_layers_leaving(
         &self,
         model_id: &ModelId,
@@ -6155,10 +6215,19 @@ impl ModelProcessPool {
             // Room an idle model is holding counts: admission takes it back
             // (`idle_vram_reclaimable_mb`), so a plan that stays within it is
             // one the loader will accept.
-            budget
-                .saturating_sub(self.vram_committed_mb())
+            let committed = self.vram_committed_mb();
+            let own = budget
+                .saturating_sub(committed)
                 .saturating_add(self.idle_vram_reclaimable_mb(model_id))
-                .min(budget)
+                .min(budget);
+            match guest_mb {
+                // The guest is admitted to the card after these layers load,
+                // against what then stands free — with NO reclaim counted, as
+                // in system memory below: a guest makes none, and the target's
+                // own stops once the target fits.
+                Some(mb) => own.min(budget.saturating_sub(committed).saturating_sub(mb)),
+                None => own,
+            }
         } else {
             let committed = self.ram_committed_mb();
             // Memory an idle model holds counts, as on the card: the spawn
@@ -10694,6 +10763,110 @@ mod tests {
         h.record_charged_segment(range, 0);
         assert_eq!(
             loaded.max_hostable_layers_beside_guest(
+                &target,
+                Requester::Swarm,
+                &drafter,
+                range,
+                KvCharge::Typical,
+            ),
+            None
+        );
+    }
+
+    /// **On a card the room is left on the card** (#275 (4), 2026-10-22). A card
+    /// plan was not cut: the target's layers filled the card and the drafter
+    /// went to the processor, where a split's trees of guesses do not pay
+    /// (`dsd_tree::trees_wanted`; on the real link trees ran 8.41-9.36 tok/s
+    /// with the drafter on the card, the chain stream 5.95-6.48). The bound now
+    /// leaves the drafter's card footprint free, and the drafter's own card
+    /// admission agrees at its edge. A plan past that room still has a drafter
+    /// where system memory takes it — as every card plan did before — and none
+    /// where it does not.
+    #[tokio::test]
+    async fn room_is_left_on_the_card_beside_the_layers_for_their_drafter() {
+        let target = ModelId("qwen2.5-coder-7b".into());
+        let drafter = ModelId("qwen3-1.7b-q8-0".into());
+        let range = (0, 28);
+        let (fixed, per_layer) = (500, 170);
+        let pool_with = |name: &str| {
+            let p = ModelProcessPool::new(std::path::PathBuf::from(name));
+            p.test_card_in_play.store(true, Ordering::Relaxed);
+            p.set_gpu_layers(-1);
+            p.set_vram_budget_mb(7_000);
+            p.test_cost_curve.insert(target.clone(), (fixed, per_layer));
+            p.test_footprint_inputs
+                .insert(drafter.clone(), qwen3_1_7b());
+            p
+        };
+        let pool = pool_with("/tmp/swarmllm-beside-guest-card");
+        assert!(pool.planning_on_card(&target), "fixture: a card plan");
+        let guest_mb = pool.estimate_gpu_footprint_mb(&drafter, Some(range), KvCharge::Typical);
+        assert!(guest_mb > 0, "fixture: the drafter is priced");
+        let alone = pool
+            .max_hostable_layers_for_planning(&target, Requester::Swarm)
+            .expect("a bound");
+        let beside = pool
+            .max_hostable_layers_beside_guest(
+                &target,
+                Requester::Swarm,
+                &drafter,
+                range,
+                KvCharge::Typical,
+            )
+            .expect("room is left on the card");
+        assert!(beside < alone, "{beside} beside the drafter, {alone} alone");
+        assert_eq!(
+            Some(beside),
+            layers_that_fit(7_000 - guest_mb, fixed, per_layer),
+            "the drafter's whole card footprint is left free"
+        );
+
+        for (layers, on_card) in [(beside, true), (beside + 1, false)] {
+            let p = pool_with("/tmp/swarmllm-beside-guest-card-load");
+            admit_and_insert_gpu_worker(
+                &p,
+                &target,
+                fixed + per_layer * u64::from(layers),
+                std::time::Duration::ZERO,
+            )
+            .await;
+            assert_eq!(
+                !p.guest_charges_ram(&drafter, range, KvCharge::Typical),
+                on_card,
+                "the drafter's own placement beside {layers} layers on the card"
+            );
+        }
+
+        // Asked of a plan before it loads: within the room the drafter goes
+        // to the card; past it, to system memory if that has room for it.
+        let plan_of = |p: &ModelProcessPool, layers: u32| {
+            p.guest_would_be_admitted_beside(
+                &drafter,
+                range,
+                KvCharge::Typical,
+                &target,
+                &[(0, layers)],
+                Requester::Swarm,
+            )
+        };
+        let roomy = pool_with("/tmp/swarmllm-beside-guest-card-plan");
+        roomy.set_ram_budget_mb(7_995);
+        assert!(plan_of(&roomy, beside), "within the room, on the card");
+        assert!(plan_of(&roomy, beside + 1), "past it, in system memory");
+        let cramped = pool_with("/tmp/swarmllm-beside-guest-card-plan-cramped");
+        cramped.set_ram_budget_mb(1_000);
+        assert!(plan_of(&cramped, beside), "within the room, on the card");
+        assert!(
+            !plan_of(&cramped, beside + 1),
+            "past it, and no room in system memory either"
+        );
+
+        // A drafter whose worker failed on the card is kept off it, so it
+        // shares no memory with the layers: nothing is left for it there.
+        let kept_off = pool_with("/tmp/swarmllm-beside-guest-card-pinned");
+        kept_off.cpu_pinned_models.insert(drafter.clone());
+        assert_eq!(
+            kept_off.max_hostable_layers_beside_guest(
                 &target,
                 Requester::Swarm,
                 &drafter,

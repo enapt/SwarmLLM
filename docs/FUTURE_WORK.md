@@ -1971,7 +1971,7 @@ segment still ends the chain when the requester holds the tail (the delegated sp
 covers only requesters holding nothing).
 
 #### #134 — Split decode: draft trees wait for their drafter, and the drafter is chosen by size, not by its device (the pipelined prompt pass is #171)
-`P3` · perf-split · **PARTIAL** — 2026-10-21 · history: archive row #134; plan: `split_speculation.md`, `large_model_splits.md` § "Draft trees"
+`P3` · perf-split · **PARTIAL** — 2026-10-22 · history: archive row #134, § Closed 2026-10-22 ((c)); plan: `split_speculation.md`, `large_model_splits.md` § "Draft trees"
 
 Shipped: guessing ahead on by default (v0.3.213), the continuous stream (v0.3.216, #149), walk
 at the tail, γ control, the engine drafter; **draft trees** (v0.3.246: trailer `0x10`, bit 29,
@@ -1985,9 +1985,8 @@ rig) 4.75-5.06 against 5.03-5.52 (`docs/invariants/scheduling.md` § "A split ch
 guesses", Measured). Left for trees: (a) **the drafter's wait after a missed seed** — the tree
 grown beside a check held its outcome in only 3-30 of 59-95 rounds, and each miss grows the next
 tree from nothing before the check: 289-416 ms of a ~0.85-0.95 s round with the drafter on the
-processor. A card head's drafter is there whenever the target fills the card (a card plan is
-not cut for it, #275 (4) — corrected 2026-10-21, an earlier line here said otherwise), which is
-why the default now needs the drafter on the card. The drafter's processor width is the
+processor — which is why the default needs the drafter on the card, and why a card plan now
+leaves it room there (#275 (4), closed 2026-10-22). The drafter's processor width is the
 contribution's (4 of 8 threads on that run: 16 ms a single-row step). **On the card
 (2026-10-21, TH↔AU, receipt DIAG):** a round of ~760-820 ms was the network's ~425 ms (minimum
 RTT 419), the regrow after a missed seed 172-211 ms (10-15 of 24-29 rounds), the head's tree
@@ -2006,13 +2005,9 @@ least round trip measured (the smoothed cost read 2.5-5 s on a 20 ms link throug
 request) — `docs/invariants/scheduling.md` § "A missed seed is regrown only as deep as pays".
 Left of (a): the drafter's own speed on the processor; (b) a stream of trees (several in
 flight) — priced by the same model at +11% over tree rounds with a card drafter on a 425 ms link,
-behind the chain stream with a processor drafter and on short links: after (a); (c) **a card head with its drafter on the card,
-against the stream with its drafter on the card, at 160 and 400 tokens** — at 160 trees ran once
-by accident on 2026-10-21 (the pool gave the drafter a card worker of its own beside the head's
-half): 7.14 / 8.31 / 8.78 tok/s, above every stream figure on that link (5.01-6.18, drafter on
-the processor). v0.3.247 keeps the default on that evidence (this boot allows one CUDA process);
-the apples-to-apples run is owed at the first boot that allows two, and turns the default off
-if trees lose. **Built 2026-10-22: a split with no drafter fetches one** — the largest of the
+behind the chain stream with a processor drafter and on short links: after (a); (c) closed
+2026-10-22 — with the drafter on the card trees beat the stream 8.41 vs 5.95 tok/s at 160
+tokens and 9.36 vs 6.48 at 400 on the real link, so the default stands (§ Closed). **Built 2026-10-22: a split with no drafter fetches one** — the largest of the
 target's family the swarm holds that can draft, ≤ 2 GiB, trusted, through the shard system, kept
 while splits want it (`docs/invariants/memory.md` § "A split with no drafter fetches one"). Left
 of it: a fetched drafter refused for memory at request time does not lead to a smaller one; a
@@ -2028,15 +2023,17 @@ measured (`dsd_controller` keeps it per model and machines); estimate, 2026-10-2
 prompt pass (Phase 3) is #171. The
 same-model-at-fewer-bits drafter is decided against as a default (#144, § "Decided").
 
-#### #275 — A target already loaded keeps its layers, and only processor plans leave the drafter room
-`P3` · perf-split · **PARTIAL** — 2026-10-15 · history: § Closed 2026-10-14 (#275's first half), 2026-10-15 (the reply's charge; judged beside the plan)
+#### #275 — A target already loaded keeps its layers, so the drafter's room appears only at its next cold load
+`P3` · perf-split · **PARTIAL** — 2026-10-22 · history: § Closed 2026-10-14 (#275's first half), 2026-10-15 (the reply's charge; judged beside the plan), 2026-10-22 ((4), card plans)
 
 Shipped: the drafter is asked before it is chosen, beside the layers the plan loads here; a
 split leaves it room where the peers offer enough; that room is the reply's own cache, not
 4,096 positions (`docs/invariants/scheduling.md` § "A split leaves room for the model that
-guesses for it"). Left: (3) a target worker already holding more layers keeps them; the room
-appears from its next cold load. (4) Card plans are not cut (a guest goes to the processor
-there).
+guesses for it"); on a card, on the card (#275 (4), closed 2026-10-22). Left: (3) a target
+worker already holding more layers keeps them; the room appears from its next cold load. The
+room is sized for the drafter `engine_drafter::chosen` picks, the largest by bytes — on a card
+the 0.5B fp16 (~1 GB) over a Q8 copy (~0.65 GB), unmeasured as a guesser (#134's device-aware
+choice).
 
 #### #145 — One reply uses one row of a ring pass that could carry dozens
 `P3` · perf-split · **OPEN** — 2026-09-28 · history: archive row #145; plan: `docs/plans/wan_parallel.md`
@@ -2961,6 +2958,25 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-22, unreleased** (#275 (4); #134 (c))
+- #275 (4) — **A large model filling the head's card leaves its drafter room there**, so the
+  split's trees of guesses run. A card plan was not cut: the target's layers filled the card, the
+  drafter went to the processor, and trees — which pay only with the drafter on a card — stood
+  aside for the chain stream. `ModelProcessPool::max_hostable_layers_beside_guest` now leaves the
+  drafter's card footprint free on a card plan, as its own `card_verdict` will weigh it; a fresh
+  worker's card/processor split (which fills the card whatever the room) is withdrawn by the cut,
+  and its offer alone calls for one (`scheduler::leaving_room_here`). Past the room the drafter
+  still loads in system memory where that has room, as before. SpecExec (arXiv 2406.02532) makes
+  the same trade. Tests `room_is_left_on_the_card_beside_the_layers_for_their_drafter`,
+  `a_fresh_card_split_gives_way_to_the_drafters_room`. The real-link run of a card-filling plan is
+  owed with the next CUDA build (next_up.md).
+- #134 (c) — **Trees with the drafter on the card beat the chain stream on the real link**:
+  Thailand↔Australia (~405 ms), a 7B split with the head's half and the 0.5B drafter on this
+  machine's card, arms alternating by node start on the v0.3.247 release binary — trees 8.41 tok/s
+  mean at 160 tokens against the stream's 5.95, 9.36 against 6.48 at 400 (four replies each; every
+  reply rank-1 against llama.cpp at 394-397 of 400 tokens, near-ties only). The .247 default
+  (trees there) stands. `docs/invariants/scheduling.md` § "A split checks a tree of guesses".
 
 **Closed 2026-10-21, released in v0.3.247** (#324, #325)
 - #325 — **A card multiplies a split's check rows and a prompt with llama.cpp's current

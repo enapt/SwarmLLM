@@ -7716,7 +7716,7 @@ fn the_drafters_room_is_only_taken_from_what_the_peers_offer() {
         let mut peer = simple_candidate(2, vec![(0, 48)]);
         peer.max_hostable_layers = Some(offered);
         let uncut = [here.clone(), peer];
-        let cut = cut_room.map(|room| super::leaving_room_here(&uncut, 0, room));
+        let cut = cut_room.map(|room| super::leaving_room_here(&uncut, 0, room).expect("a cut"));
         scheduler
             .greedy_assign_beside(
                 cut.as_deref(),
@@ -7745,6 +7745,54 @@ fn the_drafters_room_is_only_taken_from_what_the_peers_offer() {
         layers_here(&uncut),
         "a relaxed pass must not move layers onto a peer for the drafter: {relaxed:?}"
     );
+}
+
+/// **A fresh worker's card/processor split gives way to the drafter's room
+/// too** (#275 (4), 2026-10-22). That spawn fills the card to its budget
+/// whatever room is left, so a plan using it put the drafter on the processor —
+/// where a split's trees of guesses do not pay. Its offer alone calls for the
+/// cut, and the cut withdraws it; the room is never RAISED past what this node
+/// offered, and no cut is made where nothing fits beside the drafter or the
+/// room already leaves enough.
+#[test]
+fn a_fresh_card_split_gives_way_to_the_drafters_room() {
+    let with_room = |card: Option<u32>, fresh_run: Option<u32>| {
+        let mut here = simple_candidate(1, vec![(0, 48)]);
+        here.max_hostable_layers = card;
+        here.fresh_run_layers = fresh_run;
+        let mut peer = simple_candidate(2, vec![(0, 48)]);
+        peer.max_hostable_layers = Some(40);
+        peer.fresh_run_layers = Some(48);
+        vec![here, peer]
+    };
+    let cut_to = |c: &[NodeCandidate], room: u32| {
+        super::leaving_room_here(c, 0, room).map(|cut| {
+            assert_eq!(
+                (cut[1].max_hostable_layers, cut[1].fresh_run_layers),
+                (Some(40), Some(48)),
+                "a peer is never cut"
+            );
+            (cut[0].max_hostable_layers, cut[0].fresh_run_layers)
+        })
+    };
+
+    // The card alone leaves the drafter room, but a fresh split is on offer.
+    assert_eq!(
+        cut_to(&with_room(Some(10), Some(30)), 14),
+        Some((Some(10), None))
+    );
+    // The card alone would not leave it room.
+    assert_eq!(
+        cut_to(&with_room(Some(20), Some(30)), 14),
+        Some((Some(14), None))
+    );
+    assert_eq!(
+        cut_to(&with_room(Some(20), None), 14),
+        Some((Some(14), None))
+    );
+    // The controls: the room already leaves enough, or nothing fits beside.
+    assert_eq!(cut_to(&with_room(Some(10), None), 14), None);
+    assert_eq!(cut_to(&with_room(Some(20), Some(30)), 0), None);
 }
 
 /// Two card peers holding every part of a 32-layer model (4 GB, so 125 MB a

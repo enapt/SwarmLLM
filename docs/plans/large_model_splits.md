@@ -321,13 +321,12 @@ until the bytes or a processor stage say otherwise.
   over 28 — each missed seed waits ~300 ms for eight processor forwards, and
   the stream gains with length where trees do not (`docs/invariants/scheduling.md`
   § "A split checks a tree of guesses"). With the drafter on a card those eight
-  forwards are ~40 ms: the default there is a projection, owed a rig before the
-  release that carries it. ⚠ A card head's drafter is on the card only where
-  the target leaves room — a card plan is not cut for it (#275 (4)) — so a
-  large model filling the head's card puts it on the processor (corrected
-  2026-10-21; an earlier line here said the planner leaves it room on the
-  card). `SWARMLLM_DRAFT_TREES=1` / `=0` forces either way. Next: #275 (4), a
-  stream of trees.
+  forwards are ~40 ms, and on the same link (2026-10-22, arms alternating)
+  trees ran 8.41 tok/s against the stream's 5.95 at 160 tokens and 9.36
+  against 6.48 at 400 — the default there stands. A plan filling the head's
+  card now leaves the drafter room on it (#275 (4), 2026-10-22).
+  `SWARMLLM_DRAFT_TREES=1` / `=0` forces either way. Next: a stream of trees,
+  fewer seed misses.
 - **A stream of trees, weighed 2026-10-21.** FlowSpec (arXiv 2507.02620) and
   SpecPipe (2504.04104) keep tree pieces flowing through a pipeline: rows go
   out best-first as the drafter grows them, each stage prunes against the

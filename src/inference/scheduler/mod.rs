@@ -2290,18 +2290,36 @@ fn local_can_hold_every_layer(
                 .is_none_or(|k| k >= local_cand.layers_it_would_add((0, num_layers))))
 }
 
+/// `candidates` with the one at `local` (this node) allowed at most `room` new
+/// layers — the cut [`PipelineScheduler::candidates_leaving_room_for_the_drafter`]
+/// makes, decided and built in one place so its tests plan with the cut it
+/// ships. `None` when no cut is called for: nothing fits beside the drafter
+/// (`room` 0), or this node's room already leaves enough and no fresh
+/// card/processor split is on offer.
+///
+/// The cut withdraws that split (`NodeCandidate::fresh_run_layers`) too, and
+/// its offer alone calls for the cut: the fresh worker fills the card to its
+/// budget whatever the room, so a plan using it left the drafter none there
+/// (#275 (4)). A node with no card is offered no such split.
+fn leaving_room_here(
+    candidates: &[NodeCandidate],
+    local: usize,
+    room: u32,
+) -> Option<Vec<NodeCandidate>> {
+    let now = candidates[local].max_hostable_layers;
+    let fresh_run = candidates[local].fresh_run_layers;
+    if room == 0 || (now.is_some_and(|k| k <= room) && fresh_run.is_none()) {
+        return None;
+    }
+    let mut cut = candidates.to_vec();
+    cut[local].max_hostable_layers = Some(now.map_or(room, |k| k.min(room)));
+    cut[local].fresh_run_layers = None;
+    Some(cut)
+}
+
 /// `SWARMLLM_DRAFTER_ROOM=0` plans without leaving room for the drafter
 /// (`PipelineScheduler::candidates_leaving_room_for_the_drafter`) — the plan
 /// before #275, for an A/B inside one binary. Read once.
-/// `candidates` with the one at `local` (this node) allowed `room` new layers —
-/// the cut [`PipelineScheduler::candidates_leaving_room_for_the_drafter`]
-/// makes, built in one place so its tests plan with the cut it ships.
-fn leaving_room_here(candidates: &[NodeCandidate], local: usize, room: u32) -> Vec<NodeCandidate> {
-    let mut cut = candidates.to_vec();
-    cut[local].max_hostable_layers = Some(room);
-    cut
-}
-
 fn drafter_room_planned() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("SWARMLLM_DRAFTER_ROOM").map_or(true, |v| v.trim() != "0"))
@@ -5259,11 +5277,13 @@ impl PipelineScheduler {
     /// `candidates` with this node's room for new layers cut to what leaves
     /// room beside them for the drafter that will guess for them
     /// (`ModelProcessPool::max_hostable_layers_beside_guest`), for a plan that
-    /// is a split from here on (#275). `None` when no cut is called for:
-    /// speculation across computers is off, no held model can draft for this
-    /// one, this node is not a candidate, its room already leaves enough, or
-    /// nothing of the model fits beside the drafter — or with
-    /// `SWARMLLM_DRAFTER_ROOM=0`, an A/B inside one binary.
+    /// is a split from here on (#275) — on the card where the layers are
+    /// planned there (#275 (4)), else in system memory. `None` when no cut is
+    /// called for: speculation across computers is off, no held model can draft
+    /// for this one, this node is not a candidate, its room already leaves
+    /// enough and no fresh card/processor split is on offer, or nothing of the
+    /// model fits beside the drafter — or with `SWARMLLM_DRAFTER_ROOM=0`, an
+    /// A/B inside one binary.
     ///
     /// A cut, never a bound every rung keeps, and tried only where every peer
     /// is held to what it OFFERS: parallax's `CapacityBound::Everyone` rung and
@@ -5323,19 +5343,17 @@ impl PipelineScheduler {
                 drafter.layer_range,
                 kv,
             )?;
-        let now = candidates[local].max_hostable_layers;
-        if room == 0 || now.is_some_and(|k| k <= room) {
-            return None;
-        }
+        let cut = leaving_room_here(candidates, local, room)?;
         tracing::debug!(
             model = %model_id,
             drafter = %drafter.model_id,
-            room_for = room,
-            room_without_it = ?now,
+            room_for = ?cut[local].max_hostable_layers,
+            room_without_it = ?candidates[local].max_hostable_layers,
+            fresh_run_withdrawn = ?candidates[local].fresh_run_layers,
             drafter_cache = ?kv,
             "Leaving room beside this node's layers for the drafter"
         );
-        Some(leaving_room_here(candidates, local, room))
+        Some(cut)
     }
 
     /// Greedy layer assignment: cover all layers 0..num_layers using sorted candidates.

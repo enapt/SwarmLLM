@@ -12,6 +12,22 @@ for it (a 1.5B kept 20% more of each round than a 0.5B in a replay on Qwen2.5-Co
 replies), never more than 2 GiB on disk, never one that is not trusted, never on a metered
 connection — and keep it while splits keep using it, and for a week after the last.
 
+**A large model that fills your graphics card now leaves room on it for the small model that
+guesses for it.** Across a long link a split checks a whole tree of guesses each round trip, and
+that pays only when the guessing model runs on a graphics card: between Thailand and Australia,
+a 7B split wrote 8.41 tokens a second over 160-token replies and 9.36 over 400 with the guesser
+on the card, against 5.95 and 6.48 for the one-line stream of guesses with the same guesser. But
+when the big model's layers filled the card, the guesser went to the processor and the trees
+stood aside. Now a computer that cannot hold a whole model leaves the guesser's room on its card
+and hands those few layers to the other computers of the split, where they offer room for them;
+where they do not, the plan is the one it was before.
+
+**A computer that is briefly busy no longer makes a reply fail with "trying again won't help".**
+When a computer holding part of a model said it had no room for a prompt at that moment, the
+next plan counted it at no room at all and reported that the computers holding the model could
+never run it. A request ten seconds later ran. That refusal is now reported as the computers
+declining for now, with the advice to try again shortly.
+
 ## [0.3.247-alpha] — 2026-10-22
 
 **A large model can be split over computers near each other instead of one far away.** A split
