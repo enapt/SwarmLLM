@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+**A split across a long link spends less of each round waiting for its guesses.** While the far
+computer checks one tree of guesses, the small model on your graphics card grows the next one.
+Each of its steps now costs less: the positions of the guesses go to the card once per step, not
+once per layer (a step of 8 guesses 16.6 → 12.3 ms, a tree grown from nothing 146 → 119 ms). And
+in the same time it grows a tree up to four times as wide, so the part the far computer's answer
+needs is more often already there. `SWARMLLM_TREE_BESIDE=8,128` brings back the old width.
+
 **A computer that splits a model with no smaller model to guess with now fetches one.** Across
 the internet a split's speed is the words each round trip keeps: with a small model of the same
 family guessing ahead, a round keeps 3-6 words, without one it keeps one. That guess was made

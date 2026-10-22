@@ -102,11 +102,46 @@ pub(super) fn grow_beside_requested() -> bool {
     std::env::var("SWARMLLM_TREE_GROW_BESIDE").as_deref() != Ok("0")
 }
 
-/// Guesses a call grown beside a check may add, and read a forward. The time
-/// given (`TreeRounds::beside_budget_ms`) is what usually stops it; this caps
-/// the cache it takes on a fast drafter.
-pub(super) const BESIDE_ROWS: u32 = 128;
-pub(super) const BESIDE_PER_STEP: u32 = 8;
+/// `(rows, per_step)` for a call grown beside a check: the guesses it may add,
+/// and how many a forward reads. The time given
+/// (`TreeRounds::beside_budget_ms`) is what usually stops it; `rows` caps the
+/// cache it takes on a fast drafter.
+///
+/// What such a call buys is the next round's seed: the part of its tree under
+/// the outcome the check comes back with — the deepest node the target
+/// accepted and the token it chose there, never one of the node's children
+/// that went out (Speculative Speculative Decoding, arXiv 2603.03251, keeps its
+/// draft cache by the same key). With 8 rows a forward, the 128 such a call
+/// grew in a ~400 ms check missed the outcome on 32-51% of rounds
+/// (Thailand↔Australia, 2026-10-22, `cardfill275q8.sh`), and a round waited
+/// 145-163 ms for its drafter — a quarter of the round, most of it ~8
+/// forwards grown before the check on a seed too small to send as it was
+/// (sent as it was on 12-23%). A
+/// drafter's forward costs nearly the same at 32 rows as at 8 (14.9 against
+/// 17.4 ms for the 0.5B on an RTX 3070 Laptop, `prefill_bench`
+/// `SWARM_BENCH_SPEC_TREE=1`), so the same time grows ~3.5× the tree: 32 a
+/// forward, up to 416: on a full seed of [`SEED_MOST`] that is the
+/// [`MAX_TREE_ROWS`](crate::inference::draft_tree::MAX_TREE_ROWS) one tree may
+/// hold. A tree also grown before its check (≤ [`MOST_ROWS_GROWN`] more) can
+/// take the sum past it; the drafter stops there
+/// (`SplitModel::draft_tree_after`), so such a call only grows less.
+/// `SWARMLLM_TREE_BESIDE=8,128` (per step, rows) for an A/B inside one binary.
+pub(super) fn beside_growth() -> (u32, u32) {
+    beside_growth_given(std::env::var("SWARMLLM_TREE_BESIDE").ok().as_deref())
+}
+
+const BESIDE_ROWS: u32 = 416;
+const BESIDE_PER_STEP: u32 = 32;
+
+fn beside_growth_given(setting: Option<&str>) -> (u32, u32) {
+    let parsed = setting.and_then(|s| {
+        let (per_step, rows) = s.split_once(',')?;
+        let per_step: u32 = per_step.trim().parse().ok()?;
+        let rows: u32 = rows.trim().parse().ok()?;
+        (per_step > 0 && rows > 0).then_some((rows, per_step))
+    });
+    parsed.unwrap_or((BESIDE_ROWS, BESIDE_PER_STEP))
+}
 /// Rows of a grown tree carried into the next round as its seed: each is read
 /// again by the call that grows on it, so the likeliest are kept.
 const SEED_MOST: usize = 96;
@@ -563,6 +598,27 @@ impl TreeRounds {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A call beside a check grows 32 a forward, up to 416 — inside what one
+    /// tree may hold on a seed alone — and the A/B setting brings back the old
+    /// shape; a setting that cannot be read is ignored.
+    #[test]
+    fn a_call_beside_a_check_grows_wide() {
+        assert_eq!(beside_growth_given(None), (416, 32));
+        assert!(
+            beside_growth_given(None).0 + SEED_MOST as u32
+                <= crate::inference::draft_tree::MAX_TREE_ROWS as u32
+        );
+        assert_eq!(beside_growth_given(Some("8,128")), (128, 8));
+        assert_eq!(beside_growth_given(Some(" 16 , 256 ")), (256, 16));
+        for unreadable in ["", "8", "0,128", "8,0", "eight,128"] {
+            assert_eq!(
+                beside_growth_given(Some(unreadable)),
+                (416, 32),
+                "{unreadable:?}"
+            );
+        }
+    }
 
     /// Laid out trunk first, as a drafter grows it: 10 → 12 → 13 is the
     /// likeliest path; 11 also follows the last token.

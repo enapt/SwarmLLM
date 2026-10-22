@@ -74,8 +74,8 @@ speed is what the swarm is for, so split speed for large models is the top track
    tensor-core MMQ (#325, 10-21: 2.4-3.2× faster at 9-64 rows). The regrow after a missed seed
    is sized by what it buys, and trees are on only past 300 ms (#134 (a), 10-21: +57% at 20 ms,
    +4% at 300 on the rig). Next: near peers over far ones (#192); a drafter fed by the model's
-   own state (`large_model_splits.md` build-order step 4); several trees in flight last (#134
-   (b), +11% on a long link in the schedule model).
+   own state (`large_model_splits.md` build-order step 4); a tree that flows (#134 (b), re-priced
+   10-22 at +40-47% over tree rounds on a long link in the schedule model — next to build).
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
@@ -2006,9 +2006,18 @@ processor, trees forced) 11.12-11.90 tok/s against 7.33-7.48 at 20 ms and 5.40-5
 the default only where the farthest peer segment is a measured 300 ms or more away**, read as the
 least round trip measured (the smoothed cost read 2.5-5 s on a 20 ms link through a first
 request) — `docs/invariants/scheduling.md` § "A missed seed is regrown only as deep as pays".
-Left of (a): the drafter's own speed on the processor; (b) a stream of trees (several in
-flight) — priced by the same model at +11% over tree rounds with a card drafter on a 425 ms link,
-behind the chain stream with a processor drafter and on short links: after (a); (c) closed
+Left of (a): the drafter's own speed on the processor. **Built 2026-10-22 (Track A): a tree
+step pays for its tree once** — the rows' rope tables gathered once per forward (3 host-to-card
+copies a tree forward against 50; a 0.5B tree forward 12.3 against 16.6 ms at 8 rows; a tree
+grown from nothing 118.5 against 145.7 ms) — **and a call beside a check grows 32 rows a forward
+up to 416** (was 8 and 128; the real-link A/B is owed: the far peer had no conversation room at
+04:44Z) — `docs/invariants/scheduling.md` § "A tree step pays for its tree once". The wait it
+targets: per reply the seed missed on 32-51% of rounds and was grown ~8 forwards before the check
+on most others, 145-163 ms a round. (b) **re-priced 2026-10-22: a tree that FLOWS** — the old
++11% was a stream of checks each restarting at the confirmed reply; rows streamed as grown, the
+far end appending them to the tree it holds and answering each row's pick, is +40-47% over tree
+rounds at 425 ms with a card drafter in the schedule model (`large_model_splits.md` § "A tree that
+flows", where the design and build steps are); next to build; (c) closed
 2026-10-22 — with the drafter on the card trees beat the stream 8.41 vs 5.95 tok/s at 160
 tokens and 9.36 vs 6.48 at 400 on the real link, so the default stands (§ Closed). **Built 2026-10-22: a split with no drafter fetches one** — the largest of the
 target's family the swarm holds that can draft, ≤ 2 GiB, trusted, through the shard system, kept

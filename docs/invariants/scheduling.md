@@ -4630,6 +4630,38 @@ misses (10-35 a reply), a tree STREAM (several trees in flight; weighed in
 `docs/plans/large_model_splits.md` § "Draft trees"). #275 (4) — a card plan leaving its drafter
 room on the card — is built (§ "A split leaves room for the model that guesses for it").
 
+**A tree step pays for its tree once, and grows wide beside its check (2026-10-22, Track A).**
+Where a tree round's time went on TH↔AU (`~/swarmllm-318/cardfill275q8.sh`'s default arm, 192
+checks timed at their receipts): a round of 608-654 ms was ~485 ms in flight and 130-168 ms (mean)
+HERE, waiting for the drafter — a seed that missed the outcome on 32-51% of rounds, was sent as it
+was on 12-23%, and was grown ~8 forwards before the check on the rest. `prefill_bench` on this card
+(idle, live node stopped): a tree forward paid 6 ms (0.5B drafter, 8 rows: 14.9 against a chain's
+8.5) to 10 ms (7B head, 52 rows: 34.0 against 24.4) over a chain, and made 48 host-to-card copies
+a step — each layer uploaded the rows' positions and gathered its rope rows again
+(`row_positions_on`, gotcha #758's kind of copy); width was nearly free (a drafter forward 17.4 ms
+at 32 rows against 14.9 at 8). Two changes:
+- **The rows' rope tables are uploaded and gathered once per forward and table**
+  (`layers::TreeRows` in the thread-local `RowPositions`, `tree_rope_rows`; llama.cpp builds one
+  `inp_pos` per graph the same way). A pool job carries the positions, never the cache (#919: a
+  job must set what it reads). A/B `SWARMLLM_TREE_ROPE=per-call`, `treeprof2.sh`, min of 7,
+  arms adjacent: a 0.5B tree forward makes 3 host-to-card copies (positions, mask, ids) and 535
+  launches against 50 and 629; it takes 12.3 / 15.0 ms at 8 / 32 rows against 16.6 / 20.5 (chain
+  7.9 / 10.9); the 7B head 15.8 / 22.0 / 33.2 at 8 / 32 / 52 against 16.5 / 23.6 / 35.8; a tree grown from nothing 118.5 ms against 145.7
+  (64 rows, 8 a step) and 222.1 against 272.5 (416, 32). What remains over a chain at 52 rows
+  (~9 ms on the 7B) is the masked standard attention.
+- **A call beside a check grows 32 rows a forward, up to 416** (`dsd_tree::beside_growth`, was 8
+  and 128; A/B `SWARMLLM_TREE_BESIDE=8,128`): the same ~380 ms grows ~3.5× the tree, so the
+  outcome's subtree is there more often and larger. 416 + a full seed of 96 is the 512 one tree
+  may hold; a tree also grown before its check stops there (`draft_tree_after`). The schedule model
+  put it at +6% over 8/128 at 425 ms (`examples/tree_schedule_sim.py`, 7.46 against 7.06). **The
+  real-link A/B is owed**: at 04:44Z 10-22 (`~/swarmllm-318/beside318.sh`, the plan pinned 0-3 here
+  and 4-7 on aa3d1e66) the far peer refused every prompt with no conversation room on its card
+  (`holders_declined`, "0 MB available for conversations"), the warm-up excepted.
+- **Next: a tree that flows** — rows streamed as grown, the far end appending them to the tree it
+  holds and answering each row's pick, the requester walking: +40-47% over tree rounds in the
+  schedule model at 425 ms (`docs/plans/large_model_splits.md` § "A tree that flows"; the old
+  +11% stream of trees restarted every check).
+
 **What a change must keep:**
 - **The shape is bound in the AAD and refused malformed** — a relay reshaping a tree changes
   which rows a guess reads.
@@ -4646,7 +4678,9 @@ room on the card — is built (§ "A split leaves room for the model that guesse
   attention override): a pool thread waiting inside one forward's parallel work runs other jobs,
   a second forward too, which read the first one's tree ("a forward of 1 rows inside a tree of 4
   positions" between tests sharing the decode pool; at the tree's own length it would have been
-  rotated wrong, silently).
+  rotated wrong, silently). **Its rope rows are made once per forward and table, and never
+  carried into a job** — a job reading a tree of its own makes its own, and the caller's survive
+  it (`a_trees_rope_rows_are_made_once_per_forward`).
 
 **Tests**: `a_row_reads_the_context_and_its_ancestors_only`, `a_chain_is_the_causal_mask`,
 `a_tree_grown_over_several_forwards_reads_its_cached_rows`,
@@ -4664,7 +4698,8 @@ control, which must differ), `a_kept_path_read_again_continues_as_if_read_alone`
 `the_tree_grown_on_gives_the_next_check_the_part_under_its_outcome` (`draft_tree`);
 `a_job_reads_its_callers_tree_positions_not_the_threads_it_runs_on` (`cpu_pools`);
 `a_chain_shaped_tree_walks_as_the_chain_does`, `the_walk_follows_the_branch_that_carries_each_pick`,
-`a_tree_no_honest_coordinator_sends_is_refused` (`sampling`); the eight `dsd_tree` tests;
+`a_tree_no_honest_coordinator_sends_is_refused` (`sampling`); the `dsd_tree` tests (`a_call_beside_a_check_grows_wide` among them);
+`a_trees_rope_rows_are_made_once_per_forward` (`layers`);
 `a_tree_of_guesses_is_applied_only_to_a_check_it_fits` (`model_worker`);
 `a_tree_shape_survives_the_wire_and_a_malformed_one_is_refused`,
 `a_tree_shape_is_sealed_and_survives_the_encrypted_frame` (`network::protocol`). A/B in one

@@ -627,12 +627,13 @@ impl PipelineExecutor {
                     && super::dsd_tree::grow_beside_requested())
                 .then(|| trees.beside_budget_ms(check.fit(), tree_check.verify_tokens.len()))
                 .flatten();
+                let (beside_rows, beside_per_step) = super::dsd_tree::beside_growth();
                 let beside = match (&mut drafter, beside_ms) {
                     (Drafter::Engine(e), Some(ms)) => Some(e.draft_tree(
                         &self.shared_state,
                         &grown,
-                        super::dsd_tree::BESIDE_ROWS,
-                        super::dsd_tree::BESIDE_PER_STEP,
+                        beside_rows,
+                        beside_per_step,
                         Some(ms),
                         &self.request.sampling_params,
                         &generated,

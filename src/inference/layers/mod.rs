@@ -3261,8 +3261,43 @@ thread_local! {
     /// The positions of the rows of the forward running on this thread, when
     /// they are not consecutive: a tree of guesses, whose rows sit at
     /// `base + depth` (`inference::draft_tree`). Set only by [`RowPositions`].
-    static ROW_POSITIONS: std::cell::RefCell<Option<Vec<u32>>> =
+    static ROW_POSITIONS: std::cell::RefCell<Option<TreeRows>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// A tree's row positions, and what the forward has already made of them.
+///
+/// Each layer ropes its queries and its keys at the same positions, from a
+/// table every layer on a device shares (`LayerPlacement::rope_for` hands out
+/// clones of one tensor). Uploading the positions and gathering the table's
+/// rows in every call was two host-to-card copies a layer — 48 a step of a
+/// 24-layer drafter's tree, each a pageable copy that waits for the card to
+/// drain — and four gathers a layer: a tree's forward cost the 0.5B drafter
+/// 14.9 ms at 8 rows where the same rows as a chain cost 8.5, and a 7B head
+/// 34.0 ms at 52 rows against 24.4 (`prefill_bench`, RTX 3070 Laptop,
+/// 2026-10-22). llama.cpp builds its positions once per graph (`inp_pos`) and
+/// every layer's rope reads it; so here, once per forward per device, and a
+/// table's rows once per forward ([`tree_rope_rows`]). The upload is a
+/// pageable copy, which a CUDA graph capture would replay from the host
+/// address (gotcha #758): a tree's forward is never captured, and one that is
+/// must make its index before the capture. `SWARMLLM_TREE_ROPE=per-call`
+/// uploads and gathers in every call, as before.
+struct TreeRows {
+    positions: Vec<u32>,
+    /// The positions as an index, on each device a forward has asked for.
+    index_on: Vec<(candle_core::DeviceLocation, Tensor)>,
+    /// A table's rows at those positions: (cos's id, sin's id, cos rows, sin rows).
+    gathered: Vec<(candle_core::TensorId, candle_core::TensorId, Tensor, Tensor)>,
+}
+
+impl TreeRows {
+    fn new(positions: Vec<u32>) -> Self {
+        Self {
+            positions,
+            index_on: Vec::new(),
+            gathered: Vec::new(),
+        }
+    }
 }
 
 /// While alive, every RoPE on this thread rotates row `i` by `positions[i]`
@@ -3270,7 +3305,7 @@ thread_local! {
 /// that makes one). Set on the thread that runs the layers, as
 /// `attn_kernel::ForceStandardAttnGuard` is.
 pub(crate) struct RowPositions {
-    before: Option<Vec<u32>>,
+    before: Option<TreeRows>,
 }
 
 impl RowPositions {
@@ -3283,17 +3318,19 @@ impl RowPositions {
     /// must set too: a pool thread waiting inside one forward's parallel work
     /// may run another forward meanwhile (rayon steals any job it holds), and
     /// that forward would otherwise read the first one's tree
-    /// (`cpu_pools::in_phase_pool`).
+    /// (`cpu_pools::in_phase_pool`, gotcha #919). What the other thread made of
+    /// them is not carried — this thread makes its own — and the waiting
+    /// forward's comes back with its positions when this is dropped.
     pub(crate) fn carried(positions: Option<Vec<u32>>) -> Self {
         Self {
-            before: ROW_POSITIONS.with(|p| p.replace(positions)),
+            before: ROW_POSITIONS.with(|p| p.replace(positions.map(TreeRows::new))),
         }
     }
 }
 
 /// The positions [`RowPositions`] has set on this thread, if any.
 pub(crate) fn row_positions_now() -> Option<Vec<u32>> {
-    ROW_POSITIONS.with(|p| p.borrow().clone())
+    ROW_POSITIONS.with(|p| p.borrow().as_ref().map(|t| t.positions.clone()))
 }
 
 impl Drop for RowPositions {
@@ -3303,19 +3340,62 @@ impl Drop for RowPositions {
     }
 }
 
-/// The rows to read from a RoPE table for a forward of `seq_len` rows, as an
-/// index on `device`, while [`RowPositions`] is set; `None` reads the table's
-/// consecutive rows from `index_pos`. A forward of any other length inside the
-/// scope is refused — rotating it by a tree's positions would be wrong with
-/// nothing failing.
-fn row_positions_on(seq_len: usize, device: &Device) -> CandleResult<Option<Tensor>> {
-    ROW_POSITIONS.with(|p| match p.borrow().as_ref() {
-        None => Ok(None),
-        Some(rows) if rows.len() == seq_len => Tensor::new(rows.as_slice(), device).map(Some),
-        Some(rows) => candle_core::bail!(
-            "a forward of {seq_len} rows inside a tree of {} positions",
-            rows.len()
-        ),
+/// Does every RoPE call of a tree upload its positions and gather its rows
+/// itself? `SWARMLLM_TREE_ROPE=per-call`, for an A/B inside one binary.
+fn tree_rope_per_call() -> bool {
+    static PER_CALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PER_CALL.get_or_init(|| std::env::var("SWARMLLM_TREE_ROPE").as_deref() == Ok("per-call"))
+}
+
+/// The rows of the RoPE tables `cos` and `sin` for a forward of `seq_len`
+/// rows while [`RowPositions`] is set — each row's own position, made once per
+/// forward ([`TreeRows`]); `None` outside a tree, where the caller reads the
+/// tables' consecutive rows from `index_pos`. A forward of any other length
+/// inside the scope is refused — rotating it by a tree's positions would be
+/// wrong with nothing failing.
+fn tree_rope_rows(
+    seq_len: usize,
+    cos: &Tensor,
+    sin: &Tensor,
+) -> CandleResult<Option<(Tensor, Tensor)>> {
+    ROW_POSITIONS.with(|p| {
+        let mut p = p.borrow_mut();
+        let Some(tree) = p.as_mut() else {
+            return Ok(None);
+        };
+        if tree.positions.len() != seq_len {
+            candle_core::bail!(
+                "a forward of {seq_len} rows inside a tree of {} positions",
+                tree.positions.len()
+            );
+        }
+        if tree_rope_per_call() {
+            let index = Tensor::new(tree.positions.as_slice(), cos.device())?;
+            return Ok(Some((
+                cos.index_select(&index, 0)?,
+                sin.index_select(&index, 0)?,
+            )));
+        }
+        if let Some((_, _, c, s)) = tree
+            .gathered
+            .iter()
+            .find(|(c, s, _, _)| *c == cos.id() && *s == sin.id())
+        {
+            return Ok(Some((c.clone(), s.clone())));
+        }
+        let at = cos.device().location();
+        let index = match tree.index_on.iter().find(|(on, _)| *on == at) {
+            Some((_, index)) => index.clone(),
+            None => {
+                let index = Tensor::new(tree.positions.as_slice(), cos.device())?;
+                tree.index_on.push((at, index.clone()));
+                index
+            }
+        };
+        let rows = (cos.index_select(&index, 0)?, sin.index_select(&index, 0)?);
+        tree.gathered
+            .push((cos.id(), sin.id(), rows.0.clone(), rows.1.clone()));
+        Ok(Some(rows))
     })
 }
 
@@ -4822,11 +4902,8 @@ impl LayerWeights {
         }
 
         let (_b_sz, _n_head, seq_len, _head_dim) = x.dims4()?;
-        let (cos, sin) = match row_positions_on(seq_len, self.cos.device())? {
-            Some(rows) => (
-                self.cos.index_select(&rows, 0)?,
-                self.sin.index_select(&rows, 0)?,
-            ),
+        let (cos, sin) = match tree_rope_rows(seq_len, &self.cos, &self.sin)? {
+            Some(rows) => rows,
             None => (
                 self.cos.narrow(0, index_pos, seq_len)?,
                 self.sin.narrow(0, index_pos, seq_len)?,
@@ -7714,5 +7791,91 @@ mod card_quantized_products {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tree_rope_rows_tests {
+    use super::*;
+    use candle_core::{Device, Tensor};
+
+    fn table(rows: usize, width: usize, offset: f32) -> Tensor {
+        let data: Vec<f32> = (0..rows * width).map(|i| i as f32 + offset).collect();
+        Tensor::from_vec(data, (rows, width), &Device::Cpu).unwrap()
+    }
+
+    /// A tree's positions are made into an index once per forward and a
+    /// table's rows gathered once, however many layers rope at them: every
+    /// call after the first is handed the same rows, at the right positions.
+    /// A second table (Gemma 3's windowed layers) gets rows of its own, and a
+    /// job a pool thread runs inside the forward (gotcha #919) starts from
+    /// nothing and leaves the forward's rows as they were.
+    #[test]
+    fn a_trees_rope_rows_are_made_once_per_forward() {
+        let (cos, sin) = (table(16, 4, 0.0), table(16, 4, 1000.0));
+        assert!(
+            tree_rope_rows(3, &cos, &sin).unwrap().is_none(),
+            "no tree, no rows"
+        );
+        let positions = vec![5u32, 6, 6];
+        let _tree = RowPositions::new(positions.clone());
+        let (c1, s1) = tree_rope_rows(3, &cos, &sin)
+            .unwrap()
+            .expect("a tree's rows");
+        let index = Tensor::new(positions.as_slice(), &Device::Cpu).unwrap();
+        let want = cos
+            .index_select(&index, 0)
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap();
+        assert_eq!(c1.to_vec2::<f32>().unwrap(), want);
+        assert_eq!(
+            s1.to_vec2::<f32>().unwrap(),
+            sin.index_select(&index, 0)
+                .unwrap()
+                .to_vec2::<f32>()
+                .unwrap()
+        );
+        // The same tables again — the next rope, the next layer: the same rows.
+        let (c2, s2) = tree_rope_rows(3, &cos.clone(), &sin.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (c2.id(), s2.id()),
+            (c1.id(), s1.id()),
+            "gathered once per forward"
+        );
+        // Another table is gathered for itself, at the same positions.
+        let (other_cos, other_sin) = (table(16, 4, 50.0), table(16, 4, 60.0));
+        let (c3, _) = tree_rope_rows(3, &other_cos, &other_sin).unwrap().unwrap();
+        assert_ne!(c3.id(), c1.id());
+        assert_eq!(
+            c3.to_vec2::<f32>().unwrap(),
+            other_cos
+                .index_select(&index, 0)
+                .unwrap()
+                .to_vec2::<f32>()
+                .unwrap()
+        );
+        {
+            // A stolen job with a tree of its own: its own rows, not these.
+            let _job = RowPositions::carried(Some(vec![1, 2, 3]));
+            let (cj, _) = tree_rope_rows(3, &cos, &sin).unwrap().unwrap();
+            assert_ne!(cj.id(), c1.id());
+            assert_eq!(
+                cj.to_vec2::<f32>().unwrap()[0],
+                cos.to_vec2::<f32>().unwrap()[1]
+            );
+        }
+        let (c4, _) = tree_rope_rows(3, &cos, &sin).unwrap().unwrap();
+        assert_eq!(
+            c4.id(),
+            c1.id(),
+            "the forward's rows outlive the job it ran"
+        );
+        assert!(
+            tree_rope_rows(2, &cos, &sin).is_err(),
+            "a forward of another length inside the tree is refused"
+        );
     }
 }
