@@ -429,11 +429,28 @@ loaded layers and refuse alike: 2.65-2.93 tok/s in every arm.
   the drafter keeps the card, the target's layers go elsewhere. Tests:
   `room_is_left_on_the_card_beside_the_layers_for_their_drafter`,
   `a_fresh_card_split_gives_way_to_the_drafters_room`.
+- Measured on the real link (2026-10-22, `~/swarmllm-318/cardfill275q8.sh`:
+  Thailand↔Australia ~411 ms, Qwen2.5-Coder-7B with this machine holding
+  shards 0-5 and its card capped at 4,000 MB, the peer's RTX 3060 held to
+  shards 2-7, the Q8_0 0.5B drafter at 966 MB; arms alternating by node start):
+  with `SWARMLLM_DRAFTER_ROOM=0` the plan put 22 layers here (20 on the card),
+  the drafter on the processor (17.6 ms a guess) and no trees ran — 5.22/5.47
+  tok/s at 160 tokens, 5.97/5.87 at 400; the default was cut ("Leaving room
+  beside this node's layers for the drafter", `room_for=Some(16)`,
+  `fresh_run_withdrawn=Some(28)`), the drafter loaded on the card (5.4 ms a
+  guess) and trees ran — 7.85/11.05 and 9.13/9.94. **Only that first pair
+  compares the cut**: the peer then still held layers 6-28, and both settings
+  planned 0-6 here with the drafter on the card (~10 tok/s each) — the held-layers
+  residual below, seen from the far side. With the fp16 copy (2,991 MB, its F16
+  weights widened to f32 at load — FUTURE_WORK #308) the room was 4 layers,
+  short of the 6 this node had to hold, so no plan took the cut and every arm
+  ran the card-filling plan (3.3-3.4 tok/s).
 - Residuals: a target worker that already HOLDS the layers keeps them (held
   layers cost the plan nothing), so the room appears from the next cold load;
-  the drafter is chosen largest-by-bytes, so a card leaves room for the 0.5B
-  fp16 (~1 GB) where a Q8 copy (~0.65 GB) would cost it less — whether it
-  guesses as well is unmeasured (#134 item 3, a device-aware choice); a swarm whose peers offer too little for any strict
+  of one model's copies the drafter is the one that reads the fewest bytes
+  (`largest_that_can_draft`: Q4_K_M before Q8_0 before fp16), so the room a
+  card leaves is the smallest copy's — whether a Q4_K_M 0.5B guesses as well as
+  the Q8_0 is unmeasured (#134 item 3, a device-aware choice); a swarm whose peers offer too little for any strict
   plan gets no room, by design (the drafter is then not chosen where the plan
   leaves it none).
 - Tests: `whether_a_drafter_would_load_is_asked_without_loading_it` (the probe

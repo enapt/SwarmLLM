@@ -1481,7 +1481,10 @@ existing `mul_mat_via_f16_cublas` (no dequantize step) above that; the estimator
 `forward_shared`, `FusedSlice`, LoRA and the prompt-card copy each checked against an f16 weight; a
 replies-against-llama.cpp check (`score_against_reference.py`), since a prompt pass would then round
 activations to f16 as llama.cpp's does. Who it helps: anyone who downloads a repo's "F16" file of a
-small model — the drafter choice already prefers a quantized copy (gotcha #849).
+small model — the drafter choice already prefers a quantized copy (gotcha #849). Beside a split the
+cost is card room too: the 0.5B fp16 drafter is charged 2,991 MB, so on a 4,000 MB card the room it
+left was 4 of the 7B's layers, short of the 6 this node had to hold, and no plan took the cut
+(2026-10-22, `cardfill275.sh`; the Q8_0 copy, 966 MB, left 16).
 
 #### #309 — Small dense models decoded at 0.80-0.83 of llama.cpp on a card; 0.94-1.00 since the attention chunk follows the cache, Gemma 4 E2B 0.87
 `P3` · perf-local · **PARTIAL** — 2026-10-19 · history: #307's sweep
@@ -2969,8 +2972,12 @@ grep `^| N |`).
   and its offer alone calls for one (`scheduler::leaving_room_here`). Past the room the drafter
   still loads in system memory where that has room, as before. SpecExec (arXiv 2406.02532) makes
   the same trade. Tests `room_is_left_on_the_card_beside_the_layers_for_their_drafter`,
-  `a_fresh_card_split_gives_way_to_the_drafters_room`. The real-link run of a card-filling plan is
-  owed with the next CUDA build (next_up.md).
+  `a_fresh_card_split_gives_way_to_the_drafters_room`. On the real link (Thailand↔Australia
+  ~411 ms, a 7B split, this card capped at 4,000 MB, the Q8_0 0.5B drafter at 966 MB): with no room
+  the plan put 22 layers here and the drafter on the processor — 5.22-5.97 tok/s; the default plan
+  was cut to 16 ("Leaving room beside this node's layers for the drafter"), the drafter loaded on
+  the card and trees ran — 7.85-11.05. Only that first pair compares the cut: afterwards the peer
+  still held layers 6-28 and both settings planned 0-6 here (~10 tok/s each).
 - #134 (c) — **Trees with the drafter on the card beat the chain stream on the real link**:
   Thailand↔Australia (~405 ms), a 7B split with the head's half and the 0.5B drafter on this
   machine's card, arms alternating by node start on the v0.3.247 release binary — trees 8.41 tok/s
