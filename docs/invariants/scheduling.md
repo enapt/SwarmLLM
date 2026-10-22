@@ -4821,6 +4821,43 @@ one CUDA graph since 2026-10-22** (`docs/invariants/inference.md` § "A tree lev
 this rig the drafter's time fell ~9% and this node's half rose by about as much, the three
 processes sharing one card.
 
+**On a thin uplink: the rows that DIE are the cost, and a guard holds them down** (2026-10-22,
+`FlowGuard`). With the netns rate limit on node↔node traffic only (`RIG_RATE`, the worker IPC is
+untouched), the fixed flow lost to the tree rounds — what it sends is ~26 rows a token at 8 rows a
+level, against the rounds' ~6. Every token the walk advances kills the rows not under it and the
+drafter grows the tree back: a WIDE call grows rows the next advance kills before they are read,
+a SMALL live budget leaves the walk too little tree ahead. Fixed settings, warm replies, 385 ms:
+
+| link | tree rounds | 8×128 (default) | 4×128 | 2×128 | 8×64 | 8×32 | 8×16 |
+|---|---|---|---|---|---|---|---|
+| 5 Mbit | 6.77-7.05 | 4.49-4.79 (26-28 rows/token, waiting 53 of 82 s) | 4.85-6.17 | 6.31-6.71 (~10, near-bound) | 5.70-5.77 | 6.25-6.52 (waiting 45 s) | 4.47-4.48 |
+| 10 Mbit | 7.70-7.85 | 7.65-7.69 | 8.56-8.64 | 7.07-7.17 | — | — | — |
+
+So no fixed point wins on every link — the guard is a congestion window in rows, LEDBAT++'s
+(draft-irtf-iccrg-ledbat-plus-plus-06: a 60 ms queueing-delay target over the least delay seen,
+the least of the 4 latest samples, `W -= min(W/2, W·(queue/target − 1))`): a queue narrows the
+rows a level first (8 → 2) and only then the live budget (128 → 32); room grows the budget back
+first, then the levels; one cut per window of forwards (an answer counts only if its forward left
+after the last cut, TCP's one reduction a window); rises spaced a least delay apart; the state is
+kept 10 min per (model, machines) for the next reply (RFC 6817's base-delay window). ⚠ **An
+answer is timed on ARRIVAL, on a task of its own** (`Arrival`): the first build read each delay
+when this node got round to it — between its drafter calls and its own layers' forwards, ~100 ms
+of its own work that drifts against the answers — and cut an UNTHROTTLED link 8×128 → 2×32
+(24 cuts, queue up to 141 ms, 7.8-8.0 tok/s against 8.8-8.9 unguarded). RFC 6817 § 3.4.1
+timestamps on arrival for the same reason; the min-of-4 filter does not cover a delay every
+sample carries. The rounds' check cost (`reply.check`) reads the arrival too. Measured with
+arrival timing (`guardrig2.sh`, one binary, A/B `SWARMLLM_FLOW_GUARD=0`, two warm replies an arm):
+
+| link | guard on | guard off | where it settled |
+|---|---|---|---|
+| 5 Mbit | **7.44-7.50** | 4.73-4.80 (waiting 54-55 s) | 2×32-38, 16-22 cuts |
+| 10 Mbit | **8.52-8.82** | 8.23 | 2×113 → 4×128 |
+| none | 9.02-9.12 | 9.59-10.19 | 8×128; one reply cut 6 times in bursts of the far half's own queue (answers at 630-820 ms against a least of 462: the far half shares this rig's card), the other never |
+
+With no limit, the reply that never cut ran 9.12 against 9.59-10.19 guard-off — the guard's code
+did nothing there, so that gap is the arms (the guard-on arm always ran first) — an alternating
+check is owed (FUTURE_WORK #134 (b)).
+
 **What a change must keep.** The draw at a row must not depend on the forward that carried it
 (noise by position, the row's own ancestors in its mask); the three trees change only by the
 ordered ops; a rebase's forward goes out at once, before any proposal, so path + kept never

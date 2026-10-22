@@ -14,6 +14,16 @@ replies came at 9.0-9.4 tokens a second against 8.0-8.3 for trees checked one ro
 time. If anything goes wrong mid-reply, the reply is finished the old way. `SWARMLLM_TREE_FLOW=0`
 turns it off.
 
+**On a slow upload, the flowing guesses now hold back instead of clogging the line.** Every
+guess the far computer checks has to cross your upload first, and most guesses are thrown away
+once the reply takes another path — with eight guesses a step, about 26 crossed for each word
+kept. On a 5 Mbit/s upload that made the flow slower than the old way. Now your computer watches
+how long the far computer's answers take to come back: when they start queuing behind each other,
+it guesses narrower and keeps fewer guesses ahead, and widens again when the line clears. On the
+test split at a 385 ms round trip, a 5 Mbit/s upload went from 4.7-4.8 to 7.4-7.5 words a second
+(the old way ran 6.8-7.1), 10 Mbit/s from 8.2 to 8.5-8.8, and an unlimited one stayed wide.
+`SWARMLLM_FLOW_GUARD=0` turns it off.
+
 **The small model guessing for a split now hands each step to your graphics card in one piece.**
 A flowing tree asks it for three levels of eight guesses at a time. Each level used to be some
 500 small jobs sent to the card one by one; now the attention over a level's guesses is one job,
