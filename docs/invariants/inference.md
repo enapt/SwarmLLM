@@ -4212,6 +4212,63 @@ row cap and a one-row call the scope does not describe, both with no mask — re
 version's check, at the one-row call); `a_trees_visibility_reaches_its_last_row` (`draft_tree`); the pool scope carries the
 visibility (`cpu_pools`); a tree shape's graph state is untouched by a chain's rest (`cuda_graph`).
 
+## A tree level's rows are ranked on the card in two launches (2026-10-22, #134 (b))
+
+**What it replaced.** After each level the drafter ranks its rows — each row's log-sum-exp and its
+eight likeliest tokens (`split::draft::likeliest_rows_where_they_are`; on a card since v0.3.247, so
+a row is never read back whole). Composed from candle ops that was a log-sum-exp (max, subtract,
+exp, sum, log), eight rounds of argmax + gather + scatter, and three reads back: about thirty
+launches and three waits on the card a level. candle's `fast_argmax` gives each ROW one block, so
+eight rows kept eight of a laptop card's 40 multiprocessors busy: in a flow call's bench 448
+launches × 133 µs, 21% of all the card's time (nsys, the 0.5B Q8_0 drafter, RTX 3070 Laptop).
+
+**The rule.** **`tree_rank::ranked_on_the_card`** → `kernels/tree_rank.cu`. Pass 1 cuts each row
+into up to 64 chunks of at least 2048 scores, a block of 256 threads each; every thread keeps an
+online max / sum of exp and its own top eight in registers, and the block merges them in eight
+rounds of a warp-shuffle argmax. Pass 2 merges a row's chunks the same way and writes `[lse, eight
+log-probabilities, eight ids]` a row, read back in ONE copy. It is the shape top-k sampling takes in
+FlashInfer and llama.cpp: a partial top-k per block, merged after. **NOT bit-identical** to the
+composition: the sum runs in another order, and a tie goes to the smaller id — as the host's
+`likeliest` breaks it; candle's argmax breaks it its own way. It decides only what is guessed, never
+the reply. A row with a NaN or +inf, or nothing finite, is ranked on the host as before
+(`CardRanking::NotFinite`); more than eight followers, a vocabulary of 2^24 or more, or
+`SWARMLLM_TREE_TOPK=composed` → the composition; a kernel error warns once and ranks with the
+composition, so a kernel that will not load costs speed, never the drafter.
+
+**Measured** (`prefill_bench`, the 0.5B Q8_0 drafter, idle card, live node stopped, min of 7, arms
+adjacent, two passes; `~/swarmllm-318/rankbench.sh`):
+
+| growth | composed | two launches |
+|---|---|---|
+| a flow call: 3 levels of 8 rows, from nothing | 26.8 / 26.8 ms | 21.0 / 20.8 (−22%) |
+| the same on a seed | 21.7 / 21.5 | 17.5 / 17.3 |
+| 64 rows 8 a level, from nothing | 77.6 / 78.0 | 63.5 / 63.8 (−18%) |
+| the same on a seed | 25.0 / 24.9 | 19.9 / 19.9 |
+
+The mechanism (nsys, one flow-call bench each): `fast_argmax_f32` 448 × 132.8 µs gone;
+`tree_rank_partials` 56 × 54.1 µs and `tree_rank_merge` 56 × 5.8 µs in its place.
+
+*On the card rig* (`~/swarmllm-318/rankrig.sh`: a tree that flows, 385 ms, both halves and the
+drafter on ONE card, the rig's chat prompt, 400 tokens, two warm replies an arm, arms in the order
+two launches, composed, composed, two launches): the drafter's time a reply 20.8-22.8 s against
+25.4-26.5 (−17%); the reply 9.79 / 9.68 / 9.56 / 7.52 tok/s against 9.36 / 8.98 / 9.00 / 8.74 (means
+9.14 / 9.02). Three processes time-slice one card (gotcha #759), so the card's time saved went
+mostly to the other two, and the flow guard's cuts grew through the run in both arms (1-15 a reply
+composed, 4-29 with two launches; the 7.52 reply was held at 2 × 32 rows from its start). Across a
+real link the far half runs on another computer. Replies against llama.cpp
+(`score_against_reference.py`, all twelve): every token rank 1 or a near-tie — worst rank 2 in
+every arm, largest logit gap 0.399 once with two launches (the rest ≤ 0.130) and 0.128 composed;
+the drafter's ranking chooses which rows the target checks, never what it emits.
+
+**What a change must keep**: one read back a level; a row never read back whole on a card; ties to
+the smaller id, so the card and the host agree on the order.
+
+**Tests**: `the_card_ranks_a_level_as_the_host_does` (`split/draft.rs`, card: 8 rows of a Qwen
+vocabulary, the 65-row seed, Gemma's 262K, a tiny vocabulary, tied scores, suppressed tokens, a few
+finite scores — ids equal the host's ranking, log-probabilities within 1e-4 of an f64 sum, since the
+host's one f32 sum over a vocabulary drops every term below half its last bit; NaN, +inf and nothing
+finite → `NotFinite`; nine followers → `NotTaken`) — red with `SWARMLLM_TREE_TOPK=composed`.
+
 ## A graph pays only when it is updated — a shape that keeps being rebuilt rests (2026-10-05)
 
 **What was seen.** The 60-second `decode graph` line counts launches that updated every group's

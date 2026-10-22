@@ -2029,9 +2029,13 @@ bitmask per row; `cuda_graph::StepShape`; `docs/invariants/inference.md` § "A t
 card") — on an idle card a flow call's three levels take 26.5 ms against 36.0 (−26%); on the
 one-card rig the drafter's time fell ~9% and this node's half rose
 about as much (three processes on one card, gotcha #759), so the reply's speed did not move
-there. Left of it: a whole drafter call as ONE graph with its rows chosen on the card (SGLang's
-EAGLE captures its draft levels and the top-k between them; ours chooses on the host between
-levels, a sync each); a kernel sharing K/V loads across rows (FlashInfer's query tile) to lift
+there. **Built 2026-10-22, released in v0.3.248: a level's rows are ranked in two launches and
+one read back** (`kernels/tree_rank.cu`, where ~30 launches with eight one-block-a-row argmaxes
+were 21% of the card's time): a flow call 26.8 → 21 ms on an idle card (`docs/invariants/inference.md`
+§ "A tree level's rows are ranked on the card in two launches"). Left of it: a whole drafter call
+as ONE graph with its rows chosen on the card (SGLang's EAGLE captures its draft levels and the
+top-k between them; ours still reads each level's ranking back and chooses on the host, a sync
+each, and re-captures the step every level — ~740 launch calls a level); a kernel sharing K/V loads across rows (FlashInfer's query tile) to lift
 the 8-row cap off the head's ~25-row forwards; how many levels a call pays once a level is
 cheap (re-measure the 2/3/4-level table off the one-card rig); misses (16-24 a reply, each about a round trip); the flow sends ~25 rows a
 token against rounds' ~6 (~0.8 MB/s up at 9 tok/s, and four times the far peer's work) — on a thin

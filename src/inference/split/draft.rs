@@ -177,9 +177,43 @@ type RankedRows = Vec<Vec<(u32, f32)>>;
 /// step on the TH↔AU link (2026-10-21), and ~100 ms for the 65-row seed a call
 /// beside a check starts from. The chain drafter learned the same lesson
 /// (`argmax_guesses_on_card`); EAGLE-2 and SpecExec rank on the device too
-/// (`torch.topk`). `k` picks of the row's maximum, each written over with −∞,
-/// reproduce [`likeliest`]'s order; ties may break differently.
+/// (`torch.topk`). On a card the two launches of `kernels/tree_rank.cu` rank
+/// the level (`inference::tree_rank`, card builds only: one read of each row,
+/// one copy back); elsewhere, or with `SWARMLLM_TREE_TOPK=composed`, the
+/// composition.
 fn likeliest_rows_where_they_are(
+    logits: &candle_core::Tensor,
+    temperature: f32,
+    k: usize,
+) -> Result<Option<RankedRows>, SwarmError> {
+    #[cfg(feature = "candle-cuda")]
+    {
+        use crate::inference::tree_rank::{ranked_on_the_card, CardRanking};
+        match ranked_on_the_card(logits, temperature, k) {
+            Ok(CardRanking::Ranked(ranked)) => return Ok(Some(ranked)),
+            Ok(CardRanking::NotFinite) => return Ok(None),
+            Ok(CardRanking::NotTaken) => {}
+            // A kernel that will not load or launch costs the level its speed,
+            // never the drafter: the composition ranks it as before.
+            Err(e) => {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    tracing::warn!(
+                        error = %e,
+                        "the card's tree ranking failed; ranking with candle's ops instead"
+                    );
+                });
+            }
+        }
+    }
+    likeliest_rows_composed(logits, temperature, k)
+}
+
+/// [`likeliest_rows_where_they_are`] composed from candle ops: `k` picks of
+/// the row's maximum, each written over with −∞, reproduce [`likeliest`]'s
+/// order; ties may break differently. About thirty launches and three reads
+/// back a level.
+fn likeliest_rows_composed(
     logits: &candle_core::Tensor,
     temperature: f32,
     k: usize,
@@ -1124,6 +1158,115 @@ mod tests {
         assert!(likeliest_rows_where_they_are(&none, 0.0, 8)
             .unwrap()
             .is_none());
+    }
+
+    /// The card's two launches (`kernels/tree_rank.cu`) rank a level as the
+    /// host's one-pass ranking does — the same followers in the same order,
+    /// ties to the smaller id as the host breaks them, log-probabilities to
+    /// 1e-4 — at a drafter's shapes: 8 rows of a Qwen vocabulary, the 65-row
+    /// seed, Gemma's 262K, a tiny vocabulary, suppressed (−∞) tokens, fewer
+    /// finite scores than followers. A NaN or a row with nothing finite is left
+    /// to the host.
+    ///
+    /// ⚠ Needs a card: run `cargo test --features candle-cuda --lib
+    /// the_card_ranks -- --nocapture` and look for no SKIPPED line.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn the_card_ranks_a_level_as_the_host_does() {
+        use crate::inference::tree_rank::{ranked_on_the_card, CardRanking};
+        use candle_core::{Device, Tensor};
+        let dev = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIPPED tree-rank against the host: no CUDA device ({e})");
+                return;
+            }
+        };
+        let ranked = |rows: &[Vec<f32>], temperature: f32, k: usize| {
+            let vocab = rows[0].len();
+            let flat: Vec<f32> = rows.iter().flatten().copied().collect();
+            let t = Tensor::from_vec(flat, (rows.len(), vocab), &dev).unwrap();
+            ranked_on_the_card(&t, temperature, k).unwrap()
+        };
+        let check = |rows: &[Vec<f32>], what: &str| {
+            for (temperature, k) in [(0.0f32, 8usize), (0.7, 8), (1.3, 3)] {
+                let CardRanking::Ranked(got) = ranked(rows, temperature, k) else {
+                    panic!("{what}: finite rows are ranked on the card");
+                };
+                assert_eq!(got.len(), rows.len(), "{what}");
+                for (r, (row, got)) in rows.iter().zip(&got).enumerate() {
+                    let want = likeliest(row, temperature, k, None);
+                    assert_eq!(
+                        got.iter().map(|&(t, _)| t).collect::<Vec<_>>(),
+                        want.iter().map(|&(t, _)| t).collect::<Vec<_>>(),
+                        "{what}: row {r} at temperature {temperature}"
+                    );
+                    // Against an f64 sum: the host's one f32 sum over a
+                    // vocabulary drops every term below half its last bit.
+                    let t = f64::from(if temperature > 0.0 { temperature } else { 1.0 });
+                    let finite = || row.iter().filter(|x| x.is_finite()).map(|&x| f64::from(x));
+                    let max = finite().fold(f64::NEG_INFINITY, f64::max);
+                    let lse = max / t + finite().map(|x| ((x - max) / t).exp()).sum::<f64>().ln();
+                    for &(id, g) in got {
+                        let w = f64::from(row[id as usize]) / t - lse;
+                        assert!((f64::from(g) - w).abs() < 1e-4, "{what}: {g} against {w}");
+                    }
+                }
+            }
+        };
+        let random = |rows: usize, vocab: usize| -> Vec<Vec<f32>> {
+            Tensor::randn(0f32, 3.0, (rows, vocab), &dev)
+                .unwrap()
+                .to_vec2()
+                .unwrap()
+        };
+        check(&random(8, 151_936), "8 rows of a Qwen vocabulary");
+        check(&random(65, 151_936), "the 65-row seed");
+        check(&random(3, 262_144), "Gemma's vocabulary");
+        check(&random(2, 500), "a tiny vocabulary");
+        // Few distinct values: every follower ties with others.
+        let tied: Vec<Vec<f32>> = (0..4u32)
+            .map(|r| {
+                (0..151_936u32)
+                    .map(|i| ((i * 7919 + r * 104_729) % 1009) as f32 / 37.0 - 9.0)
+                    .collect()
+            })
+            .collect();
+        check(&tied, "tied scores");
+        let mut suppressed = random(8, 151_936);
+        for row in &mut suppressed {
+            for x in row.iter_mut().step_by(3) {
+                *x = f32::NEG_INFINITY;
+            }
+        }
+        check(&suppressed, "suppressed tokens");
+        let mut short = vec![vec![f32::NEG_INFINITY; 151_936]; 2];
+        short[0][3] = 1.0;
+        short[0][140_000] = 2.0;
+        short[1][77] = -4.0;
+        let CardRanking::Ranked(got) = ranked(&short, 0.0, 8) else {
+            panic!("rows with a few finite scores are ranked");
+        };
+        assert_eq!(
+            got[0].iter().map(|&(t, _)| t).collect::<Vec<_>>(),
+            [140_000, 3]
+        );
+        assert_eq!(got[1].iter().map(|&(t, _)| t).collect::<Vec<_>>(), [77]);
+        check(&short, "a few finite scores");
+
+        let mut nan = random(3, 151_936);
+        nan[1][9_000] = f32::NAN;
+        assert!(matches!(ranked(&nan, 0.0, 8), CardRanking::NotFinite));
+        let mut inf = random(3, 151_936);
+        inf[2][5] = f32::INFINITY;
+        assert!(matches!(ranked(&inf, 0.0, 8), CardRanking::NotFinite));
+        let empty = vec![vec![f32::NEG_INFINITY; 151_936]];
+        assert!(matches!(ranked(&empty, 0.0, 8), CardRanking::NotFinite));
+        // More followers than the kernel keeps: composed instead.
+        assert!(matches!(
+            ranked(&random(1, 500), 0.0, 9),
+            CardRanking::NotTaken
+        ));
     }
 
     #[test]

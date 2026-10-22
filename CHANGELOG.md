@@ -36,11 +36,13 @@ test split at a 385 ms round trip, a 5 Mbit/s upload went from 4.7-4.8 to 7.4-7.
 **The small model guessing for a split now hands each step to your graphics card in one piece.**
 A flowing tree asks it for three levels of eight guesses at a time. Each level used to be some
 500 small jobs sent to the card one by one; now the attention over a level's guesses is one job,
-and the whole level is recorded once and replayed. On an idle card three levels take 26.5 ms
-instead of 36.0. On the test split, where every part shared one graphics card, the guessing took
-9% less time and the reply's speed did not change; across a real link the far half runs on
-another computer, so the card's time saved is the guesser's. `SWARMLLM_TREE_GRAPH=0` turns the
-replay off, and `SWARMLLM_TREE_ATTN=standard` turns off both.
+and the whole level is recorded once and replayed. Picking the likeliest guesses after each level
+is now two jobs and one read back, where it was some thirty jobs and three waits. On an idle card
+three levels take 21 ms instead of 36. On the test split, where every part shared one graphics
+card, the guessing took about a quarter less time and the reply's speed barely moved; across a
+real link the far half runs on another computer, so the card's time saved is the guesser's.
+`SWARMLLM_TREE_GRAPH=0` turns the replay off, `SWARMLLM_TREE_ATTN=standard` turns off both, and
+`SWARMLLM_TREE_TOPK=composed` picks the guesses the old way.
 
 **A split across a long link spends less of each round waiting for its guesses.** While the far
 computer checks one tree of guesses, the small model on your graphics card grows the next one.

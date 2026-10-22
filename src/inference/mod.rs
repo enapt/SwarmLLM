@@ -45,6 +45,8 @@ pub(crate) mod tensor_util;
 pub mod thermal;
 pub(crate) mod tokenizer;
 pub mod trace;
+#[cfg(feature = "candle-cuda")]
+pub(crate) mod tree_rank;
 pub mod vision;
 pub mod worker_ipc;
 

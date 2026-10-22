@@ -27,14 +27,15 @@ fn main() {
 /// above the virtual arch, so one artifact serves the whole `sm_80+` range the
 /// CUDA release builds target.
 fn build_fused_decode_ptx() {
-    // `decode_attn.cu` and `delta_rule.cu` are NOT bit-identical to the ops
-    // they replace (they sum in a different order); their headers say so. The
-    // no-fast-math rule below still applies to them.
+    // `decode_attn.cu`, `delta_rule.cu` and `tree_rank.cu` are NOT
+    // bit-identical to the ops they replace (they sum in a different order);
+    // their headers say so. The no-fast-math rule below still applies to them.
     const KERNELS: &[&str] = &[
         "fused_decode.cu",
         "decode_attn.cu",
         "kv_append.cu",
         "delta_rule.cu",
+        "tree_rank.cu",
     ];
 
     for k in KERNELS {
