@@ -832,6 +832,7 @@ impl FlowRun<'_, '_> {
                 &self.state,
                 !self.growing,
                 std::mem::take(&mut self.ops),
+                self.flow.base(),
                 rows,
                 levels,
                 guard.live,

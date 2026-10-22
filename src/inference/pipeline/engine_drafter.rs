@@ -650,6 +650,12 @@ pub(super) struct EngineDrafter {
     /// The last call, while its round's check is pending: the sequence length it
     /// read up to, and how many guesses it made.
     open: Option<(usize, usize)>,
+    /// While a tree flows: the tree's start as the worker last heard it. A
+    /// flow call carries every op queued (a `FlowOp::Rebase` among them), so
+    /// once one answers, the worker's cache holds the sequence below the start
+    /// the caller had then ([`Self::flow_ended`]). `None`: no call of this
+    /// flow has answered.
+    flow_heard: Option<usize>,
     calls: u32,
 }
 
@@ -702,6 +708,7 @@ impl EngineDrafter {
             seq: prompt_ids,
             valid: 0,
             open: None,
+            flow_heard: None,
             calls: 0,
         }
     }
@@ -863,7 +870,8 @@ impl EngineDrafter {
     /// `start` begins it from the sequence's last token (the cache cut to what
     /// it holds of the sequence before that token, the rest read), else it
     /// continues this attempt's tree after `ops` — the requester's changes
-    /// since the last call. Answers up to `rows` proposals a level, `levels`
+    /// since the last call, which leave the tree starting at `base`
+    /// (`FlowTree::base`). Answers up to `rows` proposals a level, `levels`
     /// deep, as (parent row, token) — each already a row of the drafter's
     /// tree, so the caller pushes every one, in order, and sends no op for
     /// it. While the tree flows the cache holds the sequence only below
@@ -874,6 +882,7 @@ impl EngineDrafter {
         state: &SharedState,
         start: bool,
         ops: Vec<crate::inference::draft_tree::FlowOp>,
+        base: usize,
         rows: u32,
         levels: u32,
         live_most: u32,
@@ -940,10 +949,7 @@ impl EngineDrafter {
                 drafted.parents.len(),
             )));
         }
-        if start {
-            self.valid = read_to;
-        }
-        self.open = None;
+        self.flow_answered(start, read_to, base);
         Ok(drafted
             .parents
             .iter()
@@ -952,13 +958,29 @@ impl EngineDrafter {
             .collect())
     }
 
+    /// A flow call answered: on the flow's first, the cache holds the sequence
+    /// up to the tree's root (`read_to`); after any, the worker has heard every
+    /// op up to the tree starting at `base`.
+    fn flow_answered(&mut self, start: bool, read_to: usize, base: usize) {
+        if start {
+            self.valid = read_to;
+        }
+        self.flow_heard = Some(base);
+        self.open = None;
+    }
+
     /// A tree that flowed has ended, the sequence holding every token its walk
-    /// committed: the drafter's cache holds the sequence below `base` (the
-    /// tree's start as it last moved, `FlowTree::base` — a rebase read the
-    /// path below it as context) and is trusted no further; the next call
-    /// cuts it there and reads on.
+    /// committed, the tree starting at `base` (`FlowTree::base` — a rebase read
+    /// the path below it as context). The cache is trusted below `base` only as
+    /// far as the worker HEARD: a rebase no call carried left the old tree's
+    /// rows where the path now is, and a flow none of whose calls answered left
+    /// the cache as it was. The next call cuts it there and reads on.
     pub(super) fn flow_ended(&mut self, base: usize) {
-        self.valid = base.min(self.seq.len());
+        self.valid = match self.flow_heard.take() {
+            Some(heard) => base.min(heard),
+            None => self.valid.min(base),
+        }
+        .min(self.seq.len());
         self.open = None;
     }
 
@@ -1084,6 +1106,32 @@ mod tests {
     /// A stream drafts on as if every guess were kept, then rewinds to the
     /// guess the check refused: the next call reads from the confirmed prefix,
     /// never from a chunk drafted on top of the refused guess.
+    /// After a tree that flowed, the drafter's cache is trusted only to the
+    /// tree start its worker HEARD — a rebase that went out with no call (the
+    /// flow ended first) left the old tree's rows where the reply now is.
+    #[test]
+    fn a_flow_trusts_the_cache_only_to_the_start_its_worker_heard() {
+        let seq: Vec<u32> = (0..20).collect();
+        // The first call read to the root at 12; a later one carried a
+        // rebase to 16; the walk rebased to 18 and the flow ended before any
+        // call carried it.
+        let mut d = drafter(&seq);
+        d.flow_answered(true, 12, 12);
+        d.flow_answered(false, 0, 16);
+        d.flow_ended(18);
+        assert_eq!(d.valid(), 16);
+        // Every rebase carried: trusted to the tree's start.
+        let mut d = drafter(&seq);
+        d.flow_answered(true, 12, 12);
+        d.flow_answered(false, 0, 18);
+        d.flow_ended(18);
+        assert_eq!(d.valid(), 18);
+        // A second flow none of whose calls answered leaves the cache as the
+        // first left it.
+        d.flow_ended(19);
+        assert_eq!(d.valid(), 18);
+    }
+
     #[test]
     fn a_stream_rewinds_the_drafter_to_the_refused_guess() {
         let mut d = drafter(&[1, 2, 3]);

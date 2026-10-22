@@ -12,7 +12,9 @@ arrives — the reply waits a round trip only where none of the guesses held the
 test split of a 7B model at a 385 ms round trip, with every part on one graphics card, 400-token
 replies came at 9.0-9.4 tokens a second against 8.0-8.3 for trees checked one round trip at a
 time. If anything goes wrong mid-reply, the reply is finished the old way. `SWARMLLM_TREE_FLOW=0`
-turns it off.
+turns it off. When a flowing reply ends just after the guesser was told to move on, its next
+guesses start from what it was last actually told, not from a version of the reply it never
+received — that could only ever make the guesses worse, never the reply.
 
 **A split writes text it has seen before about twice as fast.** When a reply repeats something
 already in the conversation — code you asked to have edited, a document being quoted, a list
