@@ -248,6 +248,68 @@ fn a_captured_tree_level_reads_as_the_ordinary_one() {
     }
 }
 
+/// A tree WIDER than the per-row kernel's rows, read on the card in one
+/// forward — a worker's check of a flow's levels — comes out row by row as
+/// each row's own path read fresh, and was read by the TILED kernel
+/// (`decode_attn::tiled_tree_calls`; `SWARMLLM_TREE_ATTN_TILED=0` turns this
+/// test red). 24 rows, branching (every fifth row starts afresh), over a half
+/// cache.
+///
+/// ⚠ Gated: run it on a card with `--nocapture` and look for the SKIPPED line
+/// before believing a pass.
+#[cfg(feature = "candle-cuda")]
+#[test]
+fn a_wide_tree_on_the_card_reads_what_each_path_reads() {
+    let card = match Device::new_cuda(0) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("SKIPPED wide tree on the card: no CUDA device ({e})");
+            return;
+        }
+    };
+    let mut model = whole_model_on(&card);
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let prompt = model.tensor_from_ids(&PROMPT).unwrap();
+    model.forward(&prompt, 0, &kv, "w").unwrap();
+    const ROWS: usize = 24;
+    let parents: Vec<Option<u16>> = (0..ROWS)
+        .map(|i| (i % 5 != 0).then(|| ((i * 7 + 3) % i) as u16))
+        .collect();
+    let tokens: Vec<u32> = (0..ROWS)
+        .map(|i| (i * 37 + 11) as u32 % VOCAB as u32)
+        .collect();
+    let input = model.tensor_from_ids(&tokens).unwrap();
+    let t = DraftTree::new(PROMPT.len(), parents.clone()).unwrap();
+    let before = crate::inference::decode_attn::tiled_tree_calls();
+    let out = model
+        .with_draft_tree(t, |m| {
+            m.forward_verify_all_positions(&input, PROMPT.len(), &kv, "w")
+        })
+        .unwrap()
+        .unwrap();
+    let tiled = crate::inference::decode_attn::tiled_tree_calls() - before;
+    assert!(
+        tiled >= 3,
+        "the tiled tree kernel read {tiled} of the 3 layers' attention"
+    );
+    let rows = rows_of(&out.to_device(&Device::Cpu).unwrap());
+    assert_eq!(rows.len(), ROWS);
+    for (row, read) in rows.iter().enumerate() {
+        let mut seq = PROMPT.to_vec();
+        seq.extend(path_of(&tokens, &parents, row));
+        let fresh = read_fresh(&mut model, &seq);
+        let worst = read
+            .iter()
+            .zip(&fresh)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0f32, nan_max);
+        assert!(
+            worst < 1e-3,
+            "row {row}: differs from its path read fresh by {worst}"
+        );
+    }
+}
+
 /// A tree grown over several forwards — the drafter's way — reads its cached
 /// rows as keys: the second forward's rows come out as their paths read.
 #[test]

@@ -111,7 +111,7 @@ impl Module for RmsNorm {
 /// one warp or 32. At 32 threads a row of 896 (Qwen2.5-0.5B, the drafter of a
 /// Qwen split) is 28 dependent loads a thread, twice: 14.8-15.6 µs a norm,
 /// ~49 a forward, ~0.7 ms of a drafter's 8-row tree level of ~6.9 (nsys with
-/// graph nodes traced, RTX 3070 Laptop, 2026-10-23).
+/// graph nodes traced, RTX 3070 Laptop, 2026-10-22).
 /// `SWARMLLM_NORM_WIDE_FROM=1024` is candle's line — the A/B in one binary.
 #[cfg(feature = "candle-cuda")]
 pub(crate) fn norm_block(ncols: usize) -> u32 {

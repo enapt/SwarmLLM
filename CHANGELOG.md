@@ -60,6 +60,17 @@ from 4 words for Q4_K, Q5_K and Q6_K files, from 7 for Q8_0 files, whose older k
 below that — and small weights stay on the older kernel. `SWARMLLM_NORM_WIDE_FROM=1024` brings back
 the old norms.
 
+**A graphics card checks a split's guesses faster.** A flowing tree hands each part of the model
+about twenty guesses at a time, and each guess has to look back over the whole conversation.
+Past eight guesses that went a slow, general way that copied the conversation's memory into a
+wider format on every check; now one job reads each piece of that memory once and serves every
+guess from it. On a laptop RTX 3070 the first half of a 7B model checks 24 guesses in 16 ms
+instead of 19, and 32 in 20 instead of 24; the small model's own steps of eight guesses, 600
+words into a conversation, take 5.1 ms instead of 6.7. On the test split, where both halves and
+the small model shared one graphics card, each check took 30-35 ms instead of 35-39; the reply's
+overall speed stayed within its usual run-to-run spread there. `SWARMLLM_TREE_ATTN_TILED=0`
+brings back the old way.
+
 **A split across a long link spends less of each round waiting for its guesses.** While the far
 computer checks one tree of guesses, the small model on your graphics card grows the next one.
 Each of its steps now costs less: the positions of the guesses go to the card once per step, not

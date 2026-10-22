@@ -1322,6 +1322,8 @@ the older kernels below; `SWARMLLM_QMATMUL_MMQ_MIN_ROWS=9` keeps it off 8 rows a
 `SWARMLLM_QMATMUL_MMQ_CAPTURED=0` only inside a captured step) and
 `SWARMLLM_QMATMUL_CUBLAS=0` / `SWARMLLM_QMATMUL_CUBLAS_ACC=32` the projections' kernel,
 `SWARMLLM_NORM_WIDE_FROM=1024` a 512-1023-column row's norm (a 0.5B's) on candle's 32 threads,
+`SWARMLLM_TREE_ATTN_TILED=0` a tree's attention off the tiled kernel (one block a row to 8 rows,
+standard attention past it; `SWARMLLM_TREE_ATTN=standard` off every tree kernel),
 `SWARMLLM_SLIDING_WINDOW=0` the window. A worker whose stderr says `llama.cpp MMQ unavailable, using
 the older kernels from now on` ran its first several-row product on the card and the launch failed —
 every product since went the old way; a card the library has no image for never tries (a card newer

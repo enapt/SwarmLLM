@@ -7981,7 +7981,7 @@ mod card_quantized_products {
     /// graph's answer is the uncaptured product's, bit for bit (and the f64
     /// product's, to the 8-bit activation); a Q8_0 and a k-quant weight, since
     /// the kernel is made ready per type. A drafter's tree level of 8 rows is
-    /// captured; until 2026-10-23 every product in it went to the vector
+    /// captured; until 2026-10-22 every product in it went to the vector
     /// kernel, which at 8 rows reads the weights at about a quarter of the
     /// card's bandwidth (vendored candle `mmq_takes_few_rows`).
     #[test]

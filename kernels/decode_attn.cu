@@ -274,6 +274,274 @@ static __device__ __forceinline__ void decode_attn_body(
 DA_ENTRY(decode_attn_f32, float)
 DA_ENTRY(decode_attn_f16kv, __half)
 
+// A TREE's rows TILED over the half cache (#134 (b)): one block stages ONE KV
+// head's chunk of K and V in shared memory and serves a tile of the tree's
+// query vectors from it — every row of the tree and every query head of the
+// group, `rows * n_rep` vectors a KV head, `QT` a block.
+//
+// The kernel above is one block per (row, KV head, chunk): each row re-reads
+// its chunk of the cache and sums each score with a warp's shuffles, so its
+// time grows with rows × keys and a 7B's 25 rows at 900 keys took 597 µs
+// against the matmul path's 394 (`decode_attn::tree_attention_timing`) — the
+// reason trees of more than 8 rows went to that path, which widens the whole
+// half cache to f32 and runs two cuBLAS products around a mask and a softmax
+// (~0.41 ms a layer of a 24-row near-half forward, 2026-10-22 nsys). FlashInfer
+// and SGLang's tree kernels share each block's K/V reads among a tile of query
+// rows the same way; this is that tile on CUDA cores, f32 sums, no tensor cores.
+//
+//   grid (batch * n_kv_head, n_chunks, ceil(rows * n_rep / QT)), 256 threads
+//
+// Scores: a 16 × 16 thread grid, each thread a (QT/16) × (CH/16) block of
+// (query, key) sums over the head dim in order, two dims a step; the staged K
+// row is padded to an odd number of words, so the 16 keys a warp reads sit in
+// 16 banks. Then each query's max-shifted exp and its sum, a warp a query, as
+// the kernel above; then Σ exp·V, a warp's 32 threads over the row's words and
+// each thread every eighth query of the tile, in position order as above. It
+// writes the kernel above's `partial` layout — (max, Σexp, Σexp·v) per
+// (row, KV head, chunk, query head) — so `decode_attn_combine_f32` merges it
+// unchanged. A masked score is −∞, a chunk a query sees nothing of has no
+// weight; positions past the cache are staged as zeros and masked.
+//
+// The cache must be the half cache, its rows dense and every row starting on
+// a 4-byte boundary (the caller checks the offset and the strides are even).
+// d % 32 == 0, d <= DMAX. Not bit-identical to the kernel above (each score is
+// summed in order where that one sums lanes and shuffles); pinned against the
+// matmul path by `cuda_tree_kernel_matches_the_masked_matmul_path`, replies
+// judged against llama.cpp.
+template <int CH, int QT, int DMAX>
+static __device__ __forceinline__ void tree_attn_tiled_body(
+    const float *__restrict__ q,
+    const __half *__restrict__ k,
+    const __half *__restrict__ v,
+    float *__restrict__ partial,
+    const int n_kv_head,
+    const int n_rep,
+    const int d,
+    const int s_len,
+    const long long k_sb,
+    const long long k_sh,
+    const long long v_sb,
+    const long long v_sh,
+    const float scale,
+    const float softcap,
+    const int rows,
+    const unsigned int *__restrict__ vis,
+    const int vis_words,
+    const int tree_base
+) {
+    constexpr int THREADS = 256;
+    // Words of a staged K/V row: odd, so 16 rows read at one word sit in 16 banks.
+    constexpr int KW = DMAX / 2 + 1;
+    // Floats of a staged query: two queries a warp reads sit two banks apart.
+    constexpr int QS = DMAX + 2;
+    // Floats of a score row.
+    constexpr int SS = CH + 1;
+    constexpr int KM = CH / 16;
+    constexpr int QN = QT / 16;
+    constexpr int QN2 = QT / 8;
+    constexpr int DW = DMAX / 64;
+    static_assert(CH % 32 == 0 && QT % 16 == 0 && DMAX % 64 == 0, "tile shape");
+
+    __shared__ float q_sh[QT * QS];
+    __shared__ unsigned int kv_sh[CH * KW];
+    __shared__ float s_sh[QT * SS];
+    __shared__ float m_sh[QT];
+    __shared__ float l_sh[QT];
+
+    const int g = blockIdx.x;
+    const int kv_bi = g / n_kv_head;
+    const int h = g % n_kv_head;
+    const int c = blockIdx.y;
+    const int n_chunks = gridDim.y;
+    const int s0 = c * CH;
+    const int n = min(CH, s_len - s0);
+    const int q0 = blockIdx.z * QT;
+    const int nq = min(QT, rows * n_rep - q0);
+    const int n_head = n_kv_head * n_rep;
+    const int dw = d >> 1;
+    const int tid = threadIdx.x;
+
+    // The tile's queries; vector `q0 + i` is row (q0 + i) / n_rep, query head
+    // h * n_rep + (q0 + i) % n_rep. A vector past the tree's is zeros.
+    for (int i = tid; i < QT * d; i += THREADS) {
+        const int qi = i / d;
+        const int j = i - qi * d;
+        float x = 0.0f;
+        if (qi < nq) {
+            const int qg = q0 + qi;
+            const int row = qg / n_rep;
+            const int r = qg - row * n_rep;
+            x = q[((long long)(kv_bi * rows + row) * n_head + h * n_rep + r) * d + j];
+        }
+        q_sh[qi * QS + j] = x;
+    }
+    // The chunk's K rows, two halves a word; rows past the cache are zeros.
+    const __half *kb = k + kv_bi * k_sb + h * k_sh + (long long)s0 * d;
+    const __half *vb = v + kv_bi * v_sb + h * v_sh + (long long)s0 * d;
+    for (int i = tid; i < CH * dw; i += THREADS) {
+        const int p = i / dw;
+        const int w = i - p * dw;
+        kv_sh[p * KW + w] = p < n ? reinterpret_cast<const unsigned int *>(kb + (long long)p * d)[w] : 0u;
+    }
+    __syncthreads();
+
+    {
+        const int kx = tid & 15;
+        const int qy = tid >> 4;
+        float acc[QN][KM];
+#pragma unroll
+        for (int a = 0; a < QN; a++) {
+#pragma unroll
+            for (int m = 0; m < KM; m++) {
+                acc[a][m] = 0.0f;
+            }
+        }
+        for (int w = 0; w < dw; w++) {
+            float2 kk[KM];
+#pragma unroll
+            for (int m = 0; m < KM; m++) {
+                kk[m] = __half22float2(*reinterpret_cast<const __half2 *>(&kv_sh[(kx + 16 * m) * KW + w]));
+            }
+#pragma unroll
+            for (int a = 0; a < QN; a++) {
+                const float2 qq = *reinterpret_cast<const float2 *>(&q_sh[(qy + 16 * a) * QS + 2 * w]);
+#pragma unroll
+                for (int m = 0; m < KM; m++) {
+                    acc[a][m] += qq.x * kk[m].x;
+                    acc[a][m] += qq.y * kk[m].y;
+                }
+            }
+        }
+#pragma unroll
+        for (int a = 0; a < QN; a++) {
+            const int qi = qy + 16 * a;
+            const int row = (q0 + qi) / n_rep;
+#pragma unroll
+            for (int m = 0; m < KM; m++) {
+                const int p = kx + 16 * m;
+                float x = acc[a][m] * scale;
+                if (softcap > 0.0f) {
+                    x = softcap * tanhf(x / softcap);
+                }
+                bool seen = p < n && qi < nq;
+                const int t = s0 + p - tree_base;
+                if (seen && vis != nullptr && t >= 0) {
+                    seen = (vis[(long long)row * vis_words + (t >> 5)] >> (t & 31)) & 1u;
+                }
+                s_sh[qi * SS + p] = seen ? x : -INFINITY;
+            }
+        }
+    }
+    __syncthreads();
+
+    // V over K's staging (every score is written, so every K read is done),
+    // then each query's max-shifted exp and its sum, a warp a query.
+    for (int i = tid; i < CH * dw; i += THREADS) {
+        const int p = i / dw;
+        const int w = i - p * dw;
+        kv_sh[p * KW + w] = p < n ? reinterpret_cast<const unsigned int *>(vb + (long long)p * d)[w] : 0u;
+    }
+    {
+        const int lane = tid & 31;
+        const int warp = tid >> 5;
+        for (int qi = warp; qi < QT; qi += THREADS / 32) {
+            float m = -INFINITY;
+            for (int p = lane; p < CH; p += 32) {
+                m = fmaxf(m, s_sh[qi * SS + p]);
+            }
+            m = da_warp_max(m);
+            float l = 0.0f;
+            for (int p = lane; p < CH; p += 32) {
+                const float e = m == -INFINITY ? 0.0f : expf(s_sh[qi * SS + p] - m);
+                s_sh[qi * SS + p] = e;
+                l += e;
+            }
+            l = da_warp_sum(l);
+            if (lane == 0) {
+                m_sh[qi] = m;
+                l_sh[qi] = l;
+            }
+        }
+    }
+    __syncthreads();
+
+    {
+        const int dx = tid & 31;
+        const int qy = tid >> 5;
+        float2 o[QN2][DW];
+#pragma unroll
+        for (int a = 0; a < QN2; a++) {
+#pragma unroll
+            for (int w = 0; w < DW; w++) {
+                o[a][w] = make_float2(0.0f, 0.0f);
+            }
+        }
+        for (int p = 0; p < n; p++) {
+            float2 vv[DW];
+#pragma unroll
+            for (int w = 0; w < DW; w++) {
+                const int word = dx + 32 * w;
+                vv[w] = word < dw ? __half22float2(*reinterpret_cast<const __half2 *>(&kv_sh[p * KW + word]))
+                                  : make_float2(0.0f, 0.0f);
+            }
+#pragma unroll
+            for (int a = 0; a < QN2; a++) {
+                const float e = s_sh[(qy + 8 * a) * SS + p];
+#pragma unroll
+                for (int w = 0; w < DW; w++) {
+                    o[a][w].x += e * vv[w].x;
+                    o[a][w].y += e * vv[w].y;
+                }
+            }
+        }
+#pragma unroll
+        for (int a = 0; a < QN2; a++) {
+            const int qi = qy + 8 * a;
+            if (qi < nq) {
+                const int qg = q0 + qi;
+                const int row = qg / n_rep;
+                const int r = qg - row * n_rep;
+                float *part = partial
+                    + ((((long long)(kv_bi * rows + row) * n_kv_head + h) * n_chunks + c) * n_rep + r) * (d + 2);
+#pragma unroll
+                for (int w = 0; w < DW; w++) {
+                    const int word = dx + 32 * w;
+                    if (word < dw) {
+                        part[2 + 2 * word] = o[a][w].x;
+                        part[3 + 2 * word] = o[a][w].y;
+                    }
+                }
+                if (dx == 0) {
+                    part[0] = m_sh[qi];
+                    part[1] = l_sh[qi];
+                }
+            }
+        }
+    }
+}
+
+#define TA_ENTRY(NAME, CH, QT, DMAX)                                             \
+    extern "C" __global__ void __launch_bounds__(256) NAME(                       \
+        const float *__restrict__ q, const __half *__restrict__ k,               \
+        const __half *__restrict__ v, float *__restrict__ partial,               \
+        const int n_kv_head, const int n_rep, const int d, const int s_len,      \
+        const long long k_sb, const long long k_sh, const long long v_sb,        \
+        const long long v_sh, const float scale, const float softcap,            \
+        const int rows, const unsigned int *__restrict__ vis,                    \
+        const int vis_words, const int tree_base) {                              \
+        tree_attn_tiled_body<CH, QT, DMAX>(q, k, v, partial, n_kv_head, n_rep, d, \
+                                           s_len, k_sb, k_sh, v_sb, v_sh, scale, \
+                                           softcap, rows, vis, vis_words,        \
+                                           tree_base);                           \
+    }
+
+// Head dims to 128 in chunks of 64 keys, 32 queries a block (~41 KB of shared
+// memory); to 256 in chunks of 32, 16 queries (~35 KB) — both under the 48 KB
+// a launch takes without raising its limit (a driver call no capture may make).
+// `decode_attn::tiled_chunk` is the chunk each one is launched with.
+TA_ENTRY(tree_attn_tiled_f16kv_d128, 64, 32, 128)
+TA_ENTRY(tree_attn_tiled_f16kv_d256, 32, 16, 256)
+
 // Merge the chunks: out = Σ_c e^(m_c - M) o_c / Σ_c e^(m_c - M) l_c — the CPU
 // kernel's pass 2, in the same order. A tree's rows are batch elements here
 // too (`b * rows` of them), and a chunk a row saw nothing of (max −∞) is

@@ -589,7 +589,7 @@ segment output).
 `__shfl_xor_sync` over masks 16..1, the shared-memory second stage above 32
 threads, `rsqrtf(mean + eps)`, `(scale * x) * alpha` — launched with candle-nn
 0.10.1's geometry (one block per row, 32 threads below 1024 columns, 1024 at or
-above; on a card since 2026-10-23 1024 from 512 columns, both sides — § "A
+above; on a card since 2026-10-22 1024 from 512 columns, both sides — § "A
 narrow row is normed by 1024 threads" below). The only difference is that `x = a + b` is computed in a register
 instead of loaded from `badd_f32`'s output: one IEEE add either way, and FMA
 contraction cannot fuse an add into the multiply that FOLLOWS it, so
@@ -617,7 +617,7 @@ pending sum resolves through the old ops in the old order, and
 `residual add + rms norm` (`prof.rs`), because on CUDA there is no separate add
 left to time.
 
-### A narrow row is normed by 1024 threads on a card (2026-10-23, #134 (b))
+### A narrow row is normed by 1024 threads on a card (2026-10-22, #134 (b))
 
 **What it replaced.** candle-nn's `rms_norm` and llama.cpp's `rms_norm_f32` both launch 32 threads a
 row below 1024 columns and 1024 at or above. A row of 512-1023 columns — Qwen2.5-0.5B's 896, the
@@ -3581,10 +3581,10 @@ reads (D4 / DS4 / D2S6). Below 8 rows llama.cpp keeps its vector kernel (MMVQ) f
   for this card — probed with an empty kernel) and the type is one of the ten; else cuBLAS (≥ 64
   rows) or the old dp4a kernel, exactly as before.
 - A few rows (≤ 8) go to it too, instead of the vector kernel, where **`mmq_few_rows_line(dtype)`**
-  says — since 2026-10-23 per weight type and size: a k-quant (Q2_K-Q6_K) from 4 rows, Q8_0 and
+  says — since 2026-10-22 per weight type and size: a k-quant (Q2_K-Q6_K) from 4 rows, Q8_0 and
   the other 32-value formats from 7, on a weight of at least 2 MiB (`MMQ_FEW_ROWS_LEAST_BYTES`);
   § "A few rows: the line per type and size, inside a capture too" below. Until 2026-10-21 none
-  did; until 2026-10-23 5-8 rows of any weight, never inside a capture. The activation is quantized once per group of
+  did; until 2026-10-22 5-8 rows of any weight, never inside a capture. The activation is quantized once per group of
   weights sharing it AND its layout (`SharedQ8::layout`). Every buffer comes from the device's pool
   on its one stream, uninitialised (the quantizer writes every row, the kernel every element, each
   fixup slot is written before it is read).
@@ -3666,10 +3666,10 @@ From 5 rows MMQ wins everywhere (1.3-1.9× on the head's tree, up to 2.1× whole
 loses, so the line is at 5. Not explained: with graphs on, the best 5-8-row step (26.6-28.3) sits
 between the uncaptured MMQ figure and the captured vector kernel's — the bench does not say which
 steps were captured. The gate itself asks the driver (`cuStreamIsCapturing`) about the stream the
-capture runs on, as candle's own `layout_params` does. (Explained 2026-10-23: the captured steps
+capture runs on, as candle's own `layout_params` does. (Explained 2026-10-22: the captured steps
 ran the vector kernel and the uncaptured ones MMQ — next section.)
 
-### A few rows: the line per type and size, inside a capture too (2026-10-23, #134 (b))
+### A few rows: the line per type and size, inside a capture too (2026-10-22, #134 (b))
 
 **What it replaced.** The rule above stopped at a capture, and since 2026-10-22 a drafter's tree
 level of 8 rows IS captured (§ "A tree level on a card"), so every product of a flow call's levels
@@ -4259,7 +4259,9 @@ time (§ "A tree that flows", `docs/invariants/scheduling.md`).
 - **At most 8 rows (`TREE_KERNEL_MOST_ROWS` = `cuda_graph::MAX_POSITIONS`, const-asserted).** One
   block per row × KV head × chunk reads the cache once per ROW — the lesson of #119 and gotcha
   #725 again: it beats the matmul path at ≤ 8 rows everywhere and loses past ~12 on a 7B's heads
-  (table below). More rows go to standard attention as before.
+  (table below). More rows go to standard attention as before. **Superseded over the half cache
+  the same day** by the tiled kernel (§ "A tree's rows are read TILED over the half cache"): any
+  row count, the cap now the per-row kernel's over an f32 cache.
 - **A tree level of ≤ 8 rows is captured** (`SplitModel::tree_steps_may_be_captured`: on a card,
   an unsplit segment, every layer dense and covered by the kernel). Graph state is keyed by
   **`cuda_graph::StepShape`** (positions + tree), so a tree level and a chain check of the same
@@ -4322,6 +4324,90 @@ tests); `a_tree_call_the_kernel_cannot_take_without_a_mask_fails` (`decode_attn`
 row cap and a one-row call the scope does not describe, both with no mask — red with the first
 version's check, at the one-row call); `a_trees_visibility_reaches_its_last_row` (`draft_tree`); the pool scope carries the
 visibility (`cpu_pools`); a tree shape's graph state is untouched by a chain's rest (`cuda_graph`).
+
+## A tree's rows are read TILED over the half cache (2026-10-22, #134 (b))
+
+**What it replaced.** The per-row tree kernel above (one block per row × KV head × chunk) re-read
+the cache once per row, so trees past 8 rows went to standard attention: the half cache widened
+to f32, two cuBLAS products, a `[rows, kv_len]` mask, a softmax. A tree that flows checks ~17-20
+rows a forward on BOTH halves (the rig's `rows_a_forward`), so every check took that path: on the
+7B's near half (layers 0-14, 600 deep, nsys of 30 forwards of 24 rows against none) attention was
+~0.41 ms a layer (sgemm_nn 185 µs + sgemm_tn 56 + the f16 → f32 widening ~100 + softmax 42 + affine
+26) against flash's 72 µs for a chain of the same width — ~5.7 ms of a 19-20 ms forward. On the
+one-card rig the requester's near half was ~18 s of a ~38 s 400-token reply (`near_ms`), beside
+~18.5 s of drafting.
+
+**Research.** Gotcha #934 named the fix when the cap went in: rows of a tree share their keys as
+the query heads of a group do, so a block must serve several rows from ONE read of its chunk —
+FlashInfer's query tile (its prefill kernels with a packed custom mask, the shape SGLang's and
+vLLM's tree drafts run). Tensor cores (FlashInfer's `mma` path, llama.cpp's `fattn-mma-f16`)
+would convert the queries to half; a CUDA-core tile keeps every sum in f32, as the kernel above
+does, and the problem is small (24 rows × 7 query heads × 900 keys × 128 a KV head: ~0.3 GFLOP a
+layer) — the cost was the re-reads and the launches, not arithmetic.
+
+**The rule.**
+- **`decode_attn::tree_tiles`** decides it: a HALF cache whose rows start on a word (the kernel
+  stages two halves a load — the start offset and the batch/head strides even), from
+  `tree_tiled_from_rows()` rows — every tree by default (`TREE_TILED_FROM_ROWS` = 1). The per-row
+  kernel keeps an f32 cache (≤ 8 rows); `SWARMLLM_TREE_ATTN_TILED=0` is the A/B (per-row ≤ 8,
+  standard attention past it), a number tiles from that many rows.
+- **`kernels/decode_attn.cu` `tree_attn_tiled_f16kv_d128` / `_d256`**: grid (batch × KV heads,
+  chunks, tiles), 256 threads. A block stages its KV head's chunk of K (64 positions to d 128, 32
+  to d 256) and a tile of query vectors (32 / 16: a vector is a row × a query head of the group),
+  sums each (query, key) score over the head dim in order — a 16 × 16 thread grid, the K row padded
+  to an odd word count so a warp's 16 keys sit in 16 banks — masks it with the row's visibility
+  bits, takes each query's max-shifted exp and sum a warp a query, stages V over K, and sums
+  Σ exp·V in position order. It writes the per-row kernel's `partial` layout, so
+  `decode_attn_combine_f32` merges it unchanged. Static shared memory ~41 / ~35 KB — under the
+  48 KB a launch takes without raising its limit, a driver call no capture may make (gotcha #841's
+  class), so a captured drafter level reads it too. The chunk is fixed per width
+  (`tiled_chunk`), so a growing cache only changes the launch's grid.
+- Not bit-identical to the per-row kernel (each score summed in order where that one sums lanes
+  and shuffles) nor to the matmul path; replies judged against llama.cpp.
+
+**Measured** (RTX 3070 Laptop, idle, live node stopped; `~/swarmllm-318/tiled_check.sh`).
+*The op* (`tree_attention_timing`, µs a call each synchronised, min of 30 — a ~60 µs floor of
+launch + sync in every figure), per-row / tiled / matmul path:
+
+| heads, keys | 2 rows | 8 rows | 24 rows | 64 rows |
+|---|---|---|---|---|
+| 0.5B (14/2, d 64), 300 | 78 / 69 / 142 | 99 / 74 / 195 | 176 / 90 / 247 | 315 / 128 / 243 |
+| 0.5B, 900 | 107 / 80 / 567 | 234 / 146 / 680 | 378 / 180 / 659 | 735 / 207 / 431 |
+| 7B (28/4, d 128), 300 | 77 / 68 / 149 | 124 / 81 / 168 | 236 / 109 / 192 | 513 / 197 / 283 |
+| 7B, 900 | 108 / 82 / 185 | 242 / 110 / 311 | 591 / 217 / 403 | 1447 / 417 / 2431 |
+
+*Whole forwards* (`prefill_bench SWARM_BENCH_SPEC_TREE=1`, min of 7, two passes, ms a tree
+forward). The 7B's near half (layers 0-14, 600 deep), tiled / per-row ≤ 8 + standard attention
+past it (`SWARMLLM_TREE_ATTN_TILED=0`): 8 rows 10.6-10.9 / 11.9-12.1, 16 rows 13.8 / 16.5-16.6,
+24 rows 16.0-16.3 / 19.0-19.2, 32 rows 19.8-20.1 / 23.7-23.9, 64 rows 32.9-33.4 / 36.4-38.3 — a
+chain of the same width 10.3-10.6 / 13.2-13.7 / 14.3-14.7 / 16.3-16.6 / 22.3-23.4, so a tree now
+costs a chain's time plus ~10%. The 0.5B drafter (600 deep): 2 rows 3.9-4.0 / 4.1-4.2, 4 rows
+4.3-4.4 / 5.1-5.2, 8 rows 5.1-5.2 / 6.6-6.8 (−23%).
+
+*The flow on the one-card rig* (`flow318c.sh LEN=400`, 385 ms, both halves and the drafter on ONE
+card, tiled against `SWARMLLM_TREE_ATTN_TILED=0`, two passes, warm replies;
+`~/swarmllm-318/flowtiled.out`): this node's half per check forward 29.7-34.6 ms against
+35.1-38.8 (`near_ms` / `forwards`, 14.5-18.8 rows a forward against 12.9-18.6) — ~11% with three
+processes time-slicing the card. The reply's speed, 9.0-12.9 tok/s against 9.4-11.0, is inside the
+spread the replies' own differences make (misses 11-26 a reply in both arms); no refusals, no
+errors. Every reply of every arm against llama.cpp (`score_against_reference.py`, no labels,
+gotcha #935): worst rank 2 everywhere, largest logit gap 0.244 tiled / 0.185 off — near-ties.
+In the field the far half is another machine, so the check's time saved is the requester's.
+
+**What a change must keep**: the kernel's shared memory under 48 KB (a captured level must never
+raise a limit); the `partial` layout the combine reads; every staged row past the cache zeroed (a
+masked score weighs 0, but 0 × garbage V can be NaN); the alignment check before tiling.
+
+**Tests**: `cuda_tree_kernel_matches_the_masked_matmul_path` (fourteen shapes now — 24, 40, 64 and
+512-row trees, head widths 64/96/128/160/256 with part-filled tiles and word rows, a soft cap — the
+tiled arm against `matmul_attention` with `RowVisibility::mask` within 1e-5 abs / 1e-4 rel, the
+entry point bit for bit; its scale is the layer's `scale_from_head_dim`, gotcha #938);
+`a_wide_tree_on_the_card_reads_what_each_path_reads` (`split/tests/draft_trees.rs`, card: a 24-row
+branching tree through a whole model equals each row's path read fresh within 1e-3, and the tiled
+kernel read every layer — red with `SWARMLLM_TREE_ATTN_TILED=0`, "read 0 of the 3 layers'
+attention"); `a_tree_call_the_kernel_cannot_take_without_a_mask_fails` (the per-row cap over an
+f32 cache; the half cache's 9 rows are the tiled kernel's); `a_captured_tree_level_reads_as_the_ordinary_one`
+(the captured drafter level, now tiled).
 
 ## A tree level's rows are ranked on the card in two launches (2026-10-22, #134 (b))
 

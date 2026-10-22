@@ -457,9 +457,91 @@ pub fn gqa_decode_attention_cuda(
 /// a 400-token reply against 10.1-12.6) while the drafter's 8-row levels
 /// gained 9%. At 8 rows it wins at every shape measured — and 8 is what a
 /// captured forward may carry ([`crate::inference::cuda_graph::MAX_POSITIONS`]),
-/// the place a mask cannot be. Rows sharing each block's K/V reads (FlashInfer's
-/// query tile) would lift the cap: FUTURE_WORK #134 (b).
+/// the place a mask cannot be. Over the HALF cache a card keeps, every tree
+/// goes to the tiled kernel instead ([`tree_tiles`]), whose blocks share each
+/// chunk's K/V reads among a tile of rows; this cap is the per-row kernel's,
+/// which an f32 cache (and `SWARMLLM_TREE_ATTN_TILED=0`) still reads.
 pub(crate) const TREE_KERNEL_MOST_ROWS: usize = 8;
+
+/// Positions a block of the TILED tree kernel stages for head width `d`
+/// (`kernels/decode_attn.cu`'s `tree_attn_tiled_f16kv_d128` / `_d256`): fixed
+/// per width, so a captured call only updates its chunk count as the cache
+/// grows.
+#[cfg(feature = "candle-cuda")]
+fn tiled_chunk(d: usize) -> usize {
+    if d <= 128 {
+        64
+    } else {
+        32
+    }
+}
+
+/// Query vectors (a tree row × a query head of its group) one block of the
+/// tiled kernel serves, for head width `d`.
+#[cfg(feature = "candle-cuda")]
+fn tiled_queries(d: usize) -> usize {
+    if d <= 128 {
+        32
+    } else {
+        16
+    }
+}
+
+/// The fewest rows a tree's forward must have for the TILED kernel to read it
+/// ([`tree_tiles`]). `SWARMLLM_TREE_ATTN_TILED=0` (or `off`) never tiles — a
+/// tree past [`TREE_KERNEL_MOST_ROWS`] goes back to the matmul path; a number
+/// tiles from that many rows, for an A/B inside one binary.
+fn tree_tiled_from_rows() -> Option<usize> {
+    static FROM: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *FROM.get_or_init(
+        || match std::env::var("SWARMLLM_TREE_ATTN_TILED").as_deref() {
+            Ok("0") | Ok("off") | Ok("standard") => None,
+            Ok(v) => Some(
+                v.parse::<usize>()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .unwrap_or(TREE_TILED_FROM_ROWS),
+            ),
+            Err(_) => Some(TREE_TILED_FROM_ROWS),
+        },
+    )
+}
+
+/// Rows from which a tree's forward over the half cache is read by the tiled
+/// kernel (the default of [`tree_tiled_from_rows`]): every tree. It beat one
+/// block a row at every row count measured (`tree_attention_timing`, 1-64
+/// rows, 300 and 900 keys, the 0.5B's and a 7B's heads) and in whole forwards:
+/// a 7B's near half at 8 rows 10.6-10.9 ms against 11.8-12.1, the 0.5B
+/// drafter's 8-row level 600 deep 5.1-5.2 against 6.6-6.8 (2026-10-22).
+const TREE_TILED_FROM_ROWS: usize = 1;
+
+/// Calls the TILED tree kernel has read in this process — what a test reads to
+/// know it ran (`a_wide_tree_on_the_card_reads_what_each_path_reads`).
+#[cfg(feature = "candle-cuda")]
+static TILED_TREE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `TILED_TREE_CALLS`.
+#[cfg(all(test, feature = "candle-cuda"))]
+pub(crate) fn tiled_tree_calls() -> u64 {
+    TILED_TREE_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Does the TILED tree kernel read this call? A half cache whose rows start on
+/// a word (the kernel stages two halves a load), at least
+/// [`tree_tiled_from_rows`] rows. The geometry and the visibility's reach are
+/// [`gqa_tree_attention_cuda`]'s, checked before.
+fn tree_tiles(rows: usize, k: &Tensor, v: &Tensor) -> bool {
+    let Some(from) = tree_tiled_from_rows() else {
+        return false;
+    };
+    rows >= from
+        && k.dtype() == candle_core::DType::F16
+        && v.dtype() == candle_core::DType::F16
+        && [k, v].into_iter().all(|t| {
+            t.layout().start_offset().is_multiple_of(2)
+                && t.stride()[..2].iter().all(|s| s.is_multiple_of(2))
+        })
+}
 
 // A captured tree's forward builds no mask, so the kernel must take every row
 // count a capture may carry (`SplitModel::tree_steps_may_be_captured`).
@@ -481,7 +563,8 @@ const _: () = assert!(crate::inference::cuda_graph::MAX_POSITIONS <= TREE_KERNEL
 /// rows × history — hence [`TREE_KERNEL_MOST_ROWS`]: a drafter's level of 8.
 ///
 /// Scope: the decode kernel's ([`gqa_decode_attention_cuda`]), at most
-/// [`TREE_KERNEL_MOST_ROWS`] query rows, a cache of `tree_base` context
+/// [`TREE_KERNEL_MOST_ROWS`] query rows unless the tiled kernel reads the call
+/// ([`tree_tiles`]: a half cache, any rows), a cache of `tree_base` context
 /// positions plus at most `32 * VISIBILITY_WORDS` tree rows. Anything else `Ok(None)` — the caller
 /// keeps the matmul path over the mask. `SWARMLLM_TREE_ATTN=standard` for an
 /// A/B. Not bit-identical to that path; pinned against it by
@@ -515,8 +598,9 @@ pub(crate) fn gqa_tree_attention_cuda(
     }
     let (b, n_head, rows, d) = q.dims4()?;
     let (kb, n_kv_head, s_len, kd) = k.dims4()?;
+    let tiled = tree_tiles(rows, k, v);
     if rows == 0
-        || rows > TREE_KERNEL_MOST_ROWS
+        || (rows > TREE_KERNEL_MOST_ROWS && !tiled)
         || kb != b
         || kd != d
         || !card_kernel_covers(n_head, n_kv_head, d)
@@ -550,17 +634,23 @@ pub(crate) fn gqa_tree_attention_cuda(
                 visibility: visibility.clone(),
                 rows,
                 base: tree_base,
+                tiled,
             }),
         };
         let out = q_rows.apply_op3_no_bwd(k, v, &op)?;
+        if tiled {
+            TILED_TREE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         // What a rig greps to know the kernel ran (an A/B whose arms measure
         // alike proves nothing without it).
-        static RAN: std::sync::Once = std::sync::Once::new();
-        RAN.call_once(|| {
+        // Once for each kernel.
+        static RAN: [std::sync::Once; 2] = [std::sync::Once::new(), std::sync::Once::new()];
+        RAN[usize::from(tiled)].call_once(|| {
             tracing::debug!(
                 target: "swarmllm::inference::decode_attn",
                 rows,
                 s_len,
+                tiled,
                 "a tree's attention runs on the card's tree kernel"
             )
         });
@@ -588,6 +678,9 @@ mod cuda {
         pub(super) rows: usize,
         /// The cache position of the tree's first row.
         pub(super) base: usize,
+        /// Read by the TILED kernel (`tree_attn_tiled_f16kv_*`, a half cache
+        /// only — [`super::tree_tiles`]) instead of one block per row.
+        pub(super) tiled: bool,
     }
 
     pub(super) struct DecodeAttn {
@@ -695,14 +788,19 @@ mod cuda {
                 }
             };
             let n_rep = n_head / n_kv_head;
-            let chunk = self
-                .chunk
-                .unwrap_or_else(|| super::chunk_for(b * n_kv_head, s_len));
-            if !super::CARD_CHUNKS.contains(&chunk) {
+            let tiled = self.tree.as_ref().is_some_and(|t| t.tiled);
+            let chunk = if tiled {
+                super::tiled_chunk(d)
+            } else {
+                self.chunk
+                    .unwrap_or_else(|| super::chunk_for(b * n_kv_head, s_len))
+            };
+            if !tiled && !super::CARD_CHUNKS.contains(&chunk) {
                 candle_core::bail!("decode-attention: no kernel for {chunk}-position chunks");
             }
             let n_chunks = s_len.div_ceil(chunk);
-            let merged = n_chunks > 1 || self.combine_one_chunk;
+            // The tiled kernel writes partials only.
+            let merged = tiled || n_chunks > 1 || self.combine_one_chunk;
 
             let q = s1.as_cuda_slice::<f32>()?.slice(qo..qe);
             // The cache views start where their layouts say; every read the
@@ -733,58 +831,60 @@ mod cuda {
                 None
             };
 
-            let func = dev.get_or_load_custom_func(
-                match cache {
-                    CacheViews::F32(..) => "decode_attn_f32",
-                    CacheViews::F16(..) => "decode_attn_f16kv",
-                },
-                "swarmllm_decode_attn",
-                super::DECODE_ATTN_PTX,
-            )?;
-            let cfg = LaunchConfig {
-                grid_dim: ((b * n_kv_head) as u32, n_chunks as u32, 1),
-                block_dim: (128, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            let (n_kv_i, n_rep_i, d_i, s_len_i, chunk_i) = (
-                n_kv_head as i32,
-                n_rep as i32,
-                d as i32,
-                s_len as i32,
-                chunk as i32,
-            );
             let (k_sb, k_sh, v_sb, v_sh) = (ks[0] as i64, ks[1] as i64, vs[0] as i64, vs[1] as i64);
-            let (rows_i, vis_words_i, base_i) = (
-                rows as i32,
-                crate::inference::draft_tree::VISIBILITY_WORDS as i32,
-                self.tree.as_ref().map_or(0, |t| t.base) as i32,
-            );
-            // A null pointer for whichever output this launch does not write,
-            // and for the visibility of a call with no tree.
-            let null: u64 = 0;
-            {
+            let (n_kv_i, n_rep_i, d_i, s_len_i) =
+                (n_kv_head as i32, n_rep as i32, d as i32, s_len as i32);
+            if tiled {
+                let CacheViews::F16(k, v) = &cache else {
+                    candle_core::bail!(
+                        "decode-attention: the tiled tree kernel reads a half cache"
+                    );
+                };
+                // Two halves a load: every row the kernel reads starts on a word.
+                if [l2.start_offset(), l3.start_offset()]
+                    .into_iter()
+                    .chain([ks[0], ks[1], vs[0], vs[1]])
+                    .any(|x| !x.is_multiple_of(2))
+                    || d > 256
+                    || !d.is_multiple_of(32)
+                {
+                    candle_core::bail!(
+                        "decode-attention: a cache the tiled tree kernel cannot stage"
+                    );
+                }
+                let Some(p) = partial.as_mut() else {
+                    candle_core::bail!("decode-attention: the tiled tree kernel writes partials");
+                };
+                let tree = self.tree.as_ref().expect("tiled is a tree's");
+                let func = dev.get_or_load_custom_func(
+                    if d <= 128 {
+                        "tree_attn_tiled_f16kv_d128"
+                    } else {
+                        "tree_attn_tiled_f16kv_d256"
+                    },
+                    "swarmllm_decode_attn",
+                    super::DECODE_ATTN_PTX,
+                )?;
+                let cfg = LaunchConfig {
+                    grid_dim: (
+                        (kv_b * n_kv_head) as u32,
+                        n_chunks as u32,
+                        (rows * n_rep).div_ceil(super::tiled_queries(d)) as u32,
+                    ),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let rows_i = rows as i32;
+                let (vis_words_i, base_i) = (
+                    crate::inference::draft_tree::VISIBILITY_WORDS as i32,
+                    tree.base as i32,
+                );
+                let null: u64 = 0;
                 let mut builder = func.builder();
                 builder.arg(&q);
-                match &cache {
-                    CacheViews::F32(k, v) => {
-                        builder.arg(k);
-                        builder.arg(v);
-                    }
-                    CacheViews::F16(k, v) => {
-                        builder.arg(k);
-                        builder.arg(v);
-                    }
-                }
-                match partial.as_mut() {
-                    None => {
-                        builder.arg(&mut out);
-                        builder.arg(&null);
-                    }
-                    Some(p) => {
-                        builder.arg(&null);
-                        builder.arg(p);
-                    }
-                }
+                builder.arg(k);
+                builder.arg(v);
+                builder.arg(p);
                 builder.arg(&n_kv_i);
                 builder.arg(&n_rep_i);
                 builder.arg(&d_i);
@@ -795,7 +895,6 @@ mod cuda {
                 builder.arg(&v_sh);
                 builder.arg(&self.scale);
                 builder.arg(&self.softcap);
-                builder.arg(&chunk_i);
                 builder.arg(&rows_i);
                 match &vis {
                     Some(v) => builder.arg(v),
@@ -803,13 +902,86 @@ mod cuda {
                 };
                 builder.arg(&vis_words_i);
                 builder.arg(&base_i);
-                // SAFETY: ffi. Shapes, strides and scope (d % 32 == 0, d <= 256,
-                // n_rep <= 16, chunk <= 64) are checked by the caller and above; the kernel
-                // reads within the views (a tree's visibility: `rows` rows of
-                // its words, the cache past its base within them, checked
-                // above) and writes `out` or `partial`, each sized for exactly
-                // what it assigns.
+                // SAFETY: ffi. Shapes, strides, the word alignment and scope
+                // (d % 32 == 0, d <= 256, n_rep <= 16) are checked by the
+                // caller and above; the kernel reads `kv_b` batches ×
+                // `n_kv_head` heads × `s_len` rows of `d` halves from the
+                // views by the strides passed, `rows * n_head * d` query floats
+                // and `rows` rows of the visibility's words, and writes every
+                // (row, head, chunk, query head) partial of `d + 2`.
                 unsafe { builder.launch(cfg) }.w()?;
+            } else {
+                let func = dev.get_or_load_custom_func(
+                    match cache {
+                        CacheViews::F32(..) => "decode_attn_f32",
+                        CacheViews::F16(..) => "decode_attn_f16kv",
+                    },
+                    "swarmllm_decode_attn",
+                    super::DECODE_ATTN_PTX,
+                )?;
+                let cfg = LaunchConfig {
+                    grid_dim: ((b * n_kv_head) as u32, n_chunks as u32, 1),
+                    block_dim: (128, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let chunk_i = chunk as i32;
+                let (rows_i, vis_words_i, base_i) = (
+                    rows as i32,
+                    crate::inference::draft_tree::VISIBILITY_WORDS as i32,
+                    self.tree.as_ref().map_or(0, |t| t.base) as i32,
+                );
+                // A null pointer for whichever output this launch does not write,
+                // and for the visibility of a call with no tree.
+                let null: u64 = 0;
+                {
+                    let mut builder = func.builder();
+                    builder.arg(&q);
+                    match &cache {
+                        CacheViews::F32(k, v) => {
+                            builder.arg(k);
+                            builder.arg(v);
+                        }
+                        CacheViews::F16(k, v) => {
+                            builder.arg(k);
+                            builder.arg(v);
+                        }
+                    }
+                    match partial.as_mut() {
+                        None => {
+                            builder.arg(&mut out);
+                            builder.arg(&null);
+                        }
+                        Some(p) => {
+                            builder.arg(&null);
+                            builder.arg(p);
+                        }
+                    }
+                    builder.arg(&n_kv_i);
+                    builder.arg(&n_rep_i);
+                    builder.arg(&d_i);
+                    builder.arg(&s_len_i);
+                    builder.arg(&k_sb);
+                    builder.arg(&k_sh);
+                    builder.arg(&v_sb);
+                    builder.arg(&v_sh);
+                    builder.arg(&self.scale);
+                    builder.arg(&self.softcap);
+                    builder.arg(&chunk_i);
+                    builder.arg(&rows_i);
+                    match &vis {
+                        Some(v) => builder.arg(v),
+                        None => builder.arg(&null),
+                    };
+                    builder.arg(&vis_words_i);
+                    builder.arg(&base_i);
+                    // SAFETY: ffi. Shapes, strides and scope (d % 32 == 0, d <= 256,
+                    // n_rep <= 16, chunk <= 64) are checked by the caller and above; the kernel
+                    // reads within the views (a tree's visibility: `rows` rows of
+                    // its words, the cache past its base within them, checked
+                    // above) and writes `out` or `partial`, each sized for exactly
+                    // what it assigns.
+                    unsafe { builder.launch(cfg) }.w()?;
+                }
             }
             if let Some(p) = partial.as_ref() {
                 let combine = dev.get_or_load_custom_func(
@@ -1150,6 +1322,18 @@ mod tests {
             (14, 2, 64, 5, MAX_TREE_ROWS, MAX_TREE_ROWS - 8, None),
             (14, 2, 64, 20, 1, 0, None),
             (32, 8, 128, 2000, 8, 0, None),
+            // Past the per-row kernel's rows: the tiled kernel's over a half
+            // cache — a 7B's near-half check of a flow's 24 rows, a 64-row
+            // tree, every row a tree may hold, a later level after cached
+            // rows, a head width of each tiled entry with a part-filled tile
+            // and a part-filled word row (96: 48 words; 160: 80).
+            (28, 4, 128, 600, 24, 0, None),
+            (14, 2, 64, 300, 64, 0, None),
+            (14, 2, 64, 5, MAX_TREE_ROWS, 0, None),
+            (32, 8, 128, 2000, 40, 8, None),
+            (8, 4, 256, 100, 20, 0, Some(50.0f32)),
+            (12, 4, 96, 50, 16, 0, None),
+            (10, 2, 160, 40, 12, 0, None),
         ]
         .into_iter()
         .flat_map(|case| {
@@ -1225,14 +1409,23 @@ mod tests {
                 &card,
             )
             .unwrap();
-            let scale = 1.0 / (d as f32).sqrt();
+            // The layer's scale (f64, then f32): at d 96 the f32 quotient is one
+            // step away, and the entry point below must match bit for bit.
+            let scale = crate::inference::attn_softmax::scale_from_head_dim(d) as f32;
             let flat = |t: Tensor| t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-            let entry = flat(
-                gqa_tree_attention_cuda(&qc, &kc, &vc, &vis, base, scale, softcap)
-                    .unwrap()
-                    .expect("the tree kernel applies to these inputs"),
-            );
-            if seq == TREE_KERNEL_MOST_ROWS {
+            let Some(entry) =
+                gqa_tree_attention_cuda(&qc, &kc, &vc, &vis, base, scale, softcap).unwrap()
+            else {
+                // Only a forward past the per-row kernel's rows that the tiled
+                // kernel does not take (an f32 cache) is declined.
+                assert!(
+                    seq > TREE_KERNEL_MOST_ROWS && !tree_tiles(seq, &kc, &vc),
+                    "the tree kernel declined {seq} rows (heads {n_head}/{n_kv_head} d={d} cache {cache_dtype:?})"
+                );
+                continue;
+            };
+            let entry = flat(entry);
+            if seq == TREE_KERNEL_MOST_ROWS && !tree_tiles(seq + 1, &kc, &vc) {
                 // One row more is the matmul path's.
                 let wider = Tensor::randn(0f32, 1.0, (1, n_head, seq + 1, d), &card).unwrap();
                 let wider_vis = Tensor::zeros(
@@ -1279,16 +1472,23 @@ mod tests {
                  (heads {n_head}/{n_kv_head} d={d} base {base} rows {tree_rows} cache {cache_dtype:?})"
             );
             let mut arms = vec![("entry point".to_string(), entry)];
-            for chunk in CARD_CHUNKS {
+            // Each per-row chunk, and the tiled kernel over a half cache.
+            let tiled_arm = (cache_dtype == candle_core::DType::F16).then_some((None, true));
+            for (chunk, tiled) in CARD_CHUNKS
+                .into_iter()
+                .map(|c| (Some(c), false))
+                .chain(tiled_arm)
+            {
                 let op = cuda::DecodeAttn {
                     scale,
                     softcap: softcap.unwrap_or(0.0),
                     combine_one_chunk: true,
-                    chunk: Some(chunk),
+                    chunk,
                     tree: Some(cuda::TreeOperands {
                         visibility: vis.clone(),
                         rows: seq,
                         base,
+                        tiled,
                     }),
                 };
                 let q_rows = qc
@@ -1305,7 +1505,13 @@ mod tests {
                     .unwrap()
                     .transpose(1, 2)
                     .unwrap();
-                arms.push((format!("{chunk}-position chunks"), flat(got)));
+                arms.push((
+                    match chunk {
+                        Some(c) => format!("{c}-position chunks"),
+                        None => "tiled".to_string(),
+                    },
+                    flat(got),
+                ));
             }
             for (arm, got) in arms {
                 assert_eq!(got.len(), want.len());
@@ -1346,7 +1552,11 @@ mod tests {
             }
         };
         let (n_head, n_kv_head, d, base) = (14usize, 2usize, 64usize, 20usize);
-        let call = |rows: usize, keys: usize, scope_rows: usize, with_mask: bool| {
+        let call = |rows: usize,
+                    keys: usize,
+                    scope_rows: usize,
+                    with_mask: bool,
+                    cache_dtype: candle_core::DType| {
             let parents = (0..scope_rows)
                 .map(|i| i.checked_sub(1).map(|p| p as u16))
                 .collect();
@@ -1360,7 +1570,7 @@ mod tests {
             let cache = || {
                 Tensor::randn(0f32, 1.0, (1, n_kv_head, keys, d), &card)
                     .unwrap()
-                    .to_dtype(candle_core::DType::F16)
+                    .to_dtype(cache_dtype)
                     .unwrap()
             };
             let (k, v) = (cache(), cache());
@@ -1377,15 +1587,22 @@ mod tests {
                 0,
             )
         };
+        let (f16, f32) = (candle_core::DType::F16, candle_core::DType::F32);
         let wide = TREE_KERNEL_MOST_ROWS + 1;
-        // Past the kernel's rows, its scope matching the call.
-        assert!(call(wide, base + wide, wide, false).is_err());
-        assert!(call(wide, base + wide, wide, true).is_ok());
+        // Past the per-row kernel's rows over an f32 cache (no tiled kernel
+        // reads one), its scope matching the call.
+        assert!(call(wide, base + wide, wide, false, f32).is_err());
+        assert!(call(wide, base + wide, wide, true, f32).is_ok());
+        // The same rows over the half cache are the tiled kernel's.
+        assert_eq!(
+            call(wide, base + wide, wide, false, f16).is_ok(),
+            tree_tiled_from_rows().is_some_and(|from| wide >= from)
+        );
         // One row over more keys than the scope's tree ends at.
-        assert!(call(1, base + 3, 1, false).is_err());
-        assert!(call(1, base + 3, 1, true).is_ok());
+        assert!(call(1, base + 3, 1, false, f16).is_err());
+        assert!(call(1, base + 3, 1, true, f16).is_ok());
         // The kernel's own call runs without one.
-        assert!(call(1, base + 1, 1, false).is_ok());
+        assert!(call(1, base + 1, 1, false, f16).is_ok());
     }
 
     /// What a tree's attention costs on the card, the tree kernel against the
@@ -1404,7 +1621,7 @@ mod tests {
         let card = Device::new_cuda(0).expect("a card");
         for (n_head, n_kv_head, d) in [(14usize, 2usize, 64usize), (28, 4, 128)] {
             for s_len in [300usize, 900] {
-                for rows in [1usize, 4, 8, 12, 16, 25, 32] {
+                for rows in [1usize, 2, 4, 8, 12, 16, 24, 32, 64] {
                     let base = s_len - rows;
                     let q = Tensor::randn(0f32, 1.0, (1, rows, n_head, d), &card)
                         .unwrap()
@@ -1446,28 +1663,33 @@ mod tests {
                         }
                         best
                     };
-                    // The op itself, past the entry point's row cap.
-                    let kernel = time(&|| {
-                        let op = cuda::DecodeAttn {
-                            scale,
-                            softcap: 0.0,
-                            combine_one_chunk: true,
-                            chunk: None,
-                            tree: Some(cuda::TreeOperands {
-                                visibility: vis.clone(),
-                                rows,
-                                base,
-                            }),
-                        };
-                        q.transpose(1, 2)
-                            .unwrap()
-                            .contiguous()
-                            .unwrap()
-                            .reshape((rows, n_head, 1, d))
-                            .unwrap()
-                            .apply_op3_no_bwd(&k, &v, &op)
-                            .unwrap()
-                    });
+                    // The op itself, past the entry point's row cap: one
+                    // block a row, and the tiled kernel.
+                    let op_timed = |tiled: bool| {
+                        time(&|| {
+                            let op = cuda::DecodeAttn {
+                                scale,
+                                softcap: 0.0,
+                                combine_one_chunk: true,
+                                chunk: None,
+                                tree: Some(cuda::TreeOperands {
+                                    visibility: vis.clone(),
+                                    rows,
+                                    base,
+                                    tiled,
+                                }),
+                            };
+                            q.transpose(1, 2)
+                                .unwrap()
+                                .contiguous()
+                                .unwrap()
+                                .reshape((rows, n_head, 1, d))
+                                .unwrap()
+                                .apply_op3_no_bwd(&k, &v, &op)
+                                .unwrap()
+                        })
+                    };
+                    let (kernel, tiled) = (op_timed(false), op_timed(true));
                     let matmul = time(&|| {
                         let (kw, vw) = (
                             k.to_dtype(candle_core::DType::F32).unwrap(),
@@ -1487,7 +1709,7 @@ mod tests {
                     });
                     eprintln!(
                         "TIMING heads {n_head}/{n_kv_head} d {d} keys {s_len} rows {rows}: \
-                         kernel {kernel:.1} us, matmul path {matmul:.1} us"
+                         kernel {kernel:.1} us, tiled {tiled:.1} us, matmul path {matmul:.1} us"
                     );
                 }
             }

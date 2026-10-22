@@ -775,7 +775,7 @@ fn mmq_mma_layout(dev: &CudaDevice, dtype: GgmlDType, rows: usize) -> Option<i32
 /// elsewhere, this card's generation (Ampere) included. Ours sit lower because
 /// our vector kernel is candle's copy of an older llama.cpp one, which at 8
 /// rows costs ~1.5x its 7. Measured (RTX 3070 Laptop, whole models, decode
-/// steps captured as graphs, two passes, 2026-10-23; SwarmLLM
+/// steps captured as graphs, two passes, 2026-10-22; SwarmLLM
 /// `docs/invariants/inference.md` § "A card multiplies several rows"): Q4_K_M
 /// files (Qwen2.5-Coder-7B, Llama-3.2-3B) gain from 4 rows and split at 3;
 /// Q8_0 files (Qwen2.5-0.5B, Qwen2.5-Coder-1.5B, Llama-3.2-1B, Qwen3-1.7B)
@@ -792,7 +792,7 @@ fn mmq_fewest_rows_default(dtype: GgmlDType) -> usize {
 /// ([`mmq_takes_few_rows`]). Below it the vector kernel is faster: a weight
 /// of under ~7 tiles of 128 rows runs MMQ as stream-k plus a fixup pass, and a
 /// small weight is quick to read anyway. At 8 rows on an RTX 3070 Laptop
-/// (nsys, graph nodes traced, 2026-10-23): a Qwen2.5-0.5B's 128 × 896 Q8_0 key
+/// (nsys, graph nodes traced, 2026-10-22): a Qwen2.5-0.5B's 128 × 896 Q8_0 key
 /// (0.12 MB) 3.7 µs on the vector kernel against 8.7 + 4.8 (fixup) on MMQ; its
 /// 4,864 × 896 feed-forward (4.6 MB) 43.5 against 24.7, its 151,936-row head
 /// (145 MB) 1,190 against 560. llama.cpp draws its line by rows alone (per
@@ -833,7 +833,7 @@ fn mmq_takes_few_rows(
 }
 
 /// `SWARMLLM_QMATMUL_MMQ_CAPTURED=0` keeps every CAPTURED product of ≤ 8 rows
-/// on the vector kernel, as before 2026-10-23 — the A/B in one binary.
+/// on the vector kernel, as before 2026-10-22 — the A/B in one binary.
 fn mmq_may_be_captured() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
