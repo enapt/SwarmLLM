@@ -1970,7 +1970,7 @@ measure unbatched aggregate against forced batching before changing anything. A 
 segment still ends the chain when the requester holds the tail (the delegated split #143
 covers only requesters holding nothing).
 
-#### #134 — Split decode: draft trees wait for their drafter, and a drafter the node does not hold is unbuilt (the pipelined prompt pass is #171)
+#### #134 — Split decode: draft trees wait for their drafter, and the drafter is chosen by size, not by its device (the pipelined prompt pass is #171)
 `P3` · perf-split · **PARTIAL** — 2026-10-21 · history: archive row #134; plan: `split_speculation.md`, `large_model_splits.md` § "Draft trees"
 
 Shipped: guessing ahead on by default (v0.3.213), the continuous stream (v0.3.216, #149), walk
