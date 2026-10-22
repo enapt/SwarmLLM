@@ -7,6 +7,7 @@
 
 pub(crate) mod distributed;
 mod dsd;
+mod dsd_flow;
 mod dsd_stream;
 mod dsd_tree;
 mod engine_drafter;
@@ -465,6 +466,7 @@ pub(super) fn build_spec_verify_forward(
         prompt_span: None,
         image_spans: Vec::new(),
         draft_parents: Vec::new(),
+        draft_tree_from: None,
     }
 }
 
@@ -1058,6 +1060,7 @@ pub(super) fn build_kv_truncate_forward(
         prompt_span: None,
         image_spans: Vec::new(),
         draft_parents: Vec::new(),
+        draft_tree_from: None,
     }
 }
 

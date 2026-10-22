@@ -69,7 +69,6 @@ impl DraftTree {
         Self::new(base, wire.iter().map(|&w| w.checked_sub(1)).collect())
     }
 
-    #[cfg(test)]
     pub(crate) fn to_wire(&self) -> Vec<u16> {
         self.parents
             .iter()
@@ -79,6 +78,11 @@ impl DraftTree {
 
     pub(crate) fn len(&self) -> usize {
         self.parents.len()
+    }
+
+    /// Where the tree's first row sits in the cache.
+    pub(crate) fn base(&self) -> usize {
+        self.base
     }
 
     pub(crate) fn parent(&self, row: usize) -> Option<usize> {
@@ -194,6 +198,268 @@ pub(crate) fn kept_rows(
         at = next;
     }
     Some(rows)
+}
+
+/// Where a walk over a tree that flows stopped ([`walk_draws`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WalkEnd {
+    /// On `row`, whose draw has not come back yet: the walk goes on from
+    /// there when it does.
+    Waiting { row: usize },
+    /// The draw at `row` was `token`, which no row following it carries. The
+    /// token is emitted; the tree goes on from a new row carrying it.
+    Missed { row: usize, token: u32 },
+}
+
+/// The requester's walk over a tree that FLOWS (#134 (b)): standing on `at`,
+/// take its draw (`draws[at]`, the last segment's sample after that row's
+/// path, `sampling::draw_each_row`); keep the row following it that carries
+/// the draw and go on, or stop with a draw no row carries. Returns the tokens
+/// emitted, in order, and where it stopped.
+///
+/// This is [`crate::inference::sampling::walk_verified_tree`]'s rule, walked
+/// where the tree grows instead of where the logits are: every emitted token
+/// is the model's own draw along the path emitted, whichever rows were sent
+/// and whenever their draws came back. `tokens[r]` is row r's token; the rows
+/// following one row carry distinct tokens, which is what makes "the row
+/// carrying the draw" one row.
+pub(crate) fn walk_draws(
+    tree: &DraftTree,
+    tokens: &[u32],
+    draws: &[Option<u32>],
+    mut at: usize,
+) -> (Vec<u32>, WalkEnd) {
+    let mut emitted = Vec::new();
+    loop {
+        let Some(draw) = draws.get(at).copied().flatten() else {
+            return (emitted, WalkEnd::Waiting { row: at });
+        };
+        emitted.push(draw);
+        match tree
+            .children(Some(at))
+            .find(|&c| tokens.get(c) == Some(&draw))
+        {
+            Some(next) => at = next,
+            None => {
+                return (
+                    emitted,
+                    WalkEnd::Missed {
+                        row: at,
+                        token: draw,
+                    },
+                )
+            }
+        }
+    }
+}
+
+/// One change to a tree that flows, in the order the requester made it. The
+/// requester's copy of the tree and the drafter's apply the same list in the
+/// same order, with the drafter's proposals — rows of both the moment they are
+/// made, never an op — between them, so a row number means the same row on
+/// both, and on every segment, which reads the rows in that order.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowOp {
+    /// A row carrying `token` after row `parent`: the model's draw no row
+    /// carried (`WalkEnd::Missed`).
+    Push { parent: u16, token: u32 },
+    /// The walk now stands on `row`, the rows before it on its path emitted.
+    Advance { row: u16 },
+    /// Cut the tree to the walk's row and the rows following it
+    /// ([`FlowTree::rebase`]).
+    Rebase,
+}
+
+/// What [`FlowTree::rebase`] did, for a caller keeping something per row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Rebased {
+    /// Where the tree started before.
+    pub old_base: usize,
+    /// The tokens on the walk's path before its row — emitted, now context:
+    /// a segment reads them again from `old_base` after cutting its cache there.
+    pub path: Vec<u32>,
+    /// The rows kept, as old row numbers, in their new order: the walk's row
+    /// (new row 0), then every row following it, as they were laid out.
+    pub kept: Vec<usize>,
+}
+
+/// A tree of guesses that FLOWS (#134 (b), `docs/plans/large_model_splits.md`
+/// § "A tree that flows"): grown and sent a few rows at a time while the
+/// requester walks the draws that come back (`walk_draws`). Row 0 is the token
+/// the walk started from, at `base`; `at` is the row it stands on now, whose
+/// draw has not come back. A row is LIVE when it is `at` or follows it; the
+/// rest are lost branches, still in every segment's cache and read by nothing.
+///
+/// Every segment holds the rows in this order (a forward carries the tree's
+/// last rows, `LayerForward::draft_tree_from`), so the only way rows change is
+/// [`FlowOp`], applied alike by the requester and the drafter.
+#[derive(Debug, Clone)]
+pub(crate) struct FlowTree {
+    tree: DraftTree,
+    tokens: Vec<u32>,
+    at: usize,
+}
+
+impl FlowTree {
+    /// A tree of one row, `root`, at position `base`; the walk on it.
+    pub(crate) fn new(base: usize, root: u32) -> Result<Self, String> {
+        Ok(Self {
+            tree: DraftTree::new(base, vec![None])?,
+            tokens: vec![root],
+            at: 0,
+        })
+    }
+
+    pub(crate) fn tree(&self) -> &DraftTree {
+        &self.tree
+    }
+
+    pub(crate) fn tokens(&self) -> &[u32] {
+        &self.tokens
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.tokens.len()
+    }
+
+    pub(crate) fn base(&self) -> usize {
+        self.tree.base()
+    }
+
+    /// The row the walk stands on.
+    pub(crate) fn at(&self) -> usize {
+        self.at
+    }
+
+    /// Is `row` the walk's row or one following it?
+    pub(crate) fn is_live(&self, row: usize) -> bool {
+        if row >= self.len() {
+            return false;
+        }
+        let floor = self.tree.depth(self.at);
+        let mut r = row;
+        while self.tree.depth(r) > floor {
+            match self.tree.parent(r) {
+                Some(p) => r = p,
+                None => return false,
+            }
+        }
+        r == self.at
+    }
+
+    /// How many rows are live.
+    pub(crate) fn live_rows(&self) -> usize {
+        (self.at..self.len()).filter(|&r| self.is_live(r)).count()
+    }
+
+    /// Does a row following `parent` carry `token` already?
+    pub(crate) fn has_child(&self, parent: usize, token: u32) -> bool {
+        self.tree
+            .children(Some(parent))
+            .any(|c| self.tokens[c] == token)
+    }
+
+    /// Add a row carrying `token` after `parent`. Refused where a row
+    /// following `parent` already carries it — the rows following one row
+    /// carry distinct tokens, which the walk's exactness rests on — and where
+    /// the tree is full ([`MAX_TREE_ROWS`]): the requester rebases first.
+    pub(crate) fn push(&mut self, parent: usize, token: u32) -> Result<usize, String> {
+        if parent >= self.len() {
+            return Err(format!(
+                "a row after row {parent} of a tree of {} rows",
+                self.len()
+            ));
+        }
+        if self.has_child(parent, token) {
+            return Err(format!("row {parent} is followed by {token} already"));
+        }
+        let row = self.tree.push(Some(parent))?;
+        self.tokens.push(token);
+        Ok(row)
+    }
+
+    /// The walk now stands on `row`, which must be live: a walk only goes
+    /// down.
+    pub(crate) fn advance(&mut self, row: usize) -> Result<(), String> {
+        if !self.is_live(row) {
+            return Err(format!(
+                "the walk cannot move from row {} to row {row}",
+                self.at
+            ));
+        }
+        self.at = row;
+        Ok(())
+    }
+
+    /// Cut the tree to its live rows: the walk's row becomes row 0, at the
+    /// position it already holds (`base + depth`), and the rows following it
+    /// keep their layout. The path before it is emitted and becomes context.
+    /// A segment does the same by cutting its cache to `old_base` and reading
+    /// `path` then the kept rows again — one forward, a tree from `old_base`
+    /// whose first rows are a chain ([`Self::rebase_forward`]).
+    pub(crate) fn rebase(&mut self) -> Result<Rebased, String> {
+        let old_base = self.base();
+        let mut path: Vec<u32> =
+            std::iter::successors(self.tree.parent(self.at), |&r| self.tree.parent(r))
+                .map(|r| self.tokens[r])
+                .collect();
+        path.reverse();
+        let kept: Vec<usize> = (self.at..self.len()).filter(|&r| self.is_live(r)).collect();
+        let mut new_index = vec![usize::MAX; self.len()];
+        for (new, &old) in kept.iter().enumerate() {
+            new_index[old] = new;
+        }
+        let parents = kept
+            .iter()
+            .map(|&old| {
+                if old == self.at {
+                    None
+                } else {
+                    self.tree.parent(old).map(|p| new_index[p] as u16)
+                }
+            })
+            .collect();
+        let tokens = kept.iter().map(|&old| self.tokens[old]).collect();
+        self.tree = DraftTree::new(old_base + path.len(), parents)?;
+        self.tokens = tokens;
+        self.at = 0;
+        Ok(Rebased {
+            old_base,
+            path,
+            kept,
+        })
+    }
+
+    /// The forward that reads a rebased tree into a segment whose cache was
+    /// cut to `rebased.old_base`: the path as a chain, then every row of this
+    /// (rebased) tree after the path's last token. Returns its tokens and its
+    /// shape as a tree from `old_base` (wire form).
+    pub(crate) fn rebase_forward(&self, rebased: &Rebased) -> (Vec<u32>, Vec<u16>) {
+        let lead = rebased.path.len();
+        let mut tokens = rebased.path.clone();
+        tokens.extend(&self.tokens);
+        // Row i of the chain follows row i - 1 (wire i); the tree's rows follow
+        // the chain's last (wire `lead`) or their own parent, `lead` rows on.
+        let mut wire: Vec<u16> = (0..lead as u16).collect();
+        wire.extend(self.tree.to_wire().iter().map(|&w| {
+            if w == 0 {
+                lead as u16
+            } else {
+                w + lead as u16
+            }
+        }));
+        (tokens, wire)
+    }
+
+    /// Apply one change. A rebase answers what it did.
+    #[cfg(test)]
+    pub(crate) fn apply(&mut self, op: FlowOp) -> Result<Option<Rebased>, String> {
+        match op {
+            FlowOp::Push { parent, token } => self.push(usize::from(parent), token).map(|_| None),
+            FlowOp::Advance { row } => self.advance(usize::from(row)).map(|()| None),
+            FlowOp::Rebase => self.rebase().map(Some),
+        }
+    }
 }
 
 /// Lay a tree out with its most likely path first: rows `0..d` become the
@@ -630,5 +896,120 @@ mod tests {
             (next.tokens, next.parents),
             (vec![30, 50], vec![None, Some(0)])
         );
+    }
+    /// The tokens on `row`'s path in `tree`, root first, itself last.
+    fn path_tokens(tree: &DraftTree, tokens: &[u32], row: usize) -> Vec<u32> {
+        let mut out: Vec<u32> = std::iter::successors(Some(row), |&r| tree.parent(r))
+            .map(|r| tokens[r])
+            .collect();
+        out.reverse();
+        out
+    }
+
+    /// A tree that flows (#134 (b)): rows go only down from the walk's row, a
+    /// row's followers carry distinct tokens, and a rebase keeps every live
+    /// row at the position it held, following the same path — read again in
+    /// one forward from the old start, the path as a chain first.
+    #[test]
+    fn a_tree_that_flows_keeps_its_live_rows_through_a_rebase() {
+        // Root 5 at position 40; 9 and 11 follow it; 13 follows 9; 15 follows
+        // 11; 17 follows 13; 19 follows 15.
+        let mut flow = FlowTree::new(40, 5).unwrap();
+        for (parent, token) in [(0, 9), (0, 11), (1, 13), (2, 15), (3, 17), (4, 19)] {
+            flow.push(parent, token).unwrap();
+        }
+        assert!(flow.push(0, 9).is_err(), "row 0 is followed by 9 already");
+        assert!(flow.push(9, 1).is_err(), "no row 9");
+        assert_eq!(flow.live_rows(), 7);
+        // The walk takes 11, then 15: rows 1, 3, 5 are lost.
+        flow.advance(2).unwrap();
+        flow.advance(4).unwrap();
+        assert!(flow.advance(1).is_err(), "a walk only goes down");
+        assert!(flow.is_live(6) && flow.is_live(4));
+        assert!(!flow.is_live(1) && !flow.is_live(3) && !flow.is_live(5) && !flow.is_live(2));
+        assert_eq!(flow.live_rows(), 2);
+        // A row the model drew that no row carried: 23 after 15.
+        let bonus = flow.push(4, 23).unwrap();
+        assert_eq!(bonus, 7);
+
+        let before = flow.clone();
+        let rebased = flow.rebase().unwrap();
+        assert_eq!(rebased.old_base, 40);
+        assert_eq!(rebased.path, vec![5, 11], "the path before the walk's row");
+        assert_eq!(rebased.kept, vec![4, 6, 7]);
+        assert_eq!(flow.base(), 42);
+        assert_eq!(flow.at(), 0);
+        assert_eq!(flow.tokens(), &[15, 19, 23]);
+        for (new, &old) in rebased.kept.iter().enumerate() {
+            assert_eq!(
+                flow.base() + flow.tree().depth(new),
+                before.base() + before.tree().depth(old),
+                "row {old} keeps its position"
+            );
+        }
+        // Read again from the old start: the path as a chain, then the rows.
+        let (tokens, wire) = flow.rebase_forward(&rebased);
+        let again = DraftTree::from_wire(40, &wire).unwrap();
+        assert_eq!(tokens, vec![5, 11, 15, 19, 23]);
+        for (new, &old) in rebased.kept.iter().enumerate() {
+            let row = rebased.path.len() + new;
+            assert_eq!(
+                path_tokens(&again, &tokens, row),
+                path_tokens(before.tree(), before.tokens(), old),
+                "row {old} follows the same path"
+            );
+            assert_eq!(
+                again.base() + again.depth(row),
+                40 + before.tree().depth(old)
+            );
+        }
+        // The same changes applied as a list give the same tree.
+        let mut replay = FlowTree::new(40, 5).unwrap();
+        let ops = [
+            FlowOp::Push {
+                parent: 0,
+                token: 9,
+            },
+            FlowOp::Push {
+                parent: 0,
+                token: 11,
+            },
+            FlowOp::Push {
+                parent: 1,
+                token: 13,
+            },
+            FlowOp::Push {
+                parent: 2,
+                token: 15,
+            },
+            FlowOp::Push {
+                parent: 3,
+                token: 17,
+            },
+            FlowOp::Push {
+                parent: 4,
+                token: 19,
+            },
+            FlowOp::Advance { row: 4 },
+            FlowOp::Push {
+                parent: 4,
+                token: 23,
+            },
+            FlowOp::Rebase,
+        ];
+        let mut answered = None;
+        for op in ops {
+            answered = replay.apply(op).unwrap().or(answered);
+        }
+        assert_eq!(answered, Some(rebased));
+        assert_eq!(replay.tokens(), flow.tokens());
+        assert_eq!(replay.tree(), flow.tree());
+        // A rebase with the walk on row 0 only drops the lost rows.
+        let mut root = FlowTree::new(10, 1).unwrap();
+        root.push(0, 2).unwrap();
+        let r = root.rebase().unwrap();
+        assert!(r.path.is_empty());
+        assert_eq!((root.base(), root.len()), (10, 2));
+        assert_eq!(root.rebase_forward(&r), (vec![1, 2], vec![0, 1]));
     }
 }

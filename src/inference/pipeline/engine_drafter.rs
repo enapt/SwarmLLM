@@ -539,6 +539,7 @@ pub(super) fn read_ahead(
         for_the_owner: true,
         stop_below: None,
         tree: None,
+        flow: None,
     };
     let release = release_of(state.clone(), key);
     ReadAhead::new(
@@ -747,6 +748,7 @@ impl EngineDrafter {
             for_the_owner: true,
             stop_below: draft_confidence_floor(),
             tree: None,
+            flow: None,
         };
         let guesses = state.model_process_pool.draft(d, cancel).await?.tokens;
         self.open = Some((self.seq.len(), guesses.len()));
@@ -823,6 +825,7 @@ impl EngineDrafter {
                 grow_for_ms,
                 seed: crate::inference::worker_ipc::TreeSeed::of(seed),
             }),
+            flow: None,
         };
         let drafted = state.model_process_pool.draft(d, cancel).await?;
         if drafted.parents.len() != drafted.tokens.len()
@@ -842,6 +845,109 @@ impl EngineDrafter {
             tokens: drafted.tokens,
             path_logp: drafted.scores,
         })
+    }
+
+    /// One call of a tree that FLOWS (#134 (b), `SplitModel::grow_flow`):
+    /// `start` begins it from the sequence's last token (the cache cut to what
+    /// it holds of the sequence before that token, the rest read), else it
+    /// continues this attempt's tree after `ops` — the requester's changes
+    /// since the last call. Answers up to `rows` proposals a level, `levels`
+    /// deep, as (parent row, token) — each already a row of the drafter's
+    /// tree, so the caller pushes every one, in order, and sends no op for
+    /// it. While the tree flows the cache holds the sequence only below
+    /// the tree's start: [`Self::flow_ended`] says where that is once it ends.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn flow(
+        &mut self,
+        state: &SharedState,
+        start: bool,
+        ops: Vec<crate::inference::draft_tree::FlowOp>,
+        rows: u32,
+        levels: u32,
+        live_most: u32,
+        sampling: &SamplingParams,
+        coupling_seed: Option<u64>,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<Vec<(u16, u32)>, SwarmError> {
+        use crate::inference::draft_tree::FlowOp;
+        self.calls += 1;
+        if fault_draft_fail_at() == Some(self.calls) {
+            return Err(SwarmError::ServiceUnavailable(
+                "SWARMLLM_FAULT_DRAFT_FAIL: this drafter call fails on purpose".into(),
+            ));
+        }
+        let pushed_past_vocab = ops
+            .iter()
+            .any(|op| matches!(op, FlowOp::Push { token, .. } if *token >= self.spec.reads));
+        let (keep, append, root) = if start {
+            let Some((&root, before)) = self.seq.split_last() else {
+                return Err(SwarmError::Internal(
+                    "a tree that flows started with no token to follow".into(),
+                ));
+            };
+            let keep = self.valid.min(before.len());
+            (keep, before[keep..].to_vec(), Some(root))
+        } else {
+            (0, Vec::new(), None)
+        };
+        if pushed_past_vocab
+            || root.is_some_and(|r| r >= self.spec.reads)
+            || append.iter().any(|&t| t >= self.spec.reads)
+        {
+            return Err(SwarmError::Inference(
+                "the reply holds a token the drafter's vocabulary has no row for".into(),
+            ));
+        }
+        let read_to = keep + append.len();
+        let d = IpcDraft {
+            request_id: self.key,
+            model_id: self.spec.model_id.clone(),
+            layer_range: self.spec.layer_range,
+            keep: keep as u32,
+            append,
+            gamma: 0,
+            sampling: sampling.clone(),
+            history: Vec::new(),
+            coupling_seed,
+            for_the_owner: true,
+            stop_below: None,
+            tree: None,
+            flow: Some(crate::inference::worker_ipc::FlowAsk {
+                start: root,
+                ops,
+                rows,
+                levels,
+                live_most,
+            }),
+        };
+        let drafted = state.model_process_pool.draft(d, cancel).await?;
+        if drafted.parents.len() != drafted.tokens.len() || drafted.parents.contains(&0) {
+            return Err(SwarmError::Internal(format!(
+                "the drafter proposed {} rows with {} parents",
+                drafted.tokens.len(),
+                drafted.parents.len(),
+            )));
+        }
+        if start {
+            self.valid = read_to;
+        }
+        self.open = None;
+        Ok(drafted
+            .parents
+            .iter()
+            .zip(drafted.tokens)
+            .map(|(&p, token)| (p - 1, token))
+            .collect())
+    }
+
+    /// A tree that flowed has ended, the sequence holding every token its walk
+    /// committed: the drafter's cache holds the sequence below `base` (the
+    /// tree's start as it last moved, `FlowTree::base` — a rebase read the
+    /// path below it as context) and is trusted no further; the next call
+    /// cuts it there and reads on.
+    pub(super) fn flow_ended(&mut self, base: usize) {
+        self.valid = base.min(self.seq.len());
+        self.open = None;
     }
 
     /// The last token of the sequence is read again by the next call — after a

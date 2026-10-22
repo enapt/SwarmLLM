@@ -131,33 +131,33 @@ fn stream_switch(v: Option<&str>) -> bool {
 pub(super) struct StreamShape {
     /// This node's segments before the peers' — none when they hold the
     /// model's first layers.
-    near: Vec<PipelineSegment>,
+    pub(super) near: Vec<PipelineSegment>,
     /// The first peer's segment: each chunk is sent to it.
-    far: PipelineSegment,
+    pub(super) far: PipelineSegment,
     /// The peers after it, each handed the chunk by the one before (#318) —
     /// empty where one peer holds every layer between this node's.
-    chain: Vec<ChainHop>,
+    pub(super) chain: Vec<ChainHop>,
     /// This node's segments after the peers' — the boomerang's tail. When there
     /// are any, the guesses are walked HERE, by the last of them, and the peers
     /// answer each chunk with hidden states (FUTURE_WORK #152).
-    after: Vec<PipelineSegment>,
+    pub(super) after: Vec<PipelineSegment>,
 }
 
 impl StreamShape {
     /// Whether the run's tail samples, and so walks each chunk's guesses: only
     /// when it holds the model's last layers.
-    fn far_walks(&self) -> bool {
+    pub(super) fn far_walks(&self) -> bool {
         self.after.is_empty()
     }
 
     /// The peer that answers each chunk: the run's last.
-    fn tail(&self) -> &crate::types::NodeId {
+    pub(super) fn tail(&self) -> &crate::types::NodeId {
         self.chain.last().map_or(&self.far.node_id, |h| &h.node_id)
     }
 
     /// The layer ranges of the run, in order — every hop's, since any may
     /// refuse with its own.
-    fn far_ranges(&self) -> Vec<(u32, u32)> {
+    pub(super) fn far_ranges(&self) -> Vec<(u32, u32)> {
         std::iter::once(self.far.layer_range)
             .chain(self.chain.iter().map(|h| h.layer_range))
             .collect()

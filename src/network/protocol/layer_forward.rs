@@ -124,6 +124,7 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     append_prompt_span_trailer(&mut buf, forward);
     append_image_spans_trailer(&mut buf, forward);
     append_draft_tree_trailer(&mut buf, forward);
+    append_draft_tree_flow_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -457,6 +458,52 @@ pub(crate) fn read_draft_tree_trailer(
         .collect();
     *cursor = body + 2 * n;
     Ok(parents)
+}
+
+/// Length of the tree-flow trailer, marker included.
+const DRAFT_TREE_FLOW_TRAILER_LEN: usize = 5;
+
+/// Write the tree-flow trailer: `0x11 | from u32 LE` — where a tree that
+/// flows starts (`LayerForward::draft_tree_from`, #134 (b)). Right after the
+/// `0x10` trailer, by the ONE function the plaintext frame, the encrypted frame
+/// and the AAD all call: the start decides which cached rows each row reads
+/// and which position its draw fills. Emitted only beside a tree, which a
+/// requester streams only to peers advertising `features::DRAFT_TREE_FLOW`.
+pub(crate) fn append_draft_tree_flow_trailer(buf: &mut Vec<u8>, forward: &LayerForward) {
+    let Some(from) = forward.draft_tree_from else {
+        return;
+    };
+    if forward.draft_parents.is_empty() {
+        return;
+    }
+    buf.push(0x11);
+    buf.extend_from_slice(&from.to_le_bytes());
+}
+
+/// Read the tree-flow trailer (`0x11`) at `cursor`, after the tree's own.
+/// REFUSED — never read as absent — when truncated or with no tree beside it:
+/// the rows of a tree that flows read as a tree of their own would attend the
+/// wrong cached rows and answer plausibly and wrongly.
+pub(crate) fn read_draft_tree_flow_trailer(
+    data: &[u8],
+    cursor: &mut usize,
+    has_tree: bool,
+) -> Result<Option<u32>, SwarmError> {
+    if data.len() <= *cursor || data[*cursor] != 0x11 {
+        return Ok(None);
+    }
+    if data.len() < *cursor + DRAFT_TREE_FLOW_TRAILER_LEN {
+        return Err(SwarmError::Network("tree-flow trailer truncated".into()));
+    }
+    if !has_tree {
+        return Err(SwarmError::Network(
+            "tree-flow trailer with no tree beside it refused".into(),
+        ));
+    }
+    let at = *cursor + 1;
+    let from = u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+    *cursor += DRAFT_TREE_FLOW_TRAILER_LEN;
+    Ok(Some(from))
 }
 
 /// Write the decoded-so-far trailer: `0x08 | n(2 LE) | n × id(4 LE)`.
@@ -915,6 +962,8 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
     let prompt_span = read_prompt_span_trailer(data, &mut cursor);
     let image_spans = read_image_spans_trailer(data, &mut cursor);
     let draft_parents = read_draft_tree_trailer(data, &mut cursor)?;
+    let draft_tree_from =
+        read_draft_tree_flow_trailer(data, &mut cursor, !draft_parents.is_empty())?;
     let _ = cursor;
 
     Ok(LayerForward {
@@ -945,6 +994,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         prompt_span,
         image_spans,
         draft_parents,
+        draft_tree_from,
     })
 }
 
@@ -990,6 +1040,7 @@ mod tests {
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
+            draft_tree_from: None,
         }
     }
 
@@ -1765,6 +1816,53 @@ mod tests {
                 .draft_parents
                 .len(),
             most
+        );
+    }
+
+    /// A tree that flows (#134 (b)) names its start after its shape; a tree
+    /// without one is byte-identical to before; and a start cut short, or with
+    /// no tree beside it, is REFUSED — read as absent, the rows would be read
+    /// as a tree of their own, from the wrong position.
+    #[test]
+    fn a_flowing_trees_start_survives_the_wire_and_a_malformed_one_is_refused() {
+        let mut f = base_forward();
+        f.spec_logits_requested = true;
+        f.spec_walk_at_tail = true;
+        f.draft_parents = vec![0, 1, 1, 2, 3];
+        f.draft_tree_from = Some(f.index_pos - 3);
+        let bytes = encode_layer_forward(&f).unwrap();
+        let back = decode_layer_forward(&bytes).unwrap();
+        assert_eq!(back.draft_tree_from, f.draft_tree_from);
+        assert_eq!(
+            back.draft_parents, f.draft_parents,
+            "the tree before it reads"
+        );
+
+        let mut tree = f.clone();
+        tree.draft_tree_from = None;
+        let plain = encode_layer_forward(&tree).unwrap();
+        assert_eq!(plain.len(), bytes.len() - DRAFT_TREE_FLOW_TRAILER_LEN);
+        assert_eq!(decode_layer_forward(&plain).unwrap().draft_tree_from, None);
+
+        // A start with no shape is never written...
+        let mut no_tree = f.clone();
+        no_tree.draft_parents.clear();
+        let shapeless = encode_layer_forward(&no_tree).unwrap();
+        assert_eq!(
+            decode_layer_forward(&shapeless).unwrap().draft_tree_from,
+            None
+        );
+        // ...and refused where a sender wrote one anyway.
+        let mut forged = shapeless.clone();
+        forged.push(0x11);
+        forged.extend_from_slice(&7u32.to_le_bytes());
+        assert!(
+            decode_layer_forward(&forged).is_err(),
+            "a start with no tree beside it"
+        );
+        assert!(
+            decode_layer_forward(&bytes[..bytes.len() - 1]).is_err(),
+            "cut short"
         );
     }
 }

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+**A split across a long link can now keep its guesses flowing instead of waiting on each
+check.** Until now a split across a long link sent a tree of guesses, waited the whole round trip
+for the far computer's answer, and only then went on. Now, where every computer of the split runs
+this version and the small guessing model is on your graphics card, the guessing never stops:
+each few guesses go out the moment they are made, the far computer answers every one with the
+word the model itself writes there, and your computer writes each word as soon as its answer
+arrives — the reply waits a round trip only where none of the guesses held the model's word. On a
+test split of a 7B model at a 385 ms round trip, with every part on one graphics card, 400-token
+replies came at 9.0-9.4 tokens a second against 8.0-8.3 for trees checked one round trip at a
+time. If anything goes wrong mid-reply, the reply is finished the old way. `SWARMLLM_TREE_FLOW=0`
+turns it off.
+
 **A split across a long link spends less of each round waiting for its guesses.** While the far
 computer checks one tree of guesses, the small model on your graphics card grows the next one.
 Each of its steps now costs less: the positions of the guesses go to the card once per step, not

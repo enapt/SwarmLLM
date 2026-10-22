@@ -449,6 +449,16 @@ changes no live row. (2) The drafter's growth session: the same equality for its
 loop, rig at a 300 ms injected delay against tree rounds on the same replies; then the real
 link. Exit: ≥ 1.3× tree rounds over 400 tokens, replies scored against llama.cpp.
 
+**Built 2026-10-22 (steps 1-3, unreleased).** Steps 1 and 2's equalities hold
+(`a_tree_read_in_three_forwards_reads_as_one`,
+`a_tree_that_flows_proposes_what_a_fresh_read_of_each_path_ranks_likeliest`). Step 3 on the card
+rig at 385 ms: 8.99-9.44 tok/s against tree rounds' 8.03-8.27 over 400 tokens, every reply token
+rank 1 or a near-tie against llama.cpp — +11-14%, short of the exit. The first build grew one row
+of depth a drafter call and the walk followed at 0.63-0.74 tokens a call whatever the rows; three
+levels a call (EAGLE-2's shape) took it to 1.05-1.17. The requester is compute-bound and the
+drafter's levels are ~72% of it: next, its tree steps captured as CUDA graphs, then the real link
+(`docs/invariants/scheduling.md` § "A tree that flows", Measured).
+
 ## Build order (each step ends on a measurement)
 
 1. **Per-pass breakdown.** Per hop and in both directions, record:

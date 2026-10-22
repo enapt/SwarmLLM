@@ -4718,6 +4718,125 @@ card — two CUDA processes, the FECS shape: one came at its 5th arm, 10:36Z 10-
 `~/swarmllm-318/overlap318.sh` (the far half on the card, the requester's part and drafter on its
 processor, QUIC, every packet delayed).
 
+## A tree that flows (2026-10-22, #134 (b))
+
+**What it replaced.** A tree round sends one tree, waits the whole round trip for its walk, and
+grows the next tree while it waits. On TH↔AU (~411 ms) a round was 608-654 ms, and the reply
+advanced only as deep as one check's tree reached, once per round trip. In a flow nothing waits
+for an answer but the walk: the drafter grows ONE tree, three levels of 8 rows a call
+(`SWARMLLM_FLOW_LEVELS`, `SWARMLLM_FLOW_ROWS`), each call's rows go through this node's layers and
+on to the far segment at once, and the
+far segment answers every row with the token the model draws there. This node walks those draws
+(`draft_tree::walk_draws`) and emits each token the moment the walk reaches it. The reply stalls
+only where no row holds the model's draw — a miss — and a miss costs one round trip, where a
+round costs one per check.
+
+**The rule** (`pipeline::dsd_flow`):
+
+- **One tree, kept alike in three places.** Every segment's cache keeps each row sent since the
+  tree's start (`LayerForward::draft_tree_from`, trailer `0x11`), in the order sent; every forward
+  carries the whole tree's shape (`0x10`), so a row reads the context and its own ancestors and a
+  lost branch stays in the caches, read by nothing. This node's `FlowTree` and the drafter's
+  worker (`SplitModel::grow_flow`, a `FlowSession` per attempt) change the rows only by `FlowOp`s
+  (Push — a miss's row —, Advance, Rebase), applied alike, and by the drafter's proposals: a row
+  of its tree the moment it is made (its next level reads it), pushed here in its order, no op.
+- **The tail DRAWS, it does not walk.** One draw per row (`sampling::draw_each_row`), its noise
+  keyed by `tree_start + 1 + depth` — the draw at a row does not depend on which forward carried
+  it, so the walk is exact at any temperature. A sampler reading history (penalties) cannot be
+  drawn so and keeps the rounds (`flow_possible`, `refuse_draws_with_penalties`).
+- **A miss is a row of its own.** The draw no child carries is pushed as a row under the walk's
+  row, the walk moves onto it, and the drafter grows under it with its next call.
+- **Several levels a drafter call** (`levels_a_call` 3 × `rows_a_level` 8): each level reads the
+  last one's proposals in one forward and proposes after them. At ONE level a call a branch grew
+  one row deeper a call and the walk with it — 0.63-0.74 tokens a call whatever the rows a call
+  (8, 16, 32) or the live budget (32, 64, 128): the depth a call adds, not its rows, was the bound
+  (gotcha #933). EAGLE-2 grows a draft the same way (one forward a depth, top-8, 5 deep; its
+  `cnets.py`), and FlowSpec (2507.02620) grows depth 5 a step.
+- **A rebase, not a cut per verdict.** At the row limit (`MAX_TREE_ROWS`, 512) or once the walk
+  is `REBASE_PATH_ROWS` (128) deep, the walk's row becomes the new start: ONE forward cuts every
+  cache back to the old start and reads the walk's path there, then the live rows
+  (`FlowTree::rebase_forward`). It is a stream restart (`forward_streams`): turns before it not
+  yet run are skipped and refused, never timed out. Answers from before it still count — mapped
+  onto the kept rows through the last rebase's remap; anything older, and an old epoch's
+  refusal, is dropped (`stale_answers`). **A rebase waits for the one before it to be ANSWERED**
+  (`FlowRun::settled_base`): a restart is safe only where every turn it builds on ran
+  (`forward_streams`' premise), and a rebase sent early could skip the one before it at the tail,
+  leaving that tree's rows where its path belongs. A miss while the tree is full and a rebase is
+  out holds its row (`bonus_waiting`, its token already emitted) until the answer.
+- **The window**: 12 forwards out for one peer, 8 through a chain (a hop remembers 16 of a
+  stream's forwards on the rule that a coordinator keeps half that out). A serving node holds 16
+  of one stream (`MAX_STREAM_CHUNKS_HERE`).
+- **Live rows ≤ 128** (`SWARMLLM_FLOW_LIVE`): the walk's row and those under it.
+- **Gated** on `features::DRAFT_TREE_FLOW` (bit 31) for every peer of the run, beside
+  `DRAFT_TREES`; off with `SWARMLLM_TREE_FLOW=0` (the tree rounds), on by default wherever trees
+  are checked from the start (`dsd_tree::trees_wanted`).
+- **A failed flow finishes in tree rounds** where the peers answered (`rounds_may_finish`:
+  `Validation`, `Inference`, `Internal` — a stale reading of a peer's features, a refusal, a
+  fault of the flow's own): every forward still out is answered first, every segment is cut back
+  to the last start they ANSWERED at and the reply past it is read again in front of the next
+  check (`rounds_take_over` → `TreeRounds::reread`, a kept path's own rule), and the drafter
+  follows the reply (`EngineDrafter::follow`). ⚠ Past the tree's start a cache holds rows in the
+  order SENT: the first take-over, cut to the reply's length as the chain stream's is, read those
+  rows as the reply and its next token ranked 8th against llama.cpp (logit gap 4.1, `fault` arm,
+  2026-10-22, gotcha #932). A peer
+  gone silent is the router's to re-plan, never waited on twice. Fault switch:
+  `SWARMLLM_FAULT_FLOW_FAIL=<n>`.
+
+**Measured.** *Correctness, on the processor* (2026-10-22, `flow318.sh CPU=1 LEN=64`, a 557-token
+prompt, 7B split 0-14 | 14-28 over QUIC at 385 ms, greedy, two replies an arm): the flow ran 64-65
+forwards of 10.4-10.9 rows, 1 miss and 1 rebase a reply, no stale answer and no refusal; its two
+replies agreed with each other and the tree rounds' two with plain rounds' two, the two sets one
+token apart (" cycle" against " process", token 46). Scored against llama.cpp
+(`score_against_reference.py`): every token of every reply rank 1 but for two near-ties — token 5
+(" by", gap 0.051, in all of them) and token 46, where llama.cpp itself picks the flow's " cycle"
+(gap 0.011). A tree row is read on standard attention (`ForceStandardAttnGuard`), whose sums move
+with the forward that carries it (#313), so arms that group rows differently may part at a
+near-tie.
+
+*Speed, on the card* (2026-10-22, `flow318.sh LEN=400 ARM_REPEAT=3`; the drafter, this node's
+half and the far half all on one RTX 3070 Laptop; the 0.5B Q8_0 drafter; each arm's first request
+runs before the drafter is on the card and is left out — warm replies):
+
+| arm | tok/s | forwards a reply | rows a forward | tokens a drafter call | drafting / near s |
+|---|---|---|---|---|---|
+| tree rounds | 8.03-8.27 (4) | — | — | — | — |
+| flow, 1 level × 16 (the first build) | 8.25-8.63 (4) | 624-657 | 16.8-16.9 | 0.61-0.64 | 24.3-24.6 / 21-22 |
+| 2 levels × 8 | 8.60-9.21 | 459-468 | 17.4 | 0.86 | 29-32 / 12-13 |
+| **3 levels × 8 (default)** | **8.99-9.44 (4)** | 342-380 | 24.5-25.6 | 1.05-1.17 | 30.5-32.7 / 10.4-11.5 |
+| 4 levels × 8 | 8.92-9.04 | 296-302 | 33.0 | 1.32-1.35 | 32.3-32.5 / 9.3-10.7 |
+
+A level adds ~0.24 tokens a call for ~27 ms of drafter (8 rows of a 0.5B on standard attention,
+never a CUDA graph, the card shared with both halves) — about the rate the flow already runs at,
+so it levels off past three. The requester is compute-bound: waiting under 1.2 s of 42-47, the
+drafter ~72% of the rest; misses 16-24 a reply, rebases 15-23. The three-level replies against
+llama.cpp: every token rank 1 or a rank-2 near-tie (6-8 a reply, the largest gap 0.13). **The
+drafter's call beside this node's layers was a loss** (built, measured, removed: 7.53-8.24 tok/s;
+drafting 31 → 46-49 s, near 10-11 → 19-21 s): two processes on one card time-slice it (gotcha
+#759), and in the field the drafter and this node's half share a card too — removed. The `fault`
+arm still finished in rounds (11 tokens read again, every reply whole). Short of the 1.3× exit;
+what is left is the drafter's level — a graph saves ~9 ms of a 0.5B's decode step (gotcha #233),
+and an 8-row tree step costs ~12 ms uncaptured on an idle card (§ "A tree step pays for its tree
+once") — and the real link, where the far half is not on this card.
+
+**What a change must keep.** The draw at a row must not depend on the forward that carried it
+(noise by position, the row's own ancestors in its mask); the three trees change only by the
+ordered ops; a rebase's forward goes out at once, before any proposal, so path + kept never
+exceeds the old tree; an answer is never applied to a row it was not drawn at (the remap, the
+epoch); and every forward carries the WHOLE tree's shape — a segment checks it against its real
+cache (`DraftTree::rows_for`), which is what makes a wrong one a refusal, not a wrong reply.
+
+**Tests**: `a_tree_read_in_three_forwards_reads_as_one` (`split/tests/draft_trees.rs`, a chain over
+the same rows the control); `a_tree_that_flows_proposes_what_a_fresh_read_of_each_path_ranks_likeliest`
+(`split/tests/drafting.rs`, red with the rows read as a chain, and its three-level call red at one
+level a call: 8 proposals for 24); `a_tree_that_flows_keeps_its_live_rows_through_a_rebase`
+(`draft_tree`); `walking_each_rows_draw_is_the_tails_own_walk` (`sampling`);
+`a_tree_that_flows_is_applied_from_where_it_starts` (`model_worker`);
+`a_flowing_trees_start_survives_the_wire_and_a_malformed_one_is_refused`,
+`a_flowing_trees_start_is_sealed_and_survives_the_encrypted_frame` (`network::protocol`). Rig: `~/swarmllm-318/flow318.sh` (arms `flow`, `trees`, `rounds`,
+`fault`, and `flow@NAME=v+NAME=v` for a knob; `CPU=1` the correctness pass). Security review 2026-10-22: no High or Medium; a stale
+capability reading now finishes in rounds (L1); a hop flipping draw/walk semantics only fails
+the step, as it could already (L2).
+
 ## A peer that fails a model on every request is left out of its plans for a while (2026-10-02)
 
 **What it replaced.** Field report (2026-10-01, v0.3.218): peer `bf7b3263`, a

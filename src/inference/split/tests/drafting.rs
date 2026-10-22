@@ -531,3 +531,195 @@ fn a_call_out_of_time_adds_one_step_it_does_not_read() {
     assert!(grown.parents.iter().all(Option::is_none));
     assert_eq!(grown.tokens[0], fresh(&mut model, &prompt, 1)[0]);
 }
+
+/// Row `row`'s path in a tree that flows, from its row 0.
+fn flow_path(tree: &crate::inference::draft_tree::FlowTree, row: usize) -> Vec<u32> {
+    let mut path = vec![tree.tokens()[row]];
+    let mut at = tree.tree().parent(row);
+    while let Some(p) = at {
+        path.push(tree.tokens()[p]);
+        at = tree.tree().parent(p);
+    }
+    path.reverse();
+    path
+}
+
+/// Each proposal, in order, follows a live row, carries a token none of that
+/// row's followers carries, and is among the likeliest followers a fresh read
+/// of its row's whole path ranks — the context before the tree, then the
+/// path; then it is made a row, as the requester makes every proposal one.
+fn take_flow_proposals(
+    model: &mut SplitModel,
+    tree: &mut crate::inference::draft_tree::FlowTree,
+    context: &[u32],
+    proposed: &[(u16, u32)],
+) {
+    for &(parent, token) in proposed {
+        let parent = usize::from(parent);
+        assert!(tree.is_live(parent), "a proposal after lost row {parent}");
+        assert!(
+            !tree.has_child(parent, token),
+            "row {parent} carries {token}"
+        );
+        let mut seq = context.to_vec();
+        seq.extend(flow_path(tree, parent));
+        let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+        let input = model.tensor_from_ids(&seq).unwrap();
+        let out = model
+            .forward_verify_all_positions(&input, 0, &kv, "fresh")
+            .unwrap();
+        let logits = out
+            .squeeze(0)
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut ranked = logits.clone();
+        ranked.sort_by(|a, b| b.total_cmp(a));
+        assert!(
+            logits[token as usize] >= ranked[super::super::draft::TREE_CHILDREN - 1] - 1e-3,
+            "{token} after row {parent} is not among its likeliest followers"
+        );
+        tree.push(parent, token).unwrap();
+    }
+}
+
+/// A tree that FLOWS (#134 (b), `SplitModel::grow_flow`), grown over several
+/// calls while the requester changes it — proposals made rows, the walk moved
+/// down, a draw no row carried added, the tree rebased onto the walk's row —
+/// proposes only what a fresh read of each row's path ranks likeliest, only
+/// after live rows; one call grows a branch as many rows deep as it has
+/// levels; its cache holds exactly the rows it has read; and a cache that no
+/// longer holds them is refused.
+#[test]
+fn a_tree_that_flows_proposes_what_a_fresh_read_of_each_path_ranks_likeliest() {
+    use crate::inference::draft_tree::{FlowOp, FlowTree};
+    let mut model = whole_model();
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    let prompt: Vec<u32> = vec![3, 17, 99, 250, 7, 41, 12, 5];
+    let mut context = prompt[..7].to_vec();
+    let mut session = model
+        .start_flow(&kv, "f", 0, &context, prompt[7], 0)
+        .unwrap();
+    let mut mine = FlowTree::new(context.len(), prompt[7]).unwrap();
+    let grow_flow = |model: &mut SplitModel,
+                     session: &mut FlowGrowth,
+                     ops: &[FlowOp],
+                     rows: usize,
+                     levels: usize| {
+        model
+            .grow_flow(
+                &kv,
+                "f",
+                session,
+                FlowStep {
+                    ops,
+                    rows,
+                    levels,
+                    live_most: 128,
+                },
+                &greedy(),
+                None,
+                0,
+            )
+            .unwrap()
+    };
+
+    // The first call reads the root and proposes its followers, the greedy
+    // guess first.
+    let first = grow_flow(&mut model, &mut session, &[], 6, 1);
+    assert_eq!(first.len(), 6);
+    assert!(first.iter().all(|&(p, _)| p == 0));
+    assert_eq!(first[0].1, fresh(&mut model, &prompt, 1)[0]);
+    take_flow_proposals(&mut model, &mut mine, &context, &first);
+    assert_eq!(kv.request_positions(model.kv_model_key(), "f"), 8);
+
+    // Its proposals are rows of both trees; the next call reads them and
+    // proposes on.
+    let second = grow_flow(&mut model, &mut session, &[], 12, 1);
+    assert_eq!(second.len(), 12);
+    take_flow_proposals(&mut model, &mut mine, &context, &second);
+    assert_eq!(kv.request_positions(model.kv_model_key(), "f"), 7 + 7);
+
+    // The walk takes row 1, whose draw no row carried: that draw is a row of
+    // its own and the walk stands on it, so every proposal follows it. Three
+    // levels of TREE_CHILDREN: the first takes every follower the draw has,
+    // so the second can only follow the first's rows — one call grows the
+    // branch more than one row deep.
+    let mut ops = vec![FlowOp::Advance { row: 1 }];
+    mine.advance(1).unwrap();
+    let missed = (0..VOCAB as u32).find(|&t| !mine.has_child(1, t)).unwrap();
+    let bonus = mine.push(1, missed).unwrap();
+    mine.advance(bonus).unwrap();
+    ops.extend([
+        FlowOp::Push {
+            parent: 1,
+            token: missed,
+        },
+        FlowOp::Advance { row: bonus as u16 },
+    ]);
+    let children = super::super::draft::TREE_CHILDREN;
+    let third = grow_flow(&mut model, &mut session, &ops, children, 3);
+    assert_eq!(third.len(), 3 * children);
+    let level_one = bonus + 1..bonus + 1 + children;
+    assert!(third[..children]
+        .iter()
+        .all(|&(p, _)| usize::from(p) == bonus));
+    assert!(
+        third[children..2 * children]
+            .iter()
+            .all(|&(p, _)| level_one.contains(&usize::from(p))),
+        "the second level follows the first's rows"
+    );
+    take_flow_proposals(&mut model, &mut mine, &context, &third);
+    // The last level is read by the next call.
+    assert_eq!(
+        kv.request_positions(model.kv_model_key(), "f"),
+        mine.base() + mine.len() - children
+    );
+
+    // Rebased onto a row below the draw: the path before it is context, and
+    // the next call proposes after the kept rows as a fresh read of the whole
+    // sequence does.
+    let next = level_one.start;
+    let ops = [FlowOp::Advance { row: next as u16 }, FlowOp::Rebase];
+    mine.advance(next).unwrap();
+    let rebased = mine.rebase().unwrap();
+    context.extend(&rebased.path);
+    assert_eq!(rebased.path.len(), 3, "row 0, row 1 and the draw");
+    assert_eq!(mine.base(), 10);
+    let fourth = grow_flow(&mut model, &mut session, &ops, 8, 1);
+    assert_eq!(fourth.len(), 8);
+    take_flow_proposals(&mut model, &mut mine, &context, &fourth);
+    assert_eq!(
+        (session.flow().base(), session.flow().tokens()),
+        (mine.base(), mine.tokens())
+    );
+    assert_eq!(
+        kv.request_positions(model.kv_model_key(), "f"),
+        mine.base() + mine.len() - fourth.len()
+    );
+
+    // A cache that lost the rows is refused, never read from.
+    kv.truncate_request_to(model.kv_model_key(), "f", 4)
+        .unwrap();
+    let refused = model.grow_flow(
+        &kv,
+        "f",
+        &mut session,
+        FlowStep {
+            ops: &[],
+            rows: 4,
+            levels: 1,
+            live_most: 128,
+        },
+        &greedy(),
+        None,
+        0,
+    );
+    assert!(matches!(
+        refused,
+        Err(crate::error::SwarmError::ServiceUnavailable(_))
+    ));
+}

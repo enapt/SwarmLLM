@@ -218,6 +218,10 @@ pub(super) async fn handle_layer_forward(
     } else {
         forward.draft_parents.clone()
     };
+    // A tree that flows (#134 (b)): the shape is the whole tree from where it
+    // starts, so the start goes on with it — dropped, the next hop would read
+    // this forward's rows as a tree of their own and refuse them.
+    let draft_tree_from_onward = draft_tree_from_onward(&chain, &forward);
     let sequence_num = forward.sequence_num;
     // A streamed check's number, handed on with it so the next hop runs the
     // stream in its order too (`features::CHAINED_STREAM`, #318).
@@ -261,6 +265,7 @@ pub(super) async fn handle_layer_forward(
             verify_onward.is_some(),
             stream_seq.is_some(),
             !draft_parents_onward.is_empty(),
+            draft_tree_from_onward.is_some(),
         ) {
             if reason == ONWARD_UNREACHABLE {
                 dial_next_hop(
@@ -435,6 +440,7 @@ pub(super) async fn handle_layer_forward(
                 verify_onward.is_some(),
                 stream_seq.is_some(),
                 !draft_parents_onward.is_empty(),
+                draft_tree_from_onward.is_some(),
             )
             .filter(|&r| r != ONWARD_UNREACHABLE)
             {
@@ -536,6 +542,7 @@ pub(super) async fn handle_layer_forward(
                         // cannot read one: dropped, its rows would attend their
                         // siblings and the tail would walk a wrong answer.
                         draft_parents: draft_parents_onward.clone(),
+                        draft_tree_from: draft_tree_from_onward,
                     };
                     tracing::info!(
                         request_id = %request_id,
@@ -834,8 +841,11 @@ fn onward_refusal(
     check: bool,
     streamed: bool,
     tree: bool,
+    flow: bool,
 ) -> Option<&'static str> {
-    use swarmllm_types::node::features::{CHAINED_STREAM, CHAINED_VERIFY, DRAFT_TREES};
+    use swarmllm_types::node::features::{
+        CHAINED_STREAM, CHAINED_VERIFY, DRAFT_TREES, DRAFT_TREE_FLOW,
+    };
     // First: a next hop this node has not met is in no list here, so its
     // features are unknown too — that is "dial it", not "it cannot carry it"
     // (the rig's middle machine, 2026-10-20, refused every check that way and
@@ -855,7 +865,23 @@ fn onward_refusal(
     if tree && !state.peer_advertises_feature(&next.node_id, DRAFT_TREES) {
         return Some("tree of guesses: the next segment cannot carry it");
     }
+    if flow && !state.peer_advertises_feature(&next.node_id, DRAFT_TREE_FLOW) {
+        return Some("tree that flows: the next segment cannot carry it");
+    }
     None
+}
+
+/// Where a chained forward's tree starts, for the next hop: a tree that flows
+/// (#134 (b)) names its start beside its shape, and both go on together or
+/// not at all — the start without the shape is no tree, and the shape without
+/// the start a different one.
+fn draft_tree_from_onward(
+    chain: &[crate::types::ChainHop],
+    forward: &crate::types::LayerForward,
+) -> Option<u32> {
+    forward
+        .draft_tree_from
+        .filter(|_| !chain.is_empty() && !forward.draft_parents.is_empty())
 }
 
 /// Send a sanitized error `LayerResult` back to the originating peer when
@@ -1261,6 +1287,7 @@ mod chaining_tests {
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
+            draft_tree_from: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         super::handle_layer_forward(state, tx, forward).await;
@@ -1394,6 +1421,7 @@ mod chaining_tests {
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
+            draft_tree_from: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         tokio::time::timeout(
@@ -1616,6 +1644,7 @@ mod tests {
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
+            draft_tree_from: None,
         };
         let (tx, mut rx) = mpsc::channel(4);
         refuse_forward(
@@ -1782,6 +1811,7 @@ mod forward_positions_tests {
             }),
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
+            draft_tree_from: None,
         };
         let piece = turn_wait(&f);
         assert_eq!(

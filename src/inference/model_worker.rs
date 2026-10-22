@@ -467,6 +467,8 @@ pub async fn run_worker(
     // release runs once per cancel rather than on every tick it is retained.
     let mut kv_released_for_cancel: std::collections::HashSet<uuid::Uuid> =
         std::collections::HashSet::new();
+    // The drafter's trees that flow, kept between a reply's calls (#134 (b)).
+    let mut flow_sessions = FlowSessions::default();
 
     loop {
         // Either block on the next IPC message (no slots are decoding) OR race
@@ -513,6 +515,7 @@ pub async fn run_worker(
                 &mut card_pace,
                 &pending_fetches,
                 &cancelled,
+                &mut flow_sessions,
             )
             .await;
 
@@ -542,6 +545,7 @@ pub async fn run_worker(
                             &mut card_pace,
                             &pending_fetches,
                             &cancelled,
+                            &mut flow_sessions,
                         )
                         .await;
                     }
@@ -634,6 +638,7 @@ pub async fn run_worker(
             // Here, in the main loop and between messages, no forward of a
             // cancelled request can be running in this worker.
             release_caches_of_cancelled(&cancelled, &mut kv_released_for_cancel, &kv_store);
+            flow_sessions.forget_cancelled(&cancelled);
             // Sweep cancels that never matched a request (the request had
             // already finished when the cancel arrived).
             cancelled.retain(|_, at| at.elapsed().as_secs() < CANCEL_RETENTION_SECS);
@@ -1240,7 +1245,8 @@ fn batch_eligible(requests: &[IpcForward]) -> bool {
         if r.adapter_id.is_some() {
             return false;
         }
-        if !r.draft_tokens.is_empty() || !r.draft_parents.is_empty() {
+        if !r.draft_tokens.is_empty() || !r.draft_parents.is_empty() || r.draft_tree_from.is_some()
+        {
             return false;
         }
         if r.spec_logits_requested {
@@ -1619,15 +1625,21 @@ fn wire_token_ids(bytes: &[u8], rows: Option<usize>, what: &str) -> Result<Vec<i
 /// The tree of guesses a forward applies (#134), checked: a decode-side check
 /// (never a prompt pass), well formed (`DraftTree::from_wire`: parents before
 /// children, at most `draft_tree::MAX_TREE_ROWS`), one entry per row this
-/// forward reads, and — on the segment that answers — walked here
+/// forward reads, and — on the segment that answers — answered with token ids
 /// (`unwalked_answer`): a tree's every row back as a vocabulary would be tens
-/// of megabytes, so a coordinator asks for one only from a tail that walks.
-/// Anything else is the coordinator's mistake, a 400 — a segment whose layers
-/// cannot read a tree (`layers_refuse`, `SplitModel::draft_tree_refusal`)
+/// of megabytes, so a coordinator asks for one only from a tail that walks or
+/// draws. Anything else is the coordinator's mistake, a 400 — a segment whose
+/// layers cannot read a tree (`layers_refuse`, `SplitModel::draft_tree_refusal`)
 /// included, refused before anything runs so the coordinator can check the
 /// same guesses as a chain.
+///
+/// A tree that FLOWS (`tree_from`, #134 (b)) starts at or before `index_pos`:
+/// its rows before `index_pos` are in the cache from earlier forwards, so the
+/// shape names `index_pos - tree_from` rows more than this forward reads — and
+/// a tree's rows must end where the cache does, which the layers check.
 fn draft_tree_to_apply(
     wire: &[u16],
+    tree_from: Option<u32>,
     index_pos: usize,
     positions: usize,
     sequence_num: u32,
@@ -1635,6 +1647,11 @@ fn draft_tree_to_apply(
     layers_refuse: Option<&'static str>,
 ) -> Result<Option<crate::inference::draft_tree::DraftTree>, SwarmError> {
     if wire.is_empty() {
+        if tree_from.is_some() {
+            return Err(SwarmError::Validation(
+                "a tree that flows was sent with no shape".into(),
+            ));
+        }
         return Ok(None);
     }
     if let Some(why) = layers_refuse {
@@ -1652,15 +1669,46 @@ fn draft_tree_to_apply(
             "a tree of guesses is walked by the segment that answers it".into(),
         ));
     }
-    let tree = crate::inference::draft_tree::DraftTree::from_wire(index_pos, wire)
+    let base = match tree_from {
+        None => index_pos,
+        Some(from) if from as usize <= index_pos => from as usize,
+        Some(from) => {
+            return Err(SwarmError::Validation(format!(
+                "a tree that flows from position {from} continued at {index_pos}"
+            )));
+        }
+    };
+    let tree = crate::inference::draft_tree::DraftTree::from_wire(base, wire)
         .map_err(SwarmError::Validation)?;
-    if tree.len() != positions {
+    let read_before = index_pos - base;
+    if tree.len() != read_before + positions {
         return Err(SwarmError::Validation(format!(
-            "a tree of {} rows sent with {positions} positions to read",
+            "a tree of {} rows sent with {positions} positions to read after {read_before} of it",
             tree.len()
         )));
     }
     Ok(Some(tree))
+}
+
+/// A tree that flows is answered with one draw per row (#134 (b),
+/// `sampling::draw_each_row`), and a draw there reads no path's tokens — so a
+/// request whose sampling penalises its own history is refused, a 400: its
+/// requester checks such a request in rounds, where the tail walks each path
+/// with its tokens.
+fn refuse_draws_with_penalties(
+    sampling: &crate::types::SamplingParams,
+    generated_ids: &[u32],
+) -> Result<(), SwarmError> {
+    if sampling.frequency_penalty != 0.0
+        || sampling.presence_penalty != 0.0
+        || !generated_ids.is_empty()
+    {
+        return Err(SwarmError::Validation(
+            "a tree that flows is drawn row by row, and penalties need each path's own tokens"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// The rows a check's answer is made from, checked before the forward: the
@@ -2125,12 +2173,24 @@ async fn handle_forward(
     // checked against the rows it shapes before any forward reads it.
     let draft_tree = draft_tree_to_apply(
         &fwd.draft_parents,
+        fwd.draft_tree_from,
         fwd.index_pos as usize,
         input_positions,
         fwd.sequence_num,
         is_last && !fwd.spec_walk_at_tail,
         model.draft_tree_refusal(),
     )?;
+    // A tree that flows is answered with one draw per row (#134 (b)), which
+    // reads no path's tokens: a request whose sampling penalises its own
+    // history cannot be drawn so, and its requester keeps it on rounds.
+    let draws_each_row = want_spec_output && fwd.draft_tree_from.is_some();
+    if draws_each_row {
+        refuse_draws_with_penalties(&fwd.sampling, &fwd.generated_ids)?;
+    }
+    // The rows of this forward's tree read in earlier forwards — answered then.
+    let read_before = draft_tree
+        .as_ref()
+        .map_or(0, |tree| tree.len().saturating_sub(input_positions));
     if want_spec_output && draft_tree.is_none() {
         spec_rows_fit_the_answer(
             input_positions,
@@ -2273,6 +2333,9 @@ async fn handle_forward(
                     .and_then(|t| t.to_vec1())
                     .map_err(|e| format!("spec walk on the card: {e}"))?;
                 let token_ids = match draft_tree.as_ref() {
+                    // A tree that flows: every row's own argmax, walked by the
+                    // requester.
+                    Some(_) if draws_each_row => picks,
                     Some(tree) => crate::inference::sampling::argmax_walk_tree(
                         tree,
                         &fwd.draft_tokens,
@@ -2326,11 +2389,21 @@ async fn handle_forward(
                 // Row i predicts the token at `index_pos + 1 + i` (the
                 // verify's first token is written at `index_pos`) — the
                 // absolute position the shared noise is keyed by.
+                // A tree that flows starts before this forward: its rows' draws
+                // are keyed from the tree's start, as the drafter grew them.
                 let noise = fwd
                     .coupling_seed
                     .map(crate::inference::coupled_noise::CoupledNoise::new);
-                let coupling = noise.as_ref().map(|n| (n, u64::from(fwd.index_pos) + 1));
+                let tree_start = fwd.draft_tree_from.unwrap_or(fwd.index_pos);
+                let coupling = noise.as_ref().map(|n| (n, u64::from(tree_start) + 1));
                 match draft_tree.as_ref() {
+                    Some(tree) if draws_each_row => crate::inference::sampling::draw_each_row(
+                        tree,
+                        read_before,
+                        &spec_logits,
+                        &fwd.sampling,
+                        coupling,
+                    )?,
                     Some(tree) => crate::inference::sampling::walk_verified_tree(
                         tree,
                         &fwd.draft_tokens,
@@ -4917,6 +4990,7 @@ async fn handle_draft(
     data_dir: &std::path::Path,
     shard_window: &Option<Vec<u32>>,
     prefill_chunk_tokens: usize,
+    flow_sessions: &mut FlowSessions,
     d: IpcDraft,
 ) -> Result<(), SwarmError> {
     let (layer_start, layer_end) = (d.layer_range.0 as usize, d.layer_range.1 as usize);
@@ -4935,12 +5009,45 @@ async fn handle_draft(
     let model = models
         .get_mut(&key)
         .ok_or_else(|| SwarmError::Internal("Model vanished after load".into()))?;
+    let req = d.request_id.to_string();
+    if let Some(ask) = &d.flow {
+        if d.for_the_owner {
+            kv_store.mark_owner_request(&req);
+        }
+        let proposed = tokio::task::block_in_place(|| {
+            grow_flow_call(
+                model,
+                kv_store,
+                prefix_cache,
+                flow_sessions,
+                &req,
+                &d,
+                ask,
+                prefill_chunk_tokens,
+            )
+        })?;
+        let (parents, tokens) = proposed
+            .into_iter()
+            .map(|(parent, token)| (parent + 1, token))
+            .unzip();
+        return send_worker(
+            writer,
+            &WorkerMsg::Drafted {
+                request_id: d.request_id,
+                tokens,
+                parents,
+                scores: Vec::new(),
+            },
+            &[],
+        )
+        .await
+        .map_err(|e| SwarmError::Internal(format!("send Drafted: {e}")));
+    }
     if d.append.is_empty() {
         return Err(SwarmError::Validation(
             "a draft call must name the token its first guess follows".into(),
         ));
     }
-    let req = d.request_id.to_string();
     if d.for_the_owner {
         kv_store.mark_owner_request(&req);
     }
@@ -5030,6 +5137,127 @@ async fn handle_draft(
     )
     .await
     .map_err(|e| SwarmError::Internal(format!("send Drafted: {e}")))
+}
+
+/// The drafter's trees that flow (#134 (b), `SplitModel::grow_flow`), each
+/// kept between its reply's calls under the attempt's draft key — the key its
+/// cache is kept under — and gone with it: `ReleaseRequestKv`, a cancel, or
+/// any error (a session that failed is never used again). At most
+/// [`MOST_FLOW_SESSIONS`]; the one used longest ago goes first, and its next
+/// call is refused as a cache that expired, which the drafter's caller
+/// already answers by starting again.
+#[derive(Default)]
+struct FlowSessions(HashMap<Uuid, (std::time::Instant, crate::inference::split::FlowGrowth)>);
+
+/// How many replies' trees one drafter worker keeps: a drafter serves the
+/// replies of the splits this node drives, a handful at most.
+const MOST_FLOW_SESSIONS: usize = 16;
+
+impl FlowSessions {
+    fn take(&mut self, id: &Uuid) -> Option<crate::inference::split::FlowGrowth> {
+        self.0.remove(id).map(|(_, g)| g)
+    }
+
+    fn keep(&mut self, id: Uuid, growth: crate::inference::split::FlowGrowth) {
+        while self.0.len() >= MOST_FLOW_SESSIONS {
+            let Some(oldest) = self
+                .0
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(id, _)| *id)
+            else {
+                break;
+            };
+            self.0.remove(&oldest);
+        }
+        self.0.insert(id, (std::time::Instant::now(), growth));
+    }
+
+    fn release(&mut self, id: &Uuid) {
+        self.0.remove(id);
+    }
+
+    fn forget_cancelled(&mut self, cancelled: &CancelledSet) {
+        if !self.0.is_empty() {
+            self.0.retain(|id, _| !cancelled.contains_key(id));
+        }
+    }
+}
+
+/// One drafting call of a tree that flows: start the session (`ask.start`,
+/// after reading the context since `keep`) or take it, grow it, and keep it
+/// again only if the call succeeded.
+#[allow(clippy::too_many_arguments)]
+fn grow_flow_call(
+    model: &mut SplitModel,
+    kv_store: &Arc<KvCacheStore>,
+    prefix_cache: &Arc<PrefixCache>,
+    flow_sessions: &mut FlowSessions,
+    req: &str,
+    d: &IpcDraft,
+    ask: &FlowAsk,
+    prefill_chunk_tokens: usize,
+) -> Result<Vec<(u16, u32)>, SwarmError> {
+    let mut session = match ask.start {
+        Some(root) => {
+            flow_sessions.release(&d.request_id);
+            if d.keep == 0 {
+                if d.append.is_empty() {
+                    return Err(SwarmError::Validation(
+                        "a tree that flows starts after the context it follows".into(),
+                    ));
+                }
+                // The first call reads the whole prompt: admit it with room
+                // for the tree, which sits in the cache while it flows.
+                ensure_room_for_prompt(
+                    model,
+                    kv_store,
+                    prefix_cache,
+                    req,
+                    d.append.len(),
+                    reply_reserve_positions(
+                        d.sampling.max_tokens,
+                        crate::inference::draft_tree::MAX_TREE_ROWS + 1,
+                    ),
+                    0,
+                )?;
+            }
+            model.start_flow(
+                kv_store,
+                req,
+                d.keep as usize,
+                &d.append,
+                root,
+                prefill_chunk_tokens,
+            )?
+        }
+        None => flow_sessions.take(&d.request_id).ok_or_else(|| {
+            SwarmError::ServiceUnavailable(
+                "the guessing model holds no tree for this reply — it expired or its worker \
+                 was replaced"
+                    .into(),
+            )
+        })?,
+    };
+    let noise = d
+        .coupling_seed
+        .map(crate::inference::coupled_noise::CoupledNoise::new);
+    let proposed = model.grow_flow(
+        kv_store,
+        req,
+        &mut session,
+        crate::inference::split::FlowStep {
+            ops: &ask.ops,
+            rows: ask.rows as usize,
+            levels: ask.levels as usize,
+            live_most: ask.live_most as usize,
+        },
+        &d.sampling,
+        noise.as_ref(),
+        prefill_chunk_tokens,
+    )?;
+    flow_sessions.keep(d.request_id, session);
+    Ok(proposed)
 }
 
 /// SWIFT (arxiv 2410.06916) decode loop. Greedy-only v1.
@@ -6203,6 +6431,7 @@ async fn handle_daemon_msg(
     card_pace: &mut crate::inference::card_pace::CardPace,
     pending_fetches: &PrefixFetchWaiterMap,
     cancelled: &CancelledSet,
+    flow_sessions: &mut FlowSessions,
 ) -> bool {
     let activation_compression = options.activation_compression;
     let force_standard_attn = options.force_standard_attn;
@@ -6249,6 +6478,7 @@ async fn handle_daemon_msg(
                 data_dir,
                 shard_window,
                 options.prefill_chunk_tokens as usize,
+                flow_sessions,
                 d,
             )
             .await
@@ -6400,6 +6630,7 @@ async fn handle_daemon_msg(
             // (report #019).
             let before = kv_store.occupancy().allocated_bytes;
             kv_store.cleanup_request_id(&request_id.to_string());
+            flow_sessions.release(&request_id);
             let after = kv_store.occupancy().allocated_bytes;
             if after < before {
                 tracing::debug!(
@@ -6772,11 +7003,11 @@ mod image_span_check_tests {
     fn a_tree_of_guesses_is_applied_only_to_a_check_it_fits() {
         // Row 0 follows the cache; rows 1 and 2 follow row 0; row 3 row 1.
         let wire = [0u16, 1, 1, 2];
-        let tree = draft_tree_to_apply(&wire, 10, 4, 3, false, None)
+        let tree = draft_tree_to_apply(&wire, None, 10, 4, 3, false, None)
             .unwrap()
             .unwrap();
         assert_eq!(tree.len(), 4);
-        assert!(draft_tree_to_apply(&[], 10, 4, 0, true, None)
+        assert!(draft_tree_to_apply(&[], None, 10, 4, 0, true, None)
             .unwrap()
             .is_none());
         // (wire, positions, seq, unwalked, the layers' refusal)
@@ -6789,11 +7020,50 @@ mod image_span_check_tests {
             (&wire, 4, 3, false, Some("a window")), // layers that cannot read it
         ];
         for (wire, positions, seq, unwalked, layers_refuse) in refusals {
-            let err =
-                draft_tree_to_apply(wire, 10, positions, seq, unwalked, layers_refuse).unwrap_err();
+            let err = draft_tree_to_apply(wire, None, 10, positions, seq, unwalked, layers_refuse)
+                .unwrap_err();
             assert!(
                 matches!(err, crate::error::SwarmError::Validation(_)),
                 "{wire:?} {positions} {seq}: {err}"
+            );
+        }
+    }
+
+    /// A tree that flows (#134 (b)) is its whole shape from where it starts:
+    /// this forward reads its last rows, the ones before already cached, so a
+    /// forward of 2 rows at position 12 of a tree from 10 carries 4 parents.
+    /// A start after the forward, a shape that does not end with the forward's
+    /// rows, or a start with no shape, is the requester's mistake (a 400).
+    #[test]
+    fn a_tree_that_flows_is_applied_from_where_it_starts() {
+        let wire = [0u16, 1, 1, 2];
+        let tree = draft_tree_to_apply(&wire, Some(10), 12, 2, 3, false, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tree.len(), 4);
+        // Row 3 follows row 1, at depth 2: rotated as position 12, whatever
+        // forward carries it.
+        assert_eq!(tree.depth(3), 2);
+        let (positions, _) = tree.rows_for(12, 2).unwrap();
+        assert_eq!(positions, vec![11, 12]);
+        // Starting where the forward does is the tree of one forward.
+        assert_eq!(
+            draft_tree_to_apply(&wire, Some(10), 10, 4, 3, false, None).unwrap(),
+            draft_tree_to_apply(&wire, None, 10, 4, 3, false, None).unwrap()
+        );
+        type Shape<'a> = (&'a [u16], Option<u32>, usize, usize);
+        let refusals: [Shape<'_>; 4] = [
+            (&wire, Some(13), 12, 2), // starts after the forward
+            (&wire, Some(10), 12, 3), // more rows than the shape has left
+            (&wire, Some(9), 12, 2),  // a shape one row short
+            (&[], Some(10), 12, 2),   // a start with no shape
+        ];
+        for (wire, from, index_pos, positions) in refusals {
+            let err =
+                draft_tree_to_apply(wire, from, index_pos, positions, 3, false, None).unwrap_err();
+            assert!(
+                matches!(err, crate::error::SwarmError::Validation(_)),
+                "{wire:?} {from:?} {index_pos} {positions}: {err}"
             );
         }
     }

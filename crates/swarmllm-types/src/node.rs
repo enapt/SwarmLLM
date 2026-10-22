@@ -355,6 +355,16 @@ pub mod features {
     /// head advertising this; an older head would plan without it.
     pub const CARRIED_ROUTE: u64 = 1 << 30;
 
+    /// Reads a tree of guesses that FLOWS (#134 (b)): a forward carrying
+    /// `LayerForward::draft_tree_from` (the `0x11` trailer, beside `0x10`)
+    /// holds the LAST rows of one tree whose earlier rows the segment read in
+    /// earlier forwards, `draft_parents` naming every row from that position;
+    /// the last segment answers one draw per row it read, never a walk — the
+    /// requester walks. A requester streams a tree only when every segment
+    /// advertises this; an older one would read the rows as a tree of their
+    /// own and refuse them.
+    pub const DRAFT_TREE_FLOW: u64 = 1 << 31;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`] and
     /// [`REQUESTER_GUESSES`] beside it where they apply.
@@ -385,7 +395,8 @@ pub mod features {
         | IMAGES_AT_MARKERS
         | CHAINED_STREAM
         | DRAFT_TREES
-        | CARRIED_ROUTE;
+        | CARRIED_ROUTE
+        | DRAFT_TREE_FLOW;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

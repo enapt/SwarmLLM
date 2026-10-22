@@ -596,6 +596,19 @@ pub struct LayerForward {
     /// `features::DRAFT_TREES`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub draft_parents: Vec<u16>,
+    /// Where a tree of guesses that FLOWS starts (#134 (b), `docs/plans/
+    /// large_model_splits.md` § "A tree that flows"): the requester streams one
+    /// tree a few rows a forward while it grows, so this forward's rows are
+    /// the tree's LAST, its earlier rows already in each segment's cache from
+    /// the forwards before. `draft_parents` then names EVERY row from this
+    /// position, and the last segment answers one draw per row of this
+    /// forward (`LayerResult::token_ids`) — each row's own sample, keyed by
+    /// the position it fills — never a walk. `None`: a tree, if any, starts at
+    /// `index_pos` and is walked at the tail, as before. Travels in the `0x11`
+    /// trailer, bound into the AAD, only to a peer advertising
+    /// `features::DRAFT_TREE_FLOW`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_tree_from: Option<u32>,
 }
 
 impl LayerForward {
@@ -1331,6 +1344,7 @@ mod chunk_assembly_tests {
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
+            draft_tree_from: None,
         }
     }
 

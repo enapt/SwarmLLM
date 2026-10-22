@@ -434,5 +434,6 @@ fn make_bench_forward(activations: Vec<u8>) -> LayerForward {
         prompt_span: None,
         image_spans: Vec::new(),
         draft_parents: Vec::new(),
+        draft_tree_from: None,
     }
 }

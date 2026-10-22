@@ -15,7 +15,7 @@ const SINGLE_STEP_READ_MAX: usize = 4;
 /// How many followers of each guess a tree considers ([`SplitModel::draft_tree_after`]):
 /// SpecExec's branching factor is 16; past ~8 the extra followers of a node
 /// are rarely likelier than a deeper guess elsewhere.
-const TREE_CHILDREN: usize = 8;
+pub(super) const TREE_CHILDREN: usize = 8;
 
 use crate::inference::draft_tree::GrownTree;
 
@@ -35,7 +35,55 @@ pub struct TreeGrowth<'a> {
     pub grow_for: Option<std::time::Duration>,
 }
 
+/// A drafter's tree that FLOWS, kept between calls (#134 (b),
+/// [`SplitModel::grow_flow`]): the requester's [`FlowTree`] as this model
+/// holds it — the same rows in the same order: a proposal is a row of both
+/// the moment it is made, and every other change is one of the requester's
+/// [`FlowOp`]s — with the rows it has read in its cache (`base + read`
+/// positions), each row's path rating, and the followers of read rows it has
+/// not proposed yet. A call reads what it has not read, one forward a level,
+/// and proposes; nothing is read twice and nothing is cut, but at a rebase.
+///
+/// [`FlowTree`]: crate::inference::draft_tree::FlowTree
+/// [`FlowOp`]: crate::inference::draft_tree::FlowOp
+#[derive(Debug)]
+pub struct FlowGrowth {
+    flow: crate::inference::draft_tree::FlowTree,
+    read: usize,
+    rating: Vec<f32>,
+    queue: std::collections::BinaryHeap<Candidate>,
+}
+
+impl FlowGrowth {
+    /// The tree as this session holds it.
+    #[cfg(test)]
+    pub(crate) fn flow(&self) -> &crate::inference::draft_tree::FlowTree {
+        &self.flow
+    }
+}
+
+/// What one call of a tree that flows asks for ([`SplitModel::grow_flow`]).
+#[derive(Debug, Clone, Copy)]
+pub struct FlowStep<'a> {
+    /// The requester's changes since the last call, in its order.
+    pub ops: &'a [crate::inference::draft_tree::FlowOp],
+    /// Rows to propose a level, at most.
+    pub rows: usize,
+    /// Levels: each reads the last one's proposals in one forward and
+    /// proposes after them, so a branch grows up to this many rows deep in
+    /// one call (0 reads as 1). At one a call, a walk advanced 0.63-0.74
+    /// tokens a call whatever the rows (8, 16 or 32, 2026-10-22) — the depth
+    /// the drafter added, never the rows it added, was what bound it.
+    pub levels: usize,
+    /// Propose none past this many live rows (the walk's row and those
+    /// following it), the proposals counted: past ~128 a row's chance of
+    /// lying on the reply's path is too small to pay for its place
+    /// (`docs/plans/large_model_splits.md` § "A tree that flows").
+    pub live_most: usize,
+}
+
 /// A guess waiting for a place in the tree, rated by its path's log-probability.
+#[derive(Debug)]
 struct Candidate {
     score: f32,
     own: f32,
@@ -638,6 +686,241 @@ impl SplitModel {
             tokens: rated.iter().map(|&(t, _)| t).collect(),
             path_logp: rated.iter().map(|&(_, s)| s).collect(),
         })
+    }
+
+    /// Start a tree that flows (#134 (b)): cut this request's cache back to
+    /// `keep`, read `append` (the context since, NOT the token the tree starts
+    /// from), and hold a tree of one row, `root`, at `keep + append.len()` —
+    /// read by the first [`Self::grow_flow`] call. A cache holding fewer than
+    /// `keep` positions is refused, as [`Self::draft_after`] refuses it.
+    pub fn start_flow(
+        &mut self,
+        kv: &KvCacheStore,
+        request_id: &str,
+        keep: usize,
+        append: &[u32],
+        root: u32,
+        prefill_chunk_tokens: usize,
+    ) -> Result<FlowGrowth, SwarmError> {
+        if let Some(vocab) = self.embedding_rows() {
+            if root as usize >= vocab || append.iter().any(|&t| t as usize >= vocab) {
+                return Err(SwarmError::Validation(
+                    "a tree that flows names a token past the vocabulary".into(),
+                ));
+            }
+        }
+        if append.is_empty() {
+            let held = kv.request_positions(self.kv_model_key(), request_id);
+            if held < keep {
+                return Err(SwarmError::ServiceUnavailable(format!(
+                    "the guessing model holds {held} positions of this reply, not the {keep} \
+                     this call continues from — its cache expired or its worker was replaced"
+                )));
+            }
+            kv.truncate_request_to(self.kv_model_key(), request_id, keep)?;
+        } else {
+            self.read_after(kv, request_id, keep, append, prefill_chunk_tokens)?;
+        }
+        Ok(FlowGrowth {
+            flow: crate::inference::draft_tree::FlowTree::new(keep + append.len(), root)
+                .map_err(SwarmError::Validation)?,
+            read: 0,
+            rating: vec![0.0],
+            queue: std::collections::BinaryHeap::new(),
+        })
+    }
+
+    /// One call of a tree that flows (#134 (b)): apply the requester's
+    /// changes, then for each of `step.levels` levels read the rows not read
+    /// yet in ONE tree forward (their followers join the queue) and propose up
+    /// to `step.rows` rows, best-first by path rating, each following a live
+    /// row and carrying a token no row following its parent carries. Each
+    /// proposal is a row of this tree the moment it is made — the next
+    /// level reads it — so the requester must push every one, in this order,
+    /// and sends no op for it. Answers the proposals as (parent row, token).
+    ///
+    /// The last level's proposals are read by the next call. A level costs a
+    /// forward; EAGLE-2 grows a draft the same way (one forward a depth, top-8
+    /// by path probability, 5 deep), and FlowSpec, the published design
+    /// nearest this one, grows depth 5 every step. Followers are rated as
+    /// [`Self::draft_tree_after`] rates them (`TREE_CHILDREN` a row, the
+    /// coupled draw first where `noise` is given, keyed by the position it
+    /// fills). A rebase cuts the cache to the tree's old start and reads the
+    /// walk's path there as context; every row kept is read again by this
+    /// call. On an error the session must not be used again.
+    #[allow(clippy::too_many_arguments)]
+    pub fn grow_flow(
+        &mut self,
+        kv: &KvCacheStore,
+        request_id: &str,
+        session: &mut FlowGrowth,
+        step: FlowStep<'_>,
+        sampling: &crate::types::SamplingParams,
+        noise: Option<&crate::inference::coupled_noise::CoupledNoise>,
+        prefill_chunk_tokens: usize,
+    ) -> Result<Vec<(u16, u32)>, SwarmError> {
+        use crate::inference::draft_tree::{FlowOp, MAX_TREE_ROWS};
+        let vocab = self.embedding_rows();
+        for &op in step.ops {
+            match op {
+                FlowOp::Push { parent, token } => {
+                    if vocab.is_some_and(|v| token as usize >= v) {
+                        return Err(SwarmError::Validation(
+                            "a tree that flows names a token past the vocabulary".into(),
+                        ));
+                    }
+                    let parent = usize::from(parent);
+                    // A row the model drew that no row carried — the one push
+                    // the requester sends — is as sure as its parent.
+                    let rating = session.rating.get(parent).copied().unwrap_or(0.0);
+                    session
+                        .flow
+                        .push(parent, token)
+                        .map_err(SwarmError::Validation)?;
+                    session.rating.push(rating);
+                }
+                FlowOp::Advance { row } => session
+                    .flow
+                    .advance(usize::from(row))
+                    .map_err(SwarmError::Validation)?,
+                FlowOp::Rebase => {
+                    let rebased = session.flow.rebase().map_err(SwarmError::Validation)?;
+                    let mut new_index = vec![None; session.rating.len()];
+                    for (new, &old) in rebased.kept.iter().enumerate() {
+                        new_index[old] = Some(new);
+                    }
+                    session.rating = rebased
+                        .kept
+                        .iter()
+                        .map(|&old| session.rating[old])
+                        .collect();
+                    session.queue = std::mem::take(&mut session.queue)
+                        .into_iter()
+                        .filter_map(|c| {
+                            let parent = new_index[c.parent?]?;
+                            Some(Candidate {
+                                parent: Some(parent),
+                                ..c
+                            })
+                        })
+                        .collect();
+                    kv.truncate_request_to(self.kv_model_key(), request_id, rebased.old_base)?;
+                    if !rebased.path.is_empty() {
+                        let input = self.tensor_from_ids(&rebased.path)?;
+                        self.forward_prompt_in_chunks(
+                            &input,
+                            rebased.old_base,
+                            kv,
+                            request_id,
+                            None,
+                            false,
+                            prefill_chunk_tokens,
+                        )?;
+                    }
+                    session.read = 0;
+                }
+            }
+        }
+        let base = session.flow.base();
+        let held = kv.request_positions(self.kv_model_key(), request_id);
+        if held != base + session.read {
+            return Err(SwarmError::ServiceUnavailable(format!(
+                "the guessing model holds {held} positions of this reply, not the {} its tree \
+                 continues from — its cache expired or its worker was replaced",
+                base + session.read
+            )));
+        }
+        let mut out = Vec::new();
+        for _ in 0..step.levels.max(1) {
+            self.read_flow_rows(kv, request_id, session, sampling, noise)?;
+            let before = out.len();
+            let mut live = session.flow.live_rows();
+            while out.len() - before < step.rows
+                && live < step.live_most
+                && session.flow.len() < MAX_TREE_ROWS
+            {
+                let Some(c) = session.queue.pop() else { break };
+                let Some(parent) = c.parent else { continue };
+                if !session.flow.is_live(parent) || session.flow.has_child(parent, c.token) {
+                    continue;
+                }
+                session
+                    .flow
+                    .push(parent, c.token)
+                    .map_err(SwarmError::Internal)?;
+                session.rating.push(c.score);
+                out.push((parent as u16, c.token));
+                live += 1;
+            }
+            if out.len() == before {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// The rows of a tree that flows not read yet, read in ONE tree forward;
+    /// the followers of the live ones join the queue.
+    fn read_flow_rows(
+        &mut self,
+        kv: &KvCacheStore,
+        request_id: &str,
+        session: &mut FlowGrowth,
+        sampling: &crate::types::SamplingParams,
+        noise: Option<&crate::inference::coupled_noise::CoupledNoise>,
+    ) -> Result<(), SwarmError> {
+        let flow = &session.flow;
+        if session.read >= flow.len() {
+            return Ok(());
+        }
+        let base = flow.base();
+        let from = session.read;
+        let input = self.tensor_from_ids(&flow.tokens()[from..])?;
+        let out = self.with_draft_tree(flow.tree().clone(), |m| {
+            m.forward_verify_all_positions(&input, base + from, kv, request_id)
+        })??;
+        let coupled = noise.is_some();
+        let read = out
+            .squeeze(0)
+            .map_err(SwarmError::internal)
+            .and_then(|t| StepScores::read(&t, sampling.temperature, coupled))?;
+        let mut ctx = crate::inference::sampling::SamplingContext::new(0);
+        for (i, row) in (from..flow.len()).enumerate() {
+            // A lost branch's followers could never be proposed.
+            if !flow.is_live(row) {
+                continue;
+            }
+            let followers = match read.row(i) {
+                RowScores::Ranked(ranked) => ranked.to_vec(),
+                RowScores::Logits(logits) => {
+                    let drawn = noise.map(|noise| {
+                        let mut row_logits = logits.to_vec();
+                        crate::inference::sampling::sample_token_coupled(
+                            &mut row_logits,
+                            sampling,
+                            &[],
+                            &mut ctx,
+                            noise,
+                            (base + flow.tree().depth(row) + 1) as u64,
+                        )
+                    });
+                    likeliest(logits, sampling.temperature, TREE_CHILDREN, drawn)
+                }
+            };
+            for (token, logp) in followers {
+                if flow.has_child(row, token) {
+                    continue;
+                }
+                session.queue.push(Candidate {
+                    score: session.rating[row] + logp,
+                    own: logp,
+                    parent: Some(row),
+                    token,
+                });
+            }
+        }
+        session.read = flow.len();
+        Ok(())
     }
 
     /// Argmax guesses that never leave the card between steps: each step's

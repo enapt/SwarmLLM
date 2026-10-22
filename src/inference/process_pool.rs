@@ -8312,6 +8312,7 @@ impl ModelProcessPool {
             prompt_span,
             image_spans,
             draft_parents,
+            draft_tree_from,
         } = forward;
 
         // Split vision embeddings out of the JSON header into the binary
@@ -8355,6 +8356,7 @@ impl ModelProcessPool {
             prompt_span,
             image_spans,
             draft_parents,
+            draft_tree_from,
             for_the_owner: requester == Requester::Owner,
         };
 
@@ -8664,6 +8666,7 @@ impl ModelProcessPool {
                 image_spans: _,
                 // Nor a tree of guesses.
                 draft_parents: _,
+                draft_tree_from: _,
             } = f;
             let forward_sampling = sampling.unwrap_or_default();
             activation_lens.push(activations.len() as u32);
@@ -8696,6 +8699,7 @@ impl ModelProcessPool {
                 prompt_span: None,
                 image_spans: Vec::new(),
                 draft_parents: Vec::new(),
+                draft_tree_from: None,
             });
         }
 
@@ -9802,6 +9806,7 @@ mod tests {
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
+            draft_tree_from: None,
         }
     }
 
@@ -11229,6 +11234,7 @@ mod tests {
             for_the_owner: true,
             stop_below: None,
             tree: None,
+            flow: None,
         };
         let pool = Arc::new(pool);
         let first = tokio::spawn({

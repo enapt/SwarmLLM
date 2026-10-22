@@ -465,6 +465,11 @@ pub struct IpcForward {
     /// The shape of a tree of guesses (`LayerForward::draft_parents`, #134).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub draft_parents: Vec<u16>,
+    /// Where a tree that flows starts (`LayerForward::draft_tree_from`, #134
+    /// (b)): `draft_parents` is then the whole tree from there, and the last
+    /// segment answers one draw per row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_tree_from: Option<u32>,
     /// This forward belongs to a request THIS machine's owner sent — the
     /// segment of it this node runs inside a pipeline it coordinates — so its
     /// prompt pass may read on the owner's width (`process_pool::Requester`).
@@ -648,6 +653,34 @@ pub struct IpcDraft {
     /// seed's rows and the ones added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree: Option<TreeAsk>,
+    /// Grow a tree that FLOWS (#134 (b), `SplitModel::grow_flow`): kept in the
+    /// worker between calls for this attempt, changed by the requester's ops,
+    /// answered with proposed rows (`Drafted::parents` = parent row + 1).
+    /// `gamma`, `stop_below`, `tree` and `history` are unused then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<FlowAsk>,
+}
+
+/// A drafting call of a tree that flows (`IpcDraft::flow`,
+/// `split::draft::FlowStep`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct FlowAsk {
+    /// Start the tree afresh from this token — row 0, at `keep + append.len()`
+    /// once `append` (the context since `keep`, not this token) is read.
+    /// `None` continues this attempt's tree; `keep` and `append` are unused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<u32>,
+    /// The requester's changes since the last call, in its order. Never a
+    /// proposal's push: a proposal is a row of both trees once made.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ops: Vec<crate::inference::draft_tree::FlowOp>,
+    /// Rows to propose a level, at most.
+    pub rows: u32,
+    /// Levels to grow, each read by the next (`FlowStep::levels`).
+    #[serde(default)]
+    pub levels: u32,
+    /// Propose none past this many live rows.
+    pub live_most: u32,
 }
 
 /// The tree of guesses a drafting call grows (`IpcDraft::tree`,
@@ -722,8 +755,16 @@ impl IpcDraft {
     /// (`model_worker::drafter_cache_positions`) — what a drafter loaded for
     /// it is charged (`process_pool::Tenancy::Guest`, #275).
     pub fn conversation_positions(&self) -> u64 {
+        // A tree that flows keeps its rows in the cache between calls.
+        let tree_rows = if self.flow.is_some() {
+            crate::inference::draft_tree::MAX_TREE_ROWS
+        } else {
+            0
+        };
         crate::inference::model_worker::drafter_cache_positions(
-            (self.keep as usize).saturating_add(self.append.len()),
+            (self.keep as usize)
+                .saturating_add(self.append.len())
+                .saturating_add(tree_rows),
             Some(self.sampling.max_tokens),
         )
     }
@@ -1347,6 +1388,7 @@ mod tests {
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
+            draft_tree_from: None,
         };
         let json = serde_json::to_string(&fwd).unwrap();
         // When no vision payload, the field is elided to match pre-fix wire
@@ -1390,6 +1432,7 @@ mod tests {
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
+            draft_tree_from: None,
         };
         let owners = serde_json::to_string(&fwd(true)).unwrap();
         let back: IpcForward = serde_json::from_str(&owners).unwrap();
@@ -1435,6 +1478,7 @@ mod tests {
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
+            draft_tree_from: None,
         };
         let json = serde_json::to_string(&fwd).unwrap();
         assert!(json.contains("\"vision_embeddings_len\":12345"));

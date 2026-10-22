@@ -480,6 +480,60 @@ pub(crate) fn walk_verified_tree(
     }
 }
 
+/// What the last segment answers for the rows of a tree that FLOWS (#134 (b),
+/// `LayerForward::draft_tree_from`): every row's own draw — the token the
+/// model samples after that row's path — for the requester to walk. `rows` are
+/// this forward's, the tree's last; the `read_before` rows ahead of them were
+/// answered by earlier forwards.
+///
+/// Exact at any temperature, for [`walk_verified_tree`]'s reason: the walk
+/// keeps the child carrying the draw at the row it stands on, and emits that
+/// draw whether or not a child carries it, so every emitted token is the
+/// model's own sample along the path emitted. A row's draw is made once and
+/// read only by a walk standing on that row. With shared noise it is keyed by
+/// the absolute position it fills, `first + depth` (`first`: one past the
+/// tree's start), so the drafter holding the seed reproduces it on every branch; without,
+/// each row draws independently, which is exact too — a path reads one draw
+/// per position. Penalties read each path's own tokens, which no row here
+/// knows: the caller refuses such a request before it reaches this.
+pub(crate) fn draw_each_row(
+    tree: &crate::inference::draft_tree::DraftTree,
+    read_before: usize,
+    rows: &[Vec<f32>],
+    params: &SamplingParams,
+    coupling: Option<(&CoupledNoise, u64)>,
+) -> Result<Vec<u32>, String> {
+    if read_before + rows.len() != tree.len() {
+        return Err(format!(
+            "spec draws: {} rows read after {read_before} of a tree of {} rows",
+            rows.len(),
+            tree.len()
+        ));
+    }
+    let vocab = rows.first().map_or(0, Vec::len);
+    let mut ctx = SamplingContext::new(vocab);
+    rows.iter()
+        .enumerate()
+        .map(|(q, logits)| {
+            if !logits.iter().all(|v| v.is_finite()) {
+                return Err("spec draws: non-finite logits".to_string());
+            }
+            let mut row = logits.clone();
+            Ok(match coupling {
+                Some((noise, first)) => sample_token_coupled(
+                    &mut row,
+                    params,
+                    &[],
+                    &mut ctx,
+                    noise,
+                    first + tree.depth(read_before + q) as u64,
+                ),
+                None => sample_token_with_history(&mut row, params, &[], &mut ctx),
+            })
+        })
+        .collect()
+}
+
 /// [`walk_verified_tree`] for a greedy request with no penalties, from each
 /// row's argmax alone — what a card answers instead of every row's vocabulary.
 pub(crate) fn argmax_walk_tree(
@@ -2104,6 +2158,77 @@ mod tree_walk_tests {
             crate::inference::draft_tree::kept_rows(&tree, 1, &tokens, &walked[..2]),
             Some(vec![2, 3])
         );
+    }
+
+    /// A tree that flows (#134 (b)): the tail answers each row's own draw and
+    /// the requester walks them (`draft_tree::walk_draws`). That must emit
+    /// EXACTLY what the tail's own walk emits with the same noise — greedy and
+    /// drawn — and a row's draw must not depend on which forward carried it.
+    #[test]
+    fn walking_each_rows_draw_is_the_tails_own_walk() {
+        use crate::inference::draft_tree::{walk_draws, WalkEnd};
+        let noise = CoupledNoise::new(11);
+        // Row 0 is the check's own token; 1 and 2 follow it; 3 follows 2; 4
+        // follows 3; 5 follows 1.
+        let parents = vec![None, Some(0), Some(0), Some(2), Some(3), Some(1)];
+        let tree = DraftTree::new(30, parents).unwrap();
+        for (seed, temperature) in [(5u64, 0.0f32), (6, 0.7), (7, 1.0)] {
+            let r = rows(6, 40, seed);
+            let params = SamplingParams {
+                temperature,
+                ..Default::default()
+            };
+            let draws = draw_each_row(&tree, 0, &r, &params, Some((&noise, 31))).unwrap();
+            // Guesses that carry the draws down rows 0 → 2 → 3, then miss.
+            let other = |t: u32| (t + 1) % 40;
+            let drafts = vec![other(draws[0]), draws[0], draws[2], other(draws[3]), 7];
+            let mut tokens = vec![0u32];
+            tokens.extend(&drafts);
+            let at_tail =
+                walk_verified_tree(&tree, &drafts, &r, &params, &[], Some((&noise, 31))).unwrap();
+            let known: Vec<Option<u32>> = draws.iter().copied().map(Some).collect();
+            let (emitted, end) = walk_draws(&tree, &tokens, &known, 0);
+            assert_eq!(emitted, at_tail, "temperature {temperature}");
+            assert_eq!(emitted, vec![draws[0], draws[2], draws[3]]);
+            assert_eq!(
+                end,
+                WalkEnd::Missed {
+                    row: 3,
+                    token: draws[3]
+                }
+            );
+            // The same rows read in two forwards draw the same.
+            let first = draw_each_row(
+                &DraftTree::new(30, vec![None, Some(0), Some(0)]).unwrap(),
+                0,
+                &r[..3],
+                &params,
+                Some((&noise, 31)),
+            )
+            .unwrap();
+            let later = draw_each_row(&tree, 3, &r[3..], &params, Some((&noise, 31))).unwrap();
+            assert_eq!([first, later].concat(), draws);
+            // A walk reaching a row whose draw is not back waits there.
+            let mut partial = known.clone();
+            partial[3] = None;
+            assert_eq!(
+                walk_draws(&tree, &tokens, &partial, 0),
+                (vec![draws[0], draws[2]], WalkEnd::Waiting { row: 3 })
+            );
+        }
+        // Greedy draws are each row's argmax.
+        let r = rows(6, 40, 8);
+        let greedy = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let draws = draw_each_row(&tree, 0, &r, &greedy, None).unwrap();
+        assert_eq!(draws, r.iter().map(|row| argmax(row)).collect::<Vec<_>>());
+        // Rows the tree does not end with, or a non-finite one, are refused.
+        assert!(draw_each_row(&tree, 1, &r, &greedy, None).is_err());
+        let mut bad = r.clone();
+        bad[4][2] = f32::INFINITY;
+        assert!(draw_each_row(&tree, 0, &bad, &greedy, None).is_err());
     }
 
     #[test]

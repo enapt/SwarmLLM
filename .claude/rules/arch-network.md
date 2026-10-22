@@ -157,6 +157,10 @@ A verify's last segment walks the drafts and answers with token ids (`LayerForwa
 
 → `docs/invariants/network.md` § "A speculative verify is walked where the logits are"
 
+**A tree that FLOWS is drawn at the tail, never walked there (2026-10-22, #134 (b)).** A forward carrying `draft_tree_from` (`0x11`, after `0x10`, AAD-bound; gated at the SENDER on `features::DRAFT_TREE_FLOW` for every peer of the run — a hop's onward forward by `onward_refusal` + `draft_tree_from_onward`) appends its rows to the tree the segment's cache keeps since `from`, and the tail answers ONE draw per row (`sampling::draw_each_row`); the walk is the coordinator's. **`model_worker::draft_tree_to_apply`** is the one reading (refused unless `from ≤ index_pos` and the tree is `(index_pos − from) + positions` rows; `rows_for` checks it against the REAL cache); a sampler reading history is refused (`refuse_draws_with_penalties`).
+
+→ `docs/invariants/scheduling.md` § "A tree that flows"
+
 ## A check travels a chain like a decode step does (2026-10-02)
 
 **`PipelineExecutor::verify_may_chain`** decides whether `forward_verify_through_segments` sends a run of remote segments ONE forward (every hop advertising `features::CHAINED_VERIFY`, gated at the coordinator); a chained check resends on nothing (`ResendOnRefusal::Never`). **A chained run that fails is re-run UNCHAINED there** (segments cut back to `index_pos`) and sets the REQUIRED `chain_failed` — every caller passes `&mut self.chaining_disabled` (#318). A middle hop refuses what it cannot hand on BEFORE its worker (`layer_forward::onward_refusal`) and dials an unmet next hop (`NetworkCommand::DialPeer`, via `dial_checked`, its addresses — a DHT answer's too, its private ones dropped — through `filter_dialable`). **The sender names that target, so the dial is rationed** (`dial_next_hop`): `state.next_hop_dial_budget` (4/min per sender, 16 in all), none on a metered hold, a target the DHT did not know not looked up again for 60 s (`NextHopMisses`). `SWARMLLM_CHAIN_VERIFY=0` is the control arm.

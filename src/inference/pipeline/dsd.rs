@@ -445,16 +445,102 @@ impl PipelineExecutor {
         // 2026-10-01: +20-57% over rounds); `SWARMLLM_SPEC_STREAM=0` keeps the
         // rounds.
         let mut streamed = false;
+        // A tree that FLOWS (`dsd_flow`, #134 (b)): where trees are checked
+        // from the start and the run reads one, the tree's rows leave a few a
+        // call and the far end draws every row, instead of a round trip per
+        // check. `SWARMLLM_TREE_FLOW=0` keeps the tree rounds.
         if let Drafter::Engine(engine) = &mut drafter {
-            let shape = (super::dsd_stream::stream_requested() && !trees_from_the_start)
-                .then(|| {
-                    super::dsd_stream::stream_shape(
-                        &self.shared_state,
-                        &self.assignment.segments,
-                        self.verify_may_chain(),
+            let flow_shape = (trees_from_the_start
+                && super::dsd_flow::flow_requested()
+                && finish_reason.is_empty())
+            .then(|| {
+                super::dsd_stream::stream_shape(
+                    &self.shared_state,
+                    &self.assignment.segments,
+                    self.verify_may_chain(),
+                )
+            })
+            .flatten()
+            .filter(|shape| {
+                super::dsd_flow::flow_possible(
+                    &self.shared_state,
+                    shape,
+                    &self.request.sampling_params,
+                )
+            });
+            if let Some(shape) = flow_shape {
+                let chained = shape.chained();
+                let flowed = self
+                    .flow_checks(
+                        shape,
+                        engine,
+                        current_pos as u32,
+                        super::dsd_stream::StreamIo {
+                            token_tx: &token_tx,
+                            decoder: &decoder,
+                            eos: &eos_set,
+                            noise,
+                            max_tokens,
+                        },
+                        super::dsd_stream::StreamReply {
+                            generated: &mut generated,
+                            finish_reason: &mut finish_reason,
+                            acceptance: &mut acceptance,
+                            check: &mut check,
+                            draft_cost: &mut draft_cost,
+                            proposed: &mut acceptance_proposed,
+                            accepted: &mut acceptance_accepted,
+                        },
                     )
-                })
-                .flatten();
+                    .await;
+                match flowed {
+                    Ok(()) => streamed = true,
+                    // The peers answered, with a refusal or something this
+                    // node could not use: the tree rounds below finish the
+                    // reply from the last token the flow emitted, every
+                    // segment cut back to it — the flow answered every forward
+                    // it had out before it returned.
+                    // Every cache holds the reply only up to the tree's start:
+                    // it is cut there and the reply past it read again
+                    // (`dsd_flow::rounds_take_over`).
+                    Err(failed) if super::dsd_flow::rounds_may_finish(&failed.error) => {
+                        let take_over = super::dsd_flow::rounds_take_over(
+                            prompt_token_count,
+                            &generated,
+                            failed.base,
+                        );
+                        tracing::warn!(
+                            %request_id,
+                            error = %failed.error,
+                            emitted = generated.len(),
+                            read_again = take_over.reread.len(),
+                            "DSD: the tree's flow failed — finishing the reply in tree rounds"
+                        );
+                        if chained {
+                            self.chaining_disabled = true;
+                        }
+                        last_token = *generated.last().expect("the prompt pass's token");
+                        current_pos = prompt_token_count + generated.len() - 1;
+                        expected_kv_len = take_over.kv_len;
+                        pending_truncate = Some(take_over.kv_len);
+                        trees.reread = take_over.reread;
+                        engine.follow(prompt_token_count, &generated);
+                    }
+                    Err(failed) => return Err(failed.error),
+                }
+            }
+        }
+        if let Drafter::Engine(engine) = &mut drafter {
+            let shape =
+                (!streamed && super::dsd_stream::stream_requested() && !trees_from_the_start)
+                    .then(|| {
+                        super::dsd_stream::stream_shape(
+                            &self.shared_state,
+                            &self.assignment.segments,
+                            self.verify_may_chain(),
+                        )
+                    })
+                    .flatten();
             if let Some(shape) = shape.filter(|_| finish_reason.is_empty()) {
                 let chained = shape.chained();
                 let streamed_through = self

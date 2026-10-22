@@ -74,8 +74,9 @@ speed is what the swarm is for, so split speed for large models is the top track
    tensor-core MMQ (#325, 10-21: 2.4-3.2× faster at 9-64 rows). The regrow after a missed seed
    is sized by what it buys, and trees are on only past 300 ms (#134 (a), 10-21: +57% at 20 ms,
    +4% at 300 on the rig). Next: near peers over far ones (#192); a drafter fed by the model's
-   own state (`large_model_splits.md` build-order step 4); a tree that flows (#134 (b), re-priced
-   10-22 at +40-47% over tree rounds on a long link in the schedule model — next to build).
+   own state (`large_model_splits.md` build-order step 4); a tree that flows (#134 (b), built
+   10-22: +11-14% over tree rounds on the card rig; next its drafter's tree steps as CUDA graphs,
+   then the real link).
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
@@ -2013,11 +2014,22 @@ grown from nothing 118.5 against 145.7 ms) — **and a call beside a check grows
 up to 416** (was 8 and 128; the real-link A/B is owed: the far peer had no conversation room at
 04:44Z) — `docs/invariants/scheduling.md` § "A tree step pays for its tree once". The wait it
 targets: per reply the seed missed on 32-51% of rounds and was grown ~8 forwards before the check
-on most others, 145-163 ms a round. (b) **re-priced 2026-10-22: a tree that FLOWS** — the old
-+11% was a stream of checks each restarting at the confirmed reply; rows streamed as grown, the
-far end appending them to the tree it holds and answering each row's pick, is +40-47% over tree
-rounds at 425 ms with a card drafter in the schedule model (`large_model_splits.md` § "A tree that
-flows", where the design and build steps are); next to build; (c) closed
+on most others, 145-163 ms a round. (b) **a tree that FLOWS — built 2026-10-22, unreleased**:
+rows streamed as grown, the far end appending them to the tree it holds and answering each row
+with its draw, the requester walking the draws (`pipeline::dsd_flow`, trailer `0x11`, bit 31),
+three levels of 8 rows a drafter call; on the card rig (385 ms, all three processes on one card)
+8.99-9.44 tok/s against tree rounds' 8.03-8.27 over 400 tokens, replies scored against llama.cpp
+— +11-14%, short of the 1.3× exit (`docs/invariants/scheduling.md` § "A tree that flows",
+Measured). Left of (b): the real link (the far peer must advertise bit 31 — after a release);
+the drafter's level, ~72% of the requester's time — a tree step is never captured as a CUDA
+graph (its mask and rope index are uploaded inside the forward, and the mask is a `[rows,
+kv_len]` tensor between two cuBLAS matmuls whose shapes change every call: capture needs both
+made before it and an attention whose launches do not change with the cache's length, as
+`decode_attn`'s do); misses (16-24 a reply, each about a round trip); the flow sends ~25 rows a
+token against rounds' ~6 (~0.8 MB/s up at 9 tok/s, and four times the far peer's work) — a thin
+uplink or a busy peer may run it slower than rounds, unmeasured and unguarded; the drafter's call
+beside this node's layers is a loss while they are two processes on one card (gotcha #759) and
+needs them in one; (c) closed
 2026-10-22 — with the drafter on the card trees beat the stream 8.41 vs 5.95 tok/s at 160
 tokens and 9.36 vs 6.48 at 400 on the real link, so the default stands (§ Closed). **Built 2026-10-22: a split with no drafter fetches one** — the largest of the
 target's family the swarm holds that can draft, ≤ 2 GiB, trusted, through the shard system, kept

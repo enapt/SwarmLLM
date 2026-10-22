@@ -194,6 +194,77 @@ fn a_tree_grown_a_step_at_a_time_reads_its_earlier_rows() {
     }
 }
 
+/// A tree that FLOWS (#134 (b)): sent a few rows a forward while it grows,
+/// with a later row hanging off an EARLY row after other rows have grown
+/// elsewhere — the row a requester adds where the model's draw missed every
+/// guess. Every row must read as its own path does from nothing, and as the
+/// same rows read in ONE forward: the rows in between are in the cache and
+/// read by none of its descendants.
+#[test]
+fn a_tree_read_in_three_forwards_reads_as_one() {
+    let mut model = whole_model();
+    let prompt = model.tensor_from_ids(&PROMPT).unwrap();
+    // Rows: 0 the check's token; 1, 2 follow 0; 3 follows 1; 4 follows 3;
+    // then 5 follows 2 (rows 1, 3, 4 lost) and 6 follows 5.
+    let tokens = [5u32, 9, 11, 13, 15, 21, 30];
+    let parents = vec![None, Some(0), Some(0), Some(1), Some(3), Some(2), Some(5)];
+    let forwards = [0..3, 3..5, 5..7];
+
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    model.forward(&prompt, 0, &kv, "f").unwrap();
+    let mut flowed = Vec::new();
+    for rows in forwards {
+        let shape = DraftTree::new(PROMPT.len(), parents[..rows.end].to_vec()).unwrap();
+        let input = model.tensor_from_ids(&tokens[rows.clone()]).unwrap();
+        let out = model
+            .with_draft_tree(shape, |m| {
+                m.forward_verify_all_positions(&input, PROMPT.len() + rows.start, &kv, "f")
+            })
+            .unwrap()
+            .unwrap();
+        flowed.extend(rows_of(&out));
+    }
+
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    model.forward(&prompt, 0, &kv, "o").unwrap();
+    let input = model.tensor_from_ids(&tokens).unwrap();
+    let once = model
+        .with_draft_tree(
+            DraftTree::new(PROMPT.len(), parents.clone()).unwrap(),
+            |m| m.forward_verify_all_positions(&input, PROMPT.len(), &kv, "o"),
+        )
+        .unwrap()
+        .map(|o| rows_of(&o))
+        .unwrap();
+
+    assert_eq!(flowed.len(), tokens.len());
+    for row in 0..tokens.len() {
+        let mut seq = PROMPT.to_vec();
+        seq.extend(path_of(&tokens, &parents, row));
+        let fresh = read_fresh(&mut model, &seq);
+        assert_close(&flowed[row], &fresh, &format!("row {row}, flowed"));
+        assert_close(&flowed[row], &once[row], &format!("row {row}, read once"));
+    }
+    // The control: the late rows read as a chain after the cached ones see
+    // the lost branch, and come out different — the shape is what kept them
+    // from it.
+    let kv = KvCacheStore::new(std::time::Duration::from_secs(60));
+    model.forward(&prompt, 0, &kv, "c").unwrap();
+    let input = model.tensor_from_ids(&tokens).unwrap();
+    let chain = rows_of(
+        &model
+            .forward_verify_all_positions(&input, PROMPT.len(), &kv, "c")
+            .unwrap(),
+    );
+    assert!(
+        (5..7).any(|r| chain[r]
+            .iter()
+            .zip(&flowed[r])
+            .any(|(a, b)| (a - b).abs() > 1e-3)),
+        "the late rows read the same as a chain — the check proves nothing"
+    );
+}
+
 /// A segment configured to read prompts in pieces smaller than a tree reads
 /// the tree whole: its mask covers every row, and a piece of it would be
 /// refused — on a middle segment that failed every honest tree (security

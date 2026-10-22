@@ -163,6 +163,9 @@ pub fn build_layer_forward_aad(forward: &LayerForward) -> Vec<u8> {
     super::layer_forward::append_image_spans_trailer(&mut aad, forward);
     // The draft-tree trailer (0x10): which rows each guess reads.
     super::layer_forward::append_draft_tree_trailer(&mut aad, forward);
+    // The tree-flow trailer (0x11): which cached rows the tree's rows follow,
+    // and which position each row's draw fills.
+    super::layer_forward::append_draft_tree_flow_trailer(&mut aad, forward);
 
     aad
 }
@@ -277,6 +280,7 @@ pub fn encode_layer_forward_encrypted(
     super::layer_forward::append_prompt_span_trailer(&mut buf, forward);
     super::layer_forward::append_image_spans_trailer(&mut buf, forward);
     super::layer_forward::append_draft_tree_trailer(&mut buf, forward);
+    super::layer_forward::append_draft_tree_flow_trailer(&mut buf, forward);
 
     Ok(buf)
 }
@@ -506,6 +510,11 @@ pub fn decode_layer_forward_encrypted(
     let prompt_span = super::layer_forward::read_prompt_span_trailer(data, &mut cursor);
     let image_spans = super::layer_forward::read_image_spans_trailer(data, &mut cursor);
     let draft_parents = super::layer_forward::read_draft_tree_trailer(data, &mut cursor)?;
+    let draft_tree_from = super::layer_forward::read_draft_tree_flow_trailer(
+        data,
+        &mut cursor,
+        !draft_parents.is_empty(),
+    )?;
     let _ = cursor;
 
     let mut forward = LayerForward {
@@ -536,6 +545,7 @@ pub fn decode_layer_forward_encrypted(
         prompt_span,
         image_spans,
         draft_parents,
+        draft_tree_from,
     };
 
     // Reconstruct AAD from the parsed forward via the helper. This MUST
@@ -586,6 +596,7 @@ mod tests {
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
+            draft_tree_from: None,
         }
     }
 
@@ -865,6 +876,32 @@ mod tests {
             "a relay must not reshape the tree"
         );
         other.draft_parents.clear();
+        assert_ne!(build_layer_forward_aad(&other), aad, "nor drop it");
+    }
+
+    /// Where a tree that flows starts (#134 (b)) decides which cached rows its
+    /// rows follow and which position each draw fills, so it is sealed with
+    /// the shape: moved or dropped on the way, the frame no longer opens.
+    #[test]
+    fn a_flowing_trees_start_is_sealed_and_survives_the_encrypted_frame() {
+        let mut orig = base_forward();
+        orig.spec_logits_requested = true;
+        orig.spec_walk_at_tail = true;
+        orig.draft_parents = vec![0, 1, 1, 2, 3, 3];
+        orig.draft_tree_from = Some(orig.index_pos - 4);
+        let bytes = encode_layer_forward_encrypted(&orig, vec![0u8; 32]).unwrap();
+        let (decoded, _sealed, aad) = decode_layer_forward_encrypted(&bytes).unwrap();
+        assert_eq!(decoded.draft_tree_from, orig.draft_tree_from);
+        assert_eq!(decoded.draft_parents, orig.draft_parents);
+        assert_eq!(aad, build_layer_forward_aad(&orig));
+        let mut other = orig.clone();
+        other.draft_tree_from = Some(orig.index_pos - 3);
+        assert_ne!(
+            build_layer_forward_aad(&other),
+            aad,
+            "a relay must not move the tree's start"
+        );
+        other.draft_tree_from = None;
         assert_ne!(build_layer_forward_aad(&other), aad, "nor drop it");
     }
 

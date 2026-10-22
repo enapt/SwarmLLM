@@ -2003,6 +2003,7 @@ mod seal_tests {
             prompt_span: None,
             image_spans: Vec::new(),
             draft_parents: Vec::new(),
+            draft_tree_from: None,
         }
     }
 
