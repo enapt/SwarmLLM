@@ -7880,12 +7880,17 @@ mod card_quantized_products {
     }
 
     /// Every type it covers, both tile paths (rows of the weight a multiple of
-    /// 128, and not) and the widths a tree check, a drafter's tree step (5-8
-    /// rows, taken from the vector kernel outside a CUDA graph capture) and a
-    /// prompt chunk send, against the f32 product of the SAME quantized weight. The activation is
-    /// quantized to 8 bits on the way in, so the bound is relative to the
-    /// largest product; a layout or stride mistake is off by far more. Each
-    /// product must have gone through the new kernel (its counter moved).
+    /// 128, and not) and the widths a speculative check, a drafter's tree step
+    /// (≤ 8 rows), a tree check and a prompt chunk send, against the f32
+    /// product of the SAME quantized weight. The activation is quantized to 8
+    /// bits on the way in, so the bound is relative to the largest product; a
+    /// layout or stride mistake is off by far more. Each product must have gone
+    /// through the kernel the rule names (the MMQ counter moved, or did not):
+    /// 9+ rows always MMQ; ≤ 8 rows MMQ only from its type's fewest rows on a
+    /// weight of at least its fewest bytes (`mmq_few_rows_line`) — the small
+    /// weights here take the vector kernel, a 16,384-row one of every type
+    /// takes it below its type's line and MMQ from it (inside a CUDA graph
+    /// capture too: `a_few_rows_product_takes_mmq_inside_a_capture`).
     #[test]
     fn many_rows_on_the_card_match_the_f32_product_of_the_same_weight() {
         let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
@@ -7918,25 +7923,36 @@ mod card_quantized_products {
             GgmlDType::Q6K,
         ];
         for dtype in types {
-            for n in [256usize, 200] {
+            let every_width: &[usize] = &[5, 8, 9, 16, 33, 64, 300];
+            let (fewest, least_bytes) = candle_core::quantized::cuda::mmq_few_rows_line(dtype);
+            let few: &[usize] = &[2, 3, 4, 6, 7, 8];
+            for (n, widths) in [(256usize, every_width), (200, every_width), (16384, few)] {
                 let w = Tensor::from_vec(values(n * k), (n, k), &card).unwrap();
                 let q = QTensor::quantize(&w, dtype).unwrap();
+                let bytes = q.storage_size_in_bytes();
+                assert!(
+                    widths != few || bytes >= least_bytes,
+                    "{dtype:?}: the large weight ({bytes} bytes) is under the few-rows size line \
+                     ({least_bytes}) — its widths would test nothing"
+                );
                 let wq = q
                     .dequantize(&Device::Cpu)
                     .unwrap()
                     .to_vec2::<f32>()
                     .unwrap();
                 let mm = QMatMul::from_qtensor(q).unwrap();
-                for rows in [5usize, 8, 9, 16, 33, 64, 300] {
+                for &rows in widths {
                     let a = values(rows * k);
                     let x = Tensor::from_vec(a.clone(), (rows, k), &card).unwrap();
                     let before = candle_core::quantized::cuda::mmq_mma_products();
                     let got = mm.forward(&x).unwrap().to_vec2::<f32>().unwrap();
                     let fired = candle_core::quantized::cuda::mmq_mma_products() > before;
-                    assert!(
-                        fired,
-                        "{dtype:?} n={n} rows={rows}: the product did not go through \
-                         llama.cpp's MMQ (SWARMLLM_QMATMUL_MMQ set, or no int8 tensor cores?)"
+                    let mmq_wanted = rows > 8 || (rows >= fewest.max(2) && bytes >= least_bytes);
+                    assert_eq!(
+                        fired, mmq_wanted,
+                        "{dtype:?} n={n} ({bytes} bytes) rows={rows}, its line {fewest} rows / \
+                         {least_bytes} bytes: MMQ ran = {fired} (SWARMLLM_QMATMUL_MMQ* set, or \
+                         no int8 tensor cores?)"
                     );
                     let mut scale = 0f64;
                     let mut worst = 0f64;
@@ -7955,6 +7971,125 @@ mod card_quantized_products {
                         "{dtype:?} n={n} rows={rows}: off by {err:.4} of the largest product"
                     );
                 }
+            }
+        }
+    }
+
+    /// A product of a few rows — its type's fewest (`mmq_few_rows_line`) and
+    /// 8 — against a weight past the line's size takes MMQ INSIDE a CUDA graph
+    /// capture once MMQ has answered for its weight type outside one, and the
+    /// graph's answer is the uncaptured product's, bit for bit (and the f64
+    /// product's, to the 8-bit activation); a Q8_0 and a k-quant weight, since
+    /// the kernel is made ready per type. A drafter's tree level of 8 rows is
+    /// captured; until 2026-10-23 every product in it went to the vector
+    /// kernel, which at 8 rows reads the weights at about a quarter of the
+    /// card's bandwidth (vendored candle `mmq_takes_few_rows`).
+    #[test]
+    fn a_few_rows_product_takes_mmq_inside_a_capture() {
+        use candle_core::cuda_backend::cudarc::driver::{result, sys};
+        use candle_core::quantized::cuda::mmq_mma_products;
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(card) = Device::new_cuda(0) else {
+            eprintln!("SKIPPED: no card");
+            return;
+        };
+        let Device::Cuda(dev) = &card else {
+            unreachable!("new_cuda made a card device")
+        };
+        let mut seed: u64 = 0x1234_5678_9abc_def1;
+        // A Qwen2.5-0.5B's feed-forward up (Q8_0: 38 tiles of 128 rows, 4.6 MB)
+        // and a k-quant weight of as many rows: both past the size below which
+        // a few rows stay on the vector kernel.
+        for (dtype, n, k) in [
+            (GgmlDType::Q8_0, 4864usize, 896usize),
+            (GgmlDType::Q4K, 4864, 1024),
+        ] {
+            let (fewest, least_bytes) = candle_core::quantized::cuda::mmq_few_rows_line(dtype);
+            let w = Tensor::from_vec(values(&mut seed, n * k), (n, k), &card).unwrap();
+            let q = QTensor::quantize(&w, dtype).unwrap();
+            assert!(
+                q.storage_size_in_bytes() >= least_bytes && fewest <= 8,
+                "{dtype:?}: the weight is under SWARMLLM_QMATMUL_MMQ_FEW_ROWS_BYTES, or \
+             SWARMLLM_QMATMUL_MMQ_MIN_ROWS is past 8: nothing below means anything"
+            );
+            let wq = q
+                .dequantize(&Device::Cpu)
+                .unwrap()
+                .to_vec2::<f32>()
+                .unwrap();
+            let mm = QMatMul::from_qtensor(q).unwrap();
+            let mut widths = vec![fewest.max(2), 8];
+            widths.dedup();
+            for rows in widths {
+                let a = values(&mut seed, rows * k);
+                let x = Tensor::from_vec(a.clone(), (rows, k), &card).unwrap();
+                let before = mmq_mma_products();
+                let want = mm.forward(&x).unwrap().to_vec2::<f32>().unwrap();
+                assert!(
+                mmq_mma_products() > before,
+                "{dtype:?} rows={rows}: the uncaptured product did not take MMQ — nothing below means anything"
+            );
+                // The tile width these rows take (8), against the f64 product of the
+                // same quantized weight; the activation is rounded to 8 bits.
+                let (mut scale, mut worst) = (0f64, 0f64);
+                for (r, got_row) in want.iter().enumerate() {
+                    for (o, wrow) in wq.iter().enumerate() {
+                        let exact: f64 = (0..k)
+                            .map(|i| f64::from(a[r * k + i]) * f64::from(wrow[i]))
+                            .sum();
+                        scale = scale.max(exact.abs());
+                        worst = worst.max((f64::from(got_row[o]) - exact).abs());
+                    }
+                }
+                assert!(
+                    worst / scale < 0.02,
+                    "{dtype:?} rows={rows}: off by {:.4} of the largest product",
+                    worst / scale
+                );
+                let stream = dev.cuda_stream();
+                stream.context().bind_to_thread().unwrap();
+                // SAFETY: a live stream of this device, captured THREAD_LOCAL as
+                // `cuda_graph` captures a step.
+                unsafe {
+                    result::stream::begin_capture(
+                        stream.cu_stream(),
+                        sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
+                    )
+                }
+                .unwrap();
+                let before = mmq_mma_products();
+                let out = mm.forward(&x);
+                let in_capture = mmq_mma_products() - before;
+                // SAFETY: the stream this thread began capturing.
+                let graph = unsafe { result::stream::end_capture(stream.cu_stream()) }.unwrap();
+                let out = out.unwrap();
+                assert!(
+                    !graph.is_null(),
+                    "{dtype:?} rows={rows}: the capture was invalidated"
+                );
+                let mut exec: sys::CUgraphExec = std::ptr::null_mut();
+                // SAFETY: a complete captured graph, flags 0, launched on the
+                // stream it was captured from; both destroyed after the read back.
+                unsafe {
+                    sys::cuGraphInstantiateWithFlags(&mut exec, graph, 0)
+                        .result()
+                        .unwrap();
+                    result::graph::launch(exec, stream.cu_stream()).unwrap();
+                }
+                let got = out.to_vec2::<f32>().unwrap();
+                // SAFETY: both handles are live; the read back above waited for the launch.
+                unsafe {
+                    result::graph::exec_destroy(exec).unwrap();
+                    result::graph::destroy(graph).unwrap();
+                }
+                assert!(
+                in_capture > 0,
+                "{dtype:?} rows={rows}: the captured product did not take MMQ — the vector kernel ran"
+            );
+                assert_eq!(
+                    got, want,
+                    "{dtype:?} rows={rows}: the graph's answer is not the uncaptured product's"
+                );
             }
         }
     }

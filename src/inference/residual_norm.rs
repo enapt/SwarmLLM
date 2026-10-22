@@ -86,9 +86,69 @@ impl RmsNorm {
 }
 
 impl Module for RmsNorm {
+    /// `candle_nn::ops::rms_norm`, but on a card a row of 512-1023 columns is
+    /// normed by candle's own kernel with 1024 threads (`norm_block`) — the
+    /// geometry the fused add-norm uses, so the two paths stay bit-identical.
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        #[cfg(feature = "candle-cuda")]
+        if wide_on_cuda(x, self) {
+            return x.apply_op2_no_bwd(
+                &self.weight,
+                &cuda::WideRmsNorm {
+                    eps: self.eps as f32,
+                },
+            );
+        }
         candle_nn::ops::rms_norm(x, &self.weight, self.eps as f32)
     }
+}
+
+/// The threads a row of `ncols` is normed with on a card: 1024 from
+/// `SWARMLLM_NORM_WIDE_FROM` columns (default 512; at most candle's 1024), 32
+/// below — candle's and llama.cpp's rule is 1024 from 1024 columns. Both
+/// kernels (candle's `rmsnorm`, `add_rmsnorm_f32`) take exactly one of the
+/// two: their second stage sums all 32 shared slots, one a warp, so a block is
+/// one warp or 32. At 32 threads a row of 896 (Qwen2.5-0.5B, the drafter of a
+/// Qwen split) is 28 dependent loads a thread, twice: 14.8-15.6 µs a norm,
+/// ~49 a forward, ~0.7 ms of a drafter's 8-row tree level of ~6.9 (nsys with
+/// graph nodes traced, RTX 3070 Laptop, 2026-10-23).
+/// `SWARMLLM_NORM_WIDE_FROM=1024` is candle's line — the A/B in one binary.
+#[cfg(feature = "candle-cuda")]
+pub(crate) fn norm_block(ncols: usize) -> u32 {
+    static FROM: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let from = *FROM.get_or_init(|| {
+        std::env::var("SWARMLLM_NORM_WIDE_FROM")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(512)
+    });
+    if ncols >= from.min(1024) {
+        1024
+    } else {
+        32
+    }
+}
+
+/// Whether [`RmsNorm::forward`] takes candle's kernel with [`norm_block`]'s
+/// geometry rather than `candle_nn`'s: on a card, f32, contiguous, and only
+/// where the two geometries differ — everywhere else `candle_nn` launches the
+/// same kernel the same way, so nothing changes there.
+#[cfg(feature = "candle-cuda")]
+fn wide_on_cuda(x: &Tensor, norm: &RmsNorm) -> bool {
+    use candle_core::DType;
+    let Some(&ncols) = x.dims().last() else {
+        return false;
+    };
+    matches!(x.device(), Device::Cuda(_))
+        && x.elem_count() > 0
+        && ncols < 1024
+        && norm_block(ncols) == 1024
+        && x.dtype() == DType::F32
+        && norm.weight.dtype() == DType::F32
+        && norm.weight.dims() == [ncols]
+        && x.is_contiguous()
+        && norm.weight.is_contiguous()
+        && norm.weight.device().same_device(x.device())
 }
 
 /// The hidden state between two norm points: a tensor, or a sum not yet taken.
@@ -241,9 +301,9 @@ mod cuda {
         /// Output is ONE buffer of `2 * numel`: `[normed | sum]`, shaped
         /// `(2, ..dims)` so the caller splits it with `narrow` on dim 0. From
         /// `alloc_fully_overwritten`, because both of the kernel's loops assign
-        /// every column of their row. Launch geometry is candle's `rmsnorm`
-        /// rule exactly — one block per row, 32 threads below 1024 columns and
-        /// 1024 at or above — which the kernel's reduction depends on for
+        /// every column of their row. One block per row of [`super::norm_block`]'s
+        /// threads — the geometry [`super::RmsNorm::forward`] launches candle's
+        /// `rmsnorm` with, which the kernel's reduction depends on for
         /// bit-identity.
         fn cuda_fwd(
             &self,
@@ -285,7 +345,7 @@ mod cuda {
             let alpha = s3.as_cuda_slice::<f32>()?.slice(wo..we);
 
             let mut out = dev.alloc_fully_overwritten::<f32>(2 * numel)?;
-            let block_size: u32 = if ncols < 1024 { 32 } else { 1024 };
+            let block_size = super::norm_block(ncols);
             let cfg = LaunchConfig {
                 grid_dim: (nrows as u32, 1, 1),
                 block_dim: (block_size, 1, 1),
@@ -323,6 +383,84 @@ mod cuda {
             Ok((
                 candle_core::CudaStorage::wrap_cuda_slice(out, dev),
                 Shape::from_dims(&out_dims),
+            ))
+        }
+    }
+
+    /// candle's own `rmsnorm_f32` (`candle-kernels/src/reduce.cu`), launched as
+    /// `candle_nn::ops::rms_norm` launches it but with [`super::norm_block`]'s
+    /// threads — only for the rows where that differs from candle's 32.
+    pub(super) struct WideRmsNorm {
+        pub(super) eps: f32,
+    }
+
+    impl candle_core::CustomOp2 for WideRmsNorm {
+        fn name(&self) -> &'static str {
+            "wide-rms-norm"
+        }
+
+        /// Never reached: [`super::RmsNorm::forward`] sends every tensor off a
+        /// card to `candle_nn`, which IS the CPU implementation.
+        fn cpu_fwd(
+            &self,
+            _: &CpuStorage,
+            _: &Layout,
+            _: &CpuStorage,
+            _: &Layout,
+        ) -> Result<(CpuStorage, Shape)> {
+            candle_core::bail!(
+                "wide-rms-norm is CUDA-only; RmsNorm::forward routes other devices to candle_nn"
+            )
+        }
+
+        fn cuda_fwd(
+            &self,
+            s1: &candle_core::CudaStorage,
+            l1: &Layout,
+            s2: &candle_core::CudaStorage,
+            l2: &Layout,
+        ) -> Result<(candle_core::CudaStorage, Shape)> {
+            use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+            use candle_core::cuda_backend::{kernels, WrapErr};
+
+            let dev = s1.device.clone();
+            let (Some((xo, xe)), Some((wo, we))) =
+                (l1.contiguous_offsets(), l2.contiguous_offsets())
+            else {
+                candle_core::bail!("wide-rms-norm: inputs must be contiguous");
+            };
+            let dims = l1.shape().dims();
+            let numel = xe - xo;
+            let ncols = *dims.last().unwrap_or(&0);
+            if numel == 0 || ncols == 0 || numel % ncols != 0 || we - wo != ncols {
+                candle_core::bail!("wide-rms-norm: bad shape {dims:?} (alpha {})", we - wo);
+            }
+            let x = s1.as_cuda_slice::<f32>()?.slice(xo..xe);
+            let alpha = s2.as_cuda_slice::<f32>()?.slice(wo..we);
+            // Every element is assigned: one block a row, its loop over every column.
+            let mut dst = dev.alloc_fully_overwritten::<f32>(numel)?;
+            let block_size = super::norm_block(ncols);
+            let cfg = LaunchConfig {
+                grid_dim: ((numel / ncols) as u32, 1, 1),
+                block_dim: (block_size, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let func = dev.get_or_load_func("rmsnorm_f32", &kernels::REDUCE)?;
+            let (ncols_i, block_i) = (ncols as i32, block_size as i32);
+            let mut builder = func.builder();
+            builder.arg(&x);
+            builder.arg(&mut dst);
+            builder.arg(&alpha);
+            builder.arg(&ncols_i);
+            builder.arg(&block_i);
+            builder.arg(&self.eps);
+            // SAFETY: ffi. Contiguity and every length are checked above; the
+            // kernel reads `numel` of `x` and `ncols` of `alpha` and writes
+            // `numel` into `dst`.
+            unsafe { builder.launch(cfg) }.w()?;
+            Ok((
+                candle_core::CudaStorage::wrap_cuda_slice(dst, dev),
+                l1.shape().clone(),
             ))
         }
     }
@@ -467,6 +605,70 @@ mod tests {
                         "{shape:?} {label}: element {i} differs: fused {} vs composed {}",
                         f32::from_bits(g[i]),
                         f32::from_bits(w[i])
+                    );
+                }
+            }
+        }
+    }
+
+    /// A card norms a row of 512-1023 columns with 1024 threads, not candle's
+    /// 32 — and the answer is candle's to rounding: within 1e-5 of
+    /// `candle_nn`'s 32-thread kernel and of an f64 norm of the same row.
+    /// Each width is checked to take the wide launch at all, so the
+    /// comparison is not of candle with itself.
+    ///
+    /// ⚠ Gated: `cargo test --features candle-cuda --lib residual_norm -- --nocapture`.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn a_narrow_row_normed_with_1024_threads_is_candles_norm() {
+        let dev = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIPPED wide norm: no CUDA device ({e})");
+                return;
+            }
+        };
+        for (rows, ncols) in [
+            (1usize, 896usize),
+            (8, 896),
+            (300, 896),
+            (3, 576),
+            (2, 1000),
+        ] {
+            assert_eq!(
+                norm_block(ncols),
+                1024,
+                "{ncols}: SWARMLLM_NORM_WIDE_FROM is set"
+            );
+            let n = norm(ncols, &dev);
+            let x = Tensor::randn(0f32, 2.0, (rows, ncols), &dev).unwrap();
+            assert!(
+                wide_on_cuda(&x, &n),
+                "{rows}x{ncols} should take the wide launch"
+            );
+            let ours = n.forward(&x).unwrap().to_vec2::<f32>().unwrap();
+            let candles = candle_nn::ops::rms_norm(&x, &n.weight, n.eps as f32)
+                .unwrap()
+                .to_vec2::<f32>()
+                .unwrap();
+            let xs = x.to_vec2::<f32>().unwrap();
+            let w = n.weight.to_vec1::<f32>().unwrap();
+            for r in 0..rows {
+                let mean = xs[r].iter().map(|v| f64::from(*v).powi(2)).sum::<f64>() / ncols as f64;
+                let scale = 1.0 / (mean + n.eps).sqrt();
+                for c in 0..ncols {
+                    let want = f64::from(xs[r][c]) * scale * f64::from(w[c]);
+                    let tol = 1e-5 * want.abs().max(1.0);
+                    assert!(
+                        (f64::from(ours[r][c]) - want).abs() <= tol,
+                        "{rows}x{ncols} [{r},{c}]: {} against f64 {want}",
+                        ours[r][c]
+                    );
+                    assert!(
+                        (ours[r][c] - candles[r][c]).abs() as f64 <= tol,
+                        "{rows}x{ncols} [{r},{c}]: {} against candle's {}",
+                        ours[r][c],
+                        candles[r][c]
                     );
                 }
             }

@@ -85,7 +85,8 @@ swarmllm/
 │   │                          stored in one, #292; guard `every_type_the_card_moe_kernels_are_handed_is_launched`;
 │   │                          and src/ggml_mmq/ — llama.cpp's int8 tensor-core MMQ, its headers verbatim
 │   │                          in `namespace swarm_ggml` + a launcher on the caller's stream, built as
-│   │                          libggml_mmq.a for every card product of ≥ 9 rows (5-8 uncaptured), #325;
+│   │                          libggml_mmq.a for every card product of ≥ 9 rows (fewer by weight type
+│   │                          and size, inside a CUDA graph capture too), #325;
 │   │                          guard `the_vendored_mmq_keeps_its_own_namespace`. Both libraries carry
 │   │                          their floor's PTX beside the machine code, for cards newer than it)
 │   ├── candle-flash-attn/     (cudart linked STATICALLY so the binary needs only the display driver;

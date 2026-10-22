@@ -35,16 +35,30 @@ test split at a 385 ms round trip, a 5 Mbit/s upload went from 4.7-4.8 to 7.4-7.
 (the old way ran 6.8-7.1), 10 Mbit/s from 8.2 to 8.5-8.8, and an unlimited one stayed wide.
 `SWARMLLM_FLOW_GUARD=0` turns it off.
 
-**The small model guessing for a split now hands each step to your graphics card in one piece.**
-A flowing tree asks it for three levels of eight guesses at a time. Each level used to be some
-500 small jobs sent to the card one by one; now the attention over a level's guesses is one job,
-and the whole level is recorded once and replayed. Picking the likeliest guesses after each level
-is now two jobs and one read back, where it was some thirty jobs and three waits. On an idle card
-three levels take 21 ms instead of 36. On the test split, where every part shared one graphics
-card, the guessing took about a quarter less time and the reply's speed barely moved; across a
-real link the far half runs on another computer, so the card's time saved is the guesser's.
-`SWARMLLM_TREE_GRAPH=0` turns the replay off, `SWARMLLM_TREE_ATTN=standard` turns off both, and
-`SWARMLLM_TREE_TOPK=composed` picks the guesses the old way.
+**The small model guessing for a split now hands each step to your graphics card in one piece,
+and each step is quicker.** A flowing tree asks it for three levels of eight guesses at a time.
+Each level used to be some 500 small jobs sent to the card one by one; now the attention over a
+level's guesses is one job, and the whole level is recorded once and replayed. Picking the
+likeliest guesses after each level is now two jobs and one read back, where it was some thirty
+jobs and three waits. Inside the replay, the largest multiplications now run on the card's tensor
+cores, and the model's normalising steps use 1,024 of the card's threads instead of 32. On an
+idle laptop card three levels take 15 ms instead of 36. On the test split, where every part
+shared one graphics card, the replay alone cut the guessing by about a quarter and the reply's
+speed barely moved; across a real link the far half runs on another computer, so the card's time
+saved is the guesser's. `SWARMLLM_TREE_GRAPH=0` turns the replay off, `SWARMLLM_TREE_ATTN=standard`
+turns off both, `SWARMLLM_TREE_TOPK=composed` picks the guesses the old way, and
+`SWARMLLM_QMATMUL_MMQ_CAPTURED=0` keeps the replay's multiplications on the older kernel.
+
+**Small models, and checks of a few guessed words, run faster on a graphics card.** A small
+model such as Qwen2.5-0.5B — the one that usually guesses for splits — now writes 320-335 tokens
+a second on a laptop RTX 3070 instead of 272, because each of its normalising steps uses 1,024 of
+the card's threads instead of 32. And when your computer checks a few guessed words at once on the
+card, as it does when it guesses ahead from text already in the conversation, a check of 4 to 8
+words on a 7B model takes 21-23 ms instead of 27-32: those multiplications now go to the card's
+tensor cores even inside a recorded step. Where that pays depends on how the model is stored —
+from 4 words for Q4_K, Q5_K and Q6_K files, from 7 for Q8_0 files, whose older kernel stays faster
+below that — and small weights stay on the older kernel. `SWARMLLM_NORM_WIDE_FROM=1024` brings back
+the old norms.
 
 **A split across a long link spends less of each round waiting for its guesses.** While the far
 computer checks one tree of guesses, the small model on your graphics card grows the next one.

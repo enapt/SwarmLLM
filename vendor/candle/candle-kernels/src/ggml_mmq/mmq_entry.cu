@@ -153,9 +153,10 @@ extern "C" int swarm_mmq_quantize(
     return cudaGetLastError() == cudaSuccess ? SWARM_MMQ_OK : SWARM_MMQ_CUDA_ERROR;
 }
 
-// dst[ncols_y][nrows_x] = vy · xᵀ. With `launch == 0` nothing runs: `*need`
-// is set to the floats of fixup buffer the launch will ask for (0 = none),
-// so the caller can allocate it on its own pool and stream. With
+// dst[ncols_y][nrows_x] = vy · xᵀ. With `launch == 0` nothing is enqueued:
+// `*need` is set to the floats of fixup buffer the launch will ask for (0 =
+// none), so the caller can allocate it on its own pool and stream, and the
+// chosen kernel's shared-memory limit is raised if it never was. With
 // `launch != 0` the product is enqueued on `stream`.
 extern "C" int swarm_mmq_matmul(
         const int type, const void * x, const void * vy, float * dst, float * fixup, const size_t fixup_floats,
@@ -193,4 +194,28 @@ extern "C" int swarm_mmq_matmul(
     }
     *need = needed;
     return status;
+}
+
+// Raises, on the current device, the shared-memory limit of the one kernel a
+// product of 1-8 activation rows of a weight of `type` picks — tile width 8,
+// with and without bounds checks (a weight's rows a multiple of 128 or not) —
+// by planning such a product, which launches nothing. A launch raises it the
+// first time itself, and that driver call is the one thing a CUDA graph
+// capture must not see here: the vendored candle (`mmq_takes_few_rows`) lets
+// a CAPTURED product of a few rows (≤ 8) take this kernel only after this has run
+// outside a capture for its type and device.
+extern "C" int swarm_mmq_prepare_few_rows(const int type) {
+    const int qk = swarm_mmq_block_size(type);
+    if (qk == 0) {
+        return SWARM_MMQ_UNSUPPORTED;
+    }
+    for (const int64_t nrows_x : { int64_t(128), int64_t(129) }) {
+        size_t need = 0;
+        const int status = swarm_mmq_matmul(type, nullptr, nullptr, nullptr, nullptr, 0, &need, qk, nrows_x, 8, 0, 0);
+        if (status != SWARM_MMQ_OK) {
+            (void) cudaGetLastError(); // not sticky: leave nothing for a later check to read
+            return status;
+        }
+    }
+    return SWARM_MMQ_OK;
 }

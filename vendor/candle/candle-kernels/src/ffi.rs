@@ -83,7 +83,8 @@ extern "C" {
     ) -> i32;
 
     /// `dst[ncols_y][nrows_x] = vy · xᵀ`. `launch == 0` only sets `need` (the
-    /// floats of fixup buffer the launch will want).
+    /// floats of fixup buffer the launch will want) and raises the chosen
+    /// kernel's shared-memory limit if it never was; nothing is enqueued.
     pub fn swarm_mmq_matmul(
         ggml_type: i32,
         x: *const c_void,
@@ -98,4 +99,9 @@ extern "C" {
         launch: i32,
         stream: i64,
     ) -> i32;
+
+    /// Raises, on the current device, the shared-memory limit of the kernel a
+    /// product of at most 8 rows against a weight of `ggml_type` picks, so
+    /// such a product may then be captured into a CUDA graph. 0 = done.
+    pub fn swarm_mmq_prepare_few_rows(ggml_type: i32) -> i32;
 }

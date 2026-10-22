@@ -1318,8 +1318,10 @@ switches FIRST, in one binary, at the SAME prompt and keep-last settings as the 
 arm at other settings is no baseline): `SWARMLLM_FLASH_OFFSET_CAUSAL=0` sends a chunk landing on a
 warm cache to standard attention, `SWARMLLM_PROMPT_CARD_LAYERS=0` / `SWARMLLM_PROMPT_CARD_PROJECTIONS=0`
 keep a split's processor layers there, `SWARMLLM_QMATMUL_MMQ=dp4a` (llama.cpp's tensor-core MMQ off:
-the older kernels below; `SWARMLLM_QMATMUL_MMQ_MIN_ROWS=9` keeps it off 5-8 rows only) and
+the older kernels below; `SWARMLLM_QMATMUL_MMQ_MIN_ROWS=9` keeps it off 8 rows and fewer only,
+`SWARMLLM_QMATMUL_MMQ_CAPTURED=0` only inside a captured step) and
 `SWARMLLM_QMATMUL_CUBLAS=0` / `SWARMLLM_QMATMUL_CUBLAS_ACC=32` the projections' kernel,
+`SWARMLLM_NORM_WIDE_FROM=1024` a 512-1023-column row's norm (a 0.5B's) on candle's 32 threads,
 `SWARMLLM_SLIDING_WINDOW=0` the window. A worker whose stderr says `llama.cpp MMQ unavailable, using
 the older kernels from now on` ran its first several-row product on the card and the launch failed —
 every product since went the old way; a card the library has no image for never tries (a card newer

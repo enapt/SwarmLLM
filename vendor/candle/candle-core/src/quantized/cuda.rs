@@ -758,37 +758,171 @@ fn mmq_mma_layout(dev: &CudaDevice, dtype: GgmlDType, rows: usize) -> Option<i32
     }
     // SAFETY: a table lookup.
     let layout = unsafe { candle_kernels::ffi::swarm_mmq_q8_1_layout(dtype.to_u32() as i32) };
-    (layout >= 0).then_some(layout)
+    if layout < 0 {
+        return None;
+    }
+    mmq_prepare_few_rows_once(dev, dtype);
+    Some(layout)
 }
 
 /// The fewest rows below the vector kernel's limit (8) that llama.cpp's MMQ
-/// takes instead, where [`mmq_takes_few_rows`] allows it.
-const MMQ_FEW_ROWS_DEFAULT: usize = 5;
+/// takes instead, per weight type, where [`mmq_takes_few_rows`] allows it.
+///
+/// A k-quant costs more to decode and the vector kernel redoes that for every
+/// row, so MMQ wins sooner — llama.cpp's own reasoning in
+/// `ggml_cuda_should_use_mmvq`, whose per-type tables cover Volta, Ada,
+/// Blackwell and Orin and keep every type on the vector kernel to 8 rows
+/// elsewhere, this card's generation (Ampere) included. Ours sit lower because
+/// our vector kernel is candle's copy of an older llama.cpp one, which at 8
+/// rows costs ~1.5x its 7. Measured (RTX 3070 Laptop, whole models, decode
+/// steps captured as graphs, two passes, 2026-10-23; SwarmLLM
+/// `docs/invariants/inference.md` § "A card multiplies several rows"): Q4_K_M
+/// files (Qwen2.5-Coder-7B, Llama-3.2-3B) gain from 4 rows and split at 3;
+/// Q8_0 files (Qwen2.5-0.5B, Qwen2.5-Coder-1.5B, Llama-3.2-1B, Qwen3-1.7B)
+/// lose at 5, split at 6 and gain from 7. The other 32-value formats decode as
+/// simply as Q8_0 and take its line, unmeasured.
+fn mmq_fewest_rows_default(dtype: GgmlDType) -> usize {
+    match dtype {
+        GgmlDType::Q2K | GgmlDType::Q3K | GgmlDType::Q4K | GgmlDType::Q5K | GgmlDType::Q6K => 4,
+        _ => 7,
+    }
+}
 
-/// SwarmLLM patch: whether a product of `rows` ≤ 8 activation rows goes to
-/// llama.cpp's MMQ rather than the vector kernel — from
-/// `SWARMLLM_QMATMUL_MMQ_MIN_ROWS` rows ([`MMQ_FEW_ROWS_DEFAULT`]; above 8 =
-/// never), and NEVER while the device's stream is being captured. A CUDA
-/// graph records checks of up to 8 positions, and MMQ's first launch of a
-/// tile width raises that kernel's shared-memory limit — a driver call a
-/// capture must not see (gotcha #841's class). The forwards that gain are
-/// never captured: a tree check and the drafter's tree steps (8 rows a step).
-fn mmq_takes_few_rows(dev: &CudaDevice, dtype: GgmlDType, rows: usize) -> bool {
-    static MIN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    let min = *MIN.get_or_init(|| {
-        std::env::var("SWARMLLM_QMATMUL_MMQ_MIN_ROWS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(MMQ_FEW_ROWS_DEFAULT)
-    });
-    if rows < min.max(2) {
+/// The smallest weight, in bytes, whose product of a few rows MMQ takes
+/// ([`mmq_takes_few_rows`]). Below it the vector kernel is faster: a weight
+/// of under ~7 tiles of 128 rows runs MMQ as stream-k plus a fixup pass, and a
+/// small weight is quick to read anyway. At 8 rows on an RTX 3070 Laptop
+/// (nsys, graph nodes traced, 2026-10-23): a Qwen2.5-0.5B's 128 × 896 Q8_0 key
+/// (0.12 MB) 3.7 µs on the vector kernel against 8.7 + 4.8 (fixup) on MMQ; its
+/// 4,864 × 896 feed-forward (4.6 MB) 43.5 against 24.7, its 151,936-row head
+/// (145 MB) 1,190 against 560. llama.cpp draws its line by rows alone (per
+/// card and type, [`mmq_fewest_rows_default`]).
+const MMQ_FEW_ROWS_LEAST_BYTES: usize = 2 << 20;
+
+/// SwarmLLM patch: whether a product of `rows` ≤ 8 activation rows against a
+/// weight of `weight_bytes` goes to llama.cpp's MMQ rather than the vector
+/// kernel — from the rows of [`mmq_few_rows_line`] (per type;
+/// `SWARMLLM_QMATMUL_MMQ_MIN_ROWS` sets one line for all, above 8 = never) and
+/// its bytes (`SWARMLLM_QMATMUL_MMQ_FEW_ROWS_BYTES`, 0 = any weight). While
+/// the device's stream is being captured, only once the kernel such a product
+/// picks is ready for it ([`mmq_few_rows_ready`]).
+///
+/// A CUDA graph records forwards of up to 8 positions — a drafter's tree level
+/// of 8 rows among them since 2026-10-22 (`SplitModel::tree_steps_may_be_captured`)
+/// — and at 8 rows the vector kernel reads a Qwen2.5-0.5B's weights at about a
+/// quarter of the card's bandwidth: 43.5 µs for a feed-forward up (896 × 4,864)
+/// where one row takes 13.3, 1.19 ms for the 151,936-row head where one row
+/// takes 0.36 (RTX 3070 Laptop, nsys with graph nodes traced; SwarmLLM
+/// `docs/invariants/inference.md` § "A card multiplies several rows").
+fn mmq_takes_few_rows(
+    dev: &CudaDevice,
+    dtype: GgmlDType,
+    rows: usize,
+    weight_bytes: usize,
+) -> bool {
+    let (fewest, least_bytes) = mmq_few_rows_line(dtype);
+    if rows < fewest.max(2) || weight_bytes < least_bytes {
         return false;
     }
-    let capturing = !matches!(
+    // Checked BEFORE `mmq_mma_layout`, whose first call asks the driver about
+    // the card: when the kernel is ready, that call has been made.
+    if stream_is_capturing(dev) && !(mmq_may_be_captured() && mmq_few_rows_ready(dev, dtype)) {
+        return false;
+    }
+    mmq_mma_layout(dev, dtype, rows).is_some()
+}
+
+/// `SWARMLLM_QMATMUL_MMQ_CAPTURED=0` keeps every CAPTURED product of ≤ 8 rows
+/// on the vector kernel, as before 2026-10-23 — the A/B in one binary.
+fn mmq_may_be_captured() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_QMATMUL_MMQ_CAPTURED").ok().as_deref(),
+            Some("0") | Some("off") | Some("false")
+        )
+    })
+}
+
+/// SwarmLLM patch: `(fewest rows, fewest weight bytes)` of a weight of `dtype`
+/// whose product of ≤ 8 rows MMQ takes in this process — the one answer
+/// [`mmq_takes_few_rows`] reads, public for the card tests:
+/// [`mmq_fewest_rows_default`] unless `SWARMLLM_QMATMUL_MMQ_MIN_ROWS` sets one
+/// line for every type, [`MMQ_FEW_ROWS_LEAST_BYTES`] unless
+/// `SWARMLLM_QMATMUL_MMQ_FEW_ROWS_BYTES` moves it. The environment is read once.
+pub fn mmq_few_rows_line(dtype: GgmlDType) -> (usize, usize) {
+    static ENV: std::sync::OnceLock<(Option<usize>, usize)> = std::sync::OnceLock::new();
+    let (rows, bytes) = *ENV.get_or_init(|| {
+        let read = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+        };
+        (
+            read("SWARMLLM_QMATMUL_MMQ_MIN_ROWS"),
+            read("SWARMLLM_QMATMUL_MMQ_FEW_ROWS_BYTES").unwrap_or(MMQ_FEW_ROWS_LEAST_BYTES),
+        )
+    });
+    (rows.unwrap_or_else(|| mmq_fewest_rows_default(dtype)), bytes)
+}
+
+/// Whether the device's stream is recording a CUDA graph.
+fn stream_is_capturing(dev: &CudaDevice) -> bool {
+    !matches!(
         dev.cuda_stream().capture_status(),
         Ok(cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE)
-    );
-    !capturing && mmq_mma_layout(dev, dtype, rows).is_some()
+    )
+}
+
+/// Per device ordinal (the first 16), one bit per weight type
+/// (`GgmlDType::to_u32`): the few-rows kernel's shared-memory limit is raised.
+static MMQ_FEW_ROWS_READY: [std::sync::atomic::AtomicU64; 16] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 16];
+
+/// The same, for a type whose raising was tried, so a refusal is not retried
+/// on every product.
+static MMQ_FEW_ROWS_TRIED: [std::sync::atomic::AtomicU64; 16] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 16];
+
+/// The slot and bit of `dtype` on this device, or `None` past the 16th card.
+fn mmq_few_rows_slot(dev: &CudaDevice, dtype: GgmlDType) -> Option<(usize, u64)> {
+    let ordinal = dev.cuda_stream().context().ordinal();
+    let bit = 1u64.checked_shl(dtype.to_u32())?;
+    (ordinal < MMQ_FEW_ROWS_READY.len()).then_some((ordinal, bit))
+}
+
+/// Whether a CAPTURED product of ≤ 8 rows against a weight of `dtype` may take
+/// MMQ: its kernel's shared-memory limit was raised outside a capture. That
+/// limit is raised by MMQ's first launch of each tile width, a driver call a
+/// capture must not see (gotcha #841's class); with it raised, a product
+/// enqueues kernels and stream-ordered allocations only. An atomic read —
+/// nothing here touches the driver.
+fn mmq_few_rows_ready(dev: &CudaDevice, dtype: GgmlDType) -> bool {
+    mmq_few_rows_slot(dev, dtype).is_some_and(|(slot, bit)| {
+        MMQ_FEW_ROWS_READY[slot].load(std::sync::atomic::Ordering::Acquire) & bit != 0
+    })
+}
+
+/// Raises the few-rows kernel's limit for `dtype` on this device the first
+/// time MMQ answers for that type outside a capture — the prompt a drafter
+/// reads before its first tree level, a tree check of 9+ rows, an uncaptured
+/// step of a few rows — so a later captured level can take it.
+fn mmq_prepare_few_rows_once(dev: &CudaDevice, dtype: GgmlDType) {
+    use std::sync::atomic::Ordering;
+    let Some((slot, bit)) = mmq_few_rows_slot(dev, dtype) else {
+        return;
+    };
+    if MMQ_FEW_ROWS_TRIED[slot].load(Ordering::Acquire) & bit != 0 || stream_is_capturing(dev) {
+        return;
+    }
+    MMQ_FEW_ROWS_TRIED[slot].fetch_or(bit, Ordering::AcqRel);
+    if dev.cuda_stream().context().bind_to_thread().is_err() {
+        return;
+    }
+    // SAFETY: plans two products and launches nothing; no pointer is read.
+    if unsafe { candle_kernels::ffi::swarm_mmq_prepare_few_rows(dtype.to_u32() as i32) } == 0 {
+        MMQ_FEW_ROWS_READY[slot].fetch_or(bit, Ordering::AcqRel);
+    }
 }
 
 /// Set after an MMQ launch fails; see [`mmq_mma_layout`].
@@ -1515,7 +1649,7 @@ impl QCudaStorage {
             _ => usize::MAX,
         };
         let use_vec_kernel =
-            rows <= max_bm && !mmq_takes_few_rows(self.device(), self.dtype, rows);
+            rows <= max_bm && !mmq_takes_few_rows(self.device(), self.dtype, rows, self.data.len);
         if use_vec_kernel {
             self.dequantize_matmul_vec(self_shape, storage, layout)
         } else {

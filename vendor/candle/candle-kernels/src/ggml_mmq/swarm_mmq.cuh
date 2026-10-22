@@ -125,7 +125,10 @@ static mmq_args swarm_mmq_args(const swarm_mmq_dense & p, ggml_type type) {
 
 // `launch_mul_mat_q` with the pool and the device table taken out. With
 // `fixup == nullptr` and `launch == false` it only reports, through `need`,
-// how many floats of fixup buffer the launch will want (0 when none).
+// how many floats of fixup buffer the launch will want (0 when none) — and
+// raises the kernel's shared-memory limit, the first time, so that a product
+// planned once outside a CUDA graph capture enqueues nothing but kernels
+// inside one (`swarm_mmq_prepare_few_rows`).
 template <ggml_type type, int J, bool fallback>
 static swarm_mmq_status swarm_mmq_launch(
         const swarm_mmq_device & dev, const mmq_args & args, float * fixup, size_t fixup_floats,
@@ -150,18 +153,11 @@ static swarm_mmq_status swarm_mmq_launch(
     const int  nblocks_stream_k = GGML_CUDA_CC_IS_NVIDIA(dev.cc) && tiles_efficiency_percent >= 90 ? ntiles_dst : dev.nsm;
     const bool fixup_needed     = config.stream_k && ntiles_dst % nblocks_stream_k != 0;
     need = fixup_needed ? size_t(nblocks_stream_k) * config.J * config.I : 0;
-    if (!launch) {
-        return SWARM_MMQ_OK;
-    }
-    if (fixup_floats < need) {
-        return SWARM_MMQ_FIXUP_TOO_SMALL;
-    }
-    if (config.stream_k && int64_t(ntiles_dst) * blocks_per_ne00_fd.z >= (int64_t(1) << 30)) {
-        return SWARM_MMQ_UNSUPPORTED; // `kbc` would overflow (llama.cpp asserts this)
-    }
 
     // Raised once per kernel and device, as CUDA_SET_SHARED_MEMORY_LIMIT does,
-    // but a failure is reported rather than aborting the process.
+    // but a failure is reported rather than aborting the process. Before the
+    // planning call returns, not only before a launch: it is the one driver
+    // call here besides the launches, and a capture must not see it.
     {
         static bool raised[GGML_CUDA_MAX_DEVICES] = { false };
         int id = 0;
@@ -174,6 +170,15 @@ static swarm_mmq_status swarm_mmq_launch(
             }
             raised[id] = true;
         }
+    }
+    if (!launch) {
+        return SWARM_MMQ_OK;
+    }
+    if (fixup_floats < need) {
+        return SWARM_MMQ_FIXUP_TOO_SMALL;
+    }
+    if (config.stream_k && int64_t(ntiles_dst) * blocks_per_ne00_fd.z >= (int64_t(1) << 30)) {
+        return SWARM_MMQ_UNSUPPORTED; // `kbc` would overflow (llama.cpp asserts this)
     }
 
     const uint3 ntx_fd           = init_fastdiv_values(ntx);

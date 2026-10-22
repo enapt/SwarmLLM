@@ -2032,7 +2032,15 @@ about as much (three processes on one card, gotcha #759), so the reply's speed d
 there. **Built 2026-10-22, released in v0.3.248: a level's rows are ranked in two launches and
 one read back** (`kernels/tree_rank.cu`, where ~30 launches with eight one-block-a-row argmaxes
 were 21% of the card's time): a flow call 26.8 → 21 ms on an idle card (`docs/invariants/inference.md`
-§ "A tree level's rows are ranked on the card in two launches"). Left of it: a whole drafter call
+§ "A tree level's rows are ranked on the card in two launches"). **Built 2026-10-23: a captured
+level's large products take the tensor-core MMQ** (the kernel made ready outside any capture; the
+few-row line per type — k-quants from 4 rows, Q8_0 from 7 — and size, ≥ 2 MiB) **and a 0.5B's
+norms 1024 threads** (32 below 1024 columns was 15 µs a norm against 3): a flow call 21 → 14.8 ms,
+64 rows 64.6 → 42.5, the 0.5B's own decode 272 → 320-335 tok/s, a 7B's captured check of 4-8
+guesses 21-23 ms against 27-32 (§ "A few rows: the line per type and size, inside a capture too",
+§ "A narrow row is normed by 1024 threads on a card"). Left of it: the q/k/v bias adds (~5% of a
+level, llama.cpp fuses them into its vector kernel) and the copies before attention (~4%); the flow
+on the one-card rig after it. Left of the level: a whole drafter call
 as ONE graph with its rows chosen on the card (SGLang's EAGLE captures its draft levels and the
 top-k between them; ours still reads each level's ranking back and chooses on the host, a sync
 each, and re-captures the step every level — ~740 launch calls a level); a kernel sharing K/V loads across rows (FlashInfer's query tile) to lift

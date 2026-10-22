@@ -589,7 +589,8 @@ segment output).
 `__shfl_xor_sync` over masks 16..1, the shared-memory second stage above 32
 threads, `rsqrtf(mean + eps)`, `(scale * x) * alpha` — launched with candle-nn
 0.10.1's geometry (one block per row, 32 threads below 1024 columns, 1024 at or
-above). The only difference is that `x = a + b` is computed in a register
+above; on a card since 2026-10-23 1024 from 512 columns, both sides — § "A
+narrow row is normed by 1024 threads" below). The only difference is that `x = a + b` is computed in a register
 instead of loaded from `badd_f32`'s output: one IEEE add either way, and FMA
 contraction cannot fuse an add into the multiply that FOLLOWS it, so
 `tmp += xi * xi` contracts identically. Both PTX builds use `-O3
@@ -615,6 +616,34 @@ pending sum resolves through the old ops in the old order, and
 ⚠ The profiler's `residual adds` stage is gone — the add is now timed inside
 `residual add + rms norm` (`prof.rs`), because on CUDA there is no separate add
 left to time.
+
+### A narrow row is normed by 1024 threads on a card (2026-10-23, #134 (b))
+
+**What it replaced.** candle-nn's `rms_norm` and llama.cpp's `rms_norm_f32` both launch 32 threads a
+row below 1024 columns and 1024 at or above. A row of 512-1023 columns — Qwen2.5-0.5B's 896, the
+split's drafter — then has each thread walk ~28 values in sequence: latency-bound, **14.8-16 µs a
+norm** at one to eight rows, against 2.6-3.2 µs at 1024 threads (nsys, graph nodes traced, RTX 3070
+Laptop). A drafter tree level runs 49 norms: ~0.7 ms of a ~6.9 ms level.
+
+**The rule.** **`residual_norm::norm_block(ncols)`** is the one block size for both kernels on a
+card: 1024 threads from `SWARMLLM_NORM_WIDE_FROM` columns (default 512), else 32. ⛔ **Only 32 or
+1024 are valid**: the kernel's second stage reads all 32 shared slots (one per warp of a full
+block), so a block of 224 or 256 would read slots no warp wrote. `RmsNorm::forward` launches candle's
+own `rmsnorm_f32` with that block (`cuda::WideRmsNorm`, f32, contiguous, `wide_on_cuda` is the
+scope; everything else is candle-nn's call) and `AddRmsNorm` asks the same function, so the fused
+and composed norms keep one geometry — `cuda_add_rms_norm_is_bit_identical_to_the_composed_path`
+still holds, its `[1,1,896]` shape now on 1024 threads. Against candle-nn's 32-thread norm it is
+NOT bit-identical (the sum is reduced in another order): `a_narrow_row_normed_with_1024_threads_is_candles_norm`
+holds it within 1e-5 of the f64 norm and of candle-nn's at five shapes. Rows of ≥ 1024 columns
+and the per-head norms (128-256 columns) are unchanged. A/B `SWARMLLM_NORM_WIDE_FROM=1024`.
+
+**Measured** (`~/swarmllm-318/mmqcap2_bench.sh`, 0.5B Q8_0, live node stopped, two passes, A/B in
+one binary): decode **320-335 tok/s against 272** (3.0-3.1 ms a token against 3.7); a flow call's
+three 8-row levels 14.8-14.9 ms against 16.5-16.9, 64 rows grown 8 a level 42.4-42.6 against
+47.7-48.6. In the profile `add_rmsnorm_f32` fell from 0.6 ms a level (38 × 16 µs) to 0.11 ms.
+
+**What a change must keep**: the block is 32 or 1024 and never another size; the fused and composed
+norms read `norm_block`, so they cannot drift apart.
 
 (2026-08-21 night) — eight-lane AVX2 `expf`
 (`exp_inplace`, Cephes polynomial, ~2 ulp vs libm, pinned by
@@ -3551,12 +3580,11 @@ reads (D4 / DS4 / D2S6). Below 8 rows llama.cpp keeps its vector kernel (MMVQ) f
   `swarm_mmq_available()` (int8 `mma`, 48 KiB opt-in shared memory, and an image of the library
   for this card — probed with an empty kernel) and the type is one of the ten; else cuBLAS (≥ 64
   rows) or the old dp4a kernel, exactly as before.
-- 5-8 rows go to it too, instead of the vector kernel — but never inside a CUDA graph capture
-  (`mmq_takes_few_rows`: the stream's `capture_status()`), since MMQ's first launch of a tile width
-  raises that kernel's shared-memory limit, a driver call a capture must not see (gotcha #841's
-  class). The forwards that gain are never captured anyway: a tree check and the drafter's tree
-  steps. `SWARMLLM_QMATMUL_MMQ_MIN_ROWS` (default 5, `MMQ_FEW_ROWS_DEFAULT`; above 8 = never) moves
-  the line. The activation is quantized once per group of
+- A few rows (≤ 8) go to it too, instead of the vector kernel, where **`mmq_few_rows_line(dtype)`**
+  says — since 2026-10-23 per weight type and size: a k-quant (Q2_K-Q6_K) from 4 rows, Q8_0 and
+  the other 32-value formats from 7, on a weight of at least 2 MiB (`MMQ_FEW_ROWS_LEAST_BYTES`);
+  § "A few rows: the line per type and size, inside a capture too" below. Until 2026-10-21 none
+  did; until 2026-10-23 5-8 rows of any weight, never inside a capture. The activation is quantized once per group of
   weights sharing it AND its layout (`SharedQ8::layout`). Every buffer comes from the device's pool
   on its one stream, uninitialised (the quantizer writes every row, the kernel every element, each
   fixup slot is written before it is read).
@@ -3620,7 +3648,7 @@ forward, MMQ / old:
 16-64 rows, from 2.9-3.6×. A prompt: 300 tokens 1,744-1,746 tok/s against 1,306-1,317, 512 tokens 2,108-2,127
 against 1,677-1,698 (MMQ beats the cuBLAS path at 512 too, as in llama.cpp); the head alone 3,598
 against 2,655. Decode does not reach it: 63.4-64.3 tok/s against 61.4-63.8 at 300 deep, 62.2 against
-61.6-61.9 at 512. The card test (`card_quantized_products`) checks every type at rows 5-300
+61.6-61.9 at 512. The card test (`card_quantized_products`) checks every type at rows 2-300
 against the f32 product of the same dequantized weight, and that the kernel ran (run with
 `--nocapture`: without a card it prints `SKIPPED: no card` and passes).
 
@@ -3638,7 +3666,90 @@ From 5 rows MMQ wins everywhere (1.3-1.9× on the head's tree, up to 2.1× whole
 loses, so the line is at 5. Not explained: with graphs on, the best 5-8-row step (26.6-28.3) sits
 between the uncaptured MMQ figure and the captured vector kernel's — the bench does not say which
 steps were captured. The gate itself asks the driver (`cuStreamIsCapturing`) about the stream the
-capture runs on, as candle's own `layout_params` does.
+capture runs on, as candle's own `layout_params` does. (Explained 2026-10-23: the captured steps
+ran the vector kernel and the uncaptured ones MMQ — next section.)
+
+### A few rows: the line per type and size, inside a capture too (2026-10-23, #134 (b))
+
+**What it replaced.** The rule above stopped at a capture, and since 2026-10-22 a drafter's tree
+level of 8 rows IS captured (§ "A tree level on a card"), so every product of a flow call's levels
+ran the vector kernel. Profiled (nsys `--cuda-graph-trace=node`, the 0.5B Q8_0 drafter, RTX 3070
+Laptop, `~/swarmllm-318/nodeprof.sh`), a level was ~6.9 ms of card time, ~4.5 ms of it the vector
+kernel at 8 rows — a feed-forward gate or up 43.5 µs where one row takes 13.3, the 151,936-row
+head 1,190 µs where one row takes 363: about a quarter of the card's bandwidth. MMQ at 8 rows:
+24.7 and 560.
+
+**Research.** llama.cpp captures MMQ inside its graphs at any batch: the first evaluation of a graph
+runs eagerly (`ggml-cuda.cu`, `warmup_complete`), so each kernel's one-time setup — MMQ's
+`cudaFuncSetAttribute` for a tile width's shared memory among it — happens outside a capture. Its
+vector-or-MMQ line (`ggml_cuda_should_use_mmvq`, `4b1a27fa0eb8`) is by rows, per card and type —
+"k-quants cost more to decode and mvq redoes that per column, so MMQ wins sooner" — with tables for
+Volta, Ada (RTX 4090), Blackwell (RTX 5090), DGX Spark, Orin and AMD's generations, and the vector
+kernel to 8 rows for every type on any other card, Ampere included. Ours is candle's copy of an
+older vector kernel, ~1.5× its 7-row cost at 8, so our lines sit lower.
+
+**The rule** (vendored `quantized/cuda.rs`, `mmq_takes_few_rows`):
+- **The kernel is made ready before a capture can need it.** The launcher raises a tile width's
+  shared-memory limit when it PLANS a product, not only when it launches (`swarm_mmq.cuh`).
+  `mmq_prepare_few_rows_once` → `swarm_mmq_prepare_few_rows` (`mmq_entry.cu`) plans the one kernel
+  a ≤ 8-row product picks — tile width 8, with and without bounds checks — the first time MMQ
+  answers for a weight type on a device outside a capture (the drafter's prompt, a 9+-row check),
+  and marks the type ready there (`MMQ_FEW_ROWS_READY`, an atomic bit per type and card; a type
+  tried and refused is not retried). A captured product takes MMQ only for a ready type
+  (`mmq_few_rows_ready`: an atomic read, no driver call while capturing — gotcha #841's class).
+  A/B `SWARMLLM_QMATMUL_MMQ_CAPTURED=0`.
+- **Per size**: a weight under 2 MiB (`MMQ_FEW_ROWS_LEAST_BYTES`) stays on the vector kernel. Under
+  ~7 tiles of 128 rows MMQ runs as stream-k plus a fixup pass: a 128 × 896 key (0.12 MB) 3.7 µs on
+  the vector kernel against 8.7 + 4.8 µs; a 896 × 896 query ~8.9 against ~13.5. A/B
+  `SWARMLLM_QMATMUL_MMQ_FEW_ROWS_BYTES=0` (any size).
+- **Per type** (`mmq_fewest_rows_default`; `mmq_few_rows_line(dtype)` is the one answer, the card
+  tests read it too): a k-quant (Q2_K-Q6_K) from 4 rows; Q8_0 from 7, and the other 32-value
+  formats with it (unmeasured — they decode as simply). `SWARMLLM_QMATMUL_MMQ_MIN_ROWS` sets one
+  line for every type (above 8 = never).
+
+**Measured** (live node stopped, A/B in one binary, two passes; `~/swarmllm-318/mmqcap2_bench.sh`,
+`mmqcap3_bench.sh`, `mmqcap4_bench.sh`). *The drafter's flow call* (0.5B Q8_0, `SWARM_BENCH_GROW`,
+rows ranked where the logits are, ms):
+
+| arm | 24 rows, 8 a level | 64 rows, 8 a level |
+|---|---|---|
+| default (MMQ captured, the size line, the wide norm) | 14.8-14.9 | 42.4-42.6 |
+| MMQ captured at every size (`…_FEW_ROWS_BYTES=0`) | 15.5-15.7 | 44.6-45.0 |
+| the 32-thread norm (`SWARMLLM_NORM_WIDE_FROM=1024`) | 16.5-16.9 | 47.7-48.6 |
+| neither (`…_MMQ_CAPTURED=0` + the 32-thread norm) | 21.0-21.6 | 64.6-64.7 |
+
+A seed's read (past the 8-row cap, never captured) 16.0-20.4 ms in every arm. In the default's
+profile a level is 5.2 ms of card time (was ~6.9): MMQ 1.6 ms of it (the head 0.56), the vector
+kernel on the small weights 0.35, the norms 0.11 (§ "A narrow row is normed by 1024 threads").
+
+*Whole models, decode steps captured* (`prefill_bench`'s width sweep, 300 deep, ms a forward, MMQ
+/ the vector kernel):
+
+| model (type) | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|
+| Qwen2.5-Coder-7B (Q4_K_M) | 22.0 / 23.8-24.6 | 21.4-21.9 / 27.8-28.9 | 22.0-22.5 / 31.6 ¹ | — | — | 22.3-23.1 / 27.4 ¹ |
+| Llama-3.2-3B (Q4_K_M) | 12.0-12.1 / 10.4-11.6 | 11.5-11.7 / 13.1-13.5 | 12.0-12.5 / 15.3-15.7 | — | — | 12.7-13.1 / 23.5-23.7 |
+| Qwen3-1.7B (Q8_0) | 10.1-10.2 / 8.6-8.7 | 10.2 / 9.2-9.7 | 10.2-10.5 / 9.1-9.4 | 10.4 / 9.8-9.9 | 10.4 / 10.5-10.6 | 10.5-10.7 / 16.0-16.2 |
+| Qwen2.5-Coder-1.5B (Q8_0) | — | — | 9.1-9.7 / 8.9-9.0 | 8.8-9.9 / 9.9-10.0 | 9.1-10.0 / 10.5-10.7 | 9.1-10.0 / 15.6-15.7 |
+| Llama-3.2-1B (Q8_0) | 7.0 / 6.1-6.5 | 6.9-7.0 / 6.6 | 7.0-7.2 / 6.5-7.1 | 6.9-7.1 / 7.2-7.4 | 7.1-7.2 / 7.5-7.6 | 7.1-7.5 / 10.6-11.2 |
+| Qwen2.5-0.5B (Q8_0) | 4.9-5.9 / 4.5-4.6 | 5.1 / 4.8-4.9 | 5.2-5.6 / 4.9-5.7 | 5.2-5.7 / 5.1-5.3 | 5.4 / 5.2-5.3 | 5.5-5.7 / 7.0-7.2 |
+
+¹ the first round's binary under the old rule, one run. A k-quant file gains from 4 rows on both
+files; at 3 the 7B gains and the 3B loses, at 2 the 7B loses (21.5-21.8 against 19.7-19.9). A Q8_0
+file loses at 5 on all four, splits at 6, gains or ties at 7 (the 0.5B ties) and gains by a third
+at 8, where the vector kernel's cost jumps. A capture does not change a product's arithmetic (the
+test below holds it bit for bit), and MMQ's at a few rows was judged against llama.cpp on 18
+replies in 2026-10-21's round (§ above).
+
+**What a change must keep**: nothing on the capturing thread raises a kernel's limit — a type is
+captured on MMQ only once ready; the line is read through `mmq_few_rows_line` alone; a new card
+generation or type is measured before its line moves.
+
+**Tests**: `a_few_rows_product_takes_mmq_inside_a_capture` (a Q8_0 and a Q4_K weight, each at its
+line and at 8 rows: MMQ ran INSIDE the capture and the graph's answer is the uncaptured product's
+bit for bit — red with `SWARMLLM_QMATMUL_MMQ_CAPTURED=0`, "rows=5: the captured product did not
+take MMQ"); `many_rows_on_the_card_match_the_f32_product_of_the_same_weight` (every type at 2-8
+rows of a 16,384-row weight takes the kernel its line names, small weights the vector kernel).
 
 **Replies.** 18 replies (`mmqcheck.sh`, greedy, both arms): 13 byte-identical; the other 5 — Phi-3.5,
 Phi-4-mini, Qwen2.5-Coder-7B, GLM-4-9B, Mistral-7B, all on one prompt — fork mid-reply. Scored against
