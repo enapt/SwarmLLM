@@ -342,7 +342,9 @@ until the bytes or a processor stage say otherwise.
   that: every check rooted at the confirmed reply, carrying `truncate_kv_to`
   at the oldest root still in flight, so each one is a restart and
   `forward_streams` skips the ones a later check overtook. Priced below; not
-  started.
+  started. **Re-priced 2026-10-22**: that variant is the one priced below; the
+  shape that pays — rows the far end keeps reading, no restart per check — is §
+  "A tree that flows".
 - **The schedule, priced (2026-10-21, `examples/tree_schedule_sim.py`).** One
   round is priced by `spec_best_tree.py`; this prices the schedule around it,
   with Sequoia's positional acceptance and the costs measured on TH↔AU. It
@@ -374,6 +376,78 @@ until the bytes or a processor stage say otherwise.
   11.1-11.9 tok/s against eight forwards' 7.3-7.5 at 20 ms, 5.4-5.5 against
   5.1-5.3 at 300 ms; the chain stream 15.8-16.2 and 6.0 — built as the
   default with the 300 ms gate (`docs/invariants/scheduling.md`).
+
+## A tree that flows (2026-10-22): the far end reads while the requester grows
+
+**Where a tree round's time goes on TH↔AU** (`~/swarmllm-318/cardfill275q8.sh`'s default arm,
+7B 0-16 here and the Q8 0.5B drafter on this card, 16-28 on the RTX 3060 ~411 ms away; 192
+checks timed at their receipts): a round is 608-654 ms. ~485 ms of it is in flight — the round
+trip 411, the uplink ~16 (0.087 ms/KB), the far check ~19 plus ~0.22 ms/KB of what it sends
+back — and 130-168 ms (mean) is HERE, waiting for the drafter. Per reply the seed missed the
+outcome on 32-51% of rounds, was sent as it was on 12-23%, and was grown ~8 forwards before the
+check on the rest. `prefill_bench` on this card: a drafter forward costs nearly the same at 32
+rows as at 8 (17.4 vs 14.9 ms, tree; 12.3 vs 8.5 chain), and a tree forward pays 6 ms (drafter)
+to 10 ms (7B head at 52 rows: 34.0 vs 24.4) over a chain's — 48 host-to-card copies a step for
+the rows' positions. Two levers built from it: the positions gathered once per forward
+(`layers::TreeRows`), and growth beside the check at 32 rows a forward up to 416
+(`dsd_tree::beside_growth`; A/B `SWARMLLM_TREE_ROPE=per-call`, `SWARMLLM_TREE_BESIDE=8,128`).
+
+**The earlier "stream of trees" price was the wrong stream.** § "A stream of trees, weighed"
+priced checks rooted at the CONFIRMED reply, each a restart — so confirmation still advanced one
+tree per round trip, and it came out +11%. The shape FlowSpec runs on a LAN is different: rows
+go out as they are grown and the far end keeps reading them, so the reply advances as deep as
+the tree reaches along the model's path and stalls only where it holds no row — one round trip
+per such miss, where a round pays one per check. `examples/tree_schedule_sim.py`'s `flow`
+(2026-10-22, the tail reading what has arrived in one forward, the drafter and head sharing one
+card), 400 tokens over 425 ms, card drafter:
+
+| step costs | tree rounds | wide beside (built) | flow, 16 rows a step |
+|---|---|---|---|
+| today's | 7.06 | 7.46 | 9.87 |
+| a tree step captured (guessed: call 2, step 11, head fixed 5 ms) | 7.69 | 8.06 | 11.31 |
+
++40-47% over today's rounds where the model put today's rounds 15-20% under the field (7.2
+against 8.4-9.4 measured). It loses with the drafter on the processor (4.9-6.9 against 5.8-6.0)
+and over 20 ms (25.7 against the chain stream's 47.6): a flow is for a long link and a card
+drafter, the place trees already are the default. Its ceiling is the miss rate: a token no row
+holds costs a round trip, so ~10 tokens between such misses at 425 ms is ~24 tok/s.
+
+**Research (sonnet digest, 2026-10-22).** FlowSpec 2507.02620 (Jetson LAN, per-stage compute
+~80 ms, latency never varied): score-ordered segments of ≤ 16 rows, the verdict back to the
+DRAFTER, a retained-index broadcast of a few hundred bytes to every stage, a miss starts a new
+round; 1.37-1.73× over non-streamed pipeline speculation. SpecPipe 2504.04104 (10 GbE): a tree
+level per pipeline step, pruning propagated to every device. PipeInfer 2407.11798: runs in
+flight, KV sequence per run, cancellation back-propagated. "Speculation at a Distance"
+2606.25091 models client-side pipelining that waits for verdicts — gains gone past ~50 ms; it
+does not model rows the far end reads without waiting. **Nothing published measures this shape
+over hundreds of ms**; the design below is ours.
+
+**The design — every piece but the loop already exists.**
+- **A segment continues the tree it holds.** `DraftTree::rows_for(kv_offset, seq_len)`
+  already reads a forward as the LAST rows of a tree whose earlier rows are in the cache — the
+  drafter grows that way within one call. A flow forward appends its rows to the tree the
+  segment keeps for the request (parents anywhere in it); a row reads the context and its own
+  ancestors, so a dead branch stays in the cache and is read by nothing. No cut per verdict:
+  the cache is cut and the confirmed path re-read only when the tree reaches its row limit.
+- **The far end answers with its pick for each row** — the token the model draws there, with
+  the noise keyed by position as today — never a walk. The REQUESTER walks: down from the
+  confirmed row, to the child carrying each pick, until a pick names no child. Exact at any
+  temperature (the draw at a row does not depend on which forward carried it), and the worker
+  holds no walk state.
+- **The drafter keeps its tree across calls**: the cached rows and the unexpanded children
+  (today rebuilt each call by re-reading the seed), growth re-rooted under each confirmed row.
+- **The loop**: grow a step, run it through this node's segment, send it, never wait; on each
+  answer, walk, emit, re-root. Several forwards in flight on one connection, as the chain
+  stream (`dsd_stream`) already keeps.
+- **A feature bit** for the forward that continues a tree and the per-row picks back; anything
+  else keeps the rounds.
+
+**Build steps, each ending on a measurement.** (1) A segment continues a tree across forwards
+and answers picks: a unit test that a tree read in three forwards gives every row the logits it
+gets read in one (the control: a chain over the same rows must differ), and that a dead branch
+changes no live row. (2) The drafter's growth session: the same equality for its rows. (3) The
+loop, rig at a 300 ms injected delay against tree rounds on the same replies; then the real
+link. Exit: ≥ 1.3× tree rounds over 400 tokens, replies scored against llama.cpp.
 
 ## Build order (each step ends on a measurement)
 

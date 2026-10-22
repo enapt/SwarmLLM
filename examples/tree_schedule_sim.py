@@ -6,9 +6,12 @@ schedule around it: tree rounds as `dsd` runs them (the next tree grown beside
 the check, a missed seed regrown from nothing before the next check), the same
 rounds with the regrow sized by what it buys (`adaptive`, #134 (a)), several
 self-contained tree checks in flight (`stream`, #134 (b): each rooted at the
-confirmed reply, every one cutting the caches back), and the chain stream that
+confirmed reply, every one cutting the caches back), the chain stream that
 ships (`spec_stream` with no branches: chunks rooted at the chunk before's
-predicted end, a restart at every miss).
+predicted end, a restart at every miss), and a tree that FLOWS (`flow`,
+2026-10-22: rows sent as they are grown, the far end reading them as they
+arrive and stalling only where no row holds the reply's token —
+`docs/plans/large_model_splits.md` § "A tree that flows").
 
 The acceptance model is Sequoia's positional one, as in `spec_best_tree.py`: at
 each position the reply's token is the drafter's rank-r guess with probability
@@ -167,13 +170,19 @@ def steps_by_truth(link, drafter):
     return max((1, 2, 4, STEPS), key=value)
 
 
-def rounds(truth, tokens, link, drafter, regrow="fixed", send_most=64, seed_most=96, beside_most=128):
+def rounds(truth, tokens, link, drafter, regrow="fixed", send_most=64, seed_most=96, beside_most=128,
+           beside_step=None):
     """`dsd`'s tree rounds: the next tree grown beside the check (up to 85% of
     its time), cut to the part under the outcome; a missed seed is regrown
     from nothing before the next check — 8 steps (`fixed`, today), or the
-    steps that pay (`estimate`: the code's rule; `truth`: its bound)."""
+    steps that pay (`estimate`: the code's rule; `truth`: its bound).
+    `beside_step` rows a forward beside the check (default the drafter's
+    `step`; 32 with `beside_most=416` is `dsd_tree::beside_growth` since
+    2026-10-22, a forward of 32 costing `step32_ms`)."""
     t, f, m, depth = 0.0, 0, 0, 0
     recent_kept = 3.0
+    beside_step = beside_step or drafter["step"]
+    beside_ms = drafter["step_ms"] if beside_step == drafter["step"] else drafter["step32_ms"]
     while f < tokens:
         if m == 0:
             s = {"fixed": lambda: STEPS,
@@ -183,21 +192,79 @@ def rounds(truth, tokens, link, drafter, regrow="fixed", send_most=64, seed_most
             m, depth = PER_STEP * s, s
         n = min(m, send_most)
         ms = check_ms(n, link)
-        budget, grown = 0.85 * ms, 0
+        budget, grown, steps = 0.85 * ms, 0, 0
         while grown < beside_most:
-            step = grow_ms(m + grown, drafter["step"], drafter) if grown == 0 else drafter["step_ms"]
+            step = drafter["call"] + drafter["reread_row"] * m + beside_ms if grown == 0 else beside_ms
             if budget < step:
                 break
             budget -= step
-            grown += drafter["step"]
+            grown += beside_step
+            steps += 1
         d = covered(truth, f, n, depth)
         recent_kept = 0.7 * recent_kept + 0.3 * d
         t += ms
         new_f = f + d + 1
         m = min(reroot(truth, f, m + grown, new_f), seed_most)
-        depth = max(depth + grown // drafter["step"] - (new_f - f), 1) if m else 0
+        depth = max(depth + steps - (new_f - f), 1) if m else 0
         f = new_f
     return tokens / t * 1000.0
+
+
+def flow(truth, tokens, link, drafter, per_step=32, tree_most=1024, head=(13.0, 0.33), tail=(13.0, 0.33)):
+    """A continuous tree stream, the tail walking (FlowSpec's shape over a long
+    link): the drafter grows best-first under the root it last HEARD of, each
+    forward's rows go through the head and over the link as soon as they are
+    grown, the tail walks as far as the rows it holds reach — never waiting
+    for a round to end — and each step forward of its walk comes back as a
+    verdict that re-roots the growth. The drafter and the head share one card
+    (one stream), so a step costs both. A token no guess holds (`P`'s miss)
+    stalls the walk until the requester hears of it and grows under it: one
+    round trip, where a round pays one for every check. `head` / `tail` are a
+    forward's (fixed, per row) ms on each segment's card (the 7B's 14-layer
+    halves on an RTX 3070 Laptop / 3060, `prefill_bench`
+    `SWARM_BENCH_SPEC_TREE=1`: 23.4 ms at 32 rows over 16 layers)."""
+    one_way = link["rtt"] / 2
+    t, R, m, depth = 0.0, 0, 0, 0
+    tail_f, tail_free = 0, 0.0
+    verdicts = []  # (heard at the requester, confirmed position)
+    pending = []  # (arrives at the tail, rows, the position its rows let the walk reach)
+
+    def advance_tail(until):
+        # The tail reads everything that has arrived by the time it is free in
+        # ONE forward (one fixed cost), as a worker reads its queue.
+        nonlocal tail_free, tail_f
+        while pending:
+            start = max(tail_free, pending[0][0])
+            if start > until:
+                return
+            rows, reach = 0, 0
+            while pending and pending[0][0] <= start:
+                _, add, f = pending.pop(0)
+                rows, reach = rows + add, max(reach, f)
+            tail_free = start + tail[0] + tail[1] * rows
+            if reach > tail_f:
+                tail_f = reach
+                heapq.heappush(verdicts, (tail_free + one_way, reach))
+
+    while True:
+        advance_tail(pending[-1][0] if pending else t)
+        while verdicts and verdicts[0][0] <= t:
+            heard, f = heapq.heappop(verdicts)
+            if f >= tokens:
+                return tokens / heard * 1000.0
+            if f > R:
+                m = min(reroot(truth, R, m, f), tree_most)
+                depth = max(depth - (f - R), 1) if m else 0
+                R = f
+        if m >= tree_most:
+            advance_tail(float("inf"))
+            t = verdicts[0][0] if verdicts else t + 1.0
+            continue
+        add = min(per_step, tree_most - m)
+        t += drafter["call"] + drafter["step32_ms"] * add / 32 + head[0] + head[1] * add
+        m += add
+        depth += 1
+        pending.append((t + one_way + link["wire_row"] * add, add, R + min(truth.covered(R, m), depth) + 1))
 
 
 def stream(truth, tokens, link, drafter, window=6, send_most=64, tree_most=224, seed_most=224, pace=True):
@@ -273,8 +340,8 @@ LINKS = {
     "near 20 ms": dict(rtt=20, far_fixed=10, far_row=0.3, near_row=0.5, wire_row=0.05),
 }
 DRAFTERS = {
-    "card": dict(call=5.0, reread_row=0.55, step=8, step_ms=19.0),
-    "processor": dict(call=8.0, reread_row=2.0, step=8, step_ms=45.0),
+    "card": dict(call=5.0, reread_row=0.55, step=8, step_ms=19.0, step32_ms=21.0),
+    "processor": dict(call=8.0, reread_row=2.0, step=8, step_ms=45.0, step32_ms=120.0),
 }
 
 
@@ -292,6 +359,12 @@ def main():
                 f"  (bound {mean(rounds, regrow='truth'):6.2f})"
                 f"  stream of trees {mean(stream):6.2f}"
                 f"  chain stream {mean(spec_stream):6.2f}"
+            )
+            print(
+                f"{'':21s} wide beside (32/416) {mean(rounds, regrow='estimate', beside_step=32, beside_most=416):6.2f}"
+                f"  flow (tail walks) {mean(flow):6.2f}"
+                f"  flow 16/step {mean(flow, per_step=16):6.2f}  flow 64/step {mean(flow, per_step=64):6.2f}"
+                f"  flow ≤512 rows {mean(flow, tree_most=512):6.2f}"
             )
 
 
