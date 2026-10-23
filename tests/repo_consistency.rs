@@ -13663,25 +13663,28 @@ const UPNP_BACKS_OFF: (u64, u64) = (0, 6);
 /// lockfile still lists the facade's 0.5.0 (named only through a weak
 /// `libp2p-upnp?/tokio` feature, rust-lang/cargo#10801) though nothing builds it.
 fn upnp_versions_without_the_backoff(tree: &str) -> Vec<String> {
+    built_versions_older_than(tree, "libp2p-upnp", UPNP_BACKS_OFF)
+}
+
+/// The versions of `krate` in a `cargo tree --prefix none` listing whose
+/// (major, minor) is below `floor`.
+fn built_versions_older_than(tree: &str, krate: &str, floor: (u64, u64)) -> Vec<String> {
+    let prefix = format!("{krate} v");
     tree.lines()
-        .filter_map(|line| line.trim().strip_prefix("libp2p-upnp v"))
+        .filter_map(|line| line.trim().strip_prefix(prefix.as_str()))
         .filter_map(|rest| rest.split_whitespace().next())
         .filter(|version| {
             let mut parts = version.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
             let major_minor = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
-            major_minor < UPNP_BACKS_OFF
+            major_minor < floor
         })
         .map(str::to_string)
         .collect()
 }
 
-/// UPnP is the release that backs off (2026-10-08). On 0.5.0 a node whose ports
-/// another device held — a second node behind the same router — asked the
-/// router for them again as soon as each refusal arrived, for as long as it ran,
-/// and said nothing at the default log level. Re-enabling the facade's `upnp`
-/// feature, or pinning the direct dependency back, brings that loop back.
-#[test]
-fn upnp_is_the_release_that_backs_off() {
+/// The normal-dependency tree this build compiles, one `name vX.Y.Z` a line —
+/// feature-resolved, unlike the lockfile.
+fn normal_dependency_tree() -> String {
     let out = std::process::Command::new(env!("CARGO"))
         .args([
             "tree", "-e", "normal", "--prefix", "none", "--format", "{p}", "--frozen",
@@ -13694,7 +13697,17 @@ fn upnp_is_the_release_that_backs_off() {
         "cargo tree failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let tree = String::from_utf8_lossy(&out.stdout);
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// UPnP is the release that backs off (2026-10-08). On 0.5.0 a node whose ports
+/// another device held — a second node behind the same router — asked the
+/// router for them again as soon as each refusal arrived, for as long as it ran,
+/// and said nothing at the default log level. Re-enabling the facade's `upnp`
+/// feature, or pinning the direct dependency back, brings that loop back.
+#[test]
+fn upnp_is_the_release_that_backs_off() {
+    let tree = normal_dependency_tree();
     assert!(
         tree.lines().any(|l| l.trim().starts_with("libp2p-upnp v")),
         "no libp2p-upnp in the build — if UPnP was removed on purpose, remove this guard"
@@ -13713,6 +13726,43 @@ fn the_upnp_guard_catches_the_release_without_the_backoff() {
     let planted =
         "libp2p v0.56.0\nlibp2p-upnp v0.5.0\nlibp2p-upnp v0.6.0\nlibp2p-upnp v0.10.1 (*)\n";
     assert_eq!(upnp_versions_without_the_backoff(planted), vec!["0.5.0"]);
+}
+
+/// The first igd-next that resolves a router's control URL as a URL (0.18,
+/// `common::endpoint`). 0.16 pasted it after the router's address as text.
+const IGD_JOINS_THE_CONTROL_URL: (u64, u64) = (0, 18);
+
+/// UPnP reaches a router that lists an absolute control URL (2026-10-23). On
+/// igd-next 0.16 a router describing its WAN service at
+/// `http://192.168.1.1:5555/ctrl?11` was asked at
+/// `http://192.168.1.1:5555http://192.168.1.1:5555/ctrl?11`, and the node logged
+/// "no IGD gateway found" with UPnP on at the router. vendor/libp2p-upnp is
+/// 0.6.0 built on igd-next 0.18; a libp2p that needs a newer libp2p-upnp leaves
+/// that patch unused, and the registry copy brings 0.16 back without an error.
+#[test]
+fn upnp_reaches_a_router_that_lists_an_absolute_control_url() {
+    let tree = normal_dependency_tree();
+    assert!(
+        tree.lines().any(|l| l.trim().starts_with("igd-next v")),
+        "no igd-next in the build — if UPnP was removed on purpose, remove this guard"
+    );
+    let old = built_versions_older_than(&tree, "igd-next", IGD_JOINS_THE_CONTROL_URL);
+    assert!(
+        old.is_empty(),
+        "igd-next {old:?} is built — it cannot reach a router whose control URL is \
+         absolute. Keep `[patch.crates-io] libp2p-upnp` pointing at vendor/libp2p-upnp \
+         (igd-next 0.18), or move to a libp2p-upnp release that needs 0.18 itself"
+    );
+}
+
+/// The guard above, against the listing it exists to catch — planted.
+#[test]
+fn the_igd_guard_catches_the_release_that_pastes_the_control_url() {
+    let planted = "libp2p-upnp v0.6.0\nigd-next v0.16.2\nigd-next v0.18.0 (*)\nigd-next-x v0.1.0\n";
+    assert_eq!(
+        built_versions_older_than(planted, "igd-next", IGD_JOINS_THE_CONTROL_URL),
+        vec!["0.16.2"]
+    );
 }
 
 /// Machine memory is read in ONE place: `daemon::machine_memory`.

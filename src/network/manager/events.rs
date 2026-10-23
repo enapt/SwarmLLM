@@ -739,9 +739,12 @@ impl NetworkManager {
                     }
                     UpnpEvent::GatewayNotFound => {
                         self.upnp_watch.note_answered();
+                        // libp2p-upnp searches once, at start, and never again
+                        // after this — so the advice says a restart is needed.
                         tracing::info!(
                             "UPnP: no IGD gateway found — router has UPnP disabled or none is present. \
-                             Internet peers will need a relay or a manually port-forwarded address."
+                             Internet peers will need a relay or a manually port-forwarded address. \
+                             UPnP turned on at the router later takes a restart of this node to be used."
                         );
                     }
                     UpnpEvent::NonRoutableGateway => {

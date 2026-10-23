@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #329**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #330**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2963,6 +2963,14 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   ~20 a layer), and disguised states fall to the public weights (2505.18332). Needs a verifier
   for the certificate chain and measurements (security review), a capability bit, and a scope
   beside `pool::scope::request_scope`. Trigger: a swarm peer with such a card; today none.
+- **#329 — Look for the router again after UPnP is turned on** (2026-10-23). libp2p-upnp searches
+  for the gateway once, at start, and keeps no timer after `GatewayNotFound`, so UPnP turned on
+  at the router while a node runs is used only after a restart — the log line and
+  `docs/NETWORKING.md` now say so. A re-search on a backoff (minutes) in `vendor/libp2p-upnp`
+  would remove the step; the listen addresses it saw before the search failed must then be
+  mapped too. Port libp2p PR 6459's mapping-state rework at the same time (0.7's fix for a
+  "mapping should exist" panic). Trigger: a report of a node unreachable until restarted after a
+  router change, or any other reason to touch the vendored copy.
 
 ## Decided — not doing
 

@@ -4543,6 +4543,36 @@ facade feature puts 0.5.0 back in `cargo tree` — checked). Not done: picking
 another EXTERNAL port when the router refuses ours — libp2p-upnp maps external
 = internal and has no option for it.
 
+**A router it could not even find (2026-10-23).** With UPnP turned on at the
+router, this machine's node still logged "no IGD gateway found". Two causes,
+one on each side:
+
+- **Windows had the network as Public.** WSL in mirrored mode answers through the
+  Hyper-V firewall, whose "WSL Inbound" allow rule covers the Private profile
+  only (default inbound: Block), so the router's SSDP replies never arrived.
+  Switching the network to Private let them in. Nothing in the node can fix this;
+  `docs/NETWORKING.md` says where to look.
+- **igd-next 0.16 built the control URL as text.** The router (a SKYWORTH GPON
+  fibre box) describes its WAN service at `http://192.168.1.1:5555/ctrl?11` — an
+  ABSOLUTE URL, which the UPnP device architecture allows. igd-next 0.16
+  formats every request as `http://{addr}{control_url}`, so it asked
+  `http://192.168.1.1:5555http://192.168.1.1:5555/ctrl?11`; the same SOAP
+  `GetExternalIPAddress` sent by hand to the right URL was answered. igd-next
+  0.18 joins the two with `Url::join` (`common::endpoint`) and checks the result
+  is still the router's address. libp2p-upnp 0.6.0 pins igd-next 0.16 and its
+  0.7.0 needs libp2p-swarm 0.48 (libp2p 0.56 is on 0.47), so `vendor/libp2p-upnp`
+  is 0.6.0 with only the igd-next bump — the five igd-next calls it makes have
+  the same signatures in both. Guard
+  `upnp_reaches_a_router_that_lists_an_absolute_control_url` (no igd-next < 0.18
+  in `cargo tree`), with its planted twin.
+
+Not ported from 0.7: libp2p PR 6459's rework of mapping state (a panic "mapping
+should exist" under a reordering 0.6's flow does not produce here — 0.6
+re-inserts an expired listen address as Pending). And the search still runs
+ONCE, at start: libp2p-upnp keeps no timer to search again after
+`GatewayNotFound`, so the log line now says UPnP turned on at the router later
+takes a restart of the node.
+
 ## ACK-Timeout Fast-Fail for rr Sends
 
 `SendDirectMessage` carries `delivery_request_id: Option<uuid::Uuid>`.

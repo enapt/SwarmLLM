@@ -2409,6 +2409,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "igd-next"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c71312255fdc5364bff7eec0adf68146bc4e72aba85075261af40d234c11be99"
+dependencies = [
+ "attohttpc",
+ "bytes",
+ "futures",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "log",
+ "rand 0.10.2",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+ "xml-rs",
+ "xmltree",
+]
+
+[[package]]
 name = "image"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3053,7 +3075,7 @@ checksum = "4757e65fe69399c1a243bbb90ec1ae5a2114b907467bf09f3575e899815bb8d3"
 dependencies = [
  "futures",
  "futures-timer",
- "igd-next",
+ "igd-next 0.16.2",
  "libp2p-core",
  "libp2p-swarm",
  "tokio",
@@ -3063,12 +3085,10 @@ dependencies = [
 [[package]]
 name = "libp2p-upnp"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "682749d0ae1111388f46b2fae45c77cef55c980b9efe852aed44484ae03be468"
 dependencies = [
  "futures",
  "futures-timer",
- "igd-next",
+ "igd-next 0.18.0",
  "libp2p-core",
  "libp2p-swarm",
  "tokio",

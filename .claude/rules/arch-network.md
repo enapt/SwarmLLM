@@ -193,7 +193,7 @@ Every kind of peer work takes a `PeerWorkSlot`, and a refusal is ANSWERED — `l
 
 ## UPnP that the router refuses is said out loud, and a stopping node hands its ports back (2026-10-08)
 
-UPnP is the DIRECT `libp2p-upnp` ≥ 0.6 dependency (it backs off a refused mapping; the facade's 0.5.0 asked again without pause, for ever) — the facade's `upnp` feature stays OFF; guard `upnp_is_the_release_that_backs_off`. A refused mapping emits no event, so **`network::manager::upnp_watch::UpnpWatch`** explains the silence once (`UPNP_QUIET_AFTER`), and `release_upnp_mappings` closes the P2P listeners at a clean shutdown so the router gets the ports back (#239).
+UPnP is the DIRECT `libp2p-upnp` ≥ 0.6 dependency (it backs off a refused mapping; the facade's 0.5.0 asked again without pause, for ever) — the facade's `upnp` feature stays OFF; guard `upnp_is_the_release_that_backs_off`. A refused mapping emits no event, so **`network::manager::upnp_watch::UpnpWatch`** explains the silence once (`UPNP_QUIET_AFTER`), and `release_upnp_mappings` closes the P2P listeners at a clean shutdown so the router gets the ports back (#239). It is the PATCHED copy in `vendor/libp2p-upnp` (igd-next 0.18): igd-next 0.16 could not reach a router that lists an absolute control URL (guard `upnp_reaches_a_router_that_lists_an_absolute_control_url`). The gateway is searched ONCE at start, so "no IGD gateway found" says a router change takes a restart.
 
 → `docs/invariants/network.md` § "UPnP that the router refuses is said out loud"
 

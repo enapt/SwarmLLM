@@ -6,6 +6,7 @@ exclude = [
     "vendor/candle-paged-attention",
     "vendor/libp2p-quic",
     "vendor/libp2p-request-response",
+    "vendor/libp2p-upnp",
     "vendor/rayon-core",
     "vendor/candle",
 ]
@@ -86,7 +87,8 @@ libp2p-gossipsub = { version = "0.49", features = ["metrics"] }
 # AddPortMapping requests back to back for its whole life, and said nothing at
 # the default log level. 0.6.0 backs off (30 s doubling, five tries, then a
 # warning; libp2p PR 6128) and builds on the same libp2p-swarm 0.47 / core 0.43
-# as libp2p 0.56. `upnp_is_the_release_that_backs_off` pins it.
+# as libp2p 0.56. `upnp_is_the_release_that_backs_off` pins it. Patched to
+# vendor/libp2p-upnp (see [patch.crates-io]) for the router it can reach.
 libp2p-upnp = { version = "0.6", features = ["tokio"] }
 # The registry libp2p's bandwidth counters are registered into. Pinned to the
 # version libp2p itself depends on — two copies would give us a registry libp2p
@@ -442,6 +444,15 @@ libp2p-request-response = { path = "vendor/libp2p-request-response" }
 # libp2p-quic would leave this patch unused, and the build then fails:
 # `network::manager` calls `Config::congestion`, which upstream does not have.
 libp2p-quic = { path = "vendor/libp2p-quic" }
+# libp2p-upnp 0.6.0 built on igd-next 0.18 instead of 0.16 — its ONE change. 0.16
+# builds a router's control URL as `http://{address}{control_url}`, which breaks
+# on a router that lists the URL absolute (`http://192.168.1.1:5555/ctrl?11`):
+# with UPnP on at the router the node still logged "no IGD gateway found"
+# (2026-10-23, a SKYWORTH fibre box). 0.18 resolves it with `Url::join`.
+# Upstream's 0.7 has it but needs libp2p-swarm 0.48. Guard:
+# `upnp_reaches_a_router_that_lists_an_absolute_control_url` (no igd-next < 0.18
+# in the build — a libp2p needing a newer libp2p-upnp leaves this unused).
+libp2p-upnp = { path = "vendor/libp2p-upnp" }
 # rayon-core 1.13.0 with ONE change: an idle worker spins 200 µs before it
 # sleeps (vendor/rayon-core/src/sleep/mod.rs, `spin_budget`), so the small
 # parallel regions of a decoded token stop paying a wake per worker — 8-thread

@@ -182,7 +182,11 @@ AutoNAT/DCUtR/relay — become discoverable to each other.
   `external_address`, or connect through an anchor/relay.
 - **UPnP does nothing** — router has UPnP disabled, or you're behind CGNAT
   (§2). Check the logs for `no IGD gateway found` (UPnP off) vs
-  `gateway is not routable` (CGNAT).
+  `gateway is not routable` (CGNAT). The node looks for the router only when
+  it starts: after turning UPnP on, restart the node. Under WSL in mirrored
+  mode, Windows must class the network as **Private**: the WSL firewall rule
+  that lets the router's answer in covers Private networks only, so on a
+  Public one the node never hears the router.
 - **Two nodes behind one router** — a router gives a port to ONE computer, so
   the second node's UPnP request is refused: its log says `UPnP: the router did
   not open port 8800 (UDP) or 8810 (TCP)` about three minutes after it starts.

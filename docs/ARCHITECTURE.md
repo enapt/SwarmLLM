@@ -100,6 +100,9 @@ swarmllm/
 │   │                          BBR, chosen by `network::transport::quic_congestion` (#318); 5 tests,
 │   │                          `--features tokio --lib`, CI `vendored.yml`)
 │   ├── libp2p-request-response/ (12 tests, `--lib`)
+│   ├── libp2p-upnp/           (0.6.0 + ONE change: built on igd-next 0.18, which reaches a router listing an
+│   │                          ABSOLUTE control URL — 0.16 pasted it after the address; guard
+│   │                          `upnp_reaches_a_router_that_lists_an_absolute_control_url`)
 │   └── rayon-core/            (1.13.0 + ONE patch: an idle worker spins 200 µs before it sleeps — `sleep/mod.rs`
 │                              `spin_budget`, `SWARMLLM_RAYON_SPIN_US=0` = upstream; small decode regions stop
 │                              paying a wake per worker, FUTURE_WORK #137; guard
@@ -527,7 +530,8 @@ libp2p Swarm
 │   `peer_speaks_swarmllm` gates registration BEFORE the Kademlia insert)
 ├── AutoNAT v2 client+server (per-address reachability test → ExternalAddrConfirmed / relay activation; replaced v1 in R143 to fix false-"Public")
 ├── DCUtR (hole punching)
-├── UPnP (IGD gateway port-mapping → auto-confirms public external address; default on, off on WSL2)
+├── UPnP (IGD gateway port-mapping → auto-confirms public external address; default on, off on WSL2 in NAT mode;
+│   the gateway is searched once, at start — UPnP turned on at the router later takes a restart)
 └── relay::client (circuit relay)
 ```
 
