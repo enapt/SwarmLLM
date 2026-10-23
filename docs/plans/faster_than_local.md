@@ -242,20 +242,33 @@ changes what is possible as well as what is not. Each item says what it rests on
 whose total surprise to the target is about ln N, so **E ≈ 1 + ln(N) / H**, H the target's mean
 surprise (nats) at the guesser's ratings. It fits the offline trees: greedy H 0.858, N 128 → 6.65
 (simulated 7.19); sampled before/after the shared-noise ratings H 0.965/0.883 → 6.03/6.50 (simulated
-6.15/6.90). Doubling E takes N squared (16K rows a round trip — no uplink carries that) or H halved.
-**Only guesses written by something close to the target halve H.** Every design below is judged by
-which of the two it moves.
+6.15/6.90). Doubling E takes N squared (16K rows a round trip — no uplink carries that) or H halved,
+and only guesses written by something close to the target halve H. **But the measured flow's speed
+follows E only weakly** (below): what holds a flow at ~15-18 tok/s on a 430 ms link is not settled,
+so each design below says which quantity it moves and is judged on the link, never by E alone.
 
 E/P itself is Little's law — the reply's rows in flight are its speed times the round trip — so it
-binds only where the tree cannot cover more. Two caps meet: **coverage** `tok/s ≤ D(N)/P`, and
-**rows** `tok/s ≤ R·D(N)/N` — each token of the reply costs the N/D rows grown around it, R the rows
-a second this node sends. On TH↔AU (R ≈ 24 rows / 54 ms ≈ 440, N 128, H 0.88, D 6.5) they are 15
-and 23 tok/s: coverage binds, which is why a cheaper requester ran more forwards and no more reply,
-and why 256 or 448 live rows did not pay (their D +0.8 is spent on rows the uplink and a .248 far
-end, reading every row whole, must carry). The shared-noise ratings (H 0.965 → 0.883) predicted +8%
-coverage and measured +4.5% unqueued with misses down a third (`docs/invariants/inference.md`). A
-real-link reply's time is all this node's own work but 3-7 s of waiting in 26-30 s (`realrate.sh`
-breakdown) — busy is not bound: the drafter grows whenever the budget lets it.
+says what a flow's speed IS, not what holds it there. Two caps could: **coverage** `tok/s ≤ D(N)/P`,
+and **rows** `tok/s ≤ R / (rows grown a token)`, R the rows a second this node sends. Measured on
+TH↔AU (`realrate.sh`, `realwide.sh`, 2026-10-23, coder-1.5B Q8_0):
+- A reply grows 22-28 rows a token, and this node's busy time is ~1.3-1.6 ms a row (24 rows a call:
+  38 ms busy; 37 rows: 47 ms). The best replies seen ran 15.6-18.2 tok/s, waiting 4.6-4.9 s of 22-26.
+- **Speed does not follow D**: the 0.5B → 1.5B drafter raised D 41% offline (`treesim.py`, 5.08 →
+  7.19 at 128 rows) and misses fell 42% on the link, but speed rose 6%; the shared-noise ratings cut
+  misses a third for +4.5%. The 3B (+14% D over the 1.5B offline, `gumbeldump.py` c3-T07, top-1
+  77.4% against 75.5%, at a costlier call) is not worth relaxing `DRAFTER_MAX_FRACTION` for.
+- **A cheaper drafter pays, damped**: the same 0.5B as Q8_0 against fp16 (same guesses, 15 against 28
+  ms a call) ran 15.57 against 13.98 tok/s (+11%) and waited 5 s MORE a reply (scheduling.md § "A
+  tree that flows", the drafter table) — half the saving became waiting. The drafter is ~65% of this
+  node's busy time; this node's work, not the link, is ~75% of a reply (busy 18-22 s, stalls 3-9 s).
+- **Wider rows did not pay either**: 16 a level (37 rows a call, 21% cheaper a row busy) ran
+  15.0-16.2 against 8's 15.6-18.2, waiting MORE (7.6-9.4 s against 4.6-4.9) and growing more rows a
+  token. Neither cap alone explains both results; the flow's dynamics (rows killed at each advance,
+  the live budget refilling, misses) are what a model of it must capture next — the decider is a
+  delay knob on this node's call at fixed rows.
+- **The largest swing is the far end**: its queue (v0.3.248 reads every row back whole for its
+  draws) took 3 of 10 and 2 of 6 arms to 10-13 tok/s. v0.3.249's far-end card draw shortens each
+  row there; the episodes coming and going also point at that machine's own load or the path.
 
 **6.2 The far end's lead cannot shorten a miss.** The far end learns the true token half a round
 trip before this node, but every guess must pass this node's half before the far end can check it,
@@ -265,30 +278,38 @@ case: far-end drafting, far-end top-feature drafting à la EAGLE, transplanting 
 state). Two exits exist: a cycle that leaves this node out (near chains), or a far end that can
 GUESS without this node's half — the target's exact tail fed an approximation of the head (6.6).
 
-**6.3 The far end writes 30× more of the target than the reply keeps — recycle it.** A flow draws
-EVERY row it is sent: ~12K draws for a 400-token reply, 97% of them on branches that died. Each is
-the target's own next token in a context one alternative away from the true one, and because the
-noise is keyed by POSITION, a dead branch draws with exactly the noise the live one will — so where
-the target's two distributions agree at the draw's margin, the dead branch's draws ARE the live
-branch's. At a miss, the dead spine's draws are a target-written continuation that arrives in the
-same answers that reveal the miss. Prior art recycles the target's output distributions (Token
-Recycling 2408.08696, Lookahead's n-gram pool 2402.02057) or its hidden states at rejected positions
-as context for a TRAINED drafter (Carryover Drafting 2609.14717: +6.5-14.7% accepted length; ReTrace
-2608.29748; Lyanna 2602.21224) — Carryover leaves trees as future work. None has coupled draws, which
-make a dead branch's TOKENS the live branch's, untrained, and a flow gets them for free. **Decides it**: `~/swarmllm-ref/spec/counterfactual.py` — at a spine miss, how often the
-dead branch's draw is the true next token where the drafter's re-rooted draw is not (rescue), and
-how deep the dead run stays right.
+**6.3 Recycling the far end's draws on dead branches — REFUTED offline (2026-10-23).** A flow draws
+EVERY row it is sent: ~12K draws for a 400-token reply, 97% of them on branches that died, each the
+target's own next token in a context one alternative away from the true one, drawn with the very
+noise the live branch draws with (keyed by POSITION). The hope: where the target's two distributions
+agree at the draw's margin, the dead branch's draws ARE the live branch's, so at a miss the dead
+spine hands over a target-written continuation for free. Prior art recycles the target's output
+distributions (Token Recycling 2408.08696, Lookahead's n-gram pool 2402.02057) or its hidden states
+at rejected positions as context for a TRAINED drafter (Carryover Drafting 2609.14717: +6.5-14.7%
+accepted length; ReTrace 2608.29748; Lyanna 2602.21224); none had coupled draws. **Measured**
+(`~/swarmllm-ref/spec/counterfactual.py` on `gumbeldump_c15-T07.npz`: 1,182 positions of sampled
+coder-7B replies, T 0.7, the target continuing after the drafter's dead pick with the true noise):
+one token's swap leaves the target's next token unchanged only **22.8%** of the time; at a miss of
+the drafter's own spine (318 positions) the dead branch's draw is the true next token 15.4% of the
+time, and with the drafter's re-rooted guess **either is right 72.3% against the drafter's 68.6%**,
+the run collapsing past it (9.7% two deep). Once re-converged a dead run does follow (77%, then 90%
+a token) — it is the re-convergence that is rare: one different word sends the target elsewhere. A
++3.7-point first child where the tree missed (~6% of tokens) is not worth a mechanism; not built.
+The instrument was checked against the known answer: swapping a token for ITSELF gives back the true
+continuation 197 of 197 times (`CF_CONTROL=1`).
 
-**6.4 In a flow, the requester's card is worth more as drafter room than as a stage.** Speed is
-set by the two caps of 6.1: holding a stage moves neither (it only decides who covers those layers),
-while a bigger drafter lowers H — raising D and both caps — and costs R, which lowers the rows cap
-alone. Coverage binds today (15 against 23 tok/s), so a drafter whose call costs ~1.5× (the 3B Q8_0
-against the 1.5B's 27 ms for 3 levels: ~67 ms a forward, R ≈ 360) still pays where it lowers H: IF
-the 3B's H were 0.7, N 128 would sit at ~18 (coverage) / ~22 (rows) — +22%. H is the unknown. The `DRAFTER_MAX_FRACTION` cap (sized for local
-speculation, where the drafter's time IS the cost) is then the wrong bound on a far link. Where the
-requester's card cannot hold the bigger drafter, a peer on its LAN can run it (3 ms away: drafting
-as a near service). **Decides it**: the drafter-size curve (0.5B/1.5B/3B against the 7B,
-`gumbeldump.py` + `treesim.py`: H and D at N 64/128), then the 3B's call on the card.
+**6.4 Is the requester's card worth more as drafter room than as a stage?** Holding a stage moves
+neither the guesses nor the round trip (it only decides who covers those layers); a bigger drafter
+guesses better. `DRAFTER_MAX_FRACTION` (sized for local speculation, where the drafter's time IS the
+cost) refuses a 3B for a 7B. Where the requester's card cannot hold a bigger drafter, a peer on its
+LAN could run it (3 ms away: drafting as a near service) — and would take the drafter's ~65% of
+this node's busy time off its card, a third machine in the flow's pipeline (drafter → head → tail);
+today's LAN peer has no card, and a processor drafter runs DSD chains (gotcha #941). **Measured for the 7B** (2026-10-23,
+1,200 sampled positions each): top-1 agreement 0.646 / 0.755 / 0.774 for the 0.5B / 1.5B / 3B Q8_0;
+best-first trees of 128, tokens a round — greedy 5.08 / 7.19 / 8.16, sampled (shared noise) 4.96 /
+6.90 / 7.89. The 3B's +14% would reach the link as a few percent at most (6.1: speed does not follow
+D) at a costlier call — not worth it for the 7B. For a large target the gap between a 1.5B and a 7B
+drafter is wider; untested there.
 
 **6.5 Place for the CYCLE, not the path.** Petals routes a chain by its path latency; a flow's P is
 the cycle head → … → tail → whoever drafts, and the drafter must sit in it. When the requester is

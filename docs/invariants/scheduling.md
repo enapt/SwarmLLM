@@ -4937,6 +4937,13 @@ no reply. The extra rows die, and with 448 kept the 512-row tree (`MAX_TREE_ROWS
 forwards. A rebase may only be sent once the one before it is answered, so rebases rise to 31-33 a
 reply. Deeper, narrower calls cost the drafter 52-59 ms a forward against 29-31 and miss as often.
 
+*Rows a level, again* (2026-10-23 12:55-13:14Z, `~/swarmllm-318/harness/realwide.sh`, the 656848b5
+card build, greedy, 128 live, arms ABCCBA × 2): **16 a level** (37 rows a call, 47 ms busy — 21%
+cheaper a row) 15.05-16.23 tok/s, waiting 7.6-9.4 s; **8 (default)** 15.57-18.21 unqueued, waiting
+4.6-4.9 s (its first arm 11.9-12.3 under a far-end queue, guard cuts 14-22); **4**: one arm under the
+queue (11.6-13.5), the other ran no flow (round trip unmeasured, gotcha #942). The default stands;
+wider rows grow more rows a token and wait longer.
+
 **The law this reads as: a flow advances about E (the tokens the drafter's live rows get right)
 per round trip.** 14-15 tok/s × 0.45 s ≈ 6.5 tokens. The tree rounds on the same link get 6.3-6.8 a round
 (59-63 rounds for 400 tokens, ~0.58 s each, with up to 416 rows grown beside the check). The flow's win is
