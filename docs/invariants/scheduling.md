@@ -5055,6 +5055,39 @@ What moved it was the drafter's first-choice rate, ~15% a reply for each 4 point
 guesses better for what it costs. A smaller model drafting for the 3B (staged drafting) does not
 pay: `docs/plans/split_speculation.md` § "What the literature says".
 
+**The flow's speed is the drafter's ranks** (2026-10-24, `examples/drafter_ranks.py`). A greedy
+reply's far-end draws are the target's first choice at each position of that reply, so ONE
+teacher-forced pass of the 7B's own reply through the 7B and through a drafter
+(`logits_reference_probe` with `LOGITS_PROBE_MODEL`, on the processor, a minute each) gives every
+draw's rank in the drafter's list, with no link. `flow_rows_sim.run(trace=…)` replays the flow on
+those ranks at the call cost the real flow logged, and on the refrigerator prompt (400 tokens) it
+reproduced the real link (table above and § "A small drafter may be HALF its target"):
+
+| drafter (call) | first choice | outside its 8 | replay tok/s | real tok/s |
+|---|---|---|---|---|
+| Coder-3B Q4_K_M (33 ms) | 0.820 | 1.2% | 17.2 | 17.2-18.1 |
+| Coder-1.5B Q8_0 (25 ms) | 0.820 | 2.0% | 15.8 | 15.95-16.46 |
+| 0.5B fp16 (28 ms) | 0.756 | 3.7% | 14.0 | 13.98 |
+| Coder-0.5B Q8_0 (14 ms) | 0.701 | 8.2% | 11.1 | 12.06 |
+
+It counts 1.3-2× the real misses (8 against 3.2 for the 3B) but matches tokens a forward (0.93
+against 0.90). Priced on the 3B, refrigerator / a code-writing prompt (23.6 tok/s replayed):
+- a call at 2/3 or 1/2 its cost: +6-8% (18.2 / 25.0-25.5) — the cheaper level is worth that much;
+- 16-row levels as cheap as 8 (a 16-row capture): +5-8% at best (2 × 16, 256 live, 25 ms: 18.6 /
+  24.8); at the measured 16-row cost it reproduces the real loss; 256 live rows −2%, 4 levels ±0;
+- a temperature on the ratings: the probabilities are near calibrated already (the 3B's log-loss
+  of the target's choice is least at T 0.85, 0.560 against 0.573 at 1), and T 0.85 gave +5% / −1%;
+- every draw the drafter's first choice: 26.5 / 37.5, **+54-59%**. Of that, words outside the top 8
+  cost 4-6%; the draws at ranks 1-7 cost ~30% (24.5 / 34.7 made first choices). They ARE in the
+  tree, but best-first put most rows under the first choice, so the walk enters a shallow branch
+  and waits a round trip for rows under it.
+
+So on a long link the flow is held by how often the target takes the drafter's second or third
+choice, and no knob, ranking or cheaper call gets that back — only a drafter that agrees with the
+target more often (or one fed the target's own state). On the code-writing prompt the 1.5B put the
+target's choice first more often than the 3B (0.874 against 0.861) and replays faster (25.8 against
+23.6): one prompt of 382 tokens, not yet a rule. A code edit is copied: every drafter 0.998-1.000.
+
 **The flow has its own distance line: 150 ms, not the tree rounds' 300** (2026-10-23,
 `FLOW_LEAST_ROUND_TRIP_MS`). The 300 ms line (`TREES_LEAST_ROUND_TRIP_MS`) was set for tree ROUNDS
 before the flow existed, and the flow inherited it, so every link under 300 ms — most links between

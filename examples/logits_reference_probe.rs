@@ -23,6 +23,9 @@
 //! python3 examples/compare_logits_reference.py <gguf> /tmp/q3moe
 //! ```
 //!
+//! `LOGITS_PROBE_MODEL=<model directory>` instead of `LOGITS_PROBE_GGUF` loads a model
+//! a node holds as shards, every shard present, as one segment — how a drafter's
+//! rank of the target's choice is read (`examples/drafter_ranks.py`).
 //! `LOGITS_PROBE_IDS` (a JSON array of token ids) instead of the synthetic sequence;
 //! `LOGITS_PROBE_DEVICE=cuda` to run on the card instead of the processor, and
 //! `LOGITS_PROBE_GPU_LAYERS=n` to keep only the first n layers there, and
@@ -45,6 +48,7 @@ use std::path::PathBuf;
 
 use candle_core::{Device, Tensor};
 use swarmllm::inference::split::{GgufTensorMeta, KvCacheStore, SplitModel};
+use swarmllm_types::{ModelManifest, ShardTensorEntry};
 
 fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key)
@@ -60,6 +64,41 @@ fn expand(p: &str) -> PathBuf {
     }
 }
 
+/// Every layer of a model from its shard directory, as one segment, the way a
+/// node holding the whole model loads it (`prefill_bench`'s loader).
+fn load_from_model_dir(dir: &std::path::Path, force_cpu: bool) -> anyhow::Result<SplitModel> {
+    swarmllm::inference::split::ensure_gguf_header(dir)
+        .map_err(|e| anyhow::anyhow!("gguf header: {e}"))?;
+    let manifest: ModelManifest =
+        serde_json::from_slice(&std::fs::read(dir.join("manifest.json"))?)?;
+    let mut shards: Vec<(u32, PathBuf, Vec<ShardTensorEntry>)> = Vec::new();
+    for shard in &manifest.shards {
+        let path = dir.join(format!("shard_{:03}.bin", shard.index));
+        anyhow::ensure!(path.exists(), "missing {}", path.display());
+        shards.push((shard.index, path, shard.tensors.clone()));
+    }
+    shards.sort_by_key(|(i, _, _)| *i);
+    let entries: Vec<Vec<ShardTensorEntry>> = shards.iter().map(|s| s.2.clone()).collect();
+    let files: Vec<(u32, PathBuf)> = shards.into_iter().map(|(i, p, _)| (i, p)).collect();
+    let layers = manifest.num_layers as usize;
+    let load = if force_cpu {
+        SplitModel::load_from_shards_cpu
+    } else {
+        SplitModel::load_from_shards
+    };
+    load(
+        dir,
+        files,
+        &entries,
+        manifest.total_size_bytes,
+        0,
+        layers,
+        true,
+        true,
+    )
+    .map_err(|e| anyhow::anyhow!("load: {e}"))
+}
+
 fn main() -> anyhow::Result<()> {
     // The loader's own lines (`RUST_LOG=info`), so a run can show which of its
     // choices fired — a precision mark, a placement — beside the numbers.
@@ -67,10 +106,13 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
         .try_init();
-    let gguf = expand(
-        &std::env::var("LOGITS_PROBE_GGUF")
-            .map_err(|_| anyhow::anyhow!("set LOGITS_PROBE_GGUF to a whole .gguf file"))?,
-    );
+    let model_dir = std::env::var("LOGITS_PROBE_MODEL").ok().map(|p| expand(&p));
+    let gguf = match &model_dir {
+        Some(dir) => dir.clone(),
+        None => expand(&std::env::var("LOGITS_PROBE_GGUF").map_err(|_| {
+            anyhow::anyhow!("set LOGITS_PROBE_GGUF to a whole .gguf file or LOGITS_PROBE_MODEL to a model directory")
+        })?),
+    };
     let out = expand(&std::env::var("LOGITS_PROBE_OUT").unwrap_or_else(|_| "logits_probe".into()));
     // `LOGITS_PROBE_IDS=<file>`: a JSON array of token ids to use instead of the
     // synthetic sequence — natural text, so a disagreement cannot be blamed on
@@ -84,7 +126,14 @@ fn main() -> anyhow::Result<()> {
         .map(|v| v.len())
         .unwrap_or_else(|| env_usize("LOGITS_PROBE_N", 24));
     let decode = env_usize("LOGITS_PROBE_DECODE", 4).min(n.saturating_sub(1));
-    let layers = GgufTensorMeta::from_gguf_file(&gguf)?.block_count;
+    let layers = match &model_dir {
+        Some(dir) => {
+            let manifest: ModelManifest =
+                serde_json::from_slice(&std::fs::read(dir.join("manifest.json"))?)?;
+            manifest.num_layers as usize
+        }
+        None => GgufTensorMeta::from_gguf_file(&gguf)?.block_count,
+    };
     let split = std::env::var("LOGITS_PROBE_SPLIT")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -119,12 +168,14 @@ fn main() -> anyhow::Result<()> {
         given_ids.unwrap_or_else(|| (0..n).map(|i| ((i * 997) % 5000 + 100) as i64).collect());
     let prefill = n - decode;
 
-    let mut segments: Vec<SplitModel> = match split {
-        Some(k) => vec![
+    let mut segments: Vec<SplitModel> = match (split, &model_dir) {
+        (Some(_), Some(_)) => anyhow::bail!("LOGITS_PROBE_SPLIT needs LOGITS_PROBE_GGUF"),
+        (None, Some(dir)) => vec![load_from_model_dir(dir, force_cpu)?],
+        (Some(k), None) => vec![
             SplitModel::load_from_gguf(&gguf, 0, k, true, false, force_cpu)?,
             SplitModel::load_from_gguf(&gguf, k, layers, false, true, force_cpu)?,
         ],
-        None => vec![SplitModel::load_from_gguf(
+        (None, None) => vec![SplitModel::load_from_gguf(
             &gguf, 0, layers, true, true, force_cpu,
         )?],
     };

@@ -21,6 +21,9 @@ longer than the real flow, so read it for ORDER, not level. It reproduces the or
 (`policy="horizon"`, every horizon 6-12 and weight lost 1-9%), a bonus for depth (≤ +0.3%), live
 192 (+0.4-0.9%). What moves it is the drafter's first-choice rate: P[0] 0.82 → 0.86 → 0.90 gave
 14.2 → 16.4 → 19.3 tok/s.
+`run(trace=...)` replays a MEASURED reply instead of P (`drafter_ranks.py sim`): the drafter's real
+ranks and log-probs at each position, and it reproduces the link's LEVEL too (2026-10-24, within
+0-8% for four drafters, `docs/invariants/scheduling.md` § "The flow's speed is the drafter's ranks").
 usage: flow_rows_sim.py [replies]
 """
 import heapq
@@ -37,11 +40,23 @@ WINDOW = 12
 CHILDREN = 8  # followers a read row lists
 
 
-def run(P, seed, tokens=400, levels=3, rows=8, live_most=128, policy="best", horizon=8, lam=1.0):
+def run(P, seed, tokens=400, levels=3, rows=8, live_most=128, policy="best", horizon=8, lam=1.0,
+        call_ms=None, trace=None):
+    """`trace=(rank, lp, pool)` replays a MEASURED reply (`drafter_ranks.py sim`) instead of P:
+    `rank[i]` is the target's choice at reply position i as a rank in the drafter's list, `lp[i]`
+    the drafter's top-CHILDREN log-probs there; a row off the reply's path takes a random `pool`
+    entry. `call_ms` is a drafter call's whole cost (default CALL_FIXED + LEVEL_MS a level)."""
     rng = random.Random(seed)
     truth = []
+    if trace is not None:
+        tokens = len(trace[0]) - 1
 
     def true_rank(depth):  # rank of the far end's draw at `depth` (1 = the root's child)
+        if trace is not None:
+            if depth > len(trace[0]):
+                return -1  # past the measured reply: no row is on its path
+            r = int(trace[0][depth - 1])
+            return r if r < CHILDREN else None
         while len(truth) < depth:
             u, acc, r = rng.random(), 0.0, None
             for k, p in enumerate(P):
@@ -52,12 +67,14 @@ def run(P, seed, tokens=400, levels=3, rows=8, live_most=128, policy="best", hor
             truth.append(r)
         return truth[depth - 1]
 
-    logp = [math.log(p) for p in P]
+    logp = [math.log(p) for p in P] if trace is None else None
     # node: parent, rank, depth, score(logprob), read, sent_forward, answer_at
     par, rnk, dep, lp, read = [-1], [None], [0], [0.0], [False]
     kids = [dict()]
     answer_at = [None]  # time the far end's draw for this row is HERE
     on_truth = [True]
+    child_lp = [logp if trace is None else trace[1][0]]  # each row's followers' log-probs
+    misses = 0
     walk = 0  # node id the walk is at
     unread = [0]  # proposed or pushed rows not yet read by the drafter
     unsent = [0]
@@ -78,7 +95,7 @@ def run(P, seed, tokens=400, levels=3, rows=8, live_most=128, policy="best", hor
         return n
 
     def score(parent, r):
-        s = lp[parent] + logp[r]
+        s = lp[parent] + child_lp[parent][r]
         if policy == "horizon":
             below = dep[parent] + 1 - dep[walk]
             if below > horizon:
@@ -88,9 +105,15 @@ def run(P, seed, tokens=400, levels=3, rows=8, live_most=128, policy="best", hor
     def add_row(parent, r):
         nid = len(par)
         par.append(parent); rnk.append(r); dep.append(dep[parent] + 1)
-        lp.append(lp[parent] + (logp[r] if r is not None else -9.0)); read.append(False)
+        lp.append(lp[parent] + (child_lp[parent][r] if r is not None else -9.0)); read.append(False)
         kids.append(dict()); answer_at.append(None)
         on_truth.append(on_truth[parent] and r == true_rank(dep[parent] + 1))
+        if trace is None:
+            child_lp.append(logp)
+        elif on_truth[nid] and dep[nid] < len(trace[1]):
+            child_lp.append(trace[1][dep[nid]])
+        else:
+            child_lp.append(trace[2][rng.randrange(len(trace[2]))])
         kids[parent][r] = nid
         unsent.append(nid)
         return nid
@@ -103,12 +126,13 @@ def run(P, seed, tokens=400, levels=3, rows=8, live_most=128, policy="best", hor
         return False
 
     def advance_walk():
-        nonlocal walk
+        nonlocal walk, misses
         moved = 0
         while answer_at[walk] is not None and answer_at[walk] <= t:
             r = true_rank(dep[walk] + 1)
             c = kids[walk].get(r)
             if c is None:  # a miss: push the draw
+                misses += 1
                 c = add_row(walk, r)
                 unread.append(c)
                 walk = c
@@ -128,7 +152,7 @@ def run(P, seed, tokens=400, levels=3, rows=8, live_most=128, policy="best", hor
             for x in unread:
                 if not read[x]:
                     read[x] = True
-                    for r in range(min(CHILDREN, len(P))):
+                    for r in range(min(CHILDREN, len(child_lp[x]))):
                         if r not in kids[x]:
                             heapq.heappush(cand, (-0.0, x, r))
             unread.clear()
@@ -147,7 +171,7 @@ def run(P, seed, tokens=400, levels=3, rows=8, live_most=128, policy="best", hor
                 n += 1
                 live += 1
             proposed += n
-        cost = CALL_FIXED + LEVEL_MS * levels
+        cost = CALL_FIXED + LEVEL_MS * levels if call_ms is None else call_ms
         t += cost
         drafted_ms += cost
         return proposed > 0
@@ -195,7 +219,7 @@ def run(P, seed, tokens=400, levels=3, rows=8, live_most=128, policy="best", hor
         else:
             t += 1.0
     return dict(tps=tokens / t * 1000.0, tok_fw=tokens / max(nfw, 1), wait=waiting / 1000.0,
-                fw=nfw, draft=drafted_ms / max(nfw, 1), near=near_ms / max(nfw, 1))
+                fw=nfw, draft=drafted_ms / max(nfw, 1), near=near_ms / max(nfw, 1), misses=misses)
 
 
 def mean(P, seeds, **kw):
