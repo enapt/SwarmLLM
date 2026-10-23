@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #328**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #329**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2953,6 +2953,16 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   sealed to its destination, and the relay's bandwidth asked for, not taken (~20 Mbit/s each way
   for a flowing 7B). Trigger: a peer that would shorten a split's hop by ≥ 30%; today's swarm has
   none (its Melbourne peers are all on TPG, its Thai peers on True, the rest in Europe).
+- **#328 — Private work on attested hardware (confidential computing)** (2026-10-23,
+  `docs/plans/private_inference.md`). The one design under which "no machine but yours and
+  attested hardware reads the conversation" is TRUE: route a request marked private only to
+  peers whose NVIDIA confidential-computing report (H100/H200/H20/H800, B200, HGX B300, RTX PRO
+  6000 Blackwell Server Edition; no GeForce card) and TDX/SEV-SNP quote verify, nonce-bound to a
+  key generated inside the attested VM, at 4-8% cost (2409.03992). The alternatives were
+  measured out: cryptography is ~220 s a forward on a 390 ms link from rounds alone (PermLLM's
+  ~20 a layer), and disguised states fall to the public weights (2505.18332). Needs a verifier
+  for the certificate chain and measurements (security review), a capability bit, and a scope
+  beside `pool::scope::request_scope`. Trigger: a swarm peer with such a card; today none.
 
 ## Decided — not doing
 
