@@ -2367,6 +2367,50 @@ async fn handle_forward(
                     prompt_blocks_stored: None,
                 });
             }
+            // Row i predicts the token at `index_pos + 1 + i` (the verify's
+            // first token is written at `index_pos`) — the absolute position
+            // the shared noise is keyed by. A tree that flows starts before
+            // this forward: its rows' draws are keyed from the tree's start,
+            // as the drafter grew them.
+            let noise = fwd
+                .coupling_seed
+                .map(crate::inference::coupled_noise::CoupledNoise::new);
+            let tree_start = fwd.draft_tree_from.unwrap_or(fwd.index_pos);
+            let coupling = noise.as_ref().map(|n| (n, u64::from(tree_start) + 1));
+            // A sampled tree that flows: each row's draw reads only its top k,
+            // which the card ranks, so only those come back (2026-10-23).
+            #[cfg(feature = "candle-cuda")]
+            if let (true, Some(tree), Some(coupling)) = (
+                fwd.spec_walk_at_tail && draws_each_row && output_t.device().is_cuda(),
+                draft_tree.as_ref(),
+                coupling,
+            ) {
+                let rows = output_t
+                    .squeeze(0)
+                    .map_err(|e| format!("spec draws on the card: {e}"))?;
+                if let Some(token_ids) = crate::inference::tree_rank::draw_each_row_on_the_card(
+                    &rows,
+                    tree,
+                    read_before,
+                    &fwd.sampling,
+                    coupling,
+                )? {
+                    return Ok(crate::types::LayerResult {
+                        request_id,
+                        token_ids,
+                        finish_reason: None,
+                        activations: vec![],
+                        sealed_token_ids: None,
+                        spec_logits: Vec::new(),
+                        matched_stop_sequence: None,
+                        token_logprobs: Vec::new(),
+                        locally_constructed: false,
+                        refusal: None,
+                        answers_step: None,
+                        prompt_blocks_stored: None,
+                    });
+                }
+            }
             let flat: Vec<f32> = output_t
                 .flatten_all()
                 .and_then(|t| t.to_dtype(candle_core::DType::F32))
@@ -2386,16 +2430,6 @@ async fn handle_forward(
             // 152K), which on a long link cost more than the round trips
             // speculation saved (`docs/plans/split_speculation.md`).
             let token_ids = if fwd.spec_walk_at_tail {
-                // Row i predicts the token at `index_pos + 1 + i` (the
-                // verify's first token is written at `index_pos`) — the
-                // absolute position the shared noise is keyed by.
-                // A tree that flows starts before this forward: its rows' draws
-                // are keyed from the tree's start, as the drafter grew them.
-                let noise = fwd
-                    .coupling_seed
-                    .map(crate::inference::coupled_noise::CoupledNoise::new);
-                let tree_start = fwd.draft_tree_from.unwrap_or(fwd.index_pos);
-                let coupling = noise.as_ref().map(|n| (n, u64::from(tree_start) + 1));
                 match draft_tree.as_ref() {
                     Some(tree) if draws_each_row => crate::inference::sampling::draw_each_row(
                         tree,

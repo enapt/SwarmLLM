@@ -42,6 +42,36 @@
 // finite scores is -inf with id 0. A row with a NaN or +inf, or with nothing
 // finite, writes a NaN log-sum-exp: the host ranks those rows itself.
 //
+// A ROW'S TOP K FOR A COUPLED DRAW (`tree_topk_partials`, `tree_topk_merge`)
+// --------------------------------------------------------------------------
+// A request that samples draws each guess with the request's shared noise
+// (`inference::coupled_noise`), and the sampler draws among the row's `top_k`
+// likeliest tokens only (`sampling::sample_among_top_k`; the API sends 40
+// unless the caller names another). So the card hands back those k — log-
+// probability, id and the RAW score the draw divides by the temperature —
+// and the host draws exactly as it would from the whole row. Before, a
+// sampled reply read every row back whole (608 KB at 152K) and ranked it on
+// the host: 34-43 ms a flow call against 25-29 greedy on the TH↔AU link
+// (2026-10-23, 1.5B Q8_0 drafter, temperature 0.7).
+//
+// The selection is a radix select, the shape of torch.topk
+// (aten/src/ATen/native/cuda/SortingRadixSelect.cuh: the same order-keeping
+// key, alternating count buffers): the k-th largest key is found one bit a
+// pass, MSB first, by counting the keys at or above each candidate; then
+// every key above it is taken, and its ties fill the rest — ANY of them, as
+// the host's `select_top_k_candidates` takes any.
+//
+// Pass 1: grid (chunks, rows), TOPK_THREADS a block, a chunk at most
+// TOPK_THREADS * TOPK_PER_THREAD scores. Block (c, r) writes TOPK_PARTIAL_WIDTH
+// floats: max, sum of exp(x - max), the bad flag, then KMAX scaled scores and
+// KMAX ids bit-cast — the chunk's k likeliest in no order, empty slots
+// (-inf, INT_MAX).
+// Pass 2: grid rows, TOPK_THREADS a block, chunks * k <= TOPK_THREADS *
+// TOPK_MERGE_PER_THREAD. Writes TOPK_OUT_WIDTH floats a row: the log-sum-exp,
+// KMAX log-probabilities likeliest first (a tie to the smaller id), KMAX ids as
+// exact floats, KMAX raw scores; past the row's finite scores -inf, 0, -inf.
+// A NaN or +inf, or nothing finite, writes a NaN log-sum-exp.
+//
 // Built WITHOUT `-use_fast_math`, like every kernel here (`build.rs`).
 
 #include <cuda_runtime.h>
@@ -292,5 +322,242 @@ extern "C" __global__ void tree_rank_merge(
             dst[1 + j] = empty ? -CUDART_INF_F : best_v[j] - lse;
             dst[1 + TOPK + j] = empty ? 0.0f : (float)best_id[j];
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A row's top k for a coupled draw (see the header).
+
+#define KMAX 64
+#define TOPK_THREADS 256
+#define TOPK_WARPS (TOPK_THREADS / 32)
+#define TOPK_PER_THREAD 16
+#define TOPK_MERGE_PER_THREAD 32
+#define TOPK_PARTIAL_WIDTH (3 + 2 * KMAX)
+#define TOPK_OUT_WIDTH (1 + 3 * KMAX)
+
+// A finite float's order-keeping key — torch's `TopKTypeConfig<float>::convert`:
+// the higher score, the higher key. 0 is no finite float's key; it marks an
+// empty place (absent, -inf).
+__device__ __forceinline__ unsigned order_key(float x) {
+    const unsigned u = __float_as_uint(x);
+    return u ^ ((u & 0x80000000u) ? 0xffffffffu : 0x80000000u);
+}
+
+__device__ __forceinline__ float from_order_key(unsigned key) {
+    return __uint_as_float(key ^ ((key & 0x80000000u) ? 0x80000000u : 0xffffffffu));
+}
+
+// The block's sum of `n`, answered to every thread. `buf` holds TOPK_WARPS
+// ints; consecutive calls alternate between two such buffers, so one barrier a
+// call is enough: a call's writes come after the previous call's barrier, which
+// every thread passed only once it had read the buffer before that.
+__device__ __forceinline__ int block_count(int n, int *buf) {
+    n = (int)__reduce_add_sync(0xffffffffu, (unsigned)n);
+    if ((threadIdx.x & 31) == 0) {
+        buf[threadIdx.x >> 5] = n;
+    }
+    __syncthreads();
+    int total = 0;
+#pragma unroll
+    for (int w = 0; w < TOPK_WARPS; ++w) {
+        total += buf[w];
+    }
+    return total;
+}
+
+// The k-th largest of every thread's keys, or 0 where fewer than k are
+// present: the largest T with at least k keys >= T, built a bit at a time.
+// `counts` holds 2 * TOPK_WARPS ints.
+template <int E>
+__device__ unsigned kth_largest_key(const unsigned (&keys)[E], int k, int *counts) {
+    unsigned prefix = 0;
+    for (int bit = 31; bit >= 0; --bit) {
+        const unsigned want = prefix | (1u << bit);
+        int n = 0;
+#pragma unroll
+        for (int j = 0; j < E; ++j) {
+            n += keys[j] >= want;
+        }
+        if (block_count(n, counts + (bit & 1) * TOPK_WARPS) >= k) {
+            prefix = want;
+        }
+    }
+    return prefix;
+}
+
+// The block's k largest keys into `vals` / `ids` (slots [0, k), in no order):
+// every key above the k-th, then the k-th's ties until k are placed. Answers
+// how many were placed (fewer than k only where fewer keys are present). Every
+// thread must call it; `fill` is a shared int.
+template <int E>
+__device__ int take_top_k(const unsigned (&keys)[E], const int (&key_ids)[E], int k,
+                          int *counts, int *fill, float *vals, int *ids) {
+    const unsigned kth = kth_largest_key(keys, k, counts);
+    if (threadIdx.x == 0) {
+        *fill = 0;
+    }
+    __syncthreads();
+#pragma unroll
+    for (int j = 0; j < E; ++j) {
+        if (keys[j] > kth) {
+            const int slot = atomicAdd(fill, 1);
+            vals[slot] = from_order_key(keys[j]);
+            ids[slot] = key_ids[j];
+        }
+    }
+    __syncthreads();
+    if (kth != 0) {
+#pragma unroll
+        for (int j = 0; j < E; ++j) {
+            if (keys[j] == kth) {
+                const int slot = atomicAdd(fill, 1);
+                if (slot < k) {
+                    vals[slot] = from_order_key(keys[j]);
+                    ids[slot] = key_ids[j];
+                }
+            }
+        }
+    }
+    __syncthreads();
+    return min(*fill, k);
+}
+
+extern "C" __global__ void tree_topk_partials(
+    const float *__restrict__ logits,
+    float *__restrict__ partials,
+    const int vocab,
+    const int chunks,
+    const float inv_t,
+    const int k
+) {
+    __shared__ float lse_shared[3 * TOPK_WARPS + 2];
+    __shared__ int counts[2 * TOPK_WARPS];
+    __shared__ int fill;
+    __shared__ float vals[KMAX];
+    __shared__ int ids[KMAX];
+    const int chunk = blockIdx.x;
+    const int row = blockIdx.y;
+    const int chunk_len = (vocab + chunks - 1) / chunks;
+    const int start = chunk * chunk_len;
+    const int end = min(start + chunk_len, vocab);
+    const float *scores = logits + (size_t)row * vocab;
+
+    float m = -CUDART_INF_F;
+    float s = 0.0f;
+    int bad = 0;
+    unsigned keys[TOPK_PER_THREAD];
+    int key_ids[TOPK_PER_THREAD];
+#pragma unroll
+    for (int j = 0; j < TOPK_PER_THREAD; ++j) {
+        const int i = start + (int)threadIdx.x + j * TOPK_THREADS;
+        keys[j] = 0;
+        key_ids[j] = i;
+        if (i < end) {
+            const float x = scores[i] * inv_t;
+            if (isnan(x) || x == CUDART_INF_F) {
+                bad = 1;
+            } else if (x != -CUDART_INF_F) {
+                if (x > m) {
+                    s = s * expf(m - x) + 1.0f;
+                    m = x;
+                } else {
+                    s += expf(x - m);
+                }
+                keys[j] = order_key(x);
+            }
+        }
+    }
+    block_lse(m, s, bad, lse_shared);
+    float *dst = partials + ((size_t)row * chunks + chunk) * TOPK_PARTIAL_WIDTH;
+    if (threadIdx.x == 0) {
+        dst[0] = m;
+        dst[1] = s;
+        dst[2] = (float)bad;
+    }
+    const int placed = take_top_k(keys, key_ids, k, counts, &fill, vals, ids);
+    for (int slot = threadIdx.x; slot < KMAX; slot += TOPK_THREADS) {
+        const bool held = slot < placed;
+        dst[3 + slot] = held ? vals[slot] : -CUDART_INF_F;
+        dst[3 + KMAX + slot] = __int_as_float(held ? ids[slot] : INT_MAX);
+    }
+}
+
+extern "C" __global__ void tree_topk_merge(
+    const float *__restrict__ partials,
+    const float *__restrict__ logits,
+    float *__restrict__ out,
+    const int vocab,
+    const int chunks,
+    const int k
+) {
+    __shared__ float lse_shared[3 * TOPK_WARPS + 2];
+    __shared__ int counts[2 * TOPK_WARPS];
+    __shared__ int fill;
+    __shared__ float vals[KMAX];
+    __shared__ int ids[KMAX];
+    __shared__ float row_lse;
+    const int row = blockIdx.x;
+    const float *row_partials = partials + (size_t)row * chunks * TOPK_PARTIAL_WIDTH;
+
+    // The row's log-sum-exp, from every chunk's (max, sum); chunks <= the
+    // block's width (the host bounds it).
+    float m = -CUDART_INF_F;
+    float s = 0.0f;
+    int bad = 0;
+    if ((int)threadIdx.x < chunks) {
+        const float *src = row_partials + (size_t)threadIdx.x * TOPK_PARTIAL_WIDTH;
+        m = src[0];
+        s = src[1];
+        bad = src[2] != 0.0f;
+    }
+    block_lse(m, s, bad, lse_shared);
+    if (threadIdx.x == 0) {
+        row_lse = (bad || m == -CUDART_INF_F) ? CUDART_NAN_F : m + logf(s);
+    }
+
+    // Every chunk's first k places are the candidates.
+    unsigned keys[TOPK_MERGE_PER_THREAD];
+    int key_ids[TOPK_MERGE_PER_THREAD];
+    const int candidates = chunks * k;
+#pragma unroll
+    for (int j = 0; j < TOPK_MERGE_PER_THREAD; ++j) {
+        const int e = (int)threadIdx.x + j * TOPK_THREADS;
+        keys[j] = 0;
+        key_ids[j] = INT_MAX;
+        if (e < candidates) {
+            const float *src = row_partials + (size_t)(e / k) * TOPK_PARTIAL_WIDTH;
+            const int slot = e % k;
+            const int id = __float_as_int(src[3 + KMAX + slot]);
+            if (id != INT_MAX) {
+                keys[j] = order_key(src[3 + slot]);
+                key_ids[j] = id;
+            }
+        }
+    }
+    const int placed = take_top_k(keys, key_ids, k, counts, &fill, vals, ids);
+
+    // Each placed token's rank among the placed: the higher score first, a tie
+    // to the smaller id (ids are distinct, so the ranks are too).
+    float *dst = out + (size_t)row * TOPK_OUT_WIDTH;
+    const float lse = row_lse;
+    if ((int)threadIdx.x < placed) {
+        const float v = vals[threadIdx.x];
+        const int id = ids[threadIdx.x];
+        int rank = 0;
+        for (int u = 0; u < placed; ++u) {
+            rank += ranks_before(vals[u], ids[u], v, id);
+        }
+        dst[1 + rank] = v - lse;
+        dst[1 + KMAX + rank] = (float)id;
+        dst[1 + 2 * KMAX + rank] = logits[(size_t)row * vocab + id];
+    }
+    for (int slot = placed + (int)threadIdx.x; slot < KMAX; slot += TOPK_THREADS) {
+        dst[1 + slot] = -CUDART_INF_F;
+        dst[1 + KMAX + slot] = 0.0f;
+        dst[1 + 2 * KMAX + slot] = -CUDART_INF_F;
+    }
+    if (threadIdx.x == 0) {
+        dst[0] = lse;
     }
 }

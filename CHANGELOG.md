@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+**Sampled replies over a long split run faster: each guess costs the guessing model about 40%
+less time.** When a reply is sampled (a temperature above zero, as most chat apps ask), the word
+the model writes is drawn from its few likeliest words only — 40 unless the app asks for another
+number. Yet the small guessing model read its whole vocabulary back from the graphics card for
+every guess, about 600 KB each, to find those few, and the far computer did the same for every
+guess it answered. Both now pick the likeliest words on the card and read back only those, and the
+words written are exactly the same. Over a real Thailand–Australia split of a 7B model, a guessing
+call took 24-28 ms instead of 41-48 (a greedy reply's take 24-26), and replies ran 12.1 tokens a
+second against 11.3 — with the far computer still on the old code, so that is the guessing side alone.
+`SWARMLLM_TREE_COUPLED_DRAW=host` turns it off.
+
+**Sampled replies over a long split miss a third less often.** When a reply is sampled, the far
+computer picks each word with a dose of randomness both computers know in advance. The guessing
+model used that randomness for its first guess at each point, but ranked its other guesses as if it
+did not know it — so it kept guessing words the randomness was about to rule out, and a sampled
+reply's guesses failed about twice as often as a greedy one's. Now every guess is ranked by its
+chance of being picked under that same randomness (a rule fitted on 2,400 sampled tokens of a 7B
+model, where it put each guess's claimed chance within a point or two of how often it came true).
+The words written are exactly the same. Over a real Thailand–Australia split of a 7B model, replies
+missed 23.6 times in 400 tokens against 35.2 (17.8 against 31.7 where the link did not queue), and
+ran 13.8 tokens a second against 13.2 where it did not. `SWARMLLM_TREE_SAMPLED_RATING=probability`
+brings back the old ranking.
+
 **Splits between continents keep their guesses flowing on more links: from 150 ms, not only past
 300 ms.** The fastest way to run a split across a long link — guesses streamed to the far computer
 as they are made, each answered as it arrives — was switched on only where the far computer was at

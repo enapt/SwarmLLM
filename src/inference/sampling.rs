@@ -346,6 +346,62 @@ pub fn sample_token_coupled(
     sample_token_with_ctx(logits, params, generated_ids, ctx, Some((noise, position)))
 }
 
+/// How many of a row's likeliest tokens a sampled draw chooses among — the
+/// request's `top_k`, where it is above 0 and below the vocabulary — or `None`
+/// for a draw over the whole row. The ONE answer to which path
+/// [`sample_token_with_ctx`] takes, asked by [`coupled_draw_reads_only_top_k`].
+fn draws_among_top_k(params: &SamplingParams, vocab: usize) -> Option<usize> {
+    let k = params.top_k as usize;
+    (k > 0 && k < vocab).then_some(k)
+}
+
+/// Where a coupled draw ([`sample_token_coupled`]) reads only the row's `k`
+/// likeliest tokens, `Some(k)`: the request samples (temperature above 0), names
+/// a `top_k` below the vocabulary, and has no penalty that would read its
+/// history first. A drafter on a card then has those `k` ranked there
+/// (`tree_rank::top_k_on_the_card`) instead of reading every row back whole, and
+/// draws with [`sample_coupled_from_top_k`] — the same token.
+pub(crate) fn coupled_draw_reads_only_top_k(
+    params: &SamplingParams,
+    vocab: usize,
+) -> Option<usize> {
+    (params.temperature > 0.0 && params.frequency_penalty == 0.0 && params.presence_penalty == 0.0)
+        .then(|| draws_among_top_k(params, vocab))
+        .flatten()
+}
+
+/// One of a row's likeliest tokens, as a card ranked it: its log-probability
+/// at the request's temperature and its RAW score, which the draw divides by
+/// the temperature itself, as it does a whole row's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RankedToken {
+    pub token: u32,
+    pub logp: f32,
+    pub logit: f32,
+}
+
+/// The token [`sample_token_coupled`] draws from the whole row, drawn from its
+/// `k` likeliest alone — where [`coupled_draw_reads_only_top_k`] answered
+/// `Some(k)` and `likeliest` holds that row's `k` highest scores (fewer only
+/// where fewer are finite), in any order. The same draw
+/// ([`draw_among_candidates`]) over the same candidates, in the same token
+/// order; only a tie AT the k-th place may be broken the other way, as the
+/// host's own selection breaks it arbitrarily.
+pub(crate) fn sample_coupled_from_top_k(
+    likeliest: &[RankedToken],
+    params: &SamplingParams,
+    ctx: &mut SamplingContext,
+    noise: &CoupledNoise,
+    position: u64,
+    vocab: usize,
+) -> u32 {
+    ctx.indexed_logits.clear();
+    ctx.indexed_logits
+        .extend(likeliest.iter().map(|c| (c.token as usize, c.logit)));
+    ctx.indexed_logits.sort_unstable_by_key(|&(i, _)| i);
+    draw_among_candidates(params, ctx, vocab, simple_random, Some((noise, position)))
+}
+
 /// `argmax_i (score_i + G(position, i))` over `(token, score)` pairs, where
 /// `score` is the temperature-scaled logit of a token that survived the filters —
 /// Gumbel-max, an exact sample of the softmax over those scores.
@@ -503,6 +559,33 @@ pub(crate) fn draw_each_row(
     params: &SamplingParams,
     coupling: Option<(&CoupledNoise, u64)>,
 ) -> Result<Vec<u32>, String> {
+    let vocab = rows.first().map_or(0, Vec::len);
+    let mut ctx = SamplingContext::new(vocab);
+    draws_of_each_row(tree, read_before, rows, |logits, depth| {
+        if !logits.iter().all(|v| v.is_finite()) {
+            return Err("spec draws: non-finite logits".to_string());
+        }
+        let mut row = logits.clone();
+        Ok(match coupling {
+            Some((noise, first)) => {
+                sample_token_coupled(&mut row, params, &[], &mut ctx, noise, first + depth)
+            }
+            None => sample_token_with_history(&mut row, params, &[], &mut ctx),
+        })
+    })
+}
+
+/// A tree that flows, drawn row by row: row `q` of this forward is the tree's
+/// row `read_before + q`, drawn by `draw` at its depth in the tree — the
+/// noise's key past the tree's start. The ONE statement of which row and key a
+/// flowing row's draw gets, whether the row arrived whole ([`draw_each_row`])
+/// or as its top k from a card (`tree_rank::draw_each_row_on_the_card`).
+pub(crate) fn draws_of_each_row<R>(
+    tree: &crate::inference::draft_tree::DraftTree,
+    read_before: usize,
+    rows: &[R],
+    mut draw: impl FnMut(&R, u64) -> Result<u32, String>,
+) -> Result<Vec<u32>, String> {
     if read_before + rows.len() != tree.len() {
         return Err(format!(
             "spec draws: {} rows read after {read_before} of a tree of {} rows",
@@ -510,27 +593,9 @@ pub(crate) fn draw_each_row(
             tree.len()
         ));
     }
-    let vocab = rows.first().map_or(0, Vec::len);
-    let mut ctx = SamplingContext::new(vocab);
     rows.iter()
         .enumerate()
-        .map(|(q, logits)| {
-            if !logits.iter().all(|v| v.is_finite()) {
-                return Err("spec draws: non-finite logits".to_string());
-            }
-            let mut row = logits.clone();
-            Ok(match coupling {
-                Some((noise, first)) => sample_token_coupled(
-                    &mut row,
-                    params,
-                    &[],
-                    &mut ctx,
-                    noise,
-                    first + tree.depth(read_before + q) as u64,
-                ),
-                None => sample_token_with_history(&mut row, params, &[], &mut ctx),
-            })
-        })
+        .map(|(q, row)| draw(row, tree.depth(read_before + q) as u64))
         .collect()
 }
 
@@ -706,8 +771,7 @@ fn sample_token_with_ctx(
         return token;
     }
 
-    let k = params.top_k as usize;
-    if k > 0 && k < logits.len() {
+    if let Some(k) = draws_among_top_k(params, logits.len()) {
         sample_among_top_k(logits, params, k, ctx, simple_random, coupled)
     } else {
         sample_full_vocab(logits, params, ctx, simple_random, coupled)
@@ -786,6 +850,21 @@ fn sample_among_top_k(
     coupled: Option<(&CoupledNoise, u64)>,
 ) -> u32 {
     select_top_k_candidates(logits, k, &mut ctx.indexed_logits);
+    draw_among_candidates(params, ctx, logits.len(), uniform, coupled)
+}
+
+/// [`sample_among_top_k`] after the selection: temperature, top-p and the draw
+/// over `ctx.indexed_logits` — the row's `top_k` likeliest as (token, raw
+/// logit), in token order. The ONE draw over a row's top k, whether the host
+/// chose them from the whole row or the card did
+/// ([`sample_coupled_from_top_k`]). `vocab` is only reported.
+fn draw_among_candidates(
+    params: &SamplingParams,
+    ctx: &mut SamplingContext,
+    vocab: usize,
+    uniform: impl FnOnce() -> f32,
+    coupled: Option<(&CoupledNoise, u64)>,
+) -> u32 {
     let cands = &mut ctx.indexed_logits;
 
     // Temperature on the candidates only — the same division
@@ -868,7 +947,7 @@ fn sample_among_top_k(
             }
         }
         tracing::warn!(
-            vocab_size = logits.len(),
+            vocab_size = vocab,
             sum,
             "DIAG: sampling softmax collapsed — falling back to argmax"
         );
@@ -881,7 +960,7 @@ fn sample_among_top_k(
         if cumulative >= r {
             tracing::trace!(
                 token = i as u32,
-                vocab_size = logits.len(),
+                vocab_size = vocab,
                 temperature = params.temperature,
                 top_k = params.top_k,
                 top_p = params.top_p,
@@ -892,7 +971,7 @@ fn sample_among_top_k(
         }
     }
     tracing::warn!(
-        vocab_size = logits.len(),
+        vocab_size = vocab,
         sum,
         "DIAG: sampling fallback — cumulative probability didn't reach threshold"
     );
@@ -1946,6 +2025,124 @@ mod coupled_sampling_tests {
                     "spread {spread} pos {pos}"
                 );
             }
+        }
+    }
+
+    /// A coupled draw from a row's top k alone (`sample_coupled_from_top_k`:
+    /// what a drafter on a card draws from the k the card ranked) is the draw
+    /// `sample_token_coupled` makes from the whole row, at the temperatures,
+    /// top-k and top-p a request carries — whatever order the k arrive in.
+    #[test]
+    fn a_coupled_draw_from_the_top_k_is_the_draw_from_the_whole_row() {
+        let vocab = 3000usize;
+        let noise = CoupledNoise::new(0x5EED);
+        let mut ctx = SamplingContext::new(vocab);
+        let mut not_the_argmax = 0u32;
+        for spread in [2.0f32, 8.0, 30.0] {
+            let row: Vec<f32> = (0..vocab)
+                .map(|i| ((i * 7919) % 3001) as f32 / 3001.0 * spread + (i as f32 * 0.0917).cos())
+                .collect();
+            let mut order: Vec<usize> = (0..vocab).collect();
+            order.sort_by(|&a, &b| row[b].total_cmp(&row[a]));
+            for (temperature, top_k, top_p) in [
+                (0.7f32, 40u32, 1.0f32),
+                (0.7, 40, 0.9),
+                (1.0, 8, 1.0),
+                (1.3, 64, 0.5),
+                (0.3, 1, 1.0),
+            ] {
+                let params = SamplingParams {
+                    temperature,
+                    top_k,
+                    top_p,
+                    ..Default::default()
+                };
+                let k = coupled_draw_reads_only_top_k(&params, vocab)
+                    .expect("a sampled request with a top_k draws among its top k");
+                assert_eq!(k, top_k as usize);
+                // Likeliest FIRST, as a card hands them over — not the token
+                // order the draw walks.
+                let likeliest: Vec<RankedToken> = order[..k]
+                    .iter()
+                    .map(|&i| RankedToken {
+                        token: i as u32,
+                        logp: 0.0,
+                        logit: row[i],
+                    })
+                    .collect();
+                for pos in 0..300u64 {
+                    let whole =
+                        sample_token_coupled(&mut row.clone(), &params, &[], &mut ctx, &noise, pos);
+                    let top = sample_coupled_from_top_k(
+                        &likeliest, &params, &mut ctx, &noise, pos, vocab,
+                    );
+                    assert_eq!(
+                        top, whole,
+                        "spread {spread}, T {temperature}, top_k {top_k}, top_p {top_p}, pos {pos}"
+                    );
+                    not_the_argmax += u32::from(whole as usize != order[0]);
+                }
+            }
+        }
+        // The comparison saw real sampling, not the argmax every time.
+        assert!(
+            not_the_argmax > 1000,
+            "{not_the_argmax} draws off the argmax"
+        );
+    }
+
+    /// Where the draw reads more than a row's top k — the whole row, or a
+    /// history for its penalties — or is no draw at all, the card's ranking is
+    /// not asked for it.
+    #[test]
+    fn a_draw_that_reads_more_than_the_top_k_is_not_handed_only_the_top_k() {
+        let sampled = SamplingParams {
+            temperature: 0.7,
+            top_k: 40,
+            top_p: 0.9,
+            ..Default::default()
+        };
+        assert_eq!(coupled_draw_reads_only_top_k(&sampled, 151_936), Some(40));
+        for (what, params, vocab) in [
+            (
+                "greedy",
+                SamplingParams {
+                    temperature: 0.0,
+                    ..sampled.clone()
+                },
+                151_936,
+            ),
+            (
+                "no top_k",
+                SamplingParams {
+                    top_k: 0,
+                    ..sampled.clone()
+                },
+                151_936,
+            ),
+            ("top_k past the vocabulary", sampled.clone(), 40),
+            (
+                "a frequency penalty",
+                SamplingParams {
+                    frequency_penalty: 0.5,
+                    ..sampled.clone()
+                },
+                151_936,
+            ),
+            (
+                "a presence penalty",
+                SamplingParams {
+                    presence_penalty: 0.1,
+                    ..sampled.clone()
+                },
+                151_936,
+            ),
+        ] {
+            assert_eq!(
+                coupled_draw_reads_only_top_k(&params, vocab),
+                None,
+                "{what}"
+            );
         }
     }
 

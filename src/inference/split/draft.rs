@@ -118,15 +118,69 @@ impl Ord for Candidate {
 /// is rated first whatever its probability — the coupled draw is the
 /// drafter's best guess at what the target's sampler picks.
 fn likeliest(logits: &[f32], temperature: f32, k: usize, drawn: Option<u32>) -> Vec<(u32, f32)> {
+    let Some((t, log_sum)) = row_log_sum(logits, temperature) else {
+        return Vec::new();
+    };
+    let logp = |i: usize| logits[i] / t - log_sum;
+    let best = likeliest_indices(logits, k);
+    let mut out: Vec<(u32, f32)> = Vec::with_capacity(k + 1);
+    if let Some(d) = drawn.filter(|&d| (d as usize) < logits.len()) {
+        // Rated as the likeliest sibling: ahead of every other follower.
+        let top = best.first().map_or(0.0, |&i| logp(i));
+        out.push((d, top.max(logp(d as usize))));
+    }
+    out.extend(
+        best.into_iter()
+            .filter(|&i| Some(i as u32) != drawn)
+            .map(|i| (i as u32, logp(i)))
+            .take(k.saturating_sub(usize::from(drawn.is_some()))),
+    );
+    out
+}
+
+/// A row's temperature (1 for a greedy request) and log-sum-exp at it; `None`
+/// where nothing is finite.
+fn row_log_sum(logits: &[f32], temperature: f32) -> Option<(f32, f32)> {
     let t = if temperature > 0.0 { temperature } else { 1.0 };
     let finite = logits.iter().copied().filter(|x| x.is_finite());
     let max = finite.clone().fold(f32::NEG_INFINITY, f32::max);
     if !max.is_finite() {
-        return Vec::new();
+        return None;
     }
-    let log_sum = max / t + finite.map(|x| ((x - max) / t).exp()).sum::<f32>().ln();
-    let logp = |i: usize| logits[i] / t - log_sum;
+    Some((
+        t,
+        max / t + finite.map(|x| ((x - max) / t).exp()).sum::<f32>().ln(),
+    ))
+}
+
+/// [`likeliest`] with each token's raw score beside its log-probability, no
+/// draw: what the card's `tree_rank::top_k_on_the_card` answers, ranked here
+/// for a row read back whole.
+fn likeliest_scored(
+    logits: &[f32],
+    temperature: f32,
+    k: usize,
+) -> Vec<crate::inference::sampling::RankedToken> {
+    let Some((t, log_sum)) = row_log_sum(logits, temperature) else {
+        return Vec::new();
+    };
+    likeliest_indices(logits, k)
+        .into_iter()
+        .map(|i| crate::inference::sampling::RankedToken {
+            token: i as u32,
+            logp: logits[i] / t - log_sum,
+            logit: logits[i],
+        })
+        .collect()
+}
+
+/// The `k` highest finite scores' indices, highest first, a tie to the
+/// smaller index — one pass, each index offered to a list of `k`.
+fn likeliest_indices(logits: &[f32], k: usize) -> Vec<usize> {
     let mut best: Vec<usize> = Vec::with_capacity(k + 1);
+    if k == 0 {
+        return best;
+    }
     for (i, &x) in logits.iter().enumerate() {
         if !x.is_finite() {
             continue;
@@ -148,23 +202,14 @@ fn likeliest(logits: &[f32], temperature: f32, k: usize, drawn: Option<u32>) -> 
     if best.len() < k {
         best.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
     }
-    let mut out: Vec<(u32, f32)> = Vec::with_capacity(k + 1);
-    if let Some(d) = drawn.filter(|&d| (d as usize) < logits.len()) {
-        // Rated as the likeliest sibling: ahead of every other follower.
-        let top = best.first().map_or(0.0, |&i| logp(i));
-        out.push((d, top.max(logp(d as usize))));
-    }
-    out.extend(
-        best.into_iter()
-            .filter(|&i| Some(i as u32) != drawn)
-            .map(|i| (i as u32, logp(i)))
-            .take(k.saturating_sub(usize::from(drawn.is_some()))),
-    );
-    out
+    best
 }
 
 /// Each row's followers, likeliest first: (token, log-probability).
 type RankedRows = Vec<Vec<(u32, f32)>>;
+
+/// Each row's likeliest tokens for a coupled draw, best first, with raw scores.
+type RankedTopK = Vec<Vec<crate::inference::sampling::RankedToken>>;
 
 /// [`likeliest`] for every row of a `[rows, vocab]` logits tensor, ranked on
 /// its own device: only `k` (token, log-probability) pairs a row come back,
@@ -281,36 +326,302 @@ fn likeliest_rows_composed(
     ))
 }
 
+/// [`likeliest`] for a row the card ranked for a coupled draw
+/// ([`RowScores::Candidates`], best first): its `k` likeliest, `drawn` first
+/// and rated as the likeliest sibling — the draw is always among them.
+fn likeliest_of_ranked(
+    ranked: &[crate::inference::sampling::RankedToken],
+    k: usize,
+    drawn: Option<u32>,
+) -> Vec<(u32, f32)> {
+    let mut out: Vec<(u32, f32)> = Vec::with_capacity(k + 1);
+    if let Some(d) = drawn {
+        let top = ranked.first().map_or(0.0, |c| c.logp);
+        let own = ranked.iter().find(|c| c.token == d).map_or(top, |c| c.logp);
+        out.push((d, top.max(own)));
+    }
+    out.extend(
+        ranked
+            .iter()
+            .take(k)
+            .filter(|c| Some(c.token) != drawn)
+            .map(|c| (c.token, c.logp))
+            .take(k.saturating_sub(usize::from(drawn.is_some()))),
+    );
+    out
+}
+
+/// A coupled level's rows ranked on the card for the draw: each row's
+/// likeliest `max(top_k, TREE_CHILDREN)` with their raw scores
+/// (`tree_rank::top_k_on_the_card`), where the draw reads only the request's
+/// top k (`sampling::coupled_draw_reads_only_top_k`). `None`: read the rows
+/// whole, as before.
+///
+/// A sampled reply read every row back whole — 608 KB at 152K — and ranked it
+/// on the host: 34-43 ms a flow call against 25-29 for a greedy one on the
+/// TH↔AU link (2026-10-23, coder-1.5B Q8_0, temperature 0.7), the cost
+/// [`likeliest_rows_where_they_are`] had already taken out of greedy replies.
+fn likeliest_for_a_coupled_draw(
+    logits: &candle_core::Tensor,
+    sampling: &crate::types::SamplingParams,
+) -> Result<Option<(RankedTopK, usize)>, SwarmError> {
+    let vocab = logits
+        .dim(candle_core::D::Minus1)
+        .map_err(SwarmError::internal)?;
+    let Some(k) = crate::inference::sampling::coupled_draw_reads_only_top_k(sampling, vocab) else {
+        return Ok(None);
+    };
+    #[cfg(feature = "candle-cuda")]
+    {
+        use crate::inference::tree_rank::{top_k_on_the_card, CardTopK};
+        match top_k_on_the_card(logits, sampling.temperature, k.max(TREE_CHILDREN)) {
+            Ok(CardTopK::Rows(rows)) => return Ok(Some((rows, vocab))),
+            Ok(CardTopK::NotTaken | CardTopK::NotFinite) => {}
+            // A kernel that will not load or launch costs the level its
+            // speed, never the drafter: the rows are read whole.
+            Err(e) => {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    tracing::warn!(
+                        error = %e,
+                        "the card's top-k for a sampled reply failed; reading its rows whole"
+                    );
+                });
+            }
+        }
+    }
+    #[cfg(not(feature = "candle-cuda"))]
+    let _ = k;
+    Ok(None)
+}
+
+/// A chain's sampled guess from the card: its one row's likeliest ranked there
+/// ([`likeliest_for_a_coupled_draw`]), the draw among the request's top k
+/// (`sampling::sample_coupled_from_top_k`, the token `sample_token_coupled`
+/// draws from the whole row) and its probability — never the row read back.
+/// `None`: read it whole.
+fn coupled_guess_on_the_card(
+    logits: &candle_core::Tensor,
+    sampling: &crate::types::SamplingParams,
+    ctx: &mut crate::inference::sampling::SamplingContext,
+    noise: &crate::inference::coupled_noise::CoupledNoise,
+    position: u64,
+) -> Result<Option<(u32, f32)>, SwarmError> {
+    let row = logits
+        .flatten_all()
+        .and_then(|t| t.unsqueeze(0))
+        .map_err(SwarmError::internal)?;
+    let Some((rows, vocab)) = likeliest_for_a_coupled_draw(&row, sampling)? else {
+        return Ok(None);
+    };
+    let Some(ranked) = rows.first().filter(|r| !r.is_empty()) else {
+        return Ok(None);
+    };
+    let k = (sampling.top_k as usize).min(ranked.len());
+    let t = crate::inference::sampling::sample_coupled_from_top_k(
+        &ranked[..k],
+        sampling,
+        ctx,
+        noise,
+        position,
+        vocab,
+    );
+    let logp = ranked
+        .iter()
+        .find(|c| c.token == t)
+        .map_or(f32::NEG_INFINITY, |c| c.logp);
+    Ok(Some((t, logp.exp())))
+}
+
 /// A row's scores as a tree step hands them to its queue: the logits, ranked
-/// on the host (with the coupled draw where the request samples), or the
-/// followers the card already ranked ([`likeliest_rows_where_they_are`]).
+/// on the host (with the coupled draw where the request samples), the
+/// followers the card already ranked ([`likeliest_rows_where_they_are`]), or a
+/// sampled row's likeliest the card ranked for its draw
+/// ([`likeliest_for_a_coupled_draw`]).
 enum RowScores<'a> {
     Logits(&'a [f32]),
     Ranked(&'a [(u32, f32)]),
+    Candidates {
+        likeliest: &'a [crate::inference::sampling::RankedToken],
+        vocab: usize,
+    },
+}
+
+impl RowScores<'_> {
+    /// This row's followers for the queue, likeliest first
+    /// ([`TREE_CHILDREN`]); with `draw` — the request's noise and the position
+    /// the follower will occupy — the coupled draw first. `history` is what
+    /// the sampler reads before drawing from a whole row (its penalties); a row
+    /// is ranked on the card only where nothing reads it. The ONE way a tree's
+    /// growth turns a row into followers, rounds and flow alike.
+    fn followers(
+        &self,
+        sampling: &crate::types::SamplingParams,
+        draw: Option<(&crate::inference::coupled_noise::CoupledNoise, u64)>,
+        history: impl FnOnce() -> Vec<u32>,
+        ctx: &mut crate::inference::sampling::SamplingContext,
+    ) -> Vec<(u32, f32)> {
+        match *self {
+            // Ranked only where nothing is drawn (`StepScores::read`).
+            RowScores::Ranked(ranked) => ranked.to_vec(),
+            RowScores::Logits(logits)
+                if draw.is_some()
+                    && crate::inference::sampling::coupled_draw_reads_only_top_k(
+                        sampling,
+                        logits.len(),
+                    )
+                    .is_some() =>
+            {
+                let ranked = likeliest_scored(
+                    logits,
+                    sampling.temperature,
+                    (sampling.top_k as usize).max(TREE_CHILDREN),
+                );
+                followers_drawn_from_top_k(&ranked, sampling, draw, ctx, logits.len())
+            }
+            RowScores::Logits(logits) => {
+                let drawn = draw.map(|(noise, position)| {
+                    let mut row = logits.to_vec();
+                    crate::inference::sampling::sample_token_coupled(
+                        &mut row,
+                        sampling,
+                        &history(),
+                        ctx,
+                        noise,
+                        position,
+                    )
+                });
+                likeliest(logits, sampling.temperature, TREE_CHILDREN, drawn)
+            }
+            RowScores::Candidates { likeliest, vocab } => {
+                followers_drawn_from_top_k(likeliest, sampling, draw, ctx, vocab)
+            }
+        }
+    }
+}
+
+/// A row's followers from its likeliest tokens, best first — the request's
+/// `top_k` of them at least, where the coupled draw reads only those
+/// (`sampling::coupled_draw_reads_only_top_k`): the draw among the first
+/// `top_k`, rated first, then the others rated by the chance the far end
+/// draws each ([`followers_rated_by_the_shared_noise`]). The ONE way a sampled
+/// row is drawn and ranked, whether the card ranked it or this host did.
+fn followers_drawn_from_top_k(
+    ranked: &[crate::inference::sampling::RankedToken],
+    sampling: &crate::types::SamplingParams,
+    draw: Option<(&crate::inference::coupled_noise::CoupledNoise, u64)>,
+    ctx: &mut crate::inference::sampling::SamplingContext,
+    vocab: usize,
+) -> Vec<(u32, f32)> {
+    // Nothing finite: no followers, and nothing to draw (`likeliest`).
+    if ranked.is_empty() {
+        return Vec::new();
+    }
+    let Some((noise, position)) = draw else {
+        return likeliest_of_ranked(ranked, TREE_CHILDREN, None);
+    };
+    let k = (sampling.top_k as usize).min(ranked.len());
+    let drawn = crate::inference::sampling::sample_coupled_from_top_k(
+        &ranked[..k],
+        sampling,
+        ctx,
+        noise,
+        position,
+        vocab,
+    );
+    if sampled_rows_rated_by_probability() {
+        return likeliest_of_ranked(ranked, TREE_CHILDREN, Some(drawn));
+    }
+    followers_rated_by_the_shared_noise(ranked, drawn, sampling.temperature, noise, position)
+}
+
+/// `SWARMLLM_TREE_SAMPLED_RATING=probability`: a sampled row's followers rated
+/// by the drafter's probability at the request's temperature, as before
+/// 2026-10-23 — the A/B against [`followers_rated_by_the_shared_noise`].
+fn sampled_rows_rated_by_probability() -> bool {
+    static BY_PROBABILITY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *BY_PROBABILITY.get_or_init(|| {
+        std::env::var("SWARMLLM_TREE_SAMPLED_RATING").is_ok_and(|v| v == "probability")
+    })
+}
+
+/// A sampled row's followers rated by the chance the far end DRAWS each: the
+/// log-softmax of `logit + T·g` over the ranked tokens, `g` the request's noise
+/// at that token and position — the very noise the far end's draw adds
+/// (`sampling::draw_each_row`). A token the drafter likes whose noise is low is
+/// unlikely to be the draw, since the far end sees that low noise too; the
+/// drafter's probability at `T` alone rated it as likely as any (Gumbel-top-k,
+/// Kool et al. 1903.06059, here with the target's own noise). The drawn token
+/// comes first, rated as the likeliest sibling; the rest by that score.
+///
+/// Why `T·g` and no other scale (2026-10-23, 1,200 positions of Qwen2.5-Coder-7B
+/// replies sampled at 0.7, the coder-1.5B Q8_0 drafter teacher-forced): the
+/// fitted scale of the softmax was 1/T, so the drafter's logits err by about a
+/// unit-scale Gumbel, and at T → 0 this is the greedy rule's own (calibrated)
+/// probability. Claimed per rank [0.716, 0.115, 0.051, 0.030, 0.018] against hit
+/// [0.733, 0.122, 0.046, 0.026, 0.017]; the probability at T claimed [0.795,
+/// 0.159, 0.043, 0.019, 0.010] — the second child overrated, the tail halved, so
+/// a tree grew too few of the alternatives that hold the draw. Trees of 128
+/// grown by each rating: 6.90 tokens a round against 6.15 (greedy 7.19).
+fn followers_rated_by_the_shared_noise(
+    ranked: &[crate::inference::sampling::RankedToken],
+    drawn: u32,
+    temperature: f32,
+    noise: &crate::inference::coupled_noise::CoupledNoise,
+    position: u64,
+) -> Vec<(u32, f32)> {
+    let t = f64::from(temperature);
+    let score: Vec<f64> = ranked
+        .iter()
+        .map(|c| f64::from(c.logit) + t * noise.gumbel(position, c.token))
+        .collect();
+    let max = score.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let log_sum = max + score.iter().map(|s| (s - max).exp()).sum::<f64>().ln();
+    let mut order: Vec<usize> = (0..ranked.len()).collect();
+    order.sort_by(|&a, &b| score[b].total_cmp(&score[a]));
+    let top = score[order[0]] - log_sum;
+    let own = ranked
+        .iter()
+        .position(|c| c.token == drawn)
+        .map_or(top, |i| score[i] - log_sum);
+    let mut out = Vec::with_capacity(TREE_CHILDREN);
+    out.push((drawn, top.max(own) as f32));
+    out.extend(
+        order
+            .into_iter()
+            .filter(|&i| ranked[i].token != drawn)
+            .take(TREE_CHILDREN - 1)
+            .map(|i| (ranked[i].token, (score[i] - log_sum) as f32)),
+    );
+    out
 }
 
 /// Each row of a tree step's `[rows, vocab]` logits for its queue: ranked on
-/// the card where nothing needs the whole row, else read back whole.
+/// the card where nothing needs the whole row — a sampled row's draw needs
+/// only its top k — else read back whole.
 enum StepScores {
     Logits(Vec<Vec<f32>>),
     Ranked(RankedRows),
+    Candidates { rows: RankedTopK, vocab: usize },
 }
 
 impl StepScores {
     fn read(
         logits: &candle_core::Tensor,
-        temperature: f32,
+        sampling: &crate::types::SamplingParams,
         coupled: bool,
     ) -> Result<Self, SwarmError> {
-        // A coupled draw reads the whole row (`sample_token_coupled`).
         // `SWARMLLM_TREE_RANK=host` ranks every row on the host, as before.
-        if !coupled
-            && logits.device().is_cuda()
-            && std::env::var("SWARMLLM_TREE_RANK").as_deref() != Ok("host")
+        if logits.device().is_cuda() && std::env::var("SWARMLLM_TREE_RANK").as_deref() != Ok("host")
         {
-            if let Some(ranked) = likeliest_rows_where_they_are(logits, temperature, TREE_CHILDREN)?
-            {
-                return Ok(Self::Ranked(ranked));
+            if !coupled {
+                if let Some(ranked) =
+                    likeliest_rows_where_they_are(logits, sampling.temperature, TREE_CHILDREN)?
+                {
+                    return Ok(Self::Ranked(ranked));
+                }
+            } else if let Some((rows, vocab)) = likeliest_for_a_coupled_draw(logits, sampling)? {
+                return Ok(Self::Candidates { rows, vocab });
             }
         }
         logits
@@ -324,6 +635,7 @@ impl StepScores {
         match self {
             Self::Logits(rows) => rows.len(),
             Self::Ranked(rows) => rows.len(),
+            Self::Candidates { rows, .. } => rows.len(),
         }
     }
 
@@ -331,6 +643,10 @@ impl StepScores {
         match self {
             Self::Logits(rows) => RowScores::Logits(&rows[i]),
             Self::Ranked(rows) => RowScores::Ranked(&rows[i]),
+            Self::Candidates { rows, vocab } => RowScores::Candidates {
+                likeliest: &rows[i],
+                vocab: *vocab,
+            },
         }
     }
 }
@@ -395,42 +711,61 @@ impl SplitModel {
         let mut ctx = crate::inference::sampling::SamplingContext::new(0);
         let mut guesses = Vec::with_capacity(gamma);
         for j in 0..gamma {
-            let mut row: Vec<f32> = logits
-                .flatten_all()
-                .and_then(|t| t.to_dtype(candle_core::DType::F32))
-                .and_then(|t| t.to_vec1())
-                .map_err(SwarmError::internal)?;
-            // Read before sampling, which may rewrite the row in place.
-            let unsure = stop_below.map(|floor| (row.clone(), floor));
-            let t = match noise {
-                Some(noise) => crate::inference::sampling::sample_token_coupled(
-                    &mut row,
+            // A sampled guess whose draw reads only the row's top k is drawn
+            // from the card's ranking of them; else the row is read whole.
+            let on_the_card = match noise {
+                Some(noise) if self.device.is_cuda() => coupled_guess_on_the_card(
+                    &logits,
                     sampling,
-                    &history,
                     &mut ctx,
                     noise,
                     (first + j) as u64,
-                ),
-                // The first of equal maxima, as every argmax here picks.
+                )?,
+                _ => None,
+            };
+            let (t, unsure) = match on_the_card {
+                Some((t, probability)) => (t, stop_below.is_some_and(|floor| probability < floor)),
                 None => {
-                    row.iter()
-                        .enumerate()
-                        .fold((0usize, f32::NEG_INFINITY), |best, (i, &x)| {
-                            if x > best.1 {
-                                (i, x)
-                            } else {
-                                best
-                            }
-                        })
-                        .0 as u32
+                    let mut row: Vec<f32> = logits
+                        .flatten_all()
+                        .and_then(|t| t.to_dtype(candle_core::DType::F32))
+                        .and_then(|t| t.to_vec1())
+                        .map_err(SwarmError::internal)?;
+                    // Read before sampling, which may rewrite the row in place.
+                    let raw = stop_below.map(|floor| (row.clone(), floor));
+                    let t = match noise {
+                        Some(noise) => crate::inference::sampling::sample_token_coupled(
+                            &mut row,
+                            sampling,
+                            &history,
+                            &mut ctx,
+                            noise,
+                            (first + j) as u64,
+                        ),
+                        // The first of equal maxima, as every argmax here picks.
+                        None => {
+                            row.iter()
+                                .enumerate()
+                                .fold((0usize, f32::NEG_INFINITY), |best, (i, &x)| {
+                                    if x > best.1 {
+                                        (i, x)
+                                    } else {
+                                        best
+                                    }
+                                })
+                                .0 as u32
+                        }
+                    };
+                    let unsure = raw.is_some_and(|(raw, floor)| {
+                        probability_at(&raw, t as usize, sampling.temperature) < floor
+                    });
+                    (t, unsure)
                 }
             };
             guesses.push(t);
             history.push(t);
-            if let Some((raw, floor)) = unsure {
-                if probability_at(&raw, t as usize, sampling.temperature) < floor {
-                    break;
-                }
+            if unsure {
+                break;
             }
             if j + 1 < gamma {
                 let next = self.token_tensor(t)?;
@@ -586,7 +921,7 @@ impl SplitModel {
             .flatten_all()
             .and_then(|t| t.unsqueeze(0))
             .map_err(SwarmError::internal)
-            .and_then(|t| StepScores::read(&t, sampling.temperature, coupled))?;
+            .and_then(|t| StepScores::read(&t, sampling, coupled))?;
         let mut tree = DraftTree::new(base, Vec::new()).map_err(SwarmError::Internal)?;
         let mut tokens: Vec<u32> = Vec::with_capacity(rows);
         // Each guess's log-probability among its siblings, and along its path.
@@ -608,26 +943,17 @@ impl SplitModel {
                                    so_far: f32,
                                    scores: RowScores<'_>,
                                    held: &[u32]| {
-            let followers = match scores {
-                RowScores::Ranked(ranked) => ranked.to_vec(),
-                RowScores::Logits(logits) => {
-                    let drawn = noise.map(|noise| {
-                        let mut seen = history.to_vec();
-                        seen.extend(path_tokens(tree, tokens, parent));
-                        let position = base + parent.map_or(0, |p| tree.depth(p) + 1);
-                        let mut row = logits.to_vec();
-                        crate::inference::sampling::sample_token_coupled(
-                            &mut row,
-                            sampling,
-                            &seen,
-                            &mut ctx,
-                            noise,
-                            position as u64,
-                        )
-                    });
-                    likeliest(logits, sampling.temperature, TREE_CHILDREN, drawn)
-                }
-            };
+            let position = base + parent.map_or(0, |p| tree.depth(p) + 1);
+            let followers = scores.followers(
+                sampling,
+                noise.map(|noise| (noise, position as u64)),
+                || {
+                    let mut seen = history.to_vec();
+                    seen.extend(path_tokens(tree, tokens, parent));
+                    seen
+                },
+                &mut ctx,
+            );
             for (token, logp) in followers {
                 if held.contains(&token) {
                     continue;
@@ -660,7 +986,7 @@ impl SplitModel {
                 let read = out
                     .squeeze(0)
                     .map_err(SwarmError::internal)
-                    .and_then(|t| StepScores::read(&t, sampling.temperature, coupled))?;
+                    .and_then(|t| StepScores::read(&t, sampling, coupled))?;
                 for row in 0..read.len() {
                     queue_followers(
                         &mut queue,
@@ -697,7 +1023,7 @@ impl SplitModel {
                 let read = out
                     .squeeze(0)
                     .map_err(SwarmError::internal)
-                    .and_then(|t| StepScores::read(&t, sampling.temperature, coupled))?;
+                    .and_then(|t| StepScores::read(&t, sampling, coupled))?;
                 for (i, &row) in added.iter().enumerate() {
                     queue_followers(
                         &mut queue,
@@ -934,7 +1260,7 @@ impl SplitModel {
         let read = out
             .squeeze(0)
             .map_err(SwarmError::internal)
-            .and_then(|t| StepScores::read(&t, sampling.temperature, coupled))?;
+            .and_then(|t| StepScores::read(&t, sampling, coupled))?;
         let mut ctx = crate::inference::sampling::SamplingContext::new(0);
         session.followers.resize(from, Vec::new());
         for (i, row) in (from..flow.len()).enumerate() {
@@ -943,23 +1269,13 @@ impl SplitModel {
                 session.followers.push(Vec::new());
                 continue;
             }
-            let followers = match read.row(i) {
-                RowScores::Ranked(ranked) => ranked.to_vec(),
-                RowScores::Logits(logits) => {
-                    let drawn = noise.map(|noise| {
-                        let mut row_logits = logits.to_vec();
-                        crate::inference::sampling::sample_token_coupled(
-                            &mut row_logits,
-                            sampling,
-                            &[],
-                            &mut ctx,
-                            noise,
-                            (base + flow.tree().depth(row) + 1) as u64,
-                        )
-                    });
-                    likeliest(logits, sampling.temperature, TREE_CHILDREN, drawn)
-                }
-            };
+            // A flow's sampler reads no history (`dsd_flow::flow_possible`).
+            let followers = read.row(i).followers(
+                sampling,
+                noise.map(|noise| (noise, (base + flow.tree().depth(row) + 1) as u64)),
+                Vec::new,
+                &mut ctx,
+            );
             if session.unrated[row] {
                 // A copied row is as likely as this model guesses its token
                 // after its parent — no likelier than the least of the
@@ -1096,6 +1412,170 @@ fn probability_at(logits: &[f32], token: usize, temperature: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{likeliest, likeliest_rows_where_they_are, probability_at};
+
+    /// A sampled row whose draw reads only its top k is drawn and ranked
+    /// through `followers_drawn_from_top_k` — whether this host ranked it or a
+    /// card did — and gives the same followers either way: the whole row's
+    /// coupled draw first, then the others as the shared noise rates them. A
+    /// row whose draw reads the whole row (no top_k) keeps the whole-row path.
+    #[test]
+    fn a_sampled_row_follows_from_its_top_k_as_from_the_whole_row() {
+        use super::{
+            followers_rated_by_the_shared_noise, likeliest_scored, RowScores, TREE_CHILDREN,
+        };
+        use crate::inference::coupled_noise::CoupledNoise;
+        use crate::inference::sampling::{sample_token_coupled, SamplingContext};
+        use crate::types::SamplingParams;
+        let vocab = 5000usize;
+        let row: Vec<f32> = (0..vocab)
+            .map(|i| ((i * 7919) % 5003) as f32 / 5003.0 * 14.0 + (i as f32 * 0.31).sin())
+            .collect();
+        let noise = CoupledNoise::new(77);
+        let mut ctx = SamplingContext::new(vocab);
+        let mut drawn_off_the_top = 0u32;
+        for (temperature, top_k, top_p) in [
+            (0.7f32, 40u32, 1.0f32),
+            (0.7, 40, 0.9),
+            (1.0, 3, 1.0),
+            (1.3, 64, 0.95),
+            (0.8, 0, 1.0),
+        ] {
+            let sampling = SamplingParams {
+                temperature,
+                top_k,
+                top_p,
+                ..Default::default()
+            };
+            let ranked = likeliest_scored(&row, temperature, (top_k as usize).max(TREE_CHILDREN));
+            for pos in 0..200u64 {
+                let drawn =
+                    sample_token_coupled(&mut row.clone(), &sampling, &[], &mut ctx, &noise, pos);
+                let want = if top_k > 0 {
+                    followers_rated_by_the_shared_noise(&ranked, drawn, temperature, &noise, pos)
+                } else {
+                    likeliest(&row, temperature, TREE_CHILDREN, Some(drawn))
+                };
+                assert_eq!(want[0].0, drawn);
+                let what = format!("T {temperature}, top_k {top_k}, top_p {top_p}, pos {pos}");
+                assert_eq!(
+                    RowScores::Logits(&row).followers(
+                        &sampling,
+                        Some((&noise, pos)),
+                        Vec::new,
+                        &mut ctx
+                    ),
+                    want,
+                    "read whole: {what}"
+                );
+                if top_k > 0 {
+                    assert_eq!(
+                        RowScores::Candidates {
+                            likeliest: &ranked,
+                            vocab
+                        }
+                        .followers(
+                            &sampling,
+                            Some((&noise, pos)),
+                            Vec::new,
+                            &mut ctx
+                        ),
+                        want,
+                        "ranked as a card hands it over: {what}"
+                    );
+                }
+                drawn_off_the_top += u32::from(drawn != ranked[0].token);
+            }
+        }
+        assert!(
+            drawn_off_the_top > 100,
+            "{drawn_off_the_top} draws not the likeliest"
+        );
+        // Nothing finite: no followers, and nothing drawn.
+        let none = vec![f32::NEG_INFINITY; 64];
+        let sampling = SamplingParams {
+            temperature: 0.7,
+            top_k: 40,
+            ..Default::default()
+        };
+        assert!(RowScores::Logits(&none)
+            .followers(&sampling, Some((&noise, 3)), Vec::new, &mut ctx)
+            .is_empty());
+    }
+
+    /// A sampled row's children are rated by the chance the far end draws
+    /// each. Where the drafter's logits err from the target's by a unit-scale
+    /// Gumbel (about what Qwen2.5-Coder-1.5B does against the 7B, 2026-10-23),
+    /// the far end's coupled draw `argmax(z/T + g)` is `argmax(y + T·g + ε)`, so
+    /// by the Gumbel-max theorem `softmax(y + T·g)` IS that chance: what each
+    /// rank claims must be how often it is the draw. The drafter's probability
+    /// at T claimed the second child half again too likely and the tail half
+    /// as likely as it is — a tree grew too few of the children that hold it.
+    #[test]
+    fn a_sampled_rows_children_are_rated_by_the_noise_the_far_end_draws_with() {
+        use super::{followers_rated_by_the_shared_noise, TREE_CHILDREN};
+        use crate::inference::coupled_noise::CoupledNoise;
+        use crate::inference::sampling::RankedToken;
+        let (noise, error, spread) = (
+            CoupledNoise::new(11),
+            CoupledNoise::new(12),
+            CoupledNoise::new(13),
+        );
+        let vocab = 24u32;
+        let trials = 10_000u64;
+        for temperature in [0.7f32, 1.0, 1.3] {
+            let t = f64::from(temperature);
+            let (mut claimed, mut hit) = ([0f64; TREE_CHILDREN], [0f64; TREE_CHILDREN]);
+            let mut the_noise_reordered = 0u32;
+            for trial in 0..trials {
+                let y: Vec<f64> = (0..vocab).map(|x| 1.5 * spread.gumbel(trial, x)).collect();
+                let log_sum_t = {
+                    let m = y.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    m / t + y.iter().map(|v| ((v - m) / t).exp()).sum::<f64>().ln()
+                };
+                let mut ranked: Vec<RankedToken> = (0..vocab)
+                    .map(|x| RankedToken {
+                        token: x,
+                        logp: (y[x as usize] / t - log_sum_t) as f32,
+                        logit: y[x as usize] as f32,
+                    })
+                    .collect();
+                ranked.sort_by(|a, b| b.logit.total_cmp(&a.logit));
+                let argmax = |score: &dyn Fn(u32) -> f64| {
+                    (0..vocab)
+                        .max_by(|&a, &b| score(a).total_cmp(&score(b)))
+                        .unwrap()
+                };
+                let drawn = argmax(&|x| y[x as usize] + t * noise.gumbel(trial, x));
+                let target = argmax(&|x| {
+                    y[x as usize] + t * noise.gumbel(trial, x) + error.gumbel(trial, x)
+                });
+                let children =
+                    followers_rated_by_the_shared_noise(&ranked, drawn, temperature, &noise, trial);
+                assert_eq!(children.len(), TREE_CHILDREN);
+                assert_eq!(children[0].0, drawn, "the far end's likeliest draw first");
+                for (rank, &(token, logp)) in children.iter().enumerate() {
+                    claimed[rank] += f64::from(logp).exp();
+                    hit[rank] += f64::from(u8::from(token == target));
+                }
+                the_noise_reordered += u32::from(
+                    children[1..]
+                        .windows(2)
+                        .any(|w| y[w[0].0 as usize] < y[w[1].0 as usize]),
+                );
+            }
+            for rank in 0..TREE_CHILDREN {
+                let (c, h) = (claimed[rank] / trials as f64, hit[rank] / trials as f64);
+                assert!(
+                    (c - h).abs() < 0.012 + 0.1 * h,
+                    "T {temperature}, child {rank}: claims {c:.4}, is the draw {h:.4}"
+                );
+            }
+            assert!(
+                the_noise_reordered > 1000,
+                "T {temperature}: the noise reordered {the_noise_reordered} rows' children"
+            );
+        }
+    }
 
     /// The rows ranked as tensors (on a card in a node; here on the processor,
     /// by the same operations) give each row's followers in the order and at
@@ -1267,6 +1747,253 @@ mod tests {
             ranked(&random(1, 500), 0.0, 9),
             CardRanking::NotTaken
         ));
+    }
+
+    /// The card's top k for a sampled row (`tree_rank::top_k_on_the_card`,
+    /// `kernels/tree_rank.cu`'s radix select) is the host's
+    /// (`likeliest_scored`): the same scores in the same order, each the raw
+    /// score of its token, log-probabilities to 1e-4 of an f64 sum, and the
+    /// same tokens wherever no tie sits at the k-th place (a tie there is
+    /// broken either way, as the host's own selection breaks it) — at a
+    /// drafter's shapes, with suppressed tokens and too few finite scores. A
+    /// NaN or nothing finite is left to the host, and so is a `k` the kernel
+    /// does not keep. Then the end of it: a level's followers, drawn on the
+    /// card's ranking, are the followers drawn from the rows read whole.
+    ///
+    /// ⚠ Needs a card: run `cargo test --features candle-cuda --lib
+    /// the_card_ranks_a_sampled -- --nocapture` and look for no SKIPPED line.
+    #[cfg(feature = "candle-cuda")]
+    #[test]
+    fn the_card_ranks_a_sampled_rows_top_k_as_the_host_does() {
+        use super::{likeliest_scored, RowScores, StepScores};
+        use crate::inference::coupled_noise::CoupledNoise;
+        use crate::inference::sampling::SamplingContext;
+        use crate::inference::tree_rank::{top_k_on_the_card, CardTopK, MOST_CANDIDATES};
+        use crate::types::SamplingParams;
+        use candle_core::{Device, Tensor};
+        let dev = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIPPED the card's top k against the host: no CUDA device ({e})");
+                return;
+            }
+        };
+        let tensor = |rows: &[Vec<f32>]| {
+            let vocab = rows[0].len();
+            let flat: Vec<f32> = rows.iter().flatten().copied().collect();
+            Tensor::from_vec(flat, (rows.len(), vocab), &dev).unwrap()
+        };
+        let top = |rows: &[Vec<f32>], temperature: f32, k: usize| {
+            top_k_on_the_card(&tensor(rows), temperature, k).unwrap()
+        };
+        let check = |rows: &[Vec<f32>], what: &str| {
+            for (temperature, k) in [
+                (0.7f32, 40usize),
+                (1.0, MOST_CANDIDATES),
+                (1.3, 8),
+                (0.7, 1),
+            ] {
+                let CardTopK::Rows(got) = top(rows, temperature, k) else {
+                    panic!("{what}: finite rows are ranked on the card");
+                };
+                assert_eq!(got.len(), rows.len(), "{what}");
+                for (r, (row, got)) in rows.iter().zip(&got).enumerate() {
+                    let want = likeliest_scored(row, temperature, k);
+                    let what = format!("{what}, row {r}, T {temperature}, k {k}");
+                    assert_eq!(got.len(), want.len(), "{what}");
+                    assert_eq!(
+                        got.iter().map(|c| c.logit).collect::<Vec<_>>(),
+                        want.iter().map(|c| c.logit).collect::<Vec<_>>(),
+                        "{what}: the same scores, likeliest first"
+                    );
+                    let mut seen = std::collections::HashSet::new();
+                    for (j, c) in got.iter().enumerate() {
+                        assert_eq!(
+                            c.logit, row[c.token as usize],
+                            "{what}: a token's own score"
+                        );
+                        assert!(seen.insert(c.token), "{what}: {} twice", c.token);
+                        if j > 0 && got[j - 1].logit == c.logit {
+                            assert!(
+                                got[j - 1].token < c.token,
+                                "{what}: a tie to the smaller id"
+                            );
+                        }
+                    }
+                    let kth = want.last().map(|c| c.logit);
+                    let tie_at_the_edge = want.len() == k
+                        && row.iter().filter(|&&x| Some(x) == kth).count()
+                            > want.iter().filter(|c| Some(c.logit) == kth).count();
+                    if !tie_at_the_edge {
+                        assert_eq!(
+                            got.iter().map(|c| c.token).collect::<Vec<_>>(),
+                            want.iter().map(|c| c.token).collect::<Vec<_>>(),
+                            "{what}: the same tokens"
+                        );
+                    }
+                    let t = f64::from(temperature);
+                    let finite = || row.iter().filter(|x| x.is_finite()).map(|&x| f64::from(x));
+                    let max = finite().fold(f64::NEG_INFINITY, f64::max);
+                    let lse = max / t + finite().map(|x| ((x - max) / t).exp()).sum::<f64>().ln();
+                    for c in got {
+                        let w = f64::from(c.logit) / t - lse;
+                        assert!(
+                            (f64::from(c.logp) - w).abs() < 1e-4,
+                            "{what}: {} against {w}",
+                            c.logp
+                        );
+                    }
+                }
+            }
+        };
+        let random = |rows: usize, vocab: usize| -> Vec<Vec<f32>> {
+            Tensor::randn(0f32, 3.0, (rows, vocab), &dev)
+                .unwrap()
+                .to_vec2()
+                .unwrap()
+        };
+        check(&random(8, 151_936), "8 rows of a Qwen vocabulary");
+        check(&random(65, 151_936), "the 65-row seed");
+        check(&random(2, 262_208), "Gemma 3's vocabulary");
+        check(&random(3, 32_000), "a Llama 2 vocabulary");
+        check(&random(2, 500), "a tiny vocabulary");
+        let tied: Vec<Vec<f32>> = (0..4u32)
+            .map(|r| {
+                (0..151_936u32)
+                    .map(|i| ((i * 7919 + r * 104_729) % 1009) as f32 / 37.0 - 9.0)
+                    .collect()
+            })
+            .collect();
+        check(&tied, "tied scores");
+        let mut suppressed = random(8, 151_936);
+        for row in &mut suppressed {
+            for x in row.iter_mut().step_by(3) {
+                *x = f32::NEG_INFINITY;
+            }
+        }
+        check(&suppressed, "suppressed tokens");
+        let mut short = vec![vec![f32::NEG_INFINITY; 151_936]; 2];
+        short[0][3] = 1.0;
+        short[0][140_000] = 2.0;
+        short[1][77] = -4.0;
+        check(&short, "a few finite scores");
+        let CardTopK::Rows(got) = top(&short, 0.7, 40) else {
+            panic!("rows with a few finite scores are ranked");
+        };
+        assert_eq!(
+            got[0].iter().map(|c| c.token).collect::<Vec<_>>(),
+            [140_000, 3]
+        );
+        assert_eq!(got[1].iter().map(|c| c.token).collect::<Vec<_>>(), [77]);
+
+        let mut nan = random(3, 151_936);
+        nan[1][9_000] = f32::NAN;
+        assert!(matches!(top(&nan, 0.7, 40), CardTopK::NotFinite));
+        let mut inf = random(3, 151_936);
+        inf[2][5] = f32::INFINITY;
+        assert!(matches!(top(&inf, 0.7, 40), CardTopK::NotFinite));
+        let empty = vec![vec![f32::NEG_INFINITY; 151_936]];
+        assert!(matches!(top(&empty, 0.7, 40), CardTopK::NotFinite));
+        assert!(matches!(
+            top(&random(1, 500), 0.7, MOST_CANDIDATES + 1),
+            CardTopK::NotTaken
+        ));
+        assert!(matches!(top(&random(1, 40), 0.7, 40), CardTopK::NotTaken));
+
+        // A level read for a coupled draw: the card's rows give the followers
+        // the rows read whole give.
+        let rows = random(8, 151_936);
+        let logits = tensor(&rows);
+        let noise = CoupledNoise::new(0xD1CE);
+        let mut ctx = SamplingContext::new(151_936);
+        for (top_k, top_p) in [(40u32, 1.0f32), (40, 0.9), (5, 1.0)] {
+            let sampling = SamplingParams {
+                temperature: 0.7,
+                top_k,
+                top_p,
+                ..Default::default()
+            };
+            let read = StepScores::read(&logits, &sampling, true).unwrap();
+            assert!(
+                matches!(read, StepScores::Candidates { .. }),
+                "a sampled level is ranked on the card (top_k {top_k})"
+            );
+            for (i, row) in rows.iter().enumerate() {
+                for pos in 0..20u64 {
+                    let card =
+                        read.row(i)
+                            .followers(&sampling, Some((&noise, pos)), Vec::new, &mut ctx);
+                    let host = RowScores::Logits(row).followers(
+                        &sampling,
+                        Some((&noise, pos)),
+                        Vec::new,
+                        &mut ctx,
+                    );
+                    let what = format!("row {i}, top_k {top_k}, top_p {top_p}, pos {pos}");
+                    // The same draw and followers; the log-probabilities as
+                    // close as the host's one f32 sum over the vocabulary
+                    // allows (it drops every term below half its last bit).
+                    assert_eq!(
+                        card.iter().map(|&(t, _)| t).collect::<Vec<_>>(),
+                        host.iter().map(|&(t, _)| t).collect::<Vec<_>>(),
+                        "{what}"
+                    );
+                    for (&(_, a), &(_, b)) in card.iter().zip(&host) {
+                        assert!((a - b).abs() < 1e-3, "{what}: {a} against {b}");
+                    }
+                }
+            }
+        }
+        let whole = SamplingParams {
+            temperature: 0.7,
+            top_k: 0,
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                StepScores::read(&logits, &whole, true).unwrap(),
+                StepScores::Logits(_)
+            ),
+            "a draw over the whole row reads the rows whole"
+        );
+
+        // A chain's guess, one row at a time: the whole row's draw and its
+        // probability.
+        let sampling = SamplingParams {
+            temperature: 0.7,
+            top_k: 40,
+            top_p: 0.9,
+            ..Default::default()
+        };
+        for (i, row) in rows.iter().enumerate() {
+            let one = logits.narrow(0, i, 1).unwrap();
+            for pos in 0..20u64 {
+                let (t, p) =
+                    super::coupled_guess_on_the_card(&one, &sampling, &mut ctx, &noise, pos)
+                        .unwrap()
+                        .expect("a sampled guess is drawn on the card");
+                let want = crate::inference::sampling::sample_token_coupled(
+                    &mut row.clone(),
+                    &sampling,
+                    &[],
+                    &mut ctx,
+                    &noise,
+                    pos,
+                );
+                assert_eq!(t, want, "row {i}, pos {pos}");
+                let q = super::probability_at(row, t as usize, 0.7);
+                assert!(
+                    (p - q).abs() <= 1e-3 * q + 1e-7,
+                    "row {i}, pos {pos}: {p} against {q}"
+                );
+            }
+        }
+        let first_row = logits.narrow(0, 0, 1).unwrap();
+        assert_eq!(
+            super::coupled_guess_on_the_card(&first_row, &whole, &mut ctx, &noise, 0).unwrap(),
+            None,
+            "a draw over the whole row reads it whole"
+        );
     }
 
     #[test]

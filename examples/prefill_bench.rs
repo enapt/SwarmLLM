@@ -30,7 +30,9 @@
 //! `SWARM_BENCH_LAYERS=0-14` loads one segment of a split (a split's head,
 //! whose tree check is a forward like this), and `SWARM_BENCH_GROW=64,8` times
 //! a drafter growing a tree of 64 rows 8 at a time, its rows ranked on the
-//! host against where its logits are (`SWARMLLM_TREE_RANK`).
+//! host against where its logits are (`SWARMLLM_TREE_RANK`);
+//! `SWARM_BENCH_GROW_TEMP=0.7` grows it as a SAMPLED reply does — that
+//! temperature, the API's default top-k and top-p, the request's shared noise.
 //!
 //! **Min of N, not mean** — see the note on `bench` in
 //! `src/inference/layers/mod.rs`. Every source of error here is additive, so
@@ -379,12 +381,19 @@ fn tree_growth(
         .forward(&input, 0, &store, &req)
         .map_err(|e| anyhow::anyhow!("growth prefill: {e}"))?;
     sync(device);
-    // Greedy, as the 10-21 real-link runs: a sampled request draws with shared
-    // noise and reads every row whole either way.
+    // Greedy by default, as the 10-21 real-link runs; `SWARM_BENCH_GROW_TEMP`
+    // grows a sampled reply's tree, each row drawn with the shared noise —
+    // ranked on the card for its top k, or read back whole on the host.
+    let temperature: f32 = std::env::var("SWARM_BENCH_GROW_TEMP")
+        .ok()
+        .and_then(|t| t.parse().ok())
+        .unwrap_or(0.0);
     let sampling = swarmllm::types::SamplingParams {
-        temperature: 0.0,
+        temperature,
         ..Default::default()
     };
+    let noise =
+        (temperature > 0.0).then(|| swarmllm::inference::coupled_noise::CoupledNoise::new(0x5A3F));
     let mut grow_once = |seed: &GrownTree, rows: usize| -> anyhow::Result<(f64, GrownTree)> {
         let t = Instant::now();
         let grown = model
@@ -401,7 +410,7 @@ fn tree_growth(
                 },
                 &sampling,
                 &[],
-                None,
+                noise.as_ref(),
                 512,
             )
             .map_err(|e| anyhow::anyhow!("grow: {e}"))?;
@@ -409,7 +418,9 @@ fn tree_growth(
         Ok((t.elapsed().as_secs_f64(), grown))
     };
     let reps = env_usize("SWARM_BENCH_SPEC_REPS", 5);
-    println!("\nTREE GROWTH: {rows} rows, {per_step} a step, after {prompt_tokens} positions");
+    println!(
+        "\nTREE GROWTH: {rows} rows, {per_step} a step, after {prompt_tokens} positions, temperature {temperature}"
+    );
     for (label, seeded) in [("from nothing", false), ("on a seed", true)] {
         let mut best = [f64::MAX; 2];
         for _ in 0..reps {

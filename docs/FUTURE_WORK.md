@@ -78,7 +78,10 @@ speed is what the swarm is for, so split speed for large models is the top track
    10-22: +11-14% over tree rounds on the card rig; its drafter's tree levels are one kernel and
    one CUDA graph since 10-22; on a thin uplink a guard holds its rows down — 5 Mbit 7.44-7.50 vs
    4.73-4.80 tok/s unguarded; copied runs from the conversation give it free depth — a code edit
-   23-24 → 42-47 tok/s; next the real link).
+   23-24 → 42-47 tok/s; on the real TH↔AU link 14-16.5 tok/s with the coder-1.5B; 10-23 a sampled
+   reply ranks on the card and rates its guesses by the shared noise — misses 35 → 24 a 400-token
+   reply; next better guesses: the drafter's size on a far link and the far end's dead draws
+   recycled, `faster_than_local.md` § 6).
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)

@@ -4650,6 +4650,144 @@ finite scores — ids equal the host's ranking, log-probabilities within 1e-4 of
 host's one f32 sum over a vocabulary drops every term below half its last bit; NaN, +inf and nothing
 finite → `NotFinite`; nine followers → `NotTaken`) — red with `SWARMLLM_TREE_TOPK=composed`.
 
+## A sampled row is ranked on the card too — its draw reads only the request's top k (2026-10-23)
+
+**What it replaced.** The card ranking above took the greedy reply's rows off the host, but a
+SAMPLED reply (temperature above 0 — what clients send) draws every guess with the request's
+shared noise (`inference::coupled_noise`), and that draw read the whole row: `StepScores::read`
+skipped the card for any coupled level, so every row came back whole (608 KB at 152K) and was
+scanned on the host three times — the ranking, a copy, and `sample_token_coupled`'s own top-k
+selection. On the real TH↔AU link (coder-1.5B Q8_0 drafter, 400 tokens) a flow call cost 34-43 ms
+sampled against 25-29 greedy — the guesser doing the same work either way. The far end of a
+flowing tree did the same per row (`draw_each_row`: the row copied twice, scanned for
+finiteness, then drawn), and so did the chain guesser per guess.
+
+**Why the top k is enough.** The sampler draws among the row's `top_k` likeliest only
+(`sample_among_top_k`, llama.cpp's chain: top-k shrinks the candidates, then top-p and the draw
+run on what is left), and every API surface sends one — 40 unless the caller names another
+(`api::DEFAULT_TOP_K`). With no penalty to apply first (a flow has none, `flow_possible`), those k
+tokens and their raw scores are ALL the draw reads.
+
+**The rule.** **`sampling::coupled_draw_reads_only_top_k`** is the one answer to "does this draw read
+only the top k" (temperature above 0, a `top_k` below the vocabulary, no penalty) — and
+`draws_among_top_k` is the one answer to which path `sample_token_with_ctx` takes, so the two
+cannot disagree. Where it answers, **`tree_rank::top_k_on_the_card`** (`kernels/tree_rank.cu`'s
+second pair) hands back each row's k likeliest (≤ 64) with log-probability, id and RAW score —
+772 bytes a row — and **`sampling::sample_coupled_from_top_k`** draws from them through
+**`draw_among_candidates`**, the very code `sample_among_top_k` runs after its selection, the
+candidates put in token order as the host's selection leaves them: the same token, not a copy of
+the arithmetic. The selection is a radix select, torch.topk's shape
+(`aten/src/ATen/native/cuda/SortingRadixSelect.cuh`: the same order-keeping float key, alternating
+count buffers; one bit a pass here, 32 block counts): pass 1 finds each 4096-score chunk's exact top
+k and its (max, sum), pass 2 the row's from every chunk's k, ranked by score then id. A tie AT the
+k-th place goes either way — the host's `select_top_k_candidates` breaks it arbitrarily too, and the
+card's takes the tied scores in the order its threads arrive. Either is a valid top k, and the reply
+is drawn from the far end's set alone, so a tie can cost a guess (the guesser and the far end keeping
+different tokens at rank k, worth almost nothing there) but never the reply's distribution.
+
+Paths: a growth's rows (tree rounds and the flow) through **`RowScores::followers`** — one method,
+which also draws a host-read row from its top k (`likeliest_scored`), so the processor and the card
+run the same draw; a chain's guess through `coupled_guess_on_the_card`; a flowing tree's far end
+through **`tree_rank::draw_each_row_on_the_card`**, its rows' keys from
+**`sampling::draws_of_each_row`** (shared with `draw_each_row`), its non-finite refusal kept by one
+summed scalar as the greedy walk on the card checks. NaN/+inf, nothing finite, `top_k` 0 or past
+64, a penalty, or `SWARMLLM_TREE_COUPLED_DRAW=host` → the rows read whole, as before; a kernel
+error warns once and reads them whole. No wire change: a peer on the release draws as it did.
+
+**What a change must keep**: no sampled row read back whole on a card where its draw needs only the
+top k; the draw through `draw_among_candidates`, never a second implementation of top-p or the
+Gumbel draw; candidates in token order before the draw.
+
+**Tests**: `a_coupled_draw_from_the_top_k_is_the_draw_from_the_whole_row` (sampling: five
+temperature/top-k/top-p shapes × 300 positions × three spreads, the k handed over likeliest first)
+and `a_sampled_row_follows_from_its_top_k_as_from_the_whole_row` (draft: the followers equal the
+whole-row path's, log-probabilities and all) — both red with the draw keyed one position off or the
+draw taken among every ranked token; `a_draw_that_reads_more_than_the_top_k_is_not_handed_only_the_top_k`;
+on a card `the_card_ranks_a_sampled_rows_top_k_as_the_host_does` (Qwen, the 65-row seed, Gemma 3's
+262,208, Llama 2's 32K, a tiny vocabulary, tied and suppressed scores, a few finite; the level's
+followers and a chain's guess equal the whole-row draws) and
+`a_flowing_trees_draws_on_the_card_are_its_draws_from_whole_rows` (`tree_rank`) — both red with
+`SWARMLLM_TREE_COUPLED_DRAW=host` (the card path never taken).
+
+## A sampled row's children are rated by the noise the far end draws with (2026-10-23)
+
+**What it replaced.** A sampled tree put the drafter's coupled draw first and rated every other
+child by the drafter's log-probability at the request's temperature (`likeliest_of_ranked`), and the
+tree grows the rows those ratings rank highest. But the far end draws each row as
+`argmax(z/T + g)` with the SAME noise `g` the drafter knows, so a token the drafter likes whose noise
+is low is unlikely to be the draw: the far end sees that low noise too. On the real TH↔AU link a
+sampled flow missed twice as often as a greedy one (32-36 against 14-18 a 400-token reply,
+coder-1.5B Q8_0 drafter), though the drafter is about as often right at 0.7 as at 0 (its draw is the
+far end's 73.3% of the time against greedy's 75.5%).
+
+**The measurement** (`~/swarmllm-ref/spec/{gumbeldump,calib,treesim}.py`, the dumps `gumbeldump_c15-T{07,10}.npz`:
+1,200 positions of Qwen2.5-Coder-7B Q4_K_M replies SAMPLED with the API's chain —
+top-k 40, temperature, top-p 0.9, Gumbel-max — and the coder-1.5B Q8_0 drafter teacher-forced on
+them; per rank, what a rating claims against how often that child IS the draw):
+
+| rule, T = 0.7 | claimed, children 1-6 | hit | mean log P(draw) | best-first tree of 128, tokens a round |
+|---|---|---|---|---|
+| greedy (reference: argmax, plain log-probability) | 0.704 0.119 0.049 0.026 0.017 0.011 | 0.755 0.111 0.041 0.021 0.013 0.012 | −0.858 | 7.19 |
+| sampled, the drafter's probability at T (before) | 0.795 0.159 0.043 0.019 0.010 0.007 | 0.733 0.107 0.046 0.025 0.017 0.012 | −0.965 | 6.15 |
+| sampled, probability at T = 1 | 0.704 0.150 0.052 0.027 0.017 0.012 | (same children) | −0.943 | 6.42 |
+| **sampled, log-softmax(logit + T·g)** | 0.716 0.115 0.051 0.030 0.018 0.013 | 0.733 0.122 0.046 0.026 0.017 0.007 | **−0.883** | **6.90** |
+
+At T = 1.0 (1,200 more positions): before 6.09 tokens a round, after 6.70, greedy 7.19. The
+probability at T over-rated the second child by half and rated the tail at half its worth, so a tree
+grew too few of the alternatives that hold the draw. The scale of the softmax was FITTED, not chosen:
+`log-softmax(s/τ)` over the perturbed score `s = logit/T + g` was best at τ = 1.4 at T = 0.7 and at
+τ = 1.0 at T = 1.0 — τ = 1/T, i.e. `logit + T·g`. It reads as the drafter's logits erring from the
+target's by about a unit-scale Gumbel; under exactly that model the Gumbel-max theorem makes
+`softmax(logit + T·g)` the far end's draw probability, which is what the unit test checks. At T → 0
+it is the greedy rule's plain probability, which is calibrated (a sharper τ = 0.8 fits greedy's
+log-likelihood a little better, −0.926 against −0.955, and grows trees no better: 7.19 both).
+Tried on the same dumps and REFUTED: an online per-token bias learned from the far end's answers
+within a reply (`onlinebias.py`: +η to the target's token, −η to the drafter's wrong pick) — top-1
+0.755 → 0.753 at η 0.5 and worse above (0.717 at 2.0): the drafter's misses depend on the context,
+not on particular tokens.
+
+**On the real link** (`realrate.sh`, 2026-10-23 12:00-12:23 UTC: this node with the coder-7B's shards
+0-3 and the coder-1.5B Q8_0 drafter on the card, far end aa3d1e66 on v0.3.248 at 389-392 ms; ONE
+binary, sampled arms ABBAABBA at T 0.7, 400 tokens × 2 each, greedy at both ends):
+
+| arm | replies | misses a reply (mean) | tok/s (mean) | unqueued only: misses / tok/s |
+|---|---|---|---|---|
+| shared noise (new) | 8 | **23.6** | 12.17 | 17.8 / 13.79 (4) |
+| probability at T (`SWARMLLM_TREE_SAMPLED_RATING=probability`) | 8 | 35.2 | 12.33 | 31.7 / 13.20 (6) |
+| greedy control | 4 | 10.2 | 15.06 | — |
+
+Misses fell a third (44% where the link did not queue) — the offline trees' prediction. Speed moved
+less: the far end (v0.3.248, which still reads every row whole) queued on 3 of the 10 arms, two of
+them new-rule arms (rows a forward cut to 7-9, its queue to 0.7-1.7 s, 9.6-11.3 tok/s), and the
+unqueued gain is +4.5% against the +8% a coverage-bound flow predicts from H 0.965 → 0.883
+(`docs/plans/faster_than_local.md` § 6.1). A rig at 220 ms on one card measured NOTHING here: its
+drafter had no room on the shared card, and a processor drafter runs DSD chains, which have no second
+child (gotcha #941).
+
+**Research.** Gumbel-top-k for a tree's branches is Kool et al. 1903.06059 (sampling without
+replacement); Recursive Speculative Decoding (2402.14160) builds its trees that way with the
+DRAFTER's own noise, and list-level coupling (GLS, 2506.05632) shares noise across K independent
+drafts — neither rates a tree's branches by the TARGET's noise, which is what a coupled flow knows.
+Daliri et al. (2408.07978) give the exact single-draft match probability.
+
+**The rule.** `followers_drawn_from_top_k` is the one place a sampled row becomes followers (card-
+ranked and host-ranked rows alike); past the draw it calls **`followers_rated_by_the_shared_noise`**:
+every ranked token scored `logit + T·g(position, token)`, the drawn token first and rated as the
+likeliest sibling, the rest by that score's log-softmax over the ranked tokens. Greedy rows and rows
+whose draw reads the whole row (penalties, `top_k` 0) keep their rules. The far end draws exactly as
+before, so the reply is the same text either way; no wire change. A/B
+`SWARMLLM_TREE_SAMPLED_RATING=probability`.
+
+**What a change must keep**: the rating of a sampled child is the chance the far end DRAWS it under
+the request's noise, never the drafter's probability alone; the noise read at the follower's own
+position (the one its draw is keyed by).
+
+**Tests**: `a_sampled_rows_children_are_rated_by_the_noise_the_far_end_draws_with` (synthetic rows
+whose target errs by a unit Gumbel: what each child rank claims equals how often it is the draw, at
+T 0.7, 1.0 and 1.3, and the noise reorders children) and
+`a_sampled_row_follows_from_its_top_k_as_from_the_whole_row` (card-ranked and host-ranked rows give
+the same followers, the whole row's draw first).
+
 ## A graph pays only when it is updated — a shape that keeps being rebuilt rests (2026-10-05)
 
 **What was seen.** The 60-second `decode graph` line counts launches that updated every group's

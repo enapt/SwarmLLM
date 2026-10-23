@@ -182,6 +182,142 @@ default (#144, § "Decided"): no design may need a user to hold a whole model, e
 7. **#133** (the chunked prompt pass shipped as #171 in v0.3.234; left: pieces chained between two
    peers for a pass that does not keep its prompt), then the persistent stream by default.
 
+## 5. Where the flow stands (2026-10-23), and what is left
+
+The flow (#134 (b), v0.3.248) runs the split a round trip and nothing else: **tok/s ≈ E / P**, E
+the tokens its live rows get right per round trip, P the round trip. On TH↔AU (P ≈ 430 ms) E is
+~6.5, 14-16.5 tok/s with the coder-1.5B Q8_0 drafter (`docs/invariants/scheduling.md` § "A tree
+that flows"). Rows, levels and the live budget do not move E (E grows ~log in the rows; the sweep
+found no knob beating the default). So the levers are E's quality and P.
+
+**E — measured and built 2026-10-23** (`docs/invariants/inference.md`):
+- A sampled reply's guesser read every row whole (608 KB each): drafting 41-48 ms a forward against
+  greedy's 24-26 on the real link. Ranked on the card now (top-k radix select): 24-28 ms.
+- A sampled tree rated its alternatives by the drafter's probability at T, ignoring the noise the far
+  end draws with: second child over-rated by half, tail at half its worth, misses ~2× greedy's.
+  Rated by `logit + T·g` now (fitted, calibrated at T 0.7 and 1.0): trees of 128 grow 6.90 tokens a
+  round against 6.15 offline (greedy 7.19).
+- Refuted offline: an online per-token bias from the far end's answers (no gain, worse when strong).
+
+**E — what is left, by evidence:**
+1. *A better drafter.* Agreement is what E is made of (rank-0 hit 0.755 for coder-1.5B vs the 7B;
+   a tree's E ≈ the run a spine survives, ~1/(1−α) plus what branches rescue). The 1.5B over the
+   0.5B gave +6% on the real link (16.46 vs 15.57) with misses 10-11 vs 17-19. For the targets users
+   split (32B-72B) a 1.5B-7B drafter is allowed (`DRAFTER_MAX_FRACTION` 4) and fits beside the head.
+2. *A drafter fed the target's own state — trained ONLINE from the far end's answers* (our design,
+   not published as such): the requester computes the target's split-layer state for every row it
+   sends, and the far end's draw for that row comes back — a labelled example per row, ~12K a
+   400-token reply, for free. A small head (a tuned-lens translator, Belrose 2303.08112, or a
+   steering vector into the drafter, 2511.09844 — +22-35% accepted tokens there) learned on that
+   stream needs no download and no full copy. **Why the split layer and not the top**: a flow's
+   drafter grows rows far past the walk, and any state from the far end (its top layer, an MTP
+   head's drafts, `large_model_splits.md` build-order step 4) reaches the requester a round trip
+   after the row it describes — by then the tree has grown beyond it, so it informs only the first
+   step past the walk. The split layer's state exists for EVERY row the moment this node's half has
+   run it, the deepest guesses included: the one piece of the target a flow can use where its tree
+   actually grows. Unmeasured: how well the split layer predicts the
+   next token at all (no published top-1 at ~50% depth). **The literature lowers the ceiling**
+   (searched 2026-10-23): SD² (2511.09844) taps layers 3, L/2 and L−2 into a FULLY fine-tuned
+   drafter and gains +8-10% block efficiency over a 0.6B drafter, +4% over a 1B (+38% only over a
+   160M one); a stock model's mid-depth exit is near useless (LayerSkip 2404.16710: Llama3-8B at
+   layer 16, HumanEval 0); online distillation (2310.07177) gained most for weak drafters. Against
+   our 75.5%-agreeing 1.5B, expect a few points. First step, only if nothing better is open: dump
+   the split-layer state and the target's token from our engine, fit an affine map + the target's
+   norm and head by ridge regression, and measure held-out top-1 and the mix with the drafter's top
+   k — **stop if the head alone is under ~40% or the mix under ~78%.**
+3. *Ruled out for now:* PARD-style parallel drafting (2504.18583) makes drafting cheaper, and the
+   requester's drafting is not what binds E ("a cheaper requester grows more rows, not more reply");
+   EAGLE-3 heads need the TOP layer's state, which is a round trip away, and none exist for Qwen2.5.
+
+**P:** the round trip is geography. Near chains (Stage 3, v0.3.247) run the loop among close peers
+when they hold the model; detour routing (#327: TH↔AU crosses Los Angeles, ~390 ms against ~185 ms
+direct) needs a well-placed peer the swarm does not have yet.
+
+## 6. Past the published methods: what this system alone can do (2026-10-23)
+
+Published speculative decoding assumes one machine holds the target. Ours never does, and that
+changes what is possible as well as what is not. Each item says what it rests on and what decides it.
+
+**6.1 The law that bounds E, and what it rules out.** A best-first tree of N rows covers the paths
+whose total surprise to the target is about ln N, so **E ≈ 1 + ln(N) / H**, H the target's mean
+surprise (nats) at the guesser's ratings. It fits the offline trees: greedy H 0.858, N 128 → 6.65
+(simulated 7.19); sampled before/after the shared-noise ratings H 0.965/0.883 → 6.03/6.50 (simulated
+6.15/6.90). Doubling E takes N squared (16K rows a round trip — no uplink carries that) or H halved.
+**Only guesses written by something close to the target halve H.** Every design below is judged by
+which of the two it moves.
+
+E/P itself is Little's law — the reply's rows in flight are its speed times the round trip — so it
+binds only where the tree cannot cover more. Two caps meet: **coverage** `tok/s ≤ D(N)/P`, and
+**rows** `tok/s ≤ R·D(N)/N` — each token of the reply costs the N/D rows grown around it, R the rows
+a second this node sends. On TH↔AU (R ≈ 24 rows / 54 ms ≈ 440, N 128, H 0.88, D 6.5) they are 15
+and 23 tok/s: coverage binds, which is why a cheaper requester ran more forwards and no more reply,
+and why 256 or 448 live rows did not pay (their D +0.8 is spent on rows the uplink and a .248 far
+end, reading every row whole, must carry). The shared-noise ratings (H 0.965 → 0.883) predicted +8%
+coverage and measured +4.5% unqueued with misses down a third (`docs/invariants/inference.md`). A
+real-link reply's time is all this node's own work but 3-7 s of waiting in 26-30 s (`realrate.sh`
+breakdown) — busy is not bound: the drafter grows whenever the budget lets it.
+
+**6.2 The far end's lead cannot shorten a miss.** The far end learns the true token half a round
+trip before this node, but every guess must pass this node's half before the far end can check it,
+and the far end cannot compute that half. So no protocol where the far end only reorders, redraws
+or re-ranks recovers a miss's round trip — it costs P whatever the far end does (checked case by
+case: far-end drafting, far-end top-feature drafting à la EAGLE, transplanting a sibling row's
+state). Two exits exist: a cycle that leaves this node out (near chains), or a far end that can
+GUESS without this node's half — the target's exact tail fed an approximation of the head (6.6).
+
+**6.3 The far end writes 30× more of the target than the reply keeps — recycle it.** A flow draws
+EVERY row it is sent: ~12K draws for a 400-token reply, 97% of them on branches that died. Each is
+the target's own next token in a context one alternative away from the true one, and because the
+noise is keyed by POSITION, a dead branch draws with exactly the noise the live one will — so where
+the target's two distributions agree at the draw's margin, the dead branch's draws ARE the live
+branch's. At a miss, the dead spine's draws are a target-written continuation that arrives in the
+same answers that reveal the miss. Prior art recycles the target's output distributions (Token
+Recycling 2408.08696, Lookahead's n-gram pool 2402.02057) or its hidden states at rejected positions
+as context for a TRAINED drafter (Carryover Drafting 2609.14717: +6.5-14.7% accepted length; ReTrace
+2608.29748; Lyanna 2602.21224) — Carryover leaves trees as future work. None has coupled draws, which
+make a dead branch's TOKENS the live branch's, untrained, and a flow gets them for free. **Decides it**: `~/swarmllm-ref/spec/counterfactual.py` — at a spine miss, how often the
+dead branch's draw is the true next token where the drafter's re-rooted draw is not (rescue), and
+how deep the dead run stays right.
+
+**6.4 In a flow, the requester's card is worth more as drafter room than as a stage.** Speed is
+set by the two caps of 6.1: holding a stage moves neither (it only decides who covers those layers),
+while a bigger drafter lowers H — raising D and both caps — and costs R, which lowers the rows cap
+alone. Coverage binds today (15 against 23 tok/s), so a drafter whose call costs ~1.5× (the 3B Q8_0
+against the 1.5B's 27 ms for 3 levels: ~67 ms a forward, R ≈ 360) still pays where it lowers H: IF
+the 3B's H were 0.7, N 128 would sit at ~18 (coverage) / ~22 (rows) — +22%. H is the unknown. The `DRAFTER_MAX_FRACTION` cap (sized for local
+speculation, where the drafter's time IS the cost) is then the wrong bound on a far link. Where the
+requester's card cannot hold the bigger drafter, a peer on its LAN can run it (3 ms away: drafting
+as a near service). **Decides it**: the drafter-size curve (0.5B/1.5B/3B against the 7B,
+`gumbeldump.py` + `treesim.py`: H and D at N 64/128), then the 3B's call on the card.
+
+**6.5 Place for the CYCLE, not the path.** Petals routes a chain by its path latency; a flow's P is
+the cycle head → … → tail → whoever drafts, and the drafter must sit in it. When the requester is
+far from every stage, the shortest cycle leaves it out (near chains generalise this: drafter and
+head together, the requester a client). When stages can be placed, choose the assignment of layer
+ranges to peers that minimises the cycle (a travelling-salesman order, not a shortest path).
+
+**6.6 The far end as the guesser: the exact tail on an approximate head.** The only way past 6.2's
+round trip short of a near chain: the far end approximates the head half's state for a token it
+has just drawn (from the token's embedding and the EXACT states it already holds for the past),
+runs its exact tail and draws — a guess of near-target quality made without this node — and this
+node checks behind it. Prior art drafts with the target's FIRST layers (Kangaroo, LayerSkip, the
+pipelined early exits of PPSD 2509.19368 and SPD 2605.30852) or a head on the TOP state (EAGLE);
+none replaces the first half and keeps the exact second half (searched 2026-10-23), because none
+had the second half on another machine. Against it, beyond early layers mattering most (layer-pruning
+results) and a trained approximator per model: **it is dominated at both ends of the requester's
+share.** Where this node holds FEW layers the approximation is easy — but then the far side holding
+those few layers too is a near chain, exact and without this node's round trip; where it holds MANY
+(and a five-way split leaves the tail a fifth) the approximation is poor. It can win only in the
+middle, where this node's layers are needed for coverage and are few enough to mimic. **Parked**;
+the first cheap test, if ever, is a ridge map fitted online on the states a flow already delivers,
+on the 1.5B as a stand-in target.
+
+**6.7 Every flow labels the drafter's mistakes — train it.** A flow returns the target's draw for
+every row, the dead ones included: ~12K (context, target token) pairs a reply. A drafter LoRA
+distilled on them (DistillSpec 2310.08461: +10-45% acceptance; Online SD 2310.07177) adapts to the
+user's target AND domain on the user's own machine, no data leaving it. The crude form — a
+per-token bias — was refuted (§ 5); a LoRA is not that. Needs a training loop on the card.
+
 ## Sources
 
 Petals 2312.08361 · Pope et al. 2211.05102 · StagFormer 2501.15665 · Layer
