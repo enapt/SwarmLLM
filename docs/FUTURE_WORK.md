@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #327**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #328**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2067,7 +2067,13 @@ advances E (~6.5 tokens) a round trip (`docs/invariants/scheduling.md` § "A tre
 REAL link). What is left on a long link is E itself. **The drafter on the card, measured the same
 day:** Qwen2.5-Coder-1.5B Q8_0 16.46 tok/s (10-11 misses a 400-token reply), the 0.5B Q8_0 15.57
 (17-19), the 0.5B fp16 13.98, the coder 0.5B 12.06 (39-41). `largest_that_can_draft` already
-ranks them in that order, so a node holding the 1.5B runs the winner. Left: the choice on a
+ranks them in that order, so a node holding the 1.5B runs the winner. **Built 2026-10-23: the flow
+is the default from 150 ms** (`dsd_tree::FLOW_LEAST_ROUND_TRIP_MS`; tree rounds keep 300). The
+300 ms line was the rounds', and the flow inherited it, so links of 150-300 ms — most between
+continents — took the chain stream; on the one-card rig the flow beat it 1.19× at 150 ms, 1.42× at
+220, 1.48× at 300, tied at 120 and lost 0.94× at 100 (`docs/invariants/scheduling.md` § "A tree
+that flows", the flow's distance line). Owed: a real link under 300 ms with a card at the far end.
+Left: the choice on a
 PROCESSOR (unmeasured; the Leviathan estimate put a 0.5B ~7% ahead there), a code prompt (the
 coder drafters on code text), copied runs, a drafter fed by the model's state.
 Left of the level: a whole drafter call
@@ -2930,6 +2936,20 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   (5 s) already banked 12×; replace it with load time versus the expected processor cost over
   the next turns only with both figures measured on a machine where they differ from the dev
   laptop (a first attempt recorded processor cold starts and was reverted).
+- **#327 — Route a split's far hop through a peer with a shorter path (detour routing)**
+  (2026-10-23). A flow advances E tokens a round trip, so its speed scales with the round trip,
+  and the internet's own route is not always the short one. TH↔AU, the split this project
+  measures on, is ~400 ms because True (Thailand) and TPG (Australia) meet in Los Angeles: traced
+  Chiang Mai → Bangkok → Cogent LAX (211 ms) → Sydney → Melbourne, while from the same machine a
+  Melbourne host on another network answers in 185 ms and Singapore in 41 ms. A peer in
+  South-East Asia, or on another Australian network beside the far half, could carry that hop at
+  about half the round trip — roughly 2× on this link (Detour, Savage et al. 1999, and RON,
+  Andersen et al. 2001, found a shorter one-hop detour for a large share of internet paths). What
+  it needs: peers' measured round trips to each other (a network coordinate cannot show it — a
+  detour is exactly where the triangle inequality fails), a relayed tensor forward that stays
+  sealed to its destination, and the relay's bandwidth asked for, not taken (~20 Mbit/s each way
+  for a flowing 7B). Trigger: a peer that would shorten a split's hop by ≥ 30%; today's swarm has
+  none (its Melbourne peers are all on TPG, its Thai peers on True, the rest in Europe).
 
 ## Decided — not doing
 

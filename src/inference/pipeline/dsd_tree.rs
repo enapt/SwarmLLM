@@ -56,21 +56,55 @@ use crate::inference::draft_tree::{
 /// tok/s against the chain stream's 47.6 at 20 ms with the drafter on a card.
 /// Sizing the regrow ([`TreeRounds::grow_size`]) brings that to 41.0. Unknown
 /// is short: the chain stream was measured on every link it runs on.
+///
+/// `flows`: this reply's tree would FLOW (`dsd_flow::flow_possible` on its
+/// stream shape), which pays over a shorter link than tree rounds do — the
+/// line is [`least_round_trip_ms`].
 pub(super) fn trees_wanted(
     every_segment_on_a_card: bool,
     drafter_on_a_card: bool,
     farthest_round_trip_ms: Option<u32>,
+    flows: bool,
 ) -> bool {
     trees_wanted_given(
         std::env::var("SWARMLLM_DRAFT_TREES").ok().as_deref(),
         every_segment_on_a_card,
         drafter_on_a_card,
         farthest_round_trip_ms,
+        flows,
     )
 }
 
-/// The shortest round trip to the farthest peer segment at which trees are
-/// the default. Between ~150 and ~400 ms the schedule model puts tree rounds
+/// The shortest round trip to the farthest peer segment at which a tree that
+/// FLOWS is the default. The flow pays the round trip and nothing else, so it
+/// keeps its lead over the chain stream well inside the tree rounds' line: on
+/// the rig (2026-10-23, `flow318.sh`, a 7B split over QUIC with every packet
+/// delayed, both halves AND the 0.5B Q8_0 drafter on one card — which costs
+/// the flow's many rows more than the stream's few, so the field leans further
+/// its way) the flow ran 19.4 tok/s against the chain stream's 16.3 at 150 ms,
+/// 16.5 against 11.7 at 220 and 12.9 against 8.7 at 300, four warm 400-token
+/// replies an arm, arms alternating. Most links between continents are 150-300
+/// ms (this machine to Europe ~206-236), and they took the stream.
+pub(super) const FLOW_LEAST_ROUND_TRIP_MS: u32 = 150;
+
+/// The line a reply's trees are the default from: the flow's where its tree
+/// would flow, the tree rounds' otherwise — a peer without the flow's feature
+/// bit gets the rounds, which lose to the stream under 300 ms.
+pub(super) fn least_round_trip_ms(flows: bool) -> u32 {
+    if flows {
+        FLOW_LEAST_ROUND_TRIP_MS
+    } else {
+        TREES_LEAST_ROUND_TRIP_MS
+    }
+}
+
+// The flow's line is the shorter one: a flow pays the round trip alone, tree
+// rounds pay it plus a regrow per check.
+const _: () = assert!(FLOW_LEAST_ROUND_TRIP_MS < TREES_LEAST_ROUND_TRIP_MS);
+
+/// The shortest round trip to the farthest peer segment at which tree ROUNDS
+/// are the default (a tree that flows has its own, shorter line:
+/// [`FLOW_LEAST_ROUND_TRIP_MS`]). Between ~150 and ~400 ms the schedule model puts tree rounds
 /// within its own error of the chain stream (−6% at 300 ms, against a chain
 /// stream it prices 25-50% fast on a long link, where it leaves out each
 /// chunk's fixed cost and a restart's thrown-away work). So the line is at
@@ -83,6 +117,7 @@ fn trees_wanted_given(
     every_segment_on_a_card: bool,
     drafter_on_a_card: bool,
     farthest_round_trip_ms: Option<u32>,
+    flows: bool,
 ) -> bool {
     match setting.map(str::trim) {
         Some("1") => true,
@@ -90,7 +125,7 @@ fn trees_wanted_given(
         _ => {
             every_segment_on_a_card
                 && drafter_on_a_card
-                && farthest_round_trip_ms.is_some_and(|ms| ms >= TREES_LEAST_ROUND_TRIP_MS)
+                && farthest_round_trip_ms.is_some_and(|ms| ms >= least_round_trip_ms(flows))
         }
     }
 }
@@ -640,13 +675,15 @@ mod tests {
     /// leaves the choice to the plan.
     #[test]
     fn trees_are_wanted_on_cards_unless_the_setting_says_otherwise() {
-        assert!(trees_wanted_given(None, true, true, FAR));
-        assert!(!trees_wanted_given(None, false, true, FAR));
-        assert!(trees_wanted_given(Some("1"), false, false, None));
-        assert!(trees_wanted_given(Some(" 1 "), false, false, None));
-        assert!(!trees_wanted_given(Some("0"), true, true, FAR));
-        assert!(trees_wanted_given(Some("yes"), true, true, FAR));
-        assert!(!trees_wanted_given(Some("yes"), false, true, FAR));
+        for flows in [false, true] {
+            assert!(trees_wanted_given(None, true, true, FAR, flows));
+            assert!(!trees_wanted_given(None, false, true, FAR, flows));
+            assert!(trees_wanted_given(Some("1"), false, false, None, flows));
+            assert!(trees_wanted_given(Some(" 1 "), false, false, None, flows));
+            assert!(!trees_wanted_given(Some("0"), true, true, FAR, flows));
+            assert!(trees_wanted_given(Some("yes"), true, true, FAR, flows));
+            assert!(!trees_wanted_given(Some("yes"), false, true, FAR, flows));
+        }
     }
 
     /// The segments on cards are not enough: a drafter on the processor
@@ -654,11 +691,13 @@ mod tests {
     /// over 400-token replies on the real link (2026-10-21).
     #[test]
     fn trees_are_not_the_default_where_the_drafter_runs_on_the_processor() {
-        assert!(!trees_wanted_given(None, true, false, FAR));
-        assert!(
-            trees_wanted_given(Some("1"), true, false, FAR),
-            "the switch still forces them"
-        );
+        for flows in [false, true] {
+            assert!(!trees_wanted_given(None, true, false, FAR, flows));
+            assert!(
+                trees_wanted_given(Some("1"), true, false, FAR, flows),
+                "the switch still forces them"
+            );
+        }
     }
 
     /// Cards everywhere are not enough either: over a short link a check
@@ -667,23 +706,66 @@ mod tests {
     /// segment is measured far away, and an unmeasured one is not.
     #[test]
     fn trees_are_the_default_only_over_a_long_measured_link() {
-        assert!(!trees_wanted_given(None, true, true, Some(20)));
+        assert!(!trees_wanted_given(None, true, true, Some(20), false));
         assert!(!trees_wanted_given(
             None,
             true,
             true,
-            Some(TREES_LEAST_ROUND_TRIP_MS - 1)
+            Some(TREES_LEAST_ROUND_TRIP_MS - 1),
+            false
         ));
         assert!(trees_wanted_given(
             None,
             true,
             true,
-            Some(TREES_LEAST_ROUND_TRIP_MS)
+            Some(TREES_LEAST_ROUND_TRIP_MS),
+            false
         ));
-        assert!(!trees_wanted_given(None, true, true, None), "unmeasured");
+        for flows in [false, true] {
+            assert!(
+                !trees_wanted_given(None, true, true, None, flows),
+                "unmeasured"
+            );
+            assert!(
+                trees_wanted_given(Some("1"), true, true, Some(20), flows),
+                "the switch still forces them"
+            );
+        }
+    }
+
+    /// A tree that FLOWS pays over a shorter link than tree rounds: on the rig
+    /// it beat the chain stream at 150, 220 and 300 ms, where the rounds' line
+    /// had handed every one of those links to the stream (2026-10-23). A reply
+    /// whose tree cannot flow keeps the rounds' line.
+    #[test]
+    fn a_tree_that_flows_is_the_default_over_a_shorter_link_than_tree_rounds() {
+        let between = Some(FLOW_LEAST_ROUND_TRIP_MS + 70);
+        assert!(trees_wanted_given(None, true, true, between, true));
         assert!(
-            trees_wanted_given(Some("1"), true, true, Some(20)),
-            "the switch still forces them"
+            !trees_wanted_given(None, true, true, between, false),
+            "rounds keep their own line"
+        );
+        assert!(trees_wanted_given(
+            None,
+            true,
+            true,
+            Some(FLOW_LEAST_ROUND_TRIP_MS),
+            true
+        ));
+        assert!(!trees_wanted_given(
+            None,
+            true,
+            true,
+            Some(FLOW_LEAST_ROUND_TRIP_MS - 1),
+            true
+        ));
+        assert!(
+            !trees_wanted_given(None, false, true, between, true),
+            "a segment off the card still keeps the stream"
+        );
+        assert!(
+            !trees_wanted_given(None, true, false, between, true),
+            "a drafter off the card still keeps the stream"
         );
     }
 

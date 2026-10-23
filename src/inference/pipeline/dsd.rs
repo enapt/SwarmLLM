@@ -421,6 +421,23 @@ impl PipelineExecutor {
             if self.shared_state.model_process_pool.runs_whole_on_the_card(e.model_id()));
         let farthest_round_trip_ms =
             super::farthest_segment_round_trip_ms(&self.shared_state, &self.assignment.segments);
+        // Whether this reply's tree would FLOW (`dsd_flow`): asked BEFORE the
+        // distance line, because the flow pays over a shorter link than tree
+        // rounds (`dsd_tree::least_round_trip_ms`). `SWARMLLM_TREE_FLOW=0`
+        // keeps the tree rounds, and their line.
+        let flow_shape_if_trees = (matches!(&drafter, Drafter::Engine(_))
+            && super::dsd_flow::flow_requested())
+        .then(|| {
+            super::dsd_stream::stream_shape(
+                &self.shared_state,
+                &self.assignment.segments,
+                self.verify_may_chain(),
+            )
+        })
+        .flatten()
+        .filter(|shape| {
+            super::dsd_flow::flow_possible(&self.shared_state, shape, &self.request.sampling_params)
+        });
         let trees_for_this_reply = super::dsd_tree::trees_wanted(
             super::every_segment_runs_on_a_card(
                 &self.shared_state,
@@ -429,6 +446,7 @@ impl PipelineExecutor {
             ),
             drafter_on_card,
             farthest_round_trip_ms,
+            flow_shape_if_trees.is_some(),
         ) && matches!(&drafter, Drafter::Engine(e) if reads_trees(e.model_id()))
             && reads_trees(&self.request.model_id);
         let mut trees = super::dsd_tree::TreeRounds::new();
@@ -450,24 +468,8 @@ impl PipelineExecutor {
         // call and the far end draws every row, instead of a round trip per
         // check. `SWARMLLM_TREE_FLOW=0` keeps the tree rounds.
         if let Drafter::Engine(engine) = &mut drafter {
-            let flow_shape = (trees_from_the_start
-                && super::dsd_flow::flow_requested()
-                && finish_reason.is_empty())
-            .then(|| {
-                super::dsd_stream::stream_shape(
-                    &self.shared_state,
-                    &self.assignment.segments,
-                    self.verify_may_chain(),
-                )
-            })
-            .flatten()
-            .filter(|shape| {
-                super::dsd_flow::flow_possible(
-                    &self.shared_state,
-                    shape,
-                    &self.request.sampling_params,
-                )
-            });
+            let flow_shape =
+                flow_shape_if_trees.filter(|_| trees_from_the_start && finish_reason.is_empty());
             if let Some(shape) = flow_shape {
                 let chained = shape.chained();
                 let flowed = self

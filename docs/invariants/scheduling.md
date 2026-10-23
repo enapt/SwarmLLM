@@ -4969,6 +4969,43 @@ runs the winner where the 1.5B is there. On this card that ranking is right; on 
 unmeasured (FUTURE_WORK #134, device-aware drafter choice). The coder 0.5B lost on this chat
 prompt; a code prompt is unmeasured.
 
+**The flow has its own distance line: 150 ms, not the tree rounds' 300** (2026-10-23,
+`FLOW_LEAST_ROUND_TRIP_MS`). The 300 ms line (`TREES_LEAST_ROUND_TRIP_MS`) was set for tree ROUNDS
+before the flow existed, and the flow inherited it, so every link under 300 ms — most links between
+continents: this machine reaches the Europe peers at 206-236 ms — took the chain stream. Rig:
+`~/swarmllm-318/flow318.sh` (QUIC netns, every packet delayed for the round trip, Qwen2.5-Coder-7B
+Q4_K_M split 0-3 | 4-7, both halves AND the 0.5B Q8_0 drafter on this one RTX 3070 Laptop), the
+main build `e8e649d0`'s code (`~/swarmllm-318/f2/swarmllm`), arms by env only —
+`SWARMLLM_DRAFT_TREES=1` (the flow, forced past the line) against `=0` (the chain stream) —
+alternating flow, stream, flow, stream; 400-token greedy replies, the first of each node start left
+out (it carries the load), so four warm replies an arm (outputs `~/swarmllm-318/flowgate{100,120,150,220,300}/`,
+logs `flowgate.out`, `flowgate2.out`; Windows up 0.7-1.2 h):
+
+| round trip | flow tok/s | chain stream tok/s | flow ÷ stream | flow waiting a reply |
+|---|---|---|---|---|
+| 100 ms | 19.44-21.00 (20.5) | 21.76-21.86 (21.8) | 0.94 | 0-0.1 s |
+| 120 ms | 18.97-21.81 (20.0) | 18.99-19.31 (19.2) | 1.04 | 0-0.08 s |
+| 150 ms | 18.85-20.04 (19.4) | 16.24-16.29 (16.3) | **1.19** | 0-0.15 s |
+| 220 ms | 14.88-18.92 (16.5) | 11.60-11.69 (11.7) | **1.42** | 0.36-0.68 s |
+| 300 ms | 12.56-13.28 (12.9) | 8.65-8.67 (8.7) | **1.48** | 0.7-2.2 s |
+
+The chain stream fits `2.78 tokens ÷ (round trip + 21 ms)` at every point. Below ~220 ms the flow
+stops waiting and is bound by this node's own work (drafting + its half, ~50-56 ms a forward on the
+shared card), near 20 tok/s: so the two cross at ~110-120 ms here. **The rig leans against the
+flow**: the far half shares this card, and the flow sends ~22 rows a forward against the stream's
+few, so in the field — the far half on its own machine, the requester's forward ~30 ms (the real
+link's drafter table) — the flow's ceiling is higher and the crossing nearer. The line is put where
+the flow measured a clear win on this rig, 150 ms, not at the tie. **A reply whose tree cannot flow
+keeps the rounds' line** (`dsd_tree::least_round_trip_ms`): a peer without bit 31 gets tree rounds,
+which lose to the stream under 300 ms. So the decode loop asks `flow_possible` on the stream shape
+BEFORE the line (`dsd::…`, `flow_shape_if_trees`); a flow that fails mid-reply still finishes in
+tree rounds, at any distance. Test: `a_tree_that_flows_is_the_default_over_a_shorter_link_than_tree_rounds`
+(red with the flow's line removed). **Mechanism**, the CUDA build of this change with no switch set
+(`flowmech.out`, 200-token replies): at 220 ms the warm replies flowed (`a tree that flowed is
+complete`, `farthest_round_trip_ms=Some(221)`, 14.95-15.61 tok/s) and at 120 ms they streamed
+(18.27-18.50); each start's first request streamed at both, its drafter not yet on the card
+(`drafter_on_card=false`).
+
 **What a change must keep.** The draw at a row must not depend on the forward that carried it
 (noise by position, the row's own ancestors in its mask); the three trees change only by the
 ordered ops; a rebase's forward goes out at once, before any proposal, so path + kept never

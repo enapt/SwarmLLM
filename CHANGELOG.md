@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+**Splits between continents keep their guesses flowing on more links: from 150 ms, not only past
+300 ms.** The fastest way to run a split across a long link — guesses streamed to the far computer
+as they are made, each answered as it arrives — was switched on only where the far computer was at
+least 300 ms away, a line drawn for an older method before this one existed. Most links between
+continents are shorter than that (from Thailand, Europe is about 210-240 ms away), so they used a
+slower method. On a test split of a 7B model with every part on one graphics card, the flowing
+guesses ran 1.19× as fast at 150 ms, 1.42× at 220 ms and 1.48× at 300 ms, and tied at 120 ms, so
+they are now used from 150 ms wherever every computer of the split runs a version that can (0.3.248
+or later) and the guessing model is on your graphics card. `SWARMLLM_TREE_FLOW=0` turns it off.
+
 **A split checks its guesses deep into a long conversation up to twice as fast on a graphics
 card.** When a split checks a tree of the small model's guesses, every guess reads the whole
 conversation so far, and that reading ran on code written for the guesses' own small part. The

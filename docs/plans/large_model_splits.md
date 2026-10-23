@@ -484,6 +484,21 @@ trip with the 1.5B against ~6.5. The 20 tok/s target here needs E ≈ 9 a 450 ms
 drafters a node can already fetch fall short. Next on E: a drafter fed by the model's state, or a
 larger drafter where the card has room.
 
+**The flow on shorter links (2026-10-23).** The flow had inherited the tree rounds' 300 ms line,
+so the links most splits between continents cross (150-300 ms; this machine to Europe is
+206-236 ms) took the chain stream. On the one-card rig the flow beat it 1.19× at 150 ms, 1.42× at
+220 and 1.48× at 300, tied at 120 and lost at 100 (0.94×), so it is now the default from 150 ms.
+Below ~220 ms the flow stops waiting and is bound by the requester's own work, ~20 tok/s on the
+shared card: on those links the next factor is the requester's forward (drafter + near half), not E.
+
+**Why this link is slow at all (2026-10-23, a trace).** The TH↔AU round trip is ~400 ms because the
+route goes Chiang Mai → Bangkok → Los Angeles (Cogent, 211 ms) → Sydney → Melbourne: the two ISPs
+(True and TPG) meet in the US. From the same machine a Melbourne host on another network answers in
+185 ms and Singapore in 41 ms. A peer in South-East Asia, or one on another Australian network,
+could relay this split at about half the round trip, and the flow's speed scales with it — but the
+swarm has none today (its Melbourne peers are all on TPG, its Thai peers on True). Filed as
+FUTURE_WORK #327 (detour routing), triggered by the first peer that would shorten a hop by ≥ 30%.
+
 ## Build order (each step ends on a measurement)
 
 1. **Per-pass breakdown.** Per hop and in both directions, record:
