@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [0.3.249-alpha] — 2026-10-24
+
+**A newly started computer now reaches far peers over the faster of its two connection types.**
+Computers in the swarm connect either over QUIC or over TCP, and whichever connection forms first
+is kept. A computer that had just started usually learned about other peers from a list another
+peer sent, and that list could hold only one of a peer's addresses — often its TCP one — because
+each list was cut to the first eight addresses in whatever order they came, and a computer with
+Docker, Tailscale and network cards has twelve. Lists now keep public addresses first and QUIC
+before TCP, and a computer handed several addresses for one peer tries them together, so the
+faster connection wins. It matters for splits across long links: on a real Thailand–Australia
+split of a 7B model, 400-word replies ran 16.7 tokens a second over QUIC against 13.5 over TCP.
+It takes effect as the computers you hear from run this version.
+
+**UPnP now works with routers that give their address in full.** Some home routers (a SKYWORTH
+fibre box among them) describe their port-opening service with a complete web address. The library
+the node used glued that onto the router's address and asked for a page that does not exist, so
+even with UPnP switched on at the router the node logged "no IGD gateway found" and could only be
+reached through a relay. It now reads the address properly: the same router opens both of the
+node's ports. The node looks for the router only when it starts, so after turning UPnP on, restart
+the node — the log line now says so. On Windows with WSL in mirrored mode, the network must be set
+to Private in Windows for the router's answer to reach the node.
+
 **Sampled replies over a long split run faster: each guess costs the guessing model about 40%
 less time.** When a reply is sampled (a temperature above zero, as most chat apps ask), the word
 the model writes is drawn from its few likeliest words only — 40 unless the app asks for another
@@ -53,6 +75,16 @@ families were byte-identical with it on and off). The small guessing model's cal
 (12.7-12.8 ms against 14.3-14.4, 600 tokens in) and a 7B's check of 24 guesses about 4%. Models
 that normalise each head before turning it (Qwen 3, Gemma 3 and 4) keep the old steps.
 `SWARMLLM_HEADS_FIRST=compose` turns it off.
+
+**One slow check early in a long-link reply no longer switches guessing off for ten minutes.** A
+split across a long link learns how long the far computer takes to check its guesses, as a fixed
+cost plus a cost per guess. When one of the first checks of a reply stalled, before the node can
+tell a stall from the link, that estimate could tip to "guessing never pays" — and the node then
+wrote without guesses, and remembered it: on a real Thailand–Australia split of a 7B model the
+next replies ran about 2.4 tokens a second instead of about 13, for up to ten minutes. A check that
+crosses to another computer can never cost less than the round trip there, so the estimate's fixed
+part now starts no lower than the shortest round trip measured to the farthest computer of the
+split, and the same stalled checks leave guessing on.
 
 ## [0.3.248-alpha] — 2026-10-23
 
