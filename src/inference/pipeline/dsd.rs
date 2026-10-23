@@ -143,16 +143,22 @@ impl PipelineExecutor {
             );
             return Ok(None);
         }
+        // A check crossing to a peer costs at least the round trip there: the
+        // floor of the check-cost line (`CheckCost::floor_ms`), read once here
+        // — the trees' distance line below reads it again after the prompt
+        // pass has fed the window.
+        let check_floor_round_trip_ms =
+            super::farthest_segment_round_trip_ms(&self.shared_state, &self.assignment.segments);
         let (mut acceptance, mut check, mut draft_cost, mut gamma_now) = match recalled {
             Some(l) => (
                 l.acceptance,
-                l.check,
+                l.check.on_a_plan(check_floor_round_trip_ms),
                 crate::inference::dsd_controller::RecentMedian::seeded(l.draft_ms_each),
                 l.gamma,
             ),
             None => (
                 AcceptanceEstimate::new(),
-                CheckCost::default(),
+                CheckCost::for_a_plan(check_floor_round_trip_ms),
                 crate::inference::dsd_controller::RecentMedian::default(),
                 initial_gamma,
             ),
@@ -1142,6 +1148,8 @@ impl PipelineExecutor {
             alpha = format_args!("{:.3}", acceptance.alpha()),
             check_fixed_ms = format_args!("{:.1}", check.fit().map_or(0.0, |f| f.0)),
             check_ms_per_position = format_args!("{:.1}", check.fit().map_or(0.0, |f| f.1)),
+            check_floor_ms = ?check.floor_ms().map(f64::round),
+            check_fit_floored = check.fit_is_floored(),
             checks_held_back = check.held_back().saturating_sub(held_back_before),
             draft_ms_each = format_args!("{:.1}", draft_cost.median().unwrap_or(0.0)),
             drafter_on_card,

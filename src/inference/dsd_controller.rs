@@ -59,7 +59,23 @@ pub fn expected_tokens_per_round(alpha: f64, gamma: u32) -> f64 {
 /// sample's influence the same way (Ruckdeschel's clipped RLS, arXiv 1204.3358),
 /// and servers that time their checks take medians over repeats (D-cut, arXiv
 /// 2607.14647). `SWARMLLM_DSD_CHECK_OUTLIERS=keep` fits every check as it came.
-#[derive(Debug, Clone, Default)]
+///
+/// **A check that crosses to a peer costs at least the round trip, and the
+/// line is never fitted below it** ([`Self::floor_ms`]). The hold above
+/// needs [`Self::HOLD_AFTER`] rounds of a fit, so a stall in a request's first
+/// rounds is fitted. On the real TH↔AU link (2026-10-23, `realdelay.sh` arm 2,
+/// the first request of a fresh node) three streamed checks — 3 rows at
+/// ~771 ms, 3 at ~1,529 (the stall), 1 at ~406 — fitted 12.4 ms fixed + 393.1
+/// a position. A line through the origin says guessing never pays, so the
+/// request remembered γ = 0 and the next two 400-token replies stepped aside
+/// to the n-gram loop: 2.58 and 2.17 tok/s, against ~13 for the flow on the
+/// same machines, for up to [`REPROBE_AFTER`]. The other five first requests
+/// of that run fitted 398-409 ms fixed + 3-6 a position. Where the free fit's
+/// intercept is under the floor, the fit is the least-squares line through
+/// `(0, floor)` instead: bounded-variable least squares (Stark & Parker 1995;
+/// with a single bound, the optimum lies on it). It fitted those checks at
+/// 406 + 243 a position, γ = 2.
+#[derive(Debug, Clone)]
 pub struct CheckCost {
     w: f64,
     x: f64,
@@ -72,6 +88,12 @@ pub struct CheckCost {
     held: Option<(u32, f64)>,
     /// Checks ever held back — see [`Self::held_back`].
     held_back: u32,
+    /// The least round trip measured to this request's farthest peer segment
+    /// (`pipeline::farthest_segment_round_trip_ms`); `None` where the plan
+    /// has no peer segment or it is unmeasured. See [`Self::floor_ms`].
+    round_trip_ms: Option<f64>,
+    /// The cheapest check ever recorded, held back or fitted.
+    least_check_ms: Option<f64>,
 }
 
 /// The most [`best_gamma_for_check`] moves γ in one round: far enough to
@@ -86,11 +108,39 @@ impl CheckCost {
     /// Rounds the fit needs before it can call a check an outlier.
     const HOLD_AFTER: u32 = 3;
 
+    /// An empty fit for a plan whose farthest peer segment is
+    /// `farthest_round_trip_ms` away — required, so no speculating path fits
+    /// its checks without the floor ([`Self::floor_ms`]).
+    pub fn for_a_plan(farthest_round_trip_ms: Option<u32>) -> Self {
+        Self {
+            w: 0.0,
+            x: 0.0,
+            y: 0.0,
+            xx: 0.0,
+            xy: 0.0,
+            rounds: 0,
+            held: None,
+            held_back: 0,
+            round_trip_ms: farthest_round_trip_ms.map(f64::from),
+            least_check_ms: None,
+        }
+    }
+
+    /// A fit remembered from an earlier request ([`recall`]), floored by THIS
+    /// request's reading of the same machines.
+    pub fn on_a_plan(mut self, farthest_round_trip_ms: Option<u32>) -> Self {
+        self.round_trip_ms = farthest_round_trip_ms.map(f64::from);
+        self
+    }
+
     pub fn record(&mut self, positions: u32, ms: f64) {
         self.record_with(positions, ms, hold_outlying_checks());
     }
 
     fn record_with(&mut self, positions: u32, ms: f64, hold: bool) {
+        if ms.is_finite() && ms >= 0.0 {
+            self.least_check_ms = Some(self.least_check_ms.map_or(ms, |least| least.min(ms)));
+        }
         if hold && self.rounds >= Self::HOLD_AFTER && self.is_outlier(positions, ms) {
             match self.held.take() {
                 None => {
@@ -135,18 +185,52 @@ impl CheckCost {
     /// slope is 0 until the positions have spread (variance under a quarter of
     /// a position squared) and never negative — a check that reads more cannot
     /// cost less, and a noisy fit saying so must not make long runs look free.
+    /// The fixed part is never under [`Self::floor_ms`].
     pub fn fit(&self) -> Option<(f64, f64)> {
+        self.line().map(|(fixed, slope, _)| (fixed, slope))
+    }
+
+    /// Did the floor move the fit — the free line's fixed part was under it?
+    /// Logged with every request's costs, to show the floor binding.
+    pub fn fit_is_floored(&self) -> bool {
+        self.line().is_some_and(|(_, _, floored)| floored)
+    }
+
+    fn line(&self) -> Option<(f64, f64, bool)> {
         if self.w <= 0.0 {
             return None;
         }
         let mx = self.x / self.w;
         let my = self.y / self.w;
         let var = self.xx / self.w - mx * mx;
+        // The mean of checks is never under the cheapest of them, so the
+        // constant line is never under the floor.
         if var < 0.25 {
-            return Some((my, 0.0));
+            return Some((my, 0.0, false));
         }
         let slope = ((self.xy / self.w - mx * my) / var).max(0.0);
-        Some(((my - slope * mx).max(0.0), slope))
+        let fixed = (my - slope * mx).max(0.0);
+        match self.floor_ms() {
+            // Least squares of `y − floor` on `x` through the origin.
+            Some(floor) if fixed < floor && self.xx > 0.0 => {
+                Some((floor, ((self.xy - floor * self.x) / self.xx).max(0.0), true))
+            }
+            _ => Some((fixed, slope, false)),
+        }
+    }
+
+    /// The least a check can cost: the round trip to the farthest peer it
+    /// crosses to, as its windowed minimum read it — but never more than the
+    /// cheapest check recorded. On the first request of a fresh node
+    /// that reading was 757-809 ms on a 380 ms link (4 of 6 runs, 2026-10-23),
+    /// and a check cannot cost less than what one was measured at.
+    /// `None` without a measured peer: a local check has no floor.
+    pub fn floor_ms(&self) -> Option<f64> {
+        let round_trip = self.round_trip_ms?;
+        Some(
+            self.least_check_ms
+                .map_or(round_trip, |least| round_trip.min(least)),
+        )
     }
 
     /// Predicted cost of a check reading `positions`.
@@ -160,6 +244,14 @@ impl CheckCost {
     /// reports the difference across itself.
     pub fn held_back(&self) -> u32 {
         self.held_back
+    }
+}
+
+/// Tests only: production names its plan's round trip ([`CheckCost::for_a_plan`]).
+#[cfg(test)]
+impl Default for CheckCost {
+    fn default() -> Self {
+        Self::for_a_plan(None)
     }
 }
 
@@ -672,6 +764,71 @@ mod tests {
         after.record_with(2, 55.0, true);
         assert!(after.held.is_none());
         assert!(best_gamma_overall(0.622, &after, 7.2, 3, BEST_GAMMA_MAX) > 0);
+    }
+
+    /// The first request of a fresh node on the real TH↔AU link (2026-10-23,
+    /// `realdelay.sh` arm 2): three streamed checks, the stall second — too
+    /// early for the hold — fitted 12.4 ms + 393.1 a position (these points
+    /// give 12.9 + 393.1), and the zero it remembered sent the next two
+    /// replies to the n-gram loop at ~2.4 tok/s. The plan's round-trip reading
+    /// was then 757 ms, twice the link's 380, so the cheapest check (406) is
+    /// the floor.
+    #[test]
+    fn a_check_is_never_fitted_below_the_round_trip_it_crossed() {
+        let fitted = |round_trip: Option<u32>| {
+            let mut check = CheckCost::for_a_plan(round_trip);
+            for (rows, ms) in [(3, 771.0), (3, 1529.0), (1, 406.0)] {
+                check.record_with(rows, ms, true);
+            }
+            check
+        };
+        let free = fitted(None);
+        let (fixed, slope) = free.fit().unwrap();
+        assert!(fixed < 20.0 && slope > 380.0, "{fixed} + {slope}x");
+        assert!(!free.fit_is_floored());
+        assert_eq!(
+            best_gamma_overall(0.706, &free, 8.6, 4, BEST_GAMMA_MAX),
+            0,
+            "the free line is what the request remembered"
+        );
+
+        let floored = fitted(Some(757));
+        assert_eq!(
+            floored.floor_ms(),
+            Some(406.0),
+            "capped by the cheapest check"
+        );
+        let (fixed, slope) = floored.fit().unwrap();
+        assert_eq!(fixed, 406.0);
+        assert!((200.0..300.0).contains(&slope), "{slope}");
+        assert!(floored.fit_is_floored());
+        assert!(best_gamma_overall(0.706, &floored, 8.6, 4, BEST_GAMMA_MAX) > 0);
+
+        // The link's own reading floors it the same way.
+        let at_the_link = fitted(Some(380));
+        assert_eq!(at_the_link.fit().unwrap().0, 380.0);
+        assert!(best_gamma_overall(0.706, &at_the_link, 8.6, 4, BEST_GAMMA_MAX) > 0);
+
+        // A remembered fit takes the new request's reading.
+        assert_eq!(free.on_a_plan(Some(380)).floor_ms(), Some(380.0));
+    }
+
+    /// Where the line already starts above the round trip, the floor changes
+    /// nothing: a far node checking on its processor, 405 ms + 95 a position
+    /// over a 380 ms link.
+    #[test]
+    fn a_line_above_the_round_trip_is_left_alone() {
+        let mut floored = CheckCost::for_a_plan(Some(380));
+        let mut free = CheckCost::for_a_plan(None);
+        for rows in [1, 3, 5, 2, 4, 1, 3] {
+            let ms = 405.0 + 95.0 * f64::from(rows);
+            floored.record_with(rows, ms, true);
+            free.record_with(rows, ms, true);
+        }
+        assert_eq!(floored.fit(), free.fit());
+        assert!(!floored.fit_is_floored());
+        let (fixed, slope) = floored.fit().unwrap();
+        assert!((fixed - 405.0).abs() < 1e-6 && (slope - 95.0).abs() < 1e-6);
     }
 
     /// A cost that really changed is learned one round late, not never.

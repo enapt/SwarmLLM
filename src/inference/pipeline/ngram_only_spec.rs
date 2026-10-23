@@ -643,7 +643,9 @@ impl PipelineExecutor {
         // half a one-token pass, and guesses kept 59% of the time won nothing
         // (`~/swarmllm-318/guess318.sh`, 10-20).
         let mut guess_gamma = cfg.guesses_per_check();
-        let mut check_cost = crate::inference::dsd_controller::CheckCost::default();
+        let mut check_cost = crate::inference::dsd_controller::CheckCost::for_a_plan(
+            super::farthest_segment_round_trip_ms(&self.shared_state, &self.assignment.segments),
+        );
         let mut guess_acceptance = crate::inference::dsd_controller::AcceptanceEstimate::new();
         let mut waits = GuessWaits::default();
         // SWARM-SPEC L1: pending truncate carries over to the NEXT verify
@@ -934,6 +936,7 @@ impl PipelineExecutor {
             guess_due_ms = ?waits.due_ms.median().map(f64::round),
             guess_bound_ms = ?waits.bound_ms.median().map(f64::round),
             check_fit = ?check_cost.fit().map(|(fixed, per)| (fixed.round(), per.round())),
+            check_fit_floored = check_cost.fit_is_floored(),
             coupled = noise.is_some(),
             payoff_x100 = DIST_SPEC_PAYOFF_X100.load(std::sync::atomic::Ordering::Relaxed),
             ngram_hit_rate = format!(

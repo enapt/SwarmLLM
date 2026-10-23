@@ -182,7 +182,7 @@ State scoped to one attempt (e.g. `engine_drafter::draft_key`) is keyed by the a
 
 ## Speculation that does not pay steps aside — γ = 0 is an answer (2026-09-29)
 
-**`dsd_controller::best_gamma_for_check` may choose zero guesses** (SmartSpec); `recall` / `remember` carry it to the next request. A new speculating path needs a way to stop guessing; the continuous stream remembers `best_gamma_overall`. A remembered zero must not come from ONE stalled check: every check cost goes through `CheckCost::record`, which holds an outlier back a round (#244).
+**`dsd_controller::best_gamma_for_check` may choose zero guesses** (SmartSpec); `recall` / `remember` carry it to the next request. A new speculating path needs a way to stop guessing; the continuous stream remembers `best_gamma_overall`. A remembered zero must not come from ONE stalled check: every check cost goes through `CheckCost::record`, which holds an outlier back a round (#244). **The line's fixed part is never under the round trip to the plan's farthest peer** (`CheckCost::floor_ms`, capped by the cheapest check recorded): a fit is built only by `CheckCost::for_a_plan(farthest_segment_round_trip_ms)` or a recalled one's `on_a_plan` — a stall in a request's first rounds, before the hold can act, fitted a line through the origin and remembered γ = 0 (2026-10-23, TH↔AU, next replies 2.4 tok/s for up to 10 min). Logged `check_floor_ms`, `check_fit_floored`.
 
 → `docs/invariants/scheduling.md` § "Speculation that does not pay steps aside — γ = 0 is an answer (2026-09-29)"
 

@@ -5112,6 +5112,30 @@ stalled request (`DSD: request complete`). The drafter's cost already used a med
 reason (`RecentMedian`); robust RLS bounds one sample's influence the same way (Ruckdeschel,
 arXiv 1204.3358). The stalled request itself stays slow — that is the stall, not the controller.
 
+**The hold cannot act in a request's first rounds, so the line has a floor** (2026-10-23). The hold
+needs `HOLD_AFTER` (3) fitted rounds. On the real TH↔AU link (`~/swarmllm-318/harness/realdelay.sh`
+arm 2, the first request of a fresh node, the drafter not yet on the card) the stream recorded three
+checks: 3 rows at ~771 ms, 3 at ~1,529 (the stall, second) and 1 at ~406. The fit was 12.4 ms +
+393.1 a position (`DSD: request complete`), which made `best_gamma_overall` 0. The next two
+400-token replies logged "guessing did not pay on these machines last time" and ran the n-gram loop
+at 2.58 and 2.17 tok/s, against ~13 for the flow. The other five first requests of that run fitted
+398-409 ms fixed + 3-6 a position.
+
+A check that crosses to a peer costs at least the round trip there, so the fit's fixed part is
+floored by it. `CheckCost::floor_ms` is the least round trip measured to the plan's farthest peer
+segment (`farthest_segment_round_trip_ms`, the window's minimum). It is capped by the cheapest
+check recorded, because that reading was 757-809 ms on a 380 ms link for the first request of a
+fresh node in 4 of 6 arms, and a check cannot cost less than one was measured at. Where the free
+intercept is under the floor, the fit is the weighted least-squares line through `(0, floor)`,
+slope ≥ 0. This is bounded-variable least squares (Stark & Parker 1995): with one bound, the
+optimum lies on it.
+
+Those checks fit 406 + 243 a position, γ = 2; at the link's own 380, 380 + 253, γ = 1. A line
+already above the floor is unchanged (`a_line_above_the_round_trip_is_left_alone`). The constructor
+is the guard: production has no `CheckCost::default()`, only `for_a_plan` and a recalled fit's
+`on_a_plan`, so neither speculating path (`dsd`, `ngram_only_spec`) can fit without the floor. Test:
+`a_check_is_never_fitted_below_the_round_trip_it_crossed`, red with the floor clause removed.
+
 → `docs/plans/split_speculation.md` § "Guessing steps aside where it does not pay"
 
 ## What a peer HOLDS on disk and what it has LOADED are different facts
