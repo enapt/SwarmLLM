@@ -5084,9 +5084,13 @@ against 0.90). Priced on the 3B, refrigerator / a code-writing prompt (23.6 tok/
 
 So on a long link the flow is held by how often the target takes the drafter's second or third
 choice, and no knob, ranking or cheaper call gets that back — only a drafter that agrees with the
-target more often (or one fed the target's own state). On the code-writing prompt the 1.5B put the
-target's choice first more often than the 3B (0.874 against 0.861) and replays faster (25.8 against
-23.6): one prompt of 382 tokens, not yet a rule. A code edit is copied: every drafter 0.998-1.000.
+target more often (or one fed the target's own state). The 3B over the 1.5B holds across ten prompts
+(five chat, five code-writing, 3,720 positions): first choice 0.779 against 0.755 in chat and 0.916
+against 0.902 in code, outside its 8 1.6% against 3.0% and 0.1% against 0.2%, and it replays faster on
+nine of the ten (chat +2-14%, code +1-9%; only the one CSV prompt went to the 1.5B, 25.8 against
+23.6). T 0.85 across the ten: chat +0-4%, code −0.2 to −2.7%, +0.6% on average — not a switch.
+A code edit is copied: every drafter 0.998-1.000. A drafter's flow speed varies more with the
+prompt than with any knob: the 3B replays 10.1 tok/s on a short story and 43.3 on a binary tree.
 
 **The flow has its own distance line: 150 ms, not the tree rounds' 300** (2026-10-23,
 `FLOW_LEAST_ROUND_TRIP_MS`). The 300 ms line (`TREES_LEAST_ROUND_TRIP_MS`) was set for tree ROUNDS
