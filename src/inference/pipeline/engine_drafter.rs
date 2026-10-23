@@ -1348,9 +1348,12 @@ mod tests {
         assert!(!within_reach(&size(u64::MAX), 300, DRAFTER_MAX_FRACTION));
         assert!(
             !within_reach(&size(1), 300, 8),
+            "a small drafter is held to a tighter A/B fraction"
+        );
+        assert!(
+            !within_reach(&size(u64::MAX), 1199, 8),
             "a tighter A/B fraction holds a large drafter too"
         );
-        assert!(!within_reach(&size(u64::MAX), 1199, 8));
         assert!(within_reach(&size(u64::MAX), 1200, 8));
     }
 
