@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #330**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #331**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2971,6 +2971,18 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   mapped too. Port libp2p PR 6459's mapping-state rework at the same time (0.7's fix for a
   "mapping should exist" panic). Trigger: a report of a node unreachable until restarted after a
   router change, or any other reason to touch the vendored copy.
+- **#330 — Move a peer that connected over TCP to QUIC** (2026-10-23). A split runs 23% faster
+  over QUIC (BBR) than TCP (Cubic) on the real TH↔AU link (16.68 against 13.52 tok/s, transport
+  forced per arm; `docs/invariants/network.md` § "One dial per PEER"), but a connection keeps the
+  transport of the dial that won, and libp2p never migrates. Since 0.3.249 peer exchange carries
+  both addresses QUIC first, so this matters only where a node was handed TCP alone (a sender on
+  0.3.248 or older, an inbound dial over TCP). Shape: when the peer's own Identify lists a direct
+  QUIC address and our only direct connection to it is TCP, dial that QUIC address too and move
+  traffic once it has carried an exchange — the vendored request-response ranks a NEWER
+  connection last on purpose (gotcha #353: a fresh connection dead in one direction held a
+  request 480 s), so either it learns that a QUIC connection which answered beats TCP, or the
+  TCP connection is closed while nothing is in flight on it. Trigger: the field still shows TCP
+  splits once the anchor runs 0.3.249.
 
 ## Decided — not doing
 

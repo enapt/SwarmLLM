@@ -709,6 +709,25 @@ the session scratchpad):
   `both_public_addresses_survive_the_cap_quic_first` (the observed 12-address list,
   public QUIC ninth).
 
+**It pays only once the SENDERS run it — and the first sender is the anchor** (2026-10-23,
+the real link after the fix). Fresh harness nodes on main still reached the Melbourne peer
+over TCP in 4 of 6 arms (`realquic.out`): every node's first peer exchange comes from the
+bootstrap anchor, which ran 0.3.247, and its list carried the peer's TCP address alone (its
+own pre-fix cap). The fixed receiver dials what it is handed. QUIC won only where another
+dial (`relay_providers`, from the record's full list) went first. The probe above "passed"
+because its sender was a FIXED node. So the cause clears as peers update — every peer
+within minutes of a release, the anchor when its owner updates it by hand.
+
+**And it is worth 23% on a split**: forcing the transport by bootstrapping from the far peer
+at ONE transport (`BOOT=quic|tcp`, `~/swarmllm-318/harness/realtransport.sh`; one binary,
+arms ABBAABBA, 2 x 400 greedy tokens each, the 7B split TH↔AU at ~390 ms, coder-1.5B Q8_0
+drafter): **QUIC 16.68 tok/s (15.6-18.2), TCP 13.52 (9.5-16.3)**, flow misses lower over QUIC.
+TCP's round-trip reading also came out twice the link (784-794 ms against 391) in 3 of 4
+fresh arms — the ack of the warm-up's ~160 KB prompt forward timed through slow start; QUIC
+read 391-399 in every arm. A connection that landed on TCP stays there: libp2p never
+migrates, and the request-response patch's ranking (fewest unanswered, then answered
+before, then oldest) would never pick a second, newer QUIC connection — FUTURE_WORK #330.
+
 Three rules a new dial site must follow:
 
 - **Read the peer from the LAST `/p2p/` component** (`target_peer_from_address`).

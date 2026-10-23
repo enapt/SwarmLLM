@@ -1129,6 +1129,18 @@ the rig dials TCP. `split_rig.sh` measures QUIC only with `RIG_TRANSPORT=quic` (
 `RIG_NETNS=1`; it drops TCP to the P2P ports so the one connection per peer is QUIC);
 `RIG_LOSS=1%` adds loss. → `docs/invariants/network.md` § "A burst is paced by the link".
 
+### Which transport did a real-link split run on? Forcing one per arm (2026-10-23)
+
+Read it, never assume it: `grep "connection established peer_id=<far peer>" node.log` and its
+`remote_addr` (`/udp/…/quic-v1` or `/tcp/…`). A fresh node's transport to a far peer is decided
+by whichever dial to it goes first — peer exchange, a relay-provider dial, bootstrap — and a
+sender on 0.3.248 or older may list only the TCP address. To FORCE one on the real link, start the
+node with `SWARMLLM_NETWORK_BOOTSTRAP_PEERS=<anchor>,<far peer at ONE transport>`: the bootstrap
+dial goes first and every later dial to a connected peer is refused. ⚠ `network.enable_quic =
+false` does NOT force TCP — it drops only the listener, and the node still dials QUIC. Rig:
+`~/swarmllm-318/harness/flowtransport.sh` arms `BOOT=quic|tcp` (it prints the transport per arm).
+On TH↔AU QUIC ran 16.68 tok/s against TCP 13.52 (`docs/invariants/network.md` § "One dial per PEER").
+
 ## Connection Diagnostics
 
 ### Local Multi-Node Testing
