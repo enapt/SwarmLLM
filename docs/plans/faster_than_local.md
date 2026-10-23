@@ -264,8 +264,23 @@ TH↔AU (`realrate.sh`, `realwide.sh`, 2026-10-23, coder-1.5B Q8_0):
 - **Wider rows did not pay either**: 16 a level (37 rows a call, 21% cheaper a row busy) ran
   15.0-16.2 against 8's 15.6-18.2, waiting MORE (7.6-9.4 s against 4.6-4.9) and growing more rows a
   token. Neither cap alone explains both results; the flow's dynamics (rows killed at each advance,
-  the live budget refilling, misses) are what a model of it must capture next — the decider is a
-  delay knob on this node's call at fixed rows.
+  the live budget refilling, misses) are what a model of it must capture next.
+- **This node's drafting does not bind the flow** (`realdelay.sh`, 2026-10-23, the same binary
+  and guesses, each drafter call made 0 / 12 / 25 ms longer by `SWARMLLM_FAULT_DRAFT_DELAY_MS`,
+  arms ABCCBA, greedy, 400 tokens × 2, coder-1.5B Q8_0, least answer ~400 ms):
+  | Delay | tok/s | Drafting a call | Drafting a reply | Waiting | Forwards | Misses |
+  |---|---|---|---|---|---|---|
+  | 0 ms | 12.44-14.26 (13.22; unqueued 13.77) | 27-31 ms | 15.0-18.4 s | 4.4-8.2 s | 553-627 | 14-17 |
+  | 12 ms | 13.02-13.16 | — | 20.1-21.1 s | 1.1-2.8 s | 435-490 | 12-14 |
+  | 25 ms | 13.01-13.36 (13.19) | 48-50 ms | 21.9-23.2 s | 1.3-2.0 s | 454-470 | 11-16 |
+
+  Nearly doubling the drafter's call cost 0-4%. The flow took it out of its waiting and sent fewer,
+  fuller forwards. So taking the drafter off this node — the far end drafting with the prompt in
+  hand, or a LAN machine as a drafting service (6.4) — would buy at most those few percent; not
+  built. (One d12 arm ran no flow: its 8-token warm-up fitted the check cost as 12 ms fixed + 393 ms a
+  guess and remembered "don't guess" — `dsd_controller`'s round-trip floor, 2026-10-23.) Today's d0
+  ran below the 10-23 morning's 15.6-18.2 at the same settings: the far end queued in every arm
+  (`queue_ms_most` 280-1,130 ms).
 - **The largest swing is the far end**: its queue (v0.3.248 reads every row back whole for its
   draws) took 3 of 10 and 2 of 6 arms to 10-13 tok/s. v0.3.249's far-end card draw shortens each
   row there; the episodes coming and going also point at that machine's own load or the path.
@@ -303,8 +318,8 @@ neither the guesses nor the round trip (it only decides who covers those layers)
 guesses better. `DRAFTER_MAX_FRACTION` (sized for local speculation, where the drafter's time IS the
 cost) refuses a 3B for a 7B. Where the requester's card cannot hold a bigger drafter, a peer on its
 LAN could run it (3 ms away: drafting as a near service) — and would take the drafter's ~65% of
-this node's busy time off its card, a third machine in the flow's pipeline (drafter → head → tail);
-today's LAN peer has no card, and a processor drafter runs DSD chains (gotcha #941). **Measured for the 7B** (2026-10-23,
+this node's busy time off its card, a third machine in the flow's pipeline (drafter → head → tail)
+— but that time does not bind a flow (6.1's delay table: doubling it cost 0-4%); today's LAN peer has no card, and a processor drafter runs DSD chains (gotcha #941). **Measured for the 7B** (2026-10-23,
 1,200 sampled positions each): top-1 agreement 0.646 / 0.755 / 0.774 for the 0.5B / 1.5B / 3B Q8_0;
 best-first trees of 128, tokens a round — greedy 5.08 / 7.19 / 8.16, sampled (shared noise) 4.96 /
 6.90 / 7.89. The 3B's +14% would reach the link as a few percent at most (6.1: speed does not follow

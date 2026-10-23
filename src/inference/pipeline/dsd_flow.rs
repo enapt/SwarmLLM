@@ -394,6 +394,23 @@ fn fault_flow_fail_at() -> Option<u32> {
     })
 }
 
+/// `SWARMLLM_FAULT_DRAFT_DELAY_MS=<ms>`: every drafter call of a flow takes
+/// this much longer, as a costlier drafter's would — the same rows, the same
+/// guesses, only the time. The instrument for "does this node's drafting
+/// bind the flow" (`docs/plans/faster_than_local.md` § 6.1): the slope of
+/// tok/s against it says what taking the drafter off this node could buy.
+/// Unset in production; read once.
+fn fault_draft_delay() -> Option<std::time::Duration> {
+    static D: OnceLock<Option<std::time::Duration>> = OnceLock::new();
+    *D.get_or_init(|| {
+        std::env::var("SWARMLLM_FAULT_DRAFT_DELAY_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&ms| ms > 0)
+            .map(std::time::Duration::from_millis)
+    })
+}
+
 /// Whether the tree rounds may finish a reply whose flow failed: the peers
 /// ANSWERED — refused a forward (a stale reading of a peer's features, a
 /// security review's case) or answered one this node could not use — so a
@@ -841,6 +858,9 @@ impl FlowRun<'_, '_> {
                 exec.request.cancel.clone(),
             )
             .await;
+        if let Some(delay) = fault_draft_delay() {
+            tokio::time::sleep(delay).await;
+        }
         self.drafting_ms += started.elapsed().as_secs_f64() * 1000.0;
         let proposed = match asked {
             Ok(proposed) => proposed,
