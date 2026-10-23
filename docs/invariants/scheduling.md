@@ -5022,6 +5022,35 @@ before, on a card). Tests: `the_largest_small_drafter_within_half_its_target_is_
 **Not done**: a node already holding a smaller drafter keeps it (`drafter_to_acquire` answers
 `Held`) — FUTURE_WORK #331.
 
+**With the 3B the flow keeps three levels of 8 rows and 128 live rows** (2026-10-23 night, the
+real link, round trip 393-400 ms, the same binary, QUIC, greedy chat; a throwaway first arm, then
+ABBAABBA or ABCCBA, 8 replies of 400 tokens an arm; `~/swarmllm-318/harness/realflow{lv8,rows,wide}.sh`).
+The sweep that chose them ran with the 0.5B while the flow still waited; with the 3B it drafts, so
+it was run again. Means a reply; a forward is one drafter call and this node's layers after it:
+
+| arm | tok/s | tokens a forward | drafter ms a forward | near ms a forward | waiting s |
+|---|---|---|---|---|---|
+| **3 levels × 8 rows, live 128** | 15.39-18.27 (17.21-17.77 by run) | 0.90 | 33.1-33.3 | 13.9 | 1.8-2.0 |
+| 2 levels × 8 | 16.69-18.34 (17.42) | 0.75 | 26.7 | 13.2 | 1.6 |
+| 3 × 4 rows | 15.12-17.85 (16.60) | 0.76 | 33.1 | 12.3 | 0 |
+| 3 × 16 rows, live 128 | 15.03-15.90 (15.48) | 1.14 | 43.2 | 16.7 | 4.8 |
+| 3 × 16 rows, live 256 | 13.79-16.87 (15.53) | 1.06 | 48.1 | 18.3 | 0.55 |
+
+A first ABBA read had two levels ahead by 4% (18.33 against 17.68); the longer run did not hold it.
+Half the rows cost the drafter nothing less and walked a sixth less. A level of 16 rows is not
+captured (`cuda_graph::MAX_POSITIONS`, 8) and costs ~10 ms more a call. At 128 live rows it filled
+the budget and waited. At 256 it stopped waiting but paid more a forward than it walked.
+
+*The drafter's call is the model, not the flow's path* (`~/swarmllm-318/harness/drafter3b_levels.sh`,
+`prefill_bench SWARM_BENCH_GROW=<rows>,8`, the 3B Q4_K_M 600 deep, idle card, min of 7, two passes):
+8 rows from nothing (one read of the root) 8.1-8.2 ms, 16 rows 19.2-19.5, 24 rows 30.3-30.4, 32
+rows 41.3-41.4. Each level of 8 rows costs ~11.0 ms, and the flow's three-level call (33.1) is that
+plus ~3. So the flow sits at two bounds at once: its reach, ~7.4 tokens a 434 ms answer, and this
+node's compute, 47 ms a forward for 0.9 tokens. Every knob above trades one for the other.
+**What is left**: a cheaper level (8 rows cost 11.0 ms against one row's 8.1), or a drafter that
+guesses better for what it costs. A smaller model drafting for the 3B (staged drafting) does not
+pay: `docs/plans/split_speculation.md` § "What the literature says".
+
 **The flow has its own distance line: 150 ms, not the tree rounds' 300** (2026-10-23,
 `FLOW_LEAST_ROUND_TRIP_MS`). The 300 ms line (`TREES_LEAST_ROUND_TRIP_MS`) was set for tree ROUNDS
 before the flow existed, and the flow inherited it, so every link under 300 ms — most links between

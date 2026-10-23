@@ -980,6 +980,16 @@ found several that confirm the pieces above, and each names a detail to keep:
 - **Exiting after the head's half without training does not work:** LayerSkip's
   own table has plain Llama2-7B exiting at layer 16 of 32 scoring 0% on
   HumanEval and GSM8K. Every early exit that works trains something.
+- **Staged drafting does not pay here** (2026-10-23; Staged Speculative
+  Decoding 2308.04623, Cascade Speculative Drafting 2312.11462, Hierarchical
+  Speculative Decoding 2510.19705): a still-smaller model drafts for the
+  drafter, which reads that tree in one pass. The papers assume a target many
+  times dearer than its drafter. In the flow the drafter IS the cost. From
+  parts measured on this card: the 0.5B's three levels of 8 rows take 12.7 ms
+  (`docs/invariants/inference.md` § "A tree's context is read by flash
+  attention, in runs"), and one 3B read of those 24 rows ~11-14 ms. That is ~24-27 ms
+  against the 3B's own 30-33, at most a fifth of the drafting. And the 3B can
+  only choose among branches the 0.5B proposed. Not built.
 
 **What bounds the whole approach:** at this link, matching the 4050's own 11
 tok/s needs ~5 tokens per trip, and matching the 3070's 44 needs ~20. Speculation
