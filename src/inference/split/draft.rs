@@ -520,19 +520,17 @@ fn followers_drawn_from_top_k(
     let Some((noise, position)) = draw else {
         return likeliest_of_ranked(ranked, TREE_CHILDREN, None);
     };
-    let k = (sampling.top_k as usize).min(ranked.len());
+    // Only the first `top_k` can ever be drawn, so only they may be followers:
+    // `ranked` holds at least `TREE_CHILDREN`, and below that a token past
+    // `top_k` was a row the far end could never accept (review, 2026-10-23).
+    let drawable = &ranked[..(sampling.top_k as usize).min(ranked.len())];
     let drawn = crate::inference::sampling::sample_coupled_from_top_k(
-        &ranked[..k],
-        sampling,
-        ctx,
-        noise,
-        position,
-        vocab,
+        drawable, sampling, ctx, noise, position, vocab,
     );
     if sampled_rows_rated_by_probability() {
-        return likeliest_of_ranked(ranked, TREE_CHILDREN, Some(drawn));
+        return likeliest_of_ranked(drawable, TREE_CHILDREN, Some(drawn));
     }
-    followers_rated_by_the_shared_noise(ranked, drawn, sampling.temperature, noise, position)
+    followers_rated_by_the_shared_noise(drawable, drawn, sampling.temperature, noise, position)
 }
 
 /// `SWARMLLM_TREE_SAMPLED_RATING=probability`: a sampled row's followers rated
@@ -1450,23 +1448,31 @@ mod tests {
             for pos in 0..200u64 {
                 let drawn =
                     sample_token_coupled(&mut row.clone(), &sampling, &[], &mut ctx, &noise, pos);
+                let drawable = &ranked[..(top_k as usize).min(ranked.len())];
                 let want = if top_k > 0 {
-                    followers_rated_by_the_shared_noise(&ranked, drawn, temperature, &noise, pos)
+                    followers_rated_by_the_shared_noise(drawable, drawn, temperature, &noise, pos)
                 } else {
                     likeliest(&row, temperature, TREE_CHILDREN, Some(drawn))
                 };
                 assert_eq!(want[0].0, drawn);
                 let what = format!("T {temperature}, top_k {top_k}, top_p {top_p}, pos {pos}");
-                assert_eq!(
-                    RowScores::Logits(&row).followers(
-                        &sampling,
-                        Some((&noise, pos)),
-                        Vec::new,
-                        &mut ctx
-                    ),
-                    want,
-                    "read whole: {what}"
+                let followers = RowScores::Logits(&row).followers(
+                    &sampling,
+                    Some((&noise, pos)),
+                    Vec::new,
+                    &mut ctx,
                 );
+                // The far end draws among its top_k alone: a follower past it
+                // is a row that can never be accepted.
+                if top_k > 0 {
+                    assert!(
+                        followers
+                            .iter()
+                            .all(|(t, _)| drawable.iter().any(|c| c.token == *t)),
+                        "a follower outside the top {top_k}: {what}"
+                    );
+                }
+                assert_eq!(followers, want, "read whole: {what}");
                 if top_k > 0 {
                     assert_eq!(
                         RowScores::Candidates {

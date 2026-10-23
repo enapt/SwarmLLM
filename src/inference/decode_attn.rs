@@ -619,14 +619,28 @@ fn auto_past_runs(query_vectors: usize, n_kv_head: usize, sms: usize) -> usize {
 #[cfg(feature = "candle-cuda")]
 fn card_sms(dev: &Device) -> Option<usize> {
     use candle_core::cuda_backend::cudarc::driver::sys::CUdevice_attribute;
-    let Device::Cuda(c) = dev else {
+    // Asked once per card: the count never changes, and the asker is often a
+    // check being recorded as a CUDA graph, where nothing should reach the
+    // driver that need not (gotcha #841's class; review, 2026-10-23).
+    static KNOWN: std::sync::Mutex<Vec<(usize, Option<usize>)>> = std::sync::Mutex::new(Vec::new());
+    let (Device::Cuda(c), candle_core::DeviceLocation::Cuda { gpu_id }) = (dev, dev.location())
+    else {
         return None;
     };
-    c.cuda_stream()
+    let mut known = KNOWN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(&(_, sms)) = known.iter().find(|(card, _)| *card == gpu_id) {
+        return sms;
+    }
+    let sms = c
+        .cuda_stream()
         .context()
         .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
         .ok()
-        .and_then(|n| usize::try_from(n).ok())
+        .and_then(|n| usize::try_from(n).ok());
+    known.push((gpu_id, sms));
+    sms
 }
 
 /// How flash reads a tiled tree's context of `base` positions — `(runs,

@@ -4773,7 +4773,10 @@ Daliri et al. (2408.07978) give the exact single-draft match probability.
 **The rule.** `followers_drawn_from_top_k` is the one place a sampled row becomes followers (card-
 ranked and host-ranked rows alike); past the draw it calls **`followers_rated_by_the_shared_noise`**:
 every ranked token scored `logit + T·g(position, token)`, the drawn token first and rated as the
-likeliest sibling, the rest by that score's log-softmax over the ranked tokens. Greedy rows and rows
+likeliest sibling, the rest by that score's log-softmax over the ranked tokens — over the request's
+`top_k` ONLY. The row is ranked at least `TREE_CHILDREN` (8) deep, and below a `top_k` of 8 the
+tokens past it were rated too, though the far end can never draw one: a tree spent rows on guesses
+it could not keep (pre-release review, 2026-10-23; the reply was never affected). Greedy rows and rows
 whose draw reads the whole row (penalties, `top_k` 0) keep their rules. The far end draws exactly as
 before, so the reply is the same text either way; no wire change. A/B
 `SWARMLLM_TREE_SAMPLED_RATING=probability`.
@@ -4786,7 +4789,8 @@ position (the one its draw is keyed by).
 whose target errs by a unit Gumbel: what each child rank claims equals how often it is the draw, at
 T 0.7, 1.0 and 1.3, and the noise reorders children) and
 `a_sampled_row_follows_from_its_top_k_as_from_the_whole_row` (card-ranked and host-ranked rows give
-the same followers, the whole row's draw first).
+the same followers, the whole row's draw first, and none outside the `top_k` — red at `top_k` 3 with
+the whole ranked list rated).
 
 ## A graph pays only when it is updated — a shape that keeps being rebuilt rests (2026-10-05)
 
