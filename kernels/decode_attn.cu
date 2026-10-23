@@ -595,13 +595,24 @@ TA_ENTRY(tree_attn_tiled_f16kv_d256, 32, 16, 256)
 // kernel's pass 2, in the same order. A tree's rows are batch elements here
 // too (`b * rows` of them), and a chunk a row saw nothing of (max −∞) is
 // skipped.
+//
+// A tree whose context flash attention read (`past_runs` > 0, one K/V batch:
+// `decode_attn::flash_past`) adds each run's normalised output `o_u` and
+// log-sum-exp `L_u` as one more partial: max L_u, sum 1, Σ·v o_u — e^(L_u - M)
+// is that run's Σ e^(s - M). flash's layout: query vector `row * n_rep + r` of
+// KV head `h` — `past_o` [runs, rows·n_rep, n_kv_head, d] half, `past_lse`
+// [runs, n_kv_head, rows·n_rep] — FlashInfer's `merge_state`, the cascade
+// that reads a shared prefix once. A run that read no keys (L = +∞) is skipped.
 extern "C" __global__ void decode_attn_combine_f32(
     const float *__restrict__ partial,
     float *__restrict__ out,
     const int n_kv_head,
     const int n_rep,
     const int d,
-    const int n_chunks
+    const int n_chunks,
+    const __half *__restrict__ past_o,
+    const float *__restrict__ past_lse,
+    const int past_runs
 ) {
     const int bh = blockIdx.x;
     const int n_head = n_kv_head * n_rep;
@@ -610,14 +621,33 @@ extern "C" __global__ void decode_attn_combine_f32(
     const int g = bi * n_kv_head + hh / n_rep;
     const int r = hh % n_rep;
     const int row = d + 2;
+    // flash's query vector and their count (`gridDim.x / n_head` rows).
+    const int sq = bi * n_rep + r;
+    const int n_sq = (gridDim.x / n_head) * n_rep;
+    const int kvh = hh / n_rep;
 
     float big_m = -INFINITY;
     for (int c = 0; c < n_chunks; c++) {
         big_m = fmaxf(big_m, partial[((long long)(g * n_chunks + c) * n_rep + r) * row]);
     }
+    for (int u = 0; u < past_runs; u++) {
+        const float m = past_lse[((long long)u * n_kv_head + kvh) * n_sq + sq];
+        if (isfinite(m)) {
+            big_m = fmaxf(big_m, m);
+        }
+    }
     for (int j = threadIdx.x; j < d; j += blockDim.x) {
         float num = 0.0f;
         float den = 0.0f;
+        for (int u = 0; u < past_runs; u++) {
+            const float m = past_lse[((long long)u * n_kv_head + kvh) * n_sq + sq];
+            if (!isfinite(m)) {
+                continue;
+            }
+            const float w = expf(m - big_m);
+            den += w;
+            num += w * __half2float(past_o[(((long long)u * n_sq + sq) * n_kv_head + kvh) * d + j]);
+        }
         for (int c = 0; c < n_chunks; c++) {
             const float *part = partial + ((long long)(g * n_chunks + c) * n_rep + r) * row;
             const float m = part[0];

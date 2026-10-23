@@ -3779,6 +3779,21 @@ is a near-tie.
 - A llama.cpp update re-copies the headers verbatim and re-reads `launch_mul_mat_q` /
   `mul_mat_q_switch_J` against `swarm_mmq.cuh`.
 
+### Tried and reverted: smaller MMQ tiles for 9-40 rows (2026-10-22)
+
+**The hypothesis.** At 24-32 rows the 7B's Q4_K products ran at ~50% of the card's bandwidth, and
+llama.cpp's Ampere table gives them its largest tile (256 threads, 64-wide), so fewer, fuller blocks
+might leave multiprocessors idle. **Built**: an Ampere entry for Q4_K / Q6_K / Q8_0 at J ≤ 40 — 128
+threads, occupancy 2, I 64 — with a stream-k grid of multiprocessors × resident blocks; nsys confirmed
+it fired (J 24: 128 threads, 140 registers, grid 120). **Measured** (7B near half tree forwards 600
+deep, min of 7, two passes, two builds of one tree; `~/swarmllm-318/small_ab.out`, `smallprof/`): 4 rows
+9.8 → 8.9 ms, 8 rows 10.6-10.7 → 9.8, 16 rows 13.6 → 12.7-12.8, 24 rows 16.0 → 15.8, 32 rows
+18.1-18.6 → 18.9-19.0, 64 rows 27.8-30.1 → 30.8-31.0; the 0.5B's flow call 14.0-14.4 → 13.7-14.3.
+**Verdict: reverted** — it lost at 32 rows and past, and the 24-32 rows a flowing tree checks barely
+moved, so occupancy and tile size are NOT what holds those products at half the bandwidth. A J ≤ 16
+table could keep the 6-9% at 4-16 rows (unbuilt). Next on it: the stall reasons of
+`mul_mat_q<Q4_K, 24>` under ncu (this box needs GPU counters enabled in Windows).
+
 ## A decode step can go to the card as one CUDA graph (2026-09-29; on by default since v0.3.213)
 
 **What.** (Written when it was opt-in via `SWARMLLM_CUDA_OWN_STREAM=1 SWARMLLM_CUDA_GRAPH=1`; both are now on unless set to `0`.) It sends a one-position forward
@@ -4343,7 +4358,10 @@ FlashInfer's query tile (its prefill kernels with a packed custom mask, the shap
 vLLM's tree drafts run). Tensor cores (FlashInfer's `mma` path, llama.cpp's `fattn-mma-f16`)
 would convert the queries to half; a CUDA-core tile keeps every sum in f32, as the kernel above
 does, and the problem is small (24 rows × 7 query heads × 900 keys × 128 a KV head: ~0.3 GFLOP a
-layer) — the cost was the re-reads and the launches, not arithmetic.
+layer) — the cost was the re-reads and the launches, not arithmetic. ⚠ **Corrected 2026-10-23:**
+past ~1,000 keys the tiled kernel IS bound by its CUDA-core arithmetic — 250 µs a call at 24 rows
+1,400 deep, 2.4-2.6 ms at 4,000 — which is why the context now goes to flash's tensor cores
+(§ "A tree's context is read by flash attention, in runs" below).
 
 **The rule.**
 - **`decode_attn::tree_tiles`** decides it: a HALF cache whose rows start on a word (the kernel
@@ -4418,6 +4436,98 @@ kernel read every layer — red with `SWARMLLM_TREE_ATTN_TILED=0`, "read 0 of th
 attention"); `a_tree_call_the_kernel_cannot_take_without_a_mask_fails` (the per-row cap over an
 f32 cache; the half cache's 9 rows are the tiled kernel's); `a_captured_tree_level_reads_as_the_ordinary_one`
 (the captured drafter level, now tiled).
+
+## A tree's context is read by flash attention, in runs (2026-10-23, #134 (b))
+
+**What it replaced.** The tiled kernel above read a tree's whole history: the confirmed context
+(every position before the tree's base, which EVERY row sees whole) and the tree's own rows (which
+each row sees through its visibility bits). Its sums are CUDA-core f32 — fine at a few hundred keys,
+but the work is rows × query heads × keys × head width, and on the op (`tree_context_on_flash_timing`,
+RTX 3070 Laptop, idle) a 7B's heads (28/4, d 128) took 250 µs a call at 24 rows 1,400 deep and
+2.36-2.62 ms at 16-32 rows 4,000 deep (4.7 ms at 64 rows) — so on the 7B's near half a 24-row tree
+forward cost 22.6-22.9 ms 4,000 deep against a chain's 17.3-17.5, and a 64-row one 47-48 against 26.
+
+**Research.** The context half of a tree's attention has no mask: it is plain attention of every row
+over the same keys, exactly the "shared prefix" of FlashInfer's cascade inference — the prefix read
+once by a dense kernel, the per-request suffix by a masked one, the two merged by their log-sum-exp
+(`merge_state`; the same algebra as flash-decoding's split-KV combine). The vendored flash kernel
+(FA2, `_sm80` f16 only) already returns the log-sum-exp per query (`softmax_lse`, natural log, the
+SCALED score), and takes strides for every operand — so the context needs no new kernel, only a new
+call. Two details from its source: (1) a GQA group's query heads can be laid out as ROWS of one KV
+head (FA2's own `seqlenq_ngroups_swapped` for decode), so a block reads its KV head's keys once for
+all of them; (2) `num_splits` is hard-coded 1 in the vendored launcher, so a long context with few
+query vectors would fill few blocks — split the KEYS instead, as flash-decoding does: the context in
+`runs` equal runs, each a "batch element" of the call (`q_batch_stride` 0: every run reads the same
+queries; `k_batch_stride` = a run's length × the row stride), each giving its own partial and
+log-sum-exp, merged with the rest by the combine. A run with no keys would answer +∞ — the combine
+skips any non-finite lse.
+
+**The rule.**
+- **`decode_attn::past_runs`** decides it, per call: `SWARMLLM_TREE_ATTN_PAST=tiled` (or `0`/`off`)
+  is the old path (the A/B), a number 1-16 forces that many runs; unset, flash reads the context of a
+  tiled call whose rows × base × head width reaches **`PAST_FLASH_FROM`** (700,000) in
+  **`auto_past_runs`** runs of at least `PAST_RUN_LEAST` (32) positions. A build without
+  `flash-attn` keeps the tiled kernel.
+- **`auto_past_runs`** = multiprocessors ÷ (KV heads × ⌈query vectors ÷ 128⌉), 1-16: about one of
+  flash's blocks a multiprocessor. A function of the shape and the card, never the context's length —
+  a captured check keeps its allocations as the context grows (an allocation that changes size makes a
+  graph be rebuilt, not updated).
+- **`vendor/candle-flash-attn` `flash_attn_key_runs`** is the call: queries `[1, rows × n_rep, n_kv,
+  d]` f16 (`decode_attn::flash_queries`), keys and values the half cache's own BHSD view narrowed to
+  `runs × run_len` (no copy), non-causal, no window, the layer's soft cap; it answers O `[runs, rows ×
+  n_rep, n_kv, d]` f16 and lse `[runs, n_kv, rows × n_rep]`, both uninitialised (every element
+  written — no memset a capture could not update, § "A decode step goes to the card as CUDA graphs").
+- The tiled kernel reads only `[skip, s_len)` (`skip = runs × run_len`, its base moved down by
+  `skip`), and **`decode_attn_combine_f32`** adds each run as one more partial (m = lse, l = 1, acc =
+  O) before the tiled chunks. With `past_runs = 0` it is the old combine exactly.
+- Queries reach flash in half, as a chain's check on flash does; the tiled kernel keeps f32. Not
+  bit-identical to the tiled path — replies judged against llama.cpp.
+
+**Why the threshold.** Flash is three launches where the tiled kernel alone is one (the queries'
+conversion, flash, the tiled kernel over the rest) and its floor is ~90 µs a call here; on the op, the
+0.5B drafter's heads (14/2, d 64) at 8 rows 600 deep took 74 µs tiled against 89 at the best run
+count, 16 rows 80 against 87, 24 rows 97 against 93; a 7B's 8 rows 600 deep 81 against 82, 16 rows
+101 against 90. The drafter's whole flow call 600 deep was 14.2-14.5 ms tiled against 15.0-15.1 with
+flash at every size, so the line sits between those shapes.
+
+**Measured** (`~/swarmllm-318/fuse_check.sh`, one card build, live node stopped, Windows up 23.2 h,
+min of 7, two passes, arms interleaved; "old" = `SWARMLLM_TREE_ATTN_PAST=tiled
+SWARMLLM_HEADS_FIRST=compose`, "flash" = this alone, "both" = this and § "Q, K and V reach attention
+heads-first in one launch"). *The op* (µs a call, tiled → flash at the run count `auto_past_runs`
+gives): 7B 24 rows 1,400 deep 250 → 117-125, 4,000 deep 2,519 → 241-248; 16 rows 4,000 deep 2,357 →
+133-137; 64 rows 4,000 deep 4,746 → 307. *The 7B's near half* (layers 0-14), ms a tree forward, old →
+flash → both:
+
+| deep | 8 rows | 16 rows | 24 rows | 32 rows | 64 rows |
+|---|---|---|---|---|---|
+| 600 | 10.4-10.6 → 10.6-10.8 → 10.0-10.3 | 13.5 → 12.6-13.1 → 12.4-12.5 | 15.6-15.9 → 14.3-14.7 → 13.7-13.9 | 18.6-18.7 → 16.5 → 15.5 | 29.1-30.1 → 23.5-23.7 → 22.5-22.6 |
+| 4,000 | 12.5-13.0 → 10.8-10.9 → 10.5-10.6 | 18.3-18.7 → 12.7-13.9 → 13.0 | 22.6-22.9 → 14.3-15.6 → 14.7-15.0 | 27.6 → 16.4-17.5 → 16.7-16.8 | 47.4-48.0 → 24.1-26.7 → 25.1 |
+
+A chain of the same width (flash, causal, over the whole cache) took 13.7-13.8 / 16.2-16.4 ms at 24
+rows (600 / 4,000 deep, both): a tree now costs a chain, and past ~1,000 keys less. *The drafter's
+flow call* (0.5B, 24 rows 8 a level, logits ranked where they are): 600 deep 14.1-14.2 → 14.3-14.4 →
+12.7-12.8 ms (the threshold keeps it tiled; the gain is the fusion's), 1,400 deep 15.1-15.2 →
+15.0-15.1 → 13.8-13.9. *The mechanism* (nsys of the drafter's growth 1,400 deep, old against both):
+`flash_fwd_kernel` 48 → 1,728 launches, the tiled kernel's time 64.6 → 16.8 ms of the card's.
+*The flow on the one-card rig* (`flow318c.sh LEN=400`, 385 ms, both halves and the drafter time-slicing
+ONE card, old against both, two passes, warm replies; `~/swarmllm-318/flowfuse.out`): this node's half
+per checked row 1.39-1.95 ms against 1.73-2.79 (`near_ms` / `forwards` / `rows_a_forward`, 15-21 rows a
+forward against 9-18), the drafter 27.0-29.3 ms a forward against 26.9-31.8; the reply's speed,
+9.2-11.6 tok/s against 9.5-11.5, inside the spread its misses make (9-26 a reply in both arms). No
+refusals, no fallbacks, no errors. Every reply of every arm against llama.cpp
+(`score_against_reference.py`, `~/swarmllm-318/flowfuse_score.out`): worst rank 2 everywhere, largest
+logit gap 0.214 with both changes / 0.153 without — near-ties. In the field the far half is another
+machine.
+
+**What a change must keep**: the run count independent of the context's length (captured checks);
+flash's outputs never memset; the combine's skip of a non-finite lse (a run with no keys); every
+run's keys before the tree's base (each row sees the context whole — a run reaching into the tree
+would show a row its siblings).
+
+**Tests**: `cuda_tree_kernel_matches_the_masked_matmul_path` — flash arms at 1, 3, 7 and 16 runs on
+every half-cache shape with base ≥ runs, against the matmul path over the same half-rounded queries
+(abs < 2e-3, rel < 2e-2; worst 1.1e-3 over 52 arms), the entry point's own choice included;
+`tree_context_on_flash_timing` (`#[ignore]`, the op by run count).
 
 ## A tree level's rows are ranked on the card in two launches (2026-10-22, #134 (b))
 

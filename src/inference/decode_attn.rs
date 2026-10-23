@@ -543,6 +543,141 @@ fn tree_tiles(rows: usize, k: &Tensor, v: &Tensor) -> bool {
         })
 }
 
+/// Who reads a tiled tree's context — every position before its base, which
+/// each of its rows sees whole. `SWARMLLM_TREE_ATTN_PAST=tiled` (or `0`,
+/// `off`): the tiled kernel, as before; a number: flash in that many runs
+/// from a run of one position, for an A/B inside one binary; unset: flash in
+/// [`auto_past_runs`] runs of at least [`PAST_RUN_LEAST`], once the call is
+/// [`PAST_FLASH_FROM`] work or more.
+#[cfg(feature = "candle-cuda")]
+#[derive(Clone, Copy, Debug)]
+enum PastReader {
+    Tiled,
+    Runs(usize),
+    Auto,
+}
+
+#[cfg(feature = "candle-cuda")]
+fn past_reader() -> PastReader {
+    static READER: std::sync::OnceLock<PastReader> = std::sync::OnceLock::new();
+    *READER.get_or_init(
+        || match std::env::var("SWARMLLM_TREE_ATTN_PAST").as_deref() {
+            // A build without flash attention has nothing else to read it.
+            _ if !cfg!(feature = "flash-attn") => PastReader::Tiled,
+            Ok("tiled") | Ok("0") | Ok("off") => PastReader::Tiled,
+            Ok(v) => v
+                .parse::<usize>()
+                .ok()
+                .filter(|&n| (1..=PAST_MOST_RUNS).contains(&n))
+                .map_or(PastReader::Auto, PastReader::Runs),
+            Err(_) => PastReader::Auto,
+        },
+    )
+}
+
+/// The fewest context positions a run of flash reads by default: below
+/// `runs` × this the context stays on the tiled kernel. It keeps a run at a
+/// key tile or more (32 positions at head width 128 on Ampere,
+/// `flash_fwd_launch_template.h`).
+#[cfg(feature = "candle-cuda")]
+const PAST_RUN_LEAST: usize = 32;
+
+/// The most runs flash splits a context into.
+#[cfg(feature = "candle-cuda")]
+const PAST_MOST_RUNS: usize = 16;
+
+/// Rows × context positions × head width from which flash reads a tiled
+/// tree's context by default. Below it the tiled kernel alone is as fast or
+/// faster: it is one launch to flash's three (the queries' conversion, flash,
+/// the tiled kernel over the rest), and its CUDA-core arithmetic is small.
+/// Measured on the op (`tree_context_on_flash_timing`, RTX 3070 Laptop,
+/// 2026-10-22): the 0.5B drafter's heads (d 64) 8 rows 600 deep 74 µs tiled
+/// against 89 at best (307k), 16 rows 80 against 87 (614k), 24 rows 97
+/// against 93 (922k), 8 rows 1,400 deep 98 against 90 (717k); a 7B's (d 128)
+/// 8 rows 600 deep 81 against 82 (614k), 16 rows 101 against 90 (1.2M). The
+/// drafter's whole flow call 600 deep was 14.2-14.5 ms tiled against
+/// 15.0-15.1 with flash at every size.
+#[cfg(feature = "candle-cuda")]
+const PAST_FLASH_FROM: usize = 700_000;
+
+/// Runs a context is split into: about one of flash's blocks a
+/// multiprocessor, a block being a KV head × 128 query vectors × one run —
+/// flash-decoding's split, so a tree of a few rows does not leave the card
+/// idle. Measured (`tree_context_on_flash_timing`, 40 multiprocessors): the
+/// best run count put 32-40 blocks on the card at every shape — a 7B's 24
+/// rows (8 blocks a run) 4-8 runs, its 8 rows 8, its 64 rows 2; twice that
+/// was 5-15% slower. A function of the shape and the card only, never of the
+/// context's length: a captured check keeps its allocations as the context
+/// grows (a graph whose allocation changes is rebuilt, not updated).
+#[cfg(feature = "candle-cuda")]
+fn auto_past_runs(query_vectors: usize, n_kv_head: usize, sms: usize) -> usize {
+    let blocks = n_kv_head * query_vectors.div_ceil(128);
+    (sms / blocks.max(1)).clamp(1, PAST_MOST_RUNS)
+}
+
+/// Multiprocessors of the card `dev` is on.
+#[cfg(feature = "candle-cuda")]
+fn card_sms(dev: &Device) -> Option<usize> {
+    use candle_core::cuda_backend::cudarc::driver::sys::CUdevice_attribute;
+    let Device::Cuda(c) = dev else {
+        return None;
+    };
+    c.cuda_stream()
+        .context()
+        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+        .ok()
+        .and_then(|n| usize::try_from(n).ok())
+}
+
+/// How flash reads a tiled tree's context of `base` positions — `(runs,
+/// positions a run)`, covering `runs * run_len <= base`; the tiled kernel
+/// reads the rest of it and the tree (`cuda::PastOnFlash`). `None`: the tiled
+/// kernel reads it all ([`past_reader`]; a call under [`PAST_FLASH_FROM`]; a
+/// context too short for the runs; a build without flash).
+#[cfg(feature = "candle-cuda")]
+fn past_runs(
+    rows: usize,
+    n_kv_head: usize,
+    n_rep: usize,
+    d: usize,
+    base: usize,
+    dev: &Device,
+) -> Option<(usize, usize)> {
+    let (runs, least) = match past_reader() {
+        PastReader::Tiled => return None,
+        PastReader::Runs(n) => (n, 1),
+        PastReader::Auto if rows * base * d < PAST_FLASH_FROM => return None,
+        PastReader::Auto => (
+            auto_past_runs(rows * n_rep, n_kv_head, card_sms(dev)?),
+            PAST_RUN_LEAST,
+        ),
+    };
+    let run_len = base / runs;
+    (run_len >= least).then_some((runs, run_len))
+}
+
+/// A tree's queries as flash reads its context: `q_rows` `[rows, n_head, 1,
+/// d]` f32 → `[1, rows * n_rep, n_kv_head, d]` half, query vector `row * n_rep
+/// + r` of KV head `h` being query head `h * n_rep + r` of `row`. A group's
+/// heads become rows of one head (flash's own `seqlenq_ngroups_swapped` for
+/// decode), so a block reads its KV head's keys once for all of them rather
+/// than once a query head. Flash takes half queries — what a chain's check on
+/// flash takes too (`layers::run_attention`).
+#[cfg(feature = "candle-cuda")]
+fn flash_queries(
+    q_rows: &Tensor,
+    rows: usize,
+    n_kv_head: usize,
+    n_rep: usize,
+    d: usize,
+) -> Result<Tensor> {
+    q_rows
+        .reshape((1, rows, n_kv_head, n_rep, d))?
+        .transpose(2, 3)?
+        .to_dtype(candle_core::DType::F16)?
+        .reshape((1, rows * n_rep, n_kv_head, d))
+}
+
 // A captured tree's forward builds no mask, so the kernel must take every row
 // count a capture may carry (`SplitModel::tree_steps_may_be_captured`).
 const _: () = assert!(crate::inference::cuda_graph::MAX_POSITIONS <= TREE_KERNEL_MOST_ROWS);
@@ -625,6 +760,25 @@ pub(crate) fn gqa_tree_attention_cuda(
             .transpose(1, 2)?
             .contiguous()?
             .reshape((b * rows, n_head, 1, d))?;
+        // The context on flash's tensor cores, the tree's own rows on the
+        // tiled kernel (one K/V batch: a tree is one request's).
+        let flash_runs = past_runs(
+            rows,
+            n_kv_head,
+            n_head / n_kv_head,
+            d,
+            tree_base,
+            q.device(),
+        );
+        let past = match (tiled && b == 1, flash_runs) {
+            (true, Some((runs, run_len))) => Some(cuda::PastOnFlash {
+                q: flash_queries(&q_rows, rows, n_kv_head, n_head / n_kv_head, d)?,
+                runs,
+                run_len,
+            }),
+            _ => None,
+        };
+        let runs = past.as_ref().map_or(0, |p| p.runs);
         let op = cuda::DecodeAttn {
             scale,
             softcap: softcap.unwrap_or(0.0),
@@ -635,6 +789,7 @@ pub(crate) fn gqa_tree_attention_cuda(
                 rows,
                 base: tree_base,
                 tiled,
+                past,
             }),
         };
         let out = q_rows.apply_op3_no_bwd(k, v, &op)?;
@@ -643,14 +798,19 @@ pub(crate) fn gqa_tree_attention_cuda(
         }
         // What a rig greps to know the kernel ran (an A/B whose arms measure
         // alike proves nothing without it).
-        // Once for each kernel.
-        static RAN: [std::sync::Once; 2] = [std::sync::Once::new(), std::sync::Once::new()];
-        RAN[usize::from(tiled)].call_once(|| {
+        // Once for each kernel: per row, tiled, tiled after flash.
+        static RAN: [std::sync::Once; 3] = [
+            std::sync::Once::new(),
+            std::sync::Once::new(),
+            std::sync::Once::new(),
+        ];
+        RAN[usize::from(tiled) + usize::from(runs > 0)].call_once(|| {
             tracing::debug!(
                 target: "swarmllm::inference::decode_attn",
                 rows,
                 s_len,
                 tiled,
+                flash_runs = runs,
                 "a tree's attention runs on the card's tree kernel"
             )
         });
@@ -681,6 +841,24 @@ mod cuda {
         /// Read by the TILED kernel (`tree_attn_tiled_f16kv_*`, a half cache
         /// only — [`super::tree_tiles`]) instead of one block per row.
         pub(super) tiled: bool,
+        /// The context flash attention reads instead ([`super::past_runs`]):
+        /// the tiled kernel then reads only the positions after it.
+        pub(super) past: Option<PastOnFlash>,
+    }
+
+    /// A tree's context on flash attention's tensor cores
+    /// ([`super::past_runs`]): positions `0 .. runs * run_len`, every one
+    /// of them before the tree's base, so every row sees all of them.
+    pub(super) struct PastOnFlash {
+        /// The rows' queries as flash reads them: `[1, rows * n_rep,
+        /// n_kv_head, d]` half — query vector `row * n_rep + r` of each KV
+        /// head, a group's heads as rows (flash's `seqlenq_ngroups_swapped`),
+        /// so one block reads its K/V for all of them.
+        pub(super) q: Tensor,
+        /// Equal runs of the context, one flash batch element (and block) each.
+        pub(super) runs: usize,
+        /// Positions a run.
+        pub(super) run_len: usize,
     }
 
     pub(super) struct DecodeAttn {
@@ -798,24 +976,79 @@ mod cuda {
             if !tiled && !super::CARD_CHUNKS.contains(&chunk) {
                 candle_core::bail!("decode-attention: no kernel for {chunk}-position chunks");
             }
-            let n_chunks = s_len.div_ceil(chunk);
+            // A tree's context on flash: the positions it reads, which the
+            // kernels below skip (their views start after them, the tree's
+            // base counted from there).
+            let past = self.tree.as_ref().and_then(|t| t.past.as_ref());
+            let base = self.tree.as_ref().map_or(0, |t| t.base);
+            let skip = past.map_or(0, |p| p.runs * p.run_len);
+            if let Some(p) = past {
+                if !tiled
+                    || kv_b != 1
+                    || skip == 0
+                    || skip > base
+                    || p.q.dims() != [1, rows * n_rep, n_kv_head, d]
+                {
+                    candle_core::bail!(
+                        "decode-attention: flash reads the context of one tiled tree only \
+                         ({} runs of {} before base {base}, queries {:?})",
+                        p.runs,
+                        p.run_len,
+                        p.q.dims()
+                    );
+                }
+            }
+            let kernel_len = s_len - skip;
+            let n_chunks = kernel_len.div_ceil(chunk);
             // The tiled kernel writes partials only.
             let merged = tiled || n_chunks > 1 || self.combine_one_chunk;
 
+            // Each run's output and log-sum-exp, merged by the combine below.
+            #[cfg(feature = "flash-attn")]
+            let past_out = match past {
+                None => None,
+                Some(p) => {
+                    let (qs, ql) = p.q.storage_and_layout();
+                    let candle_core::Storage::Cuda(qs) = &*qs else {
+                        candle_core::bail!("decode-attention: a tree's flash queries off the card");
+                    };
+                    Some(candle_flash_attn::flash_attn_key_runs(
+                        qs,
+                        ql,
+                        s2,
+                        &l2.narrow(2, 0, skip)?.transpose(1, 2)?,
+                        s3,
+                        &l3.narrow(2, 0, skip)?.transpose(1, 2)?,
+                        p.runs,
+                        self.scale,
+                        (self.softcap > 0.0).then_some(self.softcap),
+                    )?)
+                }
+            };
+            #[cfg(not(feature = "flash-attn"))]
+            let past_out: Option<(
+                candle_core::cuda_backend::cudarc::driver::CudaSlice<half::f16>,
+                candle_core::cuda_backend::cudarc::driver::CudaSlice<f32>,
+            )> = match past {
+                None => None,
+                Some(_) => candle_core::bail!("decode-attention: built without flash attention"),
+            };
+
             let q = s1.as_cuda_slice::<f32>()?.slice(qo..qe);
-            // The cache views start where their layouts say; every read the
-            // kernel makes is within `b` batches × `n_kv_head` heads ×
-            // `s_len` rows of `d` from there, by the strides passed. The
-            // element type picks the entry point: the half cache a card keeps
-            // (`layers::KvStorage::F16`) or the f32 one.
+            // The cache views start where their layouts say (past what flash
+            // read); every read the kernel makes is within `b` batches ×
+            // `n_kv_head` heads × `kernel_len` rows of `d` from there, by the
+            // strides passed. The element type picks the entry point: the half
+            // cache a card keeps (`layers::KvStorage::F16`) or the f32 one.
+            let (k_at, v_at) = (l2.start_offset() + skip * d, l3.start_offset() + skip * d);
             let cache = match (s2.dtype(), s3.dtype()) {
                 (candle_core::DType::F16, candle_core::DType::F16) => CacheViews::F16(
-                    s2.as_cuda_slice::<half::f16>()?.slice(l2.start_offset()..),
-                    s3.as_cuda_slice::<half::f16>()?.slice(l3.start_offset()..),
+                    s2.as_cuda_slice::<half::f16>()?.slice(k_at..),
+                    s3.as_cuda_slice::<half::f16>()?.slice(v_at..),
                 ),
                 (candle_core::DType::F32, candle_core::DType::F32) => CacheViews::F32(
-                    s2.as_cuda_slice::<f32>()?.slice(l2.start_offset()..),
-                    s3.as_cuda_slice::<f32>()?.slice(l3.start_offset()..),
+                    s2.as_cuda_slice::<f32>()?.slice(k_at..),
+                    s3.as_cuda_slice::<f32>()?.slice(v_at..),
                 ),
                 (kd, vd) => candle_core::bail!("decode-attention: a {kd:?} K beside a {vd:?} V"),
             };
@@ -833,7 +1066,7 @@ mod cuda {
 
             let (k_sb, k_sh, v_sb, v_sh) = (ks[0] as i64, ks[1] as i64, vs[0] as i64, vs[1] as i64);
             let (n_kv_i, n_rep_i, d_i, s_len_i) =
-                (n_kv_head as i32, n_rep as i32, d as i32, s_len as i32);
+                (n_kv_head as i32, n_rep as i32, d as i32, kernel_len as i32);
             if tiled {
                 let CacheViews::F16(k, v) = &cache else {
                     candle_core::bail!(
@@ -841,7 +1074,7 @@ mod cuda {
                     );
                 };
                 // Eight halves a load: every row the kernel reads starts on 16 bytes.
-                if [l2.start_offset(), l3.start_offset()]
+                if [k_at, v_at]
                     .into_iter()
                     .chain([ks[0], ks[1], vs[0], vs[1]])
                     .any(|x| !x.is_multiple_of(8))
@@ -877,7 +1110,7 @@ mod cuda {
                 let rows_i = rows as i32;
                 let (vis_words_i, base_i) = (
                     crate::inference::draft_tree::VISIBILITY_WORDS as i32,
-                    tree.base as i32,
+                    (tree.base - skip) as i32,
                 );
                 let null: u64 = 0;
                 let mut builder = func.builder();
@@ -995,6 +1228,8 @@ mod cuda {
                     shared_mem_bytes: 0,
                 };
                 let n_chunks_i = n_chunks as i32;
+                let past_runs_i = past.map_or(0, |p| p.runs) as i32;
+                let null: u64 = 0;
                 let mut builder = combine.builder();
                 builder.arg(p);
                 builder.arg(&mut out);
@@ -1002,8 +1237,22 @@ mod cuda {
                 builder.arg(&n_rep_i);
                 builder.arg(&d_i);
                 builder.arg(&n_chunks_i);
+                match &past_out {
+                    Some((o, lse)) => {
+                        builder.arg(o);
+                        builder.arg(lse);
+                    }
+                    None => {
+                        builder.arg(&null);
+                        builder.arg(&null);
+                    }
+                };
+                builder.arg(&past_runs_i);
                 // SAFETY: ffi. `partial` holds `n_chunks` rows of `d + 2` per
-                // (group, head), all written above; `out` is `b * n_head * d`.
+                // (group, head), all written above; `out` is `b * n_head * d`;
+                // flash's `past_runs` runs of `rows * n_rep` query vectors × KV
+                // heads (output × `d`), written above with the call checked to
+                // be one K/V batch's.
                 unsafe { builder.launch(cfg) }.w()?;
             }
             Ok((
@@ -1471,13 +1720,32 @@ mod tests {
                 "standard_attention under a tree's scope is not the tree kernel's answer \
                  (heads {n_head}/{n_kv_head} d={d} base {base} rows {tree_rows} cache {cache_dtype:?})"
             );
-            let mut arms = vec![("entry point".to_string(), entry)];
-            // Each per-row chunk, and the tiled kernel over a half cache.
-            let tiled_arm = (cache_dtype == candle_core::DType::F16).then_some((None, true));
-            for (chunk, tiled) in CARD_CHUNKS
+            // Did flash read the context at the entry point (its default)?
+            let n_rep = n_head / n_kv_head;
+            let entry_on_flash = tree_tiles(seq, &kc, &vc)
+                && past_runs(seq, n_kv_head, n_rep, d, base, &card).is_some();
+            let mut arms = vec![("entry point".to_string(), entry, entry_on_flash)];
+            // Each per-row chunk, and the tiled kernel over a half cache —
+            // alone, and after flash read the context in a run, in runs that
+            // leave a part of it to the tiled kernel, and in the most runs.
+            let half = cache_dtype == candle_core::DType::F16;
+            let tiled_arm = half.then_some((None, true, None));
+            let flash_arms = [1usize, 3, 7, PAST_MOST_RUNS]
                 .into_iter()
-                .map(|c| (Some(c), false))
+                .filter(|&runs| half && cfg!(feature = "flash-attn") && base >= runs)
+                .map(|runs| (None, true, Some(runs)));
+            let q_rows = qc
+                .transpose(1, 2)
+                .unwrap()
+                .contiguous()
+                .unwrap()
+                .reshape((seq, n_head, 1, d))
+                .unwrap();
+            for (chunk, tiled, runs) in CARD_CHUNKS
+                .into_iter()
+                .map(|c| (Some(c), false, None))
                 .chain(tiled_arm)
+                .chain(flash_arms)
             {
                 let op = cuda::DecodeAttn {
                     scale,
@@ -1489,15 +1757,13 @@ mod tests {
                         rows: seq,
                         base,
                         tiled,
+                        past: runs.map(|runs| cuda::PastOnFlash {
+                            q: flash_queries(&q_rows, seq, n_kv_head, n_rep, d).unwrap(),
+                            runs,
+                            run_len: base / runs,
+                        }),
                     }),
                 };
-                let q_rows = qc
-                    .transpose(1, 2)
-                    .unwrap()
-                    .contiguous()
-                    .unwrap()
-                    .reshape((seq, n_head, 1, d))
-                    .unwrap();
                 let got = q_rows
                     .apply_op3_no_bwd(&kc, &vc, &op)
                     .unwrap()
@@ -1506,27 +1772,61 @@ mod tests {
                     .transpose(1, 2)
                     .unwrap();
                 arms.push((
-                    match chunk {
-                        Some(c) => format!("{c}-position chunks"),
-                        None => "tiled".to_string(),
+                    match (chunk, runs) {
+                        (Some(c), _) => format!("{c}-position chunks"),
+                        (None, None) => "tiled".to_string(),
+                        (None, Some(r)) => format!("tiled after flash in {r} runs"),
                     },
                     flat(got),
+                    runs.is_some(),
                 ));
             }
-            for (arm, got) in arms {
+            // Flash reads half queries (as a chain's check on flash does) and
+            // sums its weights in half: its arms are held to the matmul path
+            // over the same half queries, at a half's precision.
+            let want_half_q = half.then(|| {
+                crate::inference::layers::matmul_attention(
+                    &q.to_dtype(candle_core::DType::F16)
+                        .unwrap()
+                        .to_dtype(candle_core::DType::F32)
+                        .unwrap(),
+                    &k,
+                    &v,
+                    Some(&mask),
+                    d,
+                    n_head,
+                    n_kv_head,
+                    softcap,
+                )
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+            });
+            for (arm, got, on_flash) in arms {
+                let (want, most_abs, most_rel) = match (&want_half_q, on_flash) {
+                    (Some(w), true) => (w, 2e-3, 2e-2),
+                    _ => (&want, 1e-5, 1e-4),
+                };
                 assert_eq!(got.len(), want.len());
                 let worst_abs = got
                     .iter()
-                    .zip(&want)
+                    .zip(want)
                     .map(|(a, b)| (a - b).abs())
                     .fold(0f32, nan_max);
                 let worst_rel = got
                     .iter()
-                    .zip(&want)
+                    .zip(want)
                     .map(|(a, b)| (a - b).abs() / a.abs().max(b.abs()).max(0.05))
                     .fold(0f32, nan_max);
+                if on_flash {
+                    eprintln!(
+                        "FLASH {arm}: heads {n_head}/{n_kv_head} d={d} base {base} rows {tree_rows}: worst abs {worst_abs} rel {worst_rel}"
+                    );
+                }
                 assert!(
-                    worst_abs < 1e-5 && worst_rel < 1e-4,
+                    worst_abs < most_abs && worst_rel < most_rel,
                     "{arm}: heads {n_head}/{n_kv_head} d={d} base {base} rows {tree_rows} after {before} softcap={softcap:?} cache {cache_dtype:?}: worst abs {worst_abs} rel {worst_rel}"
                 );
             }
@@ -1677,6 +1977,7 @@ mod tests {
                                     rows,
                                     base,
                                     tiled,
+                                    past: None,
                                 }),
                             };
                             q.transpose(1, 2)
@@ -1710,6 +2011,94 @@ mod tests {
                     eprintln!(
                         "TIMING heads {n_head}/{n_kv_head} d {d} keys {s_len} rows {rows}: \
                          kernel {kernel:.1} us, tiled {tiled:.1} us, matmul path {matmul:.1} us"
+                    );
+                }
+            }
+        }
+    }
+
+    /// What a tiled tree's attention costs with its context on flash, by the
+    /// runs flash splits it into, against the tiled kernel reading it all —
+    /// the 0.5B drafter's heads and a 7B's, a flow's row counts, a short, a
+    /// middling and a long context. Min of 30 calls, each synchronised, the
+    /// query conversion included. `cargo test --release --features cuda --lib
+    /// tree_context_on_flash_timing -- --ignored --nocapture`.
+    #[cfg(all(feature = "candle-cuda", feature = "flash-attn"))]
+    #[test]
+    #[ignore]
+    fn tree_context_on_flash_timing() {
+        let card = Device::new_cuda(0).expect("a card");
+        let sms = card_sms(&card).expect("the card's multiprocessors");
+        for (n_head, n_kv_head, d) in [(14usize, 2usize, 64usize), (28, 4, 128)] {
+            let n_rep = n_head / n_kv_head;
+            for base in [600usize, 1400, 4000] {
+                for rows in [8usize, 16, 24, 32, 64] {
+                    let s_len = base + rows;
+                    let q = Tensor::randn(0f32, 1.0, (1, rows, n_head, d), &card).unwrap();
+                    let cache = || {
+                        Tensor::randn(0f32, 1.0, (1, n_kv_head, s_len + 64, d), &card)
+                            .unwrap()
+                            .to_dtype(candle_core::DType::F16)
+                            .unwrap()
+                            .narrow(2, 0, s_len)
+                            .unwrap()
+                    };
+                    let (k, v) = (cache(), cache());
+                    let parents = (0..rows)
+                        .map(|i| i.checked_sub(1).map(|p| p as u16))
+                        .collect();
+                    let tree = crate::inference::draft_tree::DraftTree::new(base, parents).unwrap();
+                    let (_, seen) = tree.rows_for(base, rows).unwrap();
+                    let vis = Tensor::from_slice(
+                        &seen.words,
+                        (rows, crate::inference::draft_tree::VISIBILITY_WORDS),
+                        &card,
+                    )
+                    .unwrap();
+                    let scale = 1.0 / (d as f32).sqrt();
+                    let q_rows = q.reshape((rows, n_head, 1, d)).unwrap();
+                    let time = |runs: Option<usize>| {
+                        let mut best = f64::MAX;
+                        for i in 0..33 {
+                            card.synchronize().unwrap();
+                            let t = std::time::Instant::now();
+                            let op = cuda::DecodeAttn {
+                                scale,
+                                softcap: 0.0,
+                                combine_one_chunk: true,
+                                chunk: None,
+                                tree: Some(cuda::TreeOperands {
+                                    visibility: vis.clone(),
+                                    rows,
+                                    base,
+                                    tiled: true,
+                                    past: runs.map(|runs| cuda::PastOnFlash {
+                                        q: flash_queries(&q_rows, rows, n_kv_head, n_rep, d)
+                                            .unwrap(),
+                                        runs,
+                                        run_len: base / runs,
+                                    }),
+                                }),
+                            };
+                            let out = q_rows.apply_op3_no_bwd(&k, &v, &op).unwrap();
+                            card.synchronize().unwrap();
+                            drop(out);
+                            if i >= 3 {
+                                best = best.min(t.elapsed().as_secs_f64() * 1e6);
+                            }
+                        }
+                        best
+                    };
+                    let auto = auto_past_runs(rows * n_rep, n_kv_head, sms);
+                    let by_runs = [1usize, 2, 4, 8, 12, 16]
+                        .into_iter()
+                        .map(|runs| format!("{runs}: {:.1}", time(Some(runs))))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    eprintln!(
+                        "FLASH heads {n_head}/{n_kv_head} d {d} context {base} rows {rows}: \
+                         tiled {:.1} us; flash runs (auto {auto}) {by_runs} us",
+                        time(None)
                     );
                 }
             }

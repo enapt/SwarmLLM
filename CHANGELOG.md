@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+**A split checks its guesses deep into a long conversation up to twice as fast on a graphics
+card.** When a split checks a tree of the small model's guesses, every guess reads the whole
+conversation so far, and that reading ran on code written for the guesses' own small part. The
+conversation part now goes to the graphics card's fastest attention code (the one ordinary replies
+already use), cut into pieces so the whole card works on it at once; only the guesses' own part
+stays where it was. On the near half of a 7B model 4,000 tokens into a conversation, checking 24
+guesses took 14.7-15.0 ms instead of 22.6-22.9, and 64 guesses 25 ms instead of 47-48 — a tree of
+guesses now costs about what a single line of them does. Short conversations, where the old code
+is faster, stay on it. `SWARMLLM_TREE_ATTN_PAST=tiled` turns it off.
+
 ## [0.3.248-alpha] — 2026-10-23
 
 **A split across a long link can now keep its guesses flowing instead of waiting on each

@@ -473,6 +473,132 @@ pub fn flash_attn_alibi_windowed_softcap(
     q.apply_op3(k, v, op)
 }
 
+/// SwarmLLM patch: ONE set of queries over `runs` equal runs of keys, each
+/// run a batch element of its own — every element reads the same queries
+/// (batch stride 0) and the next run of keys (batch stride one run) — and
+/// each run's output WITH its log-sum-exp, which upstream computes and drops.
+/// Non-causal, no window, no ALiBi, f16 only.
+///
+/// For a caller that merges partial attentions by their normalisers: the
+/// split-KV of flash-decoding (each run a block of its own fills a card a
+/// short query leaves idle) and FlashInfer's cascade (a shared prefix read
+/// once, merged with each row's own part, `merge_state`). SwarmLLM's tree of
+/// guesses reads its context this way (`inference::decode_attn`).
+///
+/// * `q`: `(1, seqlen_q, h, d)`, any strides with a dense last dim.
+/// * `k`, `v`: `(1, runs * run_len, h_k, d)`, the same.
+///
+/// Returns `out` `(runs, seqlen_q, h, d)` dense, and `lse` `(runs, h,
+/// seqlen_q)`: `ln Σ exp(s)` over the run's keys, `s` the scaled (and
+/// soft-capped) score — `+∞` for a run with no keys (`flash_fwd_kernel.h`).
+#[allow(clippy::too_many_arguments)]
+pub fn flash_attn_key_runs(
+    q: &candle::CudaStorage,
+    q_l: &Layout,
+    k: &candle::CudaStorage,
+    k_l: &Layout,
+    v: &candle::CudaStorage,
+    v_l: &Layout,
+    runs: usize,
+    softmax_scale: f32,
+    softcap: Option<f32>,
+) -> Result<(
+    candle::cuda_backend::cudarc::driver::CudaSlice<f16>,
+    candle::cuda_backend::cudarc::driver::CudaSlice<f32>,
+)> {
+    let dev = q.device();
+    let (one, seqlen_q, num_heads, head_size) = q_l.shape().dims4()?;
+    let (kb, kv_len, num_heads_k, kd) = k_l.shape().dims4()?;
+    if one != 1
+        || kb != 1
+        || kd != head_size
+        || v_l.shape().dims4()? != (1, kv_len, num_heads_k, head_size)
+    {
+        candle::bail!(
+            "flash-attn key runs: q {:?}, k {:?}, v {:?}",
+            q_l.shape(),
+            k_l.shape(),
+            v_l.shape()
+        )
+    }
+    if runs == 0 || kv_len % runs != 0 {
+        candle::bail!("flash-attn key runs: {kv_len} keys in {runs} equal runs")
+    }
+    let run_len = kv_len / runs;
+    if head_size > 256 || head_size % 8 != 0 || num_heads % num_heads_k != 0 {
+        candle::bail!("flash-attn key runs: {num_heads}/{num_heads_k} heads of {head_size}")
+    }
+    let (q_stride, k_stride, v_stride) = (q_l.stride(), k_l.stride(), v_l.stride());
+    if q_stride[3] != 1 || k_stride[3] != 1 || v_stride[3] != 1 {
+        candle::bail!("flash-attn key runs: the last dim must be dense")
+    }
+    let narrow = |x: usize| -> Result<u32> {
+        u32::try_from(x).map_err(|_| candle::Error::Msg(format!("flash-attn key runs: stride {x}")))
+    };
+    let q = q.as_cuda_slice::<f16>()?.slice(q_l.start_offset()..);
+    let k = k.as_cuda_slice::<f16>()?.slice(k_l.start_offset()..);
+    let v = v.as_cuda_slice::<f16>()?.slice(v_l.start_offset()..);
+    let head_size_rounded = round_multiple(head_size, 32);
+    // SAFETY: every element is written by the kernel — `out` per (run, row,
+    // head, dim) and `lse` per (run, head, row) — before anything reads it
+    // (`flash_fwd_kernel.h`, the `actual_seqlen_q` guards; a run with no keys
+    // writes zeros and +∞). Uninitialized for the reason `cuda_fwd_t` gives:
+    // a memset into a captured step's allocation stops its graph updating.
+    let dst = unsafe { dev.alloc::<f16>(runs * seqlen_q * num_heads * head_size)? };
+    let lse = unsafe { dev.alloc::<f32>(runs * num_heads * seqlen_q)? };
+    let stream = dev.cuda_stream();
+    let status = unsafe {
+        let (q_ptr, _guard) = q.device_ptr(&stream);
+        let (k_ptr, _guard) = k.device_ptr(&stream);
+        let (v_ptr, _guard) = v.device_ptr(&stream);
+        let (dst_ptr, _guard) = dst.device_ptr(&stream);
+        let (lse_ptr, _guard) = lse.device_ptr(&stream);
+        ffi::run_mha(
+            q_ptr as *const core::ffi::c_void,
+            k_ptr as *const core::ffi::c_void,
+            v_ptr as *const core::ffi::c_void,
+            dst_ptr as *const core::ffi::c_void,
+            lse_ptr as *const core::ffi::c_void,
+            /* alibi_slopes_ptr */ std::ptr::null(),
+            /* cu_seqlens_q_ptr */ std::ptr::null(),
+            /* cu_seqlens_k_ptr */ std::ptr::null(),
+            // Every run reads the same queries.
+            /* q_batch_stride */ 0,
+            /* k_batch_stride */ narrow(run_len * k_stride[1])?,
+            /* v_batch_stride */ narrow(run_len * v_stride[1])?,
+            /* o_batch_stride */ narrow(seqlen_q * num_heads * head_size)?,
+            /* alibi_slopes_batch_stride */ 0,
+            /* q_row_stride   */ narrow(q_stride[1])?,
+            /* k_row_stride   */ narrow(k_stride[1])?,
+            /* v_row_stride   */ narrow(v_stride[1])?,
+            /* o_row_stride   */ narrow(num_heads * head_size)?,
+            /* q_head_stride  */ narrow(q_stride[2])?,
+            /* k_head_stride  */ narrow(k_stride[2])?,
+            /* v_head_stride  */ narrow(v_stride[2])?,
+            /* o_head_stride  */ narrow(head_size)?,
+            /* b */ narrow(runs)?,
+            /* h */ narrow(num_heads)?,
+            /* h_k */ narrow(num_heads_k)?,
+            /* d */ narrow(head_size)?,
+            /* d_rounded */ narrow(head_size_rounded)?,
+            /* softmax_scale*/ softmax_scale,
+            /* seqlen_q */ narrow(seqlen_q)?,
+            /* seqlen_k */ narrow(run_len)?,
+            /* seqlen_q_rounded */ narrow(round_multiple(seqlen_q, 128))?,
+            /* seqlen_k_rounded */ narrow(round_multiple(run_len, 128))?,
+            /* is_bf16 */ 0,
+            /* is_causal */ 0,
+            /* upadded_lse */ 0,
+            /* window_size_left */ -1,
+            /* window_size_right */ -1,
+            /* softcap */ softcap.unwrap_or(0f32),
+            /* stream_ptr */ stream.cu_stream() as *mut core::ffi::c_void,
+        )
+    };
+    launched(status)?;
+    Ok((dst, lse))
+}
+
 struct FlashAttnVarLen {
     pub softmax_scale: f32,
     pub max_seqlen_q: usize,

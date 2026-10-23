@@ -2044,9 +2044,16 @@ block stages one KV head's chunk and serves a tile of rows × query heads — Fl
 tile on CUDA cores, f32 sums, every load in flight at once): the 7B near half's 24-row check
 forward 19.2-19.4 → 15.6-16.0 ms, 32 rows 23.8-24.4 → 18.7-19.4, 64 rows 38.1-39.6 → 30.3-31.4,
 the 0.5B drafter's 8-row level 600 deep 6.7-6.8 → 5.1 ms (§ "A tree's
-rows are read TILED over the half cache"). Left of it: the q/k/v bias adds (~5% of a
-level, llama.cpp fuses them into its vector kernel) and the copies before attention (~4%); the flow
-on the one-card rig after it. Left of the level: a whole drafter call
+rows are read TILED over the half cache"). **Built 2026-10-23: a tree's CONTEXT goes to flash
+attention** (`decode_attn::past_runs`: every row sees the positions before the tree's base whole, so
+FA2 reads them non-causally in runs, merged by log-sum-exp in the one combine — FlashInfer's cascade
+plus flash-decoding's split; the tiled kernel keeps the tree's own rows): the 7B near half's 24-row
+check 4,000 deep 22.6-22.9 → 14.7-15.0 ms, 64 rows 47-48 → 25, a tree now costing a chain (§ "A
+tree's context is read by flash attention, in runs"). Left of it: the queries' own round trip in a tree's attention (the
+heads-first Q is transposed back to rows-first for the tree kernel and flash, a `ucopy` and a cast
+a layer); the q/k/v bias adds (~5% of a level, llama.cpp fuses them into its vector kernel) and
+the copies before attention (~4%); the flow on the real link.
+Left of the level: a whole drafter call
 as ONE graph with its rows chosen on the card (SGLang's EAGLE captures its draft levels and the
 top-k between them; ours still reads each level's ranking back and chooses on the host, a sync
 each, and re-captures the step every level — ~740 launch calls a level); how many levels a call pays once a level is
