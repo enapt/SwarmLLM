@@ -1487,7 +1487,10 @@ activations to f16 as llama.cpp's does. Who it helps: anyone who downloads a rep
 small model — the drafter choice already prefers a quantized copy (gotcha #849). Beside a split the
 cost is card room too: the 0.5B fp16 drafter is charged 2,991 MB, so on a 4,000 MB card the room it
 left was 4 of the 7B's layers, short of the 6 this node had to hold, and no plan took the cut
-(2026-10-22, `cardfill275.sh`; the Q8_0 copy, 966 MB, left 16).
+(2026-10-22, `cardfill275.sh`; the Q8_0 copy, 966 MB, left 16). As a split's guesser on the card
+(2026-10-23, the flow on the real link) the fp16 copy's call took 28.0-28.6 ms against the Q8_0's
+14.5-15.2 for the same guesses (`docs/invariants/scheduling.md` § "A tree that flows", On the REAL
+link). The drafter choice already avoids it where a quantized copy is held.
 
 #### #309 — Small dense models decoded at 0.80-0.83 of llama.cpp on a card; 0.94-1.00 since the attention chunk follows the cache, Gemma 4 E2B 0.87
 `P3` · perf-local · **PARTIAL** — 2026-10-19 · history: #307's sweep
@@ -2056,7 +2059,17 @@ two launches a layer fewer in every biased family's decode (§ "Q, K and V reach
 heads-first in one launch"). Left of it: the queries' own round trip in a tree's attention (the
 heads-first Q is transposed back to rows-first for the tree kernel and flash, a `ucopy` and a cast
 a layer); a fused-QKV family (Phi-3/3.5/4) still copies its three slices out of the fused product
-before the kernel (it could read them in place with a row stride); the flow on the real link.
+before the kernel (it could read them in place with a row stride). These card costs no longer
+decide a long link's speed. **The flow on the REAL link was measured 2026-10-23** (TH↔AU, 7B, far
+half on an RTX 3060 at ~430 ms): 14.3-14.6 tok/s over 400 tokens against tree rounds' 11.6 and the
+chain stream's 6.8. Main's cheaper requester gave the same, and no flow knob beat the defaults: it
+advances E (~6.5 tokens) a round trip (`docs/invariants/scheduling.md` § "A tree that flows", On the
+REAL link). What is left on a long link is E itself. **The drafter on the card, measured the same
+day:** Qwen2.5-Coder-1.5B Q8_0 16.46 tok/s (10-11 misses a 400-token reply), the 0.5B Q8_0 15.57
+(17-19), the 0.5B fp16 13.98, the coder 0.5B 12.06 (39-41). `largest_that_can_draft` already
+ranks them in that order, so a node holding the 1.5B runs the winner. Left: the choice on a
+PROCESSOR (unmeasured; the Leviathan estimate put a 0.5B ~7% ahead there), a code prompt (the
+coder drafters on code text), copied runs, a drafter fed by the model's state.
 Left of the level: a whole drafter call
 as ONE graph with its rows chosen on the card (SGLang's EAGLE captures its draft levels and the
 top-k between them; ours still reads each level's ranking back and chooses on the host, a sync
@@ -2100,9 +2113,10 @@ split leaves it room where the peers offer enough; that room is the reply's own 
 4,096 positions (`docs/invariants/scheduling.md` § "A split leaves room for the model that
 guesses for it"); on a card, on the card (#275 (4), closed 2026-10-22). Left: (3) a target
 worker already holding more layers keeps them; the room appears from its next cold load. The
-room is sized for the drafter `engine_drafter::chosen` picks, the largest by bytes — on a card
-the 0.5B fp16 (~1 GB) over a Q8 copy (~0.65 GB), unmeasured as a guesser (#134's device-aware
-choice).
+room is sized for the drafter `engine_drafter::chosen` picks: the largest model, then of its
+copies the one whose guess reads the fewest bytes, so a 0.5B's Q8_0 copy over its fp16. As
+guessers on a card (2026-10-23, real link) the two missed alike and the Q8_0 ran +10-14%; the 1.5B
+Q8_0 beat both (#134).
 
 #### #145 — One reply uses one row of a ring pass that could carry dozens
 `P3` · perf-split · **OPEN** — 2026-09-28 · history: archive row #145; plan: `docs/plans/wan_parallel.md`

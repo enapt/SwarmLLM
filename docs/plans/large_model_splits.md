@@ -464,12 +464,25 @@ kernel and one CUDA graph (idle card, a flow call 36.0 → 26.5 ms) and ranks it
 launches (→ 21 ms); both shipped in v0.3.248 with the flow and FlowGuard. After the tag: a tree's
 context is read by flash attention in runs, and Q, K and V reach attention heads-first in one launch
 (a flow call 600 tokens in 14.1 → 12.7 ms; a 7B near half checking 24 rows 4,000 tokens in 22.7 →
-14.8 ms; `docs/invariants/inference.md`, both sections). **Next: the real link.** Flow against tree
-rounds against the chain stream on TH↔AU (7B, the far half on an RTX 3060 ~428 ms away), plus the
-flow on the newer build. Its `DSD: a tree that flowed is complete` lines split each reply's time
-into drafting, near-half and waiting, which says whether the requester's compute or the miss rate
-binds. That decides the next lever: a cheaper requester, or more tokens between misses (a better
-drafter, item 4 of § "Build order").
+14.8 ms; `docs/invariants/inference.md`, both sections).
+
+**On the real link (2026-10-23).** TH↔AU, 7B, the far half on an RTX 3060 at 428-437 ms, this
+machine's half and the 0.5B drafter on its card. Over 400 tokens: the flow 14.3-14.6 tok/s, tree
+rounds 11.6, the chain stream 6.8. A plain split on a link like this runs ~2.85 tok/s (§ "The
+target"); .247's default here was 9.36. The cheaper requester on main (−5% drafting, −10% near half a forward) gave
+the same tok/s: it ran more forwards, not more reply. No knob moved it either: live rows 128 / 256
+/ 448, 8×3 against 4×6 levels (`docs/invariants/scheduling.md` § "A tree that flows", On the REAL
+link). **The flow now pays the round trip and nothing else, so it advances E — the tokens its live
+rows get right, ~6.5 here — per round trip.** That is this plan's formula with P at its floor. Every
+further factor on a long link has to raise E: a better drafter on the card, copied runs where the
+reply repeats its context (2× on an edit), a drafter fed by the model's own state (§ "Build order"
+item 4), or a shorter P through near chains (item 6). **The drafter, measured the same day:**
+Qwen2.5-Coder-1.5B Q8_0 on the card ran 16.46 tok/s (10-11 misses a 400-token reply), the 0.5B
+Q8_0 15.57 (17-19), the 0.5B fp16 13.98, and the coder 0.5B 12.06 (39-41). The cheaper copy of one
+drafter turns its saving into waiting; only fewer misses gain. That is E again: ~7.4 tokens a round
+trip with the 1.5B against ~6.5. The 20 tok/s target here needs E ≈ 9 a 450 ms round trip, so the
+drafters a node can already fetch fall short. Next on E: a drafter fed by the model's state, or a
+larger drafter where the card has room.
 
 ## Build order (each step ends on a measurement)
 

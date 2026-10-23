@@ -4888,6 +4888,87 @@ rows die like any unread branch, and the drafter ranks their followers by its ow
 the far half on this rig's card, the edit's denser forwards queued the far half's answers
 (200-360 ms over the least) and the guard narrowed to 3-6×128 with copies on and off alike.
 
+**On the REAL link** (2026-10-23 01:51-02:16Z, `~/swarmllm-318/flowreal248.sh`). This machine ran
+layers 0-13 of Qwen2.5-Coder-7B Q4_K_M and the 0.5B fp16 drafter, both on its RTX 3070 Laptop.
+aa3d1e66 ran layers 14-27 on an RTX 3060, on .248, at a 428-437 ms least round trip. Greedy, the
+rig's chat prompt (42 tokens); each node start asked 160, 400, 160 and 400 tokens; eight starts,
+arms alternating; Windows up 25.4-25.8 h. Decode tok/s, four replies an arm and length:
+
+| arm | 160 tokens | 400 tokens |
+|---|---|---|
+| flow, the .248 release binary | 12.21-16.14 (mean 13.45) | 14.03-15.03 (mean 14.56) |
+| flow, main `e8e649d0` (flash context + heads-first) | 13.01-16.53 (13.95) | 14.35-15.23 (14.63) |
+| tree rounds (`SWARMLLM_TREE_FLOW=0`) | 10.46-11.90 (11.37) | 11.04-12.52 (11.57) |
+| chain stream (`SWARMLLM_DRAFT_TREES=0`), one start | 6.18-6.24 | 6.78 |
+
+The flow beats the tree rounds by 18% at 160 tokens and 26% at 400, and the chain stream 2.1×. The
+same link with .247 on 10-22 gave trees 8.41 / 9.36 and the stream 5.95 / 6.48 (§ drafter room), so
+the default is 1.6× faster at 400 tokens. ⚠ The other stream start (16.3-23.1 tok/s after a 42.8 s
+first token) was not a split. A peer holding the whole model joined after the rig built its exclude
+list and was handed the reply whole (gotcha #940), so that start is left out.
+
+*Where a flowed reply's time goes* (the `DSD: a tree that flowed is complete` line, 400-token
+replies). On .248, of 26.8-30.9 s: drafting 15.1-17.4 s (55-56%), this node's half 8.2-9.2 s
+(29-30%), waiting 3.5-4.3 s (13-14%). That was 476-541 forwards of 23.5-24.2 rows, with 12-17
+misses and 22-24 rebases a reply. On main, drafting took 30.4 ms a forward against 32.0 (−5%) and the
+near half 15.2 against 17.0 (−10%). Tok/s stayed the same because main ran MORE forwards (533-549
+against 476-541) for the same 400 tokens: tokens a forward fell from 0.78-0.84 to 0.73-0.75. **So
+the time split misleads: a cheaper requester grows more rows, not more reply.** What binds is how far
+ahead along the model's path the tree reaches each round trip: ~6 tokens a 430 ms round trip. Yet a
+forward adds three levels, and 9-10 forwards fit in a round trip.
+
+Scored against llama.cpp, every reply has worst rank 2 (gap ≤ 0.238). The tree arms part from the
+stream at token 4 (" device" rank 2, gap 0.076), a near-tie.
+
+*The knobs, on the same link* (02:20-02:43Z, `~/swarmllm-318/flowsweep.sh`, main's build, arms by
+env only, two starts an arm alternating, four replies an arm and length). Each request rebuilt
+its exclude list and was kept only if the node logged a two-segment split through aa3d1e66
+(gotcha #940); none was dropped.
+
+| arm | 160 tokens | 400 tokens | 400-token replies: forwards, rebases, misses, waiting |
+|---|---|---|---|
+| **8 rows × 3 levels, 128 live (default)** | **14.00-16.78 (15.28)** | **13.84-15.37 (14.28)** | 510-569, 23-26, 14-19, 5.0 s |
+| 256 live (`SWARMLLM_FLOW_LIVE`) | 12.22-16.07 (13.79) | 12.96-16.38 (14.53) | 475-578, 23-29, 10-19, 0 |
+| 448 live | 12.48-14.38 (13.45) | 13.12-14.46 (13.75) | 598-637, 31-33, 18-23, 0 |
+| 4 rows × 6 levels (`SWARMLLM_FLOW_ROWS`, `_LEVELS`) | 11.65-12.66 (12.22) | 12.24-13.19 (12.68) | 425-446, 19-20, 18-21, 1.0-1.4 s |
+
+**No knob beats the default; the defaults stand.** A larger live budget ends the waiting but buys
+no reply. The extra rows die, and with 448 kept the 512-row tree (`MAX_TREE_ROWS`) refills in 2-3
+forwards. A rebase may only be sent once the one before it is answered, so rebases rise to 31-33 a
+reply. Deeper, narrower calls cost the drafter 52-59 ms a forward against 29-31 and miss as often.
+
+**The law this reads as: a flow advances about E (the tokens the drafter's live rows get right)
+per round trip.** 14-15 tok/s × 0.45 s ≈ 6.5 tokens. The tree rounds on the same link get 6.3-6.8 a round
+(59-63 rounds for 400 tokens, ~0.58 s each, with up to 416 rows grown beside the check). The flow's win is
+entirely in the period: it pays the round trip and nothing else, as the formula at the top of
+`docs/plans/large_model_splits.md` (tok/s = E_N / P) says. E grows only about logarithmically with the
+rows. So the next factor has to come from E itself: a drafter that guesses better on the card,
+copied text where the reply repeats (§ copied runs: 2× on an edit), or a shorter round trip (near
+chains). Not from rows, levels or the window.
+
+*The drafter, on the same link* (02:44-03:11Z, `~/swarmllm-318/flowdraft.sh` then `flowfmt.sh`,
+main's build, arms by the one drafter H holds, alternating; every DSD line named that drafter with
+`drafter_on_card=true`). 400-token replies:
+
+| drafter (on the card) | tok/s | misses | drafting a forward | waiting a reply | tokens a forward |
+|---|---|---|---|---|---|
+| **Qwen2.5-Coder-1.5B Q8_0** (1.8 GB) | **16.30-16.77 (16.46)** | **10-11** | 25.0-25.7 ms | 4.5-5.9 s | 0.80-0.85 |
+| Qwen2.5-0.5B Q8_0 (645 MB) | 14.74-16.38 (15.57) | 17-19 | 14.5-15.2 ms | 9.5-11.3 s | 0.73-0.80 |
+| Qwen2.5-0.5B fp16 (1.2 GB, f32 on the card, #308) | 13.60-14.25 (13.98) | 17-22 | 28.0-28.6 ms | 4.5-5.6 s | 0.70-0.74 |
+| Qwen2.5-Coder-0.5B Q8_0 (645 MB) | 11.96-12.20 (12.06) | 39-41 | 13.9-14.4 ms | 15.9-16.7 s | 0.66-0.68 |
+
+At 160 tokens the order is the same: 16.33, 14.55, 13.87-14.19 and 10.97. The two copies of one
+0.5B guess alike (17-19 misses against 17-22). The Q8_0 copy pays half the drafting, and that half
+comes back as waiting, because the flow is already at its round-trip wall: +10-14% (15.57 against
+13.61-14.16). The 1.5B misses half as often and wins although each of its forwards costs more,
+exactly as the law above says. A miss costs about a round trip: the coder 0.5B's 40 misses at
+~0.43 s are its 16 s of waiting. ⚠ **Every figure before this table used the fp16 0.5B**, a copy no
+node picks over a Q8_0 one (`engine_drafter::largest_that_can_draft` sorts the largest model first,
+then the fewest bytes a guess reads). With both held, a node takes the 1.5B, so the field already
+runs the winner where the 1.5B is there. On this card that ranking is right; on a processor it is
+unmeasured (FUTURE_WORK #134, device-aware drafter choice). The coder 0.5B lost on this chat
+prompt; a code prompt is unmeasured.
+
 **What a change must keep.** The draw at a row must not depend on the forward that carried it
 (noise by position, the row's own ancestors in its mask); the three trees change only by the
 ordered ops; a rebase's forward goes out at once, before any proposal, so path + kept never
