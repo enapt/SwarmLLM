@@ -61,15 +61,68 @@ pub(crate) fn label_address_with_peer(addr: &str, peer_id: Option<libp2p::PeerId
 /// Check if a multiaddr string contains a private/loopback/link-local/CGN IP.
 /// Used for PEX filtering to prevent leaking internal topology.
 pub(crate) fn is_non_public_addr(addr_str: &str) -> bool {
-    if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-        addr.iter().any(|proto| match proto {
-            libp2p::multiaddr::Protocol::Ip4(ip) => is_non_public_ipv4_bytes(&ip.octets()),
-            libp2p::multiaddr::Protocol::Ip6(ip) => is_non_public_ipv6(&ip),
-            _ => false,
-        })
-    } else {
-        true // unparseable addresses are not public
+    match addr_str.parse::<Multiaddr>() {
+        Ok(addr) => multiaddr_is_non_public(&addr),
+        Err(_) => true, // unparseable addresses are not public
     }
+}
+
+fn multiaddr_is_non_public(addr: &Multiaddr) -> bool {
+    addr.iter().any(|proto| match proto {
+        libp2p::multiaddr::Protocol::Ip4(ip) => is_non_public_ipv4_bytes(&ip.octets()),
+        libp2p::multiaddr::Protocol::Ip6(ip) => is_non_public_ipv6(&ip),
+        _ => false,
+    })
+}
+
+/// The most of a peer's advertised addresses kept in its registry entry
+/// (`PeerInfo::addresses`), which peer exchange, the next-hop dial and invite
+/// codes read.
+pub(crate) const PEER_ADDRESSES_KEPT: usize = 8;
+
+/// The addresses of a peer worth keeping, at most `cap`, ranked by use to
+/// OTHER machines: public, then private, then loopback and unspecified (kept
+/// for nodes on one host — rigs, a second node on one PC — but first to fall
+/// past the cap); within each, direct before a relay circuit and QUIC before
+/// TCP, and otherwise in the order advertised.
+///
+/// The cap used to take the first 8 as advertised. A peer with Docker,
+/// Tailscale and LAN interfaces advertises 12, in a different order each time.
+/// So whichever of its two public addresses fell past the eighth never
+/// reached peer exchange, and a fresh node met the Melbourne peer over TCP or
+/// QUIC by coin toss (2026-10-23, `pexrace.sh`). Over TCP that means Cubic
+/// plus slow start after idle, instead of the BBR every QUIC connection runs.
+/// The order is go-libp2p's `DefaultDialRanker`'s: QUIC first, TCP 250 ms
+/// later (RFC 8305), relays after both, "because the goal is to end up with a
+/// QUIC connection". A receiver that dials one address at a time (before
+/// v0.3.249) then takes the QUIC one.
+pub(crate) fn addresses_worth_passing_on(listen_addrs: &[Multiaddr], cap: usize) -> Vec<String> {
+    use libp2p::multiaddr::Protocol;
+    let reach = |a: &Multiaddr| -> u8 {
+        let this_host_only = a.iter().any(|p| match p {
+            Protocol::Ip4(ip) => ip.is_loopback() || ip.is_unspecified(),
+            Protocol::Ip6(ip) => ip.is_loopback() || ip.is_unspecified(),
+            _ => false,
+        });
+        if this_host_only {
+            2
+        } else {
+            u8::from(multiaddr_is_non_public(a))
+        }
+    };
+    let mut ranked: Vec<&Multiaddr> = listen_addrs.iter().collect();
+    ranked.sort_by_key(|a| {
+        (
+            reach(a),
+            !crate::network::relay::addr_is_direct_transport(a),
+            !a.iter().any(|p| matches!(p, Protocol::QuicV1)),
+        )
+    });
+    ranked
+        .into_iter()
+        .take(cap)
+        .map(|a| a.to_string())
+        .collect()
 }
 
 /// Get a human-readable name for a SwarmEvent (for debug logging).
@@ -526,11 +579,90 @@ mod netgroup_tests {
 
 #[cfg(test)]
 mod pex_address_tests {
-    use super::{label_address_with_peer, target_peer_from_address};
+    use super::{
+        addresses_worth_passing_on, label_address_with_peer, target_peer_from_address,
+        PEER_ADDRESSES_KEPT,
+    };
     use libp2p::Multiaddr;
 
     fn addr(s: &str) -> Multiaddr {
         s.parse().expect("test multiaddr")
+    }
+
+    /// The Melbourne peer's advertisement as a fresh probe node received it
+    /// (2026-10-23, `pexrace.sh` new-1), in its order: 12 addresses, the
+    /// public QUIC one ninth. The first eight as advertised kept only the
+    /// public TCP one, and the node behind this entry's peer exchange met
+    /// the peer over TCP.
+    #[test]
+    fn both_public_addresses_survive_the_cap_quic_first() {
+        let advertised: Vec<Multiaddr> = [
+            "/ip4/127.0.0.1/tcp/8810",
+            "/ip4/100.70.76.52/udp/8800/quic-v1",
+            "/ip4/172.18.0.1/tcp/8810",
+            "/ip4/192.168.0.154/udp/8800/quic-v1",
+            "/ip4/14.2.57.117/tcp/8810",
+            "/ip4/172.17.0.1/udp/8800/quic-v1",
+            "/ip4/192.168.0.154/tcp/8810",
+            "/ip4/172.18.0.1/udp/8800/quic-v1",
+            "/ip4/14.2.57.117/udp/8800/quic-v1",
+            "/ip4/100.70.76.52/tcp/8810",
+            "/ip4/127.0.0.1/udp/8800/quic-v1",
+            "/ip4/172.17.0.1/tcp/8810",
+        ]
+        .iter()
+        .map(|s| addr(s))
+        .collect();
+        let first_eight: Vec<String> = advertised
+            .iter()
+            .take(PEER_ADDRESSES_KEPT)
+            .map(|a| a.to_string())
+            .collect();
+        assert!(
+            !first_eight.contains(&"/ip4/14.2.57.117/udp/8800/quic-v1".to_string()),
+            "the old cut, as observed"
+        );
+
+        let kept = addresses_worth_passing_on(&advertised, PEER_ADDRESSES_KEPT);
+        assert_eq!(kept.len(), PEER_ADDRESSES_KEPT);
+        assert_eq!(
+            kept[..2],
+            [
+                "/ip4/14.2.57.117/udp/8800/quic-v1".to_string(),
+                "/ip4/14.2.57.117/tcp/8810".to_string(),
+            ],
+            "public first, QUIC before TCP: {kept:?}"
+        );
+        assert!(
+            kept.iter().all(|a| !a.contains("127.0.0.1")),
+            "this host's addresses are the first to fall past the cap: {kept:?}"
+        );
+    }
+
+    /// Nothing is dropped below the cap: nodes on one host still find each
+    /// other's loopback address, last; a circuit ranks after a direct address.
+    #[test]
+    fn under_the_cap_every_address_is_kept_and_this_host_comes_last() {
+        let relay = libp2p::PeerId::random();
+        let advertised: Vec<Multiaddr> = [
+            "/ip4/127.0.0.1/tcp/8810".to_string(),
+            format!("/ip4/203.0.113.7/udp/8800/quic-v1/p2p/{relay}/p2p-circuit"),
+            "/ip4/192.168.1.52/tcp/8810".to_string(),
+            "/ip4/203.0.113.9/tcp/8810".to_string(),
+        ]
+        .iter()
+        .map(|s| addr(s))
+        .collect();
+        let kept = addresses_worth_passing_on(&advertised, PEER_ADDRESSES_KEPT);
+        assert_eq!(
+            kept,
+            vec![
+                "/ip4/203.0.113.9/tcp/8810".to_string(),
+                format!("/ip4/203.0.113.7/udp/8800/quic-v1/p2p/{relay}/p2p-circuit"),
+                "/ip4/192.168.1.52/tcp/8810".to_string(),
+                "/ip4/127.0.0.1/tcp/8810".to_string(),
+            ]
+        );
     }
 
     /// A PEX response is nothing but addresses, so an address that names nobody

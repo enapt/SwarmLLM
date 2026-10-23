@@ -46,16 +46,35 @@ pub struct BootstrapDial {
 /// caller can only dial those bare, which is correct for genuine discovery of
 /// somebody we have never seen.
 pub fn plan_bootstrap_dials(addrs: &[String]) -> Vec<BootstrapDial> {
+    group_dials_by_peer(
+        addrs
+            .iter()
+            .filter_map(|addr_str| match addr_str.parse::<Multiaddr>() {
+                Ok(addr) => Some((
+                    crate::network::helpers::target_peer_from_address(&addr),
+                    addr,
+                )),
+                Err(e) => {
+                    tracing::warn!(addr = %addr_str, error = %e, "Invalid bootstrap address");
+                    None
+                }
+            }),
+    )
+}
+
+/// The grouping of [`plan_bootstrap_dials`] for a caller that has already
+/// said whose each address is — one [`BootstrapDial`] per peer, in the order
+/// each peer first appears, its addresses in the order given; an address
+/// naming nobody keeps its own entry. Peer exchange (`handle_pex_response`)
+/// dials through it too: it dialled one address per peer and dropped the
+/// rest as "already dialling", so a peer advertising its public TCP address
+/// before its QUIC one was reached over TCP for the life of the connection
+/// (2026-10-23, every fresh node of `realdelay.sh` to the Melbourne peer).
+pub fn group_dials_by_peer(
+    addrs: impl IntoIterator<Item = (Option<libp2p::PeerId>, Multiaddr)>,
+) -> Vec<BootstrapDial> {
     let mut plan: Vec<BootstrapDial> = Vec::new();
-    for addr_str in addrs {
-        let addr = match addr_str.parse::<Multiaddr>() {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::warn!(addr = %addr_str, error = %e, "Invalid bootstrap address");
-                continue;
-            }
-        };
-        let peer = crate::network::helpers::target_peer_from_address(&addr);
+    for (peer, addr) in addrs {
         match plan.iter_mut().find(|d| d.peer.is_some() && d.peer == peer) {
             Some(existing) => existing.addrs.push(addr),
             None => plan.push(BootstrapDial {
@@ -552,6 +571,42 @@ mod tests {
             plan[0].addrs.len(),
             2,
             "both addresses ride along on that single dial"
+        );
+    }
+
+    /// Peer exchange, shaped as the Melbourne peer's public addresses reached a
+    /// fresh node (2026-10-23): TCP first, QUIC second, another peer between.
+    /// One dial per peer carrying BOTH, so libp2p races them — the PEX loop
+    /// dialled the TCP one alone and refused the QUIC one as "already
+    /// dialling", and the connection was TCP for good.
+    #[test]
+    fn a_peer_listed_at_tcp_then_quic_is_one_dial_carrying_both() {
+        let melbourne = libp2p::PeerId::random();
+        let other = libp2p::PeerId::random();
+        let a = |s: &str| s.parse::<Multiaddr>().unwrap();
+        let plan = group_dials_by_peer([
+            (Some(melbourne), a("/ip4/14.2.57.117/tcp/8810")),
+            (Some(other), a("/ip4/203.0.113.9/udp/8800/quic-v1")),
+            (Some(melbourne), a("/ip4/14.2.57.117/udp/8800/quic-v1")),
+            (None, a("/ip4/203.0.113.10/tcp/8810")),
+            (None, a("/ip4/203.0.113.11/tcp/8810")),
+        ]);
+        assert_eq!(plan.len(), 4, "{plan:?}");
+        assert_eq!(plan[0].peer, Some(melbourne));
+        assert_eq!(
+            plan[0].addrs,
+            vec![
+                a("/ip4/14.2.57.117/tcp/8810"),
+                a("/ip4/14.2.57.117/udp/8800/quic-v1")
+            ],
+            "the QUIC address rides on the same dial"
+        );
+        assert_eq!(plan[1].peer, Some(other));
+        assert!(
+            plan[2..]
+                .iter()
+                .all(|d| d.peer.is_none() && d.addrs.len() == 1),
+            "addresses naming nobody are never merged"
         );
     }
 

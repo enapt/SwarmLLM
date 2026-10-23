@@ -281,6 +281,12 @@ TH↔AU (`realrate.sh`, `realwide.sh`, 2026-10-23, coder-1.5B Q8_0):
   guess and remembered "don't guess" — `dsd_controller`'s round-trip floor, 2026-10-23.) Today's d0
   ran below the 10-23 morning's 15.6-18.2 at the same settings: the far end queued in every arm
   (`queue_ms_most` 280-1,130 ms).
+- ⚠ **Every real-link arm so far ran over TCP.** The harness starts a fresh node, which met the
+  Melbourne peer through peer exchange. Peer exchange dialled the first address listed, and that
+  was TCP in 6 of 6 `realdelay.sh` arms, while the live node uses QUIC to the same peer. So every
+  flow figure on this link is Cubic plus slow start after idle, not BBR. Fixed 2026-10-23
+  (`docs/invariants/network.md` § "One dial per PEER"); the next real-link run reads QUIC
+  (`connection established … remote_addr=…/quic-v1`) and is the A/B.
 - **The largest swing is the far end**: its queue (v0.3.248 reads every row back whole for its
   draws) took 3 of 10 and 2 of 6 arms to 10-13 tok/s. v0.3.249's far-end card draw shortens each
   row there; the episodes coming and going also point at that machine's own load or the path.

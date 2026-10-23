@@ -46,90 +46,107 @@ impl NetworkManager {
         })
     }
 
-    /// Handle PEX response — dial unknown peers from the exchanged address list.
-    /// Limits to 5 dials per response to prevent connection storms.
+    /// Handle PEX response — dial unknown peers from the exchanged address list,
+    /// ONE dial per peer carrying every address it was listed at
+    /// (`discovery::group_dials_by_peer`). Limits to 5 dials per response to
+    /// prevent connection storms.
+    ///
+    /// It dialled one address at a time, and a peer's second address was
+    /// refused as "already dialling" — so the first address listed decided the
+    /// transport for the life of the connection. The Melbourne peer lists its
+    /// public TCP address before its QUIC one, and every fresh node reached it
+    /// over TCP (2026-10-23, `realdelay.sh`, 6 of 6): Cubic and slow start
+    /// after idle instead of the BBR every QUIC connection runs (`arch-network.md`
+    /// § "A burst is paced by the link"), and nothing later adds a QUIC
+    /// connection, because Identify gives Kademlia only the connected address.
+    /// One dial with every address RACES them (`concurrent_dial`, up to
+    /// `dial_concurrency_factor` = 8 at once) and keeps the first to connect —
+    /// QUIC's one-round-trip handshake beats TCP's three or more unless UDP is
+    /// blocked, the Happy Eyeballs shape (RFC 8305; go-libp2p's dial ranker
+    /// dials QUIC first for the same reason).
     pub(super) fn handle_pex_response(&mut self, peer_addrs: &[String]) {
         const MAX_PEX_DIALS: usize = 5;
+        let listed = peer_addrs.iter().filter_map(|addr_str| {
+            let addr = addr_str.parse::<Multiaddr>().ok()?;
+            // SEC: Filter out private/link-local/loopback/CGN IPs to prevent SSRF
+            if is_non_public_addr(addr_str) {
+                tracing::debug!(addr = %addr_str, "PEX: skipping private/loopback address");
+                return None;
+            }
+            Some(addr)
+        });
+        // Whose address is this? The gates below need the answer, and so does
+        // the dial itself. A peer that has not yet been upgraded sends bare
+        // addresses, which name nobody: ask our own registry who owns one
+        // before falling through to an unconditional dial — that fallback is
+        // the discovery path for a genuinely unknown node, and it is also what
+        // re-dialled an already-connected peer on every PEX round (gotcha #405).
+        let owned: Vec<(Option<libp2p::PeerId>, Multiaddr)> = listed
+            .map(|addr| {
+                let peer = target_peer_from_address(&addr)
+                    .or_else(|| self.peer_id_for_known_address(&addr));
+                (peer, addr)
+            })
+            .collect();
+
         let mut dialed = 0;
-        for addr_str in peer_addrs {
+        for dial in crate::network::discovery::group_dials_by_peer(owned) {
             if dialed >= MAX_PEX_DIALS {
                 break;
             }
-            if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-                // SEC: Filter out private/link-local/loopback/CGN IPs to prevent SSRF
-                if is_non_public_addr(addr_str) {
-                    tracing::debug!(addr = %addr_str, "PEX: skipping private/loopback address");
-                    continue;
-                }
-
-                // Whose address is this? Both gates below need the answer, and
-                // so does the dial itself.
-                let mut maybe_peer_id = target_peer_from_address(&addr);
-
-                // A peer that has not yet been upgraded sends bare addresses,
-                // which name nobody. Ask our own registry who owns it before
-                // falling through to an unconditional dial: that fallback is
-                // the discovery path for a genuinely unknown node, and it is
-                // also what re-dialled an already-connected peer on every PEX
-                // round (gotcha #405).
-                if maybe_peer_id.is_none() {
-                    maybe_peer_id = self.peer_id_for_known_address(&addr);
-                }
-
+            if let Some(pid) = &dial.peer {
                 // Skip a peer Identify has already shown is not SwarmLLM.
                 // PEX hands out addresses without any claim about whose they
                 // are, so this is the only thing stopping us re-dialling the
                 // same foreign nodes every PEX round for the life of the
                 // process — which is how five of them stayed in the peer list.
-                if let Some(pid) = &maybe_peer_id {
-                    if self.foreign_peers.contains(pid) {
-                        continue;
-                    }
+                if self.foreign_peers.contains(pid) {
+                    continue;
                 }
-                // Skip if already connected
-                if let Some(pid) = &maybe_peer_id {
-                    if self.swarm.is_connected(pid) {
-                        continue;
-                    }
+                if self.swarm.is_connected(pid) {
+                    continue;
                 }
+            }
 
-                // SEC: Do NOT call kademlia.add_address here — PEX-supplied
-                // (PeerId, Multiaddr) pairs are unauthenticated and would let an
-                // attacker poison the routing table for eclipse attacks. The dial
-                // below triggers Noise + identify, and the identify handler adds
-                // the verified address to Kademlia post-handshake.
-                // Dial BY PEER ID with the address as a hint, not by bare
-                // address. `DialOpts::from(Multiaddr)` reports no peer id even
-                // when the address carries `/p2p/`, so a bare-address dial is
-                // invisible to `dial_checked` — and to libp2p's own per-peer
-                // dedup. PEX is the path that hands out foreign addresses, so
-                // it is the one that most needs the gate to see them.
-                // `DisconnectedAndNotDialing` — libp2p's own default, and
-                // stricter than the `Disconnected` that was here. `Disconnected`
-                // asks only whether a connection is ESTABLISHED, so two dials
-                // issued before either completes both pass, and a peer ends up
-                // with as many connections as the per-peer cap allows. PEX is a
-                // discovery path with no urgency: if a dial to this peer is
-                // already in flight there is nothing a second one can add, and
-                // the swarm's dial timeout bounds how long that lasts.
-                //
-                // The mDNS site deliberately keeps the weaker condition — see
-                // the comment there; a LAN rediscovery has to be able to
-                // override a stale bootstrap attempt.
-                let opts = match maybe_peer_id {
-                    Some(pid) => libp2p::swarm::dial_opts::DialOpts::peer_id(pid)
-                        .addresses(vec![addr])
-                        .condition(
-                            libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing,
-                        )
-                        .build(),
-                    None => addr.into(),
-                };
-                if let Err(e) = self.dial_checked(opts, "pex") {
-                    tracing::debug!(error = %e, "PEX: failed to dial peer");
-                } else {
-                    dialed += 1;
-                }
+            // SEC: Do NOT call kademlia.add_address here — PEX-supplied
+            // (PeerId, Multiaddr) pairs are unauthenticated and would let an
+            // attacker poison the routing table for eclipse attacks. The dial
+            // below triggers Noise + identify, and the identify handler adds
+            // the verified address to Kademlia post-handshake.
+            // Dial BY PEER ID with the addresses as hints, not by bare
+            // address. `DialOpts::from(Multiaddr)` reports no peer id even
+            // when the address carries `/p2p/`, so a bare-address dial is
+            // invisible to `dial_checked` — and to libp2p's own per-peer
+            // dedup. PEX is the path that hands out foreign addresses, so
+            // it is the one that most needs the gate to see them.
+            // `DisconnectedAndNotDialing` — libp2p's own default, and
+            // stricter than the `Disconnected` that was here. `Disconnected`
+            // asks only whether a connection is ESTABLISHED, so two dials
+            // issued before either completes both pass, and a peer ends up
+            // with as many connections as the per-peer cap allows. PEX is a
+            // discovery path with no urgency: if a dial to this peer is
+            // already in flight there is nothing a second one can add, and
+            // the swarm's dial timeout bounds how long that lasts.
+            //
+            // The mDNS site deliberately keeps the weaker condition — see
+            // the comment there; a LAN rediscovery has to be able to
+            // override a stale bootstrap attempt.
+            tracing::debug!(peer = ?dial.peer, addrs = ?dial.addrs, "PEX: dialling");
+            let opts = match dial.peer {
+                Some(pid) => libp2p::swarm::dial_opts::DialOpts::peer_id(pid)
+                    .addresses(dial.addrs)
+                    .condition(libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing)
+                    .build(),
+                // An address naming nobody is its own entry: dialled bare.
+                None => match dial.addrs.into_iter().next() {
+                    Some(addr) => addr.into(),
+                    None => continue,
+                },
+            };
+            if let Err(e) = self.dial_checked(opts, "pex") {
+                tracing::debug!(error = %e, "PEX: failed to dial peer");
+            } else {
+                dialed += 1;
             }
         }
         if dialed > 0 {

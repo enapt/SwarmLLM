@@ -231,9 +231,15 @@ foreign node never enters the routing table either.
 **`NetworkManager::dial_bootstrap_peers` + `discovery::plan_bootstrap_dials`**
 are how bootstrap and cached addresses are dialled. Group by target peer, one
 `DialOpts::peer_id(..).addresses(all)` each, through `dial_checked`, with
-`PeerCondition::DisconnectedAndNotDialing`.
+`PeerCondition::DisconnectedAndNotDialing`. **Peer exchange too**
+(`handle_pex_response` → `discovery::group_dials_by_peer`): dialled one
+address at a time, the first listed decided TCP or QUIC for the connection's
+life. A peer's stored addresses are ranked by **`helpers::addresses_worth_passing_on`**
+(public, then private, then this host; QUIC first), never cut in advertised
+order — the cap dropped a 12-address peer's public QUIC address at random
+(2026-10-23: fresh nodes met the Melbourne peer over TCP 6 of 6; fixed, QUIC 4 of 4).
 
-→ `docs/invariants/network.md`
+→ `docs/invariants/network.md` § "One dial per PEER"
 
 ## Peer Cache: storable vs dialable
 

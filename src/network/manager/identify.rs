@@ -410,12 +410,10 @@ impl NetworkManager {
         let is_lan = was_lan || addr_is_lan;
         let peer_info = PeerInfo {
             node_id: node_id.clone(),
-            addresses: info
-                .listen_addrs
-                .iter()
-                .take(8)
-                .map(|a| a.to_string())
-                .collect(),
+            addresses: crate::network::helpers::addresses_worth_passing_on(
+                &info.listen_addrs,
+                crate::network::helpers::PEER_ADDRESSES_KEPT,
+            ),
             capability,
             last_seen: chrono::Utc::now(),
             latency_ms: prev_latency_ms,

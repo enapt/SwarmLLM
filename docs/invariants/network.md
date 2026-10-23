@@ -672,6 +672,43 @@ by `dial_concurrency_factor`, and yields exactly one connection. Handing one
 attempt every address is the same parallelism; it just stops keeping the losers.
 Do not "restore" per-address dialling for latency.
 
+**Peer exchange dialled per address too, and it chose the TRANSPORT** (2026-10-23).
+`handle_pex_response` dialled each listed address alone, so a peer's second address
+was refused as "already dialling", and the first one listed decided TCP or QUIC for
+the connection's life. Nothing later adds a QUIC connection: Identify gives Kademlia
+only the connected address. Every fresh rig node of `realdelay.sh` reached the
+Melbourne peer over TCP (6 of 6), while the live node used QUIC to it. Over TCP that
+means Cubic and slow start after idle, not quinn's BBR (§ "A burst is paced by the
+link"). The real-link flow measurements of 10-22/23 ran on those TCP connections.
+
+Two causes:
+- **Per-address dialling.** It now groups through `discovery::group_dials_by_peer`.
+- **The sender's address cap.** `PeerInfo::addresses` took the first 8 Identify
+  addresses AS ADVERTISED. The Melbourne peer advertises 12 (loopback, two Docker
+  bridges, Tailscale, LAN, public; TCP and QUIC each) in a different order every
+  time, so either public address could fall past the eighth. It never reached peer
+  exchange, which forwards public addresses only.
+
+`helpers::addresses_worth_passing_on` ranks the addresses before the cap: public,
+then private, then this host's own (kept for nodes on one host, but first to fall);
+direct before a circuit; QUIC before TCP. This is go-libp2p's `DefaultDialRanker`
+order: QUIC first, TCP 250 ms later (RFC 8305), relays after both.
+
+Measured with fresh probe nodes beside the live node (`pexrace.sh`, `pexab.sh` in
+the session scratchpad):
+- **Grouping alone, sender unfixed:** TCP in 3 of the 3 runs where peer exchange
+  dialled first. The sender's list held only the TCP address.
+- **Both fixed:** a fresh node bootstrapped from a fixed node dialled peer exchange
+  first in 4 of 4 runs. Each dial carried both public addresses, and the connection
+  was QUIC 4 of 4. That includes the 3 runs whose first list came from the unfixed
+  live node with TCP first, so the race goes to QUIC (1 round trip to connect,
+  against TCP's 3 or more).
+- An older sender's list still holds both public addresses only by chance, so the
+  ranking pays as the swarm updates.
+- Tests: `a_peer_listed_at_tcp_then_quic_is_one_dial_carrying_both`,
+  `both_public_addresses_survive_the_cap_quic_first` (the observed 12-address list,
+  public QUIC ninth).
+
 Three rules a new dial site must follow:
 
 - **Read the peer from the LAST `/p2p/` component** (`target_peer_from_address`).
@@ -3626,7 +3663,10 @@ its retransmission timeout restarts at the initial window. Measured with a
 plain-socket probe at 100 ms, 1500-byte packets: a 43 KB send after a 600 ms
 pause took 206 ms (two round trips), 105 with the setting off. It is a
 system-wide setting a node cannot change, and ~90% of the live node's
-connections are QUIC (2026-10-20 log), so nothing changes for TCP. **The rig
+connections are QUIC (2026-10-20 log), so nothing changes for TCP. (⚠ A FRESH
+node's were not: peer exchange dialled the first address listed, and every
+real-link rig node met the Melbourne peer over TCP until 2026-10-23 — § "One
+dial per PEER".) **The rig
 hides it**: its loopback's 64 KB packets make the initial window ~640 KB —
 `split_rig.sh` measures TCP unless `RIG_TRANSPORT=quic`.
 
