@@ -64,12 +64,22 @@ stop_nodes() {
   # answers `... (deleted)` for a process whose binary has been REPLACED, which
   # is the normal case right after a rebuild, and matching only `*swarmllm`
   # silently skips exactly the process that needs killing (gotcha #678).
+  #
+  # The node THIS script started is stopped by its pid: a binary copied under
+  # another name (`swarmllm-f1`) is not `pgrep -x swarmllm`, so the arm after it
+  # found the port and the database held, its own node exited at once, and its
+  # requests were answered — and counted — by the previous arm's node (gotcha #939).
+  [ -n "${NODE_PID:-}" ] && kill "$NODE_PID" 2>/dev/null
   for p in $(pgrep -x swarmllm 2>/dev/null); do
     case "$(readlink "/proc/$p/exe" 2>/dev/null)" in
       *swarmllm | *"swarmllm (deleted)") kill "$p" ;;
     esac
   done
-  for _ in $(seq 1 20); do pgrep -x swarmllm >/dev/null || break; sleep 1; done
+  for _ in $(seq 1 20); do
+    pgrep -x swarmllm >/dev/null || { [ -n "${NODE_PID:-}" ] && kill -0 "$NODE_PID" 2>/dev/null; } || break
+    sleep 1
+  done
+  NODE_PID=
 }
 
 run_arm() {
@@ -82,6 +92,7 @@ run_arm() {
   env "$VAR=$value" SWARMLLM_COUNT_KERNELS=1 \
     LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/wsl/lib \
     "$BIN" run -p "$PORT" >> "$log" 2>&1 &
+  NODE_PID=$!
 
   local up=0 i
   for i in $(seq 1 120); do
@@ -91,6 +102,8 @@ run_arm() {
     sleep 1
   done
   [ "$up" -eq 0 ] && { echo "node never came up; see $log"; stop_nodes; return 1; }
+  # Ready, but is it OURS? Another node on the port answers the health check too.
+  kill -0 "$NODE_PID" 2>/dev/null || { echo "this arm's node exited — another holds the port or the database; see $log"; stop_nodes; return 1; }
 
   # The warm request loads the model. Its forwards are counted too, so the
   # counters are read from the LAST decode forward only — see the awk below.
@@ -106,6 +119,7 @@ run_arm() {
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])' \
     > "$reply" 2>/dev/null
 
+  kill -0 "$NODE_PID" 2>/dev/null || { echo "this arm's node exited during the request; see $log"; stop_nodes; return 1; }
   stop_nodes
 
   # One decode forward's table: the LAST `KERNELS seq_len=1` block in the log.
