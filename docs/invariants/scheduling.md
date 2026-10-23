@@ -4976,6 +4976,52 @@ runs the winner where the 1.5B is there. On this card that ranking is right; on 
 unmeasured (FUTURE_WORK #134, device-aware drafter choice). The coder 0.5B lost on this chat
 prompt; a code prompt is unmeasured.
 
+**A small drafter may be HALF its target, where a card is in play** (2026-10-24,
+`engine_drafter::within_reach` + `small_drafter_fraction`). The table's winner was the largest the
+size rule then allowed — a quarter of the target by layers × width², set from Leviathan et al.'s
+one-machine drafters, never measured here. Qwen2.5-Coder-3B Q4_K_M (151 M against the 7B's 360 M,
+0.42; 1.96 GiB, under the fetch cap) was shut out. Same link and far peer (aa3d1e66, RTX 3060,
+0.3.248), one binary (`~/swarmllm-318/f7/swarmllm` = `99bff582` + `SWARMLLM_DRAFTER_MAX_FRACTION`),
+QUIC forced per arm and checked (`H: to the far peer over: 1 udp` every arm), greedy, both
+drafters on this card, the DSD line naming each arm's drafter (`~/swarmllm-318/harness/realdraft3b.sh`
+17:14-17:31Z 10-23, ABBAABBA × 2 × 400 tokens; the code edit `drafterval.sh` part 1, ABBA × 2 × 400,
+`copy_edit_prompt.txt`; Windows up 10.5-10.9 h):
+
+| drafter (on the card) | chat tok/s | chat misses | code edit tok/s | code misses |
+|---|---|---|---|---|
+| **Qwen2.5-Coder-3B Q4_K_M** | **16.93-19.79 (18.09)** | **0-5 (3.2)** | 62.12-64.34 (63.0) | 0 |
+| Qwen2.5-Coder-1.5B Q8_0 | 12.84-17.72 (15.95) | 8-21 (10.8) | 64.29-66.30 (65.4) | 0 |
+
+A flow call of the 3B costs ~33 ms against the 1.5B's ~25 (drafting 13.4-14.2 s of a ~21 s chat
+reply, 404-427 forwards against 487-594). Where the 1.5B misses, each miss is a round trip and the
+3B wins 13%; where neither misses — a code edit, 40-50 copied runs a reply — the extra drafting is
+a 4% loss. Chat is the common case, so the half.
+
+**Where it does NOT hold** — the rig (`~/swarmllm-318/harness/drafter318.sh`, QUIC netns at 5 ms,
+Qwen2.5-Coder-7B split 0-3 | 4-7, arms c15, c3, c3, c15):
+
+- **Both halves on this one card**: no room left for either drafter there, so both ran on the
+  processor; the first 200-token reply took 38.2/38.7 s with the 3B against 32.6/31.0 s with the
+  1.5B (its load and slower guesses), then γ = 0 for both ("guessing did not pay on these machines
+  last time") and the same 42-44 tok/s.
+- **Everything on the processor** (`CPU=1 FORCE_TREES=0`): the 3B kept 0.729 of its guesses against
+  the 1.5B's 0.744, at 73.1-73.4 ms a guess against 64.8; first 120-token reply 1.86-1.89 tok/s
+  against 2.12-2.20, then γ = 0 and 6.39-6.40 against 6.46-6.64. On a long link a chain from a processor
+  spends its round guessing (a missed seed waits ~300 ms, above), so a dearer guesser that guesses
+  no better can only lose there.
+
+**So the rule**: a drafter reading at most `SMALL_DRAFTER_READS` (= `MOST_DRAFTER_BYTES_TO_FETCH`,
+2 GiB) a guess may be `1 / drafter_max_fraction()` (½) of its target on a node whose card is in
+play (`ModelProcessPool::card_in_play`); any larger drafter, and every drafter on a node without a
+card, keeps `LARGE_DRAFTER_MAX_FRACTION` (¼). A larger one is only ever one the owner holds — a
+7B for a 14B, ~3× the 3B's cost a guess, where the flow's drafter already filled 65% of the reply.
+Planner, request and download pass choose through the one `largest_that_can_draft`, so the room
+left (#275) is the drafter's that will be chosen. A/B `SWARMLLM_DRAFTER_MAX_FRACTION=4` (the rule
+before, on a card). Tests: `the_largest_small_drafter_within_half_its_target_is_chosen` (red at 4),
+`a_large_drafter_is_held_to_a_quarter_of_its_target`, `a_node_without_a_card_holds_every_drafter_to_a_quarter`.
+**Not done**: a node already holding a smaller drafter keeps it (`drafter_to_acquire` answers
+`Held`) — FUTURE_WORK #331.
+
 **The flow has its own distance line: 150 ms, not the tree rounds' 300** (2026-10-23,
 `FLOW_LEAST_ROUND_TRIP_MS`). The 300 ms line (`TREES_LEAST_ROUND_TRIP_MS`) was set for tree ROUNDS
 before the flow existed, and the flow inherited it, so every link under 300 ms — most links between

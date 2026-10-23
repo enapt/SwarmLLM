@@ -15,6 +15,20 @@ faster connection wins. It matters for splits across long links: on a real Thail
 split of a 7B model, 400-word replies ran 16.7 tokens a second over QUIC against 13.5 over TCP.
 It takes effect as the computers you hear from run this version.
 
+**Splits across long links guess better: a computer with a graphics card now picks a larger
+guessing model.** A split guesses ahead with a small model from the same family and has the far
+computer check the guesses, a round trip for each check. The guessing model used to be no larger
+than a quarter of the model it guesses for, a rule made for one machine, where a guess costs a fair
+part of a check. Across machines a check costs the round trip whatever it carries, so a guesser
+that is right more often is worth more than one that is cheap. On a computer with a graphics card,
+a guesser small enough to fetch (2 GB at most) may now be up to half the model's size. On a real
+Thailand–Australia split of a 7B coding model, Qwen2.5-Coder-3B as the guesser replied at 18.1
+tokens a second against Qwen2.5-Coder-1.5B's 16.0, missing 3 times a reply instead of 11. On a code
+edit, where both already guessed every word, it was 4% slower. A computer without a graphics card
+keeps the quarter: there the larger guesser was no better and each guess cost 13% more. A computer
+that has never fetched a guesser now fetches the larger one; one that already holds a smaller
+guesser keeps it for now.
+
 **UPnP now works with routers that give their address in full.** Some home routers (a SKYWORTH
 fibre box among them) describe their port-opening service with a complete web address. The library
 the node used glued that onto the router's address and asked for a page that does not exist, so

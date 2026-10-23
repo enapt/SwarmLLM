@@ -4463,8 +4463,9 @@ impl ModelProcessPool {
     /// Can any model use this node's graphics card at all: one detected, one
     /// our kernels run on, in a build that has them, and not switched off
     /// (`inference.gpu_layers = 0`)? Whether a particular model FITS it is a
-    /// separate question (`is_cpu_bound_for_lack_of_vram`).
-    fn card_in_play(&self) -> bool {
+    /// separate question (`is_cpu_bound_for_lack_of_vram`). The drafter's
+    /// size rule asks it too (`engine_drafter::small_drafter_fraction`).
+    pub(crate) fn card_in_play(&self) -> bool {
         #[cfg(test)]
         if self
             .test_card_in_play

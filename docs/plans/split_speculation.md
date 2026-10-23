@@ -172,7 +172,8 @@ vocabulary check accepts a list padded with unused entries: Qwen2.5-Coder-7B
 lists 152,064 tokens, Qwen2.5-0.5B 151,936, identical over the shared ids, the
 7B's extra 128 `[PAD…]` of type unused. Unset, the drafter is chosen: the
 largest held model that can draft (whole, no recurrent state, the target's
-vocabulary) at most a quarter of the target by layers × width². Not yet:
+vocabulary) at most a quarter of the target by layers × width² (half for a drafter reading at
+most 2 GiB a guess on a node with a card, since 0.3.249, `engine_drafter::within_reach`). Not yet:
 acquiring one a node does not hold.
 
 **Measured on the real link 2026-09-28** (same TH↔BE split and binary as the

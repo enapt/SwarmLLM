@@ -2983,6 +2983,18 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   request 480 s), so either it learns that a QUIC connection which answered beats TCP, or the
   TCP connection is closed while nothing is in flight on it. Trigger: the field still shows TCP
   splits once the anchor runs 0.3.249.
+- **#331 — Replace a held drafter when a better one may now be fetched** (2026-10-24). Since
+  0.3.249 a small drafter may be half its target (`engine_drafter::within_reach`; the coder-3B
+  flowed 18.1 tok/s against the coder-1.5B's 16.0 on the real TH↔AU link,
+  `docs/invariants/scheduling.md` § "A tree that flows"), but `drafter_to_acquire` answers `Held`
+  for whatever drafter a node holds already, so a node that fetched the 1.5B under 0.3.248's
+  quarter keeps it for good. Shape: where the held drafter is smaller (by `size_proxy`) than the
+  one `acquisition_among` would fetch, answer `Fetch` — but prune keeps only `Held` / `Fetch`
+  drafters (`copy_drafts_for_a_split`), so the held one must stay kept while the better one's
+  headers are learned and its parts arrive (a `LearnHeaders` answer would drop it), and be let go
+  only once the better one is held and chosen. Rig: `split_rig.sh repeat` with A holding the
+  1.5B and `FETCH_DRAFTER` offering the 3B. Trigger: field nodes holding a fetched 1.5B for a
+  target they split.
 
 ## Decided — not doing
 

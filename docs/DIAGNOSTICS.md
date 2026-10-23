@@ -664,7 +664,8 @@ far it guessed by the end. **γ settling at 1 on a loopback rig is correct** —
 there a check costs less than a guess; across a real link it settled at 3-7.
 `check_ms_per_position` above 0 means the far computer checks on its processor.
 No line at all: grep `DSD: no drafter available` at debug — no held model shares
-the target's vocabulary within a quarter of its size (a mixture-of-experts target
+the target's vocabulary within reach of its size — half for a drafter reading at most 2 GiB a
+guess on a node with a card in play, a quarter otherwise, since 0.3.249 (a mixture-of-experts target
 counts ALL its experts since 2026-10-14 — before, Qwen3-30B-A3B sized below a dense
 3B and never had a drafter). Of copies of one model (fp16 / Q8_0 / Q4_K_M), the one
 reading the fewest bytes a guess drafts: the example above is the fp16 that name

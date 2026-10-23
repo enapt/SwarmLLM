@@ -2538,7 +2538,7 @@ against 5.18 — the larger drafter keeps ~20% more, so the largest that can dra
   business, #275) a target already recorded is refreshed, so the drafter is kept while splits
   keep USING it, not 7 days after the last miss (review, 2026-10-22).
 - **One choice**: `drafter_to_acquire` is `chosen`'s own size rule (`largest_that_can_draft`,
-  a quarter of the target) and vocabulary check (`could_draft`), over the registry's models of
+  half the target for a small drafter on a node with a card since 0.3.249, `within_reach`) and vocabulary check (`could_draft`), over the registry's models of
   the target's manifest family that this node does not hold whole — but only once every likely
   candidate's header is here (`LearnHeaders`, two a pass, largest first, through
   `ensure_model_geometry`'s cooldown), so a header learned later cannot turn up a better drafter

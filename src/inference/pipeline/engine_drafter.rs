@@ -159,11 +159,75 @@ fn size_counting_experts(geometry: u64, stored: Option<f64>, active: Option<f64>
     }
 }
 
-/// The largest a drafter may be, as a fraction of its target: past a quarter
-/// its guesses cost too much of what they save (Leviathan et al. 2023 used
-/// drafters ~1/10-1/20 of the target; the γ controller then sizes the run from
-/// the measured cost of each guess).
-const DRAFTER_MAX_FRACTION: u64 = 4;
+/// The largest a SMALL drafter may be, as a fraction of its target: half
+/// (2026-10-24). Leviathan et al. 2023 used drafters ~1/10-1/20 of the target
+/// because on one machine a guess costs a fair part of a check; this drafter
+/// only ever guesses for a SPLIT, whose check pays the round trip between
+/// machines, so a guess that is right more often is worth more than one that
+/// is cheap. On the real TH↔AU link (eight arms alternating, one binary)
+/// Qwen2.5-Coder-3B Q4_K_M — 151 M against Qwen2.5-Coder-7B's 360 M, past the
+/// quarter this rule was before — flowed a chat reply at 18.1 tok/s against the
+/// 1.5B Q8_0's 16.0, missing 3 times a reply against 11; on a code edit, where
+/// copied runs leave neither anything to miss, it was 4% slower (63.0 against
+/// 65.4). The γ controller and the tree's row pricing still size the guessing
+/// from the measured cost of each guess.
+const DRAFTER_MAX_FRACTION: u64 = 2;
+
+/// A drafter reading more than this a guess is held to [`LARGE_DRAFTER_MAX_FRACTION`]
+/// of its target: the half was measured for a drafter about this size (the 3B
+/// above reads under 2 GB), and a drafter is fetched only up to it
+/// ([`MOST_DRAFTER_BYTES_TO_FETCH`]). A larger one — only ever one the owner
+/// holds, a 7B for a 14B — costs several times as much a guess, which a flow
+/// already spends most of its time on (the 3B's calls filled 65% of the reply).
+const SMALL_DRAFTER_READS: u64 = MOST_DRAFTER_BYTES_TO_FETCH;
+
+/// The largest a drafter past [`SMALL_DRAFTER_READS`] may be: a quarter, the
+/// rule for every drafter before 2026-10-24.
+const LARGE_DRAFTER_MAX_FRACTION: u64 = 4;
+
+/// [`DRAFTER_MAX_FRACTION`], or `SWARMLLM_DRAFTER_MAX_FRACTION=<n>` (≥ 1): the
+/// A/B of the rule — a small drafter up to 1/n of its target (4 is the rule
+/// before).
+fn drafter_max_fraction() -> u64 {
+    static FRACTION: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *FRACTION.get_or_init(|| {
+        std::env::var("SWARMLLM_DRAFTER_MAX_FRACTION")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .filter(|n: &u64| *n >= 1)
+            .unwrap_or(DRAFTER_MAX_FRACTION)
+    })
+}
+
+/// The fraction of its target a small drafter may be on THIS node:
+/// [`drafter_max_fraction`] where a graphics card is in play here
+/// (`ModelProcessPool::card_in_play`) — the half was measured with the drafter
+/// on the card — else [`LARGE_DRAFTER_MAX_FRACTION`]. On the processor (rig,
+/// both halves and the drafter there, 5 ms apart, 2026-10-24) the coder-3B
+/// guessed no better than the 1.5B (kept 0.73 against 0.74 of its guesses) at
+/// 73 ms a guess against 65, and a chain on a long link spends its round
+/// guessing there, so the quarter stays.
+fn small_drafter_fraction(state: &SharedState) -> u64 {
+    if state.model_process_pool.card_in_play() {
+        drafter_max_fraction()
+    } else {
+        LARGE_DRAFTER_MAX_FRACTION
+    }
+}
+
+/// May a drafter of `drafter`'s size guess for a target of `target_size`: up
+/// to `1 / small_fraction` of it when it reads at most [`SMALL_DRAFTER_READS`]
+/// a guess, else up to [`LARGE_DRAFTER_MAX_FRACTION`] (or the small fraction,
+/// were that the tighter). A drafter whose header gives no reads (`u64::MAX`)
+/// is a large one.
+fn within_reach(drafter: &DrafterSize, target_size: u64, small_fraction: u64) -> bool {
+    let fraction = if drafter.reads <= SMALL_DRAFTER_READS {
+        small_fraction
+    } else {
+        LARGE_DRAFTER_MAX_FRACTION.max(small_fraction)
+    };
+    drafter.size.saturating_mul(fraction) <= target_size
+}
 
 /// `model` as a drafter for `target`, if it can be one: held WHOLE here, not
 /// the target, no recurrent state (a guess that is refused must be taken back,
@@ -203,7 +267,7 @@ fn could_draft(state: &SharedState, target: &ModelId, drafter: ModelId) -> Optio
 
 /// The model this node drafts with for `target`: `inference.draft_model` when
 /// set, else the LARGEST model held whole here that can draft for it
-/// ([`spec_for`]) and is at most a quarter of its size ([`size_proxy`]) — the
+/// ([`spec_for`]) and is [`within_reach`] of its size ([`size_proxy`]) — the
 /// best guesser that is still cheap, since across a network the round trip,
 /// not the guessing, is what a round mostly costs. Either way only one this
 /// node's memory would load ([`admitted`]) for a reply of `conversation`
@@ -292,7 +356,7 @@ pub(crate) const MOST_DRAFTER_HEADERS_A_PASS: usize = 2;
 /// The most a drafter fetched on its own may take on disk: a small thing (a
 /// 3B at Q4, a 1.5B at Q8). A design for split speed may need a user to hold
 /// a 0.5B model, never a large one (`memory/feedback_no_full_model_copies.md`,
-/// user 2026-09-28) — and a quarter of a 70B target would be a 17B. A drafter
+/// user 2026-09-28) — and half a 70B target would be a 35B. A drafter
 /// the owner holds already is chosen at any size.
 pub(crate) const MOST_DRAFTER_BYTES_TO_FETCH: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -314,7 +378,7 @@ pub(crate) enum DrafterToAcquire {
 /// The model to fetch so `target` has a drafter here (or the one held, which
 /// [`chosen`] picks): of the models the swarm
 /// knows that this node does not hold whole, the one [`chosen`] would pick were
-/// it held — the largest that can draft for it, a quarter of its size at most
+/// it held — the largest that can draft for it, [`within_reach`] of its size
 /// ([`largest_that_can_draft`]) — among those `may_fetch` accepts (the download
 /// pass's own gates: trust, refusals, the canonical upload, an uncensored model
 /// nobody chose). Only once every likely candidate's header is here, so a later
@@ -358,6 +422,7 @@ pub(crate) fn drafter_to_acquire(
         likely.into_iter().map(|m| m.id).collect(),
         |m| state.gguf_meta_for(m).is_some(),
         || size_proxy(state, target).map(|s| s.size),
+        small_drafter_fraction(state),
         |m| size_proxy(state, m),
         |m| could_draft(state, target, m),
     )
@@ -365,12 +430,14 @@ pub(crate) fn drafter_to_acquire(
 
 /// [`drafter_to_acquire`]'s decision over the `likely` candidates, largest on
 /// disk first: their missing headers first ([`MOST_DRAFTER_HEADERS_A_PASS`] of
-/// them), then the largest that can draft ([`largest_that_can_draft`]) against
-/// the target's size, which needs only the target's own header.
+/// them), then the largest that can draft ([`largest_that_can_draft`], a
+/// small one up to `1 / small_fraction`) against the target's size, which
+/// needs only the target's own header.
 fn acquisition_among(
     likely: Vec<ModelId>,
     has_header: impl Fn(&ModelId) -> bool,
     target_size: impl FnOnce() -> Option<u64>,
+    small_fraction: u64,
     size: impl Fn(&ModelId) -> Option<DrafterSize>,
     can_draft: impl FnMut(ModelId) -> Option<DrafterSpec>,
 ) -> DrafterToAcquire {
@@ -390,7 +457,7 @@ fn acquisition_among(
         .into_iter()
         .filter_map(|m| size(&m).map(|s| (s, m)))
         .collect();
-    match largest_that_can_draft(target_size, sized, can_draft) {
+    match largest_that_can_draft(target_size, small_fraction, sized, can_draft) {
         Some(spec) => DrafterToAcquire::Fetch(spec.model_id),
         None => DrafterToAcquire::Nothing,
     }
@@ -421,7 +488,7 @@ fn chosen(
         .into_iter()
         .filter_map(|m| size_proxy(state, &m).map(|size| (size, m)))
         .collect();
-    largest_that_can_draft(target_size, sized, |m| {
+    largest_that_can_draft(target_size, small_drafter_fraction(state), sized, |m| {
         spec_for(state, target, m).filter(&keep)
     })
 }
@@ -491,16 +558,18 @@ fn beside_the_plan() -> bool {
     })
 }
 
-/// Of `candidates`, the largest no bigger than a [`DRAFTER_MAX_FRACTION`] of
-/// `target_size` that `can_draft` accepts. Of two the same size — copies of one
-/// model at different precisions — the one reading fewer bytes a guess; then the
-/// model id, so the choice does not depend on map order.
+/// Of `candidates`, the largest [`within_reach`] of `target_size` — a small
+/// one up to `1 / small_fraction` of it ([`small_drafter_fraction`]) — that
+/// `can_draft` accepts. Of two the same size — copies of one model at
+/// different precisions — the one reading fewer bytes a guess; then the model
+/// id, so the choice does not depend on map order.
 fn largest_that_can_draft(
     target_size: u64,
+    small_fraction: u64,
     mut candidates: Vec<(DrafterSize, ModelId)>,
     mut can_draft: impl FnMut(ModelId) -> Option<DrafterSpec>,
 ) -> Option<DrafterSpec> {
-    candidates.retain(|(d, _)| d.size.saturating_mul(DRAFTER_MAX_FRACTION) <= target_size);
+    candidates.retain(|(d, _)| within_reach(d, target_size, small_fraction));
     candidates.sort_by(|a, b| {
         b.0.size
             .cmp(&a.0.size)
@@ -1193,11 +1262,16 @@ mod tests {
     }
 
     /// For Qwen2.5-Coder-7B (360 M by layers × width²) this node holds the 0.5B
-    /// (19 M), 1.5B (66 M) and 3B (151 M): the 3B is past a quarter, so the 1.5B
-    /// — and the 0.5B when the 1.5B cannot draft.
+    /// (19 M), 1.5B (66 M) and 3B (151 M), all small: the 3B is within half, so
+    /// it drafts (2026-10-24 — a quarter, the rule before, chose the 1.5B, and
+    /// the 3B flowed 18.1 tok/s against its 16.0 on the real link); then the
+    /// 1.5B where the 3B cannot draft, the 0.5B where neither can.
     #[test]
-    fn the_largest_drafter_within_a_quarter_that_can_draft_is_chosen() {
-        let sized = |size| DrafterSize { size, reads: 1 };
+    fn the_largest_small_drafter_within_half_its_target_is_chosen() {
+        let sized = |size| DrafterSize {
+            size,
+            reads: 1_700_000_000,
+        };
         let held = || {
             vec![
                 (sized(19), ModelId("q-0.5b".into())),
@@ -1205,14 +1279,113 @@ mod tests {
                 (sized(66), ModelId("q-1.5b".into())),
             ]
         };
-        let chosen = largest_that_can_draft(360, held(), |m| Some(spec(&m.0)));
+        let any = |m: ModelId| Some(spec(&m.0));
+        let chosen = largest_that_can_draft(360, DRAFTER_MAX_FRACTION, held(), any);
+        assert_eq!(chosen.unwrap().model_id.0, "q-3b");
+        let chosen = largest_that_can_draft(360, DRAFTER_MAX_FRACTION, held(), |m| {
+            (m.0 != "q-3b").then(|| spec(&m.0))
+        });
         assert_eq!(chosen.unwrap().model_id.0, "q-1.5b");
-        let chosen = largest_that_can_draft(360, held(), |m| (m.0 != "q-1.5b").then(|| spec(&m.0)));
+        let chosen = largest_that_can_draft(360, DRAFTER_MAX_FRACTION, held(), |m| {
+            (m.0 == "q-0.5b").then(|| spec(&m.0))
+        });
         assert_eq!(chosen.unwrap().model_id.0, "q-0.5b");
-        assert!(largest_that_can_draft(360, held(), |_| None).is_none());
+        assert!(largest_that_can_draft(360, DRAFTER_MAX_FRACTION, held(), |_| None).is_none());
+        assert_eq!(
+            largest_that_can_draft(360, 4, held(), any)
+                .unwrap()
+                .model_id
+                .0,
+            "q-1.5b",
+            "SWARMLLM_DRAFTER_MAX_FRACTION=4 is the rule before"
+        );
         assert!(
-            largest_that_can_draft(40, held(), |m| Some(spec(&m.0))).is_none(),
-            "nothing a quarter of a tiny target's size"
+            largest_that_can_draft(30, DRAFTER_MAX_FRACTION, held(), any).is_none(),
+            "nothing within half a tiny target's size"
+        );
+    }
+
+    /// A drafter reading more a guess than one fetched may is held to a
+    /// quarter: Qwen2.5-7B (360 M, ~4.4 GB a guess at Q4_K_M) is within half of
+    /// Qwen2.5-14B (1,258 M) and not chosen for it — the 3B is; within a quarter
+    /// of a target it drafts. Reads unknown (no header) is large.
+    #[test]
+    fn a_large_drafter_is_held_to_a_quarter_of_its_target() {
+        let held = || {
+            vec![
+                (
+                    DrafterSize {
+                        size: 360,
+                        reads: 4_400_000_000,
+                    },
+                    ModelId("q-7b".into()),
+                ),
+                (
+                    DrafterSize {
+                        size: 151,
+                        reads: 1_700_000_000,
+                    },
+                    ModelId("q-3b".into()),
+                ),
+            ]
+        };
+        let any = |m: ModelId| Some(spec(&m.0));
+        let chosen = largest_that_can_draft(1258, DRAFTER_MAX_FRACTION, held(), any);
+        assert_eq!(chosen.unwrap().model_id.0, "q-3b");
+        let chosen = largest_that_can_draft(1500, DRAFTER_MAX_FRACTION, held(), any);
+        assert_eq!(chosen.unwrap().model_id.0, "q-7b", "360 × 4 ≤ 1,500");
+        let size = |reads| DrafterSize { size: 150, reads };
+        assert!(within_reach(
+            &size(SMALL_DRAFTER_READS),
+            300,
+            DRAFTER_MAX_FRACTION
+        ));
+        assert!(!within_reach(
+            &size(SMALL_DRAFTER_READS + 1),
+            300,
+            DRAFTER_MAX_FRACTION
+        ));
+        assert!(!within_reach(&size(u64::MAX), 300, DRAFTER_MAX_FRACTION));
+        assert!(
+            !within_reach(&size(1), 300, 8),
+            "a tighter A/B fraction holds a large drafter too"
+        );
+        assert!(!within_reach(&size(u64::MAX), 1199, 8));
+        assert!(within_reach(&size(u64::MAX), 1200, 8));
+    }
+
+    /// The half is for a node whose graphics card is in play, where it was
+    /// measured; on a node without one every drafter keeps a quarter (on the
+    /// processor the 3B guessed no better than the 1.5B, at 73 ms a guess
+    /// against 65).
+    #[test]
+    fn a_node_without_a_card_holds_every_drafter_to_a_quarter() {
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(ModelExecutor::new()));
+        let (state, _, _) = SharedState::new(
+            crate::config::Config::default(),
+            Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        assert_eq!(
+            small_drafter_fraction(&state),
+            LARGE_DRAFTER_MAX_FRACTION,
+            "no card in play"
+        );
+        state
+            .model_process_pool
+            .test_card_in_play
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            small_drafter_fraction(&state),
+            drafter_max_fraction(),
+            "a card in play"
         );
     }
 
@@ -1244,7 +1417,7 @@ mod tests {
                 ModelId("qwen2.5-0.5b-a-no-header".into()),
             ),
         ];
-        let chosen = largest_that_can_draft(360, held, |m| Some(spec(&m.0)));
+        let chosen = largest_that_can_draft(360, DRAFTER_MAX_FRACTION, held, |m| Some(spec(&m.0)));
         assert_eq!(chosen.unwrap().model_id.0, "qwen2.5-0.5b-instruct-q8-0");
     }
 
@@ -1257,7 +1430,7 @@ mod tests {
         // header: 232.3 MB a layer stored, 27.3 MB read).
         let moe = size_counting_experts(201_326_592, Some(232_300_000.0), Some(27_300_000.0));
         assert!(
-            117_440_512 * DRAFTER_MAX_FRACTION <= moe,
+            117_440_512 * LARGE_DRAFTER_MAX_FRACTION <= moe,
             "Qwen3-1.7B can draft: {moe}"
         );
         assert_eq!(
@@ -1428,7 +1601,7 @@ mod tests {
 
     /// The fetch is decided only once every likely candidate's header is
     /// here — two learned a pass, largest first — and then it is the largest
-    /// that can draft, within a quarter of the target: a 1.5B before a 0.5B, a
+    /// that can draft, within half the target: a 1.5B before a 0.5B, a
     /// model the vocabulary check refuses passed over, one too big skipped.
     #[test]
     fn a_drafter_is_fetched_only_once_every_likely_header_is_here() {
@@ -1453,7 +1626,14 @@ mod tests {
         };
         let only = |have: &'static [&'static str]| move |m: &ModelId| have.contains(&m.0.as_str());
         assert_eq!(
-            acquisition_among(likely(), only(&[]), || Some(360), size, can_draft),
+            acquisition_among(
+                likely(),
+                only(&[]),
+                || Some(360),
+                DRAFTER_MAX_FRACTION,
+                size,
+                can_draft
+            ),
             DrafterToAcquire::LearnHeaders(vec![id("3b"), id("1.5b")]),
             "the largest two first"
         );
@@ -1462,6 +1642,7 @@ mod tests {
                 likely(),
                 only(&["3b", "1.5b"]),
                 || Some(360),
+                DRAFTER_MAX_FRACTION,
                 size,
                 can_draft
             ),
@@ -1470,17 +1651,38 @@ mod tests {
         );
         let every = only(&["3b", "1.5b", "0.5b", "other-vocab"]);
         assert_eq!(
-            acquisition_among(likely(), every, || Some(360), size, can_draft),
+            acquisition_among(
+                likely(),
+                every,
+                || Some(360),
+                DRAFTER_MAX_FRACTION,
+                size,
+                can_draft
+            ),
             DrafterToAcquire::Fetch(id("1.5b")),
-            "the 3B is more than a quarter; the other vocabulary cannot draft"
+            "the 3B is more than half; the other vocabulary cannot draft"
         );
         assert_eq!(
-            acquisition_among(likely(), every, || None, size, can_draft),
+            acquisition_among(
+                likely(),
+                every,
+                || None,
+                DRAFTER_MAX_FRACTION,
+                size,
+                can_draft
+            ),
             DrafterToAcquire::Nothing,
             "no header for the target: no size to judge against"
         );
         assert_eq!(
-            acquisition_among(vec![id("3b")], only(&["3b"]), || Some(360), size, can_draft),
+            acquisition_among(
+                vec![id("3b")],
+                only(&["3b"]),
+                || Some(360),
+                DRAFTER_MAX_FRACTION,
+                size,
+                can_draft
+            ),
             DrafterToAcquire::Nothing
         );
     }
