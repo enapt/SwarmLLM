@@ -5036,6 +5036,30 @@ fn rms_over_last_dim(x: &Tensor, eps: f64) -> CandleResult<Tensor> {
     x.broadcast_div(&(mean_sq + eps)?.sqrt()?)
 }
 
+/// `t` plus `bias`, broadcast over its rows (Qwen 2's q/k/v biases); `t`
+/// itself without one.
+fn biased(t: Tensor, bias: Option<&Tensor>) -> CandleResult<Tensor> {
+    match bias {
+        Some(b) => t.broadcast_add(b),
+        None => Ok(t),
+    }
+}
+
+/// How [`LayerWeights::heads_first`] normalises each head before RoPE.
+enum HeadNorm<'a> {
+    None,
+    /// `attn_q_norm` / `attn_k_norm` (Qwen 3, Gemma 3).
+    Weighted(&'a RmsNorm),
+    /// [`LayerWeights::normed_values`] (Gemma 4's V).
+    Values,
+}
+
+impl<'a> HeadNorm<'a> {
+    fn of(norm: Option<&'a RmsNorm>) -> Self {
+        norm.map_or(HeadNorm::None, HeadNorm::Weighted)
+    }
+}
+
 impl LayerWeights {
     /// How this layer keeps its KV cache on `device` — [`kv_storage`], asked
     /// with this layer's head geometry.
@@ -5068,16 +5092,27 @@ impl LayerWeights {
         }
 
         let (_b_sz, _n_head, seq_len, _head_dim) = x.dims4()?;
-        let (cos, sin) = match tree_rope_rows(seq_len, &self.cos, &self.sin)? {
-            Some(rows) => rows,
-            None => (
+        let (cos, sin) = self.rope_tables(seq_len, index_pos)?;
+        let roped = rope_over_heads(x, &cos, &sin, self.rope_dim, self.use_rope_contiguous)?;
+        self.after_rope(roped)
+    }
+
+    /// The rows of the RoPE tables for `seq_len` positions from `index_pos` —
+    /// or a tree's own rows ([`tree_rope_rows`]): `[seq_len, rope_dim / 2]`.
+    fn rope_tables(&self, seq_len: usize, index_pos: usize) -> CandleResult<(Tensor, Tensor)> {
+        match tree_rope_rows(seq_len, &self.cos, &self.sin)? {
+            Some(rows) => Ok(rows),
+            None => Ok((
                 self.cos.narrow(0, index_pos, seq_len)?,
                 self.sin.narrow(0, index_pos, seq_len)?,
-            ),
-        };
-        let roped = rope_over_heads(x, &cos, &sin, self.rope_dim, self.use_rope_contiguous)?;
-        // Here, not in the attention paths, so every path that ropes Q and K
-        // — prefill, decode, batched — also normalises them.
+            )),
+        }
+    }
+
+    /// What follows the rotation of Q and K — here, not in the attention
+    /// paths, so every path that ropes them (prefill, decode, batched, the
+    /// card's one launch) also normalises them.
+    fn after_rope(&self, roped: Tensor) -> CandleResult<Tensor> {
         match self.qk_rms_norm_after_rope {
             Some(eps) => rms_over_last_dim(&roped, eps),
             None => Ok(roped),
@@ -5098,6 +5133,29 @@ impl LayerWeights {
     /// plain loop everywhere else.
     #[allow(clippy::type_complexity)]
     fn projected(
+        &self,
+        x: &Tensor,
+        lora: Option<(&LoraAdapter, usize)>,
+    ) -> CandleResult<(Tensor, Option<(Tensor, Tensor)>)> {
+        let (q, kv) = self.unbiased_projections(x, lora)?;
+        let q = biased(q, self.attention_bq.as_ref())?;
+        let kv = kv
+            .map(|(k, v)| {
+                CandleResult::Ok((
+                    biased(k, self.attention_bk.as_ref())?,
+                    biased(v, self.attention_bv.as_ref())?,
+                ))
+            })
+            .transpose()?;
+        Ok((q, kv))
+    }
+
+    /// [`Self::projected`] before the biases: the matmuls and any adapter's
+    /// deltas. [`Self::attend`] adds the biases in [`Self::heads_first`],
+    /// where a card adds them inside the one launch that also lays the heads
+    /// out and rotates them.
+    #[allow(clippy::type_complexity)]
+    fn unbiased_projections(
         &self,
         x: &Tensor,
         lora: Option<(&LoraAdapter, usize)>,
@@ -5148,19 +5206,69 @@ impl LayerWeights {
             }
         }
 
-        // Apply QKV biases if present (Qwen2 has biases)
-        if let Some(ref bq) = self.attention_bq {
-            q = q.broadcast_add(bq)?;
-        }
-        if let Some((k, v)) = kv.as_mut() {
-            if let Some(ref bk) = self.attention_bk {
-                *k = k.broadcast_add(bk)?;
-            }
-            if let Some(ref bv) = self.attention_bv {
-                *v = v.broadcast_add(bv)?;
-            }
-        }
         Ok((q, kv))
+    }
+
+    /// A projection's output (`[b, seq, heads * head_dim]`, before its bias)
+    /// as attention reads it: `[b, heads, seq, head_dim]`, contiguous, with
+    /// `bias` added, normalised per head by `norm` (before RoPE), and — where
+    /// `rope_at` gives the first position — rotated as
+    /// [`Self::apply_rotary_emb`] rotates. The ONE preparation of
+    /// [`Self::attend`]'s Q, K and V. On a card, with no norm before RoPE,
+    /// ONE launch (`inference::heads_first`, bit-identical: TensorRT-LLM's
+    /// `addFusedQKVBiasTranspose`); otherwise, and as its reference, the
+    /// composition — the bias, the reshape, the norm, `transpose(1, 2)`,
+    /// `contiguous`, the rotation.
+    #[allow(clippy::too_many_arguments)]
+    fn heads_first(
+        &self,
+        lin: Tensor,
+        bias: Option<&Tensor>,
+        heads: usize,
+        norm: HeadNorm<'_>,
+        rope_at: Option<usize>,
+        b_sz: usize,
+        seq_len: usize,
+    ) -> CandleResult<Tensor> {
+        #[cfg(feature = "candle-cuda")]
+        if matches!(norm, HeadNorm::None) {
+            let tables = match rope_at {
+                Some(at) if !self.skip_rope => Some(self.rope_tables(seq_len, at)?),
+                _ => None,
+            };
+            let rotation =
+                tables
+                    .as_ref()
+                    .map(|(cos, sin)| crate::inference::heads_first::Rotation {
+                        cos,
+                        sin,
+                        rope_dim: self.rope_dim.min(self.head_dim),
+                        contiguous_halves: self.use_rope_contiguous,
+                    });
+            if let Some(t) = crate::inference::heads_first::on_the_card(
+                &lin,
+                bias,
+                rotation,
+                heads,
+                self.head_dim,
+            )? {
+                return match tables {
+                    Some(_) => self.after_rope(t),
+                    None => Ok(t),
+                };
+            }
+        }
+        let t = biased(lin, bias)?.reshape((b_sz, seq_len, heads, self.head_dim))?;
+        let t = match norm {
+            HeadNorm::None => t,
+            HeadNorm::Weighted(n) => n.forward(&t)?,
+            HeadNorm::Values => self.normed_values(t)?,
+        };
+        let t = t.transpose(1, 2)?.contiguous()?;
+        match rope_at {
+            Some(at) => self.apply_rotary_emb(&t, at),
+            None => Ok(t),
+        }
     }
 
     /// K and V for `b_sz × seq_len` positions shaped as the cache keeps them
@@ -5232,24 +5340,48 @@ impl LayerWeights {
         lora: Option<(&LoraAdapter, usize)>,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, _n_embd) = x.dims3()?;
-        let (q, kv) = self.projected(x, lora)?;
+        let (q, kv) = self.unbiased_projections(x, lora)?;
 
         let __shape_t = std::time::Instant::now();
-        let mut q = q.reshape((b_sz, seq_len, self.n_head, self.head_dim))?;
+        // Qwen 3 and Gemma 3 normalise Q and K per head before RoPE; Gemma 4
+        // normalises V.
+        let q = self.heads_first(
+            q,
+            self.attention_bq.as_ref(),
+            self.n_head,
+            HeadNorm::of(self.attn_q_norm.as_ref()),
+            Some(index_pos),
+            b_sz,
+            seq_len,
+        )?;
+        let q = self.scaled_queries(q)?;
         let kv = kv
-            .map(|(k, v)| self.keys_and_values(k, v, b_sz, seq_len))
-            .transpose()?;
-
-        // Qwen3 QK normalization: RmsNorm applied per-head before RoPE
-        if let Some(ref qn) = self.attn_q_norm {
-            q = qn.forward(&q)?;
-        }
-
-        let q = q.transpose(1, 2)?.contiguous()?;
-
-        let q = self.scaled_queries(self.apply_rotary_emb(&q, index_pos)?)?;
-        let kv = kv
-            .map(|(k, v)| CandleResult::Ok((self.apply_rotary_emb(&k, index_pos)?, v)))
+            .map(|(k, v)| {
+                CandleResult::Ok((
+                    self.heads_first(
+                        k,
+                        self.attention_bk.as_ref(),
+                        self.n_kv_head,
+                        HeadNorm::of(self.attn_k_norm.as_ref()),
+                        Some(index_pos),
+                        b_sz,
+                        seq_len,
+                    )?,
+                    self.heads_first(
+                        v,
+                        self.attention_bv.as_ref(),
+                        self.n_kv_head,
+                        if self.v_rms_norm.is_some() {
+                            HeadNorm::Values
+                        } else {
+                            HeadNorm::None
+                        },
+                        None,
+                        b_sz,
+                        seq_len,
+                    )?,
+                ))
+            })
             .transpose()?;
         crate::inference::prof::add(P::AttnShape, __shape_t.elapsed().as_nanos() as u64);
 

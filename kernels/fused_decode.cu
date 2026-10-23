@@ -190,3 +190,69 @@ extern "C" __global__ void rope_partial_f32(
         }
     }
 }
+
+// A projection's output to the heads-first layout attention reads, with its
+// bias added and RoPE applied on the way — ONE kernel for what candle composes
+// as `badd` (the bias), `ucopy` (the `transpose(1, 2).contiguous()` to
+// `[b, heads, seq, head_dim]`) and `rope` / `ropei` (or `rope_partial_f32`):
+// three launches for Q, three for K, two for V, each a pass over the tensor
+// and an allocation. TensorRT-LLM's `addFusedQKVBiasTranspose` is the same
+// shape (bias, rotary, transpose in one pass); llama.cpp fuses its rope with
+// the cache's `set_rows` for the same reason.
+//
+// ⚠ **Bit-identical to the composition.** The bias is candle's `badd`
+// (`x + b`); the rotated pair is candle's `rope` (contiguous halves: element j
+// pairs with j + rope_dim/2) or `ropei` (interleaved: 2j with 2j+1) from
+// `candle-kernels/src/reduce.cu`, expression for expression, over the biased
+// values, with the same cos/sin index (position × half + j); every other
+// channel is copied (biased). `cuda_heads_first_is_bit_identical_to_the_composed_path` pins it.
+//
+// LAYOUT: `src` is `[b, seq, heads, head_dim]` contiguous (a projection's
+// `[b, seq, heads * head_dim]`); `bias` is `[heads * head_dim]` or null;
+// `cos` and `sin` are `[seq, rope_dim / 2]` (unread when `rope_dim` is 0);
+// `dst` is `[b, heads, seq, head_dim]`. Every element of `dst` is assigned, so
+// it may come from `alloc_fully_overwritten`.
+extern "C" __global__ void heads_first_f32(
+    const float *src,
+    const float *bias,
+    const float *cos,
+    const float *sin,
+    float *dst,
+    const unsigned int b,
+    const unsigned int seq,
+    const unsigned int heads,
+    const unsigned int head_dim,
+    const unsigned int rope_dim,
+    const int interleaved
+) {
+    const unsigned int half = rope_dim / 2;
+    const unsigned int per_row = half + (head_dim - rope_dim);
+    const size_t total = (size_t)b * heads * seq * per_row;
+    for (size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x; idx < total;
+         idx += (size_t)blockDim.x * gridDim.x) {
+        // `r` is a row of `dst`: (batch, head, position).
+        const size_t r = idx / per_row;
+        const unsigned int j = (unsigned int)(idx - r * per_row);
+        const unsigned int t = (unsigned int)(r % seq);
+        const size_t bh = r / seq;
+        const unsigned int h = (unsigned int)(bh % heads);
+        const size_t bi = bh / heads;
+        const float *in = src + ((bi * seq + t) * heads + h) * head_dim;
+        const float *bias_h = bias == nullptr ? nullptr : bias + (size_t)h * head_dim;
+        float *out = dst + r * head_dim;
+        if (j < half) {
+            const size_t i_cs = (size_t)t * half + j;
+            const float c = cos[i_cs];
+            const float s = sin[i_cs];
+            const unsigned int i1 = interleaved ? 2 * j : j;
+            const unsigned int i2 = interleaved ? i1 + 1 : i1 + half;
+            const float x1 = bias_h == nullptr ? in[i1] : in[i1] + bias_h[i1];
+            const float x2 = bias_h == nullptr ? in[i2] : in[i2] + bias_h[i2];
+            out[i1] = x1 * c - x2 * s;
+            out[i2] = x1 * s + x2 * c;
+        } else {
+            const unsigned int k = rope_dim + (j - half);
+            out[k] = bias_h == nullptr ? in[k] : in[k] + bias_h[k];
+        }
+    }
+}

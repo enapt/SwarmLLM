@@ -449,7 +449,7 @@ changes no live row. (2) The drafter's growth session: the same equality for its
 loop, rig at a 300 ms injected delay against tree rounds on the same replies; then the real
 link. Exit: ≥ 1.3× tree rounds over 400 tokens, replies scored against llama.cpp.
 
-**Built 2026-10-22 (steps 1-3, unreleased).** Steps 1 and 2's equalities hold
+**Built 2026-10-22 (steps 1-3; released in v0.3.248).** Steps 1 and 2's equalities hold
 (`a_tree_read_in_three_forwards_reads_as_one`,
 `a_tree_that_flows_proposes_what_a_fresh_read_of_each_path_ranks_likeliest`). Step 3 on the card
 rig at 385 ms: 8.99-9.44 tok/s against tree rounds' 8.03-8.27 over 400 tokens, every reply token
@@ -458,6 +458,18 @@ of depth a drafter call and the walk followed at 0.63-0.74 tokens a call whateve
 levels a call (EAGLE-2's shape) took it to 1.05-1.17. The requester is compute-bound and the
 drafter's levels are ~72% of it: next, its tree steps captured as CUDA graphs, then the real link
 (`docs/invariants/scheduling.md` § "A tree that flows", Measured).
+
+**Since then (2026-10-22/23), all on the requester's card.** The drafter's tree level is one tree
+kernel and one CUDA graph (idle card, a flow call 36.0 → 26.5 ms) and ranks its tree in two card
+launches (→ 21 ms); both shipped in v0.3.248 with the flow and FlowGuard. After the tag: a tree's
+context is read by flash attention in runs, and Q, K and V reach attention heads-first in one launch
+(a flow call 600 tokens in 14.1 → 12.7 ms; a 7B near half checking 24 rows 4,000 tokens in 22.7 →
+14.8 ms; `docs/invariants/inference.md`, both sections). **Next: the real link.** Flow against tree
+rounds against the chain stream on TH↔AU (7B, the far half on an RTX 3060 ~428 ms away), plus the
+flow on the newer build. Its `DSD: a tree that flowed is complete` lines split each reply's time
+into drafting, near-half and waiting, which says whether the requester's compute or the miss rate
+binds. That decides the next lever: a cheaper requester, or more tokens between misses (a better
+drafter, item 4 of § "Build order").
 
 ## Build order (each step ends on a measurement)
 

@@ -2049,10 +2049,14 @@ attention** (`decode_attn::past_runs`: every row sees the positions before the t
 FA2 reads them non-causally in runs, merged by log-sum-exp in the one combine — FlashInfer's cascade
 plus flash-decoding's split; the tiled kernel keeps the tree's own rows): the 7B near half's 24-row
 check 4,000 deep 22.6-22.9 → 14.7-15.0 ms, 64 rows 47-48 → 25, a tree now costing a chain (§ "A
-tree's context is read by flash attention, in runs"). Left of it: the queries' own round trip in a tree's attention (the
+tree's context is read by flash attention, in runs"); **and Q, K and V reach attention heads-first
+in ONE launch** (`inference::heads_first`: the bias, RoPE and the copy, bit-identical — the q/k/v
+bias adds and the copies before attention this entry named): a flow call 14.3-14.4 → 12.7-12.8 ms,
+two launches a layer fewer in every biased family's decode (§ "Q, K and V reach attention
+heads-first in one launch"). Left of it: the queries' own round trip in a tree's attention (the
 heads-first Q is transposed back to rows-first for the tree kernel and flash, a `ucopy` and a cast
-a layer); the q/k/v bias adds (~5% of a level, llama.cpp fuses them into its vector kernel) and
-the copies before attention (~4%); the flow on the real link.
+a layer); a fused-QKV family (Phi-3/3.5/4) still copies its three slices out of the fused product
+before the kernel (it could read them in place with a row stride); the flow on the real link.
 Left of the level: a whole drafter call
 as ONE graph with its rows chosen on the card (SGLang's EAGLE captures its draft levels and the
 top-k between them; ours still reads each level's ranking back and chooses on the host, a sync

@@ -14,6 +14,8 @@ pub mod draft_tree;
 pub mod dsd_controller;
 pub mod executor;
 pub mod fast_math;
+#[cfg(feature = "candle-cuda")]
+pub(crate) mod heads_first;
 pub mod kv_cache;
 pub(crate) mod layers;
 pub mod local_embedder;

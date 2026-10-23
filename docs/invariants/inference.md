@@ -887,6 +887,70 @@ reply, `test-split`'s rate after the first 8 steps, live node stopped, Windows u
 alternated three times, the decode-attention stall below already removed): 87.0-87.1 → 91.8-92.1
 tokens a second, replies identical; llama.cpp `llama-bench` 103.1 (median sample).
 
+### Q, K and V reach attention heads-first in one launch: bias, RoPE and the copy (2026-10-23)
+
+**What it replaced.** A projection's output `[b, seq, heads × head_dim]` became attention's `[b,
+heads, seq, head_dim]` in three ops: the bias (`badd`), the reshape and `transpose(1, 2).contiguous()`
+(`ucopy`), then RoPE (`rope` / `rope_i` / `rope_partial_f32`) — three launches for Q, three for K,
+two for V: eight a layer, each reading and writing the whole tensor. nsys of the 0.5B drafter's
+growth (24 rows 8 a level, 600 deep) put them at 5.5% (`badd`), 5.4% (`ucopy`) and 2.0% (`rope`) of
+the card's time; of the 7B's near half's 24-row tree forwards, 2.1%, 4.4% and 0.6%. A drafter level
+and a decode step are bound by their launch COUNT (§ "A decode token is bound by GPU submission
+COUNT"), and FUTURE_WORK #134 named these two items as what was left of a level.
+
+**Research.** TensorRT-LLM fuses exactly this (`addFusedQKVBiasTranspose`: bias + RoPE + the
+heads-first layout in one kernel, its context phase); llama.cpp adds the bias inside its
+matrix-vector kernel (decode only), and needs no transpose because its attention reads the
+projection's layout. Fusing the bias into the MMQ kernels would change llama.cpp's vendored code
+(`namespace swarm_ggml`, gotcha #927) and still leave the copy and the rotation; one kernel AFTER the
+product removes all three ops and touches nothing vendored. The add_rmsnorm precedent (§
+"`inference::residual_norm`") says why it can be bit-identical: an add computed in a register is one
+IEEE add either way.
+
+**The rule.** **`layers::LayerWeights::heads_first`** is the ONE preparation of `attend`'s Q, K and
+V — bias, per-head norm, heads-first, rotation — and on a card, where no per-head norm comes before
+RoPE (`HeadNorm::None`), it asks **`inference::heads_first::on_the_card`** first: ONE launch of
+`kernels/fused_decode.cu::heads_first_f32` (a thread per rotated pair or copied channel; candle's
+`rope` / `rope_i` expressions for the pair, the bias added to each input in a register, every
+channel past `rope_dim` copied as `rope_partial_f32` does). `fusable` checks every precondition
+(f32, contiguous, whole heads, a `[width]` bias, `[seq, rope_dim / 2]` tables, even `rope_dim` ≤
+head width, counts under u32) and declines to the composition otherwise. The rotation's tables are
+`rope_tables` — the same narrow, or a tree's gathered rows (`layers::TreeRows`), the composition
+reads — and a post-rotation norm (`after_rope`) still follows. V passes no rotation (the same kernel
+as a copy + bias); a V with NO bias is declined — the kernel would be the copy alone, which the
+composition makes only where one is needed (none for a decoded token: `transpose(1, 2)` of one
+position is already contiguous). The first build fused it and ADDED a launch a layer to every
+bias-free family's decode (TinyLlama: +3 `heads_first_f32`, −2 `rope_i_f32`; `kernel_count_ab.sh`). Out of scope, composed as before: a per-head norm before RoPE (Qwen 3, Gemma 3
+and 4 — the norm reads the heads-first layout), `forward_attn_batched` (`projected`), the processor.
+A fused-QKV family (Phi-3/3.5/4) takes it after `forward_shared`'s narrow copies. A/B
+`SWARMLLM_HEADS_FIRST=compose`.
+
+**Bit-identical** — `cuda_heads_first_is_bit_identical_to_the_composed_path`: nine shapes × both
+layouts (a 7B's and the 0.5B's Q and K decoding, a tree's 24 rows, a prompt chunk, a partial
+rotation 64 of 256 and 96 of 128, no bias, no rotation, a batch of two, tables narrowed at an
+offset), every element's bits against the layer's own composition (`badd`, the transpose,
+`layers::rope_over_heads`).
+
+**Measured** (`~/swarmllm-318/fuse_check.sh`, the arms of § "A tree's context is read by flash
+attention, in runs"; "flash" → "both" is this alone). The 7B's near half, ms a forward, 600 deep:
+a chain of 8 / 24 / 64 rows 10.3-10.5 → 9.7-10.2 / 14.3-14.5 → 13.7-13.8 / 22.8-22.9 → 21.7-22.2;
+a tree of 24 rows 14.3-14.7 → 13.7-13.9, 32 rows 16.5 → 15.5. The 0.5B drafter's flow call 600 deep
+14.3-14.4 → 12.7-12.8 ms, 1,400 deep 15.0-15.1 → 13.8-13.9 (−8-11%). The mechanism (nsys, the
+drafter's growth 1,400 deep, old → both): `heads_first_f32` 0 → 9,360 launches, `badd` 10,581 →
+1,221, `rope` 6,240 → 0, `ucopy` 7,008 → 1,824; the card's time 735.8 → 659.4 ms with flash.
+*A decoded token* (`kernel_count_ab.sh SWARMLLM_HEADS_FIRST fused compose`, replies identical): the
+0.5B and the 7B `badd_f32` 3.46 → 0.46 and `rope_f32` 2 → 0 a layer for 3 `heads_first_f32` — two
+launches a layer fewer (0.5B 582 → 534 a token); the bias-free families, once their V is declined,
+the same count both ways (TinyLlama 468, Llama 3.2 3B 594, Mistral 7B 678: `rope_i_f32` 2 → 0 for 2
+`heads_first_f32`) — their gain is the copies of a prompt chunk's and a tree's Q and K; nsys of the 0.5B's 128-token decodes (`~/swarmllm-318/decprof.sh`, graph
+nodes traced) 1,356.7 → 1,262.3 ms of card time, 224k → 206k kernel launches. A decode's tok/s on
+this box spread 280-318 in BOTH arms over three rounds — the count and the card's time are the
+instrument, not the clock (§ "A decode token is bound by GPU submission COUNT").
+
+**What a change must keep**: bit-identity with the composition (an A/B of the switch moves the
+launch count and nothing else); a contiguous result (the KV cache writes K with `slice_set`); the
+preconditions in `fusable`, checked rather than assumed.
+
 ## A RoPE layout is read off llama.cpp, per architecture (2026-09-24, FUTURE_WORK #96)
 
 **`ModelArch::use_rope_contiguous` is llama.cpp's `llama_model_rope_type`, arch

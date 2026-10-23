@@ -12,6 +12,15 @@ guesses took 14.7-15.0 ms instead of 22.6-22.9, and 64 guesses 25 ms instead of 
 guesses now costs about what a single line of them does. Short conversations, where the old code
 is faster, stay on it. `SWARMLLM_TREE_ATTN_PAST=tiled` turns it off.
 
+**Three small steps before every attention layer are now one on a graphics card.** Before
+attention, each layer adds the model's bias to its queries, keys and values, turns them by their
+position in the text, and rearranges them the way attention reads them — eight small jobs handed
+to the card a layer, now three, with exactly the same numbers coming out (the replies of nine model
+families were byte-identical with it on and off). The small guessing model's call is 8-11% faster
+(12.7-12.8 ms against 14.3-14.4, 600 tokens in) and a 7B's check of 24 guesses about 4%. Models
+that normalise each head before turning it (Qwen 3, Gemma 3 and 4) keep the old steps.
+`SWARMLLM_HEADS_FIRST=compose` turns it off.
+
 ## [0.3.248-alpha] — 2026-10-23
 
 **A split across a long link can now keep its guesses flowing instead of waiting on each

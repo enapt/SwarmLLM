@@ -175,9 +175,9 @@ Never open-code it, and never estimate it.
 
 ## Partial RoPE has one implementation, and it answers with a tensor the KV cache can write
 
-**`inference::layers::rope_over_heads`** is the single partial-RoPE implementation; its result is contiguous (the pass-through half is made contiguous BEFORE `cat`), because `slice_set` refuses a non-contiguous source. `SeqCache::append` makes its source contiguous too. Never write a second copy. On a card it is ONE launch (`inference::partial_rope`, llama.cpp's shape: the kernel copies the unrotated channels), bit-identical to `partial_rope_composed`; A/B `SWARMLLM_PARTIAL_ROPE=compose`.
+**`inference::layers::rope_over_heads`** is the single partial-RoPE implementation; its result is contiguous (the pass-through half is made contiguous BEFORE `cat`), because `slice_set` refuses a non-contiguous source. `SeqCache::append` makes its source contiguous too. Never write a second copy. On a card it is ONE launch (`inference::partial_rope`, llama.cpp's shape: the kernel copies the unrotated channels), bit-identical to `partial_rope_composed`; A/B `SWARMLLM_PARTIAL_ROPE=compose`. **`layers::LayerWeights::heads_first`** is the ONE preparation of `attend`'s Q, K and V (bias, per-head norm, heads-first, rotation); on a card with no per-head norm before RoPE it is ONE launch (`inference::heads_first`, 2026-10-23: TensorRT-LLM's `addFusedQKVBiasTranspose`, bit-identical to the composition); A/B `SWARMLLM_HEADS_FIRST=compose`.
 
-→ `docs/invariants/inference.md` § "`inference::layers::rope_over_heads` — partial RoPE has one implementation, and it answers with a tensor the KV cache can write"
+→ `docs/invariants/inference.md` § "`inference::layers::rope_over_heads` — partial RoPE has one implementation, and it answers with a tensor the KV cache can write", § "Q, K and V reach attention heads-first in one launch"
 
 ## A GGUF tensor the loader ignores is a feature silently missing (2026-09-27)
 
