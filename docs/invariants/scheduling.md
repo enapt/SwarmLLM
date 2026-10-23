@@ -5047,6 +5047,10 @@ the budget and waited. At 256 it stopped waiting but paid more a forward than it
 rows 41.3-41.4. Each level of 8 rows costs ~11.0 ms, and the flow's three-level call (33.1) is that
 plus ~3. So the flow sits at two bounds at once: its reach, ~7.4 tokens a 434 ms answer, and this
 node's compute, 47 ms a forward for 0.9 tokens. Every knob above trades one for the other.
+Nor does the ranking: a row-level replay (`examples/flow_rows_sim.py`, which reproduces the
+measured order) found nothing better than best-first by path probability. Holding back rows past
+the walk's round-trip reach lost 1-9%, and a bonus for depth or 192 live rows gained under 1%.
+What moved it was the drafter's first-choice rate, ~15% a reply for each 4 points.
 **What is left**: a cheaper level (8 rows cost 11.0 ms against one row's 8.1), or a drafter that
 guesses better for what it costs. A smaller model drafting for the 3B (staged drafting) does not
 pay: `docs/plans/split_speculation.md` § "What the literature says".
