@@ -5715,5 +5715,78 @@ off: `a_peers_compressed_bytes_are_held_to_the_size_expected` (a 64 MiB bomb),
 `a_rank_zero_partial_of_the_wrong_size_is_refused`,
 `a_snapshot_whose_sizes_overflow_is_refused_not_a_panic`,
 `a_peer_streaming_past_the_requests_max_tokens_is_stopped`,
-`a_late_token_from_the_attempt_before_a_continuation_is_not_an_overrun`. Still open in the same
-class: the registry takes any number of model ids from peers (FUTURE_WORK #333).
+`a_late_token_from_the_attempt_before_a_continuation_is_not_an_overrun`. The registry's bound on
+the model ids peers name is the next section (#333).
+
+## The models peers name are bounded, and one in good standing is never displaced (2026-10-24, #333)
+
+**The defect.** A manifest under a model id new to this node was adopted whatever it named
+(`judge_peer_manifest` → `register_manifest`): each one kept a registry entry and its parts'
+heard hashes, and every model listing walks them all (`compute_wishlist`, `/v1/models`, the
+dashboard, `manifests_to_gossip`). The checks were per manifest only (≤ 256 parts, ≤ 16,384
+tensors a part, the 4 MB message), so one manifest could carry ~70,000 tensor entries, and a
+peer's key costs nothing to make. Two neighbours had the same shape: a peer's `ShardAnnounce`
+records a holder for ANY shard id it names (512 an announcement, 50 holders a shard, no bound
+per holder), and the manifest arm checked no model-id length (a digest and an announcement both
+cap it at 256 bytes).
+
+**What systems with more scars do.** libp2p's Kademlia record store refuses a new record once it
+holds `max_records` (1,024; `MemoryStore::put` → `Error::MaxRecords`). Bitcoin Core's address
+manager lets a newcomer take an occupied bucket slot only from an entry that `IsTerrible` (stale,
+or never seen to work) — `AddSingle`'s `fInsert` — so an entry in good standing is never pushed
+out by an unknown one, and a flood displaces only the flood.
+
+**The rule** (`daemon::state::peer_models`, asked LAST in `judge_peer_manifest`, verdict
+`PeerManifest::NoRoom`):
+- At most `MOST_MODELS` (1,024) models adopted as NEW from peers, weighing at most `MOST_BYTES`
+  (64 MiB) and none past `MOST_BYTES_A_MODEL` (1 MiB). The weight is the manifest's stored size,
+  its JSON (`weight_of`): a first cut counted rows (manifest + parts + tensors) and the security
+  review sent one two-part manifest carrying 4 MB of name and licence text past it. The live
+  node's 28 real manifests weigh 20-111 KB. A model known before any peer named it (this node's
+  own, or its database's) is not weighed.
+- Past a bound, room comes from a model NOBODY holds that this node has not acted on
+  (`SharedState::acted_on_model`: downloading it or any record of trying, origin hashes, a
+  verified upload, pinned or kept here by its owner, in use), the longest known first; a kept one
+  goes to the back (CLOCK's second chance), and ONE arrival looks at no more than 64 across all
+  the room it needs, so a flood costs a bounded walk (and ≤ 64 stored-row reads) per arrival.
+  None to spare: the newcomer is refused. A model gone from the registry by another path frees its
+  room and its stored row is left to that path.
+- **"Holds" counts this node and the peers in `peer_registry` only** (`holder_counts`). A
+  `ShardAnnounce` needs only an authenticated signer — any fresh key, any number of them over one
+  connection — and nothing sweeps the holder records of a key that never became a peer
+  (FUTURE_WORK #339). The first cut counted every record, so fresh keys could announce their own
+  fakes as held and block every newcomer (security review, 2026-10-24).
+- The wishlist is NOT a reason to keep one: it is built from this registry, so a peer could steer
+  its own entries onto it.
+- A forgotten model's manifest and the heard hashes of EVERY part number it could have had go
+  (`ModelRegistry::forget_a_model_nobody_holds`, 0..`MAX_SHARDS_PER_MANIFEST`): an earlier
+  manifest under the same id may have named parts the last one does not. Its stored `model_meta`
+  row goes too, read first — and `register_manifest` now stores a peer's enriched manifest only
+  for a model with a part here (`!held_locally.is_empty()`), since `load_from_db` brought every
+  stored one back at the next start as "known", outside the bound.
+- At the dispatcher: a model id past `manifest_sync::MAX_MODEL_ID_BYTES` (256), a part number ≥
+  `manifest::MAX_SHARDS_PER_MANIFEST` (256) or a name past `MAX_NAME_BYTES` (512 — it reaches the
+  activity feed and the INFO log) is refused. The "no room" warning is rate-limited under ONE key
+  (`RejectionKey::NoRoom`): a flood names a new id each time.
+- One KEY is recorded holding at most `MOST_PARTS_A_HOLDER` (4,096) parts
+  (`record_shard_holder_with_build`, checked before any guard is taken): a new claim past it is
+  not recorded, one it already has is renewed, this node is exempt. The live node holds ~250. It
+  is per key, not per computer: fresh keys are not bounded by it (#339).
+
+**Residual, by design.** A connected peer can keep its own made-up models from being forgotten by
+announcing that it holds them — at most `MOST_PARTS_A_HOLDER` of them, and only while connected
+(its holder records go with its last connection). With all 1,024 so held, a NEW model is refused
+until it disconnects; the owner can still fetch any model from HuggingFace, which registers it
+through the local paths. An honest swarm (a few dozen models) never reaches either bound.
+
+**Tests**, each red with its safeguard switched off (17 switches, 2026-10-24):
+`past_the_bound_a_model_nobody_holds_makes_room_the_oldest_first` (the count; `pop_back` for
+`pop_front`), `a_model_held_or_acted_on_is_kept_and_with_no_room_the_newcomer_is_refused` (the
+held/acted-on keep; a stranger's record counting; a failed fetch; kept-here),
+`what_the_learned_models_weigh_is_bounded_and_one_too_heavy_is_refused` (the total weight; the
+per-model ceiling; a fresh walk budget per call),
+`a_model_known_here_first_is_not_weighed_and_a_deleted_one_frees_its_room` (both halves),
+`a_forgotten_models_stored_manifest_is_removed`,
+`forgetting_a_model_clears_the_hashes_of_parts_its_last_manifest_did_not_name`,
+`one_holder_cannot_fill_the_holder_records`, and in the registry
+`a_recovered_hash_is_persisted_once_not_on_every_gossip_round` (no part here, nothing stored).

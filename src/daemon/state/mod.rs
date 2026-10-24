@@ -27,6 +27,7 @@ mod load_rate;
 pub(crate) mod manifest_sync;
 mod metrics;
 mod models;
+pub(crate) mod peer_models;
 mod peer_outliers;
 pub(crate) mod peer_speed;
 mod perf_history;
@@ -1628,6 +1629,7 @@ impl SharedState {
                 manifest_heard,
                 manifest_heard_changes: Default::default(),
                 manifest_sync: Default::default(),
+                peer_models: Default::default(),
                 parallax_stability: DashMap::new(),
                 cross_node_prefix_index: DashMap::new(),
                 peer_prefix_blocks: DashMap::new(),
@@ -4799,6 +4801,14 @@ mod manifest_persist_tests {
             db,
             executor,
             None,
+        );
+        // Only a model with a part here is stored (#333).
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: ModelId("m".into()),
+                index: 0,
+            },
+            state.identity.node_id().clone(),
         );
         state.model_registry.register_manifest(manifest([7u8; 32]));
         // A copy that leaves the hash blank: the registry recovers it, which is

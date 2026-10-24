@@ -204,6 +204,10 @@ pub struct ModelMgmt {
     /// `versions_to_pull` for a peer's `ManifestDigest`, `answers_allowed` for
     /// its `ManifestPull` — and pruned by the health monitor's tick.
     pub manifest_sync: super::manifest_sync::ManifestSync,
+    /// The models peers told this node of, bounded (#333): which were adopted
+    /// as new, in what order, and what each weighs. Written only by
+    /// `SharedState::admit_a_peers_manifest` (`judge_peer_manifest`).
+    pub peer_models: super::peer_models::PeerModels,
     pub model_request_counts: DashMap<crate::types::ModelId, AtomicU64>,
     pub resource_schedule: RwLock<crate::config::ResourceSchedule>,
     pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
@@ -1155,6 +1159,7 @@ mod tests {
             manifest_heard: DashMap::new(),
             manifest_heard_changes: Default::default(),
             manifest_sync: Default::default(),
+            peer_models: Default::default(),
             model_request_counts: DashMap::new(),
             resource_schedule: RwLock::new(Default::default()),
             prune_history: RwLock::new(VecDeque::new()),

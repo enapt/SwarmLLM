@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #339**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #340**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2814,21 +2814,25 @@ Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the 
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
 
-#### #333 — A peer can fill the model registry with model ids that nobody holds
-`P2` · network · **OPEN** — 2026-10-24 · history: sweep 2026-10-24 (`.claude/sweep-log.jsonl`)
+#### #339 — Holder records from a key that never became a peer are never swept, and can crowd out real holders
+`P2` · network · **OPEN** — 2026-10-24 · history: #333 security review
 
-`ModelRegistry::register_manifest` keeps every manifest whose id is new, with no cap on how
-many. `judge_peer_manifest` adopts any id it has not seen, and the only size checks are per
-manifest (under 256 parts, 16,384 tensors a part). A peer, whose key costs nothing to make,
-can gossip a stream of valid manifests under distinct ids. Each one adds a `manifests` entry,
-up to 256 × 8 `heard_part_hashes` (written before any other check) and holder records. Every
-model-listing path then walks all of them (`compute_wishlist`, `/v1/models`, the dashboard).
-`MAX_MANIFESTS_HEARD` bounds only the log of versions heard, not the registry. The same shape
-as that bound's 2026-10-17 security finding.
-Next: cap the model ids learned from peers. A new id with no local part, no origin claim and
-no holder past the cap evicts the oldest such entry, never one this node holds, wants
-(wishlist) or has an origin for. Read `docs/invariants/network.md` § "Gossip says what
-CHANGED" first. A wire or registry change here goes to `security-reviewer`.
+A `ShardAnnounce` needs only an authenticated signer equal to its `node_id` (dispatch, the
+`ShardAnnounce` arm): any key, and any number of keys over one connection, each recording up to
+512 holder claims an announcement. Three things follow, checked in code 2026-10-24:
+- `MOST_PARTS_A_HOLDER` (4,096, #333) bounds one KEY, not one computer.
+- The holder sweep (`health/monitor.rs`, over `peer_registry`) and the disconnect path clear only
+  nodes registered as peers, so a key that never became one keeps its records until restart —
+  memory that grows with the number of fresh keys.
+- At `MAX_HOLDERS_PER_SHARD` (50) `record_shard_holder_with_build` evicts the OLDEST non-local
+  holder, so a flood of fresh keys announcing a real part pushes its real holders out of the
+  record until they re-announce. What the router then does with holders it cannot reach is not
+  yet checked.
+Since #333 such records keep no learned model from being forgotten (`holder_counts`). Next:
+record a holder claim only for a signer this node knows (a peer, or a relayed origin it
+registered), or age out claims from unknown keys — checking first that a real peer's first
+announcement does not arrive before it is registered. A change here goes to
+`security-reviewer`.
 
 #### #317 — Another program can hold `[::1]` on the node's port while the node runs
 `P3` · api · **OPEN** — 2026-10-20 · history: found with #255's key proof
@@ -3239,7 +3243,23 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-24, ships in v0.3.252** (#335)
+**Closed 2026-10-24, ships in v0.3.252** (#335, #333)
+- #333 — **A peer can no longer fill the model registry with model ids nobody holds.** A manifest
+  under a new id was adopted whatever it named, with only per-manifest size checks, so a peer
+  whose key costs nothing could add entries without end, each walked by every model listing.
+  `daemon::state::peer_models` bounds what peers name (asked last in `judge_peer_manifest`,
+  `PeerManifest::NoRoom`): 1,024 models adopted as new, 64 MiB of their stored JSON (strings
+  count), 1 MiB a model. Past a bound, room comes only from a model NOBODY holds — this node or a
+  peer in `peer_registry`, never a stranger's holder record — that this node has not acted on,
+  oldest first, 64 looks per arrival (CLOCK); with none to spare the newcomer is refused —
+  libp2p-kad's `MaxRecords` and Bitcoin addrman's `IsTerrible`, so a flood displaces only the
+  flood. A forgotten model's stored row and every part number's heard hashes go too, and a peer's
+  manifest is stored only for a model with a part here. The door refuses an id past 256 bytes, a
+  part number ≥ 256 and a name past 512 bytes; one key is recorded holding at most 4,096 parts.
+  The security review's six findings were fixed before it shipped. Residual, by design: a
+  connected peer announcing that it holds its own made-up models keeps up to 4,096 of them while
+  connected; fresh keys' holder records are #339. `docs/invariants/network.md` § "The models
+  peers name are bounded".
 - #335 — **The upload limit that protects a user's internet is one limit for the whole node, and a
   downloader turned away keeps its place.** `shard_upload_mbps` was applied per REQUEST: each
   answer slept `bytes / limit` in its own task, so three parts at once went up at 3 × 1.25 MB/s.

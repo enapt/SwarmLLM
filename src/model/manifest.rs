@@ -3,6 +3,19 @@ use std::path::Path;
 use crate::error::SwarmError;
 use crate::types::{Blake3Hash, ModelManifest};
 
+/// The most parts a peer's manifest may name, and the highest part number +1
+/// (R105, #333). Real manifests have ≤ 256 parts (the 70B-class upper bound).
+/// Refused past at the network door (`daemon::dispatch`); a part number past it
+/// would key heard hashes no forget could find.
+pub const MAX_SHARDS_PER_MANIFEST: usize = 256;
+
+/// The most tensor entries one part of a peer's manifest may list (R105).
+pub const MAX_TENSORS_PER_SHARD: usize = 16_384;
+
+/// The longest model name a peer's manifest may carry (#333): it reaches the
+/// activity feed and the INFO log. Real names are under 100 bytes.
+pub const MAX_NAME_BYTES: usize = 512;
+
 /// Backup-copy artifacts a file manager (or a stray `cp`) leaves on disk.
 /// A model id whose final dotted segment is one of these — or that ends in a
 /// `~` / " copy" marker — is a local copy of a model, not a real upstream
@@ -632,6 +645,10 @@ pub(crate) enum RejectionKey {
         shard: u32,
         claimed: [u8; 32],
     },
+    /// Any model a peer named while this node had no room for it (#333). One
+    /// key for all: a flood names a new id each time, which a per-model key
+    /// would log once each.
+    NoRoom,
 }
 
 pub(crate) static REJECTED_MANIFESTS: std::sync::LazyLock<

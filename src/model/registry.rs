@@ -13,6 +13,13 @@ use crate::types::{ModelId, ModelManifest, NodeId, ShardId, MMPROJ_SHARD_INDEX};
 /// DHT provider queries fill in the rest on demand.
 const MAX_HOLDERS_PER_SHARD: usize = 50;
 
+/// The most parts ONE other computer is recorded as holding (#333). A peer
+/// may announce any shard id, and each one it named became a holder record —
+/// up to 512 an announcement, with no bound in all. A node holds a few hundred
+/// (the live node, 28 models: ~250), so a claim past this is not recorded,
+/// while the claims it already has are kept and renewed. This node is exempt.
+pub(crate) const MOST_PARTS_A_HOLDER: usize = 4096;
+
 /// How long a holder's own retraction outranks a DHT provider record naming it.
 ///
 /// Sized to exceed the provider-record lifetime (`network::behaviour::
@@ -332,7 +339,7 @@ impl ModelRegistry {
     /// assertion, so it is what lets [`Self::register_manifest`] tell "someone
     /// re-published this model" (adopt it) from "someone else built it
     /// differently" (keep ours).
-    fn has_origin_knowledge(&self, model_id: &ModelId) -> bool {
+    pub fn has_origin_knowledge(&self, model_id: &ModelId) -> bool {
         self.origin_verified
             .iter()
             .any(|e| &e.key().model_id == model_id)
@@ -674,7 +681,11 @@ impl ModelRegistry {
                 .collect(),
             None => Vec::new(),
         };
-        let persist = recovered > 0 && changed;
+        // Only for a model with a part here: the enrichment matters to the
+        // copy on disk, and stored, a peer's manifest of a model nobody here
+        // holds came back at every start outside the bound on what peers
+        // name (`daemon::state::peer_models`, #333 — security review).
+        let persist = recovered > 0 && changed && !held_locally.is_empty();
         if persist || !recheck.is_empty() {
             if let Some(hook) = self.persist_hook.get() {
                 hook(&manifest, persist, &recheck);
@@ -779,6 +790,15 @@ impl ModelRegistry {
         build: u64,
         checked: Option<bool>,
     ) -> bool {
+        // Read before any guard on `shard_holders` is taken.
+        if Some(&node_id) != self.local_node_id.as_ref()
+            && self
+                .node_shards
+                .get(&node_id)
+                .is_some_and(|held| held.len() >= MOST_PARTS_A_HOLDER && !held.contains(&shard_id))
+        {
+            return false;
+        }
         // A first-hand claim supersedes any earlier retraction: the node is
         // telling us it has the shard now. Only this path clears it — the DHT
         // merge must not, or a stale provider record would undo a retraction.
@@ -1679,6 +1699,44 @@ impl ModelRegistry {
         self.manifests.remove(model_id);
     }
 
+    /// A manifest's part indices, without copying the manifest.
+    pub fn part_indices(&self, model_id: &ModelId) -> Option<Vec<u32>> {
+        self.manifests
+            .get(model_id)
+            .map(|m| m.shards.iter().map(|s| s.index).collect())
+    }
+
+    /// Is this part held, of any build, by a node `counts` vouches for? The
+    /// holders are copied out first, so `counts` may read other maps.
+    pub fn part_has_a_holder_where(
+        &self,
+        shard_id: &ShardId,
+        counts: impl Fn(&NodeId) -> bool,
+    ) -> bool {
+        let holders: Vec<NodeId> = match self.shard_holders.get(shard_id) {
+            Some(holders) => holders.keys().cloned().collect(),
+            None => return false,
+        };
+        holders.iter().any(counts)
+    }
+
+    /// Forget a model a peer told this node of that nobody holds (#333): its
+    /// manifest and the hashes heard for ANY part number it could have had
+    /// (`manifest::MAX_SHARDS_PER_MANIFEST`, refused past at the door) — an
+    /// earlier manifest under the id may have named parts this one does not.
+    /// Holder records are left: a holder this node does not count announced
+    /// them, and they are bounded per key (`MOST_PARTS_A_HOLDER`). Called only
+    /// by `daemon::state::peer_models`.
+    pub fn forget_a_model_nobody_holds(&self, model_id: &ModelId) {
+        self.manifests.remove(model_id);
+        for index in 0..crate::model::manifest::MAX_SHARDS_PER_MANIFEST as u32 {
+            self.heard_part_hashes.remove(&ShardId {
+                model_id: model_id.clone(),
+                index,
+            });
+        }
+    }
+
     /// Remove all shard holder entries for a given model.
     /// Maintains reverse index: removes affected ShardIds from each holder's node_shards.
     pub fn remove_all_model_shards(&self, model_id: &ModelId) {
@@ -2133,7 +2191,8 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 
-        let registry = ModelRegistry::new();
+        let me = NodeId([0xEE; 32]);
+        let registry = ModelRegistry::with_local_node(me.clone());
         let writes = Arc::new(AtomicUsize::new(0));
         let w = writes.clone();
         registry.set_persist_hook(Box::new(move |_m, persist, _recheck| {
@@ -2142,8 +2201,29 @@ mod tests {
             }
         }));
 
+        // A model with no part here: a peer's manifest of it is never stored,
+        // or it would come back at every start outside the bound on the
+        // models peers name (#333).
+        let mut theirs = test_manifest("theirs", "T");
+        theirs.shards = vec![test_shard(0, [7u8; 32])];
+        registry.register_manifest(theirs.clone());
+        theirs.shards = vec![test_shard(0, [0u8; 32])];
+        registry.register_manifest(theirs);
+        assert_eq!(
+            writes.load(Ordering::SeqCst),
+            0,
+            "no part here, nothing stored"
+        );
+
         let mut complete = test_manifest("m", "M");
         complete.shards = vec![test_shard(0, [7u8; 32])];
+        registry.record_shard_holder(
+            ShardId {
+                model_id: ModelId("m".into()),
+                index: 0,
+            },
+            me,
+        );
         registry.register_manifest(complete);
         assert_eq!(
             writes.load(Ordering::SeqCst),

@@ -25,6 +25,9 @@ pub enum PeerManifest {
     /// It describes another build than the manifest a download running here
     /// is fetching against.
     ReplacesTheOneBeingDownloaded,
+    /// A model new to this node with no room left for it, or a manifest
+    /// heavier than any real one (`peer_models`, #333).
+    NoRoom,
 }
 
 fn origin_key(source: &HfSource) -> String {
@@ -167,6 +170,10 @@ impl SharedState {
                 });
         if ours_is_another_build && self.models.model_download_under_way(&manifest.id) {
             return PeerManifest::ReplacesTheOneBeingDownloaded;
+        }
+        // Last: it may make room, which no other verdict should pay for.
+        if !self.admit_a_peers_manifest(manifest) {
+            return PeerManifest::NoRoom;
         }
         PeerManifest::Adopt
     }

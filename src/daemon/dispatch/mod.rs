@@ -1653,6 +1653,17 @@ pub(crate) async fn dispatch_network_messages(
                                             tracing::debug!("Dropping unauthenticated ModelManifest");
                                             continue;
                                         }
+                                        // A model id is a key in every map that names a model,
+                                        // and a peer chose this one: no longer than a digest or
+                                        // an announcement may name (#333).
+                                        if manifest.id.0.len() > crate::daemon::state::manifest_sync::MAX_MODEL_ID_BYTES {
+                                            tracing::warn!(
+                                                id_bytes = manifest.id.0.len(),
+                                                cap = crate::daemon::state::manifest_sync::MAX_MODEL_ID_BYTES,
+                                                "Rejecting peer manifest: model id too long"
+                                            );
+                                            continue;
+                                        }
                                         // Refuse copied-folder model names (`<model>.FULLBACKUP`,
                                         // `<model>.old`) at the network boundary. A peer on an
                                         // older build still re-gossips these; accepting one lets
@@ -1707,8 +1718,26 @@ pub(crate) async fn dispatch_network_messages(
                                         // Real-world manifests have ≤ 256 shards × ≤ 16k
                                         // tensor entries each (the 70B-class Llama upper
                                         // bound). Anything beyond is hostile/malformed.
-                                        const MAX_SHARDS_PER_MANIFEST: usize = 256;
-                                        const MAX_TENSORS_PER_SHARD: usize = 16_384;
+                                        use crate::model::manifest::{
+                                            MAX_NAME_BYTES, MAX_SHARDS_PER_MANIFEST, MAX_TENSORS_PER_SHARD,
+                                        };
+                                        // A part number keys this node's heard hashes,
+                                        // and forgetting a model clears only the numbers
+                                        // a manifest can have; the name reaches the
+                                        // activity feed and the log (#333).
+                                        if manifest
+                                            .shards
+                                            .iter()
+                                            .any(|s| s.index as usize >= MAX_SHARDS_PER_MANIFEST)
+                                            || manifest.name.len() > MAX_NAME_BYTES
+                                        {
+                                            tracing::warn!(
+                                                model = %manifest.id,
+                                                name_bytes = manifest.name.len(),
+                                                "Rejecting peer manifest: a part number or the name is out of range"
+                                            );
+                                            continue;
+                                        }
                                         if manifest.shards.len() > MAX_SHARDS_PER_MANIFEST {
                                             tracing::warn!(
                                                 model = %manifest.id,
@@ -1839,6 +1868,22 @@ pub(crate) async fn dispatch_network_messages(
                                                                 "Ignoring a manifest of another upload of this \
                                                                  model — the swarm uses one upload per model"
                                                             );
+                                                        } else if verdict == crate::daemon::state::PeerManifest::NoRoom {
+                                                            if let Some(suppressed) = crate::model::manifest::note_manifest_rejection(
+                                                                crate::model::manifest::RejectionKey::NoRoom,
+                                                            ) {
+                                                            tracing::warn!(
+                                                                model = %manifest.id,
+                                                                publisher = %manifest.publisher,
+                                                                sender = %authenticated_sender.as_ref().map(ToString::to_string).unwrap_or_default(),
+                                                                learned = shared_state.models.peer_models.len(),
+                                                                suppressed,
+                                                                "Ignoring a model a peer named — this node already \
+                                                                 knows as many models from peers as it keeps, every \
+                                                                 one held by someone, or the manifest is heavier \
+                                                                 than any real model's"
+                                                            );
+                                                            }
                                                         } else {
                                                             tracing::info!(
                                                                 model = %manifest.id,
@@ -3470,6 +3515,7 @@ mod rejected_manifest_tests {
             RejectionKey::Manifest { model, .. } | RejectionKey::ShardHash { model, .. } => {
                 model.0 != name
             }
+            RejectionKey::NoRoom => true,
         });
         ModelId(name.to_string())
     }

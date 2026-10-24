@@ -12,6 +12,14 @@ three answers, against 28% before. Only your own requests read or add to them, n
 this computer handles for someone else, and a computer in the split is never sent words from an
 answer it did not help write. They are kept in memory only: never saved, shared or announced.
 
+**Another computer can no longer fill your model list with made-up models.** Computers in the
+network tell each other which models exist. One of them could name any number of invented
+models, and every one was kept, using memory without limit and slowing every list of models.
+Your computer now keeps at most 1,024 models it heard of from others, and a bounded amount of
+memory for them. Past that, room is made only from a model that neither your computer nor any
+computer it is connected to holds. A model you hold, are downloading, have pinned or are using
+is never dropped. A real network has a few dozen models, so nothing changes there.
+
 **Sharing model files with other computers now stays within the upload limit you set, however
 many computers ask at once.** A computer shares the parts of models it holds, by default at no
 more than 10 megabits a second, so that sharing never fills your internet connection. That limit
