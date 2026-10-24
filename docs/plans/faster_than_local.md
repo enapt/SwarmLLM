@@ -471,6 +471,28 @@ conversation. A word-level nudge cannot learn misses that depend on the context.
 the top two layers (no backward past them, cheap to build in candle) and on every layer, the same
 protocol; the stop rule is +2 points on a session.
 
+**7.6 Copying from the user's EARLIER sessions, not only this one: worth it for agents, at a
+session's start.** A copied run (`FlowRun::copy_ahead` → `ngram_lookup::copied_run`) looks up the
+reply's last 4, 3 or 2 tokens in the prompt, then in the reply's last 500 tokens. SuffixDecoding
+(2411.04975) adds a GLOBAL store, every earlier reply, and reports up to 5.3× on agent work.
+Measured offline with today's lookup reproduced (`~/swarmllm-318/suffix/sim.py`: the most recent
+match, run max(matched, 10) ≤ 32 tokens, a walk taking the run's matching prefix), the store tried
+only where the prompt and the reply found nothing. Share of reply tokens a copy predicted:
+- **400 SWE-agent sessions** (public, `nebius/SWE-agent-trajectories`, Llama-70B's replies, 1.17M
+  reply tokens): **64.6% → 73.9%**; a session's first 3 replies **28.1% → 61.2%**.
+- **30 coding-agent sessions of the `/v1/messages` kind** (this project's own Claude Code
+  transcripts, only the counts read; 6.6M reply tokens, 95% of them tool-call inputs): **55.3% →
+  57.9%** (text 17.8 → 20.9, tool calls 57.2 → 59.8); a session's first 10 replies **33.6% → 63.6%**.
+
+So the store matters where the session's own history is short — an agent's opening calls, a new
+chat on a familiar task — and adds a few points once the history has built up. Both workloads are
+another model's text: this measures the repetition in agent work, not a drafter, and chat is
+unmeasured (SuffixDecoding's WildChat gains are smaller). **A store is a side channel**: REST's
+datastore leaks at over 25 tokens a second through the speed of the reply alone (2411.01076), so a
+store holds only ONE requester's replies and is read only for that requester — never another API
+key's, never for a peer's request (a head leading someone's split, a pool member's forward).
+Filed as FUTURE_WORK #337.
+
 ## Sources
 
 Petals 2312.08361 · Pope et al. 2211.05102 · StagFormer 2501.15665 · Layer
@@ -485,4 +507,5 @@ Qwen3-Coder-30B) · Leviathan 2211.17192 · Chen 2302.01318 · § 7: llguidance 
 (`docs/fast_forward.md`, `syntax.md`) · TensorRT-LLM tech blog 12 (guided + speculative
 decoding) · vLLM `v1/structured_output` · Medusa 2401.10774 (typical acceptance) · Tuned Lens
 2303.08112 · LayerSkip 2404.16710 · BloomBee 2604.21072 (lossless activation coding) · OSD
-2310.07177 · OmniDraft 2507.02659.
+2310.07177 · OmniDraft 2507.02659 · SuffixDecoding 2411.04975 · speculation side channels
+2411.01076.

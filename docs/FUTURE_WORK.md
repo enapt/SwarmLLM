@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #335**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #338**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2226,6 +2226,22 @@ warming, no placement precompute — a stub, against the "no stubs" rule. **Deci
 benchmark harness first shows a TTFT win for the idle-time K-layer seeding. (Its learner's
 per-session response histories are a candidate input for #3 — keep that in mind when
 deleting.)
+
+#### #337 — A copied run looks only in this conversation, so an agent's first replies copy little
+`P2` · perf-split · **OPEN** — 2026-10-24 · history: `docs/plans/faster_than_local.md` § 7.6
+
+A copied run (`ngram_lookup::copied_run`, read by the flow's `copy_ahead`, the n-gram loop and local
+prompt lookup) searches the prompt and the reply so far. An agent's opening calls repeat its EARLIER
+sessions, which no lookup sees. Measured offline (§ 7.6): the share of reply tokens a copy predicts
+on a session's first replies is 28 → 61% (SWE-agent) and 34 → 64% (coding-agent sessions of the
+`/v1/messages` kind) with a store of earlier replies, +2.6 to +9.3 points over whole sessions.
+Next: a per-model store of ONE requester's recent reply ids, in memory, bounded (1M tokens), indexed
+by 2-4-grams, written when a reply is finalised and searched after the prompt and the reply. It is a
+REQUIRED argument of the one lookup, never an `Option` a path may skip. It is never shared: one store per API key; none for a
+peer's request (a led split's head, a pool forward); never announced or saved to disk. Reason: a
+store's matches show in the reply's speed (REST's datastore leaked at over 25 tokens a second,
+2411.01076). Measure with the flow's own `SWARMLLM_FLOW_COPY` A/B on an agent's replayed session
+before it is on by default.
 
 ### Model families and platforms
 
