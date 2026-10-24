@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+**A model split across computers can now reuse your own earlier answers to guess ahead.** When a
+model is split across computers, this computer guesses the next words so the others can check
+several in one trip, and one cheap source of guesses is text that already appeared — an agent
+asked to change a file repeats much of what it wrote before. That copying looked only at the
+current conversation. It now also looks at your earlier conversations with the same model. On 400
+recorded coding-agent sessions, copying could predict 60% of the words of each session's first
+three answers, against 28% before. Only your own requests read or add to them, never a request
+this computer handles for someone else, and a computer in the split is never sent words from an
+answer it did not help write. They are kept in memory only: never saved, shared or announced.
+
 **Sharing model files with other computers now stays within the upload limit you set, however
 many computers ask at once.** A computer shares the parts of models it holds, by default at no
 more than 10 megabits a second, so that sharing never fills your internet connection. That limit

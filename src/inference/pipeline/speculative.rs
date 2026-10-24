@@ -294,6 +294,18 @@ impl PipelineExecutor {
             finish_reason = "stop".to_string();
         }
 
+        // The owner's earlier replies (#337) — the rule of `dsd.rs`'s rounds:
+        // looked in by who a round's guesses reach, the reply kept only if its
+        // peers stayed the same.
+        let earlier = self
+            .shared_state
+            .models
+            .owner_replies
+            .for_the_owner(&self.request);
+        let seen_at_start = self.exposure_of_a_check().seen;
+        let mut peers_changed = false;
+        let mut earlier_rounds = 0u32;
+
         // Speculative round loop.
         while finish_reason.is_empty() && (generated.len() as u32) < max_tokens {
             // Honor external cancel between rounds — same pattern as
@@ -319,13 +331,20 @@ impl PipelineExecutor {
             // reports 2.4-4.2× speedup on input-grounded workloads
             // (code, RAG, summarisation) — exactly SwarmLLM's primary
             // workload (Claude Code subs, MCP tool use).
-            let ngram_drafts = if self.shared_state.config.inference.ngram_lookup_enabled {
-                let d = ngram_lookup_drafts(
-                    &self.shared_state.config.inference,
+            let ngram_drafts = if self.shared_state.cfg().inference.ngram_lookup_enabled {
+                let exposure = earlier.as_ref().map(|_| self.exposure_of_a_check());
+                if let Some(exposure) = &exposure {
+                    peers_changed |= exposure.seen != seen_at_start;
+                }
+                let (d, from) = ngram_lookup_drafts(
+                    &self.shared_state.cfg().inference,
                     &draft_state.prompt_tokens,
                     &generated,
                     this_gamma,
+                    earlier.as_ref().zip(exposure.as_ref().map(|e| &e.shown)),
                 );
+                earlier_rounds +=
+                    u32::from(from == crate::inference::ngram_lookup::NgramHitSource::EarlierReply);
                 // R137: bump lifetime hit/miss counters for visibility via
                 // /api/admin/stats → swarm_spec.ngram.
                 if d.is_empty() {
@@ -568,10 +587,20 @@ impl PipelineExecutor {
                 .await;
         }
 
+        if let Some(store) = &earlier {
+            peers_changed |= self.exposure_of_a_check().seen != seen_at_start;
+            if !peers_changed {
+                store.keep(&generated, &seen_at_start);
+            }
+        }
+
         tracing::info!(
             %request_id,
             proposed = acceptance_proposed,
             accepted = acceptance_accepted,
+            earlier = earlier.is_some(),
+            earlier_rounds,
+            earlier_unkept = peers_changed,
             acceptance_rate = format_args!(
                 "{:.2}",
                 if acceptance_proposed > 0 {
@@ -1014,28 +1043,42 @@ pub(super) fn ngram_lookup_config(
 /// `prompt_tokens` is the tokenized prompt (captured at draft prefill time).
 /// `generated` is the running list of tokens emitted so far. The cascade
 /// searches both for matches of the recent context tail.
+///
+/// `earlier`: the owner's earlier replies and who this check's guesses would
+/// reach (`PipelineExecutor::exposure_of_a_check`), looked in where the
+/// conversation has no match (#337); REQUIRED, so no loop can forget it —
+/// `None` for anyone else's request (`OwnerReplies::for_the_owner`).
 pub(super) fn ngram_lookup_drafts(
     cfg: &crate::config::InferenceConfig,
     prompt_tokens: &[u32],
     generated: &[u32],
     this_gamma: u32,
-) -> Vec<u32> {
-    use crate::inference::ngram_lookup::cascade_find_candidate;
+    earlier: Option<(
+        &crate::inference::owner_replies::EarlierReplies,
+        &crate::inference::owner_replies::Exposure,
+    )>,
+) -> (Vec<u32>, crate::inference::ngram_lookup::NgramHitSource) {
+    use crate::inference::ngram_lookup::{cascade_find_candidate, NgramHitSource};
     let Some(lookup_cfg) = ngram_lookup_config(cfg) else {
-        return Vec::new();
+        return (Vec::new(), NgramHitSource::None);
     };
     let mut context: Vec<u32> = Vec::with_capacity(prompt_tokens.len() + generated.len());
     context.extend_from_slice(prompt_tokens);
     context.extend_from_slice(generated);
     let prompt_len = prompt_tokens.len();
-    let (cand, _source) =
+    let (mut cand, mut source) =
         cascade_find_candidate(&context, prompt_len, NGRAM_RECENT_REPLY, lookup_cfg);
-    // Cap at this_gamma so the verify wire format stays sized as expected.
-    if cand.len() <= this_gamma as usize {
-        cand
-    } else {
-        cand[..this_gamma as usize].to_vec()
+    if cand.is_empty() {
+        if let Some(run) = earlier.and_then(|(store, shown)| {
+            store.copied_run(&context, shown, lookup_cfg, this_gamma as usize)
+        }) {
+            cand = run.tokens;
+            source = run.source;
+        }
     }
+    // Cap at this_gamma so the verify wire format stays sized as expected.
+    cand.truncate(this_gamma as usize);
+    (cand, source)
 }
 
 /// SWARM-SPEC Layer 1 helper: feed `[bootstrap, tokens...]` through the
@@ -1373,5 +1416,83 @@ mod finalisation_tests {
             "got {:?}",
             exec.reply_stops().await
         );
+    }
+}
+
+#[cfg(test)]
+mod earlier_replies_tests {
+    use super::ngram_lookup_drafts;
+    use crate::inference::ngram_lookup::NgramHitSource;
+    use crate::inference::owner_replies::{Exposure, OwnerReplies};
+    use crate::types::{InferenceRequest, KeepAsked, ModelId, NodeId, RequestedBy, SamplingParams};
+    use std::sync::Arc;
+
+    /// #337 in the rounds: where the conversation has no match, a check's
+    /// guesses come from the owner's earlier replies — only from one every
+    /// peer the check reaches saw, in the form it saw it — and say so.
+    #[test]
+    fn a_check_with_no_match_here_takes_its_guesses_from_the_owners_earlier_replies() {
+        let cfg = crate::config::InferenceConfig {
+            ngram_lookup_enabled: true,
+            ngram_num_pred_tokens: 8,
+            ..Default::default()
+        };
+        let store = Arc::new(OwnerReplies::default());
+        let earlier = store
+            .for_the_owner(&InferenceRequest::local(
+                ModelId("m".into()),
+                Vec::new(),
+                SamplingParams::default(),
+                true,
+                None,
+                None,
+                None,
+                KeepAsked::Unasked,
+                RequestedBy::Owner,
+            ))
+            .unwrap();
+        let (a, b, c) = (NodeId([1; 32]), NodeId([2; 32]), NodeId([3; 32]));
+        // A middle peer `a` (hidden states) and a tail `b` (ids).
+        let split = Exposure::new([a.clone(), b.clone()], [b.clone()]);
+        earlier.keep(&[50, 51, 52, 53, 54, 55, 99], &split);
+
+        // Nothing in the prompt or the reply so far continues [50, 51, 52].
+        let (prompt, reply) = ([1, 2, 3, 50], [51, 52]);
+        assert_eq!(
+            ngram_lookup_drafts(&cfg, &prompt, &reply, 4, Some((&earlier, &split))),
+            (vec![53, 54, 55], NgramHitSource::EarlierReply)
+        );
+        assert_eq!(
+            ngram_lookup_drafts(&cfg, &prompt, &reply, 2, Some((&earlier, &split))).0,
+            vec![53, 54],
+            "capped at the check's guesses"
+        );
+        assert!(ngram_lookup_drafts(&cfg, &prompt, &reply, 4, None)
+            .0
+            .is_empty());
+        // A check reaching a peer that never saw the reply, or one that would
+        // hand the middle peer the guesses' ids (a chained check), guesses
+        // nothing from it.
+        for shown in [
+            Exposure::new([a.clone(), b.clone(), c.clone()], [b.clone()]),
+            Exposure::new([a.clone(), b.clone()], [a.clone(), b.clone()]),
+        ] {
+            assert!(
+                ngram_lookup_drafts(&cfg, &prompt, &reply, 4, Some((&earlier, &shown)))
+                    .0
+                    .is_empty(),
+                "{shown:?}"
+            );
+        }
+        // The conversation's own match comes first.
+        let (d, from) = ngram_lookup_drafts(
+            &cfg,
+            &[50, 51, 52, 7, 8],
+            &[50, 51, 52],
+            4,
+            Some((&earlier, &split)),
+        );
+        assert_eq!(d.first(), Some(&7));
+        assert_ne!(from, NgramHitSource::EarlierReply);
     }
 }

@@ -2231,17 +2231,24 @@ the conversation has no match, written with the flow's reply at its end:
   saved no rows on the store and cost 0.5 points (`combo.py`), so the run is today's.
   A/B `SWARMLLM_FLOW_COPY_STORE=0`.
 
+**Done for the rounds (2026-10-24)** — the three daemon loops (the n-gram loop, DSD's rounds, the
+draft-model loop) read it at their one choke point, `speculative::ngram_lookup_drafts` (a REQUIRED
+`earlier` argument). `owner_replies::Exposure` names peers AND which of them get ids, and each path
+names both for a guess it SENDS (more is safe) and the reply it KEEPS (fewer is safe): the rounds
+send ids to the tail (`draft_tokens`) and, chained, through every hop of the run ending there
+(`verify_onward`), so a chained check through a middle peer copies nothing, and only a tail that
+walks knows the reply as ids; read from the LIVE segments each round, and a
+reply whose peers changed (failover) is not kept (`PipelineExecutor::exposure_of_a_check`).
+
 **Residual**:
-- The daemon's speculative loops (`speculative::ngram_lookup_drafts`: draft-model, DSD, the
-  distributed n-gram loop) do not read the store. Neither does the worker's local prompt lookup
-  (`model_worker::ngram_spec_round`, which runs in another process and knows only
-  `IpcGenerate::for_the_owner`). Each needs the peers it sends a guess to. ⚠ Those rounds send the
-  guesses' IDS to the tail too (`LayerForward::draft_tokens` under `spec_walk_at_tail`), and every hop
-  of a chained check reads them on its way (`layer_forward`'s `verify_onward`), so the flow's one
-  `ids_to` peer becomes a SET there (the flow's tail gets `drafts: &[]`). The worker's path needs the
-  reply's ids at the write point: `WorkerMsg::Token` carries `token_id`, which
-  `ModelProcessPool::generate_attempt` drops (`token_id: _`), and a forwarded request reaches the
-  pool as `Requester::Owner` (`api/openai/streaming.rs`), so `requested_by` must be threaded too.
+- The chain stream (`dsd_stream`) neither reads nor keeps the store — on the rig a reply's first
+  answer ran it (the drafter not yet on the card), so the next had nothing to copy.
+- The worker's local prompt lookup (`model_worker::ngram_spec_round`, another process, knowing only
+  `IpcGenerate::for_the_owner`). Its path needs the reply's ids at the write point:
+  `WorkerMsg::Token` carries `token_id`, which `ModelProcessPool::generate_attempt` drops
+  (`token_id: _`), and a forwarded request reaches the pool as `Requester::Owner`
+  (`api/openai/streaming.rs`), so `requested_by` must be threaded too.
+- A requester guessing for the head that leads its split (`requester_guesses`) does not read it.
 - Field measurement on an agent's replayed session (the rig measures the mechanism, below).
 
 #### #338 — A copied run takes the most recent match's continuation whatever the other matches did

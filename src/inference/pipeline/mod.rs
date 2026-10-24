@@ -318,6 +318,25 @@ pub(super) fn pack_verify_tokens_to_le_bytes(tokens: &[u32]) -> Vec<u8> {
     out
 }
 
+/// Who a split's speculative checks reach (`PipelineExecutor::exposure_of_a_check`).
+pub(super) struct CheckExposure {
+    /// A guess the check would send — naming more than it reaches, never
+    /// fewer: as token ids to a remote first segment (packed in its input), to
+    /// the tail that walks them (`LayerForward::draft_tokens`) and, where the
+    /// check may chain, to every hop of the run ending there that hands them
+    /// on (`verify_onward`) — every remote segment after the last one run
+    /// here.
+    pub shown: crate::inference::owner_replies::Exposure,
+    /// The reply — naming fewer than it reached, never more: as ids only a
+    /// remote first segment, sent every token but the last as its input
+    /// (unless prompt privacy embeds them here), and a tail that walks
+    /// (`peer_walks_at_tail`): it is sent every guess and draws every other
+    /// token, the first on the prompt pass. A tail that cannot walk returns
+    /// distributions and is not counted. Never a middle segment: hidden
+    /// states only, outside a chained check's guesses.
+    pub seen: crate::inference::owner_replies::Exposure,
+}
+
 /// What the segment that samples needs to walk a verify's drafts itself
 /// (`LayerForward::spec_walk_at_tail`): the drafts, the caller's sampler, and
 /// the history its penalties read. The walk IS sampling, so these travel
@@ -1651,6 +1670,66 @@ impl PipelineExecutor {
             && self.shared_state.cfg().inference.pipeline_chaining
     }
 
+    /// Who a speculative check's guesses reach, and who this reply has
+    /// reached, from the LIVE segments (failover rewrites them) — what the
+    /// owner's earlier replies are copied and kept by (`owner_replies`, #337).
+    /// The flow's own is `dsd_flow::flow_exposure`.
+    pub(super) fn exposure_of_a_check(&self) -> CheckExposure {
+        let local = self.shared_state.identity.node_id();
+        let segments = &self.assignment.segments;
+        let peers: Vec<crate::types::NodeId> = segments
+            .iter()
+            .filter(|s| s.node_id != *local)
+            .map(|s| s.node_id.clone())
+            .collect();
+        let remote_id = |s: Option<&crate::types::PipelineSegment>| {
+            s.filter(|s| s.node_id != *local).map(|s| s.node_id.clone())
+        };
+        let first = remote_id(segments.first());
+        let tail = remote_id(segments.last());
+        // Drafts go as ids only to the first segment and to the run that
+        // ends at the last one. Chained, that run is any of the remote
+        // segments back to the nearest one run here (`plan_chain` never
+        // crosses this node), so `[me, a, me]`'s `a` is never named.
+        let shown_ids: Vec<crate::types::NodeId> = if self.verify_may_chain() {
+            first
+                .iter()
+                .cloned()
+                .chain(
+                    segments
+                        .iter()
+                        .rev()
+                        .take_while(|s| s.node_id != *local)
+                        .map(|s| s.node_id.clone()),
+                )
+                .collect()
+        } else {
+            first.iter().chain(tail.iter()).cloned().collect()
+        };
+        // A tail that cannot walk (an older peer) sends its vocabularies
+        // here and draws none of a check's tokens.
+        let seen_ids = first
+            .filter(|_| !self.shared_state.local_embedding_privacy())
+            .into_iter()
+            .chain(tail.filter(|t| peer_walks_at_tail(&self.shared_state, t)));
+        // A tensor-parallel group's other machines share a segment's work:
+        // counted as reached by a guess, never as having seen the reply.
+        let grouped = self
+            .assignment
+            .tp_groups
+            .iter()
+            .flat_map(|g| g.nodes.iter())
+            .filter(|n| *n != local)
+            .cloned();
+        CheckExposure {
+            shown: crate::inference::owner_replies::Exposure::new(
+                peers.iter().cloned().chain(grouped),
+                shown_ids,
+            ),
+            seen: crate::inference::owner_replies::Exposure::new(peers, seen_ids),
+        }
+    }
+
     /// Resolve a `peer_id_bytes` for each segment in `self.assignment`.
     /// `None` for local segments (dispatched to the worker subprocess),
     /// `Some(bytes)` for remote segments. Returns `Ok(None)` when any
@@ -2182,6 +2261,98 @@ mod tests {
         let mut executor = PipelineExecutor::new(state, tx, request, assignment);
         let result = executor.execute(None).await;
         assert!(result.is_err());
+    }
+
+    /// #337: who a split's checks reach, for the owner's earlier replies. A
+    /// remote first segment is sent the guesses' ids and knows the reply's;
+    /// the tail is sent the guesses' ids to walk and draws every token; a
+    /// middle peer sees hidden states — counted as sent the guesses' ids where
+    /// a check may chain (it hands them on), never as knowing the reply's.
+    #[test]
+    fn a_checks_guesses_and_its_reply_are_counted_for_every_peer_they_reach() {
+        use crate::inference::owner_replies::Exposure;
+        let state = make_test_state();
+        let me = state.identity.node_id().clone();
+        let (a, b) = (
+            crate::types::NodeId([0xA1; 32]),
+            crate::types::NodeId([0xB2; 32]),
+        );
+        let executor = |nodes: &[&crate::types::NodeId]| {
+            let request = make_test_request(&state);
+            let assignment = PipelineAssignment {
+                request_id: request.id,
+                segments: nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| PipelineSegment {
+                        node_id: (*n).clone(),
+                        shard_id: ShardId {
+                            model_id: request.model_id.clone(),
+                            index: i as u32,
+                        },
+                        layer_range: (i as u32, i as u32 + 1),
+                    })
+                    .collect(),
+                standbys: vec![],
+                tp_groups: vec![],
+                supports_speculative: true,
+            };
+            let (tx, _rx) = mpsc::channel::<NetworkCommand>(8);
+            PipelineExecutor::new(state.clone(), tx, request, assignment)
+        };
+        let both = || [a.clone(), b.clone()];
+        // Peers that walk a check at the tail, as every current build does.
+        let walks = swarmllm_types::node::features::SPEC_WALK_AT_TAIL
+            | swarmllm_types::node::features::FORWARD_SAMPLING
+            | swarmllm_types::node::features::FORWARD_GENERATED_IDS;
+        for n in both() {
+            state
+                .peer_registry
+                .insert(n.clone(), peer_advertising(&n, walks));
+        }
+
+        // This node first, one peer the rest: its tail.
+        let e = executor(&[&me, &a]).exposure_of_a_check();
+        assert_eq!(e.shown, Exposure::new([a.clone()], [a.clone()]));
+        assert_eq!(e.seen, Exposure::new([a.clone()], [a.clone()]));
+        // Both remote: the first is sent ids and knows the reply's, as the tail does.
+        let e = executor(&[&a, &b]).exposure_of_a_check();
+        assert_eq!(e.seen, Exposure::new(both(), both()));
+        // This node last: the peer before it is the first segment.
+        let e = executor(&[&a, &me]).exposure_of_a_check();
+        assert_eq!(e.seen, Exposure::new([a.clone()], [a.clone()]));
+
+        // A middle peer knows the reply as hidden states ...
+        let mut middle = executor(&[&me, &a, &b]);
+        let e = middle.exposure_of_a_check();
+        assert_eq!(e.seen, Exposure::new(both(), [b.clone()]));
+        // ... and is sent the guesses' ids only where the check may chain.
+        assert_eq!(e.shown, Exposure::new(both(), both()), "a chained check");
+        middle.chaining_disabled = true;
+        assert_eq!(
+            middle.exposure_of_a_check().shown,
+            Exposure::new(both(), [b.clone()])
+        );
+        // A chain never runs through this node: with both ends here, the
+        // peer between them is sent hidden states only, chained or not.
+        let e = executor(&[&me, &a, &me]).exposure_of_a_check();
+        assert_eq!(e.shown, Exposure::new([a.clone()], []), "a boomerang");
+        assert_eq!(e.seen, Exposure::new([a.clone()], []));
+
+        // An older tail that cannot walk sends its distributions here: sent
+        // the guesses, it is never counted as knowing the reply's ids.
+        let old = crate::types::NodeId([0xC3; 32]);
+        let e = executor(&[&me, &old]).exposure_of_a_check();
+        assert_eq!(e.shown, Exposure::new([old.clone()], [old.clone()]));
+        assert_eq!(e.seen, Exposure::new([old.clone()], []), "an older tail");
+
+        // Under prompt privacy this node embeds what the first peer reads.
+        let mut cfg = crate::config::Config::clone(&state.cfg());
+        cfg.inference.local_embedding_privacy = true;
+        state.apply_live_config(cfg);
+        let e = executor(&[&a, &b]).exposure_of_a_check();
+        assert_eq!(e.seen, Exposure::new(both(), [b.clone()]));
+        assert_eq!(e.shown, Exposure::new(both(), both()));
     }
 
     #[tokio::test]

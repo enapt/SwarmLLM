@@ -618,6 +618,21 @@ impl PipelineExecutor {
             }
         }
 
+        // The owner's earlier replies (#337), for the rounds' prompt lookup:
+        // looked in by who a round's guesses reach, and the part of the reply
+        // the rounds write kept as seen by the peers it began with — only if
+        // they are the peers it ends with (a failover's stand-in never saw its
+        // start). A flow keeps its own part; the stream's is not kept.
+        let earlier = self
+            .shared_state
+            .models
+            .owner_replies
+            .for_the_owner(&self.request);
+        let rounds_from = generated.len();
+        let seen_at_start = self.exposure_of_a_check().seen;
+        let mut peers_changed = false;
+        let mut earlier_rounds = 0u32;
+
         // Spec round loop.
         while !streamed && finish_reason.is_empty() && (generated.len() as u32) < max_tokens {
             // Honor external cancel between rounds — same pattern as
@@ -888,12 +903,20 @@ impl PipelineExecutor {
             let ngram_drafts = if pick.is_some() || gamma == 0 {
                 Vec::new()
             } else {
-                ngram_lookup_drafts(
-                    &self.shared_state.config.inference,
+                let exposure = earlier.as_ref().map(|_| self.exposure_of_a_check());
+                if let Some(exposure) = &exposure {
+                    peers_changed |= exposure.seen != seen_at_start;
+                }
+                let (drafts, from) = ngram_lookup_drafts(
+                    &self.shared_state.cfg().inference,
                     &prompt_tokens,
                     &generated,
                     gamma,
-                )
+                    earlier.as_ref().zip(exposure.as_ref().map(|e| &e.shown)),
+                );
+                earlier_rounds +=
+                    u32::from(from == crate::inference::ngram_lookup::NgramHitSource::EarlierReply);
+                drafts
             };
             let outcome: Result<Vec<u32>, SwarmError> = match &mut drafter {
                 _ if drafting_off => Ok(Vec::new()),
@@ -1129,6 +1152,13 @@ impl PipelineExecutor {
                 .await;
         }
 
+        if let Some(store) = &earlier {
+            peers_changed |= self.exposure_of_a_check().seen != seen_at_start;
+            if !peers_changed {
+                store.keep(&generated[rounds_from..], &seen_at_start);
+            }
+        }
+
         crate::inference::dsd_controller::remember(
             learned_key,
             crate::inference::dsd_controller::Learned {
@@ -1145,6 +1175,9 @@ impl PipelineExecutor {
             drafter = %drafter_name,
             proposed = acceptance_proposed,
             accepted = acceptance_accepted,
+            earlier = earlier.is_some(),
+            earlier_rounds,
+            earlier_unkept = peers_changed,
             final_gamma = gamma_now,
             alpha = format_args!("{:.3}", acceptance.alpha()),
             check_fixed_ms = format_args!("{:.1}", check.fit().map_or(0.0, |f| f.0)),

@@ -2235,12 +2235,14 @@ What each node sees in a distributed pipeline (Requester → A → B → C):
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Guessed rows are sent too.** Where a split's reply flows (`dsd_flow`), every guess is a row
-the peers run and the tail draws, so a guess is shown to them as surely as the reply is. A guess
-copied from the owner's EARLIER replies (`inference::owner_replies`, #337) is taken only from a
-reply every peer of the split already served. A peer is never shown text of another
-conversation it did not take part in, and a request that is not the owner's never reads the
-store at all.
+**Guessed rows are sent too.** Where a split guesses ahead — a flowing tree (`dsd_flow`) or
+rounds of checks — every guess is run by the peers and checked or drawn by the tail, so a guess
+is shown to them as surely as the reply is; a check's TAIL is sent the guesses' token ids to
+walk them, and a chained check carries them through every hop. A guess copied from the owner's
+EARLIER replies (`inference::owner_replies`, #337) is taken only from a reply every peer it
+reaches already served, and sent as token ids only to a peer that knew that reply as ids
+(`owner_replies::Exposure`). A peer is never shown text of another conversation it did not take
+part in, and a request that is not the owner's never reads the store at all.
 
 ## Local Embedding Privacy
 

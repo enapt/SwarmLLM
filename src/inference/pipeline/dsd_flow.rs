@@ -115,6 +115,19 @@ fn copy_on() -> bool {
     })
 }
 
+/// Who a flow's rows reach (`owner_replies::Exposure`) — a copied run it would
+/// send and the reply it keeps alike: every peer of the run, and as token ids
+/// only the first, where this node runs none of the first layers (`send` packs
+/// the rows as ids for it). The tail is sent no ids (`TailWalk::drafts` is
+/// empty): it draws on hidden states.
+fn flow_exposure(shape: &StreamShape) -> crate::inference::owner_replies::Exposure {
+    crate::inference::owner_replies::Exposure::new(
+        std::iter::once(shape.far.node_id.clone())
+            .chain(shape.chain.iter().map(|h| h.node_id.clone())),
+        shape.near.is_empty().then(|| shape.far.node_id.clone()),
+    )
+}
+
 /// The most rows of a copied run kept ahead of the walk. A run the walk keeps
 /// following is extended as it goes, so a round trip carries at most this many
 /// copied tokens: 32 a 385 ms trip is ~83 a second, past what this node's own
@@ -617,8 +630,12 @@ struct FlowRun<'a, 'r> {
     /// The lookup's shape; `None` where copied runs are off.
     copy: Option<crate::inference::ngram_lookup::NgramLookupConfig>,
     /// The owner's earlier replies, which this flow may copy from and is kept
-    /// in (#337); `None` for anyone else's reply, or where copied runs are off.
-    earlier: Option<crate::inference::owner_replies::EarlierReplies>,
+    /// in (#337), and who its rows reach; `None` for anyone else's reply, or
+    /// where copied runs are off.
+    earlier: Option<(
+        crate::inference::owner_replies::EarlierReplies,
+        crate::inference::owner_replies::Exposure,
+    )>,
     /// The walk's row, by epoch, a run was last looked up from.
     copied_from: Option<(u32, usize)>,
     copied_runs: u32,
@@ -677,16 +694,15 @@ impl PipelineExecutor {
             .filter(|_| copy_on());
         // Every peer of the run is sent each row, a copied one too: the
         // owner's earlier replies are looked in only where all of them saw it,
-        // in the form they saw it — the first peer is sent the rows' token ids
-        // where this node runs none of the first layers.
-        let earlier = copy.and_then(|_| {
-            self.shared_state.models.owner_replies.for_the_owner(
-                &self.request,
-                std::iter::once(shape.far.node_id.clone())
-                    .chain(shape.chain.iter().map(|h| h.node_id.clone())),
-                shape.near.is_empty().then(|| shape.far.node_id.clone()),
-            )
-        });
+        // in the form they saw it (`flow_exposure`).
+        let earlier = copy
+            .and_then(|_| {
+                self.shared_state
+                    .models
+                    .owner_replies
+                    .for_the_owner(&self.request)
+            })
+            .map(|store| (store, flow_exposure(&shape)));
         let mut run = FlowRun {
             exec: self,
             state,
@@ -750,8 +766,8 @@ impl PipelineExecutor {
         run.drafter.flow_ended(run.flow.base());
         // The reply so far is kept as seen by this run's peers (#337): every
         // row of it crossed them. A reply the rounds finish keeps this part.
-        if let Some(earlier) = &run.earlier {
-            earlier.keep(run.reply.generated);
+        if let Some((earlier, seen)) = &run.earlier {
+            earlier.keep(run.reply.generated, seen);
         }
         if run.guard.guarded {
             keep_guard(guard_key, run.guard.at(), std::time::Instant::now());
@@ -1029,7 +1045,7 @@ impl FlowRun<'_, '_> {
             None => match self
                 .earlier
                 .as_ref()
-                .and_then(|e| e.copied_run(seq, cfg, COPY_LEAD_MOST))
+                .and_then(|(e, shown)| e.copied_run(seq, shown, cfg, COPY_LEAD_MOST))
             {
                 Some(run) => (run, Copied::Earlier),
                 None => return false,

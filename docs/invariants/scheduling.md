@@ -4780,11 +4780,27 @@ round costs one per check.
      shown text the reply never contains). Each kept reply carries the peers that served it, and
      a run is copied from it only where the split's peers are ALL among them. Its last token is
      not kept: the tail drew it, the peers before the tail may never have been sent it. **And in
-     the form they saw it** (`Exposure::covers`): where this node runs none of the first layers
-     (`shape.near` empty) the first peer is sent the rows' TOKEN IDS, elsewhere every peer gets
-     hidden states; a run goes to a peer as ids only from a reply that peer was sent as ids. Prompt
-     privacy treats ids leaving as worse than states, and a reply kept under it would otherwise
-     go out as ids once the setting was off (security review, 2026-10-24).
+     the form they saw it** (`Exposure::covers`): a run goes to a peer as TOKEN IDS only from a
+     reply that peer knew as ids. Prompt privacy treats ids leaving as worse than states, and a
+     reply kept under it would otherwise go out as ids once the setting was off (security
+     review, 2026-10-24). Each path says who sees what twice — for a guess it would SEND (naming
+     more peers or ids than it reaches is safe) and for the reply it KEEPS (naming fewer is
+     safe): the flow (`dsd_flow::flow_exposure`) sends ids only to its first peer where this node
+     runs none of the first layers (`shape.near` empty; the tail gets `drafts: &[]`), so both
+     are that. The rounds (`PipelineExecutor::exposure_of_a_check`, read LIVE each round —
+     failover rewrites the segments — and a reply whose peers changed is not kept) send a
+     guess's ids to a remote first segment, to the tail that walks them (`draft_tokens`) and,
+     where a check may chain, to every hop of the run ending at the tail (`verify_onward` carries
+     them) — every remote segment after the last one run here, since a chain never crosses this
+     node (`[me, a, me]` sends `a` none); a reply is known as ids only by a remote first segment
+     (every token but the last is its input — not under prompt privacy) and a tail that WALKS
+     (`peer_walks_at_tail`: sent every guess, it draws every other token, the first on the
+     prompt pass), never a middle peer, nor an older tail that returns distributions (security
+     review, 2026-10-24). So a chained check through a middle peer copies nothing from the
+     store; a tensor-parallel group's machines count as reached, never as having seen. All three daemon loops read it at their one choke point, `speculative::ngram_lookup_drafts`
+     (a REQUIRED `earlier` argument): the n-gram loop (`ngram_only_spec`), DSD's rounds (the part
+     of the reply they write; a flow keeps its own, the stream's is not kept) and the draft-model
+     loop.
   3. **Memory only, bounded** (256K tokens and 4,096 replies a model, 4 models, ~5.5 MB a
      model; replies of one split share one record of its peers): never saved, shared or
      announced. In a pool every device shares the key, so a pool member asking THIS node directly
@@ -4796,8 +4812,16 @@ round costs one per check.
   store's rows 24% for 0.2 points. #338's agreement cut, which pays on the conversation's own
   text, saved no rows on the store and cost 0.5 points (`combo.py`), so the run is today's: the
   newest leading hit's continuation. A run never crosses a reply's end, nor a match its start.
-  Logged `earlier_runs` / `earlier_rows` / `earlier_walked` on the flow's line. A/B
-  `SWARMLLM_FLOW_COPY_STORE=0`. Tests in `owner_replies` (subset rule, ids against states, owner only, vote, bounds).
+  Logged `earlier_runs` / `earlier_rows` / `earlier_walked` on the flow's line, `earlier_rounds`
+  (and `earlier_checked` / `earlier_kept` in the n-gram loop) on the rounds'. A/B
+  `SWARMLLM_FLOW_COPY_STORE=0`. Tests in `owner_replies` (subset rule, ids against states, owner
+  only, vote, bounds), `pipeline::tests::a_checks_guesses_and_its_reply_are_counted_for_every_peer_they_reach`,
+  `speculative::earlier_replies_tests`. **Rig (2026-10-24, one binary, 385 ms, the chat prompt
+  three times, each a new conversation)**: with the store on, the third reply copied 29 runs —
+  209 rows, 19 on the walk's path — from the second; with it off, 0. Each arm's first reply ran
+  the chain stream (the drafter not yet on the card), which keeps nothing, so the second had
+  nothing to copy. The replies' text varied between repeats in EVERY arm, the store's off ones
+  too (greedy near-ties under the flow's batch shapes), so it is not the store's.
 - **Several levels a drafter call** (`levels_a_call` 3 × `rows_a_level` 8): each level reads the
   last one's proposals in one forward and proposes after them. At ONE level a call a branch grew
   one row deeper a call and the walk with it — 0.63-0.74 tokens a call whatever the rows a call

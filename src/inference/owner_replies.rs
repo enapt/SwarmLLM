@@ -21,16 +21,21 @@
 //!   key, so a pool member asking THIS node directly is its owner here — and
 //!   could already read its stored Responses replies with that key.
 //! - **A peer is never shown a copy of text it has not already seen.** A
-//!   flow's copied rows go to its peers: the first layers run them, the tail
-//!   draws them. Each reply is kept with the peers that served it — every one
-//!   of its rows crossed them — and a run is copied from it only into a split
-//!   whose peers are ALL among those. A reply's last token is not kept: the
-//!   tail drew it, the peers before the tail may never have been sent it.
-//!   **And in the form they saw it**: where this node runs none of the
-//!   model's first layers, the first peer is sent the rows' TOKEN IDS; where
-//!   it runs some, every peer gets hidden states. A run goes as ids to a peer
-//!   only from a reply that peer was sent as ids (prompt privacy treats ids
-//!   leaving as worse than states, `local_embedding_privacy`).
+//!   copied guess is SENT: the first layers run it, the tail checks or draws
+//!   it. Each reply is kept with the peers that served it — every one of its
+//!   tokens crossed them — and a run is copied from it only into a split whose
+//!   peers are ALL among those ([`Exposure`]). A reply's last token is not
+//!   kept: the tail drew it, the peers before the tail may never have been
+//!   sent it. **And in the form they saw it**: a peer is sent a guess's TOKEN
+//!   IDS where it runs the model's first layers or walks the guesses (a
+//!   chained check carries them through every hop), hidden states otherwise. A
+//!   run goes as ids to a peer only from a reply that peer certainly knew as
+//!   ids — its first peer was sent them, its tail drew them — never one it was
+//!   sent as hidden states (prompt privacy treats ids leaving as worse than
+//!   states, `local_embedding_privacy`). Each path says who sees what, for a
+//!   guess it would send (naming more is safe) and for the reply it keeps
+//!   (naming fewer is safe): `dsd_flow::flow_exposure`,
+//!   `PipelineExecutor::exposure_of_a_check`.
 //! - **Never saved, never shared, never announced**: memory only, bounded per
 //!   model ([`KEPT_PER_MODEL`] tokens, [`MOST_REPLIES`] replies) and in models
 //!   ([`MODELS_KEPT`]).
@@ -108,40 +113,23 @@ pub struct OwnerReplies {
 }
 
 impl OwnerReplies {
-    /// The store for `request`, a split through `peers`, or `None` where the
-    /// request may neither read nor be kept in it: not the owner's, or this
-    /// node leading the split for another (module doc). The ONLY way to a
-    /// store's contents.
-    ///
-    /// `ids_to` is the peer this split sends the rows' token ids to — its
-    /// first peer, where this node runs none of the model's first layers —
-    /// and `None` where every peer is sent hidden states.
-    pub fn for_the_owner(
-        self: &Arc<Self>,
-        request: &InferenceRequest,
-        peers: impl IntoIterator<Item = NodeId>,
-        ids_to: Option<NodeId>,
-    ) -> Option<EarlierReplies> {
+    /// The store for `request`, or `None` where the request may neither read
+    /// nor be kept in it: not the owner's, or this node leading the split for
+    /// another (module doc). The ONLY way to a store's contents.
+    pub fn for_the_owner(self: &Arc<Self>, request: &InferenceRequest) -> Option<EarlierReplies> {
         let owners = request.requested_by == RequestedBy::Owner
             && crate::inference::pipeline::worker_requester(request)
                 == crate::inference::process_pool::Requester::Owner;
         if !owners || !store_on() {
             return None;
         }
-        let mut peers: Vec<NodeId> = peers.into_iter().chain(ids_to.clone()).collect();
-        peers.sort_unstable_by_key(|p| p.0);
-        peers.dedup();
         Some(EarlierReplies {
             store: Arc::clone(self),
             model: request.model_id.0.clone(),
-            split: Exposure {
-                seen_by: peers.into(),
-                ids_to,
-            },
         })
     }
 
-    fn keep(&self, model: &str, reply: &[u32], split: &Exposure) {
+    fn keep(&self, model: &str, reply: &[u32], seen: &Exposure) {
         // The last token only the tail is sure to have seen (module doc).
         let Some((_, kept)) = reply.split_last() else {
             return;
@@ -158,7 +146,7 @@ impl OwnerReplies {
                 .entry(model.to_string())
                 .or_insert_with(ModelReplies::new);
             store.written = written;
-            store.append(kept, split);
+            store.append(kept, seen);
         }
         // After the write, with no entry held (an entry guard and a read of
         // the same map deadlock, gotcha #10): writers racing to two new models
@@ -183,64 +171,91 @@ impl OwnerReplies {
         &self,
         model: &str,
         context: &[u32],
-        split: &Exposure,
+        shown: &Exposure,
         cfg: NgramLookupConfig,
         most: usize,
     ) -> Option<CopiedRun> {
         self.by_model
             .get(model)?
-            .copied_run(context, split, cfg, most)
+            .copied_run(context, shown, cfg, most)
     }
 }
 
-/// Which peers are shown a reply, and in what form.
+/// Which peers a reply — or a guess — reaches, and which of them as token ids.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Exposure {
-    /// Sorted, deduplicated; `ids_to` among them.
+pub struct Exposure {
+    /// Sorted, deduplicated; `ids` among them.
     seen_by: Arc<[NodeId]>,
-    /// The peer sent its token ids, where one is (`for_the_owner`).
-    ids_to: Option<NodeId>,
+    /// Sorted, deduplicated.
+    ids: Arc<[NodeId]>,
 }
 
 impl Exposure {
-    /// Whether a run copied from a reply shown as `self` may be shown to
-    /// `split`: every peer of the split saw the reply, and a peer sent ids now
-    /// was sent its ids then.
-    fn covers(&self, split: &Exposure) -> bool {
-        split
-            .seen_by
-            .iter()
-            .all(|p| self.seen_by.binary_search_by_key(&p.0, |s| s.0).is_ok())
-            && (split.ids_to.is_none() || split.ids_to == self.ids_to)
+    /// `peers` are reached, `ids` of them as token ids (each of `ids` is
+    /// reached too, named among `peers` or not).
+    pub fn new(
+        peers: impl IntoIterator<Item = NodeId>,
+        ids: impl IntoIterator<Item = NodeId>,
+    ) -> Self {
+        let sorted = |mut v: Vec<NodeId>| -> Arc<[NodeId]> {
+            v.sort_unstable_by_key(|p| p.0);
+            v.dedup();
+            v.into()
+        };
+        let ids: Vec<NodeId> = ids.into_iter().collect();
+        let peers: Vec<NodeId> = peers.into_iter().chain(ids.iter().cloned()).collect();
+        Self {
+            seen_by: sorted(peers),
+            ids: sorted(ids),
+        }
+    }
+
+    /// The peers reached.
+    pub fn peers(&self) -> &[NodeId] {
+        &self.seen_by
+    }
+
+    /// Whether a run copied from a reply seen as `self` may be sent as
+    /// `shown`: every peer it would reach saw the reply, and every peer it
+    /// would reach as ids knew the reply as ids.
+    fn covers(&self, shown: &Exposure) -> bool {
+        let within = |few: &[NodeId], all: &[NodeId]| {
+            few.iter()
+                .all(|p| all.binary_search_by_key(&p.0, |s| s.0).is_ok())
+        };
+        within(&shown.seen_by, &self.seen_by) && within(&shown.ids, &self.ids)
     }
 }
 
-/// One owner's request's view of the store: looks only in replies every one of
-/// its split's peers has seen, and keeps its own reply as seen by them. Built
-/// only by [`OwnerReplies::for_the_owner`].
+/// One owner's request's view of the store. Built only by
+/// [`OwnerReplies::for_the_owner`].
 pub struct EarlierReplies {
     store: Arc<OwnerReplies>,
     model: String,
-    split: Exposure,
 }
 
 impl EarlierReplies {
-    /// What followed the context's last tokens in an earlier reply every peer
-    /// of this split has seen, at most `most` tokens; `None` where nothing
-    /// matched or the earlier replies did not agree (module doc).
+    /// What followed the context's last tokens in an earlier reply that may
+    /// be sent as `shown`, at most `most` tokens; `None` where nothing matched
+    /// or the earlier replies did not agree (module doc). `shown` names every
+    /// peer the run may reach and every one it may reach as ids: naming MORE
+    /// than will be is safe, fewer is the leak.
     pub fn copied_run(
         &self,
         context: &[u32],
+        shown: &Exposure,
         cfg: NgramLookupConfig,
         most: usize,
     ) -> Option<CopiedRun> {
         self.store
-            .copied_run(&self.model, context, &self.split, cfg, most)
+            .copied_run(&self.model, context, shown, cfg, most)
     }
 
-    /// Keep this reply's tokens as shown to this split's peers.
-    pub fn keep(&self, reply: &[u32]) {
-        self.store.keep(&self.model, reply, &self.split);
+    /// Keep this reply's tokens as `seen`: the peers it reached, and those
+    /// CERTAIN to know it as ids — naming FEWER than did is safe, more is the
+    /// leak.
+    pub fn keep(&self, reply: &[u32], seen: &Exposure) {
+        self.store.keep(&self.model, reply, seen);
     }
 }
 
@@ -476,17 +491,26 @@ mod tests {
         NgramLookupConfig::default()
     }
 
+    fn owner(store: &Arc<OwnerReplies>) -> EarlierReplies {
+        store.for_the_owner(&request(RequestedBy::Owner)).unwrap()
+    }
+
+    /// Peers `peers` reached, `ids` of them as token ids.
+    fn via(peers: &[u8], ids: &[u8]) -> Exposure {
+        Exposure::new(peers.iter().map(|&b| peer(b)), ids.iter().map(|&b| peer(b)))
+    }
+
     /// The case it exists for: a new conversation's text matches an earlier
     /// reply's, and the earlier reply's continuation is copied — through the
     /// same peers that served it.
     #[test]
     fn an_earlier_reply_is_copied_into_a_split_through_the_peers_that_saw_it() {
         let store = Arc::new(OwnerReplies::default());
-        let earlier = store
-            .for_the_owner(&request(RequestedBy::Owner), [peer(1), peer(2)], None)
+        let earlier = owner(&store);
+        earlier.keep(&[10, 11, 12, 13, 14, 15, 16, 17, 99], &via(&[1, 2], &[]));
+        let run = earlier
+            .copied_run(&[5, 6, 11, 12, 13], &via(&[2, 1], &[]), cfg(), 32)
             .unwrap();
-        earlier.keep(&[10, 11, 12, 13, 14, 15, 16, 17, 99]);
-        let run = earlier.copied_run(&[5, 6, 11, 12, 13], cfg(), 32).unwrap();
         assert_eq!(
             run.tokens,
             vec![14, 15, 16, 17],
@@ -494,12 +518,10 @@ mod tests {
         );
         assert_eq!(run.matched, 3);
         assert_eq!(run.source, NgramHitSource::EarlierReply);
-        // The same split with its peers named in another order, and a split
-        // through ONE of them: each has seen the reply.
-        let fewer = store
-            .for_the_owner(&request(RequestedBy::Owner), [peer(2)], None)
-            .unwrap();
-        assert!(fewer.copied_run(&[11, 12, 13], cfg(), 32).is_some());
+        // A split through ONE of them: it has seen the reply.
+        assert!(earlier
+            .copied_run(&[11, 12, 13], &via(&[2], &[]), cfg(), 32)
+            .is_some());
     }
 
     /// The privacy rule: a split with a peer that did not serve the earlier
@@ -507,25 +529,19 @@ mod tests {
     #[test]
     fn a_peer_is_never_shown_a_copy_of_a_reply_it_did_not_serve() {
         let store = Arc::new(OwnerReplies::default());
-        store
-            .for_the_owner(&request(RequestedBy::Owner), [peer(1)], None)
-            .unwrap()
-            .keep(&[10, 11, 12, 13, 14, 15, 99]);
-        for peers in [vec![peer(3)], vec![peer(1), peer(3)]] {
-            let other = store
-                .for_the_owner(&request(RequestedBy::Owner), peers.clone(), None)
-                .unwrap();
+        let s = owner(&store);
+        s.keep(&[10, 11, 12, 13, 14, 15, 99], &via(&[1], &[]));
+        for peers in [vec![3], vec![1, 3]] {
             assert_eq!(
-                other.copied_run(&[11, 12, 13], cfg(), 32),
+                s.copied_run(&[11, 12, 13], &via(&peers, &[]), cfg(), 32),
                 None,
                 "{peers:?}"
             );
         }
         // The hit it was refused is still there for the split that saw it.
-        let same = store
-            .for_the_owner(&request(RequestedBy::Owner), [peer(1)], None)
-            .unwrap();
-        assert!(same.copied_run(&[11, 12, 13], cfg(), 32).is_some());
+        assert!(s
+            .copied_run(&[11, 12, 13], &via(&[1], &[]), cfg(), 32)
+            .is_some());
     }
 
     /// Only the owner's request reads or is kept: a pool member's forward, a
@@ -535,17 +551,15 @@ mod tests {
     fn only_the_owners_request_reaches_the_store() {
         let store = Arc::new(OwnerReplies::default());
         assert!(store
-            .for_the_owner(&request(RequestedBy::NotTheOwner), [peer(1)], None)
+            .for_the_owner(&request(RequestedBy::NotTheOwner))
             .is_none());
         let mut led = request(RequestedBy::Owner);
         led.route_override = Some(crate::inference::route_override::RoutePlanOverride {
             lead_here: true,
             ..Default::default()
         });
-        assert!(store.for_the_owner(&led, [peer(1)], None).is_none());
-        assert!(store
-            .for_the_owner(&request(RequestedBy::Owner), [peer(1)], None)
-            .is_some());
+        assert!(store.for_the_owner(&led).is_none());
+        assert!(store.for_the_owner(&request(RequestedBy::Owner)).is_some());
     }
 
     /// llama.cpp's lax vote: a bigram seen once copies nothing, twice with the
@@ -554,50 +568,49 @@ mod tests {
     /// ends the lookup rather than falling back to a shorter one.
     #[test]
     fn earlier_replies_are_copied_from_only_where_they_agree() {
+        let one = via(&[1], &[]);
         let store = Arc::new(OwnerReplies::default());
-        let s = store
-            .for_the_owner(&request(RequestedBy::Owner), [peer(1)], None)
-            .unwrap();
-        s.keep(&[1, 2, 7, 8, 99]);
+        let s = owner(&store);
+        s.keep(&[1, 2, 7, 8, 99], &one);
         assert_eq!(
-            s.copied_run(&[9, 1, 2], cfg(), 32),
+            s.copied_run(&[9, 1, 2], &one, cfg(), 32),
             None,
             "a bigram seen once"
         );
-        s.keep(&[1, 2, 7, 8, 99]);
+        s.keep(&[1, 2, 7, 8, 99], &one);
         assert_eq!(
-            s.copied_run(&[9, 1, 2], cfg(), 32).unwrap().tokens,
+            s.copied_run(&[9, 1, 2], &one, cfg(), 32).unwrap().tokens,
             vec![7, 8]
         );
 
         let store = Arc::new(OwnerReplies::default());
-        let s = store
-            .for_the_owner(&request(RequestedBy::Owner), [peer(1)], None)
-            .unwrap();
-        s.keep(&[3, 4, 5, 6, 99]);
-        s.keep(&[3, 4, 5, 7, 99]);
+        let s = owner(&store);
+        s.keep(&[3, 4, 5, 6, 99], &one);
+        s.keep(&[3, 4, 5, 7, 99], &one);
         // Two of two hits, split 1:1 — the newest leads.
-        assert_eq!(s.copied_run(&[3, 4, 5], cfg(), 32).unwrap().tokens, vec![7]);
-        s.keep(&[3, 4, 5, 8, 99]);
+        assert_eq!(
+            s.copied_run(&[3, 4, 5], &one, cfg(), 32).unwrap().tokens,
+            vec![7]
+        );
+        s.keep(&[3, 4, 5, 8, 99], &one);
         // One in three for each: under half, and no fallback to [4, 5].
-        assert_eq!(s.copied_run(&[3, 4, 5], cfg(), 32), None);
+        assert_eq!(s.copied_run(&[3, 4, 5], &one, cfg(), 32), None);
     }
 
     /// A run never goes past its reply's end, and a match never runs back
     /// across the reply before it.
     #[test]
     fn a_copy_stays_inside_one_earlier_reply() {
+        let one = via(&[1], &[]);
         let store = Arc::new(OwnerReplies::default());
-        let s = store
-            .for_the_owner(&request(RequestedBy::Owner), [peer(1)], None)
-            .unwrap();
-        s.keep(&[20, 21, 22, 99]);
-        s.keep(&[23, 24, 25, 26, 99]);
+        let s = owner(&store);
+        s.keep(&[20, 21, 22, 99], &one);
+        s.keep(&[23, 24, 25, 26, 99], &one);
         // [21, 22] ends the first reply: nothing kept follows it there.
-        assert_eq!(s.copied_run(&[20, 21, 22], cfg(), 32), None);
+        assert_eq!(s.copied_run(&[20, 21, 22], &one, cfg(), 32), None);
         // [22, 23] spans the boundary and was never an n-gram of either.
-        assert_eq!(s.copied_run(&[22, 23], cfg(), 32), None);
-        let run = s.copied_run(&[22, 23, 24, 25], cfg(), 32).unwrap();
+        assert_eq!(s.copied_run(&[22, 23], &one, cfg(), 32), None);
+        let run = s.copied_run(&[22, 23, 24, 25], &one, cfg(), 32).unwrap();
         assert_eq!(run.tokens, vec![26]);
         assert_eq!(
             run.matched, 3,
@@ -605,49 +618,52 @@ mod tests {
         );
     }
 
-    /// A peer sent hidden states for a reply is never sent that reply's
-    /// token ids: a split that sends a peer ids copies only from replies that
-    /// peer was sent as ids; one sending states copies from either.
+    /// A peer that knew a reply only as hidden states is never sent that
+    /// reply's token ids: a guess that reaches a peer as ids is copied only
+    /// from replies that peer knew as ids; one reaching it as states, from
+    /// either.
     #[test]
     fn a_peer_shown_hidden_states_is_never_sent_the_replys_ids() {
         let store = Arc::new(OwnerReplies::default());
-        let owner = || request(RequestedBy::Owner);
-        store
-            .for_the_owner(&owner(), [peer(1)], None)
-            .unwrap()
-            .keep(&[10, 11, 12, 13, 14, 99]);
-        let as_ids = store
-            .for_the_owner(&owner(), Vec::<NodeId>::new(), Some(peer(1)))
-            .unwrap();
-        assert_eq!(as_ids.copied_run(&[11, 12, 13], cfg(), 32), None);
-        let as_states = store.for_the_owner(&owner(), [peer(1)], None).unwrap();
-        assert!(as_states.copied_run(&[11, 12, 13], cfg(), 32).is_some());
+        let s = owner(&store);
+        s.keep(&[10, 11, 12, 13, 14, 99], &via(&[1], &[]));
+        assert_eq!(
+            s.copied_run(&[11, 12, 13], &via(&[], &[1]), cfg(), 32),
+            None
+        );
+        assert!(s
+            .copied_run(&[11, 12, 13], &via(&[1], &[]), cfg(), 32)
+            .is_some());
 
         let store = Arc::new(OwnerReplies::default());
-        store
-            .for_the_owner(&owner(), [peer(2)], Some(peer(1)))
-            .unwrap()
-            .keep(&[20, 21, 22, 23, 24, 99]);
-        for (peers, ids_to) in [(vec![peer(2)], Some(peer(1))), (vec![peer(1)], None)] {
-            let split = store.for_the_owner(&owner(), peers, ids_to).unwrap();
-            assert!(split.copied_run(&[21, 22, 23], cfg(), 32).is_some());
+        let s = owner(&store);
+        // Peer 1 ran the first layers (ids), peer 2 the rest (states).
+        s.keep(&[20, 21, 22, 23, 24, 99], &via(&[2], &[1]));
+        for shown in [via(&[2], &[1]), via(&[1], &[]), via(&[1, 2], &[])] {
+            assert!(
+                s.copied_run(&[21, 22, 23], &shown, cfg(), 32).is_some(),
+                "{shown:?}"
+            );
         }
-        // Ids to the peer that was sent states: refused.
-        let other = store
-            .for_the_owner(&owner(), [peer(1)], Some(peer(2)))
-            .unwrap();
-        assert_eq!(other.copied_run(&[21, 22, 23], cfg(), 32), None);
+        // Ids to the peer that was sent states — a chained check's hop, or a
+        // tail that walks — refused.
+        for shown in [via(&[1], &[2]), via(&[], &[1, 2])] {
+            assert_eq!(
+                s.copied_run(&[21, 22, 23], &shown, cfg(), 32),
+                None,
+                "{shown:?}"
+            );
+        }
     }
 
     /// Short replies are bounded by count as well as by tokens.
     #[test]
     fn the_store_keeps_at_most_its_replies() {
         let store = Arc::new(OwnerReplies::default());
-        let s = store
-            .for_the_owner(&request(RequestedBy::Owner), [peer(1)], None)
-            .unwrap();
+        let s = owner(&store);
+        let one = via(&[1], &[]);
         for i in 0..(MOST_REPLIES as u32 + 10) {
-            s.keep(&[i, i + 1, i + 2]);
+            s.keep(&[i, i + 1, i + 2], &one);
         }
         let m = store.by_model.get("m").unwrap();
         assert_eq!(m.replies.len(), MOST_REPLIES);
@@ -663,17 +679,20 @@ mod tests {
     /// ago goes.
     #[test]
     fn the_store_keeps_its_bounds() {
+        let one = via(&[1], &[]);
         let store = Arc::new(OwnerReplies::default());
-        let s = store
-            .for_the_owner(&request(RequestedBy::Owner), [peer(1)], None)
-            .unwrap();
+        let s = owner(&store);
         let first: Vec<u32> = vec![40, 41, 42, 43, 99];
-        s.keep(&first);
-        assert!(s.copied_run(&[40, 41, 42], cfg(), 32).is_some());
+        s.keep(&first, &one);
+        assert!(s.copied_run(&[40, 41, 42], &one, cfg(), 32).is_some());
         let filler: Vec<u32> = (0..KEPT_PER_MODEL as u32 / 2).map(|i| 1000 + i).collect();
-        s.keep(&filler);
-        s.keep(&filler);
-        assert_eq!(s.copied_run(&[40, 41, 42], cfg(), 32), None, "dropped");
+        s.keep(&filler, &one);
+        s.keep(&filler, &one);
+        assert_eq!(
+            s.copied_run(&[40, 41, 42], &one, cfg(), 32),
+            None,
+            "dropped"
+        );
         {
             let m = store.by_model.get("m").unwrap();
             assert!(m.tokens.len() <= KEPT_PER_MODEL);
@@ -682,10 +701,7 @@ mod tests {
         for i in 0..MODELS_KEPT {
             let mut r = request(RequestedBy::Owner);
             r.model_id = ModelId(format!("other{i}"));
-            store
-                .for_the_owner(&r, [peer(1)], None)
-                .unwrap()
-                .keep(&[1, 2, 3, 4]);
+            store.for_the_owner(&r).unwrap().keep(&[1, 2, 3, 4], &one);
         }
         assert_eq!(store.by_model.len(), MODELS_KEPT);
         assert!(!store.by_model.contains_key("m"), "the oldest model went");

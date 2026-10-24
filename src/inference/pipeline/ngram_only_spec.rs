@@ -633,6 +633,18 @@ impl PipelineExecutor {
         let live = self.shared_state.cfg();
         let cfg = &live.inference;
         let max_draft = cfg.ngram_num_pred_tokens.min(cfg.guesses_per_check());
+        // The owner's earlier replies (#337): looked in where the conversation
+        // has no match, by who this round's guesses reach; this reply is kept
+        // as seen by its peers, only if they are the peers it ends with — a
+        // failover's stand-in never saw its start.
+        let earlier = self
+            .shared_state
+            .models
+            .owner_replies
+            .for_the_owner(&self.request);
+        let seen_at_start = self.exposure_of_a_check().seen;
+        let mut peers_changed = false;
+        let (mut earlier_rounds, mut earlier_checked, mut earlier_kept) = (0u32, 0u32, 0u32);
         // How many of the requester's guesses a check takes (#318): the choice
         // the requester makes when it drives (`dsd_controller::best_gamma_for_check`),
         // from this reply's own checks — what one costs by the positions it
@@ -670,11 +682,26 @@ impl PipelineExecutor {
                 .as_deref()
                 .map(|slot| requester_drafts(slot, &generated, take as usize, vocab))
                 .unwrap_or_default();
-            let looked_up = if guessed.is_empty() && cfg.ngram_lookup_enabled {
-                super::speculative::ngram_lookup_drafts(cfg, &prompt_tokens, &generated, this_gamma)
+            let exposure = earlier.as_ref().map(|_| self.exposure_of_a_check());
+            if let Some(exposure) = &exposure {
+                peers_changed |= exposure.seen != seen_at_start;
+            }
+            let (looked_up, looked_up_from) = if guessed.is_empty() && cfg.ngram_lookup_enabled {
+                super::speculative::ngram_lookup_drafts(
+                    cfg,
+                    &prompt_tokens,
+                    &generated,
+                    this_gamma,
+                    earlier.as_ref().zip(exposure.as_ref().map(|e| &e.shown)),
+                )
             } else {
-                Vec::new()
+                (
+                    Vec::new(),
+                    crate::inference::ngram_lookup::NgramHitSource::None,
+                )
             };
+            let from_earlier =
+                looked_up_from == crate::inference::ngram_lookup::NgramHitSource::EarlierReply;
             // Nothing to check but one position: wait for the requester's next
             // window where it is due soon enough to pay (#318 (a)).
             if guessed.is_empty() && looked_up.is_empty() && !guess_wait_switched_off() {
@@ -854,6 +881,10 @@ impl PipelineExecutor {
             if from_requester {
                 guesses_kept += accepted.len() as u32;
                 guess_acceptance.record(accepted.len() as u32, drafts.len() as u32);
+            } else if from_earlier {
+                earlier_rounds += 1;
+                earlier_checked += drafts.len() as u32;
+                earlier_kept += accepted.len() as u32;
             }
             if guess_slot.is_some() {
                 check_cost.record(
@@ -917,12 +948,23 @@ impl PipelineExecutor {
         if guess_rounds == 0 {
             record_payoff(generated.len() as u32, ngram_rounds + fallback_rounds);
         }
+        if let Some(store) = &earlier {
+            peers_changed |= self.exposure_of_a_check().seen != seen_at_start;
+            if !peers_changed {
+                store.keep(&generated, &seen_at_start);
+            }
+        }
 
         tracing::info!(
             request_id = %request_id,
             generated_tokens = generated.len(),
             ngram_rounds,
             fallback_rounds,
+            earlier = earlier.is_some(),
+            earlier_rounds,
+            earlier_checked,
+            earlier_kept,
+            earlier_unkept = peers_changed,
             requester_guesses = guess_slot.is_some(),
             guess_rounds,
             guesses_checked,
