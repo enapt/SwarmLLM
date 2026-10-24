@@ -20,8 +20,13 @@ use std::time::{Duration, Instant};
 pub(super) const UPNP_QUIET_AFTER: Duration = Duration::from_secs(180);
 
 /// How long a stopping node keeps its network running to hand its port
-/// mappings back: the router's answer is one request on the local network.
-pub(super) const UPNP_RELEASE_WAIT: Duration = Duration::from_millis(1500);
+/// mappings back. Each removal first reads the router's table up to its own row
+/// (vendor/libp2p-upnp never deletes a row another computer holds now) — one
+/// local request a row (~3 ms on the 2026-10-24 router; a slow router's answers
+/// take far longer). At 1.5 s one run left the second of two removals undone,
+/// cause not established; with this wait and the patched crate both went
+/// (`docs/invariants/network.md` § "UPnP that the router refuses …").
+pub(super) const UPNP_RELEASE_WAIT: Duration = Duration::from_secs(3);
 
 pub(super) struct UpnpWatch {
     enabled: bool,
@@ -32,6 +37,9 @@ pub(super) struct UpnpWatch {
     /// Mappings this node holds on the router now.
     mapped: u32,
     explained: bool,
+    /// Searches that found no gateway. vendor/libp2p-upnp searches again on a
+    /// backoff (FUTURE_WORK #329), so only the first is said to the owner.
+    gateway_misses: u32,
 }
 
 impl UpnpWatch {
@@ -42,6 +50,7 @@ impl UpnpWatch {
             heard: false,
             mapped: 0,
             explained: false,
+            gateway_misses: 0,
         }
     }
 
@@ -58,6 +67,14 @@ impl UpnpWatch {
     /// No gateway, or one behind another NAT: said by its own event.
     pub(super) fn note_answered(&mut self) {
         self.heard = true;
+    }
+
+    /// A search found no gateway. True the FIRST time only: the search repeats
+    /// on a backoff, and the owner needs telling once.
+    pub(super) fn note_no_gateway(&mut self) -> bool {
+        self.heard = true;
+        self.gateway_misses = self.gateway_misses.saturating_add(1);
+        self.gateway_misses == 1
     }
 
     /// Does this node hold a mapping on the router that it should hand back?
@@ -84,9 +101,10 @@ impl UpnpWatch {
 pub(super) fn refused_mapping_message(udp_port: u16, tcp_port: u16) -> String {
     format!(
         "UPnP: the router did not open port {udp_port} (UDP) or {tcp_port} (TCP) for this \
-         computer. The usual cause is another device on this network already holding those \
-         ports — for example a second SwarmLLM node: a router gives a port to one device \
-         only. This node is reached through a relay meanwhile. To make it reachable directly, \
+         computer, nor another port in their place. The usual cause is another device on this \
+         network already holding those ports — for example a second SwarmLLM node — on a router \
+         that maps a port only to the same port number. This node is reached through a relay \
+         meanwhile. To make it reachable directly, \
          run it on a different port (`swarmllm run -p <port>`), or stop the other node and \
          restart this one."
     )
@@ -140,6 +158,14 @@ mod tests {
 
         let (mut off, now) = watch_started_ago(false, ago);
         assert!(!off.silence_to_explain(now, false), "UPnP turned off");
+    }
+
+    #[test]
+    fn a_missing_router_is_said_once_however_often_it_is_looked_for() {
+        let (mut w, _) = watch_started_ago(true, Duration::ZERO);
+        assert!(w.note_no_gateway());
+        assert!(!w.note_no_gateway());
+        assert!(!w.note_no_gateway());
     }
 
     #[test]

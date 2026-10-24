@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+**Two SwarmLLM computers behind one home router can now both be reached from the internet.** With
+UPnP on, a computer asks the router to forward its ports to it, and it always asked for the same
+port numbers (8810 and 8800). Some routers then quietly hand the ports to whichever computer asked
+last, so two computers on one network took them from each other every half hour while both told
+peers they could be reached there; a peer dialling one could reach the other. A computer now reads
+the router's list of forwarded ports first and never asks for one another computer holds: it takes
+a different public port (between 40000 and 49999) and its log says so (`UPnP: peers reach this
+node on public port …`). It also asks only for its address on the router's network (it had asked
+for addresses the router cannot reach, such as WSL's), gives back only the ports that are still
+its own when it stops, and looks for the router again every few minutes up to half an hour, so
+UPnP turned on at the router later is used without a restart. The same change fixes a crash of the
+network side that a network change (Wi-Fi reconnecting, a laptop waking) could cause while UPnP was
+on.
+
+**The CUDA Docker image builds again.** 0.3.249's `latest-cuda` image failed to build, so it
+stayed on 0.3.248; it is built for the same graphics cards as the release binaries (RTX 30-series
+and newer) from this version.
+
 ## [0.3.249-alpha] — 2026-10-24
 
 **A newly started computer now reaches far peers over the faster of its two connection types.**

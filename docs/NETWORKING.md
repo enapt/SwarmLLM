@@ -182,19 +182,25 @@ AutoNAT/DCUtR/relay — become discoverable to each other.
   `external_address`, or connect through an anchor/relay.
 - **UPnP does nothing** — router has UPnP disabled, or you're behind CGNAT
   (§2). Check the logs for `no IGD gateway found` (UPnP off) vs
-  `gateway is not routable` (CGNAT). The node looks for the router only when
-  it starts: after turning UPnP on, restart the node. Under WSL in mirrored
-  mode, Windows must class the network as **Private**: the WSL firewall rule
-  that lets the router's answer in covers Private networks only, so on a
-  Public one the node never hears the router.
-- **Two nodes behind one router** — a router gives a port to ONE computer, so
-  the second node's UPnP request is refused: its log says `UPnP: the router did
-  not open port 8800 (UDP) or 8810 (TCP)` about three minutes after it starts.
-  Run the second node on a different port (`swarmllm run -p 8801` → TCP 8811 +
-  UDP 8801) and both can be reachable directly. A node that stops cleanly hands
-  its ports back to the router; one that was killed keeps them for up to an hour
-  (the mapping's lease), and the other node's UPnP gives up after five refused
-  attempts — restart it once the port is free.
+  `gateway is not routable` (CGNAT). A node that found no router looks again
+  after 2 minutes, then less often (at least every 30 minutes), so UPnP turned
+  on at the router is used without a restart — restart the node to use it at
+  once. Under WSL in mirrored mode, Windows must class the network as
+  **Private**: the WSL firewall rule that lets the router's answer in covers
+  Private networks only, so on a Public one the node never hears the router.
+- **Two nodes behind one router** — a router forwards a port to ONE computer.
+  Before asking for a port, a node reads the router's list of forwarded ports;
+  when another computer already holds 8810/8800, it asks for a different public
+  port (between 40000 and 49999) instead, and its log says `UPnP: peers reach
+  this node on public port 4…, not 8810`. Both nodes are then reachable
+  directly, with nothing to set. (Some routers hand the port to whichever computer asks last without
+  saying so — reading the list first is what stops two nodes taking it from
+  each other.) Two kinds of router can still get in the way: one that maps a
+  port only to the same port number refuses the second node (its log says
+  `UPnP: the router did not open port 8800 (UDP) or 8810 (TCP)` about three
+  minutes after it starts), and one that neither lists its ports nor refuses a
+  taken one lets the two nodes take it from each other. Either way, run one
+  node on a different port (`swarmllm run -p 8801` → TCP 8811 + UDP 8801).
 - **Port-forwarded but still unreachable** — almost always CGNAT (§2). Confirm
   the router's WAN IP equals your public IP.
 - **Nodes on the same Wi-Fi don't need any of this** — mDNS finds them

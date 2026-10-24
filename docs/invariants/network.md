@@ -718,6 +718,14 @@ dial (`relay_providers`, from the record's full list) went first. The probe abov
 because its sender was a FIXED node. So the cause clears as peers update — every peer
 within minutes of a release, the anchor when its owner updates it by hand.
 
+**Confirmed once the anchor ran it** (2026-10-24, anchor `bfbfeebc` on 0.3.249). A fresh
+node (new identity, the released 0.3.249 binary, mDNS and UPnP off, 4 minutes) got the
+anchor's peer exchange 0.4 s after connecting: 8 peers, each one dial with the
+`/udp/…/quic-v1` address FIRST and the TCP address after. It reached Belgium and Melbourne
+over QUIC within the same second. One Italian peer came with a TCP address alone and timed
+out. Every remote connection of the live node was QUIC. FUTURE_WORK #330 waits on its
+trigger.
+
 **And it is worth 23% on a split**: forcing the transport by bootstrapping from the far peer
 at ONE transport (`BOOT=quic|tcp`, `~/swarmllm-318/harness/realtransport.sh`; one binary,
 arms ABBAABBA, 2 x 400 greedy tokens each, the 7B split TH↔AU at ~390 ms, coder-1.5B Q8_0
@@ -4558,9 +4566,9 @@ asking by then). And at a clean shutdown with a mapping held, the P2P listeners
 are removed and the swarm runs for `UPNP_RELEASE_WAIT` so libp2p-upnp's
 `RemoveMapping` reaches the router. Tests: `upnp_watch::tests::*`; guard
 `upnp_is_the_release_that_backs_off` with its planted twin (re-enabling the
-facade feature puts 0.5.0 back in `cargo tree` — checked). Not done: picking
-another EXTERNAL port when the router refuses ours — libp2p-upnp maps external
-= internal and has no option for it.
+facade feature puts 0.5.0 back in `cargo tree` — checked). Picking another
+EXTERNAL port, not done then (libp2p-upnp maps external = internal, with no
+option), is done since 2026-10-24 — below.
 
 **A router it could not even find (2026-10-23).** With UPnP turned on at the
 router, this machine's node still logged "no IGD gateway found". Two causes,
@@ -4585,12 +4593,108 @@ one on each side:
   `upnp_reaches_a_router_that_lists_an_absolute_control_url` (no igd-next < 0.18
   in `cargo tree`), with its planted twin.
 
-Not ported from 0.7: libp2p PR 6459's rework of mapping state (a panic "mapping
-should exist" under a reordering 0.6's flow does not produce here — 0.6
-re-inserts an expired listen address as Pending). And the search still runs
-ONCE, at start: libp2p-upnp keeps no timer to search again after
-`GatewayNotFound`, so the log line now says UPnP turned on at the router later
-takes a restart of the node.
+The 10-23 reading of libp2p PR 6459 (0.7's fix for a "mapping should exist"
+panic) — that 0.6's flow here does not produce the panic — was WRONG; see the
+review below. Upstream searches ONCE, at
+start, and keeps no timer after `GatewayNotFound`; the vendored copy searches
+again after 2 minutes, doubling to 30 (#329, below), so UPnP turned on at the
+router later is used without a restart.
+
+**Two nodes behind a router that REPLACES (2026-10-24, FUTURE_WORK #332).** This
+PC's node and the Proxmox box (192.168.1.200) share one router. Its table, read
+with `GetGenericPortMappingEntry`: at 00:55Z 8810/TCP and 8800/UDP forwarded to
+.200 (mapped at its 00:16 restart onto 0.3.249); at 01:16Z the same two rows
+forwarded to 10.255.255.254 — this PC's renewal, and WSL's internal address,
+because upstream maps EVERY private listen address and that one went last. No
+718 either time: this router (SKYWORTH GPON) silently replaces another client's
+row. Both nodes advertised the one public address as theirs, so a peer dialling
+one reached whichever renewed last, in turn every half hour. A third finding on
+the way: a fired renewal `Delay` stays ready, so every poll until the reply
+queued another renewal.
+
+What others do, and why it was not enough: go-libp2p (go-nat `upnp.go`) maps a
+RANDOM external port and remembers it for the run; libtorrent (`upnp.cpp`) asks
+for the caller's port and moves to `40000 + random(10000)` on 718 or 501;
+miniupnpc's `UPNP_GetValidIGD` hands back `lanaddr`, the address facing the
+router. Neither of the first two reads the table, so neither sees a router that
+replaces. igd-next 0.18 has `get_generic_port_mapping_entry` but no
+GetSpecificPortMappingEntry, so the table is read by index until 713, at most
+128 rows.
+
+So `vendor/libp2p-upnp/src/choice.rs` asks, in order: the port this mapping
+holds; a row the router already forwards to this computer (internal port
+first); the internal port; eight ports in 40000-49999 derived from the address
+(FNV-1a, the same on every run) — and never one another computer holds. "This
+computer" is any of its listen addresses at the same internal port: the
+10.255.255.254 rows outlive their lease on this router, and read as another
+computer's they would push the node off its own port for good. A refusal
+(718, 724, 501) moves to the next candidate. A removal deletes the HELD port and
+only while the table still says it is ours (0.3.249 removed 8810/8800 at
+shutdown whoever held them). Only the listen address facing the router is
+mapped. The node logs `UPnP: peers reach this node on public port …, not …`
+when the two differ.
+
+Field check, 01:24-01:30Z, dev build, live node stopped, fresh identity: TCP
+8810 → .52 (free once the old node had removed it); UDP 8800 was still held by
+the .254 row (the own-addresses rule came after this run), so the probe mapped
+47681 → .52:8800 and said so; no row to .254. A clean stop removed TCP 8810 and
+left UDP 47681. Put down at first to two whole-table reads outlasting the 1.5 s
+`UPNP_RELEASE_WAIT` — but a request takes ~3 ms on this router (timed later), so
+that cause does not hold, and the run's log is gone: UNDETERMINED. A removal now
+reads only up to its own row and the wait is 3 s; the second field check below
+removed both rows. What the run does not prove: inbound QUIC came only from peers
+this node had already spoken to, which the router's connection state explains
+without any forward (gotcha #948), and no inbound TCP from a public address
+arrived in its six minutes — reachability from outside is shown by a peer
+dialling in cold, not by this check.
+
+**The review after it (2026-10-24) found five more, three of them upstream's.**
+libp2p #6377 (Lighthouse hit it in the field) has two panic sequences, and both
+were live here: (1) an interface flap — the address expires and comes back while
+its removal is in flight; upstream marked the removal `Pending`, the `Removed`
+reply dropped the entry, and the next `Mapped` reply hit `expect("mapping should
+exist")` in the network task; (2) a listener closing with several addresses —
+upstream removed by listener once per address, and the second `Removed` panicked.
+0.7 fixed it with PR 6459 (separate add/remove request tracking), which needs
+libp2p-swarm 0.48. Here instead: a `Removing` state that only its own reply ends,
+replies checked against the listener's CURRENT address (a stale `Mapped` hands
+the row back), the entry's key replaced with its address (`HashMap::insert` keeps
+the old key, so a listener whose address changed was renewed at the old one), one
+mapping per listener, and an address expiry acted on only for the address mapped.
+The other findings: the mapping table keeps the FIRST address seen per listener
+while the search runs, so a listener whose first address was WSL's went unmapped
+once the router-facing filter ran (now `waiting` + `place`); a mapped address that
+went stayed confirmed with the swarm; a failed removal was re-sent at once for ever
+(now 3 in all); the router-facing address was fixed
+at the search, so a DHCP change left the node unmapped. Each sequence is a test
+that drives the behaviour through a fake gateway, and each goes red with its fix
+undone.
+
+**A router that keeps its rows in SLOTS (measured 2026-10-24).** The second field
+check (01:52-01:59Z, the fixed dev build, the live node stopped): the probe mapped
+TCP 8810 and UDP 8800 to this PC (the stopped 0.3.249 node had just deleted the
+LAN box's rows — .249 removes those ports whoever holds them), nothing to
+10.255.255.254, and at its clean stop both rows went (`GetSpecificPortMappingEntry`
+on each answered "no such entry"). But right after each stop the listing read as
+EMPTY, while rows reappeared later. Throwaway rows (UDP 47996-47999, lease 300 s)
+showed why: this router keeps rows in fixed slots, a deleted row leaves a slot that
+answers 713 — the same code as the end of the table — the slots after it still
+hold rows, and a new row fills the first empty slot. Deleting a row at the end
+hides nothing; deleting slot 0 hides the whole table. So a read that stops at the
+first 713 misses rows: the probe never saw its own leftover 47681 past the gap at
+slot 5 (and took 8800 instead), and a node whose own row in slot 0 had gone would
+have read the LAN box's port as free. A read now ends only after
+`GAPS_THAT_END_THE_TABLE` (16) such answers in a row (`choice::TableRead`); at
+~3 ms a request that costs ~50 ms here. A first guess — a TIMED window after any
+delete, answered by reading again 500 ms on — was tested and is wrong (one
+delete at the end of the table hid nothing for 150 s). Field check of the read,
+02:11-02:13Z, the live node left running: two empty slots staged, then "another
+computer's" row TCP 8811 → 192.168.1.200 (nothing listens there) in the slot
+after them; a probe on `-p 8801` mapped TCP 40186 → this PC instead and logged
+`UPnP: peers reach this node on public port 40186, not 8811`, took UDP 8801, and
+at its clean stop removed both rows and left the staged one. Test
+`an_empty_slot_in_the_routers_table_does_not_end_it` is red when a read stops at
+the first gap. Tests: the crate's own 18, in `vendored.yml`'s `upnp` job.
 
 ## ACK-Timeout Fast-Fail for rr Sends
 

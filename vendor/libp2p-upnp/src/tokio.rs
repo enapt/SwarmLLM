@@ -18,16 +18,35 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use std::{error::Error, net::IpAddr};
+use std::{
+    collections::HashMap,
+    error::Error,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::{Arc, Mutex},
+};
 
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use igd_next::SearchOptions;
+use igd_next::{
+    aio::{tokio::Tokio, Gateway as IgdGateway},
+    AddPortError, GetGenericPortMappingEntryError, PortMappingProtocol, RemovePortError,
+    RequestError, SearchOptions,
+};
 
 pub use crate::behaviour::Behaviour;
-use crate::behaviour::{GatewayEvent, GatewayRequest};
+use crate::{
+    behaviour::{GatewayEvent, GatewayRequest, Mapping},
+    choice::{self, Answer, Ours, Row},
+};
+
+/// Every address this computer listens on, written by the behaviour as listen
+/// addresses appear and read here at each mapping (`choice::Ours::own_ips`).
+pub(crate) type OwnIps = Arc<Mutex<Vec<IpAddr>>>;
+
+/// The description every mapping carries on the router (upstream's).
+const MAPPING_DESCRIPTION: &str = "rust-libp2p mapping";
 
 // TODO: remove when `IpAddr::is_global` stabilizes.
 pub(crate) fn is_addr_global(addr: IpAddr) -> bool {
@@ -88,9 +107,127 @@ pub(crate) struct Gateway {
     pub(crate) sender: mpsc::Sender<GatewayRequest>,
     pub(crate) receiver: mpsc::Receiver<GatewayEvent>,
     pub(crate) external_addr: IpAddr,
+    /// The router's own address (SwarmLLM patch), to read `local_ip` again from.
+    pub(crate) router: SocketAddr,
+    /// This computer's address on the router's network (SwarmLLM patch): only a
+    /// listen address on it can be forwarded to. `None` if it could not be read.
+    pub(crate) local_ip: Option<IpAddr>,
 }
 
-pub(crate) fn search_gateway() -> oneshot::Receiver<Result<Gateway, Box<dyn Error + Send + Sync>>> {
+/// The local address this computer reaches `router` from — what miniupnpc's
+/// `UPNP_GetValidIGD` returns as `lanaddr`. A UDP `connect` sends nothing.
+pub(crate) fn local_ip_towards(router: SocketAddr) -> Option<IpAddr> {
+    let any: SocketAddr = match router {
+        SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
+        SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
+    };
+    let socket = std::net::UdpSocket::bind(any).ok()?;
+    socket.connect(router).ok()?;
+    Some(socket.local_addr().ok()?.ip())
+}
+
+/// The router's port-mapping table, or `None` if it will not list one.
+async fn read_table(gateway: &IgdGateway<Tokio>) -> Option<Vec<Row>> {
+    read_table_until(gateway, |_| false).await
+}
+
+/// The router's table up to and including the first row `stop` accepts — one
+/// request a row, so a removal at shutdown stops at its own row. Read past
+/// empty slots: `choice::TableRead` says when it is over.
+async fn read_table_until(
+    gateway: &IgdGateway<Tokio>,
+    stop: impl Fn(&Row) -> bool,
+) -> Option<Vec<Row>> {
+    let mut read = choice::TableRead::default();
+    while let Some(index) = read.next() {
+        let answer = match gateway.get_generic_port_mapping_entry(index).await {
+            Ok(entry) => Answer::Row(Row::from(entry)),
+            Err(GetGenericPortMappingEntryError::SpecifiedArrayIndexInvalid) => Answer::NoEntry,
+            Err(err) => {
+                if index == 0 {
+                    tracing::debug!("the gateway would not list its port mappings: {err}");
+                }
+                Answer::Error
+            }
+        };
+        read.answer(answer, &stop);
+    }
+    read.rows()
+}
+
+/// Map `mapping` on the first external port no other computer holds, and return it.
+async fn map_port(
+    gateway: &IgdGateway<Tokio>,
+    mapping: &Mapping,
+    duration: u32,
+    held: Option<u16>,
+    own_ips: &[IpAddr],
+) -> Result<u16, Box<dyn Error + Send + Sync>> {
+    let internal = mapping.internal_addr;
+    let ours = Ours {
+        protocol: mapping.protocol,
+        internal,
+        own_ips,
+    };
+    let table = read_table(gateway).await;
+    let mut last_err: Option<Box<dyn Error + Send + Sync>> = None;
+    for port in choice::candidates(ours, held, table.as_deref()) {
+        match gateway
+            .add_port(
+                mapping.protocol,
+                port,
+                internal,
+                duration,
+                MAPPING_DESCRIPTION,
+            )
+            .await
+        {
+            Ok(()) => {
+                tracing::debug!(
+                    protocol=%mapping.protocol,
+                    internal_port=internal.port(),
+                    external_port=port,
+                    "UPnP: mapped"
+                );
+                return Ok(port);
+            }
+            // Another client holds it (718; some routers answer 501 — libtorrent's
+            // rule), or the router maps only external = internal: try the next.
+            Err(
+                err @ (AddPortError::PortInUse
+                | AddPortError::SamePortValuesRequired
+                | AddPortError::RequestError(RequestError::ErrorCode(501, _))),
+            ) => last_err = Some(err.into()),
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "every external port asked for is another computer's".into()))
+}
+
+/// Remove the router's row for `mapping` at `port` — unless another computer
+/// holds that port now (a router that replaces gave it away), which is theirs.
+async fn unmap_port(
+    gateway: &IgdGateway<Tokio>,
+    ours: Ours<'_>,
+    port: u16,
+) -> Result<(), RemovePortError> {
+    let protocol = ours.protocol;
+    let this_row = |r: &Row| r.protocol == protocol && r.external_port == port;
+    if let Some(table) = read_table_until(gateway, this_row).await {
+        if choice::held_by_another(&table, ours, port) {
+            tracing::debug!(port, %protocol, "UPnP: not removing a mapping another computer holds now");
+            return Ok(());
+        }
+    }
+    match gateway.remove_port(protocol, port).await {
+        Ok(()) | Err(RemovePortError::NoSuchPortMapping) => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+pub(crate) fn search_gateway(
+    own_ips: OwnIps,
+) -> oneshot::Receiver<Result<Gateway, Box<dyn Error + Send + Sync>>> {
     let (search_result_sender, search_result_receiver) = oneshot::channel();
 
     let (events_sender, mut task_receiver) = mpsc::channel(10);
@@ -113,48 +250,67 @@ pub(crate) fn search_gateway() -> oneshot::Receiver<Result<Gateway, Box<dyn Erro
             }
         };
 
+        let local_ip = local_ip_towards(gateway.addr);
+
         // Check if receiver dropped.
         if search_result_sender
             .send(Ok(Gateway {
                 sender: events_sender,
                 receiver: events_queue,
                 external_addr,
+                router: gateway.addr,
+                local_ip,
             }))
             .is_err()
         {
             return;
         }
 
+        // The external port each mapping holds (go-nat's `ports`): renewed as it is,
+        // and the one a removal deletes — never the internal port by assumption.
+        let mut held: HashMap<(PortMappingProtocol, SocketAddr), u16> = HashMap::new();
+
         loop {
             // The task sender has dropped so we can return.
             let Some(req) = task_receiver.next().await else {
                 return;
             };
+            let own: Vec<IpAddr> = own_ips.lock().map(|v| v.clone()).unwrap_or_default();
             let event = match req {
                 GatewayRequest::AddMapping { mapping, duration } => {
-                    let gateway = gateway.clone();
-                    match gateway
-                        .add_port(
-                            mapping.protocol,
-                            mapping.internal_addr.port(),
-                            mapping.internal_addr,
-                            duration,
-                            "rust-libp2p mapping",
-                        )
+                    let key = (mapping.protocol, mapping.internal_addr);
+                    match map_port(&gateway, &mapping, duration, held.get(&key).copied(), &own)
                         .await
                     {
-                        Ok(()) => GatewayEvent::Mapped(mapping),
-                        Err(err) => GatewayEvent::MapFailure(mapping, err.into()),
+                        Ok(external_port) => {
+                            held.insert(key, external_port);
+                            GatewayEvent::Mapped {
+                                mapping,
+                                external_port,
+                            }
+                        }
+                        Err(err) => GatewayEvent::MapFailure(mapping, err),
                     }
                 }
                 GatewayRequest::RemoveMapping(mapping) => {
-                    let gateway = gateway.clone();
-                    match gateway
-                        .remove_port(mapping.protocol, mapping.internal_addr.port())
-                        .await
-                    {
-                        Ok(()) => GatewayEvent::Removed(mapping),
-                        Err(err) => GatewayEvent::RemovalFailure(mapping, err.into()),
+                    let key = (mapping.protocol, mapping.internal_addr);
+                    match held.get(&key).copied() {
+                        // Nothing of ours on the router.
+                        None => GatewayEvent::Removed(mapping),
+                        Some(port) => {
+                            let ours = Ours {
+                                protocol: mapping.protocol,
+                                internal: mapping.internal_addr,
+                                own_ips: &own,
+                            };
+                            match unmap_port(&gateway, ours, port).await {
+                                Ok(()) => {
+                                    held.remove(&key);
+                                    GatewayEvent::Removed(mapping)
+                                }
+                                Err(err) => GatewayEvent::RemovalFailure(mapping, err.into()),
+                            }
+                        }
                     }
                 }
             };

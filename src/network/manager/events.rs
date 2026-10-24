@@ -704,8 +704,8 @@ impl NetworkManager {
                 use libp2p_upnp::Event as UpnpEvent;
                 match event {
                     UpnpEvent::NewExternalAddr {
+                        local_addr,
                         external_addr: addr,
-                        ..
                     } => {
                         self.upnp_watch.note_mapped();
                         // The UPnP behaviour has already confirmed this address
@@ -715,6 +715,18 @@ impl NetworkManager {
                         // if the confirm event ordering differs, and let the
                         // user know their node is now internet-reachable.
                         tracing::info!(%addr, "UPnP mapped a public address — node is now reachable from the internet");
+                        // vendor/libp2p-upnp maps another external port when the
+                        // router forwards ours to another computer (two nodes behind
+                        // one router, 2026-10-24) — say so where the owner reads it.
+                        match (port_of(&local_addr), port_of(&addr)) {
+                            (Some(local), Some(public)) if local != public => tracing::info!(
+                                %addr,
+                                "UPnP: peers reach this node on public port {public}, not {local}: \
+                                 the router forwards {local} to another device (or did when this \
+                                 node first mapped it, and the router still holds {public} for it)"
+                            ),
+                            _ => {}
+                        }
                         if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write() {
                             stats.nat_status = Some("Public (UPnP-mapped)".to_string());
                         }
@@ -738,14 +750,19 @@ impl NetworkManager {
                         self.refresh_listen_multiaddrs();
                     }
                     UpnpEvent::GatewayNotFound => {
-                        self.upnp_watch.note_answered();
-                        // libp2p-upnp searches once, at start, and never again
-                        // after this — so the advice says a restart is needed.
-                        tracing::info!(
-                            "UPnP: no IGD gateway found — router has UPnP disabled or none is present. \
-                             Internet peers will need a relay or a manually port-forwarded address. \
-                             UPnP turned on at the router later takes a restart of this node to be used."
-                        );
+                        // vendor/libp2p-upnp looks again on a backoff (FUTURE_WORK
+                        // #329; upstream searched once), so this repeats: say it once.
+                        if self.upnp_watch.note_no_gateway() {
+                            tracing::info!(
+                                "UPnP: no IGD gateway found — router has UPnP disabled or none is present. \
+                                 Internet peers will need a relay or a manually port-forwarded address. \
+                                 This node looks for the router again (after 2 minutes, then less often, \
+                                 at least every 30 minutes), so UPnP turned on at the router later is used \
+                                 without a restart."
+                            );
+                        } else {
+                            tracing::debug!("UPnP: still no IGD gateway");
+                        }
                     }
                     UpnpEvent::NonRoutableGateway => {
                         self.upnp_watch.note_answered();
@@ -1404,6 +1421,16 @@ pub(crate) fn autonat_verdict(reachable: bool, tested_addr: &Multiaddr) -> NatVe
     } else {
         NatVerdict::Private
     }
+}
+
+/// The TCP or UDP port an address names, if any.
+fn port_of(addr: &Multiaddr) -> Option<u16> {
+    addr.iter().find_map(|p| match p {
+        libp2p::multiaddr::Protocol::Tcp(port) | libp2p::multiaddr::Protocol::Udp(port) => {
+            Some(port)
+        }
+        _ => None,
+    })
 }
 
 /// Decide whether an address is something a remote peer could plausibly dial.

@@ -531,7 +531,8 @@ libp2p Swarm
 ├── AutoNAT v2 client+server (per-address reachability test → ExternalAddrConfirmed / relay activation; replaced v1 in R143 to fix false-"Public")
 ├── DCUtR (hole punching)
 ├── UPnP (IGD gateway port-mapping → auto-confirms public external address; default on, off on WSL2 in NAT mode;
-│   the gateway is searched once, at start — UPnP turned on at the router later takes a restart)
+│   vendor/libp2p-upnp: the router's table is read first and a port another computer holds is never asked for —
+│   another external port is mapped instead; a gateway not found is searched for again on a 2 → 30 min backoff)
 └── relay::client (circuit relay)
 ```
 

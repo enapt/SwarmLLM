@@ -444,7 +444,7 @@ libp2p-request-response = { path = "vendor/libp2p-request-response" }
 # libp2p-quic would leave this patch unused, and the build then fails:
 # `network::manager` calls `Config::congestion`, which upstream does not have.
 libp2p-quic = { path = "vendor/libp2p-quic" }
-# libp2p-upnp 0.6.0 built on igd-next 0.18 instead of 0.16 — its ONE change. 0.16
+# libp2p-upnp 0.6.0 with three changes. (1) igd-next 0.18 instead of 0.16: 0.16
 # builds a router's control URL as `http://{address}{control_url}`, which breaks
 # on a router that lists the URL absolute (`http://192.168.1.1:5555/ctrl?11`):
 # with UPnP on at the router the node still logged "no IGD gateway found"
@@ -452,6 +452,13 @@ libp2p-quic = { path = "vendor/libp2p-quic" }
 # Upstream's 0.7 has it but needs libp2p-swarm 0.48. Guard:
 # `upnp_reaches_a_router_that_lists_an_absolute_control_url` (no igd-next < 0.18
 # in the build — a libp2p needing a newer libp2p-upnp leaves this unused).
+# (2) The external port is CHOSEN (`src/choice.rs`): the router's table is read
+# first and a port another computer holds is never asked for — the same box
+# silently handed 8810/8800 to whichever of two nodes asked last (2026-10-24).
+# Only the address facing the router is mapped. (3) No "mapping should exist"
+# panic (libp2p #6377, an interface flap): replies are checked against the
+# listener's current address. All listed in its CHANGELOG. Tests: the crate's
+# own (CI: vendored.yml).
 libp2p-upnp = { path = "vendor/libp2p-upnp" }
 # rayon-core 1.13.0 with ONE change: an idle worker spins 200 µs before it
 # sleeps (vendor/rayon-core/src/sleep/mod.rs, `spin_budget`), so the small

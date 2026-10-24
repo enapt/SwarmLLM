@@ -30,6 +30,8 @@
 #[cfg(feature = "tokio")]
 mod behaviour;
 #[cfg(feature = "tokio")]
+mod choice;
+#[cfg(feature = "tokio")]
 pub mod tokio;
 
 #[cfg(feature = "tokio")]

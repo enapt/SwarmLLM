@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #331**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #333**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1063,6 +1063,18 @@ client asks servers to test non-internet candidates (loopback, LAN — our handl
 ignores those verdicts, "probed a non-internet address"), and a server on the same host can
 dial them. Left: raise the cap to 4 only with evidence from a reachable node (a VPS peer's
 log); the loopback churn only matters for two nodes on one machine.
+
+**2026-10-24, a reachable node's log (this PC, UPnP-mapped on 0.3.249).** Steady churn from the
+LAN box fell from ~400 inbound connections an hour on 0.3.248 to ~15 on 0.3.249. But in the 7 min
+after both nodes first started 0.3.249 (00:16:36-00:23:50Z), this node took ~350 inbound
+connections from the LAN box, each closed by the box at once; the box's own log shows 7
+established. 134 came from the box's LISTEN ports (port reuse). AutoNAT v2 dials back from a new
+port (`allocate_new_port`, libp2p-autonat 0.15 `server/behaviour.rs`), so most were not
+dial-backs. No hole-punch or relay line in the window. A restart of the box at debug (00:57Z)
+did NOT reproduce it: 2 connections, both dialled by this node. Cause UNDETERMINED. The window
+matches the start of the UPnP conflict closed as #332 (both nodes claimed 171.97.115.37:8810; a
+coincidence, not a mechanism), so re-read the first 10 minutes after both nodes start 0.3.250
+before building anything here.
 
 **As filed:**
 
@@ -2963,14 +2975,6 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   ~20 a layer), and disguised states fall to the public weights (2505.18332). Needs a verifier
   for the certificate chain and measurements (security review), a capability bit, and a scope
   beside `pool::scope::request_scope`. Trigger: a swarm peer with such a card; today none.
-- **#329 — Look for the router again after UPnP is turned on** (2026-10-23). libp2p-upnp searches
-  for the gateway once, at start, and keeps no timer after `GatewayNotFound`, so UPnP turned on
-  at the router while a node runs is used only after a restart — the log line and
-  `docs/NETWORKING.md` now say so. A re-search on a backoff (minutes) in `vendor/libp2p-upnp`
-  would remove the step; the listen addresses it saw before the search failed must then be
-  mapped too. Port libp2p PR 6459's mapping-state rework at the same time (0.7's fix for a
-  "mapping should exist" panic). Trigger: a report of a node unreachable until restarted after a
-  router change, or any other reason to touch the vendored copy.
 - **#330 — Move a peer that connected over TCP to QUIC** (2026-10-23). A split runs 23% faster
   over QUIC (BBR) than TCP (Cubic) on the real TH↔AU link (16.68 against 13.52 tok/s, transport
   forced per arm; `docs/invariants/network.md` § "One dial per PEER"), but a connection keeps the
@@ -2982,7 +2986,10 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   connection last on purpose (gotcha #353: a fresh connection dead in one direction held a
   request 480 s), so either it learns that a QUIC connection which answered beats TCP, or the
   TCP connection is closed while nothing is in flight on it. Trigger: the field still shows TCP
-  splits once the anchor runs 0.3.249.
+  splits once the anchor runs 0.3.249. **2026-10-24, the anchor on 0.3.249:** a fresh node's first
+  peer exchange (from the anchor) listed QUIC first for every peer, and it reached Belgium and
+  Melbourne over QUIC within a second; every remote connection of the live node was QUIC. Not
+  fired — re-check `DSD: request complete` transports on field splits after .250.
 - **#331 — Replace a held drafter when a better one may now be fetched** (2026-10-24). Since
   0.3.249 a small drafter may be half its target (`engine_drafter::within_reach`; the coder-3B
   flowed 18.1 tok/s against the coder-1.5B's 16.0 on the real TH↔AU link,
@@ -3106,6 +3113,33 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-24, ships in v0.3.250** (#329, #332)
+- #332 — **Two nodes behind one router are both reachable: the router's table decides the
+  external port.** libp2p-upnp asks for external = internal port. A router that silently
+  REPLACES another client's mapping (this one did, no error 718) gave 8810/8800 to whichever
+  of this PC's node and the Proxmox box renewed last, while both advertised them; and
+  upstream mapped every private listen address, so WSL's 10.255.255.254 took the rows too.
+  `vendor/libp2p-upnp/src/choice.rs` reads the table and never asks for a port another
+  computer holds (the held port, a row already ours, the internal port, then 8 derived ports in
+  40000-49999 — libtorrent's range); a removal deletes the held port only while it is still
+  ours; only the router-facing address is mapped. The same pass fixed, in that crate: renewals
+  re-sent on every poll (a fired timer stays ready), upstream's "mapping should exist" panic
+  (libp2p #6377: an interface flap, a listener closing with several addresses), an address
+  that went left confirmed, removal retries without limit, and a table read that stopped at the
+  router's first EMPTY SLOT (this router answers an emptied slot with the end-of-table code, so
+  deleting slot 0 hid every row). Field checks on the real router (dev build, live node
+  stopped): 01:24Z — TCP 8810 and UDP 47681 → this PC, nothing to 10.255.255.254, the moved port
+  logged; 01:52Z — 8810/8800 → this PC, and both rows removed at the clean stop; 02:11Z —
+  another computer's row staged past two empty slots on the probe's port: it took TCP 40186
+  instead, and its clean stop left that row alone. 18 tests in the crate, run by `vendored.yml`'s `upnp` job. `docs/invariants/network.md` §
+  "UPnP that the router refuses is said out loud".
+- #329 — **UPnP turned on at the router while a node runs is used without a restart.** After
+  `GatewayNotFound` the vendored behaviour searches again after 2 minutes, doubling to 30;
+  listen addresses seen meanwhile wait and are mapped when a gateway answers, and the owner is
+  told once (`UpnpWatch::note_no_gateway`). Test
+  `a_router_that_did_not_answer_is_looked_for_again_ever_less_often`. PR 6459 itself was not
+  ported (it needs libp2p-swarm 0.48); its panic is fixed by #332's `Removing` state instead.
 
 **Closed 2026-10-22, released in v0.3.248** (#275 (4); #134 (c))
 - #275 (4) — **A large model filling the head's card leaves its drafter room there**, so the
