@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #338**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #339**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2230,9 +2230,27 @@ at each line):
 - **Write point.** `speculative::finish_speculative` holds the ids for the daemon's loops. A worker
   generation shows its ids only as `WorkerMsg::Token`. `InferenceOutput`, `RequestTrace` and
   `finalize_reply_text` carry text, not ids.
+- **Copy from the store only where its earlier sessions agree** (§ 7.6, `vote.py`, 2026-10-24):
+  llama.cpp's lookup decoding drafts from its cross-run cache only under thresholds on how often
+  the n-gram was seen and how much of it its leading next token holds. Its LAX thresholds (≥ 1-2
+  sightings, ≥ 50%) on the store cost 0.2 points of the 9.3 and cut the store's rows 24%; take
+  them. The strict ones are `FlowGuard`'s trade, not a default.
 
 Measure with the flow's own `SWARMLLM_FLOW_COPY` A/B on an agent's replayed session before it is on
 by default.
+
+#### #338 — A copied run takes the most recent match's continuation whatever the other matches did
+`P3` · perf-split · **OPEN** — 2026-10-24 · history: `docs/plans/faster_than_local.md` § 7.6
+
+`ngram_lookup::copied_run` copies the most recent occurrence's continuation, max(matched, 10) ≤ 32
+tokens. Where the n-gram occurred several times, the other occurrences say where the run is likely
+to go wrong. Measured offline on the 400 SWE-agent sessions (`~/swarmllm-318/suffix/cut.py`, today's
+lookup reproduced at 64.6% / 3.29 copied rows a reply token): walking the last 32 occurrences
+together and ending the run once the leading next token holds under 2/3 of those still following it
+gives **64.7% for 2.62 rows (−20%)**; 4/5 gives 2.55. SuffixDecoding stops a draft the same way
+(`min_token_prob` over its tree's frequencies). Rows matter only where bandwidth binds, so it is
+worth building with #337, whose store has many occurrences per n-gram, and judging on a thin uplink
+(`FlowGuard`'s case) — a wrong copy measured free on the rig.
 
 ### Model families and platforms
 

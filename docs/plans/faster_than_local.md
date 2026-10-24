@@ -362,7 +362,9 @@ on the 1.5B as a stand-in target.
 every row, the dead ones included: ~12K (context, target token) pairs a reply. A drafter LoRA
 distilled on them (DistillSpec 2310.08461: +10-45% acceptance; Online SD 2310.07177) adapts to the
 user's target AND domain on the user's own machine, no data leaving it. The crude form — a
-per-token bias — was refuted (§ 5); a LoRA is not that. Needs a training loop on the card.
+per-token bias — was refuted (§ 5), and so, within a session, was a LoRA on the top two layers
+(§ 7.5: −0.7 / −1.3 points). Left untried: distilling across MANY sessions, DistillSpec's setting,
+not one session's few thousand tokens.
 
 ## 7. New levers, measured before any code (2026-10-24)
 
@@ -459,7 +461,7 @@ the coder-7B's split at layer 14 (`LOGITS_PROBE_HIDDEN`), the wire's own Q8_0 re
   mode's question, not the default's.
 
 **7.5 A drafter that learns from the target as a session goes on (OSD 2310.07177, OmniDraft
-2507.02659): its cheapest form REFUTED, the adapter forms still to run.** Every check hands the
+2507.02659): REFUTED in both forms tried.** Every check hands the
 requester the target's tokens, so the drafter could be trained on them for free, lossless by
 construction (only the guesser changes). Measured offline (`~/swarmllm-318/osd/osd.py`, PyTorch on
 the processor): the coder-1.5B drafter (bf16 weights, HF), replaying the 11 prompts as two
@@ -467,9 +469,13 @@ sessions in order (code: 6, chat: 5), each 32-token piece SCORED before it is le
 frozen drafter reproduces the candle runs exactly (code_bst 0.965 both). **A learned bias per
 vocabulary entry** (AdamW, lr 0.05, one step a piece, the previous conversation replayed): code
 session 0.920 → 0.915 (−0.4 points; csv −3.1, code_debounce +1.9), chat −0.9 to −1.2 a
-conversation. A word-level nudge cannot learn misses that depend on the context. Owed: a LoRA on
-the top two layers (no backward past them, cheap to build in candle) and on every layer, the same
-protocol; the stop rule is +2 points on a session.
+conversation. A word-level nudge cannot learn misses that depend on the context. **A LoRA on the
+top two layers** (rank 16, 1.32M weights, lr 2e-4, one step a piece, replay 1; no backward past
+them, the form cheap to build in candle): code session 0.920 → 0.913 (−0.7 points; code_debounce
++1.6, code_rust +1.5, code_sql −3.0, csv −3.4), chat 0.754 → 0.741 (−1.3; fridge −4.8). No session
+reached the stop rule's +2 points, so the every-layer form was not run. At these settings a
+session's tokens hurt the guesser about as often as they help it; the drafter gains from the
+session by COPYING it (§ 7.6).
 
 **7.6 Copying from the user's EARLIER sessions, not only this one: worth it for agents, at a
 session's start.** A copied run (`FlowRun::copy_ahead` → `ngram_lookup::copied_run`) looks up the
@@ -486,7 +492,55 @@ only where the prompt and the reply found nothing. Share of reply tokens a copy 
 
 Several continuations as branches instead of the most recent one (`branches.py`, 200 of the
 SWE-agent sessions, 10 tokens a branch): 63.9% at one, 67.1% at two (+34% copied rows), 68.4% at
-four (+70%). Branching costs rows for little, and the store adds more with no extra rows. So the store matters where the session's own history is short — an agent's opening calls, a new
+four (+70%). The store costs rows too, since each copy it makes is a proposal the session found
+nothing for: 3.29 → 4.17 copied rows a reply token (+27%, `vote.py`) for its 9.3 points, three
+times what a second branch buys for fewer rows. Three more rules on the 400 sessions:
+- **The LONGEST match, not the most recent** (LZ77's rule: of the last 64 hits, the one whose context
+  agrees furthest back; `longest.py`): 64.6 → 65.7% local, 73.9 → 75.1% with the store, 7% fewer
+  copies, still 62-63% wrong at the first token. Small, and it is what a hash-chain index of the store
+  gives for nothing.
+- **A floor on the match before copying** (`minmatch.py`; today 2 tokens): coverage 64.6 / 60.1 /
+  56.5 / 50.1% at 2 / 3 / 4 / 6, copied rows a reply token 3.29 / 2.40 / 2.01 / 1.58. A 3-token floor
+  sends 27% fewer copied rows for 4.5 points. That trade is for `FlowGuard` to make where rows are
+  short, not a fixed default.
+- **The store copies only where its earlier sessions AGREE** (`vote.py`). llama.cpp's lookup decoding
+  keeps a cross-run n-gram cache on disk (`--lookup-cache-dynamic`) and drafts from it only under
+  STRICT thresholds — the n-gram seen ≥ 4/3/2/2 times (n = 1..4), its leading next token ≥ 75/66/66/66%
+  of them — against LAX ones in the current context (≥ 2/2/1/1, ≥ 66/50/50/50%;
+  `common/ngram-cache.cpp`, read 2026-10-24). The same vote over the store's last 64 hits, local copies
+  unchanged:
+
+  | store gate | coverage | copied rows a reply token | the store's rows that copied | first 3 replies |
+  |---|---|---|---|---|
+  | none (today's rule) | 73.9% | 4.17 | 10% | 61.2% |
+  | lax | 73.7% | 3.90 | 13% | 60.8% |
+  | strict | 71.6% | 3.59 | 17% | 54.8% |
+  | stricter (≥ 3/4/6, 75%) | 70.3% | 3.47 | 20% | 51.2% |
+
+  The lax gate is nearly free: −0.2 points, the store's own rows 1.16 → 0.88 a reply token (−24%).
+  Strict takes them to 0.52 (−41% more) for 2.1 points more, much of it at a session's start, where
+  the store matters most. #337 takes the lax gate;
+  past it the trade is `FlowGuard`'s, like the floor above.
+- **A run ends where the earlier matches stop agreeing** (`cut.py`, local sources, today's lookup
+  otherwise). SuffixDecoding scores a continuation by how often it followed the match and stops a draft
+  where that frequency falls; today's run is the most recent hit's continuation, max(matched, 10) ≤ 32,
+  whatever the other hits did. Walking the last 32 hits together and stopping once the leading next
+  token holds less than a share P of those still following:
+
+  | rule | coverage | copied rows a reply token | rows a covered token |
+  |---|---|---|---|
+  | today | 64.6% | 3.29 | 5.10 |
+  | P = 1/3 | 64.8% | 3.63 | 5.60 |
+  | P = 1/2 | 64.8% | 3.47 | 5.36 |
+  | P = 2/3 | 64.7% | 2.62 | 4.04 |
+  | P = 4/5 | 64.7% | 2.55 | 3.94 |
+
+  At 2/3, **20% fewer copied rows for no coverage**, where the 3-token floor bought 27% for 4.5
+  points. A low P lengthens runs: hits that agree carry a run past today's 10-token rule. One hit
+  alone is cut by the length rule, as today. Rows matter only where the link's bandwidth binds; a wrong
+  copy measured free on the rig (`docs/invariants/scheduling.md` § "Copied runs"). Filed as #338.
+
+So the store matters where the session's own history is short — an agent's opening calls, a new
 chat on a familiar task — and adds a few points once the history has built up. Both workloads are
 another model's text: this measures the repetition in agent work, not a drafter, and chat is
 unmeasured (SuffixDecoding's WildChat gains are smaller). **A store is a side channel**: REST's
