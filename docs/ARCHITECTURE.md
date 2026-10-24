@@ -100,9 +100,11 @@ swarmllm/
 │   │                          BBR, chosen by `network::transport::quic_congestion` (#318); 5 tests,
 │   │                          `--features tokio --lib`, CI `vendored.yml`)
 │   ├── libp2p-request-response/ (12 tests, `--lib`)
-│   ├── libp2p-upnp/           (0.6.0 + ONE change: built on igd-next 0.18, which reaches a router listing an
-│   │                          ABSOLUTE control URL — 0.16 pasted it after the address; guard
-│   │                          `upnp_reaches_a_router_that_lists_an_absolute_control_url`)
+│   ├── libp2p-upnp/           (0.6.0 + patches, listed in its CHANGELOG: igd-next 0.18, which reaches a router
+│   │                          listing an ABSOLUTE control URL (guard `upnp_reaches_a_router_that_lists_an_absolute_control_url`);
+│   │                          the external port CHOSEN from the router's table (`src/choice.rs`, read past empty
+│   │                          slots); the router-facing address only; no "mapping should exist" panic (libp2p #6377);
+│   │                          re-search on a backoff (#329); 18 tests, `--features tokio --lib`, CI `vendored.yml`)
 │   └── rayon-core/            (1.13.0 + ONE patch: an idle worker spins 200 µs before it sleeps — `sleep/mod.rs`
 │                              `spin_budget`, `SWARMLLM_RAYON_SPIN_US=0` = upstream; small decode regions stop
 │                              paying a wake per worker, FUTURE_WORK #137; guard
@@ -531,8 +533,9 @@ libp2p Swarm
 ├── AutoNAT v2 client+server (per-address reachability test → ExternalAddrConfirmed / relay activation; replaced v1 in R143 to fix false-"Public")
 ├── DCUtR (hole punching)
 ├── UPnP (IGD gateway port-mapping → auto-confirms public external address; default on, off on WSL2 in NAT mode;
-│   vendor/libp2p-upnp: the router's table is read first and a port another computer holds is never asked for —
-│   another external port is mapped instead; a gateway not found is searched for again on a 2 → 30 min backoff)
+│   vendor/libp2p-upnp: the router's table is read first (past empty slots) and a port another computer holds is
+│   never asked for — another external port is mapped instead; only the router-facing address is mapped, one per
+│   listener; a removal deletes only a row still ours; a gateway not found is searched for again on a 2 → 30 min backoff)
 └── relay::client (circuit relay)
 ```
 

@@ -91,14 +91,14 @@ cargo dev-test                        # lib + integration; counts below come fro
 cargo dev-run -- run -p 8800 -v       # start a daemon serving the frontend from disk
 ```
 
-**Counts, measured at v0.3.249 (dev,claude-subscription)**: **3900 lib** (+17 ignored),
+**Counts, measured at v0.3.250 (dev,claude-subscription)**: **3901 lib** (+17 ignored),
 80 integration (32 + 34 + 14 `yamux_substream`), **248 repo-consistency**,
 1 `api_key_side_effects`, 62 `swarmllm-types`, 12 in the vendored
-request-response patch and 5 in the libp2p-quic one — plus 25 in the `swarmllm` BIN target (`cli::*`, counted
+request-response patch, 5 in the libp2p-quic one and 18 in the libp2p-upnp one — plus 25 in the `swarmllm` BIN target (`cli::*`, counted
 nowhere else). They are refreshed at release (`memory/release_gate.md`), not
 per change, so a higher count since then is expected. The types crate and the
 vendored patches are **not** run by a bare `cargo test`: `cargo test --manifest-path
-vendor/<crate>/Cargo.toml --lib` (request-response; libp2p-quic adds `--features tokio`). Two VLM
+vendor/<crate>/Cargo.toml --lib` (request-response; libp2p-quic and libp2p-upnp add `--features tokio`). Two VLM
 targets need model files: `llava_e2e` (`#[ignore]`) and `vlm_mmproj_e2e` (skips without an
 mmproj). Never edit a count without the run behind it (`completeness.md`).
 
