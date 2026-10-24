@@ -27,9 +27,10 @@ checked before this computer asks HuggingFace about it, as every other HuggingFa
 was.
 
 **A reply at temperature 0 picks the same word with and without guessing ahead.** When two words
-scored exactly the same, the normal path took the last of them and the paths that check guesses
-took the first, so in that rare case one prompt could get two different replies. All of them now
-take the first, as llama.cpp does.
+scored exactly the same, the normal path took the last of them, the paths that check guesses took
+the first, and a graphics card checking guesses took whichever its own work order reached first, so
+in that rare case one prompt could get different replies. All of them now take the first, as
+llama.cpp does.
 
 **The Performance page says it could not load instead of showing a computer that served
 nothing.** When the node refused the request (while starting up, or with an expired key), the

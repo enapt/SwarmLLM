@@ -2327,11 +2327,26 @@ async fn handle_forward(
                 if !total.is_finite() {
                     return Err("spec walk: non-finite logits".into());
                 }
-                let picks: Vec<u32> = output_t
+                // The first of equal maxima, as every other greedy path picks —
+                // never candle's `argmax`, whose card kernel breaks a tie by
+                // thread order (`tree_rank::greedy_picks`).
+                let rows = output_t
                     .squeeze(0)
-                    .and_then(|t| t.argmax(candle_core::D::Minus1))
-                    .and_then(|t| t.to_vec1())
                     .map_err(|e| format!("spec walk on the card: {e}"))?;
+                #[cfg(feature = "candle-cuda")]
+                let picks: Vec<u32> = crate::inference::tree_rank::greedy_picks(&rows)
+                    .map_err(|e| format!("spec walk on the card: {e}"))?
+                    .ok_or_else(|| "spec walk: non-finite logits".to_string())?;
+                // A build without the card kernels has no card tensor to reach
+                // this branch; the rows are picked on the host all the same.
+                #[cfg(not(feature = "candle-cuda"))]
+                let picks: Vec<u32> = rows
+                    .to_dtype(candle_core::DType::F32)
+                    .and_then(|t| t.to_vec2::<f32>())
+                    .map_err(|e| format!("spec walk on the card: {e}"))?
+                    .iter()
+                    .map(|row| crate::inference::sampling::argmax(row))
+                    .collect();
                 let token_ids = match draft_tree.as_ref() {
                     // A tree that flows: every row's own argmax, walked by the
                     // requester.

@@ -344,6 +344,7 @@ Each names the ONE place a decision is made (`.claude/rules/architecture.md` § 
 - **`layers::standard_attention` grouped GQA decode** — no `repeat_kv` for `q_len == 1`.
 - **`layers::cuda_decode_prefers_standard`** — `SWARMLLM_GQA_DECODE_FLASH=1` = old rule.
 - **`inference::sampling::sample_among_top_k`** — never re-add a vocabulary-wide pass after top-k. → § "Top-k shrinks the candidate set"
+- **`inference::sampling::argmax` + `tree_rank::greedy_picks`** — the ONE greedy pick, host and card: the first of equal maxima. Never candle's `argmax` where a reply is decided: its card kernel breaks a tie by thread order (guard `no_reply_is_picked_by_candles_argmax`; the drafter's guesses are listed). → § "A greedy pick is the first of equal maxima, on the card too"
 - **`inference::mem_bandwidth::measured_gbps`**
 - **`inference::cancel::unless_cancelled`** — `InferenceRequest::cancel` is the ONE cancellation signal; read around every WAIT.
 - **`KvCacheStore::set_cancel_oracle`** — `forward_was_cancelled` is the one reader.

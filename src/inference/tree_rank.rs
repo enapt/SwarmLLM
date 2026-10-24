@@ -99,6 +99,42 @@ pub(crate) fn ranked_on_the_card(
     Ok(CardRanking::Ranked(ranked))
 }
 
+/// Each row's greedy pick (`[rows, vocab]`): the FIRST of equal maxima, as
+/// `sampling::argmax` breaks a tie. Never candle's `argmax` for a pick that
+/// decides a reply: its card kernel gives a row one block of 1024 threads,
+/// thread t reading ids t, t + 1024, …, and keeps the lowest THREAD of a tie —
+/// a tie between ids 1 and 1024 reads 1024 there and 1 on every other path
+/// (pre-release review of v0.3.251). On a card the ranking kernel answers it:
+/// it ranks by the raw score, a tie to the smaller id (`kernels/tree_rank.cu`
+/// `better`). Where it does not take the rows (switched off, a vocabulary too
+/// wide), they are read back and picked by `sampling::argmax`. `None` when a
+/// row holds a NaN or +inf, or nothing finite.
+pub(crate) fn greedy_picks(logits: &Tensor) -> Result<Option<Vec<u32>>> {
+    match ranked_on_the_card(logits, 0.0, 1)? {
+        CardRanking::Ranked(rows) => Ok(Some(
+            rows.iter()
+                .map(|row| row.first().map_or(0, |&(id, _)| id))
+                .collect(),
+        )),
+        CardRanking::NotFinite => Ok(None),
+        CardRanking::NotTaken => {
+            let rows: Vec<Vec<f32>> = logits.to_dtype(DType::F32)?.to_vec2()?;
+            let comparable = |row: &Vec<f32>| {
+                row.iter().all(|x| !x.is_nan() && *x != f32::INFINITY)
+                    && row.iter().any(|x| x.is_finite())
+            };
+            if !rows.iter().all(comparable) {
+                return Ok(None);
+            }
+            Ok(Some(
+                rows.iter()
+                    .map(|row| crate::inference::sampling::argmax(row))
+                    .collect(),
+            ))
+        }
+    }
+}
+
 struct TreeRank {
     inv_t: f32,
 }
@@ -552,5 +588,58 @@ mod tests {
             draw_each_row_on_the_card(&logits, &tree, 1, &params, (&noise, 41)).is_err(),
             "rows that are not the tree's last are refused"
         );
+    }
+
+    /// A speculative check's greedy picks on the card (`greedy_picks`) are the
+    /// FIRST of equal maxima, as `sampling::argmax` picks on every other path —
+    /// and candle's card `argmax`, which the check used until v0.3.251, is
+    /// not: a tie between ids 1 and 1024 of a Qwen-wide row (threads 1 and 0
+    /// of its 1024-thread block) reads 1024 there. Rows held on the processor
+    /// are picked on the host; a NaN is refused.
+    ///
+    /// ⚠ Needs a card: run `cargo test --features candle-cuda --lib
+    /// the_cards_greedy_picks -- --nocapture` and look for no SKIPPED line.
+    #[test]
+    fn the_cards_greedy_picks_take_the_first_of_a_tie() {
+        use super::greedy_picks;
+        use crate::inference::sampling::argmax;
+        let vocab = 152_064;
+        let mut tied = vec![0.0f32; vocab];
+        tied[1] = 5.0;
+        tied[1024] = 5.0;
+        let mut plain = vec![-1.0f32; vocab];
+        plain[77_000] = 3.0;
+        let mut far = vec![0.0f32; vocab];
+        far[3_000] = 2.0;
+        far[151_000] = 2.0;
+        let flat = [tied.clone(), plain.clone(), far.clone()].concat();
+        let want: Vec<u32> = [&tied, &plain, &far].iter().map(|r| argmax(r)).collect();
+        assert_eq!(want, vec![1, 77_000, 3_000]);
+
+        let on_host = Tensor::from_vec(flat.clone(), (3, vocab), &Device::Cpu).unwrap();
+        assert_eq!(greedy_picks(&on_host).unwrap(), Some(want.clone()));
+
+        let dev = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIPPED the card's greedy picks: no CUDA device ({e})");
+                return;
+            }
+        };
+        let rows = Tensor::from_vec(flat, (3, vocab), &dev).unwrap();
+        let by_candle: Vec<u32> = rows
+            .argmax(candle_core::D::Minus1)
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_eq!(
+            by_candle[0], 1024,
+            "candle's card argmax now breaks this tie by id — the reason for greedy_picks is gone"
+        );
+        assert_eq!(greedy_picks(&rows).unwrap(), Some(want));
+        let mut nan = plain;
+        nan[5] = f32::NAN;
+        let nan = Tensor::from_vec(nan, (1, vocab), &dev).unwrap();
+        assert_eq!(greedy_picks(&nan).unwrap(), None);
     }
 }

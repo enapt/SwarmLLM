@@ -6678,6 +6678,32 @@ bias). Not covered: the `llama` feature's legacy executor (a whole file named in
 Guards: `a_suppressed_token_is_out_of_reach_on_every_forward_path` (single, every position of a
 check, a batch of two; red with the row off), `a_files_suppressed_tokens_become_one_row_of_the_heads_width`.
 
+## A greedy pick is the first of equal maxima, on the card too (2026-10-24, v0.3.251)
+
+**What it replaced.** The sweep of 2026-10-24 made the host's three greedy copies one
+(`sampling::argmax`: strict `>`, the first of equal maxima — llama.cpp's `llama_sampler_greedy_apply`).
+The worker's check of guesses on a CARD still picked with candle's `Tensor::argmax`
+(`model_worker`, `spec_walk_at_tail`), which reads only γ+1 ids back. Its kernel (`fast_argmax`,
+`candle-kernels/src/reduce.cu`) gives a row ONE block of `min(1024, vocab)` threads: thread t keeps
+the first maximum among ids t, t + 1024, …, and the reduction keeps the lower THREAD of a tie
+(`shr[tid + s] > shr[tid]`, strict). A tie between ids 1 (thread 1) and 1024 (thread 0) read 1024
+there and 1 everywhere else, so an exact tie could still give a card user one reply with guessing
+and another without. Found by the pre-release review of v0.3.251.
+
+**The rule.** **`tree_rank::greedy_picks`** answers a check's picks on a card: the ranking kernel
+(`kernels/tree_rank.cu`) ranks by the raw score, a tie to the smaller id (`better`), so it is the
+host's rule; where it does not take the rows they are read back and picked by `sampling::argmax`. A
+NaN or +inf is refused, as the walk's own guard already did. Candle's `argmax` stays only in the
+drafter's guesses (`split/draft.rs`: the composed tree ranking and the chain guesses), which decide
+what is guessed, never the reply.
+
+**Measured** (RTX 3070 Laptop, `the_cards_greedy_picks_take_the_first_of_a_tie`, `--features
+candle-cuda`, no SKIPPED line): three 152,064-wide rows — the 1/1024 tie, a plain row, a tie
+between 3,000 and 151,000 — candle's card `argmax` read 1024 for the first; `greedy_picks` read 1,
+77,000 and 3,000, the host's answers, on the card and off it. Guards:
+`no_reply_is_picked_by_candles_argmax` (red with the old call planted back, line 2337) and its
+self-test `the_argmax_guard_sees_every_form_and_skips_tests_and_comments`.
+
 ## Single-source-of-truth helpers — Inference kernels, caches and the tokenizer
 
 Each names the ONE place a decision is made. A second implementation of any of

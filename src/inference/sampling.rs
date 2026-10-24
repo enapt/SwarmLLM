@@ -1164,7 +1164,10 @@ pub fn sample_token_with_logprobs_history(
 /// coordinator's greedy check (`pipeline::speculative`) and the worker's SWIFT
 /// check (`model_worker::sample_argmax`) call it too: with copies that broke
 /// ties apart, an exact tie could read one token without speculation and
-/// another with it (sweep 2026-10-24).
+/// another with it (sweep 2026-10-24). A check whose rows stay on a card picks
+/// through `tree_rank::greedy_picks`, the same rule; candle's card `argmax`
+/// breaks a tie by thread order and never decides a reply (guard
+/// `no_reply_is_picked_by_candles_argmax`).
 pub(crate) fn argmax(logits: &[f32]) -> u32 {
     let mut best_idx = 0usize;
     let mut best_val = f32::NEG_INFINITY;

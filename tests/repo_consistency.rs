@@ -14514,3 +14514,88 @@ fn the_zstd_cap_guard_catches_every_uncapped_form() {
         uncapped_zstd_sites(fine)
     );
 }
+
+/// Every call of candle's `argmax` / `argmax_keepdim` in production code, as
+/// 1-indexed lines. Test code and comments are skipped.
+fn candle_argmax_sites(src: &str) -> Vec<usize> {
+    let tests = cfg_test_spans(src);
+    let line_of = |at: usize| src[..at].matches('\n').count() + 1;
+    let mut out = Vec::new();
+    for needle in [".argmax(", ".argmax_keepdim("] {
+        let mut from = 0;
+        while let Some(rel) = src[from..].find(needle) {
+            let at = from + rel;
+            from = at + 1;
+            let line_start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+            let skipped =
+                tests.iter().any(|(s, e)| *s < at && at < *e) || src[line_start..at].contains("//");
+            if !skipped {
+                out.push(line_of(at));
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// A greedy pick that decides a reply is the FIRST of equal maxima on every
+/// path — `sampling::argmax` on the host, `tree_rank::greedy_picks` on a card —
+/// never candle's `argmax`, whose card kernel keeps the lowest THREAD of a tie
+/// (thread t reads ids t, t + 1024, …): the card's speculative check read 1024
+/// where every other path read 1 (pre-release review of v0.3.251). The
+/// drafter's own guesses may use it — they decide only what is guessed, never
+/// the reply — listed below with their count.
+#[test]
+fn no_reply_is_picked_by_candles_argmax() {
+    // `split/draft.rs`: the composed tree ranking and the chain drafter's
+    // guesses on the card — both only what is guessed.
+    const GUESSES_ONLY: &[(&str, usize)] = &[("src/inference/split/draft.rs", 2)];
+    let root = repo_root();
+    let mut offenders = Vec::new();
+    for path in rust_sources_under("src")
+        .into_iter()
+        .chain(rust_sources_under("crates"))
+    {
+        if module_file_is_test_only(&path) {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).expect("read source");
+        let sites = candle_argmax_sites(&src);
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let allowed = GUESSES_ONLY
+            .iter()
+            .find(|(f, _)| *f == rel)
+            .map_or(0, |(_, n)| *n);
+        if sites.len() != allowed {
+            offenders.push(format!("{rel}: lines {sites:?} (allowed {allowed})"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "candle's argmax picks where a reply is decided — its card kernel breaks a tie \
+         by thread order; use `sampling::argmax` or `tree_rank::greedy_picks` (or, for \
+         a drafter's guess, update GUESSES_ONLY): {offenders:#?}"
+    );
+}
+
+#[test]
+fn the_argmax_guard_sees_every_form_and_skips_tests_and_comments() {
+    let planted = "fn a(t: &Tensor) -> Vec<u32> {\n    \
+                   t.argmax(D::Minus1).unwrap().to_vec1().unwrap()\n}\n\
+                   fn b(t: &Tensor) {\n    let p = t\n        .squeeze(0)\n        \
+                   .and_then(|r| r.argmax_keepdim(1));\n}\n";
+    assert_eq!(candle_argmax_sites(planted), vec![2, 7]);
+    let fine = "fn a(row: &[f32]) -> u32 {\n    sampling::argmax(row)\n}\n\
+                // candle's `.argmax(` broke ties by thread\n\
+                #[cfg(test)]\nmod tests {\n    fn t(r: &Tensor) {\n        \
+                r.argmax(0).unwrap();\n    }\n}\n";
+    assert!(
+        candle_argmax_sites(fine).is_empty(),
+        "{:?}",
+        candle_argmax_sites(fine)
+    );
+}
