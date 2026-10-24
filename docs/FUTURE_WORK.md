@@ -2849,10 +2849,14 @@ neighbour forwards announces of many keys — and that is how a REAL holder seve
 learned, so "record only a registered signer" would lose real holders. The scheduler already
 skips a holder neither connected nor relay-reachable (`scheduler/mod.rs` ~4207); download-source
 choice (`select_best_allowed_peer`) ranks unregistered holders last but still picks one when no
-registered holder is permitted. Next: age out a record whose key is not in `peer_registry` once
-it goes unrefreshed past a few re-announce periods (`FULL_REANNOUNCE_EVERY_TICKS`; `HolderRecord::seen`
-is already kept), and at `MAX_HOLDERS_PER_SHARD` evict an unregistered holder before a
-registered one. A change here goes to `security-reviewer`.
+registered holder is permitted. libp2p-kad's `MemoryStore::add_provider` (0.48) does the
+opposite of ours when a key's list is full: it IGNORES the new provider — "this strategy can
+mitigate Sybil attacks, in which an attacker floods the network with fake provider records" —
+and provider records expire (`provider_record_ttl` 48 h, republished every 12 h). Next: at
+`MAX_HOLDERS_PER_SHARD` displace only a record gone unrefreshed past a few re-announce periods
+(`FULL_REANNOUNCE_EVERY_TICKS`; `HolderRecord::seen` is already kept), else ignore the newcomer;
+and age out unrefreshed records of keys not in `peer_registry`. A change here goes to
+`security-reviewer`.
 
 #### #317 — Another program can hold `[::1]` on the node's port while the node runs
 `P3` · api · **OPEN** — 2026-10-20 · history: found with #255's key proof
