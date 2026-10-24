@@ -555,7 +555,7 @@ fn pinned_compute_caps(file: &str) -> Vec<String> {
     found
 }
 
-/// The compute-capability floor is stated in four places that cannot disagree.
+/// The compute-capability floor is stated in five places that cannot disagree.
 ///
 /// `MIN_COMPUTE_CAP` decides at RUNTIME whether to route a card to the CPU;
 /// `CUDA_COMPUTE_CAP` decides at BUILD time which kernels exist. If the
@@ -566,7 +566,10 @@ fn pinned_compute_caps(file: &str) -> Vec<String> {
 ///
 /// cache-warm.yml matters for a third reason: it shares one rust-cache key with
 /// release.yml, so a divergent value there means the release restores a cache
-/// built for a different architecture.
+/// built for a different architecture. `Dockerfile.cuda` is built only when a
+/// release is published, so no other check compiles it: it stayed at 75 when the
+/// floor rose to 80 (2026-08-07), and v0.3.249's CUDA image failed on an sm_80
+/// intrinsic (`__reduce_add_sync`) the release binaries compiled fine.
 #[test]
 fn compute_cap_matches_release_workflow() {
     let expected = format!(
@@ -584,6 +587,26 @@ fn compute_cap_matches_release_workflow() {
                      daemon::gpu_support::MIN_COMPUTE_CAP is {expected}"
                 ));
             }
+        }
+    }
+    let dockerfile = std::fs::read_to_string(repo_root().join("Dockerfile.cuda"))
+        .unwrap_or_else(|e| panic!("read Dockerfile.cuda: {e}"));
+    let docker_pins: Vec<&str> = dockerfile
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("ENV CUDA_COMPUTE_CAP="))
+        .map(str::trim)
+        .collect();
+    assert!(
+        !docker_pins.is_empty(),
+        "Dockerfile.cuda: no `ENV CUDA_COMPUTE_CAP=` pin found — the shape changed, \
+         so this test has stopped checking the image"
+    );
+    for pinned in docker_pins {
+        if pinned != expected {
+            problems.push(format!(
+                "Dockerfile.cuda builds kernels for compute capability {pinned}, but \
+                 daemon::gpu_support::MIN_COMPUTE_CAP is {expected}"
+            ));
         }
     }
     assert!(
