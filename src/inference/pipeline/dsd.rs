@@ -231,7 +231,8 @@ impl PipelineExecutor {
                 tracing::debug!(%request_id, "DSD: no drafter available — falling back");
                 return Ok(None);
             };
-            // One here: splits keep it (#134).
+            // One here: splits keep it, and a larger one may come beside it
+            // (#134, #331).
             super::engine_drafter::note_split_wanting_a_drafter(&self.shared_state, &target, true);
             Some((spec, ids))
         };

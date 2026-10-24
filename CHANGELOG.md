@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+**A computer that already guesses ahead with a small model now fetches a better one when the
+swarm has it.** When a model is split across computers, a small model of the same family guesses
+the next words, so each trip between the computers keeps several of them instead of one. Since
+0.3.249 a computer with a graphics card may guess with a model up to half the size of the one it
+splits — the 3B for a 7B, which ran 18.1 tokens a second against the 1.5B's 16.0 on a real
+long-distance link. But a computer that already held a smaller guessing model, fetched under the
+older rule or kept for any other reason, went on using it. It now fetches the larger one from the
+swarm (at most 2 GB, as before) beside the one it has, keeps guessing with the old one while the
+new one arrives, and switches once the new one is complete.
+
 **Another computer can no longer make this one use unbounded memory, or crash part of it, by
 sending more than it was asked for.** Four places took a size from the computer on the other end
 on trust. The reply another computer streams back for a split request was buffered with no limit.

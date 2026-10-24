@@ -2531,12 +2531,28 @@ against 5.18 — the larger drafter keeps ~20% more, so the largest that can dra
 
 **The rule** (`pipeline::engine_drafter`, `auto_manage/coverage/drafter.rs`):
 
-- **The trigger is a split that found none**: `note_split_wanting_a_drafter` (DSD, before its
+- **The trigger is a split that guesses**: `note_split_wanting_a_drafter` (DSD, before its
   rounds; a led split's requester when the head would take guesses) records the target in
-  `state.models.drafters_wanted` and wakes the download pass when none is held. Not where the
-  owner named a drafter; where one is held (found, or refused for memory — the room rule's
-  business, #275) a target already recorded is refreshed, so the drafter is kept while splits
-  keep USING it, not 7 days after the last miss (review, 2026-10-22).
+  `state.models.drafters_wanted`, and wakes the download pass when none is held. Not where the
+  owner named a drafter. Where one is held (found, or refused for memory — the room rule's
+  business, #275) the record is refreshed, so the drafter is kept while splits keep USING it,
+  not 7 days after the last miss (review, 2026-10-22) — and since 2026-10-24 (#331) it is
+  written there too, not only refreshed: the pass may have a LARGER one to fetch. Recorded only
+  on a miss, a node holding a small model for any other reason (the owner's, one it serves for
+  the swarm) never reached the pass and guessed with that model for good.
+- **A held drafter is replaced only by a larger one, fetched beside it** (#331): where one is
+  held, `drafter_to_acquire` fetches only a candidate larger by `size_proxy` than it — never a
+  copy of the same size, whose cheaper guesses a flow turned into waiting (Q8_0 against fp16,
+  2026-10-23) — and the answer is `DrafterToAcquire { held, next }`, so the held one is kept
+  on EVERY step (headers learned, parts arriving) by construction, not by each consumer
+  remembering it: prune and the download pass ask `DrafterToAcquire::keeps`. It is let go once
+  the larger one is held whole and `chosen`, which makes that one `held` — a rolling update's
+  surge (`maxUnavailable: 0`: the new copy ready before the old stops). The old answer was one
+  of `Held` / `Fetch` / `LearnHeaders`, none of which could keep one model and fetch another,
+  so a node that fetched the 1.5B under 0.3.248's quarter kept it after 0.3.249 allowed the 3B
+  (18.1 against 16.0 tok/s on the real link, `docs/invariants/scheduling.md` § "A tree that
+  flows"). Once let go, the old one is pruned like any model held whole (kept below urgent
+  pressure, `completes_model_here_counting`) — nothing deletes it on purpose.
 - **One choice**: `drafter_to_acquire` is `chosen`'s own size rule (`largest_that_can_draft`,
   half the target for a small drafter on a node with a card since 0.3.249, `within_reach`) and vocabulary check (`could_draft`), over the registry's models of
   the target's manifest family that this node does not hold whole — but only once every likely
@@ -2567,7 +2583,7 @@ three-part model two nearby peers hold, its replica target met, is offered and s
 a split wanted a drafter (control: nothing offered), a MIDDLE part is kept at 0.9 and shed at 0.99, and shed at
 0.9 once nothing wants it — with the download rule off nothing is offered, with prune's rule off
 nothing is started (the download pass fetches only what prune keeps).
-`a_split_using_its_drafter_keeps_it_wanted`, `a_model_the_owner_deleted_a_part_of_is_not_fetched_to_draft`.
+`every_split_that_guesses_keeps_its_target_wanted` (with an owner-named drafter as the null control), `a_model_the_owner_deleted_a_part_of_is_not_fetched_to_draft`.
 **End to end** (`split_rig.sh repeat` with `FETCH_DRAFTER`, dev build, both nodes on the processor, 2026-10-21): A held
 part 0 of Qwen2.5-Coder-7B and only the 0.5B Q8's manifest and header, B parts 1-7 and the 0.5B whole. 18:59:07 the
 first split noted it had none; 19:08:36 the trust update promoted the 0.5B (one holder in a two-node swarm); 19:09:53
@@ -2578,6 +2594,21 @@ run FAILED for the trust floor alone: a model is trusted only by the update ever
 `only_a_small_model_is_ever_fetched_to_draft`: a 4 GiB candidate of the family is not even
 named for its header (red without the cap). `engine_drafter::tests::a_drafter_is_fetched_only_once_every_likely_header_is_here`
 (red with the header rule off).
+**The replacement (#331)**: `a_node_holding_a_drafter_fetches_only_a_larger_one` (a held 0.5B gets
+the 1.5B, headers first; a held 1.5B gets nothing — never a copy of the same size),
+`an_answer_keeps_the_drafter_held_while_a_better_one_comes`,
+`a_drafter_being_replaced_is_kept_until_its_replacement_is_held` (both kept at 0.9 while the new
+one's parts are offered, the old one shed once the new one is held) and
+`every_split_that_guesses_keeps_its_target_wanted` — all four red with the size rule, `keeps` and
+the widened trigger switched off, the other 21 green. End to end (`split_rig.sh repeat`,
+`DRAFTER=qwen2.5-0.5b-instruct-q8-0 FETCH_DRAFTER=qwen2.5-coder-1.5b-instruct-q8-0`, the coder-7B
+target, dev build, both nodes on the processor, 2026-10-24): replies at 06:37 and 06:50 guessed
+with the 0.5B; 06:46:05 the pass logged `replacing="qwen2.5-0.5b-instruct-q8-0"`; the 1.5B's 4
+parts arrived 06:51:58-06:58:47 (B's `Minimal` upload cap, 1.25 MB/s a part — #335) while the
+0.5B kept serving; the 07:02 reply guessed with `drafter=qwen2.5-coder-1.5b-instruct-q8-0`. The
+first run failed on timing alone: its last reply came before the last part, and DSD had stepped
+aside for one reply after a γ = 0 round (`dsd_controller::REPROBE_AFTER`, 600 s) — so the rig
+waits for the parts before its last reply, and replies 610 s apart.
 
 **A change must keep**: one choice with `chosen`; the byte cap; both passes asking
 `copy_drafts_for_a_split`'s answer; the parts through the shard system like any other part

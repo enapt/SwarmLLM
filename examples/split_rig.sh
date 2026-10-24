@@ -67,6 +67,11 @@
 #          REPEAT=4 REPEAT_GAP=300: a model is trusted (here: one holder) only by the trust
 #          update every 10 min, the first 10 min after start. MODEL must share its vocabulary, e.g.
 #          MODEL=qwen2.5-coder-7b-instruct-q4-k-m FETCH_DRAFTER=qwen2.5-0.5b-instruct-q8-0.
+#          With DRAFTER as well (a smaller one, held by A whole) it is the REPLACEMENT (#331):
+#          the first replies guess with DRAFTER, A fetches FETCH_DRAFTER beside it (the DIAG
+#          line says replacing=DRAFTER) and a later reply names FETCH_DRAFTER, e.g.
+#          DRAFTER=qwen2.5-0.5b-instruct-q8-0 FETCH_DRAFTER=qwen2.5-coder-1.5b-instruct-q8-0
+#          (the processor's quarter rule: the 1.5B is within a quarter of the 7B, the 3B is not).
 #   (any mode) DRAFTER=<model id> also gives A that model WHOLE, from the same
 #          models directory — the small model speculation across computers guesses
 #          with (`pipeline::engine_drafter`). Pair it with EXTRA_TOML switching
@@ -1763,6 +1768,15 @@ sys.stdout.write(users[-1] if users else sys.argv[1])' "$PROMPT" > "$OUT/prompt.
   : > "$OUT/repeat.jsonl"
   for i in $(seq 1 "${REPEAT:-3}"); do
     [ "$i" -gt 1 ] && sleep "${REPEAT_GAP:-0}"
+    # The last reply of a FETCH_DRAFTER run is the one that must guess with it: wait (up to
+    # 20 min) until A holds every part, so a slow transfer reads as slow, not as a FAIL
+    # (2026-10-24: 1.65 GB took 9 min between two nodes here and the last reply came first).
+    if [ -n "${FETCH_DRAFTER:-}" ] && [ "$i" = "${REPEAT:-3}" ]; then
+      for _ in $(seq 1 240); do
+        [ "$(ls "$BASE/A/models/$FETCH_DRAFTER" | grep -c '^shard_[0-9]*\.bin$')" = "$(ls "$FSRC" | grep -c '^shard_')" ] && break
+        sleep 5
+      done
+    fi
     ask "$PROMPT" "${REPEAT_MAX_TOKENS:-120}" "repeat$i" | tee -a "$OUT/repeat.jsonl" | cut -c1-160
   done
   # Not "the first only" any more: since the tail walks the guesses (a few ids back,
@@ -1771,10 +1785,11 @@ sys.stdout.write(users[-1] if users else sys.argv[1])' "$PROMPT" > "$OUT/prompt.
   echo "repeat: n-gram path taken by $(grep -c 'try_ngram_only_distributed ELIGIBLE' "$BASE/A/node.log") of ${REPEAT:-3} requests (payoff_x100: $(grep -a -o 'payoff_x100=[0-9]*' "$BASE/A/node.log" | tail -1))"
   echo "repeat: streamed replies by peers crossed: $(grep -a 'DSD: streamed checks complete' "$BASE/A/node.log" | grep -o 'peers=[0-9]*' | sort | uniq -c | paste -sd' ')"
   if [ -n "${FETCH_DRAFTER:-}" ]; then
-    held=$(ls "$BASE/A/models/$FETCH_DRAFTER" | grep -c '^shard_')
+    held=$(ls "$BASE/A/models/$FETCH_DRAFTER" | grep -c '^shard_[0-9]*\.bin$')
     want=$(ls "$FSRC" | grep -c '^shard_')
     echo "fetchdrafter: A noted a split with none $(grep -ac 'ran with no model here to guess ahead' "$BASE/A/node.log")x," \
-      "fetched for it $(grep -ac 'fetching a model to guess ahead for a split that had none' "$BASE/A/node.log")x," \
+      "fetched for it $(grep -ac 'fetching a model to guess ahead for splits here' "$BASE/A/node.log")x" \
+      "(replacing: $(grep -a 'fetching a model to guess ahead for splits here' "$BASE/A/node.log" | grep -o 'replacing=[^ ]*' | sort -u | paste -sd' '))," \
       "holds $held of $want parts; target parts fetched by A: $(ls "$BASE/A/models/$MODEL" | grep -c '^shard_') (gave it ${SHARDS_A})"
     echo "fetchdrafter: drafters named by A's requests: $(grep -a 'DSD: request complete' "$BASE/A/node.log" | grep -o 'drafter=[^ ]*' | paste -sd' ')"
     if [ "$held" = "$want" ] && grep -a 'DSD: request complete' "$BASE/A/node.log" | grep -q "drafter=$FETCH_DRAFTER"; then

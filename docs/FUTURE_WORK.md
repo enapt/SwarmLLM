@@ -1072,6 +1072,24 @@ remove one. Measure the newcomer's first-plan delay before and after.
 
 ### Network and transport
 
+#### #335 — The upload cap that protects a user's internet is per request, so it grows with every part served at once
+`P2` · network · **OPEN** — 2026-10-24 · history: found while timing #331's rig
+
+`ResourcesConfig::shard_upload_mbps` exists so seeding cannot saturate the owner's connection
+("the classic complaint against peer-to-peer software"): `Minimal`, the default, is 10 Mbps. The
+serving code (`network/manager/requests.rs`, the `ShardRequest` arm) sleeps `bytes / cap` after
+reading EACH chunk, in that request's own task, so nothing is shared: three parts fetched at once
+moved at 3 × 1.25 MB/s (1.65 GB in ~9 min between two rig nodes on one machine, 2026-10-24), and
+a node serving N chunk requests uploads at N × its cap. Its comment still says "0 = unlimited
+(default)". Reference: libtorrent and Transmission meter upload with ONE session-wide limiter and
+bound how many peers it serves (unchoke slots). Next: one node-wide pacer at the choke point
+(reserve `bytes / cap` on a shared next-free instant; read `cfg()` per reservation). ⚠ A shared
+pacer queues: 30 queued 8 MiB chunks put the last ~200 s out, past the requester's 180 s
+no-progress sweep (`daemon/state/models.rs`) and toward `RR_REQUEST_TIMEOUT_SECS` (600), so the
+wait must be bounded — past it, answer busy and let the requester go to another holder (check how
+a refused `ShardRequest` is retried before choosing the answer). `docs/invariants/network.md`
+and the timeouts rule (`.claude/rules/architecture.md`) apply.
+
 #### #155 — AutoNAT redials a peer this node is already connected to, and the per-peer cap denies it, every ~5 s
 `P3` · network · **PARTIAL** — 2026-10-02, narrowed 2026-10-07 (measured on the swarm: not seen there) · history: archive row #155, gotcha #774
 
@@ -3040,18 +3058,6 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   peer exchange (from the anchor) listed QUIC first for every peer, and it reached Belgium and
   Melbourne over QUIC within a second; every remote connection of the live node was QUIC. Not
   fired — re-check `DSD: request complete` transports on field splits after .250.
-- **#331 — Replace a held drafter when a better one may now be fetched** (2026-10-24). Since
-  0.3.249 a small drafter may be half its target (`engine_drafter::within_reach`; the coder-3B
-  flowed 18.1 tok/s against the coder-1.5B's 16.0 on the real TH↔AU link,
-  `docs/invariants/scheduling.md` § "A tree that flows"), but `drafter_to_acquire` answers `Held`
-  for whatever drafter a node holds already, so a node that fetched the 1.5B under 0.3.248's
-  quarter keeps it for good. Shape: where the held drafter is smaller (by `size_proxy`) than the
-  one `acquisition_among` would fetch, answer `Fetch` — but prune keeps only `Held` / `Fetch`
-  drafters (`copy_drafts_for_a_split`), so the held one must stay kept while the better one's
-  headers are learned and its parts arrive (a `LearnHeaders` answer would drop it), and be let go
-  only once the better one is held and chosen. Rig: `split_rig.sh repeat` with A holding the
-  1.5B and `FETCH_DRAFTER` offering the 3B. Trigger: field nodes holding a fetched 1.5B for a
-  target they split.
 
 ## Decided — not doing
 
@@ -3163,6 +3169,25 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-24, ships in v0.3.251** (#331)
+- #331 — **A node already guessing with a small drafter fetches a larger one when the swarm has
+  it, and keeps guessing with the old one until the new one is whole.** 0.3.249 let a small
+  drafter be half its target (the coder-3B flowed 18.1 tok/s against the 1.5B's 16.0 on the real
+  link), but `drafter_to_acquire` answered `Held` for any drafter already held, and only a split
+  that FOUND none recorded its target, so a node keeping a 1.5B (or holding a small model for
+  any other reason) guessed with it for good. Now every split that guesses records its target;
+  the answer is `DrafterToAcquire { held, next }`, `next` fetching only a candidate larger by
+  `size_proxy` than the held one (never a same-size copy), and prune and the download pass ask
+  `keeps`, so the held drafter is kept on EVERY step — a rolling update's surge
+  (`maxUnavailable: 0`). The DIAG line names it: `replacing=`. Tests: four new ones fail with the
+  three mechanisms switched off (21 of 25 pass then). Rig (`split_rig.sh repeat`, A holding the
+  0.5B, `FETCH_DRAFTER` = coder-1.5B, both Q8_0, the coder-7B target; 2026-10-24): replies 1-2
+  guessed with the 0.5B, the fetch began 06:46 (`replacing="qwen2.5-0.5b-instruct-q8-0"`), its 4
+  parts landed 06:51-06:58 while the 0.5B served reply 2, and reply 3 guessed with the 1.5B —
+  PASS. Run 1 failed on timing only (the last reply came before the last part), so the rig now
+  waits for the parts before its last reply and counts only whole parts as held.
+  `docs/invariants/memory.md` § the drafter rule.
 
 **Closed 2026-10-24, ships in v0.3.250** (#329, #332)
 - #332 — **Two nodes behind one router are both reachable: the router's table decides the

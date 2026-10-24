@@ -356,17 +356,19 @@ impl AutoShardManager {
                     "DIAG: fetching this computer's part of a chain of nearby machines for a model none of them can run whole (Stage 3)"
                 );
             }
-            // A split driven from here ran with nothing to guess for it: this
-            // model is the drafter it lacked (`coverage::drafter`, #134). Its
-            // parts skip the replica target and the hash ring — a drafter must
-            // be HERE — and nothing else; prune keeps them
-            // (`copy_drafts_for_a_split`).
-            let drafter_parts = self.parts_of_a_drafter_to_fetch(&manifest);
+            // A split driven from here ran with nothing to guess for it, or
+            // with a smaller drafter than the swarm has: this model is the one
+            // it lacked (`coverage::drafter`, #134, #331). Its parts skip the
+            // replica target and the hash ring — a drafter must be HERE — and
+            // nothing else; prune keeps them, and the one they replace until
+            // they are held (`copy_drafts_for_a_split`).
+            let (drafter_parts, replacing) = self.parts_of_a_drafter_to_fetch(&manifest);
             if !drafter_parts.is_empty() {
                 tracing::info!(
                     model = %manifest.id,
                     parts = drafter_parts.len(),
-                    "DIAG: fetching a model to guess ahead for a split that had none (#134)"
+                    replacing = replacing.as_ref().map_or("none", |m| m.0.as_str()),
+                    "DIAG: fetching a model to guess ahead for splits here (#134)"
                 );
             }
 

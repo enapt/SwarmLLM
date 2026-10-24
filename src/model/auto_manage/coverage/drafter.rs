@@ -18,8 +18,14 @@
 //! 5.18, and 3.21 against 2.81 in a chain of four (2026-10-22,
 //! `examples/spec_coverage.py`, `spec_best_tree.py`) — so the largest that can
 //! draft is fetched, as `chosen` picks the largest held.
+//!
+//! And a node already holding a drafter fetches a larger one where the swarm
+//! has it (#331): the 3B flowed 18.1 tok/s against the 1.5B's 16.0 on the real
+//! link, and a node that fetched the 1.5B under 0.3.248's quarter rule guessed
+//! with it for good. The held one stays kept while the larger one comes, and
+//! goes only once that one is held and chosen (`DrafterToAcquire::keeps`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -127,33 +133,37 @@ impl AutoShardManager {
                 .is_some_and(|until| Instant::now() < *until)
     }
 
-    /// The drafters to fetch now, one per target wanting one.
-    fn drafters_to_fetch(&self) -> HashSet<ModelId> {
+    /// The drafters to fetch now, one per target wanting one, each with the
+    /// drafter held here it would replace (#331), if any.
+    fn drafters_to_fetch(&self) -> HashMap<ModelId, Option<ModelId>> {
         self.targets_wanting_a_drafter()
             .iter()
-            .filter_map(|target| match self.drafter_answer(target) {
-                DrafterToAcquire::Fetch(drafter) => Some(drafter),
-                _ => None,
+            .filter_map(|target| {
+                let answer = self.drafter_answer(target);
+                let fetch = answer.fetching()?.clone();
+                Some((fetch, answer.held))
             })
             .collect()
     }
 
     /// The parts of `manifest` this node fetches because it is the drafter a
-    /// split here lacks: every part it does not hold. Like a near chain's they
+    /// split here lacks, or a larger one than it holds: every part it does not
+    /// hold — and the drafter it replaces, if any. Like a near chain's they
     /// skip the replica target and the hash ring — the target counts the
     /// swarm's copies, and a drafter must be HERE — and nothing else; prune
     /// keeps them ([`Self::copy_drafts_for_a_split`]).
     pub(in crate::model::auto_manage) fn parts_of_a_drafter_to_fetch(
         &self,
         manifest: &ModelManifest,
-    ) -> HashSet<u32> {
-        if self.shared_state.models.drafters_wanted.is_empty()
-            || !self.drafters_to_fetch().contains(&manifest.id)
-        {
-            return HashSet::new();
+    ) -> (HashSet<u32>, Option<ModelId>) {
+        if self.shared_state.models.drafters_wanted.is_empty() {
+            return (HashSet::new(), None);
         }
+        let Some(replacing) = self.drafters_to_fetch().remove(&manifest.id) else {
+            return (HashSet::new(), None);
+        };
         let local = self.shared_state.identity.node_id();
-        manifest
+        let parts = manifest
             .shards
             .iter()
             .filter(|s| s.index != MMPROJ_SHARD_INDEX)
@@ -168,12 +178,13 @@ impl AutoShardManager {
                     })
                     .contains(local)
             })
-            .collect()
+            .collect();
+        (parts, replacing)
     }
 
     /// Is `shard_id` a part of the drafter a split here guesses with, or is
-    /// about to — held and chosen, or being fetched for it (one cached answer,
-    /// [`DrafterToAcquire::Held`] or `Fetch`)? Prune keeps such a part below
+    /// about to — held and chosen, or being fetched for it, beside the held
+    /// one it replaces (one cached answer, [`DrafterToAcquire::keeps`])? Prune keeps such a part below
     /// urgent pressure while splits keep wanting it
     /// ([`DRAFTER_WANTED_FOR`]); the download pass asks the same before it
     /// fetches, so a fetched part is not shed again.
@@ -190,12 +201,7 @@ impl AutoShardManager {
         // The cached answer only: prune asks of every part it holds.
         self.targets_wanting_a_drafter()
             .iter()
-            .any(|target| match self.drafter_answer(target) {
-                DrafterToAcquire::Held(drafter) | DrafterToAcquire::Fetch(drafter) => {
-                    drafter == *model
-                }
-                DrafterToAcquire::LearnHeaders(_) | DrafterToAcquire::Nothing => false,
-            })
+            .any(|target| self.drafter_answer(target).keeps(model))
     }
 
     /// Learn the headers [`drafter_to_acquire`] names before it chooses — a
@@ -213,9 +219,7 @@ impl AutoShardManager {
         }
         let mut wanted: Vec<ModelId> = Vec::new();
         for target in &targets {
-            if let DrafterToAcquire::LearnHeaders(models) = self.drafter_answer(target) {
-                wanted.extend(models);
-            }
+            wanted.extend_from_slice(self.drafter_answer(target).headers_to_learn());
         }
         wanted.sort_by(|a, b| a.0.cmp(&b.0));
         wanted.dedup();
@@ -242,7 +246,7 @@ mod tests {
     };
     use crate::config::Config;
     use crate::inference::pipeline::{
-        drafter_to_acquire, note_split_wanting_a_drafter, DrafterToAcquire,
+        drafter_to_acquire, note_split_wanting_a_drafter, DrafterStep, DrafterToAcquire,
     };
     use crate::types::{ModelId, ModelTrustInfo, ModelTrustLevel, ShardId};
 
@@ -291,7 +295,10 @@ mod tests {
                 target.clone(),
                 (
                     Instant::now() + Duration::from_secs(3600),
-                    DrafterToAcquire::Fetch(drafter.clone()),
+                    DrafterToAcquire {
+                        held: None,
+                        next: DrafterStep::Fetch(drafter.clone()),
+                    },
                 ),
             );
         };
@@ -361,29 +368,47 @@ mod tests {
             register_manifest_with_sized_shards(&state, "small-1.5b", 28, &[(0, 28)], 1024 * MIB);
         assert_eq!(
             drafter_to_acquire(&state, &target, |_| true),
-            DrafterToAcquire::LearnHeaders(vec![small])
+            DrafterToAcquire {
+                held: None,
+                next: DrafterStep::LearnHeaders(vec![small]),
+            }
         );
     }
 
-    /// A split with no drafter starts wanting one; a split that found its
-    /// drafter keeps a target already wanted wanted — prune keeps the drafter
-    /// while splits keep using it, not a week after the last miss — and never
-    /// starts wanting one where none was missed.
+    /// Every split that guesses here records its target — one that found its
+    /// drafter too, so the download pass can fetch a larger one beside it
+    /// (#331; before, a node that never missed guessed with what it had for
+    /// good), and each later split keeps it recorded: prune keeps the drafter
+    /// while splits keep using it, not a week after the first. Not where the
+    /// owner named the drafter (the null control).
     #[test]
-    fn a_split_using_its_drafter_keeps_it_wanted() {
-        let (state, _manager) = make_test_manager_with_config(Config::default());
+    fn every_split_that_guesses_keeps_its_target_wanted() {
+        let mut named = Config::default();
+        named.inference.draft_model = Some("small-0.5b".into());
+        let (state, _manager) = make_test_manager_with_config(named);
         let target = ModelId("big-7b".into());
         note_split_wanting_a_drafter(&state, &target, true);
+        note_split_wanting_a_drafter(&state, &target, false);
         assert!(
             state.models.drafters_wanted.is_empty(),
-            "a drafter was found: nothing missed, nothing recorded"
+            "control: the owner named the drafter"
         );
-        note_split_wanting_a_drafter(&state, &target, false);
+
+        let (state, _manager) = make_test_manager_with_config(Config::default());
+        note_split_wanting_a_drafter(&state, &target, true);
         let first = *state
             .models
             .drafters_wanted
             .get(&target)
+            .expect("a drafter was found: recorded, so a larger one may come");
+        std::thread::sleep(Duration::from_millis(5));
+        note_split_wanting_a_drafter(&state, &target, false);
+        let second = *state
+            .models
+            .drafters_wanted
+            .get(&target)
             .expect("none here: wanted");
+        assert!(second > first);
         std::thread::sleep(Duration::from_millis(5));
         note_split_wanting_a_drafter(&state, &target, true);
         assert!(
@@ -391,8 +416,110 @@ mod tests {
                 .models
                 .drafters_wanted
                 .get(&target)
-                .is_some_and(|at| *at > first),
+                .is_some_and(|at| *at > second),
             "a split using its drafter keeps it wanted"
+        );
+    }
+
+    /// A drafter being replaced is kept while its replacement arrives, and
+    /// the replacement is fetched (#331): with the planted answer "the 0.5B is
+    /// held, fetch the 1.5B", the download pass offers the parts of the 1.5B
+    /// not held here and names the 0.5B it replaces, and prune keeps a part of
+    /// each; with the answer "the 1.5B is held", it keeps the 1.5B's part and
+    /// sheds the 0.5B's.
+    #[test]
+    fn a_drafter_being_replaced_is_kept_until_its_replacement_is_held() {
+        let mut config = Config::default();
+        config.auto_manage.min_replicas = 1;
+        let (state, manager) = make_test_manager_with_config(config);
+        state.models.auto_manage_default_model_cap.store(0, Relaxed);
+        let target = register_manifest_with_sized_shards(
+            &state,
+            "big-7b",
+            28,
+            &[(0, 14), (14, 28)],
+            2048 * MIB,
+        );
+        let held = register_manifest_with_sized_shards(
+            &state,
+            "small-0.5b",
+            24,
+            &[(0, 8), (8, 16), (16, 24)],
+            500 * MIB,
+        );
+        let better = register_manifest_with_sized_shards(
+            &state,
+            "small-1.5b",
+            28,
+            &[(0, 10), (10, 20), (20, 28)],
+            1600 * MIB,
+        );
+        let peer = peer_with_disk(&state, 2, None, 100_000);
+        let other = peer_with_disk(&state, 3, None, 100_000);
+        let local = state.identity.node_id().clone();
+        holds(&state, &target, &peer, &[0, 1]);
+        for m in [&held, &better] {
+            holds(&state, m, &peer, &[0, 1, 2]);
+            holds(&state, m, &other, &[0, 1, 2]);
+            trusted(&state, m);
+        }
+        trusted(&state, &target);
+        // A MIDDLE part of each here (prompt privacy keeps a whole model's
+        // ends), three copies, two of them nearby: no other rule keeps it.
+        holds(&state, &held, &local, &[1]);
+        holds(&state, &better, &local, &[1]);
+        let plant = |answer: DrafterToAcquire| {
+            manager.drafter_book.answers.insert(
+                target.clone(),
+                (Instant::now() + Duration::from_secs(3600), answer),
+            );
+        };
+        state
+            .models
+            .drafters_wanted
+            .insert(target.clone(), Instant::now());
+        let part = |m: &ModelId| ShardId {
+            model_id: m.clone(),
+            index: 1,
+        };
+        let three = [local.clone(), peer.clone(), other.clone()];
+
+        plant(DrafterToAcquire {
+            held: Some(held.clone()),
+            next: DrafterStep::Fetch(better.clone()),
+        });
+        let manifest = state
+            .model_registry
+            .get_manifest(&better)
+            .expect("registered");
+        let (parts, replacing) = manager.parts_of_a_drafter_to_fetch(&manifest);
+        assert_eq!(
+            parts,
+            [0, 2].into_iter().collect(),
+            "the parts not held here"
+        );
+        assert_eq!(replacing.as_ref(), Some(&held));
+        assert!(
+            !manager.would_shed_copy(&part(&held), &three, 0.9, &[]),
+            "the 0.5B is kept while the 1.5B comes"
+        );
+        assert!(
+            !manager.would_shed_copy(&part(&better), &three, 0.9, &[]),
+            "the 1.5B being fetched is kept"
+        );
+
+        plant(DrafterToAcquire {
+            held: Some(better.clone()),
+            next: DrafterStep::Nothing,
+        });
+        assert!(
+            manager.parts_of_a_drafter_to_fetch(&manifest).0.is_empty(),
+            "held: nothing more to fetch"
+        );
+        assert!(!manager.would_shed_copy(&part(&better), &three, 0.9, &[]));
+        assert!(
+            manager.would_shed_copy(&part(&held), &three, 0.9, &[]),
+            "the 1.5B held and chosen: the 0.5B is no longer kept for drafting"
         );
     }
 

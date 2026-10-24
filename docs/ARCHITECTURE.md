@@ -1949,13 +1949,14 @@ named part is kept 24 h, a machine that never fetches its segment is passed over
 near machine holding none of the model learns its header first, since every ceiling is weighed with
 the header's cost curve. → `docs/plans/regional_pipelines.md` § Stage 3.
 
-**A drafter a split lacked** (#134, `coverage/drafter.rs`, 2026-10-22). A split driven from here that
-found no drafter records its target (`state.models.drafters_wanted`); the download pass fetches the
-model `engine_drafter::drafter_to_acquire` names — what the drafter choice would pick were it held,
-of the target's family, at most 2 GiB on disk, trusted as adoption requires, once every likely
-candidate's header is here — past the replica target and the ring, and prune keeps it below urgent
-pressure while splits keep using it (7 days after the last). → `docs/invariants/memory.md` § "A
-split with no drafter fetches one".
+**A drafter a split lacked, or a larger one** (#134, #331, `coverage/drafter.rs`, 2026-10-22/24). A
+split driven from here that guesses records its target (`state.models.drafters_wanted`); the download
+pass fetches the model `engine_drafter::drafter_to_acquire` names — what the drafter choice would pick
+were it held, of the target's family, at most 2 GiB on disk, trusted as adoption requires, once every
+likely candidate's header is here, and where one is held only a larger one — past the replica target
+and the ring, and prune keeps it below urgent pressure while splits keep using it (7 days after the
+last), beside the held one it replaces until it is held and chosen (`DrafterToAcquire::keeps`). →
+`docs/invariants/memory.md` § "A split with no drafter fetches one".
 
 **Prune Scoring** (highest score pruned first):
 ```

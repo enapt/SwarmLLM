@@ -311,15 +311,18 @@ pub(crate) const DRAFTER_WANTED_FOR: std::time::Duration =
     std::time::Duration::from_secs(7 * 24 * 60 * 60);
 
 /// A split of `target` driven from here is about to guess, with the drafter
-/// `drafter_found` says it found or with nothing. With nothing — no model held
-/// here can draft for it — it is recorded for the download pass
-/// (`ModelMgmt::drafters_wanted`), which fetches the one [`drafter_to_acquire`]
-/// names: a split with no drafter checks one token a round trip where one with
-/// a drafter keeps 3-6 (`docs/plans/large_model_splits.md`). With one held —
-/// found, or held but with no room this time (memory, not a missing model) — a
-/// target already recorded is recorded again, so prune keeps the drafter while
-/// splits keep using it, not for a week after the last one that had none.
-/// Nothing where the owner named the drafter (`inference.draft_model`).
+/// `drafter_found` says it found or with nothing. Either way it is recorded for
+/// the download pass (`ModelMgmt::drafters_wanted`), which acts on the answer
+/// [`drafter_to_acquire`] gives: with nothing held — no model here can draft
+/// for it — the one to fetch, and the pass is woken now (a split with no
+/// drafter checks one token a round trip where one with a drafter keeps 3-6,
+/// `docs/plans/large_model_splits.md`); with one held — found, or held but with
+/// no room this time (memory, not a missing model) — prune keeps it while
+/// splits keep using it, and a larger one is fetched beside it where the swarm
+/// has one (#331) on the pass's own rounds. Recorded only on a miss before
+/// 2026-10-24, so a node holding a small model for any other reason — the
+/// owner's, or one it serves — guessed with it for good. Nothing where the
+/// owner named the drafter (`inference.draft_model`).
 pub(crate) fn note_split_wanting_a_drafter(
     state: &SharedState,
     target: &ModelId,
@@ -329,13 +332,10 @@ pub(crate) fn note_split_wanting_a_drafter(
         return;
     }
     let now = std::time::Instant::now();
+    let before = state.models.drafters_wanted.insert(target.clone(), now);
     if drafter_found || drafter_to_leave_room_for(state, target).is_some() {
-        if let Some(mut at) = state.models.drafters_wanted.get_mut(target) {
-            *at = now;
-        }
         return;
     }
-    let before = state.models.drafters_wanted.insert(target.clone(), now);
     if before.is_none_or(|at| now.duration_since(at) > NOTE_AGAIN_AFTER) {
         tracing::info!(
             target_model = %target,
@@ -361,44 +361,116 @@ pub(crate) const MOST_DRAFTER_HEADERS_A_PASS: usize = 2;
 pub(crate) const MOST_DRAFTER_BYTES_TO_FETCH: u64 = 2 * 1024 * 1024 * 1024;
 
 /// What the download pass does so a split of `target` can guess
-/// ([`drafter_to_acquire`]).
+/// ([`drafter_to_acquire`]): keep the drafter held here, if there is one, and
+/// take the next step.
+///
+/// A replacement is fetched BESIDE the drafter it replaces (#331), as a
+/// rolling update starts the new copy before it stops the old one
+/// (`maxUnavailable: 0`): the held one is kept on EVERY answer — while the
+/// better one's headers are learned and while its parts arrive — and is let go
+/// only once the better one is held whole and [`chosen`], when it becomes
+/// `held` itself. Before 2026-10-24 the answer was one of `Held`, `Fetch`,
+/// `LearnHeaders`, so there was no answer that kept one model and fetched
+/// another, and a node that had fetched the 1.5B under 0.3.248's quarter rule
+/// kept guessing with it after 0.3.249 allowed the 3B (18.1 against 16.0 tok/s
+/// on the real link).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DrafterToAcquire {
-    /// Fetch this model's parts: the drafter [`chosen`] would pick were it held.
+pub(crate) struct DrafterToAcquire {
+    /// The drafter [`chosen`] picks among the models held whole here — prune
+    /// keeps it whatever `next` is.
+    pub held: Option<ModelId>,
+    pub next: DrafterStep,
+}
+
+/// The download pass's next step towards a drafter for a target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DrafterStep {
+    /// Fetch this model's parts: the drafter [`chosen`] would pick were it
+    /// held — larger than [`DrafterToAcquire::held`], where one is.
     Fetch(ModelId),
     /// Learn these candidates' headers first — the vocabulary and the size are
     /// read from them.
     LearnHeaders(Vec<ModelId>),
-    /// A drafter for it is held here already — prune keeps this one.
-    Held(ModelId),
-    /// No model the swarm knows could draft for it.
+    /// Nothing to fetch: no model the swarm knows could draft for it, or none
+    /// better than the one held.
     Nothing,
 }
 
-/// The model to fetch so `target` has a drafter here (or the one held, which
-/// [`chosen`] picks): of the models the swarm
-/// knows that this node does not hold whole, the one [`chosen`] would pick were
-/// it held — the largest that can draft for it, [`within_reach`] of its size
-/// ([`largest_that_can_draft`]) — among those `may_fetch` accepts (the download
-/// pass's own gates: trust, refusals, the canonical upload, an uncensored model
-/// nobody chose). Only once every likely candidate's header is here, so a later
+impl DrafterToAcquire {
+    /// The model to fetch now, if any.
+    pub(crate) fn fetching(&self) -> Option<&ModelId> {
+        match &self.next {
+            DrafterStep::Fetch(model) => Some(model),
+            _ => None,
+        }
+    }
+
+    /// The headers to learn before the choice can be made.
+    pub(crate) fn headers_to_learn(&self) -> &[ModelId] {
+        match &self.next {
+            DrafterStep::LearnHeaders(models) => models,
+            _ => &[],
+        }
+    }
+
+    /// Does this answer keep `model` here: the drafter held, or the one being
+    /// fetched. The one answer prune and the download pass ask.
+    pub(crate) fn keeps(&self, model: &ModelId) -> bool {
+        self.held.as_ref() == Some(model) || self.fetching() == Some(model)
+    }
+}
+
+/// The drafter `target` has here, and the model to fetch so it has the best
+/// one: of the models the swarm knows that this node does not hold whole, the
+/// one [`chosen`] would pick were it held — the largest that can draft for it,
+/// [`within_reach`] of its size ([`largest_that_can_draft`]), and LARGER (by
+/// [`size_proxy`]) than the one held, where one is — among those `may_fetch`
+/// accepts (the download pass's own gates: trust, refusals, the canonical
+/// upload, an uncensored model nobody chose). Larger, not merely cheaper: of
+/// two copies of one model the cheaper reads fewer bytes a guess, which a flow
+/// turned into waiting (Q8_0 against fp16, 2026-10-23), so a copy is never
+/// worth a fetch. Only once every likely candidate's header is here, so a later
 /// header cannot turn up a better one after the parts were fetched: a likely
 /// candidate is a model of the target's family (the manifest's architecture —
 /// the vocabulary check on the header is the final word) no larger on disk
 /// than the target or [`MOST_DRAFTER_BYTES_TO_FETCH`].
 /// Their headers are named for learning first, [`MOST_DRAFTER_HEADERS_A_PASS`]
-/// at a time, largest first.
+/// at a time, largest first. Nothing to fetch where the owner named the
+/// drafter: [`chosen`] drafts with that one or with none.
 pub(crate) fn drafter_to_acquire(
     state: &SharedState,
     target: &ModelId,
     may_fetch: impl Fn(&crate::types::ModelManifest) -> bool,
 ) -> DrafterToAcquire {
-    if let Some(held) = drafter_to_leave_room_for(state, target) {
-        return DrafterToAcquire::Held(held.model_id);
-    }
+    let held = drafter_to_leave_room_for(state, target).map(|spec| spec.model_id);
+    let next = if state.cfg().inference.draft_model.is_some() {
+        DrafterStep::Nothing
+    } else {
+        next_drafter_step(state, target, held.as_ref(), may_fetch)
+    };
+    DrafterToAcquire { held, next }
+}
+
+/// [`drafter_to_acquire`]'s step: the candidates, then [`acquisition_among`]
+/// with the held drafter's size to beat.
+fn next_drafter_step(
+    state: &SharedState,
+    target: &ModelId,
+    held: Option<&ModelId>,
+    may_fetch: impl Fn(&crate::types::ModelManifest) -> bool,
+) -> DrafterStep {
+    let to_beat = match held {
+        None => None,
+        Some(held) => match size_proxy(state, held) {
+            Some(size) => Some(size.size),
+            // Chosen, so sized a moment ago: a header gone since cannot be
+            // compared with — keep it, fetch nothing.
+            None => return DrafterStep::Nothing,
+        },
+    };
     let registry = &state.model_registry;
     let Some(target_manifest) = registry.get_manifest(target) else {
-        return DrafterToAcquire::Nothing;
+        return DrafterStep::Nothing;
     };
     let family = std::mem::discriminant(&target_manifest.architecture);
     let mut likely: Vec<crate::types::ModelManifest> = registry
@@ -423,6 +495,7 @@ pub(crate) fn drafter_to_acquire(
         |m| state.gguf_meta_for(m).is_some(),
         || size_proxy(state, target).map(|s| s.size),
         small_drafter_fraction(state),
+        to_beat,
         |m| size_proxy(state, m),
         |m| could_draft(state, target, m),
     )
@@ -432,15 +505,17 @@ pub(crate) fn drafter_to_acquire(
 /// disk first: their missing headers first ([`MOST_DRAFTER_HEADERS_A_PASS`] of
 /// them), then the largest that can draft ([`largest_that_can_draft`], a
 /// small one up to `1 / small_fraction`) against the target's size, which
-/// needs only the target's own header.
+/// needs only the target's own header — of those larger than `to_beat`, the
+/// size of the drafter held here.
 fn acquisition_among(
     likely: Vec<ModelId>,
     has_header: impl Fn(&ModelId) -> bool,
     target_size: impl FnOnce() -> Option<u64>,
     small_fraction: u64,
+    to_beat: Option<u64>,
     size: impl Fn(&ModelId) -> Option<DrafterSize>,
     can_draft: impl FnMut(ModelId) -> Option<DrafterSpec>,
-) -> DrafterToAcquire {
+) -> DrafterStep {
     let headerless: Vec<ModelId> = likely
         .iter()
         .filter(|m| !has_header(m))
@@ -448,18 +523,19 @@ fn acquisition_among(
         .cloned()
         .collect();
     if !headerless.is_empty() {
-        return DrafterToAcquire::LearnHeaders(headerless);
+        return DrafterStep::LearnHeaders(headerless);
     }
     let Some(target_size) = target_size() else {
-        return DrafterToAcquire::Nothing;
+        return DrafterStep::Nothing;
     };
     let sized: Vec<(DrafterSize, ModelId)> = likely
         .into_iter()
         .filter_map(|m| size(&m).map(|s| (s, m)))
+        .filter(|(s, _)| to_beat.is_none_or(|held| s.size > held))
         .collect();
     match largest_that_can_draft(target_size, small_fraction, sized, can_draft) {
-        Some(spec) => DrafterToAcquire::Fetch(spec.model_id),
-        None => DrafterToAcquire::Nothing,
+        Some(spec) => DrafterStep::Fetch(spec.model_id),
+        None => DrafterStep::Nothing,
     }
 }
 
@@ -1634,10 +1710,11 @@ mod tests {
                 only(&[]),
                 || Some(360),
                 DRAFTER_MAX_FRACTION,
+                None,
                 size,
                 can_draft
             ),
-            DrafterToAcquire::LearnHeaders(vec![id("3b"), id("1.5b")]),
+            DrafterStep::LearnHeaders(vec![id("3b"), id("1.5b")]),
             "the largest two first"
         );
         assert_eq!(
@@ -1646,10 +1723,11 @@ mod tests {
                 only(&["3b", "1.5b"]),
                 || Some(360),
                 DRAFTER_MAX_FRACTION,
+                None,
                 size,
                 can_draft
             ),
-            DrafterToAcquire::LearnHeaders(vec![id("0.5b"), id("other-vocab")]),
+            DrafterStep::LearnHeaders(vec![id("0.5b"), id("other-vocab")]),
             "a later header could still name a better one: not yet"
         );
         let every = only(&["3b", "1.5b", "0.5b", "other-vocab"]);
@@ -1659,10 +1737,11 @@ mod tests {
                 every,
                 || Some(360),
                 DRAFTER_MAX_FRACTION,
+                None,
                 size,
                 can_draft
             ),
-            DrafterToAcquire::Fetch(id("1.5b")),
+            DrafterStep::Fetch(id("1.5b")),
             "the 3B is more than half; the other vocabulary cannot draft"
         );
         assert_eq!(
@@ -1671,10 +1750,11 @@ mod tests {
                 every,
                 || None,
                 DRAFTER_MAX_FRACTION,
+                None,
                 size,
                 can_draft
             ),
-            DrafterToAcquire::Nothing,
+            DrafterStep::Nothing,
             "no header for the target: no size to judge against"
         );
         assert_eq!(
@@ -1683,10 +1763,106 @@ mod tests {
                 only(&["3b"]),
                 || Some(360),
                 DRAFTER_MAX_FRACTION,
+                None,
                 size,
                 can_draft
             ),
-            DrafterToAcquire::Nothing
+            DrafterStep::Nothing
+        );
+    }
+
+    /// A node holding a drafter fetches a LARGER one that can draft (#331): a
+    /// 0.5B held, the 1.5B is fetched; a 1.5B held, nothing — neither another
+    /// copy of the same size (a Q4 of the 1.5B reads fewer bytes a guess, which
+    /// a flow turns into waiting) nor the 3B, past the size rule. Every likely
+    /// header is still learned first.
+    #[test]
+    fn a_node_holding_a_drafter_fetches_only_a_larger_one() {
+        let id = |s: &str| ModelId(s.into());
+        let likely = || vec![id("3b"), id("1.5b-q8"), id("1.5b-q4")];
+        let size = |m: &ModelId| {
+            let (size, reads) = match m.0.as_str() {
+                "3b" => (264, 2_000),
+                "1.5b-q8" => (66, 1_600),
+                "1.5b-q4" => (66, 900),
+                _ => return None,
+            };
+            Some(DrafterSize { size, reads })
+        };
+        let can_draft = |m: ModelId| {
+            Some(DrafterSpec {
+                model_id: m,
+                layer_range: (0, 28),
+                reads: 151_936,
+            })
+        };
+        let headers =
+            |have: &'static [&'static str]| move |m: &ModelId| have.contains(&m.0.as_str());
+        let every = headers(&["3b", "1.5b-q8", "1.5b-q4"]);
+        let held_0_5b = Some(19);
+        assert_eq!(
+            acquisition_among(
+                likely(),
+                headers(&["3b"]),
+                || Some(360),
+                4,
+                held_0_5b,
+                size,
+                can_draft
+            ),
+            DrafterStep::LearnHeaders(vec![id("1.5b-q8"), id("1.5b-q4")]),
+            "a held drafter does not skip the headers"
+        );
+        assert_eq!(
+            acquisition_among(likely(), every, || Some(360), 4, held_0_5b, size, can_draft),
+            DrafterStep::Fetch(id("1.5b-q4")),
+            "larger than the 0.5B held; of its two copies the one reading less"
+        );
+        assert_eq!(
+            acquisition_among(likely(), every, || Some(360), 4, Some(66), size, can_draft),
+            DrafterStep::Nothing,
+            "a 1.5B held: a copy of the same size is never worth a fetch"
+        );
+        assert_eq!(
+            acquisition_among(likely(), every, || Some(360), 4, None, size, can_draft),
+            DrafterStep::Fetch(id("1.5b-q4")),
+            "control: nothing held, the same choice"
+        );
+    }
+
+    /// The held drafter is kept on every answer, and so is the one being
+    /// fetched — the replacement arrives beside the drafter it replaces.
+    #[test]
+    fn an_answer_keeps_the_drafter_held_while_a_better_one_comes() {
+        let id = |s: &str| ModelId(s.into());
+        let answer = |next| DrafterToAcquire {
+            held: Some(id("0.5b")),
+            next,
+        };
+        for next in [
+            DrafterStep::LearnHeaders(vec![id("1.5b")]),
+            DrafterStep::Fetch(id("1.5b")),
+            DrafterStep::Nothing,
+        ] {
+            assert!(answer(next.clone()).keeps(&id("0.5b")), "{next:?}");
+        }
+        let fetching = answer(DrafterStep::Fetch(id("1.5b")));
+        assert!(fetching.keeps(&id("1.5b")));
+        assert_eq!(fetching.fetching(), Some(&id("1.5b")));
+        assert!(!fetching.keeps(&id("3b")));
+        let learning = answer(DrafterStep::LearnHeaders(vec![id("3b")]));
+        assert!(
+            !learning.keeps(&id("3b")),
+            "a header being learned keeps no parts"
+        );
+        assert_eq!(learning.headers_to_learn(), &[id("3b")]);
+        let replaced = DrafterToAcquire {
+            held: Some(id("1.5b")),
+            next: DrafterStep::Nothing,
+        };
+        assert!(
+            !replaced.keeps(&id("0.5b")),
+            "once the 1.5B is held and chosen, the 0.5B is no longer the drafter's"
         );
     }
 }

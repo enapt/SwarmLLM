@@ -5019,8 +5019,9 @@ Planner, request and download pass choose through the one `largest_that_can_draf
 left (#275) is the drafter's that will be chosen. A/B `SWARMLLM_DRAFTER_MAX_FRACTION=4` (the rule
 before, on a card). Tests: `the_largest_small_drafter_within_half_its_target_is_chosen` (red at 4),
 `a_large_drafter_is_held_to_a_quarter_of_its_target`, `a_node_without_a_card_holds_every_drafter_to_a_quarter`.
-**Not done**: a node already holding a smaller drafter keeps it (`drafter_to_acquire` answers
-`Held`) — FUTURE_WORK #331.
+**A node already holding a smaller drafter fetches the larger one beside it** (#331, 2026-10-24):
+`drafter_to_acquire` answers the held drafter AND the next step, and prune keeps both until the
+larger one is held and chosen — `docs/invariants/memory.md` § "A split with no drafter fetches one".
 
 **With the 3B the flow keeps three levels of 8 rows and 128 live rows** (2026-10-23 night, the
 real link, round trip 393-400 ms, the same binary, QUIC, greedy chat; a throwaway first arm, then

@@ -33,12 +33,12 @@ pub struct ModelMgmt {
         DashMap<crate::types::ModelId, crate::config::ModelAutoManagePolicy>,
     pub hf_probe_cache: DashMap<crate::types::ModelId, HfProbeInfo>,
     pub peer_shard_downloads: DashMap<crate::types::ShardId, Vec<(NodeId, u32)>>,
-    /// Targets a split driven from here ran WITHOUT a drafter — no model held
-    /// here could guess for them — and when a split of them last ran (one that
-    /// then found its drafter refreshes the time). Written ONLY by
+    /// Targets a split driven from here guessed for — with no drafter here, or
+    /// with one — and when a split of them last ran. Written ONLY by
     /// `pipeline::engine_drafter::note_split_wanting_a_drafter`; the download
     /// pass fetches the drafter `engine_drafter::drafter_to_acquire` names for
-    /// each, and prune keeps it (`auto_manage::coverage::drafter`).
+    /// each (where one is held, only a larger one, #331), and prune keeps the
+    /// held one and the one being fetched (`auto_manage::coverage::drafter`).
     pub drafters_wanted: DashMap<crate::types::ModelId, std::time::Instant>,
     pub download_cancel_flags: DashMap<crate::types::ModelId, Arc<AtomicBool>>,
     pub model_trust: DashMap<crate::types::ModelId, crate::types::ModelTrustInfo>,
