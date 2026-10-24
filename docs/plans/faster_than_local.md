@@ -364,7 +364,7 @@ distilled on them (DistillSpec 2310.08461: +10-45% acceptance; Online SD 2310.07
 user's target AND domain on the user's own machine, no data leaving it. The crude form — a
 per-token bias — was refuted (§ 5); a LoRA is not that. Needs a training loop on the card.
 
-## 7. Three new levers, measured before any code (2026-10-24)
+## 7. New levers, measured before any code (2026-10-24)
 
 None of these was in the plans above. Each was measured offline on the coder-7B target and its
 drafters before anything was built, and each says what the number decides. Data and scripts:
@@ -438,6 +438,39 @@ the model's own reply, scored against llama.cpp with `examples/score_against_ref
 its cheapest form: no judge to train. Next, only when that mode is built: replies under τ 0.5 and
 1.0 scored against llama.cpp, then the link.
 
+**7.4 Fewer bytes a row without losing anything: ~8% is all there is.** For a large model on a
+home uplink the rows, not the round trip, set the tree's width: a 70B row is 8,192 values, ~8.7 KB
+at Q8_0, so 64 guesses a round at ~6.5 rounds a second is ~29 Mbit/s a hop, past most home uploads,
+and the flow's guard (`FlowGuard`) holds the tree down to fit. BloomBee (2604.21072) codes
+activations losslessly; the question is what is left after OUR wire, which already sends Q8_0
+through zstd level 1 (`network/protocol/mod.rs`, `compress_tensors`). Measured on the state crossing
+the coder-7B's split at layer 14 (`LOGITS_PROBE_HIDDEN`), the wire's own Q8_0 reproduced
+(`~/swarmllm-318/osd/rowbits.py`), on a chat reply (443 rows) and a long code prompt (1,913):
+- **today: 7.73-7.74 bits a value** (raw Q8_0 is 8.5), the same at 8, 64 and 512 rows a message;
+- the best ideal STATIC coder — a table per dimension for the quants, the scales coded too: **7.14
+  on the 1,913 rows** (the 443-row figure, 6.86, is a plug-in entropy estimated from too few
+  samples a dimension), **7.6% under today's wire**. A real coder does a little worse, so worth a
+  few per cent of tok/s where bandwidth binds, and a new wire format. Not built.
+- **Scaling each dimension by its typical size before the group quantization — REFUTED**
+  (`rowlane.py`, calibrated on half the rows, scored on the other half): worse at every width, more
+  error AND more bits (8 bits: 1.11% against Q8_0's 0.86% a row). A few dimensions run ~170× the
+  median, and they carry the row's norm. Plain group quantization keeps its usual price, about
+  twice the error a bit removed (7 bits, 1.73%), so fewer bytes a row means more loss: the opt-in
+  mode's question, not the default's.
+
+**7.5 A drafter that learns from the target as a session goes on (OSD 2310.07177, OmniDraft
+2507.02659): its cheapest form REFUTED, the adapter forms still to run.** Every check hands the
+requester the target's tokens, so the drafter could be trained on them for free, lossless by
+construction (only the guesser changes). Measured offline (`~/swarmllm-318/osd/osd.py`, PyTorch on
+the processor): the coder-1.5B drafter (bf16 weights, HF), replaying the 11 prompts as two
+sessions in order (code: 6, chat: 5), each 32-token piece SCORED before it is learned from. The
+frozen drafter reproduces the candle runs exactly (code_bst 0.965 both). **A learned bias per
+vocabulary entry** (AdamW, lr 0.05, one step a piece, the previous conversation replayed): code
+session 0.920 → 0.915 (−0.4 points; csv −3.1, code_debounce +1.9), chat −0.9 to −1.2 a
+conversation. A word-level nudge cannot learn misses that depend on the context. Owed: a LoRA on
+the top two layers (no backward past them, cheap to build in candle) and on every layer, the same
+protocol; the stop rule is +2 points on a session.
+
 ## Sources
 
 Petals 2312.08361 · Pope et al. 2211.05102 · StagFormer 2501.15665 · Layer
@@ -451,4 +484,5 @@ docs · llama.cpp `--n-cpu-moe` reports (discussions #15396, dev.to 8 GB
 Qwen3-Coder-30B) · Leviathan 2211.17192 · Chen 2302.01318 · § 7: llguidance 1.9.1
 (`docs/fast_forward.md`, `syntax.md`) · TensorRT-LLM tech blog 12 (guided + speculative
 decoding) · vLLM `v1/structured_output` · Medusa 2401.10774 (typical acceptance) · Tuned Lens
-2303.08112 · LayerSkip 2404.16710.
+2303.08112 · LayerSkip 2404.16710 · BloomBee 2604.21072 (lossless activation coding) · OSD
+2310.07177 · OmniDraft 2507.02659.
