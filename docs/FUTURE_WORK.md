@@ -2235,13 +2235,27 @@ prompt lookup) searches the prompt and the reply so far. An agent's opening call
 sessions, which no lookup sees. Measured offline (§ 7.6): the share of reply tokens a copy predicts
 on a session's first replies is 28 → 61% (SWE-agent) and 34 → 64% (coding-agent sessions of the
 `/v1/messages` kind) with a store of earlier replies, +2.6 to +9.3 points over whole sessions.
-Next: a per-model store of ONE requester's recent reply ids, in memory, bounded (1M tokens), indexed
+Next: a per-model store of the OWNER's recent reply ids, in memory, bounded (1M tokens), indexed
 by 2-4-grams, written when a reply is finalised and searched after the prompt and the reply. It is a
-REQUIRED argument of the one lookup, never an `Option` a path may skip. It is never shared: one store per API key; none for a
-peer's request (a led split's head, a pool forward); never announced or saved to disk. Reason: a
-store's matches show in the reply's speed (REST's datastore leaked at over 25 tokens a second,
-2411.01076). Measure with the flow's own `SWARMLLM_FLOW_COPY` A/B on an agent's replayed session
-before it is on by default.
+REQUIRED argument of the one lookup, never an `Option` a path may skip. It is never shared, never
+announced and never saved to disk. Reason: a store's matches show in the reply's speed (REST's
+datastore leaked at over 25 tokens a second, 2411.01076). Mapped 2026-10-24 (read, not yet checked
+at each line):
+- **No per-key identity exists.** A node has one API key (`SharedState::api_key`). "The owner" is
+  `pipeline::worker_requester` = `Owner` (a led split arrives `lead_here` → `Swarm`) AND not a pool
+  member's HTTP forward. That forward carries the same key plus `x-swarm-forwarded`, which today
+  reaches only the subscription check (`peer_forward.rs`, `middleware.rs`), not `InferenceRequest`.
+  It must be carried there first.
+- **Two processes.** The flow (`dsd_flow::copy_ahead` → `copied_run`) and the daemon's speculative
+  loops (`speculative::ngram_lookup_drafts`: draft-model, DSD, the distributed n-gram loop) run in
+  the daemon. Local prompt lookup (`model_worker::ngram_spec_round`) runs in the worker, which knows
+  only `IpcGenerate::for_the_owner`.
+- **Write point.** `speculative::finish_speculative` holds the ids for the daemon's loops. A worker
+  generation shows its ids only as `WorkerMsg::Token`. `InferenceOutput`, `RequestTrace` and
+  `finalize_reply_text` carry text, not ids.
+
+Measure with the flow's own `SWARMLLM_FLOW_COPY` A/B on an agent's replayed session before it is on
+by default.
 
 ### Model families and platforms
 

@@ -484,13 +484,19 @@ only where the prompt and the reply found nothing. Share of reply tokens a copy 
   transcripts, only the counts read; 6.6M reply tokens, 95% of them tool-call inputs): **55.3% →
   57.9%** (text 17.8 → 20.9, tool calls 57.2 → 59.8); a session's first 10 replies **33.6% → 63.6%**.
 
-So the store matters where the session's own history is short — an agent's opening calls, a new
+Several continuations as branches instead of the most recent one (`branches.py`, 200 of the
+SWE-agent sessions, 10 tokens a branch): 63.9% at one, 67.1% at two (+34% copied rows), 68.4% at
+four (+70%). Branching costs rows for little, and the store adds more with no extra rows. So the store matters where the session's own history is short — an agent's opening calls, a new
 chat on a familiar task — and adds a few points once the history has built up. Both workloads are
 another model's text: this measures the repetition in agent work, not a drafter, and chat is
 unmeasured (SuffixDecoding's WildChat gains are smaller). **A store is a side channel**: REST's
 datastore leaks at over 25 tokens a second through the speed of the reply alone (2411.01076), so a
-store holds only ONE requester's replies and is read only for that requester — never another API
-key's, never for a peer's request (a head leading someone's split, a pool member's forward).
+store holds only the owner's replies and is read only for the owner's requests — never for a peer's
+request (a head leading someone's split, a pool member's forward under the same key).
+vLLM's suffix method builds ONE `SuffixDecodingCache` (Arctic Inference) for the whole server,
+fed every request's output and keyed by request id. Its proposer shows no user or tenant key
+(`vllm/v1/spec_decode/suffix_decoding.py`, read 2026-10-24; the cache's own matching is in Arctic
+Inference, not read). Here the store is the owner's alone.
 Filed as FUTURE_WORK #337.
 
 ## Sources
