@@ -3132,7 +3132,7 @@ grep `^| N |`).
   stopped): 01:24Z — TCP 8810 and UDP 47681 → this PC, nothing to 10.255.255.254, the moved port
   logged; 01:52Z — 8810/8800 → this PC, and both rows removed at the clean stop; 02:11Z —
   another computer's row staged past two empty slots on the probe's port: it took TCP 40186
-  instead, and its clean stop left that row alone. 18 tests in the crate, run by `vendored.yml`'s `upnp` job. `docs/invariants/network.md` §
+  instead, and its clean stop left that row alone. 20 tests in the crate, run by `vendored.yml`'s `upnp` job. `docs/invariants/network.md` §
   "UPnP that the router refuses is said out loud".
 - #329 — **UPnP turned on at the router while a node runs is used without a restart.** After
   `GatewayNotFound` the vendored behaviour searches again after 2 minutes, doubling to 30;

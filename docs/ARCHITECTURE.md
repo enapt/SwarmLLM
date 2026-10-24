@@ -103,8 +103,9 @@ swarmllm/
 │   ├── libp2p-upnp/           (0.6.0 + patches, listed in its CHANGELOG: igd-next 0.18, which reaches a router
 │   │                          listing an ABSOLUTE control URL (guard `upnp_reaches_a_router_that_lists_an_absolute_control_url`);
 │   │                          the external port CHOSEN from the router's table (`src/choice.rs`, read past empty
-│   │                          slots); the router-facing address only; no "mapping should exist" panic (libp2p #6377);
-│   │                          re-search on a backoff (#329); 18 tests, `--features tokio --lib`, CI `vendored.yml`)
+│   │                          slots, an unanswered read never taken as empty); the router-facing address only, and
+│   │                          another of the listener's when it goes; no "mapping should exist" panic (libp2p #6377);
+│   │                          re-search on a backoff (#329); 20 tests, `--features tokio --lib`, CI `vendored.yml`)
 │   └── rayon-core/            (1.13.0 + ONE patch: an idle worker spins 200 µs before it sleeps — `sleep/mod.rs`
 │                              `spin_budget`, `SWARMLLM_RAYON_SPIN_US=0` = upstream; small decode regions stop
 │                              paying a wake per worker, FUTURE_WORK #137; guard

@@ -53,8 +53,24 @@ pub(crate) enum Answer {
     Row(Row),
     /// 713: an empty slot, or past the end.
     NoEntry,
-    /// Anything else (at the first index: the router will not list its table).
-    Error,
+    /// Another error from the router (at the first index: it will not list its
+    /// table).
+    Refused,
+    /// No answer at all: a timeout (igd-next's is 10 s) or a dropped connection.
+    Silent,
+}
+
+/// What a read of the router's table found.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Table {
+    Listed(Vec<Row>),
+    /// The router refused to list its mappings: only a refusal to map can say a
+    /// port is taken (upstream's order, `candidates`).
+    Unlisted,
+    /// The router did not answer. Not read as empty, nor as unlisted — either
+    /// would ask for a port another computer may hold, or remove its row — so
+    /// the request fails and is asked again later.
+    Unknown,
 }
 
 /// A read of the router's table, one index at a time (`tokio.rs` asks).
@@ -65,6 +81,9 @@ pub(crate) struct TableRead {
     gaps: u32,
     done: bool,
     unlisted: bool,
+    /// This index went unanswered once already.
+    retried: bool,
+    unknown: bool,
 }
 
 impl TableRead {
@@ -75,26 +94,42 @@ impl TableRead {
     }
 
     /// The answer for the index `next` gave; a row `found` accepts ends the read.
+    /// An index that went unanswered is asked once more before the read gives up.
     pub(crate) fn answer(&mut self, answer: Answer, found: impl Fn(&Row) -> bool) {
         match answer {
+            Answer::Silent if !self.retried => {
+                self.retried = true;
+                return;
+            }
+            Answer::Silent => {
+                self.unknown = true;
+                self.done = true;
+            }
             Answer::Row(row) => {
                 self.gaps = 0;
                 self.done = found(&row);
                 self.rows.push(row);
             }
             Answer::NoEntry => self.gaps += 1,
-            Answer::Error if self.index == 0 => {
+            Answer::Refused if self.index == 0 => {
                 self.unlisted = true;
                 self.done = true;
             }
-            Answer::Error => self.gaps += 1,
+            Answer::Refused => self.gaps += 1,
         }
+        self.retried = false;
         self.index += 1;
     }
 
-    /// The rows read, or `None` if the router would not list them.
-    pub(crate) fn rows(self) -> Option<Vec<Row>> {
-        (!self.unlisted).then_some(self.rows)
+    /// What the read found.
+    pub(crate) fn table(self) -> Table {
+        if self.unknown {
+            Table::Unknown
+        } else if self.unlisted {
+            Table::Unlisted
+        } else {
+            Table::Listed(self.rows)
+        }
     }
 }
 
@@ -317,8 +352,8 @@ mod tests {
         );
     }
 
-    /// Feed `answers` to a read; return the rows and how many indices were asked.
-    fn read(answers: Vec<Answer>, found: impl Fn(&Row) -> bool) -> (Option<Vec<Row>>, usize) {
+    /// Feed `answers` to a read; return what it found and how many requests it made.
+    fn read(answers: Vec<Answer>, found: impl Fn(&Row) -> bool) -> (Table, usize) {
         let mut answers = answers.into_iter();
         let mut read = TableRead::default();
         let mut asked = 0;
@@ -326,7 +361,14 @@ mod tests {
             asked += 1;
             read.answer(answers.next().unwrap_or(Answer::NoEntry), &found);
         }
-        (read.rows(), asked)
+        (read.table(), asked)
+    }
+
+    fn listed(table: Table) -> Vec<Row> {
+        match table {
+            Table::Listed(rows) => rows,
+            other => panic!("not listed: {other:?}"),
+        }
     }
 
     #[test]
@@ -342,8 +384,8 @@ mod tests {
             Answer::NoEntry,
             Answer::Row(row(47_681, UDP, "192.168.1.52", 8800)),
         ];
-        let (rows, _) = read(answers, |_| false);
-        let rows = rows.unwrap();
+        let (table, _) = read(answers, |_| false);
+        let rows = listed(table);
         assert_eq!(rows.len(), 5);
         assert!(held_by_another(&rows, ours(TCP, me()), 8810));
         // And this computer's own row past the second gap is found to reuse.
@@ -353,36 +395,64 @@ mod tests {
 
     #[test]
     fn a_read_ends_after_enough_empty_answers_or_at_the_row_it_wants() {
-        let (rows, asked) = read(
+        let (table, asked) = read(
             vec![Answer::Row(row(8810, TCP, "192.168.1.52", 8810))],
             |_| false,
         );
-        assert_eq!(rows.unwrap().len(), 1);
+        assert_eq!(listed(table).len(), 1);
         assert_eq!(asked, 1 + GAPS_THAT_END_THE_TABLE as usize);
         // A removal stops at its own row.
-        let (rows, asked) = read(
+        let (table, asked) = read(
             vec![
                 Answer::Row(row(8810, TCP, "192.168.1.52", 8810)),
                 Answer::Row(row(8800, UDP, "192.168.1.52", 8800)),
             ],
             |r| r.external_port == 8810,
         );
-        assert_eq!((rows.unwrap().len(), asked), (1, 1));
+        assert_eq!((listed(table).len(), asked), (1, 1));
     }
 
     #[test]
-    fn a_router_that_will_not_list_is_read_as_unknown() {
-        assert!(read(vec![Answer::Error], |_| false).0.is_none());
+    fn a_router_that_will_not_list_is_read_as_unlisted() {
+        assert_eq!(read(vec![Answer::Refused], |_| false).0, Table::Unlisted);
         // An error further on is a gap, not the router refusing.
-        let (rows, _) = read(
+        let (table, _) = read(
             vec![
                 Answer::Row(row(8810, TCP, "192.168.1.52", 8810)),
-                Answer::Error,
+                Answer::Refused,
                 Answer::Row(row(8800, UDP, "192.168.1.52", 8800)),
             ],
             |_| false,
         );
-        assert_eq!(rows.unwrap().len(), 2);
+        assert_eq!(listed(table).len(), 2);
+    }
+
+    #[test]
+    fn a_router_that_does_not_answer_is_not_read_as_one_that_will_not_list() {
+        // A timeout on the first request (pre-release review, 2026-10-24) was
+        // read as "will not list", and that falls back to asking for the internal
+        // port: on a router that replaces, another computer's.
+        let (table, asked) = read(vec![Answer::Silent, Answer::Silent], |_| false);
+        assert_eq!((table, asked), (Table::Unknown, 2));
+        // Nor as a gap further on: the row not read may be another computer's.
+        let (table, _) = read(
+            vec![
+                Answer::Row(row(8810, TCP, "192.168.1.52", 8810)),
+                Answer::Silent,
+                Answer::Silent,
+            ],
+            |_| false,
+        );
+        assert_eq!(table, Table::Unknown);
+        // Answered the second time: the read goes on from there.
+        let (table, _) = read(
+            vec![
+                Answer::Silent,
+                Answer::Row(row(8810, TCP, "192.168.1.200", 8810)),
+            ],
+            |_| false,
+        );
+        assert!(held_by_another(&listed(table), ours(TCP, me()), 8810));
     }
 
     #[test]

@@ -38,7 +38,7 @@ use igd_next::{
 pub use crate::behaviour::Behaviour;
 use crate::{
     behaviour::{GatewayEvent, GatewayRequest, Mapping},
-    choice::{self, Answer, Ours, Row},
+    choice::{self, Answer, Ours, Row, Table},
 };
 
 /// Every address this computer listens on, written by the behaviour as listen
@@ -126,34 +126,46 @@ pub(crate) fn local_ip_towards(router: SocketAddr) -> Option<IpAddr> {
     Some(socket.local_addr().ok()?.ip())
 }
 
-/// The router's port-mapping table, or `None` if it will not list one.
-async fn read_table(gateway: &IgdGateway<Tokio>) -> Option<Vec<Row>> {
+/// The router's port-mapping table.
+async fn read_table(gateway: &IgdGateway<Tokio>) -> Table {
     read_table_until(gateway, |_| false).await
 }
 
 /// The router's table up to and including the first row `stop` accepts — one
 /// request a row, so a removal at shutdown stops at its own row. Read past
 /// empty slots: `choice::TableRead` says when it is over.
-async fn read_table_until(
-    gateway: &IgdGateway<Tokio>,
-    stop: impl Fn(&Row) -> bool,
-) -> Option<Vec<Row>> {
+async fn read_table_until(gateway: &IgdGateway<Tokio>, stop: impl Fn(&Row) -> bool) -> Table {
     let mut read = choice::TableRead::default();
     while let Some(index) = read.next() {
         let answer = match gateway.get_generic_port_mapping_entry(index).await {
             Ok(entry) => Answer::Row(Row::from(entry)),
             Err(GetGenericPortMappingEntryError::SpecifiedArrayIndexInvalid) => Answer::NoEntry,
+            // The request never got an answer (igd-next maps its 10 s timeout to
+            // an I/O error): not the router refusing to list.
+            Err(GetGenericPortMappingEntryError::RequestError(
+                err @ (RequestError::IoError(_)
+                | RequestError::HyperError(_)
+                | RequestError::HyperClientError(_)),
+            )) => {
+                tracing::debug!(
+                    index,
+                    "the gateway did not answer a read of its port mappings: {err}"
+                );
+                Answer::Silent
+            }
             Err(err) => {
                 if index == 0 {
                     tracing::debug!("the gateway would not list its port mappings: {err}");
                 }
-                Answer::Error
+                Answer::Refused
             }
         };
         read.answer(answer, &stop);
     }
-    read.rows()
+    read.table()
 }
+
+const NO_ANSWER: &str = "the router did not answer a read of its port mappings";
 
 /// Map `mapping` on the first external port no other computer holds, and return it.
 async fn map_port(
@@ -169,7 +181,11 @@ async fn map_port(
         internal,
         own_ips,
     };
-    let table = read_table(gateway).await;
+    let table = match read_table(gateway).await {
+        Table::Listed(rows) => Some(rows),
+        Table::Unlisted => None,
+        Table::Unknown => return Err(NO_ANSWER.into()),
+    };
     let mut last_err: Option<Box<dyn Error + Send + Sync>> = None;
     for port in choice::candidates(ours, held, table.as_deref()) {
         match gateway
@@ -206,6 +222,7 @@ async fn map_port(
 
 /// Remove the router's row for `mapping` at `port` — unless another computer
 /// holds that port now (a router that replaces gave it away), which is theirs.
+/// A router that did not answer the read is not asked to remove it either.
 async fn unmap_port(
     gateway: &IgdGateway<Tokio>,
     ours: Ours<'_>,
@@ -213,11 +230,17 @@ async fn unmap_port(
 ) -> Result<(), RemovePortError> {
     let protocol = ours.protocol;
     let this_row = |r: &Row| r.protocol == protocol && r.external_port == port;
-    if let Some(table) = read_table_until(gateway, this_row).await {
-        if choice::held_by_another(&table, ours, port) {
+    match read_table_until(gateway, this_row).await {
+        Table::Listed(table) if choice::held_by_another(&table, ours, port) => {
             tracing::debug!(port, %protocol, "UPnP: not removing a mapping another computer holds now");
             return Ok(());
         }
+        Table::Unknown => {
+            return Err(RemovePortError::RequestError(RequestError::IoError(
+                std::io::Error::new(std::io::ErrorKind::TimedOut, NO_ANSWER),
+            )))
+        }
+        Table::Listed(_) | Table::Unlisted => {}
     }
     match gateway.remove_port(protocol, port).await {
         Ok(()) | Err(RemovePortError::NoSuchPortMapping) => Ok(()),

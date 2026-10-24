@@ -14,9 +14,10 @@ a different public port (between 40000 and 49999) and its log says so (`UPnP: pe
 node on public port …`). It also asks only for its address on the router's network (it had asked
 for addresses the router cannot reach, such as WSL's), gives back only the ports that are still
 its own when it stops, and looks for the router again every few minutes up to half an hour, so
-UPnP turned on at the router later is used without a restart. The same change fixes a crash of the
-network side that a network change (Wi-Fi reconnecting, a laptop waking) could cause while UPnP was
-on. Both computers need this version for it to hold: an older one still asks for 8810 and 8800 and
+UPnP turned on at the router later is used without a restart. A computer plugged into a cable
+while on Wi-Fi stays reachable when the Wi-Fi goes, and a router slow to answer can no longer
+make a computer take another one's port. The same change fixes a crash of the network side that a
+network change (Wi-Fi reconnecting, a laptop waking) could cause while UPnP was on. Both computers need this version for it to hold: an older one still asks for 8810 and 8800 and
 can take them from a newer one.
 
 **The CUDA Docker image builds again.** 0.3.249's `latest-cuda` image failed to build, so it

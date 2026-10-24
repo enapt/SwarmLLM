@@ -333,10 +333,11 @@ pub struct Behaviour {
     /// List of port mappings.
     mappings: MappingList,
 
-    /// SwarmLLM patch: every listen address seen before a gateway was found.
-    /// `mappings` holds ONE per listener (keyed by `listener_id`, and an insert
-    /// keeps the first key), and which of a listener's addresses faces the
-    /// router is known only once one answers — so they wait here (`place`).
+    /// SwarmLLM patch: every listen address that is not mapped — seen before a
+    /// gateway was found, not facing the router, or of a listener mapped at
+    /// another address — until it expires. `mappings` holds ONE per listener
+    /// (keyed by `listener_id`), and which address faces the router is known only
+    /// once one answers (`place`) and can change (`map_a_successor`).
     waiting: Vec<Mapping>,
 
     /// Pending behaviour events to be emitted.
@@ -414,6 +415,13 @@ impl NetworkBehaviour for Behaviour {
                     return;
                 };
 
+                let this = Mapping {
+                    listener_id,
+                    protocol,
+                    internal_addr: addr,
+                    multiaddr: multiaddr.clone(),
+                };
+
                 if let Some((mapping, _state)) = self.mappings.iter().find(|(mapping, state)| {
                     matches!(state, MappingState::Active { .. })
                         && mapping.internal_addr.port() == addr.port()
@@ -423,6 +431,11 @@ impl NetworkBehaviour for Behaviour {
                         mapped_multiaddress=%mapping.multiaddr,
                         "port from multiaddress is already mapped on the gateway"
                     );
+                    // SwarmLLM patch: kept, to be mapped if the mapped one goes
+                    // (`map_a_successor`); upstream dropped it.
+                    if mapping.multiaddr != *multiaddr {
+                        remember(&mut self.waiting, this);
+                    }
                     return;
                 }
 
@@ -432,14 +445,7 @@ impl NetworkBehaviour for Behaviour {
                     // first of each listener: the one facing the router is picked
                     // when it answers (`place`).
                     GatewayState::Searching(_) | GatewayState::GatewayNotFound(_) => {
-                        if !self.waiting.iter().any(|m| m.multiaddr == *multiaddr) {
-                            self.waiting.push(Mapping {
-                                listener_id,
-                                protocol,
-                                internal_addr: addr,
-                                multiaddr: multiaddr.clone(),
-                            });
-                        }
+                        remember(&mut self.waiting, this);
                     }
                     GatewayState::Available(ref mut gateway) => {
                         // SwarmLLM patch: an address that is not the one the router
@@ -450,11 +456,15 @@ impl NetworkBehaviour for Behaviour {
                                 gateway.local_ip = Some(ip);
                             }
                         }
+                        // SwarmLLM patch: an address not mapped now is kept, to be
+                        // mapped if this listener's mapping ends (`map_a_successor`)
+                        // — a new address can arrive before its route does.
                         if !faces_the_router(gateway.local_ip, addr.ip()) {
                             tracing::debug!(
                                 multiaddress=%multiaddr,
-                                "not on the router's network; UPnP port mapping of multiaddress discarded"
+                                "not on the router's network; not mapped for now"
                             );
+                            remember(&mut self.waiting, this);
                             return;
                         }
                         // SwarmLLM patch: one mapping per listener. Another address
@@ -470,14 +480,10 @@ impl NetworkBehaviour for Behaviour {
                                 multiaddress=%multiaddr,
                                 "this listener is mapped at another address already"
                             );
+                            remember(&mut self.waiting, this);
                             return;
                         }
-                        let mapping = Mapping {
-                            listener_id,
-                            protocol,
-                            internal_addr: addr,
-                            multiaddr: multiaddr.clone(),
-                        };
+                        let mapping = this;
 
                         let duration = MAPPING_DURATION;
                         let state = match gateway.sender.try_send(GatewayRequest::AddMapping {
@@ -510,12 +516,12 @@ impl NetworkBehaviour for Behaviour {
                 };
             }
             FromSwarm::ExpiredListenAddr(ExpiredListenAddr { listener_id, addr }) => {
-                if !matches!(self.state, GatewayState::Available(_)) {
-                    // SwarmLLM patch: nothing is on a router yet; forget it, or a
-                    // later search would map a port nothing listens on.
-                    self.waiting
-                        .retain(|m| m.listener_id != listener_id || m.multiaddr != *addr);
-                } else if let GatewayState::Available(ref mut gateway) = &mut self.state {
+                // SwarmLLM patch: an address that went is not waiting to be mapped
+                // either, or a later search or successor would map a port nothing
+                // listens on.
+                self.waiting
+                    .retain(|m| m.listener_id != listener_id || m.multiaddr != *addr);
+                if let GatewayState::Available(ref mut gateway) = &mut self.state {
                     // SwarmLLM patch: only when the address that went is the one
                     // mapped. A listener has several (one per interface) and only
                     // the router-facing one is mapped; upstream removed by listener
@@ -553,6 +559,12 @@ impl NetworkBehaviour for Behaviour {
                                 err
                             );
                             self.mappings.remove(&listener_id);
+                            map_a_successor(
+                                &mut self.waiting,
+                                &mut self.mappings,
+                                gateway,
+                                listener_id,
+                            );
                         }
                     }
                 }
@@ -605,9 +617,14 @@ impl NetworkBehaviour for Behaviour {
                             // SwarmLLM patch: a listen address on another network
                             // (WSL's 10.255.255.254, a Docker bridge) cannot be
                             // forwarded to; upstream asked the router for it too.
-                            for mapping in
-                                place(std::mem::take(&mut self.waiting), gateway.local_ip)
-                            {
+                            // The rest stay waiting, for `map_a_successor`.
+                            let placed = place(self.waiting.clone(), gateway.local_ip);
+                            self.waiting.retain(|w| {
+                                !placed.iter().any(|p| {
+                                    p.listener_id == w.listener_id && p.multiaddr == w.multiaddr
+                                })
+                            });
+                            for mapping in placed {
                                 self.mappings.set(mapping, MappingState::Inactive);
                             }
                             self.state = GatewayState::Available(gateway);
@@ -796,6 +813,12 @@ impl NetworkBehaviour for Behaviour {
                                         "successfully removed UPnP mapping for protocol"
                                     );
                                     self.mappings.remove(&mapping.listener_id);
+                                    map_a_successor(
+                                        &mut self.waiting,
+                                        &mut self.mappings,
+                                        gateway,
+                                        mapping.listener_id,
+                                    );
                                 } else {
                                     tracing::debug!(
                                         address=%mapping.internal_addr,
@@ -835,6 +858,12 @@ impl NetworkBehaviour for Behaviour {
                                         "giving up removing the UPnP mapping; its lease ends it"
                                     );
                                     self.mappings.remove(&mapping.listener_id);
+                                    map_a_successor(
+                                        &mut self.waiting,
+                                        &mut self.mappings,
+                                        gateway,
+                                        mapping.listener_id,
+                                    );
                                 }
                             }
                         }
@@ -873,6 +902,50 @@ fn first_ip(addr: &Multiaddr) -> Option<IpAddr> {
 /// reaches from `local_ip`? Unknown → yes (upstream's behaviour).
 fn faces_the_router(local_ip: Option<IpAddr>, ip: IpAddr) -> bool {
     local_ip.is_none_or(|local| local == ip)
+}
+
+/// SwarmLLM patch: keep a listen address that is not mapped now (no router yet,
+/// not facing it, or its listener mapped at another address).
+fn remember(waiting: &mut Vec<Mapping>, mapping: Mapping) {
+    if !waiting
+        .iter()
+        .any(|m| m.listener_id == mapping.listener_id && m.multiaddr == mapping.multiaddr)
+    {
+        waiting.push(mapping);
+    }
+}
+
+/// SwarmLLM patch: a listener's mapping ended — map another of its addresses,
+/// the one facing the router now. A new address can arrive BEFORE the mapped one
+/// goes (a cable plugged in while Wi-Fi is up, a DHCP renumbering); upstream
+/// dropped it as "already mapped", and once the old one went the listener stayed
+/// unmapped (pre-release review, 2026-10-24). go-nat (`upnp.go`) reads the
+/// router-facing address afresh for every request; this is the same, per address.
+fn map_a_successor(
+    waiting: &mut Vec<Mapping>,
+    mappings: &mut MappingList,
+    gateway: &mut Gateway,
+    listener_id: ListenerId,
+) {
+    let facing = |waiting: &[Mapping], local_ip: Option<IpAddr>| {
+        waiting.iter().position(|m| {
+            m.listener_id == listener_id && faces_the_router(local_ip, m.internal_addr.ip())
+        })
+    };
+    if !waiting.iter().any(|m| m.listener_id == listener_id) {
+        return;
+    }
+    let found = facing(waiting, gateway.local_ip).or_else(|| {
+        // The address that went may have been the router-facing one.
+        if let Some(ip) = crate::tokio::local_ip_towards(gateway.router) {
+            gateway.local_ip = Some(ip);
+        }
+        facing(waiting, gateway.local_ip)
+    });
+    if let Some(i) = found {
+        // Asked for at this poll's renewal pass, like a mapping placed at the search.
+        mappings.set(waiting.remove(i), MappingState::Inactive);
+    }
 }
 
 /// The addresses seen before a gateway answered that are to be mapped: at most
@@ -1093,9 +1166,55 @@ mod tests {
         fn state(&self, listener_id: ListenerId) -> Option<&MappingState> {
             self.behaviour.mappings.get(&listener_id)
         }
+
+        /// The router-facing address, as a re-read would find it after a route
+        /// moved (the re-read itself asks this machine's routing table).
+        fn set_local_ip(&mut self, ip: &str) {
+            if let GatewayState::Available(ref mut gateway) = self.behaviour.state {
+                gateway.local_ip = Some(ip.parse().unwrap());
+            }
+        }
     }
 
     const LAN_TCP: &str = "/ip4/192.168.1.52/tcp/8810";
+    const CABLE_TCP: &str = "/ip4/192.168.1.60/tcp/8810";
+
+    #[test]
+    fn a_new_address_that_came_before_the_old_one_went_is_mapped_when_it_goes() {
+        // Pre-release review, 2026-10-24: a cable plugged in while Wi-Fi is up.
+        // The new address arrives first; upstream dropped it as "already
+        // mapped", and when the Wi-Fi one went the listener stayed unmapped.
+        let mut rig = Rig::new(Some("192.168.1.52"));
+        let l = ListenerId::next();
+        rig.listen(l, LAN_TCP);
+        let [(_, m)]: [_; 1] = rig.asked().try_into().unwrap();
+        rig.reply(GatewayEvent::Mapped {
+            mapping: m.clone(),
+            external_port: 8810,
+        });
+        rig.run();
+
+        rig.set_local_ip("192.168.1.60");
+        rig.listen(l, CABLE_TCP);
+        assert!(rig.asked().is_empty(), "one mapping per listener");
+        rig.unlisten(l, LAN_TCP);
+        let asked: Vec<_> = rig.asked().into_iter().map(|(what, _)| what).collect();
+        assert_eq!(asked, ["remove"]);
+        rig.reply(GatewayEvent::Removed(m));
+        rig.run();
+        let [(what, next)]: [_; 1] = rig.asked().try_into().unwrap();
+        assert_eq!(
+            (what, next.multiaddr.to_string()),
+            ("add", CABLE_TCP.into())
+        );
+        rig.reply(GatewayEvent::Mapped {
+            mapping: next,
+            external_port: 8810,
+        });
+        let (confirmed, _) = rig.run();
+        assert_eq!(confirmed.len(), 1);
+        assert!(matches!(rig.state(l), Some(MappingState::Active { .. })));
+    }
 
     #[test]
     fn a_listener_back_before_its_removal_is_answered_is_mapped_again() {
@@ -1164,6 +1283,10 @@ mod tests {
         rig.reply(GatewayEvent::Removed(m));
         rig.run();
         assert!(rig.state(l).is_none());
+        assert!(
+            rig.asked().is_empty(),
+            "an address that went is not mapped next"
+        );
     }
 
     #[test]

@@ -41,6 +41,16 @@
   un-polled, so the next reply woke nobody.
 - The router-facing address is read again for a listen address that is not it (a DHCP change,
   Wi-Fi to cable); it was fixed at the search.
+- A listen address not mapped now — another of a mapped listener's, or one not facing the
+  router yet — is kept until it goes, and mapped when its listener's mapping ends
+  (`map_a_successor`): a new address can arrive BEFORE the old one goes (a cable plugged in
+  while Wi-Fi is up), and upstream dropped it as "already mapped", so once the old one went
+  the listener stayed unmapped.
+- A router that does not ANSWER a read of its table (a timeout, a dropped connection; each
+  index is asked twice) is not read as one that will not list: that falls back to asking for
+  the internal port, another computer's on a router that replaces. The mapping or removal
+  fails and is asked again later. Only an error the router answers with, at the first index,
+  means it will not list (`choice::Table`).
 - A gateway not found is searched for again after 2 minutes, doubling to 30 (FUTURE_WORK
   #329); listen addresses seen meanwhile are mapped when one is found.
 

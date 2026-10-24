@@ -4694,7 +4694,29 @@ after them; a probe on `-p 8801` mapped TCP 40186 → this PC instead and logged
 `UPnP: peers reach this node on public port 40186, not 8811`, took UDP 8801, and
 at its clean stop removed both rows and left the staged one. Test
 `an_empty_slot_in_the_routers_table_does_not_end_it` is red when a read stops at
-the first gap. Tests: the crate's own 18, in `vendored.yml`'s `upnp` job.
+the first gap. Tests: the crate's own 20, in `vendored.yml`'s `upnp` job.
+
+**The pre-release review (v0.3.250, sonnet) found two more.** (1) A new listen
+address arriving BEFORE the mapped one goes — a cable plugged in while Wi-Fi is up,
+a DHCP renumbering where the new lease lands first — was dropped as "already
+mapped" (upstream's early return), so once the old address went the listener had
+no mapping until a restart. The earlier DHCP fix re-read the router-facing address
+only for an address arriving AFTER the old one went. Now every unmapped listen
+address stays in `waiting` until it expires, and when a listener's mapping ends
+(removed, removal given up) `map_a_successor` maps the one facing the router — read
+again if none faces the stored one, since the address that went may have been it.
+go-nat (`upnp.go`) gets the same result by reading the internal address afresh for
+every `AddPortMapping`; libp2p maps per address, so here it is per listener. (2) Any
+error on the table's first index read as "this router will not list", and that
+falls back to upstream's order — the internal port first — which on a router that
+replaces takes another computer's port; a removal skipped its ownership check the
+same way. A timeout (igd-next's is 10 s) or a dropped connection is now `Silent`:
+asked once more, then the read is `Table::Unknown` and the mapping or removal
+FAILS and is asked again later. Only an error the router answers with means it will
+not list. Tests `a_new_address_that_came_before_the_old_one_went_is_mapped_when_it_goes`
+and `a_router_that_does_not_answer_is_not_read_as_one_that_will_not_list`, plus an
+assertion in `a_listener_closing_with_several_addresses_removes_its_mapping_once`
+that an address which went is never mapped next; each goes red with its fix undone.
 
 ## ACK-Timeout Fast-Fail for rr Sends
 

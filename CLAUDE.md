@@ -94,7 +94,7 @@ cargo dev-run -- run -p 8800 -v       # start a daemon serving the frontend from
 **Counts, measured at v0.3.250 (dev,claude-subscription)**: **3901 lib** (+17 ignored),
 80 integration (32 + 34 + 14 `yamux_substream`), **248 repo-consistency**,
 1 `api_key_side_effects`, 62 `swarmllm-types`, 12 in the vendored
-request-response patch, 5 in the libp2p-quic one and 18 in the libp2p-upnp one — plus 25 in the `swarmllm` BIN target (`cli::*`, counted
+request-response patch, 5 in the libp2p-quic one and 20 in the libp2p-upnp one — plus 25 in the `swarmllm` BIN target (`cli::*`, counted
 nowhere else). They are refreshed at release (`memory/release_gate.md`), not
 per change, so a higher count since then is expected. The types crate and the
 vendored patches are **not** run by a bare `cargo test`: `cargo test --manifest-path
