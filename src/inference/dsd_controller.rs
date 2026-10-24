@@ -327,6 +327,61 @@ pub fn best_gamma_overall(
     }
 }
 
+/// The guess count for a round on ONE computer, where a round that guesses
+/// nothing is a different forward from a check — [`best_gamma_overall`] with
+/// the step priced on its own. On a card a step of one position is one
+/// captured CUDA graph (`cuda_graph`), and a check of several either a graph
+/// of its own shape or, where its attention reads a mask (Qwen 3.5's), op by
+/// op. One line through both prices a short check as nearly a step, so the
+/// worst buy — a whole check for a token or two — looks cheapest. Here
+/// `step_ms` prices a round of one position and the line `check`, fitted from
+/// checks only, every round of more.
+///
+/// `rows_before`: rows the round reads ahead of the token it decides — the
+/// tokens a check taken back left to read again — which make even a round that
+/// guesses nothing a check.
+///
+/// `rejection_rereads`: a rejected guess takes the whole check back and its
+/// accepted tokens are read again at the head of the next round (a model with
+/// recurrent state, #228 (5)), so a check that may be rejected also turns the
+/// next round's step into a check: `1 − α^γ` times the difference between a
+/// check of two rows and a step.
+///
+/// `None` until a step and a check have both been timed: the caller guesses
+/// as far as it may, which is how the line is learned. Zero is an answer
+/// (SmartSpec, as [`best_gamma_for_check`]); ties go to the smaller γ.
+pub fn best_gamma_beside_a_step(
+    alpha: f64,
+    step_ms: Option<f64>,
+    check: &CheckCost,
+    rows_before: u32,
+    rejection_rereads: bool,
+    max: u32,
+) -> Option<u32> {
+    let step_ms = step_ms?;
+    let check_two = check.predict(2)?;
+    let a = alpha.clamp(0.0, 0.999_999);
+    let reread_ms = if rejection_rereads {
+        (check_two - step_ms).max(0.0)
+    } else {
+        0.0
+    };
+    let cost = |g: u32| {
+        let forward = match (g, rows_before) {
+            (0, 0) => step_ms,
+            _ => check.predict(rows_before + 1 + g).unwrap_or(check_two),
+        };
+        let rejected = if g == 0 { 0.0 } else { 1.0 - a.powi(g as i32) };
+        (forward + rejected * reread_ms).max(0.1)
+    };
+    Some(
+        (0..=max)
+            .map(|g| (g, expected_tokens_per_round(alpha, g) / cost(g)))
+            .fold((0, f64::MIN), |best, c| if c.1 > best.1 { c } else { best })
+            .0,
+    )
+}
+
 /// The γ in `range` with the most tokens per millisecond: a round costs the
 /// fitted check over γ + 1 positions plus `draft_ms_each` per guess. Ties go
 /// to the smaller γ.
@@ -357,26 +412,60 @@ fn best_in(
 /// from a prior worth a few rounds, so the first round cannot swing γ to an end.
 #[derive(Debug, Clone)]
 pub struct AcceptanceEstimate {
+    prior_accepted: f64,
+    prior_trials: f64,
     accepted: f64,
     trials: f64,
+    /// What each round keeps of the rounds before it: 1 remembers the whole
+    /// request ([`Self::new`]), less follows a reply that changes ([`Self::recent`]).
+    keep: f64,
 }
 
 impl AcceptanceEstimate {
-    /// Prior: α = 0.7 over 10 trials.
+    /// Prior: α = 0.7 over 10 trials; every round remembered.
     pub fn new() -> Self {
         Self {
-            accepted: 7.0,
-            trials: 10.0,
+            prior_accepted: 7.0,
+            prior_trials: 10.0,
+            accepted: 0.0,
+            trials: 0.0,
+            keep: 1.0,
+        }
+    }
+
+    /// An estimate of the LAST few rounds, for guesses copied out of the
+    /// context (`model_worker::LocalSpec`): whether the text is being copied
+    /// changes inside one reply — a preamble, then the model quoting the prompt
+    /// back — so each round weighs the ones before it by 0.9, and
+    /// [`Self::fade`] lets a round that checked nothing forget too. The prior
+    /// (0.7 over 2 trials) is never forgotten: evidence that turned guessing
+    /// off fades back towards it, and the guesses come back where the prior
+    /// says checking pays — sooner the cheaper a check is.
+    pub fn recent() -> Self {
+        Self {
+            prior_accepted: 1.4,
+            prior_trials: 2.0,
+            accepted: 0.0,
+            trials: 0.0,
+            keep: 0.9,
         }
     }
 
     pub fn record(&mut self, accepted: u32, proposed: u32) {
+        self.fade();
         self.accepted += f64::from(accepted);
         self.trials += f64::from(accepted) + f64::from(u32::from(accepted < proposed));
     }
 
+    /// A round that had guesses and checked none of them: what came before
+    /// weighs less, as a checked round would make it.
+    pub fn fade(&mut self) {
+        self.accepted *= self.keep;
+        self.trials *= self.keep;
+    }
+
     pub fn alpha(&self) -> f64 {
-        self.accepted / self.trials
+        (self.prior_accepted + self.accepted) / (self.prior_trials + self.trials)
     }
 }
 
@@ -507,6 +596,87 @@ pub fn remember(key: String, learned: Learned) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A check fitted only from checks, with the step priced on its own: a
+    /// card's captured step of 7.7 ms against op-by-op checks of ~20 ms at
+    /// any width (Qwen 3.5) — guessing pays only while nearly every guess is
+    /// kept, and a rejection that is read again costs the next step too.
+    #[test]
+    fn a_check_dearer_than_a_step_is_bought_only_when_its_guesses_are_kept() {
+        let mut check = CheckCost::default();
+        for p in [2u32, 5, 8, 3, 8, 6] {
+            check.record(p, 19.5 + 0.1 * f64::from(p));
+        }
+        let step = Some(7.7);
+        assert_eq!(
+            best_gamma_beside_a_step(0.5, step, &check, 0, false, 7),
+            Some(0)
+        );
+        assert_eq!(
+            best_gamma_beside_a_step(0.95, step, &check, 0, false, 7),
+            Some(7)
+        );
+        // Read again on a rejection: the same α buys less.
+        let kept = best_gamma_beside_a_step(0.8, step, &check, 0, false, 7);
+        let reread = best_gamma_beside_a_step(0.8, step, &check, 0, true, 7);
+        assert!(reread <= kept, "{reread:?} vs {kept:?}");
+        // A round already reading rows again is a check anyway: guess.
+        assert_eq!(
+            best_gamma_beside_a_step(0.5, step, &check, 2, false, 5),
+            Some(5)
+        );
+        // A captured check of a few positions, nearly a step: guess at once —
+        // four, where a fifth guess kept half the time adds less than its row.
+        let mut captured = CheckCost::default();
+        for p in [2u32, 8, 4, 8] {
+            captured.record(p, 8.6 + 0.2 * f64::from(p));
+        }
+        assert_eq!(
+            best_gamma_beside_a_step(0.5, step, &captured, 0, false, 7),
+            Some(4)
+        );
+        // Nothing timed yet: no answer, the caller explores.
+        assert_eq!(
+            best_gamma_beside_a_step(0.5, None, &check, 0, false, 7),
+            None
+        );
+        assert_eq!(
+            best_gamma_beside_a_step(0.5, step, &CheckCost::default(), 0, false, 7),
+            None
+        );
+    }
+
+    /// The recent estimate follows a reply that turns to copying, and one that
+    /// checked nothing fades back to its prior; the whole-request one does not.
+    #[test]
+    fn a_recent_acceptance_follows_the_reply_and_fades_to_its_prior() {
+        let mut recent = AcceptanceEstimate::recent();
+        let mut whole = AcceptanceEstimate::new();
+        for _ in 0..20 {
+            recent.record(0, 7);
+            whole.record(0, 7);
+        }
+        assert!(recent.alpha() < 0.15, "{}", recent.alpha());
+        for _ in 0..3 {
+            recent.record(7, 7);
+            whole.record(7, 7);
+        }
+        assert!(recent.alpha() > 0.6, "copying again: {}", recent.alpha());
+        assert!(whole.alpha() < 0.6, "{}", whole.alpha());
+        let mut faded = AcceptanceEstimate::recent();
+        for _ in 0..20 {
+            faded.record(0, 7);
+        }
+        for _ in 0..60 {
+            faded.fade();
+        }
+        assert!((faded.alpha() - 0.7).abs() < 0.05, "{}", faded.alpha());
+        // `new` is unchanged: 7 of 10, then counts.
+        let mut e = AcceptanceEstimate::new();
+        assert!((e.alpha() - 0.7).abs() < 1e-12);
+        e.record(3, 4);
+        assert!((e.alpha() - 10.0 / 14.0).abs() < 1e-12);
+    }
 
     /// Where guessing costs more than the round trips it saves, the controller
     /// stops guessing — the split of 2026-09-29: ~25 ms checks, a drafter on

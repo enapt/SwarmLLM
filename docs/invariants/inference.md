@@ -5162,32 +5162,81 @@ run before pushing such a change is CI's own:
 `CARGO_TARGET_DIR=~/swarm-target-cuda CUDA_COMPUTE_CAP=80 cargo check --locked
 --features candle-cuda --all-targets` with `nvcc` on `PATH`.
 
-## A model whose state cannot be wound back is never speculated
+## A model whose state cannot be wound back takes a rejected check back whole, or is not speculated
 
-(2026-10-06, FUTURE_WORK #117.) Qwen 3.5's Gated DeltaNet layers (three of every four) carry a
-recurrent state per request — a running summary, not a list of positions — so the tokens a rejected
-draft wrote into it cannot be taken back. Every speculative path takes a rejection back by
-truncating the attention caches; on such a model that would leave the two describing different
-histories, a silently wrong reply.
+(2026-10-06, FUTURE_WORK #117; the worker's n-gram since 2026-10-25, #228 (5).) Qwen 3.5's Gated
+DeltaNet layers (three of every four) carry a recurrent state per request — a running summary, not
+a list of positions — so the tokens a rejected guess wrote into it cannot be taken back one by one.
+Every speculative path takes a rejection back by truncating the attention caches; on such a model
+that alone would leave the two describing different histories, a silently wrong reply.
+
+**What can be taken back: one step.** `SsmState` keeps the pair its last step READ
+(`rewind_to`): on a card since #228 (4), for a refused graph capture; on the processor since
+2026-10-25, where the delta rule makes a fresh state anyway (`delta_rule_cpu` copies the state in
+and out), so keeping the one it read costs no copy — only that pair's memory, a few MB a
+conversation (the 9B: 2 MB a DeltaNet layer at f32, × 24).
+
+**The worker's n-gram takes a rejected check back WHOLE** (`model_worker::ngram_spec_round`,
+driven by `LocalSpec::next` from the decode loop and from the test alike). The cache goes back to
+the check's start — the one rewind the state allows — committing nothing, and the tokens the
+check accepted (the token it was asked about and the accepted guesses) wait in `refeed` to be read
+at the head of the next check: no extra forward, only those rows. Tokens waiting narrow the next
+check's guesses, so no check is wider than `num_pred_tokens` + 2. A check that accepts every
+guess, or makes none, commits as on any other model.
+
+**What other systems do.** llama.cpp master keeps a state per position of the check
+(`ggml_gated_delta_net(…, K)` writes K slots, `seq_rm` picks one; read at `4b1a27f`) — kernel
+changes on both devices and a state written per position on every check. Dao AI Lab's ReplaySSM
+(2026, `tridao.me/blog/2026/replayssm`) measured that shape — vLLM's per-draft state snapshots —
+at 4.85× a decode step at six guesses on Qwen3.5-122B, and caches each step's INPUTS instead (for
+Gated DeltaNet: k, g and the correction u = β(v − S·k)), replaying them from one checkpoint. The
+re-read here is the same idea at its coarsest — the accepted tokens' inputs are the tokens — and
+costs at batch 1 only rows of a bandwidth-bound forward. Replaying a check's convolution inputs
+and g/β per DeltaNet layer is what a split needs (FUTURE_WORK #228 (5)).
+
+**Measured** (2026-10-25, Qwen3.5-0.8B Q8_0 on the processor, the test's prompt — four Python
+functions, 96 tokens): ids identical to one token at a time; 66 checks, 30 guesses kept, 18 checks
+taken back. Each row of a check on the processor is computed as a lone step computes it
+(`attn_rows`, the row-blocked quantized matmul, the delta rule's per-token loop), which is why
+identical is the bar there. Each switch turns the test red: truncating a rejected check as an
+attention-only model's (the truncate refuses and the request fails), dropping the accepted tokens
+instead of reading them again (the reply derails into `return a /\n /\n /\n …`), the processor
+keeping no pair (the rewind refuses).
+
+**Speed, and why only the processor** (2026-10-25, release build, the test's three arms in one
+binary — one token at a time, every guess checked, the guesses that pay (`LocalSpec::guesses`,
+`docs/invariants/scheduling.md` § "Speculation that does not pay steps aside") — each run twice and
+the second timed, two runs, 96 greedy tokens, live node stopped). On the processor the guesses that
+pay: Qwen3.5-0.8B Q8_0 code 26.6-26.8 → 31.6-33.2 tok/s, a story 25.9-27.0 → 26.4; Qwen3.5-4B
+Q4_K_M code 9.9-10.1 → 10.0-10.3, a story that repeats itself 10.0-10.1 → 14.6-14.7. On the card
+(RTX 3070) the same arm: 0.8B code 139.5-139.8 → 113.8-125.2, story 134.4-139.2 → 95.6-152.4; 4B
+code 72.8-73.3 → 71.0-73.7, story 72.8-73.2 → 62.7-106.4 (every guess: 0.8B 99-112, 4B 66 and
+103-108). A Qwen 3.5 check of several positions is never captured on a card — `mask_is_read` asks
+that every layer be dense, and its attention layers read the mask — so a check costs 2-3× a
+captured step (7-14 ms against 15-35), and whether guessing pays turned on a few early timings. So
+`model_worker::local_guessing_suits` keeps a card's Qwen 3.5 one token at a time, as before; a
+captured check is what would turn it on (FUTURE_WORK #228 (5)).
 
 - **Coordinator**: `pipeline::distributed::speculation_can_roll_back(architecture)` is asked ONCE in
   `execute_distributed`, after the delegated-split hand-off and ahead of DSD (stream included),
   single-segment speculative and n-gram-only — "one invariant, N paths", so it sits where all three
-  pass. A delegated split's head asks the same on its own node.
-- **Worker**: `ngram_spec_eligible` (slot admission AND the decode loop) and SWIFT ask
-  `SplitModel::carries_recurrent_state`. ⚠ Slot admission can run before the model has loaded
-  (observed 2026-10-06: the first request was admitted to the n-gram path with no model loaded); the
-  decode loop's own check, made with the model in hand, is what declines it — keep both.
+  pass. A delegated split's head asks the same on its own node. A split stays off until the tail's
+  walk and each segment can take a check back (#228 (5)).
+- **Worker**: SWIFT and a drafter with recurrent state (`engine_drafter`, which would have to take
+  back γ steps) ask `SplitModel::carries_recurrent_state` and stay off; `ngram_spec_eligible` asks
+  `local_guessing_suits` (REQUIRED — slot admission and the decode loop): the processor yes, a card
+  no. ⚠ Slot admission can run before the model has loaded (`models` empty answers yes); the decode
+  loop's own answer, made with the model in hand, is what declines it — keep both.
 - **Backstop**: `KvCacheEntry::truncate_to` refuses unless every `ssm_states` entry can be taken
-  back to the target — at most the one step a card keeps (`SsmState::can_rewind_to`, #228 (4)) —
-  so a path added later that truncates further fails loudly instead of answering from the wrong
-  history.
+  back to the target — only the start of its last step (`SsmState::can_rewind_to`) — so a path
+  added later that truncates a recurrent model into the middle of a check fails loudly instead of
+  answering from the wrong history.
 - **Prefix cache**: since 2026-10-18 a snapshot carries the recurrent state, saved short of the
   prompt's end and restored whole or not at all — § "Qwen 3.5's prompt is saved short of its end,
   and restored whole". A prompt pass at position 0 clears the entry (state included), which is also
   how a failover replay rebuilds it on a stand-in.
 
-Allowing speculation would need a snapshot of the recurrent state per draft (#228).
+A card, splits and the drafter wait on #228 (5).
 
 ## Qwen 3.5's prompt is saved short of its end, and restored whole (2026-10-18, FUTURE_WORK #228 (8))
 

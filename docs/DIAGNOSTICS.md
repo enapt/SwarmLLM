@@ -644,7 +644,12 @@ grep "local n-gram speculation complete" node.log
 
 `tokens_per_round` is the number that matters: ~8.8 means it is working, ~1.0
 means this workload has nothing to copy. `paused_rounds` counts rounds where the
-backoff suppressed drafting — high is CORRECT on prose, not a fault. A request
+backoff suppressed drafting — high is CORRECT on prose, not a fault. `learned=`
+says what the guess count was priced from (2026-10-25): the step and the
+check line in ms, the recent acceptance, `declined` (guesses found and not worth
+their check — high on a card where a check costs several steps) and `probes`
+(declined guesses checked anyway, to see whether the text turned to copying).
+`SWARMLLM_LOCAL_GUESS_GAMMA=fixed` checks every guess, the rule before. A request
 that is not alone on the worker joins the batch instead and logs nothing.
 
 ### Across computers (DSD) — on by default since v0.3.213 (off in v0.3.212)

@@ -111,7 +111,7 @@ speed is what the swarm is for, so split speed for large models is the top track
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
 11. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
-12. **#228** — Qwen 3.5 without speculation (its state cannot be wound back yet).
+12. **#228** — Qwen 3.5 guesses ahead only on one computer's processor; a card (capture its checks) and splits (replay a check's inputs) next, #228 (5).
 13. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
     decision, with research, when picked up.
 14. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
@@ -2328,8 +2328,30 @@ delta rule is ONE op per layer"); (4) ~~decode is never captured as a CUDA graph
 two buffer pairs and a step writes the pair it did not read (`SsmState`), as llama.cpp keeps fixed
 cache tensors; the 0.8B writes 121-126 tokens a second instead of 50-54 whole on the card, the 4B is unchanged
 (~37, card-bound), ids identical with capture on and off (`docs/invariants/inference.md` § "Qwen 3.5's decode steps are captured
-too"). MoE layers are captured where their experts are stacked on the card (#138 (2), 2026-10-14); (5) no speculation of any kind — a
-snapshot of the recurrent state per draft would allow it. **llama.cpp master's way, read at
+too"). MoE layers are captured where their experts are stacked on the card (#138 (2), 2026-10-14); (5) **speculation —
+PARTIAL: the worker's own n-gram ON THE PROCESSOR since 2026-10-25, ships in v0.3.253.** A check that rejects a guess
+is taken back WHOLE — `SsmState` now keeps the pair its last step read on the processor too
+(`rewind_to`, one step) — and its accepted tokens are read again at the head of the next check
+(`model_worker::ngram_spec_round`, no extra forward); ids identical to one token at a time on the
+processor (`a_guessed_reply_is_the_reply_read_one_token_at_a_time`, Qwen3.5-0.8B Q8_0: 66
+checks, 30 guesses kept, 18 taken back; `docs/invariants/inference.md` § "A model whose state
+cannot be wound back takes a rejected check back whole"); processor 0.8B code 26.7 → 31.6-33.2 tok/s,
+4B story 10 → 14.6). **Still out: a card, splits, the drafter, MTP.** **A card — capture a several-position
+check first**: Qwen 3.5's never is (`SplitModel::mask_is_read` asks every layer be dense; its attention
+layers read the mask), so a check costs 2-3× a captured step and guessing came out 95.6-152.4 tok/s
+against 134-140 one at a time on the 0.8B, 62.7-106.4 against 73 on the 4B (2026-10-25); with checks
+captured, turn `model_worker::local_guessing_suits` on and measure again.
+**Next — replay a check's inputs instead of re-reading its tokens** (Dao AI Lab's ReplaySSM, 2026:
+cache each step's inputs, not its states; vLLM's per-draft state snapshots measured 4.85× a decode
+step at six guesses on Qwen3.5-122B). Each DeltaNet layer keeps its last check's convolution
+inputs (`mixed`) and g/β beside the pair it read, and a truncate INTO the check rewinds and
+replays the accepted positions' convolution and delta rule — no projection, no attention, nothing
+sent again. The split's existing truncate (`pending_truncate` → the peer's `truncate_kv_to`)
+then rolls back correctly with no wire change but a feature bit (an older peer refuses the
+truncate); a card's checks stay within a captured graph's 8 positions; the re-read rows here go.
+On a card the inputs go into fixed buffers, as the state's pair does (memory a captured step
+allocates is the graph's). One check in flight only: the chain stream, trees and flows stay off
+for such a model. **llama.cpp master's way, read at
 `4b1a27f` (2026-10-25):** the recurrent cache keeps `1 + n_rs_seq` rows a sequence
 (`llama_memory_recurrent`); the fused delta-rule op takes K = `n_rs_seq + 1` and writes the state
 after each of a batch's last min(tokens, K) tokens into K slots (`ggml_gated_delta_net(…, K)`,
@@ -2343,15 +2365,9 @@ layer a slot at f32, × 24 DeltaNet layers), the truncate path (`build_kv_trunca
 the worker) choosing the slot, chains only — a tree's branches cannot share one recurrent state —
 and every segment of a split that holds DeltaNet layers doing the same on the verdict. It
 unblocks the n-gram copies, the 0.8B drafter AND MTP (`docs/plans/split_speculation.md` § MTP,
-2026-10-25). **A cheaper design to weigh first:** `SsmState` already keeps the state its last
-step STARTED from (`layers::SsmState::rewind_to`, one step back, for a refused graph capture).
-On any rejection, rewind to the step's start and put the accepted tokens back at the head of the
-NEXT forward: no extra trip and no kernel change, at the cost of the accepted rows again
-(compute, and their bytes between segments); a stream of checks needs a ring of step starts, one
-per chunk in flight. Today's gates: `pipeline::distributed` (`no_speculation_on_a_model_with_recurrent_state`),
-`model_worker` (`ngram_spec_eligible(…, carries_recurrent_state)`), `engine_drafter` (a drafter
-with recurrent state is refused), `split::kv_cache` (an entry with recurrent state refuses to be
-truncated); (6) ~~the 4B's gap to llama.cpp~~ —
+2026-10-25). Today's gates: `pipeline::distributed` (`no_speculation_on_a_model_with_recurrent_state`),
+`engine_drafter` (a drafter with recurrent state is refused — it would take back γ steps), SWIFT,
+`split::kv_cache` (truncating into the middle of a check is refused); (6) ~~the 4B's gap to llama.cpp~~ —
 checked 2026-10-07, not a defect: six prompts scored on the processor against llama.cpp master
 (`score_ids_dump.py`, margin 0.05) — Qwen 3.5 4B Q4_K_M misses on 3 (gaps 0.11-0.21), and
 Llama-3.2-3B Q4_K_M, a long-verified family, misses on 1 by MORE (0.306, "why the sky is blue").

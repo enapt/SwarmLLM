@@ -123,24 +123,27 @@ impl DeltaNetWeights {
 
     /// `build_layer_attn_linear`: projections, causal conv, L2-normalised
     /// q/k, the gated delta rule, gated RMSNorm, `ssm_out` — the step from
-    /// `index_pos` to `index_pos + seq_len`. A card keeps the state's second
-    /// pair of buffers ([`SsmState`]); the processor does not.
+    /// `index_pos` to `index_pos + seq_len`. The state it read is kept
+    /// ([`SsmState`]); a card writes the new one into the pair the last step
+    /// read, the processor into fresh tensors.
     pub(crate) fn forward_deltanet(
         &self,
         x: &Tensor,
         ssm_state: &mut Option<SsmState>,
         index_pos: usize,
     ) -> CandleResult<Tensor> {
-        self.forward_deltanet_keeping(x, ssm_state, index_pos, !x.device().is_cpu())
+        self.forward_deltanet_into(x, ssm_state, index_pos, !x.device().is_cpu())
     }
 
-    /// [`Self::forward_deltanet`], with the state's second pair kept or not.
-    fn forward_deltanet_keeping(
+    /// [`Self::forward_deltanet`], the new state written into the pair the last
+    /// step read (`into_spare`, a card's two fixed addresses) or into fresh
+    /// tensors (the processor, whose delta rule makes one anyway).
+    fn forward_deltanet_into(
         &self,
         x: &Tensor,
         ssm_state: &mut Option<SsmState>,
         index_pos: usize,
-        keep_previous: bool,
+        into_spare: bool,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, _hidden) = x.dims3()?;
         let device = x.device();
@@ -188,7 +191,7 @@ impl DeltaNetWeights {
         // so the state read survives the step and lives at two fixed
         // addresses (`SsmState`). Made here when missing — never inside a
         // capture, which asks `SsmState::holds_the_next_step` first.
-        let target = if keep_previous {
+        let target = if into_spare {
             Some(match held.take_spare() {
                 Some(spare) if spare.recurrent_state.dims() == read.recurrent_state.dims() => spare,
                 _ => SsmSlot {
@@ -274,7 +277,7 @@ impl DeltaNetWeights {
                 recurrent_state: new_state,
             },
         };
-        held.advance(next, index_pos + seq_len, keep_previous);
+        held.advance(next, index_pos + seq_len);
         self.ssm_out.forward(&gated)
     }
 
@@ -679,34 +682,29 @@ mod tests {
         let device = Device::Cpu;
         let w = weights(&device);
         let x = Tensor::randn(0f32, 1.0, (1, 7, 8), &device).unwrap();
-        // Both ways a state is kept: replaced each step (the processor) and
-        // written into the previous step's buffers (a card, `SsmState`).
-        for keep_previous in [false, true] {
+        // Both ways a new state is written: into fresh tensors (the
+        // processor) and into the previous step's buffers (a card, `SsmState`).
+        for into_spare in [false, true] {
             let mut whole_state = None;
             let whole = w
-                .forward_deltanet_keeping(&x, &mut whole_state, 0, keep_previous)
+                .forward_deltanet_into(&x, &mut whole_state, 0, into_spare)
                 .unwrap();
 
             let mut state = None;
             let mut parts = vec![w
-                .forward_deltanet_keeping(&x.narrow(1, 0, 3).unwrap(), &mut state, 0, keep_previous)
+                .forward_deltanet_into(&x.narrow(1, 0, 3).unwrap(), &mut state, 0, into_spare)
                 .unwrap()];
             for t in 3..7 {
                 parts.push(
-                    w.forward_deltanet_keeping(
-                        &x.narrow(1, t, 1).unwrap(),
-                        &mut state,
-                        t,
-                        keep_previous,
-                    )
-                    .unwrap(),
+                    w.forward_deltanet_into(&x.narrow(1, t, 1).unwrap(), &mut state, t, into_spare)
+                        .unwrap(),
                 );
             }
             let stepped = Tensor::cat(&parts, 1).unwrap();
             let diff = max_abs_diff(&whole, &stepped);
             assert!(
                 diff < 1e-5,
-                "keep_previous={keep_previous}: stepped decode drifts from one pass by {diff}"
+                "into_spare={into_spare}: stepped decode drifts from one pass by {diff}"
             );
         }
     }
@@ -729,25 +727,25 @@ mod tests {
     /// HAVE run). With the state's second pair kept, the step is taken back to
     /// the state it read and the re-run lands exactly where an uninterrupted
     /// run does — red if a step wrote into the state it read, or if rewinding
-    /// left the state's position or buffers behind (gotcha #761). Without the
-    /// pair, taking a step back is refused, never faked.
+    /// left the state's position or buffers behind (gotcha #761). Taking back
+    /// more than one step is refused, never faked.
     #[test]
     fn a_deltanet_step_taken_back_and_run_again_lands_where_one_run_does() {
         let device = Device::Cpu;
         let w = weights(&device);
         let x = Tensor::randn(0f32, 1.0, (1, 6, 8), &device).unwrap();
         let step = |state: &mut Option<SsmState>, t: usize| {
-            w.forward_deltanet_keeping(&x.narrow(1, t, 1).unwrap(), state, t, true)
+            w.forward_deltanet_into(&x.narrow(1, t, 1).unwrap(), state, t, true)
                 .unwrap()
         };
 
         let mut plain = None;
-        w.forward_deltanet_keeping(&x.narrow(1, 0, 3).unwrap(), &mut plain, 0, true)
+        w.forward_deltanet_into(&x.narrow(1, 0, 3).unwrap(), &mut plain, 0, true)
             .unwrap();
         let plain_outs: Vec<Tensor> = (3..6).map(|t| step(&mut plain, t)).collect();
 
         let mut redone = None;
-        w.forward_deltanet_keeping(&x.narrow(1, 0, 3).unwrap(), &mut redone, 0, true)
+        w.forward_deltanet_into(&x.narrow(1, 0, 3).unwrap(), &mut redone, 0, true)
             .unwrap();
         // Step 3 runs, is taken back, and runs again; then 4 and 5 as usual.
         step(&mut redone, 3);
@@ -781,16 +779,61 @@ mod tests {
             0.0
         );
 
-        // Two steps back is more than the pair holds; and the processor keeps no pair.
+        // Two steps back is more than the pair holds.
         let mut b = Some(b);
         assert!(!b.as_mut().unwrap().rewind_to(4));
-        let mut lean = None;
-        w.forward_deltanet_keeping(&x.narrow(1, 0, 3).unwrap(), &mut lean, 0, false)
+        let mut two = None;
+        w.forward_deltanet_into(&x.narrow(1, 0, 3).unwrap(), &mut two, 0, false)
             .unwrap();
-        w.forward_deltanet_keeping(&x.narrow(1, 3, 1).unwrap(), &mut lean, 3, false)
+        w.forward_deltanet_into(&x.narrow(1, 3, 1).unwrap(), &mut two, 3, false)
             .unwrap();
-        assert!(!lean.as_mut().unwrap().rewind_to(3));
-        assert_eq!(lean.as_ref().unwrap().positions(), 4);
+        w.forward_deltanet_into(&x.narrow(1, 4, 1).unwrap(), &mut two, 4, false)
+            .unwrap();
+        assert!(!two.as_mut().unwrap().rewind_to(3));
+        assert_eq!(two.as_ref().unwrap().positions(), 5);
+    }
+
+    /// The processor writes each step's state into fresh tensors and keeps the
+    /// one it read, so a step of several positions — a check of guesses — is
+    /// taken back whole and read again shorter, landing exactly where reading
+    /// only the shorter run does (#228 (5): a rejected guess). Red if the
+    /// processor dropped the state it read, or if the delta rule updated it in
+    /// place.
+    #[test]
+    fn a_processor_step_of_guesses_is_taken_back_and_read_again_shorter() {
+        let device = Device::Cpu;
+        let w = weights(&device);
+        let x = Tensor::randn(0f32, 1.0, (1, 8, 8), &device).unwrap();
+        let run = |state: &mut Option<SsmState>, from: usize, len: usize| {
+            w.forward_deltanet_into(&x.narrow(1, from, len).unwrap(), state, from, false)
+                .unwrap()
+        };
+
+        let mut plain = None;
+        run(&mut plain, 0, 3);
+        run(&mut plain, 3, 2);
+        let plain_next = run(&mut plain, 5, 1);
+
+        let mut guessed = None;
+        run(&mut guessed, 0, 3);
+        // Positions 3..8 checked at once; only 3 and 4 kept.
+        run(&mut guessed, 3, 5);
+        let held = guessed.as_mut().unwrap();
+        assert!(held.rewind_to(3), "the processor keeps the state it read");
+        assert_eq!(held.positions(), 3);
+        run(&mut guessed, 3, 2);
+        let guessed_next = run(&mut guessed, 5, 1);
+
+        assert_eq!(max_abs_diff(&plain_next, &guessed_next), 0.0);
+        let (a, b) = (plain.unwrap(), guessed.unwrap());
+        assert_eq!(
+            max_abs_diff(&a.current().recurrent_state, &b.current().recurrent_state),
+            0.0
+        );
+        assert_eq!(
+            max_abs_diff(&a.current().conv_state, &b.current().conv_state),
+            0.0
+        );
     }
 
     /// A state that does not describe the step's first position is a lost

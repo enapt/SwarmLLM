@@ -543,6 +543,12 @@ impl DecodeGraph {
         (self.stats.launched, self.stats.refused)
     }
 
+    /// Launches that made a graph — instantiated one, or rebuilt one the
+    /// driver would not update — rather than updating every group's in place.
+    pub(crate) fn launches_that_made_a_graph(&self) -> u64 {
+        self.stats.instantiated
+    }
+
     /// True when forwards of `positions` are not to be captured now: they were
     /// refused often enough, for reasons of the program's making, to be given
     /// up for good — or their graphs kept having to be rebuilt and they are

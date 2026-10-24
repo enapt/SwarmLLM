@@ -636,6 +636,18 @@ impl SplitModel {
         &self.device
     }
 
+    /// Card steps this model has launched that made a graph rather than
+    /// updating one (`cuda_graph::DecodeGraph::launches_that_made_a_graph`);
+    /// 0 where it captures none.
+    pub(crate) fn launches_that_made_a_graph(&self) -> u64 {
+        match &self.decode_graph {
+            crate::inference::cuda_graph::DecodeGraphSlot::On(graph) => {
+                graph.launches_that_made_a_graph()
+            }
+            _ => 0,
+        }
+    }
+
     /// The card this model uses, if any: its primary device, or the card half
     /// of a card/processor split.
     pub(crate) fn card(&self) -> Option<&Device> {
@@ -918,8 +930,11 @@ impl SplitModel {
     /// Does this model carry RECURRENT state between forwards — state a later
     /// token cannot be taken back out of? Qwen 3.5's DeltaNet layers do. The
     /// KV cache of an attention layer can be truncated after a rejected
-    /// speculative draft; a recurrent state cannot, so no speculative path may
-    /// run on such a model (FUTURE_WORK #117).
+    /// speculative draft; a recurrent state only back to where its last step
+    /// started (`SsmState::rewind_to`). So a speculative path on such a model
+    /// takes a rejected check back whole and reads its accepted tokens again
+    /// (`model_worker::ngram_spec_round`, #228 (5)); every other asks this
+    /// first and does not speculate (FUTURE_WORK #117).
     pub fn carries_recurrent_state(&self) -> bool {
         self.layers
             .iter()

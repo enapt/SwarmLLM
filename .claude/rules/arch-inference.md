@@ -185,11 +185,11 @@ Never open-code it, and never estimate it.
 
 → `docs/invariants/inference.md` § "A model's RoPE frequency factors are applied — and reach a node without shard 0"
 
-## A model whose state cannot be wound back is never speculated (2026-10-06)
+## A model whose state cannot be wound back takes a rejected check back whole, or is not speculated (2026-10-06; 2026-10-25, #228 (5))
 
-Qwen 3.5's DeltaNet layers keep a recurrent state per request, and a rejected draft would leave its tokens in it. **`pipeline::distributed::speculation_can_roll_back`** is asked once ahead of every coordinator speculative path; the worker's own n-gram (`ngram_spec_eligible`, both call sites) and SWIFT ask **`SplitModel::carries_recurrent_state`**; `KvCacheEntry::truncate_to` refuses past the one step a card's state keeps (`SsmState::can_rewind_to`), so a new path that truncates further fails loudly. A new speculative path asks one of the two.
+Qwen 3.5's DeltaNet layers keep a recurrent state per request, and a rejected guess would leave its tokens in it; `SsmState` keeps only the pair its last step READ (`rewind_to`, one step — card AND processor). **The worker's n-gram takes a rejected check back WHOLE**: the cache to the check's start, its accepted tokens read again at the head of the next check (`model_worker::ngram_spec_round`, driven by `LocalSpec::next` from the decode loop and the test alike) — never truncate a recurrent model into the middle of a check. **On the processor only** (`model_worker::local_guessing_suits`, a REQUIRED argument of `ngram_spec_eligible`, so slot admission and the loop both answer it): on a card its several-position forwards are never captured and guessing came out as often slower as faster. **Every other path asks first and stays off**: **`pipeline::distributed::speculation_can_roll_back`** ahead of every coordinator speculative path; SWIFT and the drafter (**`SplitModel::carries_recurrent_state`**, `engine_drafter`). `KvCacheEntry::truncate_to` refuses any other rewind (`SsmState::can_rewind_to`), so a new path fails loudly. Test: `a_guessed_reply_is_the_reply_read_one_token_at_a_time` (a real file; ids EXACT on the processor).
 
-→ `docs/invariants/inference.md` § "A model whose state cannot be wound back is never speculated"
+→ `docs/invariants/inference.md` § "A model whose state cannot be wound back takes a rejected check back whole, or is not speculated"
 
 ## Qwen 3.5's delta rule is ONE op per layer (2026-10-11)
 

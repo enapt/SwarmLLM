@@ -5329,6 +5329,42 @@ is the guard: production has no `CheckCost::default()`, only `for_a_plan` and a 
 `on_a_plan`, so neither speculating path (`dsd`, `ngram_only_spec`) can fit without the floor. Test:
 `a_check_is_never_fitted_below_the_round_trip_it_crossed`, red with the floor clause removed.
 
+**On one computer the step is priced on its own** (2026-10-25, `model_worker::LocalSpec`). The
+worker's n-gram checked every guess it found, up to `num_pred_tokens`, at any width. Its own
+measurement (the arms of `a_guessed_reply_is_the_reply_read_one_token_at_a_time`, release build,
+RTX 3070 and this laptop's processor, 96 greedy tokens, each arm run twice and the second timed,
+two runs) found that a loss in as many places as a gain: Llama-3.2-3B code on the card 88-112 tok/s
+against 115 one at a time, its processor 15.9-16.2 against 17.4; qwen3-1.7B prose on the processor
+17.4 against 18.9. A card's step is ONE captured graph (7.7-8.8 ms); a check of up to 8 positions
+is a graph of its own shape (10-13 ms warm), wider ones run op by op (17-28 ms), and a
+conversation's first check of each width runs uncaptured whatever its width (`cuda_graph`: a
+capture follows an ordinary step of the same shape; 25-49 ms). One line through steps and checks
+prices a short check as nearly a step — the worst buy looks cheapest — so
+`best_gamma_beside_a_step` takes the step's median (`RecentMedian`) and a line fitted from checks
+only, and is asked per round over the guesses FOUND (two guesses can be worth less than their
+check where seven are not). A model whose rejected check is read again (Qwen 3.5) also pays the
+next round's step turned into a check, `1 − α^γ` times. The acceptance is `AcceptanceEstimate::recent`
+(each round weighs the ones before it by 0.9; a declined round fades it towards a prior of 0.7 over
+2 trials), because whether text is being copied changes inside one reply.
+
+**A refusal is tried again.** The first fit of the first version saw one check — the cold one —
+chose zero and checked nothing more: Qwen3.5-4B's repetitive story, 102-104 tok/s with every guess
+checked, stayed at 71 (72 one at a time); qwen3-1.7B code fitted 24.9 ms from its first 8-position
+check and declined the rest. So after 8 rounds of declined guesses the next are checked anyway; a
+check that paid (more tokens than steps in its time, counting the step a rejected recurrent check
+turns into a check) starts the count over, one that did not doubles it to at most 64 —
+`SpecBackoff`'s doubling, the in-request counterpart of `REPROBE_AFTER`. Measured after it, the
+guesses that pay against one at a time: processor qwen3-1.7B code 17.9-19.0 → 24.6-27.6, prose
+18.9-19.0 → 18.4-18.8; Llama-3.2-3B code 17.4-17.5 → 18.0-18.1, prose 17.5 → 17.1-17.9; card
+qwen3-1.7B code 126.7-127.8 → 115.4-165.5 (every guess 127.7-135.3), prose 128.7-129.4 →
+126.5-128.3; Llama-3.2-3B code 114.8-115.7 → 113.8-114.6, prose 112.8-113.8 → 113.1-116.5. The
+card's spread is the choice turning on a few early timings. Qwen 3.5 on a card stays one token at a
+time (`local_guessing_suits`, `docs/invariants/inference.md` § "A model whose state cannot be
+wound back takes a rejected check back whole"). A/B `SWARMLLM_LOCAL_GUESS_GAMMA=fixed` (every
+guess, the old rule); the test runs both arms. Tests:
+`a_check_dearer_than_a_step_is_bought_only_when_its_guesses_are_kept`,
+`a_recent_acceptance_follows_the_reply_and_fades_to_its_prior`.
+
 → `docs/plans/split_speculation.md` § "Guessing steps aside where it does not pay"
 
 ## What a peer HOLDS on disk and what it has LOADED are different facts

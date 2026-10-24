@@ -2696,27 +2696,32 @@ pub(crate) struct DeltaNetWeights {
 /// DeltaNet layer's counterpart of a KV cache: its convolution window and its
 /// recurrent state, after [`Self::positions`] tokens.
 ///
-/// **On a card a second pair of buffers is kept** — the one holding the state
-/// before the last step. A step reads `current` and writes the new state INTO
-/// that pair, then the two swap (`layers::qwen35`, FUTURE_WORK #228 (4)), so:
+/// **A second pair is kept** — the one holding the state before the last
+/// step — so the state a step read survives it and the step can be taken back
+/// with [`Self::rewind_to`]:
 ///
-/// - the state a step read survives it. A refused CUDA graph capture takes the
-///   step back with [`Self::rewind_to`] and runs it again: groups launched
-///   before a refusal HAVE run (`cuda_graph::DecodeGraph::capture`), and a
-///   state updated in place would take that step twice. The swap is host
+/// - a refused CUDA graph capture takes the step back and runs it again:
+///   groups launched before a refusal HAVE run (`cuda_graph::DecodeGraph::capture`),
+///   and a state updated in place would take that step twice. The swap is host
 ///   bookkeeping a refusal must undo (gotcha #761);
-/// - the state lives at two addresses that never change, which a captured
-///   step needs — memory allocated inside a capture belongs to the graph.
+/// - a rejected guess takes back the whole check that carried it, and the
+///   accepted tokens are read again at the head of the next one
+///   (`model_worker::ngram_spec_round`, FUTURE_WORK #228 (5)).
 ///
-/// llama.cpp keeps its recurrent states in fixed cache tensors written with
-/// `ggml_cpy` for the same second reason. On the processor nothing is captured
-/// and the second pair is not kept.
+/// On a card a step writes the new state INTO that pair and the two swap
+/// (`layers::qwen35`, #228 (4)), so the state lives at two addresses that never
+/// change, which a captured step needs — memory allocated inside a capture
+/// belongs to the graph. llama.cpp keeps its recurrent states in fixed cache
+/// tensors written with `ggml_cpy` for the same reason. On the processor the
+/// delta rule makes a fresh state anyway, so keeping the one it read costs no
+/// copy — only the pair's memory, a few MB a conversation.
 #[derive(Debug, Clone)]
 pub(crate) struct SsmState {
     current: SsmSlot,
     /// Positions `current` describes.
     at: usize,
-    /// The buffers the next step writes into — a card's only.
+    /// The pair the last step read: what [`Self::rewind_to`] puts back, and on
+    /// a card the buffers the next step writes into.
     previous: Option<SsmSlot>,
     /// Positions `previous` holds the state for, while it holds one: the
     /// position the last step started from. `None` once rewound, when its
@@ -2767,22 +2772,17 @@ impl SsmState {
     }
 
     /// The state after a step from [`Self::positions`] to `positions`, written
-    /// into `next`. With `keep_previous` the state read becomes the next
-    /// step's buffers (a card); without, it is dropped (the processor).
-    pub(crate) fn advance(&mut self, next: SsmSlot, positions: usize, keep_previous: bool) {
+    /// into `next`. The state read is kept: the step can be taken back, and on
+    /// a card it is the next step's buffers.
+    pub(crate) fn advance(&mut self, next: SsmSlot, positions: usize) {
         let read = std::mem::replace(&mut self.current, next);
-        if keep_previous {
-            self.previous = Some(read);
-            self.previous_at = Some(self.at);
-        } else {
-            self.previous = None;
-            self.previous_at = None;
-        }
+        self.previous = Some(read);
+        self.previous_at = Some(self.at);
         self.at = positions;
     }
 
     /// Whether [`Self::rewind_to`] would succeed: the state is there already,
-    /// or the last step started there and the state it read was kept.
+    /// or the last step started there.
     pub(crate) fn can_rewind_to(&self, positions: usize) -> bool {
         self.at == positions || self.previous_at == Some(positions)
     }

@@ -1448,14 +1448,14 @@ impl KvCacheEntry {
         target_len: usize,
     ) -> Result<(), crate::error::SwarmError> {
         // A recurrent state (Qwen 3.5's DeltaNet) cannot give tokens back —
-        // past the one step a card's state keeps the state before
-        // (`SsmState::rewind_to`), which is what a refused CUDA graph capture
-        // takes back. Shortening the attention caches further would leave the
-        // two describing different histories — a silently wrong reply — so
-        // refuse. Every path that truncates further is gated away from such
-        // models first (`SplitModel::carries_recurrent_state`,
-        // `speculation_can_roll_back`, no prefix snapshot of SSM state); this
-        // makes a new one loud.
+        // past the one step whose starting state it keeps
+        // (`SsmState::rewind_to`): what a refused CUDA graph capture and a
+        // rejected guess (`model_worker::ngram_spec_round`) take back.
+        // Shortening the attention caches anywhere else would leave the two
+        // describing different histories — a silently wrong reply — so
+        // refuse. Every path that truncates otherwise is gated away from such
+        // models first (`speculation_can_roll_back`, SWIFT, no prefix snapshot
+        // of SSM state); this makes a new one loud.
         if !self
             .ssm_states
             .iter()
@@ -3190,7 +3190,7 @@ mod tests {
 
         // A card's state after a one-position step from 7: back to 7 only.
         let mut card = SsmState::new(slot(), 7);
-        card.advance(slot(), 8, true);
+        card.advance(slot(), 8);
         entry.ssm_states[1] = Some(card);
         assert!(entry.truncate_to(6).is_err());
         entry.truncate_to(7).unwrap();
@@ -3220,10 +3220,7 @@ mod tests {
         assert!(!store.every_cache_holds(&key, 8, |_| false));
         {
             let mut entry = store.get_or_create_keyed(&key, 2);
-            entry.ssm_states[1]
-                .as_mut()
-                .unwrap()
-                .advance(slot(), 9, true);
+            entry.ssm_states[1].as_mut().unwrap().advance(slot(), 9);
         }
         assert!(store.every_cache_holds(&key, 8, |_| false));
     }

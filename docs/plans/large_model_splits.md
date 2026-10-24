@@ -549,8 +549,8 @@ FUTURE_WORK #327 (detour routing), triggered by the first peer that would shorte
   in `split_speculation.md`; the persistent stream keeps the connection warm.
 - **A chunk a worker has already started cannot be cancelled** (#149 (b), gotcha
   #180). Item 2's early drop acts only on rows not yet started.
-- **Qwen 3.5's recurrent state cannot be wound back yet** (#228). A tree needs one
-  state per branch, so that model stays on a chain until it can.
+- **Qwen 3.5's recurrent state winds back one step only** (#228 (5)). A tree needs one
+  state per branch, so that model stays on a chain.
 - **"Start and finish on this computer"** (`encrypted_pipeline`) makes the requester
   both head and tail, so P includes the requester's distance. A regional chain helps
   only when the requester is in that region.

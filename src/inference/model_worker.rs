@@ -2959,20 +2959,35 @@ async fn try_remote_prefix_hydrate(
 ///   request would fight.
 /// * a non-zero draft width, which is how `inference.ngram_lookup_enabled`
 ///   arrives here.
+///
+/// * the model suits it ([`local_guessing_suits`]) — asked with the model in
+///   hand, so REQUIRED here: slot admission and the decode loop both answer it.
 pub(crate) fn ngram_spec_eligible(
     sampling: &crate::types::SamplingParams,
     ngram_cfg: &crate::inference::ngram_lookup::NgramLookupConfig,
     swift_cfg: &SwiftConfig,
-    carries_recurrent_state: bool,
+    suits_the_model: bool,
 ) -> bool {
-    // A rejected draft is taken back by truncating the KV cache; a model with
-    // recurrent state (`SplitModel::carries_recurrent_state`) cannot take it
-    // back, and would answer from a history that includes the rejected tokens.
-    !carries_recurrent_state
+    suits_the_model
         && ngram_cfg.num_pred_tokens > 0
         && ngram_cfg.max_ngram_size >= ngram_cfg.min_ngram_size
         && !sampling.logprobs
         && !(swift_cfg.enabled && sampling.temperature == 0.0)
+}
+
+/// Whether the worker's own n-gram guesses for `model`. A model with recurrent
+/// state (Qwen 3.5) is guessed for on the PROCESSOR: a check that rejects a
+/// guess is taken back whole and its accepted tokens are read again at the head
+/// of the next (`ngram_spec_round`, #228 (5)) — and there it paid, Qwen3.5-0.8B
+/// 26.7 → 31.6-33.2 tok/s on code, Qwen3.5-4B 10 → 14.6 on a story that repeats
+/// itself, the rest within a few percent of one token at a time (2026-10-25).
+/// **Not on a card**: its checks are never captured there (its attention reads
+/// a mask, `SplitModel::mask_is_read`), so a check costs 2-3× a captured step,
+/// and the measured choice ([`LocalSpec::guesses`]) came out as often slower as
+/// faster: Qwen3.5-0.8B 96-152 tok/s against 134-140 one at a time, the 4B
+/// 63-106 against 73. A captured check is what would turn it on.
+fn local_guessing_suits(model: &crate::inference::split::SplitModel) -> bool {
+    !(model.carries_recurrent_state() && model.device().is_cuda())
 }
 
 /// Recent tokens-per-round the local speculator has been achieving, ×100, or 0
@@ -3108,10 +3123,11 @@ const NGRAM_RECENT_GEN_WINDOW: usize = 500;
 
 /// One draft-free speculative round on the local decode path.
 ///
-/// Drafts from an n-gram match against the prompt and the generation tail, then
-/// verifies the whole draft in ONE forward. There is no draft model: the guess
-/// is that text already in the context will recur, which is what SwarmLLM's own
-/// workload does constantly (tool schemas, code, retrieved passages).
+/// Verifies `draft` — the guesses [`LocalSpec::next`] found in an n-gram match
+/// against the prompt and the generation tail, and judged worth checking — in
+/// ONE forward. There is no draft model: the guess is that text already in the
+/// context will recur, which is what SwarmLLM's own workload does constantly
+/// (tool schemas, code, retrieved passages).
 ///
 /// Returns the tokens produced and how many KV positions were committed. The
 /// two are deliberately NOT the same number: a round commits `next_token` plus
@@ -3119,6 +3135,19 @@ const NGRAM_RECENT_GEN_WINDOW: usize = 500;
 /// cache yet. That is the same invariant the plain loop keeps, where one
 /// forward commits one position and yields one not-yet-cached token — which is
 /// why the caller can drain the extras without forwarding again.
+///
+/// **A model with recurrent state takes a rejected check back WHOLE** (#228
+/// (5)). Its DeltaNet layers summarise every token the check read, the
+/// rejected guesses included, and keep only the state from before the check
+/// (`SsmState::rewind_to`, one step). So the cache goes back to `index_pos`,
+/// committing nothing, and the tokens the check did accept — `next_token` and
+/// the accepted guesses — wait in `refeed` to be read at the head of the next
+/// round's forward, which costs no extra forward: only those rows. llama.cpp
+/// instead keeps a state per token of the check (its delta-rule kernel writes
+/// them) and rolls back to the accepted one; that costs a state copy per
+/// position on every check, accepted or not. Tokens waiting to be read again
+/// narrow the next round's guesses, so no check is wider than the bonus
+/// token's worth past `num_pred_tokens + 1`.
 ///
 /// **Acceptance goes through the real sampler, not a private argmax.** Every
 /// position is sampled by the same `sample_token_with_logprob_history` the plain
@@ -3149,34 +3178,29 @@ fn ngram_spec_round(
     model_key: &str,
     req_id_str: &str,
     index_pos: usize,
+    refeed: &mut Vec<u32>,
     next_token: u32,
-    ctx: &[u32],
-    prompt_len: usize,
+    draft: &[u32],
     generated: &[u32],
     sampling: &crate::types::SamplingParams,
-    cfg: crate::inference::ngram_lookup::NgramLookupConfig,
-    draft_allowed: bool,
     force_attn: bool,
-) -> Result<(Vec<u32>, usize), SwarmError> {
-    let (draft, _source) = if draft_allowed {
-        crate::inference::ngram_lookup::cascade_find_candidate(
-            ctx,
-            prompt_len,
-            NGRAM_RECENT_GEN_WINDOW,
-            cfg,
-        )
-    } else {
-        (
-            Vec::new(),
-            crate::inference::ngram_lookup::NgramHitSource::None,
-        )
-    };
+) -> Result<SpecRound, SwarmError> {
+    let started = std::time::Instant::now();
+    // The check reads, from `index_pos`: the tokens a taken-back round left to
+    // read again, the token just emitted, then the guesses.
+    let fed = refeed.len();
+    let mut ids = std::mem::take(refeed);
+    ids.push(next_token);
+    ids.extend_from_slice(draft);
 
     // No match: do exactly what the plain loop does. A miss must cost nothing
     // beyond the lookup itself, or speculation becomes a tax on the workloads
     // it cannot help.
     if draft.is_empty() {
-        let input = model.token_tensor(next_token)?;
+        let input = match fed {
+            0 => model.token_tensor(next_token)?,
+            _ => model.tensor_from_ids(&ids)?,
+        };
         let logits = tokio::task::block_in_place(|| {
             let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
             model.forward(&input, index_pos, kv_store, req_id_str)
@@ -3184,12 +3208,17 @@ fn ngram_spec_round(
         let (tok, _) = crate::inference::tensor_util::sample_token_with_logprob_history(
             &logits, sampling, generated,
         )?;
-        return Ok((vec![tok], 1));
+        return Ok(SpecRound {
+            produced: vec![tok],
+            committed: ids.len(),
+            positions: ids.len(),
+            ms: started.elapsed().as_secs_f64() * 1000.0,
+            proposed: 0,
+            accepted: 0,
+            taken_back: false,
+        });
     }
 
-    let ids: Vec<u32> = std::iter::once(next_token)
-        .chain(draft.iter().copied())
-        .collect();
     let input = model.tensor_from_ids(&ids)?;
     let all = tokio::task::block_in_place(|| {
         let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
@@ -3200,9 +3229,9 @@ fn ngram_spec_round(
     let mut hist: Vec<u32> = generated.to_vec();
     let mut produced: Vec<u32> = Vec::with_capacity(draft.len() + 1);
     let mut accepted = 0usize;
-    for (i, _) in ids.iter().enumerate() {
+    for i in 0..=draft.len() {
         let row = all
-            .i((0, i))
+            .i((0, fed + i))
             .and_then(|t| t.unsqueeze(0))
             .map_err(SwarmError::internal)?;
         let (tok, _) = crate::inference::tensor_util::sample_token_with_logprob_history(
@@ -3219,12 +3248,357 @@ fn ngram_spec_round(
         }
     }
 
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    let positions = ids.len();
+    let kept = fed + 1 + accepted;
+    // A recurrent state cannot give back the rejected guesses it summarised:
+    // the whole check goes, and what it accepted is read again next round.
+    if accepted < draft.len() && model.carries_recurrent_state() {
+        kv_store.truncate_request_to(model_key, req_id_str, index_pos)?;
+        ids.truncate(kept);
+        *refeed = ids;
+        return Ok(SpecRound {
+            produced,
+            committed: 0,
+            positions,
+            ms,
+            proposed: draft.len(),
+            accepted,
+            taken_back: true,
+        });
+    }
     // Drop the cache entries written for drafts that were not accepted. Without
     // this the next forward would attend over positions holding tokens the
     // reply does not contain — a silent corruption, not an error.
-    let committed = 1 + accepted;
-    kv_store.truncate_request_to(model_key, req_id_str, index_pos + committed)?;
-    Ok((produced, committed))
+    kv_store.truncate_request_to(model_key, req_id_str, index_pos + kept)?;
+    Ok(SpecRound {
+        produced,
+        committed: kept,
+        positions,
+        ms,
+        proposed: draft.len(),
+        accepted,
+        taken_back: false,
+    })
+}
+
+/// What one [`ngram_spec_round`] did.
+#[derive(Debug)]
+struct SpecRound {
+    /// The accepted guesses and the token after them, in order.
+    produced: Vec<u32>,
+    /// Cache positions it added: 0 for a round taken back.
+    committed: usize,
+    /// Positions its forward read, and how long the forward and the sampling
+    /// took — what [`LocalSpec`] prices the next round's guesses from.
+    positions: usize,
+    ms: f64,
+    /// Guesses checked; 0 for a round that found none, was paused, or found
+    /// some not worth checking — which proves nothing about whether guessing
+    /// works ([`SpecBackoff::record`]).
+    proposed: usize,
+    /// Guesses accepted.
+    accepted: usize,
+    /// Taken back whole, its accepted tokens left to read again (a model with
+    /// recurrent state rejected a guess).
+    taken_back: bool,
+}
+
+/// One request's local speculation on the decode loop: what the lookup
+/// searches, the tokens a round verified beyond the one being emitted, and the
+/// tokens a round taken back left to read again ([`ngram_spec_round`]). The
+/// loop and `a_guessed_reply_is_the_reply_read_one_token_at_a_time` both
+/// drive it through [`Self::next`].
+///
+/// **It checks only as many guesses as pay** ([`Self::guesses`], 2026-10-25).
+/// It checked every guess it found, up to `num_pred_tokens`, which made replies
+/// SLOWER on a card: a step there is one captured CUDA graph, a check of 11
+/// positions is past what a graph carries (`cuda_graph::MAX_POSITIONS`) and
+/// runs op by op, and Qwen 3.5's checks run op by op at any width. Measured on
+/// an RTX 3070, 96 greedy tokens: qwen3-1.7B 120 → 110 tok/s on code and
+/// 121 → 65-86 on a story; Llama-3.2-3B 107 → 65-71 on code; Qwen3.5-0.8B
+/// 127-132 → 87-97. Each round is now timed — a step of one position on its
+/// own, every wider forward as a check (`dsd_controller::CheckCost`) — and a
+/// round checks as many of the guesses it FOUND as give the most tokens per
+/// millisecond (`dsd_controller::best_gamma_beside_a_step`, zero included:
+/// SmartSpec, as every other speculating path chooses), at the recent
+/// acceptance (`AcceptanceEstimate::recent`): two guesses found can be worth
+/// less than the check that reads them, where seven are not. On a card a check
+/// is held to a graph's width.
+///
+/// **A refusal is tried again** ([`Self::probe_after`]). A conversation's first
+/// check of each width runs without a graph (`cuda_graph`: a capture follows an
+/// ordinary step of the same shape) and cost 25-49 ms beside a 7.7-13.5 ms
+/// step; fitted from that one check, the count went to zero and, checking
+/// nothing more, never learned that the reply had turned to repeating itself —
+/// Qwen3.5-4B's story, where checking every guess ran 102-104 tok/s against 72
+/// one at a time (α 0.93), stayed at 71. So after `probe_after` rounds of
+/// guesses declined, the next guesses found are checked anyway; one that pays
+/// (it wrote more than a step would have in its time, counting the step a
+/// rejected recurrent check turns into a check) starts the count over at
+/// [`Self::FIRST_PROBE_AFTER`], one that does not doubles it, up to
+/// [`Self::MOST_PROBE_AFTER`] — `SpecBackoff`'s doubling. The split path's
+/// counterpart re-tries a remembered zero after `dsd_controller::REPROBE_AFTER`.
+/// `SWARMLLM_LOCAL_GUESS_GAMMA=fixed` checks every guess as before.
+struct LocalSpec {
+    cfg: crate::inference::ngram_lookup::NgramLookupConfig,
+    /// Prompt then reply, in order, so its tail is always the most recent token.
+    ctx: Vec<u32>,
+    prompt_len: usize,
+    /// Verified tokens a round produced beyond the one being emitted. Already
+    /// in the cache, or in `refeed`, so draining them costs no forward. This
+    /// is where speculation actually pays.
+    pending: std::collections::VecDeque<u32>,
+    /// Tokens of the reply the cache does not hold yet, read at the head of
+    /// the next round's forward.
+    refeed: Vec<u32>,
+    backoff: SpecBackoff,
+    /// The most positions a round may read: a captured graph's on a card.
+    widest: usize,
+    /// A rejected guess is read again next round (a model with recurrent state).
+    rejection_rereads: bool,
+    /// Every guess checked, as before 2026-10-25 (`SWARMLLM_LOCAL_GUESS_GAMMA=fixed`).
+    fixed: bool,
+    step_ms: crate::inference::dsd_controller::RecentMedian,
+    check: crate::inference::dsd_controller::CheckCost,
+    acceptance: crate::inference::dsd_controller::AcceptanceEstimate,
+    rounds: u64,
+    produced: u64,
+    accepted: u64,
+    taken_back: u64,
+    /// Rounds that found guesses and checked none of them.
+    declined: u64,
+    /// Rounds whose forward made a card graph rather than updating one.
+    made_a_graph: u64,
+    /// Rounds of guesses declined since the last check.
+    declined_run: u32,
+    /// Declined rounds after which found guesses are checked anyway.
+    probe_after: u32,
+    /// Checks made that way.
+    probes: u64,
+    /// Every round's positions, milliseconds and whether it made a graph.
+    #[cfg(test)]
+    trace: Vec<(usize, f64, bool)>,
+}
+
+impl LocalSpec {
+    /// `fixed`: check every guess found, as before 2026-10-25 — the loop
+    /// passes [`local_guess_gamma_fixed`], the test runs both.
+    fn new(
+        cfg: crate::inference::ngram_lookup::NgramLookupConfig,
+        prompt_ids: &[u32],
+        model: &crate::inference::split::SplitModel,
+        fixed: bool,
+    ) -> Self {
+        let widest = if model.device().is_cuda() && !fixed {
+            crate::inference::cuda_graph::MAX_POSITIONS
+        } else {
+            usize::MAX
+        };
+        Self {
+            cfg,
+            ctx: prompt_ids.to_vec(),
+            prompt_len: prompt_ids.len(),
+            pending: std::collections::VecDeque::new(),
+            refeed: Vec::new(),
+            backoff: SpecBackoff::default(),
+            widest,
+            rejection_rereads: model.carries_recurrent_state(),
+            fixed,
+            step_ms: Default::default(),
+            check: crate::inference::dsd_controller::CheckCost::for_a_plan(None),
+            acceptance: crate::inference::dsd_controller::AcceptanceEstimate::recent(),
+            rounds: 0,
+            produced: 0,
+            accepted: 0,
+            taken_back: 0,
+            declined: 0,
+            made_a_graph: 0,
+            declined_run: 0,
+            probe_after: Self::FIRST_PROBE_AFTER,
+            probes: 0,
+            #[cfg(test)]
+            trace: Vec::new(),
+        }
+    }
+
+    const FIRST_PROBE_AFTER: u32 = 8;
+    const MOST_PROBE_AFTER: u32 = 64;
+
+    /// Did a check made against the count's advice pay — write more tokens
+    /// than steps would have in its time? A rejected check of a model with
+    /// recurrent state also turns the next round's step into a check.
+    fn probe_paid(&self, round: &SpecRound) -> bool {
+        let Some(step) = self.step_ms.median() else {
+            return true;
+        };
+        let reread = match (round.taken_back, self.check.predict(2)) {
+            (true, Some(check_two)) => (check_two - step).max(0.0),
+            _ => 0.0,
+        };
+        round.produced.len() as f64 * step >= round.ms + reread
+    }
+
+    /// How many guesses the next round's lookup may return: a round reads the
+    /// tokens waiting to be read again, the token, then the guesses.
+    fn room(&self) -> usize {
+        let fed = self.refeed.len();
+        self.cfg
+            .num_pred_tokens
+            .saturating_sub(fed)
+            .min(self.widest.saturating_sub(fed + 1))
+    }
+
+    /// How many of the `most` guesses found the round checks: all of them
+    /// until a step and a check have both been timed, then the count that
+    /// pays — zero included.
+    fn guesses(&self, most: usize) -> usize {
+        let fed = self.refeed.len();
+        if self.fixed {
+            return most;
+        }
+        crate::inference::dsd_controller::best_gamma_beside_a_step(
+            self.acceptance.alpha(),
+            self.step_ms.median(),
+            &self.check,
+            u32::try_from(fed).unwrap_or(u32::MAX),
+            self.rejection_rereads,
+            u32::try_from(most).unwrap_or(u32::MAX),
+        )
+        .map_or(most, |g| g as usize)
+    }
+
+    /// What the guessing learned, for the request's closing line.
+    fn summary(&self) -> String {
+        let fit = self.check.fit().map_or("-".to_string(), |(f, s)| {
+            format!("{f:.1} + {s:.2}/position")
+        });
+        let step = self
+            .step_ms
+            .median()
+            .map_or("-".to_string(), |m| format!("{m:.1}"));
+        format!(
+            "rounds {} accepted {} taken back {} declined {} probes {} made a graph {} step {step} ms check {fit} ms alpha {:.2} next {}",
+            self.rounds,
+            self.accepted,
+            self.taken_back,
+            self.declined,
+            self.probes,
+            self.made_a_graph,
+            self.acceptance.alpha(),
+            self.guesses(self.room()),
+        )
+    }
+
+    /// The token after `next_token`, which the caller has just emitted and
+    /// pushed onto `generated`: one already verified, else the first of a new
+    /// round. `index_pos` is the cache's length, moved by what the round adds.
+    #[allow(clippy::too_many_arguments)]
+    fn next(
+        &mut self,
+        model: &mut crate::inference::split::SplitModel,
+        kv_store: &crate::inference::split::KvCacheStore,
+        model_key: &str,
+        req_id_str: &str,
+        index_pos: &mut usize,
+        next_token: u32,
+        generated: &[u32],
+        sampling: &crate::types::SamplingParams,
+        force_attn: bool,
+    ) -> Result<u32, SwarmError> {
+        self.ctx.push(next_token);
+        if let Some(tok) = self.pending.pop_front() {
+            return Ok(tok);
+        }
+        let room = self.room();
+        let found = if self.backoff.should_draft() && room > 0 {
+            let (mut found, _source) = crate::inference::ngram_lookup::cascade_find_candidate(
+                &self.ctx,
+                self.prompt_len,
+                NGRAM_RECENT_GEN_WINDOW,
+                self.cfg,
+            );
+            found.truncate(room);
+            found
+        } else {
+            Vec::new()
+        };
+        let mut worth = self.guesses(found.len());
+        let mut probe = false;
+        if !found.is_empty() {
+            if worth > 0 {
+                self.declined_run = 0;
+            } else {
+                self.declined_run += 1;
+                if self.declined_run >= self.probe_after {
+                    (worth, probe, self.declined_run) = (found.len(), true, 0);
+                }
+            }
+        }
+        // Guesses found and none worth their check.
+        let declined = !found.is_empty() && worth == 0;
+        let graphs_before = model.launches_that_made_a_graph();
+        let round = ngram_spec_round(
+            model,
+            kv_store,
+            model_key,
+            req_id_str,
+            *index_pos,
+            &mut self.refeed,
+            next_token,
+            &found[..worth],
+            generated,
+            sampling,
+            force_attn,
+        )?;
+        *index_pos += round.committed;
+        let made_a_graph = model.launches_that_made_a_graph() > graphs_before;
+        self.made_a_graph += u64::from(made_a_graph);
+        #[cfg(test)]
+        self.trace.push((round.positions, round.ms, made_a_graph));
+        self.rounds += 1;
+        self.produced += round.produced.len() as u64;
+        self.accepted += round.accepted as u64;
+        self.taken_back += u64::from(round.taken_back);
+        match round.positions {
+            1 => self.step_ms.record(round.ms),
+            p => self
+                .check
+                .record(u32::try_from(p).unwrap_or(u32::MAX), round.ms),
+        }
+        if round.proposed > 0 {
+            self.backoff.record(round.accepted > 0);
+            self.acceptance
+                .record(round.accepted as u32, round.proposed as u32);
+        } else if declined {
+            self.declined += 1;
+            self.acceptance.fade();
+        }
+        if probe {
+            self.probes += 1;
+            self.probe_after = if self.probe_paid(&round) {
+                Self::FIRST_PROBE_AFTER
+            } else {
+                (self.probe_after * 2).min(Self::MOST_PROBE_AFTER)
+            };
+        }
+        let mut it = round.produced.into_iter();
+        // A round always yields at least the token that follows the one just
+        // forwarded, so this cannot be empty.
+        let first = it
+            .next()
+            .ok_or_else(|| SwarmError::Internal("speculative round produced no token".into()))?;
+        self.pending.extend(it);
+        Ok(first)
+    }
+}
+
+/// `SWARMLLM_LOCAL_GUESS_GAMMA=fixed`: the local n-gram checks every guess it
+/// finds, up to `num_pred_tokens` and at any width — the rule before
+/// [`LocalSpec::guesses`] — for A/B inside one binary.
+fn local_guess_gamma_fixed() -> bool {
+    static FIXED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FIXED.get_or_init(|| std::env::var("SWARMLLM_LOCAL_GUESS_GAMMA").as_deref() == Ok("fixed"))
 }
 
 /// KV positions reserved for the reply when a prompt is admitted and when its
@@ -4812,26 +5186,14 @@ async fn handle_generate(
         // sampler and keeping a draft only when it matches is the
         // speculative-sampling rejection rule itself, not an approximation of
         // it. See the note on `ngram_spec_eligible`.
-        let spec_cfg = *ngram_cfg;
-        let spec_active = ngram_spec_eligible(
+        // Only built when it will be used — it copies the whole prompt.
+        let mut spec = (ngram_spec_eligible(
             &gen.sampling,
             ngram_cfg,
             swift_cfg,
-            model.carries_recurrent_state(),
-        ) && !swift_active;
-        // Context the lookup searches: prompt then generation, in order, so its
-        // tail is always the most recent token. Only built when it will be used
-        // — it is a copy of the whole prompt.
-        let mut spec_ctx: Vec<u32> = if spec_active {
-            prompt_ids.clone()
-        } else {
-            Vec::new()
-        };
-        // Verified tokens a round produced beyond the one being emitted. They
-        // are already in the KV cache, so draining them costs no forward.
-        let mut pending: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
-        let (mut spec_rounds, mut spec_drafted, mut spec_accepted) = (0u64, 0u64, 0u64);
-        let mut spec_backoff = SpecBackoff::default();
+            local_guessing_suits(model),
+        ) && !swift_active)
+            .then(|| LocalSpec::new(*ngram_cfg, &prompt_ids, model, local_guess_gamma_fixed()));
 
         for _ in 0..gen.sampling.max_tokens {
             // This loop owns the worker's main loop for its whole duration, so
@@ -4865,9 +5227,6 @@ async fn handle_generate(
             }
 
             generated.push(next_token);
-            if spec_active {
-                spec_ctx.push(next_token);
-            }
 
             send_worker(
                 writer,
@@ -4883,42 +5242,18 @@ async fn handle_generate(
             .await
             .map_err(|e| SwarmError::Internal(format!("send Token: {e}")))?;
 
-            if let Some(tok) = pending.pop_front() {
-                // Already verified and already in the cache: no forward at all.
-                // This is where speculation actually pays.
-                next_token = tok;
-                token_logprob = None;
-            } else if spec_active {
-                let draft_allowed = spec_backoff.should_draft();
-                let (produced, committed) = ngram_spec_round(
+            if let Some(spec) = spec.as_mut() {
+                next_token = spec.next(
                     model,
                     kv_store,
                     &model_key_string,
                     &req_id_str,
-                    index_pos,
+                    &mut index_pos,
                     next_token,
-                    &spec_ctx,
-                    prompt_ids.len(),
                     &generated,
                     &gen.sampling,
-                    spec_cfg,
-                    draft_allowed,
                     force_attn,
                 )?;
-                index_pos += committed;
-                spec_rounds += 1;
-                spec_drafted += produced.len() as u64;
-                spec_accepted += (committed - 1) as u64;
-                if draft_allowed {
-                    spec_backoff.record(committed > 1);
-                }
-                let mut it = produced.into_iter();
-                // A round always yields at least the token that follows the one
-                // just forwarded, so this cannot be empty.
-                next_token = it.next().ok_or_else(|| {
-                    SwarmError::Internal("speculative round produced no token".into())
-                })?;
-                pending.extend(it);
                 token_logprob = None;
             } else {
                 let input = model.token_tensor(next_token)?;
@@ -4939,18 +5274,20 @@ async fn handle_generate(
             }
         }
 
-        if spec_rounds > 0 {
-            let tokens_per_round = spec_drafted as f64 / spec_rounds as f64;
+        if let Some(spec) = spec.filter(|s| s.rounds > 0) {
+            let tokens_per_round = spec.produced as f64 / spec.rounds as f64;
             // Steers the next admission decision — see
             // `spec_payoff_justifies_diverting`.
             record_spec_payoff(tokens_per_round);
             tracing::debug!(
                 request_id = %request_id,
-                rounds = spec_rounds,
-                drafted = spec_drafted,
-                accepted = spec_accepted,
-                paused_rounds = spec_backoff.paused_rounds,
+                rounds = spec.rounds,
+                drafted = spec.produced,
+                accepted = spec.accepted,
+                taken_back = spec.taken_back,
+                paused_rounds = spec.backoff.paused_rounds,
                 tokens_per_round,
+                learned = %spec.summary(),
                 "DIAG: local n-gram speculation complete"
             );
         }
@@ -5617,7 +5954,7 @@ fn slot_admission_eligible(
     swift_cfg: &SwiftConfig,
     ngram_cfg: &crate::inference::ngram_lookup::NgramLookupConfig,
     slot_table: &SlotTable,
-    carries_recurrent_state: bool,
+    guessing_suits: bool,
 ) -> bool {
     if gen.sampling.max_tokens == 0 {
         tracing::debug!(request_id = %gen.request_id, "slot admission refused: max_tokens=0");
@@ -5656,7 +5993,7 @@ fn slot_admission_eligible(
     // that, and against an empty table batching has nothing to amortise
     // anyway — there is no second request to share the weight read with.
     if slot_table.is_empty()
-        && ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg, carries_recurrent_state)
+        && ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg, guessing_suits)
         && spec_payoff_justifies_diverting()
     {
         tracing::debug!(
@@ -6590,8 +6927,8 @@ async fn handle_daemon_msg(
                     .as_ref()
                     .map(|g| {
                         // One worker serves one model family.
-                        let recurrent = models.values().any(SplitModel::carries_recurrent_state);
-                        slot_admission_eligible(g, swift_cfg, ngram_cfg, slot_table, recurrent)
+                        let suits = models.values().all(local_guessing_suits);
+                        slot_admission_eligible(g, swift_cfg, ngram_cfg, slot_table, suits)
                     })
                     .unwrap_or(false)
             {
@@ -7406,7 +7743,10 @@ mod local_speculation_tests {
     /// so it loses batching and gains nothing.
     #[test]
     fn eligibility_is_one_predicate_both_callers_share() {
-        assert!(ngram_spec_eligible(&greedy(), &on(), &swift_off(), false));
+        assert!(ngram_spec_eligible(&greedy(), &on(), &swift_off(), true));
+
+        // A model it does not suit (Qwen 3.5 on a card, `local_guessing_suits`).
+        assert!(!ngram_spec_eligible(&greedy(), &on(), &swift_off(), false));
 
         // Sampling on is FINE, and this is the case that matters: 0.7 and 1.0
         // are the two API defaults, so gating on greedy left the feature inert
@@ -7416,21 +7756,21 @@ mod local_speculation_tests {
         // `accepting_only_on_a_match_preserves_the_sampled_distribution`.
         let mut warm = greedy();
         warm.temperature = 0.7;
-        assert!(ngram_spec_eligible(&warm, &on(), &swift_off(), false));
+        assert!(ngram_spec_eligible(&warm, &on(), &swift_off(), true));
 
         // Logprobs asked for: accepted tokens carry none back out, and
         // answering `null` where a client asked for numbers is worse than
         // declining to speculate.
         let mut lp = greedy();
         lp.logprobs = true;
-        assert!(!ngram_spec_eligible(&lp, &on(), &swift_off(), false));
+        assert!(!ngram_spec_eligible(&lp, &on(), &swift_off(), true));
 
         // SWIFT is already speculating for this request.
         let swift_on = SwiftConfig {
             enabled: true,
             ..Default::default()
         };
-        assert!(!ngram_spec_eligible(&greedy(), &on(), &swift_on, false));
+        assert!(!ngram_spec_eligible(&greedy(), &on(), &swift_on, true));
 
         // `inference.ngram_lookup_enabled = false` arrives as a zero width, so
         // the switch cannot disagree with the shape.
@@ -7438,10 +7778,176 @@ mod local_speculation_tests {
             num_pred_tokens: 0,
             ..NgramLookupConfig::default()
         };
-        assert!(!ngram_spec_eligible(&greedy(), &off, &swift_off(), false));
-        // A model with recurrent state cannot take a rejected draft back
-        // (Qwen 3.5's DeltaNet, FUTURE_WORK #117) — whatever else holds.
-        assert!(!ngram_spec_eligible(&greedy(), &on(), &swift_off(), true));
+        assert!(!ngram_spec_eligible(&greedy(), &off, &swift_off(), true));
+    }
+
+    /// A reply guessed ahead is the reply written one token at a time — and,
+    /// for Qwen 3.5, the rewind that makes it so (#228 (5)). Its DeltaNet
+    /// layers cannot give back a rejected guess, so a check that rejects one is
+    /// taken back whole and its accepted tokens are read again at the head of
+    /// the next. On the processor each row of a check is computed as a lone
+    /// step computes it (`attn_rows`, the row-blocked quantized matmul, the
+    /// delta rule's per-token loop), so the ids must match EXACTLY; and on a
+    /// model with recurrent state checks must have been both accepted and
+    /// taken back, or it proved nothing. Red if a rejected check is truncated
+    /// as an attention-only model's is (the request fails), or if the accepted
+    /// tokens are not read again (the reply goes its own way). It prints both
+    /// speeds: read them off a release build on an idle machine.
+    ///
+    /// Needs a real file: `SWARMLLM_GUESS_TEST_GGUF=~/swarmllm-ref/qwen35/Qwen3.5-0.8B-Q8_0.gguf
+    /// cargo dev-test --lib guessed_reply -- --ignored --nocapture`
+    /// (`SWARMLLM_GUESS_TEST_ON_CARD=1` on a card build).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a GGUF in SWARMLLM_GUESS_TEST_GGUF"]
+    async fn a_guessed_reply_is_the_reply_read_one_token_at_a_time() {
+        let Ok(path) = std::env::var("SWARMLLM_GUESS_TEST_GGUF") else {
+            eprintln!("SWARMLLM_GUESS_TEST_GGUF not set — skipped");
+            return;
+        };
+        let mut model = SplitModel::load_from_gguf(
+            std::path::Path::new(&path),
+            0,
+            999,
+            true,
+            true,
+            std::env::var("SWARMLLM_GUESS_TEST_ON_CARD").is_err(),
+        )
+        .expect("load the file");
+        let recurrent = model.carries_recurrent_state();
+        // Code that repeats its shape: guesses land on the shape and miss on
+        // each new name.
+        // `SWARMLLM_GUESS_TEST_PROMPT` measures another reply (an open-ended
+        // one guesses little), and then only the ids are checked.
+        let asked = std::env::var("SWARMLLM_GUESS_TEST_PROMPT").ok();
+        let prompt = model.encode_ids(asked.as_deref().unwrap_or(
+            "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n\n\
+             def mul(a, b):\n    return a * b\n\ndef div(a, b):\n",
+        ));
+        let kv = crate::inference::split::KvCacheStore::new(std::time::Duration::from_secs(600));
+        // One token at a time, every guess checked (the rule before
+        // 2026-10-25, and the one that exercises the rewind most), the count
+        // that pays — each twice, the second timed, so graphs captured on a
+        // card's first use of a shape are not in the figure.
+        let mut every = None;
+        let mut chosen = None;
+        let mut plain = (Vec::new(), 0.0, None);
+        for pass in 0..2 {
+            plain = guessed_reply(&mut model, &kv, &prompt, &format!("plain-{pass}"), None);
+            every = Some(guessed_reply(
+                &mut model,
+                &kv,
+                &prompt,
+                &format!("every-{pass}"),
+                Some(true),
+            ));
+            chosen = Some(guessed_reply(
+                &mut model,
+                &kv,
+                &prompt,
+                &format!("chosen-{pass}"),
+                Some(false),
+            ));
+        }
+        let (every, chosen) = (every.unwrap(), chosen.unwrap());
+        let speed = |secs: f64| GUESSED_REPLY_STEPS as f64 / secs;
+        // Speed is read off a release build on an idle machine, never this
+        // test's debug one.
+        eprintln!(
+            "one token at a time {:.1} tok/s, every guess {:.1} tok/s, guesses that pay {:.1} tok/s",
+            speed(plain.1),
+            speed(every.1),
+            speed(chosen.1)
+        );
+        let text = |ids: &[u32]| {
+            let mut carry = Vec::new();
+            ids.iter()
+                .map(|&t| decode_token(&model, t, &mut carry))
+                .collect::<String>()
+        };
+        eprintln!("reply {:?}", text(&plain.0));
+        let arms = [("every guess", &every), ("guesses that pay", &chosen)];
+        for (name, (ids, _, spec)) in arms {
+            let apart = plain.0.iter().zip(ids).position(|(a, b)| a != b);
+            let spec = spec.as_ref().unwrap();
+            eprintln!("{name}: {}; first apart {apart:?}", spec.summary());
+            // `SWARMLLM_GUESS_TEST_TRACE=1`: every round, positions:ms, `*`
+            // where its forward made a card graph.
+            if std::env::var("SWARMLLM_GUESS_TEST_TRACE").is_ok() {
+                let rounds: Vec<String> = spec
+                    .trace
+                    .iter()
+                    .map(|(p, ms, made)| format!("{p}:{ms:.1}{}", if *made { "*" } else { "" }))
+                    .collect();
+                eprintln!("{name} rounds: {}", rounds.join(" "));
+            }
+        }
+        for (name, (ids, _, _)) in arms {
+            let first_apart = plain.0.iter().zip(ids).position(|(a, b)| a != b);
+            assert_eq!(
+                first_apart,
+                None,
+                "{name}\none token at a time {:?}\nguessed ahead     {:?}",
+                text(&plain.0),
+                text(ids)
+            );
+        }
+        if asked.is_none() {
+            let spec = every.2.as_ref().unwrap();
+            assert!(
+                spec.accepted > 0,
+                "no guess was accepted — nothing was checked"
+            );
+            assert!(
+                !recurrent || spec.taken_back > 0,
+                "no check was taken back — the rewind never ran"
+            );
+        }
+    }
+
+    const GUESSED_REPLY_STEPS: usize = 96;
+
+    /// [`GUESSED_REPLY_STEPS`] greedy tokens after `prompt` under `request`:
+    /// one at a time (`None`), or through [`LocalSpec`] (`Some(fixed)`).
+    /// Returns the ids, the seconds the reply took, and the guessing's state.
+    fn guessed_reply(
+        model: &mut SplitModel,
+        kv: &crate::inference::split::KvCacheStore,
+        prompt: &[u32],
+        request: &str,
+        guessing: Option<bool>,
+    ) -> (Vec<u32>, f64, Option<LocalSpec>) {
+        let sampling = greedy();
+        let key = model.kv_model_key().to_string();
+        let pick = |logits: &candle_core::Tensor, history: &[u32]| {
+            crate::inference::tensor_util::sample_token_with_logprob_history(
+                logits, &sampling, history,
+            )
+            .unwrap()
+            .0
+        };
+        let input = model.tensor_from_ids(prompt).unwrap();
+        let mut next = pick(&model.forward(&input, 0, kv, request).unwrap(), &[]);
+        let mut spec = guessing
+            .map(|fixed| LocalSpec::new(NgramLookupConfig::default(), prompt, model, fixed));
+        let (mut reply, mut pos) = (Vec::new(), prompt.len());
+        let started = std::time::Instant::now();
+        for _ in 0..GUESSED_REPLY_STEPS {
+            reply.push(next);
+            next = match spec.as_mut() {
+                Some(spec) => spec
+                    .next(
+                        model, kv, &key, request, &mut pos, next, &reply, &sampling, false,
+                    )
+                    .unwrap(),
+                None => {
+                    let input = model.token_tensor(next).unwrap();
+                    let logits = model.forward(&input, pos, kv, request).unwrap();
+                    pos += 1;
+                    pick(&logits, &reply)
+                }
+            };
+        }
+        (reply, started.elapsed().as_secs_f64(), spec)
     }
 
     #[test]

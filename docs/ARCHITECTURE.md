@@ -1431,7 +1431,11 @@ machine drafts from an n-gram match against the prompt and its own output, and
 verifies the batch in one forward — no second model, nothing downloaded. Lives
 in `model_worker::ngram_spec_round`, i.e. in the worker's decode loop, which is
 the choke point every local surface funnels through (streaming and not, OpenAI
-and Anthropic). ~2x CPU / ~3x GPU on replies that copy from context.
+and Anthropic). It checks only the guesses that pay (`LocalSpec::guesses`, from
+a measured step and check, 2026-10-25): on the processor 1.3-1.5x on replies
+that copy from context (qwen3-1.7B code 18-19 → 24.6-27.6 tok/s), within a few
+percent on prose; on a card, where a step is one captured graph, within a few
+percent either way. Qwen 3.5 on the processor only (`local_guessing_suits`).
 
 **Draft-free n-gram, DISTRIBUTED.** `pipeline::ngram_only_spec` for pipelines
 with a remote segment, verifying through `forward_verify_through_segments`.
@@ -1447,8 +1451,8 @@ Three invariants the two draft-free paths share, all learned the hard way:
   near-tie can land the other way. Each run is deterministic; that is how you
   tell reassociation from a race.
 - **A miss is not free** (#371), and diverting a request out of the batched path
-  is not free either (#373). `SpecBackoff` handles the first,
-  `spec_payoff_justifies_diverting` the second.
+  is not free either (#373). `LocalSpec::guesses` and `SpecBackoff` handle the
+  first, `spec_payoff_justifies_diverting` the second.
 
 ### Subprocess-Per-Model Isolation (Ollama-style)
 
