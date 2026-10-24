@@ -247,6 +247,9 @@ pub enum NgramHitSource {
     /// Match found in the recent generation tail — model is repeating
     /// a pattern.
     Generation,
+    /// Match found in one of the owner's earlier replies
+    /// (`owner_replies`, #337).
+    EarlierReply,
     /// No match at any n.
     None,
 }

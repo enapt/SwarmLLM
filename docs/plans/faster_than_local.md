@@ -539,6 +539,33 @@ times what a second branch buys for fewer rows. Three more rules on the 400 sess
   points. A low P lengthens runs: hits that agree carry a run past today's 10-token rule. One hit
   alone is cut by the length rule, as today. Rows matter only where the link's bandwidth binds; a wrong
   copy measured free on the rig (`docs/invariants/scheduling.md` § "Copied runs"). Filed as #338.
+- **The store as built** (`combo.py`, 2026-10-24): each earlier reply its own (no match or run
+  across a reply's end), bounded to the newest N tokens, the lax gate over the last K hits:
+
+  | store | coverage | rows a reply token | from the store | first 3 replies |
+  |---|---|---|---|---|
+  | unbounded, K 64, lax (reproduces the table above) | 73.7% | 3.86 | 11.7 pt for 0.85 rows | 60.7% |
+  | 256K, K 64, lax | 73.3% | 3.83 | 11.2 pt for 0.81 rows | 59.9% |
+  | **256K, K 32, lax** | 73.3% | 3.84 | 11.3 pt for 0.82 rows | 59.9% |
+  | 256K, K 32, lax + agreement cut 2/3 | 72.9% | 3.86 | 10.8 pt for 0.82 rows | 58.5% |
+  | 128K, K 32, lax + cut | 72.6% | 3.82 | 10.5 pt for 0.77 rows | 58.1% |
+
+  256K tokens (a fifth of the 1.18M reply tokens here) keeps 96% of the gain. The agreement cut
+  saves no rows on the store: many earlier replies agreeing carry a run to 32, past the length
+  rule. #337 is built at 256K, K 32, lax, today's run.
+- **Unmeasured next source: a PUBLIC store.** REST (2311.08252) drafts from a datastore of public
+  text alone: CodeLlama 7B on HumanEval took 2.12-2.36x with 2.7M Python files of The Stack
+  (27 GB), and RASD's (2503.03434) table has 2.76 at 0.9 GB against 2.90 at 27 GB, so most of the
+  gain is in a small store. CREST (2408.04678) keeps only each size's most frequent n-grams, each
+  with its continuations precomputed as a tree, and matches REST at a tenth of the storage
+  (acceptance length 2.37 against 2.17 on HumanEval, 1.9 against 1.77 on MT-Bench chat, as
+  measured without any prompt lookup). A public store has none of the owner store's limits: no
+  owner check, no peer rule, and it could be shared as parts like a model. What it would add here
+  is the question. Its gains were measured with no prompt lookup and no drafter, and on chat this
+  flow's copies are already nearly all wrong (1-6 walked of 292-369 rows). Measure before
+  building: tokenize a public code corpus's most frequent 2-5-grams with Qwen's tokenizer, then
+  add them to `combo.py` as a fourth source and count the coverage they add beyond the owner
+  store on the SWE-agent sessions.
 
 So the store matters where the session's own history is short — an agent's opening calls, a new
 chat on a familiar task — and adds a few points once the history has built up. Both workloads are

@@ -2205,39 +2205,44 @@ per-session response histories are a candidate input for #3 — keep that in min
 deleting.)
 
 #### #337 — A copied run looks only in this conversation, so an agent's first replies copy little
-`P2` · perf-split · **OPEN** — 2026-10-24 · history: `docs/plans/faster_than_local.md` § 7.6
+`P2` · perf-split · **OPEN** (the flow done 2026-10-24; residual below) · history: `docs/plans/faster_than_local.md` § 7.6
 
 A copied run (`ngram_lookup::copied_run`, read by the flow's `copy_ahead`, the n-gram loop and local
 prompt lookup) searches the prompt and the reply so far. An agent's opening calls repeat its EARLIER
-sessions, which no lookup sees. Measured offline (§ 7.6): the share of reply tokens a copy predicts
-on a session's first replies is 28 → 61% (SWE-agent) and 34 → 64% (coding-agent sessions of the
-`/v1/messages` kind) with a store of earlier replies, +2.6 to +9.3 points over whole sessions.
-Next: a per-model store of the OWNER's recent reply ids, in memory, bounded (1M tokens), indexed
-by 2-4-grams, written when a reply is finalised and searched after the prompt and the reply. It is a
-REQUIRED argument of the one lookup, never an `Option` a path may skip. It is never shared, never
-announced and never saved to disk. Reason: a store's matches show in the reply's speed (REST's
-datastore leaked at over 25 tokens a second, 2411.01076). Mapped 2026-10-24 (read, not yet checked
-at each line):
-- **No per-key identity exists.** A node has one API key (`SharedState::api_key`). "The owner" is
-  `pipeline::worker_requester` = `Owner` (a led split arrives `lead_here` → `Swarm`) AND not a pool
-  member's HTTP forward. That forward carries the same key plus `x-swarm-forwarded`, which today
-  reaches only the subscription check (`peer_forward.rs`, `middleware.rs`), not `InferenceRequest`.
-  It must be carried there first.
-- **Two processes.** The flow (`dsd_flow::copy_ahead` → `copied_run`) and the daemon's speculative
-  loops (`speculative::ngram_lookup_drafts`: draft-model, DSD, the distributed n-gram loop) run in
-  the daemon. Local prompt lookup (`model_worker::ngram_spec_round`) runs in the worker, which knows
-  only `IpcGenerate::for_the_owner`.
-- **Write point.** `speculative::finish_speculative` holds the ids for the daemon's loops. A worker
-  generation shows its ids only as `WorkerMsg::Token`. `InferenceOutput`, `RequestTrace` and
-  `finalize_reply_text` carry text, not ids.
-- **Copy from the store only where its earlier sessions agree** (§ 7.6, `vote.py`, 2026-10-24):
-  llama.cpp's lookup decoding drafts from its cross-run cache only under thresholds on how often
-  the n-gram was seen and how much of it its leading next token holds. Its LAX thresholds (≥ 1-2
-  sightings, ≥ 50%) on the store cost 0.2 points of the 9.3 and cut the store's rows 24%; take
-  them. The strict ones are `FlowGuard`'s trade, not a default.
+sessions, which no lookup sees. Measured offline (§ 7.6): a store of earlier replies takes the share
+of reply tokens a copy predicts on a session's first three replies from 28% to 60% (SWE-agent), and
+over whole sessions from 64.6% to 73.3% at 256K tokens a model.
 
-Measure with the flow's own `SWARMLLM_FLOW_COPY` A/B on an agent's replayed session before it is on
-by default.
+**Done for the flow (2026-10-24)** — `inference::owner_replies`, read by `dsd_flow::copy_ahead` where
+the conversation has no match, written with the flow's reply at its end:
+- **Only the owner's.** `OwnerReplies::for_the_owner` is the one way in. It needs
+  `InferenceRequest::requested_by == Owner` (a new local field, REQUIRED in `::local`, never read off
+  the wire; `api::requested_by` sets it where the key was presented and no `x-swarm-forwarded`) AND
+  `worker_requester` (a split led here for another node is the swarm's). Reason: a store's matches
+  show in the reply's speed (REST's datastore leaked at over 25 tokens a second, 2411.01076).
+- **A peer is never shown a copy of text it has not seen.** A flow's copied rows are SENT, so each kept
+  reply carries the peers that served it. A run is copied from it only where every peer of the split
+  is among them. The reply's last token is not kept, because only the tail is sure to have seen it.
+  A run goes to a peer as TOKEN IDS (this node runs none of the first layers) only from a reply
+  that peer was sent as ids, never from one it was sent as hidden states.
+- Memory only (256K tokens and 4,096 replies a model, 4 models), never saved, shared or announced.
+  In a pool every device shares the key: a pool member asking this node directly is its owner.
+- llama.cpp's LAX vote over the last 32 hits (−24% of the store's rows for 0.2 points). #338's cut
+  saved no rows on the store and cost 0.5 points (`combo.py`), so the run is today's.
+  A/B `SWARMLLM_FLOW_COPY_STORE=0`.
+
+**Residual**:
+- The daemon's speculative loops (`speculative::ngram_lookup_drafts`: draft-model, DSD, the
+  distributed n-gram loop) do not read the store. Neither does the worker's local prompt lookup
+  (`model_worker::ngram_spec_round`, which runs in another process and knows only
+  `IpcGenerate::for_the_owner`). Each needs the peers it sends a guess to. ⚠ Those rounds send the
+  guesses' IDS to the tail too (`LayerForward::draft_tokens` under `spec_walk_at_tail`), and every hop
+  of a chained check reads them on its way (`layer_forward`'s `verify_onward`), so the flow's one
+  `ids_to` peer becomes a SET there (the flow's tail gets `drafts: &[]`). The worker's path needs the
+  reply's ids at the write point: `WorkerMsg::Token` carries `token_id`, which
+  `ModelProcessPool::generate_attempt` drops (`token_id: _`), and a forwarded request reaches the
+  pool as `Requester::Owner` (`api/openai/streaming.rs`), so `requested_by` must be threaded too.
+- Field measurement on an agent's replayed session (the rig measures the mechanism, below).
 
 #### #338 — A copied run takes the most recent match's continuation whatever the other matches did
 `P3` · perf-split · **OPEN** — 2026-10-24 · history: `docs/plans/faster_than_local.md` § 7.6
@@ -2249,8 +2254,9 @@ lookup reproduced at 64.6% / 3.29 copied rows a reply token): walking the last 3
 together and ending the run once the leading next token holds under 2/3 of those still following it
 gives **64.7% for 2.62 rows (−20%)**; 4/5 gives 2.55. SuffixDecoding stops a draft the same way
 (`min_token_prob` over its tree's frequencies). Rows matter only where bandwidth binds, so it is
-worth building with #337, whose store has many occurrences per n-gram, and judging on a thin uplink
-(`FlowGuard`'s case) — a wrong copy measured free on the rig.
+worth judging on a thin uplink (`FlowGuard`'s case) — a wrong copy measured free on the rig. On
+#337's store it saved NO rows and cost 0.5 points (`combo.py`, 2026-10-24: many earlier replies
+agreeing carry a run past the length rule), so it is a question for the conversation's own text only.
 
 ### Model families and platforms
 

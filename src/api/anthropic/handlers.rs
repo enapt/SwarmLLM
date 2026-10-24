@@ -221,6 +221,7 @@ async fn emit_anthropic_tool_blocks(
     emitted
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn anthropic_non_stream(
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
     messages: Vec<ChatMessage>,
@@ -232,6 +233,7 @@ pub(super) async fn anthropic_non_stream(
     // `tools_requested` is derived below so the two cannot disagree.
     tools: Option<Vec<serde_json::Value>>,
     keep: crate::types::KeepAsked,
+    requested_by: crate::types::RequestedBy,
 ) -> Result<axum::response::Response, ApiError> {
     let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
     let inference_req = InferenceRequest::local(
@@ -243,6 +245,7 @@ pub(super) async fn anthropic_non_stream(
         None,
         tools.clone(),
         keep,
+        requested_by,
     );
 
     // A client that disconnects stops the work: `submit_to_router` cancels a
@@ -270,6 +273,7 @@ pub(super) async fn anthropic_stream(
     // `tools_requested` is derived below so the two cannot disagree.
     tools: Option<Vec<serde_json::Value>>,
     keep: crate::types::KeepAsked,
+    requested_by: crate::types::RequestedBy,
 ) -> Result<axum::response::Response, ApiError> {
     let tools_requested = tools.as_ref().is_some_and(|t| !t.is_empty());
     // The request's own cancel flag: `/v1/messages` has no cancel-by-token
@@ -290,6 +294,7 @@ pub(super) async fn anthropic_stream(
         // deliberately not part of Anthropic's `/v1/messages` contract.
         None,
         keep,
+        requested_by,
     )
     .await?;
     let progress_handle = Some((state.shared_state.clone(), traced_id));
@@ -1873,6 +1878,7 @@ mod route_in_body_tests {
             "m".into(),
             None,
             crate::types::KeepAsked::Unasked,
+            crate::types::RequestedBy::Owner,
         )
         .await
         .unwrap_or_else(|e| panic!("{}", e.0));

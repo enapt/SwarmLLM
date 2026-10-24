@@ -141,6 +141,8 @@ pub fn request_to_chat(
         // The caller's instruction to keep the request here crosses the
         // translation intact; `validate_chat_request` folds the header in.
         swarmllm: req.swarmllm.clone(),
+        // Set from the headers by `validate_chat_request`, as for a chat request.
+        requested_by: crate::types::RequestedBy::NotTheOwner,
         cache_control: None,
         extras,
     })

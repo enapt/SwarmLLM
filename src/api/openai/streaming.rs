@@ -441,6 +441,8 @@ pub async fn submit_stream_to_router(
     // The caller's instruction to keep the request on this computer (#251
     // (2b)) — required, so neither surface can forget to pass it on.
     keep: crate::types::KeepAsked,
+    // Whether the owner asked (#337) — required for the same reason.
+    requested_by: crate::types::RequestedBy,
 ) -> Result<
     (
         tokio::sync::oneshot::Receiver<
@@ -467,6 +469,7 @@ pub async fn submit_stream_to_router(
         lora_adapter,
         tools,
         keep,
+        requested_by,
     );
     inference_req.cancel = cancel;
     inference_req.route_override = route_override;
@@ -606,6 +609,7 @@ pub(super) async fn router_inference(
         req.lora_adapter.clone(),
         req.tool_definitions(),
         req.keep_asked(),
+        req.requested_by,
     );
     inference_req.cancel = cancel;
     inference_req.route_override = req.route_plan_override();
@@ -782,6 +786,7 @@ async fn router_inference_stream(
         req.tool_definitions(),
         req.route_plan_override(),
         req.keep_asked(),
+        req.requested_by,
     )
     .await?;
 

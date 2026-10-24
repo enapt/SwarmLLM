@@ -40,6 +40,11 @@ pub struct ModelMgmt {
     /// each (where one is held, only a larger one, #331), and prune keeps the
     /// held one and the one being fetched (`auto_manage::coverage::drafter`).
     pub drafters_wanted: DashMap<crate::types::ModelId, std::time::Instant>,
+    /// The owner's earlier replies, per model, for a flow's copied runs
+    /// (#337): memory only, never shared or saved. Reached ONLY through
+    /// `OwnerReplies::for_the_owner` (the owner's request, the split's peers),
+    /// read and written by `pipeline::dsd_flow` alone.
+    pub owner_replies: Arc<crate::inference::owner_replies::OwnerReplies>,
     pub download_cancel_flags: DashMap<crate::types::ModelId, Arc<AtomicBool>>,
     pub model_trust: DashMap<crate::types::ModelId, crate::types::ModelTrustInfo>,
     pub loading_models: DashMap<crate::types::ModelId, Arc<tokio::sync::Notify>>,
@@ -1130,6 +1135,7 @@ mod tests {
             hf_probe_cache: DashMap::new(),
             peer_shard_downloads: DashMap::new(),
             drafters_wanted: DashMap::new(),
+            owner_replies: Arc::default(),
             download_cancel_flags: DashMap::new(),
             model_trust: DashMap::new(),
             loading_models: DashMap::new(),

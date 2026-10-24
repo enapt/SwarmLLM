@@ -447,6 +447,7 @@ mod deliver_result_tests {
             None,
             None,
             crate::types::KeepAsked::Unasked,
+            crate::types::RequestedBy::Owner,
         );
         if cancelled {
             r.cancel = Some(Arc::new(AtomicBool::new(true)));

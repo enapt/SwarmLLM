@@ -62,6 +62,21 @@ pub(crate) fn extract_bearer_token(headers: &axum::http::HeaderMap) -> &str {
         .unwrap_or("")
 }
 
+/// Who an inference request reaching this node's API is answered for (#337):
+/// the owner, unless a pool member forwarded it (`x-swarm-forwarded`, set by
+/// `openai::peer_forward`). The auth middleware has already required this
+/// node's key (or, from this machine, its internal token), so a caller that
+/// sets the header itself is only refused the owner's copies — the safe
+/// direction. Read by both chat surfaces (the Responses API through the
+/// OpenAI one); `/mcp` is never forwarded and is the owner's.
+pub(crate) fn requested_by(headers: &axum::http::HeaderMap) -> crate::types::RequestedBy {
+    if headers.contains_key("x-swarm-forwarded") {
+        crate::types::RequestedBy::NotTheOwner
+    } else {
+        crate::types::RequestedBy::Owner
+    }
+}
+
 /// Strip `provider:` prefix from a model name, returning the bare model name.
 pub(crate) fn strip_provider_prefix(model: &str) -> &str {
     model.split_once(':').map_or(model, |(_, name)| name)
@@ -516,6 +531,7 @@ mod submit_to_router_tests {
             None,
             None,
             crate::types::KeepAsked::Unasked,
+            crate::types::RequestedBy::Owner,
         );
         req.cancel = cancel;
         req

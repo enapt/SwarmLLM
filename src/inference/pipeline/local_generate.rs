@@ -219,6 +219,7 @@ mod tests {
             route_override: None,
             continuation: None,
             keep: Default::default(),
+            requested_by: Default::default(),
         };
         let (tx, _rx) = tokio::sync::mpsc::channel::<NetworkCommand>(8);
         let assignment = PipelineAssignment {
@@ -595,6 +596,7 @@ mod tests {
             None,
             None,
             crate::types::KeepAsked::Unasked,
+            crate::types::RequestedBy::Owner,
         );
         assert!(worker_requester(&request) == Requester::Owner);
         request.route_override = Some(RoutePlanOverride {

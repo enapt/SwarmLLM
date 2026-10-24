@@ -134,7 +134,8 @@ fn bench_ngram_lookup() {
         match source {
             NgramHitSource::Prompt => prompt_hits += 1,
             NgramHitSource::Generation => gen_hits += 1,
-            NgramHitSource::None => {}
+            // The cascade looks only in this request's own tokens.
+            NgramHitSource::EarlierReply | NgramHitSource::None => {}
         }
         std::hint::black_box(cand);
     }

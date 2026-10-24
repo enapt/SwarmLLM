@@ -1274,6 +1274,7 @@ mod finalisation_tests {
             route_override: None,
             continuation: None,
             keep: Default::default(),
+            requested_by: Default::default(),
         };
         let (tx, _rx) = tokio::sync::mpsc::channel::<NetworkCommand>(8);
         let assignment = PipelineAssignment {

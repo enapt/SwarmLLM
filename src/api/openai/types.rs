@@ -82,6 +82,11 @@ pub struct ChatCompletionRequest {
     /// know, and a request kept here is never forwarded.
     #[serde(default, skip_serializing)]
     pub swarmllm: Option<crate::api::keep_here::SwarmllmOptions>,
+    /// Whether the owner asked (#337): never read from the body, set ONLY by
+    /// `validate_chat_request` from the headers — a pool member's forward
+    /// (`x-swarm-forwarded`) is not the owner. Unset, it is not the owner.
+    #[serde(skip)]
+    pub requested_by: crate::types::RequestedBy,
     /// Optional cache control hints for prefix caching (Anthropic-compatible).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,

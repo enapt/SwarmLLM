@@ -70,6 +70,11 @@ fn validate_chat_request(
         });
     }
 
+    // Who asked (#337): a request reaching this handler holds this node's key
+    // (the auth middleware), and is the owner's unless a pool member forwarded
+    // it. Only this line sets it; every path below reads the one answer.
+    req.requested_by = crate::api::requested_by(headers);
+
     // Bind session_id to the caller's API key so different users cannot
     // hijack each other's KV-cache sessions by guessing session IDs.
     if let Some(ref mut sid) = req.session_id {
@@ -1482,6 +1487,7 @@ mod tests {
             lora_adapter: None,
             swarm_route: None,
             swarmllm: None,
+            requested_by: crate::types::RequestedBy::Owner,
             cache_control: None,
             extras: Default::default(),
         };

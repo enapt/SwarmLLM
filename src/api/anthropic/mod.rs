@@ -170,6 +170,8 @@ pub async fn messages(
     // `ANTHROPIC_CUSTOM_HEADERS`) or the body's `swarmllm` object, the
     // strictest of the two. Read before anything can route.
     let keep = crate::api::keep_here::asked(&headers, req.swarmllm.as_ref())?;
+    // Who asked (#337): the owner unless a pool member forwarded it.
+    let requested_by = crate::api::requested_by(&headers);
 
     // Cap max_tokens at the same upper bound the local sampling clamp uses
     // (`build_sampling_params` clamps to DEFAULT_MAX_TOKENS=32768). Without
@@ -349,6 +351,7 @@ pub async fn messages(
                     model,
                     convert::tool_definitions_for_template(&req),
                     keep,
+                    requested_by,
                 )
                 .await;
             } else {
@@ -360,6 +363,7 @@ pub async fn messages(
                     model,
                     convert::tool_definitions_for_template(&req),
                     keep,
+                    requested_by,
                 )
                 .await;
             }

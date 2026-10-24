@@ -72,6 +72,28 @@ pub struct InferenceRequest {
     /// peer, so no peer is ever told.
     #[serde(skip)]
     pub keep: KeepAsked,
+    /// Whether this node's OWNER asked for this reply — the one reading of
+    /// "may it copy from, and be kept with, the owner's earlier replies"
+    /// (FUTURE_WORK #337). Local only, like `keep`: a request that arrived
+    /// over the network deserializes as [`RequestedBy::NotTheOwner`], which
+    /// is the safe answer — a request wrongly called "not the owner's" only
+    /// copies less.
+    #[serde(skip)]
+    pub requested_by: RequestedBy,
+}
+
+/// Who a request is answered for (#337): the owner — a caller holding this
+/// node's API key, directly — or anyone else. There is one key per node, and
+/// whoever holds it can already read every reply the node keeps (the
+/// Responses API's stored responses), so the key is the boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RequestedBy {
+    /// A caller holding this node's key, on this node's own API — not a pool
+    /// member's forward (`x-swarm-forwarded`), not a peer's hand-off.
+    Owner,
+    /// A peer, a pool member's forward, or anything not known to be the owner.
+    #[default]
+    NotTheOwner,
 }
 
 /// A caller's instruction about where ONE request may run (#251 (2b)).
@@ -123,7 +145,8 @@ impl InferenceRequest {
     /// context that made it correct — see `chat_template::build_prompt`, which
     /// carries the same note for the same reason. `keep` is required for the
     /// same reason: a caller's instruction to keep a request on this computer
-    /// is exactly the context a shorter form would lose (#251 (2b)).
+    /// is exactly the context a shorter form would lose (#251 (2b)), and
+    /// `requested_by` for the same reason (#337).
     #[allow(clippy::too_many_arguments)]
     pub fn local(
         model_id: ModelId,
@@ -134,6 +157,7 @@ impl InferenceRequest {
         lora_adapter: Option<String>,
         tools: Option<Vec<serde_json::Value>>,
         keep: KeepAsked,
+        requested_by: RequestedBy,
     ) -> Self {
         Self {
             id: uuid::Uuid::new_v4(),
@@ -151,6 +175,7 @@ impl InferenceRequest {
             route_override: None,
             continuation: None,
             keep,
+            requested_by,
         }
     }
 
@@ -1346,6 +1371,29 @@ mod chunk_assembly_tests {
             draft_parents: Vec::new(),
             draft_tree_from: None,
         }
+    }
+
+    /// A request that crossed the network is never the owner's, whatever the
+    /// sender's node said: the field is local, and its default is the safe
+    /// answer (#337).
+    #[test]
+    fn a_request_off_the_wire_is_never_the_owners() {
+        let request = InferenceRequest::local(
+            ModelId("m".into()),
+            Vec::new(),
+            SamplingParams::default(),
+            false,
+            None,
+            None,
+            None,
+            KeepAsked::Unasked,
+            RequestedBy::Owner,
+        );
+        let bytes = serde_json::to_vec(&request).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("requested_by"));
+        let arrived: InferenceRequest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(request.requested_by, RequestedBy::Owner);
+        assert_eq!(arrived.requested_by, RequestedBy::NotTheOwner);
     }
 
     #[test]

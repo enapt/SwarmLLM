@@ -4759,6 +4759,45 @@ round costs one per check.
   when it did not list it), so a wrong copy's followers rank where the drafter would have put
   them and never crowd out its own guesses. Between this node and its own worker only — no wire
   change. Off with `inference.ngram_lookup_enabled` (read live); A/B `SWARMLLM_FLOW_COPY=0`.
+- **Where this conversation has no match, the owner's EARLIER replies are looked in — only
+  for the owner, and only those every peer of the split has seen** (#337,
+  `inference::owner_replies`). An agent's opening calls repeat its earlier sessions; offline on
+  400 SWE-agent sessions a store of earlier replies took a copy's share of a session's first
+  three replies from 28% to 60%, and of whole sessions from 64.6% to 73.3% at 256K tokens a
+  model (11.2 of an unbounded store's 11.7 points; `faster_than_local.md` § 7.6). Three rules
+  make it safe to keep:
+  1. **Only the owner's request reads it or is kept in it.** `OwnerReplies::for_the_owner` is the
+     one way to a store's contents, and asks `InferenceRequest::requested_by` (local only,
+     `#[serde(skip)]`, a REQUIRED argument of `InferenceRequest::local`; `Owner` only where the
+     API saw this node's key and no `x-swarm-forwarded`, `api::requested_by`) AND
+     `worker_requester` (a split led here for another node is the swarm's). A store's matches show
+     in a reply's speed — REST's datastore leaked through it at over 25 tokens a second
+     (2411.01076) — so a pool member's forward and a peer's hand-off are never the owner. One key
+     per node, and its holder already reads every stored Responses reply: the key is the boundary.
+  2. **A peer is never shown a copy of text it has not already seen.** A flow's copied rows are
+     SENT: the first layers run them, the tail draws them, so a copy from another conversation
+     shows that conversation's fragments to today's peers (and ~60% of copies are wrong, so it is
+     shown text the reply never contains). Each kept reply carries the peers that served it, and
+     a run is copied from it only where the split's peers are ALL among them. Its last token is
+     not kept: the tail drew it, the peers before the tail may never have been sent it. **And in
+     the form they saw it** (`Exposure::covers`): where this node runs none of the first layers
+     (`shape.near` empty) the first peer is sent the rows' TOKEN IDS, elsewhere every peer gets
+     hidden states; a run goes to a peer as ids only from a reply that peer was sent as ids. Prompt
+     privacy treats ids leaving as worse than states, and a reply kept under it would otherwise
+     go out as ids once the setting was off (security review, 2026-10-24).
+  3. **Memory only, bounded** (256K tokens and 4,096 replies a model, 4 models, ~5.5 MB a
+     model; replies of one split share one record of its peers): never saved, shared or
+     announced. In a pool every device shares the key, so a pool member asking THIS node directly
+     is its owner here; it could already read the node's stored Responses replies.
+
+  The lookup is llama.cpp's for its cross-run cache (`common/ngram-cache.cpp`) at its LAX
+  thresholds — the last 32 occurrences vote, the leader must hold half, a bigram must have been
+  seen twice, and a longer n-gram that fails ends the lookup (no fallback): the vote cut the
+  store's rows 24% for 0.2 points. #338's agreement cut, which pays on the conversation's own
+  text, saved no rows on the store and cost 0.5 points (`combo.py`), so the run is today's: the
+  newest leading hit's continuation. A run never crosses a reply's end, nor a match its start.
+  Logged `earlier_runs` / `earlier_rows` / `earlier_walked` on the flow's line. A/B
+  `SWARMLLM_FLOW_COPY_STORE=0`. Tests in `owner_replies` (subset rule, ids against states, owner only, vote, bounds).
 - **Several levels a drafter call** (`levels_a_call` 3 × `rows_a_level` 8): each level reads the
   last one's proposals in one forward and proposes after them. At ONE level a call a branch grew
   one row deeper a call and the walk with it — 0.63-0.74 tokens a call whatever the rows a call

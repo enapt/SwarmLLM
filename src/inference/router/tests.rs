@@ -64,6 +64,7 @@ fn make_request(priority: PriorityTier) -> InferenceRequest {
         route_override: None,
         continuation: None,
         keep: Default::default(),
+        requested_by: Default::default(),
     }
 }
 
@@ -89,6 +90,7 @@ fn make_request_with_model(priority: PriorityTier, model: &str) -> InferenceRequ
         route_override: None,
         continuation: None,
         keep: Default::default(),
+        requested_by: Default::default(),
     }
 }
 

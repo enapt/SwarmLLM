@@ -1567,6 +1567,7 @@ impl SharedState {
                 hf_probe_cache: DashMap::new(),
                 peer_shard_downloads: DashMap::new(),
                 drafters_wanted: DashMap::new(),
+                owner_replies: Arc::default(),
                 download_cancel_flags: DashMap::new(),
                 model_trust: {
                     let map = DashMap::new();

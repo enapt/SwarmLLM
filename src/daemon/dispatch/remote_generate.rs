@@ -681,6 +681,8 @@ pub(super) async fn handle_delegated_split(
         // A peer's request: one its caller kept on their computer never
         // reaches this one (#251 (2b)).
         crate::types::KeepAsked::Unasked,
+        // A peer's reply: never copied from, or kept with, the owner's (#337).
+        crate::types::RequestedBy::NotTheOwner,
     );
     request.cancel = Some(cancel.clone());
     request.route_override = Some(route);

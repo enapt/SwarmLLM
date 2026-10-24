@@ -539,6 +539,17 @@ enum Taken {
     Done,
 }
 
+/// Where a row of the flow's tree came from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Copied {
+    /// The drafter's, or a draw no row carried.
+    No,
+    /// A copied run from this conversation: its prompt or its reply.
+    Here,
+    /// A copied run from the owner's earlier replies (#337).
+    Earlier,
+}
+
 /// What a forward carries.
 struct Rows {
     index_pos: usize,
@@ -601,16 +612,23 @@ struct FlowRun<'a, 'r> {
     /// The rows a level and the live rows the drafter may keep ahead of the
     /// walk, held down while the forwards queue.
     guard: FlowGuard,
-    /// Each row was copied (`copy_ahead`), beside `draws`.
-    copied: Vec<bool>,
+    /// Where each row came from (`copy_ahead`), beside `draws`.
+    copied: Vec<Copied>,
     /// The lookup's shape; `None` where copied runs are off.
     copy: Option<crate::inference::ngram_lookup::NgramLookupConfig>,
+    /// The owner's earlier replies, which this flow may copy from and is kept
+    /// in (#337); `None` for anyone else's reply, or where copied runs are off.
+    earlier: Option<crate::inference::owner_replies::EarlierReplies>,
     /// The walk's row, by epoch, a run was last looked up from.
     copied_from: Option<(u32, usize)>,
     copied_runs: u32,
     copied_rows: u32,
     /// Copied rows the walk went through: drawn there as copied.
     copied_walked: u32,
+    /// The part of the three above copied from the owner's earlier replies.
+    earlier_runs: u32,
+    earlier_rows: u32,
+    earlier_walked: u32,
 }
 
 impl PipelineExecutor {
@@ -655,6 +673,20 @@ impl PipelineExecutor {
             kept_guard(&guard_key, std::time::Instant::now()),
         );
         let guard_at_start = guard.at();
+        let copy = super::speculative::ngram_lookup_config(&self.shared_state.cfg().inference)
+            .filter(|_| copy_on());
+        // Every peer of the run is sent each row, a copied one too: the
+        // owner's earlier replies are looked in only where all of them saw it,
+        // in the form they saw it — the first peer is sent the rows' token ids
+        // where this node runs none of the first layers.
+        let earlier = copy.and_then(|_| {
+            self.shared_state.models.owner_replies.for_the_owner(
+                &self.request,
+                std::iter::once(shape.far.node_id.clone())
+                    .chain(shape.chain.iter().map(|h| h.node_id.clone())),
+                shape.near.is_empty().then(|| shape.far.node_id.clone()),
+            )
+        });
         let mut run = FlowRun {
             exec: self,
             state,
@@ -691,13 +723,16 @@ impl PipelineExecutor {
             unsettled: false,
             bonus_waiting: None,
             guard,
-            copied: vec![false],
-            copy: super::speculative::ngram_lookup_config(&self.shared_state.cfg().inference)
-                .filter(|_| copy_on()),
+            copied: vec![Copied::No],
+            copy,
+            earlier,
             copied_from: None,
             copied_runs: 0,
             copied_rows: 0,
             copied_walked: 0,
+            earlier_runs: 0,
+            earlier_rows: 0,
+            earlier_walked: 0,
         };
         let started = std::time::Instant::now();
         let emitted_before = run.reply.generated.len();
@@ -713,6 +748,11 @@ impl PipelineExecutor {
             while run.out.next().await.is_some() {}
         }
         run.drafter.flow_ended(run.flow.base());
+        // The reply so far is kept as seen by this run's peers (#337): every
+        // row of it crossed them. A reply the rounds finish keeps this part.
+        if let Some(earlier) = &run.earlier {
+            earlier.keep(run.reply.generated);
+        }
         if run.guard.guarded {
             keep_guard(guard_key, run.guard.at(), std::time::Instant::now());
         }
@@ -750,6 +790,10 @@ impl PipelineExecutor {
             copied_runs = run.copied_runs,
             copied_rows = run.copied_rows,
             copied_walked = run.copied_walked,
+            earlier = run.earlier.is_some(),
+            earlier_runs = run.earlier_runs,
+            earlier_rows = run.earlier_rows,
+            earlier_walked = run.earlier_walked,
             window = forwards_in_flight(chained),
             "DSD: a tree that flowed is complete"
         );
@@ -893,7 +937,7 @@ impl FlowRun<'_, '_> {
                 .push(usize::from(parent), token)
                 .map_err(|e| SwarmError::Internal(format!("a drafter's proposal: {e}")))?;
             self.draws.push(None);
-            self.copied.push(false);
+            self.copied.push(Copied::No);
         }
         *self.reply.proposed += pushed;
         Ok(pushed > 0)
@@ -947,7 +991,9 @@ impl FlowRun<'_, '_> {
 
     /// Grow a copied run under the walk's row: what followed the reply's last
     /// tokens where they occurred before, in the prompt or the reply
-    /// (`ngram_lookup::copied_run`, the n-gram lookup's own cascade), through
+    /// (`ngram_lookup::copied_run`, the n-gram lookup's own cascade), else in
+    /// the owner's earlier replies this run's peers have seen (`earlier`,
+    /// #337), through
     /// the rows the tree already holds and new rows for the rest — sent with
     /// the next forward, before the drafter's next call. The run is as long as
     /// its match goes back, at least the lookup's own width and at most
@@ -971,14 +1017,23 @@ impl FlowRun<'_, '_> {
             return false;
         }
         let prompt_len = seq.len().saturating_sub(self.reply.generated.len());
-        let Some(run) = crate::inference::ngram_lookup::copied_run(
+        let here = crate::inference::ngram_lookup::copied_run(
             seq,
             prompt_len,
             super::speculative::NGRAM_RECENT_REPLY,
             cfg,
             COPY_LEAD_MOST,
-        ) else {
-            return false;
+        );
+        let (run, from) = match here {
+            Some(run) => (run, Copied::Here),
+            None => match self
+                .earlier
+                .as_ref()
+                .and_then(|e| e.copied_run(seq, cfg, COPY_LEAD_MOST))
+            {
+                Some(run) => (run, Copied::Earlier),
+                None => return false,
+            },
         };
         let lead = run.matched.max(cfg.num_pred_tokens).min(COPY_LEAD_MOST);
         // A row the drafter has no embedding for would end its tree.
@@ -996,7 +1051,7 @@ impl FlowRun<'_, '_> {
                 break;
             };
             self.draws.push(None);
-            self.copied.push(true);
+            self.copied.push(from);
             self.ops.push(FlowOp::Copy {
                 parent: parent as u16,
                 token,
@@ -1007,16 +1062,23 @@ impl FlowRun<'_, '_> {
         if added > 0 {
             self.copied_runs += 1;
             self.copied_rows += added;
+            if from == Copied::Earlier {
+                self.earlier_runs += 1;
+                self.earlier_rows += added;
+            }
         }
         added > 0
     }
 
-    /// The copied rows on the walk's path after `from`, down to `to`.
-    fn copied_between(&self, from: usize, to: usize) -> u32 {
-        let mut copied = 0;
+    /// The copied rows on the walk's path after `from`, down to `to`: all of
+    /// them, and those from the owner's earlier replies.
+    fn copied_between(&self, from: usize, to: usize) -> (u32, u32) {
+        let mut copied = (0, 0);
         let mut row = to;
         while row != from {
-            copied += u32::from(self.copied.get(row).copied().unwrap_or(false));
+            let source = self.copied.get(row).copied().unwrap_or(Copied::No);
+            copied.0 += u32::from(source != Copied::No);
+            copied.1 += u32::from(source == Copied::Earlier);
             match self.flow.tree().parent(row) {
                 Some(parent) => row = parent,
                 None => break,
@@ -1031,7 +1093,7 @@ impl FlowRun<'_, '_> {
         let at = self.flow.at();
         let row = self.flow.push(at, token).map_err(SwarmError::Internal)?;
         self.draws.push(None);
-        self.copied.push(false);
+        self.copied.push(Copied::No);
         self.ops.push(FlowOp::Push {
             parent: at as u16,
             token,
@@ -1380,7 +1442,9 @@ impl FlowRun<'_, '_> {
             return Ok(Taken::Continue);
         }
         let (WalkEnd::Waiting { row: reached } | WalkEnd::Missed { row: reached, .. }) = end;
-        self.copied_walked += self.copied_between(self.flow.at(), reached);
+        let (walked, earlier) = self.copied_between(self.flow.at(), reached);
+        self.copied_walked += walked;
+        self.earlier_walked += earlier;
         let carried = emitted.len() - usize::from(matches!(end, WalkEnd::Missed { .. }));
         *self.reply.accepted += carried as u32;
         self.reply

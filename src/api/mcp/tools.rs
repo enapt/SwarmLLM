@@ -166,6 +166,9 @@ async fn tool_chat(
         // the model it drives, which answers in prose.
         None,
         keep,
+        // The owner's (#337): `/mcp` takes this node's key, and no pool member
+        // forwards it (`openai::peer_forward` forwards the chat surfaces only).
+        crate::types::RequestedBy::Owner,
     );
 
     match tokio::time::timeout(
