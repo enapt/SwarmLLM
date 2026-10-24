@@ -713,6 +713,17 @@ impl HealthMonitor {
                     self.cleanup_stale_peer_shard_downloads();
                     self.cleanup_stale_channels();
                     self.cleanup_stale_peer_id_map();
+                    // Holder records of keys that never became peers, gone
+                    // unrefreshed past every node's re-announce period (#339).
+                    if nonce.is_multiple_of(FULL_REANNOUNCE_EVERY_TICKS) {
+                        let aged = self.shared_state.model_registry.age_out_holders();
+                        if aged > 0 {
+                            tracing::debug!(
+                                aged,
+                                "Forgot holder records no peer of this node has refreshed"
+                            );
+                        }
+                    }
                     // Cleanup expired anti-gaming rate limit entries.
                     // try_lock so a contending API/credit-ledger call can't stall the
                     // health monitor; cleanup is idempotent and the next tick retries.

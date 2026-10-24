@@ -5758,10 +5758,12 @@ out by an unknown one, and a flood displaces only the flood.
   the room it needs, so a flood costs a bounded walk (and ≤ 64 stored-row reads) per arrival.
   None to spare: the newcomer is refused. A model gone from the registry by another path frees its
   room and its stored row is left to that path.
-- **"Holds" counts this node and the peers in `peer_registry` only** (`holder_counts`). A
+- **"Holds" counts this node and the nodes CONNECTED to it only** (`holder_counts` →
+  `SharedState::holder_standing`, since #339; it was `peer_registry`, where up to 64 relayed
+  origins sit and anyone can mint one — #339's security review). A
   `ShardAnnounce` needs only an authenticated signer — any fresh key, any number of them over one
-  connection — and nothing sweeps the holder records of a key that never became a peer
-  (FUTURE_WORK #339). The first cut counted every record, so fresh keys could announce their own
+  connection — and until #339 (below) nothing swept the holder records of a key that never
+  became a peer. The first cut counted every record, so fresh keys could announce their own
   fakes as held and block every newcomer (security review, 2026-10-24).
 - The wishlist is NOT a reason to keep one: it is built from this registry, so a peer could steer
   its own entries onto it.
@@ -5778,7 +5780,8 @@ out by an unknown one, and a flood displaces only the flood.
 - One KEY is recorded holding at most `MOST_PARTS_A_HOLDER` (4,096) parts
   (`record_shard_holder_with_build`, checked before any guard is taken): a new claim past it is
   not recorded, one it already has is renewed, this node is exempt. The live node holds ~250. It
-  is per key, not per computer: fresh keys are not bounded by it (#339).
+  is per key, not per computer: fresh keys are not bounded by it — a full part's list and the
+  age-out are (#339, below).
 
 **Residual, by design.** A connected peer can keep its own made-up models from being forgotten by
 announcing that it holds them — at most `MOST_PARTS_A_HOLDER` of them, and only while connected
@@ -5797,3 +5800,99 @@ per-model ceiling; a fresh walk budget per call),
 `forgetting_a_model_clears_the_hashes_of_parts_its_last_manifest_did_not_name`,
 `one_holder_cannot_fill_the_holder_records`, and in the registry
 `a_recovered_hash_is_persisted_once_not_on_every_gossip_round` (no part here, nothing stored).
+
+## A full holder list takes a stranger's claim only in a stale record's place, and strangers' records age out (2026-10-25, #339)
+
+**The defect.** A `ShardAnnounce` is gossip, sealed by its sender's key (`network/manager/events.rs`,
+`open_signed`) and accepted from whoever forwards it, so one neighbour can deliver the claims of
+any number of fresh keys. Two things followed (code reading, the #333 security review): at
+`MAX_HOLDERS_PER_SHARD` (50) `record_shard_holder_with_build` evicted the OLDEST non-local holder
+for every new claim, so a flood of fresh keys naming a real part pushed its real holders out of
+the list until each re-announced; and the holder sweeps (the stale-peer sweep, a disconnect)
+clear only nodes in `peer_registry`, so a key that never became a peer kept its records until a
+restart.
+
+**Why "only peers" is not the fix.** A real holder several hops away reaches this node exactly the
+same way and is never connected to it; refusing unknown signers would lose every far holder. So
+a node not connected here is displaced first and aged out — never refused outright.
+
+**What systems with more scars do.** libp2p-kad 0.48 `MemoryStore::add_provider`: when a key's
+provider list is full the new provider is IGNORED — "this strategy can mitigate Sybil attacks, in
+which an attacker floods the network with fake provider records" — and provider records expire
+(`provider_record_ttl` 48 h, republished every 12 h). Bitcoin Core's peer eviction
+(`SelectNodeToEvict`) protects the longest-connected peers and those of under-represented network
+groups, and evicts from the group with the most connections, its newest — because connections are
+what an attacker can make cheaply. Bitcoin addrman's `IsTerrible` (#333 above) is the same shape
+for addresses.
+
+**The rule** (`model::registry`):
+- **Where a holder stands** — `SharedState::holder_standing`, the ONE answer, used by the
+  registry's hook (`ModelRegistry::set_standing_hook`, installed by `SharedState::new` through a
+  `Weak`) and by #333's `holder_counts`: `None` when the node is not connected to this one;
+  `Some(network)` when it is this node or connected, `network` a key for the `NetGroup` its
+  newest connection comes from (`connected_networks`, written beside `connected_node_ids` by
+  the network manager at Identify and at the last close; a node with none on record has a network
+  of its own). CONNECTED, not `peer_registry`: a proven relayed origin is registered by its first
+  body, up to `MAX_UNCONNECTED_REGISTERED` (64, more than a list's 50) at once, and "anyone can
+  mint one" (`identify.rs`). The hook reads other maps, so it is asked with no registry guard
+  held, before the list's entry is taken; a holder that joined after the question counts as not
+  connected, and a list that FILLED after it ignores the claim rather than judge every holder a
+  stranger (second review, finding 4).
+- **A full list** gives up a holder by `holder_to_give_up`, never this node's:
+  - a claim from a node NOT connected takes only the place of a record that is not connected
+    either and that nothing refreshed for `STALE_HOLDER_AFTER`, the oldest first; otherwise it
+    is ignored (`false`, nothing recorded). A connected peer's stale record is never a
+    stranger's to take (review finding 4). Only stale holders are asked about, so a flood of
+    strangers' claims costs no lookup per holder.
+  - a claim from a CONNECTED node whose network already holds the most places takes its own
+    network's NEWEST arrival's place (`HolderRecord::since`); otherwise it takes the place of the
+    longest-unrefreshed holder that is not connected, and with every holder connected, the
+    network holding the most places gives up its newest arrival. A connection costs nothing per
+    host, so one machine opening fifty under fresh keys is fifty connected holders that
+    re-announce as often as they like: "the longest-unrefreshed goes" gave up the real peers
+    (first review, finding 1), and "strangers first" gave up every far holder before any
+    network rule applied (second review, finding 1). This way it takes at most as many far
+    holders' places as the largest connected network holds, then pushes out its own, and a peer
+    that arrives after it keeps its place.
+- **`STALE_HOLDER_AFTER`** = 3 × 10 × 10 × 30 s = 2.5 h: three of the slowest full re-announce
+  periods any node runs (`health::monitor` re-announces in full every
+  `FULL_REANNOUNCE_EVERY_TICKS` (10) broadcast rounds; a round comes every 1-10 ticks of 30 s
+  with the ANNOUNCER's peer count, so ≤ 50 min) — a far holder's period is its own, not ours.
+- **The age-out**: every `FULL_REANNOUNCE_EVERY_TICKS` health-monitor ticks,
+  `ModelRegistry::age_out_holders` forgets every record past the bound whose node is not
+  connected — collected first, standing asked with no guard, each record re-checked stale under
+  its own part's guard (a claim may have renewed it), the reverse index (`node_shards`) updated
+  under that same guard as a claim updates it, and emptied lists removed. A real far holder renews
+  its records on each full re-announce; a holder learned from the DHT (`merge_dht_providers`,
+  on-demand lookups from the scheduler and auto-manage) is learned again by the next lookup —
+  and a provider record outlives the fact it asserts by hours, so those were the likeliest to be
+  stale.
+
+**What it does not stop** (review findings 3 and 5, by design). A stranger can still take an EMPTY
+place (a part with < 50 holders) and keep it by re-announcing within 2.5 h; a real holder that is
+not connected here then finds no stale record and is ignored while the squatters refresh. Such
+places never cost a CONNECTED peer its own, routing already skips a holder neither connected nor
+relay-reachable (`scheduler`), and a download ranks unregistered holders last
+(`select_best_allowed_peer`) — the cost is a failed fetch before the next source. Many machines
+on as many networks, each connected, still look like as many peers (Bitcoin's limit too): with
+every network holding one place the rule is "the newest goes", so one place a list can flap
+between an attacker's fresh key and an honest newcomer (second review, finding 2); established
+holders are untouched. One key's records are bounded by `MOST_PARTS_A_HOLDER` (#333). A holder
+named by a DHT provider record is recorded as that key's claim with no connection and no
+signature, so a node near a key can name this node's CONNECTED peers as holders of a part they
+lack — pre-existing, FUTURE_WORK #341.
+
+**Tests** (`model::registry`, `daemon::state::peer_models`), each red with its safeguard
+switched off (14 switches, 2026-10-25):
+`one_machines_connections_take_at_most_one_far_holders_place` (its own network first),
+`a_list_found_full_after_the_question_ignores_the_claim` (no snapshot, no place),
+`a_flood_of_strangers_keys_does_not_push_a_parts_holders_out` (a stranger takes the oldest of
+all), `a_connected_peers_claim_takes_a_strangers_place_first` (strangers first),
+`many_connections_from_one_network_push_out_only_their_own` (the network rule; this node exempt),
+`with_every_holder_from_its_own_network_the_newest_arrival_goes` (newest, not oldest; this node
+exempt), `a_strangers_claim_takes_only_a_stale_strangers_place` (the stale bound, never a
+connected peer's record, never none),
+`the_sweep_forgets_only_strangers_records_nobody_refreshed` (connected and renewed records kept,
+the reverse index, no empty list left), `a_registered_node_that_is_not_connected_keeps_nothing`
+(#333 counting `peer_registry`),
+`a_holders_standing_is_its_connection_and_the_network_it_comes_from` (`connected_networks` read).

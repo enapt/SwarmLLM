@@ -493,6 +493,13 @@ impl NetworkManager {
         // "flapping with no log" (2026-08-10): the number they watch is the
         // size of THIS set, it falls inside the logged disconnect path, and it
         // rose here in silence.
+        // The network it connects from, beside the set (#339): its newest
+        // connection's, re-read on every Identify.
+        if let Some(remote) = self.peer_remote_addrs.get(&peer_id) {
+            self.shared_state
+                .connected_networks
+                .insert(node_id.clone(), remote.group);
+        }
         if self.shared_state.connected_node_ids.insert(node_id.clone()) {
             tracing::info!(
                 %peer_id,

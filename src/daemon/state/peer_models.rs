@@ -17,10 +17,11 @@
 //! longest known first; one that is kept is looked at again later (CLOCK's
 //! second chance), and one arrival looks at no more than [`LOOKED_AT_A_TIME`].
 //! With none to spare the newcomer is refused, never an entry in good
-//! standing. "Holds" counts this node and the peers in `peer_registry` only: a
-//! part announcement needs no more than a key, and a fresh key's holder
-//! record is never swept (security review), so counting one would let fresh
-//! keys keep their own fakes. The wishlist is not a reason to keep one either:
+//! standing. "Holds" counts this node and the nodes CONNECTED to it only
+//! ([`SharedState::holder_standing`]): a part announcement needs no more than a
+//! key, and a relayed origin in `peer_registry` costs no more (security
+//! reviews, #333 and #339), so counting either would let fresh keys keep their
+//! own fakes. The wishlist is not a reason to keep one either:
 //! it is built from this registry, so a peer could steer its own entries onto
 //! it.
 //!
@@ -227,11 +228,30 @@ impl SharedState {
         None
     }
 
-    /// Does `holder`'s record keep a model: this node, or a peer this node
-    /// knows (`peer_registry`: connected, or one of a bounded few relayed
-    /// origins)? Not a key that only ever announced a part.
+    /// Does `holder`'s record keep a model: this node, or a node CONNECTED to
+    /// it ([`Self::holder_standing`])? Not a key that only ever announced a
+    /// part, and not a registered relayed origin: up to 64 sit in
+    /// `peer_registry` at once and anyone can mint one (security review, #339).
     fn holder_counts(&self, holder: &NodeId) -> bool {
-        holder == self.identity.node_id() || self.peer_registry.contains_key(holder)
+        self.holder_standing(holder).is_some()
+    }
+
+    /// Where a holder of a part stands with this node — the one answer for the
+    /// registry's full lists, its age-out and [`Self::holder_counts`] (#339):
+    /// `None` when it is not connected; `Some(network)` when it is this node or
+    /// connected, `network` being a key for the network it connects from
+    /// (`connected_networks`; a node with none on record has its own).
+    pub(crate) fn holder_standing(&self, holder: &NodeId) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        if holder != self.identity.node_id() && !self.connected_node_ids.contains(holder) {
+            return None;
+        }
+        let Some(network) = self.connected_networks.get(holder).map(|n| *n) else {
+            return Some(crate::model::registry::own_network(holder));
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        network.hash(&mut hasher);
+        Some(hasher.finish())
     }
 
     /// Has this node done something with this model a peer's word cannot
@@ -328,6 +348,13 @@ mod tests {
 
     /// A peer this node is connected to.
     fn connect(state: &SharedState, node: &NodeId) {
+        state.connected_node_ids.insert(node.clone());
+        register(state, node);
+    }
+
+    /// A node in `peer_registry` that is not connected — what a proven
+    /// relayed origin is.
+    fn register(state: &SharedState, node: &NodeId) {
         state.peer_registry.insert(
             node.clone(),
             crate::types::PeerInfo {
@@ -351,6 +378,68 @@ mod tests {
 
     fn part(id: &str) -> ShardId {
         part_n(id, 0)
+    }
+
+    /// #339's review: up to 64 relayed origins sit in `peer_registry` at once
+    /// and anyone can mint one, so a registered node that is not connected
+    /// keeps nothing either.
+    #[test]
+    fn a_registered_node_that_is_not_connected_keeps_nothing() {
+        let state = test_state();
+        let relayed = NodeId([3; 32]);
+        register(&state, &relayed);
+        for i in 0..MOST_MODELS {
+            arrive(&state, &manifest(&format!("m{i}"), 0));
+        }
+        state
+            .model_registry
+            .record_shard_holder(part("m0"), relayed.clone());
+        assert_eq!(arrive(&state, &manifest("new-a", 0)), PeerManifest::Adopt);
+        assert!(
+            !knows(&state, "m0"),
+            "the oldest went, its holder not connected"
+        );
+
+        state.connected_node_ids.insert(relayed.clone());
+        state
+            .model_registry
+            .record_shard_holder(part("m1"), relayed);
+        assert_eq!(arrive(&state, &manifest("new-b", 0)), PeerManifest::Adopt);
+        assert!(knows(&state, "m1"), "a connected holder keeps it");
+    }
+
+    #[test]
+    fn a_holders_standing_is_its_connection_and_the_network_it_comes_from() {
+        use crate::network::helpers::{NetGroup, Network};
+        let state = test_state();
+        let me = state.identity.node_id().clone();
+        let (a, b, c, d) = (
+            NodeId([1; 32]),
+            NodeId([2; 32]),
+            NodeId([3; 32]),
+            NodeId([4; 32]),
+        );
+        for n in [&a, &b, &c] {
+            connect(&state, n);
+        }
+        register(&state, &d);
+        let one_isp = NetGroup::Direct(Network::Ipv4Slash16([203, 0]));
+        state.connected_networks.insert(a.clone(), one_isp);
+        state.connected_networks.insert(b.clone(), one_isp);
+
+        assert!(state.holder_standing(&me).is_some(), "this node");
+        assert_eq!(state.holder_standing(&a), state.holder_standing(&b));
+        assert!(state.holder_standing(&a).is_some());
+        let c_net = state
+            .holder_standing(&c)
+            .expect("connected, no network on record");
+        assert_ne!(
+            Some(c_net),
+            state.holder_standing(&a),
+            "a network of its own"
+        );
+        assert_eq!(state.holder_standing(&d), None, "registered, not connected");
+        assert_eq!(state.holder_standing(&NodeId([9; 32])), None);
     }
 
     fn part_n(id: &str, index: u32) -> ShardId {

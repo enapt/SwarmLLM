@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
@@ -19,6 +19,16 @@ const MAX_HOLDERS_PER_SHARD: usize = 50;
 /// (the live node, 28 models: ~250), so a claim past this is not recorded,
 /// while the claims it already has are kept and renewed. This node is exempt.
 pub(crate) const MOST_PARTS_A_HOLDER: usize = 4096;
+
+/// A holder record no claim has refreshed for this long is stale (#339): if
+/// its node is not connected here, a claim from another such node may take its
+/// place in a full list (`holder_to_give_up`), and it is aged out
+/// ([`ModelRegistry::age_out_holders`]). Three of the slowest full re-announce
+/// periods any node runs: `health::monitor` re-announces every
+/// `FULL_REANNOUNCE_EVERY_TICKS` (10) broadcast rounds, and a round comes every
+/// 1-10 ticks of 30 s with the ANNOUNCER's peer count (≤ 50 min) — a far
+/// holder's period is its own, not ours, so the bound is the worst case.
+const STALE_HOLDER_AFTER: Duration = Duration::from_secs(3 * 10 * 10 * 30);
 
 /// How long a holder's own retraction outranks a DHT provider record naming it.
 ///
@@ -57,6 +67,25 @@ pub const ORIGIN_VERIFIED_TREE: &str = "origin_verified_hashes";
 /// against the new reference.
 type ManifestUpdateHook = Box<dyn Fn(&ModelManifest, bool, &[u32]) + Send + Sync>;
 
+/// Where `node` stands with this node (#339): `None` — not connected to it;
+/// `Some(network)` — connected, from `network` (a key for its
+/// `network::helpers::NetGroup`: a public /16 or /32, a private host, a relay's
+/// network). A part announcement needs only a key, sealed in a gossip message
+/// any neighbour forwards, so a holder record says nothing about who made it;
+/// a REAL holder several hops away arrives the same way, so "not connected" is
+/// never "refused", only "displaced first and aged out". Installed by
+/// `SharedState::new` (`SharedState::holder_standing`); with none installed
+/// every node is connected from a network of its own.
+type StandingHook = Box<dyn Fn(&NodeId) -> Option<u64> + Send + Sync>;
+
+/// The network key of a node with no network on record: one of its own.
+pub(crate) fn own_network(node: &NodeId) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    ("own network", &node.0).hash(&mut hasher);
+    hasher.finish()
+}
+
 /// What we know about one node's claim on one shard.
 ///
 /// `build` is the holder's own content hash for that shard, truncated
@@ -66,6 +95,9 @@ type ManifestUpdateHook = Box<dyn Fn(&ModelManifest, bool, &[u32]) + Send + Sync
 #[derive(Clone, Copy, Debug)]
 struct HolderRecord {
     seen: Instant,
+    /// When this holder first entered the list: a full list of connected
+    /// holders gives up its newest arrival, not its longest-unrefreshed (#339).
+    since: Instant,
     build: u64,
     /// The holder said, in its own announcement, that it CHECKED this part
     /// against the model's origin (`ShardAnnounce::origin_checked_models`).
@@ -186,6 +218,10 @@ pub struct ModelRegistry {
     heard_part_hashes: DashMap<ShardId, Vec<(crate::types::Blake3Hash, u64)>>,
 
     persist_hook: std::sync::OnceLock<ManifestUpdateHook>,
+    standing_hook: std::sync::OnceLock<StandingHook>,
+    /// When a holder record counts as stale ([`STALE_HOLDER_AFTER`]; shorter
+    /// only in tests, which cannot wait hours).
+    stale_after: Duration,
     /// Local node ID — never evicted from holder sets.
     local_node_id: Option<NodeId>,
 }
@@ -204,6 +240,8 @@ impl ModelRegistry {
             origin_checked_models: dashmap::DashSet::new(),
             heard_part_hashes: DashMap::new(),
             persist_hook: std::sync::OnceLock::new(),
+            standing_hook: std::sync::OnceLock::new(),
+            stale_after: STALE_HOLDER_AFTER,
             local_node_id: None,
         }
     }
@@ -224,6 +262,8 @@ impl ModelRegistry {
             origin_checked_models: dashmap::DashSet::new(),
             heard_part_hashes: DashMap::new(),
             persist_hook: std::sync::OnceLock::new(),
+            standing_hook: std::sync::OnceLock::new(),
+            stale_after: STALE_HOLDER_AFTER,
             local_node_id: Some(local_node_id),
         }
     }
@@ -238,6 +278,24 @@ impl ModelRegistry {
     /// `merge_known_shard_hashes`. Idempotent; the first call wins.
     pub fn set_persist_hook(&self, hook: ManifestUpdateHook) {
         let _ = self.persist_hook.set(hook);
+    }
+
+    /// Install the answer to "where does that node stand with this one?"
+    /// (#339). Idempotent; the first call wins. It reads other maps, so it is
+    /// only ever asked with no guard of this registry held.
+    pub fn set_standing_hook(&self, hook: StandingHook) {
+        let _ = self.standing_hook.set(hook);
+    }
+
+    /// See [`StandingHook`]; this node is always connected.
+    fn standing(&self, node: &NodeId) -> Option<u64> {
+        if Some(node) == self.local_node_id.as_ref() {
+            return Some(own_network(node));
+        }
+        match self.standing_hook.get() {
+            Some(hook) => hook(node),
+            None => Some(own_network(node)),
+        }
     }
 
     /// Record a shard hash derived from bytes fetched from the model's ORIGIN.
@@ -836,6 +894,40 @@ impl ModelRegistry {
                 "DIAG: a holder claim this peer had withdrawn was reinstated"
             );
         }
+        // Where the holders of a full list stand, asked with no `shard_holders`
+        // guard held: the hook reads other maps (#339). A claim from a node
+        // not connected here may take only a stale record's place, so only
+        // those holders are asked about, and a flood of strangers' claims
+        // costs no lookup per holder.
+        let now = Instant::now();
+        let newcomer = self.standing(&node_id);
+        let newcomer_connected = newcomer.is_some();
+        let mut asked_full = false;
+        let standing: HashMap<NodeId, Option<u64>> = {
+            let asked: Vec<NodeId> = self
+                .shard_holders
+                .get(&shard_id)
+                .filter(|h| h.len() >= MAX_HOLDERS_PER_SHARD && !h.contains_key(&node_id))
+                .map(|h| {
+                    asked_full = true;
+                    h.iter()
+                        .filter(|(nid, rec)| {
+                            Some(*nid) != self.local_node_id.as_ref()
+                                && (newcomer_connected
+                                    || now.saturating_duration_since(rec.seen) >= self.stale_after)
+                        })
+                        .map(|(nid, _)| nid.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            asked
+                .into_iter()
+                .map(|nid| {
+                    let standing = self.standing(&nid);
+                    (nid, standing)
+                })
+                .collect()
+        };
         let mut entry = self.shard_holders.entry(shard_id.clone()).or_default();
         let holders = entry.value_mut();
 
@@ -858,13 +950,17 @@ impl ModelRegistry {
             return false;
         }
 
-        // At capacity — evict oldest non-local holder
+        // At capacity (#339): see `holder_to_give_up`. Evicting the oldest for
+        // every claim let fresh keys push a part's real holders out of its list.
         if holders.len() >= MAX_HOLDERS_PER_SHARD {
-            let evict_id = holders
-                .iter()
-                .filter(|(nid, _)| Some(*nid) != self.local_node_id.as_ref())
-                .min_by_key(|(_, rec)| rec.seen)
-                .map(|(nid, _)| nid.clone());
+            let evict_id = holder_to_give_up(
+                holders,
+                asked_full.then_some(&standing),
+                newcomer,
+                self.local_node_id.as_ref(),
+                now,
+                self.stale_after,
+            );
 
             if let Some(evict) = evict_id {
                 holders.remove(&evict);
@@ -873,15 +969,17 @@ impl ModelRegistry {
                     shards.remove(&shard_id);
                 }
             } else {
-                // All holders are local (shouldn't happen) — skip insert
+                // No record this claim may displace: ignored.
                 return false;
             }
         }
 
+        let now = Instant::now();
         holders.insert(
             node_id.clone(),
             HolderRecord {
-                seen: Instant::now(),
+                seen: now,
+                since: now,
                 build,
                 checked: checked.unwrap_or(false),
             },
@@ -1778,6 +1876,61 @@ impl ModelRegistry {
         }
     }
 
+    /// Forget the holder records no claim has refreshed for
+    /// [`STALE_HOLDER_AFTER`] whose node this one does not know (#339) — a key that announced once and was
+    /// never a peer, whose records nothing else would ever clear (the stale-peer
+    /// sweep and a disconnect clear only peers). A real holder refreshes its own
+    /// on every full re-announce. Returns how many went.
+    pub fn age_out_holders(&self) -> usize {
+        let now = Instant::now();
+        let stale =
+            |rec: &HolderRecord| now.saturating_duration_since(rec.seen) >= self.stale_after;
+        let local = self.local_node_id.as_ref();
+        let candidates: Vec<(ShardId, NodeId)> = self
+            .shard_holders
+            .iter()
+            .flat_map(|e| {
+                let shard = e.key().clone();
+                e.value()
+                    .iter()
+                    .filter(|(node, rec)| Some(*node) != local && stale(rec))
+                    .map(|(node, _)| (shard.clone(), node.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        // Asked with no guard held: the hook reads other maps.
+        let mut known: HashMap<NodeId, bool> = HashMap::new();
+        let mut removed = 0;
+        for (shard, node) in candidates {
+            let connected = *known
+                .entry(node.clone())
+                .or_insert_with(|| self.standing(&node).is_some());
+            if connected {
+                continue;
+            }
+            let gone = match self.shard_holders.get_mut(&shard) {
+                // Re-read under the guard: a claim may have refreshed it.
+                Some(mut holders) if holders.get(&node).is_some_and(stale) => {
+                    holders.remove(&node);
+                    // The reverse index under the same guard, as a claim updates it.
+                    if let Some(mut shards) = self.node_shards.get_mut(&node) {
+                        shards.remove(&shard);
+                    }
+                    true
+                }
+                _ => false,
+            };
+            if gone {
+                removed += 1;
+                self.shard_holders
+                    .remove_if(&shard, |_, holders| holders.is_empty());
+                self.node_shards
+                    .remove_if(&node, |_, shards| shards.is_empty());
+            }
+        }
+        removed
+    }
+
     /// Get all shards held by a specific node (via reverse index).
     pub fn shards_for_node(&self, node_id: &NodeId) -> Vec<ShardId> {
         self.node_shards
@@ -1882,6 +2035,75 @@ impl ModelRegistry {
         db.put_json("model_meta", &manifest.id.0, manifest)?;
         Ok(())
     }
+}
+
+/// Which holder a FULL list gives up for a new claim, or `None`: the claim is
+/// ignored (#339). `standing` is where the holders asked about stand (see
+/// [`StandingHook`]); one not asked about — it joined after the question —
+/// counts as not connected, and a list that filled after the question
+/// (`standing` is `None`) ignores the claim rather than judge everyone a
+/// stranger. `newcomer` is where the claimant stands. This node is never given
+/// up.
+///
+/// - A claim from a node not connected here takes only the place of a record
+///   that is not connected either and that nothing refreshed for
+///   `stale_after`, the oldest first; otherwise it is ignored, as libp2p-kad's
+///   `MemoryStore::add_provider` ignores a new provider when a key's list is
+///   full, "to mitigate Sybil attacks, in which an attacker floods the network
+///   with fake provider records".
+/// - A claim from a connected node whose network already holds the most places
+///   takes its own network's NEWEST arrival's place. Otherwise it takes the
+///   place of the longest-unrefreshed holder that is not connected, and with
+///   every holder connected, the network holding the most places gives up its
+///   newest arrival. Connections cost nothing per host, so one machine opening
+///   fifty under fresh keys would otherwise push out every peer that refreshes
+///   less often than it does, and every holder further away first; this way it
+///   pushes out its own (Bitcoin Core's peer eviction keeps the
+///   longest-standing peers and those of rare network groups the same way).
+fn holder_to_give_up(
+    holders: &HashMap<NodeId, HolderRecord>,
+    standing: Option<&HashMap<NodeId, Option<u64>>>,
+    newcomer: Option<u64>,
+    local: Option<&NodeId>,
+    now: Instant,
+    stale_after: Duration,
+) -> Option<NodeId> {
+    let standing = standing?;
+    let network = |node: &NodeId| standing.get(node).copied().flatten();
+    let others = || holders.iter().filter(|(nid, _)| Some(*nid) != local);
+    let oldest_not_connected = |only_stale: bool| {
+        others()
+            .filter(|(nid, rec)| {
+                network(nid).is_none()
+                    && (!only_stale || now.saturating_duration_since(rec.seen) >= stale_after)
+            })
+            .min_by_key(|(_, rec)| rec.seen)
+            .map(|(nid, _)| nid.clone())
+    };
+    let Some(own) = newcomer else {
+        return oldest_not_connected(true);
+    };
+    let mut places: HashMap<u64, usize> = HashMap::new();
+    for (nid, _) in others() {
+        if let Some(net) = network(nid) {
+            *places.entry(net).or_default() += 1;
+        }
+    }
+    let most = places.values().copied().max().unwrap_or(0);
+    let newest_of = |nets: &dyn Fn(u64) -> bool| {
+        others()
+            .filter(|(nid, _)| network(nid).is_some_and(nets))
+            .max_by_key(|(_, rec)| rec.since)
+            .map(|(nid, _)| nid.clone())
+    };
+    let own_places = places.get(&own).copied().unwrap_or(0);
+    if own_places > 0 && own_places >= most {
+        return newest_of(&|net| net == own);
+    }
+    if let Some(stranger) = oldest_not_connected(false) {
+        return Some(stranger);
+    }
+    newest_of(&|net| places.get(&net) == Some(&most))
 }
 
 impl Default for ModelRegistry {
@@ -3307,6 +3529,329 @@ mod tests {
         assert!(registry.shard_holders(&shard_id).contains(&local));
         // New node present
         assert!(registry.shard_holders(&shard_id).contains(&overflow));
+    }
+
+    /// A key from `i` (two bytes, so a full list's worth and more are distinct).
+    fn key(i: u32) -> NodeId {
+        let mut bytes = [0u8; 32];
+        bytes[..4].copy_from_slice(&i.to_le_bytes());
+        bytes[31] = 0xA5;
+        NodeId(bytes)
+    }
+
+    fn part0() -> ShardId {
+        ShardId {
+            model_id: ModelId("test".into()),
+            index: 0,
+        }
+    }
+
+    /// Make `node`'s claim on `shard` read as last refreshed `ago`.
+    fn backdate(registry: &ModelRegistry, shard: &ShardId, node: &NodeId, ago: Duration) {
+        let then = Instant::now()
+            .checked_sub(ago)
+            .expect("the clock reaches back that far");
+        registry
+            .shard_holders
+            .get_mut(shard)
+            .expect("the part has holders")
+            .get_mut(node)
+            .expect("the node holds the part")
+            .seen = then;
+    }
+
+    /// Make `node` read as having entered `shard`'s list `ago`.
+    fn arrived(registry: &ModelRegistry, shard: &ShardId, node: &NodeId, ago: Duration) {
+        let then = Instant::now()
+            .checked_sub(ago)
+            .expect("the clock reaches back that far");
+        registry
+            .shard_holders
+            .get_mut(shard)
+            .expect("the part has holders")
+            .get_mut(node)
+            .expect("the node holds the part")
+            .since = then;
+    }
+
+    /// A registry connected to exactly `peers`, each from the network paired
+    /// with it (and itself), with a stale bound short enough to reach.
+    fn connected_to(
+        local: &NodeId,
+        peers: impl IntoIterator<Item = (NodeId, u64)>,
+    ) -> ModelRegistry {
+        let mut registry = ModelRegistry::with_local_node(local.clone());
+        registry.stale_after = Duration::from_secs(60);
+        let peers: HashMap<NodeId, u64> = peers.into_iter().collect();
+        registry.set_standing_hook(Box::new(move |n| peers.get(n).copied()));
+        registry
+    }
+
+    fn fill(registry: &ModelRegistry, part: &ShardId, local: &NodeId) {
+        registry.record_shard_holder(part.clone(), local.clone());
+        for i in 1..MAX_HOLDERS_PER_SHARD as u32 {
+            registry.record_shard_holder(part.clone(), key(i));
+        }
+        assert_eq!(registry.shard_holder_count(part), MAX_HOLDERS_PER_SHARD);
+    }
+
+    /// #339: a part announcement needs only a key, so before this a flood of
+    /// fresh keys on a full list pushed out every real holder, oldest first.
+    #[test]
+    fn a_flood_of_strangers_keys_does_not_push_a_parts_holders_out() {
+        let local = key(0);
+        // Half the list connected peers, half real holders further away.
+        let registry = connected_to(&local, (1..25).map(|i| (key(i), u64::from(i))));
+        let part = part0();
+        fill(&registry, &part, &local);
+        let before: HashSet<NodeId> = registry.shard_holders(&part).into_iter().collect();
+
+        for i in 0..1_000 {
+            assert!(!registry.record_shard_holder(part.clone(), key(1_000_000 + i)));
+        }
+        let after: HashSet<NodeId> = registry.shard_holders(&part).into_iter().collect();
+        assert_eq!(after, before, "the flood took no holder's place");
+        assert!(registry.shards_for_node(&key(1_000_000)).is_empty());
+    }
+
+    #[test]
+    fn a_connected_peers_claim_takes_a_strangers_place_first() {
+        let local = key(0);
+        let peers: Vec<NodeId> = (1..25).map(key).collect();
+        let registry = connected_to(
+            &local,
+            peers.iter().cloned().zip(1..).chain([(key(999), 999)]),
+        );
+        let part = part0();
+        fill(&registry, &part, &local);
+        // The peers' records are the OLDEST, so "oldest first" alone would
+        // give one of them up; the oldest STRANGER's goes instead.
+        for (n, peer) in peers.iter().enumerate() {
+            backdate(&registry, &part, peer, Duration::from_secs(50 - n as u64));
+        }
+        let oldest_stranger = key(30);
+        backdate(&registry, &part, &oldest_stranger, Duration::from_secs(10));
+
+        assert!(registry.record_shard_holder(part.clone(), key(999)));
+        let after: HashSet<NodeId> = registry.shard_holders(&part).into_iter().collect();
+        assert_eq!(after.len(), MAX_HOLDERS_PER_SHARD);
+        assert!(after.contains(&key(999)));
+        assert!(
+            peers.iter().all(|p| after.contains(p)),
+            "no peer was given up"
+        );
+        assert!(!after.contains(&oldest_stranger));
+        assert!(registry.shards_for_node(&oldest_stranger).is_empty());
+    }
+
+    /// The security review's case: connections cost nothing per host, so one
+    /// machine opening many under fresh keys is "connected" many times over.
+    /// It re-announces as often as it likes, so "the longest-unrefreshed goes"
+    /// would give up the real peers; the largest network gives up its own.
+    #[test]
+    fn many_connections_from_one_network_push_out_only_their_own() {
+        let local = key(0);
+        const ONE_MACHINE: u64 = 7_777;
+        let real: Vec<NodeId> = (1..=20).map(key).collect();
+        let registry = connected_to(
+            &local,
+            real.iter()
+                .cloned()
+                .zip(1..)
+                .chain((21..2_000).map(|i| (key(i), ONE_MACHINE)))
+                .chain([(key(5_000), 5_000)]),
+        );
+        let part = part0();
+        fill(&registry, &part, &local);
+        // The real peers last refreshed long ago; the machine's keys just now.
+        for peer in &real {
+            backdate(&registry, &part, peer, Duration::from_secs(55));
+        }
+        for i in 50..2_000 {
+            assert!(registry.record_shard_holder(part.clone(), key(i)));
+            registry.record_shard_holder(part.clone(), key(i - 1));
+        }
+        let after: HashSet<NodeId> = registry.shard_holders(&part).into_iter().collect();
+        assert!(
+            real.iter().all(|p| after.contains(p)),
+            "no real peer was given up"
+        );
+        assert!(after.contains(&local));
+
+        // A real newcomer from a network of its own takes one of the machine's places.
+        assert!(registry.record_shard_holder(part.clone(), key(5_000)));
+        let after: HashSet<NodeId> = registry.shard_holders(&part).into_iter().collect();
+        assert!(after.contains(&key(5_000)));
+        assert!(real.iter().all(|p| after.contains(p)));
+        assert_eq!(after.len(), MAX_HOLDERS_PER_SHARD);
+
+        // It is now the newest arrival, and the machine's keys keep coming:
+        // they still push out only their own.
+        for i in 21..200 {
+            registry.record_shard_holder(part.clone(), key(i));
+        }
+        let after: HashSet<NodeId> = registry.shard_holders(&part).into_iter().collect();
+        assert!(after.contains(&key(5_000)), "the latecomer kept its place");
+        assert!(real.iter().all(|p| after.contains(p)));
+    }
+
+    /// The second review's case: before any network rule applies, every new
+    /// key of one machine took a FAR holder's place, and a far holder finds no
+    /// stale record to come back into. A network already holding the most
+    /// places gives up its own first.
+    #[test]
+    fn one_machines_connections_take_at_most_one_far_holders_place() {
+        let local = key(0);
+        const ONE_MACHINE: u64 = 7_777;
+        // keys 1-19 connected peers, 20-49 holders further away (not connected).
+        let registry = connected_to(
+            &local,
+            (1..20)
+                .map(|i| (key(i), u64::from(i)))
+                .chain((1_000..1_100).map(|i| (key(i), ONE_MACHINE))),
+        );
+        let part = part0();
+        fill(&registry, &part, &local);
+        let far: Vec<NodeId> = (20..50).map(key).collect();
+        for i in 1_000..1_100 {
+            assert!(registry.record_shard_holder(part.clone(), key(i)));
+        }
+        let after: HashSet<NodeId> = registry.shard_holders(&part).into_iter().collect();
+        let far_kept = far.iter().filter(|n| after.contains(*n)).count();
+        assert_eq!(far_kept, far.len() - 1, "one far holder's place, no more");
+        assert!((1..20).map(key).all(|p| after.contains(&p)));
+        assert_eq!(after.len(), MAX_HOLDERS_PER_SHARD);
+    }
+
+    /// A list that filled after its holders were asked about ignores the
+    /// claim rather than judge every holder a stranger.
+    #[test]
+    fn a_list_found_full_after_the_question_ignores_the_claim() {
+        let holders: HashMap<NodeId, HolderRecord> = (1..=MAX_HOLDERS_PER_SHARD as u32)
+            .map(|i| {
+                let now = Instant::now();
+                (
+                    key(i),
+                    HolderRecord {
+                        seen: now,
+                        since: now,
+                        build: swarmllm_types::BUILD_TAG_UNKNOWN,
+                        checked: false,
+                    },
+                )
+            })
+            .collect();
+        let none_stale = Duration::from_secs(3_600);
+        for newcomer in [None, Some(1)] {
+            assert_eq!(
+                holder_to_give_up(&holders, None, newcomer, None, Instant::now(), none_stale),
+                None
+            );
+        }
+        let asked: HashMap<NodeId, Option<u64>> = HashMap::new();
+        assert!(
+            holder_to_give_up(
+                &holders,
+                Some(&asked),
+                Some(1),
+                None,
+                Instant::now(),
+                none_stale
+            )
+            .is_some(),
+            "asked, the same list gives a connected claim a place"
+        );
+    }
+
+    #[test]
+    fn with_every_holder_from_its_own_network_the_newest_arrival_goes() {
+        let local = key(0);
+        let registry = connected_to(
+            &local,
+            (1..=MAX_HOLDERS_PER_SHARD as u32).map(|i| (key(i), u64::from(i))),
+        );
+        let part = part0();
+        fill(&registry, &part, &local);
+        for i in 1..MAX_HOLDERS_PER_SHARD as u32 {
+            arrived(&registry, &part, &key(i), Duration::from_secs(100));
+        }
+        arrived(&registry, &part, &key(7), Duration::from_secs(1));
+        // An incumbent that rarely refreshes keeps its place.
+        backdate(&registry, &part, &key(3), Duration::from_secs(59));
+
+        assert!(registry.record_shard_holder(part.clone(), key(MAX_HOLDERS_PER_SHARD as u32)));
+        let after = registry.shard_holders(&part);
+        assert!(!after.contains(&key(7)), "the newest arrival went");
+        assert!(after.contains(&key(3)));
+        assert!(after.contains(&local), "this node is never given up");
+    }
+
+    #[test]
+    fn a_strangers_claim_takes_only_a_stale_strangers_place() {
+        let local = key(0);
+        let peer = key(5);
+        let registry = connected_to(&local, [(peer.clone(), 5)]);
+        let part = part0();
+        fill(&registry, &part, &local);
+        // This node's record and a connected peer's are the stale ones: still
+        // not a stranger's to take.
+        backdate(&registry, &part, &local, Duration::from_secs(600));
+        backdate(&registry, &part, &peer, Duration::from_secs(61));
+        backdate(&registry, &part, &key(3), Duration::from_secs(30));
+        assert!(!registry.record_shard_holder(part.clone(), key(500)));
+        assert!(!registry.shard_holders(&part).contains(&key(500)));
+
+        // A stranger's record goes unrefreshed past the bound: its place is free.
+        backdate(&registry, &part, &key(3), Duration::from_secs(61));
+        assert!(registry.record_shard_holder(part.clone(), key(500)));
+        let after = registry.shard_holders(&part);
+        assert!(after.contains(&key(500)));
+        assert!(!after.contains(&key(3)));
+        assert!(after.contains(&peer));
+        assert!(after.contains(&local));
+        assert_eq!(after.len(), MAX_HOLDERS_PER_SHARD);
+    }
+
+    #[test]
+    fn the_sweep_forgets_only_strangers_records_nobody_refreshed() {
+        let local = key(0);
+        let peer = key(1);
+        let registry = connected_to(&local, [(peer.clone(), 1)]);
+        let (a, b) = (
+            part0(),
+            ShardId {
+                model_id: ModelId("test".into()),
+                index: 1,
+            },
+        );
+        let (gone, fresh, renewed) = (key(2), key(3), key(4));
+        for node in [&local, &peer, &gone, &fresh, &renewed] {
+            registry.record_shard_holder(a.clone(), node.clone());
+        }
+        // The stranger that goes also held a part nobody else holds.
+        registry.record_shard_holder(b.clone(), gone.clone());
+        let long_ago = Duration::from_secs(120);
+        for node in [&local, &peer, &gone, &renewed] {
+            backdate(&registry, &a, node, long_ago);
+        }
+        backdate(&registry, &b, &gone, long_ago);
+        // A repeat claim renews a record.
+        registry.record_shard_holder(a.clone(), renewed.clone());
+
+        assert_eq!(registry.age_out_holders(), 2, "the stranger's two records");
+        let holders: HashSet<NodeId> = registry.shard_holders(&a).into_iter().collect();
+        assert_eq!(holders, HashSet::from([local, peer, fresh, renewed]));
+        assert!(registry.shard_holders(&b).is_empty());
+        assert!(
+            !registry.shard_holders.contains_key(&b),
+            "no empty list is left"
+        );
+        assert!(registry.shards_for_node(&gone).is_empty());
+        assert!(
+            !registry.node_shards.contains_key(&gone),
+            "the reverse index agrees"
+        );
+        assert_eq!(registry.age_out_holders(), 0);
     }
 
     #[test]

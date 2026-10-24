@@ -684,6 +684,11 @@ pub struct SharedState {
     /// to avoid evicting peer_registry entries for peers that are still connected but
     /// momentarily silent (e.g. slow WSL2 QUIC substream negotiation, no recent gossip).
     pub connected_node_ids: dashmap::DashSet<NodeId>,
+    /// The network each node in `connected_node_ids` reaches this one from,
+    /// its newest connection's (`network::helpers::NetGroup`). Written ONLY by
+    /// the network manager beside `connected_node_ids` (Identify, the last
+    /// close); read ONLY by [`SharedState::holder_standing`] (#339).
+    pub connected_networks: DashMap<NodeId, crate::network::helpers::NetGroup>,
     /// NETWORKING_PLAN Phase 1 — learned reverse relay routes, keyed by the
     /// TARGET's libp2p peer-id bytes. When an inference message for us arrives
     /// wrapped in a `RelayedEnvelope` via relay R, we record "to reach the
@@ -1680,6 +1685,7 @@ impl SharedState {
             nickname_registry,
             peer_id_map: DashMap::new(),
             connected_node_ids: dashmap::DashSet::new(),
+            connected_networks: DashMap::new(),
             relay_routes: DashMap::new(),
             relay_forward_counters: DashMap::new(),
             relay_proven_features: DashMap::new(),
@@ -1877,6 +1883,18 @@ impl SharedState {
                 .set_ram_budget_provider(Box::new(move || {
                     weak.upgrade()
                         .and_then(|s| crate::model::auto_manage::vram::ram_budget_now(&s))
+                }));
+        }
+        // Where a holder stands, for the registry's full lists and its age-out
+        // (#339). `Weak`, as below; a state already gone answers "connected,
+        // from a network of its own" for everyone (the rule before).
+        {
+            let weak = Arc::downgrade(&state);
+            state
+                .model_registry
+                .set_standing_hook(Box::new(move |node| match weak.upgrade() {
+                    Some(s) => s.holder_standing(node),
+                    None => Some(crate::model::registry::own_network(node)),
                 }));
         }
         // Keep a shard hash learned from a peer's manifest across a restart.

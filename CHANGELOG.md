@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+**Made-up computers can no longer push a model part's real holders out of your node's list.**
+Each computer keeps a list of up to 50 others holding each piece of a model. Announcing that you
+hold a piece needs only a freshly made identity, and once a list was full every new announcement
+pushed out the oldest entry, so a flood of made-up identities could push the real holders out
+until they announced again — and those made-up entries were never cleared until a restart. Now
+an entry from a computer yours is not connected to gets into a full list only in place of
+another such entry nobody renewed for 2.5 hours. A computer that is connected first takes the
+place of one that is not; when every entry is connected, the place comes from whichever network
+holds the most entries, so one machine opening many connections pushes out only its own
+entries — and once it holds the most, it gives up its own before anyone else's. Entries
+from computers that are not connected and were not renewed for 2.5 hours are forgotten; real
+holders further away renew theirs every 5 to 50 minutes. The protection for models your computer
+learned from others (added in 0.3.252) now also counts only connected computers (#339).
+
 ## [0.3.252-alpha] — 2026-10-25
 
 **A model split across computers can now reuse your own earlier answers to guess ahead.** When a

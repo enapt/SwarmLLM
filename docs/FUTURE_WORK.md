@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #341**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #342**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2828,35 +2828,23 @@ unchoke slots: a few peers served at a time, rotated. Next: a per-peer bound on 
 ahead (e.g. no peer past half of `RELEASED_WITHIN`), measured on the `split_rig.sh fetch` rig
 with two downloaders.
 
-#### #339 — Holder records from a key that never became a peer are never swept, and can crowd out real holders
-`P2` · network · **OPEN** — 2026-10-24 · history: #333 security review
+#### #341 — A DHT provider record makes any key a holder, a connected peer's included
+`P3` · network · **OPEN** — 2026-10-25 · history: #339's second security review
 
-A `ShardAnnounce` needs only an authenticated signer equal to its `node_id` (dispatch, the
-`ShardAnnounce` arm): any key, and any number of keys over one connection, each recording up to
-512 holder claims an announcement. Three things follow, checked in code 2026-10-24:
-- `MOST_PARTS_A_HOLDER` (4,096, #333) bounds one KEY, not one computer.
-- The holder sweep (`health/monitor.rs`, over `peer_registry`) and the disconnect path clear only
-  nodes registered as peers, so a key that never became one keeps its records until restart —
-  memory that grows with the number of fresh keys.
-- At `MAX_HOLDERS_PER_SHARD` (50) `record_shard_holder_with_build` evicts the OLDEST non-local
-  holder, so a flood of fresh keys announcing a real part pushes its real holders out of the
-  record until they re-announce. What the router then does with holders it cannot reach is not
-  yet checked.
-Since #333 such records keep no learned model from being forgotten (`holder_counts`).
-Checked 2026-10-24 (code reading, not a run): `ShardAnnounce` is gossip-only and authenticated by
-its sealed signer (`network/manager/events.rs`, `open_signed`), not by the connection, so one
-neighbour forwards announces of many keys — and that is how a REAL holder several hops away is
-learned, so "record only a registered signer" would lose real holders. The scheduler already
-skips a holder neither connected nor relay-reachable (`scheduler/mod.rs` ~4207); download-source
-choice (`select_best_allowed_peer`) ranks unregistered holders last but still picks one when no
-registered holder is permitted. libp2p-kad's `MemoryStore::add_provider` (0.48) does the
-opposite of ours when a key's list is full: it IGNORES the new provider — "this strategy can
-mitigate Sybil attacks, in which an attacker floods the network with fake provider records" —
-and provider records expire (`provider_record_ttl` 48 h, republished every 12 h). Next: at
-`MAX_HOLDERS_PER_SHARD` displace only a record gone unrefreshed past a few re-announce periods
-(`FULL_REANNOUNCE_EVERY_TICKS`; `HolderRecord::seen` is already kept), else ignore the newcomer;
-and age out unrefreshed records of keys not in `peer_registry`. A change here goes to
-`security-reviewer`.
+`network/manager/dht.rs` (`handle_dht_providers_found`, ~243-270) turns every PeerId a
+`GetProviders` answer names into a holder record through `merge_dht_providers` → the same
+`record_shard_holder` a first-hand claim uses: no connection to that node and no signature of
+its. A node near a key in the DHT can therefore name this node's CONNECTED peers as holders of a
+part they do not hold. Since #339 such a record carries the connected peer's standing: on a full
+list it is judged a connected claim, and #333's `holder_counts` lets it keep a peer-learned
+model from being forgotten. Routing and downloads ask the named peer, which answers that it
+lacks the part (a wasted request). Next: record a DHT-learned holder as such
+(`HolderRecord::first_hand`, set only by the holder's own announcement, as `checked` is) and
+give it no standing — never counted by `holder_counts`, never a connected claim on a full list —
+until the holder's own announcement confirms it. Checked at the same review, low: a peer
+identified while `peer_to_node` is at `MAX_PEER_TO_NODE` stays in `connected_node_ids` after its
+last close (`connections.rs` finds no node id to clean up); `cleanup_stale_peer_id_map` and the
+10,000 cap keep it far from reach.
 
 #### #317 — Another program can hold `[::1]` on the node's port while the node runs
 `P3` · api · **OPEN** — 2026-10-20 · history: found with #255's key proof
@@ -3267,6 +3255,28 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
+**Closed 2026-10-25, ships in v0.3.253** (#339)
+- #339 — **A flood of made-up computers can no longer push a model part's real holders out of
+  this node's list, and their records no longer pile up.** A part announcement needs only a key
+  (gossip, signed by its sender; one neighbour forwards many keys, which is also how a real holder
+  several hops away is learned), and at 50 holders a part every new claim pushed out the OLDEST,
+  while nothing ever cleared the records of a key that never became a peer. Now
+  `SharedState::holder_standing` says where a holder stands (not connected, or connected from a
+  network — a `NetGroup`, `connected_networks`), and a full list (`holder_to_give_up`) gives a
+  stranger's claim only a stale STRANGER's place (`STALE_HOLDER_AFTER`, 2.5 h: three of the
+  slowest full re-announce periods), else ignores it — libp2p-kad's `add_provider` does the same;
+  a connected node's claim takes the oldest stranger's place, else the network holding the most
+  places gives up its newest arrival — and a connected node whose network already holds the
+  most places gives up its own network's newest first (Bitcoin Core's peer eviction: one machine
+  opening fifty connections under fresh keys pushes out its own). Every 10 health-monitor ticks
+  `ModelRegistry::age_out_holders` forgets unconnected nodes' records past the bound. #333's
+  `holder_counts` asks the same question: it counted `peer_registry`, where up to 64 relayed
+  origins sit and anyone can mint one. Two security reviews: their medium findings (cheap
+  connections; #333's residual) and three low ones (a stranger taking a connected peer's stale
+  record; one machine clearing the far holders first; a list that filled mid-claim) were fixed
+  before it was committed, a pre-existing one is #341; 14 switches each turn a test red.
+  `docs/invariants/network.md` § "A full holder list".
+
 **Closed 2026-10-24, ships in v0.3.252** (#335, #333)
 - #333 — **A peer can no longer fill the model registry with model ids nobody holds.** A manifest
   under a new id was adopted whatever it named, with only per-manifest size checks, so a peer
@@ -3274,7 +3284,7 @@ grep `^| N |`).
   `daemon::state::peer_models` bounds what peers name (asked last in `judge_peer_manifest`,
   `PeerManifest::NoRoom`): 1,024 models adopted as new, 64 MiB of their stored JSON (strings
   count), 1 MiB a model. Past a bound, room comes only from a model NOBODY holds — this node or a
-  peer in `peer_registry`, never a stranger's holder record — that this node has not acted on,
+  peer CONNECTED to it (since #339; it read `peer_registry`), never a stranger's holder record — that this node has not acted on,
   oldest first, 64 looks per arrival (CLOCK); with none to spare the newcomer is refused —
   libp2p-kad's `MaxRecords` and Bitcoin addrman's `IsTerrible`, so a flood displaces only the
   flood. A forgotten model's stored row and every part number's heard hashes go too, and a peer's
@@ -3282,7 +3292,7 @@ grep `^| N |`).
   part number ≥ 256 and a name past 512 bytes; one key is recorded holding at most 4,096 parts.
   The security review's six findings were fixed before it shipped. Residual, by design: a
   connected peer announcing that it holds its own made-up models keeps up to 4,096 of them while
-  connected; fresh keys' holder records are #339. `docs/invariants/network.md` § "The models
+  connected; fresh keys' holder records were #339 (closed above). `docs/invariants/network.md` § "The models
   peers name are bounded".
 - #335 — **The upload limit that protects a user's internet is one limit for the whole node, and a
   downloader turned away keeps its place.** `shard_upload_mbps` was applied per REQUEST: each
