@@ -780,6 +780,13 @@ pub enum NetworkCommand {
         target_peer_bytes: Vec<u8>,
         request: ShardRequest,
     },
+    /// Ask again for a part a holder answered BUSY (#335), once the wait has
+    /// passed. Sent only if the transfer is still the one that waited: no
+    /// request of its own in flight, at the same offset, not cancelled.
+    ResumeShardAfterBusy {
+        target_peer_bytes: Vec<u8>,
+        request: ShardRequest,
+    },
     /// Send an AllReduce partial to the TP coordinator.
     SendAllReduceRequest {
         target_peer_bytes: Vec<u8>,
@@ -890,6 +897,40 @@ impl ShardResponse {
             total_size: 0,
         }
     }
+
+    /// "Ask again later — keep what you have" (#335): this holder's upload
+    /// limit is spoken for, so the downloader keeps its bytes and asks again
+    /// at the same offset, here after `retry_after_ms` or at another holder at
+    /// once. Sent only to a peer advertising `features::SHARD_BUSY`: an older
+    /// one would read the marker size as a part too large and drop the
+    /// transfer.
+    ///
+    /// It travels in the ordinary binary part frame: `total_size` is
+    /// [`Self::BUSY_TOTAL_SIZE`], which no real part can have, and the data is
+    /// the wait in milliseconds, 4 bytes little-endian.
+    pub fn busy(retry_after_ms: u32) -> Self {
+        Self {
+            data: retry_after_ms.to_le_bytes().to_vec(),
+            total_size: Self::BUSY_TOTAL_SIZE,
+        }
+    }
+
+    /// The `total_size` that marks a busy answer.
+    pub const BUSY_TOTAL_SIZE: u64 = u64::MAX;
+
+    /// The wait a busy answer names, or `None` for any other answer. A busy
+    /// marker whose wait is not 4 bytes reads as a wait of 0 — the downloader
+    /// clamps it anyway.
+    pub fn busy_retry_after_ms(&self) -> Option<u32> {
+        if self.total_size != Self::BUSY_TOTAL_SIZE {
+            return None;
+        }
+        Some(
+            <[u8; 4]>::try_from(self.data.as_slice())
+                .map(u32::from_le_bytes)
+                .unwrap_or(0),
+        )
+    }
 }
 
 /// One block in a `PrefixCacheAnnounce`. The hash is a chained BLAKE3
@@ -942,6 +983,33 @@ pub struct PruneEvent {
     pub holder_count_before: usize,
     pub holder_count_after: usize,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+#[cfg(test)]
+mod busy_answer_tests {
+    use super::*;
+
+    /// A busy answer names its wait, and nothing else reads as busy: not the
+    /// empty refusal, not a real chunk, not a malformed marker's wait.
+    #[test]
+    fn only_a_busy_answer_reads_as_busy_and_it_carries_its_wait() {
+        assert_eq!(
+            ShardResponse::busy(1_500).busy_retry_after_ms(),
+            Some(1_500)
+        );
+        assert_eq!(ShardResponse::busy(0).busy_retry_after_ms(), Some(0));
+        assert_eq!(ShardResponse::empty().busy_retry_after_ms(), None);
+        let chunk = ShardResponse {
+            data: vec![7; 4],
+            total_size: 8,
+        };
+        assert_eq!(chunk.busy_retry_after_ms(), None);
+        let malformed = ShardResponse {
+            data: vec![1, 2],
+            total_size: ShardResponse::BUSY_TOTAL_SIZE,
+        };
+        assert_eq!(malformed.busy_retry_after_ms(), Some(0));
+    }
 }
 
 #[cfg(test)]

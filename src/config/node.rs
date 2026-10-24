@@ -386,6 +386,10 @@ impl ResourceConfig {
     ///
     /// Note this throttles shard SERVING only. Tensor forwards during inference
     /// are latency-critical and bounded by the concurrency limits instead.
+    ///
+    /// It is ONE cap for the whole node, however many parts go up at once
+    /// (`network::manager::upload_pacer`, #335). It was applied per request,
+    /// so three parts served together went up at three times it.
     pub fn shard_upload_mbps(&self, contribution: ContributionMode) -> u64 {
         if self.max_bandwidth_mbps > 0 {
             return self.max_bandwidth_mbps;

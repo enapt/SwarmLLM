@@ -35,6 +35,7 @@ mod relay;
 mod requests;
 mod shard_transfer;
 mod tensors;
+mod upload_pacer;
 mod upnp_watch;
 
 /// Maximum in-flight shard chunk requests before dropping new ones.
@@ -178,10 +179,10 @@ const MAX_INBOUND_PREFIX_FETCHES: usize = 256;
 /// spawned task.
 const MAX_INBOUND_SHARD_FETCHES: usize = 256;
 /// Maximum age of a stale `pending_shard_responses` ticket before the sweep
-/// drops it. Sized to the worst-case shard chunk read + bandwidth-throttle
-/// at the cluster's slowest cap (4 MB at 1 Mbps ≈ 32s, plus disk latency
-/// headroom). Beyond this, the serving task likely panicked or was
-/// orphaned; the channel will close on drop.
+/// drops it. An answer is released within `upload_pacer::RELEASED_WITHIN`
+/// (20 s) of its request at any upload limit (#335), plus the disk read.
+/// Beyond this, the serving task likely panicked or was orphaned; the channel
+/// will close on drop.
 const PENDING_SHARD_TICKET_TTL_SECS: u64 = 60;
 /// Maximum entries in connection_addrs before half-eviction of oldest ConnectionIds.
 const MAX_CONNECTION_ADDRS: usize = 1024;
@@ -483,6 +484,13 @@ pub struct NetworkManager {
     /// Used by the stale shard watchdog to detect stalled downloads that never fire
     /// OutboundFailure (e.g., silent connection drops, handler starvation).
     shard_last_progress_at: HashMap<crate::types::ShardId, std::time::Instant>,
+    /// Which holders answered a part request BUSY, and how often (#335): the
+    /// downloader keeps its offset and asks a holder that is not busy, or the
+    /// first to come free when its wait ends. Gone with the transfer.
+    shard_busy_holders: HashMap<crate::types::ShardId, shard_transfer::BusyHolders>,
+    /// The one timeline every part this node serves books its share of the
+    /// upload limit on (#335) — never a wait per request.
+    upload_pacer: upload_pacer::UploadPacer,
     /// Reverse lookup: PeerId → NodeId for O(1) peer identification.
     peer_to_node: DashMap<libp2p::PeerId, crate::types::NodeId>,
     /// Buffered GossipSub messages that failed to publish at startup (no peers yet).
@@ -995,6 +1003,8 @@ impl NetworkManager {
             shard_download_progress: HashMap::new(),
             shard_p2p_retries: HashMap::new(),
             shard_last_progress_at: HashMap::new(),
+            shard_busy_holders: HashMap::new(),
+            upload_pacer: upload_pacer::UploadPacer::default(),
             peer_to_node: DashMap::new(),
             buffered_gossip: Vec::new(),
             relay_activated: false,

@@ -1074,29 +1074,6 @@ remove one. Measure the newcomer's first-plan delay before and after.
 
 ### Network and transport
 
-#### #335 — The upload cap that protects a user's internet is per request, so it grows with every part served at once
-`P2` · network · **OPEN** — 2026-10-24 · history: found while timing #331's rig
-
-`ResourcesConfig::shard_upload_mbps` exists so seeding cannot saturate the owner's connection
-("the classic complaint against peer-to-peer software"): `Minimal`, the default, is 10 Mbps. The
-serving code (`network/manager/requests.rs`, the `ShardRequest` arm) sleeps `bytes / cap` after
-reading EACH chunk, in that request's own task, so nothing is shared: three parts fetched at once
-moved at 3 × 1.25 MB/s (1.65 GB in ~9 min between two rig nodes on one machine, 2026-10-24), and
-a node serving N chunk requests uploads at N × its cap. Its comment still says "0 = unlimited
-(default)". Reference: libtorrent and Transmission meter upload with ONE session-wide limiter and
-bound how many peers it serves (unchoke slots). Next: one node-wide pacer at the choke point
-(reserve `bytes / cap` on a shared next-free instant; read `cfg()` per reservation). ⚠ A shared
-pacer queues: 30 queued 8 MiB chunks put the last ~200 s out, past the requester's 180 s
-no-progress sweep (`daemon/state/models.rs`) and toward `RR_REQUEST_TIMEOUT_SECS` (600), so the
-wait must be bounded — past it, answer busy and let the requester go to another holder. ⚠ Not
-with today's refusal: an empty `ShardResponse` (what the inbound-queue-full path sends,
-`MAX_INBOUND_SHARD_FETCHES`) makes the downloader clear that part's progress and restart it from
-offset 0 elsewhere (`shard_transfer.rs::retry_shard_or_fallback`), so a busy answer must let it
-RESUME at its offset — every holder serves the same upload's bytes and the whole part is hashed
-at the end — and a new answer shape is a wire change (feature bit, additive). The queue-full path
-has the same restart cost today. `docs/invariants/network.md` and the timeouts rule
-(`.claude/rules/architecture.md`) apply.
-
 #### #155 — AutoNAT redials a peer this node is already connected to, and the per-peer cap denies it, every ~5 s
 `P3` · network · **PARTIAL** — 2026-10-02, narrowed 2026-10-07 (measured on the swarm: not seen there) · history: archive row #155, gotcha #774
 
@@ -3230,6 +3207,26 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-24, ships in v0.3.252** (#335)
+- #335 — **The upload limit that protects a user's internet is one limit for the whole node, and a
+  downloader turned away keeps its place.** `shard_upload_mbps` was applied per REQUEST: each
+  answer slept `bytes / limit` in its own task, so three parts at once went up at 3 × 1.25 MB/s.
+  `network::manager::upload_pacer::UploadPacer` is one timeline (libtorrent's and Transmission's
+  session-wide limiter): every answer books its share before the read and is sent when it ends.
+  A shared limit queues, so the queue is bounded by the downloader's patience — an answer holds at
+  most 4 s of the limit (fewer bytes than asked; a downloader walks by bytes received) and none is
+  released later than 20 s after its request (two thirds of `SHARD_STALL_SECS`). Past that, and
+  when the inbound queue is full, a downloader advertising `features::SHARD_BUSY` (bit 32) is
+  answered BUSY (`ShardResponse::busy`) and asks again AT ITS OFFSET — a holder not busy at once,
+  else the first to come free (`next_ask`; `ResumeShardAfterBusy` asks only if the transfer is
+  still the one that waited) — instead of the empty answer that restarts the part from 0, which an
+  older downloader still gets. Tests: the pacer's two go red with per-request booking.
+  Rig (`split_rig.sh fetch`, `RIG_NETNS=1 FETCH_MBPS=8`, seven of the coder-7B's parts at once):
+  1.00 MB/s under the 8 Mbps limit, 66 busy answers each resumed at its offset, none restarted, all
+  seven hash-checked once the limit was lifted live; a 0.3.251 downloader was answered empty,
+  never the marker. `docs/invariants/network.md` § "Every part this
+  node serves shares ONE upload limit".
 
 **Closed 2026-10-24, ships in v0.3.251** (#331)
 - #331 — **A node already guessing with a small drafter fetches a larger one when the swarm has

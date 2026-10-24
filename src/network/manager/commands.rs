@@ -111,6 +111,7 @@ impl NetworkManager {
             NetworkCommand::SendTensorResult { .. } => "SendTensorResult",
             NetworkCommand::SendStreamingToken { .. } => "SendStreamingToken",
             NetworkCommand::SendShardRequest { .. } => "SendShardRequest",
+            NetworkCommand::ResumeShardAfterBusy { .. } => "ResumeShardAfterBusy",
             NetworkCommand::SendAllReduceRequest { .. } => "SendAllReduceRequest",
             NetworkCommand::SendAllReduceResponse { .. } => "SendAllReduceResponse",
             NetworkCommand::SendRingChunk { .. } => "SendRingChunk",
@@ -174,6 +175,12 @@ impl NetworkManager {
                 request,
             } => {
                 self.handle_send_shard_request(target_peer_bytes, request);
+            }
+            NetworkCommand::ResumeShardAfterBusy {
+                target_peer_bytes,
+                request,
+            } => {
+                self.resume_shard_after_busy(target_peer_bytes, request);
             }
             NetworkCommand::SendAllReduceRequest {
                 target_peer_bytes,

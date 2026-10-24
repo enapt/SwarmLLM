@@ -291,6 +291,12 @@ A gossip publish that succeeded says nothing about who received it. A pool join 
 
 → `docs/invariants/network.md` § "A metered connection holds back what this node uploads for others"
 
+## Every part this node serves shares ONE upload limit (2026-10-24, #335)
+
+**`network::manager::upload_pacer::UploadPacer`** is the one timeline: an answer books its share of `shard_upload_mbps` (read live) BEFORE the read and is sent when its share ends — never a sleep per request (N parts at once went up at N times the limit). An answer holds at most 4 s of the limit (fewer bytes than asked; a downloader walks by bytes received) and is released within `RELEASED_WITHIN` (two thirds of the downloader's `SHARD_STALL_SECS`). Past that, and when the inbound queue is full, **`answer_part_request_busy`** answers BUSY to a downloader advertising `features::SHARD_BUSY` (bit 32) — it resumes at its offset (`ask_again_after_busy`, `next_ask`), never from 0 — and empty to an older one. A shared limit queues: bound every wait it adds by the requester's patience.
+
+→ `docs/invariants/network.md` § "Every part this node serves shares ONE upload limit"
+
 ## Centralised Wire-Format Helpers
 
 Single sources of truth for invariants that silently break at the wire if duplicated. Read the evidence before changing one.
@@ -302,7 +308,7 @@ Single sources of truth for invariants that silently break at the wire if duplic
 - **`credit::ledger::check_signed_freshness`** — staleness for signed `DateTime<Utc>` messages.
 - **`pipeline::pack_verify_tokens_to_le_bytes`**, **`pipeline::build_spec_verify_forward`**, **`pipeline::build_kv_truncate_forward`**, **`pipeline::register_pending_layer_result`** — the shared builders for verify/truncate forwards and waiter registration.
 - **`storage::Database::with_write_table`** — the write-transaction wrapper; it hands the worker off before it blocks (#314).
-- **`swarmllm_types::ShardResponse::empty()`**, **`swarmllm_types::LayerResult::error(request_id, reason)`** — canonical refusal/error replies.
+- **`swarmllm_types::ShardResponse::empty()`**, **`ShardResponse::busy(retry_after_ms)`** (only to a `SHARD_BUSY` downloader), **`swarmllm_types::LayerResult::error(request_id, reason)`** — canonical refusal/error replies.
 - **`network/manager/connections::try_enqueue_redial`** — dedup + cap + push for `pending_redial`.
 - **`responses::types::raw_tool_kind_or_unknown`**, **`cli::bail_if_no_api_key` / `cli::exit_daemon_unreachable`** — shared error wording.
 - **`model::auto_manage::spawn_check_and_load`** — "shard landed → reload model → refresh dashboard", always the three steps together.

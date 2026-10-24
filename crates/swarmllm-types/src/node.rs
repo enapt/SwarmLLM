@@ -365,6 +365,15 @@ pub mod features {
     /// own and refuse them.
     pub const DRAFT_TREE_FLOW: u64 = 1 << 31;
 
+    /// Reads a BUSY answer to a part request (#335): a holder whose upload
+    /// limit is spoken for answers `ShardResponse::busy` instead of a chunk,
+    /// and the downloader keeps the bytes it has, asking again at the same
+    /// offset — another holder at once, or this one after the wait the answer
+    /// names. A holder sends a busy answer only to a downloader advertising
+    /// this; an older one is answered empty, as before, and starts the part
+    /// again elsewhere.
+    pub const SHARD_BUSY: u64 = 1 << 32;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`] and
     /// [`REQUESTER_GUESSES`] beside it where they apply.
@@ -396,7 +405,8 @@ pub mod features {
         | CHAINED_STREAM
         | DRAFT_TREES
         | CARRIED_ROUTE
-        | DRAFT_TREE_FLOW;
+        | DRAFT_TREE_FLOW
+        | SHARD_BUSY;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

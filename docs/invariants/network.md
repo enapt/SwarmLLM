@@ -5150,6 +5150,71 @@ Wiring the hold into relaying found the relay switch did less than it said:
 network switch drops both with the connection; only a link that turns metered
 in place (Windows "set as metered", or `pause`) leaves one to run out.
 
+## Every part this node serves shares ONE upload limit (2026-10-24, FUTURE_WORK #335)
+
+**What it replaced.** `ResourcesConfig::shard_upload_mbps` (`Minimal`, the default, 10 Mbps;
+`Moderate` 50; `Maximum` unlimited; `max_bandwidth_mbps` overrides) exists so that seeding
+cannot fill the owner's connection. The serving arm slept `bytes / limit` after reading each
+chunk, in that request's own task, so nothing was shared: three parts fetched at once moved at
+3 × 1.25 MB/s (1.65 GB in ~9 min between two rig nodes on one machine, 2026-10-24, found while
+timing #331's rig), and a node serving N chunk requests uploaded at N times its limit.
+
+**Reference.** libtorrent and Transmission meter upload with ONE session-wide limiter (and bound
+how many peers they serve, unchoke slots). Here `network::manager::upload_pacer::UploadPacer` is
+one next-free instant: each answer books `bytes / limit` from `max(now, next_free)` and is sent
+when its share ends.
+
+**What a shared limit has to keep.**
+- **A queue needs a bound.** 30 queued 8 MiB chunks at 10 Mbps put the last ~200 s out — past
+  the downloader's stall sweep (`SHARD_STALL_SECS`, 30 s since the request's last chunk, which
+  restarts the part elsewhere) and the 180 s permit sweep. So an answer holds at most
+  `ANSWER_HOLDS_AT_MOST` (4 s) of the limit — 5 MB of the 8 MiB asked at 10 Mbps, the whole
+  chunk from 17 Mbps — and none is released later than `RELEASED_WITHIN` (20 s, two thirds of
+  the stall sweep) after its request. A shorter answer needs no wire change: every downloader
+  since chunking walks the part by the bytes it received (`new_offset = offset + chunk_len`).
+- **Past the bound the answer is BUSY, and a busy downloader RESUMES.** Not the old refusal: an
+  empty `ShardResponse` (what the inbound-queue-full path sent) makes the downloader clear the
+  part's progress and start it again from offset 0 elsewhere (`retry_shard_or_fallback`).
+  `ShardResponse::busy` (`total_size = u64::MAX`, 4 bytes of retry-after milliseconds) keeps the
+  offset — every holder serves the same upload's bytes and the whole part is hashed at the end.
+  It is a new answer shape, gated at the SENDER on `features::SHARD_BUSY` (bit 32): an older
+  downloader reads a `total_size` past its cap and drops the transfer, so it is answered empty,
+  as before (`answer_part_request_busy`). The queue-full path (`MAX_INBOUND_SHARD_FETCHES`)
+  answers the same way.
+- **The downloader** (`shard_transfer::ask_again_after_busy`) reads the marker BEFORE its
+  total-size cap, which the marker would trip; records the holder busy until its wait ends
+  (clamped to 1 s … `RELEASED_WITHIN`); and asks a holder that is not busy now, else the first to
+  come free (`next_ask`) — through the same scoped choice as any request
+  (`select_best_allowed_peer`, so private mode holds). It notes transfer progress, so the 180 s
+  permit sweep does not read the wait as a stall; while it waits no request is pending, so the
+  30 s sweep has nothing to reap. A wait ends in `NetworkCommand::ResumeShardAfterBusy`, which
+  asks again only if the transfer is still the one that waited (its busy record, its offset, no
+  request of its own in flight, not cancelled): a transfer restarted meanwhile would otherwise
+  have its offset reset to the old one. After `MOST_BUSY_ANSWERS` (16, each wait ≤ 20 s) in a
+  row — a landed chunk clears the record — the transfer takes the ordinary retry path.
+- **Booked before the read, for the bytes asked.** At a part's end the read can be shorter,
+  which costs at most one answer's share once per part. A busy answer books nothing. The limit
+  is read live (`cfg()`) per request. The pending-answer ticket's TTL (60 s) stays above the
+  release bound plus the disk read.
+
+**Measured** (2026-10-24, `split_rig.sh fetch` with `RIG_NETNS=1 FETCH_MBPS=8 FETCH_SHARD="1 2 3 4 5 6
+7"`, the coder-7B's parts, both nodes on this build): seven parts asked at once under A's 8 Mbps
+(1.00 MB/s) — B took in **1.00 MB/s** over the 120 s window (120.0 MB in 90 answers; the old arm
+sends up to seven times that); A answered busy 66 times and B asked again at its offset 66 times,
+no part started again; the limit lifted LIVE (`PUT /api/admin/config`), all seven landed and passed
+their hash check, resumed ones included; no event-loop stall. **With B on the 0.3.251 release**
+(which does not advertise the bit; 60 s window): 1.00 MB/s again; A turned two requests away and
+B was answered EMPTY — never the marker (0 answers refused as too large) — so those two parts took
+B's ordinary retry path, to HuggingFace (none in the namespace), and the other five landed. One
+holder and no other: the retry skips the holder that refused, so an older downloader does not spin.
+
+**Tests.** `upload_pacer::tests::parts_served_at_once_share_one_limit` (3 × 5 MB at 10 Mbps
+released at 4/8/12 s — 1.25 MB/s together; red with per-request booking, as is the busy test),
+`a_queue_past_its_bound_answers_busy_and_books_nothing`,
+`an_answer_is_cut_only_by_a_low_limit`;
+`shard_transfer::tests::a_busy_holder_is_passed_over_and_the_first_free_one_is_waited_for`; the
+types crate's `only_a_busy_answer_reads_as_busy_and_it_carries_its_wait`.
+
 ## A relayed body's origin is signed (2026-10-17, FUTURE_WORK #298)
 
 **What was wrong.** The application relay (NETWORKING_PLAN Phase 1: a NAT'd node's

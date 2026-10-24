@@ -189,6 +189,13 @@
 #          every `network event loop stalled` line B logged meanwhile — the hash
 #          of a downloaded part ran ON the event loop until FUTURE_WORK #108
 #          (~229 ms per 512 MB part, over the loop's 100 ms tripwire).
+#          FETCH_SHARD may name several parts ("1 2 3 4 5 6 7"), all asked at
+#          once. FETCH_MBPS=<n> serves them under A's upload limit for
+#          FETCH_LIMITED_FOR seconds (default 120), measured from the chunks B
+#          took in (#335: N parts at once went up at N times the limit), then
+#          lifts the limit LIVE so every part lands and is hash-checked. Under
+#          16 Mbps an answer is cut and more than five parts at once are
+#          answered BUSY; both nodes log at debug so the busy answers count.
 #   cache  the field report of 2026-09-26: an agent's SECOND turn on a node
 #          that runs the model on its processor. A and B each hold every part
 #          (processor by default, so A's router is consulted and nothing
@@ -502,7 +509,10 @@ elif [ "$MODE" = fetch ]; then
   # Shard SERVING is throttled by the contribution level (~10 Mbit/s by
   # default here, 7 s an 8 MiB chunk), which is a rig measuring the hash's
   # cost, not the link's, waiting minutes for nothing.
-  EXTRA_TOML="${EXTRA_TOML:-$'[resources]\nmax_bandwidth_mbps = 10000'}"
+  EXTRA_TOML="${EXTRA_TOML:-$'[resources]\nmax_bandwidth_mbps = '"${FETCH_MBPS:-10000}"}"
+  if [ -n "${FETCH_MBPS:-}" ]; then
+    ENV_A="${ENV_A:-} SWARMLLM_LOGGING_LEVEL=debug"; ENV_B="${ENV_B:-} SWARMLLM_LOGGING_LEVEL=debug"
+  fi
 elif [ "$MODE" = failover ] || [ "$MODE" = context ]; then
   # B's range must need TWO nodes to cover it, so C stops one shard short.
   [ "$N" -ge 3 ] || { echo "failover needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
@@ -1741,16 +1751,34 @@ PY
 fi
 
 if [ "$MODE" = fetch ]; then
-  KB=$(cat "$BASE/B/api_key")
+  KB=$(cat "$BASE/B/api_key"); KA=$(cat "$BASE/A/api_key")
   FETCH_SHARD="${FETCH_SHARD:-1}"
+  want=$(echo $FETCH_SHARD | wc -w)
   since=$(date -u +%Y-%m-%dT%H:%M:%S)
-  echo "fetch: asking B for part $FETCH_SHARD: $(curl -s -m 30 -X POST -H "Authorization: Bearer $KB" \
-    "localhost:8920/api/admin/models/$MODEL/shards/$FETCH_SHARD/download")"
-  for _ in $(seq 1 600); do
-    grep -qE "P2P shard download complete|did not arrive intact|failed hash verification" "$BASE/B/node.log" && break
+  for s in $FETCH_SHARD; do
+    echo "fetch: asking B for part $s: $(curl -s -m 30 -X POST -H "Authorization: Bearer $KB" \
+      "localhost:8920/api/admin/models/$MODEL/shards/$s/download")"
+  done
+  if [ -n "${FETCH_MBPS:-}" ]; then
+    # The window opens 10 s in, so every part's first request is out; B's
+    # received-chunk lines (debug) are the bytes A sent it.
+    sleep 10; w0=$(date -u +%Y-%m-%dT%H:%M:%S); sleep "${FETCH_LIMITED_FOR:-120}"; w1=$(date -u +%Y-%m-%dT%H:%M:%S)
+    awk -v a="$w0" -v b="$w1" '$1 >= a && $1 < b' "$BASE/B/node.log" | grep -a "Received shard data chunk" \
+      | grep -o 'bytes=[0-9]*' | cut -d= -f2 | awk -v s="${FETCH_LIMITED_FOR:-120}" -v m="$FETCH_MBPS" -v n="$want" \
+        '{b+=$1; c++} END {printf "fetch: under A'"'"'s %d Mbps limit (%.2f MB/s), %d parts at once: B took in %.1f MB in %d s = %.2f MB/s (%d answers)\n", m, m*0.125, n, b/1e6, s, b/1e6/s, c}'
+    echo "fetch: A answered busy $(grep -ac 'replying busy' "$BASE/A/node.log")x; B asked again at its offset $(grep -ac 'asking again at the same offset' "$BASE/B/node.log")x, let a moved-on transfer be $(grep -ac 'transfer has moved on' "$BASE/B/node.log")x, took the retry path (a part started again) $(awk -v t="$since" '$1 >= t' "$BASE/B/node.log" | grep -ac 'retry_shard_or_fallback entered')x"
+    # An older B is never sent the busy marker: it would read its size as too
+    # large and drop the part (FUTURE_WORK #335).
+    echo "fetch: B refused an answer as too large $(grep -ac 'total_size exceeds limit' "$BASE/B/node.log")x (must be 0)"
+    echo "fetch: lifting A's limit live: $(curl -s -m 30 -X PUT -H "Authorization: Bearer $KA" -H 'Content-Type: application/json' \
+      -d '{"max_bandwidth_mbps": 10000}' localhost:8900/api/admin/config | head -c 120)"
+  fi
+  for _ in $(seq 1 1200); do
+    [ "$(grep -acE "P2P shard download complete|did not arrive intact|failed hash verification" "$BASE/B/node.log")" -ge "$want" ] && break
     sleep 1
   done
-  grep -E "P2P shard download complete|failed hash verification|did not arrive intact|removed while it was being checked" "$BASE/B/node.log" | cut -c1-200
+  grep -aE "P2P shard download complete|failed hash verification|did not arrive intact|removed while it was being checked" "$BASE/B/node.log" | cut -c1-200
+  echo "fetch: $(grep -ac 'P2P shard download complete' "$BASE/B/node.log") of $want part(s) landed and checked"
   echo "fetch: event-loop stalls on B since the request:"
   awk -v t="$since" '$1 >= t' "$BASE/B/node.log" | grep "network event loop stalled" | cut -c1-220 || true
   echo "fetch: $(awk -v t="$since" '$1 >= t' "$BASE/B/node.log" | grep -c "network event loop stalled") stall line(s)"

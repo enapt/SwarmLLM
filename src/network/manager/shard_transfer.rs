@@ -73,6 +73,7 @@ impl NetworkManager {
         self.shard_download_progress.remove(shard_id);
         self.shard_last_progress_at.remove(shard_id);
         self.shard_p2p_retries.remove(shard_id);
+        self.shard_busy_holders.remove(shard_id);
         self.pending_shard_requests
             .retain(|_, (_, sid)| sid != shard_id);
         true
@@ -120,6 +121,7 @@ impl NetworkManager {
         self.shard_download_progress.remove(shard_id);
         self.shard_last_progress_at.remove(shard_id);
         self.shard_p2p_retries.remove(shard_id);
+        self.shard_busy_holders.remove(shard_id);
         self.pending_shard_requests
             .retain(|_, (_, sid)| sid != shard_id);
 
@@ -210,6 +212,7 @@ impl NetworkManager {
         {
             if let Some(victim) = self.shard_p2p_retries.keys().next().cloned() {
                 self.shard_p2p_retries.remove(&victim);
+                self.shard_busy_holders.remove(&victim);
                 tracing::warn!(
                     cap = MAX_P2P_RETRY_ENTRIES,
                     "shard_p2p_retries at cap; evicted one entry"
@@ -283,6 +286,7 @@ impl NetworkManager {
         // its own permit in a separate trigger_download call) doesn't
         // starve behind the dead P2P request.
         self.shard_p2p_retries.remove(&shard_id);
+        self.shard_busy_holders.remove(&shard_id);
         self.shared_state
             .models
             .p2p_download_permits
@@ -384,6 +388,139 @@ impl NetworkManager {
                 .schedule_acquisition_cleanup(shard_id.model_id.clone());
         }
         false
+    }
+
+    /// A holder answered a part request BUSY (#335): its upload limit is
+    /// spoken for. Keep the bytes already written and ask again at the same
+    /// offset — a holder that is not busy at once, else the first to come free
+    /// when its wait ends. Never a failure, never a restart from 0, which is
+    /// what the empty refusal costs an older build. Bounded: past
+    /// [`MOST_BUSY_ANSWERS`] answers the transfer takes the ordinary retry
+    /// path, as a failure would.
+    pub(super) fn ask_again_after_busy(
+        &mut self,
+        shard_id: crate::types::ShardId,
+        busy_peer: libp2p::PeerId,
+        retry_after_ms: u32,
+    ) {
+        if self.abort_shard_transfer_if_cancelled(&shard_id)
+            || self.abandon_shard_transfer_if_not_ours(&shard_id)
+        {
+            return;
+        }
+        let Some(busy_holder) = self.peer_to_node.get(&busy_peer).map(|r| r.clone()) else {
+            self.retry_shard_or_fallback(shard_id, busy_peer, "busy holder no longer known");
+            return;
+        };
+        let now = std::time::Instant::now();
+        let wait = std::time::Duration::from_millis(u64::from(retry_after_ms))
+            .clamp(BUSY_WAIT_LEAST, super::upload_pacer::RELEASED_WITHIN);
+        if !self.shard_busy_holders.contains_key(&shard_id)
+            && self.shard_busy_holders.len() >= MAX_BUSY_ENTRIES
+        {
+            // Entries leave with their transfer; this only bounds a map no
+            // transfer cleans up (the retry map's own cap does the same).
+            if let Some(victim) = self.shard_busy_holders.keys().next().cloned() {
+                self.shard_busy_holders.remove(&victim);
+            }
+        }
+        let busy = self.shard_busy_holders.entry(shard_id.clone()).or_default();
+        busy.note(busy_holder, now + wait);
+        if busy.answers > MOST_BUSY_ANSWERS {
+            self.shard_busy_holders.remove(&shard_id);
+            self.retry_shard_or_fallback(shard_id, busy_peer, "every holder stayed busy");
+            return;
+        }
+        let ask = next_ask(
+            busy,
+            &self.shared_state.model_registry.shard_holders(&shard_id),
+            now,
+        );
+        // The holder answered, so the transfer is alive: the permit sweep
+        // must not read the wait as a stall.
+        self.shared_state
+            .models
+            .note_p2p_transfer_progress(&shard_id);
+        let offset = self
+            .shard_download_progress
+            .get(&shard_id)
+            .copied()
+            .unwrap_or(0);
+        let (candidates, at) = match ask {
+            NextAsk::Now(free) => (free, None),
+            NextAsk::At(when, free) => (free, Some(when)),
+        };
+        let target = self
+            .shared_state
+            .select_best_allowed_peer(&candidates)
+            .and_then(|n| {
+                self.shared_state
+                    .peer_registry
+                    .get(&n)
+                    .and_then(|p| p.peer_id_bytes.clone())
+            });
+        let Some(target_peer_bytes) = target else {
+            self.retry_shard_or_fallback(shard_id, busy_peer, "no holder to ask after busy");
+            return;
+        };
+        tracing::debug!(
+            model = %shard_id.model_id,
+            shard = shard_id.index,
+            %busy_peer,
+            offset,
+            wait_ms = at.map(|t| t.saturating_duration_since(now).as_millis() as u64),
+            "Part holder busy — asking again at the same offset"
+        );
+        let request = crate::types::ShardRequest {
+            shard_id,
+            chunk_offset: offset,
+            chunk_size: crate::network::protocol::SHARD_CHUNK_SIZE,
+        };
+        match at {
+            None => self.handle_send_shard_request(target_peer_bytes, request),
+            Some(when) => {
+                let tx = self.internal_cmd_tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(when)).await;
+                    let _ = tx
+                        .send(crate::types::NetworkCommand::ResumeShardAfterBusy {
+                            target_peer_bytes,
+                            request,
+                        })
+                        .await;
+                });
+            }
+        }
+    }
+
+    /// The wait after a busy answer has passed (#335): ask again, unless the
+    /// transfer has moved on meanwhile — ended (its busy record goes with it),
+    /// cancelled, fetched another way, or started again with a request of its
+    /// own in flight. Asking then would reset that transfer's offset to ours.
+    pub(super) fn resume_shard_after_busy(
+        &mut self,
+        target_peer_bytes: Vec<u8>,
+        request: crate::types::ShardRequest,
+    ) {
+        let shard_id = &request.shard_id;
+        let still_waiting = self.shard_busy_holders.contains_key(shard_id)
+            && self.shard_download_progress.get(shard_id) == Some(&request.chunk_offset)
+            && !self
+                .pending_shard_requests
+                .values()
+                .any(|(_, sid)| sid == shard_id);
+        if !still_waiting
+            || self.abort_shard_transfer_if_cancelled(shard_id)
+            || self.abandon_shard_transfer_if_not_ours(shard_id)
+        {
+            tracing::debug!(
+                model = %shard_id.model_id,
+                shard = shard_id.index,
+                "Not asking again after busy — the transfer has moved on"
+            );
+            return;
+        }
+        self.handle_send_shard_request(target_peer_bytes, request);
     }
 
     /// Send a shard transfer request to a specific peer.
@@ -509,9 +646,119 @@ pub(super) async fn read_shard_chunk_async(
     }
 }
 
+/// The shortest wait before asking a busy holder again, whatever it named.
+const BUSY_WAIT_LEAST: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Busy answers in a row — no chunk landing between — one transfer takes
+/// before it is handled as a failure. Each wait is at most
+/// `upload_pacer::RELEASED_WITHIN`, so a part gives up on holders that stay
+/// busy within ~5 min.
+const MOST_BUSY_ANSWERS: u32 = 16;
+
+/// Transfers with busy-holder memory at once; only a bound.
+const MAX_BUSY_ENTRIES: usize = 4096;
+
+/// Holders of one part that answered BUSY, and until when (#335).
+#[derive(Debug, Default)]
+pub(super) struct BusyHolders {
+    /// Busy answers since a chunk last landed, from every holder.
+    answers: u32,
+    /// Each busy holder and when its wait ends. A few holders at most.
+    until: Vec<(crate::types::NodeId, std::time::Instant)>,
+}
+
+impl BusyHolders {
+    fn note(&mut self, holder: crate::types::NodeId, until: std::time::Instant) {
+        self.answers += 1;
+        match self.until.iter_mut().find(|(n, _)| *n == holder) {
+            Some(entry) => entry.1 = until,
+            None => self.until.push((holder, until)),
+        }
+    }
+
+    fn busy_at(&self, holder: &crate::types::NodeId, at: std::time::Instant) -> bool {
+        self.until.iter().any(|(n, u)| n == holder && *u > at)
+    }
+}
+
+/// Where a downloader turned away BUSY asks next.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum NextAsk {
+    /// Now, one of these holders (none of them busy).
+    Now(Vec<crate::types::NodeId>),
+    /// At this instant — when the first busy holder comes free — one of these.
+    At(std::time::Instant, Vec<crate::types::NodeId>),
+}
+
+/// The holders worth asking after a busy answer: those not busy now; if every
+/// holder is, those free when the first wait ends. The caller picks among
+/// them with the same scoped choice as any request (`select_best_allowed_peer`).
+pub(super) fn next_ask(
+    busy: &BusyHolders,
+    holders: &[crate::types::NodeId],
+    now: std::time::Instant,
+) -> NextAsk {
+    let free: Vec<_> = holders
+        .iter()
+        .filter(|h| !busy.busy_at(h, now))
+        .cloned()
+        .collect();
+    if !free.is_empty() {
+        return NextAsk::Now(free);
+    }
+    let soonest = busy
+        .until
+        .iter()
+        .filter(|(n, _)| holders.contains(n))
+        .map(|(_, u)| *u)
+        .min()
+        .unwrap_or(now);
+    let free_then = holders
+        .iter()
+        .filter(|h| !busy.busy_at(h, soonest))
+        .cloned()
+        .collect();
+    NextAsk::At(soonest, free_then)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// After a busy answer the downloader asks a holder that is not busy at
+    /// once; when every holder is busy it waits for the FIRST to come free —
+    /// never for the one that just answered, if another is free sooner.
+    #[test]
+    fn a_busy_holder_is_passed_over_and_the_first_free_one_is_waited_for() {
+        use crate::types::NodeId;
+        use std::time::{Duration, Instant};
+        let (a, b, c) = (NodeId([1; 32]), NodeId([2; 32]), NodeId([3; 32]));
+        let now = Instant::now();
+        let mut busy = BusyHolders::default();
+        busy.note(a.clone(), now + Duration::from_secs(5));
+        assert_eq!(
+            next_ask(&busy, &[a.clone(), b.clone(), c.clone()], now),
+            NextAsk::Now(vec![b.clone(), c.clone()])
+        );
+        busy.note(b.clone(), now + Duration::from_secs(3));
+        busy.note(c.clone(), now + Duration::from_secs(9));
+        assert_eq!(
+            next_ask(&busy, &[a.clone(), b.clone(), c.clone()], now),
+            NextAsk::At(now + Duration::from_secs(3), vec![b.clone()])
+        );
+        // A holder's newer wait replaces its older one, and every answer counts.
+        busy.note(b.clone(), now + Duration::from_secs(7));
+        assert_eq!(busy.answers, 4);
+        assert_eq!(
+            next_ask(&busy, &[a.clone(), b.clone(), c], now),
+            NextAsk::At(now + Duration::from_secs(5), vec![a])
+        );
+        // A holder that has since gone from the registry is not waited for.
+        assert_eq!(
+            next_ask(&busy, std::slice::from_ref(&b), now),
+            NextAsk::At(now + Duration::from_secs(7), vec![b])
+        );
+    }
 
     /// The serve side clamps to `SHARD_CHUNK_SIZE`, and a requester walks the
     /// file by the bytes it ACTUALLY received.

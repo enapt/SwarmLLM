@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+**Sharing model files with other computers now stays within the upload limit you set, however
+many computers ask at once.** A computer shares the parts of models it holds, by default at no
+more than 10 megabits a second, so that sharing never fills your internet connection. That limit
+was applied to each request on its own, so three computers downloading at once took three times
+it. It is now one limit for the whole computer. When it is fully used, a computer asking for a
+part is told to come back in a few seconds, or asks another computer that has the part. Either
+way it keeps what it has already downloaded instead of starting that part again from the
+beginning. A computer still on an older version starts the part again, as it did before.
+
 ## [0.3.251-alpha] — 2026-10-24
 
 **A computer that already guesses ahead with a small model now fetches a better one when the

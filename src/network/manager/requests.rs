@@ -283,24 +283,47 @@ impl NetworkManager {
                 // response back via internal_cmd_tx; same pattern as the
                 // PrefixKvFetch path immediately below.
                 if self.pending_shard_responses.len() >= MAX_INBOUND_SHARD_FETCHES {
-                    tracing::warn!(
-                        %peer,
-                        "ShardTransfer: inbound queue full, replying empty"
-                    );
-                    let resp = SwarmResponse::ShardData(crate::types::ShardResponse::empty());
-                    let _ = self
-                        .swarm
-                        .behaviour_mut()
-                        .request_response
-                        .send_response(channel, resp);
+                    tracing::warn!(%peer, "ShardTransfer: inbound queue full, replying busy");
+                    self.answer_part_request_busy(channel, &peer, BUSY_QUEUE_FULL_RETRY);
                     return;
                 }
-                let prepared = self.prepare_shard_read(&shard_req);
                 let bw_limit = self
                     .shared_state
                     .cfg()
                     .resources
                     .shard_upload_mbps(self.shared_state.contribution());
+                // ONE upload limit for every part served (#335): the answer
+                // books its share on the node's one timeline and goes when its
+                // share ends — fewer bytes than asked where the limit is low,
+                // busy where the queue would keep the downloader past its
+                // patience. It was a wait per request, so N parts at once went
+                // up at N times the limit.
+                let (prepared, release) = match self.prepare_shard_read(&shard_req) {
+                    Some((path, offset, asked, model_id, shard_index)) => {
+                        let asked = asked.min(crate::network::protocol::SHARD_CHUNK_SIZE);
+                        match self
+                            .upload_pacer
+                            .reserve(std::time::Instant::now(), asked, bw_limit)
+                        {
+                            super::upload_pacer::Grant::Serve { bytes, release } => {
+                                (Some((path, offset, bytes, model_id, shard_index)), release)
+                            }
+                            super::upload_pacer::Grant::Busy { retry_after } => {
+                                tracing::debug!(
+                                    %peer,
+                                    model = %shard_req.shard_id.model_id,
+                                    index = shard_req.shard_id.index,
+                                    retry_after_ms = retry_after.as_millis() as u64,
+                                    upload_mbps = bw_limit,
+                                    "ShardTransfer: the upload limit is spoken for — replying busy"
+                                );
+                                self.answer_part_request_busy(channel, &peer, retry_after);
+                                return;
+                            }
+                        }
+                    }
+                    None => (None, std::time::Instant::now()),
+                };
                 let ticket = uuid::Uuid::new_v4();
                 self.pending_shard_responses
                     .insert(ticket, (std::time::Instant::now(), channel));
@@ -319,23 +342,14 @@ impl NetworkManager {
                                 shard_index,
                             )
                             .await;
-                            // Enforce upload bandwidth cap. 0 = unlimited
-                            // (default). Only throttles shard serving, not
-                            // tensor forwards.
-                            if bw_limit > 0 {
-                                if let SwarmResponse::ShardData(ref sr) = resp {
-                                    if !sr.data.is_empty() {
-                                        let bytes = sr.data.len() as u64;
-                                        let limit_bytes_per_sec = bw_limit * 125_000; // Mbps → bytes/s
-                                        let delay_ms = (bytes * 1000) / limit_bytes_per_sec;
-                                        if delay_ms > 0 {
-                                            tokio::time::sleep(std::time::Duration::from_millis(
-                                                delay_ms,
-                                            ))
-                                            .await;
-                                        }
-                                    }
-                                }
+                            // Sent when its share of the upload limit ends
+                            // (booked above; at once with no limit); a failed
+                            // read is answered at once. Only part serving is
+                            // paced, never a tensor forward.
+                            if matches!(&resp, SwarmResponse::ShardData(sr) if !sr.data.is_empty())
+                            {
+                                tokio::time::sleep_until(tokio::time::Instant::from_std(release))
+                                    .await;
                             }
                             match resp {
                                 SwarmResponse::ShardData(sr) => {
@@ -689,6 +703,13 @@ impl NetworkManager {
                 // Route to AcquisitionManager — always clean up tracking state
                 // NET-C1: Look up by OutboundRequestId for correct correlation
                 if let Some((_, shard_id)) = self.pending_shard_requests.remove(&request_id) {
+                    // A holder too busy to serve (#335): keep the bytes we have
+                    // and ask again at the same offset. Read before the size
+                    // cap below, which the busy marker's size would trip.
+                    if let Some(retry_after_ms) = data.busy_retry_after_ms() {
+                        self.ask_again_after_busy(shard_id, peer, retry_after_ms);
+                        return;
+                    }
                     // Cap total_size to prevent unbounded download loops from malicious peers
                     let max_shard_bytes =
                         self.shared_state.cfg().model.shard_size_mb * 1024 * 1024 * 2;
@@ -702,6 +723,7 @@ impl NetworkManager {
                         self.shard_download_progress.remove(&shard_id);
                         self.shard_last_progress_at.remove(&shard_id);
                         self.shard_p2p_retries.remove(&shard_id);
+                        self.shard_busy_holders.remove(&shard_id);
                         return;
                     }
                     let offset = self
@@ -861,6 +883,10 @@ impl NetworkManager {
                                 .insert(shard_id.clone(), new_offset);
                             self.shard_last_progress_at
                                 .insert(shard_id.clone(), std::time::Instant::now());
+                            // A holder that served a chunk is not busy, and
+                            // busy answers count only while nothing lands
+                            // (#335): a long part on a busy swarm may take many.
+                            self.shard_busy_holders.remove(&shard_id);
 
                             let next_req = crate::types::ShardRequest {
                                 shard_id: shard_id.clone(),
@@ -880,6 +906,7 @@ impl NetworkManager {
                         // Download complete for this shard
                         self.shard_download_progress.remove(&shard_id);
                         self.shard_p2p_retries.remove(&shard_id);
+                        self.shard_busy_holders.remove(&shard_id);
                         self.shard_last_progress_at.remove(&shard_id);
                         // Allow future P2P attempts for this shard if it gets re-downloaded later.
                         self.shared_state.models.shard_p2p_failed.remove(&shard_id);
@@ -1268,7 +1295,35 @@ pub(super) struct ShardVerdict {
     pub(super) another_upload: bool,
 }
 
+/// How long a downloader turned away by a full inbound queue waits before it
+/// asks this holder again — it asks a holder that is not busy at once.
+const BUSY_QUEUE_FULL_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl NetworkManager {
+    /// Answer a part request this node will not serve now (#335): BUSY to a
+    /// downloader advertising `features::SHARD_BUSY`, which keeps the bytes
+    /// it has and asks again at the same offset; EMPTY to an older one, which
+    /// starts the part again elsewhere — all an older build understands.
+    pub(super) fn answer_part_request_busy(
+        &mut self,
+        channel: request_response::ResponseChannel<SwarmResponse>,
+        peer: &libp2p::PeerId,
+        retry_after: std::time::Duration,
+    ) {
+        let resp = if self.peer_advertises(peer, crate::types::features::SHARD_BUSY) {
+            crate::types::ShardResponse::busy(
+                u32::try_from(retry_after.as_millis()).unwrap_or(u32::MAX),
+            )
+        } else {
+            crate::types::ShardResponse::empty()
+        };
+        let _ = self
+            .swarm
+            .behaviour_mut()
+            .request_response
+            .send_response(channel, SwarmResponse::ShardData(resp));
+    }
+
     /// A peer's part matched the hash this node's manifest carries and is
     /// still not the swarm's upload: the hash came from a node holding another
     /// upload. Discard it and fetch the part from the upload itself — which
