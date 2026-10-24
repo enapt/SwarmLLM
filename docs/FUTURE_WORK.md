@@ -2329,7 +2329,29 @@ two buffer pairs and a step writes the pair it did not read (`SsmState`), as lla
 cache tensors; the 0.8B writes 121-126 tokens a second instead of 50-54 whole on the card, the 4B is unchanged
 (~37, card-bound), ids identical with capture on and off (`docs/invariants/inference.md` § "Qwen 3.5's decode steps are captured
 too"). MoE layers are captured where their experts are stacked on the card (#138 (2), 2026-10-14); (5) no speculation of any kind — a
-snapshot of the recurrent state per draft would allow it; (6) ~~the 4B's gap to llama.cpp~~ —
+snapshot of the recurrent state per draft would allow it. **llama.cpp master's way, read at
+`4b1a27f` (2026-10-25):** the recurrent cache keeps `1 + n_rs_seq` rows a sequence
+(`llama_memory_recurrent`); the fused delta-rule op takes K = `n_rs_seq + 1` and writes the state
+after each of a batch's last min(tokens, K) tokens into K slots (`ggml_gated_delta_net(…, K)`,
+`delta-net-base.cpp::build_recurrent_attn`), the short-convolution state the same way
+(`build_conv_state`, slot K − t ← the window ending at token t); `seq_rm(p0)` on a rejection of r
+≤ `n_rs_seq` tokens sets a single-use rollback index so the next step reads slot r — no
+recompute; a larger rollback fails. The batch splitter keeps a sequence's last K tokens in one
+micro-batch (`split_equal`'s keep-tail) so the slots stay valid. Here that is: K slots per DeltaNet
+layer in `delta_rule_cpu`, `kernels/delta_rule.cu` and the card's `SsmState` (the 9B: 2 MB a
+layer a slot at f32, × 24 DeltaNet layers), the truncate path (`build_kv_truncate_forward` →
+the worker) choosing the slot, chains only — a tree's branches cannot share one recurrent state —
+and every segment of a split that holds DeltaNet layers doing the same on the verdict. It
+unblocks the n-gram copies, the 0.8B drafter AND MTP (`docs/plans/split_speculation.md` § MTP,
+2026-10-25). **A cheaper design to weigh first:** `SsmState` already keeps the state its last
+step STARTED from (`layers::SsmState::rewind_to`, one step back, for a refused graph capture).
+On any rejection, rewind to the step's start and put the accepted tokens back at the head of the
+NEXT forward: no extra trip and no kernel change, at the cost of the accepted rows again
+(compute, and their bytes between segments); a stream of checks needs a ring of step starts, one
+per chunk in flight. Today's gates: `pipeline::distributed` (`no_speculation_on_a_model_with_recurrent_state`),
+`model_worker` (`ngram_spec_eligible(…, carries_recurrent_state)`), `engine_drafter` (a drafter
+with recurrent state is refused), `split::kv_cache` (an entry with recurrent state refuses to be
+truncated); (6) ~~the 4B's gap to llama.cpp~~ —
 checked 2026-10-07, not a defect: six prompts scored on the processor against llama.cpp master
 (`score_ids_dump.py`, margin 0.05) — Qwen 3.5 4B Q4_K_M misses on 3 (gaps 0.11-0.21), and
 Llama-3.2-3B Q4_K_M, a long-verified family, misses on 1 by MORE (0.306, "why the sky is blue").

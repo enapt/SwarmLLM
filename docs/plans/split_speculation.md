@@ -995,6 +995,28 @@ found several that confirm the pieces above, and each names a detail to keep:
     real link. So a head pays where no small sibling exists (Qwen 3.5,
     Gemma 4, 70B targets whose 1B/3B siblings agree less), not as a
     replacement for the 3B on a 7B.
+  **MTP, checked 2026-10-25** (web + this machine's files): **the MTP ("nextn") layers are
+  not in the uploads the swarm picks.** llama.cpp's converter keeps them since PR #22673
+  (merged 2026-05-16; `--spec-type draft-mtp`, one MTP block chained k times, its own KV
+  cache), but the published GGUFs that carry them are SEPARATE repos — unsloth's
+  `Qwen3.5-{0.8B…397B-A17B}-MTP-GGUF` and `Qwen3.6-{27B,35B-A3B}-MTP-GGUF`, ggml-org's
+  Qwen3.6 ones; none found from Qwen, bartowski or lmstudio-community. Here:
+  `unsloth/Qwen3.5-9B-GGUF` Q4_K_M (the live node's header) and a Qwen3.5-4B Q4_K_M have
+  none, a Qwen3.5-0.8B Q8_0 from 2026-09-26 has `blk.24.nextn.*` with
+  `qwen35.nextn_predict_layers = 1` (our loader already leaves it out of the layer count,
+  `split::gguf_meta`). Gemma 4's MTP ships as a separate file in unsloth's regular repos
+  (PR #23398: > 2× on the dense model, nothing on the MoE). Reported, all on ONE machine:
+  Qwen3.6-27B 0.83 acceptance at 2 guesses, 0.72 at 3, 1.7-2× decode (PR #22673's thread).
+  **So, for us:** (1) the canonical upload has no MTP layer, and fetching another upload whole
+  is ruled out; the layer would come as its own piece — the nextn tensors only, by range
+  request from the `-MTP` repo of the same base model, as a header is fetched — and a graft
+  onto another quant needs its norm weights stored as w+1 or acceptance is zero
+  (github.com/MH221B/graft-mtp); (2) Qwen 3.5 has **no speculation of any kind yet**
+  (FUTURE_WORK #228 (5): the DeltaNet state is not wound back after a rejected guess), and
+  that blocks the 0.8B drafter and the n-gram copies as much as MTP — it comes first;
+  (3) in a FLOW the tail's guesses arrive a round trip late (`faster_than_local.md` § 5 item
+  2), so MTP pays in rounds and on near chains, not on the far flow. DFlash (2602.06036)
+  and DSpark need separately trained drafters: not "no separate model".
 - **SuffixDecoding** (arXiv 2411.04975): suffix trees over the prompt and
   earlier replies. Up to 5.3× on agent workloads. It is a second candidate
   source for the same tree and the right successor to the n-gram lookup.
