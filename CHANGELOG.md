@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.251-alpha] — 2026-10-24
+
 **A computer that already guesses ahead with a small model now fetches a better one when the
 swarm has it.** When a model is split across computers, a small model of the same family guesses
 the next words, so each trip between the computers keeps several of them instead of one. Since
