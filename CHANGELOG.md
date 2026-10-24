@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.252-alpha] — 2026-10-25
+
 **A model split across computers can now reuse your own earlier answers to guess ahead.** When a
 model is split across computers, this computer guesses the next words so the others can check
 several in one trip, and one cheap source of guesses is text that already appeared — an agent
