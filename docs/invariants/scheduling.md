@@ -5156,6 +5156,19 @@ nine of the ten (chat +2-14%, code +1-9%; only the one CSV prompt went to the 1.
 A code edit is copied: every drafter 0.998-1.000. A drafter's flow speed varies more with the
 prompt than with any knob: the 3B replays 10.1 tok/s on a short story and 43.3 on a binary tree.
 
+**For a 14B target the 3B is still the drafter to hold** (2026-10-24, `~/swarmllm-318/ranks14/`:
+`gen14.py` — the 14B's own greedy replies from the llama.cpp reference GGUF, ids kept as generated —
+then `run14.sh` and `sim14.py`; eleven prompts, 4,245 positions, Qwen2.5-14B-Instruct Q4_K_M as the
+truth). First choice: coder-7B 0.859, coder-3B 0.838, coder-1.5B 0.817, 0.5B 0.796 (outside the 8:
+0.7%, 1.2%, 2.4%, 3.2%). Replayed on the long link with the halves' compute doubled for a 14B (far
+40 + 1.0 ms a row, near 19 + 0.36): the 3B at its measured 33 ms 19.9 tok/s (code 27.4, chat 10.9);
+the 7B 19.4 at an assumed 55 ms a call and 17.8 at 70 (its call on the card is unmeasured; scaled
+from its 18.5 ms a decoded token, ~60), the 1.5B 18.0, the 0.5B 16.3. So the 7B's +2 points pay only
+if its call is ≤ 55 ms, and only in chat (12.2 against 10.9) — code goes to the 3B. Nothing to
+change: the 7B (4.7 GB) is past `MOST_DRAFTER_BYTES_TO_FETCH` (2 GB), so `largest_that_can_draft`
+already picks the 3B. Every draw the 3B's first choice replays 26.4 (+33%) — as for the 7B target,
+the headroom is a drafter that agrees with the target more, not a larger one.
+
 **The flow has its own distance line: 150 ms, not the tree rounds' 300** (2026-10-23,
 `FLOW_LEAST_ROUND_TRIP_MS`). The 300 ms line (`TREES_LEAST_ROUND_TRIP_MS`) was set for tree ROUNDS
 before the flow existed, and the flow inherited it, so every link under 300 ms — most links between
