@@ -5192,10 +5192,17 @@ when its share ends.
   request of its own in flight, not cancelled): a transfer restarted meanwhile would otherwise
   have its offset reset to the old one. After `MOST_BUSY_ANSWERS` (16, each wait ≤ 20 s) in a
   row — a landed chunk clears the record — the transfer takes the ordinary retry path.
-- **Booked before the read, for the bytes asked.** At a part's end the read can be shorter,
-  which costs at most one answer's share once per part. A busy answer books nothing. The limit
-  is read live (`cfg()`) per request. The pending-answer ticket's TTL (60 s) stays above the
-  release bound plus the disk read.
+- **Booked before the read, for the bytes the part HAS** (`upload_pacer::bytes_to_book`: the
+  bytes asked, ≤ one chunk, ≤ the part's length past the offset — the read's own bound). The first
+  cut booked the bytes ASKED, so a request past a part's end held 4 s of the limit and sent
+  nothing: five, from any peer, answered every downloader busy, and one every 4 s kept it so
+  (pre-release review of v0.3.252, confirmed in code before it shipped). A busy answer books
+  nothing. The limit is read live (`cfg()`) per request. The pending-answer ticket's TTL (60 s)
+  stays above the release bound plus the disk read.
+- **Still open: one peer can take the whole limit by downloading** (#340). The shared timeline
+  has no per-peer share, so a peer asking for real bytes as fast as it is answered holds the
+  queue and others are answered busy. It costs that peer the limit's bandwidth (1.25 MB/s at the
+  default) and was possible before #335 too (filling `MAX_INBOUND_SHARD_FETCHES`).
 
 **Measured** (2026-10-24, `split_rig.sh fetch` with `RIG_NETNS=1 FETCH_MBPS=8 FETCH_SHARD="1 2 3 4 5 6
 7"`, the coder-7B's parts, both nodes on this build): seven parts asked at once under A's 8 Mbps
@@ -5211,7 +5218,7 @@ holder and no other: the retry skips the holder that refused, so an older downlo
 **Tests.** `upload_pacer::tests::parts_served_at_once_share_one_limit` (3 × 5 MB at 10 Mbps
 released at 4/8/12 s — 1.25 MB/s together; red with per-request booking, as is the busy test),
 `a_queue_past_its_bound_answers_busy_and_books_nothing`,
-`an_answer_is_cut_only_by_a_low_limit`;
+`an_answer_is_cut_only_by_a_low_limit`, `a_request_past_a_parts_end_books_nothing`;
 `shard_transfer::tests::a_busy_holder_is_passed_over_and_the_first_free_one_is_waited_for`; the
 types crate's `only_a_busy_answer_reads_as_busy_and_it_carries_its_wait`.
 

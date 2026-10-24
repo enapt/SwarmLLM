@@ -19,10 +19,11 @@
 //!   Past that the request is answered BUSY (`ShardResponse::busy`, to a
 //!   downloader advertising `features::SHARD_BUSY`; empty to an older one).
 //!
-//! The reservation is made before the disk read, for the bytes asked. At a
-//! part's end the read can be shorter than the reservation, which costs at
-//! most one answer's share once per part (≤ 4 s of a 512 MB part's ~7 min at
-//! 10 Mbps).
+//! The reservation is made before the disk read, for the bytes the part HAS
+//! from the offset asked ([`bytes_to_book`]). Booked for the bytes asked, a
+//! request past a part's end held 4 s of the limit and sent nothing: five of
+//! them, from any peer, answered every downloader busy for 20 s (pre-release
+//! review of v0.3.252).
 
 use std::time::{Duration, Instant};
 
@@ -33,6 +34,16 @@ pub(super) const ANSWER_HOLDS_AT_MOST: Duration = Duration::from_secs(4);
 /// No answer is released later than this after its request: two thirds of the
 /// downloader's `SHARD_STALL_SECS`, leaving the rest for the bytes to cross.
 pub(super) const RELEASED_WITHIN: Duration = Duration::from_secs(super::SHARD_STALL_SECS * 2 / 3);
+
+/// What an answer to a part request may book for: the bytes asked, at most one
+/// chunk (`SHARD_CHUNK_SIZE`), and at most what the part has from `offset` —
+/// the same bound the read applies (`shard_transfer::read_shard_chunk_async`),
+/// so a share is never booked for bytes that will not be sent.
+pub(super) fn bytes_to_book(part_len: u64, offset: u64, asked: u64) -> u64 {
+    asked
+        .min(crate::network::protocol::SHARD_CHUNK_SIZE)
+        .min(part_len.saturating_sub(offset))
+}
 
 /// What a part request may be given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +152,29 @@ mod tests {
         let (_, release) = served(pacer.reserve(later, CHUNK, 10));
         assert_eq!(release.duration_since(now), Duration::from_secs(24));
         assert!(RELEASED_WITHIN < Duration::from_secs(super::super::SHARD_STALL_SECS));
+    }
+
+    /// A request for bytes the part does not have books nothing: a peer asking
+    /// past a part's end, over and over, cannot hold the limit other
+    /// downloaders share.
+    #[test]
+    fn a_request_past_a_parts_end_books_nothing() {
+        let mut pacer = UploadPacer::default();
+        let now = Instant::now();
+        let part_len = 100 * 1024 * 1024;
+        assert_eq!(bytes_to_book(part_len, u64::MAX, CHUNK), 0);
+        assert_eq!(bytes_to_book(part_len, part_len, CHUNK), 0);
+        for _ in 0..50 {
+            let asked = bytes_to_book(part_len, u64::MAX, CHUNK);
+            served(pacer.reserve(now, asked, 10));
+        }
+        let (bytes, release) = served(pacer.reserve(now, bytes_to_book(part_len, 0, CHUNK), 10));
+        assert_eq!(bytes, 5_000_000, "a real request still gets its full share");
+        assert_eq!(release.duration_since(now), Duration::from_secs(4));
+        // The last chunk books only what is left; a request is never booked
+        // past one chunk.
+        assert_eq!(bytes_to_book(part_len, part_len - 10, CHUNK), 10);
+        assert_eq!(bytes_to_book(part_len, 0, u64::MAX), CHUNK);
     }
 
     /// A high limit serves the whole chunk asked for; no limit is no wait; the

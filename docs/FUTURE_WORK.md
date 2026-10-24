@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #340**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #341**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2814,6 +2814,20 @@ Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the 
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
 
+#### #340 — One peer can take a node's whole upload limit by downloading as fast as it is answered
+`P3` · network · **OPEN** — 2026-10-24 · history: v0.3.252 pre-release review (#335)
+
+Since #335 every part a node serves books its share of ONE upload timeline
+(`network::manager::upload_pacer`), released within 20 s or answered busy. Nothing gives a peer
+a share of it: a peer asking for real bytes as fast as it is answered keeps the queue full, and
+every other downloader is answered busy, waits, and after 16 busy answers in a row takes the
+ordinary retry path (another holder, or HuggingFace). It costs that peer the limit's bandwidth
+(1.25 MB/s at the default 10 Mbps). Before #335 the same peer could fill the inbound queue
+(`MAX_INBOUND_SHARD_FETCHES`) the same way, so this is not new in kind. libtorrent bounds it with
+unchoke slots: a few peers served at a time, rotated. Next: a per-peer bound on the share booked
+ahead (e.g. no peer past half of `RELEASED_WITHIN`), measured on the `split_rig.sh fetch` rig
+with two downloaders.
+
 #### #339 — Holder records from a key that never became a peer are never swept, and can crowd out real holders
 `P2` · network · **OPEN** — 2026-10-24 · history: #333 security review
 
@@ -2828,11 +2842,17 @@ A `ShardAnnounce` needs only an authenticated signer equal to its `node_id` (dis
   holder, so a flood of fresh keys announcing a real part pushes its real holders out of the
   record until they re-announce. What the router then does with holders it cannot reach is not
   yet checked.
-Since #333 such records keep no learned model from being forgotten (`holder_counts`). Next:
-record a holder claim only for a signer this node knows (a peer, or a relayed origin it
-registered), or age out claims from unknown keys — checking first that a real peer's first
-announcement does not arrive before it is registered. A change here goes to
-`security-reviewer`.
+Since #333 such records keep no learned model from being forgotten (`holder_counts`).
+Checked 2026-10-24 (code reading, not a run): `ShardAnnounce` is gossip-only and authenticated by
+its sealed signer (`network/manager/events.rs`, `open_signed`), not by the connection, so one
+neighbour forwards announces of many keys — and that is how a REAL holder several hops away is
+learned, so "record only a registered signer" would lose real holders. The scheduler already
+skips a holder neither connected nor relay-reachable (`scheduler/mod.rs` ~4207); download-source
+choice (`select_best_allowed_peer`) ranks unregistered holders last but still picks one when no
+registered holder is permitted. Next: age out a record whose key is not in `peer_registry` once
+it goes unrefreshed past a few re-announce periods (`FULL_REANNOUNCE_EVERY_TICKS`; `HolderRecord::seen`
+is already kept), and at `MAX_HOLDERS_PER_SHARD` evict an unregistered holder before a
+registered one. A change here goes to `security-reviewer`.
 
 #### #317 — Another program can hold `[::1]` on the node's port while the node runs
 `P3` · api · **OPEN** — 2026-10-20 · history: found with #255's key proof

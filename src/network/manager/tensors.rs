@@ -974,7 +974,8 @@ impl NetworkManager {
         }
     }
 
-    /// Check if a shard is available locally and return the path + request params.
+    /// Check if a shard is available locally and return its path, the offset
+    /// asked and the bytes the answer may carry (`upload_pacer::bytes_to_book`).
     /// Returns None if the shard is not available. This is sync to avoid holding
     /// `&self` across async boundaries (NetworkManager is not Send).
     pub(super) fn prepare_shard_read(
@@ -985,11 +986,15 @@ impl NetworkManager {
         let shard_index = req.shard_id.index;
 
         let shard_path = self.shard_store.shard_path(model_id, shard_index);
-        if shard_path.exists() {
+        if let Ok(meta) = std::fs::metadata(&shard_path) {
+            // What the answer may carry, so the upload limit is booked only
+            // for bytes that exist (`upload_pacer::bytes_to_book`).
+            let bytes =
+                super::upload_pacer::bytes_to_book(meta.len(), req.chunk_offset, req.chunk_size);
             return Some((
                 shard_path,
                 req.chunk_offset,
-                req.chunk_size,
+                bytes,
                 model_id.clone(),
                 shard_index,
             ));

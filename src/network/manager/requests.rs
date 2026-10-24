@@ -300,7 +300,6 @@ impl NetworkManager {
                 // up at N times the limit.
                 let (prepared, release) = match self.prepare_shard_read(&shard_req) {
                     Some((path, offset, asked, model_id, shard_index)) => {
-                        let asked = asked.min(crate::network::protocol::SHARD_CHUNK_SIZE);
                         match self
                             .upload_pacer
                             .reserve(std::time::Instant::now(), asked, bw_limit)
