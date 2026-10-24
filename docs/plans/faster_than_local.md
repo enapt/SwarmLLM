@@ -224,7 +224,9 @@ found no knob beating the default). So the levers are E's quality and P.
    our 75.5%-agreeing 1.5B, expect a few points. First step, only if nothing better is open: dump
    the split-layer state and the target's token from our engine, fit an affine map + the target's
    norm and head by ridge regression, and measure held-out top-1 and the mix with the drafter's top
-   k — **stop if the head alone is under ~40% or the mix under ~78%.**
+   k — **stop if the head alone is under ~40% or the mix under ~78%.** **Run 2026-10-24 and
+   STOPPED** (§ 7.2): at an even split the trained head is right 32.8% among the drafter's 8 and
+   the mix gains 0.2 points.
 3. *Ruled out for now:* PARD-style parallel drafting (2504.18583) makes drafting cheaper, and the
    requester's drafting is not what binds E ("a cheaper requester grows more rows, not more reply");
    EAGLE-3 heads need the TOP layer's state, which is a round trip away, and none exist for Qwen2.5.
@@ -362,6 +364,80 @@ distilled on them (DistillSpec 2310.08461: +10-45% acceptance; Online SD 2310.07
 user's target AND domain on the user's own machine, no data leaving it. The crude form — a
 per-token bias — was refuted (§ 5); a LoRA is not that. Needs a training loop on the card.
 
+## 7. Three new levers, measured before any code (2026-10-24)
+
+None of these was in the plans above. Each was measured offline on the coder-7B target and its
+drafters before anything was built, and each says what the number decides. Data and scripts:
+`~/swarmllm-318/{grammar,lens}/`; the probe dumps the state crossing a split
+(`LOGITS_PROBE_HIDDEN`, `examples/logits_reference_probe.rs`).
+
+**7.1 Decoding to the request's schema: a correctness gain, not a speed lever.** Today
+`response_format` is an instruction in the prompt (`api/openai/types.rs`, `to_internal_messages`)
+and a tool call is whatever the model writes, parsed afterwards. Constrained decoding
+(llguidance 1.9.1: MIT, pure Rust; a mask costs ~50 µs a token at a 128K vocabulary by its
+authors' figure; `rollback` lets one matcher walk a tree depth-first) makes the output valid by
+construction. The hope for splits: a token the grammar FORCES (one legal token) needs no guess, so
+a tree spends nothing on it.
+- **Measured** (12 tool calls and a JSON reply rendered by Qwen 2.5's own template, the grammar
+  walked over each reply's tokens; separators pinned to Qwen's `", "` / `": "` — llguidance's
+  default is FLEXIBLE whitespace, which forces far less): **45% of the tokens inside the object
+  are forced.** But the coder-1.5B drafter reads the tools in its prompt and already writes them:
+  top-1 **0.994** on the forced tokens, **0.021 nats** a token — **3.3%** of its surprise over the
+  object (361 tokens; free tokens 0.880 and 0.498). By E ≈ 1 + ln N / H (§ 6.1) that is worth
+  ~3% at most; masking the free positions can add only what the drafter's 12% misses there hold.
+  Consistent with the one published figure, TensorRT-LLM's +8% for masked drafts (2.65 → 2.86
+  accepted on a chain of 3, an EAGLE-3 drafter, which reads no prompt); no published work
+  combines a grammar with draft TREES (searched 2026-10-24).
+- **What it is instead**: the only way to make `strict: true` true — OpenAI guarantees
+  schema-valid output and we cannot — and to stop a small model's malformed call failing an
+  agent: FUTURE_WORK #336. Two things the measurement found for that design: both coder models
+  score Qwen's added `<tool_call>` token at ~e⁻²⁰ where a reply starts (the 7B begins with a plain
+  `<` and spells the tag as text), so the trigger must match the TEXT as well as the token; and
+  `"}}\n` is ONE token, so the grammar must own the closing text, not end at `}`.
+
+**7.2 The requester's half of the target as a re-ranker — REFUTED (§ 5 item 2's first step,
+run).** The requester computes the target's state at the split for every row it sends; if that
+state could tell the drafter's candidates apart, a flow would gain E with no download and no
+round trip. Measured on the coder-7B split at layer 14 of 28 (an even two-way split, the most a
+requester holds), at 4,121 reply positions of 11 prompts, against the coder-1.5B Q8_0 drafter's
+top 8 (drafter's first choice right 84.7%; the 8 hold the target's token 98.6%):
+- the untrained lens (the target's own final norm and head on that state): **2.8%** top-1 over
+  the vocabulary, **24.5%** among the drafter's 8 (chance 12.5%);
+- a TRAINED translator (a rank-64 correction plus a bias, cross-entropy on the target's pick
+  among the 8, four folds by prompt, scored on held-out prompts): **32.8%** among the 8;
+- mixed with the drafter's log-prob at the weight best IN HINDSIGHT on the held-out positions:
+  **0.849 against 0.847.** The stop rule (the head under 40%, the mix under the drafter + ~2.5)
+  fired on every count.
+- Instrument check: the same lens one layer from the top (split at 27) is right **83.8%** over
+  the vocabulary, so the code is sound; the half-way state does not carry the next token in a
+  form a linear head reads (LayerSkip's stock Llama3-8B at layer 16, § 5, agrees). A requester
+  holding less than half holds less. Not built. The target state that does predict is the top
+  layer's (EAGLE-3 / MTP heads), a round trip late in a flow (§ 5 item 2), and published heads
+  cover Qwen 3 and Llama 3.x, not Qwen 2.5 (`split_speculation.md`, checked 2026-10-24).
+
+**7.3 Accepting a near-tie: the simplest opt-in fast mode, measured.** Only a GREEDY reply
+changes: a sampled one already accepts a near-tie in proportion to the target's own probability,
+losslessly. Rule: keep the drafter's first choice where the target scores it within τ nats of
+its own best. The same 4,121 positions, coder-1.5B:
+
+| τ | chat: first choice kept | code | target log-prob given up (nats a token, chat / code) |
+|---|---|---|---|
+| 0 (lossless) | 0.755 | 0.919 | 0 |
+| 0.25 | 0.783 | 0.933 | 0.003 / 0.002 |
+| 0.5 | 0.803 | 0.943 | 0.010 / 0.005 |
+| 1.0 | 0.845 | 0.961 | 0.042 / 0.019 |
+| Medusa's typical acceptance (0.09, 0.3) | 0.919 | 0.982 | 0.158 / 0.050 |
+
+By the link's measured slope (§ 5: first choice +4 points ≈ +15% tok/s), τ = 0.5 is worth about
++18% on chat and +9% on code for 0.005-0.010 nats a token; Medusa's rule ~+60% on chat at
+sixteen times the loss. Two limits: these are per position on the target's own greedy path, so
+what a run accepts AFTER a kept near-tie (the reply has left that path) is unmeasured; and nats
+given up are not a quality score. It belongs to the planned opt-in fast mode
+(`large_model_splits.md` item 6, Judge Decoding's rules: never the default, labelled as no longer
+the model's own reply, scored against llama.cpp with `examples/score_against_reference.py`) as
+its cheapest form: no judge to train. Next, only when that mode is built: replies under τ 0.5 and
+1.0 scored against llama.cpp, then the link.
+
 ## Sources
 
 Petals 2312.08361 · Pope et al. 2211.05102 · StagFormer 2501.15665 · Layer
@@ -372,4 +448,7 @@ LLMCompiler 2312.04511 · Skeleton-of-Thought 2307.15337 · SpecExec 2406.02532 
 Sequoia 2402.12374 · ML-SpecQD 2503.13565 · QuantSpec 2502.10424 · SPEQ
 2510.18525 · Daliri et al. 2408.07978 · multistream-select 0.13.0 `Version`
 docs · llama.cpp `--n-cpu-moe` reports (discussions #15396, dev.to 8 GB
-Qwen3-Coder-30B) · Leviathan 2211.17192 · Chen 2302.01318.
+Qwen3-Coder-30B) · Leviathan 2211.17192 · Chen 2302.01318 · § 7: llguidance 1.9.1
+(`docs/fast_forward.md`, `syntax.md`) · TensorRT-LLM tech blog 12 (guided + speculative
+decoding) · vLLM `v1/structured_output` · Medusa 2401.10774 (typical acceptance) · Tuned Lens
+2303.08112 · LayerSkip 2404.16710.

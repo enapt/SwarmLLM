@@ -43,6 +43,9 @@
 //! positions (read as the last chunk, every position) plus the decode steps —
 //! every position of a 4K prompt is 2.4 GB at a 152K vocabulary, on the card
 //! as well as on disk. The JSON's `first_position` says where the rows start.
+//! `LOGITS_PROBE_HIDDEN=1` (with `LOGITS_PROBE_SPLIT`) also writes the state
+//! crossing the boundary at those kept positions, `<OUT>.hidden.f32`
+//! (`[K, hidden]`) — what a split's requester holds for every row it sends.
 
 use std::path::PathBuf;
 
@@ -197,10 +200,16 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Run `input` (token ids) through every segment; the LAST one answers with
-    // logits at every position when `all_positions`, else at the last one.
-    let mut run = |input: Tensor, pos: usize, all_positions: bool| -> anyhow::Result<Tensor> {
+    // logits at every position when `all_positions`, else at the last one. With
+    // two segments it also answers the state that crossed the boundary — what
+    // the requester of a split computes for every row it sends.
+    let mut run = |input: Tensor,
+                   pos: usize,
+                   all_positions: bool|
+     -> anyhow::Result<(Tensor, Option<Tensor>)> {
         let last = segments.len() - 1;
         let mut h = input;
+        let mut boundary = None;
         for (i, seg) in segments.iter_mut().enumerate() {
             h = match (i == 0, i == last, all_positions) {
                 (true, true, true) => seg.forward_verify_all_positions(&h, pos, &store, req)?,
@@ -210,8 +219,11 @@ fn main() -> anyhow::Result<()> {
                 (true, _, _) => seg.forward(&h, pos, &store, req)?,
                 (false, _, _) => seg.forward_pre_embedded(&h, pos, &store, req)?,
             };
+            if i == 0 && i != last {
+                boundary = Some(h.clone());
+            }
         }
-        Ok(h)
+        Ok((h, boundary))
     };
 
     // The prompt before the positions kept is read for its cache only, in
@@ -232,14 +244,37 @@ fn main() -> anyhow::Result<()> {
         &[1, keep],
         &Device::Cpu,
     )?;
-    let all = run(kept, first_position, true)?.squeeze(0)?; // [keep, vocab]
+    let (all, boundary) = run(kept, first_position, true)?;
+    let all = all.squeeze(0)?; // [keep, vocab]
     for p in 0..keep {
         rows.push(all.get(p)?.to_dtype(candle_core::DType::F32)?.to_vec1()?);
+    }
+    // `LOGITS_PROBE_HIDDEN=1` with `LOGITS_PROBE_SPLIT`: the boundary state of
+    // the kept positions as `<OUT>.hidden.f32` (`[keep, hidden]`) — whether the
+    // requester's own half of the target can tell the drafter's candidates
+    // apart (`docs/plans/faster_than_local.md` § 7).
+    let mut hidden_width = None;
+    if std::env::var("LOGITS_PROBE_HIDDEN").as_deref() == Ok("1") {
+        let state = boundary
+            .ok_or_else(|| anyhow::anyhow!("LOGITS_PROBE_HIDDEN needs LOGITS_PROBE_SPLIT"))?
+            .squeeze(0)?
+            .to_dtype(candle_core::DType::F32)?;
+        let (positions, width) = state.dims2()?;
+        anyhow::ensure!(
+            positions == keep,
+            "boundary state of {positions} positions, not {keep}"
+        );
+        let mut bytes = Vec::with_capacity(positions * width * 4);
+        for v in state.flatten_all()?.to_vec1::<f32>()? {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        std::fs::write(out.with_extension("hidden.f32"), bytes)?;
+        hidden_width = Some(width);
     }
     for (step, &id) in ids[prefill..].iter().enumerate() {
         let pos = prefill + step;
         let t = Tensor::from_vec(vec![id], &[1, 1], &Device::Cpu)?;
-        let logits = run(t, pos, false)?.flatten_all()?;
+        let logits = run(t, pos, false)?.0.flatten_all()?;
         rows.push(logits.to_dtype(candle_core::DType::F32)?.to_vec1()?);
     }
 
@@ -257,7 +292,7 @@ fn main() -> anyhow::Result<()> {
         serde_json::to_vec(&serde_json::json!({
             "gguf": gguf, "tokens": ids, "positions": rows.len(), "vocab": vocab,
             "prefill": prefill, "decode": decode, "split": split,
-            "first_position": first_position, "chunk": chunk,
+            "first_position": first_position, "chunk": chunk, "hidden": hidden_width,
         }))?,
     )?;
     println!(

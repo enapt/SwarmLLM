@@ -2606,6 +2606,13 @@ Two things that will otherwise be misread:
   both arms on the same ids (`logits_reference_probe`, `LOGITS_PROBE_DEVICE=cuda`
   for the card) and compare position by position — and give llama.cpp the
   node's context, or a LongRoPE model runs its short factors.
+- **What a split's state could tell a drafter is measured offline, and the lens
+  is checked near the top first.** `LOGITS_PROBE_SPLIT=k LOGITS_PROBE_HIDDEN=1`
+  writes the state crossing the split at every kept position
+  (`<OUT>.hidden.f32`, `[K, hidden]`). A low number at the half means nothing
+  until the same lens one layer from the top reads the target's token: 83.8% at
+  27 of 28 against 2.8% at 14 for the coder-7B (2026-10-24,
+  `docs/plans/faster_than_local.md` § 7.2).
 - **The benches have no tracing subscriber**, so `tracing::info!` from the code
   under test goes nowhere. If a decision needs to be observed, give it an
   explicit `eprintln!` behind an env var.

@@ -969,6 +969,32 @@ found several that confirm the pieces above, and each names a detail to keep:
   These are drafters that need no separate small model. They come AFTER Phase
   1, for families with no small sibling. `qwen35-support` is the natural first
   user.
+  **Checked 2026-10-24, in source:**
+  - **Support:** llama.cpp has EAGLE-3 (PR #18039, `LLM_ARCH_EAGLE3`,
+    `--spec-type draft-eagle3`) and native MTP (PR #22673, the "nextn" layers
+    inside the main GGUF, `--spec-type draft-mtp`).
+  - **Published heads:** Qwen3 8B/14B/32B (AngelSlim, RedHatAI), Llama-3.1-8B
+    and 3.3-70B (yuhuili, RedHatAI), and Qwen2.5-7B-Instruct (thoughtworks).
+    **None for Qwen2.5-Coder-7B**, our test target. The Qwen2.5-7B head is
+    0.36 B parameters, the Qwen3-8B head ~1 B with its embedding.
+  - **Inputs:** an EAGLE-3 head reads THREE target states, the residual stream
+    BEFORE the norm at layer inputs 2, N/2 and N−3 (vLLM, SGLang and llama.cpp
+    use the same defaults). Only the first is local when the requester holds
+    the first segment; the others must come back from the peers.
+  - **What gets gotten wrong:**
+    - a tap at layer k's input is layer k−1's output (an off-by-one makes the
+      head silently weak);
+    - the head keeps its own cache, so it needs features for EVERY accepted
+      position, not only the newest;
+    - it drafts in a 32k vocabulary mapped back through `d2t`;
+    - the paper's τ≈6 is for trees, and no first-choice rate is published.
+  - **Closest analogue:** SGLang's pipeline-parallel spec relay keeps the
+    draft head on the LAST stage only and relays the tree to the others.
+  - **Does it pay here?** A head guesses as well as a small sibling at a
+    fraction of the cost, and cheaper calls are worth +6-8% at most on the
+    real link. So a head pays where no small sibling exists (Qwen 3.5,
+    Gemma 4, 70B targets whose 1B/3B siblings agree less), not as a
+    replacement for the 3B on a 7B.
 - **SuffixDecoding** (arXiv 2411.04975): suffix trees over the prompt and
   earlier replies. Up to 5.3× on agent workloads. It is a second candidate
   source for the same tree and the right successor to the n-gram lookup.

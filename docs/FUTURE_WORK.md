@@ -117,6 +117,8 @@ speed is what the swarm is for, so split speed for large models is the top track
 14. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
     the first reply waits ~2 min while the driver compiles flash attention's PTX (MMQ's ~8 s a
     weight type), then it is cached. Correct since the PTX went in (before: wrong output).
+15. **#336** — `strict: true` and tool calls are not enforced, so an agent driving a small model
+    meets malformed calls (filed 2026-10-24; constrained decoding, `faster_than_local.md` § 7.1).
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
 maintenance or an idea with no user waiting on it.
@@ -1086,9 +1088,14 @@ bound how many peers it serves (unchoke slots). Next: one node-wide pacer at the
 (reserve `bytes / cap` on a shared next-free instant; read `cfg()` per reservation). ⚠ A shared
 pacer queues: 30 queued 8 MiB chunks put the last ~200 s out, past the requester's 180 s
 no-progress sweep (`daemon/state/models.rs`) and toward `RR_REQUEST_TIMEOUT_SECS` (600), so the
-wait must be bounded — past it, answer busy and let the requester go to another holder (check how
-a refused `ShardRequest` is retried before choosing the answer). `docs/invariants/network.md`
-and the timeouts rule (`.claude/rules/architecture.md`) apply.
+wait must be bounded — past it, answer busy and let the requester go to another holder. ⚠ Not
+with today's refusal: an empty `ShardResponse` (what the inbound-queue-full path sends,
+`MAX_INBOUND_SHARD_FETCHES`) makes the downloader clear that part's progress and restart it from
+offset 0 elsewhere (`shard_transfer.rs::retry_shard_or_fallback`), so a busy answer must let it
+RESUME at its offset — every holder serves the same upload's bytes and the whole part is hashed
+at the end — and a new answer shape is a wire change (feature bit, additive). The queue-full path
+has the same restart cost today. `docs/invariants/network.md` and the timeouts rule
+(`.claude/rules/architecture.md`) apply.
 
 #### #155 — AutoNAT redials a peer this node is already connected to, and the per-peer cap denies it, every ~5 s
 `P3` · network · **PARTIAL** — 2026-10-02, narrowed 2026-10-07 (measured on the swarm: not seen there) · history: archive row #155, gotcha #774
@@ -2590,6 +2597,30 @@ stall per layer; TP off by default), and `VisionEncodeResponse` has no error fie
 image-encode refusal stays silent.
 
 ### API surface
+
+#### #336 — `strict: true` and tool calls are not enforced: a reply is checked only after it is written
+`P2` · api · **OPEN** — 2026-10-24 · history: `docs/plans/faster_than_local.md` § 7.1
+
+OpenAI's `response_format: {"type": "json_schema", "strict": true}` guarantees a reply that matches
+the schema, and agents (Claude Code, OpenClaw) depend on tool calls that parse. Here
+`response_format` becomes an instruction in the prompt (`api/openai/types.rs`,
+`to_internal_messages`) and a tool call is parsed after generation, so a small model's malformed
+JSON reaches the client. Next: constrained decoding with llguidance 1.9.1 (MIT, pure Rust, Rust
+1.87; its `TokTrie` built once per model from the GGUF vocabulary's bytes, special tokens
+0xFF-marked, as llama.cpp's `common/llguidance.cpp` does). The shape, from the 2026-10-24 research:
+- the mask applies where tokens are DRAWN — the local sampler, and on a split the far end for
+  every row (one matcher walking the tree depth-first with `consume_token` / `rollback`, vLLM's
+  pattern on chains), with the requester's drafter masked by the same grammar;
+- the grammar travels with the request: a new optional field, gated on a feature bit;
+- a tool call is a LAZY grammar (llguidance's `StructTag`: free text until the family's trigger,
+  then that call's schema), the trigger matched as TEXT as well as the token — the coder-7B
+  writes `<tool_call>` as text, § 7.1 — and the grammar owns the closing text (`"}}\n` is one token);
+- separators pinned to the family's own JSON style (llguidance's default is flexible whitespace);
+- a matcher error FAILS the request with a message (llama.cpp drops the constraint silently on a
+  mask failure);
+- every response path gets it at one choke point (`.claude/rules/architecture.md` § "One
+  invariant, N paths").
+Not a speed lever (§ 7.1: the forced tokens are 3.3% of the drafter's surprise).
 
 #### #312 — A Responses tool output that is a list of parts is refused
 `P3` · api · **OPEN** — 2026-10-19 · history: found closing #310
