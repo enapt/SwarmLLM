@@ -200,11 +200,6 @@ pub enum AcquisitionCommand {
         data: Vec<u8>,
         total_size: u64,
     },
-    /// Query the status of an acquisition.
-    Status {
-        model_id: ModelId,
-        reply: tokio::sync::oneshot::Sender<Option<AcquisitionStatus>>,
-    },
 }
 
 /// Manages the lifecycle of acquiring models from the network.
@@ -271,10 +266,6 @@ impl AcquisitionManager {
                             shard_id, offset, data, total_size,
                         }) => {
                             self.handle_shard_data(shard_id, offset, &data, total_size).await;
-                        }
-                        Some(AcquisitionCommand::Status { model_id, reply }) => {
-                            let status = self.jobs.get(&model_id).map(|j| j.status.clone());
-                            let _ = reply.send(status);
                         }
                         None => break,
                     }

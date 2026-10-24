@@ -151,9 +151,9 @@ pub struct NetworkConfig {
     /// On a home router with UPnP enabled this opens the P2P ports on the
     /// gateway and confirms the resulting public address with the swarm — the
     /// zero-config path to internet reachability for most home users. Inert
-    /// (emits GatewayNotFound) on routers without UPnP — and the gateway is
-    /// searched for once, at start: UPnP turned on at the router later takes
-    /// a restart (libp2p-upnp 0.6 never searches again). Auto-disabled on WSL2
+    /// (emits GatewayNotFound) on routers without UPnP; a gateway not found is
+    /// searched for again (2 min, doubling to 30), so UPnP turned on at the
+    /// router later is found without a restart (#329). Auto-disabled on WSL2
     /// in NAT mode; mirrored mode keeps it.
     #[serde(default = "default_true")]
     pub enable_upnp: bool,

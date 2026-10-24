@@ -107,11 +107,22 @@ impl TpAllReduceCollector {
                 .map_err(|e| attribute(0, format!("zstd decompress: {e}")))?;
             buf
         };
+        // A partial of the wrong size is refused for rank 0 as for every other
+        // rank: skipped, the sum went out short of that rank's share with no
+        // error (sweep 2026-10-24).
+        if decompressed.len() != elem_count * 4 {
+            return Err(attribute(
+                0,
+                format!(
+                    "AllReduce: rank 0 partial size mismatch ({} != {})",
+                    decompressed.len(),
+                    elem_count * 4
+                ),
+            ));
+        }
         let mut sum = vec![0.0f32; elem_count];
-        if decompressed.len() == elem_count * 4 {
-            for (i, chunk) in decompressed.as_chunks::<4>().0.iter().enumerate() {
-                sum[i] = f32::from_le_bytes(*chunk);
-            }
+        for (i, chunk) in decompressed.as_chunks::<4>().0.iter().enumerate() {
+            sum[i] = f32::from_le_bytes(*chunk);
         }
 
         // Add remaining partials

@@ -165,12 +165,7 @@
   --top-banner-height: 0px;
   --chrome-top: calc(var(--header-height) + var(--top-banner-height));
   --sidebar-width: 240px;
-  /* Icon sizing scale — use these for any icon/toggle/arrow */
-  --icon-xs: 12px;
-  --icon-sm: 14px;
-  --icon-md: 16px;   /* default — matches info icon */
-  --icon-lg: 20px;
-  --icon-xl: 32px;
+  --icon-md: 16px;   /* the cloud card's expand toggle */
   /* Badge shared tokens — pill style used across status/tag badges */
   --badge-font-size: var(--fs-xs);
   --badge-font-weight: 700;
@@ -3587,9 +3582,7 @@ textarea:focus:not(:focus-visible) {
 .badge-green { background: var(--green-dim); color: var(--green-text); border: 1px solid rgba(34, 197, 94, 0.3); }
 .badge-blue { background: var(--accent-glow); color: var(--accent); border: 1px solid rgba(59, 130, 246, 0.3); }
 .badge-orange { background: var(--orange-dim); color: var(--orange-text); border: 1px solid rgba(245, 158, 11, 0.3); }
-.badge-red { background: var(--red-dim); color: var(--red-text); border: 1px solid rgba(239, 68, 68, 0.3); }
 .badge-purple { background: var(--purple-dim); color: var(--purple-text); border: 1px solid rgba(167, 139, 250, 0.3); }
-.badge-muted { background: var(--bg-tertiary); color: var(--text-secondary); border: 1px solid var(--border); }
 /* Semantic aliases. These names were already in use — `_routeBadge` builds
    `badge-ok` / `badge-info` / `badge-warning` from its route map, and two
    components write `badge-warning` and `badge-amber` directly — but none of

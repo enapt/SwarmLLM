@@ -1918,7 +1918,7 @@
             if (data.authenticated) {
               pills.push('<span class="ph-tag tag-ok" title="' + U.escapeHtml(I18n.t('dashboard.sub_authenticated')) + '">\u2713 ' + U.escapeHtml(I18n.t('dashboard.sub_authenticated')) + '</span>');
               if (data.subscription_type) {
-                var plan = data.subscription_type.charAt(0).toUpperCase() + data.subscription_type.slice(1);
+                var plan = U.capitalize(data.subscription_type);
                 pills.push('<span class="ph-tag tag-plan">' + U.escapeHtml(plan) + '</span>');
               }
               if (data.cli_version) {

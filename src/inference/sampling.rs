@@ -1013,20 +1013,12 @@ fn sample_full_vocab(
     // Fall back to argmax over the pre-softmax logits rather than emitting
     // the last vocab token, which is a silent wrong-token bug.
     if !sum.is_finite() || sum == 0.0 {
-        let mut best_i = 0u32;
-        let mut best_v = f32::NEG_INFINITY;
-        for (i, &l) in logits.iter().enumerate() {
-            if l > best_v {
-                best_v = l;
-                best_i = i as u32;
-            }
-        }
         tracing::warn!(
             vocab_size = logits.len(),
             sum,
             "DIAG: sampling softmax collapsed — falling back to argmax"
         );
-        return best_i;
+        return argmax(logits);
     }
 
     // Weighted random selection
@@ -1165,13 +1157,24 @@ pub fn sample_token_with_logprobs_history(
     (token_id, logprob_info)
 }
 
-fn argmax(logits: &[f32]) -> u32 {
-    logits
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(i, _)| i as u32)
-        .unwrap_or(0)
+/// The one greedy pick over a row of logits: the FIRST of equal maxima (the
+/// lowest id), as llama.cpp's greedy sampler (`llama_sampler_greedy_apply`,
+/// strict `>`), `gumbel_argmax` and the card's ranking (`tree_rank`) break a
+/// tie. A NaN never wins; a row with nothing comparable answers 0. The
+/// coordinator's greedy check (`pipeline::speculative`) and the worker's SWIFT
+/// check (`model_worker::sample_argmax`) call it too: with copies that broke
+/// ties apart, an exact tie could read one token without speculation and
+/// another with it (sweep 2026-10-24).
+pub(crate) fn argmax(logits: &[f32]) -> u32 {
+    let mut best_idx = 0usize;
+    let mut best_val = f32::NEG_INFINITY;
+    for (i, &v) in logits.iter().enumerate() {
+        if v > best_val {
+            best_val = v;
+            best_idx = i;
+        }
+    }
+    best_idx as u32
 }
 
 /// Random float in [0, 1) using the `rand` crate.
@@ -1551,6 +1554,10 @@ mod tests {
     fn argmax_returns_correct_index() {
         assert_eq!(argmax(&[1.0, 3.0, 2.0]), 1);
         assert_eq!(argmax(&[5.0, 1.0, 1.0]), 0);
+        // An exact tie goes to the lowest id, as llama.cpp's greedy sampler
+        // and the card's ranking break it.
+        assert_eq!(argmax(&[1.0, 3.0, 3.0, 2.0]), 1);
+        assert_eq!(argmax(&[f32::NAN, 2.0, 2.0]), 1);
     }
 
     #[test]

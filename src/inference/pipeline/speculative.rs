@@ -47,6 +47,7 @@ use std::sync::Arc;
 use crate::daemon::SharedState;
 use crate::error::SwarmError;
 use crate::inference::router::{InferenceOutput, StreamingTokenEvent, StreamingTokenTx};
+use crate::inference::sampling::argmax;
 use crate::types::{LayerForward, LayerResult, NetworkCommand, NetworkFinishReason, TensorFormat};
 use tokio::sync::mpsc;
 
@@ -750,18 +751,6 @@ pub(super) async fn send_verify_batch(
         ));
     }
     Ok(result.spec_logits)
-}
-
-pub(super) fn argmax(logits: &[f32]) -> u32 {
-    let mut best_idx: usize = 0;
-    let mut best_val = f32::NEG_INFINITY;
-    for (i, &v) in logits.iter().enumerate() {
-        if v > best_val {
-            best_val = v;
-            best_idx = i;
-        }
-    }
-    best_idx as u32
 }
 
 /// Greedy accept-reject for distributed speculative decoding.

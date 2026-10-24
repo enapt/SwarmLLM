@@ -46,16 +46,11 @@ use crate::types::{ModelId, ModelManifest};
 ///
 /// The ONE derivation: the dashboard download, the HuggingFace search badges
 /// and the canonical-upload check all ask it, so an upload claimed for a model
-/// can be checked against the id it would really produce.
+/// can be checked against the id it would really produce. The slug itself is
+/// `types::slugify_model_name`'s — a display name and a file name must give
+/// the same id, and the slug rule is what names models on disk and in the DHT.
 pub fn model_id_for_gguf_filename(filename: &str) -> String {
-    filename
-        .trim_end_matches(".gguf")
-        .to_lowercase()
-        .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
+    crate::types::slugify_model_name(filename.trim_end_matches(".gguf"))
 }
 
 /// Would downloading `source` produce THIS model id?
@@ -139,19 +134,6 @@ pub fn note_claim(claims: &mut Vec<HfSource>, model_id: &ModelId, source: HfSour
     claims.insert(at, source);
     claims.truncate(MAX_ORIGIN_CLAIMS_PER_MODEL);
     true
-}
-
-/// The best claimed upload that `excluded` does not rule out (one HuggingFace
-/// refused to serve, say). `claims` need not be sorted.
-pub fn best_claim<'a>(
-    model_id: &ModelId,
-    claims: &'a [HfSource],
-    excluded: impl Fn(&HfSource) -> bool,
-) -> Option<&'a HfSource> {
-    claims
-        .iter()
-        .filter(|c| origin_names_model(c, model_id) && !excluded(c))
-        .min_by_key(|c| origin_rank(model_id, c))
 }
 
 /// Is the one-upload-per-model machinery on? `SWARMLLM_CANONICAL_UPLOADS=0`
@@ -326,6 +308,20 @@ impl CanonicalBuild {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The best claimed upload that `excluded` does not rule out, found by a
+    /// fresh scan of unsorted claims: the check that `note_claim` keeps them
+    /// best-first. Production reads `claims[0]`, so this lives here.
+    fn best_claim<'a>(
+        model_id: &ModelId,
+        claims: &'a [HfSource],
+        excluded: impl Fn(&HfSource) -> bool,
+    ) -> Option<&'a HfSource> {
+        claims
+            .iter()
+            .filter(|c| origin_names_model(c, model_id) && !excluded(c))
+            .min_by_key(|c| origin_rank(model_id, c))
+    }
 
     fn src(repo: &str, file: &str) -> HfSource {
         HfSource {

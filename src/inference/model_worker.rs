@@ -5568,15 +5568,7 @@ fn sample_argmax(logits: &candle_core::Tensor) -> Result<u32, SwarmError> {
     };
     let l = l.to_dtype(DType::F32).map_err(SwarmError::internal)?;
     let v: Vec<f32> = l.to_vec1::<f32>().map_err(SwarmError::internal)?;
-    let mut best = 0usize;
-    let mut best_val = f32::NEG_INFINITY;
-    for (i, &x) in v.iter().enumerate() {
-        if x > best_val {
-            best_val = x;
-            best = i;
-        }
-    }
-    Ok(best as u32)
+    Ok(crate::inference::sampling::argmax(&v))
 }
 
 /// Slice the per-position logits out of a verify-pass output of shape

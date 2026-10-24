@@ -834,8 +834,6 @@ var NeuralBg = (function() {
     updateState: updateState,
     setHealth: setHealth,
     setEnabled: setEnabled,
-    isEnabled: function() { return enabled; },
-    shouldAnimate: shouldAnimate,
-    resize: function() { resize(); }
+    shouldAnimate: shouldAnimate
   };
 })();

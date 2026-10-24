@@ -302,7 +302,7 @@
             App.settings._updateClaudeSubSteps(data);
             if (data.cli_installed && data.authenticated) {
               var planLabel = data.subscription_type
-                ? data.subscription_type.charAt(0).toUpperCase() + data.subscription_type.slice(1)
+                ? U.capitalize(data.subscription_type)
                 : '';
               if (info) info.textContent = I18n.t('settings.claude_sub_ready');
               info.style.color = 'var(--green)';

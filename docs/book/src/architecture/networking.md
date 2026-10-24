@@ -146,5 +146,6 @@ for the full pipeline and measured numbers.
 - Signed balance reports with timestamp freshness (5 min window)
 - Gossip replay rejection (5 min window)
 - `cross_node_prefix_trust_min` gates fetch peers at a minimum trust
-  score (default 0.5, equal to `DEFAULT_TRUST`; set to 2.0 to disable
-  cross-node fetch entirely)
+  score (default 0.5, equal to `DEFAULT_TRUST`; it must be between 0.0 and
+  1.0 or the node will not start — to stop sharing saved prompts altogether,
+  leave `share_prefix_cache_with_peers` off)

@@ -382,8 +382,8 @@ impl NetworkManager {
             .unwrap_or(0);
         drop(existing);
         // A peer is on our LAN only if the ACTUAL connection to it runs over a
-        // private/loopback/link-local address, or it observes US on such an
-        // address (same private network). We deliberately do NOT infer LAN from
+        // private/loopback/link-local address (or an earlier sighting already
+        // said so — `was_lan`). We deliberately do NOT infer LAN from
         // the peer's advertised `listen_addrs`: a public node bound to 0.0.0.0
         // advertises `127.0.0.1` (and often a private cloud-interface IP) too,
         // which used to mislabel every remote peer — e.g. a public relay anchor
@@ -586,9 +586,9 @@ impl NetworkManager {
 
 /// Does this multiaddr denote a private / loopback / link-local address — one
 /// that implies same-LAN reachability? Applied by the identify handler to the
-/// ACTUAL connection address and to the peer's observed view of us, NOT to the
-/// peer's advertised listen_addrs (those include 127.0.0.1 for any 0.0.0.0-bound
-/// node, which would mislabel remote peers as LAN).
+/// ACTUAL connection address only — never to the peer's observed view of us (its
+/// claim) nor its advertised listen_addrs (those include 127.0.0.1 for any
+/// 0.0.0.0-bound node, which would mislabel remote peers as LAN).
 fn multiaddr_is_local(a: &libp2p::Multiaddr) -> bool {
     a.iter().any(|proto| match proto {
         libp2p::multiaddr::Protocol::Ip4(ip) => {

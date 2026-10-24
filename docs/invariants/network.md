@@ -4718,6 +4718,15 @@ and `a_router_that_does_not_answer_is_not_read_as_one_that_will_not_list`, plus 
 assertion in `a_listener_closing_with_several_addresses_removes_its_mapping_once`
 that an address which went is never mapped next; each goes red with its fix undone.
 
+**Confirmed on the router with 0.3.250 on both nodes (2026-10-24).** This PC started 0.3.250
+at 04:24:45Z and mapped TCP 8810. The box's old 0.3.249, stopping at 04:25:24Z, removed
+8810/8800 whoever held them (0.3.249's flaw), which took this PC's row; the box's 0.3.250
+then mapped both. With no restart, this PC's next renewal (04:54:02Z) read the table, found
+8810 forwarded to another device and moved: `UPnP: peers reach this node on public port
+48807, not 8810`, the old `…/tcp/8810` address expired. The table afterwards: box TCP 8810 +
+UDP 8800, this PC TCP 48807 + UDP 47681, one row each and nothing left from the probes. A
+node whose port is taken while it runs heals at its next renewal (≤ 30 min); it needs no restart.
+
 ## ACK-Timeout Fast-Fail for rr Sends
 
 `SendDirectMessage` carries `delivery_request_id: Option<uuid::Uuid>`.
@@ -5594,3 +5603,52 @@ gossiping, a future-dated record kept, a record past the window kept):
 `a_restart_does_not_gossip_what_the_swarm_already_heard` (two boots over one data directory),
 `a_round_with_no_peer_connected_gossips_no_manifest`,
 `a_stored_record_is_kept_only_where_this_boots_clock_can_hold_it`.
+
+## A size the other computer chose is checked before it sizes anything (2026-10-24)
+
+**The defect, four times over.** Each site took a number from a peer's bytes and let it decide
+how much memory this node used, or where a slice began:
+- **The image payload** (gotcha #901): the worker's zstd decode had no cap. It became
+  `vision::decode_wire_embeddings`, capped at 50 MB, with its shape checked by `checked_mul`.
+- **Tensor parallelism**: the post-attention and FFN reductions were unpacked with an uncapped
+  `zstd::decode_all` of `TpAllReduceResponse::reduced_data` (`pipeline/tensor_parallel.rs`).
+  zstd turns a few hundred KB of zeros into gigabytes, so any peer that knew a request id could
+  answer with a bomb. The ring all-reduce's received chunks had the same flaw
+  (`allreduce::ring_allreduce_network`).
+- **A peer's prefix-cache snapshot** (`split::prefix_cache::deserialize_snapshot_full`): the
+  header length and each layer's k/v counts were the peer's. A length that overflowed panicked
+  the check, and the slice offsets were never compared with the body.
+- **A peer's streamed reply** (`remote_generate::StreamReassembler`): the reorder buffer was
+  keyed by the PEER's sequence number. A peer that skipped 0 and streamed 1, 2, 3, … grew it
+  without end, because nothing was ever released from it.
+- **Adjacent**: rank 0's AllReduce partial of the wrong size was skipped in silence
+  (`daemon::state::tp_allreduce`), so a zero sum went out as the reduction while the other
+  ranks' partials were refused.
+
+**What it is now.**
+- `allreduce::decompress_peer_bytes(data, expected)` is `zstd::bulk::decompress` with the
+  output capped at the size this node knows the answer has: its own partial's, or its own
+  chunk's. Any other length is refused (`SwarmError::Inference`, the peer's fault).
+- The snapshot reader checks every size with `checked_add` / `checked_mul` against the body
+  before slicing.
+- The reassembler stops a stream past `max_tokens + OVERRUN_SLACK` (64) and bars the peer for
+  the request. Its bound is `reply_stream_bound`: on a continued reply, the whole reply's
+  budget. A continuation can go back to the same peer under the same wire id (the request id,
+  which the router's end-of-request `CancelInference` release is keyed by, so a fresh id
+  there would leave the peer's cache to its timers, #238). A late token from the attempt
+  before is then numbered past this attempt's budget but never past the reply's.
+- The serving side numbers from 0 and sends one message per non-empty token
+  (`dispatch/remote_generate.rs`). A peer never raises the budget (`clamp_peer_sampling`,
+  `resolve_max_new_tokens`), so an honest stream never trips it.
+
+**What a change must keep.** Guard `no_production_code_decompresses_without_a_cap_on_the_output`
+fails on a `decode_all(` / `copy_decode(`, or on a zstd `Decoder` whose function never
+`.take(`s, anywhere in `src/` or `crates/` outside test code. Its one listed exception is
+`ring_allreduce_network` unpacking the partial this node compressed itself. Its self-test
+`the_zstd_cap_guard_catches_every_uncapped_form` plants each form. Tests, each red with its fix
+off: `a_peers_compressed_bytes_are_held_to_the_size_expected` (a 64 MiB bomb),
+`a_rank_zero_partial_of_the_wrong_size_is_refused`,
+`a_snapshot_whose_sizes_overflow_is_refused_not_a_panic`,
+`a_peer_streaming_past_the_requests_max_tokens_is_stopped`,
+`a_late_token_from_the_attempt_before_a_continuation_is_not_an_overrun`. Still open in the same
+class: the registry takes any number of model ids from peers (FUTURE_WORK #333).

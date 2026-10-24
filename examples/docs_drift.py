@@ -229,17 +229,19 @@ def check_diag(files):
                     fields.append(name)
             calls.append((f, t[:m.start()].count('\n') + 1, m.group(1).upper(), msg.group(1), fields))
 
-    row = re.compile(r'^\|\s*(TRACE|DEBUG|INFO|WARN|ERROR)\s*\|\s*`(DIAG:[^`]*)`[^|]*\|\s*(.*?)\s*\|\s*$')
+    row = re.compile(r'^\|\s*(TRACE|DEBUG|INFO|WARN|ERROR)\s*\|\s*(`DIAG:[^|]*)\|\s*(.*?)\s*\|\s*$')
     found = []
     for n, line in enumerate(read('docs/DIAGNOSTICS.md').split('\n'), 1):
         m = row.match(line)
         if not m:
             continue
-        level, msg = m.group(1), m.group(2).rstrip(' …')
-        hits = [c for c in calls if c[3].startswith(msg) or msg.startswith(c[3])]
+        # A row may name several messages (`A` / `B`); its fields are read against them all.
+        level = m.group(1)
+        msgs = [s.rstrip(' …') for s in re.findall(r'`(DIAG:[^`]*)`', m.group(2))]
+        hits = [c for c in calls for msg in msgs if c[3].startswith(msg) or msg.startswith(c[3])]
         if not hits:
             continue      # the repo_consistency guard owns "the message exists"
-        exact = [c for c in hits if c[3] == msg] or hits
+        exact = [c for c in hits if c[3] in msgs] or hits
         problems = []
         levels = {c[2] for c in exact}
         if level not in levels:
@@ -250,7 +252,7 @@ def check_diag(files):
         if missing and code_fields:
             problems.append(f'fields the call does not log: {missing} (it logs {exact[0][4]})')
         if problems:
-            found.append(f'docs/DIAGNOSTICS.md:{n}\t{msg}\t' + '; '.join(problems) + f'\t@{exact[0][0]}:{exact[0][1]}')
+            found.append(f'docs/DIAGNOSTICS.md:{n}\t{msgs[0]}\t' + '; '.join(problems) + f'\t@{exact[0][0]}:{exact[0][1]}')
     return found
 
 
@@ -278,8 +280,14 @@ def check_sections(files, with_memory):
 
     def headings(path):
         if path not in heading_cache:
-            heading_cache[path] = [re.sub(r'^#+\s*', '', l.strip()).replace('**', '').replace('`', '').lower()
-                                   for l in read(path).split('\n') if l.startswith('#')]
+            text = read(path)
+            found = [re.sub(r'^#+\s*', '', l.strip()).replace('**', '').replace('`', '').lower()
+                     for l in text.split('\n') if l.startswith('#')]
+            # A paragraph's bold lead is a sub-section here too (`**A router that keeps its rows
+            # in SLOTS (measured …).**`), and pointers name it; it may wrap across lines.
+            for lead in re.findall(r'(?m)^\s*\*\*((?:(?!\*\*).)+?)\*\*', text, re.S):
+                found.append(re.sub(r'\s+', ' ', lead).replace('`', '').strip().lower())
+            heading_cache[path] = found
         return heading_cache[path]
 
     def continuation(line):

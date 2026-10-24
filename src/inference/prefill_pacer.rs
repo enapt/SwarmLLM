@@ -30,8 +30,8 @@
 //!   even one token overruns `target_ms`, no chunk size meets the target and
 //!   driving it to 1 would pay maximum per-call overhead for the last sliver of
 //!   responsiveness. `MIN_CHUNK_TOKENS` stops there and the target is simply not
-//!   met — the honest outcome, and `PrefillPacer::meeting_target` reports it so
-//!   the caller can say so rather than implying otherwise.
+//!   met — the honest outcome (`PrefillPacer::meeting_target`, which the tests
+//!   read).
 
 use std::time::Duration;
 
@@ -241,9 +241,20 @@ impl PrefillPacer {
         });
     }
 
+    /// Whether this tick has anyone to starve. `active_slots` is the number of
+    /// slots in the table, prefilling and decoding alike — a second *prefilling*
+    /// slot is starved by a big chunk just as a decoding one is.
+    pub fn is_sharing(active_slots: usize) -> bool {
+        active_slots > 1
+    }
+
+    // The two readers below are test-only, so they sit after every production
+    // item: repo guards treat a file's first `#[cfg(test)]` as where its tests start.
+
     /// Whether the chosen quantum can actually meet `target_ms`, i.e. the floor
     /// is not binding. False means this machine is slow enough that a single
-    /// prompt token overruns the per-tick budget.
+    /// prompt token overruns the per-tick budget. Only the tests read it.
+    #[cfg(test)]
     pub fn meeting_target(&self) -> bool {
         match self.ms_per_token {
             None => true,
@@ -252,16 +263,11 @@ impl PrefillPacer {
     }
 
     /// Current cost estimate in milliseconds per prompt token; `None` before the
-    /// first observation. Used to derive a prefill ETA.
+    /// first observation. Only the tests read it (a prompt's ETA is the
+    /// request trace's, `RequestTrace::set_progress`).
+    #[cfg(test)]
     pub fn ms_per_token(&self) -> Option<f64> {
         self.ms_per_token
-    }
-
-    /// Whether this tick has anyone to starve. `active_slots` is the number of
-    /// slots in the table, prefilling and decoding alike — a second *prefilling*
-    /// slot is starved by a big chunk just as a decoding one is.
-    pub fn is_sharing(active_slots: usize) -> bool {
-        active_slots > 1
     }
 }
 

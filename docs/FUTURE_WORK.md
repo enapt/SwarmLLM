@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #333**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #335**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -260,6 +260,33 @@ the replies' md5s compared; and `examples/logits_reference_probe.rs` with
 paths across a cache hit.
 
 ### Reliability and failover
+
+#### #334 — Four rules are computed in several places, and the copies already differ
+`P3` · reliability · **OPEN** — 2026-10-24 · history: sweep 2026-10-24 (`.claude/sweep-log.jsonl`)
+
+Found by the duplication pass; each copy was checked by hand. None is a one-line fix: each
+changes behaviour on some path, so each needs its own test before it is merged.
+1. **"Is this part on disk and whole?"** `auto_manage::shard_size_ok` (±10%) and
+   `shard_size_exact` exist. `scan::rescan_local_shards` picks exact for a zero hash, and the
+   download check verifies the hash where there is one. Other copies diverge:
+   - `scan::check_and_load_model` and `dispatch/remote_generate.rs` always take ±10%, so a
+     zero-hash placeholder passes there that the rescan refuses. The second one also skips
+     `is_shard_in_progress`.
+   - `SharedState::parts_missing_here` asks only that the file exists (`shard_file_present`).
+   Next: one verdict from the `ShardInfo`, with the zero-hash rule inside it.
+2. **A layout's tensor entries**: `manifest::build_shard_infos_from_layouts` and
+   `shard_loader::derive_tensor_entries` each build the running offsets. The second one's
+   comment says the two must agree, and only the ignored `a_derived_tensor_table_matches_the_published_one`
+   checks it. Next: one helper in `model::manifest` that both call. Run that test with
+   `SWARMLLM_TEST_MODEL_DIR`.
+3. **A `<…>`-shaped vocabulary entry matched whole by shape**: the BPE encoder takes it up to
+   20 characters, the SentencePiece one up to 30, and the SentencePiece one has no
+   end-of-generation names. `split_special_tokens` is written twice (BPE, SPM). Next: read
+   llama.cpp's rule for each vocabulary type (`llama-vocab.cpp`), then one predicate. Judge it
+   with `examples/tokenizer_reference.py`, because it changes what the model reads.
+4. **The disk a path is on**: `model::check_disk_space`, `auto_manage::disk_space_for` and
+   the health monitor each search for the longest mount point. With no match they pass,
+   answer `None` and sum every disk, respectively. Next: the first and last call `disk_space_for`.
 
 #### #167 — A speculative split decode has no mid-reply failover
 `P2` · reliability · **PARTIAL** — 2026-08-25 · history: archive § "Speculative distributed decode has no failover", archive row #149 item (d)
@@ -1075,6 +1102,13 @@ did NOT reproduce it: 2 connections, both dialled by this node. Cause UNDETERMIN
 matches the start of the UPnP conflict closed as #332 (both nodes claimed 171.97.115.37:8810; a
 coincidence, not a mechanism), so re-read the first 10 minutes after both nodes start 0.3.250
 before building anything here.
+
+**2026-10-24, the same reading on 0.3.250.** Both nodes restarted into 0.3.250 (this PC 04:24:45Z,
+the box 04:25:22Z). In the 10 minutes after that, this node took 12 inbound connections from the
+LAN box, against ~350 in the same window after 0.3.249. 0.3.250 also ends the UPnP conflict: by
+04:54Z each node held its own router rows (box TCP 8810 + UDP 8800, this PC TCP 48807 + UDP 47681).
+So the burst did not recur once the two nodes stopped advertising one address. That is still a
+correlation from one window, so the cause stays UNDETERMINED; nothing to build unless it recurs.
 
 **As filed:**
 
@@ -2692,6 +2726,22 @@ endpoints. `candle-*` stays on 0.10 deliberately (§ "Decided").
 Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the build if one
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
+
+#### #333 — A peer can fill the model registry with model ids that nobody holds
+`P2` · network · **OPEN** — 2026-10-24 · history: sweep 2026-10-24 (`.claude/sweep-log.jsonl`)
+
+`ModelRegistry::register_manifest` keeps every manifest whose id is new, with no cap on how
+many. `judge_peer_manifest` adopts any id it has not seen, and the only size checks are per
+manifest (under 256 parts, 16,384 tensors a part). A peer, whose key costs nothing to make,
+can gossip a stream of valid manifests under distinct ids. Each one adds a `manifests` entry,
+up to 256 × 8 `heard_part_hashes` (written before any other check) and holder records. Every
+model-listing path then walks all of them (`compute_wishlist`, `/v1/models`, the dashboard).
+`MAX_MANIFESTS_HEARD` bounds only the log of versions heard, not the registry. The same shape
+as that bound's 2026-10-17 security finding.
+Next: cap the model ids learned from peers. A new id with no local part, no origin claim and
+no holder past the cap evicts the oldest such entry, never one this node holds, wants
+(wishlist) or has an origin for. Read `docs/invariants/network.md` § "Gossip says what
+CHANGED" first. A wire or registry change here goes to `security-reviewer`.
 
 #### #317 — Another program can hold `[::1]` on the node's port while the node runs
 `P3` · api · **OPEN** — 2026-10-20 · history: found with #255's key proof

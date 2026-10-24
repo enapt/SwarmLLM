@@ -577,8 +577,7 @@
               body: JSON.stringify({ enabled: encryptedEl.checked }),
             });
           if (!encResp.ok) {
-            var encData = await encResp.json().catch(function() { return {}; });
-            encErr = U.extractErrorMessage(encData, I18n.t('models.enc_pipeline_save_failed'));
+            encErr = await U.getApiErrorMessage(encResp, I18n.t('models.enc_pipeline_save_failed'));
           }
         }
         if (!encErr && keepEl && !keepEl.disabled) {
@@ -588,8 +587,7 @@
             body: JSON.stringify({ enabled: keepEl.checked }),
           });
           if (!keepResp.ok) {
-            var keepData = await keepResp.json().catch(function() { return {}; });
-            encErr = U.extractErrorMessage(keepData, I18n.t('models.keep_here_save_failed'));
+            encErr = await U.getApiErrorMessage(keepResp, I18n.t('models.keep_here_save_failed'));
           }
         }
 
@@ -601,8 +599,7 @@
         } else {
           var errMsg = encErr || '';
           if (!amResp.ok) {
-            var errData = await amResp.json().catch(function() { return {}; });
-            errMsg = U.extractErrorMessage(errData, I18n.t('models.save_failed'));
+            errMsg = await U.getApiErrorMessage(amResp, I18n.t('models.save_failed'));
           }
           App.ui.showBanner('error', errMsg);
         }

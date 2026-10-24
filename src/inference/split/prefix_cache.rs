@@ -1426,6 +1426,7 @@ impl PrefixCache {
     /// Bytes of KV currently held for a model, wherever it is kept. The
     /// figure the byte budget bounds, and the one a count of entries cannot
     /// express.
+    #[cfg(test)]
     pub fn bytes_held(&self, model_key: &str) -> usize {
         self.inner
             .read()
@@ -1897,13 +1898,18 @@ pub fn deserialize_snapshot_full(
             "snapshot: unsupported version {version}"
         )));
     }
-    let header_len = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
-    if bytes.len() < 16 + header_len {
-        return Err(SwarmError::Internal("snapshot: truncated header".into()));
-    }
-    let header: SnapshotHeader = serde_json::from_slice(&bytes[16..16 + header_len])
+    // Every size below is the SENDER's (a peer's snapshot reaches here through
+    // `verify_fetched_snapshot`), so each sum and product is checked: wrapped,
+    // `16 + header_len` passed the length test and the slice panicked the probe
+    // task (sweep 2026-10-24).
+    let header_end = usize::try_from(u64::from_le_bytes(bytes[8..16].try_into().unwrap()))
+        .ok()
+        .and_then(|len| len.checked_add(16))
+        .filter(|&end| end <= bytes.len())
+        .ok_or_else(|| SwarmError::Internal("snapshot: truncated header".into()))?;
+    let header: SnapshotHeader = serde_json::from_slice(&bytes[16..header_end])
         .map_err(|e| SwarmError::Internal(format!("snapshot header decode: {e}")))?;
-    let body = &bytes[16 + header_len..];
+    let body = &bytes[header_end..];
     let mut cursor = 0usize;
     let mut layers: Vec<Option<(Tensor, Tensor)>> = Vec::with_capacity(header.layers.len());
     for meta_opt in header.layers {
@@ -1911,16 +1917,22 @@ pub fn deserialize_snapshot_full(
             layers.push(None);
             continue;
         };
-        let k_bytes = meta.k_count * 4;
-        let v_count: usize = meta.v_shape.iter().product();
-        let v_bytes = v_count * 4;
-        if cursor + k_bytes + v_bytes > body.len() {
+        let sizes = meta
+            .v_shape
+            .iter()
+            .try_fold(1usize, |n, &d| n.checked_mul(d))
+            .and_then(|v_count| {
+                let k_bytes = meta.k_count.checked_mul(4)?;
+                let v_bytes = v_count.checked_mul(4)?;
+                let end = cursor.checked_add(k_bytes)?.checked_add(v_bytes)?;
+                (end <= body.len()).then_some((v_count, k_bytes, v_bytes))
+            });
+        let Some((v_count, k_bytes, v_bytes)) = sizes else {
             return Err(SwarmError::Internal(format!(
-                "snapshot: body too short at layer (have {}, need {})",
-                body.len() - cursor,
-                k_bytes + v_bytes
+                "snapshot: body too short at layer (have {} bytes)",
+                body.len() - cursor
             )));
-        }
+        };
         let k_vec: Vec<f32> = (0..meta.k_count)
             .map(|i| {
                 let off = cursor + i * 4;
@@ -2820,6 +2832,51 @@ mod tests {
         buf.extend_from_slice(&999u32.to_le_bytes());
         buf.extend_from_slice(&0u64.to_le_bytes());
         assert!(deserialize_snapshot(&buf, &Device::Cpu).is_err());
+    }
+
+    /// The sizes in a snapshot are the SENDER's. Wrapped, they passed the
+    /// length checks and the slice panicked the task verifying a peer's
+    /// snapshot (sweep 2026-10-24); each is refused instead.
+    #[test]
+    fn a_snapshot_whose_sizes_overflow_is_refused_not_a_panic() {
+        use candle_core::Device;
+        let frame = |header_len: u64, header: &[u8], body: &[u8]| {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(KV_SNAPSHOT_MAGIC);
+            buf.extend_from_slice(&KV_SNAPSHOT_VERSION.to_le_bytes());
+            buf.extend_from_slice(&header_len.to_le_bytes());
+            buf.extend_from_slice(header);
+            buf.extend_from_slice(body);
+            buf
+        };
+        // `16 + header_len` wraps to 7.
+        let wrapped = frame(u64::MAX - 8, b"{}", &[0u8; 16]);
+        assert!(deserialize_snapshot(&wrapped, &Device::Cpu).is_err());
+        // `k_count * 4` wraps to 0, and the shape's product past usize.
+        for meta in [
+            SnapshotLayerMeta {
+                k_shape: vec![1],
+                v_shape: vec![1],
+                k_count: 1 << 62,
+            },
+            SnapshotLayerMeta {
+                k_shape: vec![1],
+                v_shape: vec![usize::MAX, 2],
+                k_count: 1,
+            },
+        ] {
+            let header = serde_json::to_vec(&SnapshotHeader {
+                token_count: 1,
+                tokens: vec![1],
+                dim: 1,
+                max_seq_len: 8,
+                block_size: None,
+                layers: vec![Some(meta)],
+            })
+            .unwrap();
+            let buf = frame(header.len() as u64, &header, &[0u8; 8]);
+            assert!(deserialize_snapshot(&buf, &Device::Cpu).is_err());
+        }
     }
 
     /// A request whose caller asked to keep it on this computer (#251 (2b))

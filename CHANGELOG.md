@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+**Another computer can no longer make this one use unbounded memory, or crash part of it, by
+sending more than it was asked for.** Four places took a size from the computer on the other end
+on trust. The reply another computer streams back for a split request was buffered with no limit.
+The compressed results computers exchange when they share one layer's work were unpacked with no
+cap, so a few kilobytes could expand to gigabytes. A cached-prompt snapshot from another computer
+was cut up by lengths it chose, and a length that overflowed crashed the check. And the first
+computer's share of a shared layer was not size-checked like the others'. Each is now held to the
+size this computer asked for or expects. A computer that sends more is set aside for that request,
+and the error names what it did. A HuggingFace repository name another computer passes on is now
+checked before this computer asks HuggingFace about it, as every other HuggingFace request already
+was.
+
+**A reply at temperature 0 picks the same word with and without guessing ahead.** When two words
+scored exactly the same, the normal path took the last of them and the paths that check guesses
+took the first, so in that rare case one prompt could get two different replies. All of them now
+take the first, as llama.cpp does.
+
+**The Performance page says it could not load instead of showing a computer that served
+nothing.** When the node refused the request (while starting up, or with an expired key), the
+page drew the refusal as a row of zeros.
+
 ## [0.3.250-alpha] — 2026-10-24
 
 **Two SwarmLLM computers behind one home router can now both be reached from the internet.** With

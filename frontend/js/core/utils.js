@@ -1416,6 +1416,7 @@
     updateChatAvailability: updateChatAvailability,
     updateChatDownloadProgress: updateChatDownloadProgress,
     extractErrorMessage: extractErrorMessage,
+    capitalize: capitalize,
     apiAction: apiAction,
     submitCodeForm: submitCodeForm,
     copyToClipboard: copyToClipboard,

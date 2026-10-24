@@ -45,6 +45,20 @@ enum AllReduceStrategy {
     Ring,
 }
 
+/// A peer's zstd bytes decompressed to exactly `expected_bytes`, the size this
+/// node knows the answer has (its own partial's, or its own chunk's). The output
+/// is capped there: zstd turns a few hundred KB of zeros into gigabytes, so an
+/// uncapped `decode_all` of a peer's bytes let any peer that knew a request id
+/// exhaust this node's memory (sweep 2026-10-24). A longer or shorter answer is
+/// the sender's error.
+pub(crate) fn decompress_peer_bytes(data: &[u8], expected_bytes: usize) -> Result<Vec<u8>, String> {
+    let out = zstd::bulk::decompress(data, expected_bytes).map_err(|e| e.to_string())?;
+    if out.len() != expected_bytes {
+        return Err(format!("{} bytes, expected {expected_bytes}", out.len()));
+    }
+    Ok(out)
+}
+
 /// Choose strategy based on group size and tensor size.
 fn choose_allreduce_strategy(tp_size: u32, tensor_elements: usize) -> AllReduceStrategy {
     if tp_size >= RING_MIN_TP_SIZE && tensor_elements >= RING_MIN_TENSOR_ELEMENTS {
@@ -524,7 +538,8 @@ pub(crate) async fn ring_allreduce_network(
         // bad bytes on the wire — chargeable `Inference`, per the comment above
         // and matching the NaN/Inf check. (Only the ambiguous timeout stays
         // `Internal`, since a stall can be our own slowness.)
-        let recv_bytes = zstd::decode_all(std::io::Cursor::new(&received_data))
+        let expected = chunks[ring_step.recv_chunk_idx].len() * std::mem::size_of::<f32>();
+        let recv_bytes = decompress_peer_bytes(&received_data, expected)
             .map_err(|e| SwarmError::Inference(format!("Decompress ring recv: {e}")))?;
         if recv_bytes.len() % 4 != 0 {
             return Err(SwarmError::Inference(format!(
@@ -741,6 +756,21 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn a_peers_compressed_bytes_are_held_to_the_size_expected() {
+        // An honest answer, an empty chunk, and a bomb: 64 MiB of zeros, a few
+        // KB on the wire, against an answer this node knows is 16 bytes.
+        let honest = compress_f32(&[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(decompress_peer_bytes(&honest, 16).unwrap().len(), 16);
+        let empty = zstd::encode_all(std::io::Cursor::new(&[] as &[u8]), 1).unwrap();
+        assert!(decompress_peer_bytes(&empty, 0).unwrap().is_empty());
+        let bomb = zstd::encode_all(std::io::Cursor::new(vec![0u8; 64 << 20]), 19).unwrap();
+        assert!(bomb.len() < 64 << 10, "the bomb is small on the wire");
+        assert!(decompress_peer_bytes(&bomb, 16).is_err());
+        // Shorter than expected is the sender's error too.
+        assert!(decompress_peer_bytes(&honest, 32).is_err());
+    }
+
     // ── Existing star topology tests ─────────────────────────────────────
 
     #[test]
@@ -793,6 +823,28 @@ mod tests {
         let (reduced, shape) = collector.reduce_sum().unwrap();
         assert_eq!(shape, vec![1, 1, 3]);
         assert_eq!(decompress_f32(&reduced), vec![5.0, 7.0, 9.0]);
+    }
+
+    /// Rank 0's partial is held to its size as every other rank's is: a short
+    /// one was skipped, and the sum went out without its share (sweep
+    /// 2026-10-24).
+    #[test]
+    fn a_rank_zero_partial_of_the_wrong_size_is_refused() {
+        let mut collector = TpAllReduceCollector::new(2);
+        let request_id = Uuid::new_v4();
+        let partial = |tp_rank: u32, vals: &[f32]| TpAllReduceRequest {
+            request_id,
+            layer_idx: 5,
+            tp_rank,
+            tp_size: 2,
+            partial_data: compress_f32(vals),
+            shape: vec![1, 1, 3],
+            op: AllReduceOp::Sum,
+            sender_peer_bytes: None,
+        };
+        assert!(!collector.insert(partial(0, &[1.0, 2.0]), None));
+        assert!(collector.insert(partial(1, &[4.0, 5.0, 6.0]), None));
+        assert!(collector.reduce_sum().is_err());
     }
 
     #[test]

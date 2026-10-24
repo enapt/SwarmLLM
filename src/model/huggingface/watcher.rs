@@ -219,6 +219,18 @@ struct HfApiModel {
     siblings: Vec<HfApiSibling>,
 }
 
+impl HfApiModel {
+    /// The repo's creation time in Unix seconds; 0 when HuggingFace gave none
+    /// or one that does not parse (the age gate then reads it as unknown).
+    fn created_at_secs(&self) -> i64 {
+        self.created_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc).timestamp())
+            .unwrap_or(0)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct HfApiSibling {
     rfilename: String,
@@ -417,12 +429,7 @@ impl HfWatcher {
                 continue;
             }
             let task_tags = infer_task_tags(&m.tags, m.pipeline_tag.as_deref());
-            let created_at_secs = m
-                .created_at
-                .as_deref()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.with_timezone(&chrono::Utc).timestamp())
-                .unwrap_or(0);
+            let created_at_secs = m.created_at_secs();
             entries.push(HfTrendingEntry {
                 repo_id: m.repo_id.clone(),
                 downloads: m.downloads,
@@ -589,7 +596,15 @@ async fn promote_trust_for_known_sources(
 /// figures the trust thresholds are expressed in. `None` on any failure —
 /// an unreachable origin is not evidence of anything, so the model simply
 /// keeps whatever trust it already had.
+///
+/// `repo_id` can be a peer's claim (`hf_sources` takes origin claims from
+/// gossip), so it is checked like every other HuggingFace URL before one is
+/// built from it.
 async fn fetch_repo_stats(client: &reqwest::Client, repo_id: &str) -> Option<(u64, i64)> {
+    if let Err(e) = super::validate_hf_repo_id(repo_id) {
+        tracing::debug!(repo = %repo_id, error = %e, "HfWatcher: not asking about a malformed repo id");
+        return None;
+    }
     let url = format!("https://huggingface.co/api/models/{repo_id}");
     let resp = client.get(&url).send().await.ok()?;
     if !resp.status().is_success() {
@@ -597,13 +612,7 @@ async fn fetch_repo_stats(client: &reqwest::Client, repo_id: &str) -> Option<(u6
         return None;
     }
     let m: HfApiModel = resp.json().await.ok()?;
-    let created = m
-        .created_at
-        .as_deref()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.with_timezone(&chrono::Utc).timestamp())
-        .unwrap_or(0);
-    Some((m.downloads, created))
+    Some((m.downloads, m.created_at_secs()))
 }
 
 /// Apply the trust thresholds to ONE model whose origin statistics we have,

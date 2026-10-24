@@ -422,7 +422,7 @@
           if (!data) return;
           var label = '';
           if (data.subscription_type) {
-            var typeName = data.subscription_type.charAt(0).toUpperCase() + data.subscription_type.slice(1);
+            var typeName = U.capitalize(data.subscription_type);
             label = I18n.t('settings.subscription_plan_label', { type: typeName });
           }
           if (data.cli_version) {

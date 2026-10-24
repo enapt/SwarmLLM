@@ -4666,6 +4666,13 @@ pub(crate) fn flash_handles_offset_causal() -> bool {
     })
 }
 
+/// Pre-converted f16 BSHD (K, V) for the CUDA flash kernel, when the caller has
+/// a [`LayerKv`] mirror to hand.
+///
+/// `None` keeps the original behaviour — convert the whole f32 cache here — so
+/// every path without a mirror (CPU, tests, direct calls) is unaffected.
+pub(crate) type FlashKv<'a> = Option<(&'a Tensor, &'a Tensor)>;
+
 /// Unified attention dispatch: selects the best backend for the device.
 ///
 /// - **CPU**: Uses `candle_nn::cpu_flash_attention::run_flash_attn_cpu::<f32>()` which
@@ -4675,14 +4682,6 @@ pub(crate) fn flash_handles_offset_causal() -> bool {
 /// - **GPU without `flash-attn` / fallback**: Standard matmul path with `repeat_kv`.
 ///
 /// All paths produce output in BHSD layout `(b, n_head, seq, head_dim)`.
-#[allow(clippy::too_many_arguments)]
-/// Pre-converted f16 BSHD (K, V) for the CUDA flash kernel, when the caller has
-/// a [`LayerKv`] mirror to hand.
-///
-/// `None` keeps the original behaviour — convert the whole f32 cache here — so
-/// every path without a mirror (CPU, tests, direct calls) is unaffected.
-pub(crate) type FlashKv<'a> = Option<(&'a Tensor, &'a Tensor)>;
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_attention(
     q: &Tensor,

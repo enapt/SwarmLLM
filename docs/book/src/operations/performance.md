@@ -210,7 +210,8 @@ plus a coordinator loop in `pipeline/dsd.rs`.
 - **The guesser** is a model this computer already holds, run by SwarmLLM's
   own engine from its parts — chosen automatically (the largest held model
   that shares the big model's vocabulary and is at most a quarter of its
-  size), or named with `inference.draft_model`. A whole model file named in
+  size — or up to half, when it is small, reading at most 2 GB a guess, and
+  this computer's graphics card is in use), or named with `inference.draft_model`. A whole model file named in
   `draft_model_path` is still used, by llama.cpp, where the build has it.
   It uses only graphics memory that is free — never the card of the model it
   guesses for — and runs on the processor otherwise.

@@ -84,16 +84,51 @@ pub(super) struct StreamReassembler {
     pending: std::collections::BTreeMap<u32, swarmllm_types::StreamingToken>,
     /// Content-token count from the done token, once it has arrived.
     expected_total: Option<u32>,
+    /// More content tokens than any honest server sends for this request
+    /// (`overruns`).
+    limit: u32,
+}
+
+/// Content tokens past the request's `max_tokens` that an honest server may
+/// still send (a final flush, a stop sequence's tail). Generous: it only has to
+/// stop a peer streaming without end.
+const OVERRUN_SLACK: u32 = 64;
+
+/// The tokens a hand-off's stream may carry: what the peer is asked for, plus,
+/// on a continued reply, what was streamed before. A continuation can go back
+/// to the same peer under the same id on the wire (the request id, which the
+/// router's end-of-request release of the peer's memory is keyed by), so a late
+/// token from the attempt before can still arrive. It is numbered past this
+/// attempt's budget but never past the whole reply's, and must not read as an
+/// overrun.
+fn reply_stream_bound(
+    asked_max_tokens: u32,
+    continuation: Option<&crate::types::ReplyContinuation>,
+) -> u32 {
+    asked_max_tokens.saturating_add(continuation.map_or(0, |c| c.tokens))
 }
 
 impl StreamReassembler {
-    pub(super) fn new() -> Self {
+    /// `max_tokens` is the request's: a peer is asked for at most that many, and
+    /// each content token is one message.
+    pub(super) fn new(max_tokens: u32) -> Self {
         Self {
             sequenced: false,
             next_seq: 0,
             pending: std::collections::BTreeMap::new(),
             expected_total: None,
+            limit: max_tokens.saturating_add(OVERRUN_SLACK),
         }
+    }
+
+    /// Would accepting `tok` take the reply past what the request allows? A
+    /// sequence number that far ahead, or that many tokens held, is a peer
+    /// streaming without end — the buffer is keyed by the PEER's number, so
+    /// without this a skipped 0 followed by 1, 2, 3, … grew it for ever
+    /// (sweep 2026-10-24).
+    pub(super) fn overruns(&self, tok: &swarmllm_types::StreamingToken) -> bool {
+        tok.token_id >= self.limit
+            || (self.next_seq as usize).saturating_add(self.pending.len()) >= self.limit as usize
     }
 
     /// Accept a content token; returns whatever is now emittable, in order.
@@ -781,6 +816,9 @@ impl PipelineExecutor {
         // exists to prevent: the serving node only truncates the stop list it
         // is handed, so a marker we do not send is one nothing will ever match.
         let (prompt, sampling) = self.build_prompt_and_stops().await;
+        // The most the peer is asked for, and what its stream is held to.
+        let asked_max_tokens = sampling.max_tokens;
+        let stream_bound = reply_stream_bound(asked_max_tokens, self.request.continuation.as_ref());
         // Sized from the prompt we are about to send, before it is moved.
         // Prefer the model's own tokenizer: a character heuristic mis-sizes the
         // budget by several-fold across scripts. It is often unavailable here —
@@ -933,7 +971,7 @@ impl PipelineExecutor {
         let mut first_token_at: Option<std::time::Instant> = None;
 
         // Reassembly of an unordered stream — see `StreamReassembler`.
-        let mut stream = StreamReassembler::new();
+        let mut stream = StreamReassembler::new(stream_bound);
         // A hole in that stream can be FILLED if the peer keeps what it sent
         // (`features::RESEND_TOKENS`); before that existed one lost token
         // cost the whole tail of the reply (gotcha #438).
@@ -1295,6 +1333,23 @@ impl PipelineExecutor {
             // An unsequenced server has arrival order as its only order, so its
             // tokens slot in at `next_seq` and emit immediately — unchanged
             // behaviour.
+            if stream.overruns(&tok) {
+                tracing::warn!(
+                    %request_id,
+                    peer = %segment.node_id,
+                    token_id = tok.token_id,
+                    max_tokens = asked_max_tokens,
+                    bound = stream_bound,
+                    "remote-generate: the peer sent more of the reply than was asked for — stopping"
+                );
+                self.shared_state.streaming_token_txs.remove(&wire_id);
+                self.shared_state
+                    .blacklist_holder_for_request(request_id, &segment.node_id);
+                return Err(SwarmError::Inference(format!(
+                    "the peer serving this request sent more than the {stream_bound} tokens \
+                     this reply was given"
+                )));
+            }
             let mut client_gone = false;
             for t in stream.push_content(tok) {
                 if let Some(lp) = t.logprob.clone() {
@@ -1732,7 +1787,8 @@ mod first_token_budget_tests {
 #[cfg(test)]
 mod stream_reassembly_tests {
     use super::{
-        hole_wait, ResendPolicy, StreamReassembler, HOLE_WAIT_MAX, HOLE_WAIT_MIN, MAX_RESEND_ASKS,
+        hole_wait, reply_stream_bound, ResendPolicy, StreamReassembler, HOLE_WAIT_MAX,
+        HOLE_WAIT_MIN, MAX_RESEND_ASKS, OVERRUN_SLACK,
     };
     use std::time::Duration;
     use swarmllm_types::StreamingToken;
@@ -1763,7 +1819,7 @@ mod stream_reassembly_tests {
     /// `503 Reply truncated in transit: 9 of 12 tokens arrived` (gotcha #416).
     #[test]
     fn a_multi_byte_reply_is_not_truncated_just_because_it_generated_more_tokens() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         // What actually goes on the wire for "🚀 ⭐ 🔥 ❤️ 🌕": one send per
         // completed codepoint, densely numbered.
         for (i, t) in ["🚀", " ⭐", " 🔥", " ❤️", " 🌕"].iter().enumerate() {
@@ -1796,7 +1852,7 @@ mod stream_reassembly_tests {
     /// "never report truncation", which is the failure mode #282 exists for.
     #[test]
     fn a_genuinely_lost_token_is_still_truncated() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         s.push_content(content(0, "a"));
         s.push_content(content(1, "b"));
         // Token 2 never arrives.
@@ -1813,7 +1869,7 @@ mod stream_reassembly_tests {
     /// name exactly the range to ask for.
     #[test]
     fn a_hole_names_the_range_to_ask_for() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         s.push_content(content(0, "a"));
         s.push_content(content(1, "b"));
         assert!(!s.has_hole(), "nothing missing yet");
@@ -1844,7 +1900,7 @@ mod stream_reassembly_tests {
     /// resend — must not be buffered for ever as a phantom hole.
     #[test]
     fn a_duplicate_of_an_emitted_token_is_ignored() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         s.push_content(content(0, "a"));
         s.push_content(content(1, "b"));
         assert!(s.push_content(content(1, "b")).is_empty());
@@ -1854,11 +1910,50 @@ mod stream_reassembly_tests {
         assert_eq!(s.emitted(), 2);
     }
 
+    #[test]
+    fn a_peer_streaming_past_the_requests_max_tokens_is_stopped() {
+        // Sweep 2026-10-24: the buffer is keyed by the peer's own number, so a
+        // peer that skipped 0 and sent 1, 2, 3, … grew it without end.
+        let limit = 4 + OVERRUN_SLACK;
+        let mut s = StreamReassembler::new(4);
+        for id in 1..limit {
+            assert!(!s.overruns(&content(id, "x")), "{id}");
+            assert!(s.push_content(content(id, "x")).is_empty(), "0 never came");
+        }
+        assert!(s.overruns(&content(limit, "x")));
+        assert!(s.overruns(&content(u32::MAX, "x")));
+        // An unsequenced peer (every id 0) is held to the count.
+        let mut s = StreamReassembler::new(4);
+        for _ in 0..limit {
+            assert!(!s.overruns(&content(0, "x")));
+            s.push_content(content(0, "x"));
+        }
+        assert!(s.overruns(&content(0, "x")));
+    }
+
+    #[test]
+    fn a_late_token_from_the_attempt_before_a_continuation_is_not_an_overrun() {
+        // 500 of a 512-token reply reached the reader, then the stream was cut;
+        // the continuation asks the same peer for the last 12 under the same
+        // wire id, and a straggler numbered 505 from the first attempt lands.
+        let before = crate::types::ReplyContinuation {
+            text: "…".into(),
+            tokens: 500,
+        };
+        let continued = StreamReassembler::new(reply_stream_bound(12, Some(&before)));
+        assert!(!continued.overruns(&content(505, "x")));
+        // The whole reply's budget is still a bound.
+        assert!(continued.overruns(&content(512 + OVERRUN_SLACK, "x")));
+        // A first attempt is held to what it asked for.
+        let first = StreamReassembler::new(reply_stream_bound(12, None));
+        assert!(first.overruns(&content(505, "x")));
+    }
+
     /// An unsequenced peer has arrival order and nothing else: no holes, no
     /// asks, exactly the behaviour it always had.
     #[test]
     fn an_unsequenced_peer_never_has_a_hole() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         s.push_content(content(0, "a"));
         s.push_content(content(0, "b"));
         s.mark_done(0);
@@ -1899,7 +1994,7 @@ mod stream_reassembly_tests {
     /// degradation `is_complete` makes for mixed-version swarms.
     #[test]
     fn an_unsequenced_peer_is_never_called_truncated() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         s.push_content(content(0, "a"));
         s.push_content(content(0, "b"));
         s.mark_done(0);
@@ -1912,7 +2007,7 @@ mod stream_reassembly_tests {
     /// returned "", while `usage` correctly reported 2 completion tokens.
     #[test]
     fn a_done_token_that_overtakes_the_content_does_not_end_the_stream() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         s.mark_done(2);
         assert!(
             !s.is_complete(),
@@ -1931,7 +2026,7 @@ mod stream_reassembly_tests {
     /// Content tokens race each other too, so arrival order is not text order.
     #[test]
     fn out_of_order_content_is_emitted_in_generation_order() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
 
         // Token 1 wins the race; nothing may be emitted yet or the reply reads
         // "erryCh".
@@ -1955,7 +2050,7 @@ mod stream_reassembly_tests {
     /// charged for and never refunded. It has to key off `emitted()`.
     #[test]
     fn tokens_can_arrive_while_nothing_can_be_shown() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         s.mark_done(3);
 
         // Tokens 1 and 2 arrive; token 0 is lost.
@@ -1986,7 +2081,7 @@ mod stream_reassembly_tests {
     /// better served by it than by an error.
     #[test]
     fn a_hole_after_the_start_still_leaves_something_to_return() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         s.mark_done(3);
         assert_eq!(joined(s.push_content(content(0, "Hi"))), "Hi");
         assert!(s.push_content(content(2, "!")).is_empty());
@@ -2005,7 +2100,7 @@ mod stream_reassembly_tests {
     /// `emitted()` is the honest number and is what the caller now sees.
     #[test]
     fn delivered_token_count_is_what_the_caller_received() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         s.mark_done(4);
         assert_eq!(joined(s.push_content(content(0, "a"))), "a");
         assert_eq!(joined(s.push_content(content(1, "b"))), "b");
@@ -2022,7 +2117,7 @@ mod stream_reassembly_tests {
     /// the guard is invisible on the normal path.
     #[test]
     fn a_complete_reply_reports_every_token_it_generated() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         s.mark_done(3);
         for (i, t) in [(0, "x"), (1, "y"), (2, "z")] {
             assert!(!s.push_content(content(i, t)).is_empty());
@@ -2034,7 +2129,7 @@ mod stream_reassembly_tests {
     /// A late token releases everything buffered behind it in one go.
     #[test]
     fn a_single_late_token_releases_the_whole_run_behind_it() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         assert!(s.push_content(content(3, "d")).is_empty());
         assert!(s.push_content(content(1, "b")).is_empty());
         assert!(s.push_content(content(2, "c")).is_empty());
@@ -2047,7 +2142,7 @@ mod stream_reassembly_tests {
     /// shipped before sequencing existed.
     #[test]
     fn an_unsequenced_peer_still_streams_in_arrival_order_and_completes() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         assert_eq!(joined(s.push_content(content(0, "Ch"))), "Ch");
         assert_eq!(joined(s.push_content(content(0, "erry"))), "erry");
 
@@ -2064,7 +2159,7 @@ mod stream_reassembly_tests {
     /// token, which is what identifies a modern peer that sent exactly one.
     #[test]
     fn a_single_token_reply_is_recognised_as_sequenced_by_its_done_token() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         assert_eq!(joined(s.push_content(content(0, "Cherry"))), "Cherry");
         s.mark_done(1);
         assert!(s.is_complete());
@@ -2074,7 +2169,7 @@ mod stream_reassembly_tests {
     /// A modern peer that generated nothing at all still terminates.
     #[test]
     fn an_empty_reply_completes() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         s.mark_done(0);
         assert!(s.is_complete());
     }
@@ -2085,7 +2180,7 @@ mod stream_reassembly_tests {
     /// still turns on `next_seq`, so nothing waits on it.
     #[test]
     fn a_late_duplicate_does_not_stall_completion() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         assert_eq!(joined(s.push_content(content(0, "a"))), "a");
         assert_eq!(joined(s.push_content(content(1, "b"))), "b");
         // Token 0 again, after both have been emitted.
@@ -2102,7 +2197,7 @@ mod stream_reassembly_tests {
     /// spliced in.
     #[test]
     fn a_permanent_gap_leaves_a_prefix_rather_than_a_scrambled_reply() {
-        let mut s = StreamReassembler::new();
+        let mut s = StreamReassembler::new(u32::MAX);
         assert_eq!(joined(s.push_content(content(0, "a"))), "a");
         assert!(s.push_content(content(2, "c")).is_empty());
         s.mark_done(3);

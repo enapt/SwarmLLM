@@ -579,13 +579,9 @@
     // alike (#588).
     _browseState.trendingLoaded = true;
     if (!App.authFetch) return;
-    var giveBack = function () { _browseState.trendingLoaded = false; };
-    App.authFetch('/api/admin/hf/trending').then(function (r) {
-      return r.ok ? r.json() : null;
-    }).then(function (snap) {
-      if (snap) _renderBrowseTrending(snap);
-      else giveBack();
-    }).catch(giveBack);
+    _restFetch('/api/admin/hf/trending', _renderBrowseTrending, function () {
+      _browseState.trendingLoaded = false;
+    });
   }
 
   function _renderBrowseTrending(snap) {
@@ -1104,14 +1100,13 @@
     el.innerHTML = html;
   }
 
+  // A refusal (a 401, a node starting up) is "could not load", never an error
+  // body rendered as a node that has served nothing.
   function _loadPerformance() {
-    var el = document.getElementById('perf-content');
-    App.authFetch('/api/admin/performance')
-      .then(function (r) { return r.json(); })
-      .then(_renderPerformance)
-      .catch(function () {
-        if (el) el.innerHTML = '<div class="text-muted">' + I18n.t('perf.load_failed') + '</div>';
-      });
+    _restFetch('/api/admin/performance', _renderPerformance, function () {
+      var el = document.getElementById('perf-content');
+      if (el) el.innerHTML = '<div class="text-muted">' + U.escapeHtml(I18n.t('perf.load_failed')) + '</div>';
+    });
   }
 
   App.swarmTab = {

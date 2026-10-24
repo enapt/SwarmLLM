@@ -293,7 +293,9 @@ pub struct InferenceConfig {
     /// build. Used only for targets that share its vocabulary; a
     /// `draft_model_path` takes precedence where the build can load it. Unset,
     /// the largest held model that shares the target's vocabulary and is at
-    /// most a quarter of its size is chosen (`pipeline::engine_drafter`).
+    /// most a quarter of its size is chosen — up to half where it is small
+    /// (≤ 2 GiB a guess) and this node has a graphics card in play
+    /// (`pipeline::engine_drafter`).
     #[serde(default)]
     pub draft_model: Option<String>,
     /// GPU layers to offload for the draft model (default: same as main model).
@@ -565,7 +567,8 @@ pub struct InferenceConfig {
     ///
     /// **On by default since 2026-09-29.** It engages only where this node
     /// holds a drafter — a model sharing the target's vocabulary at most a
-    /// quarter of its size (`pipeline::engine_drafter`, or `draft_model`) —
+    /// quarter of its size, half for a small one beside a graphics card
+    /// (`pipeline::engine_drafter`, or `draft_model`) —
     /// and its controller chooses zero guesses where guessing costs more than
     /// the round trips it saves (`dsd_controller`), staying out of the next
     /// requests on those machines for ten minutes. Measured 1.7-2.4× on a

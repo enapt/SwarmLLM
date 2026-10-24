@@ -14395,3 +14395,122 @@ fn the_data_dir_guard_catches_a_node_on_the_default_directory() {
                    let (s, _, _) = SharedState::new(config, id, db, ex, None);\n}\n";
     assert!(nodes_without_a_data_dir(wrapped).is_empty());
 }
+
+/// Every site in `src` that decompresses zstd with no cap on the output, as
+/// 1-indexed lines: a `decode_all(` (or `copy_decode(`), or a zstd `Decoder`
+/// whose function never `.take(`s from it. Test code and comments are skipped.
+fn uncapped_zstd_sites(src: &str) -> Vec<usize> {
+    let tests = cfg_test_spans(src);
+    let bodies = fn_bodies(src);
+    let bare_decoder_is_zstd = src.contains("use zstd");
+    let line_of = |at: usize| src[..at].matches('\n').count() + 1;
+    let skipped = |at: usize| {
+        let line_start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+        tests.iter().any(|(s, e)| *s < at && at < *e) || src[line_start..at].contains("//")
+    };
+    let mut out = Vec::new();
+    for needle in ["decode_all(", "copy_decode("] {
+        let mut from = 0;
+        while let Some(rel) = src[from..].find(needle) {
+            let at = from + rel;
+            from = at + 1;
+            if !skipped(at) {
+                out.push(line_of(at));
+            }
+        }
+    }
+    let mut from = 0;
+    while let Some(rel) = src[from..].find("Decoder::new(") {
+        let at = from + rel;
+        from = at + 1;
+        let path_start = src[..at]
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'))
+            .map_or(0, |i| i + 1);
+        let path = &src[path_start..at];
+        let is_zstd = path.contains("zstd::") || (path.is_empty() && bare_decoder_is_zstd);
+        if !is_zstd || skipped(at) {
+            continue;
+        }
+        let capped = bodies
+            .iter()
+            .filter(|(s, e)| *s < at && at < *e)
+            .min_by_key(|(s, e)| e - s)
+            .is_some_and(|&(_, end)| src[at..end].contains(".take("));
+        if !capped {
+            out.push(line_of(at));
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// A peer's compressed bytes are decompressed only with a cap on the output:
+/// `allreduce::decompress_peer_bytes` (the size expected), a zstd `Decoder`
+/// read through `.take(cap)`, or `zstd::bulk::decompress(data, cap)`. zstd
+/// turns a few hundred KB of zeros into gigabytes, and an uncapped decode of a
+/// peer's bytes let any peer exhaust this node's memory: the image payload
+/// (gotcha #901), then tensor parallelism's two reduced results and the ring
+/// all-reduce's chunks (sweep 2026-10-24). `decode_all` stays only where the
+/// bytes are this node's OWN, listed below with their count.
+#[test]
+fn no_production_code_decompresses_without_a_cap_on_the_output() {
+    // `ring_allreduce_network` unpacking the partial this node compressed itself.
+    const OWN_BYTES: &[(&str, usize)] = &[("src/inference/allreduce.rs", 1)];
+    let root = repo_root();
+    let mut offenders = Vec::new();
+    let sources = rust_sources_under("src")
+        .into_iter()
+        .chain(rust_sources_under("crates"));
+    for path in sources {
+        if module_file_is_test_only(&path) {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).expect("read source");
+        let sites = uncapped_zstd_sites(&src);
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let allowed = OWN_BYTES
+            .iter()
+            .find(|(f, _)| *f == rel)
+            .map_or(0, |(_, n)| *n);
+        if sites.len() != allowed {
+            offenders.push(format!("{rel}: lines {sites:?} (allowed {allowed})"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "zstd decoded with no cap on the output — a peer's bytes can expand to \
+         gigabytes; use `allreduce::decompress_peer_bytes` or `.take(cap)` \
+         (or, for this node's own bytes, update OWN_BYTES): {offenders:#?}"
+    );
+}
+
+#[test]
+fn the_zstd_cap_guard_catches_every_uncapped_form() {
+    let planted = "fn a(peer: &[u8]) -> Vec<u8> {\n    \
+                   zstd::decode_all(std::io::Cursor::new(peer)).unwrap()\n}\n\
+                   fn b(peer: &[u8]) -> Vec<u8> {\n    \
+                   zstd::stream::decode_all(peer).unwrap()\n}\n\
+                   fn c(peer: &[u8]) {\n    \
+                   let mut d = zstd::Decoder::new(peer).unwrap();\n    \
+                   let mut v = Vec::new();\n    d.read_to_end(&mut v).unwrap();\n}\n";
+    assert_eq!(uncapped_zstd_sites(planted), vec![2, 5, 8]);
+    let bare = "use zstd::Decoder;\nfn c(peer: &[u8]) {\n    \
+                let mut d = Decoder::new(peer).unwrap();\n    d.read_to_end(&mut v);\n}\n";
+    assert_eq!(uncapped_zstd_sites(bare), vec![3]);
+    let fine = "fn a(peer: &[u8]) {\n    \
+                let d = zstd::stream::read::Decoder::new(peer).unwrap();\n    \
+                d.take(MAX).read_to_end(&mut v).unwrap();\n}\n\
+                fn b() {\n    // an uncapped `zstd::decode_all(x)` was the bug\n}\n\
+                fn c() {\n    let _ = CachedDecoder::new(vocab, None);\n}\n\
+                #[cfg(test)]\nmod tests {\n    fn t() {\n        \
+                zstd::decode_all(&b\"\"[..]).unwrap();\n    }\n}\n";
+    assert!(
+        uncapped_zstd_sites(fine).is_empty(),
+        "{:?}",
+        uncapped_zstd_sites(fine)
+    );
+}

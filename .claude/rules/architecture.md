@@ -128,6 +128,18 @@ complete an update.
 
 → `docs/invariants/api-surfaces.md` § Timeouts
 
+## A size the other computer chose is checked before it sizes anything
+
+A length, count or sequence number read off a peer's bytes never sizes an
+allocation, a slice or a buffer unchecked. Check it with `checked_add` /
+`checked_mul` against the bytes actually present. Decompress a peer's zstd only
+to a cap: `allreduce::decompress_peer_bytes` where the size is known, `.take(cap)`
+otherwise, never `decode_all`. Bound a buffer keyed by a peer's number by what
+was ASKED for (`StreamReassembler`, `reply_stream_bound`). Four sites in four
+subsystems had it wrong. Guard: `no_production_code_decompresses_without_a_cap_on_the_output`.
+
+→ `docs/invariants/network.md` § "A size the other computer chose is checked before it sizes anything"
+
 ## Event System
 
 All events flow through `state.events.activity_tx` (ActivityEvent). Use the builder:

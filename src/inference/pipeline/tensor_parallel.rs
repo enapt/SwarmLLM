@@ -225,6 +225,7 @@ impl PipelineExecutor {
                 let attn_shape: Vec<u32> = attn_tensor.dims().iter().map(|&d| d as u32).collect();
                 let attn_raw = split::tensor_to_raw_f32(&attn_tensor)
                     .map_err(|e| SwarmError::Internal(format!("Extract attn f32: {e}")))?;
+                let attn_expected_bytes = attn_raw.len();
                 let attn_compressed = zstd::encode_all(std::io::Cursor::new(&attn_raw), 1)
                     .map_err(|e| SwarmError::Internal(format!("Compress attn partial: {e}")))?;
 
@@ -243,8 +244,12 @@ impl PipelineExecutor {
                 .await?;
 
                 // Decompress raw f32 AllReduce result, reconstruct tensor, add residual
-                let post_attn_raw = zstd::decode_all(std::io::Cursor::new(&attn_resp.reduced_data))
-                    .map_err(|e| SwarmError::Internal(format!("Decompress attn AR: {e}")))?;
+                // Capped at our own partial's size: the sum has its shape.
+                let post_attn_raw = crate::inference::allreduce::decompress_peer_bytes(
+                    &attn_resp.reduced_data,
+                    attn_expected_bytes,
+                )
+                .map_err(|e| SwarmError::Inference(format!("Decompress attn AR: {e}")))?;
                 // SEC: Reject NaN/Inf from the coordinator's reduced output. A
                 // malicious coordinator (or any peer that contributed a poisoned
                 // partial that slipped through) would otherwise corrupt every
@@ -362,6 +367,7 @@ impl PipelineExecutor {
                 let ffn_shape: Vec<u32> = ffn_tensor.dims().iter().map(|&d| d as u32).collect();
                 let ffn_raw = split::tensor_to_raw_f32(&ffn_tensor)
                     .map_err(|e| SwarmError::Internal(format!("Extract ffn f32: {e}")))?;
+                let ffn_expected_bytes = ffn_raw.len();
                 let ffn_compressed = zstd::encode_all(std::io::Cursor::new(&ffn_raw), 1)
                     .map_err(|e| SwarmError::Internal(format!("Compress ffn partial: {e}")))?;
 
@@ -379,8 +385,11 @@ impl PipelineExecutor {
                 .await?;
 
                 // Decompress raw f32 AllReduce result, reconstruct tensor, add residual
-                let ffn_raw = zstd::decode_all(std::io::Cursor::new(&ffn_resp.reduced_data))
-                    .map_err(|e| SwarmError::Internal(format!("Decompress ffn AR: {e}")))?;
+                let ffn_raw = crate::inference::allreduce::decompress_peer_bytes(
+                    &ffn_resp.reduced_data,
+                    ffn_expected_bytes,
+                )
+                .map_err(|e| SwarmError::Inference(format!("Decompress ffn AR: {e}")))?;
                 // SEC: see attn AR check above — reject NaN/Inf from coordinator.
                 if ffn_raw.len() % 4 == 0
                     && ffn_raw

@@ -241,9 +241,12 @@ The daemon reclaims VRAM in two ways:
   `idle_unload_secs = 0` to keep every loaded model resident. Deliberately-held
   models are never idle-unloaded — reference/test models (`swarmllm get-model`),
   pinned or locked models, and encrypted-pipeline models stay resident.
-- **Pressure-driven (automatic):** above **70%** VRAM the daemon narrows loaded
-  models to fewer shards; above **95%** it fully unloads a model. Both keep shards
-  on disk.
+- **When another program takes the card (automatic):** if a game or a video
+  editor takes graphics memory SwarmLLM's models were loaded into, the daemon
+  gives back what it can — the largest model that is not answering anyone loads
+  fewer of its parts onto the card. A model answering a request is left alone,
+  the parts stay on disk, and the model grows back once the memory is free. A
+  card full of SwarmLLM's own model is normal and triggers nothing.
 
 To free VRAM immediately, restart the daemon, or lower `contribution`. There is no
 leak here — the `model-worker` subprocess holding a model is killed (freeing all
