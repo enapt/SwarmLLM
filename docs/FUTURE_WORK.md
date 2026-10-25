@@ -563,12 +563,19 @@ Llama 3.3 70B Q4_K_M, 08:38:45Z: no strict rung found a chain, so `PeersAtCeilin
 so its worker charged the 56 layers to memory and refused: "needs about 30432 MB … `resources.max_ram_mb`
 is 24000 MB". The refusal arrived as a forward's error, so failover barred the peer for the request
 (`tried=["aa3d…"]`), and with it gone the holders had "room for about 43 of its 80 layers". AU could
-have taken ~44 layers under its cap. The up-front ask (#252 (b)) holds a peer to `layers_that_fit`
-for a PROMPT refusal; a LOAD refusal needs the same: the refusal states what fits (additive, on the
-LayerResult, read only where present), and the re-plan holds the peer to it via
-`peer_layers_fitting_for_request`, never barring it. v0.3.253's room beside the card
-(`machine_room_beside_card_mb`) makes this case plan at face value instead, so this matters only
-where a relaxed rung still runs.
+have taken ~44 layers under its cap. **AU had been asked up front** (#252 (b), `asked=2 refused=0`)
+and answered "go ahead": `ModelProcessPool::weigh_peer_prompt` weighs only a LIVE worker's
+conversation memory, and "no worker" is Fits. The coordinator side is already right — a refusal's
+`layers_that_fit` goes through `note_peer_prompt_refusal` and the re-plan holds the peer to it,
+never barring it — so no wire change is needed. Next: where no worker holds an asked range,
+`weigh_peer_prompt` weighs the LOAD as a `Swarm` spawn would (the card whole, a card/processor
+split's processor share, else the whole run in memory — `get_or_spawn_once`'s order, with the idle
+reclaim it would do), charging nothing, and answers `DoesNotFit` with the widest run from the range's
+start a spawn admits (bisection, as `fresh_run_layers_for_planning`'s `run_at_is_taken`), in the
+spawn's own refusal words. One predicate for the planner's bound and the weigh, so the two cannot
+disagree. Peers answer it once they run the fix. v0.3.253's room beside the card
+(`machine_room_beside_card_mb`) makes this case plan at face value instead, so it matters where a
+relaxed rung still runs.
 
 #### #250 — A model held whole here, which the card holds only part of, can be routed through peers at a fraction of local speed
 `P1` · routing · **PARTIAL** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.232-.234)
