@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.254-alpha] — 2026-10-25
+
 **A computer with a graphics card no longer tells others it could hold more of a large model than
 its owner allows.** Each computer states the most memory it could ever give a model, and the
 planner never asks for more. A computer with a graphics card counted its card plus all of its
