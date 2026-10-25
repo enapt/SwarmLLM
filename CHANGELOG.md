@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+**A computer without a graphics card no longer turns down part of a large model because of layers
+it loaded for an earlier attempt.** When a plan changed, a computer could be asked for a slightly
+different run of layers than the one it had just loaded. With a graphics card it let go of the
+unused layers and loaded the new ones; without one it kept the old layers and refused, even though
+the new run alone would have fitted. Every computer now lets go of layers no conversation is
+using when that is what makes room, and keeps them when the new run would not fit anyway (#348).
+
 ## [0.3.254-alpha] — 2026-10-25
 
 **A computer with a graphics card no longer tells others it could hold more of a large model than

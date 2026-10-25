@@ -2012,8 +2012,22 @@ RTX 3070 Laptop, graphics budget 6019-6162 MB (Windows and a browser hold
    is #93's garbage-reply defect.
 3. **A worker in use keeps its refusal** (`LocalMemoryUnavailable`, which the
    router re-plans) — once the split rung below has also said no. A worker
-   charged against system memory also keeps it: every extra rung is about the
-   card.
+   charged against system memory skips the reclaim and the split, which are
+   about the card, but NOT the replacement (2026-10-25, FUTURE_WORK #348):
+   retiring an idle worker gives its memory back on either device. Proxmox
+   (no card, 4096 MB for the swarm) held [17..23) of a 70B — 3330 MB, loaded
+   for a plan that failed before its first forward — when the next plan asked
+   for [19..26) (3773 MB): either fitted, not both, and the request failed with
+   all 80 layers otherwise covered; it happened again with [73..80) ten minutes
+   later. There the worker is retired only where a fresh spawn of the range
+   would be admitted with its memory given back
+   (`a_fresh_spawn_fits_in_place_of_the_worker`, the spawn's own figure
+   `fresh_spawn_machine_mb` against `machine_would_take`): with no card to fall
+   back to, a range too big for the machine alone would cost the worker and
+   still be refused. Test
+   `an_idle_worker_in_system_memory_that_cannot_grow_is_replaced_where_the_range_fits`
+   (and its two controls: too big alone, in use). A/B
+   `SWARMLLM_RAM_GROWTH_RETIRE=0`.
 4. **Retire the handle this call was given, never whichever the map holds** —
    a concurrent spawn may already have replaced it (`Arc::ptr_eq`).
 

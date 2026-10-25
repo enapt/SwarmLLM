@@ -6073,8 +6073,19 @@ impl ModelProcessPool {
     /// range afresh. A
     /// worker in use keeps the refusal it always got — retiring it would kill a
     /// conversation mid-reply (#93) — and the router re-plans on it as before.
-    /// A worker charged against system memory also keeps it: both extra rungs
-    /// are about the card.
+    ///
+    /// **A worker charged against system memory skips the two card rungs, not
+    /// the last one.** Retiring an idle worker gives its memory back on either
+    /// device. Without it a processor-only node kept the layers an earlier,
+    /// failed plan had loaded and refused the next plan's range beside them: a
+    /// Llama 3.3 70B worker held [17..23) (3330 MB, never forwarded) when the
+    /// next request asked for [19..26) (3773 MB), and the 4096 MB budget took
+    /// either range but not both — the request failed with the 80 layers
+    /// otherwise covered (2026-10-25). There it retires only where a fresh
+    /// spawn of the range would be admitted once the worker's memory is back
+    /// ([`Self::a_fresh_spawn_fits_in_place_of_the_worker`]): with no card to
+    /// fall back to, a range too big for the machine alone would cost the
+    /// worker and still be refused.
     async fn grow_worker(
         &self,
         model_id: &ModelId,
@@ -6089,40 +6100,45 @@ impl ModelProcessPool {
             Ok(()) => return Ok(Growth::Grown(handle)),
             Err(r) => r,
         };
-        if !refused.on_gpu {
-            return Err(refused.error);
-        }
-        // Outside `spawn_lock` — the charge above took and released it — because
-        // a reclaim unloads workers and waits for their processes to exit.
-        let freed = self
-            .free_vram_for_admission(model_id, refused.needed_mb)
-            .await;
-        if freed > 0 {
-            tracing::info!(
-                model = %model_id,
-                freed_mb = freed,
-                layers = format!("[{}..{})", segment.0, segment.1),
-                "Reclaimed graphics memory from idle models so this model's worker can \
-                 take on the range asked for"
-            );
-            refused = match self
-                .charge_additional_segment(model_id, segment, &handle, requester)
+        if refused.on_gpu {
+            // Outside `spawn_lock` — the charge above took and released it —
+            // because a reclaim unloads workers and waits for their processes to
+            // exit.
+            let freed = self
+                .free_vram_for_admission(model_id, refused.needed_mb)
+                .await;
+            if freed > 0 {
+                tracing::info!(
+                    model = %model_id,
+                    freed_mb = freed,
+                    layers = format!("[{}..{})", segment.0, segment.1),
+                    "Reclaimed graphics memory from idle models so this model's worker can \
+                     take on the range asked for"
+                );
+                refused = match self
+                    .charge_additional_segment(model_id, segment, &handle, requester)
+                    .await
+                {
+                    Ok(()) => return Ok(Growth::Grown(handle)),
+                    Err(r) => r,
+                };
+            }
+            // Then the spawn's next rung (#265): the range across the card and
+            // the processor. Before retiring, because a worker in use — the case
+            // of report #037, a request's second local run — can never be
+            // retired.
+            match self
+                .charge_segment_as_split(model_id, segment, &handle, requester)
                 .await
             {
-                Ok(()) => return Ok(Growth::Grown(handle)),
-                Err(r) => r,
-            };
-        }
-        // Then the spawn's next rung (#265): the range across the card and the
-        // processor. Before retiring, because a worker in use — the case of
-        // report #037, a request's second local run — can never be retired.
-        match self
-            .charge_segment_as_split(model_id, segment, &handle, requester)
-            .await
+                Ok(true) => return Ok(Growth::Grown(handle)),
+                Ok(false) => {}
+                Err(r) => refused = r,
+            }
+        } else if std::env::var("SWARMLLM_RAM_GROWTH_RETIRE").as_deref() == Ok("0")
+            || !self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, segment, requester)
         {
-            Ok(true) => return Ok(Growth::Grown(handle)),
-            Ok(false) => {}
-            Err(r) => refused = r,
+            return Err(refused.error);
         }
         // Decide under the spawn lock — the one every charge takes — so a
         // request that grew this same worker between our refusal and here is
@@ -6150,6 +6166,30 @@ impl ModelProcessPool {
         self.unload_model(model_id).await;
         drop(guard);
         Ok(Growth::Respawn)
+    }
+
+    /// Would a fresh spawn of `segment` be admitted to system memory once this
+    /// model's worker has given back what it holds there? What `grow_worker`
+    /// asks before retiring an idle worker charged against system memory —
+    /// the spawn's own figure ([`Self::fresh_spawn_machine_mb`], the one the
+    /// up-front weighing reads, #345) against the admission it will meet
+    /// ([`Self::machine_would_take`]), the worker's charge counted as released.
+    /// Synchronous header reads, so off the runtime's workers.
+    fn a_fresh_spawn_fits_in_place_of_the_worker(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        requester: Requester,
+    ) -> bool {
+        let held_mb = self.ram_reserved_mb.get(model_id).map_or(0, |mb| *mb);
+        crate::inference::executor::without_starving_the_runtime(|| {
+            self.machine_would_take(
+                model_id,
+                self.fresh_spawn_machine_mb(model_id, segment),
+                requester,
+                held_mb,
+            )
+        })
     }
 
     /// May `grow_worker` retire `handle`? Called under `spawn_lock`.
@@ -11802,6 +11842,95 @@ mod tests {
             pool.workers.get(&wanted).is_none(),
             "retired, so `get_or_spawn` falls through to a fresh spawn"
         );
+    }
+
+    /// **An idle worker in system memory that cannot grow is replaced too —
+    /// where the range alone would load.** Proxmox's 70B worker held [17..23),
+    /// loaded for a plan that failed before any forward, and the next plan's
+    /// [19..26) was refused beside it: the budget took either range, not both,
+    /// and the request failed with every layer otherwise covered (2026-10-25).
+    /// Two controls: a budget the range alone would not fit keeps the worker
+    /// (retiring it would cost the layers and still refuse), and so does a
+    /// worker in use.
+    #[tokio::test]
+    async fn an_idle_worker_in_system_memory_that_cannot_grow_is_replaced_where_the_range_fits() {
+        let model = ModelId("seventy-b-shaped-ram-growth".into());
+        // The fixture's 8 layers: two ranges that overlap, neither holding the
+        // other — as [17..23) and [19..26) did.
+        let (held, asked) = ((1, 4), (3, 7));
+        let setup = |tag: &str| {
+            let data_dir = header_only_seventy_b(&format!("ram-growth-{tag}"), &model, false);
+            let p = ModelProcessPool::new(data_dir.clone());
+            (p, data_dir)
+        };
+        let (probe, probe_dir) = setup("probe");
+        let held_mb = probe.fresh_spawn_machine_mb(&model, held);
+        let asked_mb = probe.fresh_spawn_machine_mb(&model, asked);
+        let (_, per_layer_mb) = probe
+            .segment_cost_curve(&model, false)
+            .expect("fixture: a readable header");
+        let growth_mb = per_layer_mb * u64::from(asked.1 - asked.0);
+        assert!(
+            held_mb > 0 && asked_mb > held_mb,
+            "fixture: the asked range is the larger load"
+        );
+        let _ = std::fs::remove_dir_all(&probe_dir);
+
+        async fn worker_holding(
+            p: &ModelProcessPool,
+            model: &ModelId,
+            held: (u32, u32),
+            held_mb: u64,
+        ) -> Arc<WorkerHandle> {
+            let h = admit_and_insert_cpu_worker(p, model, held_mb, false).await;
+            h.record_charged_segment(held, held_mb);
+            h
+        }
+
+        // Room for the asked range alone, not beside the held one.
+        let (p, dir) = setup("replaced");
+        p.set_ram_budget_mb(asked_mb);
+        assert!(held_mb + growth_mb > asked_mb, "fixture: growth is refused");
+        let h = worker_holding(&p, &model, held, held_mb).await;
+        let outcome = p
+            .grow_worker(&model, asked, h, Requester::Swarm)
+            .await
+            .expect("an idle worker is replaced rather than refusing a range that would load");
+        assert!(matches!(outcome, Growth::Respawn));
+        assert!(p.workers.get(&model).is_none(), "retired for a fresh spawn");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The range would not load even with the worker gone: keep it.
+        let (p, dir) = setup("too-big");
+        p.set_ram_budget_mb(asked_mb - 1);
+        let h = worker_holding(&p, &model, held, held_mb).await;
+        let refused = p
+            .grow_worker(&model, asked, h.clone(), Requester::Swarm)
+            .await;
+        assert!(matches!(
+            refused,
+            Err(SwarmError::LocalMemoryUnavailable(_))
+        ));
+        assert!(
+            p.workers.get(&model).is_some_and(|w| Arc::ptr_eq(&w, &h)),
+            "a worker is not given up for a range that would not load anyway"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // In use: keep it, as on the card (#93).
+        let (p, dir) = setup("in-use");
+        p.set_ram_budget_mb(asked_mb);
+        let h = worker_holding(&p, &model, held, held_mb).await;
+        h.note_conversation(Uuid::new_v4());
+        let refused = p
+            .grow_worker(&model, asked, h.clone(), Requester::Swarm)
+            .await;
+        assert!(matches!(
+            refused,
+            Err(SwarmError::LocalMemoryUnavailable(_))
+        ));
+        assert!(p.workers.get(&model).is_some_and(|w| Arc::ptr_eq(&w, &h)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The planner is offered room an idle model holds** — the half of the

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #348**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #349**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3297,6 +3297,17 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-25, ships in v0.3.255** (#348)
+- #348 — **A computer without a graphics card lets go of layers nothing is using to take the ones
+  it is asked for.** A worker that could not take on a new range beside the ones it held was
+  replaced only where it held graphics memory; in system memory it kept its refusal. Proxmox held
+  [17..23) of a 70B (3330 MB, loaded for a plan that failed before its first forward) when the next
+  plan asked for [19..26) (3773 MB of its 4096): either range fitted, not both, so the request
+  failed with all 80 layers otherwise covered — twice, the second time [73..80). Now an idle worker
+  in system memory is replaced too, where the range alone would load
+  (`a_fresh_spawn_fits_in_place_of_the_worker`). Evidence: `docs/invariants/memory.md` § the
+  growth ladder, point 3. A/B `SWARMLLM_RAM_GROWTH_RETIRE=0`.
 
 **Closed 2026-10-25, ships in v0.3.254** (#343, #344, #345, #346)
 - #343 — **A card/processor split places each of the card's layers by its own weights.**
