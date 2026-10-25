@@ -7548,6 +7548,7 @@ fn a_card_holder_of_a_model_it_must_split_on(
         crate::model::auto_manage::vram::VramFootprintInputs {
             quantized_weight_bytes: 4_400 * 1024 * 1024,
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 32_768,
             embedding_length: 4096,
@@ -7998,6 +7999,7 @@ fn a_model_no_holder_could_ever_hold_is_refused_by_the_planner() {
     let geometry = crate::model::auto_manage::vram::VramFootprintInputs {
         quantized_weight_bytes: 4_000_000_000,
         host_resident_bytes: 0,
+        head_bytes: 0,
         unquantized_bytes_per_element: None,
         vocab_size: 32_000,
         embedding_length: 4096,

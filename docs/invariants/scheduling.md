@@ -3373,12 +3373,12 @@ MEASURED figure is still taken as it is. The local candidate is `has_gpu` at the
 the hand-off gate, which compares whole models.
 (3) **`fresh_run_layers_for_planning` offers a SEGMENT card+processor run** where the whole model's
 processor share does not fit: the widest run whose machine charge (`machine_charge` over that
-run's `partial_gpu_layers` split) the RAM admission takes (`machine_would_take`), weighed as a run
-from the first layer — the width is placed wherever this node holds layers, and the first run is
-where the estimator charges most (what the loader keeps in the machine whatever the device, #296;
-`segment_shape` spreads every other weight, the output head included, over the layers) — found by
-bisection; offered only where it is wider than the card alone. A run wholly on the card is still
-weighed for what the loader keeps in the machine.
+run's `partial_gpu_layers` split) the RAM admission takes (`machine_would_take`), weighed at BOTH
+ends of the model — the width is placed wherever this node holds layers, and the ends cost most:
+the first carries the token table and what the loader keeps in the machine whatever the device
+(#296), the last the output head, on the card, which pushes layers onto the processor (#342) —
+found by bisection; offered only where it is wider than the card alone. A run wholly on the card
+is still weighed for what the loader keeps in the machine.
 Tests: `the_processor_beside_a_card_is_offered_only_by_a_card_node_that_states_it` (types),
 `a_card_node_offers_its_processors_room_beside_the_card`,
 `a_range_split_across_card_and_processor_is_priced_per_device` (the control, priced at the blend,

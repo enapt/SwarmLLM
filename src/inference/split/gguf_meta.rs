@@ -381,6 +381,54 @@ pub(crate) fn host_resident(name: &str) -> bool {
     name == PER_LAYER_TOKEN_TABLE
 }
 
+/// Which segment of a model loads a GGUF tensor ([`segment_tensor`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SegmentTensor {
+    /// `blk.N.*`: the segment holding layer N.
+    Layer(usize),
+    /// `blk.*` with no layer number: no segment.
+    Unplaced,
+    /// `token_embd.weight`: the first segment, and — weight-tied, when the
+    /// file has no `output.weight` — the last one too, as its output head.
+    TokenTable,
+    /// `output.weight` and `output_norm.weight`: the last segment.
+    OutputHead,
+    /// Kept in the machine's memory whatever the device ([`host_resident`]):
+    /// the first segment.
+    HostResident,
+    /// `per_layer_*` projection and norm, beside the embedding: the first segment.
+    BesideEmbedding,
+    /// Small odds and ends (rope factors, per-model extras): every segment.
+    Shared,
+}
+
+/// Where tensor `name` is loaded in a split — the ONE classification both the
+/// loader's KV budget (`segment_weight_bytes`) and the pool's footprint
+/// (`process_pool::segment_weights`) count a segment's weights by. The pool
+/// once spread every weight evenly over the layers instead, and charged a 70B's
+/// first segment ~7 MB of the 564 MB token table the loader puts on its card
+/// (2026-10-25, FUTURE_WORK #342).
+pub(crate) fn segment_tensor(name: &str) -> SegmentTensor {
+    if let Some(rest) = name.strip_prefix("blk.") {
+        return rest
+            .split_once('.')
+            .and_then(|(n, _)| n.parse::<usize>().ok())
+            .map_or(SegmentTensor::Unplaced, SegmentTensor::Layer);
+    }
+    if name == "token_embd.weight" {
+        SegmentTensor::TokenTable
+    } else if name == "output.weight" || name == "output_norm.weight" {
+        SegmentTensor::OutputHead
+    } else if host_resident(name) {
+        // Before the `per_layer_` prefix: the per-layer TABLE shares it.
+        SegmentTensor::HostResident
+    } else if name.starts_with("per_layer_") {
+        SegmentTensor::BesideEmbedding
+    } else {
+        SegmentTensor::Shared
+    }
+}
+
 /// Which of layers `[start, end)` keep a KV cache: all of them for a
 /// transformer, the full-attention ones only for a model that interleaves
 /// recurrent layers ([`layer_is_recurrent`]). The ONE answer for everything
@@ -1519,6 +1567,44 @@ mod gguf_parse_error_tests {
     fn other_parse_failures_pass_through() {
         let e = candle_core::Error::Msg("invalid magic 0x0".into());
         assert_eq!(explain_gguf_parse_error(&e), "invalid magic 0x0");
+    }
+}
+
+#[cfg(test)]
+mod segment_tensor_tests {
+    use super::{segment_tensor, SegmentTensor, PER_LAYER_TOKEN_TABLE};
+
+    /// Each tensor goes to the segment that loads it — and the per-layer
+    /// TABLE, which shares its `per_layer_` prefix with the projection beside
+    /// the embedding, stays in the machine's memory (#296, #342).
+    #[test]
+    fn each_tensor_is_placed_with_the_segment_that_loads_it() {
+        assert_eq!(
+            segment_tensor("blk.17.ffn_down.weight"),
+            SegmentTensor::Layer(17)
+        );
+        assert_eq!(
+            segment_tensor("blk.x.ffn_down.weight"),
+            SegmentTensor::Unplaced
+        );
+        assert_eq!(
+            segment_tensor("token_embd.weight"),
+            SegmentTensor::TokenTable
+        );
+        assert_eq!(segment_tensor("output.weight"), SegmentTensor::OutputHead);
+        assert_eq!(
+            segment_tensor("output_norm.weight"),
+            SegmentTensor::OutputHead
+        );
+        assert_eq!(
+            segment_tensor(PER_LAYER_TOKEN_TABLE),
+            SegmentTensor::HostResident
+        );
+        assert_eq!(
+            segment_tensor("per_layer_model_proj.weight"),
+            SegmentTensor::BesideEmbedding
+        );
+        assert_eq!(segment_tensor("rope_freqs.weight"), SegmentTensor::Shared);
     }
 }
 

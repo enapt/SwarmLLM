@@ -53,7 +53,7 @@ pub use self::gguf_meta::{
 };
 pub(crate) use self::gguf_meta::{
     host_resident, kv_layers, kv_sources, layer_is_recurrent, query_scale, routed_expert_bytes,
-    SlidingWindow, PER_LAYER_TOKEN_TABLE,
+    segment_tensor, SegmentTensor, SlidingWindow, PER_LAYER_TOKEN_TABLE,
 };
 pub use self::kv_cache::{KvCacheStore, KvOccupancy};
 pub use self::model::SplitModel;

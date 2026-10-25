@@ -68,6 +68,15 @@ card, was priced as if it ran the whole model mostly on its processor, and a slo
 another country was given those layers instead. Computers on earlier versions are planned as
 before.
 
+**A computer with a graphics card no longer puts one layer too many of a split model on the card.**
+When a model's share is split between a graphics card and the processor, the model's word table —
+and, at the model's end, its output table — always goes on the card. The memory estimate spread
+those tables thinly over every layer of the model instead, so the share that starts a reply of a
+70-billion-parameter model was charged 7 MB for a 564 MB table: an 8 GB card was given 11 layers
+where 10 fit, found no room left to remember the conversation, and ran the whole share on the
+processor instead. Each share is now charged the tables it really loads, and the card is given
+layers only once they are paid for (#342).
+
 **A model split across computers that all start cold answers its first message about twice as
 soon.** When several computers each run part of a model, each one used to start reading its part
 from disk only once the computer before it had finished reading its own and passed the work along,

@@ -111,29 +111,18 @@ fn segment_weight_bytes(
 
     let mut total = 0u64;
     for (name, info) in ct.tensor_infos.iter() {
-        let counted = if let Some(rest) = name.strip_prefix("blk.") {
-            match rest
-                .split_once('.')
-                .and_then(|(n, _)| n.parse::<usize>().ok())
-            {
-                Some(idx) => (layer_start..layer_end).contains(&idx),
-                None => false,
-            }
-        } else if name == "token_embd.weight" {
-            // Charged below at its dequantized size instead.
-            false
-        } else if name == "output.weight" || name == "output_norm.weight" {
-            is_last
-        } else if super::host_resident(name) {
+        use super::SegmentTensor;
+        let counted = match super::segment_tensor(name) {
+            SegmentTensor::Layer(idx) => (layer_start..layer_end).contains(&idx),
+            SegmentTensor::Unplaced => false,
+            // Charged below, at the size this path keeps it.
+            SegmentTensor::TokenTable => false,
+            SegmentTensor::OutputHead => is_last,
             // Gemma 4 E2B/E4B's per-layer table stays in the machine's
             // memory, rows gathered there (`split::per_layer`).
-            false
-        } else if name.starts_with("per_layer_") {
-            // Its projection and norm: beside the embedding.
-            is_first
-        } else {
-            // Small odds and ends (rope factors, per-model extras).
-            true
+            SegmentTensor::HostResident => false,
+            SegmentTensor::BesideEmbedding => is_first,
+            SegmentTensor::Shared => true,
         };
         if counted {
             total = total.saturating_add(tensor_bytes(info));

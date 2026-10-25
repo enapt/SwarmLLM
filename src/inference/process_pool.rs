@@ -2364,6 +2364,76 @@ pub(crate) fn segment_shape(
     (layers, start == 0, weights)
 }
 
+/// A segment's weights where the loader puts them ([`segment_weights`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SegmentWeights {
+    /// Every tensor the segment loads, at its quantized size.
+    pub total: u64,
+    /// Of which kept in the machine's memory whatever the device
+    /// (`VramFootprintInputs::host_resident_bytes`).
+    pub host_resident: u64,
+    /// Of which the ends' tables, on the segment's main device
+    /// (`VramFootprintInputs::head_bytes`).
+    pub head: u64,
+}
+
+/// What layers `[start, end)` load of a model whose tensor table is `tensors`
+/// (`(name, bytes)`), by the loader's own classification
+/// (`split::segment_tensor`): their own layers' tensors, the token table on
+/// the first, the output head on the last — weight-tied, the token table
+/// again, once where one segment is both — and the small shared ones on
+/// every segment. `None` when no tensor names a layer, so nothing here can
+/// say which are whose.
+///
+/// The token table is counted at its QUANTIZED size, as a card reading its
+/// rows on demand keeps it; where it cannot be gathered the estimator adds
+/// the dequantized table on top (`resident_footprint_on`), as before.
+///
+/// Spread evenly over the layers instead (`segment_shape`), a 70B's first
+/// segment was charged ~7 MB of its 564 MB token table and its last ~10 MB of
+/// its 822 MB output head, and a card split placed one layer too many: the
+/// worker found no room for the conversation (2026-10-25, FUTURE_WORK #342).
+pub(crate) fn segment_weights(
+    tensors: &[(&str, u64)],
+    (start, end): (usize, usize),
+    is_first: bool,
+    is_last: bool,
+) -> Option<SegmentWeights> {
+    use crate::inference::split::SegmentTensor;
+    let tied = !tensors.iter().any(|(name, _)| *name == "output.weight");
+    let mut any_layer = false;
+    let mut weights = SegmentWeights {
+        total: 0,
+        host_resident: 0,
+        head: 0,
+    };
+    for &(name, bytes) in tensors {
+        let (counted, head, host) = match crate::inference::split::segment_tensor(name) {
+            SegmentTensor::Layer(idx) => {
+                any_layer = true;
+                ((start..end).contains(&idx), false, false)
+            }
+            SegmentTensor::Unplaced => (false, false, false),
+            // One tensor: a segment that is first and last shares it.
+            SegmentTensor::TokenTable => (is_first || (is_last && tied), true, false),
+            SegmentTensor::OutputHead => (is_last, true, false),
+            SegmentTensor::HostResident => (is_first, false, true),
+            SegmentTensor::BesideEmbedding => (is_first, false, false),
+            SegmentTensor::Shared => (true, false, false),
+        };
+        if counted {
+            weights.total = weights.total.saturating_add(bytes);
+            if head {
+                weights.head = weights.head.saturating_add(bytes);
+            }
+            if host {
+                weights.host_resident = weights.host_resident.saturating_add(bytes);
+            }
+        }
+    }
+    any_layer.then_some(weights)
+}
+
 /// `(fixed_mb, per_layer_mb)` that `estimate` charges a MIDDLE segment of the
 /// model `base` describes (its whole-model inputs) — weights charged in
 /// proportion to the layers, as `segment_shape` charges them at admission. The estimate is affine in the
@@ -2394,6 +2464,9 @@ fn cost_curve_of(
         // In proportion too, as the weights it is part of: the card's curve
         // then prices the card-held weights, the processor's all of them (#296).
         i.host_resident_bytes = base.host_resident_bytes / total * layers;
+        // A middle segment carries neither end's table; the curve keeps them
+        // in its weights, spread evenly, as before (#342's residual).
+        i.head_bytes = 0;
         i.kv = base.kv.share(layers, total);
         estimate(&i)
     };
@@ -2536,9 +2609,11 @@ fn split_for_card(
     if layers == 0 {
         return None;
     }
+    // The ends' tables go to the card whichever layers do (#342): paid
+    // first, and the layers placed in what is left, by their own weights.
     let n = crate::inference::split::hybrid::plan_gpu_layers(
-        available_bytes,
-        inputs.card_weight_bytes(),
+        available_bytes.saturating_sub(inputs.head_bytes),
+        inputs.card_weight_bytes().saturating_sub(inputs.head_bytes),
         card_kv_bytes_of_split(inputs),
         layers,
     );
@@ -3596,6 +3671,7 @@ impl ModelProcessPool {
                     .saturating_add(u32::try_from(on_card).unwrap_or(u32::MAX))
                     .min(segment.1);
                 self.estimate_gpu_footprint_mb(model_id, Some((segment.0, end)), KvCharge::Typical)
+                    .saturating_add(self.head_of_processor_run_mb(model_id, (end, segment.1)))
             }
             CardSplit::ExpertsInRam { in_ram, .. } => self
                 .estimate_gpu_footprint_mb(model_id, Some(segment), KvCharge::Typical)
@@ -3628,12 +3704,28 @@ impl ModelProcessPool {
             .map_or(0, |i| i.host_resident_bytes.div_ceil(1024 * 1024))
     }
 
+    /// The output head of a card/processor split's processor-held `run`, in MB
+    /// rounded up: the loader puts it on the card with the segment's main
+    /// device though the run's layers are on the processor (#342), so the
+    /// card's share carries it ([`Self::card_share_of_split_mb`]) and the
+    /// machine's does not ([`Self::machine_charge`]). 0 for a run short of
+    /// the last layer, and for one from layer 0, which no split's processor
+    /// run is (a split puts at least one layer on the card).
+    fn head_of_processor_run_mb(&self, model_id: &ModelId, run: (u32, u32)) -> u64 {
+        if run.0 == 0 || run.0 >= run.1 {
+            return 0;
+        }
+        self.footprint_inputs(model_id, Some(run))
+            .map_or(0, |i| i.head_bytes.div_ceil(1024 * 1024))
+    }
+
     /// What a spawn of `segment` placed as `charge_ram` / `split` charges the
     /// machine's memory — the ONE figure its RAM admission weighs, and the
     /// planner's mirrors of it ask ([`Self::fresh_run_layers_for_planning`],
     /// the card's bound in [`Self::max_local_hostable_layers`]): the share
-    /// [`ram_charged_share`] names, priced, and — for any placement that
-    /// reaches the card — the tensors the loader keeps in the machine's memory
+    /// [`ram_charged_share`] names, priced — a split's processor run less the
+    /// output head the card holds for it (#342) — and, for any placement that
+    /// reaches the card, the tensors the loader keeps in the machine's memory
     /// whatever the device. Charged nothing there, the E2B's 1.9 GB per-layer
     /// table sat outside every budget while the card was priced it (#296).
     fn machine_charge(
@@ -3646,6 +3738,10 @@ impl ModelProcessPool {
     ) -> MachineCharge {
         let share = ram_charged_share(charge_ram, segment, split);
         let share_mb = match share {
+            // A split's processor run, less the output head the card holds.
+            Some(RamShare::Layers(run)) if !charge_ram => self
+                .estimate_cpu_footprint_mb(model_id, Some(run), kv)
+                .saturating_sub(self.head_of_processor_run_mb(model_id, run)),
             Some(RamShare::Layers(run)) => self.estimate_cpu_footprint_mb(model_id, Some(run), kv),
             Some(RamShare::Experts { layers }) => self.experts_in_ram_mb(model_id, segment, layers),
             None => 0,
@@ -3968,6 +4064,9 @@ impl ModelProcessPool {
                 i.quantized_weight_bytes =
                     whole.card_weight_bytes() / whole.segment_layers.max(1) * layers + host;
                 i.host_resident_bytes = host;
+                // A fixture's segment is priced in proportion, with no table
+                // at either end; the header's path counts them (#342).
+                i.head_bytes = 0;
                 i.segment_layers = layers;
                 i.kv = whole.kv.share(layers, whole.segment_layers.max(1));
                 i.is_first = start == 0;
@@ -4080,27 +4179,56 @@ impl ModelProcessPool {
         // two end layers as the entire model. Reported from the field: a 16 GB
         // Mac mini refused every part of a 14B it was holding, retried, and
         // produced the identical plan (gotcha #452).
-        // Proportional weights slightly under-charge a first segment (shard 0
-        // also carries the embedding table) and the estimator adds that table
-        // back whenever `is_first`.
         //
-        // What the loader keeps in the machine's memory whatever the device
-        // (`split::host_resident`, Gemma 4 E2B/E4B's per-layer table) is the
-        // first segment's, and named apart, so a card is not priced it (#296);
-        // the rest of the weights are spread over the layers as before.
-        let host_bytes: u64 = ct
+        // Each tensor is counted where the loader loads it (`segment_weights`):
+        // the token table and output head at the segment's ends, on its main
+        // device (`head_bytes`, #342), and what the loader keeps in the
+        // machine's memory whatever the device (`split::host_resident`, Gemma
+        // 4 E2B/E4B's per-layer table) on the first, named apart so a card is
+        // not priced it (#296). A table naming no layer is spread over the
+        // layers instead.
+        let tensors: Vec<(&str, u64)> = ct
             .tensor_infos
             .iter()
-            .filter(|(name, _)| crate::inference::split::host_resident(name))
-            .map(|(_, info)| crate::inference::split::tensor_byte_size(info))
-            .sum();
-        let (segment_layers, is_first, layer_weight_bytes) = segment_shape(
-            tensor_meta.block_count as u64,
-            shard_bytes.saturating_sub(host_bytes),
-            segment,
-        );
-        let host_resident_bytes = if is_first { host_bytes } else { 0 };
-        let segment_weight_bytes = layer_weight_bytes.saturating_add(host_resident_bytes);
+            .map(|(name, info)| {
+                (
+                    name.as_str(),
+                    crate::inference::split::tensor_byte_size(info),
+                )
+            })
+            .collect();
+        let block_count = tensor_meta.block_count as u64;
+        let (segment_layers, is_first, _) = segment_shape(block_count, shard_bytes, segment);
+        let (start, end) = segment.map_or((0, block_count), |(start, end)| {
+            (u64::from(start), u64::from(end))
+        });
+        let is_last = end >= block_count;
+        let weights = segment_weights(
+            &tensors,
+            (
+                usize::try_from(start).unwrap_or(usize::MAX),
+                usize::try_from(end).unwrap_or(usize::MAX),
+            ),
+            is_first,
+            is_last,
+        )
+        .unwrap_or_else(|| {
+            let host_bytes: u64 = tensors
+                .iter()
+                .filter(|(name, _)| crate::inference::split::host_resident(name))
+                .map(|(_, bytes)| bytes)
+                .sum();
+            let (_, _, layer_weight_bytes) =
+                segment_shape(block_count, shard_bytes.saturating_sub(host_bytes), segment);
+            let host_resident = if is_first { host_bytes } else { 0 };
+            SegmentWeights {
+                total: layer_weight_bytes.saturating_add(host_resident),
+                host_resident,
+                head: 0,
+            }
+        });
+        let (segment_weight_bytes, host_resident_bytes, head_bytes) =
+            (weights.total, weights.host_resident, weights.head);
         // What the same segment's caches cost, read off the header by the
         // loader's own layout (`kv_budget::KvLayout`): the layers that keep
         // one, each by its own shape, a sliding-window layer charged its
@@ -4126,6 +4254,7 @@ impl ModelProcessPool {
         let inputs = VramFootprintInputs {
             quantized_weight_bytes: segment_weight_bytes,
             host_resident_bytes,
+            head_bytes,
             unquantized_bytes_per_element,
             embedding_gatherable,
             vocab_size: vocab,
@@ -6340,12 +6469,12 @@ impl ModelProcessPool {
         //
         // The width is offered for a run ANYWHERE in the model (the search
         // places it over the layers this node holds), so it is weighed where
-        // the estimator charges a run most: from the first layer, which
-        // carries what the loader keeps in the machine whatever the device
-        // (#296). `segment_shape` spreads every other weight over the layers,
-        // the output head included, so no other placement costs more.
-        let run_is_taken = |layers: u32| {
-            let run = (0, layers);
+        // a run costs most: at either END. The first carries the token table
+        // and what the loader keeps in the machine whatever the device (#296),
+        // the last the output head (#342) — on a 70B the head is the larger,
+        // 822 MB against 564, and it takes room on the card from the layers.
+        // A middle run carries neither.
+        let run_at_is_taken = |run: (u32, u32)| {
             let estimated = self.estimate_gpu_footprint_mb(model_id, Some(run), KvCharge::Typical);
             match self.partial_gpu_layers(model_id, Some(run), estimated, budget) {
                 Some(split) => fits(run, split),
@@ -6365,6 +6494,11 @@ impl ModelProcessPool {
                         )
                 }
             }
+        };
+        let run_is_taken = |layers: u32| {
+            [(0, layers), (total.saturating_sub(layers), total)]
+                .into_iter()
+                .all(&run_at_is_taken)
         };
         let card_layers = u32::try_from(on_card).unwrap_or(0);
         let (mut fitting, mut refused) = (card_layers, total);
@@ -10783,6 +10917,7 @@ mod tests {
         crate::model::auto_manage::vram::VramFootprintInputs {
             quantized_weight_bytes: 1_800 * 1024 * 1024,
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 151_936,
             embedding_length: 2048,
@@ -11514,6 +11649,7 @@ mod tests {
             crate::model::auto_manage::vram::VramFootprintInputs {
                 quantized_weight_bytes: 4_400 * 1024 * 1024,
                 host_resident_bytes: 0,
+                head_bytes: 0,
                 unquantized_bytes_per_element: None,
                 vocab_size: 152_064,
                 embedding_length: 3584,
@@ -11572,6 +11708,7 @@ mod tests {
                 crate::model::auto_manage::vram::VramFootprintInputs {
                     quantized_weight_bytes: 4_400 * 1024 * 1024,
                     host_resident_bytes: 0,
+                    head_bytes: 0,
                     unquantized_bytes_per_element: None,
                     vocab_size: 152_064,
                     embedding_length: 3584,
@@ -13068,6 +13205,300 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
+    /// A GGUF header with `tensors` (`(name, ggml dims — columns first —,
+    /// ggml type id)`) and no tensor data: the tensor table is all a footprint
+    /// reads, so a 70B's shape costs a few hundred bytes here. Written as
+    /// `model`'s header under a fresh data directory, which is returned.
+    fn header_only_model(
+        tag: &str,
+        model: &ModelId,
+        tensors: &[(&str, &[u64], u32)],
+    ) -> std::path::PathBuf {
+        fn string(out: &mut Vec<u8>, s: &str) {
+            out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+            out.extend_from_slice(s.as_bytes());
+        }
+        // (key, GGUF value type, value bytes): 4 = u32, 6 = f32, 8 = string.
+        let mut arch = Vec::new();
+        string(&mut arch, "llama");
+        let metadata: [(&str, u32, Vec<u8>); 7] = [
+            ("general.architecture", 8, arch),
+            ("llama.block_count", 4, 8u32.to_le_bytes().to_vec()),
+            ("llama.context_length", 4, 8192u32.to_le_bytes().to_vec()),
+            ("llama.embedding_length", 4, 8192u32.to_le_bytes().to_vec()),
+            (
+                "llama.attention.head_count",
+                4,
+                64u32.to_le_bytes().to_vec(),
+            ),
+            (
+                "llama.attention.head_count_kv",
+                4,
+                8u32.to_le_bytes().to_vec(),
+            ),
+            (
+                "llama.attention.layer_norm_rms_epsilon",
+                6,
+                1e-5f32.to_le_bytes().to_vec(),
+            ),
+        ];
+        let mut out = b"GGUF".to_vec();
+        out.extend_from_slice(&3u32.to_le_bytes());
+        out.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
+        out.extend_from_slice(&(metadata.len() as u64).to_le_bytes());
+        for (key, kind, value) in &metadata {
+            string(&mut out, key);
+            out.extend_from_slice(&kind.to_le_bytes());
+            out.extend_from_slice(value);
+        }
+        let mut offset = 0u64;
+        for (name, dims, kind) in tensors {
+            string(&mut out, name);
+            out.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+            for d in *dims {
+                out.extend_from_slice(&d.to_le_bytes());
+            }
+            out.extend_from_slice(&kind.to_le_bytes());
+            out.extend_from_slice(&offset.to_le_bytes());
+            offset += 1 << 20;
+        }
+        while !out.len().is_multiple_of(32) {
+            out.push(0);
+        }
+        let data_dir =
+            std::env::temp_dir().join(format!("swarmllm-header-only-{tag}-{}", std::process::id()));
+        let dir = crate::model::shard::model_dir(&data_dir, &model.0);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(crate::model::shard::HEADER_FILENAME), out).unwrap();
+        data_dir
+    }
+
+    /// GGUF type ids and their (block elements, block bytes).
+    const GGUF_F32: u32 = 0;
+    const GGUF_Q8_0: u32 = 8;
+    const GGUF_Q4_K: u32 = 12;
+    const GGUF_Q6_K: u32 = 14;
+
+    /// An eight-layer model shaped like Llama 3.3 70B's ends: a Q4_K token
+    /// table, a Q6_K output head (the larger, as on the 70B: 822 MB against
+    /// 564), Q8_0 layers whose first is heavier (Q4_K_M gives the first and
+    /// last eighth more bits), a shared `rope_freqs`. `tied` drops
+    /// `output.weight`, so the token table is the head too.
+    fn seventy_b_shaped(tied: bool) -> Vec<(String, Vec<u64>, u32)> {
+        let mut t = vec![
+            (
+                "token_embd.weight".to_string(),
+                vec![8192, 64_000],
+                GGUF_Q4_K,
+            ),
+            ("output_norm.weight".to_string(), vec![8192], GGUF_F32),
+            ("rope_freqs.weight".to_string(), vec![64], GGUF_F32),
+        ];
+        if !tied {
+            t.push(("output.weight".to_string(), vec![8192, 64_000], GGUF_Q6_K));
+        }
+        for il in 0..8u64 {
+            let rows = if il == 0 { 32_768 } else { 24_576 };
+            t.push((
+                format!("blk.{il}.attn_q.weight"),
+                vec![8192, rows],
+                GGUF_Q8_0,
+            ));
+        }
+        t
+    }
+
+    fn header_only_seventy_b(tag: &str, model: &ModelId, tied: bool) -> std::path::PathBuf {
+        let tensors = seventy_b_shaped(tied);
+        let table: Vec<(&str, &[u64], u32)> = tensors
+            .iter()
+            .map(|(n, d, k)| (n.as_str(), d.as_slice(), *k))
+            .collect();
+        header_only_model(tag, model, &table)
+    }
+
+    /// **A segment is charged the tables its ends load, and its own layers'
+    /// weights** (FUTURE_WORK #342): the token table on the first, the output
+    /// head on the last (weight-tied: the token table again, once where one
+    /// segment is both), `rope_freqs` on every one. Spread evenly over the
+    /// layers, a 70B's first segment was charged ~7 MB of its 564 MB table, and
+    /// a card split put one layer too many on an 8 GB card: the worker found
+    /// no room for the conversation and fell back to the processor
+    /// (2026-10-25).
+    #[test]
+    fn a_segment_is_charged_the_tables_its_ends_load() {
+        const Q8_LAYER: u64 = 8192 * 24_576 / 32 * 34;
+        const Q8_FIRST_LAYER: u64 = 8192 * 32_768 / 32 * 34;
+        const TOKEN_TABLE: u64 = 8192 * 64_000 / 256 * 144;
+        const OUTPUT_HEAD: u64 = 8192 * 64_000 / 256 * 210;
+        const NORM: u64 = 8192 * 4;
+        const ROPE: u64 = 64 * 4;
+        for tied in [false, true] {
+            let model = ModelId(format!("seventy-b-shaped-{tied}"));
+            let data_dir = header_only_seventy_b("tables", &model, tied);
+            let pool = ModelProcessPool::new(data_dir.clone());
+            let charged = |segment| {
+                let i = pool
+                    .footprint_inputs(&model, segment)
+                    .expect("the header alone is enough");
+                (i.quantized_weight_bytes, i.head_bytes)
+            };
+            let last_head = if tied { TOKEN_TABLE } else { OUTPUT_HEAD } + NORM;
+
+            assert_eq!(
+                charged(Some((0, 1))),
+                (Q8_FIRST_LAYER + TOKEN_TABLE + ROPE, TOKEN_TABLE),
+                "the first segment, tied {tied}"
+            );
+            assert_eq!(
+                charged(Some((1, 3))),
+                (2 * Q8_LAYER + ROPE, 0),
+                "a middle segment carries no table, tied {tied}"
+            );
+            assert_eq!(
+                charged(Some((7, 8))),
+                (Q8_LAYER + last_head + ROPE, last_head),
+                "the last segment, tied {tied}"
+            );
+            // The whole model: every tensor once — a tied table is both ends'.
+            let whole_head = TOKEN_TABLE + if tied { 0 } else { OUTPUT_HEAD } + NORM;
+            assert_eq!(
+                charged(None),
+                (
+                    Q8_FIRST_LAYER + 7 * Q8_LAYER + whole_head + ROPE,
+                    whole_head
+                ),
+                "the whole model, tied {tied}"
+            );
+            let _ = std::fs::remove_dir_all(&data_dir);
+        }
+    }
+
+    /// **A card/processor split pays its ends' tables to the card before it
+    /// places a layer** (#342). The control prices the same weights with the
+    /// tables spread over the layers, as before: it puts six layers where five
+    /// fit, and the card is out of room once the table lands beside them.
+    #[test]
+    fn a_split_pays_the_cards_tables_before_it_places_a_layer() {
+        use crate::inference::model_arch::ModelArch;
+        use crate::inference::split::hybrid::{arch_supports_hybrid, FORWARD_BUFFER_RESERVE_BYTES};
+        const MIB: u64 = 1024 * 1024;
+        let with_table = crate::model::auto_manage::vram::VramFootprintInputs {
+            // Ten layers of 100 MiB and a 300 MiB token table.
+            quantized_weight_bytes: 1_300 * MIB,
+            host_resident_bytes: 0,
+            head_bytes: 300 * MIB,
+            unquantized_bytes_per_element: None,
+            vocab_size: 128_256,
+            embedding_length: 4096,
+            segment_layers: 10,
+            // No cache: the weights alone decide.
+            kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                0,
+                8,
+                64,
+                128,
+                crate::inference::layers::KvAttention::Standard,
+            ),
+            rope_dim: 128,
+            effective_context: 8192,
+            is_first: true,
+            embedding_gatherable: true,
+            splits_across_devices: arch_supports_hybrid(&ModelArch::Llama),
+        };
+        // Room for the table and five layers, and not a sixth.
+        let room = FORWARD_BUFFER_RESERVE_BYTES + 300 * MIB + 5 * 100 * MIB + 50 * MIB;
+        assert_eq!(split_for_card(&with_table, room), Some((5, 10)));
+        let spread = crate::model::auto_manage::vram::VramFootprintInputs {
+            head_bytes: 0,
+            ..with_table
+        };
+        assert_eq!(split_for_card(&spread, room), Some((6, 10)));
+    }
+
+    /// **A split's processor run that ends the model leaves its output head to
+    /// the card** (#342): the loader loads it with the segment's main device,
+    /// so the card's share carries it and the machine's does not — each budget
+    /// is charged what lands in it.
+    #[test]
+    fn a_split_charges_its_output_head_to_the_card() {
+        let model = ModelId("seventy-b-shaped-head".into());
+        let data_dir = header_only_seventy_b("head", &model, false);
+        let p = ModelProcessPool::new(data_dir.clone());
+        p.set_vram_budget_mb(100_000);
+        let head_mb = (8192u64 * 64_000 / 256 * 210 + 8192 * 4).div_ceil(1024 * 1024);
+        let split = CardSplit::Layers {
+            on_card: 2,
+            total: 4,
+        };
+        // The last four layers: two on the card, two (and the head) beside.
+        let segment = (4, 8);
+        assert_eq!(
+            p.card_share_of_split_mb(&model, segment, split),
+            p.estimate_gpu_footprint_mb(&model, Some((4, 6)), KvCharge::Typical) + head_mb
+        );
+        assert_eq!(
+            p.machine_charge(&model, segment, false, Some(split), KvCharge::Typical)
+                .share_mb,
+            p.estimate_cpu_footprint_mb(&model, Some((6, 8)), KvCharge::Typical) - head_mb
+        );
+        // The first four: the token table is in the card's run already, and
+        // the processor's run ends short of the model, so carries no head.
+        assert_eq!(
+            p.card_share_of_split_mb(&model, (0, 4), split),
+            p.estimate_gpu_footprint_mb(&model, Some((0, 2)), KvCharge::Typical)
+        );
+        assert_eq!(
+            p.machine_charge(&model, (0, 4), false, Some(split), KvCharge::Typical)
+                .share_mb,
+            p.estimate_cpu_footprint_mb(&model, Some((2, 4)), KvCharge::Typical)
+        );
+        // A processor placement keeps everything, the head included.
+        assert_eq!(
+            p.machine_charge(&model, segment, true, None, KvCharge::Typical)
+                .share_mb,
+            p.estimate_cpu_footprint_mb(&model, Some(segment), KvCharge::Typical)
+        );
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// **A segment is offered only at a width BOTH ends of the model would
+    /// take** (#342). The width is offered for a run anywhere, and the ends
+    /// cost most: the first carries the token table, the last the output head —
+    /// on the card, so it pushes layers onto the processor. With the machine's
+    /// room set where the first end takes a width and the last does not, the
+    /// offer stops short of that width.
+    #[test]
+    fn a_fresh_segment_is_weighed_at_both_ends_of_the_model() {
+        let model = ModelId("seventy-b-shaped-ends".into());
+        let data_dir = header_only_seventy_b("ends", &model, false);
+        let p = ModelProcessPool::new(data_dir.clone());
+        p.test_card_in_play
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        let card_mb = 1_500;
+        p.set_vram_budget_mb(card_mb);
+        let machine_mb = |run: (u32, u32)| {
+            let estimated = p.estimate_gpu_footprint_mb(&model, Some(run), KvCharge::Typical);
+            let split = p.partial_gpu_layers(&model, Some(run), estimated, card_mb);
+            p.machine_charge(&model, run, false, split, KvCharge::Typical)
+                .mb()
+        };
+        let width = (2..8)
+            .find(|&w| machine_mb((8 - w, 8)) > machine_mb((0, w)))
+            .expect("fixture: the head's end costs the machine more at some width");
+        p.set_ram_budget_mb(machine_mb((0, width)));
+
+        // The first end takes `width` (its own charge is the room); the last
+        // does not, so one layer narrower is the widest both take.
+        assert_eq!(
+            p.fresh_run_layers_for_planning(&model, Requester::Owner),
+            Some(width - 1),
+            "the last end refuses {width}"
+        );
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
     /// **Admission prices a sliding-window layer's cache as its window**, read
     /// off the header by the loader's own layout (#281 (II)) — for the whole
     /// model and for a segment, each by its own layers. Gemma 2's even layers
@@ -13166,6 +13597,7 @@ mod tests {
         let whole = VramFootprintInputs {
             quantized_weight_bytes: 4_400 * 1024 * 1024,
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 152_064,
             embedding_length: 3584,
@@ -13646,6 +14078,7 @@ mod admission_tests {
         let splittable = crate::model::auto_manage::vram::VramFootprintInputs {
             quantized_weight_bytes: 4_400 * 1024 * 1024,
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 152_064,
             embedding_length: 3584,
@@ -13708,6 +14141,7 @@ mod admission_tests {
         crate::model::auto_manage::vram::VramFootprintInputs {
             quantized_weight_bytes: (48 * (208 + 8) + 340) * MIB,
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 151_936,
             embedding_length: 2048,
@@ -13869,6 +14303,7 @@ mod admission_tests {
         crate::model::auto_manage::vram::VramFootprintInputs {
             quantized_weight_bytes: 3_447 * MIB,
             host_resident_bytes: host_resident_mib * MIB,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 262_144,
             embedding_length: 1536,
@@ -14079,6 +14514,7 @@ mod admission_tests {
         let seven_b = crate::model::auto_manage::vram::VramFootprintInputs {
             quantized_weight_bytes: 4_400 * 1024 * 1024,
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 152_064,
             embedding_length: 3584,
@@ -14155,6 +14591,7 @@ mod admission_tests {
         let seventy_b = crate::model::auto_manage::vram::VramFootprintInputs {
             quantized_weight_bytes: 40_000 * 1024 * 1024,
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 128_256,
             embedding_length: 8192,
@@ -14508,6 +14945,7 @@ mod admission_tests {
             crate::model::auto_manage::vram::VramFootprintInputs {
                 quantized_weight_bytes: 4_400 * 1024 * 1024,
                 host_resident_bytes: 0,
+                head_bytes: 0,
                 unquantized_bytes_per_element: None,
                 vocab_size: 152_064,
                 embedding_length: 3584,

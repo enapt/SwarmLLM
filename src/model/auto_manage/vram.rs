@@ -61,6 +61,16 @@ pub struct VramFootprintInputs {
     /// sent it to the processor (FUTURE_WORK #296); a spawn on the card charges
     /// it to the machine instead (`process_pool::ModelProcessPool::machine_charge`).
     pub host_resident_bytes: u64,
+    /// Of `quantized_weight_bytes`, the tensors outside the layers that the
+    /// segment's ends carry — the token table on the first, the output head
+    /// (or, tied, the token table again) on the last — which the loader puts
+    /// on the segment's MAIN device whichever of its layers go there
+    /// (`split::loader`: both are loaded onto `device`). A card/processor
+    /// split pays them to the card before it places a layer
+    /// (`process_pool::split_for_card`). Spread evenly over a 70B's 80 layers,
+    /// a first segment was charged ~7 MB of its 564 MB table, and its card ran
+    /// out of room for the conversation (2026-10-25, FUTURE_WORK #342).
+    pub head_bytes: u64,
     /// Bytes per element of the weight tensors when the checkpoint is NOT
     /// quantized (F16/BF16 → 2, F32 → 4); `None` for a quantized checkpoint.
     ///
@@ -361,7 +371,7 @@ fn resident_footprint_on(
     //
     // Where the loader reads rows on demand it never materialises that table,
     // and the quantized bytes are already counted in `quantized_weight_bytes`
-    // (token_embd lives in shard 0, whose file size is summed above) — so the
+    // (a first segment is counted its token table, `head_bytes`) — so the
     // term is simply absent rather than replaced. Charging it anyway is what
     // refuses a model that would have fitted.
     let embedding_bytes = if i.is_first && !rows_on_demand {
@@ -2078,6 +2088,7 @@ mod footprint_tests {
         VramFootprintInputs {
             quantized_weight_bytes: 667_078_656,
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 32_000,
             embedding_length: 2048,
@@ -2103,6 +2114,7 @@ mod footprint_tests {
         VramFootprintInputs {
             quantized_weight_bytes: 860_807_296,
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 128_256,
             embedding_length: 2048,
@@ -2128,6 +2140,7 @@ mod footprint_tests {
         VramFootprintInputs {
             quantized_weight_bytes: 2_392_493_952,
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 32_064,
             embedding_length: 3072,
@@ -2396,6 +2409,7 @@ mod footprint_tests {
         VramFootprintInputs {
             quantized_weight_bytes: 1629 * 1024 * 1024,
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 256_000,
             embedding_length: 2304,
@@ -2456,6 +2470,7 @@ mod footprint_tests {
         let z = VramFootprintInputs {
             quantized_weight_bytes: 0,
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 0,
             embedding_length: 0,
@@ -2481,6 +2496,7 @@ mod footprint_tests {
         let huge = VramFootprintInputs {
             quantized_weight_bytes: u64::MAX,
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: u64::MAX,
             embedding_length: u64::MAX,
@@ -2568,6 +2584,7 @@ mod footprint_tests {
         VramFootprintInputs {
             quantized_weight_bytes: 994_156_864,
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: Some(2),
             vocab_size: 151_936,
             embedding_length: 896,
@@ -2603,6 +2620,7 @@ mod footprint_tests {
         let f16 = qwen05b_f16();
         let as_if_quantized = VramFootprintInputs {
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             ..f16
         };
@@ -2630,11 +2648,13 @@ mod footprint_tests {
     fn an_f32_checkpoint_is_not_charged_twice() {
         let f32_ckpt = VramFootprintInputs {
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: Some(4),
             ..qwen05b_f16()
         };
         let quantized = VramFootprintInputs {
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             ..qwen05b_f16()
         };
@@ -2700,6 +2720,7 @@ mod footprint_tests {
         let i = VramFootprintInputs {
             quantized_weight_bytes: 2284 * 1024 * 1024,
             host_resident_bytes: 0,
+            head_bytes: 0,
             unquantized_bytes_per_element: None,
             vocab_size: 32064,
             embedding_length: 3072,

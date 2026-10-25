@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #343**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #344**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2464,18 +2464,22 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
-#### #342 — A segment is charged an even share of the output head and token table, which only its end carries
-`P3` · memory · **OPEN** — 2026-10-25 · history: found while adding the segment card/processor run
+#### #343 — A card/processor split places a segment's layers by their average weight
+`P3` · memory · **OPEN** — 2026-10-25 · history: #342's residual
 
-`process_pool::segment_shape` charges a segment the header's weights in proportion to its layers,
-the output head and the token table included, while the loader maps the head only for the LAST
-segment and the token table only for the first. For a 128,256-word vocabulary at 8,192 wide
-(Llama 3.x 70B) the head is ~860 MB at Q6_K, so the last 10 of 80 layers are charged ~110 MB of
-it: a plan can give a node a tail segment its load then refuses (`LocalMemoryUnavailable`, one
-re-plan). Only the first segment's host-resident tensors are charged where they live (#296). Next:
-read `output.weight` / `token_embd.weight` off the tensor table into `VramFootprintInputs` (an
-`is_last` beside `is_first`), charge each to the segment that maps it, and check the estimate
-against a real tail segment's `charged_mb` and the worker's resident memory.
+#342 counts each segment's own layers and its ends' tables off the header, but two figures still
+average. `hybrid::plan_gpu_layers` places the card's layers by the segment's MEAN layer weight,
+while the card takes the FIRST ones: Q4_K_M gives the first and last eighth of a model more bits,
+so a 70B's first ten layers weigh 519 MiB each against 502 averaged over 17 — ~170 MiB the card
+was not charged (on this laptop's segment the cache room was 349 MiB against 320 needed). And the
+planning curve (`process_pool::cost_curve_of`, which the card-only bound and a peer's bound read)
+still spreads both tables over every layer, so a first or last run held wholly on a card is offered
+up to one layer more than its spawn places there (the spawn then splits it, priced a little
+slow). Next: hand `split_for_card` the segment's per-layer bytes (`segment_geometry` already reads
+each layer's experts), and decide whether the curve keeps the larger table in its fixed term.
+Beyond both: llama.cpp keeps the token table on the processor outright ("very little benefit to
+offloading the input layer") — 564 MiB more of the card for a 70B's first segment, at a row
+gather per token over the processor.
 
 #### #322 — A cold load's first request was refused for a 9-token prompt, its card cache budget 0
 `P3` · memory · **OPEN** — 2026-10-20 · history: field report 2026-10-19 (a tester, RTX 3060 12 GB, v0.3.244), request `3acb5624`
@@ -3293,7 +3297,17 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-25, ships in v0.3.253** (#339)
+**Closed 2026-10-25, ships in v0.3.253** (#339, #342)
+- #342 — **A segment is charged the tables its ends load, where the loader loads them.** The pool
+  spread every weight evenly over the layers (`segment_shape`), so a 70B's first segment was
+  charged ~7 MiB of its 564 MiB token table and this laptop's 8 GB card was given 11 of its 17
+  layers where 10 fit: no room for the cache, `gpu-kv-budget-exhausted`, the share run on the
+  processor. Now `split::segment_tensor` is the one classification the loader and the pool share;
+  `segment_geometry` counts each segment's own layers and its ends' tables (`head_bytes`, on the
+  main device), `split_for_card` pays them first, a processor run ending the model leaves its
+  output head to the card's share, and a fresh run is weighed at both ends. Evidence:
+  `docs/invariants/memory.md` § "A split's processor share is charged to the machine". Residual:
+  #343.
 - #339 — **A flood of made-up computers can no longer push a model part's real holders out of
   this node's list, and their records no longer pile up.** A part announcement needs only a key
   (gossip, signed by its sender; one neighbour forwards many keys, which is also how a real holder

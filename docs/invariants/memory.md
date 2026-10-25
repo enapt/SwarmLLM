@@ -3549,6 +3549,39 @@ in use is not room), `a_card_is_not_charged_the_weights_the_machine_keeps`,
 layers, a processor peer with the same room and the control card do not; the booking is the
 card's share), `the_per_layer_token_table_is_a_row_per_token_held_off_the_card`.
 
+**The tables a segment's ends load, where the loader loads them (2026-10-25, #342).** The loader
+puts the token table on a first segment's MAIN device and the output head (weight-tied: the token
+table again) on a last one's — in a card/processor split, the card, whichever layers go there
+(`split::loader`: `token_embd.weight`, `output.weight` onto `device`). The pool spread every
+weight evenly over the layers (`segment_shape`), so on Llama 3.3 70B Q4_K_M (80 layers; token
+table 564 MiB Q4_K, output head 822 MiB Q6_K, layers 460-519 MiB) the first 17 layers were charged
+~7 MiB of the table. This laptop's card (budget 6,510 MB) was given 11 of them: 5,649 MiB of
+layers + 564 of table = the worker's "6212 MB of weights", against `VRAM_HEADROOM_PCT` (85%) of
+the 7,180 MB free — no room for the 352 MB cache, `gpu-kv-budget-exhausted`, the model pinned to
+the processor. llama.cpp keeps the input layer on the processor outright ("there is very little
+benefit to offloading the input layer", `src/llama-model.cpp`) and counts the output layer as
+layer `n_layer`, offloaded with the last layers; we keep both on the card and charge them there.
+
+The rule: `split::segment_tensor` is the ONE classification of a tensor to the segment that loads
+it — the loader's KV budget (`segment_weight_bytes`) and the pool (`process_pool::segment_weights`)
+both match on it. `segment_geometry` counts a segment's own layers, its ends' tables and the
+shared tensors off the header (`VramFootprintInputs::head_bytes` = the tables; proportional only
+for a table naming no layer). `split_for_card` pays `head_bytes` to the card before placing a
+layer; a split whose processor run ends the model leaves the run's output head to the card's
+share (`head_of_processor_run_mb`: added in `card_share_of_split_mb`, taken off the processor run
+in `machine_charge`); `fresh_run_layers_for_planning` weighs a width at BOTH ends of the model,
+since the last carries the larger table and it pushes layers off the card. On this laptop's
+segment the split now places 10 layers (5,754 MiB with the table, 349 MiB of cache room against
+the 320 the conversation needs). Not changed (FUTURE_WORK #343): `plan_gpu_layers` places a
+segment's layers by their AVERAGE weight (the 70B's first ten weigh 519 MiB against 502 averaged
+over 17), and the planning curve (`cost_curve_of`) still spreads both tables over the layers.
+
+Tests: `a_segment_is_charged_the_tables_its_ends_load` (a header-only 70B shape, tied and untied:
+first, middle, last, whole), `a_split_pays_the_cards_tables_before_it_places_a_layer` (the
+control, the tables spread, places six layers where five fit),
+`a_split_charges_its_output_head_to_the_card`, `a_fresh_segment_is_weighed_at_both_ends_of_the_model`.
+Each fails with its part of the fix removed.
+
 ## The owner's own load is weighed against the owner's memory cap (2026-10-14, FUTURE_WORK #266)
 
 Found by #138 (3) stage B's first rig. #264 charged a split's processor share to the RAM budget,
