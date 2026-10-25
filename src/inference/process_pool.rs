@@ -5692,6 +5692,54 @@ impl ModelProcessPool {
         freed
     }
 
+    /// What growing `handle` by `segment` is charged, on the device the worker
+    /// was charged against (`WorkerHandle::holds_gpu_memory`, decided once at
+    /// spawn by `charges_ram`): the range's own figure off the admission curve,
+    /// and what the ranges it strictly contains already hold. The worker drops
+    /// those BEFORE it loads, so the peak it reaches is the new range LESS what
+    /// they held — and the peak is what admission exists to bound. Weighing the
+    /// full width against a total that still included them refused a
+    /// consolidation that fits: a worker holding [0..2) and [14..40) of a
+    /// 40-layer model, asked for [0..40), was charged for 40 new layers when it
+    /// needed 12 (FUTURE_WORK #95). `None`: unreadable geometry, nothing to
+    /// weigh. The one arithmetic behind [`Self::charge_additional_segment`] and
+    /// its dry run, [`Self::growth_would_be_admitted`].
+    fn growth_figures(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        handle: &WorkerHandle,
+    ) -> Option<(u64, u64)> {
+        let layers = u64::from(segment.1.saturating_sub(segment.0)).max(1);
+        let (_fixed_mb, per_layer_mb) =
+            self.segment_cost_curve(model_id, handle.holds_gpu_memory())?;
+        Some((
+            per_layer_mb.saturating_mul(layers),
+            handle.subsumed_charge(segment).mb,
+        ))
+    }
+
+    /// Would [`Self::charge_additional_segment`] admit `segment` beside what
+    /// `handle` holds — the same figures and the same verdict, charging
+    /// nothing?
+    fn growth_would_be_admitted(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        handle: &WorkerHandle,
+        requester: Requester,
+    ) -> bool {
+        let Some((delta_mb, subsumed_mb)) = self.growth_figures(model_id, segment, handle) else {
+            return true;
+        };
+        let net_mb = delta_mb.saturating_sub(subsumed_mb);
+        if handle.holds_gpu_memory() {
+            !matches!(self.card_verdict(net_mb), Verdict::Refused { .. })
+        } else {
+            !matches!(self.ram_verdict(net_mb, requester), Verdict::Refused { .. })
+        }
+    }
+
     /// Weigh and charge a layer range a live worker has not held before.
     ///
     /// Only the LAYERS are charged, never the fixed terms again: the process
@@ -5748,7 +5796,12 @@ impl ModelProcessPool {
         // accountant — `WorkerHandle::holds_gpu_memory` is that answer.
         let on_gpu = handle.holds_gpu_memory();
         let layers = u64::from(segment.1.saturating_sub(segment.0)).max(1);
-        let Some((_fixed_mb, per_layer_mb)) = self.segment_cost_curve(model_id, on_gpu) else {
+        // Still "admission before release", which is the property that
+        // matters: nothing is released here, so a refusal leaves every charge
+        // standing for memory the worker still holds. The discount is read
+        // under `spawn_lock`, the same lock the release below runs under, so
+        // the two see the same ranges.
+        let Some((delta_mb, subsumed_mb)) = self.growth_figures(model_id, segment, handle) else {
             // Unreadable geometry: nothing to weigh, and refusing on a file we
             // could not read would be a worse failure than the one prevented —
             // the same treatment `admit_to_gpu` and `admit_to_cpu` give it.
@@ -5759,22 +5812,6 @@ impl ModelProcessPool {
             }
             return Ok(());
         };
-        let delta_mb = per_layer_mb.saturating_mul(layers);
-        // The worker drops every range this one strictly contains BEFORE it
-        // loads it, so the peak it reaches is the new range LESS what those
-        // held — and the peak is what admission exists to bound. Weighing the
-        // full width against a total that still includes the ranges about to
-        // go refused a consolidation that fits: a worker holding [0..2) and
-        // [14..40) of a 40-layer model, asked for [0..40), was charged for 40
-        // new layers when it needed 12 (FUTURE_WORK #95).
-        //
-        // Still "admission before release", which is the property that
-        // matters: nothing is released here, so a refusal leaves every charge
-        // standing for memory the worker still holds. The discount is read
-        // under `spawn_lock`, the same lock the release below runs under, so
-        // the two see the same ranges.
-        let subsumed = handle.subsumed_charge(segment);
-        let subsumed_mb = subsumed.mb;
         let net_mb = delta_mb.saturating_sub(subsumed_mb);
         let admitted = if on_gpu {
             self.admit_to_gpu(model_id, net_mb)
@@ -6135,9 +6172,18 @@ impl ModelProcessPool {
                 Ok(false) => {}
                 Err(r) => refused = r,
             }
-        } else if std::env::var("SWARMLLM_RAM_GROWTH_RETIRE").as_deref() == Ok("0")
-            || !self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, segment, requester)
-        {
+        } else if std::env::var("SWARMLLM_RAM_GROWTH_RETIRE").as_deref() == Ok("0") {
+            return Err(refused.error);
+        }
+        // On either device, a worker is never given up for a range that would
+        // not load in its place: a card node's 70B worker holding [26..66) was
+        // retired for [13..73), whose fresh spawn then asked 29542 MB of a
+        // 24000 MB budget — the 40 layers were lost and the range refused all
+        // the same (2026-10-25, #349).
+        let fits_in_its_place = crate::inference::executor::without_starving_the_runtime(|| {
+            self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, segment, requester)
+        });
+        if !fits_in_its_place {
             return Err(refused.error);
         }
         // Decide under the spawn lock — the one every charge takes — so a
@@ -6168,13 +6214,15 @@ impl ModelProcessPool {
         Ok(Growth::Respawn)
     }
 
-    /// Would a fresh spawn of `segment` be admitted to system memory once this
-    /// model's worker has given back what it holds there? What `grow_worker`
-    /// asks before retiring an idle worker charged against system memory —
-    /// the spawn's own figure ([`Self::fresh_spawn_machine_mb`], the one the
-    /// up-front weighing reads, #345) against the admission it will meet
-    /// ([`Self::machine_would_take`]), the worker's charge counted as released.
-    /// Synchronous header reads, so off the runtime's workers.
+    /// Would a fresh spawn of `segment` be admitted once this model's worker,
+    /// if any, has given back what it holds? What `grow_worker` asks before it
+    /// retires an idle worker, and what the up-front weighing asks of a peer's
+    /// load ([`Self::forward_would_load`]) — the spawn's own figure for the
+    /// machine ([`Self::fresh_spawn_machine_mb`], the worker's card memory
+    /// counted as free) against the admission it will meet
+    /// ([`Self::machine_would_take`], the worker's system memory counted as
+    /// released). With no worker, a fresh spawn as it stands. Synchronous
+    /// header reads: call it off the runtime's workers.
     fn a_fresh_spawn_fits_in_place_of_the_worker(
         &self,
         model_id: &ModelId,
@@ -6182,14 +6230,41 @@ impl ModelProcessPool {
         requester: Requester,
     ) -> bool {
         let held_mb = self.ram_reserved_mb.get(model_id).map_or(0, |mb| *mb);
-        crate::inference::executor::without_starving_the_runtime(|| {
-            self.machine_would_take(
-                model_id,
-                self.fresh_spawn_machine_mb(model_id, segment),
-                requester,
-                held_mb,
-            )
-        })
+        self.machine_would_take(
+            model_id,
+            self.fresh_spawn_machine_mb(model_id, segment),
+            requester,
+            held_mb,
+        )
+    }
+
+    /// Would the forward that names `run` have its layers loaded here — what
+    /// `get_or_spawn` does for it, charging nothing? With no worker, a fresh
+    /// spawn; with one holding `run`, yes; with one that does not, the growth
+    /// ladder ([`Self::grow_worker`]): the range beside what it holds, else —
+    /// only where nothing is using the worker — a fresh spawn in its place.
+    ///
+    /// The card's reclaim and split rungs are not weighed for a worker in
+    /// use, so one can be answered no where its split rung would have taken
+    /// the range. That error is the cheaper one: a refusal up front holds the
+    /// peer to the layers that fit on the re-plan, where a refused forward
+    /// bars it from the request (#349).
+    fn forward_would_load(
+        &self,
+        model_id: &ModelId,
+        run: (u32, u32),
+        worker: Option<&WorkerHandle>,
+        requester: Requester,
+    ) -> bool {
+        match worker {
+            Some(h) if h.segment_is_charged(run) => true,
+            Some(h) => {
+                self.growth_would_be_admitted(model_id, run, h, requester)
+                    || (!h.in_use(self.conversation_window())
+                        && self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, run, requester))
+            }
+            None => self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, run, requester),
+        }
     }
 
     /// May `grow_worker` retire `handle`? Called under `spawn_lock`.
@@ -6682,10 +6757,15 @@ impl ModelProcessPool {
     /// forward naming it would spawn one — asks of the machine: the rungs of
     /// `get_or_spawn_once` in its order, charging nothing. The card whole or a
     /// card/processor split ([`Self::machine_mb_beside_card`], the planner's
-    /// own bound), else the whole run on the processor.
+    /// own bound), else the whole run on the processor. A fresh spawn of a
+    /// model replaces its worker, so what that worker holds on the card is
+    /// counted as free — none with no worker (#349).
     fn fresh_spawn_machine_mb(&self, model_id: &ModelId, run: (u32, u32)) -> u64 {
         if self.spawn_may_take_the_card(model_id) {
-            let budget = self.card_budget_for_planning(model_id);
+            let own_card_mb = self.vram_reserved_mb.get(model_id).map_or(0, |mb| *mb);
+            let budget = self
+                .card_budget_for_planning(model_id)
+                .saturating_add(own_card_mb);
             if let Some(mb) = self.machine_mb_beside_card(model_id, run, budget) {
                 return mb;
             }
@@ -6696,9 +6776,18 @@ impl ModelProcessPool {
 
     /// Would the forwards of a peer's split be refused the LOAD of the layers
     /// it asks about — weighed when no worker of the model runs here, so the
-    /// first forward would spawn one (FUTURE_WORK #345)? `None` when the spawn
-    /// would take them, or nothing here can say; else the spawn's own words
-    /// and the widest run from the first range's start that it takes.
+    /// first forward would spawn one (FUTURE_WORK #345), or the one that runs
+    /// does not hold the first range, so it would grow or be replaced
+    /// ([`Self::forward_would_load`], #349)? `None` when the load would be
+    /// admitted, or nothing here can say; else the spawn's own words and the
+    /// widest run from the first range's start that would load.
+    ///
+    /// **Why a live worker is weighed too.** A worker that held a range was
+    /// "go ahead" whatever it was asked, and only its prompt memory was
+    /// weighed. A card node holding [26..66) of a 70B for an earlier plan was
+    /// asked for [13..73), said go ahead, and its first forward retired the
+    /// worker and was refused at the spawn: twice on 2026-10-25, each time the
+    /// request failed where a refusal up front would have re-planned it.
     ///
     /// **Why the question is asked here.** "No worker" was "go ahead": there
     /// was no conversation memory to weigh. A cold Llama 3.3 70B was planned
@@ -6730,19 +6819,17 @@ impl ModelProcessPool {
             return None;
         }
         self.footprint_inputs(model_id, Some((start, end)))?;
-        let takes = |run| {
-            self.machine_would_take(
-                model_id,
-                self.fresh_spawn_machine_mb(model_id, run),
-                Requester::Swarm,
-                0,
-            )
-        };
+        let worker = self.live_worker(model_id);
+        let takes =
+            |run| self.forward_would_load(model_id, run, worker.as_deref(), Requester::Swarm);
         if takes((start, end)) {
             return None;
         }
-        // The widest run from `start` a spawn takes, by bisection: a run's
-        // charge grows with its width.
+        // The widest run from `start` that would load, by bisection: a run's
+        // charge grows with its width. (Growth beside a held range can cost
+        // less once the run swallows it; an idle worker's answer is the fresh
+        // spawn's, which grows with the width, and a busy worker's is held to
+        // the cheaper error above.)
         let (mut fitting, mut refused) = (start, end);
         while refused > fitting + 1 {
             let mid = fitting + (refused - fitting) / 2;
@@ -6956,25 +7043,39 @@ impl ModelProcessPool {
     /// keep a model loaded. Anything but a refusal (a busy worker, a worker
     /// error) is "go ahead": the forwards find out as they always have.
     ///
-    /// With no worker, what the forwards would do first is LOAD the layers:
-    /// that is weighed instead, as a spawn would weigh it, charging nothing
-    /// ([`Self::peer_load_refusal`], #345).
+    /// Where the forwards would first LOAD the layers — no worker, or one that
+    /// does not hold the first range — the load is weighed first, as the spawn
+    /// or the growth would weigh it, charging nothing
+    /// ([`Self::peer_load_refusal`], #345, #349); with no worker that is the
+    /// whole answer.
     pub(crate) async fn weigh_peer_prompt(
         &self,
         model_id: &ModelId,
         layer_ranges: Vec<(u32, u32)>,
         prompt_tokens: u32,
     ) -> PeerPromptWeight {
-        if self.live_worker(model_id).is_none() {
-            return match crate::inference::executor::without_starving_the_runtime(|| {
-                self.peer_load_refusal(model_id, &layer_ranges)
-            }) {
-                Some((message, layers_that_fit)) => PeerPromptWeight::DoesNotFit {
+        let worker = self.live_worker(model_id);
+        let holds_the_first = worker
+            .as_ref()
+            .zip(layer_ranges.first())
+            .is_some_and(|(h, &first)| h.segment_is_charged(first));
+        let no_worker = worker.is_none();
+        // Not held across the wait below: a handle is how a retirement signals.
+        drop(worker);
+        if !holds_the_first {
+            if let Some((message, layers_that_fit)) =
+                crate::inference::executor::without_starving_the_runtime(|| {
+                    self.peer_load_refusal(model_id, &layer_ranges)
+                })
+            {
+                return PeerPromptWeight::DoesNotFit {
                     message,
                     layers_that_fit,
-                },
-                None => PeerPromptWeight::Fits,
-            };
+                };
+            }
+            if no_worker {
+                return PeerPromptWeight::Fits;
+            }
         }
         let ask = IpcAdmitPrompt {
             request_id: Uuid::new_v4(),
@@ -10725,6 +10826,19 @@ mod tests {
         h
     }
 
+    /// [`admit_and_insert_cpu_worker`] holding `range` at `mb` — what a spawn
+    /// for that range leaves behind.
+    async fn cpu_worker_holding(
+        p: &ModelProcessPool,
+        m: &ModelId,
+        range: (u32, u32),
+        mb: u64,
+    ) -> Arc<WorkerHandle> {
+        let h = admit_and_insert_cpu_worker(p, m, mb, false).await;
+        h.record_charged_segment(range, mb);
+        h
+    }
+
     /// **A worker that consolidates its ranges kept paying for the ones it
     /// dropped.** The worker's map is keyed by the exact range, so a plan
     /// restating coverage it already has — [16..48) plus [0..16) becoming
@@ -11876,22 +11990,11 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&probe_dir);
 
-        async fn worker_holding(
-            p: &ModelProcessPool,
-            model: &ModelId,
-            held: (u32, u32),
-            held_mb: u64,
-        ) -> Arc<WorkerHandle> {
-            let h = admit_and_insert_cpu_worker(p, model, held_mb, false).await;
-            h.record_charged_segment(held, held_mb);
-            h
-        }
-
         // Room for the asked range alone, not beside the held one.
         let (p, dir) = setup("replaced");
         p.set_ram_budget_mb(asked_mb);
         assert!(held_mb + growth_mb > asked_mb, "fixture: growth is refused");
-        let h = worker_holding(&p, &model, held, held_mb).await;
+        let h = cpu_worker_holding(&p, &model, held, held_mb).await;
         let outcome = p
             .grow_worker(&model, asked, h, Requester::Swarm)
             .await
@@ -11903,7 +12006,7 @@ mod tests {
         // The range would not load even with the worker gone: keep it.
         let (p, dir) = setup("too-big");
         p.set_ram_budget_mb(asked_mb - 1);
-        let h = worker_holding(&p, &model, held, held_mb).await;
+        let h = cpu_worker_holding(&p, &model, held, held_mb).await;
         let refused = p
             .grow_worker(&model, asked, h.clone(), Requester::Swarm)
             .await;
@@ -11920,7 +12023,7 @@ mod tests {
         // In use: keep it, as on the card (#93).
         let (p, dir) = setup("in-use");
         p.set_ram_budget_mb(asked_mb);
-        let h = worker_holding(&p, &model, held, held_mb).await;
+        let h = cpu_worker_holding(&p, &model, held, held_mb).await;
         h.note_conversation(Uuid::new_v4());
         let refused = p
             .grow_worker(&model, asked, h.clone(), Requester::Swarm)
@@ -11931,6 +12034,134 @@ mod tests {
         ));
         assert!(p.workers.get(&model).is_some_and(|w| Arc::ptr_eq(&w, &h)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A peer whose worker does not hold the asked range weighs its LOAD**
+    /// (#349). A worker that held a range was "go ahead" whatever it was asked
+    /// — only its prompt memory was weighed — and its first forward then grew
+    /// or replaced it and was refused: a card node holding [26..66) of a 70B,
+    /// asked for [13..73), failed two requests that way (2026-10-25). Now it
+    /// answers as the forward would load: an idle worker by a fresh spawn in
+    /// its place, a busy one by the growth beside what it holds.
+    #[tokio::test]
+    async fn a_peer_with_a_worker_weighs_the_load_of_a_range_it_does_not_hold() {
+        let model = ModelId("seventy-b-shaped-held-load".into());
+        let (held, asked) = ((1, 4), (3, 7));
+        let setup = |tag: &str| {
+            let data_dir = header_only_seventy_b(&format!("held-load-{tag}"), &model, false);
+            (ModelProcessPool::new(data_dir.clone()), data_dir)
+        };
+        let (probe, probe_dir) = setup("probe");
+        let (held_mb, three_mb, asked_mb) = (
+            probe.fresh_spawn_machine_mb(&model, held),
+            probe.fresh_spawn_machine_mb(&model, (3, 6)),
+            probe.fresh_spawn_machine_mb(&model, asked),
+        );
+        let (_, per_layer_mb) = probe
+            .segment_cost_curve(&model, false)
+            .expect("fixture: a readable header");
+        let _ = std::fs::remove_dir_all(&probe_dir);
+        assert!(
+            held_mb == three_mb && three_mb < asked_mb,
+            "fixture: layers 1-7 weigh the same, a wider run costs more"
+        );
+        assert!(
+            held_mb + per_layer_mb * 4 > asked_mb,
+            "fixture: the asked range does not fit beside the held one"
+        );
+
+        // Idle, room for three layers in its place: no, three would load.
+        let (p, dir) = setup("refused");
+        p.set_ram_budget_mb(three_mb);
+        let _h = cpu_worker_holding(&p, &model, held, held_mb).await;
+        match p.weigh_peer_prompt(&model, vec![asked], 64).await {
+            PeerPromptWeight::DoesNotFit {
+                message,
+                layers_that_fit,
+            } => {
+                assert_eq!(
+                    layers_that_fit, 3,
+                    "a fresh spawn in its place takes [3..6)"
+                );
+                assert!(message.contains("3 would load"), "{message}");
+            }
+            PeerPromptWeight::Fits => {
+                panic!("a load neither growth nor a spawn in its place takes was answered go ahead")
+            }
+        }
+        assert!(p.live_worker(&model).is_some(), "weighing retires nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Idle, room for the asked range in its place: go ahead (the forward
+        // replaces the worker, #348).
+        let (p, dir) = setup("fits");
+        p.set_ram_budget_mb(asked_mb);
+        let _h = cpu_worker_holding(&p, &model, held, held_mb).await;
+        assert!(matches!(
+            p.weigh_peer_prompt(&model, vec![asked], 64).await,
+            PeerPromptWeight::Fits
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // In use: only the growth beside what it holds, which does not fit.
+        let (p, dir) = setup("in-use");
+        p.set_ram_budget_mb(asked_mb);
+        let h = cpu_worker_holding(&p, &model, held, held_mb).await;
+        h.note_conversation(Uuid::new_v4());
+        match p.weigh_peer_prompt(&model, vec![asked], 64).await {
+            PeerPromptWeight::DoesNotFit {
+                layers_that_fit, ..
+            } => assert!(layers_that_fit < 4, "{layers_that_fit}"),
+            PeerPromptWeight::Fits => {
+                panic!("a busy worker's growth beyond its memory was answered go ahead")
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **An idle worker on the card is kept where the range would not load in
+    /// its place** (#349). The growth ladder retired an idle card worker
+    /// whenever the card could not take the range, and the fresh spawn could
+    /// then be refused too: a 70B worker holding [26..66) was retired for
+    /// [13..73), whose spawn asked 29542 MB of a 24000 MB budget — 40 loaded
+    /// layers lost for nothing (2026-10-25). The control that a retirement
+    /// still happens where the spawn would load is
+    /// `an_idle_worker_that_cannot_grow_on_the_card_is_replaced_not_refused`.
+    #[tokio::test]
+    async fn an_idle_card_worker_is_kept_where_the_range_would_not_load_in_its_place() {
+        let model = ModelId("seventy-b-shaped-card-keep".into());
+        let data_dir = header_only_seventy_b("card-keep", &model, false);
+        let p = ModelProcessPool::new(data_dir.clone());
+        p.test_card_in_play
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        p.set_vram_budget_mb(1_500);
+        p.set_ram_budget_mb(64);
+        let (held, asked) = ((1, 4), (3, 8));
+        let h = admit_and_insert_gpu_worker(&p, &model, 750, std::time::Duration::from_secs(3600))
+            .await;
+        h.record_charged_segment(held, 750);
+        assert!(
+            !p.growth_would_be_admitted(&model, asked, &h, Requester::Swarm),
+            "fixture: the card cannot take the range beside the held one"
+        );
+        assert!(
+            !p.a_fresh_spawn_fits_in_place_of_the_worker(&model, asked, Requester::Swarm),
+            "fixture: nor would a fresh spawn's share of the machine fit"
+        );
+
+        let refused = p
+            .grow_worker(&model, asked, h.clone(), Requester::Swarm)
+            .await;
+        assert!(
+            matches!(refused, Err(SwarmError::LocalMemoryUnavailable(_))),
+            "refused, not replaced"
+        );
+        assert!(
+            p.workers.get(&model).is_some_and(|w| Arc::ptr_eq(&w, &h)),
+            "the worker and its layers are kept"
+        );
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     /// **The planner is offered room an idle model holds** — the half of the

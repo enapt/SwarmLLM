@@ -2019,8 +2019,8 @@ RTX 3070 Laptop, graphics budget 6019-6162 MB (Windows and a browser hold
    for a plan that failed before its first forward — when the next plan asked
    for [19..26) (3773 MB): either fitted, not both, and the request failed with
    all 80 layers otherwise covered; it happened again with [73..80) ten minutes
-   later. There the worker is retired only where a fresh spawn of the range
-   would be admitted with its memory given back
+   later. There — and on the card too since #349 — the worker is retired only
+   where a fresh spawn of the range would be admitted with its memory given back
    (`a_fresh_spawn_fits_in_place_of_the_worker`, the spawn's own figure
    `fresh_spawn_machine_mb` against `machine_would_take`): with no card to fall
    back to, a range too big for the machine alone would cost the worker and
@@ -3485,9 +3485,30 @@ reclaim counted (`machine_would_take`). A "no" carries the widest run from the a
 spawn takes (bisection, a run's charge growing with its width) and the spawn's own words
 (`ram_refusal_words`), and the coordinator's re-plan holds the peer to it — the path #252 (b)
 already had. The ask runs off the runtime's workers (`without_starving_the_runtime`: each weighing
-parses the header). What it does not weigh: a later range (it grows the first's worker), a live
-worker asked for a range it lacks (its growth is met by the forward), and the card's idle reclaim
-(as the planner's bound). Test `a_peer_with_no_worker_weighs_the_load_it_is_asked_for` (fails with
+parses the header). What it does not weigh: a later range (it grows the first's worker) and the
+card's idle reclaim (as the planner's bound). A live worker asked for a range it lacks was not
+weighed either until #349 (below).
+
+**A live worker asked for a range it lacks is weighed too (2026-10-25, #349).** Two requests of
+the same 70B failed past #345 on `aa3d1e66`: an earlier plan had loaded [26..66) there, the next
+asked for [13..73), and the worker's prompt check — the only one made when a worker runs — said go
+ahead. The first forward grew the worker, the card could not take the range, nothing was using the
+worker so the growth ladder RETIRED it, and the fresh spawn then asked 29542 MB of the 24000 MB
+budget: 40 loaded layers lost, the forward refused, the peer barred (requests `fd9ed40c`,
+`c8060e2f`). Now `weigh_peer_prompt` weighs the load whenever the worker does not hold the first
+range, by `ModelProcessPool::forward_would_load` — the growth ladder's outcome, charging nothing:
+the range beside what the worker holds (`growth_would_be_admitted`, the same `growth_figures` and
+verdict `charge_additional_segment` uses), else, only where nothing is using the worker, a fresh
+spawn in its place (`a_fresh_spawn_fits_in_place_of_the_worker`: `fresh_spawn_machine_mb` with the
+worker's card memory counted free, against `machine_would_take` with its system memory released).
+And the ladder itself asks that predicate before it retires, on either device: a worker is never
+given up for a range that would not load in its place. Not weighed: the card's reclaim and split
+rungs for a worker IN USE, so one can be answered no where the split would have taken the range —
+the cheaper error, a refusal up front holding the peer to `layers_that_fit` where a refused forward
+bars it. Tests `a_peer_with_a_worker_weighs_the_load_of_a_range_it_does_not_hold` (idle refused /
+idle fits / in use) and `an_idle_card_worker_is_kept_where_the_range_would_not_load_in_its_place`;
+the retirement that must still happen is
+`an_idle_worker_that_cannot_grow_on_the_card_is_replaced_not_refused`. Test `a_peer_with_no_worker_weighs_the_load_it_is_asked_for` (fails with
 the weigh off: the 8-layer ask is answered go ahead); A/B `SWARMLLM_PEER_LOAD_WEIGH=0`; log line on
 the asked node `DIAG: a peer's split asks this node for more layers than a worker here would be
 given memory for`.

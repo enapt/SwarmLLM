@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #349**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #350**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3298,7 +3298,19 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-25, ships in v0.3.255** (#348)
+**Closed 2026-10-25, ships in v0.3.255** (#348, #349)
+- #349 — **A computer already holding part of a model says no up front to a part it could not
+  load, and no longer drops what it holds for a fresh start that cannot fit.** The up-front
+  question (#345) weighed the load only where no worker ran; a worker holding OTHER layers
+  answered go ahead on its prompt memory alone. `aa3d1e66` held [26..66) of a 70B when asked for
+  [13..73): its first forward retired the worker (the card could not take the range, nothing was
+  using it) and the fresh spawn was refused (29542 MB of 24000) — two requests failed and 40
+  loaded layers were thrown away. Now `forward_would_load` weighs what the forward would do
+  (growth beside the held layers, else for an idle worker a fresh spawn in its place) and the
+  growth ladder retires a worker only where the range would load in its place. Evidence:
+  `docs/invariants/memory.md` § "A live worker asked for a range it lacks is weighed too".
+  Residual: a worker IN USE is weighed without the card's reclaim and split rungs (the cheaper
+  error, said in the evidence).
 - #348 — **A computer without a graphics card lets go of layers nothing is using to take the ones
   it is asked for.** A worker that could not take on a new range beside the ones it held was
   replaced only where it held graphics memory; in system memory it kept its refusal. Proxmox held

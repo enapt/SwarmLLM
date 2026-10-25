@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+**A computer already holding part of a large model now says no up front to a part it could not
+load.** Before a reply starts, each computer in a split is asked whether it can take its part.
+One that had already loaded other layers of the model answered only about the conversation's
+memory, said yes to a part bigger than it could load, then let go of the layers it had and
+failed — and the reply failed with it. It now answers by what loading the part would take, so
+the plan is changed before the reply starts, and it keeps the layers it has when the new part
+would not fit anyway (#349).
+
 **A computer without a graphics card no longer turns down part of a large model because of layers
 it loaded for an earlier attempt.** When a plan changed, a computer could be asked for a slightly
 different run of layers than the one it had just loaded. With a graphics card it let go of the
