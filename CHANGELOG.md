@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+**A computer with a graphics card no longer tells others it could hold more of a large model than
+its owner allows.** Each computer states the most memory it could ever give a model, and the
+planner never asks for more. A computer with a graphics card counted its card plus all of its
+ordinary memory, though the swarm's share of that memory is capped by its owner's setting: a
+12 GB card whose owner lets the swarm use 24 GB said it could hold all 80 layers of a
+70-billion-parameter model, where it could take about 66. It now counts the card plus the
+swarm's cap (#344).
+
 ## [0.3.253-alpha] — 2026-10-25
 
 **A model running whole on your computer now checks only the guesses that pay, and Qwen 3.5

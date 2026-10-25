@@ -1434,10 +1434,14 @@ layers "fit" a cap of 784 MB against a 980 MB footprint in the rig below.
 So each node advertises `NodeCapability::model_memory_ceiling_mb` (additive,
 `#[serde(default)]`; `vram::node_model_memory_ceiling_mb`): the RAM cap on a
 processor node — exactly what admission refuses past — and the whole card plus
-the whole machine's memory on a card node, whose loader splits a model across
-both and does not charge the processor's share to the RAM budget. An upper
-bound by construction, because a ceiling set too low would refuse routes the
-peer would accept. The planner weighs it with the PEER's own admission
+the swarm's RAM cap on a card node. (It was the card plus the whole machine's
+memory, written when the loader's split did not charge the processor's share to
+the RAM budget; since #264 that share is admitted against the requester's cap,
+and every reader of a ceiling is a peer, judged at the swarm's `cap_mb` (#266).
+Left as it was, a 12 GB card whose owner gives the swarm 24 GB advertised room
+for all 80 layers of a 70B where a peer could be given ~66 — 2026-10-25, #344.)
+An upper bound by construction, because a ceiling set too low would refuse
+routes the peer would accept. The planner weighs it with the PEER's own admission
 arithmetic, which is now ours too: `segment_cost_curve(model, processor)`, read
 once per plan — a model's weights come from its HEADER on every node
 (`footprint_inputs`, `docs/invariants/memory.md` § "A model's weights are its

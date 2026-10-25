@@ -1527,16 +1527,22 @@ pub fn node_model_budget_mb(shared: &crate::daemon::SharedState) -> Option<u64> 
 ///
 /// - models on the processor: the RAM cap admission refuses past
 ///   (`RamBudget::cap_mb` — `resources.max_ram_mb`, or what it auto-sized to);
-/// - models on a card: the whole card plus the whole machine's memory. The
-///   loader splits a model the card cannot hold across the card and the
-///   processor; that share is charged against the RAM cap of whoever asked
-///   (#264, #266), and the owner's cap is not the one advertised, so nothing
-///   tighter is certain.
+/// - models on a card: the whole card plus the SWARM's RAM cap. The loader
+///   splits a model the card cannot hold across the card and the processor,
+///   and the processor's share is admitted against the RAM cap of whoever
+///   asked (`process_pool::ram_charged_share`, #264, #266) — for every reader
+///   of this figure, a peer (`Requester::Swarm`, `RamBudget::cap_mb`), or
+///   coverage judging what this node carries for the swarm.
+///
+/// It was the card plus the whole machine's memory, from before #264 charged
+/// that share to anything: a 12 GB card on a machine whose owner gives the
+/// swarm 24 GB advertised room for all 80 layers of a 70B, where no peer's
+/// request could ever be given more than ~66 (2026-10-25, FUTURE_WORK #344).
 pub fn node_model_memory_ceiling_mb(shared: &crate::daemon::SharedState) -> Option<u64> {
     let ram = ram_budget_now(shared)?;
     if models_go_to_the_card(shared) {
         let card = shared.gpu_info.as_ref()?.vram_total_mb;
-        return Some(card.saturating_add(ram.total_mb.max(ram.cap_mb)));
+        return Some(card.saturating_add(ram.cap_mb));
     }
     Some(ram.cap_mb)
 }
@@ -1690,6 +1696,45 @@ pub fn ram_budget_now(shared: &crate::daemon::SharedState) -> Option<RamBudget> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A card node's ceiling is its card plus the swarm's RAM cap** (#344):
+    /// a peer's request is admitted against `RamBudget::cap_mb`, so room past it
+    /// is room no reader of the ceiling could ever be given. The machine's whole
+    /// memory, counted before, let a relaxed rung plan past the cap.
+    #[test]
+    fn a_card_nodes_ceiling_is_its_card_and_the_swarms_ram_cap() {
+        let mut config = crate::config::Config::default();
+        config.resources.max_ram_mb = 4_000;
+        let temp = tempfile::tempdir().unwrap();
+        let (state, _, _) = crate::daemon::SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            crate::storage::db::Database::open(temp.path()).unwrap(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::inference::executor::ModelExecutor::new(),
+            )),
+            Some(crate::inference::executor::GpuInfo {
+                name: "test card".into(),
+                vram_total_mb: 12_288,
+                backend: "cuda".into(),
+            }),
+        );
+        assert!(
+            models_go_to_the_card(&state),
+            "fixture: the card runs models"
+        );
+        let ram = ram_budget_now(&state).expect("this machine's memory reads");
+        assert!(
+            ram.total_mb > ram.cap_mb,
+            "fixture: the cap ({} MB) binds below the machine's {} MB",
+            ram.cap_mb,
+            ram.total_mb
+        );
+        assert_eq!(
+            node_model_memory_ceiling_mb(&state),
+            Some(12_288 + ram.cap_mb)
+        );
+    }
 
     /// #244: an `nvidia-smi` that took seconds parked the task queued behind it
     /// on the same runtime worker — the network manager, unpolled for 2.4-4.1 s.

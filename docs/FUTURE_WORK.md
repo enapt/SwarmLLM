@@ -570,16 +570,6 @@ LayerResult, read only where present), and the re-plan holds the peer to it via
 (`machine_room_beside_card_mb`) makes this case plan at face value instead, so this matters only
 where a relaxed rung still runs.
 
-#### #344 — A card node's memory ceiling counts all of its RAM, though a peer's share is held to the swarm's cap
-`P2` · routing · **OPEN** — 2026-10-25 · history: #345's request
-
-`vram::node_model_memory_ceiling_mb` on a card node is the card plus `max(total RAM, cap)`. Its
-rationale (`docs/invariants/scheduling.md`, v0.3.229) was that the loader "does not charge the
-processor's share to the RAM budget". Since #264/#266 the share is charged against the cap of
-whoever asked, and every reader of the ceiling is a peer (Swarm) or coverage judging for the swarm,
-so card + `RamBudget::cap_mb` is the certain bound. On AU that is 12 + 24 GB instead of 12 + all of
-its RAM. Fix it with a test that builds a card node's capability, and correct the invariants text.
-
 #### #250 — A model held whole here, which the card holds only part of, can be routed through peers at a fraction of local speed
 `P1` · routing · **PARTIAL** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.232-.234)
 
@@ -3321,6 +3311,12 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-25, ships in v0.3.254** (#344)
+- #344 — **A card computer's memory ceiling is its card plus the swarm's RAM cap.** It was the card
+  plus the whole machine's memory, from before #264 charged a split's processor share to the RAM
+  budget; a 12 GB card whose owner gives the swarm 24 GB advertised all 80 layers of a 70B where a
+  peer could be given ~66. Test `a_card_nodes_ceiling_is_its_card_and_the_swarms_ram_cap`.
 
 **Closed 2026-10-25, ships in v0.3.253** (#339, #342)
 - #342 — **A segment is charged the tables its ends load, where the loader loads them.** The pool
