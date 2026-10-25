@@ -1527,9 +1527,11 @@ mod fast_path_needs_tests {
 /// May a split of this request that this node drives guess ahead at all — is
 /// any guess-check path switched on (the drafter's, `dsd`; the n-gram loop's,
 /// which needs no drafter), is the request free of what stands every fast
-/// path aside, and can the model take a refused guess back
+/// path aside, and can the model take a refused guess back — any model by the
+/// n-gram loop, one without recurrent state by the drafter's too
 /// (`speculation_can_roll_back`)? What each path then asks of the PLAN and
-/// the drafter is its own, and the yield it got is measured, not assumed.
+/// the drafter is its own (`checks_can_be_taken_back`), and the yield it got
+/// is measured, not assumed.
 ///
 /// The ONE request-side answer for FUTURE_WORK #3 (d): the planner prices a
 /// split by its model's measured tokens per round only for a request this
@@ -1542,17 +1544,50 @@ pub(crate) fn request_may_guess_ahead(
     request: &crate::types::InferenceRequest,
 ) -> bool {
     let cfg = state.cfg();
-    let switched_on = (cfg.inference.speculative_decoding
-        && cfg.inference.decentralized_spec_decoding)
-        || cfg.inference.ngram_lookup_enabled;
-    switched_on
-        && !request_disqualifies_fast_paths(request)
+    let drafter = cfg.inference.speculative_decoding
+        && cfg.inference.decentralized_spec_decoding
         && distributed::speculation_can_roll_back(
             state
                 .gguf_meta_for(&request.model_id)
                 .map(|m| m.architecture.clone())
                 .as_deref(),
+        );
+    (drafter || cfg.inference.ngram_lookup_enabled) && !request_disqualifies_fast_paths(request)
+}
+
+/// May a check of guesses on this plan be taken back INTO — truncated to its
+/// last accepted token? Always for a model without recurrent state. One with
+/// (Qwen 3.5's DeltaNet) takes back only its last check, by replaying the rows
+/// it kept (`SsmState::rewind_to`, #228 (5)), and only on a node that does:
+/// every peer segment must advertise `features::RECURRENT_REWIND` — an older
+/// one refuses the truncate, and the forward after it. Asked before the n-gram
+/// loop and at each of its rounds, of the LIVE segments, since a stand-in may
+/// not advertise it.
+pub(super) fn checks_can_be_taken_back(exec: &PipelineExecutor) -> bool {
+    let architecture = exec
+        .shared_state
+        .gguf_meta_for(&exec.request.model_id)
+        .map(|m| m.architecture.clone());
+    distributed::speculation_can_roll_back(architecture.as_deref())
+        || every_peer_segment(
+            &exec.assignment.segments,
+            exec.shared_state.identity.node_id(),
+            |node| {
+                exec.shared_state
+                    .peer_advertises_feature(node, swarmllm_types::node::features::RECURRENT_REWIND)
+            },
         )
+}
+
+/// Does every segment of a plan that is not this node's pass `peer`?
+fn every_peer_segment(
+    segments: &[crate::types::PipelineSegment],
+    local: &crate::types::NodeId,
+    peer: impl Fn(&crate::types::NodeId) -> bool,
+) -> bool {
+    segments
+        .iter()
+        .all(|s| s.node_id == *local || peer(&s.node_id))
 }
 
 /// Common preconditions for any speculative-decoding fast path
@@ -2455,6 +2490,26 @@ mod tests {
             },
             layer_range: range,
         }
+    }
+
+    /// A check of a model with recurrent state is taken back into only where
+    /// EVERY peer segment can replay it (`features::RECURRENT_REWIND`): one
+    /// older peer refuses the truncate, so the plan reads one token at a time.
+    /// This node's own segments are its own build and never asked.
+    #[test]
+    fn a_check_is_taken_back_into_only_where_every_peer_segment_can() {
+        let (here, a, b) = (NodeId([1; 32]), NodeId([2; 32]), NodeId([3; 32]));
+        let segments = vec![
+            remote_segment(&here, (0, 8)),
+            remote_segment(&a, (8, 16)),
+            remote_segment(&b, (16, 24)),
+        ];
+        assert!(every_peer_segment(&segments, &here, |_| true));
+        assert!(!every_peer_segment(&segments, &here, |n| n == &a));
+        assert!(!every_peer_segment(&segments, &here, |n| n == &b));
+        // Only this node's segments: nothing to ask.
+        assert!(every_peer_segment(&segments[..1], &here, |_| false));
+        assert!(!every_peer_segment(&segments, &here, |n| n == &here));
     }
 
     /// Trees are wanted only where EVERY machine of the plan runs on a card:

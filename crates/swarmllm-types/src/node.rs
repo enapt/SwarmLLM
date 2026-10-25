@@ -374,6 +374,14 @@ pub mod features {
     /// again elsewhere.
     pub const SHARD_BUSY: u64 = 1 << 32;
 
+    /// Takes a check of a model with recurrent state back INTO it (#228 (5)):
+    /// a truncate to a position inside the last check replays each DeltaNet
+    /// layer's accepted rows from the state the check read
+    /// (`SsmState::rewind_to`). A coordinator checks guesses in a split of
+    /// such a model (Qwen 3.5) only where every peer segment advertises this;
+    /// an older node refuses the truncate, and the forward after it.
+    pub const RECURRENT_REWIND: u64 = 1 << 33;
+
     /// The full feature set THIS build implements. Advertised by every node,
     /// with [`KV_HALF_ON_CARD`], [`KV_WINDOW_SLIDES`] and
     /// [`REQUESTER_GUESSES`] beside it where they apply.
@@ -406,7 +414,8 @@ pub mod features {
         | DRAFT_TREES
         | CARRIED_ROUTE
         | DRAFT_TREE_FLOW
-        | SHARD_BUSY;
+        | SHARD_BUSY
+        | RECURRENT_REWIND;
 
     /// Does `advertised` include every bit in `needed`?
     pub fn supports(advertised: u64, needed: u64) -> bool {

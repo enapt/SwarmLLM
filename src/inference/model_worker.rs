@@ -1924,22 +1924,25 @@ async fn handle_forward(
 
     // Speculative partial-accept KV fixup: coordinator may request truncation
     // of this request's KV cache to a specific length before the forward runs.
-    // Discards trailing stale entries written during a prior verify round.
+    // Discards trailing stale entries written during a prior verify round. A
+    // truncate refused is the forward refused: the cache would hold positions
+    // the reply does not, and the forward would write after them (it read
+    // "proceeding without truncation" until 2026-10-25) — a model with
+    // recurrent state refuses one past its last check (`SsmState::rewind_to`).
     if let Some(target_len) = fwd.truncate_kv_to {
-        if let Err(e) = kv_store.truncate_request_to(&model_key, &req_id_str, target_len as usize) {
-            tracing::warn!(
-                request_id = %request_id,
-                target_len,
-                error = %e,
-                "truncate_request_to failed — proceeding without truncation"
-            );
-        } else {
-            tracing::debug!(
-                request_id = %request_id,
-                target_len,
-                "DIAG: truncated KV cache for speculative partial accept"
-            );
-        }
+        kv_store
+            .truncate_request_to(&model_key, &req_id_str, target_len as usize)
+            .map_err(|e| {
+                SwarmError::ServiceUnavailable(format!(
+                    "this computer cannot take request {request_id} back to position \
+                     {target_len}: {e}"
+                ))
+            })?;
+        tracing::debug!(
+            request_id = %request_id,
+            target_len,
+            "DIAG: truncated KV cache for speculative partial accept"
+        );
     }
 
     // A streamed verify must continue exactly where the cache ends: the cache

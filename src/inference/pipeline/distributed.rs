@@ -59,8 +59,10 @@ impl PipelineExecutor {
 
         // Every speculative path below takes a rejected draft back by
         // truncating each holder's KV cache. A model with RECURRENT state
-        // (Qwen 3.5's DeltaNet) cannot be taken back, so none of them may run
-        // on it — asked once, here, ahead of all three (FUTURE_WORK #117).
+        // (Qwen 3.5's DeltaNet) takes back only its last check (FUTURE_WORK
+        // #117, #228 (5)), so the drafter's two paths may not run on it —
+        // asked once, here, ahead of all three; the n-gram loop asks
+        // `checks_can_be_taken_back` of the plan.
         let speculation_allowed = speculation_can_roll_back(
             self.shared_state
                 .gguf_meta_for(&self.request.model_id)
@@ -109,7 +111,7 @@ impl PipelineExecutor {
         // f32 return per round. The payoff gate is what bounds that now; the
         // wire itself is still the wrong shape for a miss round, and that is
         // written up in `docs/FUTURE_WORK.md`.
-        if speculation_allowed {
+        if super::checks_can_be_taken_back(self) {
             let outcome = self.try_ngram_only_distributed(token_tx.clone()).await;
             if let Some(out) = self.keeping_the_partial(outcome, token_tx.as_ref()).await? {
                 return Ok(out);
@@ -4052,12 +4054,15 @@ mod composite_takeover_tests {
     }
 }
 
-/// May a speculative path run on a model of this GGUF architecture? No, when
-/// the model carries recurrent state (Qwen 3.5's DeltaNet): speculation takes a
-/// rejected draft back by truncating the KV cache, and a recurrent state cannot
-/// be truncated. An architecture this node has not read (`None`) is left to the
-/// paths' own preconditions — each needs this node's copy of the model's header
-/// or a draft model. The worker asks the same question of its loaded model
+/// May a speculative path that takes back more than its last check run on a
+/// model of this GGUF architecture — the drafter's (its own steps, checks in
+/// flight)? No, when the model carries recurrent state (Qwen 3.5's DeltaNet):
+/// such a state is taken back only into its last check, by replaying the rows
+/// that check kept (`SsmState::rewind_to`, #228 (5)) — what the n-gram loop
+/// needs, which asks [`super::checks_can_be_taken_back`]. An architecture this
+/// node has not read (`None`) is left to the paths' own preconditions — each
+/// needs this node's copy of the model's header or a draft model. The worker
+/// asks the same question of its loaded model
 /// (`SplitModel::carries_recurrent_state`).
 pub(super) fn speculation_can_roll_back(architecture: Option<&str>) -> bool {
     !architecture

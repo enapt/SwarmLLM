@@ -111,7 +111,7 @@ speed is what the swarm is for, so split speed for large models is the top track
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
 11. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
-12. **#228** — Qwen 3.5 guesses ahead only on one computer (processor and card since 2026-10-25, a rejected check replayed into); splits next — a feature bit, #228 (5) stage 2.
+12. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25; the drafter's paths and MTP still stay off — a checkpoint replayed across steps, #228 (5).
 13. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
     decision, with research, when picked up.
 14. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
@@ -2329,7 +2329,8 @@ two buffer pairs and a step writes the pair it did not read (`SsmState`), as lla
 cache tensors; the 0.8B writes 121-126 tokens a second instead of 50-54 whole on the card, the 4B is unchanged
 (~37, card-bound), ids identical with capture on and off (`docs/invariants/inference.md` § "Qwen 3.5's decode steps are captured
 too"). MoE layers are captured where their experts are stacked on the card (#138 (2), 2026-10-14); (5) **speculation —
-PARTIAL: the worker's own n-gram on the processor AND the card since 2026-10-25, ships in v0.3.253.** A check
+PARTIAL: the worker's own n-gram on the processor AND the card, and a split's n-gram loop, since 2026-10-25,
+ship in v0.3.253.** A check
 that rejects a guess is taken back INTO: each DeltaNet layer keeps its last check's inputs (`SsmRows`: the
 convolution's inputs, normalised q and k, v, g, β — 64 KB a row a layer on the 4B against 2 MB for a state)
 beside the pair it read, and a truncate into the check replays the accepted rows' convolution window and delta
@@ -2343,12 +2344,13 @@ again at the head of the next. Measured (`docs/invariants/inference.md` § "A re
 into its last check by replaying the rows it kept"): processor 4B story 10.4 → 15.9-17.0 tok/s, 0.8B code
 29-32 → 33.4-33.8; card, one-off captures left out, 0.8B code 145 → 193-196, story 145 → 233-236, 4B 78 →
 89-96; a card's guessed reply parts from one at a time only where the card cannot decide. Residual: a new
-check width's first capture costs up to 0.56 s, once per worker. **Next — splits (stage 2)**: the split's
-n-gram loop already sends its peers `truncate_kv_to` into the check; a peer that replays it advertises a
-feature bit (`RECURRENT_REWIND`, 33), the coordinator checks guesses on a Qwen 3.5 split only where every
-peer segment does, and a peer whose truncate is refused refuses the forward (today it is logged and the
-forward runs — its cache would hold positions the reply does not). One check in flight only: the chain
-stream, trees and flows stay off for such a model. **Then the drafter and MTP**: they take back γ steps of
+check width's first capture costs up to 0.56 s, once per worker. **Splits (stage 2, done 2026-10-25)**: a
+peer that replays a check advertises `features::RECURRENT_REWIND` (bit 33); the coordinator's n-gram loop
+runs on a Qwen 3.5 split only where every peer segment does (`pipeline::checks_can_be_taken_back`, asked
+before the loop and at each round — a stand-in may not), and a peer whose truncate is refused refuses the
+forward (`ServiceUnavailable`; it was logged and the forward ran, its cache holding positions the reply did
+not). Qwen3.5-0.8B Q8_0 split across two nodes on the processor (`split_rig.sh split`, `RIG_PROMPT`, `RIG_ASKS=2`, a 100 ms round trip, an optimized build, the warm second ask, two runs an arm, greedy): code continued 6.5-6.6 → 13.8-14.0 tokens a second (73 rounds → 22), a function renamed 6.0 → 12.7-12.8 (44 → 12); every reply identical to the one with the n-gram off, and with B on v0.3.252 A did not guess (same reply). B took back 9 checks, each INTO the check it had just read (a 5-position check from 104 cut to 107), none refused. One check in flight only: the chain stream, trees and flows stay off for such a
+model. **Then the drafter and MTP**: they take back γ steps of
 their own, so the rows must be kept across steps from one checkpoint (ReplaySSM buffers 16 for Qwen 3.5;
 `docs/plans/split_speculation.md` § MTP). Today's gates: `pipeline::distributed`
 (`no_speculation_on_a_model_with_recurrent_state`), `engine_drafter` (a drafter with recurrent state is

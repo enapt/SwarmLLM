@@ -5235,11 +5235,16 @@ uptime: 0.8B code 144-146 → 193-196, story 143-147 → 233-236; 4B code 78-79 
 cost a conversation's first check the buffers they live in on the card (28.8 ms against 12.3 for
 the next of its width, 0.8B) — counted since as a one-off (`DecodeGraph::note_not_ready`).
 
-**A split** (`pipeline::ngram_only_spec`) sends its peers the same truncate into a check
-(`truncate_kv_to`, the check's last accepted position); a peer replays it as the worker does. It
-stays off for a recurrent model until every segment advertises that it can (FUTURE_WORK #228 (5)
-stage 2). A drafter with recurrent state needs more than one step taken back — a checkpoint replayed
-across several steps, as ReplaySSM buffers them — and stays off.
+**A split** (`pipeline::ngram_only_spec`, since 2026-10-25) sends its peers the same truncate into
+a check (`truncate_kv_to`, the check's last accepted position); a peer replays it as the worker does,
+and says so: `features::RECURRENT_REWIND` (bit 33). The loop runs on a recurrent model only where every
+peer segment advertises it (`pipeline::checks_can_be_taken_back`, asked before the loop and at each
+round, of the live segments — a stand-in may be older), and a worker whose truncate is refused refuses
+the forward (`ServiceUnavailable`): until then it logged "proceeding without truncation" and ran the
+forward after positions the reply did not hold — on any model, a silently wrong cache. Its checks are
+`MAX_GUESSES_PER_CHECK` (16) guesses and the token before them, under the 32 rows kept. Measured: Qwen3.5-0.8B Q8_0 split across two nodes on the processor (`split_rig.sh split`, `RIG_PROMPT`, `RIG_ASKS=2`, a 100 ms round trip, an optimized build, the warm second ask, two runs an arm, greedy): code continued 6.5-6.6 → 13.8-14.0 tokens a second (73 rounds → 22), a function renamed 6.0 → 12.7-12.8 (44 → 12); every reply identical to the one with the n-gram off, and with B on v0.3.252 A did not guess (same reply). B took back 9 checks, each INTO the check it had just read (a 5-position check from 104 cut to 107), none refused.
+A drafter with recurrent state needs more than one step taken back — a checkpoint replayed across
+several steps, as ReplaySSM buffers them — and stays off.
 
 **What a card's guessed reply is held to** (2026-10-25). A card's forward of several positions is
 not width-invariant — vLLM's "batch invariance", which its kernels lack too outside a dedicated
@@ -5264,8 +5269,9 @@ bar stays identical ids.
 - **Coordinator**: `pipeline::distributed::speculation_can_roll_back(architecture)` is asked ONCE in
   `execute_distributed`, after the delegated-split hand-off and ahead of DSD (stream included),
   single-segment speculative and n-gram-only — "one invariant, N paths", so it sits where all three
-  pass. A delegated split's head asks the same on its own node. A split stays off until every
-  segment advertises that it takes a check back into it (#228 (5) stage 2).
+  pass. A delegated split's head asks the same on its own node. It gates the drafter's paths;
+  the n-gram loop asks `pipeline::checks_can_be_taken_back` (every peer segment advertises
+  `RECURRENT_REWIND`), before the loop and at each round.
 - **Worker**: SWIFT and a drafter with recurrent state (`engine_drafter`, which would have to take
   back γ steps) ask `SplitModel::carries_recurrent_state` and stay off; the worker's n-gram
   (`ngram_spec_eligible`) takes every model on either device.
@@ -5278,7 +5284,8 @@ bar stays identical ids.
   and restored whole". A prompt pass at position 0 clears the entry (state included), which is also
   how a failover replay rebuilds it on a stand-in.
 
-Splits wait on #228 (5) stage 2; a recurrent drafter on a checkpoint replayed across steps.
+A recurrent drafter, MTP and the split's chain stream, trees and flows wait on a checkpoint replayed
+across steps (FUTURE_WORK #228 (5)).
 
 ## Qwen 3.5's prompt is saved short of its end, and restored whole (2026-10-18, FUTURE_WORK #228 (8))
 

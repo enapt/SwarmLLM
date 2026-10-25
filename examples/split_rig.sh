@@ -14,6 +14,9 @@
 #
 # MODES
 #   split  two greedy questions through A; prints the route headers and replies.
+#          RIG_PROMPT asks that question alone instead (RIG_MAX_TOKENS, default
+#          128; RIG_ASKS times, default 1 — a later ask finds both nodes warm)
+#          — e.g. one the reply copies from, so A's n-gram loop guesses.
 #   reasoning  one greedy question to a reasoning model (default qwen3-1.7b-q8-0)
 #          through the split, streamed and not: the finished scratchpad must be
 #          the same in message.reasoning_content and delta.reasoning_content,
@@ -1284,6 +1287,12 @@ PY
   exit $?
 fi
 
+if [ "$MODE" = split ] && [ -n "${RIG_PROMPT:-}" ]; then
+  for i in $(seq 1 "${RIG_ASKS:-1}"); do
+    ask "$RIG_PROMPT" "${RIG_MAX_TOKENS:-128}" "q$i" | tee -a "$OUT/replies.jsonl"
+  done
+  exit 0
+fi
 if [ "$MODE" = split ]; then
   ask "What is the capital of France? Answer in one sentence." 64 q1 | tee "$OUT/replies.jsonl"
   ask "Write a short Python function that returns the factorial of n." 64 q2 | tee -a "$OUT/replies.jsonl"

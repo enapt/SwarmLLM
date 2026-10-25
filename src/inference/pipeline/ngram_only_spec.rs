@@ -733,6 +733,14 @@ impl PipelineExecutor {
             }
             let from_requester = !guessed.is_empty();
             let drafts = if from_requester { guessed } else { looked_up };
+            // A stand-in that cannot take a check of this model back into it
+            // (an older node, on a model with recurrent state) reads it one
+            // token at a time.
+            let drafts = if drafts.is_empty() || super::checks_can_be_taken_back(self) {
+                drafts
+            } else {
+                Vec::new()
+            };
 
             if drafts.is_empty() {
                 // ── Fallback: single-token verify (γ=0 batch = 1 position) ──

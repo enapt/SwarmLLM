@@ -24,6 +24,16 @@ at 114 tokens a second instead of 88-112 (115 without guessing). As with every m
 graphics card checks guesses for, a reply can differ from the one-word-at-a-time reply where the
 model is almost evenly split between two words; llama.cpp on a graphics card behaves the same way.
 
+**Qwen 3.5 split across several computers guesses ahead too, about twice as fast where the reply
+repeats text.** A split checks its guesses on every computer holding part of the model, and each has
+to undo a wrong guess the same exact way one computer does. Computers on this version say that they
+can, and the computer running the reply guesses only when every other one in the split does — with
+one on an older version it reads one word at a time, as before. Measured with the 0.8B split between
+two computers 100 ms apart: code continued at 13.8-14.0 words a second instead of 6.5-6.6, a renamed
+function at 12.7-12.8 instead of 6.0, every reply identical to the one written a word at a time.
+A computer told to undo words it cannot now refuses the step outright rather than carrying on from
+the wrong place (#228).
+
 **Made-up computers can no longer push a model part's real holders out of your node's list.**
 Each computer keeps a list of up to 50 others holding each piece of a model. Announcing that you
 hold a piece needs only a freshly made identity, and once a list was full every new announcement
