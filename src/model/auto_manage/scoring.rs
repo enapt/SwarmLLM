@@ -343,7 +343,8 @@ impl AutoShardManager {
                      fetching them so it runs here whole"
                 );
             }
-            // Stage 3: this node's segment of the chain its NEARBY machines
+            // Stage 3: this node's segment of the chain its NEARBY machines —
+            // or, where they cannot carry it, every machine in scope (#346) —
             // plan alike for a model none of them can run whole
             // (`coverage::near_chain`) — the parts of it this node lacks. Like
             // carried parts they skip the replica target and the hash ring, and
@@ -353,7 +354,7 @@ impl AutoShardManager {
                 tracing::info!(
                     model = %manifest.id,
                     parts = near_parts.len(),
-                    "DIAG: fetching this computer's part of a chain of nearby machines for a model none of them can run whole (Stage 3)"
+                    "DIAG: fetching this computer's part of a chain of machines for a model none of them can run whole (Stage 3, #346)"
                 );
             }
             // A split driven from here ran with nothing to guess for it, or

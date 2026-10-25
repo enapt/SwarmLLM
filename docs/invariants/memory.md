@@ -2529,7 +2529,8 @@ in rendezvous order — and fetches its own segment's missing parts:
   from its header, which a node fetches only to route the model or fetch a part — so a near
   machine holding none of it never planned at all. Each pass learns the header of an asked-for
   model a near machine holds part of (at most two, HuggingFace, not offline or metered).
-- Below urgent disk pressure only: a near chain makes a split fast, carrying makes it possible.
+- Below urgent disk pressure only: a near chain makes a split fast, carrying makes it possible
+  (and so does a far chain, #346, kept at any pressure for that reason).
 
 **Evidence.** `coverage::near_chain::tests::*` — the reported fleet shape (this node 16 layers,
 the LAN box 20 holding parts 2-6, a far peer holding everything): the chain is this node 0-12 and
@@ -2575,6 +2576,52 @@ because for nine tokens the router rightly keeps a warm far route over a near co
 
 **A change must keep**: both passes ask the one chain; in-flight counted as held; the holds
 deadlines, never an `Instant` set in the past (a just-booted host cannot represent one).
+
+**Where the near machines cannot carry it, the chain is planned over every machine in scope
+(2026-10-25, #346).** Llama 3.3 70B Q4_K_M (80 layers), asked at 10:48Z with every peer on
+v0.3.253 (request `5a383498`): four holders 300-410 ms apart but for this node's LAN box, none
+able to run it — this node [0,17) (room for 22), `99aafc41` [0,13),[43,44),[73,80) (23),
+`aa3d1e66` [13,73) (35 at face value — the 80 its v0.3.253 ceiling claimed was #344's defect), `96842635` [17,43),[44,80) (7). No near set could
+carry it, so no near chain; and carrying's count SUMMED each holder's own figure (the smaller of
+the distinct layers it held and its ceiling), counting a layer once per holder: 21 + 17 + 35 + 7
+= 80 of 80 "carried" while a maximum flow from layers to holders places 67. `copy_carries_model`
+was false everywhere, nothing fetched, and the replica count shed the Mac's middle parts (21
+layers at 10:48Z from 40 at 08:38Z) — the one holder with room to spare there. Two changes:
+
+- **`scheduler::layers_carried` is a maximum flow** — each layer given to ONE holder of it, none
+  past what it could take (Edmonds-Karp over stretches of layers held by the same computers, so
+  the network follows the ranges). It is also the planner's "room for about N of its L layers",
+  which read the same overcount. Test
+  `scheduler::tests::a_layer_held_by_several_computers_is_carried_once` (four holders of the same
+  ten layers carry 20 of 28, not 40; the 70B's holders 67, not 80).
+- **`compute_near_chain` falls back to `Reach::Far`** — the same plan (`plan_over`: one run per
+  machine within its ceiling, fewest segments, fewest parts, rendezvous ties; leases and holds
+  unchanged) over `machines_in_scope`, where the near ones `CannotCarry`; a machine able to run
+  the model whole is still carrying's. Prune keeps a part of the far chain planned NOW at ANY
+  pressure, as carrying's copies are — it is how the model runs at all — and a near chain's, or
+  one named only within the day, below urgent (`copy_in_near_chain` → `ChainPart`): the day's hold
+  rides out a neighbour that flaps, never a full disk — the first cut kept a dissolved far chain's
+  part at urgent pressure for 24 h, which
+  `prune_keeps_the_copies_that_carry_a_model_until_another_holder_can` caught. A far machine
+  stating no ceiling yet (connected a moment ago) is planned without — the far set differs per
+  observer anyway, and aborting on every newcomer would hand a large swarm's model back and
+  forth between the chain and carrying; a NEAR one still stops the plan (test
+  `a_far_chain_is_planned_without_a_machine_that_has_not_stated_its_memory`). **Carrying stands
+  down while any chain is planned** (`chain_planned_for`, asked by `needs_carrier` and `copy_carries_model`): a carrier
+  fetching in model order beside the chain fetched what the chain did not use, and its per-holder
+  keep held all 62 layers of a holder with room for 7. A machine with no header learns it when
+  the model's weights alone outgrow every in-scope ceiling and any in-scope machine holds part of
+  it. Test `machines_far_apart_that_only_together_can_run_a_model_plan_one_chain` (this node 20,
+  a peer 250 ms away 16, a holder 200 ms away 12: chain holder 12 + this node 20, its five parts
+  offered and kept, carrying down; controls: a machine able to run it whole, ceilings short).
+
+This is Petals' placement (Borzunov et al. 2023, arXiv 2312.08361 § 3.2;
+`petals/server/block_selection.py` `choose_best_blocks`): each server one contiguous span sized to
+its memory, over the blocks the swarm covers worst. Petals moves a server only when a simulated
+rebalance gains ≥ 20%; here a complete chain is never rebalanced at all. **What it does not do**:
+weigh distance — fewest segments is the proxy, and the router prices the chain it is given; and
+agree where machines see different peers (a partial mesh): each plan's fetch is bounded by one
+machine's ceiling, and both settle on what is then held.
 
 ## A split with no drafter fetches one (2026-10-22, #134)
 

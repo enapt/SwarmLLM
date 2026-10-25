@@ -9,11 +9,12 @@
 //! honest, and still no answer.
 //!
 //! **Carrying** is the question replicas never asked: how many of a model's
-//! layers its live holders could ever hold between them — each counted at the
-//! smaller of the layers it holds and its advertised ceiling
-//! (`NodeCapability::model_memory_ceiling_mb`, weighed with the model's own
-//! admission curve), the arithmetic the planner's shortage report uses
-//! (`scheduler::layers_carried`). When that falls short of the model:
+//! layers its live holders could ever hold between them — the most layers
+//! that can each be given to one holder of it, none past its advertised
+//! ceiling (`NodeCapability::model_memory_ceiling_mb`, weighed with the model's
+//! own admission curve), the arithmetic the planner's shortage report uses
+//! (`scheduler::layers_carried`; a sum of each holder's own figure until #346,
+//! which counted a layer once per holder). When that falls short of the model:
 //!
 //! - **one carrier at a time** fetches it: the machine with the highest
 //!   rendezvous weight (`blake3(model ‖ node)`) among those with room for at
@@ -32,7 +33,10 @@
 //!
 //! Only for a model somebody has ASKED for (regional demand or this node's own
 //! requests) and only when the connected swarm's ceilings could carry it at
-//! all: a model nobody can run must not pull a copy onto every machine.
+//! all: a model nobody can run must not pull a copy onto every machine. A model
+//! only a split can run is placed by a CHAIN instead (`near_chain`, near
+//! machines first, else every machine in scope — #346), and carrying stands
+//! down while one is planned.
 //! Unknown — no header here, a holder or candidate with no ceiling (older than
 //! v0.3.230) — is never "short": everything behaves as before.
 
@@ -45,7 +49,7 @@ use super::AutoShardManager;
 mod drafter;
 mod near_chain;
 pub(super) use drafter::DrafterBook;
-pub(super) use near_chain::NearChainBook;
+pub(super) use near_chain::{ChainPart, NearChainBook, Reach};
 
 /// How long a model's cost curve is kept. It changes only with the node's own
 /// context override; the header behind it never changes.
@@ -295,9 +299,14 @@ impl AutoShardManager {
     }
 
     /// Does `manifest` need a carrier: asked for, its holders short of it,
-    /// and the swarm able to carry it?
+    /// the swarm able to carry it, and no chain planned for it — a chain
+    /// places a model only a split can run (`near_chain`, #346), and two
+    /// placements of one model would fetch past each other.
     pub(super) fn needs_carrier(&self, manifest: &ModelManifest) -> bool {
-        if manifest.num_layers == 0 || !self.asked_for(&manifest.id) {
+        if manifest.num_layers == 0
+            || !self.asked_for(&manifest.id)
+            || self.chain_planned_for(manifest)
+        {
             return false;
         }
         let Some(curve) = self.carry_curve(&manifest.id) else {
@@ -448,6 +457,10 @@ impl AutoShardManager {
     ///   part is held, so holdings alone cannot answer it;
     /// - otherwise, `node` adds to what carries the model, and without it the
     ///   model would fall short. A holder adding nothing (no room) is not kept.
+    ///
+    /// Never for a model a chain is planned for: the chain keeps its own
+    /// segments (`copy_in_near_chain`), and this answer — per holder, not per
+    /// part — would keep all 62 layers a holder with room for 7 has (#346).
     pub(super) fn copy_carries_model(&self, shard_id: &ShardId, node: &NodeId) -> bool {
         if shard_id.index == MMPROJ_SHARD_INDEX || !self.asked_for(&shard_id.model_id) {
             return false;
@@ -459,6 +472,9 @@ impl AutoShardManager {
         else {
             return false;
         };
+        if self.chain_planned_for(&manifest) {
+            return false;
+        }
         if self.needs_carrier(&manifest) && self.carrier_for(&manifest).as_ref() == Some(node) {
             return true;
         }
@@ -670,6 +686,10 @@ mod tests {
     #[test]
     fn the_chosen_carrier_fetches_only_what_closes_the_shortfall() {
         let (state, manager, mid, small) = the_reported_shape(16);
+        // A machine that could run the model whole, as the report's cards
+        // could — with no disk, so it is never the one chosen. Without one
+        // the model is a split's, placed by a chain (`near_chain`, #346).
+        peer_with_disk(&state, 6, Some(ceiling_for(32)), 0);
         assert_eq!(
             offered(&manager, &state),
             vec![0],
@@ -678,9 +698,7 @@ mod tests {
         assert_eq!(fetched(&manager, &state), vec![0]);
 
         // The holder could carry only 8: 24 short, and this node's room (16)
-        // is what bounds it. A machine with room but no disk keeps the swarm
-        // able to carry the model without being the one chosen to.
-        peer_with_disk(&state, 6, Some(ceiling_for(32)), 0);
+        // is what bounds it.
         state
             .peer_registry
             .get_mut(&small)
@@ -706,6 +724,9 @@ mod tests {
     /// Prune keeps a copy without which the model's holders could not carry it,
     /// and sheds it once another holder can — the same answer the download pass
     /// asked before fetching it, so a carried part is never shed and refetched.
+    /// Here no machine could run the model whole, so the keep is the far
+    /// chain's (this node 0-16, the holder 16-32; #346), at urgent pressure as
+    /// carrying's is; once one could, it is carrying's question again.
     #[test]
     fn prune_keeps_the_copies_that_carry_a_model_until_another_holder_can() {
         let (state, manager, mid, small) = the_reported_shape(16);
@@ -730,6 +751,7 @@ mod tests {
         let big = peer(&state, 3, Some(ceiling_for(32)));
         holds(&state, &mid, &big, &[0, 1, 2, 3]);
         let holders = vec![small, roomless, big, local];
+        manager.forget_planned_chains();
         assert!(
             manager.would_shed_copy(&part0, &holders, 0.99, &[]),
             "the model is carried without this copy: prune treats it like any other"

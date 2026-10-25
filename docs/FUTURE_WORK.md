@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #346**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #347**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -554,33 +554,6 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 § 4 item 7); with V1Lazy (#136) request-response is as fast, so there is no speed reason to.
 
 ### Routing and placement
-
-#### #346 — A model only a split can run is "carried" by a sum that counts the same layers on every holder, so its parts are never placed where the holders' memory is
-`P1` · placement · **OPEN** — 2026-10-25 · history: the 70B's third ask, request `5a383498` (10:48Z, every peer on v0.3.253)
-
-Llama 3.3 70B Q4_K_M (80 layers). Disk holdings → layers each could load (face / ceiling): this node
-[0,17) → 22 (one fresh run) · `99aafc41` [0,13),[43,44),[73,80) → 15 / 23 · `aa3d1e66` [13,73) → 35 / 80
-(the pre-#344 ceiling) · `96842635` [17,43),[44,80) → 6 / 7. At face value the four offer 78 layers of 80,
-whatever the placement, so no strict rung routes; `PeersAtCeiling` gave `aa3d1e66` 60 layers and its spawn
-refused ("needs about 31077 MB"). Two placement faults sit under it. (1) `coverage::carried_layers` counts
-each holder at `min(distinct layers held, ceiling layers)` and SUMS them (`scheduler::layers_carried`), so a
-layer held by three machines counts three times: 60 + 21 + 17 + 7 = 105 "carried" of 80, `copy_carries_model`
-is false everywhere, and nothing fetches — while layers 58-73 are held only by two machines whose room is
-spent elsewhere. (2) So the Mac's copies count as spare and the replica count sheds them: it held
-[0,17),[29,34),[43,52),[56,57),[69,80) at 08:38Z and 21 layers at 10:48Z — the one holder with room to spare
-for the middle. Only `coverage::near_chain` places parts by memory (one run per machine, ≤ its ceiling,
-fewest segments), and only over machines ≤ 30 ms apart; the 70B's holders are 300-410 ms apart. Petals
-solves the same problem (Borzunov et al., arXiv 2312.08361 §3.2; `petals/server/block_selection.py`
-`choose_best_blocks`): each server serves ONE contiguous span sized to its memory, placed over the blocks
-the swarm's announced spans cover worst, and moves only when a simulated rebalance gains ≥ 20% (a move
-resets attention caches). Next: "carried" is whether a chain of one run per in-scope holder, each within
-its holdings and its ceiling, covers every layer (`near_chain::plan_chain`'s question, asked of every
-in-scope machine); where none does and the summed ceilings could, plan that chain over every machine, as
-the near chain is planned over near ones — fewest segments, fewest parts to fetch, rendezvous ties — and
-each machine fetches its segment, prune keeping it (`copy_in_near_chain`'s rule). A far chain is slow,
-but the only way such a model runs; the near chain stays first. Bound the fetch by the storage budget
-(`could_ever_hold`). Even placed perfectly, these four machines' face values are 2 layers short — the
-Mac at its ceiling would close it.
 
 #### #250 — A model held whole here, which the card holds only part of, can be routed through peers at a fraction of local speed
 `P1` · routing · **PARTIAL** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.232-.234)
@@ -3324,7 +3297,28 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-25, ships in v0.3.254** (#344, #345)
+**Closed 2026-10-25, ships in v0.3.254** (#344, #345, #346)
+- #346 — **A model only a split can run is placed by a chain over every machine in scope where
+  the near machines cannot carry it, and carrying counts each layer once.** Llama 3.3 70B (80
+  layers), every peer on v0.3.253 (request `5a383498`, 10:48Z): holders 300-410 ms apart (but for
+  this node's LAN box), none able to run it; carrying SUMMED each holder's figure (distinct layers
+  held vs its ceiling), counting a layer once per holder — 80 of 80 "carried" at face value where
+  67 could be placed (105 at the ceiling `aa3d1e66` advertised before #344) — so nothing fetched
+  and the replica count shed the Mac's middle parts. `scheduler::layers_carried` is now a maximum
+  flow (Edmonds-Karp over stretches of layers held by the same computers; also the planner's "room
+  for about N of its L layers"), and `near_chain::compute_near_chain` falls back to `Reach::Far`:
+  the near chain's own plan and leases over `machines_in_scope`, its parts kept at any disk
+  pressure while it is planned, as carrying's are (a near chain's, or a part named only within the
+  day, below urgent); carrying stands down while
+  any chain is planned (`chain_planned_for`), and a machine learns the header of a model whose
+  weights outgrow every in-scope ceiling. Petals' placement (arXiv 2312.08361 § 3.2,
+  `block_selection.py`). Tests `a_layer_held_by_several_computers_is_carried_once`,
+  `machines_far_apart_that_only_together_can_run_a_model_plan_one_chain`. Residual, as for near
+  chains: the plan does not weigh distance (fewest segments is the proxy), machines that see
+  different peers may plan different segments (each fetch bounded by one ceiling), and a machine
+  whose storage budget refuses its segment is passed over only after the 20-min lease. Even placed
+  perfectly, the 70B's four machines are 2 layers short at face value; the Mac near its ceiling
+  closes it. Field check once the peers run v0.3.254 (`memory/next_up.md`).
 - #345 — **A computer with no worker for a model weighs the LOAD it is asked about before a
   split's prompt pass.** "No worker" was "go ahead": Llama 3.3 70B was planned 56 layers on a peer
   whose card held 2 (request `b6a07b44`, 08:38Z); its first forward was refused at the spawn ("needs

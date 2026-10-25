@@ -1364,26 +1364,140 @@ fn clamp_room_to_ceiling(room: Option<f64>, ceiling: Option<u32>) -> Option<f64>
     }
 }
 
-/// Layers a set of computers could carry between them: each counted once, at
-/// the smaller of the DISTINCT layers it holds (however its ranges overlap) and
-/// what it could take. The one arithmetic behind "room for about N of its L
-/// layers" (`layers_offered_at`) and auto-manage's "do its holders carry this
-/// model" (`auto_manage::coverage`, #231).
+/// Layers a set of computers could carry between them: the most layers that
+/// can each be given to ONE computer holding it, none given more than it
+/// could take — a maximum flow from the layers to the computers. The one
+/// arithmetic behind "room for about N of its L layers" (`layers_offered_at`)
+/// and auto-manage's "do its holders carry this model"
+/// (`auto_manage::coverage`, #231).
+///
+/// It summed each computer's own figure (the smaller of the layers it holds
+/// and what it could take) until #346, which counted a layer once for every
+/// computer holding it: four holding the same 10 layers "carried" 40. A 70B's
+/// four holders summed to all 80 of its layers while 67 could be placed
+/// (2026-10-25) — so nothing fetched what they lacked, and a holder shedding
+/// parts was never stopped. Layers held by the same computers are one node of
+/// the network (a stretch between two neighbouring ends of anybody's range),
+/// so its size follows the ranges, not the layers.
 pub(crate) fn layers_carried(holdings: impl IntoIterator<Item = (Vec<(u32, u32)>, u32)>) -> u32 {
-    holdings
+    let holders: Vec<(Vec<(u32, u32)>, u32)> = holdings
         .into_iter()
-        .map(|(mut ranges, could_take)| {
-            ranges.sort_unstable();
-            let (mut layers, mut end) = (0u32, 0u32);
-            for (a, b) in ranges {
-                if b > end {
-                    layers += b - a.max(end);
-                    end = b;
+        .map(|(ranges, could_take)| (merged_ranges(ranges), could_take))
+        .filter(|(ranges, could_take)| *could_take > 0 && !ranges.is_empty())
+        .collect();
+    let mut ends: Vec<u32> = holders
+        .iter()
+        .flat_map(|(ranges, _)| ranges.iter().flat_map(|&(a, b)| [a, b]))
+        .collect();
+    ends.sort_unstable();
+    ends.dedup();
+    // Node 0 is the source, 1 the sink, then one per computer, then one per
+    // stretch of layers somebody holds.
+    let mut network = FlowNetwork::new(2 + holders.len());
+    for (h, (ranges, could_take)) in holders.iter().enumerate() {
+        let held: u32 = ranges.iter().map(|(a, b)| b - a).sum();
+        network.add_edge(2 + h, 1, held.min(*could_take));
+    }
+    for pair in ends.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let holding: Vec<usize> = holders
+            .iter()
+            .enumerate()
+            .filter(|(_, (ranges, _))| ranges.iter().any(|&(s, e)| s <= a && b <= e))
+            .map(|(h, _)| h)
+            .collect();
+        if holding.is_empty() {
+            continue;
+        }
+        let stretch = network.add_node();
+        network.add_edge(0, stretch, b - a);
+        for h in holding {
+            network.add_edge(stretch, 2 + h, b - a);
+        }
+    }
+    network.max_flow(0, 1)
+}
+
+/// `ranges` sorted, empty ones dropped, overlapping or touching ones joined.
+fn merged_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    ranges.retain(|(a, b)| b > a);
+    ranges.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+    for (a, b) in ranges {
+        match merged.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    merged
+}
+
+/// A flow network with whole-number capacities, solved by shortest augmenting
+/// paths (Edmonds–Karp). Edges are stored in pairs: `e ^ 1` is `e`'s reverse.
+struct FlowNetwork {
+    adjacent: Vec<Vec<usize>>,
+    to: Vec<usize>,
+    room: Vec<u32>,
+}
+
+impl FlowNetwork {
+    fn new(nodes: usize) -> Self {
+        Self {
+            adjacent: vec![Vec::new(); nodes],
+            to: Vec::new(),
+            room: Vec::new(),
+        }
+    }
+
+    fn add_node(&mut self) -> usize {
+        self.adjacent.push(Vec::new());
+        self.adjacent.len() - 1
+    }
+
+    fn add_edge(&mut self, from: usize, to: usize, capacity: u32) {
+        for (a, b, c) in [(from, to, capacity), (to, from, 0)] {
+            self.adjacent[a].push(self.to.len());
+            self.to.push(b);
+            self.room.push(c);
+        }
+    }
+
+    fn max_flow(&mut self, source: usize, sink: usize) -> u32 {
+        let mut total = 0u32;
+        loop {
+            // The edge each node was first reached by; the source has none.
+            let mut via: Vec<Option<usize>> = vec![None; self.adjacent.len()];
+            let mut queue = std::collections::VecDeque::from([source]);
+            while let Some(node) = queue.pop_front() {
+                if node == sink {
+                    break;
+                }
+                for &e in &self.adjacent[node] {
+                    let next = self.to[e];
+                    if self.room[e] > 0 && next != source && via[next].is_none() {
+                        via[next] = Some(e);
+                        queue.push_back(next);
+                    }
                 }
             }
-            layers.min(could_take)
-        })
-        .sum()
+            if via[sink].is_none() {
+                return total;
+            }
+            let mut push = u32::MAX;
+            let mut node = sink;
+            while let Some(e) = via[node] {
+                push = push.min(self.room[e]);
+                node = self.to[e ^ 1];
+            }
+            let mut node = sink;
+            while let Some(e) = via[node] {
+                self.room[e] -= push;
+                self.room[e ^ 1] += push;
+                node = self.to[e ^ 1];
+            }
+            total = total.saturating_add(push);
+        }
+    }
 }
 
 /// The answer when no plan fits what the holders could EVER hold: not enough

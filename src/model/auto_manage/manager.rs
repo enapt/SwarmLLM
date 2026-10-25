@@ -1016,7 +1016,8 @@ impl AutoShardManager {
             return;
         }
 
-        // A model a chain of nearby machines may name this node for is planned
+        // A model a chain of machines may name this node for — nearby ones, or
+        // every one in scope where they cannot carry it (#346) — is planned
         // from its header; learn the few that are missing first.
         self.learn_headers_near_chains_need().await;
         // So is the drafter a split here lacked: its candidates' headers say

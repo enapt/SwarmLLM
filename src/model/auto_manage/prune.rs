@@ -1528,13 +1528,24 @@ impl AutoShardManager {
         if self.copy_carries_model(shard_id, local_node_id) {
             return Some("this copy carries the model");
         }
-        // This computer's segment of the chain its NEARBY machines plan alike
-        // for a model none of them can run whole — named now, or within the
-        // day (`coverage::near_chain`, Stage 3). Below urgent pressure only: a
-        // near chain makes a split fast, it does not make the model runnable,
-        // which carrying above does at any pressure.
-        if pressure < PRESSURE_URGENT && self.copy_in_near_chain(shard_id) {
-            return Some("this copy is this computer's part of a chain of nearby machines");
+        // This computer's segment of the chain its machines plan alike for a
+        // model none of them can run whole — named now, or within the day
+        // (`coverage::near_chain`, Stage 3). A NEAR chain's below urgent
+        // pressure only: it makes a split fast, it does not make the model
+        // runnable, which carrying above does at any pressure. A FAR chain's
+        // — planned over every machine in scope because the near ones cannot
+        // carry the model — is how the model runs at all, so it is kept at
+        // any pressure, as carrying's copies are (#346).
+        match self.copy_in_near_chain(shard_id) {
+            Some(super::coverage::ChainPart::PlannedNow(super::coverage::Reach::Far)) => {
+                return Some(
+                    "this copy is this computer's part of the only chain that can run the model",
+                );
+            }
+            Some(_) if pressure < PRESSURE_URGENT => {
+                return Some("this copy is this computer's part of a chain of machines");
+            }
+            Some(_) | None => {}
         }
         // The drafter a split here guesses with, or is fetching to (#134):
         // below urgent pressure, like a near chain — it makes a split fast,

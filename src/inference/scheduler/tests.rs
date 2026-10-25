@@ -1059,6 +1059,45 @@ fn the_room_the_holders_offer_is_counted_once_each_and_capped_by_what_they_hold(
     assert_eq!(super::layers_offered(&holders), None);
 }
 
+/// A layer held by several computers is carried once (#346): what they carry
+/// is the most layers each given to ONE holder of it, none past what it
+/// could take — never the sum of their own figures.
+#[test]
+fn a_layer_held_by_several_computers_is_carried_once() {
+    use super::layers_carried;
+    // Three hold the same ten layers; one holds the other eighteen and could
+    // take ten of them. The sum said 40 of 28.
+    let same_ten = || (vec![(0, 10)], 10);
+    assert_eq!(
+        layers_carried([same_ten(), same_ten(), same_ten(), (vec![(10, 28)], 10)]),
+        20
+    );
+    // The 70B's holders on 2026-10-25 at their ceilings — the card node's at
+    // its face value, since the 80 its ceiling claimed was #344's defect: the
+    // sum said all 80 layers.
+    let seventy_b = [
+        (vec![(0, 13), (43, 44), (73, 80)], 23),
+        (vec![(0, 17)], 22),
+        (vec![(13, 73)], 35),
+        (vec![(17, 43), (44, 80)], 7),
+    ];
+    assert_eq!(layers_carried(seventy_b), 67);
+    // Holders that could take what they hold carry every layer held, once.
+    assert_eq!(
+        layers_carried([(vec![(0, 50), (40, 80)], 80), (vec![(0, 80)], 80)]),
+        80
+    );
+    // A's room goes where nobody else can serve: B holds 10..20, so A's ten
+    // layers are 0..10.
+    assert_eq!(
+        layers_carried([(vec![(0, 20)], 10), (vec![(10, 20)], 10)]),
+        20
+    );
+    // Nobody and no room carry nothing.
+    assert_eq!(layers_carried(Vec::<(Vec<(u32, u32)>, u32)>::new()), 0);
+    assert_eq!(layers_carried([(vec![(0, 10)], 0)]), 0);
+}
+
 #[test]
 fn a_plan_past_a_peers_offer_is_recognised_and_one_inside_it_is_not() {
     let holders = qwen3_30b_holders();

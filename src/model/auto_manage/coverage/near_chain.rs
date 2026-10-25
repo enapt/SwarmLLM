@@ -41,6 +41,23 @@
 //! minutes in every three hours caused no re-fetch. What it cannot do —
 //! neighbourhoods that only overlap, which see different near sets — is phase 2
 //! (published near lists), in the plan.
+//!
+//! **Where the near machines cannot carry the model, the same chain is planned
+//! over every machine in scope** ([`Reach::Far`], #346, 2026-10-25). A Llama
+//! 3.3 70B no machine could run whole had four holders 300-410 ms apart, none
+//! near another but this one's LAN box: no near chain, and carrying — which
+//! summed the holders' figures, counting a layer once per holder — read 80 of
+//! its 80 layers carried while 67 could be placed, so nothing fetched and a
+//! holder shed the middle it alone had room for. A far chain is slow, but the
+//! only way such a model runs at all; the near chain stays first. It is Petals'
+//! placement (Borzunov et al. 2023, arXiv 2312.08361 § 3.2;
+//! `petals/server/block_selection.py`): each server one contiguous span sized
+//! to its memory, over the blocks covered worst. Every machine sees the same
+//! machines only in a swarm where all are connected; where they are not, two
+//! plans may name different segments, each fetch bounded by one machine's
+//! ceiling, and both settle on what is then held. While a chain is planned,
+//! carrying stands down for the model ([`AutoShardManager::chain_planned_for`]):
+//! one placement per model.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -117,9 +134,49 @@ struct NearChain {
     segments: Vec<(NodeId, (u32, u32))>,
     /// Over what its machines hold already: nothing is fetched.
     complete: bool,
+    /// Which machines it was planned over.
+    reach: Reach,
+}
+
+/// Which machines a chain is planned over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::model::auto_manage) enum Reach {
+    /// This node and the machines measured near it.
+    Near,
+    /// Every machine in scope — the near ones could not carry the model (#346).
+    Far,
+}
+
+/// Why a part is this node's to keep for a chain
+/// ([`AutoShardManager::copy_in_near_chain`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::model::auto_manage) enum ChainPart {
+    /// It is in this node's segment of the chain planned now, at this reach.
+    PlannedNow(Reach),
+    /// A chain named it within [`NAMED_PART_HOLD`] and none does now.
+    NamedLately,
+}
+
+/// What planning over one [`Reach`] came to.
+enum Planned {
+    Chain(NearChain),
+    /// A machine among them could run the model whole: carrying's to fill.
+    OneRunsItWhole,
+    /// Their ceilings could not carry it between them, or no chain over them
+    /// fits their disks.
+    CannotCarry,
 }
 
 impl NearChain {
+    /// `node:start-end` for each segment, in chain order — for the log.
+    fn describe(&self) -> String {
+        self.segments
+            .iter()
+            .map(|(node, (start, end))| format!("{node}:{start}-{end}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     fn segment_of(&self, node: &NodeId) -> Option<(u32, u32)> {
         self.segments
             .iter()
@@ -436,20 +493,31 @@ impl AutoShardManager {
         }
     }
 
-    /// The machines `manifest`'s near chain is planned over, in rendezvous
-    /// order: this node and the near ones not passed over. `None` when a
-    /// connected one states no ceiling — cannot tell, and unknown is never
-    /// short; one that has gone takes no part.
-    fn near_machines(
+    /// The machines `manifest`'s chain is planned over at `reach`, in
+    /// rendezvous order: this node and the near ones — or every connected one
+    /// in scope — not passed over. `None` when this node, or a near one,
+    /// states no ceiling — cannot tell, and unknown is never short; one that
+    /// has gone takes no part. A FAR machine stating none yet (connected a
+    /// moment ago) is planned without: the far set differs per observer
+    /// anyway, and in a large swarm a newcomer every minute would hand the
+    /// model back and forth between the chain and carrying.
+    fn chain_machines(
         &self,
         manifest: &ModelManifest,
         parts: &[Part],
         curve: (u64, u64),
+        reach: Reach,
     ) -> Option<Vec<Machine>> {
         let state = &self.shared_state;
         let local = state.identity.node_id().clone();
-        let mut nodes = vec![local.clone()];
-        nodes.extend(self.near_peers());
+        let mut nodes = match reach {
+            Reach::Near => {
+                let mut nodes = vec![local.clone()];
+                nodes.extend(self.near_peers());
+                nodes
+            }
+            Reach::Far => self.machines_in_scope(),
+        };
         nodes.retain(|n| !self.passed_over_for_chain(&manifest.id, n));
         let sid = |index| ShardId {
             model_id: manifest.id.clone(),
@@ -485,7 +553,9 @@ impl AutoShardManager {
         let mut machines = Vec::with_capacity(nodes.len());
         for node in nodes {
             let Some(ceiling) = self.ceiling_layers(&node, manifest, curve) else {
-                if node == local || state.connected_node_ids.contains(&node) {
+                if node == local
+                    || (reach == Reach::Near && state.connected_node_ids.contains(&node))
+                {
                     return None;
                 }
                 continue;
@@ -568,9 +638,11 @@ impl AutoShardManager {
         self.asked_for(model_id) && !self.shared_state.unchosen_uncensored_model(model_id)
     }
 
-    /// `manifest`'s near chain, computed now. `None`: nobody asked for it,
-    /// no header here, a near machine could run it whole, the near machines
-    /// could not carry it between them, or a ceiling is unknown.
+    /// `manifest`'s chain, computed now: over the near machines, else — where
+    /// they cannot carry it — over every machine in scope (#346). `None`:
+    /// nobody asked for it, no header here, a machine planned over could run
+    /// it whole, they could not carry it between them, or a ceiling is
+    /// unknown.
     fn compute_near_chain(&self, manifest: &ModelManifest) -> Option<NearChain> {
         let layers = manifest.num_layers;
         if layers == 0 || near_chains_switched_off() || !self.may_plan_a_near_chain(&manifest.id) {
@@ -578,22 +650,47 @@ impl AutoShardManager {
         }
         let curve = self.carry_curve(&manifest.id)?;
         let parts = parts_in_order(manifest)?;
-        let mut machines = self.near_machines(manifest, &parts, curve)?;
+        match self.plan_over(manifest, &parts, curve, Reach::Near)? {
+            Planned::Chain(chain) => Some(chain),
+            Planned::OneRunsItWhole => None,
+            Planned::CannotCarry => match self.plan_over(manifest, &parts, curve, Reach::Far)? {
+                Planned::Chain(chain) => Some(chain),
+                Planned::OneRunsItWhole | Planned::CannotCarry => None,
+            },
+        }
+    }
+
+    /// Plan `manifest`'s chain over the machines at `reach`, passing over a
+    /// named machine whose lease lapsed. `None`: a ceiling is unknown.
+    fn plan_over(
+        &self,
+        manifest: &ModelManifest,
+        parts: &[Part],
+        curve: (u64, u64),
+        reach: Reach,
+    ) -> Option<Planned> {
+        let layers = manifest.num_layers;
+        let mut machines = self.chain_machines(manifest, parts, curve, reach)?;
         loop {
-            // Stage 3 is for a model that needs a split: a near machine that
-            // could run it whole is today's rules' to fill.
+            // A chain is for a model that needs a split: a machine that could
+            // run it whole is today's rules' to fill.
             let total: u64 = machines.iter().map(|m| u64::from(m.ceiling)).sum();
-            if machines.iter().any(|m| m.ceiling >= layers) || total < u64::from(layers) {
-                return None;
+            if machines.iter().any(|m| m.ceiling >= layers) {
+                return Some(Planned::OneRunsItWhole);
             }
-            let held = plan_chain(layers, &parts, &machines, false);
+            if total < u64::from(layers) {
+                return Some(Planned::CannotCarry);
+            }
+            let held = plan_chain(layers, parts, &machines, false);
             let complete = held.is_some();
-            let steps = held.or_else(|| plan_chain(layers, &parts, &machines, true))?;
+            let Some(steps) = held.or_else(|| plan_chain(layers, parts, &machines, true)) else {
+                return Some(Planned::CannotCarry);
+            };
             let mut named = HashSet::new();
             let mut stalled = None;
             for &(i, x, e) in &steps {
                 let machine = &machines[i];
-                if lacks_any(&parts, machine, x, e) {
+                if lacks_any(parts, machine, x, e) {
                     named.insert(machine.node.clone());
                     if !self.named_machine_keeps_its_place(&manifest.id, machine) {
                         stalled = Some(i);
@@ -614,21 +711,18 @@ impl AutoShardManager {
                     .map(|&(i, x, e)| (machines[i].node.clone(), (x, e)))
                     .collect(),
                 complete,
+                reach,
             };
             tracing::debug!(
                 model = %manifest.id,
                 machines = machines.len(),
                 segments = chain.segments.len(),
                 complete,
-                plan = %chain
-                    .segments
-                    .iter()
-                    .map(|(node, (start, end))| format!("{node}:{start}-{end}"))
-                    .collect::<Vec<_>>()
-                    .join(" "),
+                reach = ?reach,
+                plan = %chain.describe(),
                 "near chain planned (Stage 3)"
             );
-            return Some(chain);
+            return Some(Planned::Chain(chain));
         }
     }
 
@@ -647,6 +741,17 @@ impl AutoShardManager {
             return chain;
         }
         let chain = self.compute_near_chain(manifest);
+        let before = book.chains.get(&manifest.id).and_then(|c| c.1.clone());
+        if let Some(planned) = chain.as_ref().filter(|c| before.as_ref() != Some(*c)) {
+            tracing::info!(
+                model = %manifest.id,
+                reach = ?planned.reach,
+                complete = planned.complete,
+                plan = %planned.describe(),
+                "DIAG: a chain of machines is planned for a model none of them can run whole \
+                 (Stage 3; over every machine in scope where the near ones cannot carry it, #346)"
+            );
+        }
         book.named_until.retain(|_, until| now < *until);
         let local = self.shared_state.identity.node_id();
         if let Some(segment) = chain.as_ref().and_then(|c| c.segment_of(local)) {
@@ -665,6 +770,18 @@ impl AutoShardManager {
             (now + CHAIN_ANSWERS_FOR, chain.clone()),
         );
         chain
+    }
+
+    /// Is a chain planned for `manifest` — near or far? Then carrying stands
+    /// down for it (`coverage::needs_carrier`, `copy_carries_model`): the chain
+    /// places every segment, and a carrier fetching beside it in model order
+    /// would fetch what the chain does not use, and keep a holder's every copy
+    /// for the few layers it adds.
+    pub(in crate::model::auto_manage) fn chain_planned_for(
+        &self,
+        manifest: &ModelManifest,
+    ) -> bool {
+        self.near_chain(manifest).is_some()
     }
 
     /// The parts THIS node fetches as its segment of `manifest`'s near chain:
@@ -697,9 +814,18 @@ impl AutoShardManager {
     /// (`copy_kept_because`); the download pass, asking the same before it
     /// fetches, fetches it. The chain counts in-flight parts as held, so the
     /// answer before a fetch is the answer after it.
-    pub(in crate::model::auto_manage) fn copy_in_near_chain(&self, shard_id: &ShardId) -> bool {
+    ///
+    /// Prune keeps a part of the chain planned NOW by its reach — a far
+    /// chain's at any pressure (it is how a model only a split can run runs at
+    /// all, as carrying's copies are — #346), a near chain's below urgent (it
+    /// makes a split fast) — and one named only within the day below urgent:
+    /// the hold rides out a neighbour that flaps, never a full disk.
+    pub(in crate::model::auto_manage) fn copy_in_near_chain(
+        &self,
+        shard_id: &ShardId,
+    ) -> Option<ChainPart> {
         if shard_id.index == MMPROJ_SHARD_INDEX {
-            return false;
+            return None;
         }
         if let Some(manifest) = self
             .shared_state
@@ -707,12 +833,26 @@ impl AutoShardManager {
             .get_manifest(&shard_id.model_id)
         {
             // Asked first: it names this node's parts anew.
-            let _ = self.near_chain(&manifest);
+            let local = self.shared_state.identity.node_id();
+            if let Some(chain) = self.near_chain(&manifest) {
+                if chain.segment_of(local).is_some_and(|segment| {
+                    parts_touching(&manifest, segment).contains(&shard_id.index)
+                }) {
+                    return Some(ChainPart::PlannedNow(chain.reach));
+                }
+            }
         }
         self.near_chain_book
             .named_until
             .get(shard_id)
             .is_some_and(|until| Instant::now() < *until)
+            .then_some(ChainPart::NamedLately)
+    }
+
+    /// Forget every computed chain, as a minute passing would.
+    #[cfg(test)]
+    pub(in crate::model::auto_manage) fn forget_planned_chains(&self) {
+        self.near_chain_book.chains.clear();
     }
 
     /// Does this node hold `model_id` loaded over layers OUTSIDE its segment of
@@ -802,17 +942,24 @@ impl AutoShardManager {
     }
 
     /// The models whose header this node should learn so it can plan their
-    /// near chain: asked for, a part already held by a near machine — whose
-    /// chain may name this one — and no cost curve here, which is read from
-    /// the header. A node fetches a header only to route a model or to fetch a
-    /// part of it, so a near machine holding none of the model never computed
-    /// the plan naming it, never fetched, and was passed over. Only where
+    /// chain: asked for, no cost curve here (it is read from the header), and
+    /// a part already held by a near machine — whose chain may name this one —
+    /// or, for a model whose weights alone outgrow every machine in scope's
+    /// ceiling, by any machine in scope: its far chain may name this one
+    /// (#346). A node fetches a header only to route a model or to fetch a
+    /// part of it, so a machine holding none of the model never computed the
+    /// plan naming it, never fetched, and was passed over. Only where
     /// HuggingFace can give it (`ensure_model_geometry`'s source).
     fn models_a_near_chain_needs_a_header_for(&self) -> Vec<ModelId> {
         let near = self.near_peers();
-        if near.is_empty() {
-            return Vec::new();
-        }
+        let in_scope = self.machines_in_scope();
+        // Unknown for any machine: it might run the model whole, so no far
+        // chain is assumed.
+        let largest_ceiling_mb = in_scope
+            .iter()
+            .map(|node| self.advertised(node).and_then(|(ceiling, _)| ceiling))
+            .collect::<Option<Vec<u64>>>()
+            .and_then(|ceilings| ceilings.into_iter().max());
         let registry = &self.shared_state.model_registry;
         let mut wanted = Vec::new();
         for manifest in registry.models() {
@@ -829,20 +976,26 @@ impl AutoShardManager {
             {
                 continue;
             }
-            let held_near = manifest
-                .shards
-                .iter()
-                .filter(|s| s.index != MMPROJ_SHARD_INDEX)
-                .any(|s| {
+            let layer_parts = || {
+                manifest
+                    .shards
+                    .iter()
+                    .filter(|s| s.index != MMPROJ_SHARD_INDEX)
+            };
+            let held_by = |machines: &[NodeId]| {
+                layer_parts().any(|s| {
                     registry
                         .shard_holders(&ShardId {
                             model_id: manifest.id.clone(),
                             index: s.index,
                         })
                         .iter()
-                        .any(|h| near.contains(h))
-                });
-            if held_near {
+                        .any(|h| machines.contains(h))
+                })
+            };
+            let weights_mb = layer_parts().map(|s| s.size_bytes).sum::<u64>() / (1024 * 1024);
+            let only_a_split_runs_it = largest_ceiling_mb.is_some_and(|c| weights_mb > c);
+            if held_by(&near) || (only_a_split_runs_it && held_by(&in_scope)) {
                 wanted.push(manifest.id.clone());
             }
         }
@@ -884,7 +1037,7 @@ mod tests {
         register_manifest_with_sized_shards, write_sparse_shards,
     };
     use super::super::super::AutoShardManager;
-    use super::{plan_chain, Machine, NearChain, Part};
+    use super::{plan_chain, Machine, NearChain, Part, Reach};
     use crate::config::Config;
     use crate::daemon::SharedState;
     use crate::types::{ModelId, ModelManifest, NodeId, ShardId};
@@ -1289,6 +1442,80 @@ mod tests {
         assert_eq!(s.offered(), vec![0, 1, 2], "control: open swarm");
         s.state.credits.private_mode.store(true, Relaxed);
         assert!(s.chain().is_none());
+    }
+
+    /// [`swarm`] with the machines far apart and none able to run the model:
+    /// this node could run 20 of the 32 layers, the peer 250 ms away 16, the
+    /// one 200 ms away 12 — and it holds the model whole.
+    fn apart() -> Swarm {
+        let s = swarm(250.0);
+        s.state
+            .local_capability
+            .store(Some(Arc::new(capability(Some(ceiling_for(20)), 100_000))));
+        peer_with_disk(&s.state, 2, Some(ceiling_for(16)), 100_000);
+        peer_with_disk(&s.state, 3, Some(ceiling_for(12)), 100_000);
+        s.manager.carry_curves.clear();
+        s
+    }
+
+    /// A machine connected a moment ago, its ceiling not yet stated, is
+    /// planned without: a far chain does not wait on every newcomer. (A NEAR
+    /// one stating none still stops the plan:
+    /// `a_near_machine_with_no_ceiling_changes_nothing`.)
+    #[test]
+    fn a_far_chain_is_planned_without_a_machine_that_has_not_stated_its_memory() {
+        let s = apart();
+        assert_eq!(s.chain().map(|c| c.reach), Some(Reach::Far), "control");
+        peer_with_disk(&s.state, 7, None, 100_000);
+        assert_eq!(s.chain().map(|c| c.reach), Some(Reach::Far));
+    }
+
+    /// Where the near machines cannot carry a model only a split can run,
+    /// the chain is planned over every machine in scope (#346) — the 70B's
+    /// shape: holders far apart, none able to run it, enough between them.
+    /// This node is named a segment and offered its parts, prune keeps them,
+    /// and carrying — which would fetch in model order beside it — stands
+    /// down. With a machine able to run the model whole, or the ceilings
+    /// short of it, no chain (the controls).
+    #[test]
+    fn machines_far_apart_that_only_together_can_run_a_model_plan_one_chain() {
+        let s = apart();
+        let chain = s.chain().expect("a far chain");
+        assert_eq!(chain.reach, Reach::Far);
+        assert!(!chain.complete);
+        // Fewest segments (20 + 12 = 32), then fewest parts: the holder runs
+        // what it holds and this node the rest — five parts, either way round.
+        let width = |node: &NodeId| chain.segment_of(node).map(|(a, b)| b - a);
+        assert_eq!(chain.segments.len(), 2);
+        assert_eq!(width(&s.far), Some(12));
+        assert_eq!(width(&s.local()), Some(20));
+        let (start, end) = chain.segment_of(&s.local()).unwrap();
+        let mine: Vec<u32> = (start / 4..end / 4).collect();
+        assert_eq!(s.offered(), mine);
+        assert!(
+            !s.sheds(mine[2], &[s.far.clone(), s.local()], 0.9),
+            "a part of this node's segment is kept below urgent pressure"
+        );
+        s.later();
+        assert!(
+            !s.manager.needs_carrier(&s.manifest()),
+            "carrying stands down while a chain places the model"
+        );
+
+        // Controls: a machine that could run it whole leaves it to carrying,
+        // and ceilings short of it plan nothing.
+        let whole = swarm(250.0);
+        assert!(whole.chain().is_none(), "the 200 ms peer could run all 32");
+        let short = swarm(250.0);
+        short
+            .state
+            .local_capability
+            .store(Some(Arc::new(capability(Some(ceiling_for(8)), 100_000))));
+        peer_with_disk(&short.state, 2, Some(ceiling_for(8)), 100_000);
+        peer_with_disk(&short.state, 3, Some(ceiling_for(12)), 100_000);
+        short.manager.carry_curves.clear();
+        assert!(short.chain().is_none(), "8 + 8 + 12 of 32");
+        assert!(short.offered().is_empty());
     }
 
     /// A near machine stating no ceiling (older than v0.3.230) cannot be

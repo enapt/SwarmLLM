@@ -20,6 +20,19 @@ whether it could load what it is asked for, and if not, answers how many layers 
 The plan is then made again with that computer kept to that many (#345). Computers answer this
 way once they run this version.
 
+**A model too large for any one computer is now spread across computers far apart, each holding
+the part its memory can run.** When no single computer can run a model, the computers near each
+other agree on which of them holds which slice of it, and each fetches its slice. Where the
+nearby computers together did not have the memory, nothing arranged the slices at all. The check
+that should have caught this counted a layer once for every computer holding it, so the model
+looked covered when it was not. On 2026-10-25 a 70-billion-parameter model's four holders counted
+as covering all 80 of its layers when their memory could run 67 of them. Nothing fetched the
+missing layers, and one computer gave away the middle slice it alone had room for. Now every
+layer is counted once. Where the nearby computers cannot run such a model, the same agreement is
+made among every computer in reach: each holds one slice sized to its memory, as the Petals
+project does, and keeps it even when the space its owner gave the swarm is nearly used, since
+that is the only way the model runs. A model spread this far is slow, but before it could not run at all (#346).
+
 ## [0.3.253-alpha] — 2026-10-25
 
 **A model running whole on your computer now checks only the guesses that pay, and Qwen 3.5
