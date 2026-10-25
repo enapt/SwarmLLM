@@ -87,7 +87,10 @@ those tables thinly over every layer of the model instead, so the share that sta
 70-billion-parameter model was charged 7 MB for a 564 MB table: an 8 GB card was given 11 layers
 where 10 fit, found no room left to remember the conversation, and ran the whole share on the
 processor instead. Each share is now charged the tables it really loads, and the card is given
-layers only once they are paid for (#342).
+layers only once they are paid for (#342). This can put a layer or two fewer on the card: on this
+project's test machine a 14B model split between an 8 GB card and the processor now keeps 27 of
+its 48 layers on the card instead of 29. It writes 3-9% slower and reads a prompt about twice as
+fast, and the card has room for the model's whole 8,192-token conversation instead of about 5,000.
 
 **A model split across computers that all start cold answers its first message about twice as
 soon.** When several computers each run part of a model, each one used to start reading its part
