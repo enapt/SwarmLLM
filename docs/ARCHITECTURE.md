@@ -1435,7 +1435,8 @@ and Anthropic). It checks only the guesses that pay (`LocalSpec::guesses`, from
 a measured step and check, 2026-10-25): on the processor 1.3-1.5x on replies
 that copy from context (qwen3-1.7B code 18-19 → 24.6-27.6 tok/s), within a few
 percent on prose; on a card, where a step is one captured graph, within a few
-percent either way. Qwen 3.5 on the processor only (`local_guessing_suits`).
+percent either way. Qwen 3.5 guesses on both (a rejected check taken back whole, #228 (5)):
+on the card 4B story 72-73 → 74-86 tok/s, 0.8B code 133-137 → 159-164.
 
 **Draft-free n-gram, DISTRIBUTED.** `pipeline::ngram_only_spec` for pipelines
 with a remote segment, verifying through `forward_verify_through_segments`.

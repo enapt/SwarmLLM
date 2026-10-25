@@ -760,15 +760,24 @@ impl SplitModel {
     /// card, and the one thing that kept a check from being captured.
     /// `run_attention` refuses standard attention over several positions with
     /// no mask, so a disagreement here fails loudly.
+    ///
+    /// Qwen 3.5's layers count as dense here (2026-10-25, #228 (5)): its
+    /// attention layers call the same `run_attention`, and its DeltaNet layers
+    /// read no mask at all — leaving them out kept every Qwen 3.5 check of
+    /// several positions off the graph, at 2-3× a captured step.
     fn mask_is_read(&self) -> bool {
         #[cfg(feature = "flash-attn")]
         {
             let flash_takes_it = self.device.is_cuda()
                 && self.layer_devices.is_empty()
-                && self
-                    .layers
-                    .iter()
-                    .all(|layer| matches!(layer, LayerVariant::Dense(_)))
+                && self.layers.iter().all(|layer| {
+                    matches!(
+                        layer,
+                        LayerVariant::Dense(_)
+                            | LayerVariant::Qwen35Attn { .. }
+                            | LayerVariant::Qwen35Ssm { .. }
+                    )
+                })
                 && !crate::inference::attn_kernel::is_force_standard_attn()
                 && crate::inference::layers::flash_handles_offset_causal();
             !flash_takes_it

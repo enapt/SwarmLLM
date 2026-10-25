@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 **A model running whole on your computer now checks only the guesses that pay, and Qwen 3.5
-guesses ahead on the processor.** Such a model guesses the next words from text already in the
+guesses ahead too.** Such a model guesses the next words from text already in the
 conversation and checks several at once. It checked every guess it found, which often made
 replies slower: on a graphics card one step at a time is the card's fastest path and a wide check
 is not, and on prose most guesses were wrong. Each check is now timed against a plain step, and
@@ -13,8 +13,11 @@ tokens a second instead of 18-19, and Llama-3.2-3B, which guessing had slowed to
 runs at 18 against 17.5 without it. Qwen 3.5, which could not guess ahead at all, now does on the
 processor: the 0.8B writes code at 32-33 tokens a second instead of 27, the 4B a story that repeats
 itself at 14.6 instead of 10. On a graphics card Llama-3.2-3B writes code at 114 tokens a second
-instead of 88-112 (115 without guessing), and Qwen 3.5 still writes one token at a time there,
-because its checks cannot take the card's fast path yet (#228).
+instead of 88-112 (115 without guessing). Qwen 3.5 now guesses on the card as well, where its checks
+take the card's fast path for the first time: the 0.8B writes code at 159-164 tokens a second
+instead of 133-137, the 4B that story at 74-86 instead of 72-73 (#228). As with every model a
+graphics card checks guesses for, a reply can differ from the one-word-at-a-time reply where the
+model is almost evenly split between two words; llama.cpp on a graphics card behaves the same way.
 
 **Made-up computers can no longer push a model part's real holders out of your node's list.**
 Each computer keeps a list of up to 50 others holding each piece of a model. Announcing that you

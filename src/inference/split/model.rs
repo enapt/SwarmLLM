@@ -636,14 +636,11 @@ impl SplitModel {
         &self.device
     }
 
-    /// Card steps this model has launched that made a graph rather than
-    /// updating one (`cuda_graph::DecodeGraph::launches_that_made_a_graph`);
-    /// 0 where it captures none.
-    pub(crate) fn launches_that_made_a_graph(&self) -> u64 {
+    /// Forwards on the card that cost more than their shape will from now on
+    /// (`cuda_graph::DecodeGraph::one_off_forwards`); 0 where it captures none.
+    pub(crate) fn one_off_forwards(&self) -> u64 {
         match &self.decode_graph {
-            crate::inference::cuda_graph::DecodeGraphSlot::On(graph) => {
-                graph.launches_that_made_a_graph()
-            }
+            crate::inference::cuda_graph::DecodeGraphSlot::On(graph) => graph.one_off_forwards(),
             _ => 0,
         }
     }

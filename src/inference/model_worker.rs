@@ -2960,34 +2960,20 @@ async fn try_remote_prefix_hydrate(
 /// * a non-zero draft width, which is how `inference.ngram_lookup_enabled`
 ///   arrives here.
 ///
-/// * the model suits it ([`local_guessing_suits`]) — asked with the model in
-///   hand, so REQUIRED here: slot admission and the decode loop both answer it.
+/// Every model qualifies, on either device. One with recurrent state (Qwen
+/// 3.5) cannot give back a rejected guess, so a check that rejects one is
+/// taken back whole and its accepted tokens are read again at the head of the
+/// next (`ngram_spec_round`, #228 (5)); on a card its checks are captured as a
+/// dense model's are (`SplitModel::mask_is_read`).
 pub(crate) fn ngram_spec_eligible(
     sampling: &crate::types::SamplingParams,
     ngram_cfg: &crate::inference::ngram_lookup::NgramLookupConfig,
     swift_cfg: &SwiftConfig,
-    suits_the_model: bool,
 ) -> bool {
-    suits_the_model
-        && ngram_cfg.num_pred_tokens > 0
+    ngram_cfg.num_pred_tokens > 0
         && ngram_cfg.max_ngram_size >= ngram_cfg.min_ngram_size
         && !sampling.logprobs
         && !(swift_cfg.enabled && sampling.temperature == 0.0)
-}
-
-/// Whether the worker's own n-gram guesses for `model`. A model with recurrent
-/// state (Qwen 3.5) is guessed for on the PROCESSOR: a check that rejects a
-/// guess is taken back whole and its accepted tokens are read again at the head
-/// of the next (`ngram_spec_round`, #228 (5)) — and there it paid, Qwen3.5-0.8B
-/// 26.7 → 31.6-33.2 tok/s on code, Qwen3.5-4B 10 → 14.6 on a story that repeats
-/// itself, the rest within a few percent of one token at a time (2026-10-25).
-/// **Not on a card**: its checks are never captured there (its attention reads
-/// a mask, `SplitModel::mask_is_read`), so a check costs 2-3× a captured step,
-/// and the measured choice ([`LocalSpec::guesses`]) came out as often slower as
-/// faster: Qwen3.5-0.8B 96-152 tok/s against 134-140 one at a time, the 4B
-/// 63-106 against 73. A captured check is what would turn it on.
-fn local_guessing_suits(model: &crate::inference::split::SplitModel) -> bool {
-    !(model.carries_recurrent_state() && model.device().is_cuda())
 }
 
 /// Recent tokens-per-round the local speculator has been achieving, ×100, or 0
@@ -3326,10 +3312,15 @@ struct SpecRound {
 /// less than the check that reads them, where seven are not. On a card a check
 /// is held to a graph's width.
 ///
-/// **A refusal is tried again** ([`Self::probe_after`]). A conversation's first
-/// check of each width runs without a graph (`cuda_graph`: a capture follows an
-/// ordinary step of the same shape) and cost 25-49 ms beside a 7.7-13.5 ms
-/// step; fitted from that one check, the count went to zero and, checking
+/// **A one-off is not a price** ([`Self::one_offs`]). On a card a worker's
+/// first forward of each shape runs without a graph (`cuda_graph`: a capture
+/// follows an ordinary step of the same shape; 25-49 ms beside a 7.7-13.5 ms
+/// step) and its next one makes the graph (a Qwen3.5-4B check: 259-277 ms
+/// against 16-30 replayed). Timed as checks, either priced every check of the
+/// reply; neither is timed.
+///
+/// **A refusal is tried again** ([`Self::probe_after`]). Fitted from its first
+/// cold check, the count went to zero and, checking
 /// nothing more, never learned that the reply had turned to repeating itself —
 /// Qwen3.5-4B's story, where checking every guess ran 102-104 tok/s against 72
 /// one at a time (α 0.93), stayed at 71. So after `probe_after` rounds of
@@ -3368,17 +3359,43 @@ struct LocalSpec {
     taken_back: u64,
     /// Rounds that found guesses and checked none of them.
     declined: u64,
-    /// Rounds whose forward made a card graph rather than updating one.
-    made_a_graph: u64,
+    /// Rounds whose forward paid a one-off on the card — the first of its
+    /// shape, a graph made, a refused capture (`SplitModel::one_off_forwards`):
+    /// a Qwen3.5-4B check that made its graph took 259-277 ms against 16-30
+    /// replayed. Left out of the timings, or one such round prices every
+    /// check of the reply.
+    one_offs: u64,
     /// Rounds of guesses declined since the last check.
     declined_run: u32,
     /// Declined rounds after which found guesses are checked anyway.
     probe_after: u32,
     /// Checks made that way.
     probes: u64,
-    /// Every round's positions, milliseconds and whether it made a graph.
+    /// Every round, as the test prints it.
     #[cfg(test)]
-    trace: Vec<(usize, f64, bool)>,
+    trace: Vec<Traced>,
+    /// The guesses each round checks, in place of the count's choice: a
+    /// failing card run replayed exactly, on either device.
+    #[cfg(test)]
+    script: Option<std::collections::VecDeque<usize>>,
+}
+
+/// One round of [`LocalSpec`], for the test's trace.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct Traced {
+    /// The cache's length when it began.
+    at: usize,
+    /// Tokens it read again.
+    fed: usize,
+    /// Guesses it checked.
+    checked: usize,
+    ms: f64,
+    /// Its forward paid a one-off on the card.
+    one_off: bool,
+    accepted: usize,
+    taken_back: bool,
+    produced: Vec<u32>,
 }
 
 impl LocalSpec {
@@ -3413,12 +3430,14 @@ impl LocalSpec {
             accepted: 0,
             taken_back: 0,
             declined: 0,
-            made_a_graph: 0,
+            one_offs: 0,
             declined_run: 0,
             probe_after: Self::FIRST_PROBE_AFTER,
             probes: 0,
             #[cfg(test)]
             trace: Vec::new(),
+            #[cfg(test)]
+            script: None,
         }
     }
 
@@ -3478,13 +3497,13 @@ impl LocalSpec {
             .median()
             .map_or("-".to_string(), |m| format!("{m:.1}"));
         format!(
-            "rounds {} accepted {} taken back {} declined {} probes {} made a graph {} step {step} ms check {fit} ms alpha {:.2} next {}",
+            "rounds {} accepted {} taken back {} declined {} probes {} one-off {} step {step} ms check {fit} ms alpha {:.2} next {}",
             self.rounds,
             self.accepted,
             self.taken_back,
             self.declined,
             self.probes,
-            self.made_a_graph,
+            self.one_offs,
             self.acceptance.alpha(),
             self.guesses(self.room()),
         )
@@ -3536,8 +3555,14 @@ impl LocalSpec {
             }
         }
         // Guesses found and none worth their check.
+        #[cfg(test)]
+        if let Some(script) = self.script.as_mut() {
+            (worth, probe) = (script.pop_front().unwrap_or(0).min(found.len()), false);
+        }
         let declined = !found.is_empty() && worth == 0;
-        let graphs_before = model.launches_that_made_a_graph();
+        let one_offs_before = model.one_off_forwards();
+        #[cfg(test)]
+        let (began_at, fed) = (*index_pos, self.refeed.len());
         let round = ngram_spec_round(
             model,
             kv_store,
@@ -3552,15 +3577,25 @@ impl LocalSpec {
             force_attn,
         )?;
         *index_pos += round.committed;
-        let made_a_graph = model.launches_that_made_a_graph() > graphs_before;
-        self.made_a_graph += u64::from(made_a_graph);
+        let one_off = model.one_off_forwards() > one_offs_before;
+        self.one_offs += u64::from(one_off);
         #[cfg(test)]
-        self.trace.push((round.positions, round.ms, made_a_graph));
+        self.trace.push(Traced {
+            at: began_at,
+            fed,
+            checked: worth,
+            ms: round.ms,
+            one_off,
+            accepted: round.accepted,
+            taken_back: round.taken_back,
+            produced: round.produced.clone(),
+        });
         self.rounds += 1;
         self.produced += round.produced.len() as u64;
         self.accepted += round.accepted as u64;
         self.taken_back += u64::from(round.taken_back);
         match round.positions {
+            _ if one_off => {}
             1 => self.step_ms.record(round.ms),
             p => self
                 .check
@@ -3576,7 +3611,9 @@ impl LocalSpec {
         }
         if probe {
             self.probes += 1;
-            self.probe_after = if self.probe_paid(&round) {
+            // A probe that paid a one-off said nothing of a check's price:
+            // the next is soon, and cheap.
+            self.probe_after = if one_off || self.probe_paid(&round) {
                 Self::FIRST_PROBE_AFTER
             } else {
                 (self.probe_after * 2).min(Self::MOST_PROBE_AFTER)
@@ -5187,12 +5224,7 @@ async fn handle_generate(
         // speculative-sampling rejection rule itself, not an approximation of
         // it. See the note on `ngram_spec_eligible`.
         // Only built when it will be used — it copies the whole prompt.
-        let mut spec = (ngram_spec_eligible(
-            &gen.sampling,
-            ngram_cfg,
-            swift_cfg,
-            local_guessing_suits(model),
-        ) && !swift_active)
+        let mut spec = (ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg) && !swift_active)
             .then(|| LocalSpec::new(*ngram_cfg, &prompt_ids, model, local_guess_gamma_fixed()));
 
         for _ in 0..gen.sampling.max_tokens {
@@ -5954,7 +5986,6 @@ fn slot_admission_eligible(
     swift_cfg: &SwiftConfig,
     ngram_cfg: &crate::inference::ngram_lookup::NgramLookupConfig,
     slot_table: &SlotTable,
-    guessing_suits: bool,
 ) -> bool {
     if gen.sampling.max_tokens == 0 {
         tracing::debug!(request_id = %gen.request_id, "slot admission refused: max_tokens=0");
@@ -5993,7 +6024,7 @@ fn slot_admission_eligible(
     // that, and against an empty table batching has nothing to amortise
     // anyway — there is no second request to share the weight read with.
     if slot_table.is_empty()
-        && ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg, guessing_suits)
+        && ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg)
         && spec_payoff_justifies_diverting()
     {
         tracing::debug!(
@@ -6925,11 +6956,7 @@ async fn handle_daemon_msg(
             if batch_generate
                 && pending
                     .as_ref()
-                    .map(|g| {
-                        // One worker serves one model family.
-                        let suits = models.values().all(local_guessing_suits);
-                        slot_admission_eligible(g, swift_cfg, ngram_cfg, slot_table, suits)
-                    })
+                    .map(|g| slot_admission_eligible(g, swift_cfg, ngram_cfg, slot_table))
                     .unwrap_or(false)
             {
                 let g = pending.take().expect("checked above");
@@ -7743,10 +7770,7 @@ mod local_speculation_tests {
     /// so it loses batching and gains nothing.
     #[test]
     fn eligibility_is_one_predicate_both_callers_share() {
-        assert!(ngram_spec_eligible(&greedy(), &on(), &swift_off(), true));
-
-        // A model it does not suit (Qwen 3.5 on a card, `local_guessing_suits`).
-        assert!(!ngram_spec_eligible(&greedy(), &on(), &swift_off(), false));
+        assert!(ngram_spec_eligible(&greedy(), &on(), &swift_off()));
 
         // Sampling on is FINE, and this is the case that matters: 0.7 and 1.0
         // are the two API defaults, so gating on greedy left the feature inert
@@ -7756,21 +7780,21 @@ mod local_speculation_tests {
         // `accepting_only_on_a_match_preserves_the_sampled_distribution`.
         let mut warm = greedy();
         warm.temperature = 0.7;
-        assert!(ngram_spec_eligible(&warm, &on(), &swift_off(), true));
+        assert!(ngram_spec_eligible(&warm, &on(), &swift_off()));
 
         // Logprobs asked for: accepted tokens carry none back out, and
         // answering `null` where a client asked for numbers is worse than
         // declining to speculate.
         let mut lp = greedy();
         lp.logprobs = true;
-        assert!(!ngram_spec_eligible(&lp, &on(), &swift_off(), true));
+        assert!(!ngram_spec_eligible(&lp, &on(), &swift_off()));
 
         // SWIFT is already speculating for this request.
         let swift_on = SwiftConfig {
             enabled: true,
             ..Default::default()
         };
-        assert!(!ngram_spec_eligible(&greedy(), &on(), &swift_on, true));
+        assert!(!ngram_spec_eligible(&greedy(), &on(), &swift_on));
 
         // `inference.ngram_lookup_enabled = false` arrives as a zero width, so
         // the switch cannot disagree with the shape.
@@ -7778,7 +7802,7 @@ mod local_speculation_tests {
             num_pred_tokens: 0,
             ..NgramLookupConfig::default()
         };
-        assert!(!ngram_spec_eligible(&greedy(), &off, &swift_off(), true));
+        assert!(!ngram_spec_eligible(&greedy(), &off, &swift_off()));
     }
 
     /// A reply guessed ahead is the reply written one token at a time — and,
@@ -7787,9 +7811,15 @@ mod local_speculation_tests {
     /// taken back whole and its accepted tokens are read again at the head of
     /// the next. On the processor each row of a check is computed as a lone
     /// step computes it (`attn_rows`, the row-blocked quantized matmul, the
-    /// delta rule's per-token loop), so the ids must match EXACTLY; and on a
-    /// model with recurrent state checks must have been both accepted and
-    /// taken back, or it proved nothing. Red if a rejected check is truncated
+    /// delta rule's per-token loop), so the ids must match EXACTLY; on a card
+    /// a forward of several positions rounds otherwise than a step of one, so
+    /// there they may come apart only where the card cannot decide: at a near
+    /// tie ([`CARD_NEAR_TIE_LOGITS`]) or at a token its own prompt pass does
+    /// not pick either (printed with the top two either way). That a row reads
+    /// nothing after it is [`a_checks_row_reads_nothing_after_it`], bit for
+    /// bit on both devices. On a model with recurrent state
+    /// checks must have been both accepted and taken back, or it proved
+    /// nothing. Red if a rejected check is truncated
     /// as an attention-only model's is (the request fails), or if the accepted
     /// tokens are not read again (the reply goes its own way). It prints both
     /// speeds: read them off a release build on an idle machine.
@@ -7800,29 +7830,14 @@ mod local_speculation_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "needs a GGUF in SWARMLLM_GUESS_TEST_GGUF"]
     async fn a_guessed_reply_is_the_reply_read_one_token_at_a_time() {
-        let Ok(path) = std::env::var("SWARMLLM_GUESS_TEST_GGUF") else {
-            eprintln!("SWARMLLM_GUESS_TEST_GGUF not set — skipped");
+        let Some(mut model) = guess_test_model() else {
             return;
         };
-        let mut model = SplitModel::load_from_gguf(
-            std::path::Path::new(&path),
-            0,
-            999,
-            true,
-            true,
-            std::env::var("SWARMLLM_GUESS_TEST_ON_CARD").is_err(),
-        )
-        .expect("load the file");
         let recurrent = model.carries_recurrent_state();
-        // Code that repeats its shape: guesses land on the shape and miss on
-        // each new name.
         // `SWARMLLM_GUESS_TEST_PROMPT` measures another reply (an open-ended
         // one guesses little), and then only the ids are checked.
         let asked = std::env::var("SWARMLLM_GUESS_TEST_PROMPT").ok();
-        let prompt = model.encode_ids(asked.as_deref().unwrap_or(
-            "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n\n\
-             def mul(a, b):\n    return a * b\n\ndef div(a, b):\n",
-        ));
+        let prompt = model.encode_ids(asked.as_deref().unwrap_or(GUESS_TEST_CODE));
         let kv = crate::inference::split::KvCacheStore::new(std::time::Duration::from_secs(600));
         // One token at a time, every guess checked (the rule before
         // 2026-10-25, and the one that exercises the rewind most), the count
@@ -7849,6 +7864,34 @@ mod local_speculation_tests {
             ));
         }
         let (every, chosen) = (every.unwrap(), chosen.unwrap());
+        // Where an arm came apart: the logits there, read one token at a time
+        // and in one prompt pass. A card's
+        // forward of several positions rounds otherwise than its step of one
+        // (other matmul kernels, flash against the decode kernel), so there a
+        // near tie can fall either way; a wide gap is a fault.
+        let mut apart = Vec::new();
+        for (name, (ids, _, _)) in [("every guess", &every), ("guesses that pay", &chosen)] {
+            if let Some(at) = plain.0.iter().zip(ids).position(|(a, b)| a != b) {
+                let opened = &plain.0[..at];
+                let stepped = logits_after(
+                    &mut model,
+                    &kv,
+                    &prompt,
+                    opened,
+                    &format!("why-step-{name}"),
+                    true,
+                );
+                let passed = logits_after(
+                    &mut model,
+                    &kv,
+                    &prompt,
+                    opened,
+                    &format!("why-pass-{name}"),
+                    false,
+                );
+                apart.push((name, at, ids, stepped, passed));
+            }
+        }
         let speed = |secs: f64| GUESSED_REPLY_STEPS as f64 / secs;
         // Speed is read off a release build on an idle machine, never this
         // test's debug one.
@@ -7870,23 +7913,73 @@ mod local_speculation_tests {
             let apart = plain.0.iter().zip(ids).position(|(a, b)| a != b);
             let spec = spec.as_ref().unwrap();
             eprintln!("{name}: {}; first apart {apart:?}", spec.summary());
+            if let Some(at) = apart {
+                // Replayed with `SWARMLLM_GUESS_TEST_SCRIPT`.
+                let checked: Vec<String> =
+                    spec.trace.iter().map(|t| t.checked.to_string()).collect();
+                eprintln!("{name} checked: {}", checked.join(","));
+                // The rounds before it: where each began, what it read again
+                // and checked, and the reply positions it wrote.
+                let mut wrote = 1;
+                for (j, t) in spec.trace.iter().enumerate() {
+                    let from = wrote;
+                    wrote += t.produced.len();
+                    if wrote + 12 > at && from <= at {
+                        eprintln!(
+                            "{name} round {j}: cache {} read again {} checked {} accepted {} taken back {} wrote {from}..{wrote} {:?}",
+                            t.at, t.fed, t.checked, t.accepted, t.taken_back, t.produced
+                        );
+                    }
+                }
+            }
             // `SWARMLLM_GUESS_TEST_TRACE=1`: every round, positions:ms, `*`
-            // where its forward made a card graph.
+            // where its forward paid a one-off on the card.
             if std::env::var("SWARMLLM_GUESS_TEST_TRACE").is_ok() {
                 let rounds: Vec<String> = spec
                     .trace
                     .iter()
-                    .map(|(p, ms, made)| format!("{p}:{ms:.1}{}", if *made { "*" } else { "" }))
+                    .map(|t| {
+                        let p = t.fed + 1 + t.checked;
+                        format!("{p}:{:.1}{}", t.ms, if t.one_off { "*" } else { "" })
+                    })
                     .collect();
                 eprintln!("{name} rounds: {}", rounds.join(" "));
             }
         }
-        for (name, (ids, _, _)) in arms {
-            let first_apart = plain.0.iter().zip(ids).position(|(a, b)| a != b);
-            assert_eq!(
-                first_apart,
-                None,
-                "{name}\none token at a time {:?}\nguessed ahead     {:?}",
+        for (name, at, ids, stepped, passed) in &apart {
+            let (wrote, guessed) = (plain.0[*at] as usize, ids[*at] as usize);
+            eprintln!(
+                "{name}: apart at {at} — one at a time wrote {wrote}, guessing {guessed}; \
+                 one at a time {:.3} against {:.3}, top two {:?}; in one prompt pass {:.3} against {:.3}, top two {:?}",
+                stepped[wrote],
+                stepped[guessed],
+                top_two(stepped),
+                passed[wrote],
+                passed[guessed],
+                top_two(passed)
+            );
+        }
+        // On the processor the ids must match EXACTLY. On a card an arm may
+        // come apart only where the card cannot decide: a near tie (one token
+        // at a time wrote its likeliest token and the guessed one was within
+        // `CARD_NEAR_TIE_LOGITS` of it), or a token the card's own prompt pass
+        // over the same text does not pick — where llama.cpp's card build
+        // parts from its processor build too (`CARD_NEAR_TIE_LOGITS`'s note).
+        // A fault in a check shows where the steps and the pass agree.
+        let on_card = model.device().is_cuda();
+        for (name, at, ids, stepped, passed) in &apart {
+            let (wrote, guessed) = (plain.0[*at] as usize, ids[*at] as usize);
+            let near_tie = top_two(stepped)[0].0 as usize == wrote
+                && stepped[wrote] - stepped[guessed] < CARD_NEAR_TIE_LOGITS;
+            let undecided = top_two(passed)[0].0 as usize != wrote;
+            assert!(
+                on_card && (near_tie || undecided),
+                "{name} came apart at {at}{}\none token at a time {:?}\nguessed ahead     {:?}",
+                if on_card {
+                    ", not at a near tie, where the card's steps and its prompt pass agree"
+                } else {
+                    ""
+                },
                 text(&plain.0),
                 text(ids)
             );
@@ -7905,6 +7998,25 @@ mod local_speculation_tests {
     }
 
     const GUESSED_REPLY_STEPS: usize = 96;
+
+    /// How close two logits must be for a card to pick either (2026-10-25,
+    /// Qwen3.5-0.8B and 4B on an RTX 3070): where guessing came apart from
+    /// one token at a time the top two were 0.013, 0.09 and 0.11 apart, and
+    /// in two of the three a plain prompt pass over the same text picked the
+    /// guessed token too; that pass moved a logit 0.43 from where steps put it.
+    /// A tie can be three-way (Llama-3.2-3B: 18.703, 18.678 and the guessed
+    /// token's), so the guessed token is weighed against the top, not second.
+    ///
+    /// Past a near tie, a card can be unable to decide at all. Qwen3.5-4B's
+    /// story reply, position 58 ("Once upon a way"): steps — ours on either
+    /// device, llama.cpp master's processor build — write "way" (1560), and
+    /// guessing wrote "hope" (3769), 1.3 below it. Every several-position
+    /// forward on the card picks otherwise there: our prompt pass picks 854,
+    /// 8026 with `SWARMLLM_DELTA_RULE=steps` (16.568 / 15.001 for its top two)
+    /// and 3769 with `SWARMLLM_QMATMUL_MMQ=dp4a`, and llama.cpp's own card
+    /// build (`dump_logits_cuda2`, `DUMP_GPU_LAYERS=99`) picks 8026 (16.107 /
+    /// 14.951), its last row up to 10.2 logits from its processor build's.
+    const CARD_NEAR_TIE_LOGITS: f32 = 0.5;
 
     /// [`GUESSED_REPLY_STEPS`] greedy tokens after `prompt` under `request`:
     /// one at a time (`None`), or through [`LocalSpec`] (`Some(fixed)`).
@@ -7927,8 +8039,31 @@ mod local_speculation_tests {
         };
         let input = model.tensor_from_ids(prompt).unwrap();
         let mut next = pick(&model.forward(&input, 0, kv, request).unwrap(), &[]);
-        let mut spec = guessing
-            .map(|fixed| LocalSpec::new(NgramLookupConfig::default(), prompt, model, fixed));
+        // `SWARMLLM_GUESS_TEST_MOST=7`: at most that many guesses a check, so
+        // on a card every check of the fixed arm is captured
+        // (`cuda_graph::MAX_POSITIONS`) and its choices do not turn on timings.
+        let cfg = NgramLookupConfig {
+            num_pred_tokens: std::env::var("SWARMLLM_GUESS_TEST_MOST")
+                .ok()
+                .and_then(|most| most.parse().ok())
+                .unwrap_or(NgramLookupConfig::default().num_pred_tokens),
+            ..NgramLookupConfig::default()
+        };
+        let mut spec = guessing.map(|fixed| LocalSpec::new(cfg, prompt, model, fixed));
+        // `SWARMLLM_GUESS_TEST_SCRIPT=3,0,7,…`: the guesses each round of the
+        // guesses that pay checks, as a failing run printed them.
+        if let (Some(spec), Some(false), Ok(script)) = (
+            spec.as_mut(),
+            guessing,
+            std::env::var("SWARMLLM_GUESS_TEST_SCRIPT"),
+        ) {
+            spec.script = Some(
+                script
+                    .split(',')
+                    .filter_map(|w| w.trim().parse().ok())
+                    .collect(),
+            );
+        }
         let (mut reply, mut pos) = (Vec::new(), prompt.len());
         let started = std::time::Instant::now();
         for _ in 0..GUESSED_REPLY_STEPS {
@@ -7948,6 +8083,159 @@ mod local_speculation_tests {
             };
         }
         (reply, started.elapsed().as_secs_f64(), spec)
+    }
+
+    /// The logits after `prompt` then `reply`: read one token at a time
+    /// (`stepped`), or in one prompt pass.
+    fn logits_after(
+        model: &mut SplitModel,
+        kv: &crate::inference::split::KvCacheStore,
+        prompt: &[u32],
+        reply: &[u32],
+        request: &str,
+        stepped: bool,
+    ) -> Vec<f32> {
+        let logits = if stepped {
+            let input = model.tensor_from_ids(prompt).unwrap();
+            let mut logits = model.forward(&input, 0, kv, request).unwrap();
+            for (i, &token) in reply.iter().enumerate() {
+                let input = model.token_tensor(token).unwrap();
+                logits = model
+                    .forward(&input, prompt.len() + i, kv, request)
+                    .unwrap();
+            }
+            logits
+        } else {
+            let ids: Vec<u32> = prompt.iter().chain(reply).copied().collect();
+            let input = model.tensor_from_ids(&ids).unwrap();
+            model.forward(&input, 0, kv, request).unwrap()
+        };
+        logits
+            .flatten_all()
+            .and_then(|l| l.to_dtype(candle_core::DType::F32))
+            .and_then(|l| l.to_vec1())
+            .unwrap()
+    }
+
+    /// Code that repeats its shape: guesses land on the shape and miss on each
+    /// new name.
+    const GUESS_TEST_CODE: &str =
+        "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n\n\
+         def mul(a, b):\n    return a * b\n\ndef div(a, b):\n";
+
+    /// The file the guessing tests read (`SWARMLLM_GUESS_TEST_GGUF`), on the
+    /// card with `SWARMLLM_GUESS_TEST_ON_CARD=1`; `None` skips the test.
+    /// `SWARMLLM_GUESS_TEST_LOG=swarmllm::inference::cuda_graph=info` prints
+    /// the decode graph's DIAG lines (why a capture was rebuilt or refused).
+    fn guess_test_model() -> Option<SplitModel> {
+        let Ok(path) = std::env::var("SWARMLLM_GUESS_TEST_GGUF") else {
+            eprintln!("SWARMLLM_GUESS_TEST_GGUF not set — skipped");
+            return None;
+        };
+        if let Ok(filter) = std::env::var("SWARMLLM_GUESS_TEST_LOG") {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+                .with_writer(std::io::stderr)
+                .try_init();
+        }
+        let model = SplitModel::load_from_gguf(
+            std::path::Path::new(&path),
+            0,
+            999,
+            true,
+            true,
+            std::env::var("SWARMLLM_GUESS_TEST_ON_CARD").is_err(),
+        )
+        .expect("load the file");
+        Some(model)
+    }
+
+    /// A row of a check reads nothing after it: the same opening checked with
+    /// other guesses after it gives that row bit for bit, on either device —
+    /// every kernel a check runs (the projections, the convolution, the delta
+    /// rule, attention) computes a row from its own position and those before
+    /// it. Across WIDTHS a card's kernels may round otherwise (printed); on the
+    /// processor every width gives the row bit for bit too. The check opens on
+    /// the reply's own tokens: `SWARMLLM_ROW_TEST_AT` (default 8) of the reply
+    /// read one token at a time, then a check of the next three and a tail.
+    /// Needs a real file, as [`a_guessed_reply_is_the_reply_read_one_token_at_a_time`].
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a GGUF in SWARMLLM_GUESS_TEST_GGUF"]
+    async fn a_checks_row_reads_nothing_after_it() {
+        use candle_core::IndexOp;
+        let Some(mut model) = guess_test_model() else {
+            return;
+        };
+        let asked = std::env::var("SWARMLLM_GUESS_TEST_PROMPT").ok();
+        let prompt = model.encode_ids(asked.as_deref().unwrap_or(GUESS_TEST_CODE));
+        let kv = crate::inference::split::KvCacheStore::new(std::time::Duration::from_secs(600));
+        let reply = guessed_reply(&mut model, &kv, &prompt, "row-plain", None).0;
+        let at: usize = std::env::var("SWARMLLM_ROW_TEST_AT")
+            .ok()
+            .and_then(|at| at.parse().ok())
+            .unwrap_or(8);
+        const OPENING: usize = 3;
+        let (opening, after) = (&reply[at..at + OPENING], &reply[at + OPENING..]);
+        // Tokens the reply does not continue with: the prompt's.
+        let other = &prompt[1..];
+        let tails: [(&str, &[u32]); 5] = [
+            ("width 5, the reply's own", &after[..2]),
+            ("width 5, other tokens", &other[..2]),
+            ("width 8, the reply's own", &after[..5]),
+            ("width 8, other tokens", &other[..5]),
+            ("width 3", &[]),
+        ];
+        let next = after[0] as usize;
+        let mut rows = Vec::new();
+        for (i, (name, tail)) in tails.iter().enumerate() {
+            let request = format!("row-{i}");
+            logits_after(&mut model, &kv, &prompt, &reply[..at], &request, true);
+            let ids: Vec<u32> = opening.iter().chain(tail.iter()).copied().collect();
+            let input = model.tensor_from_ids(&ids).unwrap();
+            let all = model
+                .forward_verify_all_positions(&input, prompt.len() + at, &kv, &request)
+                .unwrap();
+            let row: Vec<f32> = all
+                .i((0, OPENING - 1))
+                .and_then(|r| r.to_dtype(candle_core::DType::F32))
+                .and_then(|r| r.to_vec1())
+                .unwrap();
+            eprintln!(
+                "{name}: top two {:?}, the reply's next token {next} at {:.3}",
+                top_two(&row),
+                row[next]
+            );
+            rows.push(row);
+        }
+        assert!(
+            rows[0] == rows[1],
+            "a row of a 5-wide check read the guesses after it"
+        );
+        assert!(
+            rows[2] == rows[3],
+            "a row of an 8-wide check read the guesses after it"
+        );
+        if model.device().is_cpu() {
+            assert!(
+                rows[0] == rows[2] && rows[0] == rows[4],
+                "on the processor a row depends on the check's width"
+            );
+        }
+    }
+
+    /// The two likeliest tokens of a row and their logits, the first of equal
+    /// maxima first (as the greedy pick takes it).
+    fn top_two(row: &[f32]) -> [(u32, f32); 2] {
+        let mut best = [(0u32, f32::NEG_INFINITY); 2];
+        for (id, &logit) in row.iter().enumerate() {
+            if logit > best[0].1 {
+                best[1] = best[0];
+                best[0] = (id as u32, logit);
+            } else if logit > best[1].1 {
+                best[1] = (id as u32, logit);
+            }
+        }
+        best
     }
 
     #[test]

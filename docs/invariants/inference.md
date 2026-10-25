@@ -4312,6 +4312,17 @@ decode step's graphs. The drafter reads a short catch-up as single captured step
 γ choice reads is a median of recent calls (`RecentMedian`). Split speculation at an emulated
 10 / 24 / 50 ms round trip: +30% / +48% / +80% over a plain split (was break-even / +30% / +57%).
 
+**Qwen 3.5's checks too** (2026-10-25, #228 (5)). `mask_is_read` asked that every layer be
+`LayerVariant::Dense`, so no Qwen 3.5 check was ever captured: its attention layers call the same
+`run_attention` (flash takes the check, no mask), and its DeltaNet layers read no mask at all.
+Counting them as dense captures its checks of ≤ 8 positions; plain replies are unchanged (ids
+identical before and after). **A one-off is not a price**: a forward that is the first of its
+shape (run the ordinary way so a capture knows its output), instantiates a graph, or is refused
+costs more than the shape will from then on — a Qwen3.5-4B check that made its graph took 240-300
+ms against 16-30 replayed (RTX 3070, 44 h uptime under WSL2) — so `DecodeGraph::one_off_forwards`
+counts them and the worker's guess pricing leaves them out (`docs/invariants/scheduling.md` § "On
+one computer the step is priced on its own"). A new width meets its first capture once per worker.
+
 → `docs/invariants/inference.md` § "A speculative check is captured too"
 
 ## A tree level on a card: one tree kernel, captured as a graph (2026-10-22, #134 (b))
@@ -5203,19 +5214,41 @@ attention-only model's (the truncate refuses and the request fails), dropping th
 instead of reading them again (the reply derails into `return a /\n /\n /\n …`), the processor
 keeping no pair (the rewind refuses).
 
-**Speed, and why only the processor** (2026-10-25, release build, the test's three arms in one
-binary — one token at a time, every guess checked, the guesses that pay (`LocalSpec::guesses`,
-`docs/invariants/scheduling.md` § "Speculation that does not pay steps aside") — each run twice and
-the second timed, two runs, 96 greedy tokens, live node stopped). On the processor the guesses that
-pay: Qwen3.5-0.8B Q8_0 code 26.6-26.8 → 31.6-33.2 tok/s, a story 25.9-27.0 → 26.4; Qwen3.5-4B
-Q4_K_M code 9.9-10.1 → 10.0-10.3, a story that repeats itself 10.0-10.1 → 14.6-14.7. On the card
-(RTX 3070) the same arm: 0.8B code 139.5-139.8 → 113.8-125.2, story 134.4-139.2 → 95.6-152.4; 4B
-code 72.8-73.3 → 71.0-73.7, story 72.8-73.2 → 62.7-106.4 (every guess: 0.8B 99-112, 4B 66 and
-103-108). A Qwen 3.5 check of several positions is never captured on a card — `mask_is_read` asks
-that every layer be dense, and its attention layers read the mask — so a check costs 2-3× a
-captured step (7-14 ms against 15-35), and whether guessing pays turned on a few early timings. So
-`model_worker::local_guessing_suits` keeps a card's Qwen 3.5 one token at a time, as before; a
-captured check is what would turn it on (FUTURE_WORK #228 (5)).
+**Speed** (2026-10-25, release build, the test's three arms in one binary — one token at a time,
+every guess checked, the guesses that pay (`LocalSpec::guesses`, `docs/invariants/scheduling.md` §
+"Speculation that does not pay steps aside") — each run twice and the second timed, two runs, 96
+greedy tokens, live node stopped). On the processor the guesses that pay: Qwen3.5-0.8B Q8_0 code
+26.6-26.8 → 31.6-33.2 tok/s, a story 25.9-27.0 → 26.4; Qwen3.5-4B Q4_K_M code 9.9-10.1 →
+10.0-10.3, a story that repeats itself 10.0-10.1 → 14.6-14.7. **On the card (RTX 3070) only once its
+checks were captured**: before, `mask_is_read` asked that every layer be dense, so a check of
+several positions ran op by op at 2-3× a captured step and the same arm came out as often slower as
+faster — 0.8B code 139.5-139.8 → 113.8-125.2, story 134.4-139.2 → 95.6-152.4; 4B code 72.8-73.3 →
+71.0-73.7, story 72.8-73.2 → 62.7-106.4 — and a card's Qwen 3.5 was kept one token at a time
+(`local_guessing_suits`, removed). With its checks captured and one-off forwards left out of the
+price (§ "A speculative check is captured too"; the final code, 02Z): 0.8B code 133.1-136.8 →
+158.6-163.7, story 133.8-135.6 → 137.4-146.5; 4B code 73.0-73.3 → 75.4-76.7, story 71.5-72.8 →
+73.9-86.0 (every guess 99.8-105.4). The 73.9 met five one-offs in its timed pass (new widths'
+first captures, 240-300 ms each on the 4B); an earlier run that met one in a short reply read 50.3.
+
+**What a card's guessed reply is held to** (2026-10-25). A card's forward of several positions is
+not width-invariant — vLLM's "batch invariance", which its kernels lack too outside a dedicated
+mode. `a_checks_row_reads_nothing_after_it` reads one row of a check opened on the reply's own
+tokens, at widths 5 and 8 with the reply's continuation or the prompt's tokens after it: identical
+bit for bit on both devices (no row reads a later one), and on the processor at every width; on a
+card the row moves with the width as the matmul kernel does (MMQ from 4 rows for a k-quant, 7 for
+Q8_0). Qwen3.5-4B's story at reply position 58 ("Once upon a way"): width 3 reads "way" (1560) at
+15.084 on top, widths 5 and 8 read 2018 at 15.267 with "way" at 12.755. That spot is chaotic for
+every several-position forward on a card, llama.cpp's included: llama.cpp master's processor build
+(a prompt pass) picks "way" at 16.927 ("hope", 3769, 13.853) as every step does; its card build
+(`dump_logits_cuda2`, `DUMP_GPU_LAYERS=99`) picks 8026 at 16.107, its last row up to 10.2 logits
+from the processor build's (the rows before it ≤ 0.83); our card's prompt pass picks 854, 8026 with
+`SWARMLLM_DELTA_RULE=steps` (16.568 / 15.001 for its top two against llama.cpp card's 16.107 /
+14.951) and 3769 with `SWARMLLM_QMATMUL_MMQ=dp4a`. Guessing wrote "hope" there, 1.3 below "way" as
+steps read it — not a near tie, and no fault. So on the card the test holds a guessed reply to
+parting from one at a time only where the card cannot decide: a near tie (`CARD_NEAR_TIE_LOGITS`,
+0.5 — the near ties seen were 0.013-0.28) or a token the card's own prompt pass does not pick
+either. A fault in a check shows where the card's steps and its pass agree. On the processor the
+bar stays identical ids.
 
 - **Coordinator**: `pipeline::distributed::speculation_can_roll_back(architecture)` is asked ONCE in
   `execute_distributed`, after the delegated-split hand-off and ahead of DSD (stream included),
@@ -5223,10 +5256,8 @@ captured check is what would turn it on (FUTURE_WORK #228 (5)).
   pass. A delegated split's head asks the same on its own node. A split stays off until the tail's
   walk and each segment can take a check back (#228 (5)).
 - **Worker**: SWIFT and a drafter with recurrent state (`engine_drafter`, which would have to take
-  back γ steps) ask `SplitModel::carries_recurrent_state` and stay off; `ngram_spec_eligible` asks
-  `local_guessing_suits` (REQUIRED — slot admission and the decode loop): the processor yes, a card
-  no. ⚠ Slot admission can run before the model has loaded (`models` empty answers yes); the decode
-  loop's own answer, made with the model in hand, is what declines it — keep both.
+  back γ steps) ask `SplitModel::carries_recurrent_state` and stay off; the worker's n-gram
+  (`ngram_spec_eligible`) takes every model on either device.
 - **Backstop**: `KvCacheEntry::truncate_to` refuses unless every `ssm_states` entry can be taken
   back to the target — only the start of its last step (`SsmState::can_rewind_to`) — so a path
   added later that truncates a recurrent model into the middle of a check fails loudly instead of
@@ -5236,7 +5267,7 @@ captured check is what would turn it on (FUTURE_WORK #228 (5)).
   and restored whole". A prompt pass at position 0 clears the entry (state included), which is also
   how a failover replay rebuilds it on a stand-in.
 
-A card, splits and the drafter wait on #228 (5).
+Splits and the drafter wait on #228 (5).
 
 ## Qwen 3.5's prompt is saved short of its end, and restored whole (2026-10-18, FUTURE_WORK #228 (8))
 

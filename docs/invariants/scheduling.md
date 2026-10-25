@@ -5358,9 +5358,18 @@ guesses that pay against one at a time: processor qwen3-1.7B code 17.9-19.0 → 
 18.9-19.0 → 18.4-18.8; Llama-3.2-3B code 17.4-17.5 → 18.0-18.1, prose 17.5 → 17.1-17.9; card
 qwen3-1.7B code 126.7-127.8 → 115.4-165.5 (every guess 127.7-135.3), prose 128.7-129.4 →
 126.5-128.3; Llama-3.2-3B code 114.8-115.7 → 113.8-114.6, prose 112.8-113.8 → 113.1-116.5. The
-card's spread is the choice turning on a few early timings. Qwen 3.5 on a card stays one token at a
-time (`local_guessing_suits`, `docs/invariants/inference.md` § "A model whose state cannot be
-wound back takes a rejected check back whole"). A/B `SWARMLLM_LOCAL_GUESS_GAMMA=fixed` (every
+card's spread is the choice turning on a few early timings.
+
+**A one-off is not a price** (2026-10-25). Much of that spread was forwards that cost more than
+their shape ever will again: the first of a shape (run the ordinary way so a capture knows its
+output), one that instantiates a graph, one whose capture is refused — a Qwen3.5-4B check that made
+its graph took 240-300 ms against 16-30 replayed, and one such check fitted into the line priced
+every later check of the reply. `LocalSpec::next` reads `SplitModel::one_off_forwards` before and
+after a round and records neither the step nor the check from a round that paid one; a probe that
+paid one starts the count over, as one that paid does, instead of doubling its wait (it said
+nothing of what a check costs). Qwen 3.5 guesses on a card since then (`docs/invariants/inference.md` § "A model
+whose state cannot be wound back takes a rejected check back whole": Qwen3.5-4B story 71.5-72.8 →
+73.9-86.0 tok/s). A/B `SWARMLLM_LOCAL_GUESS_GAMMA=fixed` (every
 guess, the old rule); the test runs both arms. Tests:
 `a_check_dearer_than_a_step_is_bought_only_when_its_guesses_are_kept`,
 `a_recent_acceptance_follows_the_reply_and_fades_to_its_prior`.

@@ -451,6 +451,9 @@ struct Stats {
     updated: u64,
     instantiated: u64,
     uncaptured: u64,
+    /// Ordinary steps that were the first of their shape: they ran to learn
+    /// the output a capture records into, and the next of the shape captures.
+    first_of_shape: u64,
     refused: u64,
     /// Launches where the driver refused to update an existing graph.
     rebuilt: u64,
@@ -543,10 +546,14 @@ impl DecodeGraph {
         (self.stats.launched, self.stats.refused)
     }
 
-    /// Launches that made a graph — instantiated one, or rebuilt one the
-    /// driver would not update — rather than updating every group's in place.
-    pub(crate) fn launches_that_made_a_graph(&self) -> u64 {
-        self.stats.instantiated
+    /// Forwards that cost more than their shape will from now on: the first
+    /// of a shape (run the ordinary way so a capture knows its output), one
+    /// that made a graph — instantiated it, or rebuilt one the driver would
+    /// not update — and a refused capture. A Qwen3.5-4B check that made its
+    /// graph took 259-277 ms against 16-30 replayed (2026-10-25), so a caller
+    /// pricing its next forward leaves these out (`model_worker::LocalSpec`).
+    pub(crate) fn one_off_forwards(&self) -> u64 {
+        self.stats.first_of_shape + self.stats.instantiated + self.stats.refused
     }
 
     /// True when forwards of `positions` are not to be captured now: they were
@@ -677,8 +684,11 @@ impl DecodeGraph {
     ) {
         let timed = could_capture && self.resting(shape);
         self.end_step(began, shape, timed.then_some(StepRan::Ordinary));
-        self.templates
-            .insert((all_positions, shape), (out.dims().to_vec(), out.dtype()));
+        let first = self
+            .templates
+            .insert((all_positions, shape), (out.dims().to_vec(), out.dtype()))
+            .is_none();
+        self.stats.first_of_shape += u64::from(first);
         if let Some(churn) = self.churn.get_mut(&shape) {
             if churn.rest_left > 0 {
                 churn.rest_left -= 1;

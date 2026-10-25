@@ -111,7 +111,7 @@ speed is what the swarm is for, so split speed for large models is the top track
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
 11. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
-12. **#228** — Qwen 3.5 guesses ahead only on one computer's processor; a card (capture its checks) and splits (replay a check's inputs) next, #228 (5).
+12. **#228** — Qwen 3.5 guesses ahead only on one computer (processor and card since 2026-10-25); splits (replay a check's inputs) next, #228 (5).
 13. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
     decision, with research, when picked up.
 14. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
@@ -2329,18 +2329,19 @@ two buffer pairs and a step writes the pair it did not read (`SsmState`), as lla
 cache tensors; the 0.8B writes 121-126 tokens a second instead of 50-54 whole on the card, the 4B is unchanged
 (~37, card-bound), ids identical with capture on and off (`docs/invariants/inference.md` § "Qwen 3.5's decode steps are captured
 too"). MoE layers are captured where their experts are stacked on the card (#138 (2), 2026-10-14); (5) **speculation —
-PARTIAL: the worker's own n-gram ON THE PROCESSOR since 2026-10-25, ships in v0.3.253.** A check that rejects a guess
+PARTIAL: the worker's own n-gram on the processor AND the card since 2026-10-25, ships in v0.3.253.** A check that rejects a guess
 is taken back WHOLE — `SsmState` now keeps the pair its last step read on the processor too
 (`rewind_to`, one step) — and its accepted tokens are read again at the head of the next check
 (`model_worker::ngram_spec_round`, no extra forward); ids identical to one token at a time on the
 processor (`a_guessed_reply_is_the_reply_read_one_token_at_a_time`, Qwen3.5-0.8B Q8_0: 66
 checks, 30 guesses kept, 18 taken back; `docs/invariants/inference.md` § "A model whose state
 cannot be wound back takes a rejected check back whole"); processor 0.8B code 26.7 → 31.6-33.2 tok/s,
-4B story 10 → 14.6). **Still out: a card, splits, the drafter, MTP.** **A card — capture a several-position
-check first**: Qwen 3.5's never is (`SplitModel::mask_is_read` asks every layer be dense; its attention
-layers read the mask), so a check costs 2-3× a captured step and guessing came out 95.6-152.4 tok/s
-against 134-140 one at a time on the 0.8B, 62.7-106.4 against 73 on the 4B (2026-10-25); with checks
-captured, turn `model_worker::local_guessing_suits` on and measure again.
+4B story 10 → 14.6). ✅ **The card, the same day**: its checks are captured (`SplitModel::mask_is_read`
+counts its layers as dense) and one-off forwards are left out of the guess pricing — 0.8B code 133-137 →
+159-164 tok/s, 4B story 72-73 → 74-86; a card's guessed reply parts from one at a time only where the card
+cannot decide (llama.cpp's card build parts from its processor build there too —
+`docs/invariants/inference.md` § "A model whose state cannot be wound back"). Residual: a new check
+width's first capture costs 240-300 ms on the 4B, once per worker. **Still out: splits, the drafter, MTP.**
 **Next — replay a check's inputs instead of re-reading its tokens** (Dao AI Lab's ReplaySSM, 2026:
 cache each step's inputs, not its states; vLLM's per-draft state snapshots measured 4.85× a decode
 step at six guesses on Qwen3.5-122B). Each DeltaNet layer keeps its last check's convolution
