@@ -21,6 +21,11 @@ pub struct ModelMgmt {
         DashMap<crate::types::ModelId, crate::model::acquisition::AcquisitionStatus>,
     pub hf_sources: DashMap<crate::types::ModelId, HfSource>,
     pub auto_manage_notify: Arc<tokio::sync::Notify>,
+    /// A model was given an origin it did not have (`write_hf_source`, the
+    /// one writer of `hf_sources`): the HuggingFace watcher asks that origin
+    /// about trust now, not at its next hourly poll — until then no peer on
+    /// auto-manage fetches a part of a model it holds none of.
+    pub origin_trust_notify: Arc<tokio::sync::Notify>,
     pub auto_manage_enabled: std::sync::atomic::AtomicBool,
     pub auto_manage_default_model_cap: AtomicU32,
     /// The model `auto` last resolved to. Read and written ONLY by
@@ -1132,6 +1137,7 @@ mod tests {
             acquisition_progress: DashMap::new(),
             hf_sources: DashMap::new(),
             auto_manage_notify: Arc::new(tokio::sync::Notify::new()),
+            origin_trust_notify: Arc::new(tokio::sync::Notify::new()),
             auto_manage_enabled: AtomicBool::new(false),
             auto_manage_default_model_cap: AtomicU32::new(0),
             auto_model: parking_lot::Mutex::new(None),

@@ -34,6 +34,14 @@ function at 12.7-12.8 instead of 6.0, every reply identical to the one written a
 A computer told to undo words it cannot now refuses the step outright rather than carrying on from
 the wrong place (#228).
 
+**A large model someone adds to the swarm is taken up by other computers within minutes, not up
+to an hour later.** A computer fetches parts of a model it holds none of only once it trusts the
+model, which it decides from how often the model has been downloaded on HuggingFace. It asked
+HuggingFace once an hour, so a model added just after one of those checks waited up to an hour
+before any other computer started on it — seen today with a 70B model, 63 of whose 79 parts no
+computer fetched. A computer now asks within a minute of first hearing of a model (at most 8
+questions a minute), and starts fetching as soon as the answer is in.
+
 **Made-up computers can no longer push a model part's real holders out of your node's list.**
 Each computer keeps a list of up to 50 others holding each piece of a model. Announcing that you
 hold a piece needs only a freshly made identity, and once a list was full every new announcement

@@ -29,8 +29,9 @@
 //!
 //! R112.
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -85,6 +86,17 @@ const MIN_AGE_FOR_TRUST_HOURS: i64 = 24;
 /// third party; the watcher runs hourly, so a handful per tick clears any
 /// realistic backlog within a few hours while never looking like a scraper.
 const MAX_ORIGIN_TRUST_PROBES_PER_TICK: usize = 8;
+
+/// A model given a new origin (`ModelMgmt::origin_trust_notify`) is asked
+/// about this long after the wake, so a burst of claims — a catch-up names
+/// every model a peer holds — is one round of questions.
+const ORIGIN_WAKE_SETTLE: Duration = Duration::from_secs(10);
+
+/// Rounds of questions a wake starts are at least this far apart. With
+/// `MAX_ORIGIN_TRUST_PROBES_PER_TICK` that is at most 8 a minute, under
+/// HuggingFace's anonymous limit (~1,000 an hour) even for a node hearing of a
+/// new model every minute.
+const ORIGIN_WAKE_MIN_GAP: Duration = Duration::from_secs(60);
 
 /// Curator allowlist: HF publishers whose releases are known-good
 /// quantisations / official model weights. Maintainers earn this slot
@@ -270,6 +282,9 @@ pub struct HfWatcher {
     shutdown_rx: watch::Receiver<bool>,
     interval: Duration,
     client: reqwest::Client,
+    /// When each origin was last asked about (`origins_to_ask`). Memory only:
+    /// a restart asks again, as its first poll always has.
+    asked: parking_lot::Mutex<HashMap<crate::types::ModelId, Instant>>,
 }
 
 impl HfWatcher {
@@ -291,6 +306,7 @@ impl HfWatcher {
             shutdown_rx,
             interval: Duration::from_secs(HF_WATCHER_INTERVAL_SECS),
             client,
+            asked: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -345,12 +361,51 @@ impl HfWatcher {
                 }
             }
 
-            tokio::select! {
-                _ = tokio::time::sleep(backoff) => {},
-                _ = self.shutdown_rx.changed() => {
-                    if *self.shutdown_rx.borrow() {
-                        tracing::info!("HfWatcher shutting down");
-                        return Ok(());
+            // Until the next poll, a model given a new origin is asked about
+            // within a minute: peers on auto-manage fetch no part of a model
+            // they hold none of until it is trusted, and an hourly poll made
+            // the swarm sit on a model seeded just after one (2026-10-25: a
+            // 70B's 63 missing parts, no peer fetching any). Kubernetes'
+            // controllers run the same way — act on each change event, and
+            // resync on a period for whatever an event missed.
+            let next_poll = Instant::now() + backoff;
+            let notify = self.shared_state.models.origin_trust_notify.clone();
+            let mut last_wake: Option<Instant> = None;
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(next_poll.into()) => break,
+                    _ = notify.notified() => {
+                        let gap_ends = last_wake
+                            .map_or_else(Instant::now, |t| t + ORIGIN_WAKE_MIN_GAP)
+                            .max(Instant::now() + ORIGIN_WAKE_SETTLE);
+                        if gap_ends >= next_poll {
+                            continue; // the poll asks about it anyway
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep_until(gap_ends.into()) => {},
+                            _ = self.shutdown_rx.changed() => {
+                                if *self.shutdown_rx.borrow() {
+                                    tracing::info!("HfWatcher shutting down");
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        last_wake = Some(Instant::now());
+                        let promoted = promote_trust_for_known_sources(
+                            &self.shared_state,
+                            &self.client,
+                            &[],
+                            &self.asked,
+                            Some(self.interval),
+                        )
+                        .await;
+                        tracing::info!(promoted, "HfWatcher: asked about origins heard since the last poll");
+                    }
+                    _ = self.shutdown_rx.changed() => {
+                        if *self.shutdown_rx.borrow() {
+                            tracing::info!("HfWatcher shutting down");
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -444,7 +499,14 @@ impl HfWatcher {
 
         // Decide trust for every model we know an origin for — from this feed
         // where it appears, and by asking the origin directly where it does not.
-        promote_trust_for_known_sources(&self.shared_state, &self.client, &entries).await;
+        promote_trust_for_known_sources(
+            &self.shared_state,
+            &self.client,
+            &entries,
+            &self.asked,
+            None,
+        )
+        .await;
 
         // Publish the new snapshot.
         let snapshot = HfTrendingSnapshot {
@@ -552,13 +614,19 @@ pub(crate) fn should_auto_promote(trust: &crate::types::ModelTrustInfo) -> bool 
 /// obtained the same way, about a repo we were told about rather than one that
 /// happened to be popular this week. Peer agreement still proves nothing; the
 /// origin does (see `origin_verified`, gotcha #382).
+///
+/// Which origins are asked, and how many, is `origins_to_ask`'s answer over
+/// `asked` (when each was last asked); `fresh_within` asks only about those
+/// not asked within it (a wake, between polls). A model promoted wakes the
+/// download pass, which would otherwise wait out its interval. Returns how many
+/// were promoted.
 async fn promote_trust_for_known_sources(
     state: &SharedState,
     client: &reqwest::Client,
     entries: &[HfTrendingEntry],
-) {
-    use std::collections::HashMap;
-
+    asked: &parking_lot::Mutex<HashMap<crate::types::ModelId, Instant>>,
+    fresh_within: Option<Duration>,
+) -> usize {
     let by_repo: HashMap<&str, &HfTrendingEntry> =
         entries.iter().map(|e| (e.repo_id.as_str(), e)).collect();
 
@@ -571,25 +639,74 @@ async fn promote_trust_for_known_sources(
         .map(|e| (e.key().clone(), e.value().repo_id.clone()))
         .collect();
 
-    let mut probes = 0usize;
+    let mut promoted = 0usize;
+    let mut not_in_the_feed = Vec::new();
     for (model_id, repo_id) in sources {
         if already_trusted_enough(state, &model_id) {
             continue;
         }
-        let stats = match by_repo.get(repo_id.as_str()) {
-            Some(e) => Some((e.downloads, e.created_at_secs)),
-            None => {
-                if probes >= MAX_ORIGIN_TRUST_PROBES_PER_TICK {
-                    continue;
-                }
-                probes += 1;
-                fetch_repo_stats(client, &repo_id).await
+        match by_repo.get(repo_id.as_str()) {
+            Some(e) => {
+                promoted += usize::from(apply_trust_promotion(
+                    state,
+                    &model_id,
+                    &repo_id,
+                    e.downloads,
+                    e.created_at_secs,
+                ));
             }
-        };
-        if let Some((downloads, created_at_secs)) = stats {
-            apply_trust_promotion(state, &model_id, &repo_id, downloads, created_at_secs);
+            None => not_in_the_feed.push((model_id, repo_id)),
         }
     }
+    let due = {
+        let mut asked = asked.lock();
+        // Forget what is no longer a candidate, so the map stays as small
+        // as `hf_sources` (itself capped).
+        let candidates: std::collections::HashSet<&crate::types::ModelId> =
+            not_in_the_feed.iter().map(|(m, _)| m).collect();
+        asked.retain(|m, _| candidates.contains(m));
+        origins_to_ask(not_in_the_feed, &asked, Instant::now(), fresh_within)
+    };
+    for (model_id, repo_id) in due {
+        asked.lock().insert(model_id.clone(), Instant::now());
+        if let Some((downloads, created_at_secs)) = fetch_repo_stats(client, &repo_id).await {
+            promoted += usize::from(apply_trust_promotion(
+                state,
+                &model_id,
+                &repo_id,
+                downloads,
+                created_at_secs,
+            ));
+        }
+    }
+    if promoted > 0 {
+        state.models.auto_manage_notify.notify_one();
+    }
+    promoted
+}
+
+/// Which of `candidates` (models with an origin, untrusted, not in the feed)
+/// to ask HuggingFace about now: those never asked first, then the longest
+/// since, at most `MAX_ORIGIN_TRUST_PROBES_PER_TICK` — so a backlog past the
+/// cap is worked through instead of the same few being asked every poll (the
+/// map's iteration order decided that before 2026-10-25). With `fresh_within`,
+/// only those not asked within it.
+fn origins_to_ask(
+    mut candidates: Vec<(crate::types::ModelId, String)>,
+    asked: &HashMap<crate::types::ModelId, Instant>,
+    now: Instant,
+    fresh_within: Option<Duration>,
+) -> Vec<(crate::types::ModelId, String)> {
+    if let Some(within) = fresh_within {
+        candidates.retain(|(m, _)| {
+            asked
+                .get(m)
+                .is_none_or(|t| now.saturating_duration_since(*t) >= within)
+        });
+    }
+    candidates.sort_by_key(|(m, _)| asked.get(m).copied());
+    candidates.truncate(MAX_ORIGIN_TRUST_PROBES_PER_TICK);
+    candidates
 }
 
 /// Ask HuggingFace about one repo: downloads and creation time, the two
@@ -616,20 +733,20 @@ async fn fetch_repo_stats(client: &reqwest::Client, repo_id: &str) -> Option<(u6
 }
 
 /// Apply the trust thresholds to ONE model whose origin statistics we have,
-/// wherever they came from. Idempotent.
+/// wherever they came from. Idempotent. True when it promoted the model.
 fn apply_trust_promotion(
     state: &SharedState,
     model_id: &crate::types::ModelId,
     repo_id: &str,
     downloads: u64,
     created_at_secs: i64,
-) {
+) -> bool {
     let now = chrono::Utc::now().timestamp();
     if downloads < min_downloads_for_repo(repo_id) {
-        return;
+        return false;
     }
     if created_at_secs > 0 && (now - created_at_secs) < MIN_AGE_FOR_TRUST_HOURS * 3600 {
-        return;
+        return false;
     }
     // Promote — only if currently Discovered (don't override an
     // explicit user pin, and don't downgrade higher trust) AND
@@ -674,6 +791,7 @@ fn apply_trust_promotion(
             "HfWatcher: re-promotion blocked by failed-promotion cooldown"
         );
     }
+    upgraded
 }
 
 /// Does this model already sit at or above `DemandVerified`? Used to avoid
@@ -857,5 +975,45 @@ mod tests {
         info.record_request();
         assert_eq!(info.failed_promotions, 0);
         assert_eq!(info.total_requests, 1);
+    }
+
+    /// The origins asked about: never-asked first, then the longest since,
+    /// at most the per-tick cap — and a wake (`fresh_within`) asks only about
+    /// those not asked within it, so a model seeded between polls is asked at
+    /// once and a backlog past the cap is worked through, not the same few.
+    #[test]
+    fn origins_are_asked_never_asked_first_and_a_wake_asks_only_fresh_ones() {
+        let base = Instant::now();
+        let now = base + Duration::from_secs(10_000);
+        let ago = |secs: u64| base + Duration::from_secs(10_000 - secs);
+        let id = |i: usize| crate::types::ModelId(format!("m{i}"));
+        let candidates: Vec<_> = (0..12).map(|i| (id(i), format!("org/repo{i}"))).collect();
+        let mut asked = HashMap::new();
+        // m0..m5 asked, m0 longest ago; m6..m11 never.
+        for i in 0..6 {
+            asked.insert(id(i), ago(5_000 - 100 * i as u64));
+        }
+        let names = |v: Vec<(crate::types::ModelId, String)>| -> Vec<String> {
+            v.into_iter().map(|(m, _)| m.0).collect()
+        };
+        let poll = names(origins_to_ask(candidates.clone(), &asked, now, None));
+        assert_eq!(
+            poll,
+            ["m6", "m7", "m8", "m9", "m10", "m11", "m0", "m1"],
+            "the never-asked come first, then the longest since"
+        );
+        // A wake between polls: m4 and m5 were asked within the hour, so it
+        // asks the never-asked and the two longest since, not them.
+        asked.insert(id(4), ago(60));
+        asked.insert(id(5), ago(600));
+        let wake = names(origins_to_ask(
+            candidates,
+            &asked,
+            now,
+            Some(Duration::from_secs(3600)),
+        ));
+        assert!(!wake.contains(&"m4".to_string()) && !wake.contains(&"m5".to_string()));
+        assert_eq!(wake.len(), MAX_ORIGIN_TRUST_PROBES_PER_TICK);
+        assert_eq!(&wake[..6], ["m6", "m7", "m8", "m9", "m10", "m11"]);
     }
 }

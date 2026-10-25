@@ -2057,6 +2057,7 @@ Discovered → Pinned → DemandVerified → NetworkPopular
   - **Unknown publishers** keep the original **100k downloads** floor (`MIN_DOWNLOADS_FOR_TRUST`).
   - The 24h age gate is unchanged for both tiers — a fresh repo can still be a download-pump even from a trusted account if it's compromised.
   - Helper `is_trusted_publisher` is the canonical check, re-exported via `crate::model::huggingface`. Used by both the watcher's promotion path AND the wishlist scorer for the `wishlist.why.trusted_publisher` why-tag + score bonus.
+- A model given an origin it did not have (`SharedState::write_hf_source`, the one writer of `hf_sources`) wakes the watcher (`state.models.origin_trust_notify`): it asks that origin `ORIGIN_WAKE_SETTLE` (10 s) later, rounds at least `ORIGIN_WAKE_MIN_GAP` (60 s) apart, at most 8 asks a round — never-asked first, then the longest since (`watcher::origins_to_ask`, the poll's order too) — and a promotion wakes the download pass. Until 2026-10-25 only the hourly poll asked, so a model seeded just after one sat for up to an hour with no peer fetching a part of it (a 70B: 63 of 79 parts untouched).
 - 7 days without requests → decay (`NetworkPopular` → `DemandVerified`, `DemandVerified` → `Discovered`)
 - Auto-promoted models that decay back to `Discovered` with zero real swarm requests bump `failed_promotions` (anti-gaming cooldown for re-promotion; `FAILED_PROMOTION_COOLDOWN_BASE_DAYS = 7`, cap 4 strikes — beyond that only a user pin lifts the level)
 - Pinned models never decay

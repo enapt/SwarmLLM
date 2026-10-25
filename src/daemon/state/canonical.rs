@@ -344,9 +344,16 @@ impl SharedState {
     /// stalls every message behind it (gotcha #74, FUTURE_WORK #90). Every
     /// reader consults the in-memory map, which is updated first.
     fn write_hf_source(&self, model_id: &ModelId, source: HfSource, canonical: bool) {
-        self.models
+        let previous = self
+            .models
             .hf_sources
             .insert(model_id.clone(), source.clone());
+        // An origin this model did not have is one the trust check has not
+        // asked about: wake it (`HfWatcher`), or peers wait up to its hourly
+        // poll before fetching any part of a model they hold none of.
+        if previous.is_none_or(|p| p.repo_id != source.repo_id) {
+            self.models.origin_trust_notify.notify_one();
+        }
         let db = self.db.clone();
         let key = model_id.0.clone();
         let file = Some(self.model_dir(&model_id.0))

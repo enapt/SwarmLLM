@@ -1566,6 +1566,7 @@ impl SharedState {
                 acquisition_progress: DashMap::new(),
                 hf_sources,
                 auto_manage_notify: Arc::new(tokio::sync::Notify::new()),
+                origin_trust_notify: Arc::new(tokio::sync::Notify::new()),
                 auto_manage_enabled: std::sync::atomic::AtomicBool::new(auto_manage_enabled),
                 auto_manage_default_model_cap: AtomicU32::new(default_model_shard_cap),
                 auto_model: parking_lot::Mutex::new(None),
