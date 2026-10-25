@@ -720,10 +720,36 @@ mod tests {
     use super::*;
 
     fn weights(device: &Device) -> DeltaNetWeights {
+        weights_of(device, false)
+    }
+
+    /// `t` rounded to a multiple of `1 / per`: a sum of products of such
+    /// values is exact in f32, so it is the same whatever order a kernel adds
+    /// it in.
+    fn exact(t: Tensor, per: f64) -> Tensor {
+        t.affine(per, 0.0)
+            .unwrap()
+            .round()
+            .unwrap()
+            .affine(1.0 / per, 0.0)
+            .unwrap()
+    }
+
+    /// The test layer; with `exact_projections`, its input projections hold
+    /// multiples of 1/32, so fed multiples of 1/8 ([`exact`]) every row they
+    /// make is the same however many rows are multiplied together. On an ARM
+    /// processor it is not otherwise: the `gemm` crate multiplies one row by
+    /// a matrix-vector kernel and several by its blocked one (its small-size
+    /// dot-product kernel, which serves both on x86, is `H_M = 0` for NEON),
+    /// and the two add in different orders — so a check's rows part from the
+    /// same rows read one at a time in the last bit (CI's macOS job,
+    /// 2026-10-25).
+    fn weights_of(device: &Device, exact_projections: bool) -> DeltaNetWeights {
         let (hidden, nk, kd, nv, vd, k) = (8usize, 2usize, 4usize, 4usize, 4usize, 4usize);
         let c = 2 * nk * kd + nv * vd;
         let mm = |o: usize, i: usize| {
-            super::super::QMatMul::from_dense(Tensor::randn(0f32, 0.3, (o, i), device).unwrap())
+            let w = Tensor::randn(0f32, 0.3, (o, i), device).unwrap();
+            super::super::QMatMul::from_dense(if exact_projections { exact(w, 32.0) } else { w })
         };
         DeltaNetWeights {
             wqkv: mm(c, hidden),
@@ -935,8 +961,12 @@ mod tests {
     #[test]
     fn a_check_rewound_into_its_middle_is_where_its_kept_rows_lead() {
         let device = Device::Cpu;
-        let w = weights(&device);
-        let x = Tensor::randn(0f32, 1.0, (1, 10, 8), &device).unwrap();
+        // Exact projections: the one-at-a-time reference multiplies one row
+        // where the check multiplied six, which an ARM processor's `gemm`
+        // rounds differently (`weights_of`) — a property of the matrix
+        // multiply, not of the replay this test checks.
+        let w = weights_of(&device, true);
+        let x = exact(Tensor::randn(0f32, 1.0, (1, 10, 8), &device).unwrap(), 8.0);
         let same = |a: &SsmState, b: &SsmState, what: &str| {
             assert_eq!(a.positions(), b.positions(), "{what}: positions");
             assert_eq!(

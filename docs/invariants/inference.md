@@ -5198,7 +5198,14 @@ under `SWARMLLM_DELTA_RULE=steps`) — no projection, no attention, nothing sent
 arithmetic per token does not depend on how many tokens a call carries, so the replayed state is
 bit for bit the one the check passed at that row (`a_check_rewound_into_its_middle_is_where_its_kept_rows_lead`:
 the state, the window and the next step's output, every way a step and a replay write; red with
-the window read from the wrong end). On a card the rows sit in fixed buffers made outside any
+the window read from the wrong end). That test compares against the same rows read ONE at a time,
+which equals the check's own rows only where the input projections give a row the same bits
+whatever the rows beside it: on an ARM processor the `gemm` crate multiplies one f32 row by its
+matrix-vector kernel and several by its blocked one (the small-size dot-product kernel that serves
+both on x86 is `H_M = 0` for NEON, `gemm-f32` 0.19), so CI's macOS job failed the comparison
+by the last bit while the replay was right (2026-10-25); its projections now hold multiples of 1/32
+fed multiples of 1/8, whose sums are exact in any order. A quantized model's rows are per row on
+every processor (`vec_dot_rows_chosen`). On a card the rows sit in fixed buffers made outside any
 capture (`SsmState::holds_a_step_to`, asked by `KvCacheStore::every_cache_holds`; room for
 `cuda_graph::MAX_POSITIONS` rows at least, so a captured check never finds too few), and the
 replay writes into the current pair's own buffers — the addresses a captured step reads. A wider
