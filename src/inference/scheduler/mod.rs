@@ -285,6 +285,25 @@ struct NodeCandidate {
     /// may use the run's WIDTH up to this; a plan giving it two or more is held
     /// to `max_hostable_layers` in layers added, as before (2026-10-08).
     fresh_run_layers: Option<u32>,
+    /// How many layers of a range this candidate runs on its graphics card
+    /// before the rest go to its processor — the loader's card/processor split
+    /// (`process_pool::CardSplit`): a peer stating the processor's room beside
+    /// its card (`NodeCapability::processor_beside_card`; its card's own bound),
+    /// or this node where its loader would split the model
+    /// (`ModelProcessPool::card_share_for_planning`). `None` runs every layer on
+    /// one device, priced at `est_tokens_per_sec`. Read only through
+    /// [`Self::layers_by_device`].
+    ///
+    /// A token's time is the sum of its layers' times, each on its own device
+    /// (llama.cpp's partial offload behaves the same), so a range is priced
+    /// per device. Priced at the WHOLE model's share instead, this node
+    /// holding 17 of a 70B's 80 layers — 12 of which its card holds — was
+    /// priced at 7.1 tokens a second against a computer in another country's
+    /// 15.4, and was left out of the chain (2026-10-25).
+    card_layers: Option<u32>,
+    /// The processor's speed for the layers past [`Self::card_layers`], in the
+    /// units of `est_tokens_per_sec` (which is then the card's). 0 = unknown.
+    processor_tokens_per_sec: f32,
     /// This node's conversation memory refused this request's prompt
     /// (`ModelProcessPool::admit_prompt`, #263), or a PEER's did when asked
     /// before the pass (`peer_layers_fitting_for_request`, #252 (b)) — its
@@ -455,6 +474,46 @@ impl NodeCandidate {
         let stated_speed = reference_layer_ms * self.layer_work;
         self.stated_ms_per_layer
             .map_or(stated_speed, |timed| timed.max(stated_speed))
+    }
+
+    /// The same prior for a layer this candidate runs on its PROCESSOR beside a
+    /// card ([`Self::card_layers`]), from `processor_tokens_per_sec`; its own
+    /// timing is a floor here too.
+    fn processor_prior_ms_per_layer(&self) -> f32 {
+        let reference_layer_ms = if self.processor_tokens_per_sec > 0.0 {
+            1000.0 / self.processor_tokens_per_sec / parallax::BASELINE_LAYER_COUNT
+        } else {
+            parallax::UNKNOWN_COMPUTE_MS
+        };
+        let stated_speed = reference_layer_ms * self.layer_work;
+        self.stated_ms_per_layer
+            .map_or(stated_speed, |timed| timed.max(stated_speed))
+    }
+
+    /// The layers of `range` this candidate runs on its card and on its
+    /// processor beside it: the first [`Self::card_layers`] on the card. Every
+    /// layer on the one device it has where it splits nothing.
+    fn layers_by_device(&self, range: (u32, u32)) -> (u32, u32) {
+        let width = range.1.saturating_sub(range.0);
+        match self.card_layers {
+            Some(card) => (width.min(card), width.saturating_sub(card)),
+            None => (width, 0),
+        }
+    }
+
+    /// The static prior for one of `range`'s layers, averaged over the devices
+    /// they run on ([`Self::layers_by_device`]) — the ONE prior a router prices
+    /// an unmeasured range by (`parallax::vertex_cost`, greedy's
+    /// `estimated_cost_per_layer`). [`Self::prior_ms_per_layer`] where every
+    /// layer runs on one device.
+    fn prior_ms_per_layer_over(&self, range: (u32, u32)) -> f32 {
+        let (first, beside) = self.layers_by_device(range);
+        if beside == 0 {
+            return self.prior_ms_per_layer();
+        }
+        (first as f32 * self.prior_ms_per_layer()
+            + beside as f32 * self.processor_prior_ms_per_layer())
+            / (first + beside) as f32
     }
 
     /// Layers of NEW memory this candidate needs to run `range` — its width,
@@ -780,6 +839,30 @@ fn room_for_new_layers(
     let usable_bytes = usable_bytes_for_layers(capability, margin, committed_mb)?;
     let full_price = bytes_per_layer.saturating_add(prompt_kv_bytes_per_layer);
     Some((usable_bytes as f64 / full_price as f64).min(f64::from(model_layers)))
+}
+
+/// New layers a peer's PROCESSOR takes beside its card — each at its whole
+/// weights plus this prompt's KV as a processor keeps it — from the room it
+/// states (`NodeCapability::processor_beside_card`), with `margin` on top,
+/// UNROUNDED. 0 for a peer that states none, which is then held to its card
+/// alone, as before. Added to every bound a peer's card gives
+/// ([`max_hostable_layers`] at both margins, [`room_for_new_layers`]), so a
+/// card node is offered card layers plus these, the latter priced at its
+/// processor's speed ([`NodeCandidate::card_layers`]).
+fn layers_beside_card(
+    capability: Option<&swarmllm_types::NodeCapability>,
+    bytes_per_layer: u64,
+    prompt_kv_bytes_per_layer: u64,
+    margin: f64,
+) -> f64 {
+    let Some((room_mb, _)) = capability.and_then(|c| c.processor_beside_card()) else {
+        return 0.0;
+    };
+    let full_price = bytes_per_layer.saturating_add(prompt_kv_bytes_per_layer);
+    if full_price == 0 {
+        return 0.0;
+    }
+    room_mb as f64 * 1_048_576.0 / margin / full_price as f64
 }
 
 /// KV-cache bytes ONE prompt position costs across ONE layer of `meta`'s model
@@ -2763,9 +2846,7 @@ impl PipelineScheduler {
     /// such a model here — the search's local candidate and the whole-model
     /// hand-off gate's baseline (#129).
     fn local_speed_off_the_card(&self, model_id: &ModelId) -> f32 {
-        let processor = self.pinned_local_processor_speed().unwrap_or_else(|| {
-            crate::model::auto_manage::vram::node_tokens_per_sec_7b(None).unwrap_or(0.0)
-        });
+        let processor = self.local_processor_speed();
         let card =
             self.shared_state.gpu_info.as_ref().and_then(|g| {
                 crate::model::auto_manage::vram::node_tokens_per_sec_7b(Some(&g.name))
@@ -2777,6 +2858,14 @@ impl PipelineScheduler {
                 .model_process_pool
                 .card_share_for_planning(model_id),
         )
+    }
+
+    /// This node's processor speed in 7B reference tokens a second (a test may
+    /// pin it).
+    fn local_processor_speed(&self) -> f32 {
+        self.pinned_local_processor_speed().unwrap_or_else(|| {
+            crate::model::auto_manage::vram::node_tokens_per_sec_7b(None).unwrap_or(0.0)
+        })
     }
 
     /// The pinned processor speed, when a test set one; `None` in production.
@@ -4431,18 +4520,36 @@ impl PipelineScheduler {
             // `serves_on_cpu` reads "card" and the model was priced at the
             // card's whole speed (#129, seen 2026-10-08: 56 tok/s for a 14B
             // running 22 of its 48 layers on the card).
-            let local_on_processor = is_local
-                && (local_runs_on_processor()
-                    || self
-                        .shared_state
-                        .model_process_pool
-                        .card_share_for_planning(&manifest.id)
-                        .is_some());
+            let local_card_share = if is_local {
+                self.shared_state
+                    .model_process_pool
+                    .card_share_for_planning(&manifest.id)
+            } else {
+                None
+            };
+            let local_on_processor =
+                is_local && (local_runs_on_processor() || local_card_share.is_some());
             let local_device_name = if local_on_processor {
                 None
             } else {
                 self.shared_state.gpu_info.as_ref().map(|g| g.name.as_str())
             };
+            // Where this node's loader would split the model, a range is priced
+            // per device — its first `on_card` layers at the card's speed, the
+            // rest at the processor's (`NodeCandidate::card_layers`). Over the
+            // whole model that is `local_speed_off_the_card`'s blend, which the
+            // hand-off gate's baseline still reads; over a segment of a split
+            // it is what that segment runs at, which the blend was not.
+            let local_split_speeds = local_card_share.and_then(|(on_card, _)| {
+                let card = self.shared_state.gpu_info.as_ref().and_then(|g| {
+                    crate::model::auto_manage::vram::node_tokens_per_sec_7b(Some(&g.name))
+                })?;
+                Some((
+                    u32::try_from(on_card).unwrap_or(u32::MAX),
+                    card,
+                    self.local_processor_speed(),
+                ))
+            });
             // Look up speed estimation from capability gossip
             let est_tokens_per_sec = if is_local {
                 // Derived the same way every peer derives its own, so this
@@ -4450,7 +4557,9 @@ impl PipelineScheduler {
                 // a real figure instead of the zero its consumers read as
                 // "unknown". 0.0 is still the answer when the machine's
                 // bandwidth genuinely could not be measured.
-                if local_on_processor {
+                if let Some((_, card, _)) = local_split_speeds {
+                    card
+                } else if local_on_processor {
                     self.local_speed_off_the_card(&manifest.id)
                 } else {
                     crate::model::auto_manage::vram::node_tokens_per_sec_7b(local_device_name)
@@ -4527,9 +4636,11 @@ impl PipelineScheduler {
                 .observed_prompt_ms_per_layer_byte(&node_id, &manifest.id);
             // Which prefill prior applies — a card reads a prompt ~40x faster
             // than it writes a reply, a processor ~4.5x. It follows the device
-            // the request would use, not the device the node owns.
+            // the request would use, not the device the node owns: for a split
+            // here, the card's for its card layers (the processor's are priced
+            // per device, `parallax::prefill_ms_per_layer`).
             let has_gpu = if is_local {
-                local_device_name.is_some()
+                local_device_name.is_some() || local_split_speeds.is_some()
             } else {
                 self.shared_state
                     .peer_registry
@@ -4645,148 +4756,199 @@ impl PipelineScheduler {
             } else {
                 None
             };
-            let (max_hostable_layers, max_hostable_layers_at_face_value, cold_load_per_layer) =
-                if node_id == *local_node_id {
-                    let mut ours = self
-                        .shared_state
-                        .model_process_pool
-                        .max_hostable_layers_for_planning(&manifest.id, requester);
-                    // The loader's verdict on an earlier attempt at THIS request
-                    // outranks the estimate it contradicted: a re-plan may give
-                    // this node fewer new layers than it refused to add, never as
-                    // many — or a node holding part of the model is planned the
-                    // ranges it just refused (2026-10-07).
-                    if let Some(refused) = self
-                        .shared_state
-                        .local_layers_refused_for_request(request_id)
+            let (
+                max_hostable_layers,
+                max_hostable_layers_at_face_value,
+                cold_load_per_layer,
+                card_layers,
+            ) = if node_id == *local_node_id {
+                let mut ours = self
+                    .shared_state
+                    .model_process_pool
+                    .max_hostable_layers_for_planning(&manifest.id, requester);
+                // The loader's verdict on an earlier attempt at THIS request
+                // outranks the estimate it contradicted: a re-plan may give
+                // this node fewer new layers than it refused to add, never as
+                // many — or a node holding part of the model is planned the
+                // ranges it just refused (2026-10-07).
+                if let Some(refused) = self
+                    .shared_state
+                    .local_layers_refused_for_request(request_id)
+                {
+                    let below = refused.saturating_sub(1);
+                    ours = Some(ours.map_or(below, |k| k.min(below)));
+                }
+                // Its conversation memory's verdict on this prompt bounds
+                // every layer here, held ones included: the held layers'
+                // weights were never the shortfall, their caches were
+                // (#263). Room for new layers still counts, in the same
+                // total.
+                if let Some(fit) = self
+                    .shared_state
+                    .local_layers_fitting_for_request(request_id)
+                {
+                    let held: u32 = held_ranges
+                        .iter()
+                        .map(|h| h.range.1.saturating_sub(h.range.0))
+                        .sum();
+                    ours = Some(ours.map_or(fit, |add| held.saturating_add(add).min(fit)));
+                }
+                // Our own held ranges say what is resident here exactly;
+                // our own loads say how fast the rest would arrive.
+                let load = cold_load_ms_per_layer(
+                    self.shared_state.model_process_pool.load_ms_per_gib(),
+                    bytes_per_layer,
+                );
+                // What this node OFFERS, read by "room for about N of its L
+                // layers": the most any plan may give it, the split's width
+                // included.
+                let offered = match (ours, fresh_run_layers) {
+                    (Some(add), Some(run)) => Some(add.max(run)),
+                    (ours, _) => ours,
+                };
+                (
+                    ours,
+                    offered,
+                    load,
+                    local_split_speeds.map(|(on_card, _, _)| on_card),
+                )
+            } else {
+                // What the peer SAYS it has resident beats what we can
+                // infer from having seen it serve the model recently. A peer
+                // that reports residency but does not name this model tells
+                // us nothing about it — gossip is up to 30 s old, so a model
+                // it has just loaded would be missing — and falls back to
+                // the recency signal, which is what this did before.
+                let reported_resident = reported.as_ref().map(|r| r.layers);
+                let residency = match reported_resident {
+                    Some(layers) => PeerResidency::Layers(layers),
+                    None if self.shared_state.peer_model_is_warm(
+                        &node_id,
+                        &manifest.id,
+                        std::time::Duration::from_secs(PEER_MODEL_WARM_TTL_SECS),
+                    ) =>
                     {
-                        let below = refused.saturating_sub(1);
-                        ours = Some(ours.map_or(below, |k| k.min(below)));
+                        PeerResidency::WarmAmountUnknown
                     }
-                    // Its conversation memory's verdict on this prompt bounds
-                    // every layer here, held ones included: the held layers'
-                    // weights were never the shortfall, their caches were
-                    // (#263). Room for new layers still counts, in the same
-                    // total.
-                    if let Some(fit) = self
-                        .shared_state
-                        .local_layers_fitting_for_request(request_id)
-                    {
-                        let held: u32 = held_ranges
-                            .iter()
-                            .map(|h| h.range.1.saturating_sub(h.range.0))
-                            .sum();
-                        ours = Some(ours.map_or(fit, |add| held.saturating_add(add).min(fit)));
-                    }
-                    // Our own held ranges say what is resident here exactly;
-                    // our own loads say how fast the rest would arrive.
-                    let load = cold_load_ms_per_layer(
-                        self.shared_state.model_process_pool.load_ms_per_gib(),
-                        bytes_per_layer,
-                    );
-                    // What this node OFFERS, read by "room for about N of its L
-                    // layers": the most any plan may give it, the split's width
-                    // included.
-                    let offered = match (ours, fresh_run_layers) {
-                        (Some(add), Some(run)) => Some(add.max(run)),
-                        (ours, _) => ours,
-                    };
-                    (ours, offered, load)
-                } else {
-                    // What the peer SAYS it has resident beats what we can
-                    // infer from having seen it serve the model recently. A peer
-                    // that reports residency but does not name this model tells
-                    // us nothing about it — gossip is up to 30 s old, so a model
-                    // it has just loaded would be missing — and falls back to
-                    // the recency signal, which is what this did before.
-                    let reported_resident = reported.as_ref().map(|r| r.layers);
-                    let residency = match reported_resident {
-                        Some(layers) => PeerResidency::Layers(layers),
-                        None if self.shared_state.peer_model_is_warm(
-                            &node_id,
-                            &manifest.id,
-                            std::time::Duration::from_secs(PEER_MODEL_WARM_TTL_SECS),
-                        ) =>
-                        {
-                            PeerResidency::WarmAmountUnknown
-                        }
-                        None => PeerResidency::Cold,
-                    };
-                    let device = self
-                        .shared_state
+                    None => PeerResidency::Cold,
+                };
+                let device = self
+                    .shared_state
+                    .peer_registry
+                    .get(&node_id)
+                    .map_or(KvDevice::PROCESSOR, |p| {
+                        KvDevice::advertised(p.capability.as_ref())
+                    });
+                let prompt_kv_per_layer = prompt_kv_per_layer_on(device);
+                let held_bytes_per_layer =
+                    weight_bytes_per_layer(manifest, host_resident_bytes, device.on_card);
+                let bound = |residency: PeerResidency, margin: f64| {
+                    self.shared_state.peer_registry.get(&node_id).and_then(|p| {
+                        max_hostable_layers(
+                            manifest.num_layers,
+                            p.capability.as_ref(),
+                            held_bytes_per_layer,
+                            residency,
+                            margin,
+                            prompt_kv_per_layer,
+                            committed_mb,
+                        )
+                    })
+                };
+                // The processor's room beside a card, where the peer states
+                // it: new layers at their whole weights and a processor's
+                // KV, added to every bound its card gives and priced at the
+                // processor's speed (`NodeCandidate::card_layers`). A node
+                // stating it is new enough that a card reading of 0 means a
+                // full card, not "told us nothing".
+                let beside_bytes_per_layer =
+                    weight_bytes_per_layer(manifest, host_resident_bytes, false);
+                let beside_kv_per_layer = prompt_kv_per_layer_on(KvDevice::PROCESSOR);
+                let beside = |margin: f64| {
+                    self.shared_state
                         .peer_registry
                         .get(&node_id)
-                        .map_or(KvDevice::PROCESSOR, |p| {
-                            KvDevice::advertised(p.capability.as_ref())
-                        });
-                    let prompt_kv_per_layer = prompt_kv_per_layer_on(device);
-                    let held_bytes_per_layer =
-                        weight_bytes_per_layer(manifest, host_resident_bytes, device.on_card);
-                    let bound = |residency: PeerResidency, margin: f64| {
-                        self.shared_state.peer_registry.get(&node_id).and_then(|p| {
-                            max_hostable_layers(
+                        .map_or(0.0, |p| {
+                            layers_beside_card(
+                                p.capability.as_ref(),
+                                beside_bytes_per_layer,
+                                beside_kv_per_layer,
+                                margin,
+                            )
+                        })
+                };
+                let card_and_beside = |card: Option<u32>, margin: f64| {
+                    let extra = beside(margin);
+                    if extra <= 0.0 {
+                        return card;
+                    }
+                    Some(
+                        card.unwrap_or(0)
+                            .saturating_add(extra as u32)
+                            .min(manifest.num_layers),
+                    )
+                };
+                let card_layers = (beside(DELEGATE_VRAM_MARGIN) > 0.0)
+                    .then(|| bound(residency, DELEGATE_VRAM_MARGIN).unwrap_or(0));
+                // Room for NEW layers is the Cold-shaped bound over the
+                // same free memory — the advertised figure already
+                // excludes what is resident — from the same function and
+                // inputs as the totals below, so the two cannot drift.
+                if !held_ranges.is_empty() {
+                    let full_price = held_bytes_per_layer.saturating_add(prompt_kv_per_layer);
+                    let room = |margin: f64| {
+                        let card = self.shared_state.peer_registry.get(&node_id).and_then(|p| {
+                            room_for_new_layers(
                                 manifest.num_layers,
                                 p.capability.as_ref(),
                                 held_bytes_per_layer,
-                                residency,
                                 margin,
                                 prompt_kv_per_layer,
                                 committed_mb,
                             )
-                        })
-                    };
-                    // Room for NEW layers is the Cold-shaped bound over the
-                    // same free memory — the advertised figure already
-                    // excludes what is resident — from the same function and
-                    // inputs as the totals below, so the two cannot drift.
-                    if !held_ranges.is_empty() {
-                        let full_price = held_bytes_per_layer.saturating_add(prompt_kv_per_layer);
-                        let room = |margin: f64| {
-                            self.shared_state.peer_registry.get(&node_id).and_then(|p| {
-                                room_for_new_layers(
-                                    manifest.num_layers,
-                                    p.capability.as_ref(),
-                                    held_bytes_per_layer,
-                                    margin,
-                                    prompt_kv_per_layer,
-                                    committed_mb,
-                                )
-                            })
-                        };
-                        published_room = Some(PublishedRoom {
-                            new_layers: room(DELEGATE_VRAM_MARGIN),
-                            new_layers_at_face_value: room(1.0),
-                            reused_share: if full_price == 0 {
-                                0.0
-                            } else {
-                                prompt_kv_per_layer as f64 / full_price as f64
-                            },
                         });
-                    }
-                    // Its own measured load speed, where it reports one.
-                    let advertised_rate =
-                        self.shared_state.peer_registry.get(&node_id).and_then(|p| {
-                            p.capability.as_ref().and_then(|c| c.model_load_ms_per_gib)
-                        });
-                    let load = match residency {
-                        // Warm by the only signal there is, amount unknown:
-                        // priced as resident, as the memory bound prices it.
-                        PeerResidency::WarmAmountUnknown => 0.0,
-                        // A count with no ranges (a build before #99) covering
-                        // the whole model is the whole model.
-                        PeerResidency::Layers(n)
-                            if held_ranges.is_empty() && n >= manifest.num_layers =>
-                        {
-                            0.0
+                        let extra = beside(margin);
+                        if extra <= 0.0 {
+                            return card;
                         }
-                        _ => cold_load_ms_per_layer(advertised_rate, bytes_per_layer),
+                        Some((card.unwrap_or(0.0) + extra).min(f64::from(manifest.num_layers)))
                     };
-                    (
-                        bound(residency, DELEGATE_VRAM_MARGIN),
-                        bound(residency, 1.0),
-                        load,
-                    )
+                    published_room = Some(PublishedRoom {
+                        new_layers: room(DELEGATE_VRAM_MARGIN),
+                        new_layers_at_face_value: room(1.0),
+                        reused_share: if full_price == 0 {
+                            0.0
+                        } else {
+                            prompt_kv_per_layer as f64 / full_price as f64
+                        },
+                    });
+                }
+                // Its own measured load speed, where it reports one.
+                let advertised_rate = self
+                    .shared_state
+                    .peer_registry
+                    .get(&node_id)
+                    .and_then(|p| p.capability.as_ref().and_then(|c| c.model_load_ms_per_gib));
+                let load = match residency {
+                    // Warm by the only signal there is, amount unknown:
+                    // priced as resident, as the memory bound prices it.
+                    PeerResidency::WarmAmountUnknown => 0.0,
+                    // A count with no ranges (a build before #99) covering
+                    // the whole model is the whole model.
+                    PeerResidency::Layers(n)
+                        if held_ranges.is_empty() && n >= manifest.num_layers =>
+                    {
+                        0.0
+                    }
+                    _ => cold_load_ms_per_layer(advertised_rate, bytes_per_layer),
                 };
+                (
+                    card_and_beside(bound(residency, DELEGATE_VRAM_MARGIN), DELEGATE_VRAM_MARGIN),
+                    card_and_beside(bound(residency, 1.0), 1.0),
+                    load,
+                    card_layers,
+                )
+            };
             // Copied out first: no registry guard is held while the header is read.
             let advertised_ceiling_mb = if is_local {
                 None
@@ -4872,6 +5034,22 @@ impl PipelineScheduler {
                 .filter(|held| held.node == node_id)
                 .map(|held| (held.range, held.tokens))
                 .collect();
+            // What the layers past `card_layers` run at.
+            let processor_tokens_per_sec = if card_layers.is_none() {
+                0.0
+            } else if is_local {
+                local_split_speeds.map_or(0.0, |(_, _, processor)| processor)
+            } else {
+                self.shared_state
+                    .peer_registry
+                    .get(&node_id)
+                    .and_then(|p| {
+                        p.capability
+                            .as_ref()
+                            .and_then(|c| c.processor_beside_card())
+                    })
+                    .map_or(0.0, |(_, processor)| processor)
+            };
             let ring = if is_local {
                 // This node is never inside a chain its head leads.
                 parallax::RingFacts::default()
@@ -4943,6 +5121,8 @@ impl PipelineScheduler {
                 reply_tokens_expected,
                 split_tokens_per_round,
                 fresh_run_layers,
+                card_layers,
+                processor_tokens_per_sec,
                 prompt_memory_refused: peer_prompt_fit.is_some()
                     || is_local
                         && self
@@ -5021,6 +5201,10 @@ impl PipelineScheduler {
                 // This node only: the one run a fresh worker would split across
                 // card and processor; any further run is held to the bound above.
                 fresh_run_layers = ?c.fresh_run_layers,
+                // Layers of a range on its card before the rest go to its
+                // processor, and that processor's speed (`card_layers`).
+                card_layers = ?c.card_layers,
+                processor_tokens_per_sec = c.processor_tokens_per_sec,
                 // This node only: the bound above is then ALL its layers (#263).
                 prompt_memory_refused = c.prompt_memory_refused,
                 // Beside the bound, because the bound is room for NEW layers:
@@ -5217,20 +5401,23 @@ impl PipelineScheduler {
     ) -> f32 {
         let covered = range.1.saturating_sub(current_layer).max(1) as f32;
 
-        let compute_per_layer = candidate
+        let measured = candidate
             .observed_latency_ms_per_layer
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .unwrap_or_else(|| {
-                // No measurement. Fall back to the advertised capability, priced
-                // as one of THIS model's layers (#250), then to a neutral figure
-                // so an unrated peer is neither favoured nor disqualified —
-                // weighed by the model the same way.
-                if candidate.est_tokens_per_sec > 0.0 {
-                    candidate.prior_ms_per_layer()
-                } else {
-                    DEFAULT_COMPUTE_MS_PER_LAYER * candidate.layer_work
-                }
-            });
+            .filter(|v| v.is_finite() && *v > 0.0);
+        // No measurement. Fall back to the advertised capability, priced as one
+        // of THIS model's layers (#250) on the device each runs on, then to a
+        // neutral figure so an unrated peer is neither favoured nor
+        // disqualified — weighed by the model the same way.
+        let decode_price = match measured {
+            Some(ms) => parallax::DecodePrice::Measured(ms),
+            None if candidate.est_tokens_per_sec > 0.0 => {
+                parallax::DecodePrice::Prior((current_layer, range.1))
+            }
+            None => {
+                parallax::DecodePrice::Measured(DEFAULT_COMPUTE_MS_PER_LAYER * candidate.layer_work)
+            }
+        };
+        let compute_per_layer = decode_price.ms_per_layer(candidate);
 
         let load_multiplier = 1.0 + candidate.load.max(0.0);
         // A peer that must first read the layers in is charged for it, as the
@@ -5265,7 +5452,7 @@ impl PipelineScheduler {
         }) {
             None | Some(0) => 0.0,
             Some(tokens) => {
-                parallax::prefill_ms_per_layer(candidate, tokens, compute_per_layer) / rounds
+                parallax::prefill_ms_per_layer(candidate, tokens, decode_price) / rounds
             }
         };
         candidate.latency_ms as f32 / covered
@@ -6098,7 +6285,15 @@ impl PipelineScheduler {
                 host_resident_bytes,
                 KvDevice::advertised(peer.capability.as_ref()).on_card,
             );
-            let layer_capacity = available_bytes.checked_div(bytes_per_layer).unwrap_or(0) as u32;
+            // Plus what its processor takes beside its card, where it says.
+            let beside = layers_beside_card(
+                peer.capability.as_ref(),
+                weight_bytes_per_layer(&manifest, host_resident_bytes, false),
+                0,
+                1.0,
+            );
+            let layer_capacity = (available_bytes.checked_div(bytes_per_layer).unwrap_or(0) as u32)
+                .saturating_add(beside as u32);
             let tps = peer
                 .capability
                 .as_ref()

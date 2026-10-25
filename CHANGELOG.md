@@ -56,6 +56,18 @@ Now, when a part of a model someone asked for is on no computer and does not fit
 gives back a spare copy of another model to make room — only a copy two other computers still
 hold, never part of a model it holds whole or is running, and never more than the room needed.
 
+**A computer with a graphics card now offers its ordinary memory to a split model too.** A model
+too big for any one computer is split across several, each running some of its layers. A computer
+with a graphics card offered only the card's memory for this, so a 12 GB card already busy
+offered room for two layers of a 70-billion-parameter model while 24 GB of the computer's own
+memory sat unused, and a split of that model could not be planned. Such a computer now also offers
+the memory beside its card, and the planner prices each layer on the part of the computer that
+would run it: the card's layers at the card's speed, the rest at the processor's. This also keeps
+a computer's own layers at home: one holding the first 17 layers of a 70B, 12 of which fit on its
+card, was priced as if it ran the whole model mostly on its processor, and a slower computer in
+another country was given those layers instead. Computers on earlier versions are planned as
+before.
+
 **A model split across computers that all start cold answers its first message about twice as
 soon.** When several computers each run part of a model, each one used to start reading its part
 from disk only once the computer before it had finished reading its own and passed the work along,

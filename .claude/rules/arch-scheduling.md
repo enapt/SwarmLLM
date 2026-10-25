@@ -26,7 +26,7 @@ measured at, and what a change must keep — lives in `docs/invariants/`.
 
 ## The component that will refuse must be asked while the plan can still change
 
-Admission runs at load time, too late to reshape a plan (#452). **`ModelProcessPool::max_hostable_layers_for_planning`** (+ `held_layer_ranges_for_planning`) bounds the LOCAL node from the loader's own estimator and budgets, weighed on the device the LOADER would use — never on `serves_on_cpu`, which is the SPEED answer (#444 vs #129) (`None` = unknowable, never "no room"); **`process_pool::segment_shape`** prices the segment the worker will actually map, never the whole model. On a card that bound is what a RUNNING worker can ADD — the card alone; the card/processor split is a fresh worker's, for ONE run of layers: **`fresh_run_layers_for_planning`** → `NodeCandidate::fresh_run_layers`, held to one run by the search (`parallax::local_fits`) and by `local_can_hold_every_layer` (#234), offered only where the spawn would admit its processor share for the same requester (#250).
+Admission runs at load time, too late to reshape a plan (#452). **`ModelProcessPool::max_hostable_layers_for_planning`** (+ `held_layer_ranges_for_planning`) bounds the LOCAL node from the loader's own estimator and budgets, weighed on the device the LOADER would use — never on `serves_on_cpu`, which is the SPEED answer (#444 vs #129) (`None` = unknowable, never "no room"); **`process_pool::segment_shape`** prices the segment the worker will actually map, never the whole model. On a card that bound is what a RUNNING worker can ADD — the card alone; the card/processor split is a fresh worker's, for ONE run of layers: **`fresh_run_layers_for_planning`** → `NodeCandidate::fresh_run_layers`, held to one run by the search (`parallax::local_fits`) and by `local_can_hold_every_layer` (#234), offered only where the spawn would admit its processor share for the same requester (#250) — the whole model's split, else the widest SEGMENT run whose processor share it would admit (2026-10-25: a 70B's whole-model split never fits, so this node was offered its card alone).
 
 → `docs/invariants/scheduling.md` § "The component that will refuse must be asked while the plan can still change"
 
@@ -205,7 +205,15 @@ memory can this peer give a model's layers"**, and `ram_model_budget_mb` is the
 figure a node without a graphics card puts behind it. That figure (`vram::live_headroom_mb`) is never more
 than the worker's own admission honours (`kv_budget::device_free_margin_bytes`; #219).
 
-→ `docs/invariants/scheduling.md`
+**A card node's machine memory is offered BESIDE its card (2026-10-25)**: `machine_room_beside_card_mb` +
+`processor_tokens_per_sec_7b`, read only through **`NodeCapability::processor_beside_card`**, added to
+the card's bound by `scheduler::layers_beside_card` and recorded as `NodeCandidate::card_layers`. A
+range is then priced PER DEVICE — **`NodeCandidate::layers_by_device`**: its first `card_layers` at the
+card's speed (the loader's order), the rest at `processor_tokens_per_sec`
+(`prior_ms_per_layer_over`, `parallax::DecodePrice`, `prefill_ms_per_layer`) — never at one blended
+speed, which priced this node's 17 layers of a 70B as if it ran all 80 and sent them to Italy.
+
+→ `docs/invariants/scheduling.md` § "A range that runs partly on a card is priced per device"
 
 ## A hand-off is priced as the shape it will be given, not as the whole model
 
@@ -319,7 +327,7 @@ budget it is describing.
 
 Each names the ONE place a decision is made; a second implementation of any is this codebase's most-repeated defect (`.claude/rules/architecture.md` § "One invariant, N paths").
 
-- **`PipelineScheduler::local_speed_off_the_card` is this node's speed for a model its card cannot hold whole** — the processor's, blended with the card's for the layers a card/processor split puts there, fresh or resident (`ModelProcessPool::card_share_for_planning` → `split_tokens_per_sec`, harmonic by layer share). The search's local candidate AND the hand-off gate's baseline (`DelegationInput::local_cpu_tokens_per_sec`) read it (#129).
+- **`PipelineScheduler::local_speed_off_the_card` is this node's speed for a model its card cannot hold whole** — the processor's, blended with the card's for the layers a card/processor split puts there, fresh or resident (`ModelProcessPool::card_share_for_planning` → `split_tokens_per_sec`, harmonic by layer share). The hand-off gate's baseline (`DelegationInput::local_cpu_tokens_per_sec`) reads it, and the search's local candidate where the loader would not split (#129); where it would, the candidate is priced per device instead (`card_layers`, 2026-10-25).
 - **`ModelProcessPool::serves_on_cpu` is the whole-model delegation precondition**
 - **A node holding every layer that would run the model on its processor lets the priced search compete with its fast path**
 - **A peer's capacity for a prompt is weights PLUS that prompt's KV cache** — the weights at **`scheduler::weight_bytes_per_layer`**: the file over its layers, less the tensors its loader keeps in host memory where the peer's layers run on its card (`GgufTensorMeta::host_resident_bytes`, #296), in the bound, the published room, the booking and `allocate_offline`; a load's price keeps the file's figure.

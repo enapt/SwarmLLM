@@ -326,6 +326,14 @@ fn capability_news(
     if let (Some(n), Some(s)) = (now.ram_model_budget_mb.as_mut(), sent.ram_model_budget_mb) {
         hold(n, s, CAPABILITY_MEMORY_DEADBAND_MB);
     }
+    // The machine's room beside a card moves with every other program's
+    // memory, as the RAM budget does.
+    if let (Some(n), Some(s)) = (
+        now.machine_room_beside_card_mb.as_mut(),
+        sent.machine_room_beside_card_mb,
+    ) {
+        hold(n, s, CAPABILITY_MEMORY_DEADBAND_MB);
+    }
     if let (Some(n), Some(s)) = (now.gpu.as_mut(), sent.gpu.as_ref()) {
         hold(
             &mut n.vram_available_mb,
@@ -1266,9 +1274,7 @@ impl HealthMonitor {
                 // advertise itself as capable. See
                 // `mem_bandwidth::UNMEASURABLE_FALLBACK_GBPS` for why the figure
                 // is small and why it had to move when the efficiency did.
-                let gbps = crate::model::auto_manage::vram::node_memory_bandwidth_gbps(None)
-                    .unwrap_or(crate::inference::mem_bandwidth::UNMEASURABLE_FALLBACK_GBPS);
-                crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(gbps, false)
+                crate::model::auto_manage::vram::processor_tokens_per_sec_7b()
             });
 
         // Top-N observed-latency snapshot, ordered by the trust we have in
@@ -1318,6 +1324,8 @@ impl HealthMonitor {
                 )
                 .collect::<Vec<_>>()
         };
+        let machine_room_beside_card_mb =
+            crate::model::auto_manage::vram::node_machine_room_beside_card_mb(&self.shared_state);
 
         let cap = crate::types::NodeCapability {
             // OS family only — see the field docs on why not a version string.
@@ -1388,6 +1396,13 @@ impl HealthMonitor {
             model_memory_ceiling_mb: crate::model::auto_manage::vram::node_model_memory_ceiling_mb(
                 &self.shared_state,
             ),
+            // On a card node: what a segment wider than the card may put in
+            // system memory, and how fast those layers run — without them a
+            // card that was full offered almost nothing, with the machine's
+            // memory free beside it (2026-10-25).
+            machine_room_beside_card_mb,
+            processor_tokens_per_sec_7b: machine_room_beside_card_mb
+                .map(|_| crate::model::auto_manage::vram::processor_tokens_per_sec_7b()),
             // Advertise the protocol epoch + the optional features this build
             // implements, so peers negotiate new message types additively.
             protocol_version: swarmllm_types::PROTOCOL_VERSION,
@@ -2880,6 +2895,8 @@ mod tests {
             context_ceiling_tokens: Some(8192),
             model_load_ms_per_gib: Some(900),
             model_memory_ceiling_mb: Some(24_000),
+            machine_room_beside_card_mb: None,
+            processor_tokens_per_sec_7b: None,
         }
     }
 

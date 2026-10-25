@@ -446,6 +446,114 @@ fn a_cards_room_is_charged_only_the_weights_the_card_holds() {
     );
 }
 
+/// **A card node stating the processor's room beside its card is offered its
+/// card's layers PLUS the layers that room buys, the latter at its processor's
+/// speed** (2026-10-25). A 12 GB card nearly full, with 24 GB of system memory
+/// free beside it, offered room for 2 of a 70B's 80 layers, and no route
+/// fitted. The control: the same node not stating it — an older build — is
+/// held to its card, priced at its card, as before.
+#[test]
+fn a_card_node_offers_its_processors_room_beside_the_card() {
+    const MIB: u64 = 1024 * 1024;
+    let peer = NodeId([2u8; 32]);
+    let run = |states: bool| {
+        let state = make_shared_state();
+        let local_id = state.identity.node_id().clone();
+        let model = ModelId("seventy".into());
+        let mut manifest = make_manifest(
+            "seventy",
+            80,
+            vec![ShardInfo {
+                index: 0,
+                layer_range: (0, 80),
+                size_bytes: 40_000 * MIB,
+                hash: [0u8; 32],
+                tensors: vec![],
+            }],
+        );
+        manifest.total_size_bytes = 40_000 * MIB;
+        state.model_registry.register_manifest(manifest);
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: model.clone(),
+                index: 0,
+            },
+            peer.clone(),
+        );
+        let mut cap = capability_with_gpu(Some(1_300));
+        cap.node_id = peer.clone();
+        cap.est_tokens_per_sec_7b = 45.0;
+        if states {
+            cap.machine_room_beside_card_mb = Some(24_000);
+            cap.processor_tokens_per_sec_7b = Some(6.0);
+        }
+        state.peer_registry.insert(
+            peer.clone(),
+            PeerInfo {
+                node_id: peer.clone(),
+                addresses: vec![],
+                capability: Some(cap),
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(10),
+                trust_score: 0.8,
+                peer_id_bytes: None,
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        );
+        state.connected_node_ids.insert(peer.clone());
+        let manifest = state.model_registry.get_manifest(&model).unwrap();
+        PipelineScheduler::new(state.clone())
+            .gather_candidates(
+                &manifest,
+                &local_id,
+                uuid::Uuid::new_v4(),
+                None.into(),
+                super::Purpose::Route,
+                &|| false,
+                crate::types::KeepAsked::Unasked,
+            )
+            .into_iter()
+            .find(|c| c.node_id == peer)
+            .unwrap()
+    };
+
+    let older = run(false);
+    let card = older.max_hostable_layers.expect("fixture: a card bound");
+    assert!(card <= 2, "fixture: a nearly full card, room for {card}");
+    assert_eq!(older.card_layers, None);
+    assert_eq!(older.processor_tokens_per_sec, 0.0);
+
+    let stating = run(true);
+    let beside = |margin: f64| (24_000.0 / margin / 500.0) as u32;
+    assert_eq!(
+        stating.card_layers,
+        Some(card),
+        "priced at its card for the card's layers"
+    );
+    assert_eq!(stating.processor_tokens_per_sec, 6.0);
+    assert_eq!(
+        stating.max_hostable_layers,
+        Some(card + beside(super::DELEGATE_VRAM_MARGIN))
+    );
+    assert_eq!(
+        stating.max_hostable_layers_at_face_value,
+        Some(older.max_hostable_layers_at_face_value.unwrap() + beside(1.0))
+    );
+    // And the layers past the card cost the processor's time.
+    let past_the_card = stating.prior_ms_per_layer_over((0, card + 10));
+    assert!(
+        past_the_card > 4.0 * stating.prior_ms_per_layer(),
+        "{past_the_card} against the card's {}",
+        stating.prior_ms_per_layer()
+    );
+}
+
 /// **A model kept on this computer is never planned onto a peer** (#251).
 /// Two peers hold all of it; this node holds none. Unkept, the plan uses them
 /// (the control); kept, the request is refused as `KeptOnThisComputer` — a
@@ -776,6 +884,8 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         ring: Default::default(),
         stated_ms_per_layer: None,
         fresh_run_layers: None,
+        card_layers: None,
+        processor_tokens_per_sec: 0.0,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
         goodput_bytes_per_sec: None,
@@ -1051,6 +1161,8 @@ fn greedy_assign_multi_range_candidate() {
             ring: Default::default(),
             stated_ms_per_layer: None,
             fresh_run_layers: None,
+            card_layers: None,
+            processor_tokens_per_sec: 0.0,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
             goodput_bytes_per_sec: None,
@@ -1093,6 +1205,8 @@ fn greedy_assign_multi_range_candidate() {
             ring: Default::default(),
             stated_ms_per_layer: None,
             fresh_run_layers: None,
+            card_layers: None,
+            processor_tokens_per_sec: 0.0,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
             goodput_bytes_per_sec: None,
@@ -1284,6 +1398,8 @@ fn slow_peer_capability(node: &NodeId) -> crate::types::NodeCapability {
         context_ceiling_tokens: None,
         model_load_ms_per_gib: None,
         model_memory_ceiling_mb: None,
+        machine_room_beside_card_mb: None,
+        processor_tokens_per_sec_7b: None,
     }
 }
 
@@ -2128,6 +2244,8 @@ fn cost_cand(
         ring: Default::default(),
         stated_ms_per_layer: None,
         fresh_run_layers: None,
+        card_layers: None,
+        processor_tokens_per_sec: 0.0,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
         goodput_bytes_per_sec: None,
@@ -3534,6 +3652,8 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         ring: Default::default(),
         stated_ms_per_layer: None,
         fresh_run_layers: None,
+        card_layers: None,
+        processor_tokens_per_sec: 0.0,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
         goodput_bytes_per_sec: None,
@@ -3639,6 +3759,8 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         ring: Default::default(),
         stated_ms_per_layer: None,
         fresh_run_layers: None,
+        card_layers: None,
+        processor_tokens_per_sec: 0.0,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
         goodput_bytes_per_sec: None,
@@ -3744,6 +3866,8 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         ring: Default::default(),
         stated_ms_per_layer: None,
         fresh_run_layers: None,
+        card_layers: None,
+        processor_tokens_per_sec: 0.0,
         prompt_memory_refused: false,
         memory_refused_this_request: false,
         goodput_bytes_per_sec: None,
@@ -3850,6 +3974,8 @@ fn capability_with_gpu(free_mb: Option<u64>) -> crate::types::NodeCapability {
         context_ceiling_tokens: None,
         model_load_ms_per_gib: None,
         model_memory_ceiling_mb: None,
+        machine_room_beside_card_mb: None,
+        processor_tokens_per_sec_7b: None,
     }
 }
 
@@ -7518,24 +7644,34 @@ fn a_local_model_the_loader_splits_is_priced_with_the_cards_share() {
         .unwrap();
     let expected =
         super::split_tokens_per_sec(PROCESSOR_TPS, Some(card_tps), Some((on_card, total)));
+    // A range is priced per device: its first `on_card` layers at the card's
+    // speed, the rest at the processor's (2026-10-25).
+    assert_eq!(priced.card_layers, Some(on_card as u32));
+    assert_eq!(priced.est_tokens_per_sec, card_tps);
+    assert_eq!(priced.processor_tokens_per_sec, PROCESSOR_TPS);
+    let at = |tps: f32| 1000.0 / tps / super::parallax::BASELINE_LAYER_COUNT * priced.layer_work;
+    let whole = priced.prior_ms_per_layer_over((0, total as u32));
     assert!(
-        priced.est_tokens_per_sec > PROCESSOR_TPS,
-        "a split runs {on_card} of {total} layers on the card: faster than the processor alone ({} vs {PROCESSOR_TPS})",
-        priced.est_tokens_per_sec
-    );
-    assert!((priced.est_tokens_per_sec - expected).abs() < 1e-3);
-    assert!(
-        priced.est_tokens_per_sec < card_tps,
-        "and slower than the card alone"
+        (whole - at(expected)).abs() / whole < 1e-4,
+        "the whole model is the blend of the split the loader makes: {whole} against {}",
+        at(expected)
     );
     assert!(
-        !priced.has_gpu,
-        "the prompt pass keeps the processor's prior — conservative for a split"
+        expected > PROCESSOR_TPS && expected < card_tps,
+        "a split runs {on_card} of {total} layers on the card: between the two ({expected})"
     );
-    assert_eq!(
-        scheduler.local_speed_off_the_card(&mid),
-        priced.est_tokens_per_sec,
-        "the hand-off gate's baseline is the same figure"
+    assert!(
+        (scheduler.local_speed_off_the_card(&mid) - expected).abs() < 1e-3,
+        "the hand-off gate's baseline is the same blend"
+    );
+    // A segment the card holds — this node's share of a split — runs at the
+    // card's speed, which the whole model's blend did not say.
+    let card_part = priced.prior_ms_per_layer_over((0, on_card as u32));
+    assert!((card_part - at(card_tps)).abs() / card_part < 1e-4);
+    assert!(
+        priced.has_gpu,
+        "the card's layers read a prompt at the card's rate; the processor's are priced \
+         per device"
     );
 
     // The speed answer reading "card" — a resident split worker holds card
@@ -7555,8 +7691,12 @@ fn a_local_model_the_loader_splits_is_priced_with_the_cards_share() {
         .find(|c| c.node_id == local)
         .unwrap();
     assert_eq!(
-        on_card_answer.est_tokens_per_sec, priced.est_tokens_per_sec,
-        "a split is priced as a split, not at the card's {card_tps}"
+        (
+            on_card_answer.est_tokens_per_sec,
+            on_card_answer.card_layers
+        ),
+        (priced.est_tokens_per_sec, priced.card_layers),
+        "a split is priced as a split, not at the card's {card_tps} for every layer"
     );
 }
 

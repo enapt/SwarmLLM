@@ -1531,6 +1531,42 @@ pub fn node_model_memory_ceiling_mb(shared: &crate::daemon::SharedState) -> Opti
     Some(ram.cap_mb)
 }
 
+/// The figure behind `NodeCapability::machine_room_beside_card_mb`: on a node
+/// whose models go to a card, the system memory a segment's processor share
+/// may take now — the swarm's RAM cap (the peer asking is the swarm, #266)
+/// less what is committed, and never more than the machine absorbs without
+/// swapping — the same arithmetic as [`node_model_budget_mb`]'s processor
+/// branch, which is what the spawn's processor admission weighs a split's
+/// share against (`process_pool::ram_charged_share`). `None` without a card in
+/// use, and where the loader does not split a model across the two
+/// (`SWARMLLM_HYBRID_OFFLOAD=0`).
+pub fn node_machine_room_beside_card_mb(shared: &crate::daemon::SharedState) -> Option<u64> {
+    if !models_go_to_the_card(shared)
+        || std::env::var("SWARMLLM_HYBRID_OFFLOAD").as_deref() == Ok("0")
+    {
+        return None;
+    }
+    let budget = ram_budget_now(shared)?;
+    Some(
+        budget
+            .cap_mb
+            .saturating_sub(shared.model_process_pool.ram_committed_mb())
+            .min(budget.live_headroom_mb),
+    )
+}
+
+/// This machine's processor speed in 7B reference tokens a second — what its
+/// memory delivers (generating a token is bandwidth-bound), or a deliberately
+/// modest nominal when that cannot be measured
+/// (`mem_bandwidth::UNMEASURABLE_FALLBACK_GBPS`). The figure a node without a
+/// card advertises, and a card node states beside its card's
+/// (`NodeCapability::processor_tokens_per_sec_7b`).
+pub fn processor_tokens_per_sec_7b() -> f32 {
+    let gbps = node_memory_bandwidth_gbps(None)
+        .unwrap_or(crate::inference::mem_bandwidth::UNMEASURABLE_FALLBACK_GBPS);
+    estimate_tokens_per_sec_7b(gbps, false)
+}
+
 pub fn compute_vram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
     let gpu_total = shared
         .gpu_info

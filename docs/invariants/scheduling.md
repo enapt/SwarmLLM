@@ -3343,6 +3343,47 @@ worker holding card memory); `gather_candidates` now treats any split (`card_sha
 as off the card, and the new build priced the warm requests at 6.34 too (test: the `&|| false` arm of
 `a_local_model_the_loader_splits_is_priced_with_the_cards_share`, red with that half off;
 `a_resident_split_worker_reports_its_card_share_to_the_planner`).
+**A range that runs partly on a card is priced per device, and a card's machine memory is offered
+too (2026-10-25).** The blend above is right for a WHOLE model; for a segment it is wrong twice.
+Llama-3.3-70B Q4_K_M (80 layers, ~40 GB) with this PC holding layers 0-16 on a 6.6 GB card budget:
+the local candidate read `has_gpu=false`, est 7.1-7.4 (the blend, ~8 of 80 layers on the card),
+`max_hostable_layers` 8-12 (the card alone) and `fresh_run_layers=None` (the only split offered was
+the whole model's, whose ~32 GB processor share never fits 16 GB), so the Mac mini in Italy (est
+15.4, 241 ms) was planned layers 0-13. And no card machine could offer its RAM at all:
+`memory_for_model_layers_mb` is the card's free memory, so the RTX 3060 in Australia (12 GB card,
+`max_ram_mb = 24000`) advertised 2 layers, the `PeersAtCeiling` rung gave it 60, its spawn went to
+the processor (card full) and refused 30,432 MB against 24,000. llama.cpp's RPC backend spreads a
+model's weights and cache over EVERY device, card and processor, local and remote, in proportion to
+free memory (`--tensor-split` over `ggml-rpc` devices) — a card machine's RAM is part of what it can
+give a split. Three changes:
+(1) a card node states **`NodeCapability::machine_room_beside_card_mb`**
+(`vram::node_machine_room_beside_card_mb`: the RAM budget less what its pool committed, under the
+live headroom — the figure its spawn's RAM admission weighs; `SWARMLLM_HYBRID_OFFLOAD=0` states
+none) and `processor_tokens_per_sec_7b`, read only through `NodeCapability::processor_beside_card`;
+`gather_candidates` adds `layers_beside_card` (room ÷ margin ÷ (processor-side weights + prompt KV
+per layer)) to the card's bound, its face value and its published room, still under
+`clamp_to_ceiling`, and records the card's part as `NodeCandidate::card_layers`. An older card node
+states nothing and is planned exactly as before.
+(2) **`NodeCandidate::layers_by_device`** puts a range's first `card_layers` on the card — the
+loader's order (`split::hybrid`: `offset < gpu_layers`) — and the rest at
+`processor_tokens_per_sec`: decode by `prior_ms_per_layer_over` (`parallax::DecodePrice::Prior`,
+greedy and `vertex_cost` alike), the prompt by `prefill_ms_per_layer` at each device's speed-up. A
+MEASURED figure is still taken as it is. The local candidate is `has_gpu` at the card's speed with
+`card_layers = on_card` wherever the loader splits; `local_speed_off_the_card` keeps the blend for
+the hand-off gate, which compares whole models.
+(3) **`fresh_run_layers_for_planning` offers a SEGMENT card+processor run** where the whole model's
+processor share does not fit: the widest run whose machine charge (`machine_charge` over that
+run's `partial_gpu_layers` split) the RAM admission takes (`machine_would_take`), weighed as a run
+from the first layer — the width is placed wherever this node holds layers, and the first run is
+where the estimator charges most (what the loader keeps in the machine whatever the device, #296;
+`segment_shape` spreads every other weight, the output head included, over the layers) — found by
+bisection; offered only where it is wider than the card alone. A run wholly on the card is still
+weighed for what the loader keeps in the machine.
+Tests: `the_processor_beside_a_card_is_offered_only_by_a_card_node_that_states_it` (types),
+`a_card_node_offers_its_processors_room_beside_the_card`,
+`a_range_split_across_card_and_processor_is_priced_per_device` (the control, priced at the blend,
+routes to the farther peer), `a_model_too_big_for_the_card_and_the_machine_is_offered_as_a_segment`
+(its control, with RAM for the whole processor share, offers all 80).
 **Why this is not `cbbed678` again**: that pass priced local layers at a
 constant 10,000 — a penalty, not a price — so the search could not see the
 LAN split that was best and sent a request abroad. Here the local figure is

@@ -665,6 +665,34 @@ pub struct NodeCapability {
     /// `None` from a node predating the field: unknown, never "no room".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_memory_ceiling_mb: Option<u64>,
+
+    /// On a node whose models go to a graphics card: the system memory a
+    /// segment's PROCESSOR share may take now, in MB — what its RAM admission
+    /// grants the swarm's work, less what is committed there. A segment wider
+    /// than the card holds is split by its loader, the first layers on the
+    /// card and the rest on the processor, each share charged to its own
+    /// memory, so a coordinator may plan such a node the layers its card takes
+    /// PLUS the layers this buys, the latter priced at
+    /// [`Self::processor_tokens_per_sec_7b`]. llama.cpp counts every device
+    /// of a machine, its processor's memory included, when it spreads a model
+    /// across them.
+    ///
+    /// Without it a card node offered its card alone: a 12 GB card already
+    /// holding other work, with 24 GB of system memory free beside it, offered
+    /// room for 2 of a 70B's 80 layers, and no route fitted (2026-10-25).
+    ///
+    /// `None` from a node without a card (`ram_model_budget_mb` is its whole
+    /// answer), from a card node whose loader does not split a model, and from
+    /// an older node: then the card alone, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_room_beside_card_mb: Option<u64>,
+
+    /// This node's PROCESSOR speed, in the units of `est_tokens_per_sec_7b` —
+    /// which on a card node is the card's. What a layer planned into
+    /// [`Self::machine_room_beside_card_mb`] runs at. Stated beside that field
+    /// and `None` wherever it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processor_tokens_per_sec_7b: Option<f32>,
 }
 
 /// The serde default for [`NodeCapability::can_serve_inference`].
@@ -787,6 +815,27 @@ impl NodeCapability {
     /// means the card, exactly as before.
     pub fn models_run_on_card(&self) -> bool {
         self.gpu.is_some() && self.ram_model_budget_mb.is_none()
+    }
+
+    /// The system memory a segment's processor share may take beside the
+    /// card, with the processor's speed — `Some` only on a node whose models
+    /// run on its card and that states both (see
+    /// [`Self::machine_room_beside_card_mb`]). The single reading: a node
+    /// whose models run on its processor answers through
+    /// [`Self::memory_for_model_layers_mb`] already, and must not be counted
+    /// twice. A speed that is not a finite positive number states nothing: an
+    /// infinite one would price the layers beside the card at nothing.
+    pub fn processor_beside_card(&self) -> Option<(u64, f32)> {
+        if !self.models_run_on_card() {
+            return None;
+        }
+        match (
+            self.machine_room_beside_card_mb,
+            self.processor_tokens_per_sec_7b,
+        ) {
+            (Some(mb), Some(speed)) if speed.is_finite() && speed > 0.0 => Some((mb, speed)),
+            _ => None,
+        }
     }
 }
 
@@ -1014,6 +1063,66 @@ mod version_compat_tests {
         let cap: NodeCapability = serde_json::from_value(v).unwrap();
         assert!(cap.ram_model_budget_mb.is_none());
         assert_eq!(cap.memory_for_model_layers_mb(), 6000);
+    }
+
+    /// The processor's room beside a card is read only from a node whose
+    /// models run on the card and that states it with a speed — an older
+    /// node, and one whose models run on its processor, offer exactly what
+    /// they did before the fields existed.
+    #[test]
+    fn the_processor_beside_a_card_is_offered_only_by_a_card_node_that_states_it() {
+        let card = serde_json::json!({
+            "name": "card",
+            "vram_total_mb": 12288u64,
+            "vram_available_mb": 1000u64,
+            "memory_bandwidth_gbps": 360.0f32,
+        });
+        let mut older = base_fields();
+        older
+            .as_object_mut()
+            .unwrap()
+            .insert("gpu".into(), card.clone());
+        let cap: NodeCapability = serde_json::from_value(older.clone()).unwrap();
+        assert_eq!(cap.processor_beside_card(), None, "an older card node");
+
+        let mut stating = older;
+        let obj = stating.as_object_mut().unwrap();
+        obj.insert(
+            "machine_room_beside_card_mb".into(),
+            serde_json::json!(24000u64),
+        );
+        obj.insert(
+            "processor_tokens_per_sec_7b".into(),
+            serde_json::json!(6.5f32),
+        );
+        let cap: NodeCapability = serde_json::from_value(stating.clone()).unwrap();
+        assert_eq!(cap.processor_beside_card(), Some((24000, 6.5)));
+        assert_eq!(
+            cap.memory_for_model_layers_mb(),
+            1000,
+            "the card's figure is still the card's"
+        );
+
+        // A node whose models run on its processor states a RAM budget; its
+        // memory is already the whole answer and is not counted twice.
+        stating
+            .as_object_mut()
+            .unwrap()
+            .insert("ram_model_budget_mb".into(), serde_json::json!(4096u64));
+        let cap: NodeCapability = serde_json::from_value(stating).unwrap();
+        assert_eq!(cap.processor_beside_card(), None);
+
+        // A speed that is not a number a processor could run at states nothing.
+        let mut card = NodeCapability {
+            ram_model_budget_mb: None,
+            ..cap
+        };
+        for speed in [f32::INFINITY, f32::NAN, 0.0, -1.0] {
+            card.processor_tokens_per_sec_7b = Some(speed);
+            assert_eq!(card.processor_beside_card(), None, "speed {speed}");
+        }
+        card.processor_tokens_per_sec_7b = Some(6.5);
+        assert_eq!(card.processor_beside_card(), Some((24000, 6.5)));
     }
 
     /// A card is where models run only when the node says so by stating NO

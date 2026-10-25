@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #342**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #343**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2463,6 +2463,19 @@ against llama.cpp 0.3.16, then flip `is_supported` and re-read `arch_supports_hy
 StarCoder2, inert while refused).
 
 ### Memory and admission
+
+#### #342 — A segment is charged an even share of the output head and token table, which only its end carries
+`P3` · memory · **OPEN** — 2026-10-25 · history: found while adding the segment card/processor run
+
+`process_pool::segment_shape` charges a segment the header's weights in proportion to its layers,
+the output head and the token table included, while the loader maps the head only for the LAST
+segment and the token table only for the first. For a 128,256-word vocabulary at 8,192 wide
+(Llama 3.x 70B) the head is ~860 MB at Q6_K, so the last 10 of 80 layers are charged ~110 MB of
+it: a plan can give a node a tail segment its load then refuses (`LocalMemoryUnavailable`, one
+re-plan). Only the first segment's host-resident tensors are charged where they live (#296). Next:
+read `output.weight` / `token_embd.weight` off the tensor table into `VramFootprintInputs` (an
+`is_last` beside `is_first`), charge each to the segment that maps it, and check the estimate
+against a real tail segment's `charged_mb` and the worker's resident memory.
 
 #### #322 — A cold load's first request was refused for a 9-token prompt, its card cache budget 0
 `P3` · memory · **OPEN** — 2026-10-20 · history: field report 2026-10-19 (a tester, RTX 3060 12 GB, v0.3.244), request `3acb5624`

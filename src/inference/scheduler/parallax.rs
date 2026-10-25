@@ -621,8 +621,14 @@ fn vertex_cost_as(
         } else {
             2.0 * c.latency_ms as f32
         };
-        // The static prior, priced as one of THIS model's layers (#250).
-        (network, c.prior_ms_per_layer())
+        // The static prior, priced as one of THIS model's layers (#250), on
+        // the device each layer of the range runs on.
+        (network, DecodePrice::Prior(range).ms_per_layer(c))
+    };
+    let decode_price = if observation.is_some() {
+        DecodePrice::Measured(per_layer_ms)
+    } else {
+        DecodePrice::Prior(range)
     };
 
     // Compute is per forward pass, and a request is many passes. Scaling every
@@ -683,7 +689,7 @@ fn vertex_cost_as(
     let prefill_ms = match prompt_tokens {
         None => 0.0,
         Some(0) => 0.0,
-        Some(tokens) => prefill_ms_per_layer(c, tokens, per_layer_ms) * layers,
+        Some(tokens) => prefill_ms_per_layer(c, tokens, decode_price) * layers,
     };
 
     // Scale the whole vertex by how many attempts it takes to get one intact
@@ -755,31 +761,60 @@ fn vertex_cost_as(
     }
 }
 
+/// What prices a candidate's decode in a router's model: a figure measured
+/// on it, or the static prior for a range, which knows the device each of the
+/// range's layers runs on (`NodeCandidate::layers_by_device`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum DecodePrice {
+    /// ms per layer, measured (or a neutral stand-in): one figure for every
+    /// layer, whatever device it ran on.
+    Measured(f32),
+    /// The static prior over this range.
+    Prior((u32, u32)),
+}
+
+impl DecodePrice {
+    /// ms per layer of one decode pass.
+    pub(super) fn ms_per_layer(self, c: &NodeCandidate) -> f32 {
+        match self {
+            Self::Measured(ms) => ms,
+            Self::Prior(range) => c.prior_ms_per_layer_over(range),
+        }
+    }
+}
+
 /// What reading `tokens` of a prompt costs `c`, in ms per layer — the ONE
 /// prefill rate, which the search's [`vertex_cost`] and the greedy fallback
-/// both charge. `decode_ms_per_layer` is whatever prices the candidate's decode
-/// in the caller's model, the stand-in until a prefill is measured.
-pub(super) fn prefill_ms_per_layer(
-    c: &NodeCandidate,
-    tokens: u32,
-    decode_ms_per_layer: f32,
-) -> f32 {
+/// both charge. `decode` is whatever prices the candidate's decode in the
+/// caller's model, the stand-in until a prefill is measured.
+pub(super) fn prefill_ms_per_layer(c: &NodeCandidate, tokens: u32, decode: DecodePrice) -> f32 {
     match c.observed_prefill_ms_per_layer_byte {
         // Measured on this peer, for exactly this work. The coefficient
         // is normalised by layers x activation bytes, so it carries
         // across models.
         Some(coeff) => coeff * tokens as f32 * ACTIVATION_BYTES_PER_TOKEN as f32,
         // Never measured: derive from whatever prices its decode, using
-        // the device-class prior. `decode_ms_per_layer` is a per-TOKEN decode
-        // cost, so a prompt of N tokens costs N of them, divided by how
-        // much faster this class of machine reads than writes.
+        // the device-class prior. A decode figure is a per-TOKEN cost, so a
+        // prompt of N tokens costs N of them, divided by how much faster this
+        // class of machine reads than writes — per device where the range
+        // runs on two, the processor's layers reading at the processor's rate
+        // (a card reads ~40x faster than it writes, a processor ~4.5x).
         None => {
-            let speedup = if c.has_gpu {
+            let first_speedup = if c.has_gpu {
                 PREFILL_SPEEDUP_GPU
             } else {
                 PREFILL_SPEEDUP_CPU
             };
-            decode_ms_per_layer * tokens as f32 / speedup
+            match decode {
+                DecodePrice::Measured(ms) => ms * tokens as f32 / first_speedup,
+                DecodePrice::Prior(range) => {
+                    let (first, beside) = c.layers_by_device(range);
+                    let width = (first + beside).max(1) as f32;
+                    let per_token = first as f32 * c.prior_ms_per_layer() / first_speedup
+                        + beside as f32 * c.processor_prior_ms_per_layer() / PREFILL_SPEEDUP_CPU;
+                    per_token * tokens as f32 / width
+                }
+            }
         }
     }
 }
@@ -1880,6 +1915,8 @@ mod tests {
             ring: Default::default(),
             stated_ms_per_layer: None,
             fresh_run_layers: None,
+            card_layers: None,
+            processor_tokens_per_sec: 0.0,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
             goodput_bytes_per_sec: None,
@@ -4678,6 +4715,84 @@ mod tests {
             "the peer is planned the range it holds, which costs it nothing new"
         );
     }
+
+    /// **A range a candidate splits across its card and processor is priced
+    /// per device** (2026-10-25). This node held 17 of a 70B's 80 layers, 12 of
+    /// which its card holds, and was priced at the WHOLE model's blend — 7 of
+    /// its 80 layers on the card — so a slower computer farther away took the
+    /// first layers. Priced per device, the 17 cost 12 at the card's speed and
+    /// 5 at the processor's, and the route starts here. The control is the old
+    /// price: the blend, every layer at one speed, and the farther peer wins.
+    #[test]
+    fn a_range_split_across_card_and_processor_is_priced_per_device() {
+        const WORK: f32 = 3.81;
+        let here = NodeId([1; 32]);
+        let local = |per_device: bool| {
+            let mut c = cand(1, vec![(0, 17)], 0, 0.0, true, false, 56.0);
+            c.layer_work = WORK;
+            c.max_hostable_layers = Some(12);
+            c.fresh_run_layers = Some(23);
+            if per_device {
+                c.card_layers = Some(12);
+                c.processor_tokens_per_sec = 6.3;
+                c.has_gpu = true;
+            } else {
+                c.est_tokens_per_sec = crate::inference::scheduler::split_tokens_per_sec(
+                    6.3,
+                    Some(56.0),
+                    Some((12, 80)),
+                );
+            }
+            c
+        };
+        let mut near = cand(2, vec![(0, 17)], 30, 0.0, true, false, 20.0);
+        near.layer_work = WORK;
+        let mut tail = cand(3, vec![(17, 80)], 386, 0.0, false, true, 45.0);
+        tail.layer_work = WORK;
+        tail.has_gpu = true;
+
+        let first = |per_device: bool| {
+            let cands = vec![local(per_device), near.clone(), tail.clone()];
+            route_shortest_path(
+                80,
+                &cands,
+                &here,
+                false,
+                false,
+                CapacityBound::Everyone,
+                Some(17),
+            )
+            .expect("a route")[0]
+                .node_id
+                .clone()
+        };
+        assert_eq!(
+            first(true),
+            here,
+            "priced per device, the route starts here"
+        );
+        assert_eq!(
+            first(false),
+            NodeId([2; 32]),
+            "the control: at the whole model's blend the farther peer looked cheaper"
+        );
+
+        // The price itself: 12 layers at the card's speed, 5 at the processor's.
+        let c = local(true);
+        let at = |tps: f32| 1000.0 / tps / BASELINE_LAYER_COUNT * WORK;
+        let per_layer = c.prior_ms_per_layer_over((0, 17));
+        let expected = (12.0 * at(56.0) + 5.0 * at(6.3)) / 17.0;
+        assert!(
+            (per_layer - expected).abs() / expected < 1e-4,
+            "{per_layer} vs {expected}"
+        );
+        assert_eq!(c.prior_ms_per_layer_over((0, 12)), c.prior_ms_per_layer());
+        // A prompt reads at each device's own rate.
+        let prompt = prefill_ms_per_layer(&c, 1000, DecodePrice::Prior((0, 17))) * 17.0;
+        let expected_prompt =
+            1000.0 * (12.0 * at(56.0) / PREFILL_SPEEDUP_GPU + 5.0 * at(6.3) / PREFILL_SPEEDUP_CPU);
+        assert!((prompt - expected_prompt).abs() / expected_prompt < 1e-4);
+    }
 }
 
 #[cfg(test)]
@@ -4729,6 +4844,8 @@ mod transfer_cost_tests {
             ring: Default::default(),
             stated_ms_per_layer: None,
             fresh_run_layers: None,
+            card_layers: None,
+            processor_tokens_per_sec: 0.0,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
         }

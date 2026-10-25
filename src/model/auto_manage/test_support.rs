@@ -155,6 +155,8 @@ pub(super) fn capability(ceiling_mb: Option<u64>, disk_mb: u64) -> NodeCapabilit
         context_ceiling_tokens: None,
         model_load_ms_per_gib: None,
         model_memory_ceiling_mb: ceiling_mb,
+        machine_room_beside_card_mb: None,
+        processor_tokens_per_sec_7b: None,
     }
 }
 

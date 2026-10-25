@@ -6311,31 +6311,82 @@ impl ModelProcessPool {
             return None;
         }
         let estimated = self.estimated_gpu_mb(model_id)?;
-        let split = self.partial_gpu_layers(
-            model_id,
-            None,
-            estimated,
-            self.card_budget_for_planning(model_id),
-        )?;
-        let (_, total) = split.card_share();
-        let run = (0, u32::try_from(total).unwrap_or(u32::MAX));
-        let host_mb = self
-            .machine_charge(model_id, run, false, Some(split), KvCharge::Typical)
-            .mb();
+        let budget = self.card_budget_for_planning(model_id);
+        let split = self.partial_gpu_layers(model_id, None, estimated, budget)?;
+        let (on_card, total) = split.card_share();
+        let total = u32::try_from(total).unwrap_or(u32::MAX);
         // A live card worker of this model is not counted as released: it may
         // be grown in place across the processor (`charge_segment_as_split`)
         // rather than retired, its charge kept.
-        if !self.machine_would_take(model_id, host_mb, requester, 0) {
+        let fits = |run: (u32, u32), split: CardSplit| {
+            let host_mb = self
+                .machine_charge(model_id, run, false, Some(split), KvCharge::Typical)
+                .mb();
+            self.machine_would_take(model_id, host_mb, requester, 0)
+        };
+        if fits((0, total), split) {
+            return Some(total);
+        }
+        // Too big for the card AND the machine whole, so this node can only
+        // ever be part of a split of it — and then a SEGMENT is what a spawn
+        // splits: its first layers on the card, the rest on the processor, the
+        // share weighed exactly as for the whole model. The widest run whose
+        // processor share is still taken, found by bisection (the share grows
+        // with the run). Offered only past the card's own layers, which
+        // `max_local_hostable_layers` already offers. Without it a 16 GB
+        // laptop holding 17 of a 70B's 80 layers was offered for the 8-12 its
+        // card holds, and the first layers went to a computer in another
+        // country (2026-10-25).
+        //
+        // The width is offered for a run ANYWHERE in the model (the search
+        // places it over the layers this node holds), so it is weighed where
+        // the estimator charges a run most: from the first layer, which
+        // carries what the loader keeps in the machine whatever the device
+        // (#296). `segment_shape` spreads every other weight over the layers,
+        // the output head included, so no other placement costs more.
+        let run_is_taken = |layers: u32| {
+            let run = (0, layers);
+            let estimated = self.estimate_gpu_footprint_mb(model_id, Some(run), KvCharge::Typical);
+            match self.partial_gpu_layers(model_id, Some(run), estimated, budget) {
+                Some(split) => fits(run, split),
+                // No split: the run fits the card whole, or nothing of it does.
+                // Whole on the card, the machine still keeps what the loader
+                // holds there whatever the device (Gemma 4 E2B's per-layer
+                // table, #296).
+                None => {
+                    estimated > 0
+                        && budget.saturating_sub(self.vram_committed_mb()) >= estimated
+                        && self.machine_would_take(
+                            model_id,
+                            self.machine_charge(model_id, run, false, None, KvCharge::Typical)
+                                .mb(),
+                            requester,
+                            0,
+                        )
+                }
+            }
+        };
+        let card_layers = u32::try_from(on_card).unwrap_or(0);
+        let (mut fitting, mut refused) = (card_layers, total);
+        while refused > fitting + 1 {
+            let mid = fitting + (refused - fitting) / 2;
+            if run_is_taken(mid) {
+                fitting = mid;
+            } else {
+                refused = mid;
+            }
+        }
+        if fitting <= card_layers {
             tracing::debug!(
                 model = %model_id,
-                host_share_mb = host_mb,
+                card_layers,
                 ?requester,
                 "a fresh card/processor split would not be given its processor share — \
                  not planning it here"
             );
             return None;
         }
-        Some(run.1)
+        Some(fitting)
     }
 
     /// Would a spawn's RAM admission take `host_mb` for `requester` — counting
@@ -13947,10 +13998,17 @@ mod admission_tests {
         let charge = p.machine_charge(&m, whole, false, Some(split), KvCharge::Typical);
         assert_eq!(charge.beside_card_mb, 1_927);
         p.set_ram_budget_mb(charge.share_mb + 1_000);
+        let narrower = p.fresh_run_layers_for_planning(&m, Requester::Swarm);
+        assert!(
+            narrower.is_none_or(|run| run < 35),
+            "room for the whole run but not the table: at most a narrower run, \
+             the table beside it (2026-10-25), got {narrower:?}"
+        );
+        p.set_ram_budget_mb(1_926);
         assert_eq!(
             p.fresh_run_layers_for_planning(&m, Requester::Swarm),
             None,
-            "room for the run but not the table"
+            "no room for the table: no run starting at the first layer is taken"
         );
         p.set_ram_budget_mb(charge.mb());
         assert_eq!(
@@ -14079,6 +14137,80 @@ mod admission_tests {
         assert_eq!(
             q.max_local_hostable_layers(&m, true, Requester::Swarm),
             Some(on_card_alone)
+        );
+    }
+
+    /// **A model too big for the card AND the machine whole is offered as a
+    /// SEGMENT** (2026-10-25): the widest run whose processor share the
+    /// machine still takes, as a spawn splits a segment — its first layers on
+    /// the card, the rest on the processor. Offered the whole model only, a
+    /// 16 GB laptop holding 17 of a 70B's 80 layers was planned the 8-12 its
+    /// card holds, and the first layers went to a computer abroad. The
+    /// control: a machine with room for the whole model's share is offered
+    /// the whole model, as before.
+    #[test]
+    fn a_model_too_big_for_the_card_and_the_machine_is_offered_as_a_segment() {
+        use crate::inference::model_arch::ModelArch;
+        use crate::inference::split::hybrid::arch_supports_hybrid;
+        let seventy_b = crate::model::auto_manage::vram::VramFootprintInputs {
+            quantized_weight_bytes: 40_000 * 1024 * 1024,
+            host_resident_bytes: 0,
+            unquantized_bytes_per_element: None,
+            vocab_size: 128_256,
+            embedding_length: 8192,
+            segment_layers: 80,
+            kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                80,
+                8,
+                64,
+                128,
+                crate::inference::layers::KvAttention::Standard,
+            ),
+            rope_dim: 128,
+            effective_context: 8192,
+            is_first: true,
+            embedding_gatherable: true,
+            splits_across_devices: arch_supports_hybrid(&ModelArch::Llama),
+        };
+        let p = pool();
+        p.test_card_in_play
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        p.set_vram_budget_mb(6_600);
+        p.set_ram_budget_mb(6_000);
+        let m = ModelId("seventy-b".into());
+        p.test_footprint_inputs.insert(m.clone(), seventy_b);
+        let on_card_alone = p
+            .max_local_hostable_layers(&m, true, Requester::Owner)
+            .expect("fixture: the card holds some");
+
+        let run = p
+            .fresh_run_layers_for_planning(&m, Requester::Owner)
+            .expect("a segment the card and the machine hold together is on offer");
+        assert!(
+            on_card_alone < run && run < 80,
+            "card alone {on_card_alone}, offered {run}"
+        );
+        // The widest: its processor share is taken, one layer more is not.
+        let taken = |layers: u32| {
+            let segment = (0, layers);
+            let estimated = p.estimate_gpu_footprint_mb(&m, Some(segment), KvCharge::Typical);
+            let split = p
+                .partial_gpu_layers(&m, Some(segment), estimated, 6_600)
+                .expect("fixture: it splits");
+            let host_mb = p
+                .machine_charge(&m, segment, false, Some(split), KvCharge::Typical)
+                .mb();
+            p.machine_would_take(&m, host_mb, Requester::Owner, 0)
+        };
+        assert!(taken(run));
+        assert!(!taken(run + 1));
+
+        // The control: room for the whole model's share, the whole model.
+        p.set_ram_budget_mb(60_000);
+        assert_eq!(
+            p.fresh_run_layers_for_planning(&m, Requester::Owner),
+            Some(80)
         );
     }
 
@@ -14288,11 +14420,14 @@ mod admission_tests {
             Some(48),
             "room for the {host_mb} MB of experts it keeps in RAM"
         );
+        // One MB short the spawn would refuse the whole model's split, so only
+        // a narrower run of it is offered — one the spawn would take
+        // (2026-10-25; `a_model_too_big_for_the_card_and_the_machine_is_offered_as_a_segment`).
         p.set_ram_budget_mb(host_mb - 1);
-        assert_eq!(
-            p.fresh_run_layers_for_planning(&m, Requester::Owner),
-            None,
-            "one MB short: the spawn would refuse the split"
+        let narrower = p.fresh_run_layers_for_planning(&m, Requester::Owner);
+        assert!(
+            narrower.is_some_and(|run| run < 48),
+            "one MB short: the spawn would refuse the whole split, got {narrower:?}"
         );
 
         // Whole layers: the machine holds the run after the card's.
@@ -14311,7 +14446,11 @@ mod admission_tests {
             Some(48)
         );
         q.set_ram_budget_mb(host_mb - 1);
-        assert_eq!(q.fresh_run_layers_for_planning(&d, Requester::Swarm), None);
+        let narrower = q.fresh_run_layers_for_planning(&d, Requester::Swarm);
+        assert!(
+            narrower.is_none_or(|run| run < 48),
+            "never the whole split one MB short, got {narrower:?}"
+        );
     }
 
     /// **The RAM an idle model holds is room for a fresh split**, because the
@@ -14345,10 +14484,10 @@ mod admission_tests {
             .lock()
             .unwrap()
             .insert(Uuid::new_v4(), std::time::Instant::now());
-        assert_eq!(
-            p.fresh_run_layers_for_planning(&m, Requester::Owner),
-            None,
-            "a model in a conversation keeps its 2000 MB"
+        let narrower = p.fresh_run_layers_for_planning(&m, Requester::Owner);
+        assert!(
+            narrower.is_some_and(|run| run < 48),
+            "a model in a conversation keeps its 2000 MB: only a narrower run, got {narrower:?}"
         );
     }
 
