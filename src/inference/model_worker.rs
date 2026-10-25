@@ -7014,6 +7014,42 @@ async fn handle_daemon_msg(
                 "model-worker: placing a later range where the daemon found room for it"
             );
         }
+        DaemonMsg::LoadRange {
+            model_id,
+            layer_start,
+            layer_end,
+        } => {
+            // A peer's split will send this range its forwards; read it now so
+            // the machines before this one in the split are not loading first
+            // and this one after. The forward loads it the same way when it
+            // was not asked for ahead (`ensure_model_loaded` is a no-op on a
+            // range already held).
+            let began = std::time::Instant::now();
+            match ensure_model_loaded(
+                models,
+                data_dir,
+                &model_id,
+                layer_start,
+                layer_end,
+                0,
+                1,
+                shard_window,
+            ) {
+                Ok(()) => tracing::info!(
+                    model = %model_id,
+                    layers = format!("[{layer_start}..{layer_end})"),
+                    load_ms = began.elapsed().as_millis() as u64,
+                    "DIAG: model-worker: read a range ahead of its first forward"
+                ),
+                Err(e) => tracing::warn!(
+                    model = %model_id,
+                    layers = format!("[{layer_start}..{layer_end})"),
+                    error = %e,
+                    "model-worker: could not read a range ahead — its first forward \
+                     tries the load again and answers with the error"
+                ),
+            }
+        }
         DaemonMsg::ExportPrefixSnapshot {
             request_id,
             model_id,

@@ -42,6 +42,15 @@ before any other computer started on it — seen today with a 70B model, 63 of w
 computer fetched. A computer now asks within a minute of first hearing of a model (at most 8
 questions a minute), and starts fetching as soon as the answer is in.
 
+**A model split across computers that all start cold answers its first message about twice as
+soon.** When several computers each run part of a model, each one used to start reading its part
+from disk only once the computer before it had finished reading its own and passed the work along,
+so the waits added up: a 30B model across three computers waited 73 seconds for its first word.
+The computer leading the reply already asks the others, before it starts, whether they have room;
+a computer that answers yes now starts loading its part right then, while the others load theirs.
+Measured with two computers 50 ms apart, each made to take 20 seconds to load: the first reply
+came after 23-24 seconds instead of 43.6, and the reply was the same.
+
 **Made-up computers can no longer push a model part's real holders out of your node's list.**
 Each computer keeps a list of up to 50 others holding each piece of a model. Announcing that you
 hold a piece needs only a freshly made identity, and once a list was full every new announcement

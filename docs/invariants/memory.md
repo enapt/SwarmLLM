@@ -3315,6 +3315,37 @@ request answers 200 — the released v0.3.243 asks nothing there and also answer
 "B refuses, the re-plan gives A the excess, 200" did not arise in either shape; the clamp it rests
 on is the scheduler test above.
 
+**A "go ahead" also starts the load (2026-10-25).** A split's forwards reach each machine only
+after every machine before it has answered, and a worker reads a range's weights on the forward
+that first names it — so a split whose machines were all cold loaded one after another: Qwen3-30B-A3B
+across three peers waited 73 s for its first token, three loads end to end. Now, after answering
+`Proceed` (and only then, so the asker's wait never includes a load), the asked node loads the
+ranges it was asked about (`ModelProcessPool::load_ahead_for_a_peer`): `get_or_spawn` as the
+forward would — the swarm's tenant, weighed against the swarm's memory cap, refused where the
+forward would be — then `DaemonMsg::LoadRange`, which the worker answers with `ensure_model_loaded`
+(the forward's own call, a no-op on a range held). Not when the range is already charged to a live
+worker, not during an inference outage, not past the ask budget (an unweighed answer loads
+nothing), and only what a forward naming the ranges could load (`may_load_ahead`): each range inside
+the model by the forward's own check (`layer_forward::layer_range_is_valid`), every part overlapping
+it held here (a load of layers it lacks would spawn a worker to fail), at most two ranges
+(`MAX_RANGES_LOADED_AHEAD` — a plan gives one machine a segment or two) and none overlapping
+another. The security review of the change (security-reviewer, 2026-10-25) found the range check
+missing: an ask for `[0, N+1)` of an N-layer model overlapped every part, so the worker dropped a
+resident `[0, N)` it subsumed, read N layers for ~20 s, failed at the last one and left the range
+charged — a forward is refused before it reaches the worker. It also found the loads unmetered
+beside a forward's per-peer work slot (16 ranges an ask, nested ones each held as a copy), hence
+the two-range, no-overlap bound. This is the one thing a question WRITES,
+and it writes nothing a forward from the same peer could not: the same authenticated, registered
+sender, the same metered refusal, the same admission; nothing keyed by the asker's request id, no
+KV reserved, no conversation noted, and an ask about a range already charged spawns nothing, so
+questions cannot keep a model from its idle unload. A first cut stopped at the spawn and measured
+the serial figure — the spawn charges a range, the worker reads nothing until told. Measured (TinyLlama split across two nodes, `split_rig.sh split`, `RIG_NETNS=1`, a 50 ms round trip, every load held 20 s by `SWARMLLM_FAULT_LOAD_DELAY_SECS` on both nodes, dev build, 2026-10-25, two runs an arm): the first reply in 23.2-24.0 s against 43.6-43.7 s with `SWARMLLM_LOAD_AHEAD=0` — B's worker read its range in 20.5-21.1 s beside A's own load — every reply identical; the spawn-only first cut 43.5-43.7 s.
+A/B `SWARMLLM_LOAD_AHEAD=0`. Rig: `RIG_NETNS=1 RIG_RTT_MS=50 ENV_A=SWARMLLM_FAULT_LOAD_DELAY_SECS=20
+ENV_B=SWARMLLM_FAULT_LOAD_DELAY_SECS=20 split_rig.sh split` (add `SWARMLLM_LOAD_AHEAD=0` to `ENV_B`
+for the control), the first ask's `DIAG: request complete` `total_ms` on A. Log lines: the asked node
+`DIAG: loading the layers a peer's split will send here, before its first forward`, its worker
+`DIAG: model-worker: read a range ahead of its first forward` (`load_ms`).
+
 ## A cache is charged to the memory it lives in (2026-10-13, FUTURE_WORK #262)
 
 **What was wrong.** A card/processor split (`process_pool::split_for_card`, `hybrid::LayerPlacement`)

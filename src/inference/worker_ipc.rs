@@ -61,6 +61,18 @@ pub enum DaemonMsg {
         layer_end: usize,
         placement: Option<crate::inference::split::RangePlacement>,
     },
+    /// Read a range's layers now, before any forward names them — sent when a
+    /// peer's split asks about a prompt this node's range will run
+    /// (`ModelProcessPool::load_ahead_for_a_peer`), so the machines of a cold
+    /// split load side by side instead of each waiting for the one before it
+    /// to finish loading and send its first forward. A worker loads only on a
+    /// forward otherwise. No reply: the range's first forward queues behind
+    /// the load and finds it done, or meets the load's error itself.
+    LoadRange {
+        model_id: ModelId,
+        layer_start: usize,
+        layer_end: usize,
+    },
     /// Item 8 Phase 2b: daemon's reply to a `WorkerMsg::PrefixFetchProbe`.
     /// When `present == true`, the BLAKE3-verified `KvSnapshot` bytes are
     /// carried in the IPC binary-payload slot (not inside this JSON header).

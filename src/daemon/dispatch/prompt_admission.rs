@@ -96,8 +96,72 @@ pub(super) fn on_ask(
                 layers_that_fit,
             },
         };
+        let load_ahead = matches!(verdict, PromptAdmissionVerdict::Proceed)
+            && loads_ahead()
+            && shared_state.inference_outage().is_none()
+            && may_load_ahead(
+                &shared_state.model_registry,
+                shared_state.identity.node_id(),
+                &ask.model_id,
+                &ask.layer_ranges,
+            );
+        let (model_id, ranges) = (ask.model_id.clone(), ask.layer_ranges.clone());
         answer(network_tx, asker, asker_peer_bytes, ask, verdict).await;
+        // After the answer, so the asker's wait never includes the load.
+        if load_ahead {
+            shared_state
+                .model_process_pool
+                .load_ahead_for_a_peer(&model_id, &ranges)
+                .await;
+        }
     });
+}
+
+/// The most ranges one ask may have loaded ahead. A plan gives one machine a
+/// segment or two; an ask naming more is answered, but its forwards load the
+/// rest as they always did.
+const MAX_RANGES_LOADED_AHEAD: usize = 2;
+
+/// May a peer's ask have these ranges loaded now, ahead of their forwards?
+/// Only what a forward naming them could load: each range inside the model
+/// (`layer_forward::layer_range_is_valid`, the forward's own check — a range
+/// past the end would make the worker drop a resident range it subsumes, then
+/// fail its load and leave the charge behind; security review, 2026-10-25),
+/// every part covering it held here (a load of layers this node lacks spawns
+/// a worker to fail), at most [`MAX_RANGES_LOADED_AHEAD`] of them and none
+/// overlapping another (nested ranges would each be held as a copy of their
+/// own). A refusal here loads nothing; the answer is unchanged.
+fn may_load_ahead(
+    registry: &crate::model::registry::ModelRegistry,
+    here: &NodeId,
+    model_id: &crate::types::ModelId,
+    ranges: &[(u32, u32)],
+) -> bool {
+    let Some(manifest) = registry.get_manifest(model_id) else {
+        return false;
+    };
+    let total = manifest.num_layers as usize;
+    let overlap = |a: (u32, u32), b: (u32, u32)| a.0 < b.1 && b.0 < a.1;
+    ranges.len() <= MAX_RANGES_LOADED_AHEAD
+        && ranges
+            .iter()
+            .enumerate()
+            .all(|(i, &a)| ranges[i + 1..].iter().all(|&b| !overlap(a, b)))
+        && ranges.iter().all(|&range| {
+            let parts = registry.shards_overlapping_layers(model_id, range);
+            super::layer_forward::layer_range_is_valid(range.0 as usize, range.1 as usize, total)
+                && !parts.is_empty()
+                && parts
+                    .iter()
+                    .all(|part| registry.shard_holders(part).contains(here))
+        })
+}
+
+/// `SWARMLLM_LOAD_AHEAD=0` loads a peer's layers only when its first forward
+/// arrives, as before 2026-10-25 — the control arm for the measurement.
+fn loads_ahead() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_LOAD_AHEAD").map_or(true, |v| v != "0"))
 }
 
 /// A verdict that needed no worker, sent from the dispatcher itself: no task,
@@ -182,6 +246,80 @@ mod tests {
             layer_ranges: ranges,
             prompt_tokens,
         }
+    }
+
+    /// A peer's layers are loaded ahead only where a forward naming them could
+    /// load them: every part covering them here, inside the model, a range or
+    /// two that do not overlap. A range reaching into a part this node lacks,
+    /// past the model's end, or a model whose parts are unknown, would spawn a
+    /// worker only to fail its load.
+    #[test]
+    fn a_peers_layers_are_loaded_ahead_only_where_a_forward_could_load_them() {
+        use crate::model::registry::ModelRegistry;
+        use crate::types::{ModelId, ShardId, ShardInfo};
+        let registry = ModelRegistry::new();
+        let model = ModelId("m".into());
+        let (here, other) = (NodeId([1u8; 32]), NodeId([2u8; 32]));
+        let part = |index: u32, layer_range: (u32, u32)| ShardInfo {
+            index,
+            layer_range,
+            size_bytes: 1,
+            hash: [0u8; 32],
+            tensors: vec![],
+        };
+        registry.register_manifest(crate::types::ModelManifest {
+            id: model.clone(),
+            name: "M".into(),
+            architecture: crate::types::ModelArchitecture::Llama,
+            num_layers: 30,
+            num_params_billions: 0.001,
+            quantization: crate::types::Quantization::Q4KM,
+            total_size_bytes: 3,
+            shard_count: 3,
+            shards: vec![part(0, (0, 10)), part(1, (10, 20)), part(2, (20, 30))],
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: other.clone(),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+            context_length: None,
+        });
+        let shard = |index| ShardId {
+            model_id: model.clone(),
+            index,
+        };
+        registry.record_shard_holder(shard(1), here.clone());
+        registry.record_shard_holder(shard(2), here.clone());
+        registry.record_shard_holder(shard(0), other.clone());
+
+        let may = |ranges: &[(u32, u32)]| may_load_ahead(&registry, &here, &model, ranges);
+        assert!(may(&[(10, 30)]));
+        assert!(may(&[(12, 18), (20, 25)]));
+        assert!(
+            !may(&[(5, 15)]),
+            "layers 5-9 are in a part only another computer holds"
+        );
+        assert!(
+            !may(&[(10, 20), (0, 3)]),
+            "one range out of reach is enough to load nothing"
+        );
+        assert!(
+            !may(&[(10, 31)]),
+            "a range past the model's last layer is refused, as its forward would be"
+        );
+        assert!(
+            !may(&[(10, 20), (10, 25)]),
+            "nested ranges would each be held as a copy of their own"
+        );
+        assert!(
+            !may(&[(10, 12), (12, 14), (14, 16)]),
+            "more ranges than a plan gives one machine"
+        );
+        assert!(
+            !may_load_ahead(&registry, &here, &ModelId("unknown".into()), &[(0, 3)]),
+            "a model whose parts are unknown here"
+        );
     }
 
     #[test]

@@ -6540,6 +6540,73 @@ impl ModelProcessPool {
         }
     }
 
+    /// Load the layers a PEER's split will send here, as soon as its
+    /// coordinator asks about the prompt (`PromptAdmissionAsk`) — not when the
+    /// first forward arrives. A split's forwards reach each machine only after
+    /// every machine before it has answered, so a chain of machines that all
+    /// had to load the model loaded one after another: Qwen3-30B-A3B across
+    /// three peers waited 73 s for its first token, three loads end to end
+    /// (2026-10-25). Asked here, every machine loads while the others do.
+    ///
+    /// Through `get_or_spawn` as the forward would (a tenant, weighed as the
+    /// swarm's work against the swarm's memory cap), so it loads nothing a
+    /// forward could not and is refused where a forward would be. The spawn
+    /// charges the range; the worker reads it on `DaemonMsg::LoadRange` (it
+    /// loads only on a forward otherwise — a first cut that stopped at the
+    /// spawn measured 43.7 s, the serial figure), and the forward queues
+    /// behind that load and finds it done. Nothing is keyed by the asker's
+    /// request id. A refusal is left to the forward, which meets it as it
+    /// always has.
+    pub(crate) async fn load_ahead_for_a_peer(&self, model_id: &ModelId, ranges: &[(u32, u32)]) {
+        for &range in ranges {
+            let held = self
+                .workers
+                .get(model_id)
+                .is_some_and(|h| !h.dead.load(Ordering::Acquire) && h.segment_is_charged(range));
+            if held {
+                continue;
+            }
+            let handle = match self
+                .get_or_spawn(model_id, range, Tenancy::Tenant, Requester::Swarm)
+                .await
+            {
+                Ok(handle) => handle,
+                Err(e) => {
+                    tracing::debug!(
+                        model = %model_id,
+                        layers = ?range,
+                        error = %e,
+                        "Did not load a peer's layers ahead of its forward — the forward loads or refuses them"
+                    );
+                    continue;
+                }
+            };
+            // A worker reads a range's weights on the forward that first names
+            // it, so the spawn alone loads nothing: tell it to read them now.
+            // The forward queues behind the load in the worker's one queue.
+            let msg = DaemonMsg::LoadRange {
+                model_id: model_id.clone(),
+                layer_start: range.0 as usize,
+                layer_end: range.1 as usize,
+            };
+            let mut writer = handle.writer.lock().await;
+            match send_daemon(&mut *writer, &msg, &[]).await {
+                Ok(()) => tracing::info!(
+                    model = %model_id,
+                    layers = ?range,
+                    "DIAG: loading the layers a peer's split will send here, before its first forward"
+                ),
+                Err(e) => tracing::warn!(
+                    model = %model_id,
+                    layers = ?range,
+                    error = %e,
+                    "Could not ask the model's worker to load a peer's layers ahead — the \
+                     range's own forward will find the worker gone"
+                ),
+            }
+        }
+    }
+
     /// Send one `DaemonMsg::AdmitPrompt` to the model's live worker and wait,
     /// bounded, for its answer. A worker answers one message at a time, so an
     /// admission sent while it is reading another request's prompt waits for
