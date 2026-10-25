@@ -3404,6 +3404,29 @@ for the control), the first ask's `DIAG: request complete` `total_ms` on A. Log 
 `DIAG: loading the layers a peer's split will send here, before its first forward`, its worker
 `DIAG: model-worker: read a range ahead of its first forward` (`load_ms`).
 
+**With no worker, the asked node weighs the LOAD (2026-10-25, #345).** "No worker" answered "go
+ahead" — there was no conversation memory to weigh — so a cold peer said yes to whatever it was
+planned. Llama 3.3 70B Q4_K_M, request `b6a07b44` (08:38Z): no strict rung found a chain, the
+`PeersAtCeiling` rung gave `aa3d1e66` (RTX 3060 12 GB, v0.3.252) layers 17-73, it answered the ask
+"go ahead" (`asked=2 answered=2 refused=0`), and its first forward was refused at the spawn ("needs
+about 30432 MB … `resources.max_ram_mb` is 24000 MB"). A forward's refusal is a peer failure, so
+failover barred it (`tried=["aa3d…"]`), and the holders left had room for 43 of the 80 layers. Now
+`weigh_peer_prompt` asks `ModelProcessPool::peer_load_refusal` first when no worker runs the
+model: the first asked range is weighed as its forward's spawn would weigh it, charging nothing —
+`get_or_spawn_once`'s rungs in its order (`fresh_spawn_machine_mb`: on a card whole or split by
+`machine_mb_beside_card`, the SAME function the planner's `fresh_run_layers_for_planning` bounds
+this node by, else the whole run on the processor), against the swarm's RAM cap with the idle
+reclaim counted (`machine_would_take`). A "no" carries the widest run from the asked start that a
+spawn takes (bisection, a run's charge growing with its width) and the spawn's own words
+(`ram_refusal_words`), and the coordinator's re-plan holds the peer to it — the path #252 (b)
+already had. The ask runs off the runtime's workers (`without_starving_the_runtime`: each weighing
+parses the header). What it does not weigh: a later range (it grows the first's worker), a live
+worker asked for a range it lacks (its growth is met by the forward), and the card's idle reclaim
+(as the planner's bound). Test `a_peer_with_no_worker_weighs_the_load_it_is_asked_for` (fails with
+the weigh off: the 8-layer ask is answered go ahead); A/B `SWARMLLM_PEER_LOAD_WEIGH=0`; log line on
+the asked node `DIAG: a peer's split asks this node for more layers than a worker here would be
+given memory for`.
+
 ## A cache is charged to the memory it lives in (2026-10-13, FUTURE_WORK #262)
 
 **What was wrong.** A card/processor split (`process_pool::split_for_card`, `hybrid::LayerPlacement`)

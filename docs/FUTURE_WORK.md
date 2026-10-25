@@ -555,27 +555,32 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 
 ### Routing and placement
 
-#### #345 — A peer that refuses its share of a split at load is barred from the re-plan, not held to what fits
-`P2` · routing · **OPEN** — 2026-10-25 · history: the 70B's second ask, request `b6a07b44`
+#### #346 — A model only a split can run is "carried" by a sum that counts the same layers on every holder, so its parts are never placed where the holders' memory is
+`P1` · placement · **OPEN** — 2026-10-25 · history: the 70B's third ask, request `5a383498` (10:48Z, every peer on v0.3.253)
 
-Llama 3.3 70B Q4_K_M, 08:38:45Z: no strict rung found a chain, so `PeersAtCeiling` gave `aa3d1e66`
-(AU, RTX 3060 12 GB, v0.3.252) layers 17-73. Its card had room for 2 (`max_hostable_layers=Some(2)`),
-so its worker charged the 56 layers to memory and refused: "needs about 30432 MB … `resources.max_ram_mb`
-is 24000 MB". The refusal arrived as a forward's error, so failover barred the peer for the request
-(`tried=["aa3d…"]`), and with it gone the holders had "room for about 43 of its 80 layers". AU could
-have taken ~44 layers under its cap. **AU had been asked up front** (#252 (b), `asked=2 refused=0`)
-and answered "go ahead": `ModelProcessPool::weigh_peer_prompt` weighs only a LIVE worker's
-conversation memory, and "no worker" is Fits. The coordinator side is already right — a refusal's
-`layers_that_fit` goes through `note_peer_prompt_refusal` and the re-plan holds the peer to it,
-never barring it — so no wire change is needed. Next: where no worker holds an asked range,
-`weigh_peer_prompt` weighs the LOAD as a `Swarm` spawn would (the card whole, a card/processor
-split's processor share, else the whole run in memory — `get_or_spawn_once`'s order, with the idle
-reclaim it would do), charging nothing, and answers `DoesNotFit` with the widest run from the range's
-start a spawn admits (bisection, as `fresh_run_layers_for_planning`'s `run_at_is_taken`), in the
-spawn's own refusal words. One predicate for the planner's bound and the weigh, so the two cannot
-disagree. Peers answer it once they run the fix. v0.3.253's room beside the card
-(`machine_room_beside_card_mb`) makes this case plan at face value instead, so it matters where a
-relaxed rung still runs.
+Llama 3.3 70B Q4_K_M (80 layers). Disk holdings → layers each could load (face / ceiling): this node
+[0,17) → 22 (one fresh run) · `99aafc41` [0,13),[43,44),[73,80) → 15 / 23 · `aa3d1e66` [13,73) → 35 / 80
+(the pre-#344 ceiling) · `96842635` [17,43),[44,80) → 6 / 7. At face value the four offer 78 layers of 80,
+whatever the placement, so no strict rung routes; `PeersAtCeiling` gave `aa3d1e66` 60 layers and its spawn
+refused ("needs about 31077 MB"). Two placement faults sit under it. (1) `coverage::carried_layers` counts
+each holder at `min(distinct layers held, ceiling layers)` and SUMS them (`scheduler::layers_carried`), so a
+layer held by three machines counts three times: 60 + 21 + 17 + 7 = 105 "carried" of 80, `copy_carries_model`
+is false everywhere, and nothing fetches — while layers 58-73 are held only by two machines whose room is
+spent elsewhere. (2) So the Mac's copies count as spare and the replica count sheds them: it held
+[0,17),[29,34),[43,52),[56,57),[69,80) at 08:38Z and 21 layers at 10:48Z — the one holder with room to spare
+for the middle. Only `coverage::near_chain` places parts by memory (one run per machine, ≤ its ceiling,
+fewest segments), and only over machines ≤ 30 ms apart; the 70B's holders are 300-410 ms apart. Petals
+solves the same problem (Borzunov et al., arXiv 2312.08361 §3.2; `petals/server/block_selection.py`
+`choose_best_blocks`): each server serves ONE contiguous span sized to its memory, placed over the blocks
+the swarm's announced spans cover worst, and moves only when a simulated rebalance gains ≥ 20% (a move
+resets attention caches). Next: "carried" is whether a chain of one run per in-scope holder, each within
+its holdings and its ceiling, covers every layer (`near_chain::plan_chain`'s question, asked of every
+in-scope machine); where none does and the summed ceilings could, plan that chain over every machine, as
+the near chain is planned over near ones — fewest segments, fewest parts to fetch, rendezvous ties — and
+each machine fetches its segment, prune keeping it (`copy_in_near_chain`'s rule). A far chain is slow,
+but the only way such a model runs; the near chain stays first. Bound the fetch by the storage budget
+(`could_ever_hold`). Even placed perfectly, these four machines' face values are 2 layers short — the
+Mac at its ceiling would close it.
 
 #### #250 — A model held whole here, which the card holds only part of, can be routed through peers at a fraction of local speed
 `P1` · routing · **PARTIAL** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.232-.234)
@@ -3319,7 +3324,20 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-25, ships in v0.3.254** (#344)
+**Closed 2026-10-25, ships in v0.3.254** (#344, #345)
+- #345 — **A computer with no worker for a model weighs the LOAD it is asked about before a
+  split's prompt pass.** "No worker" was "go ahead": Llama 3.3 70B was planned 56 layers on a peer
+  whose card held 2 (request `b6a07b44`, 08:38Z); its first forward was refused at the spawn ("needs
+  about 30432 MB … 24000 MB"), the refusal barred the peer for the request, and the holders left had
+  room for 43 of the 80 layers. Now `ModelProcessPool::weigh_peer_prompt` asks `peer_load_refusal`:
+  the spawn's rungs in its order, charging nothing (`fresh_spawn_machine_mb` — the card whole or
+  split through `machine_mb_beside_card`, the planner's own bound, else the processor), and a "no"
+  carries the widest run from the asked start a spawn takes, which the re-plan holds the peer to
+  (`note_peer_prompt_refusal`) instead of barring it. No wire change; peers answer it once they run
+  v0.3.254. Test `a_peer_with_no_worker_weighs_the_load_it_is_asked_for`; A/B
+  `SWARMLLM_PEER_LOAD_WEIGH=0`. Residual: only the first asked range is weighed, and a LIVE worker
+  asked for a range it does not hold is still weighed on its conversation memory alone — its growth
+  (`grow_worker`) is met by the forward, as before.
 - #344 — **A card computer's memory ceiling is its card plus the swarm's RAM cap.** It was the card
   plus the whole machine's memory, from before #264 charged a split's processor share to the RAM
   budget; a 12 GB card whose owner gives the swarm 24 GB advertised all 80 layers of a 70B where a

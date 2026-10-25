@@ -419,7 +419,7 @@ loaded layers and refuse alike: 2.65-2.93 tok/s in every arm.
   footprint free on a card plan (`local_layers_leaving(.., true, .., Some(mb))`:
   what stands free after the layers, no reclaim counted, as the guest's own
   `card_verdict` will weigh it), where the guest may use the card at all
-  (`guest_may_take_the_card`, the room-free half of `guest_charges_ram`). A
+  (`spawn_may_take_the_card`, the room-free half of `guest_charges_ram`). A
   fresh worker's card/processor split (`fresh_run_layers`) fills the card
   whatever the room, so its offer alone calls for the cut and the cut withdraws
   it (`leaving_room_here`, which now decides and builds the cut, never raising

@@ -10,6 +10,16 @@ ordinary memory, though the swarm's share of that memory is capped by its owner'
 70-billion-parameter model, where it could take about 66. It now counts the card plus the
 swarm's cap (#344).
 
+**A model split across several computers no longer fails because one of them agreed to more of it
+than it could load.** Before a split starts, every computer in it is asked whether it has room. A
+computer that had not loaded the model yet always said yes, then refused when the work arrived,
+and was left out of the request entirely: a 70-billion-parameter model was given 56 of its 80
+layers on a computer with room for about 44, and the request failed with "room for about 43 of
+its 80 layers" once that computer was left out. Such a computer now works out, before saying yes,
+whether it could load what it is asked for, and if not, answers how many layers it could take.
+The plan is then made again with that computer kept to that many (#345). Computers answer this
+way once they run this version.
+
 ## [0.3.253-alpha] — 2026-10-25
 
 **A model running whole on your computer now checks only the guesses that pay, and Qwen 3.5

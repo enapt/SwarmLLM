@@ -2528,6 +2528,17 @@ pub struct HeldRange {
     pub releasable_layers: u32,
 }
 
+/// What a spawn refused system memory says when no itemised footprint can be
+/// given — the spawn's own words, and a peer's answer when it weighs the same
+/// spawn before the prompt pass (`ModelProcessPool::peer_load_refusal`).
+fn ram_refusal_words(model: &str, needed_mb: u64, budget_mb: u64, in_use_mb: u64) -> String {
+    format!(
+        "{model} needs about {needed_mb} MB of memory but this node's budget allows \
+         {budget_mb} MB and {in_use_mb} MB is already in use. Raise `resources.max_ram_mb`, \
+         or free memory by unloading another model."
+    )
+}
+
 /// How many layers of NEW memory running `range` would take on a worker that
 /// already holds `held`.
 ///
@@ -5384,11 +5395,13 @@ impl ModelProcessPool {
         )
     }
 
-    /// May a guest's spawn use the card at all, room aside — a card, a build that
-    /// can drive it, and nothing sending this model to the processor
-    /// ([`Self::cpu_reason`]: a setting, a failed or too-old card)? The part of
-    /// [`Self::guest_charges_ram`] that does not depend on the card's room.
-    fn guest_may_take_the_card(&self, model_id: &ModelId) -> bool {
+    /// May a spawn of this model use the card at all, room aside — a card, a
+    /// build that can drive it, and nothing sending this model to the
+    /// processor ([`Self::cpu_reason`]: a setting, a failed or too-old card)?
+    /// `get_or_spawn_once`'s placement before it weighs room, for a guest
+    /// ([`Self::guest_charges_ram`]) and a tenant
+    /// ([`Self::fresh_spawn_machine_mb`]) alike.
+    fn spawn_may_take_the_card(&self, model_id: &ModelId) -> bool {
         #[cfg(test)]
         if self
             .test_card_in_play
@@ -5408,7 +5421,7 @@ impl ModelProcessPool {
     /// for a guest, which is offered neither a reclaim nor a card/processor
     /// split.
     fn guest_charges_ram(&self, model_id: &ModelId, segment: (u32, u32), kv: KvCharge) -> bool {
-        !self.guest_may_take_the_card(model_id)
+        !self.spawn_may_take_the_card(model_id)
             || matches!(
                 self.card_verdict(self.estimate_gpu_footprint_mb(model_id, Some(segment), kv)),
                 Verdict::Refused { .. }
@@ -5460,7 +5473,7 @@ impl ModelProcessPool {
             return None;
         }
         if self.planning_on_card(model_id) {
-            if !self.guest_may_take_the_card(guest) {
+            if !self.spawn_may_take_the_card(guest) {
                 return None;
             }
             let guest_mb = self.estimate_gpu_footprint_mb(guest, Some(guest_range), kv);
@@ -6496,25 +6509,8 @@ impl ModelProcessPool {
         // 822 MB against 564, and it takes room on the card from the layers.
         // A middle run carries neither.
         let run_at_is_taken = |run: (u32, u32)| {
-            let estimated = self.estimate_gpu_footprint_mb(model_id, Some(run), KvCharge::Typical);
-            match self.partial_gpu_layers(model_id, Some(run), estimated, budget) {
-                Some(split) => fits(run, split),
-                // No split: the run fits the card whole, or nothing of it does.
-                // Whole on the card, the machine still keeps what the loader
-                // holds there whatever the device (Gemma 4 E2B's per-layer
-                // table, #296).
-                None => {
-                    estimated > 0
-                        && budget.saturating_sub(self.vram_committed_mb()) >= estimated
-                        && self.machine_would_take(
-                            model_id,
-                            self.machine_charge(model_id, run, false, None, KvCharge::Typical)
-                                .mb(),
-                            requester,
-                            0,
-                        )
-                }
-            }
+            self.machine_mb_beside_card(model_id, run, budget)
+                .is_some_and(|host_mb| self.machine_would_take(model_id, host_mb, requester, 0))
         };
         let run_is_taken = |layers: u32| {
             [(0, layers), (total.saturating_sub(layers), total)]
@@ -6542,6 +6538,139 @@ impl ModelProcessPool {
             return None;
         }
         Some(fitting)
+    }
+
+    /// What a fresh worker's spawn of `run` asks of the machine where the card
+    /// takes the run — whole, or its first layers there and the rest on the
+    /// processor — against card `budget`: `get_or_spawn_once`'s card rungs,
+    /// charging nothing. A split's processor share and what the loader keeps
+    /// in the machine whatever the device (#296) are [`Self::machine_charge`]'s,
+    /// which the spawn's RAM admission weighs. `None` where the card takes
+    /// none of it — the spawn then places the whole run on the processor — or
+    /// the size cannot be read.
+    fn machine_mb_beside_card(
+        &self,
+        model_id: &ModelId,
+        run: (u32, u32),
+        budget: u64,
+    ) -> Option<u64> {
+        let estimated = self.estimate_gpu_footprint_mb(model_id, Some(run), KvCharge::Typical);
+        let split = match self.partial_gpu_layers(model_id, Some(run), estimated, budget) {
+            Some(split) => Some(split),
+            // No split: the run fits the card whole, or nothing of it does.
+            // Whole on the card, the machine still keeps what the loader holds
+            // there whatever the device (Gemma 4 E2B's per-layer table, #296).
+            None if estimated > 0
+                && budget.saturating_sub(self.vram_committed_mb()) >= estimated =>
+            {
+                None
+            }
+            None => return None,
+        };
+        Some(
+            self.machine_charge(model_id, run, false, split, KvCharge::Typical)
+                .mb(),
+        )
+    }
+
+    /// What a fresh worker's spawn of `run` here, for the swarm — as a peer's
+    /// forward naming it would spawn one — asks of the machine: the rungs of
+    /// `get_or_spawn_once` in its order, charging nothing. The card whole or a
+    /// card/processor split ([`Self::machine_mb_beside_card`], the planner's
+    /// own bound), else the whole run on the processor.
+    fn fresh_spawn_machine_mb(&self, model_id: &ModelId, run: (u32, u32)) -> u64 {
+        if self.spawn_may_take_the_card(model_id) {
+            let budget = self.card_budget_for_planning(model_id);
+            if let Some(mb) = self.machine_mb_beside_card(model_id, run, budget) {
+                return mb;
+            }
+        }
+        self.machine_charge(model_id, run, true, None, KvCharge::Typical)
+            .mb()
+    }
+
+    /// Would the forwards of a peer's split be refused the LOAD of the layers
+    /// it asks about — weighed when no worker of the model runs here, so the
+    /// first forward would spawn one (FUTURE_WORK #345)? `None` when the spawn
+    /// would take them, or nothing here can say; else the spawn's own words
+    /// and the widest run from the first range's start that it takes.
+    ///
+    /// **Why the question is asked here.** "No worker" was "go ahead": there
+    /// was no conversation memory to weigh. A cold Llama 3.3 70B was planned
+    /// 56 layers on a peer whose card held 2, the peer said go ahead, and its
+    /// first forward was refused at the spawn ("needs about 30432 MB … the
+    /// budget allows 24000"). A forward's refusal bars the peer for the
+    /// request, and without it the holders had room for 43 of the 80 layers:
+    /// the request failed where the peer could have taken ~44 (2026-10-25). A
+    /// refusal up front is held to `layers_that_fit` on the re-plan instead
+    /// (`note_peer_prompt_refusal`), never barred.
+    ///
+    /// Only the first range is weighed: the first forward spawns for it, and a
+    /// later one grows that worker (`grow_worker`), whose own refusal its
+    /// forward meets as before. A range past the model's end, or a model whose
+    /// size cannot be read, is not weighed — the forward's own checks answer
+    /// it. Synchronous header reads: called off the runtime's workers
+    /// ([`crate::inference::executor::without_starving_the_runtime`]).
+    fn peer_load_refusal(
+        &self,
+        model_id: &ModelId,
+        layer_ranges: &[(u32, u32)],
+    ) -> Option<(String, u32)> {
+        if std::env::var("SWARMLLM_PEER_LOAD_WEIGH").as_deref() == Ok("0") {
+            return None;
+        }
+        let &(start, end) = layer_ranges.first()?;
+        let layers = self.footprint_inputs(model_id, None)?.segment_layers;
+        if start >= end || u64::from(end) > layers {
+            return None;
+        }
+        self.footprint_inputs(model_id, Some((start, end)))?;
+        let takes = |run| {
+            self.machine_would_take(
+                model_id,
+                self.fresh_spawn_machine_mb(model_id, run),
+                Requester::Swarm,
+                0,
+            )
+        };
+        if takes((start, end)) {
+            return None;
+        }
+        // The widest run from `start` a spawn takes, by bisection: a run's
+        // charge grows with its width.
+        let (mut fitting, mut refused) = (start, end);
+        while refused > fitting + 1 {
+            let mid = fitting + (refused - fitting) / 2;
+            if takes((start, mid)) {
+                fitting = mid;
+            } else {
+                refused = mid;
+            }
+        }
+        let layers_that_fit = fitting - start;
+        let needed_mb = self.fresh_spawn_machine_mb(model_id, (start, end));
+        let in_use = self.ram_committed_mb();
+        let budget = self.ram_budget_now(Requester::Swarm).map_or(
+            self.ram_budget_mb
+                .load(std::sync::atomic::Ordering::Relaxed),
+            |b| b.limiting_figure(in_use, needed_mb).0,
+        );
+        tracing::info!(
+            model = %model_id,
+            layers = format!("[{start}..{end})"),
+            layers_that_fit,
+            needed_mb,
+            ram_budget_mb = budget,
+            ram_in_use_mb = in_use,
+            "DIAG: a peer's split asks this node for more layers than a worker here would \
+             be given memory for — answering no before its prompt pass, with the layers \
+             that would load"
+        );
+        let message = format!(
+            "{} Of layers {start}..{end} of the model, {layers_that_fit} would load here.",
+            ram_refusal_words(&model_id.0, needed_mb, budget, in_use)
+        );
+        Some((message, layers_that_fit))
     }
 
     /// Would a spawn's RAM admission take `host_mb` for `requester` — counting
@@ -6719,14 +6848,29 @@ impl ModelProcessPool {
     /// answers are routed by id, and an ask naming a request whose forward
     /// runs here would otherwise take that forward's answer (security review,
     /// 2026-10-18). The conversation is not noted either — a question does not
-    /// keep a model loaded. Anything but a refusal (no worker, a busy one, a
-    /// worker error) is "go ahead": the forwards find out as they always have.
+    /// keep a model loaded. Anything but a refusal (a busy worker, a worker
+    /// error) is "go ahead": the forwards find out as they always have.
+    ///
+    /// With no worker, what the forwards would do first is LOAD the layers:
+    /// that is weighed instead, as a spawn would weigh it, charging nothing
+    /// ([`Self::peer_load_refusal`], #345).
     pub(crate) async fn weigh_peer_prompt(
         &self,
         model_id: &ModelId,
         layer_ranges: Vec<(u32, u32)>,
         prompt_tokens: u32,
     ) -> PeerPromptWeight {
+        if self.live_worker(model_id).is_none() {
+            return match crate::inference::executor::without_starving_the_runtime(|| {
+                self.peer_load_refusal(model_id, &layer_ranges)
+            }) {
+                Some((message, layers_that_fit)) => PeerPromptWeight::DoesNotFit {
+                    message,
+                    layers_that_fit,
+                },
+                None => PeerPromptWeight::Fits,
+            };
+        }
         let ask = IpcAdmitPrompt {
             request_id: Uuid::new_v4(),
             model_id: model_id.clone(),
@@ -7701,12 +7845,7 @@ impl ModelProcessPool {
                             in_use,
                         )
                     }
-                    (_, None) => format!(
-                        "{} needs about {} MB of memory but this node's budget allows {} MB \
-                         and {} MB is already in use. Raise `resources.max_ram_mb`, or free \
-                         memory by unloading another model.",
-                        model_id.0, estimated, budget, in_use,
-                    ),
+                    (_, None) => ram_refusal_words(&model_id.0, estimated, budget, in_use),
                 };
                 // Its own variant, not `ServiceUnavailable`, and the wire
                 // wording is deliberately identical — see
@@ -13548,6 +13687,67 @@ mod tests {
             Some(width - 1),
             "the last end refuses {width}"
         );
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// **A peer asked about layers it has no worker for weighs their LOAD**
+    /// (FUTURE_WORK #345). "No worker" was "go ahead", and the first forward
+    /// was refused at the spawn: a 70B's peer said yes to 56 layers its memory
+    /// held ~44 of, the refusal barred it, and the request failed (2026-10-25).
+    /// Now it says no up front, with the widest run from the asked start that
+    /// a spawn takes — what the re-plan holds it to.
+    #[tokio::test]
+    async fn a_peer_with_no_worker_weighs_the_load_it_is_asked_for() {
+        let model = ModelId("seventy-b-shaped-peer-load".into());
+        let data_dir = header_only_seventy_b("peer-load", &model, false);
+        let p = ModelProcessPool::new(data_dir.clone());
+        p.test_card_in_play
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        let card_mb = 1_500;
+        p.set_vram_budget_mb(card_mb);
+        let machine_mb = |run: (u32, u32)| {
+            let estimated = p.estimate_gpu_footprint_mb(&model, Some(run), KvCharge::Typical);
+            let split = p.partial_gpu_layers(&model, Some(run), estimated, card_mb);
+            p.machine_charge(&model, run, false, split, KvCharge::Typical)
+                .mb()
+        };
+        assert!(
+            machine_mb((0, 5)) < machine_mb((0, 6)),
+            "fixture: a wider run asks the machine for more"
+        );
+        // Room for a five-layer run from the asked start, not a six-layer one.
+        p.set_ram_budget_mb(machine_mb((0, 5)));
+
+        match p.weigh_peer_prompt(&model, vec![(0, 8)], 64).await {
+            PeerPromptWeight::DoesNotFit {
+                message,
+                layers_that_fit,
+            } => {
+                assert_eq!(layers_that_fit, 5, "the widest run a spawn takes");
+                assert!(
+                    message.contains("needs about") && message.contains("5 would load"),
+                    "the spawn's own words: {message}"
+                );
+            }
+            PeerPromptWeight::Fits => panic!("a load the spawn refuses was answered go ahead"),
+        }
+        // A run the spawn takes is go ahead, and so is a range no forward
+        // could load (past the model's end) — its forward's checks answer it.
+        assert!(matches!(
+            p.weigh_peer_prompt(&model, vec![(0, 5)], 64).await,
+            PeerPromptWeight::Fits
+        ));
+        assert!(matches!(
+            p.weigh_peer_prompt(&model, vec![(0, 9)], 64).await,
+            PeerPromptWeight::Fits
+        ));
+        // The control: room for every layer asked.
+        p.set_ram_budget_mb(machine_mb((0, 8)));
+        assert!(matches!(
+            p.weigh_peer_prompt(&model, vec![(0, 8)], 64).await,
+            PeerPromptWeight::Fits
+        ));
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
