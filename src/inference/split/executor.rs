@@ -911,15 +911,14 @@ impl SplitModel {
         // capture and keeps memory allocated inside it — never captured. Nor
         // is a conversation's first decode step: it is the one that may shed a
         // hydrated snapshot's mirror, and it loads the kernel modules.
-        let ready = graph
-            .template(all_positions, shape)
-            .filter(|_| {
-                follows
-                    && kv_cache_store.every_cache_holds(&cache_key, index_pos + positions, |slot| {
-                        self.slot_keeps_no_cache(slot)
-                    })
-            })
-            .cloned();
+        let template = graph.template(all_positions, shape).cloned();
+        let caches_ready = template.is_some()
+            && follows
+            && kv_cache_store.every_cache_holds(&cache_key, index_pos + positions, |slot| {
+                self.slot_keeps_no_cache(slot)
+            });
+        let not_ready = template.is_some() && !caches_ready;
+        let ready = template.filter(|_| caches_ready);
         let template = match ready {
             Some(t) if !graph.declines(shape) => t,
             ready => {
@@ -936,6 +935,9 @@ impl SplitModel {
                     None,
                 )?;
                 graph.note_uncaptured(all_positions, shape, &out, began, ready.is_some());
+                if not_ready {
+                    graph.note_not_ready();
+                }
                 return Ok(out);
             }
         };
@@ -1724,8 +1726,13 @@ impl SplitModel {
                     .flatten()
                     .all(|s| s.can_rewind_to(back_to))
                 {
+                    // To the step's start: a swap, never a replay.
                     for state in layer_ssm_states.iter_mut().flatten() {
-                        state.rewind_to(back_to);
+                        if let Err(lost) = state.rewind_to(back_to) {
+                            return Err(SwarmError::Internal(format!(
+                                "{e}; the recurrent state was not put back: {lost}"
+                            )));
+                        }
                     }
                     for cache in layer_kv_caches.iter_mut().flatten() {
                         cache.truncate(kv_offset);

@@ -454,6 +454,9 @@ struct Stats {
     /// Ordinary steps that were the first of their shape: they ran to learn
     /// the output a capture records into, and the next of the shape captures.
     first_of_shape: u64,
+    /// Ordinary steps of a shape that has its graph, run so because the step
+    /// could not be captured YET ([`DecodeGraph::note_not_ready`]).
+    not_ready: u64,
     refused: u64,
     /// Launches where the driver refused to update an existing graph.
     rebuilt: u64,
@@ -549,11 +552,27 @@ impl DecodeGraph {
     /// Forwards that cost more than their shape will from now on: the first
     /// of a shape (run the ordinary way so a capture knows its output), one
     /// that made a graph — instantiated it, or rebuilt one the driver would
-    /// not update — and a refused capture. A Qwen3.5-4B check that made its
-    /// graph took 259-277 ms against 16-30 replayed (2026-10-25), so a caller
-    /// pricing its next forward leaves these out (`model_worker::LocalSpec`).
+    /// not update — a refused capture, and one not ready to be captured
+    /// ([`Self::note_not_ready`]). A Qwen3.5-4B check that made its graph took
+    /// 259-277 ms against 16-30 replayed (2026-10-25), so a caller pricing its
+    /// next forward leaves these out (`model_worker::LocalSpec`).
     pub(crate) fn one_off_forwards(&self) -> u64 {
-        self.stats.first_of_shape + self.stats.instantiated + self.stats.refused
+        self.stats.first_of_shape
+            + self.stats.not_ready
+            + self.stats.instantiated
+            + self.stats.refused
+    }
+
+    /// A step of a shape that has its graph, run the ordinary way because it
+    /// could not be captured yet: a conversation's first decode step, or one
+    /// whose caches must grow first — a KV buffer, or the buffers a check of
+    /// a model with recurrent state keeps its rows in for a rewind
+    /// (`SsmState::holds_a_step_to`), made by a conversation's first check.
+    /// That first check of Qwen3.5-0.8B took 28.8 ms against 12.3 for the
+    /// next of its width (2026-10-25); priced as a check, it told the local
+    /// guess count that checking never pays.
+    pub(crate) fn note_not_ready(&mut self) {
+        self.stats.not_ready += 1;
     }
 
     /// True when forwards of `positions` are not to be captured now: they were
@@ -906,6 +925,7 @@ impl DecodeGraph {
             rested = s.rested,
             rests_declined = s.rests_declined,
             uncaptured = s.uncaptured,
+            not_ready = s.not_ready,
             refused = s.refused,
             "DIAG: decode graph"
         );

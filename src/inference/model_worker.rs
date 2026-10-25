@@ -2961,9 +2961,8 @@ async fn try_remote_prefix_hydrate(
 ///   arrives here.
 ///
 /// Every model qualifies, on either device. One with recurrent state (Qwen
-/// 3.5) cannot give back a rejected guess, so a check that rejects one is
-/// taken back whole and its accepted tokens are read again at the head of the
-/// next (`ngram_spec_round`, #228 (5)); on a card its checks are captured as a
+/// 3.5) takes a rejected guess back by replaying the check's accepted rows
+/// (`SsmState::rewind_to`, #228 (5)); on a card its checks are captured as a
 /// dense model's are (`SplitModel::mask_is_read`).
 pub(crate) fn ngram_spec_eligible(
     sampling: &crate::types::SamplingParams,
@@ -3122,18 +3121,13 @@ const NGRAM_RECENT_GEN_WINDOW: usize = 500;
 /// forward commits one position and yields one not-yet-cached token — which is
 /// why the caller can drain the extras without forwarding again.
 ///
-/// **A model with recurrent state takes a rejected check back WHOLE** (#228
-/// (5)). Its DeltaNet layers summarise every token the check read, the
-/// rejected guesses included, and keep only the state from before the check
-/// (`SsmState::rewind_to`, one step). So the cache goes back to `index_pos`,
-/// committing nothing, and the tokens the check did accept — `next_token` and
-/// the accepted guesses — wait in `refeed` to be read at the head of the next
-/// round's forward, which costs no extra forward: only those rows. llama.cpp
-/// instead keeps a state per token of the check (its delta-rule kernel writes
-/// them) and rolls back to the accepted one; that costs a state copy per
-/// position on every check, accepted or not. Tokens waiting to be read again
-/// narrow the next round's guesses, so no check is wider than the bonus
-/// token's worth past `num_pred_tokens + 1`.
+/// **A model with recurrent state is taken back the same way** (#228 (5)):
+/// its DeltaNet layers summarise every token the check read, and a truncate
+/// into the check replays the accepted rows from the state the check read
+/// (`SsmState::rewind_to` — only the convolution and the delta rule, from the
+/// inputs the check kept). Until 2026-10-25 such a check was taken back WHOLE
+/// and its accepted tokens read again at the head of the next round, which a
+/// split's peers could not do.
 ///
 /// **Acceptance goes through the real sampler, not a private argmax.** Every
 /// position is sampled by the same `sample_token_with_logprob_history` the plain
@@ -3164,7 +3158,6 @@ fn ngram_spec_round(
     model_key: &str,
     req_id_str: &str,
     index_pos: usize,
-    refeed: &mut Vec<u32>,
     next_token: u32,
     draft: &[u32],
     generated: &[u32],
@@ -3172,21 +3165,11 @@ fn ngram_spec_round(
     force_attn: bool,
 ) -> Result<SpecRound, SwarmError> {
     let started = std::time::Instant::now();
-    // The check reads, from `index_pos`: the tokens a taken-back round left to
-    // read again, the token just emitted, then the guesses.
-    let fed = refeed.len();
-    let mut ids = std::mem::take(refeed);
-    ids.push(next_token);
-    ids.extend_from_slice(draft);
-
     // No match: do exactly what the plain loop does. A miss must cost nothing
     // beyond the lookup itself, or speculation becomes a tax on the workloads
     // it cannot help.
     if draft.is_empty() {
-        let input = match fed {
-            0 => model.token_tensor(next_token)?,
-            _ => model.tensor_from_ids(&ids)?,
-        };
+        let input = model.token_tensor(next_token)?;
         let logits = tokio::task::block_in_place(|| {
             let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
             model.forward(&input, index_pos, kv_store, req_id_str)
@@ -3196,15 +3179,17 @@ fn ngram_spec_round(
         )?;
         return Ok(SpecRound {
             produced: vec![tok],
-            committed: ids.len(),
-            positions: ids.len(),
+            committed: 1,
+            positions: 1,
             ms: started.elapsed().as_secs_f64() * 1000.0,
             proposed: 0,
             accepted: 0,
-            taken_back: false,
         });
     }
 
+    let mut ids = Vec::with_capacity(draft.len() + 1);
+    ids.push(next_token);
+    ids.extend_from_slice(draft);
     let input = model.tensor_from_ids(&ids)?;
     let all = tokio::task::block_in_place(|| {
         let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
@@ -3217,7 +3202,7 @@ fn ngram_spec_round(
     let mut accepted = 0usize;
     for i in 0..=draft.len() {
         let row = all
-            .i((0, fed + i))
+            .i((0, i))
             .and_then(|t| t.unsqueeze(0))
             .map_err(SwarmError::internal)?;
         let (tok, _) = crate::inference::tensor_util::sample_token_with_logprob_history(
@@ -3235,24 +3220,7 @@ fn ngram_spec_round(
     }
 
     let ms = started.elapsed().as_secs_f64() * 1000.0;
-    let positions = ids.len();
-    let kept = fed + 1 + accepted;
-    // A recurrent state cannot give back the rejected guesses it summarised:
-    // the whole check goes, and what it accepted is read again next round.
-    if accepted < draft.len() && model.carries_recurrent_state() {
-        kv_store.truncate_request_to(model_key, req_id_str, index_pos)?;
-        ids.truncate(kept);
-        *refeed = ids;
-        return Ok(SpecRound {
-            produced,
-            committed: 0,
-            positions,
-            ms,
-            proposed: draft.len(),
-            accepted,
-            taken_back: true,
-        });
-    }
+    let kept = 1 + accepted;
     // Drop the cache entries written for drafts that were not accepted. Without
     // this the next forward would attend over positions holding tokens the
     // reply does not contain — a silent corruption, not an error.
@@ -3260,11 +3228,10 @@ fn ngram_spec_round(
     Ok(SpecRound {
         produced,
         committed: kept,
-        positions,
+        positions: ids.len(),
         ms,
         proposed: draft.len(),
         accepted,
-        taken_back: false,
     })
 }
 
@@ -3273,7 +3240,7 @@ fn ngram_spec_round(
 struct SpecRound {
     /// The accepted guesses and the token after them, in order.
     produced: Vec<u32>,
-    /// Cache positions it added: 0 for a round taken back.
+    /// Cache positions it added.
     committed: usize,
     /// Positions its forward read, and how long the forward and the sampling
     /// took — what [`LocalSpec`] prices the next round's guesses from.
@@ -3285,15 +3252,11 @@ struct SpecRound {
     proposed: usize,
     /// Guesses accepted.
     accepted: usize,
-    /// Taken back whole, its accepted tokens left to read again (a model with
-    /// recurrent state rejected a guess).
-    taken_back: bool,
 }
 
 /// One request's local speculation on the decode loop: what the lookup
-/// searches, the tokens a round verified beyond the one being emitted, and the
-/// tokens a round taken back left to read again ([`ngram_spec_round`]). The
-/// loop and `a_guessed_reply_is_the_reply_read_one_token_at_a_time` both
+/// searches and the tokens a round verified beyond the one being emitted
+/// ([`ngram_spec_round`]). The loop and `a_guessed_reply_is_the_reply_read_one_token_at_a_time` both
 /// drive it through [`Self::next`].
 ///
 /// **It checks only as many guesses as pay** ([`Self::guesses`], 2026-10-25).
@@ -3325,8 +3288,7 @@ struct SpecRound {
 /// Qwen3.5-4B's story, where checking every guess ran 102-104 tok/s against 72
 /// one at a time (α 0.93), stayed at 71. So after `probe_after` rounds of
 /// guesses declined, the next guesses found are checked anyway; one that pays
-/// (it wrote more than a step would have in its time, counting the step a
-/// rejected recurrent check turns into a check) starts the count over at
+/// (it wrote more than a step would have in its time) starts the count over at
 /// [`Self::FIRST_PROBE_AFTER`], one that does not doubles it, up to
 /// [`Self::MOST_PROBE_AFTER`] — `SpecBackoff`'s doubling. The split path's
 /// counterpart re-tries a remembered zero after `dsd_controller::REPROBE_AFTER`.
@@ -3337,17 +3299,14 @@ struct LocalSpec {
     ctx: Vec<u32>,
     prompt_len: usize,
     /// Verified tokens a round produced beyond the one being emitted. Already
-    /// in the cache, or in `refeed`, so draining them costs no forward. This
-    /// is where speculation actually pays.
+    /// in the cache, so draining them costs no forward. This is where
+    /// speculation actually pays.
     pending: std::collections::VecDeque<u32>,
-    /// Tokens of the reply the cache does not hold yet, read at the head of
-    /// the next round's forward.
-    refeed: Vec<u32>,
     backoff: SpecBackoff,
-    /// The most positions a round may read: a captured graph's on a card.
+    /// The most positions a round may read: a captured graph's on a card, and
+    /// for a model with recurrent state no more than the rows a rewind can
+    /// replay (`SsmState::MOST_ROWS_KEPT`).
     widest: usize,
-    /// A rejected guess is read again next round (a model with recurrent state).
-    rejection_rereads: bool,
     /// Every guess checked, as before 2026-10-25 (`SWARMLLM_LOCAL_GUESS_GAMMA=fixed`).
     fixed: bool,
     step_ms: crate::inference::dsd_controller::RecentMedian,
@@ -3356,7 +3315,8 @@ struct LocalSpec {
     rounds: u64,
     produced: u64,
     accepted: u64,
-    taken_back: u64,
+    /// Checks that refused a guess, and so were taken back into.
+    rejected: u64,
     /// Rounds that found guesses and checked none of them.
     declined: u64,
     /// Rounds whose forward paid a one-off on the card — the first of its
@@ -3386,15 +3346,12 @@ struct LocalSpec {
 struct Traced {
     /// The cache's length when it began.
     at: usize,
-    /// Tokens it read again.
-    fed: usize,
     /// Guesses it checked.
     checked: usize,
     ms: f64,
     /// Its forward paid a one-off on the card.
     one_off: bool,
     accepted: usize,
-    taken_back: bool,
     produced: Vec<u32>,
 }
 
@@ -3412,15 +3369,18 @@ impl LocalSpec {
         } else {
             usize::MAX
         };
+        let widest = if model.carries_recurrent_state() {
+            widest.min(crate::inference::layers::SsmState::MOST_ROWS_KEPT)
+        } else {
+            widest
+        };
         Self {
             cfg,
             ctx: prompt_ids.to_vec(),
             prompt_len: prompt_ids.len(),
             pending: std::collections::VecDeque::new(),
-            refeed: Vec::new(),
             backoff: SpecBackoff::default(),
             widest,
-            rejection_rereads: model.carries_recurrent_state(),
             fixed,
             step_ms: Default::default(),
             check: crate::inference::dsd_controller::CheckCost::for_a_plan(None),
@@ -3428,7 +3388,7 @@ impl LocalSpec {
             rounds: 0,
             produced: 0,
             accepted: 0,
-            taken_back: 0,
+            rejected: 0,
             declined: 0,
             one_offs: 0,
             declined_run: 0,
@@ -3445,34 +3405,24 @@ impl LocalSpec {
     const MOST_PROBE_AFTER: u32 = 64;
 
     /// Did a check made against the count's advice pay — write more tokens
-    /// than steps would have in its time? A rejected check of a model with
-    /// recurrent state also turns the next round's step into a check.
+    /// than steps would have in its time?
     fn probe_paid(&self, round: &SpecRound) -> bool {
         let Some(step) = self.step_ms.median() else {
             return true;
         };
-        let reread = match (round.taken_back, self.check.predict(2)) {
-            (true, Some(check_two)) => (check_two - step).max(0.0),
-            _ => 0.0,
-        };
-        round.produced.len() as f64 * step >= round.ms + reread
+        round.produced.len() as f64 * step >= round.ms
     }
 
     /// How many guesses the next round's lookup may return: a round reads the
-    /// tokens waiting to be read again, the token, then the guesses.
+    /// token, then the guesses.
     fn room(&self) -> usize {
-        let fed = self.refeed.len();
-        self.cfg
-            .num_pred_tokens
-            .saturating_sub(fed)
-            .min(self.widest.saturating_sub(fed + 1))
+        self.cfg.num_pred_tokens.min(self.widest.saturating_sub(1))
     }
 
     /// How many of the `most` guesses found the round checks: all of them
     /// until a step and a check have both been timed, then the count that
     /// pays — zero included.
     fn guesses(&self, most: usize) -> usize {
-        let fed = self.refeed.len();
         if self.fixed {
             return most;
         }
@@ -3480,8 +3430,6 @@ impl LocalSpec {
             self.acceptance.alpha(),
             self.step_ms.median(),
             &self.check,
-            u32::try_from(fed).unwrap_or(u32::MAX),
-            self.rejection_rereads,
             u32::try_from(most).unwrap_or(u32::MAX),
         )
         .map_or(most, |g| g as usize)
@@ -3497,10 +3445,10 @@ impl LocalSpec {
             .median()
             .map_or("-".to_string(), |m| format!("{m:.1}"));
         format!(
-            "rounds {} accepted {} taken back {} declined {} probes {} one-off {} step {step} ms check {fit} ms alpha {:.2} next {}",
+            "rounds {} accepted {} rejected {} declined {} probes {} one-off {} step {step} ms check {fit} ms alpha {:.2} next {}",
             self.rounds,
             self.accepted,
-            self.taken_back,
+            self.rejected,
             self.declined,
             self.probes,
             self.one_offs,
@@ -3562,14 +3510,13 @@ impl LocalSpec {
         let declined = !found.is_empty() && worth == 0;
         let one_offs_before = model.one_off_forwards();
         #[cfg(test)]
-        let (began_at, fed) = (*index_pos, self.refeed.len());
+        let began_at = *index_pos;
         let round = ngram_spec_round(
             model,
             kv_store,
             model_key,
             req_id_str,
             *index_pos,
-            &mut self.refeed,
             next_token,
             &found[..worth],
             generated,
@@ -3582,18 +3529,16 @@ impl LocalSpec {
         #[cfg(test)]
         self.trace.push(Traced {
             at: began_at,
-            fed,
             checked: worth,
             ms: round.ms,
             one_off,
             accepted: round.accepted,
-            taken_back: round.taken_back,
             produced: round.produced.clone(),
         });
         self.rounds += 1;
         self.produced += round.produced.len() as u64;
         self.accepted += round.accepted as u64;
-        self.taken_back += u64::from(round.taken_back);
+        self.rejected += u64::from(round.accepted < round.proposed);
         match round.positions {
             _ if one_off => {}
             1 => self.step_ms.record(round.ms),
@@ -5316,7 +5261,7 @@ async fn handle_generate(
                 rounds = spec.rounds,
                 drafted = spec.produced,
                 accepted = spec.accepted,
-                taken_back = spec.taken_back,
+                rejected = spec.rejected,
                 paused_rounds = spec.backoff.paused_rounds,
                 tokens_per_round,
                 learned = %spec.summary(),
@@ -7807,9 +7752,9 @@ mod local_speculation_tests {
 
     /// A reply guessed ahead is the reply written one token at a time — and,
     /// for Qwen 3.5, the rewind that makes it so (#228 (5)). Its DeltaNet
-    /// layers cannot give back a rejected guess, so a check that rejects one is
-    /// taken back whole and its accepted tokens are read again at the head of
-    /// the next. On the processor each row of a check is computed as a lone
+    /// layers summarise every token a check read, so a check that rejects a
+    /// guess is taken back into by replaying the rows it accepted
+    /// (`SsmState::rewind_to`). On the processor each row of a check is computed as a lone
     /// step computes it (`attn_rows`, the row-blocked quantized matmul, the
     /// delta rule's per-token loop), so the ids must match EXACTLY; on a card
     /// a forward of several positions rounds otherwise than a step of one, so
@@ -7817,12 +7762,12 @@ mod local_speculation_tests {
     /// tie ([`CARD_NEAR_TIE_LOGITS`]) or at a token its own prompt pass does
     /// not pick either (printed with the top two either way). That a row reads
     /// nothing after it is [`a_checks_row_reads_nothing_after_it`], bit for
-    /// bit on both devices. On a model with recurrent state
-    /// checks must have been both accepted and taken back, or it proved
-    /// nothing. Red if a rejected check is truncated
-    /// as an attention-only model's is (the request fails), or if the accepted
-    /// tokens are not read again (the reply goes its own way). It prints both
-    /// speeds: read them off a release build on an idle machine.
+    /// bit on both devices. On a model with recurrent state checks must have
+    /// been both accepted and rejected, or it proved nothing. Red if a check
+    /// keeps no rows (the truncate into it is refused and the request fails),
+    /// or if the replay reads the wrong rows or window (the reply goes its own
+    /// way). It prints both speeds: read them off a release build on an idle
+    /// machine.
     ///
     /// Needs a real file: `SWARMLLM_GUESS_TEST_GGUF=~/swarmllm-ref/qwen35/Qwen3.5-0.8B-Q8_0.gguf
     /// cargo dev-test --lib guessed_reply -- --ignored --nocapture`
@@ -7918,16 +7863,16 @@ mod local_speculation_tests {
                 let checked: Vec<String> =
                     spec.trace.iter().map(|t| t.checked.to_string()).collect();
                 eprintln!("{name} checked: {}", checked.join(","));
-                // The rounds before it: where each began, what it read again
-                // and checked, and the reply positions it wrote.
+                // The rounds before it: where each began, what it checked
+                // and accepted, and the reply positions it wrote.
                 let mut wrote = 1;
                 for (j, t) in spec.trace.iter().enumerate() {
                     let from = wrote;
                     wrote += t.produced.len();
                     if wrote + 12 > at && from <= at {
                         eprintln!(
-                            "{name} round {j}: cache {} read again {} checked {} accepted {} taken back {} wrote {from}..{wrote} {:?}",
-                            t.at, t.fed, t.checked, t.accepted, t.taken_back, t.produced
+                            "{name} round {j}: cache {} checked {} accepted {} wrote {from}..{wrote} {:?}",
+                            t.at, t.checked, t.accepted, t.produced
                         );
                     }
                 }
@@ -7939,7 +7884,7 @@ mod local_speculation_tests {
                     .trace
                     .iter()
                     .map(|t| {
-                        let p = t.fed + 1 + t.checked;
+                        let p = 1 + t.checked;
                         format!("{p}:{:.1}{}", t.ms, if t.one_off { "*" } else { "" })
                     })
                     .collect();
@@ -7990,9 +7935,11 @@ mod local_speculation_tests {
                 spec.accepted > 0,
                 "no guess was accepted — nothing was checked"
             );
+            // A rejected check's truncate into it can only succeed through
+            // the replay (`SsmState::rewind_to`), so one is the mechanism.
             assert!(
-                !recurrent || spec.taken_back > 0,
-                "no check was taken back — the rewind never ran"
+                !recurrent || spec.rejected > 0,
+                "no check was taken back into — the replay never ran"
             );
         }
     }

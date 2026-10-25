@@ -8,7 +8,7 @@ use candle_core::{DType, Device, Result as CandleResult, Tensor, D};
 use candle_nn::Module;
 use rayon::prelude::*;
 
-use super::{run_attention, DeltaNetWeights, Qwen35AttnWeights, SsmSlot, SsmState};
+use super::{run_attention, DeltaNetWeights, Qwen35AttnWeights, SsmRows, SsmSlot, SsmState};
 
 // ── Qwen 3.5 full-attention layer forward ──
 
@@ -190,7 +190,7 @@ impl DeltaNetWeights {
         // The buffers this step writes into: on a card the previous step's,
         // so the state read survives the step and lives at two fixed
         // addresses (`SsmState`). Made here when missing — never inside a
-        // capture, which asks `SsmState::holds_the_next_step` first.
+        // capture, which asks `SsmState::holds_a_step_to` first.
         let target = if into_spare {
             Some(match held.take_spare() {
                 Some(spare) if spare.recurrent_state.dims() == read.recurrent_state.dims() => spare,
@@ -215,47 +215,16 @@ impl DeltaNetWeights {
         let v = conv
             .narrow(2, 2 * self.key_dim(), self.value_dim())?
             .reshape((b_sz, seq_len, nv, vd))?;
-        let scale = 1.0 / (kd as f64).sqrt();
 
-        let state = read.recurrent_state.clone();
-        let one_pass = delta_rule_in_one_pass();
-        // `written`: the card kernel put the new state straight into the
-        // target's buffers.
-        let (out, new_state, written) =
-            crate::inference::prof::timed!(crate::inference::prof::Stage::DeltaRule, {
-                let on_card = if one_pass && device.is_cuda() && card_delta_rule_covers(kd, vd) {
-                    let into = match &target {
-                        Some(t) => t.recurrent_state.clone(),
-                        None => state.zeros_like()?,
-                    };
-                    delta_rule_cuda(&qk, nk, &v, &g, &beta, &state, &into, scale as f32)?
-                        .map(|out| (out, into, target.is_some()))
-                } else {
-                    None
-                };
-                let (q, k) = (qk.narrow(2, 0, nk)?, qk.narrow(2, nk, nk)?);
-                match on_card {
-                    Some(done) => done,
-                    None if one_pass && device.is_cpu() => {
-                        let (out, new) =
-                            delta_rule_cpu(&q, &k, &v, &g, &beta, &state, scale as f32)?;
-                        (out, new, false)
-                    }
-                    None => {
-                        // More value heads than key heads: llama.cpp TILES the key
-                        // heads (`ggml_repeat_4d`), value head h reading key head h % nk.
-                        let (q, k) = if nv > nk {
-                            let r = nv / nk;
-                            let tile = |t: &Tensor| Tensor::cat(&vec![t; r], 2);
-                            (tile(&q)?, tile(&k)?)
-                        } else {
-                            (q, k)
-                        };
-                        let (out, new) = delta_rule(&(q * scale)?, &k, &v, &g, &beta, state)?;
-                        (out, new, false)
-                    }
-                }
-            }); // out [b, seq, nv, vd]
+        let (out, new_state, written) = delta_rule_into(
+            &qk,
+            nk,
+            &v,
+            &g,
+            &beta,
+            &read.recurrent_state,
+            target.as_ref().map(|t| &t.recurrent_state),
+        )?; // out [b, seq, nv, vd]
 
         // Gated RMSNorm per value head: RMSNorm(o, ssm_norm) · silu(z).
         let z = z.reshape((b_sz, seq_len, nv, vd))?;
@@ -263,20 +232,19 @@ impl DeltaNetWeights {
         let gated = (normed * candle_nn::ops::silu(&z)?)?;
         let gated = gated.reshape((b_sz, seq_len, nv * vd))?;
 
-        let next = match target {
-            Some(t) => {
-                t.conv_state.slice_set(&new_conv, 0, 0)?;
-                if !written {
-                    t.recurrent_state
-                        .slice_set(&new_state.contiguous()?, 0, 0)?;
-                }
-                t
-            }
-            None => SsmSlot {
-                conv_state: new_conv,
-                recurrent_state: new_state,
+        let in_place = target.is_some();
+        let next = written_into(target, new_conv, new_state, written)?;
+        // What a rewind into this step replays (`SsmState::rewind_to`).
+        held.keep_rows(
+            SsmRows {
+                mixed,
+                qk,
+                v: v.contiguous()?,
+                g,
+                beta,
             },
-        };
+            in_place,
+        )?;
         held.advance(next, index_pos + seq_len);
         self.ssm_out.forward(&gated)
     }
@@ -310,6 +278,123 @@ impl DeltaNetWeights {
         let new_state = padded.narrow(2, seq_len, pad)?.contiguous()?;
         Ok((out, new_state))
     }
+}
+
+/// The new state as a step or a replay leaves it: on a card in `target`, the
+/// buffers it keeps (the delta rule's kernel `written` its state there
+/// already), on the processor the tensors made.
+fn written_into(
+    target: Option<SsmSlot>,
+    conv_state: Tensor,
+    recurrent_state: Tensor,
+    written: bool,
+) -> CandleResult<SsmSlot> {
+    Ok(match target {
+        Some(t) => {
+            t.conv_state.slice_set(&conv_state, 0, 0)?;
+            if !written {
+                t.recurrent_state
+                    .slice_set(&recurrent_state.contiguous()?, 0, 0)?;
+            }
+            t
+        }
+        None => SsmSlot {
+            conv_state,
+            recurrent_state,
+        },
+    })
+}
+
+/// The delta rule over a step's rows, from `state` — the one choice of kernel
+/// a step and a replay share, so a replay's state is the step's: the card
+/// kernel (written straight into `into`, the third answer `true`), the
+/// processor's one pass, or the token-by-token composition
+/// (`SWARMLLM_DELTA_RULE=steps`). q and k are `qk` `[b, seq, 2·nk, kd]`,
+/// L2-normalised; the scale is `1/√kd`. Returns the outputs
+/// `[b, seq, nv, vd]` and the new state.
+#[allow(clippy::too_many_arguments)]
+fn delta_rule_into(
+    qk: &Tensor,
+    nk: usize,
+    v: &Tensor,
+    g: &Tensor,
+    beta: &Tensor,
+    state: &Tensor,
+    into: Option<&Tensor>,
+) -> CandleResult<(Tensor, Tensor, bool)> {
+    let (_, _, nv, vd) = v.dims4()?;
+    let kd = qk.dim(3)?;
+    let device = qk.device();
+    let scale = 1.0 / (kd as f64).sqrt();
+    let one_pass = delta_rule_in_one_pass();
+    crate::inference::prof::timed!(crate::inference::prof::Stage::DeltaRule, {
+        let on_card = if one_pass && device.is_cuda() && card_delta_rule_covers(kd, vd) {
+            let out_buffer = match into {
+                Some(t) => t.clone(),
+                None => state.zeros_like()?,
+            };
+            delta_rule_cuda(qk, nk, v, g, beta, state, &out_buffer, scale as f32)?
+                .map(|out| (out, out_buffer, into.is_some()))
+        } else {
+            None
+        };
+        let (q, k) = (qk.narrow(2, 0, nk)?, qk.narrow(2, nk, nk)?);
+        Ok(match on_card {
+            Some(done) => done,
+            None if one_pass && device.is_cpu() => {
+                let (out, new) = delta_rule_cpu(&q, &k, v, g, beta, state, scale as f32)?;
+                (out, new, false)
+            }
+            None => {
+                // More value heads than key heads: llama.cpp TILES the key
+                // heads (`ggml_repeat_4d`), value head h reading key head h % nk.
+                let (q, k) = if nv > nk {
+                    let r = nv / nk;
+                    let tile = |t: &Tensor| Tensor::cat(&vec![t; r], 2);
+                    (tile(&q)?, tile(&k)?)
+                } else {
+                    (q, k)
+                };
+                let (out, new) = delta_rule(&(q * scale)?, &k, v, g, beta, state.clone())?;
+                (out, new, false)
+            }
+        })
+    })
+}
+
+/// The state after the first `rows` rows of a step, from the state the step
+/// read (`read`) and the inputs it kept (`kept`) — `SsmState::rewind_to` into
+/// a check. Only the convolution's window and the delta rule run: the window is
+/// the last `kernel − 1` of `read`'s and those rows' inputs, as
+/// [`DeltaNetWeights::causal_conv`] leaves it, and the delta rule takes each
+/// row's update in the step's order with the step's kernel
+/// ([`delta_rule_into`]), so the state is bit for bit the one the step passed
+/// at that row (`a_check_rewound_into_its_middle_is_where_its_kept_rows_lead`).
+/// On a card it is written into `into`'s buffers, which a captured step reads.
+pub(super) fn replay_rows(
+    read: &SsmSlot,
+    kept: &SsmRows,
+    rows: usize,
+    into: Option<&SsmSlot>,
+) -> CandleResult<SsmSlot> {
+    let first = |t: &Tensor| t.narrow(1, 0, rows)?.contiguous();
+    let pad = read.conv_state.dim(2)?;
+    let inputs = first(&kept.mixed)?.transpose(1, 2)?.contiguous()?; // [b, C, rows]
+    let conv_state = Tensor::cat(&[&read.conv_state, &inputs], 2)?
+        .narrow(2, rows, pad)?
+        .contiguous()?;
+    let qk = first(&kept.qk)?;
+    let nk = qk.dim(2)? / 2;
+    let (_, recurrent_state, written) = delta_rule_into(
+        &qk,
+        nk,
+        &first(&kept.v)?,
+        &first(&kept.g)?,
+        &first(&kept.beta)?,
+        &read.recurrent_state,
+        into.map(|t| &t.recurrent_state),
+    )?;
+    written_into(into.cloned(), conv_state, recurrent_state, written)
 }
 
 /// The gated delta rule, token by token (`build_delta_net_autoregressive`),
@@ -750,12 +835,9 @@ mod tests {
         // Step 3 runs, is taken back, and runs again; then 4 and 5 as usual.
         step(&mut redone, 3);
         let held = redone.as_mut().unwrap();
-        assert!(held.can_rewind_to(3) && held.rewind_to(3));
+        assert!(held.can_rewind_to(3) && held.rewind_to(3).unwrap());
         assert_eq!(held.positions(), 3);
-        assert!(
-            held.holds_the_next_step(),
-            "the re-run must find its buffers"
-        );
+        assert!(held.holds_a_step_to(4), "the re-run must find its buffers");
         assert!(
             !held.can_rewind_to(4),
             "a taken-back step's pair describes nothing"
@@ -781,7 +863,7 @@ mod tests {
 
         // Two steps back is more than the pair holds.
         let mut b = Some(b);
-        assert!(!b.as_mut().unwrap().rewind_to(4));
+        assert!(!b.as_mut().unwrap().rewind_to(4).unwrap());
         let mut two = None;
         w.forward_deltanet_into(&x.narrow(1, 0, 3).unwrap(), &mut two, 0, false)
             .unwrap();
@@ -789,14 +871,14 @@ mod tests {
             .unwrap();
         w.forward_deltanet_into(&x.narrow(1, 4, 1).unwrap(), &mut two, 4, false)
             .unwrap();
-        assert!(!two.as_mut().unwrap().rewind_to(3));
+        assert!(!two.as_mut().unwrap().rewind_to(3).unwrap());
         assert_eq!(two.as_ref().unwrap().positions(), 5);
     }
 
     /// The processor writes each step's state into fresh tensors and keeps the
     /// one it read, so a step of several positions — a check of guesses — is
-    /// taken back whole and read again shorter, landing exactly where reading
-    /// only the shorter run does (#228 (5): a rejected guess). Red if the
+    /// taken back to its start and read again shorter, landing exactly where
+    /// reading only the shorter run does. Red if the
     /// processor dropped the state it read, or if the delta rule updated it in
     /// place.
     #[test]
@@ -819,7 +901,10 @@ mod tests {
         // Positions 3..8 checked at once; only 3 and 4 kept.
         run(&mut guessed, 3, 5);
         let held = guessed.as_mut().unwrap();
-        assert!(held.rewind_to(3), "the processor keeps the state it read");
+        assert!(
+            held.rewind_to(3).unwrap(),
+            "the processor keeps the state it read"
+        );
         assert_eq!(held.positions(), 3);
         run(&mut guessed, 3, 2);
         let guessed_next = run(&mut guessed, 5, 1);
@@ -834,6 +919,119 @@ mod tests {
             max_abs_diff(&a.current().conv_state, &b.current().conv_state),
             0.0
         );
+    }
+
+    /// A check rewound INTO its middle — a rejected guess (#228 (5)) — replays
+    /// only the rows it accepted from the state it read, and lands bit for bit
+    /// where reading those rows alone does: the state, the convolution's
+    /// window and the next step's output. Both ways a step writes its state
+    /// (fresh tensors, the processor; the kept buffers, a card), and both ways
+    /// a replay does (`replay_rows` into the current pair's buffers is the
+    /// card's). A second rewind further back still replays from the state the
+    /// check read; one to the check's start is the swap; past where the state
+    /// is now, or wider than the rows kept, is refused. Red if a replay reads
+    /// the wrong window (the conv state's last `kernel − 1`), skips a row's
+    /// decay, or starts from the state after the check.
+    #[test]
+    fn a_check_rewound_into_its_middle_is_where_its_kept_rows_lead() {
+        let device = Device::Cpu;
+        let w = weights(&device);
+        let x = Tensor::randn(0f32, 1.0, (1, 10, 8), &device).unwrap();
+        let same = |a: &SsmState, b: &SsmState, what: &str| {
+            assert_eq!(a.positions(), b.positions(), "{what}: positions");
+            assert_eq!(
+                max_abs_diff(&a.current().recurrent_state, &b.current().recurrent_state),
+                0.0,
+                "{what}: recurrent state"
+            );
+            assert_eq!(
+                max_abs_diff(&a.current().conv_state, &b.current().conv_state),
+                0.0,
+                "{what}: convolution window"
+            );
+        };
+        for into_spare in [false, true] {
+            let run = |state: &mut Option<SsmState>, from: usize, len: usize| {
+                w.forward_deltanet_into(&x.narrow(1, from, len).unwrap(), state, from, into_spare)
+                    .unwrap()
+            };
+            // One at a time from 3, as a reply read without guessing does.
+            let alone = |upto: usize| {
+                let mut s = None;
+                run(&mut s, 0, 3);
+                for t in 3..upto {
+                    run(&mut s, t, 1);
+                }
+                s
+            };
+            let mut plain = alone(5);
+            let plain_next = run(&mut plain, 5, 1);
+
+            let mut checked = None;
+            run(&mut checked, 0, 3);
+            // Positions 3..9 checked at once; 3 and 4 kept.
+            run(&mut checked, 3, 6);
+            let held = checked.as_mut().unwrap();
+            assert!(held.can_rewind_to(5) && held.rewind_to(5).unwrap());
+            same(
+                held,
+                alone(5).as_ref().unwrap(),
+                &format!("into_spare={into_spare}, at 5"),
+            );
+            // Back further, within the check: still from the state it read.
+            assert!(held.rewind_to(4).unwrap());
+            same(
+                held,
+                alone(4).as_ref().unwrap(),
+                &format!("into_spare={into_spare}, at 4"),
+            );
+            assert!(
+                !held.can_rewind_to(5) && !held.rewind_to(5).unwrap(),
+                "a rewind never goes forward"
+            );
+            assert!(held.rewind_to(4).unwrap(), "where it is already");
+            // Read on from 4 as the reply would: 4 again, then 5.
+            run(&mut checked, 4, 1);
+            let next = run(&mut checked, 5, 1);
+            assert_eq!(
+                max_abs_diff(&plain_next, &next),
+                0.0,
+                "into_spare={into_spare}: the step after a replay"
+            );
+
+            // The card's replay: the state written into the current pair.
+            let mut card = None;
+            run(&mut card, 0, 3);
+            run(&mut card, 3, 6);
+            let held = card.as_mut().unwrap();
+            let (read, kept) = (held.previous.clone().unwrap(), held.rows.clone().unwrap());
+            let into = held.current().clone();
+            replay_rows(&read, &kept, 2, Some(&into)).unwrap();
+            let fresh = replay_rows(&read, &kept, 2, None).unwrap();
+            // Written into the pair's own buffers, as a captured step reads them.
+            assert_eq!(
+                max_abs_diff(&into.recurrent_state, &fresh.recurrent_state),
+                0.0
+            );
+            assert_eq!(max_abs_diff(&into.conv_state, &fresh.conv_state), 0.0);
+            same(
+                &SsmState::new(fresh, 5),
+                alone(5).as_ref().unwrap(),
+                "a replay into fresh tensors",
+            );
+            // To the check's start is the swap, as a refused capture's.
+            assert!(held.rewind_to(3).unwrap());
+            same(held, alone(3).as_ref().unwrap(), "at the check's start");
+            assert!(!held.can_rewind_to(4), "the swap leaves no rows to replay");
+        }
+
+        // A step of one position keeps no rows; a prompt pass wider than any
+        // check keeps none either.
+        let mut wide = None;
+        let long = Tensor::randn(0f32, 1.0, (1, SsmState::MOST_ROWS_KEPT + 1, 8), &device).unwrap();
+        w.forward_deltanet_into(&long, &mut wide, 0, false).unwrap();
+        let held = wide.as_ref().unwrap();
+        assert!(held.rows_held == 0 && !held.can_rewind_to(5));
     }
 
     /// A state that does not describe the step's first position is a lost

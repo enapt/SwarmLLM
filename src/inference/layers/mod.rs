@@ -2704,17 +2704,32 @@ pub(crate) struct DeltaNetWeights {
 ///   groups launched before a refusal HAVE run (`cuda_graph::DecodeGraph::capture`),
 ///   and a state updated in place would take that step twice. The swap is host
 ///   bookkeeping a refusal must undo (gotcha #761);
-/// - a rejected guess takes back the whole check that carried it, and the
-///   accepted tokens are read again at the head of the next one
-///   (`model_worker::ngram_spec_round`, FUTURE_WORK #228 (5)).
+/// - a rejected guess takes the cache back INTO the check that carried it, to
+///   the last token it accepted (#228 (5)).
+///
+/// **A rewind into a step of several positions replays its first rows**
+/// ([`SsmRows`]). Such a step keeps what its convolution and delta rule read
+/// for each position — the convolution's inputs, the normalised q and k, v, g
+/// and β — and a rewind to a position inside it runs only those two over the
+/// rows it keeps, from the state the step read: no projection, no attention,
+/// nothing sent again, so a split's peers take a check back as a lone node
+/// does. The delta rule runs each position's update as the step did, so the
+/// state lands bit for bit where the check's own run passed (`layers::qwen35`
+/// `replay_rows`). llama.cpp master keeps a STATE per position of the check
+/// instead (`ggml_gated_delta_net(…, K)` writes K slots; read at `4b1a27f`) —
+/// on Qwen3.5-4B 2 MB a slot per layer against a row's 32 KB of inputs; Dao AI
+/// Lab's ReplaySSM (2026) measured that shape at 4.85× a decode step at six
+/// guesses and caches each step's inputs, as here.
 ///
 /// On a card a step writes the new state INTO that pair and the two swap
 /// (`layers::qwen35`, #228 (4)), so the state lives at two addresses that never
 /// change, which a captured step needs — memory allocated inside a capture
 /// belongs to the graph. llama.cpp keeps its recurrent states in fixed cache
-/// tensors written with `ggml_cpy` for the same reason. On the processor the
-/// delta rule makes a fresh state anyway, so keeping the one it read costs no
-/// copy — only the pair's memory, a few MB a conversation.
+/// tensors written with `ggml_cpy` for the same reason; the rows live in fixed
+/// buffers too, made before any capture ([`Self::holds_a_step_to`]). On the
+/// processor the delta rule makes a fresh state anyway, so keeping the one it
+/// read costs no copy — only the pair's memory, a few MB a conversation — and
+/// the rows are the step's own tensors.
 #[derive(Debug, Clone)]
 pub(crate) struct SsmState {
     current: SsmSlot,
@@ -2727,6 +2742,58 @@ pub(crate) struct SsmState {
     /// position the last step started from. `None` once rewound, when its
     /// contents are a step that may never have run.
     previous_at: Option<usize>,
+    /// The inputs of the last step, row 0 at `previous_at` — written by a step
+    /// of several positions.
+    rows: Option<SsmRows>,
+    /// Rows of `rows` the last step wrote: 0 after a step of one position, or
+    /// once the next step has begun.
+    rows_held: usize,
+}
+
+/// What a step of several positions gave its convolution and delta rule, one
+/// row a position, `[batch, rows, …]`. On a card the buffers outlive the step
+/// and may hold more rows than it wrote; on the processor they are its tensors.
+#[derive(Debug, Clone)]
+pub(crate) struct SsmRows {
+    /// `[b, rows, channels]`: the convolution's inputs — the window after row
+    /// r is the last `kernel − 1` of the state read and rows 0..r.
+    pub mixed: Tensor,
+    /// `[b, rows, 2·k_heads, k_dim]`: q then k, L2-normalised.
+    pub qk: Tensor,
+    /// `[b, rows, v_heads, v_dim]`.
+    pub v: Tensor,
+    /// `[b, rows, v_heads]`: the log-decay and the write strength.
+    pub g: Tensor,
+    pub beta: Tensor,
+}
+
+impl SsmRows {
+    fn tensors(&self) -> [&Tensor; 5] {
+        [&self.mixed, &self.qk, &self.v, &self.g, &self.beta]
+    }
+
+    /// Rows the buffers hold.
+    fn capacity(&self) -> usize {
+        self.mixed.dims().get(1).copied().unwrap_or(0)
+    }
+
+    /// Whether these buffers take a step whose rows are `like`'s, `rows` of them.
+    fn fits(&self, like: &SsmRows, rows: usize) -> bool {
+        self.capacity() >= rows
+            && self
+                .tensors()
+                .iter()
+                .zip(like.tensors())
+                .all(|(have, want)| {
+                    let (have, want) = (have.dims(), want.dims());
+                    have.len() == want.len()
+                        && have
+                            .iter()
+                            .zip(want)
+                            .enumerate()
+                            .all(|(i, (h, w))| i == 1 || h == w)
+                })
+    }
 }
 
 /// One copy of a DeltaNet layer's state.
@@ -2740,6 +2807,14 @@ pub(crate) struct SsmSlot {
 }
 
 impl SsmState {
+    /// The widest step whose rows are kept: the most positions a check reads
+    /// (`network::protocol::MAX_SPEC_LOGITS_POSITIONS` — an honest chain is at
+    /// most `config::MAX_GUESSES_PER_CHECK` + 1; a tree is refused for a
+    /// recurrent layer). A wider step is a prompt pass, never rewound into: its
+    /// rows would be 128 MB a layer at 4,096 tokens of Qwen3.5-4B. The worker's
+    /// own checks are held to it (`model_worker::LocalSpec`).
+    pub(crate) const MOST_ROWS_KEPT: usize = crate::network::protocol::MAX_SPEC_LOGITS_POSITIONS;
+
     /// A state after `positions` tokens, with no second pair yet.
     pub(crate) fn new(current: SsmSlot, positions: usize) -> Self {
         Self {
@@ -2747,6 +2822,8 @@ impl SsmState {
             at: positions,
             previous: None,
             previous_at: None,
+            rows: None,
+            rows_held: 0,
         }
     }
 
@@ -2759,16 +2836,68 @@ impl SsmState {
         self.at
     }
 
-    /// Whether the next step's buffers exist — a captured step must allocate
-    /// nothing (`KvCacheStore::every_cache_holds`).
-    pub(crate) fn holds_the_next_step(&self) -> bool {
+    /// Whether a step from here to `positions` finds every buffer it writes —
+    /// the next pair, and for a step of several positions rows enough to keep
+    /// its inputs — since a captured step must allocate nothing
+    /// (`KvCacheStore::every_cache_holds`). An ordinary step makes what is
+    /// missing.
+    pub(crate) fn holds_a_step_to(&self, positions: usize) -> bool {
+        let rows = positions.saturating_sub(self.at);
         self.previous.is_some()
+            && (rows < 2 || self.rows.as_ref().is_some_and(|r| r.capacity() >= rows))
     }
 
-    /// Takes the buffers the next step writes into, if kept.
+    /// Takes the buffers the next step writes into, if kept. The step about to
+    /// run overwrites the last one's rows.
     pub(crate) fn take_spare(&mut self) -> Option<SsmSlot> {
         self.previous_at = None;
+        self.rows_held = 0;
         self.previous.take()
+    }
+
+    /// Keeps a step's inputs (`step`, each `[b, positions, …]`, contiguous) for
+    /// a rewind into it — on a card copied into the buffers kept for them
+    /// (`in_place`: made here when missing or too few, never inside a capture,
+    /// which asks [`Self::holds_a_step_to`] first), on the processor as they
+    /// are. A step of one position keeps none: every rewind it allows is to its
+    /// start or its end. Called by the step, before [`Self::advance`].
+    pub(crate) fn keep_rows(&mut self, step: SsmRows, in_place: bool) -> CandleResult<()> {
+        let positions = step.capacity();
+        self.rows_held = 0;
+        if !(2..=Self::MOST_ROWS_KEPT).contains(&positions) {
+            return Ok(());
+        }
+        if !in_place {
+            self.rows = Some(step);
+            self.rows_held = positions;
+            return Ok(());
+        }
+        let buffers = match self.rows.take() {
+            Some(kept) if kept.fits(&step, positions) => kept,
+            _ => {
+                // Room for any check a captured step carries, so a capture
+                // never finds too few.
+                let rows = positions.max(crate::inference::cuda_graph::MAX_POSITIONS);
+                let room = |t: &Tensor| {
+                    let mut dims = t.dims().to_vec();
+                    dims[1] = rows;
+                    Tensor::zeros(dims, t.dtype(), t.device())
+                };
+                SsmRows {
+                    mixed: room(&step.mixed)?,
+                    qk: room(&step.qk)?,
+                    v: room(&step.v)?,
+                    g: room(&step.g)?,
+                    beta: room(&step.beta)?,
+                }
+            }
+        };
+        for (into, from) in buffers.tensors().iter().zip(step.tensors()) {
+            into.slice_set(from, 1, 0)?;
+        }
+        self.rows = Some(buffers);
+        self.rows_held = positions;
+        Ok(())
     }
 
     /// The state after a step from [`Self::positions`] to `positions`, written
@@ -2782,30 +2911,56 @@ impl SsmState {
     }
 
     /// Whether [`Self::rewind_to`] would succeed: the state is there already,
-    /// or the last step started there.
+    /// the last step started there, or it is inside the last step and that
+    /// step kept its rows up to it.
     pub(crate) fn can_rewind_to(&self, positions: usize) -> bool {
-        self.at == positions || self.previous_at == Some(positions)
+        self.at == positions
+            || self.previous_at == Some(positions)
+            || self.rows_to_replay(positions).is_some()
     }
 
-    /// Puts the state back to `positions` — see [`Self::can_rewind_to`]; `false`
-    /// (and nothing changed) otherwise. One step only: a recurrent state cannot
-    /// give back tokens it has summarised (#117).
-    pub(crate) fn rewind_to(&mut self, positions: usize) -> bool {
+    /// The rows a rewind to `positions` replays: inside the last step (after
+    /// its start, before where the state is now) and within the rows it kept.
+    fn rows_to_replay(&self, positions: usize) -> Option<usize> {
+        let from = self.previous_at?;
+        let rows = positions.checked_sub(from)?;
+        (rows > 0 && positions < self.at && rows <= self.rows_held && self.rows.is_some())
+            .then_some(rows)
+    }
+
+    /// Puts the state back to `positions` — see [`Self::can_rewind_to`];
+    /// `Ok(false)` (and nothing changed) otherwise. Never past the last step's
+    /// start: a recurrent state cannot give back tokens it has summarised
+    /// (#117). Into the last step, its first rows are replayed from the state
+    /// it read, into the current pair's buffers on a card; the state it read is
+    /// kept, so a later rewind to a position before this one still works.
+    pub(crate) fn rewind_to(&mut self, positions: usize) -> CandleResult<bool> {
         if self.at == positions {
-            return true;
+            return Ok(true);
+        }
+        if let Some(rows) = self.rows_to_replay(positions) {
+            let (Some(read), Some(kept)) = (&self.previous, &self.rows) else {
+                return Ok(false);
+            };
+            let in_place = !self.current.recurrent_state.device().is_cpu();
+            self.current =
+                qwen35::replay_rows(read, kept, rows, in_place.then_some(&self.current))?;
+            self.at = positions;
+            return Ok(true);
         }
         if self.previous_at != Some(positions) {
-            return false;
+            return Ok(false);
         }
         let Some(read) = self.previous.take() else {
-            return false;
+            return Ok(false);
         };
         // The newer pair becomes the buffers the re-run writes into; what it
         // holds may never have run, so it describes no position.
         self.previous = Some(std::mem::replace(&mut self.current, read));
         self.previous_at = None;
+        self.rows_held = 0;
         self.at = positions;
-        true
+        Ok(true)
     }
 
     /// Every buffer the state holds, for the memory it is charged.
@@ -2813,6 +2968,9 @@ impl SsmState {
         let mut out = vec![&self.current.conv_state, &self.current.recurrent_state];
         if let Some(p) = &self.previous {
             out.extend([&p.conv_state, &p.recurrent_state]);
+        }
+        if let Some(rows) = &self.rows {
+            out.extend(rows.tensors());
         }
         out
     }

@@ -5173,62 +5173,73 @@ run before pushing such a change is CI's own:
 `CARGO_TARGET_DIR=~/swarm-target-cuda CUDA_COMPUTE_CAP=80 cargo check --locked
 --features candle-cuda --all-targets` with `nvcc` on `PATH`.
 
-## A model whose state cannot be wound back takes a rejected check back whole, or is not speculated
+## A recurrent state is taken back into its last check by replaying the rows it kept
 
-(2026-10-06, FUTURE_WORK #117; the worker's n-gram since 2026-10-25, #228 (5).) Qwen 3.5's Gated
-DeltaNet layers (three of every four) carry a recurrent state per request — a running summary, not
-a list of positions — so the tokens a rejected guess wrote into it cannot be taken back one by one.
-Every speculative path takes a rejection back by truncating the attention caches; on such a model
-that alone would leave the two describing different histories, a silently wrong reply.
+(2026-10-06, FUTURE_WORK #117; the worker's n-gram since 2026-10-25, #228 (5); the replay the
+same day.) Qwen 3.5's Gated DeltaNet layers (three of every four) carry a recurrent state per
+request — a running summary, not a list of positions — so the tokens a rejected guess wrote into
+it cannot be taken back one by one. Every speculative path takes a rejection back by truncating
+the attention caches; on such a model that alone would leave the two describing different
+histories, a silently wrong reply.
 
-**What can be taken back: one step.** `SsmState` keeps the pair its last step READ
-(`rewind_to`): on a card since #228 (4), for a refused graph capture; on the processor since
-2026-10-25, where the delta rule makes a fresh state anyway (`delta_rule_cpu` copies the state in
-and out), so keeping the one it read costs no copy — only that pair's memory, a few MB a
-conversation (the 9B: 2 MB a DeltaNet layer at f32, × 24).
-
-**The worker's n-gram takes a rejected check back WHOLE** (`model_worker::ngram_spec_round`,
-driven by `LocalSpec::next` from the decode loop and from the test alike). The cache goes back to
-the check's start — the one rewind the state allows — committing nothing, and the tokens the
-check accepted (the token it was asked about and the accepted guesses) wait in `refeed` to be read
-at the head of the next check: no extra forward, only those rows. Tokens waiting narrow the next
-check's guesses, so no check is wider than `num_pred_tokens` + 2. A check that accepts every
-guess, or makes none, commits as on any other model.
+**What can be taken back: the last step, and any position inside it.** `SsmState` keeps the pair
+its last step READ (`rewind_to`): on a card since #228 (4), for a refused graph capture; on the
+processor since 2026-10-25, where the delta rule makes a fresh state anyway (`delta_rule_cpu`
+copies the state in and out), so keeping the one it read costs no copy — only that pair's memory,
+a few MB a conversation (the 9B: 2 MB a DeltaNet layer at f32, × 24). A step of 2 to
+`SsmState::MOST_ROWS_KEPT` (32, the widest check any path sends) positions also keeps its INPUTS,
+one row a position (`SsmRows`): the convolution's inputs, the normalised q and k, v, g and β —
+on Qwen3.5-4B 64 KB a row a layer, against 2 MB for a state. A truncate to a position inside that
+step replays its first rows from the state it read (`qwen35::replay_rows`): the convolution's
+window is the last `kernel − 1` of the read window and those rows' inputs, as `causal_conv` leaves
+it, and the delta rule takes each row's update in the step's order through the one kernel choice
+a step makes (`delta_rule_into`: the card kernel, the processor's one pass, or the composition
+under `SWARMLLM_DELTA_RULE=steps`) — no projection, no attention, nothing sent again. The rule's
+arithmetic per token does not depend on how many tokens a call carries, so the replayed state is
+bit for bit the one the check passed at that row (`a_check_rewound_into_its_middle_is_where_its_kept_rows_lead`:
+the state, the window and the next step's output, every way a step and a replay write; red with
+the window read from the wrong end). On a card the rows sit in fixed buffers made outside any
+capture (`SsmState::holds_a_step_to`, asked by `KvCacheStore::every_cache_holds`; room for
+`cuda_graph::MAX_POSITIONS` rows at least, so a captured check never finds too few), and the
+replay writes into the current pair's own buffers — the addresses a captured step reads. A wider
+step is a prompt pass and keeps nothing: its rows would be 128 MB a layer at 4,096 tokens of the 4B.
 
 **What other systems do.** llama.cpp master keeps a state per position of the check
 (`ggml_gated_delta_net(…, K)` writes K slots, `seq_rm` picks one; read at `4b1a27f`) — kernel
 changes on both devices and a state written per position on every check. Dao AI Lab's ReplaySSM
 (2026, `tridao.me/blog/2026/replayssm`) measured that shape — vLLM's per-draft state snapshots —
 at 4.85× a decode step at six guesses on Qwen3.5-122B, and caches each step's INPUTS instead (for
-Gated DeltaNet: k, g and the correction u = β(v − S·k)), replaying them from one checkpoint. The
-re-read here is the same idea at its coarsest — the accepted tokens' inputs are the tokens — and
-costs at batch 1 only rows of a bandwidth-bound forward. Replaying a check's convolution inputs
-and g/β per DeltaNet layer is what a split needs (FUTURE_WORK #228 (5)).
+Gated DeltaNet: k, g and the correction u = β(v − S·k)), replaying them from one checkpoint. Here
+the replay re-runs the delta rule rather than caching u: at batch 1 the rule is bound by reading
+and writing the state once a call, whatever the rows, so skipping the correction's dot saves
+nothing, and the same kernel keeps the replay bit-exact. Until the replay, the worker's n-gram took
+a rejected check back WHOLE and read its accepted tokens again at the head of the next check —
+the same idea at its coarsest, which a split's peers could not do (ids identical on the processor,
+Qwen3.5-0.8B Q8_0: 66 checks, 30 guesses kept, 18 taken back).
 
-**Measured** (2026-10-25, Qwen3.5-0.8B Q8_0 on the processor, the test's prompt — four Python
-functions, 96 tokens): ids identical to one token at a time; 66 checks, 30 guesses kept, 18 checks
-taken back. Each row of a check on the processor is computed as a lone step computes it
-(`attn_rows`, the row-blocked quantized matmul, the delta rule's per-token loop), which is why
-identical is the bar there. Each switch turns the test red: truncating a rejected check as an
-attention-only model's (the truncate refuses and the request fails), dropping the accepted tokens
-instead of reading them again (the reply derails into `return a /\n /\n /\n …`), the processor
-keeping no pair (the rewind refuses).
+**Measured** (2026-10-25, release build, RTX 3070 and this laptop's processor, live node stopped,
+the test's three arms in one binary — one token at a time, every guess checked, the guesses that pay
+— each run twice and the second timed, 96 greedy tokens, two runs a cell; `~/swarmllm-318/q35spec.sh`
+runs 21-23). Ids identical to one token at a time on the processor, both models and both prompts; on
+the card apart only at a near tie, as before. Qwen3.5-0.8B code: 66 checks, 30 guesses kept, 18
+checks rejected and replayed into — the decisions taking the check back whole made, so checking
+every guess compares the replay with the re-read alone: Qwen3.5-4B's story on the card 99.8-105.4 →
+110.0-122.0 tok/s, on the processor 13.5-13.8 → 14.2-16.8. With the guess count's fix of the same
+day (`docs/invariants/scheduling.md` § "A width not yet timed is priced through the step"), the
+guesses that pay against one at a time: processor 0.8B code 28.8-32.4 → 33.4-33.8, its story
+29.0-29.1 → 28.0-28.7, 4B code 10.2-10.7 → 10.1-10.9, 4B story 10.4-10.5 → 15.9-17.0 (take-back-whole
+gave 13.8-14.5). On the card, leaving out the forwards that made a new width's graph — once in a
+worker's life, but in every run of the test's fresh process, up to 0.56 s each on the 4B at 45 h
+uptime: 0.8B code 144-146 → 193-196, story 143-147 → 233-236; 4B code 78-79 → 89-91, story 77-78 →
+93-96; with them, as the test times it, 148-152, 199-202, 67-84 and 61-89. The rows a check keeps
+cost a conversation's first check the buffers they live in on the card (28.8 ms against 12.3 for
+the next of its width, 0.8B) — counted since as a one-off (`DecodeGraph::note_not_ready`).
 
-**Speed** (2026-10-25, release build, the test's three arms in one binary — one token at a time,
-every guess checked, the guesses that pay (`LocalSpec::guesses`, `docs/invariants/scheduling.md` §
-"Speculation that does not pay steps aside") — each run twice and the second timed, two runs, 96
-greedy tokens, live node stopped). On the processor the guesses that pay: Qwen3.5-0.8B Q8_0 code
-26.6-26.8 → 31.6-33.2 tok/s, a story 25.9-27.0 → 26.4; Qwen3.5-4B Q4_K_M code 9.9-10.1 →
-10.0-10.3, a story that repeats itself 10.0-10.1 → 14.6-14.7. **On the card (RTX 3070) only once its
-checks were captured**: before, `mask_is_read` asked that every layer be dense, so a check of
-several positions ran op by op at 2-3× a captured step and the same arm came out as often slower as
-faster — 0.8B code 139.5-139.8 → 113.8-125.2, story 134.4-139.2 → 95.6-152.4; 4B code 72.8-73.3 →
-71.0-73.7, story 72.8-73.2 → 62.7-106.4 — and a card's Qwen 3.5 was kept one token at a time
-(`local_guessing_suits`, removed). With its checks captured and one-off forwards left out of the
-price (§ "A speculative check is captured too"; the final code, 02Z): 0.8B code 133.1-136.8 →
-158.6-163.7, story 133.8-135.6 → 137.4-146.5; 4B code 73.0-73.3 → 75.4-76.7, story 71.5-72.8 →
-73.9-86.0 (every guess 99.8-105.4). The 73.9 met five one-offs in its timed pass (new widths'
-first captures, 240-300 ms each on the 4B); an earlier run that met one in a short reply read 50.3.
+**A split** (`pipeline::ngram_only_spec`) sends its peers the same truncate into a check
+(`truncate_kv_to`, the check's last accepted position); a peer replays it as the worker does. It
+stays off for a recurrent model until every segment advertises that it can (FUTURE_WORK #228 (5)
+stage 2). A drafter with recurrent state needs more than one step taken back — a checkpoint replayed
+across several steps, as ReplaySSM buffers them — and stays off.
 
 **What a card's guessed reply is held to** (2026-10-25). A card's forward of several positions is
 not width-invariant — vLLM's "batch invariance", which its kernels lack too outside a dedicated
@@ -5253,21 +5264,21 @@ bar stays identical ids.
 - **Coordinator**: `pipeline::distributed::speculation_can_roll_back(architecture)` is asked ONCE in
   `execute_distributed`, after the delegated-split hand-off and ahead of DSD (stream included),
   single-segment speculative and n-gram-only — "one invariant, N paths", so it sits where all three
-  pass. A delegated split's head asks the same on its own node. A split stays off until the tail's
-  walk and each segment can take a check back (#228 (5)).
+  pass. A delegated split's head asks the same on its own node. A split stays off until every
+  segment advertises that it takes a check back into it (#228 (5) stage 2).
 - **Worker**: SWIFT and a drafter with recurrent state (`engine_drafter`, which would have to take
   back γ steps) ask `SplitModel::carries_recurrent_state` and stay off; the worker's n-gram
   (`ngram_spec_eligible`) takes every model on either device.
 - **Backstop**: `KvCacheEntry::truncate_to` refuses unless every `ssm_states` entry can be taken
-  back to the target — only the start of its last step (`SsmState::can_rewind_to`) — so a path
-  added later that truncates a recurrent model into the middle of a check fails loudly instead of
-  answering from the wrong history.
+  back to the target — the start of its last step, or a position inside it its kept rows reach
+  (`SsmState::can_rewind_to`) — so a path added later that truncates a recurrent model further back
+  fails loudly instead of answering from the wrong history.
 - **Prefix cache**: since 2026-10-18 a snapshot carries the recurrent state, saved short of the
   prompt's end and restored whole or not at all — § "Qwen 3.5's prompt is saved short of its end,
   and restored whole". A prompt pass at position 0 clears the entry (state included), which is also
   how a failover replay rebuilds it on a stand-in.
 
-Splits and the drafter wait on #228 (5).
+Splits wait on #228 (5) stage 2; a recurrent drafter on a checkpoint replayed across steps.
 
 ## Qwen 3.5's prompt is saved short of its end, and restored whole (2026-10-18, FUTURE_WORK #228 (8))
 

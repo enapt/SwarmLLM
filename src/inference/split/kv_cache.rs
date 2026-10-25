@@ -1447,15 +1447,16 @@ impl KvCacheEntry {
         mode: TruncateMode,
         target_len: usize,
     ) -> Result<(), crate::error::SwarmError> {
-        // A recurrent state (Qwen 3.5's DeltaNet) cannot give tokens back —
-        // past the one step whose starting state it keeps
-        // (`SsmState::rewind_to`): what a refused CUDA graph capture and a
-        // rejected guess (`model_worker::ngram_spec_round`) take back.
-        // Shortening the attention caches anywhere else would leave the two
-        // describing different histories — a silently wrong reply — so
-        // refuse. Every path that truncates otherwise is gated away from such
-        // models first (`speculation_can_roll_back`, SWIFT, no prefix snapshot
-        // of SSM state); this makes a new one loud.
+        // A recurrent state (Qwen 3.5's DeltaNet) cannot give tokens back
+        // past the start of its last step, whose starting state it keeps
+        // (`SsmState::rewind_to`) — what a refused CUDA graph capture takes
+        // back — nor into that step further than the rows it kept, which a
+        // rejected guess replays. Shortening the attention caches anywhere
+        // else would leave the two describing different histories — a
+        // silently wrong reply — so refuse. Every path that truncates
+        // otherwise is gated away from such models first
+        // (`speculation_can_roll_back`, SWIFT, no prefix snapshot of SSM
+        // state); this makes a new one loud.
         if !self
             .ssm_states
             .iter()
@@ -1485,8 +1486,11 @@ impl KvCacheEntry {
                 kv.held_from()
             )));
         }
+        // A replay that fails (a card error) leaves its layer where it was:
+        // the next forward then finds the state out of step and refuses.
         for s in self.ssm_states.iter_mut().flatten() {
-            s.rewind_to(target_len);
+            s.rewind_to(target_len)
+                .map_err(|e| crate::error::SwarmError::Internal(format!("ssm rewind: {e}")))?;
         }
         match mode {
             TruncateMode::InPlace => {
@@ -1634,7 +1638,8 @@ impl KvCacheStore {
     /// the graph can then neither be replayed nor trusted.
     ///
     /// A recurrent layer (Qwen 3.5's DeltaNet) keeps no KV cache: it holds when
-    /// the buffers its next step writes into exist (`SsmState`, #228 (4)). A
+    /// the buffers its next step writes into exist (`SsmState`, #228 (4)) —
+    /// for a check, the rows it keeps for a rewind too (#228 (5)). A
     /// slot `keeps_no_cache` names stays empty by design and holds too — a
     /// Gemma 4 E2B/E4B layer attending an earlier layer's cache
     /// (`SplitModel::slot_keeps_no_cache`, #295); read as a cache yet to be
@@ -1661,7 +1666,7 @@ impl KvCacheStore {
                             .ssm_states
                             .get(i)
                             .and_then(Option::as_ref)
-                            .is_some_and(SsmState::holds_the_next_step),
+                            .is_some_and(|s| s.holds_a_step_to(positions)),
                     })
         })
     }

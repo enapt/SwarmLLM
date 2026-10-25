@@ -239,6 +239,36 @@ impl CheckCost {
             .map(|(fixed, slope)| fixed + slope * f64::from(positions))
     }
 
+    /// Predicted cost of a check reading `positions` on the computer whose
+    /// forward of ONE position — a step — costs `step_ms`: the fitted line once
+    /// checks of more than one width have been timed ([`Self::fit`]'s spread);
+    /// before that, the line through the step and the mean check.
+    ///
+    /// A fit from one width has no slope, so it prices every check as that
+    /// one — and a request's first checks are all as wide as it may guess.
+    /// Qwen3.5-4B on the processor (2026-10-25): an 11-position check at 305 ms
+    /// beside a 95 ms step priced a check of 2 at 305, so the count chose zero
+    /// and checked nothing for 30 rounds, at 13.1 tok/s against 15.7 checking
+    /// every guess; the fitted line was 40-49 ms + 21-22 a position. Through
+    /// the step it is 116 ms at 2 — dearer than the truth, still worth a
+    /// check, and the check of another width it buys fits the slope. That is
+    /// optimism where a cost is unknown, as UCB prices an arm not yet tried
+    /// (BanditSpec, Hou et al., ICML 2025, picks γ that way); a check that
+    /// crosses to a peer ([`Self::floor_ms`]) is priced by its fit alone.
+    pub fn predict_beside_a_step(&self, positions: u32, step_ms: f64) -> Option<f64> {
+        if self.w <= 0.0 {
+            return None;
+        }
+        let mx = self.x / self.w;
+        let my = self.y / self.w;
+        let spread = self.xx / self.w - mx * mx >= 0.25;
+        if spread || mx <= 1.0 || self.round_trip_ms.is_some() {
+            return self.predict(positions);
+        }
+        let slope = ((my - step_ms) / (mx - 1.0)).max(0.0);
+        Some(step_ms + slope * (f64::from(positions) - 1.0))
+    }
+
     /// Checks held back as possible stalls since this fit began — it is
     /// carried from request to request ([`Learned::check`]), so a request
     /// reports the difference across itself.
@@ -337,42 +367,27 @@ pub fn best_gamma_overall(
 /// `step_ms` prices a round of one position and the line `check`, fitted from
 /// checks only, every round of more.
 ///
-/// `rows_before`: rows the round reads ahead of the token it decides — the
-/// tokens a check taken back left to read again — which make even a round that
-/// guesses nothing a check.
-///
-/// `rejection_rereads`: a rejected guess takes the whole check back and its
-/// accepted tokens are read again at the head of the next round (a model with
-/// recurrent state, #228 (5)), so a check that may be rejected also turns the
-/// next round's step into a check: `1 − α^γ` times the difference between a
-/// check of two rows and a step.
-///
 /// `None` until a step and a check have both been timed: the caller guesses
-/// as far as it may, which is how the line is learned. Zero is an answer
-/// (SmartSpec, as [`best_gamma_for_check`]); ties go to the smaller γ.
+/// as far as it may, which is how the line is learned. A check of a width not
+/// yet timed is priced through the step ([`CheckCost::predict_beside_a_step`]).
+/// Zero is an answer (SmartSpec, as [`best_gamma_for_check`]); ties go to the
+/// smaller γ.
 pub fn best_gamma_beside_a_step(
     alpha: f64,
     step_ms: Option<f64>,
     check: &CheckCost,
-    rows_before: u32,
-    rejection_rereads: bool,
     max: u32,
 ) -> Option<u32> {
     let step_ms = step_ms?;
-    let check_two = check.predict(2)?;
-    let a = alpha.clamp(0.0, 0.999_999);
-    let reread_ms = if rejection_rereads {
-        (check_two - step_ms).max(0.0)
-    } else {
-        0.0
-    };
+    check.predict(2)?;
     let cost = |g: u32| {
-        let forward = match (g, rows_before) {
-            (0, 0) => step_ms,
-            _ => check.predict(rows_before + 1 + g).unwrap_or(check_two),
+        let forward = match g {
+            0 => step_ms,
+            _ => check
+                .predict_beside_a_step(1 + g, step_ms)
+                .unwrap_or(step_ms),
         };
-        let rejected = if g == 0 { 0.0 } else { 1.0 - a.powi(g as i32) };
-        (forward + rejected * reread_ms).max(0.1)
+        forward.max(0.1)
     };
     Some(
         (0..=max)
@@ -599,8 +614,7 @@ mod tests {
 
     /// A check fitted only from checks, with the step priced on its own: a
     /// card's captured step of 7.7 ms against op-by-op checks of ~20 ms at
-    /// any width (Qwen 3.5) — guessing pays only while nearly every guess is
-    /// kept, and a rejection that is read again costs the next step too.
+    /// any width — guessing pays only while nearly every guess is kept.
     #[test]
     fn a_check_dearer_than_a_step_is_bought_only_when_its_guesses_are_kept() {
         let mut check = CheckCost::default();
@@ -608,40 +622,46 @@ mod tests {
             check.record(p, 19.5 + 0.1 * f64::from(p));
         }
         let step = Some(7.7);
-        assert_eq!(
-            best_gamma_beside_a_step(0.5, step, &check, 0, false, 7),
-            Some(0)
-        );
-        assert_eq!(
-            best_gamma_beside_a_step(0.95, step, &check, 0, false, 7),
-            Some(7)
-        );
-        // Read again on a rejection: the same α buys less.
-        let kept = best_gamma_beside_a_step(0.8, step, &check, 0, false, 7);
-        let reread = best_gamma_beside_a_step(0.8, step, &check, 0, true, 7);
-        assert!(reread <= kept, "{reread:?} vs {kept:?}");
-        // A round already reading rows again is a check anyway: guess.
-        assert_eq!(
-            best_gamma_beside_a_step(0.5, step, &check, 2, false, 5),
-            Some(5)
-        );
+        assert_eq!(best_gamma_beside_a_step(0.5, step, &check, 7), Some(0));
+        assert_eq!(best_gamma_beside_a_step(0.95, step, &check, 7), Some(7));
         // A captured check of a few positions, nearly a step: guess at once —
         // four, where a fifth guess kept half the time adds less than its row.
         let mut captured = CheckCost::default();
         for p in [2u32, 8, 4, 8] {
             captured.record(p, 8.6 + 0.2 * f64::from(p));
         }
+        assert_eq!(best_gamma_beside_a_step(0.5, step, &captured, 7), Some(4));
+        // Checks of one width only, all as wide as the round may guess (a
+        // request's first, Qwen3.5-4B on the processor): no slope yet, so a
+        // narrower check is priced through the step — dearer than it is, and
+        // still bought. Priced as the wide one, it was not, and nothing more
+        // was ever timed.
+        let mut one_width = CheckCost::default();
+        one_width.record(11, 305.0);
         assert_eq!(
-            best_gamma_beside_a_step(0.5, step, &captured, 0, false, 7),
-            Some(4)
+            best_gamma_beside_a_step(0.5, Some(95.0), &one_width, 10),
+            Some(1)
         );
+        assert_eq!(
+            one_width
+                .predict_beside_a_step(2, 95.0)
+                .map(|ms| ms.round()),
+            Some(116.0)
+        );
+        // Once a second width is timed, the fitted line alone.
+        one_width.record(5, 152.0);
+        assert_eq!(
+            one_width.predict_beside_a_step(2, 95.0),
+            one_width.predict(2)
+        );
+        // A check that crosses to a peer is its fit's, whatever the widths.
+        let mut remote = CheckCost::for_a_plan(Some(400));
+        remote.record(11, 420.0);
+        assert_eq!(remote.predict_beside_a_step(2, 95.0), remote.predict(2));
         // Nothing timed yet: no answer, the caller explores.
+        assert_eq!(best_gamma_beside_a_step(0.5, None, &check, 7), None);
         assert_eq!(
-            best_gamma_beside_a_step(0.5, None, &check, 0, false, 7),
-            None
-        );
-        assert_eq!(
-            best_gamma_beside_a_step(0.5, step, &CheckCost::default(), 0, false, 7),
+            best_gamma_beside_a_step(0.5, step, &CheckCost::default(), 7),
             None
         );
     }

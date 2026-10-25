@@ -11,11 +11,16 @@ only as many guesses are checked as come out ahead — none, where none do. Meas
 project's test machine (96-token replies): on the processor qwen3-1.7B writes code at 25-28
 tokens a second instead of 18-19, and Llama-3.2-3B, which guessing had slowed to 16 on code, now
 runs at 18 against 17.5 without it. Qwen 3.5, which could not guess ahead at all, now does on the
-processor: the 0.8B writes code at 32-33 tokens a second instead of 27, the 4B a story that repeats
-itself at 14.6 instead of 10. On a graphics card Llama-3.2-3B writes code at 114 tokens a second
-instead of 88-112 (115 without guessing). Qwen 3.5 now guesses on the card as well, where its checks
-take the card's fast path for the first time: the 0.8B writes code at 159-164 tokens a second
-instead of 133-137, the 4B that story at 74-86 instead of 72-73 (#228). As with every model a
+processor and the graphics card. Its memory of the conversation is a running summary rather than a
+list of words, so a wrong guess cannot simply be cut off the end: each check keeps what it read, and
+a wrong guess is undone by replaying the words that were right from the summary as it stood before
+the check — exact to the bit, with nothing read again. On the processor the 0.8B writes code at
+33-34 tokens a second instead of 29-32, the 4B a story that repeats itself at 16-17 instead of 10.
+On the card, where its checks take the card's fast path for the first time, the 0.8B writes code
+at 193-196 tokens a second instead of 144-146 and a story at 233-236 instead of 143-147, the 4B
+89-96 instead of 77-78 — once the card has prepared each size of check, which costs up to half a
+second the first time a running model meets it (#228). On a graphics card Llama-3.2-3B writes code
+at 114 tokens a second instead of 88-112 (115 without guessing). As with every model a
 graphics card checks guesses for, a reply can differ from the one-word-at-a-time reply where the
 model is almost evenly split between two words; llama.cpp on a graphics card behaves the same way.
 

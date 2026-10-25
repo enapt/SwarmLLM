@@ -928,10 +928,11 @@ impl SplitModel {
     /// token cannot be taken back out of? Qwen 3.5's DeltaNet layers do. The
     /// KV cache of an attention layer can be truncated after a rejected
     /// speculative draft; a recurrent state only back to where its last step
-    /// started (`SsmState::rewind_to`). So a speculative path on such a model
-    /// takes a rejected check back whole and reads its accepted tokens again
-    /// (`model_worker::ngram_spec_round`, #228 (5)); every other asks this
-    /// first and does not speculate (FUTURE_WORK #117).
+    /// started, or into that step by replaying the rows it kept
+    /// (`SsmState::rewind_to`, #228 (5)) — a check, never a drafter's γ
+    /// steps. So the worker's n-gram speculates such a model as any other
+    /// (`model_worker::ngram_spec_round`); SWIFT and a drafter with recurrent
+    /// state ask this and do not (FUTURE_WORK #117).
     pub fn carries_recurrent_state(&self) -> bool {
         self.layers
             .iter()

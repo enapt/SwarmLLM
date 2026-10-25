@@ -5342,8 +5342,7 @@ capture follows an ordinary step of the same shape; 25-49 ms). One line through 
 prices a short check as nearly a step — the worst buy looks cheapest — so
 `best_gamma_beside_a_step` takes the step's median (`RecentMedian`) and a line fitted from checks
 only, and is asked per round over the guesses FOUND (two guesses can be worth less than their
-check where seven are not). A model whose rejected check is read again (Qwen 3.5) also pays the
-next round's step turned into a check, `1 − α^γ` times. The acceptance is `AcceptanceEstimate::recent`
+check where seven are not). The acceptance is `AcceptanceEstimate::recent`
 (each round weighs the ones before it by 0.9; a declined round fades it towards a prior of 0.7 over
 2 trials), because whether text is being copied changes inside one reply.
 
@@ -5351,8 +5350,7 @@ next round's step turned into a check, `1 − α^γ` times. The acceptance is `A
 chose zero and checked nothing more: Qwen3.5-4B's repetitive story, 102-104 tok/s with every guess
 checked, stayed at 71 (72 one at a time); qwen3-1.7B code fitted 24.9 ms from its first 8-position
 check and declined the rest. So after 8 rounds of declined guesses the next are checked anyway; a
-check that paid (more tokens than steps in its time, counting the step a rejected recurrent check
-turns into a check) starts the count over, one that did not doubles it to at most 64 —
+check that paid (more tokens than steps in its time) starts the count over, one that did not doubles it to at most 64 —
 `SpecBackoff`'s doubling, the in-request counterpart of `REPROBE_AFTER`. Measured after it, the
 guesses that pay against one at a time: processor qwen3-1.7B code 17.9-19.0 → 24.6-27.6, prose
 18.9-19.0 → 18.4-18.8; Llama-3.2-3B code 17.4-17.5 → 18.0-18.1, prose 17.5 → 17.1-17.9; card
@@ -5367,12 +5365,30 @@ its graph took 240-300 ms against 16-30 replayed, and one such check fitted into
 every later check of the reply. `LocalSpec::next` reads `SplitModel::one_off_forwards` before and
 after a round and records neither the step nor the check from a round that paid one; a probe that
 paid one starts the count over, as one that paid does, instead of doubling its wait (it said
-nothing of what a check costs). Qwen 3.5 guesses on a card since then (`docs/invariants/inference.md` § "A model
-whose state cannot be wound back takes a rejected check back whole": Qwen3.5-4B story 71.5-72.8 →
-73.9-86.0 tok/s). A/B `SWARMLLM_LOCAL_GUESS_GAMMA=fixed` (every
-guess, the old rule); the test runs both arms. Tests:
+nothing of what a check costs). Qwen 3.5 guesses on a card since then (`docs/invariants/inference.md` § "A
+recurrent state is taken back into its last check by replaying the rows it kept"). A/B
+`SWARMLLM_LOCAL_GUESS_GAMMA=fixed` (every guess, the old rule); the test runs both arms. Tests:
 `a_check_dearer_than_a_step_is_bought_only_when_its_guesses_are_kept`,
 `a_recent_acceptance_follows_the_reply_and_fades_to_its_prior`.
+
+**A width not yet timed is priced through the step** (2026-10-25,
+`CheckCost::predict_beside_a_step`). A line fitted from checks of ONE width has no slope (`fit`
+holds it flat until the widths spread), and a request's first checks are all as wide as it may
+guess, so the count priced a check of two as the check of eleven and chose zero. Qwen3.5-4B's story
+on the processor, once a rejected check stopped being read again at the head of the next (which had
+varied the widths by luck): an 11-position check at 305 ms beside a 95 ms step, then 30 rounds
+declined — 13.1 tok/s against 15.7 checking every guess; Qwen3.5-0.8B's code on the card declined
+10-14 rounds the same way, its first check made dearer by the buffers it keeps its rows in (28.8 ms
+against 12.3; counted as a one-off since, `DecodeGraph::note_not_ready` — a conversation's first
+decode step and a step whose caches must grow are run uncaptured and cost more than their shape
+will again). Until a second width is timed, a check is priced by the line through the step (a
+forward of one position) and the mean check: 116 ms for two positions there, against 93 fitted
+later — dearer than the truth, still bought, and the check of another width it buys fits the slope.
+Optimism where a cost is unknown, as UCB prices an untried arm (BanditSpec, Hou et al., ICML 2025,
+chooses γ that way). A check that crosses to a peer is priced by its fit alone, round trip floor
+included. After it, no round declined in 16 runs of the test; the 4B story 15.9-17.0 tok/s on the
+processor (10.4-10.5 one at a time). Test: `a_check_dearer_than_a_step_is_bought_only_when_its_guesses_are_kept`
+(a check of one width, red with the step's line removed).
 
 → `docs/plans/split_speculation.md` § "Guessing steps aside where it does not pay"
 
