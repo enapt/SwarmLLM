@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.253-alpha] — 2026-10-25
+
 **A model running whole on your computer now checks only the guesses that pay, and Qwen 3.5
 guesses ahead too.** Such a model guesses the next words from text already in the
 conversation and checks several at once. It checked every guess it found, which often made
@@ -54,7 +56,9 @@ before any further copy. Seen today: a node given room fetched copies of 14B and
 took nothing new, so when every computer was full a newly added model could never be assembled.
 Now, when a part of a model someone asked for is on no computer and does not fit, a full computer
 gives back a spare copy of another model to make room — only a copy two other computers still
-hold, never part of a model it holds whole or is running, and never more than the room needed.
+hold, never part of a model it holds whole or is running, and never more than the room needed. A
+part too large for the computer's storage limit even when it holds nothing else is left to
+computers that can take it, and no longer holds up the computer's other downloads.
 
 **A computer with a graphics card now offers its ordinary memory to a split model too.** A model
 too big for any one computer is split across several, each running some of its layers. A computer
