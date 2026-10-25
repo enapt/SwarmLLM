@@ -3568,11 +3568,17 @@ both match on it. `segment_geometry` counts a segment's own layers, its ends' ta
 shared tensors off the header (`VramFootprintInputs::head_bytes` = the tables; proportional only
 for a table naming no layer). `split_for_card` pays `head_bytes` to the card before placing a
 layer; a split whose processor run ends the model leaves the run's output head to the card's
-share (`head_of_processor_run_mb`: added in `card_share_of_split_mb`, taken off the processor run
-in `machine_charge`); `fresh_run_layers_for_planning` weighs a width at BOTH ends of the model,
+share (`tables_beyond_card_run_mb`, the segment's tables less the card run's, added in
+`card_share_of_split_mb`; `head_of_processor_run_mb`, taken off the processor run in
+`machine_charge`) — the difference, not the processor run's head, because a weight-tied model
+held from layer 0 to its end loads ONE token table for both ends (`load_split_model` shares it),
+and adding the run's head charged the card that table twice (281 MiB in the 70B-shaped fixture;
+found by the v0.3.253 pre-release review, test `a_split_charges_its_output_head_to_the_card`);
+`fresh_run_layers_for_planning` weighs a width at BOTH ends of the model,
 since the last carries the larger table and it pushes layers off the card. On this laptop's
 segment the split now places 10 layers (5,754 MiB with the table, 349 MiB of cache room against
-the 320 the conversation needs). Not changed (FUTURE_WORK #343): `plan_gpu_layers` places a
+the 320 the conversation needs) — confirmed live on 2026-10-25 08:38:51Z: "placing its first 10 of
+17 layers", the loader's cache budget "comfortably covers" 8,192 tokens (9,411 affordable). Not changed (FUTURE_WORK #343): `plan_gpu_layers` places a
 segment's layers by their AVERAGE weight (the 70B's first ten weigh 519 MiB against 502 averaged
 over 17), and the planning curve (`cost_curve_of`) still spreads both tables over the layers.
 

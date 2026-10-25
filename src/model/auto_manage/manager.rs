@@ -1000,7 +1000,7 @@ impl AutoShardManager {
             // never took a part of a model that existed nowhere.
             let candidates = self.gather_candidates(&local_node_id, pool_vram);
             let lacks = super::scoring::room_a_hole_lacks(
-                self.first_hole_to_fetch(&candidates),
+                self.first_hole_to_fetch(&candidates, &report),
                 false,
                 0,
                 report.held_bytes.saturating_sub(report.budget.bytes),
@@ -1033,7 +1033,7 @@ impl AutoShardManager {
             );
             return;
         }
-        let first_hole = self.first_hole_to_fetch(&candidates);
+        let first_hole = self.first_hole_to_fetch(&candidates, &report);
 
         // 3. Select the best candidates within budget
         let selected = self.select_within_budget(candidates, &report, config.max_shards);

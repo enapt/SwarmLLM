@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #344**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #346**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -554,6 +554,31 @@ frame, then add a receipt ACK or a per-frame read deadline mirroring request-res
 § 4 item 7); with V1Lazy (#136) request-response is as fast, so there is no speed reason to.
 
 ### Routing and placement
+
+#### #345 — A peer that refuses its share of a split at load is barred from the re-plan, not held to what fits
+`P2` · routing · **OPEN** — 2026-10-25 · history: the 70B's second ask, request `b6a07b44`
+
+Llama 3.3 70B Q4_K_M, 08:38:45Z: no strict rung found a chain, so `PeersAtCeiling` gave `aa3d1e66`
+(AU, RTX 3060 12 GB, v0.3.252) layers 17-73. Its card had room for 2 (`max_hostable_layers=Some(2)`),
+so its worker charged the 56 layers to memory and refused: "needs about 30432 MB … `resources.max_ram_mb`
+is 24000 MB". The refusal arrived as a forward's error, so failover barred the peer for the request
+(`tried=["aa3d…"]`), and with it gone the holders had "room for about 43 of its 80 layers". AU could
+have taken ~44 layers under its cap. The up-front ask (#252 (b)) holds a peer to `layers_that_fit`
+for a PROMPT refusal; a LOAD refusal needs the same: the refusal states what fits (additive, on the
+LayerResult, read only where present), and the re-plan holds the peer to it via
+`peer_layers_fitting_for_request`, never barring it. v0.3.253's room beside the card
+(`machine_room_beside_card_mb`) makes this case plan at face value instead, so this matters only
+where a relaxed rung still runs.
+
+#### #344 — A card node's memory ceiling counts all of its RAM, though a peer's share is held to the swarm's cap
+`P2` · routing · **OPEN** — 2026-10-25 · history: #345's request
+
+`vram::node_model_memory_ceiling_mb` on a card node is the card plus `max(total RAM, cap)`. Its
+rationale (`docs/invariants/scheduling.md`, v0.3.229) was that the loader "does not charge the
+processor's share to the RAM budget". Since #264/#266 the share is charged against the cap of
+whoever asked, and every reader of the ceiling is a peer (Swarm) or coverage judging for the swarm,
+so card + `RamBudget::cap_mb` is the certain bound. On AU that is 12 + 24 GB instead of 12 + all of
+its RAM. Fix it with a test that builds a card node's capability, and correct the invariants text.
 
 #### #250 — A model held whole here, which the card holds only part of, can be routed through peers at a fraction of local speed
 `P1` · routing · **PARTIAL** — 2026-10-12 · history: report #035 (a tester, RTX 3060 12 GB, v0.3.232-.234)

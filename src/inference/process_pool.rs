@@ -3671,7 +3671,7 @@ impl ModelProcessPool {
                     .saturating_add(u32::try_from(on_card).unwrap_or(u32::MAX))
                     .min(segment.1);
                 self.estimate_gpu_footprint_mb(model_id, Some((segment.0, end)), KvCharge::Typical)
-                    .saturating_add(self.head_of_processor_run_mb(model_id, (end, segment.1)))
+                    .saturating_add(self.tables_beyond_card_run_mb(model_id, segment, end))
             }
             CardSplit::ExpertsInRam { in_ram, .. } => self
                 .estimate_gpu_footprint_mb(model_id, Some(segment), KvCharge::Typical)
@@ -3704,12 +3704,33 @@ impl ModelProcessPool {
             .map_or(0, |i| i.host_resident_bytes.div_ceil(1024 * 1024))
     }
 
-    /// The output head of a card/processor split's processor-held `run`, in MB
-    /// rounded up: the loader puts it on the card with the segment's main
-    /// device though the run's layers are on the processor (#342), so the
-    /// card's share carries it ([`Self::card_share_of_split_mb`]) and the
-    /// machine's does not ([`Self::machine_charge`]). 0 for a run short of
-    /// the last layer, and for one from layer 0, which no split's processor
+    /// The tables `segment` loads on the card beyond those its card-held run
+    /// `(segment.0, end)` is charged already, in MB rounded up: the output head
+    /// its processor-held run reaches, which the loader puts on the card with
+    /// the segment's main device (#342). Taken as the whole segment's tables
+    /// less the card run's, so a weight-tied model held from layer 0 to its
+    /// end — whose head IS the token table the card run holds, loaded once
+    /// (`load_split_model` shares it) — is charged that table once, not twice
+    /// (pre-release review, 2026-10-25).
+    fn tables_beyond_card_run_mb(&self, model_id: &ModelId, segment: (u32, u32), end: u32) -> u64 {
+        if end >= segment.1 {
+            return 0;
+        }
+        let tables = |run: (u32, u32)| {
+            self.footprint_inputs(model_id, Some(run))
+                .map_or(0, |i| i.head_bytes)
+        };
+        tables(segment)
+            .saturating_sub(tables((segment.0, end)))
+            .div_ceil(1024 * 1024)
+    }
+
+    /// The tables a card/processor split's processor-held `run` is charged by
+    /// its own estimate though they sit on the card, in MB rounded up — the
+    /// output head, which the loader puts with the segment's main device
+    /// though the run's layers are on the processor (#342) — so the machine's
+    /// share does not carry them ([`Self::machine_charge`]). 0 for a run short
+    /// of the last layer, and for one from layer 0, which no split's processor
     /// run is (a split puts at least one layer on the card).
     fn head_of_processor_run_mb(&self, model_id: &ModelId, run: (u32, u32)) -> u64 {
         if run.0 == 0 || run.0 >= run.1 {
@@ -13458,6 +13479,37 @@ mod tests {
             p.machine_charge(&model, segment, true, None, KvCharge::Typical)
                 .share_mb,
             p.estimate_cpu_footprint_mb(&model, Some(segment), KvCharge::Typical)
+        );
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        // Weight-tied, the head IS the token table, and the loader loads it
+        // once. Held whole, the card's run holds it from layer 0: the card is
+        // charged it once — beyond its run, only the output norm — and the
+        // machine is not charged it at all.
+        let tied = ModelId("seventy-b-shaped-tied-head".into());
+        let data_dir = header_only_seventy_b("tied-head", &tied, true);
+        let p = ModelProcessPool::new(data_dir.clone());
+        p.set_vram_budget_mb(100_000);
+        let norm_mb = (8192u64 * 4).div_ceil(1024 * 1024);
+        let table_mb = (8192u64 * 64_000 / 256 * 144 + 8192 * 4).div_ceil(1024 * 1024);
+        let whole = CardSplit::Layers {
+            on_card: 2,
+            total: 8,
+        };
+        assert_eq!(
+            p.card_share_of_split_mb(&tied, (0, 8), whole),
+            p.estimate_gpu_footprint_mb(&tied, Some((0, 2)), KvCharge::Typical) + norm_mb,
+            "the token table is charged to the card once"
+        );
+        assert_eq!(
+            p.machine_charge(&tied, (0, 8), false, Some(whole), KvCharge::Typical)
+                .share_mb,
+            p.estimate_cpu_footprint_mb(&tied, Some((2, 8)), KvCharge::Typical) - table_mb
+        );
+        // Its last four: the card's run holds no table, so the head is beside.
+        assert_eq!(
+            p.card_share_of_split_mb(&tied, segment, split),
+            p.estimate_gpu_footprint_mb(&tied, Some((4, 6)), KvCharge::Typical) + table_mb
         );
         let _ = std::fs::remove_dir_all(&data_dir);
     }

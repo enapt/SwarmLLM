@@ -991,7 +991,10 @@ impl AutoShardManager {
                             );
                             continue;
                         }
-                        if candidate.fills_a_hole && candidate.shard_size_bytes > budget_bytes {
+                        if candidate.fills_a_hole
+                            && candidate.shard_size_bytes > budget_bytes
+                            && could_ever_hold(candidate.shard_size_bytes, report)
+                        {
                             a_hole_did_not_fit = true;
                         }
                         if candidate.shard_size_bytes <= budget_bytes {
@@ -1139,6 +1142,16 @@ pub(super) fn fills_a_hole(assembling_an_asked_model: bool, holder_count: usize)
 /// (`over_budget_bytes` — giving back only the part's size would leave it
 /// still over). What the download pass notes for prune
 /// (`AutoShardManager::room_for_holes`).
+/// Could this node ever hold a part of `bytes` — does it fit the whole storage
+/// budget, with nothing else held? A hole larger than that is no hole THIS
+/// node can fill: it neither keeps a cycle's room from further copies nor asks
+/// prune for room ([`AutoShardManager::first_hole_to_fetch`]). Counted, every
+/// cycle skipped the copies and gave back a spare one for a part that could
+/// never land (pre-release review, 2026-10-25).
+pub(super) fn could_ever_hold(bytes: u64, report: &BudgetReport) -> bool {
+    bytes <= report.budget.bytes
+}
+
 pub(super) fn room_a_hole_lacks(
     first_hole_bytes: Option<u64>,
     chose_a_hole: bool,
@@ -1155,14 +1168,20 @@ pub(super) fn room_a_hole_lacks(
 }
 
 impl AutoShardManager {
-    /// The size of the first part offered that fills a hole and is not being
-    /// fetched here already — what the room a hole lacks is measured by.
-    pub(super) fn first_hole_to_fetch(&self, candidates: &[ShardCandidate]) -> Option<u64> {
+    /// The size of the first part offered that fills a hole, could ever fit
+    /// this node's storage ([`could_ever_hold`]) and is not being fetched here
+    /// already — what the room a hole lacks is measured by.
+    pub(super) fn first_hole_to_fetch(
+        &self,
+        candidates: &[ShardCandidate],
+        report: &BudgetReport,
+    ) -> Option<u64> {
         candidates
             .iter()
             .find(|c| {
                 c.fills_a_hole
                     && c.shard_size_bytes > 0
+                    && could_ever_hold(c.shard_size_bytes, report)
                     && !self
                         .shared_state
                         .models
@@ -2103,6 +2122,26 @@ mod holes_first {
             "the copy does not take the room the hole is waiting for: {:?}",
             chosen.iter().map(|c| &c.model_id).collect::<Vec<_>>()
         );
+
+        assert_eq!(
+            manager.first_hole_to_fetch(&[candidate(&hole, 500 * MIB, true)], &report),
+            Some(500 * MIB),
+            "the hole asks prune for room"
+        );
+
+        // A hole larger than the whole 1,000 MB budget can never land here:
+        // it keeps no room and asks prune for none, so the copy is taken.
+        let never = candidate(&hole, 1_200 * MIB, true);
+        let chosen = manager.select_within_budget(vec![never.clone(), copy.clone()], &report, 0);
+        assert_eq!(
+            chosen
+                .iter()
+                .map(|c| c.model_id.clone())
+                .collect::<Vec<_>>(),
+            vec![small.clone()],
+            "a hole this node could never hold does not stop the copy"
+        );
+        assert_eq!(manager.first_hole_to_fetch(&[never], &report), None);
 
         let chosen = manager.select_within_budget(vec![copy], &report, 0);
         assert_eq!(
