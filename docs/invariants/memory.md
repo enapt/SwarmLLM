@@ -3652,9 +3652,28 @@ found by the v0.3.253 pre-release review, test `a_split_charges_its_output_head_
 since the last carries the larger table and it pushes layers off the card. On this laptop's
 segment the split now places 10 layers (5,754 MiB with the table, 349 MiB of cache room against
 the 320 the conversation needs) — confirmed live on 2026-10-25 08:38:51Z: "placing its first 10 of
-17 layers", the loader's cache budget "comfortably covers" 8,192 tokens (9,411 affordable). Not changed (FUTURE_WORK #343): `plan_gpu_layers` places a
-segment's layers by their AVERAGE weight (the 70B's first ten weigh 519 MiB against 502 averaged
-over 17), and the planning curve (`cost_curve_of`) still spreads both tables over the layers.
+17 layers", the loader's cache budget "comfortably covers" 8,192 tokens (9,411 affordable).
+
+**Each layer placed on the card is charged its own weights (2026-10-25, #343).** `plan_gpu_layers`
+divided the room by the segment's AVERAGE layer while the card takes the FIRST layers. Q4_K_M
+gives a model's first and last eighth, and every third layer between, more bits (llama.cpp's
+`use_more_bits`): the 70B's first ten weigh 519 MiB each against 502 averaged over 17 — 170 MiB
+the plan did not see, on a card whose cache had 29 MiB to spare. `segment_geometry` now reads
+each layer's own tensors (`LayerBytes::weights`, by `split::segment_tensor`; spread evenly only
+where no tensor names a layer) and `plan_gpu_layers` walks them in order, each with its share of
+the cache, after the ends' tables and the shared tensors are paid. llama.cpp's own fitting
+(`common/fit.cpp`, `llama_params_fit_impl`) weighs each candidate count by the tensors it would
+place, never by an average. On this laptop's segment both rules give 10 (10.09 layers of room
+exactly, 10.4 averaged): the fix moves the line where a segment sits near it.
+
+**The planning curve keeps the tables spread (decided 2026-10-25, #343).** `cost_curve_of` gives
+every layer 1/L of both tables (17 MiB on the 70B), so a first or last run held wholly on a card
+is offered up to a layer more than its spawn places (the spawn splits it, priced a little slow),
+while a middle run is charged 17 MiB a layer it does not load. Putting the larger table in the
+curve's fixed term would charge every MIDDLE segment 822 MiB it never loads: about 1.6 layers off
+every machine's ceiling, on the model that needs every layer of ceiling to run at all (the 70B
+sat 2 layers short at face value). A ceiling is one number per model, so it cannot be right at
+both; the end's over-offer is the cheaper error, met by the spawn's split and the re-plan.
 
 Tests: `a_segment_is_charged_the_tables_its_ends_load` (a header-only 70B shape, tied and untied:
 first, middle, last, whole), `a_split_pays_the_cards_tables_before_it_places_a_layer` (the

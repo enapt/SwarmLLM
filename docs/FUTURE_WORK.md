@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #347**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #348**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2467,22 +2467,20 @@ StarCoder2, inert while refused).
 
 ### Memory and admission
 
-#### #343 — A card/processor split places a segment's layers by their average weight
-`P3` · memory · **OPEN** — 2026-10-25 · history: #342's residual
+#### #347 — A first segment on a card keeps its token table there, where llama.cpp keeps it on the processor
+`P3` · memory · **OPEN** — 2026-10-25 · history: #343's residual
 
-#342 counts each segment's own layers and its ends' tables off the header, but two figures still
-average. `hybrid::plan_gpu_layers` places the card's layers by the segment's MEAN layer weight,
-while the card takes the FIRST ones: Q4_K_M gives the first and last eighth of a model more bits,
-so a 70B's first ten layers weigh 519 MiB each against 502 averaged over 17 — ~170 MiB the card
-was not charged (on this laptop's segment the cache room was 349 MiB against 320 needed). And the
-planning curve (`process_pool::cost_curve_of`, which the card-only bound and a peer's bound read)
-still spreads both tables over every layer, so a first or last run held wholly on a card is offered
-up to one layer more than its spawn places there (the spawn then splits it, priced a little
-slow). Next: hand `split_for_card` the segment's per-layer bytes (`segment_geometry` already reads
-each layer's experts), and decide whether the curve keeps the larger table in its fixed term.
-Beyond both: llama.cpp keeps the token table on the processor outright ("very little benefit to
-offloading the input layer") — 564 MiB more of the card for a 70B's first segment, at a row
-gather per token over the processor.
+The loader puts the token table on a first segment's main device — on a card/processor split,
+the card — and `split_for_card` pays it there before any layer (#342). llama.cpp keeps the input
+layer on the processor outright ("there is very little benefit to offloading the input layer",
+`src/llama-model.cpp`): a token's step reads ONE row of it. On Llama 3.3 70B Q4_K_M the table is
+564 MiB, about one more 519 MiB layer on this laptop's 8 GB card (10 of the first segment's 17
+today). What it takes: the row gather on the processor, the row handed to the card before a
+decode step's capture (a pageable copy inside one replays garbage — `executor::Prepared`, as
+Gemma 4 E2B/E4B's per-layer inputs are, #295), `head_bytes` split into the table that stays and
+the head that goes, and the card's prompt pass gathering its rows on the host. Measure the step
+it adds on the card (the copy is 32 KB a token) against the layer it frees, on a split this
+laptop leads.
 
 #### #322 — A cold load's first request was refused for a 9-token prompt, its card cache budget 0
 `P3` · memory · **OPEN** — 2026-10-20 · history: field report 2026-10-19 (a tester, RTX 3060 12 GB, v0.3.244), request `3acb5624`
@@ -3300,7 +3298,22 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-25, ships in v0.3.254** (#344, #345, #346)
+**Closed 2026-10-25, ships in v0.3.254** (#343, #344, #345, #346)
+- #343 — **A card/processor split places each of the card's layers by its own weights.**
+  `plan_gpu_layers` divided the card's room by the segment's AVERAGE layer while the card takes the
+  FIRST ones; Q4_K_M gives a model's first and last eighth, and every third layer between, more bits,
+  so a 70B's first ten layers weigh 519 MiB each against 502 averaged over 17 — 170 MiB the plan did
+  not see, on a card whose cache had 29 MiB to spare. `segment_geometry` now reads each layer's own
+  tensors (`LayerBytes::weights`) and the plan walks them in order with each one's share of the
+  cache, as llama.cpp's fitting weighs each count by the tensors it places (`common/fit.cpp`). Tests
+  `a_card_split_charges_each_layer_its_own_weights` (a header-only 70B shape: 1 layer where the
+  average placed 2), `the_card_is_charged_its_own_layers_not_their_average`. Decided, not changed:
+  the planning curve (`cost_curve_of`) keeps both tables spread over the layers — in its fixed term
+  every middle segment would be charged an 822 MiB head it never loads, ~1.6 layers off every
+  machine's ceiling on the model that needs them all (`docs/invariants/memory.md`). Residual: the
+  token table itself could stay on the processor (#347), and the cache is still charged as the
+  segment's average per layer, so a recurrent or windowed model's first layers may keep more or
+  less than their share (review, 2026-10-25).
 - #346 — **A model only a split can run is placed by a chain over every machine in scope where
   the near machines cannot carry it, and carrying counts each layer once.** Llama 3.3 70B (80
   layers), every peer on v0.3.253 (request `5a383498`, 10:48Z): holders 300-410 ms apart (but for

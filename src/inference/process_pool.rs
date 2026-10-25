@@ -2609,26 +2609,58 @@ pub struct WorkerSummary {
 /// failed load and a respawn on the processor at best. DeepSeek-2 and Qwen 3.5's
 /// MoE variant are the ones today (review of #104, 2026-09-25; dense Qwen 3.5
 /// joined the allowlist 2026-10-07, #228).
+///
+/// `layer_weights[i]` is layer `i` of the segment's own tensors
+/// ([`LayerBytes::weights`]); the card takes the FIRST layers, so each is
+/// charged what it weighs, never the segment's average (#343).
 fn split_for_card(
     inputs: &crate::model::auto_manage::vram::VramFootprintInputs,
+    layer_weights: &[u64],
     available_bytes: u64,
 ) -> Option<(usize, usize)> {
-    if !inputs.splits_across_devices {
-        return None;
-    }
     let layers = inputs.segment_layers as usize;
-    if layers == 0 {
+    if !inputs.splits_across_devices || layers == 0 || layer_weights.len() != layers {
         return None;
     }
-    // The ends' tables go to the card whichever layers do (#342): paid
-    // first, and the layers placed in what is left, by their own weights.
+    // The ends' tables go to the card whichever layers do (#342), and so do
+    // the small tensors no layer names (the output norm, `rope_freqs`): paid
+    // first, and the layers placed in what is left, each by its own weights.
+    let laid = layer_weights
+        .iter()
+        .fold(0u64, |sum, &bytes| sum.saturating_add(bytes));
+    let up_front = inputs
+        .card_weight_bytes()
+        .saturating_sub(laid)
+        .max(inputs.head_bytes);
     let n = crate::inference::split::hybrid::plan_gpu_layers(
-        available_bytes.saturating_sub(inputs.head_bytes),
-        inputs.card_weight_bytes().saturating_sub(inputs.head_bytes),
+        available_bytes.saturating_sub(up_front),
+        layer_weights,
         card_kv_bytes_of_split(inputs),
-        layers,
     );
     (n > 0).then_some((n, layers))
+}
+
+/// Each of a segment's layers' bytes, from the same read of the header as its
+/// footprint ([`ModelProcessPool::segment_geometry`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LayerBytes {
+    /// Layer `i`'s own tensors (`split::segment_tensor` → `Layer`) — what
+    /// placing it on the card costs in weights ([`split_for_card`]). Spread
+    /// evenly where no tensor names a layer.
+    pub weights: Vec<u64>,
+    /// Of which its routed experts (`split::routed_expert_bytes`), all 0 for
+    /// a dense model — what keeping experts in RAM is weighed by
+    /// ([`experts_in_ram_for_card`]).
+    pub experts: Vec<u64>,
+}
+
+/// `bytes` spread evenly over `layers` layers — a segment's weights where no
+/// tensor says which layer it belongs to.
+fn spread_over_layers(bytes: u64, layers: usize) -> Vec<u64> {
+    if layers == 0 {
+        return Vec::new();
+    }
+    vec![bytes / layers as u64; layers]
 }
 
 /// What a segment's caches take on the card at its full context, as a
@@ -2765,14 +2797,14 @@ fn experts_in_ram_for_card(
 /// ([`split_for_card`]); `None` leaves it to the processor.
 fn card_split(
     inputs: &crate::model::auto_manage::vram::VramFootprintInputs,
-    expert_bytes: &[u64],
+    layers: &LayerBytes,
     available_bytes: u64,
 ) -> Option<CardSplit> {
     let total = inputs.segment_layers as usize;
-    if let Some(in_ram) = experts_in_ram_for_card(inputs, expert_bytes, available_bytes) {
+    if let Some(in_ram) = experts_in_ram_for_card(inputs, &layers.experts, available_bytes) {
         return Some(CardSplit::ExpertsInRam { in_ram, total });
     }
-    split_for_card(inputs, available_bytes)
+    split_for_card(inputs, &layers.weights, available_bytes)
         .map(|(on_card, total)| CardSplit::Layers { on_card, total })
 }
 
@@ -3697,8 +3729,9 @@ impl ModelProcessPool {
     /// header cannot be read.
     fn experts_in_ram_mb(&self, model_id: &ModelId, segment: (u32, u32), in_ram: usize) -> u64 {
         self.segment_geometry(model_id, Some(segment))
-            .map(|(_, experts)| {
-                experts
+            .map(|(_, layers)| {
+                layers
+                    .experts
                     .iter()
                     .take(in_ram)
                     .fold(0u64, |sum, &b| sum.saturating_add(b))
@@ -3843,17 +3876,13 @@ impl ModelProcessPool {
         if available_mb >= estimated_mb {
             return None;
         }
-        let (inputs, mut expert_bytes) = self.segment_geometry(model_id, segment)?;
+        let (inputs, mut layers) = self.segment_geometry(model_id, segment)?;
         // A/B inside one binary: `0` places a mixture-of-experts model by
         // whole layers, as before #138 (3).
         if std::env::var("SWARMLLM_EXPERTS_IN_RAM").as_deref() == Ok("0") {
-            expert_bytes.clear();
+            layers.experts.clear();
         }
-        card_split(
-            &inputs,
-            &expert_bytes,
-            available_mb.saturating_mul(1024 * 1024),
-        )
+        card_split(&inputs, &layers, available_mb.saturating_mul(1024 * 1024))
     }
 
     /// The `--gpu-layers` value a worker for `model_id` should be spawned with.
@@ -4067,16 +4096,16 @@ impl ModelProcessPool {
     }
 
     /// [`Self::footprint_inputs`] and, from the same read of the header, each
-    /// of the segment's layers' routed-expert bytes (`split::routed_expert_bytes`,
-    /// all 0 for a dense model) — what [`card_split`] weighs keeping experts
-    /// in RAM by.
+    /// of the segment's layers' own bytes and routed-expert bytes
+    /// ([`LayerBytes`]) — what [`card_split`] places the card's layers by and
+    /// weighs keeping experts in RAM by.
     fn segment_geometry(
         &self,
         model_id: &ModelId,
         segment: Option<(u32, u32)>,
     ) -> Option<(
         crate::model::auto_manage::vram::VramFootprintInputs,
-        Vec<u64>,
+        LayerBytes,
     )> {
         use crate::model::auto_manage::vram::VramFootprintInputs;
         #[cfg(test)]
@@ -4110,7 +4139,12 @@ impl ModelProcessPool {
                     per_layer[first.min(per_layer.len())..end.min(per_layer.len())].to_vec()
                 })
                 .unwrap_or_else(|| vec![0; end.saturating_sub(first)]);
-            return Some((i, experts));
+            // A fixture's layers weigh alike, as its segments are priced.
+            let weights = spread_over_layers(
+                i.card_weight_bytes().saturating_sub(i.head_bytes),
+                i.segment_layers as usize,
+            );
+            return Some((i, LayerBytes { weights, experts }));
         }
         let model_dir = crate::model::shard::model_dir(&self.data_dir, &model_id.0);
         let header = model_dir.join(crate::model::shard::HEADER_FILENAME);
@@ -4279,9 +4313,35 @@ impl ModelProcessPool {
             self.prefill_chunk_tokens
                 .load(std::sync::atomic::Ordering::Relaxed) as usize,
         );
-        let expert_bytes = (first_layer..first_layer + segment_layers as usize)
+        let segment_end = first_layer + segment_layers as usize;
+        let expert_bytes = (first_layer..segment_end)
             .map(|layer| crate::inference::split::routed_expert_bytes(&ct, layer, layer + 1))
             .collect();
+        // Each layer's own tensors, by the loader's classification: a
+        // quantization mix gives some layers more bits than others, and a card
+        // takes the FIRST layers (#343). Spread evenly where no tensor names a
+        // layer, as the segment's weights then are.
+        let mut layer_weights = vec![0u64; segment_layers as usize];
+        let mut any_layer = false;
+        for &(name, bytes) in &tensors {
+            if let crate::inference::split::SegmentTensor::Layer(idx) =
+                crate::inference::split::segment_tensor(name)
+            {
+                any_layer = true;
+                if (first_layer..segment_end).contains(&idx) {
+                    layer_weights[idx - first_layer] =
+                        layer_weights[idx - first_layer].saturating_add(bytes);
+                }
+            }
+        }
+        if !any_layer {
+            layer_weights = spread_over_layers(
+                segment_weight_bytes
+                    .saturating_sub(host_resident_bytes)
+                    .saturating_sub(head_bytes),
+                segment_layers as usize,
+            );
+        }
 
         let inputs = VramFootprintInputs {
             quantized_weight_bytes: segment_weight_bytes,
@@ -4300,7 +4360,13 @@ impl ModelProcessPool {
                 &crate::inference::model_arch::ModelArch::from_gguf_arch(&arch),
             ),
         };
-        Some((inputs, expert_bytes))
+        Some((
+            inputs,
+            LayerBytes {
+                weights: layer_weights,
+                experts: expert_bytes,
+            },
+        ))
     }
 
     /// Set the GPU memory budget used for admission. 0 disables the check.
@@ -5883,13 +5949,12 @@ impl ModelProcessPool {
         {
             return Ok(false);
         }
-        let Some((inputs, mut expert_bytes)) = self.segment_geometry(model_id, Some(segment))
-        else {
+        let Some((inputs, mut layers)) = self.segment_geometry(model_id, Some(segment)) else {
             return Ok(false);
         };
         // The same A/B as a spawn's (`partial_gpu_layers`).
         if std::env::var("SWARMLLM_EXPERTS_IN_RAM").as_deref() == Ok("0") {
-            expert_bytes.clear();
+            layers.experts.clear();
         }
         let (Some((_, card_per_layer_mb)), Some((_, host_per_layer_mb))) = (
             self.segment_cost_curve(model_id, true),
@@ -5905,7 +5970,7 @@ impl ModelProcessPool {
             .saturating_add(subsumed.mb);
         let Some(split) = card_split(
             &inputs,
-            &expert_bytes,
+            &layers,
             room_mb
                 .saturating_mul(1024 * 1024)
                 .saturating_add(crate::inference::split::hybrid::FORWARD_BUFFER_RESERVE_BYTES),
@@ -13468,6 +13533,24 @@ mod tests {
         t
     }
 
+    /// [`seventy_b_shaped`], untied, with every layer the same weight.
+    fn header_only_seventy_b_even_layers(tag: &str, model: &ModelId) -> std::path::PathBuf {
+        let tensors: Vec<(String, Vec<u64>, u32)> = seventy_b_shaped(false)
+            .into_iter()
+            .map(|(name, mut dims, kind)| {
+                if name.starts_with("blk.") {
+                    dims[1] = 24_576;
+                }
+                (name, dims, kind)
+            })
+            .collect();
+        let table: Vec<(&str, &[u64], u32)> = tensors
+            .iter()
+            .map(|(n, d, k)| (n.as_str(), d.as_slice(), *k))
+            .collect();
+        header_only_model(tag, model, &table)
+    }
+
     fn header_only_seventy_b(tag: &str, model: &ModelId, tied: bool) -> std::path::PathBuf {
         let tensors = seventy_b_shaped(tied);
         let table: Vec<(&str, &[u64], u32)> = tensors
@@ -13568,12 +13651,66 @@ mod tests {
         };
         // Room for the table and five layers, and not a sixth.
         let room = FORWARD_BUFFER_RESERVE_BYTES + 300 * MIB + 5 * 100 * MIB + 50 * MIB;
-        assert_eq!(split_for_card(&with_table, room), Some((5, 10)));
+        assert_eq!(
+            split_for_card(&with_table, &[100 * MIB; 10], room),
+            Some((5, 10))
+        );
         let spread = crate::model::auto_manage::vram::VramFootprintInputs {
             head_bytes: 0,
             ..with_table
         };
-        assert_eq!(split_for_card(&spread, room), Some((6, 10)));
+        assert_eq!(
+            split_for_card(&spread, &[130 * MIB; 10], room),
+            Some((6, 10))
+        );
+    }
+
+    /// **A card split charges each layer its own weights** (#343), read off
+    /// the header: the card takes the FIRST layers, and on this 70B-shaped
+    /// model the first is a third heavier than the rest (Q4_K_M gives a
+    /// model's first eighth more bits). With room for the heavy layer and one
+    /// more, short of a byte, one layer goes on the card; averaged over the
+    /// segment, as before, two did, and the card ran out of room.
+    #[test]
+    fn a_card_split_charges_each_layer_its_own_weights() {
+        const Q8_LAYER: u64 = 8192 * 24_576 / 32 * 34;
+        const Q8_FIRST_LAYER: u64 = 8192 * 32_768 / 32 * 34;
+        let model = ModelId("seventy-b-shaped-per-layer".to_string());
+        let data_dir = header_only_seventy_b("per-layer", &model, false);
+        let pool = ModelProcessPool::new(data_dir.clone());
+        let (inputs, layers) = pool
+            .segment_geometry(&model, Some((0, 8)))
+            .expect("the header alone is enough");
+        let mut expected = vec![Q8_LAYER; 8];
+        expected[0] = Q8_FIRST_LAYER;
+        assert_eq!(layers.weights, expected, "each layer's own tensors");
+        assert_eq!(
+            pool.segment_geometry(&model, Some((1, 3)))
+                .unwrap()
+                .1
+                .weights,
+            vec![Q8_LAYER; 2],
+            "a later segment's layers, from its own start"
+        );
+
+        let kv_per_layer = card_kv_bytes_of_split(&inputs).div_ceil(8);
+        let up_front = inputs.card_weight_bytes() - Q8_FIRST_LAYER - 7 * Q8_LAYER;
+        let room = crate::inference::split::hybrid::FORWARD_BUFFER_RESERVE_BYTES
+            + up_front
+            + Q8_FIRST_LAYER
+            + Q8_LAYER
+            + 2 * kv_per_layer
+            - 1;
+        assert_eq!(split_for_card(&inputs, &layers.weights, room), Some((1, 8)));
+        // The control: the same room, the layers priced at their average.
+        let averaged = spread_over_layers(inputs.card_weight_bytes() - inputs.head_bytes, 8);
+        assert_eq!(split_for_card(&inputs, &averaged, room), Some((2, 8)));
+        // And one more byte is room for the second.
+        assert_eq!(
+            split_for_card(&inputs, &layers.weights, room + 1),
+            Some((2, 8))
+        );
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     /// **A split's processor run that ends the model leaves its output head to
@@ -13658,11 +13795,14 @@ mod tests {
     /// cost most: the first carries the token table, the last the output head —
     /// on the card, so it pushes layers onto the processor. With the machine's
     /// room set where the first end takes a width and the last does not, the
-    /// offer stops short of that width.
+    /// offer stops short of that width. The layers weigh alike, so the ends
+    /// differ only by their tables: with the first layer a third heavier, as
+    /// the 70B shape has it, the first end costs the machine as much once each
+    /// layer is charged its own weights (#343).
     #[test]
     fn a_fresh_segment_is_weighed_at_both_ends_of_the_model() {
         let model = ModelId("seventy-b-shaped-ends".into());
-        let data_dir = header_only_seventy_b("ends", &model, false);
+        let data_dir = header_only_seventy_b_even_layers("ends", &model);
         let p = ModelProcessPool::new(data_dir.clone());
         p.test_card_in_play
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -14311,6 +14451,14 @@ mod validation_detail_tests {
 mod admission_tests {
     use super::*;
 
+    /// `inputs`' layers weighing alike, as a fixture's segments are priced.
+    fn alike(inputs: &crate::model::auto_manage::vram::VramFootprintInputs) -> Vec<u64> {
+        spread_over_layers(
+            inputs.card_weight_bytes().saturating_sub(inputs.head_bytes),
+            inputs.segment_layers as usize,
+        )
+    }
+
     fn pool() -> ModelProcessPool {
         ModelProcessPool::new(std::path::PathBuf::from("/tmp/swarmllm-admission-test"))
     }
@@ -14349,14 +14497,18 @@ mod admission_tests {
             splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen2),
         };
         let three_gb = 3 * 1024 * 1024 * 1024;
-        let (n, total) = split_for_card(&splittable, three_gb).expect("Qwen2 splits");
+        let (n, total) =
+            split_for_card(&splittable, &alike(&splittable), three_gb).expect("Qwen2 splits");
         assert!(n > 0 && n < total, "{n} of {total}");
 
         let unsplittable = crate::model::auto_manage::vram::VramFootprintInputs {
             splits_across_devices: arch_supports_hybrid(&ModelArch::DeepSeek2),
             ..splittable
         };
-        assert_eq!(split_for_card(&unsplittable, three_gb), None);
+        assert_eq!(
+            split_for_card(&unsplittable, &alike(&unsplittable), three_gb),
+            None
+        );
         // Qwen 3.5 splits, checked on a card: dense since 2026-10-07, the MoE
         // since 2026-10-11 (#228).
         for arch in [ModelArch::Qwen35, ModelArch::Qwen35Moe] {
@@ -14364,7 +14516,10 @@ mod admission_tests {
                 splits_across_devices: arch_supports_hybrid(&arch),
                 ..splittable
             };
-            assert!(split_for_card(&splits, three_gb).is_some(), "{arch}");
+            assert!(
+                split_for_card(&splits, &alike(&splits), three_gb).is_some(),
+                "{arch}"
+            );
         }
         let qwen35 = crate::model::auto_manage::vram::VramFootprintInputs {
             splits_across_devices: arch_supports_hybrid(&ModelArch::Qwen35),
@@ -14378,8 +14533,8 @@ mod admission_tests {
                 .share(qwen35.segment_layers / 4, qwen35.segment_layers),
             ..qwen35
         };
-        let (all_kv, _) = split_for_card(&qwen35, three_gb).unwrap();
-        let (some_kv, _) = split_for_card(&quarter_kv, three_gb).unwrap();
+        let (all_kv, _) = split_for_card(&qwen35, &alike(&qwen35), three_gb).unwrap();
+        let (some_kv, _) = split_for_card(&quarter_kv, &alike(&quarter_kv), three_gb).unwrap();
         assert!(some_kv > all_kv, "{some_kv} layers vs {all_kv}");
     }
 
@@ -14425,23 +14580,28 @@ mod admission_tests {
         let moe = thirty_b_a3b();
         let experts = vec![208 * MIB; 48];
         let room = 6_500 * MIB;
-        let Some(CardSplit::ExpertsInRam { in_ram, total }) = card_split(&moe, &experts, room)
+        let layers = |experts: &[u64]| LayerBytes {
+            weights: alike(&moe),
+            experts: experts.to_vec(),
+        };
+        let Some(CardSplit::ExpertsInRam { in_ram, total }) =
+            card_split(&moe, &layers(&experts), room)
         else {
-            panic!("{:?}", card_split(&moe, &experts, room));
+            panic!("{:?}", card_split(&moe, &layers(&experts), room));
         };
         assert_eq!(total, 48);
         assert!(in_ram > 0 && in_ram < 48, "{in_ram}");
         // The FEWEST: one more layer's experts of room is one fewer in RAM,
         // one less is one more.
         assert_eq!(
-            card_split(&moe, &experts, room + 208 * MIB),
+            card_split(&moe, &layers(&experts), room + 208 * MIB),
             Some(CardSplit::ExpertsInRam {
                 in_ram: in_ram - 1,
                 total
             })
         );
         assert_eq!(
-            card_split(&moe, &experts, room - 208 * MIB),
+            card_split(&moe, &layers(&experts), room - 208 * MIB),
             Some(CardSplit::ExpertsInRam {
                 in_ram: in_ram + 1,
                 total
@@ -14452,7 +14612,7 @@ mod admission_tests {
         let mut heavy_first = experts.clone();
         heavy_first[..4].fill(416 * MIB);
         let Some(CardSplit::ExpertsInRam { in_ram: fewer, .. }) =
-            card_split(&moe, &heavy_first, room)
+            card_split(&moe, &layers(&heavy_first), room)
         else {
             panic!("still experts in RAM");
         };
@@ -14460,13 +14620,13 @@ mod admission_tests {
 
         // A dense model has no experts to keep back: whole layers, as before.
         assert!(matches!(
-            card_split(&moe, &[0; 48], room),
+            card_split(&moe, &layers(&[0; 48]), room),
             Some(CardSplit::Layers { on_card, total: 48 }) if on_card < 48
         ));
         // A card too small for everything but the experts — attention and the
         // whole conversation cache of all 48 layers — is split by layers too.
         assert!(matches!(
-            card_split(&moe, &experts, 1_000 * MIB),
+            card_split(&moe, &layers(&experts), 1_000 * MIB),
             Some(CardSplit::Layers { .. }) | None
         ));
         // And an architecture the loader will not split gets neither.
@@ -14474,7 +14634,7 @@ mod admission_tests {
             splits_across_devices: false,
             ..moe
         };
-        assert_eq!(card_split(&unsplittable, &experts, room), None);
+        assert_eq!(card_split(&unsplittable, &layers(&experts), room), None);
     }
 
     /// **Experts kept in RAM are charged to the machine and the rest to the

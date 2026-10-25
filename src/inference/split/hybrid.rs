@@ -51,54 +51,49 @@ use candle_core::{Device, Tensor};
 /// symmetric trade and this is set generously.
 pub(crate) const FORWARD_BUFFER_RESERVE_BYTES: u64 = 384 * 1024 * 1024;
 
-/// How many of `total_layers` fit on the card, given what a layer costs.
+/// How many of a segment's FIRST layers fit on the card: `0..=layer_weights.len()`.
 ///
-/// Returns `0..=total_layers`. Zero means the processor takes the whole
-/// segment, which is the old behaviour and still correct when nothing fits.
+/// Zero means the processor takes the whole segment, which is the old
+/// behaviour and still correct when nothing fits.
 ///
-/// `kv_bytes_per_layer` is a layer's cache at the context KV is charged for.
-/// It has to be the figure admission uses, or a model is placed by one number
-/// and then runs out of memory against another — the disagreement that made
+/// Each layer is charged its OWN weights (`layer_weights[i]`, the header's
+/// tensors of that layer) and its share of the segment's caches at the context
+/// charged (`kv_budget::KvPrice` — each layer by its own shape, a
+/// sliding-window layer by its window; FUTURE_WORK #281). The cache figure has
+/// to be the one admission uses, or a model is placed by one number and then
+/// runs out of memory against another — the disagreement that made
 /// `estimate_gpu_footprint_mb` and `estimate_vram_from_shard_dir` reach
 /// different conclusions about the same model (gotcha #388).
-pub(crate) fn layers_that_fit(
+///
+/// **The weights were averaged over the segment until 2026-10-25** (#343),
+/// while the card takes the first layers. Q4_K_M gives the first and last
+/// eighth of a model, and every third layer between, more bits (llama.cpp's
+/// `use_more_bits`), so a 70B's first ten layers weigh 519 MiB each against
+/// 502 averaged over its first 17: ~170 MiB the card was not charged.
+/// llama.cpp's own fitting (`common/fit.cpp`, `llama_params_fit_impl`) weighs
+/// each candidate count by the tensors it would place, never by an average.
+pub(crate) fn plan_gpu_layers(
     budget_bytes: u64,
-    weights_bytes_per_layer: u64,
-    kv_bytes_per_layer: u64,
-    total_layers: usize,
+    layer_weights: &[u64],
+    segment_kv_bytes: u64,
 ) -> usize {
-    if total_layers == 0 || weights_bytes_per_layer == 0 {
+    // An unpriced segment is placed nowhere: no weights is "not known", never
+    // "free".
+    if layer_weights.iter().all(|&bytes| bytes == 0) {
         return 0;
     }
     let usable = budget_bytes.saturating_sub(FORWARD_BUFFER_RESERVE_BYTES);
     // A layer on the card brings its KV with it; one on the processor does not.
     // Folding KV in here is what removes the need for a flat reserve.
-    let per_layer = weights_bytes_per_layer.saturating_add(kv_bytes_per_layer);
-    if per_layer == 0 {
-        return 0;
-    }
-    ((usable / per_layer) as usize).min(total_layers)
-}
-
-/// The same decision over a whole segment: its weights, and the cache its
-/// layers keep on the card at the context charged (`kv_budget::KvPrice` — each
-/// layer by its own shape, a sliding-window layer by its window; FUTURE_WORK
-/// #281), each averaged over the segment's layers.
-pub(crate) fn plan_gpu_layers(
-    budget_bytes: u64,
-    segment_weights_bytes: u64,
-    segment_kv_bytes: u64,
-    total_layers: usize,
-) -> usize {
-    if total_layers == 0 {
-        return 0;
-    }
-    layers_that_fit(
-        budget_bytes,
-        segment_weights_bytes / total_layers as u64,
-        segment_kv_bytes.div_ceil(total_layers as u64),
-        total_layers,
-    )
+    let kv_per_layer = segment_kv_bytes.div_ceil(layer_weights.len() as u64);
+    let mut placed = 0u64;
+    layer_weights
+        .iter()
+        .take_while(|&&weights| {
+            placed = placed.saturating_add(weights).saturating_add(kv_per_layer);
+            placed <= usable
+        })
+        .count()
 }
 
 /// How many of a segment's `segment_layers` go on the loader's `device` (the card): the pool's
@@ -391,6 +386,12 @@ mod tests {
     const MB: u64 = 1024 * 1024;
     const GB: u64 = 1024 * MB;
 
+    /// `weights` spread evenly over `layers` layers, as every layer of a
+    /// segment was charged before #343.
+    fn even(weights: u64, layers: usize) -> Vec<u64> {
+        vec![weights / layers as u64; layers]
+    }
+
     /// `layers` layers' caches of `elems` K and V elements a token each, kept
     /// as `storage`, at `context` positions.
     fn segment_kv(layers: usize, elems: usize, storage: KvStorage, context: u64) -> u64 {
@@ -405,9 +406,8 @@ mod tests {
         let weights = 9347 * MB;
         let n = plan_gpu_layers(
             4990 * MB,
-            weights,
+            &even(weights, total),
             segment_kv(total, 1024, KvStorage::F32, 4096),
-            total,
         );
         assert!(n > 0, "still placing nothing on a card with room");
         assert!(n < total, "claimed to fit a segment that does not fit");
@@ -450,9 +450,8 @@ mod tests {
         // 2 GB of weights, 8 GB budget: everything, and never more than exists.
         let n = plan_gpu_layers(
             8 * GB,
-            2 * GB,
+            &even(2 * GB, 28),
             segment_kv(28, 512, KvStorage::F32, 4096),
-            28,
         );
         assert_eq!(n, 28);
     }
@@ -463,15 +462,18 @@ mod tests {
         assert_eq!(
             plan_gpu_layers(
                 256 * MB,
-                8 * GB,
-                segment_kv(32, 1024, KvStorage::F32, 4096),
-                32
+                &even(8 * GB, 32),
+                segment_kv(32, 1024, KvStorage::F32, 4096)
             ),
             0
         );
         // And a zero budget cannot go negative or wrap.
         assert_eq!(
-            plan_gpu_layers(0, 8 * GB, segment_kv(32, 1024, KvStorage::F32, 4096), 32),
+            plan_gpu_layers(
+                0,
+                &even(8 * GB, 32),
+                segment_kv(32, 1024, KvStorage::F32, 4096)
+            ),
             0
         );
     }
@@ -484,9 +486,8 @@ mod tests {
         let args = |ctx| {
             plan_gpu_layers(
                 6 * GB,
-                4 * GB,
+                &even(4 * GB, 32),
                 segment_kv(32, 1024, KvStorage::F32, ctx),
-                32,
             )
         };
         let short = args(2048);
@@ -504,24 +505,21 @@ mod tests {
         // model maintaining one must not be planned as though it were free.
         let plain = plan_gpu_layers(
             6 * GB,
-            4 * GB,
+            &even(4 * GB, 32),
             segment_kv(32, 1024, KvStorage::F32, 8192),
-            32,
         );
         let mirrored = plan_gpu_layers(
             6 * GB,
-            4 * GB,
+            &even(4 * GB, 32),
             segment_kv(32, 1024, KvStorage::F32Mirrored, 8192),
-            32,
         );
         assert!(mirrored <= plain, "mirroring must not increase the plan");
         // And the half cache, at a third of the mirrored layout's bytes, leaves
         // room for more of the model on the card (FUTURE_WORK #194).
         let half = plan_gpu_layers(
             6 * GB,
-            4 * GB,
+            &even(4 * GB, 32),
             segment_kv(32, 1024, KvStorage::F16, 8192),
-            32,
         );
         assert!(
             half > mirrored,
@@ -650,9 +648,34 @@ mod tests {
 
     #[test]
     fn degenerate_inputs_do_not_panic_or_wrap() {
-        assert_eq!(layers_that_fit(u64::MAX, 0, 0, 8), 0);
-        assert_eq!(layers_that_fit(0, 1, 1, 0), 0);
+        assert_eq!(plan_gpu_layers(u64::MAX, &[0; 8], 0), 0, "unpriced");
+        assert_eq!(plan_gpu_layers(0, &[], 1), 0, "no layers");
         // Never more layers than the segment has, however large the budget.
-        assert_eq!(layers_that_fit(u64::MAX, 1, 0, 8), 8);
+        assert_eq!(plan_gpu_layers(u64::MAX, &[1; 8], 0), 8);
+        assert_eq!(plan_gpu_layers(u64::MAX, &[u64::MAX; 3], u64::MAX), 0);
+    }
+
+    /// **Each layer is charged its own weights** (#343): the card takes the
+    /// FIRST layers, and a quantization mix gives some more bits than others.
+    /// Averaged, a heavy opening placed one layer too many and a light one a
+    /// layer too few.
+    #[test]
+    fn the_card_is_charged_its_own_layers_not_their_average() {
+        let budget = FORWARD_BUFFER_RESERVE_BYTES + 450 * MB;
+        // 300 + 100 fits 450, a third layer does not; averaged at 150, three did.
+        let heavy_first = [300 * MB, 100 * MB, 100 * MB, 100 * MB];
+        assert_eq!(plan_gpu_layers(budget, &heavy_first, 0), 2);
+        assert_eq!(plan_gpu_layers(budget, &even(600 * MB, 4), 0), 3);
+        // Light first: three fit in 350; averaged at 150, only two did.
+        let budget = FORWARD_BUFFER_RESERVE_BYTES + 350 * MB;
+        let heavy_last = [100 * MB, 100 * MB, 100 * MB, 300 * MB];
+        assert_eq!(plan_gpu_layers(budget, &heavy_last, 0), 3);
+        assert_eq!(plan_gpu_layers(budget, &even(600 * MB, 4), 0), 2);
+        // A layer's cache comes with it: 40 MB of cache a layer moves the
+        // heavy opening's line to one.
+        assert_eq!(
+            plan_gpu_layers(budget + 100 * MB, &heavy_first, 4 * 40 * MB),
+            1
+        );
     }
 }

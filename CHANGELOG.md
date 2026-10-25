@@ -35,6 +35,14 @@ made among every computer in reach: each holds one slice sized to its memory, as
 project does, and keeps it even when the space its owner gave the swarm is nearly used, since
 that is the only way the model runs. A model spread this far is slow, but before it could not run at all (#346).
 
+**A computer that runs part of a large model on its graphics card no longer plans more of it there
+than fits.** When a card cannot hold a computer's whole share of a model, the first layers go on
+the card and the rest run on the processor. How many went on the card was worked out from the
+share's average layer, but the first layers of most downloaded models are stored at higher
+quality and weigh more: on a 70-billion-parameter model the card was 170 MB fuller than planned,
+leaving its conversation memory almost no margin. Each layer is now counted at its own size
+(#343).
+
 ## [0.3.253-alpha] — 2026-10-25
 
 **A model running whole on your computer now checks only the guesses that pay, and Qwen 3.5
