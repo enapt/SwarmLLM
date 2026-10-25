@@ -216,6 +216,37 @@ impl AutoShardManager {
         parts
     }
 
+    /// Is `model_id` a model being assembled — asked for, a part of it on a
+    /// live computer and another part on none? The model whose missing parts
+    /// come first (`scoring::fills_a_hole`); prune never gives back a copy of
+    /// one to make room for another's (`prune::spare_for_a_hole`). Only live
+    /// holders count: a part listed for a computer that is gone is missing.
+    pub(super) fn model_has_holes(&self, model_id: &ModelId) -> bool {
+        if !self.asked_for(model_id) {
+            return false;
+        }
+        let registry = &self.shared_state.model_registry;
+        let Some(manifest) = registry.get_manifest(model_id) else {
+            return false;
+        };
+        let local = self.shared_state.identity.node_id();
+        let held: Vec<bool> = manifest
+            .shards
+            .iter()
+            .filter(|s| s.index != MMPROJ_SHARD_INDEX)
+            .map(|s| {
+                registry
+                    .shard_holders(&ShardId {
+                        model_id: model_id.clone(),
+                        index: s.index,
+                    })
+                    .iter()
+                    .any(|h| h == local || self.shared_state.connected_node_ids.contains(h))
+            })
+            .collect();
+        held.iter().any(|&h| h) && held.iter().any(|&h| !h)
+    }
+
     /// Has anyone asked for this model — regional demand gossiped by any node,
     /// or a request routed by this one since the last decay?
     pub(super) fn asked_for(&self, model_id: &ModelId) -> bool {
@@ -510,6 +541,32 @@ fn rendezvous(model: &ModelId, node: &NodeId) -> [u8; 32] {
     h.update(model.0.as_bytes());
     h.update(&node.0);
     *h.finalize().as_bytes()
+}
+
+/// `node`'s rendezvous weight for one part, `blake3(model ‖ 0 ‖ index ‖ node)`:
+/// per part, so the holders a model's parts keep are spread across machines.
+pub(super) fn part_rank_weight(part: &ShardId, node: &NodeId) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(part.model_id.0.as_bytes());
+    h.update(&[0]);
+    h.update(&part.index.to_le_bytes());
+    h.update(&node.0);
+    *h.finalize().as_bytes()
+}
+
+/// Is `node` among the first `keep` of `part`'s `holders` in rendezvous order
+/// ([`part_rank_weight`])? Every computer reading the same holders ranks them
+/// alike, so when copies are given back for a hole (`prune::spare_for_a_hole`)
+/// the first `keep` never give theirs back, and the part keeps them however
+/// many holders decide in the same minute. Without it, each of three full
+/// holders could count three copies, one to spare, and give its own back at
+/// once. Rendezvous (highest-random-weight) hashing is how CRUSH-style
+/// placement agrees on replicas with no coordinator.
+pub(super) fn kept_by_rank(part: &ShardId, holders: &[NodeId], node: &NodeId, keep: usize) -> bool {
+    let mut ranked: Vec<&NodeId> = holders.iter().collect();
+    ranked.sort_by_key(|n| std::cmp::Reverse(part_rank_weight(part, n)));
+    ranked.dedup();
+    ranked.into_iter().take(keep).any(|n| n == node)
 }
 
 /// The layer ranges of `parts` of `manifest`.

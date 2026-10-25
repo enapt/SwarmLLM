@@ -873,7 +873,7 @@ impl AutoShardManager {
         // the pressure all of them leave behind.
         let mut chosen_bytes = 0u64;
         let shard_pins = super::manager::read_shard_pins(&self.shared_state);
-        let mut selected = Vec::new();
+        let mut selected: Vec<ShardCandidate> = Vec::new();
         let max = if max_shards > 0 {
             max_shards as usize
         } else {
@@ -932,9 +932,18 @@ impl AutoShardManager {
         // In two tiers: the parts that fill a hole (`fills_a_hole`) across every
         // model first, then the rest — so a cycle's few slots go to a part no
         // computer holds before a further copy of one some computer does.
+        //
+        // A hole the budget could not fit, with no hole chosen, keeps what is
+        // left for itself: the copies are not looked at this cycle. Filled with
+        // copies, the room prune makes for the hole (`prune::spare_for_a_hole`)
+        // would be taken before the hole could use it.
         let (holes, copies): (Vec<ShardCandidate>, Vec<ShardCandidate>) =
             candidates.into_iter().partition(|c| c.fills_a_hole);
-        for tier in [holes, copies] {
+        let mut a_hole_did_not_fit = false;
+        for (holes_tier, tier) in [(true, holes), (false, copies)] {
+            if !holes_tier && a_hole_did_not_fit && !selected.iter().any(|c| c.fills_a_hole) {
+                break;
+            }
             let mut by_model: std::collections::HashMap<String, Vec<ShardCandidate>> =
                 std::collections::HashMap::new();
             let mut model_order: Vec<String> = Vec::new();
@@ -981,6 +990,9 @@ impl AutoShardManager {
                                 "Auto-manage: skipping candidate with zero shard_size_bytes (unknown size)"
                             );
                             continue;
+                        }
+                        if candidate.fills_a_hole && candidate.shard_size_bytes > budget_bytes {
+                            a_hole_did_not_fit = true;
                         }
                         if candidate.shard_size_bytes <= budget_bytes {
                             let pressure_after = report
@@ -1118,6 +1130,46 @@ impl AutoShardManager {
 /// pulled onto every machine.
 pub(super) fn fills_a_hole(assembling_an_asked_model: bool, holder_count: usize) -> bool {
     assembling_an_asked_model && holder_count == 0
+}
+
+/// The room the first part that fills a hole (`first_hole_bytes`) still lacks
+/// on this node after a cycle's choice: `None` when a hole was chosen (it is
+/// being fetched) or none was offered, else its size less what storage had
+/// left (`remaining_bytes`), plus whatever this node holds past its budget
+/// (`over_budget_bytes` — giving back only the part's size would leave it
+/// still over). What the download pass notes for prune
+/// (`AutoShardManager::room_for_holes`).
+pub(super) fn room_a_hole_lacks(
+    first_hole_bytes: Option<u64>,
+    chose_a_hole: bool,
+    remaining_bytes: u64,
+    over_budget_bytes: u64,
+) -> Option<u64> {
+    if chose_a_hole {
+        return None;
+    }
+    first_hole_bytes
+        .map(|bytes| bytes.saturating_add(over_budget_bytes))
+        .and_then(|needed| needed.checked_sub(remaining_bytes))
+        .filter(|&lacks| lacks > 0)
+}
+
+impl AutoShardManager {
+    /// The size of the first part offered that fills a hole and is not being
+    /// fetched here already — what the room a hole lacks is measured by.
+    pub(super) fn first_hole_to_fetch(&self, candidates: &[ShardCandidate]) -> Option<u64> {
+        candidates
+            .iter()
+            .find(|c| {
+                c.fills_a_hole
+                    && c.shard_size_bytes > 0
+                    && !self
+                        .shared_state
+                        .models
+                        .is_shard_in_progress(&c.model_id, c.shard_index)
+            })
+            .map(|c| c.shard_size_bytes)
+    }
 }
 
 #[cfg(test)]
@@ -1974,6 +2026,92 @@ mod holes_first {
             fetched_with_pool_vram(&manager, &state, pool_vram_mb),
             vec![(small, 1)],
             "nobody asked for the large model: the score decides, as before"
+        );
+    }
+
+    /// What the download pass notes for prune: the size a hole lacks beyond
+    /// what storage has left, plus anything held past the budget; nothing
+    /// once a hole is chosen or when none is offered.
+    #[test]
+    fn the_room_a_hole_lacks_is_its_size_less_what_is_left() {
+        use super::room_a_hole_lacks;
+        assert_eq!(room_a_hole_lacks(Some(500), false, 300, 0), Some(200));
+        assert_eq!(room_a_hole_lacks(Some(500), false, 0, 100), Some(600));
+        assert_eq!(room_a_hole_lacks(Some(500), false, 500, 0), None, "it fits");
+        assert_eq!(
+            room_a_hole_lacks(Some(500), true, 0, 0),
+            None,
+            "a hole was chosen"
+        );
+        assert_eq!(
+            room_a_hole_lacks(None, false, 0, 0),
+            None,
+            "no hole offered"
+        );
+    }
+
+    /// A hole the budget cannot fit keeps what is left for itself: with 300 MB
+    /// left, a 500 MB part no computer holds and a 200 MB further copy, the
+    /// cycle takes nothing — the copy would fill the room prune is about to
+    /// make for the hole. With the hole gone (the control), the copy is taken.
+    #[test]
+    fn a_hole_that_does_not_fit_keeps_the_room_from_further_copies() {
+        use super::super::manager::ShardCandidate;
+        use super::super::{DiskSpace, StorageReading};
+        use super::BudgetReport;
+
+        let (state, manager) = make_test_manager_with_config(Config::default());
+        let small = register_manifest_with_sized_shards(&state, "small", 8, &[(0, 8)], 200 * MIB);
+        let candidate = |mid: &ModelId, size: u64, fills_a_hole: bool| ShardCandidate {
+            model_id: mid.clone(),
+            model_name: mid.0.clone(),
+            shard_index: 0,
+            shard_size_bytes: size,
+            holder_count: usize::from(!fills_a_hole),
+            score: 1.0,
+            fills_a_hole,
+        };
+        let reading = StorageReading {
+            max_storage_mb: 1_000,
+            max_disk_mb: 50_000,
+            contribution: ContributionMode::Maximum,
+            disk: Some(DiskSpace {
+                free_bytes: 400_000 * MIB,
+                total_bytes: 1_000_000 * MIB,
+            }),
+            held_bytes: 700 * MIB,
+        };
+        let report = BudgetReport {
+            held_bytes: reading.held_bytes,
+            held_shards: 2,
+            budget: reading.budget(),
+            max_shards: 0,
+            max_shards_reached: false,
+            reading,
+        };
+        assert_eq!(report.remaining_bytes(), 300 * MIB, "fixture: 300 MB left");
+        let hole = ModelId("large".into());
+        let copy = candidate(&small, 200 * MIB, false);
+
+        let chosen = manager.select_within_budget(
+            vec![candidate(&hole, 500 * MIB, true), copy.clone()],
+            &report,
+            0,
+        );
+        assert!(
+            chosen.is_empty(),
+            "the copy does not take the room the hole is waiting for: {:?}",
+            chosen.iter().map(|c| &c.model_id).collect::<Vec<_>>()
+        );
+
+        let chosen = manager.select_within_budget(vec![copy], &report, 0);
+        assert_eq!(
+            chosen
+                .iter()
+                .map(|c| c.model_id.clone())
+                .collect::<Vec<_>>(),
+            vec![small],
+            "control: with no hole waiting, the copy is taken"
         );
     }
 }

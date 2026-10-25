@@ -674,6 +674,12 @@ impl AutoShardManager {
                     target_replicas: effective_target,
                     score,
                     not_ours_to_host,
+                    to_make_room: self.sheds_only_to_make_room(
+                        &shard_id,
+                        &holders,
+                        disk_pressure,
+                        &shard_pins_cached,
+                    ),
                 });
             }
 
@@ -724,6 +730,7 @@ impl AutoShardManager {
                                 target_replicas: mmproj_min,
                                 score: 0.1, // Very low score -- only prune under extreme pressure
                                 not_ours_to_host: false,
+                                to_make_room: false,
                             });
                         }
                     }
@@ -794,6 +801,12 @@ impl AutoShardManager {
 
         // Execute pruning with per-model limits
         let max_per_model = if pressure_urgent { 2u32 } else { 1u32 };
+        // A copy given back only to make room for a part no computer holds
+        // stops at the room the download pass noted, counting every part this
+        // pass frees.
+        let room_for_holes = self.room_for_holes_now().unwrap_or(0);
+        let mut room_made = 0u64;
+        let floor_for_a_hole = self.floor_for_a_hole();
 
         for candidate in &prune_candidates {
             let count = pruned_per_model
@@ -802,6 +815,9 @@ impl AutoShardManager {
                 .unwrap_or(0);
             // Every part of a copy that is not ours to host goes in one pass.
             if count >= max_per_model && !candidate.not_ours_to_host {
+                continue;
+            }
+            if candidate.to_make_room && room_made >= room_for_holes {
                 continue;
             }
 
@@ -853,7 +869,14 @@ impl AutoShardManager {
                 );
                 continue;
             }
-            if current_holders <= effective_target as usize && !candidate.not_ours_to_host {
+            // A copy given back to make room is held to the hole's floor, not
+            // the target that kept it.
+            let still_spare = if candidate.to_make_room {
+                current_holders > floor_for_a_hole
+            } else {
+                current_holders > effective_target as usize
+            };
+            if !still_spare && !candidate.not_ours_to_host {
                 tracing::debug!(
                     model = %candidate.model_id,
                     shard = candidate.shard_index,
@@ -945,10 +968,18 @@ impl AutoShardManager {
                 model_id: candidate.model_id.clone(),
                 model_name: candidate.model_name.clone(),
                 shard_index: candidate.shard_index,
-                reason: format!(
-                    "Over-replicated ({} holders, target {})",
-                    candidate.holder_count, candidate.target_replicas
-                ),
+                reason: if candidate.to_make_room {
+                    format!(
+                        "Room for a part no computer holds ({} holders, {} kept)",
+                        current_holders,
+                        current_holders.saturating_sub(1)
+                    )
+                } else {
+                    format!(
+                        "Over-replicated ({} holders, target {})",
+                        candidate.holder_count, candidate.target_replicas
+                    )
+                },
                 freed_bytes: candidate.shard_size_bytes,
                 remaining_local_shards: remaining_local,
                 // Use the freshly-recomputed holder count (`current_holders`)
@@ -961,14 +992,26 @@ impl AutoShardManager {
                 timestamp: chrono::Utc::now(),
             };
 
-            tracing::info!(
-                model = %candidate.model_id,
-                shard = candidate.shard_index,
-                holders = candidate.holder_count,
-                target = candidate.target_replicas,
-                freed_mb = candidate.shard_size_bytes / (1024 * 1024),
-                "Pruning over-replicated shard"
-            );
+            room_made = room_made.saturating_add(candidate.shard_size_bytes);
+            if candidate.to_make_room {
+                tracing::info!(
+                    model = %candidate.model_id,
+                    shard = candidate.shard_index,
+                    holders = current_holders,
+                    freed_mb = candidate.shard_size_bytes / (1024 * 1024),
+                    room_mb = room_for_holes / (1024 * 1024),
+                    "DIAG: gave back a spare copy to make room for a part no computer holds"
+                );
+            } else {
+                tracing::info!(
+                    model = %candidate.model_id,
+                    shard = candidate.shard_index,
+                    holders = candidate.holder_count,
+                    target = candidate.target_replicas,
+                    freed_mb = candidate.shard_size_bytes / (1024 * 1024),
+                    "Pruning over-replicated shard"
+                );
+            }
 
             // If no local shards remain, kill the worker subprocess to free VRAM
             if remaining_local == 0
@@ -1305,8 +1348,82 @@ impl AutoShardManager {
         pressure: f64,
         shard_pins: &[crate::types::ShardPin],
     ) -> bool {
-        self.copy_kept_because(shard_id, holders, pressure, shard_pins)
+        self.copy_kept_because(shard_id, holders, pressure, shard_pins, true)
             .is_none()
+    }
+
+    /// Would prune shed this copy ONLY to make room for a part no computer
+    /// holds — kept by the replica count or the region rule, given back because
+    /// the download pass noted a hole it could not fit
+    /// ([`Self::spare_for_a_hole`])? Prune gives such copies back within the
+    /// room noted, never more, and re-checks them against
+    /// [`Self::floor_for_a_hole`], not the replica target.
+    pub(super) fn sheds_only_to_make_room(
+        &self,
+        shard_id: &ShardId,
+        holders: &[NodeId],
+        pressure: f64,
+        shard_pins: &[crate::types::ShardPin],
+    ) -> bool {
+        self.copy_kept_because(shard_id, holders, pressure, shard_pins, false)
+            .is_some()
+            && self.would_shed_copy(shard_id, holders, pressure, shard_pins)
+    }
+
+    /// The live holders, this node among them, a part must have MORE than for
+    /// this node's copy to be given back to make room for a hole:
+    /// `min_replicas`, and never under two — so two other copies remain.
+    pub(super) fn floor_for_a_hole(&self) -> usize {
+        (self.shared_state.cfg().auto_manage.min_replicas as usize).max(2)
+    }
+
+    /// May this copy, kept only for how many copies there are or where they
+    /// are (the replica count, the last close holder in this region), be given
+    /// back to make room for a part no computer holds? Only while the download
+    /// pass says such a
+    /// part lacks room here ([`super::manager::AutoShardManager::room_for_holes_now`]),
+    /// only where the part keeps more than [`Self::floor_for_a_hole`] live
+    /// holders counting this node and this node is not among the first that
+    /// many in the order every computer ranks them (`coverage::kept_by_rank`),
+    /// and never a copy of a model being assembled
+    /// itself (`coverage::model_has_holes`), loaded here, or held here whole
+    /// or all but a few parts of (`completes_model_here_counting` — at any
+    /// pressure: the owner's one-hop answer is not traded for a hole).
+    ///
+    /// Why: a node whose budget is full of copies those rules keep never took a
+    /// part of a model that existed nowhere, and with every node full the
+    /// model could never be assembled. 2026-10-25: a node full at 12.5 GB took
+    /// nothing while 63 of a 70B's 79 parts were on no computer. Read once its
+    /// limit was raised, its copies had three to five holders each, and of 21
+    /// of 28 it was the only close one (the rest were 200-400 ms away): the
+    /// region rule, not the count, held them. A part on no computer is a
+    /// model that cannot run; another copy only makes one sturdier or nearer.
+    /// Petals moves a server off its blocks only when no block is left
+    /// uncovered (`block_selection.should_choose_other_blocks`); this keeps
+    /// two other copies besides. Past the region rule, deliberately: the last
+    /// close copy of a runnable model costs a slower reply, a hole costs every
+    /// one. Never past the rules that keep a copy for what it DOES (carrying a
+    /// model, a near chain, a drafter, privacy, pins). Both passes ask it through
+    /// [`Self::would_shed_copy`], so a copy given back is not fetched straight
+    /// back while the room is noted (gotcha #795).
+    pub(super) fn spare_for_a_hole(&self, shard_id: &ShardId, holders: &[NodeId]) -> bool {
+        let floor = self.floor_for_a_hole();
+        self.room_for_holes_now().is_some()
+            && holders.len() > floor
+            // The first `floor` holders every computer ranks alike keep theirs,
+            // so holders deciding at once never all give theirs back.
+            && !super::coverage::kept_by_rank(
+                shard_id,
+                holders,
+                self.shared_state.identity.node_id(),
+                floor,
+            )
+            && !self.model_has_holes(&shard_id.model_id)
+            && !self
+                .shared_state
+                .model_process_pool
+                .is_loaded(&shard_id.model_id)
+            && !self.completes_model_here_counting(shard_id)
     }
 
     /// [`Self::would_shed_copy`] with its reason: `None` sheds the copy,
@@ -1320,6 +1437,9 @@ impl AutoShardManager {
         holders: &[NodeId],
         pressure: f64,
         shard_pins: &[crate::types::ShardPin],
+        // Whether a part no computer holds may take a copy the replica count
+        // keeps (`spare_for_a_hole`); `false` asks the replica count alone.
+        make_room: bool,
     ) -> Option<&'static str> {
         let live = self.shared_state.cfg();
         if !live.auto_manage.prune_enabled {
@@ -1431,31 +1551,38 @@ impl AutoShardManager {
         // In auto mode, a shard over-replicated by ≥SATURATION_FACTOR_AUTO×
         // target bypasses the RELAXED nudge and uses the raw target — so a
         // node with zero local pressure still sheds once the swarm has plenty.
-        if !sheds_at(
+        let kept_for_its_copies = if !sheds_at(
             target,
             pressure,
             holders.len(),
             live.node.contribution_auto,
             live.auto_manage.min_replicas,
         ) {
-            return Some("not more copies than the target");
+            Some("not more copies than the target")
+        } else {
+            // A part of a model this node holds WHOLE, or all but a few parts of
+            // (the download pass completes those) — counting this part, so the
+            // download pass asking before the part is here gets the same answer —
+            // is not surplus by the count: shedding it frees one part and turns the
+            // one computer that answers with no hop into a split, the hole a
+            // request then fails on (field report 2026-10-16: a 30B's part 25,
+            // pruned beside two other holders, failed a request 0.3.238 answered
+            // locally). Copies of partial holders go first; only an urgent disk
+            // takes one. After the count, so the files are read only for a part
+            // the count would shed (`parts_missing_here` stats each part).
+            if pressure < PRESSURE_URGENT && self.completes_model_here_counting(shard_id) {
+                return Some("this computer holds the whole model, or completes it");
+            }
+            // Region-aware: never the last holder in our region.
+            self.would_eliminate_region(shard_id, local_node_id, holders)
+                .then_some("the last close holder in this region")
+        };
+        // Kept only for how many copies there are, or where they are: a part
+        // no computer holds that lacks room here may take it.
+        if kept_for_its_copies.is_some() && make_room && self.spare_for_a_hole(shard_id, holders) {
+            return None;
         }
-        // A part of a model this node holds WHOLE, or all but a few parts of
-        // (the download pass completes those) — counting this part, so the
-        // download pass asking before the part is here gets the same answer —
-        // is not surplus by the count: shedding it frees one part and turns the
-        // one computer that answers with no hop into a split, the hole a
-        // request then fails on (field report 2026-10-16: a 30B's part 25,
-        // pruned beside two other holders, failed a request 0.3.238 answered
-        // locally). Copies of partial holders go first; only an urgent disk
-        // takes one. After the count, so the files are read only for a part
-        // the count would shed (`parts_missing_here` stats each part).
-        if pressure < PRESSURE_URGENT && self.completes_model_here_counting(shard_id) {
-            return Some("this computer holds the whole model, or completes it");
-        }
-        // Region-aware: never the last holder in our region.
-        self.would_eliminate_region(shard_id, local_node_id, holders)
-            .then_some("the last close holder in this region")
+        kept_for_its_copies
     }
 
     /// Would prune shed `candidate` again once it had landed — counted among
@@ -1487,7 +1614,7 @@ impl AutoShardManager {
                     ),
                 );
         }
-        match self.copy_kept_because(&shard_id, &holders, pressure_after, shard_pins) {
+        match self.copy_kept_because(&shard_id, &holders, pressure_after, shard_pins, true) {
             None => true,
             Some(rule) => {
                 tracing::debug!(

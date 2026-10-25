@@ -50,6 +50,12 @@ and its missing parts waited. A part no computer holds, of a model someone asked
 before any further copy. Seen today: a node given room fetched copies of 14B and 30B parts while
 63 of a 70B's 79 parts were on no computer at all.
 
+**A computer whose storage is full now makes room for a part no computer has.** A full computer
+took nothing new, so when every computer was full a newly added model could never be assembled.
+Now, when a part of a model someone asked for is on no computer and does not fit, a full computer
+gives back a spare copy of another model to make room — only a copy two other computers still
+hold, never part of a model it holds whole or is running, and never more than the room needed.
+
 **A model split across computers that all start cold answers its first message about twice as
 soon.** When several computers each run part of a model, each one used to start reading its part
 from disk only once the computer before it had finished reading its own and passed the work along,

@@ -998,6 +998,44 @@ The `requesting shard download` line carries `fills_a_hole`. Test:
 `fills_a_hole` returning false — the small model's copy takes the slot; the control without the
 demand is the score's order).
 
+**A full node makes room for a hole (2026-10-25).** Holes first orders what a node with room
+fetches; a FULL node fetched nothing, and with every node full a model being assembled never was.
+The Proxmox node sat at 12.9 of 12.5 GB, warning "nothing can be removed" hourly (17 times in 16 h),
+while 63 of the 70B's 79 parts were on no computer. Read once its limit was raised, its copies had three to
+five holders each, and of 21 of 28 it was the only CLOSE one (the others 200-400 ms away): the
+region rule held them, not the count. Now the download pass, finding the first hole it cannot fit
+(at `budget == 0` too, before the early return), notes the room it lacks — its size less what is
+left, plus anything held past the budget (`scoring::room_a_hole_lacks`) — in
+`AutoShardManager::room_for_holes`; it alone writes it, every cycle, clearing it once a hole is
+chosen or none is offered, and a note older than `ROOM_FOR_HOLES_KEPT` (600 s, two cycles) gives
+nothing back. The hole is one `gather_candidates` OFFERS this node, so the hash ring and the trust
+gate apply: a node holding none of the model makes room only for the parts the ring assigns it
+(another node is assigned the rest), one holding part of it for any of its gaps. While it stands, `copy_kept_because` sheds a copy kept ONLY for how many copies there
+are or where they are (the replica count, the last close holder in this region) when
+`prune::spare_for_a_hole` holds: more than `floor_for_a_hole` live holders counting this node
+(`min_replicas`, never under two — two other copies remain), this node not among the first that
+many holders in rendezvous order (`coverage::kept_by_rank`, `blake3(model ‖ 0 ‖ index ‖ node)` —
+without it each of three full holders counts one copy to spare and gives its own back in the same
+minute; every computer ranking alike, the first two never do, as CRUSH-style placement agrees on
+replicas with no coordinator), not a copy of a model being assembled
+itself (`coverage::model_has_holes`: asked for, a part on a live computer and a part on none), not
+loaded here, not held here whole or all but a few parts of (`completes_model_here_counting`, at
+any pressure). Never past what keeps a copy for what it does — carrying a model, a near chain, a
+drafter, privacy's ends, pins, the `--shards` range. Prune gives such copies back
+(`PruneCandidate::to_make_room`) until the bytes it frees this pass reach the room noted, and
+re-checks each against the floor rather than the target. Both passes ask through `would_shed_copy`,
+so while the room is noted the download pass does not fetch a spare copy back (gotcha #795), and
+`select_within_budget` skips the copies tier when a hole did not fit and none was chosen — else
+the room would fill with copies before the hole could use it. Petals moves a server only when no
+block is left uncovered (`block_selection.should_choose_other_blocks`); this keeps two copies
+besides. Past the region rule deliberately: the last close copy of a runnable model costs a slower
+reply, a hole costs every reply. Tests: `room_for_holes::*` in `manager.rs` (the live shape end to
+end through both passes: red with `spare_for_a_hole` false — nothing is given back; the floor
+with one other holder; a model missing parts of its own keeps its copies; a holder ranked among the
+kept gives nothing back — the far computers are drawn until the ranking holds, since a test node's
+id is random), and
+`a_hole_that_does_not_fit_keeps_the_room_from_further_copies`.
+
 ## `model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER BOUND on "idle since", and the worker's own `last_used` is the signal that moves
 
 (2026-09-02, gotcha #437). The idle unload used to trust
