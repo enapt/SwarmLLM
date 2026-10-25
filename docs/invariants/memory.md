@@ -2606,7 +2606,11 @@ layers at 10:48Z from 40 at 08:38Z) — the one holder with room to spare there.
   stating no ceiling yet (connected a moment ago) is planned without — the far set differs per
   observer anyway, and aborting on every newcomer would hand a large swarm's model back and
   forth between the chain and carrying; a NEAR one still stops the plan (test
-  `a_far_chain_is_planned_without_a_machine_that_has_not_stated_its_memory`). **Carrying stands
+  `a_far_chain_is_planned_without_a_machine_that_has_not_stated_its_memory`). A machine that
+  could run the model whole survives the cut to `MOST_MACHINES` whatever it holds — the cut ranked
+  by layers held, so ten holders of a part each hid it and a far chain was planned for a model one
+  machine could run (v0.3.254's pre-release review; test
+  `a_machine_that_could_run_the_model_whole_is_never_cut_from_the_count`, red without it). **Carrying stands
   down while any chain is planned** (`chain_planned_for`, asked by `needs_carrier` and `copy_carries_model`): a carrier
   fetching in model order beside the chain fetched what the chain did not use, and its per-holder
   keep held all 62 layers of a holder with room for 7. A machine with no header learns it when

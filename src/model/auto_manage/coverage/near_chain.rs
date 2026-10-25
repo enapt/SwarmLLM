@@ -583,9 +583,14 @@ impl AutoShardManager {
             });
         }
         let rank = |m: &Machine| rendezvous(&manifest.id, &m.node);
+        // A machine that could run the model whole survives the cut whatever
+        // it holds: it makes the model carrying's (`plan_over`), and ten
+        // holders of a part each must not hide it (v0.3.254's review).
+        let whole = |m: &Machine| m.ceiling >= manifest.num_layers;
         machines.sort_by(|a, b| {
-            b.has_layers
-                .cmp(&a.has_layers)
+            whole(b)
+                .cmp(&whole(a))
+                .then(b.has_layers.cmp(&a.has_layers))
                 .then(b.ceiling.cmp(&a.ceiling))
                 .then_with(|| rank(b).cmp(&rank(a)))
         });
@@ -1468,6 +1473,29 @@ mod tests {
         assert_eq!(s.chain().map(|c| c.reach), Some(Reach::Far), "control");
         peer_with_disk(&s.state, 7, None, 100_000);
         assert_eq!(s.chain().map(|c| c.reach), Some(Reach::Far));
+    }
+
+    /// A machine that could run the model whole is never cut from the
+    /// machines a chain is planned over, however many hold parts of it: the
+    /// model is carrying's then, not a far chain's (pre-release review of
+    /// v0.3.254 — the cut to `MOST_MACHINES` ranked by layers held, so ten
+    /// holders of a part each pushed it out).
+    #[test]
+    fn a_machine_that_could_run_the_model_whole_is_never_cut_from_the_count() {
+        let s = apart();
+        // Ten more machines hold a part each and could run 8 layers.
+        for byte in 10..20u8 {
+            let holder = peer_with_disk(&s.state, byte, Some(ceiling_for(8)), 100_000);
+            holds(&s.state, &s.mid, &holder, &[u32::from(byte % 8)]);
+        }
+        assert_eq!(
+            s.chain().map(|c| c.reach),
+            Some(Reach::Far),
+            "control: no machine could run it whole"
+        );
+        // One that could, holding nothing.
+        peer_with_disk(&s.state, 30, Some(ceiling_for(32)), 100_000);
+        assert!(s.chain().is_none());
     }
 
     /// Where the near machines cannot carry a model only a split can run,

@@ -971,7 +971,10 @@ machine HOLDS its segment (a peer's fetch is its own word, `chain_held_by_its_ma
 unchosen model with its safety training removed is planned no chain and no header
 (`may_plan_a_near_chain`). Open, both Low: (a) a peer within 30 ms can steer which of an asked-for
 model's parts this node fetches, inside the owner's disk budget — the plan trusts its
-neighbours' holdings as every router does; (b) ten near machines (`MOST_MACHINES`) make the
+neighbours' holdings as every router does; since #346 (v0.3.254) a far chain widens that to any
+peer in scope where the near machines cannot carry the model, and keeps its segment at any disk
+pressure, as carrying has always trusted any holder's word — still one segment within this
+node's ceiling, of a model somebody asked for and trusted; (b) ten near machines (`MOST_MACHINES`) make the
 exact plan up to ~10^7 memo steps, once a `CHAIN_ANSWERS_FOR` minute per model, on the
 download pass — measure it before bounding it.
 
