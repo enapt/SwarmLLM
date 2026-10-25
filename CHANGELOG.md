@@ -42,6 +42,14 @@ before any other computer started on it — seen today with a 70B model, 63 of w
 computer fetched. A computer now asks within a minute of first hearing of a model (at most 8
 questions a minute), and starts fetching as soon as the answer is in.
 
+**A large model someone asks for fills in across the swarm before more copies of small ones.**
+Each computer with room picks a few parts to fetch at a time. It ranked them by how many computers
+already held the model and whether the model fit the swarm's graphics cards, so a large model just
+added — held by one computer, too big for any one card — ranked below spare copies of small models,
+and its missing parts waited. A part no computer holds, of a model someone asked for, now comes
+before any further copy. Seen today: a node given room fetched copies of 14B and 30B parts while
+63 of a 70B's 79 parts were on no computer at all.
+
 **A model split across computers that all start cold answers its first message about twice as
 soon.** When several computers each run part of a model, each one used to start reading its part
 from disk only once the computer before it had finished reading its own and passed the work along,

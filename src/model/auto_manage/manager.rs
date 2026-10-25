@@ -200,6 +200,10 @@ pub(super) struct ShardCandidate {
     pub holder_count: usize,
     /// Score: higher = more worth downloading. Factors in rarity and model popularity.
     pub score: f64,
+    /// A part no computer holds or is fetching, of a model somebody asked for
+    /// that the swarm already holds some of — chosen before any other copy,
+    /// whatever its score (`scoring::fills_a_hole`).
+    pub fills_a_hole: bool,
 }
 
 /// A candidate shard identified for auto-pruning.
@@ -720,6 +724,7 @@ impl AutoShardManager {
                 // Not a scored choice: this shard was already asked for, and
                 // `trigger_download` does not rank, it fetches.
                 score: 0.0,
+                fills_a_hole: false,
             };
             // Prune's own question, asked as the download pass asks it
             // (`select_within_budget`, gotcha #795): a part this node would
@@ -1251,6 +1256,7 @@ mod tests {
             shard_size_bytes: 512 * 1024 * 1024,
             holder_count: 0,
             score: 10.0 * 10.0, // popular + zero holders
+            fills_a_hole: false,
         };
         let c2 = ShardCandidate {
             model_id: ModelId("m2".into()),
@@ -1259,6 +1265,7 @@ mod tests {
             shard_size_bytes: 512 * 1024 * 1024,
             holder_count: 5,
             score: 10.0 * 1.0, // popular but well-replicated
+            fills_a_hole: false,
         };
         assert!(c1.score > c2.score);
     }

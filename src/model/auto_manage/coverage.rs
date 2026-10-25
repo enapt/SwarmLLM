@@ -218,7 +218,7 @@ impl AutoShardManager {
 
     /// Has anyone asked for this model — regional demand gossiped by any node,
     /// or a request routed by this one since the last decay?
-    fn asked_for(&self, model_id: &ModelId) -> bool {
+    pub(super) fn asked_for(&self, model_id: &ModelId) -> bool {
         self.shared_state
             .region_demand
             .iter()

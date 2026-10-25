@@ -978,6 +978,26 @@ Tests: `this_node_holds_back_on_a_metered_connection_and_the_owner_is_told_once`
 the two parser tests, and the guard (red with either call site's check
 replaced by `false`).
 
+**Holes first (2026-10-25).** A part no computer holds or is fetching, of a model somebody asked
+for that the swarm already holds part of (`scoring::fills_a_hole`, the flag
+`ShardCandidate::fills_a_hole`), is chosen before any further copy, whatever its score: the sort
+puts holes first and `select_within_budget` runs its per-model round-robin in two tiers, every
+hole across models, then the rest. The score multiplies by how many machines hold any part of a
+model and by `vram_fitness` (down to 0.1 for a model larger than the swarm's graphics memory) —
+both against exactly the large model a swarm is assembling. Live: a 70B seeded on one machine (16
+of 79 parts), asked for, its other 63 parts on none; the Proxmox node, given room, scored those
+parts 26 and further copies of Qwen2.5-14B and Qwen3-30B-A3B parts 52-60, and at one or two slots
+a cycle the copies won. BitTorrent's rarest-first and Petals' `choose_best_blocks` (the span with
+the least throughput) order by the same thing. Not a multiplier: the product of eight factors
+makes any bonus a guess about the others' range. A model nobody holds any of is not "being
+assembled" — its parts compete as before, so a trending model nobody asked for is not pulled onto
+every machine — and the hash ring still spreads a model's holes across machines that hold none of
+it. Prune keeps the fetched part (one holder, under the target), so nothing is shed and refetched.
+The `requesting shard download` line carries `fills_a_hole`. Test:
+`a_part_nobody_holds_of_an_asked_for_model_goes_before_a_further_copy` (the live shape: red with
+`fills_a_hole` returning false — the small model's copy takes the slot; the control without the
+demand is the score's order).
+
 ## `model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER BOUND on "idle since", and the worker's own `last_used` is the signal that moves
 
 (2026-09-02, gotcha #437). The idle unload used to trust

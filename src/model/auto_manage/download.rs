@@ -134,6 +134,7 @@ impl AutoShardManager {
             shard = candidate.shard_index,
             holders = candidate.holder_count,
             score = candidate.score,
+            fills_a_hole = candidate.fills_a_hole,
             "AutoShardManager: requesting shard download"
         );
 

@@ -216,6 +216,19 @@ pub(super) fn offered(manager: &AutoShardManager, state: &Arc<SharedState>) -> V
 
 /// The parts one cycle of the download pass actually starts.
 pub(super) fn fetched(manager: &AutoShardManager, state: &Arc<SharedState>) -> Vec<u32> {
+    fetched_with_pool_vram(manager, state, 0)
+        .into_iter()
+        .map(|(_, index)| index)
+        .collect()
+}
+
+/// [`fetched`] with the swarm's graphics memory at `pool_vram_mb`, naming each
+/// part's model — for a cycle choosing between models.
+pub(super) fn fetched_with_pool_vram(
+    manager: &AutoShardManager,
+    state: &Arc<SharedState>,
+    pool_vram_mb: u64,
+) -> Vec<(ModelId, u32)> {
     let reading = StorageReading {
         max_storage_mb: 100_000,
         max_disk_mb: 500_000,
@@ -236,8 +249,8 @@ pub(super) fn fetched(manager: &AutoShardManager, state: &Arc<SharedState>) -> V
     };
     let local = state.identity.node_id().clone();
     manager
-        .select_within_budget(manager.gather_candidates(&local, 0), &report, 0)
+        .select_within_budget(manager.gather_candidates(&local, pool_vram_mb), &report, 0)
         .into_iter()
-        .map(|c| c.shard_index)
+        .map(|c| (c.model_id, c.shard_index))
         .collect()
 }

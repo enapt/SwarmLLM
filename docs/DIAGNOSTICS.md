@@ -1586,6 +1586,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | INFO  | `Model promoted to NetworkPopular` | `model`, `holders` |
 | INFO  | `HfWatcher: promoted to DemandVerified` | `model`, `repo`, `downloads` (R141 — fires at 10k for trusted publishers, 100k for unknown) |
 | DEBUG | `HfWatcher: re-promotion blocked by failed-promotion cooldown` | `model`, `repo` |
+| INFO  | `AutoShardManager: requesting shard download` | `model`, `shard`, `holders`, `score`, `fills_a_hole` — `true`: no computer held or was fetching the part, of a model somebody asked for that the swarm holds part of, so it was chosen before any further copy whatever its score (`scoring::fills_a_hole`). A large model's holes waiting behind `fills_a_hole=false` copies = an older build, or nobody's demand reached this node |
 | INFO  | `HfWatcher: asked about origins heard since the last poll` | `promoted` — a model was given a new origin (`origin_trust_notify`); asked within a minute, not at the next hourly poll |
 | WARN  | `HfSourceGossip dropped — hf_sources at capacity` | `model`, `cap` (R141 — fires alongside `activity.hf_sources_cap_reached`) |
 | WARN  | `Auto-manage: released stalled P2P download permit; the next pass fetches it from the model's origin` | `model`, `shard`, `stall_secs` (R141 — `P2P_PERMIT_STALL_SECS = 180`). With no origin to ask (none recorded, or offline mode) the next pass logs `No origin to fetch this part from` and the part goes back to its peers (gotcha #797's residual, 2026-10-07) |

@@ -403,6 +403,9 @@ impl AutoShardManager {
             // We still want to acquire shards for it if we have an HF source -- this is
             // the "complete the set" flow where one node downloads and others follow.
             let model_popularity = (all_holders.len() as f64).max(1.0);
+            // Asked for, and part of it already here or on a peer: a model
+            // being assembled, whose missing parts come first (`fills_a_hole`).
+            let assembling_an_asked_model = !all_holders.is_empty() && self.asked_for(&manifest.id);
 
             // VRAM fitness: does the global pool have enough VRAM to actually run this model?
             // Don't block downloads, but deprioritize models the pool can't run yet.
@@ -465,6 +468,7 @@ impl AutoShardManager {
                     })
                     .unwrap_or(0);
                 let holder_count = holders.len() + peer_dl_count;
+                let fills_a_hole = fills_a_hole(assembling_an_asked_model, holder_count);
 
                 // Check if this shard is in our configured --shards range but missing
                 let in_configured_range = match configured_range {
@@ -772,6 +776,7 @@ impl AutoShardManager {
                     shard_size_bytes: shard.size_bytes,
                     holder_count,
                     score,
+                    fills_a_hole,
                 });
             }
 
@@ -805,16 +810,19 @@ impl AutoShardManager {
                         shard_size_bytes: mmproj_info.size_bytes,
                         holder_count,
                         score: mmproj_score,
+                        fills_a_hole: false,
                     });
                 }
             }
         }
 
-        // Sort by score descending (best candidates first)
+        // Holes first, then by score descending (best candidates first).
         candidates.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            b.fills_a_hole.cmp(&a.fills_a_hole).then(
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
         });
 
         // If any configured-range shards are missing for the primary model,
@@ -920,76 +928,87 @@ impl AutoShardManager {
         // Round-robin interleaving: group candidates by model, take one per model
         // in rotation instead of pure score-descending. This ensures shards from
         // different models are downloaded in the same cycle when possible.
-        let mut by_model: std::collections::HashMap<String, Vec<ShardCandidate>> =
-            std::collections::HashMap::new();
-        let mut model_order: Vec<String> = Vec::new();
-        for candidate in candidates {
-            // Skip this specific shard if it's already being downloaded
-            if downloading_shards.contains(&(candidate.model_id.0.clone(), candidate.shard_index)) {
-                continue;
-            }
-            if !by_model.contains_key(&candidate.model_id.0) {
-                model_order.push(candidate.model_id.0.clone());
-            }
-            by_model
-                .entry(candidate.model_id.0.clone())
-                .or_default()
-                .push(candidate);
-        }
-
-        // Round-robin: take one candidate from each model in order
-        let mut model_indices: Vec<usize> = vec![0; model_order.len()];
-        'outer: loop {
-            let mut any_taken = false;
-            for (mi, model_key) in model_order.iter().enumerate() {
-                if selected.len() >= max || selected.len() >= per_cycle_cap {
-                    break 'outer;
+        //
+        // In two tiers: the parts that fill a hole (`fills_a_hole`) across every
+        // model first, then the rest — so a cycle's few slots go to a part no
+        // computer holds before a further copy of one some computer does.
+        let (holes, copies): (Vec<ShardCandidate>, Vec<ShardCandidate>) =
+            candidates.into_iter().partition(|c| c.fills_a_hole);
+        for tier in [holes, copies] {
+            let mut by_model: std::collections::HashMap<String, Vec<ShardCandidate>> =
+                std::collections::HashMap::new();
+            let mut model_order: Vec<String> = Vec::new();
+            for candidate in tier {
+                // Skip this specific shard if it's already being downloaded
+                if downloading_shards
+                    .contains(&(candidate.model_id.0.clone(), candidate.shard_index))
+                {
+                    continue;
                 }
-                let candidates_for_model = &by_model[model_key];
-                while model_indices[mi] < candidates_for_model.len() {
-                    let candidate = &candidates_for_model[model_indices[mi]];
-                    model_indices[mi] += 1;
-                    // SEC: skip candidates with zero `shard_size_bytes`. The
-                    // field comes from `ShardInfo.size_bytes` populated from
-                    // peer-gossiped manifests OR HF API responses where the
-                    // file size may be missing (`unwrap_or(0)`). A zero-size
-                    // candidate ALWAYS passes `<= budget_bytes` regardless
-                    // of remaining budget, then subtracts 0 — silently
-                    // letting unbounded zero-size shards through the budget
-                    // gate. Treat unknown size as a refusal signal instead.
-                    if candidate.shard_size_bytes == 0 {
-                        tracing::debug!(
-                            model = %candidate.model_id,
-                            shard = candidate.shard_index,
-                            "Auto-manage: skipping candidate with zero shard_size_bytes (unknown size)"
-                        );
-                        continue;
+                if !by_model.contains_key(&candidate.model_id.0) {
+                    model_order.push(candidate.model_id.0.clone());
+                }
+                by_model
+                    .entry(candidate.model_id.0.clone())
+                    .or_default()
+                    .push(candidate);
+            }
+
+            // Round-robin: take one candidate from each model in order
+            let mut model_indices: Vec<usize> = vec![0; model_order.len()];
+            'outer: loop {
+                let mut any_taken = false;
+                for (mi, model_key) in model_order.iter().enumerate() {
+                    if selected.len() >= max || selected.len() >= per_cycle_cap {
+                        break 'outer;
                     }
-                    if candidate.shard_size_bytes <= budget_bytes {
-                        let pressure_after = report
-                            .reading
-                            .with_added(chosen_bytes.saturating_add(candidate.shard_size_bytes))
-                            .pressure();
-                        if self.would_shed_once_fetched(candidate, pressure_after, &shard_pins) {
+                    let candidates_for_model = &by_model[model_key];
+                    while model_indices[mi] < candidates_for_model.len() {
+                        let candidate = &candidates_for_model[model_indices[mi]];
+                        model_indices[mi] += 1;
+                        // SEC: skip candidates with zero `shard_size_bytes`. The
+                        // field comes from `ShardInfo.size_bytes` populated from
+                        // peer-gossiped manifests OR HF API responses where the
+                        // file size may be missing (`unwrap_or(0)`). A zero-size
+                        // candidate ALWAYS passes `<= budget_bytes` regardless
+                        // of remaining budget, then subtracts 0 — silently
+                        // letting unbounded zero-size shards through the budget
+                        // gate. Treat unknown size as a refusal signal instead.
+                        if candidate.shard_size_bytes == 0 {
                             tracing::debug!(
                                 model = %candidate.model_id,
                                 shard = candidate.shard_index,
-                                holders = candidate.holder_count,
-                                pressure_after = %format_args!("{pressure_after:.2}"),
-                                "Not fetching a part prune would delete again once it landed"
+                                "Auto-manage: skipping candidate with zero shard_size_bytes (unknown size)"
                             );
                             continue;
                         }
-                        budget_bytes -= candidate.shard_size_bytes;
-                        chosen_bytes = chosen_bytes.saturating_add(candidate.shard_size_bytes);
-                        selected.push(candidate.clone());
-                        any_taken = true;
-                        break; // move to next model
+                        if candidate.shard_size_bytes <= budget_bytes {
+                            let pressure_after = report
+                                .reading
+                                .with_added(chosen_bytes.saturating_add(candidate.shard_size_bytes))
+                                .pressure();
+                            if self.would_shed_once_fetched(candidate, pressure_after, &shard_pins)
+                            {
+                                tracing::debug!(
+                                    model = %candidate.model_id,
+                                    shard = candidate.shard_index,
+                                    holders = candidate.holder_count,
+                                    pressure_after = %format_args!("{pressure_after:.2}"),
+                                    "Not fetching a part prune would delete again once it landed"
+                                );
+                                continue;
+                            }
+                            budget_bytes -= candidate.shard_size_bytes;
+                            chosen_bytes = chosen_bytes.saturating_add(candidate.shard_size_bytes);
+                            selected.push(candidate.clone());
+                            any_taken = true;
+                            break; // move to next model
+                        }
                     }
                 }
-            }
-            if !any_taken {
-                break;
+                if !any_taken {
+                    break;
+                }
             }
         }
 
@@ -1082,6 +1101,23 @@ impl AutoShardManager {
             .held(model_id, chrono::Utc::now().timestamp())
             .map_or(now_target, |held| held.max(now_target))
     }
+}
+
+/// Does a part fill a HOLE — no computer holds it or is fetching it
+/// (`holder_count` counts both), of a model somebody asked for that the swarm
+/// holds part of? Such a part is chosen before any other copy, whatever its
+/// score: without it the model cannot run anywhere, while another copy of a
+/// held part only makes a runnable one sturdier. The score multiplies by how
+/// many machines hold a model and down-weights one larger than the swarm's
+/// graphics memory — both against a large model the swarm is still assembling
+/// (a 70B's missing parts scored 26 against 52-60 for further copies of small
+/// models, 2026-10-25). BitTorrent's rarest-first and Petals' choice of the
+/// blocks with the least throughput (`block_selection.choose_best_blocks`)
+/// order by the same thing. A model nobody has started holding is not being
+/// assembled: its parts compete as before, so a model nobody wants is not
+/// pulled onto every machine.
+pub(super) fn fills_a_hole(assembling_an_asked_model: bool, holder_count: usize) -> bool {
+    assembling_an_asked_model && holder_count == 0
 }
 
 #[cfg(test)]
@@ -1849,6 +1885,95 @@ mod fetch_what_prune_keeps {
             manager.geo_target_replicas(&mid, 2, pool),
             3,
             "and the target still sees them, through the demand the decay filed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod holes_first {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    use super::super::test_support::{
+        fetched_with_pool_vram, holds, make_test_manager_with_config, peer_with_disk,
+        register_manifest_with_sized_shards, write_sparse_shards,
+    };
+    use crate::config::Config;
+    use crate::types::{ContributionMode, ModelId};
+
+    const MIB: u64 = 1024 * 1024;
+
+    /// The live shape (2026-10-25): a 70B somebody asked for, part of it on
+    /// one machine and the rest on none, beside a small model wanting a
+    /// further copy. The small one outscores it (more machines hold it, it
+    /// fits the swarm's graphics memory), and a cycle with one slot gave it
+    /// the slot every time. A part nobody holds of the model being assembled
+    /// now goes first; with nobody asking for the large model, the score
+    /// decides again (the control).
+    #[test]
+    fn a_part_nobody_holds_of_an_asked_for_model_goes_before_a_further_copy() {
+        let mut config = Config::default();
+        config.auto_manage.min_replicas = 2;
+        config.node.contribution = ContributionMode::Minimal;
+        let (state, manager) = make_test_manager_with_config(config);
+        state.models.auto_manage_default_model_cap.store(0, Relaxed);
+        let local = state.identity.node_id().clone();
+        let small =
+            register_manifest_with_sized_shards(&state, "small", 8, &[(0, 4), (4, 8)], 100 * MIB);
+        let large = register_manifest_with_sized_shards(
+            &state,
+            "large",
+            32,
+            &[(0, 8), (8, 16), (16, 24), (24, 32)],
+            5_000 * MIB,
+        );
+        let peers: Vec<_> = (2..=4)
+            .map(|byte| peer_with_disk(&state, byte, None, 100_000))
+            .collect();
+        // The small model: part 0 on this node and every peer, part 1 on one.
+        holds(&state, &small, &local, &[0]);
+        write_sparse_shards(&state, &small, [0], 100 * MIB);
+        for peer in &peers {
+            holds(&state, &small, peer, &[0]);
+        }
+        holds(&state, &small, &peers[0], &[1]);
+        // The large one: part 0 here, part 1 on a peer, parts 2 and 3 nowhere.
+        holds(&state, &large, &local, &[0]);
+        write_sparse_shards(&state, &large, [0], 5_000 * MIB);
+        holds(&state, &large, &peers[1], &[1]);
+        state
+            .region_demand
+            .insert((large.clone(), "TH".to_string()), 1.0);
+
+        let pool_vram_mb = 1_000;
+        let candidates = manager.gather_candidates(&local, pool_vram_mb);
+        let offered = |mid: &ModelId, index: u32| {
+            candidates
+                .iter()
+                .find(|c| &c.model_id == mid && c.shard_index == index)
+                .map(|c| (c.score, c.fills_a_hole))
+        };
+        let (copy_score, copy_fills) = offered(&small, 1).expect("the small model's part 1");
+        let (hole_score, hole_fills) = offered(&large, 2).expect("the large model's part 2");
+        assert!(
+            copy_score > hole_score,
+            "the shape: the further copy outscores the missing part ({copy_score} vs {hole_score})"
+        );
+
+        let first = fetched_with_pool_vram(&manager, &state, pool_vram_mb);
+        assert_eq!(first.len(), 1, "one slot a cycle at this contribution");
+        assert_eq!(
+            first[0].0, large,
+            "a part no computer holds of the model being assembled goes first, whatever the score"
+        );
+        assert!(hole_fills && !copy_fills);
+
+        state
+            .region_demand
+            .remove(&(large.clone(), "TH".to_string()));
+        assert_eq!(
+            fetched_with_pool_vram(&manager, &state, pool_vram_mb),
+            vec![(small, 1)],
+            "nobody asked for the large model: the score decides, as before"
         );
     }
 }
