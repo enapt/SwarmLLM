@@ -1466,6 +1466,18 @@ no ceiling fits is answered by the planner itself as `SwarmShortOfMemory`
 Where the holders' ceilings add up, the model is SPLIT across them instead of
 handed whole to one.
 
+That verdict needs every holder to be known, so it is given only where every layer HAS one
+(`first_layers_held_by_nobody`); a layer nobody holds is `ModelIncompleteInSwarm`, which the
+router waits on and plans again (`assembly_failed_for_lack_of_holders`). Greedy walks the
+layers in order, so a full holder met BEFORE the gap answered first: on 2026-10-26, 3 min
+after a restart (the 70B A/B's arm 2), Llama 3.3 70B was refused "not enough memory" with two
+candidates — this node holding 0-28 and a peer holding 0-54 in pieces, capped at 23 — and
+nobody yet known for layers 54-80; the peer holding all 80 was a candidate 20 s later and the
+next ask was answered. Petals treats a block no server is known to hold the same way
+(`MissingBlocksError`, retried by the request path; its client's first table update "was
+likely to produce incorrect information and cause MissingBlocksErrors until the next
+update"). Pinned by `a_full_holder_before_a_layer_nobody_holds_is_the_gap_not_a_shortage`.
+
 What it needs, and what happens without it: the model's header on the
 coordinator. `ensure_model_geometry` fetches it from HuggingFace before planning
 (8 s budget) and keeps it, so a connected node has it from its first request; a

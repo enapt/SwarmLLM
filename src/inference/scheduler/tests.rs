@@ -954,6 +954,43 @@ fn a_model_that_fits_nobody_is_still_assigned_rather_than_refused() {
     );
 }
 
+/// A full holder met before a layer NOBODY holds is the holders not all being
+/// known yet, never "not enough memory": the field's candidate set 3 min after
+/// a restart (2026-10-26, Llama 3.3 70B) — this node holding 0-28, a peer
+/// holding 0-54 in pieces capped at 23, and the peer with all 80 not yet seen.
+/// Answered as the gap, which the router waits on and plans again.
+#[test]
+fn a_full_holder_before_a_layer_nobody_holds_is_the_gap_not_a_shortage() {
+    let scheduler = PipelineScheduler::new(make_shared_state());
+    let mut here = simple_candidate(1, vec![(0, 28)]);
+    here.max_hostable_layers = Some(12);
+    let mut peer = simple_candidate(2, vec![(0, 54), (55, 57), (61, 62), (72, 74)]);
+    peer.max_hostable_layers = Some(12);
+    peer.max_hostable_layers_at_ceiling = Some(23);
+
+    let err = scheduler
+        .greedy_assign(80, &[here, peer], None, false, false, super::Purpose::Route)
+        .expect_err("nobody is known to hold layer 54");
+    match err {
+        crate::error::SwarmError::ModelIncompleteInSwarm { layer, .. } => {
+            assert_eq!(layer, 54, "the first layer nobody holds")
+        }
+        other => panic!("the gap, not a shortage: {other:?}"),
+    }
+
+    let held = |ranges: Vec<(u32, u32)>| {
+        let c = simple_candidate(3, ranges);
+        super::first_layers_held_by_nobody(std::slice::from_ref(&c), 80)
+    };
+    assert_eq!(held(vec![(0, 80)]), None);
+    assert_eq!(held(vec![(0, 10), (10, 80)]), None);
+    assert_eq!(held(vec![(0, 90)]), None);
+    assert_eq!(held(vec![(5, 80)]), Some((0, 5)));
+    assert_eq!(held(vec![(0, 40), (50, 90)]), Some((40, 50)));
+    assert_eq!(held(vec![(0, 40), (30, 70)]), Some((70, 80)));
+    assert_eq!(held(vec![]), Some((0, 80)));
+}
+
 /// ...but never past what the holder could EVER hold (a tester's report,
 /// 2026-10-07: a whole 9B to a peer capped below it, 46 of a 30B's 48 layers to a
 /// 16 GB machine). The relaxed pass lifts a holder's CURRENT figure — stale, or

@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #358**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #359**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3404,7 +3404,17 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-26, ships in the next release** (#350, #355, #356)
+**Closed 2026-10-26, ships in the next release** (#350, #355, #356, #358)
+- #358 — **A large model asked for just after a computer starts is no longer refused as too
+  big for the swarm.** The planner answered "not enough memory, trying again won't help" when
+  the holders it knew were full, even where some of the model's layers had no known holder at
+  all — the swarm's holdings still arriving. 2026-10-26, 3 min after a restart: Llama 3.3 70B
+  refused with this node (layers 0-28) and one peer (0-54 in pieces, capped at 23) known and
+  nobody yet for layers 54-80; the peer holding all 80 appeared 20 s later. Found and fixed the
+  same day: that verdict is given only where every layer has a holder; a layer nobody holds is
+  the gap the router waits on and plans again (`first_layers_held_by_nobody`, Petals'
+  `MissingBlocksError`). Evidence: `docs/invariants/scheduling.md` § "The relaxation is scoped
+  to the figures that are actually unreliable".
 - #356 — **Where the swarm's graphics cards can hold a large model between them, its layers
   are placed on cards, not processors.** Placement filled each machine's ceiling — its card
   plus the memory beside it — with the fewest segments, never asking which device a layer

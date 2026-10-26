@@ -1610,16 +1610,35 @@ impl FlowNetwork {
 /// The answer when no plan fits what the holders could EVER hold: not enough
 /// memory among them, and retrying cannot help (#218's variant, raised before
 /// any peer is asked rather than after one refuses).
+///
+/// Only where every layer HAS a holder. Where some layer has none, the holders
+/// are not all known — a node minutes after its start, the swarm's holdings
+/// still arriving — and that is the gap, which the router waits on and plans
+/// again (`assembly_failed_for_lack_of_holders`). Greedy walks the layers in
+/// order and met a full holder before the gap: on 2026-10-26, 3 min after a
+/// restart, a 70B was refused "not enough memory, trying again won't help"
+/// with two holders of layers 0-54 known (one capped at 23) and nobody yet
+/// known for layers 54-80; the peer holding all 80 was a candidate 20 s later.
+/// Petals answers a block no server is known to hold the same way
+/// (`MissingBlocksError`, retried by the request path as its table fills).
 fn short_of_memory(
     candidates: &[NodeCandidate],
     num_layers: u32,
     local_node_id: &NodeId,
 ) -> SwarmError {
+    let model_id = candidates
+        .first()
+        .map(|c| c.shard_id.model_id.0.clone())
+        .unwrap_or_else(|| "this model".to_string());
+    if let Some((from, to)) = first_layers_held_by_nobody(candidates, num_layers) {
+        return SwarmError::ModelIncompleteInSwarm {
+            model_id,
+            layer: from,
+            span: crate::error::describe_missing_layers(from, to),
+        };
+    }
     SwarmError::SwarmShortOfMemory {
-        model_id: candidates
-            .first()
-            .map(|c| c.shard_id.model_id.0.clone())
-            .unwrap_or_else(|| "this model".to_string()),
+        model_id,
         room: crate::error::describe_offered_room(
             layers_offered_at(candidates, local_node_id, |c| {
                 c.max_hostable_layers_at_ceiling
@@ -1627,6 +1646,31 @@ fn short_of_memory(
             num_layers,
         ),
     }
+}
+
+/// The first run of layers `[from, to)` no candidate holds, or `None` where
+/// every layer of the model has a holder.
+fn first_layers_held_by_nobody(
+    candidates: &[NodeCandidate],
+    num_layers: u32,
+) -> Option<(u32, u32)> {
+    let mut ranges: Vec<(u32, u32)> = candidates
+        .iter()
+        .flat_map(|c| c.available_ranges.iter().copied())
+        .filter(|(a, b)| a < b)
+        .collect();
+    ranges.sort_unstable();
+    let mut covered = 0u32;
+    for (a, b) in ranges {
+        if covered >= num_layers {
+            return None;
+        }
+        if a > covered {
+            return Some((covered, a.min(num_layers)));
+        }
+        covered = covered.max(b);
+    }
+    (covered < num_layers).then_some((covered, num_layers))
 }
 
 /// Indices of the segments no standby covers — the ones whose holder failing
