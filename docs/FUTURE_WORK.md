@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #355**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #356**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3371,7 +3371,18 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-26, ships in the next release** (#350)
+**Closed 2026-10-26, ships in the next release** (#350, #355)
+- #355 — **A large model split across the graphics card and the processor takes idle
+  models' card memory first.** The reclaim before a load freed nothing unless the model then
+  fit the card WHOLE, so a split was sized on the free memory alone with an idle model kept
+  beside it. Field, 2026-10-25 15:53:36: Llama 3.3 70B's spawn put 6 of 19 layers on the card
+  while gemma-2-2b-it, idle for 29 minutes, held 2,367 MB of it (about four more layers). The
+  spawn's split and growth's split rung now unload idle models, most idle first, as far as
+  each adds layers to the card (`free_vram_for_split`, `plan_vram_reclaim_for_split`); every
+  planner of a split counts that memory (`split_budget_for_planning`), as Ollama evicts idle
+  runners before a partial offload. A worker that guesses for another model is never taken
+  (`split_reclaim_eligible`): the 70B would lose its drafter for four layers. Evidence: `docs/invariants/memory.md` § "A split takes
+  idle models' card memory too".
 - #350 — **A computer holding part of a large model offers the wider share it could load
   once its idle worker is replaced, and its own request no longer stops that replacement.**
   Request `c2cde5c3` (Llama 3.3 70B, v0.3.254): this node's idle worker held [0..13), its 10

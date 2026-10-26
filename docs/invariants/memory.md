@@ -271,6 +271,51 @@ place every execution path (local, distributed, peer-served) passes through.
 headroom doing its job, and trusting the measured figure would admit a model and
 then OOM it.
 
+### A split takes idle models' card memory too (2026-10-26, #355)
+
+"Plan before destroying" was written when a model that did not fit went to the
+processor whatever was freed, so the plan frees nothing unless the model then
+fits WHOLE. Card/processor splits (#265 and the spawn's `partial_gpu_layers`)
+made that reason stale: a split's card share grows with every layer's worth
+freed, and each layer moved to the card runs several times faster for every
+token. Field, 2026-10-25 15:53:36: the 70B's spawn placed "its first 6 of 19
+layers" on the card while gemma-2-2b-it — last used at 15:24:41, 29 minutes idle
+— held 2,367 MB of it, about four of the 70B's layers. Gemma was unloaded three
+minutes later only because an unrelated growth range then fit whole.
+
+`plan_vram_reclaim_for_split` asks the split's own question: the same
+candidates, predicate (`vram_reclaim_eligible`: idle floor, never busy) and
+order (most idle first), freeing a prefix only as far as reclaiming every
+eligible model would put more layers on the card, and nothing when none adds a
+layer. The spawn's split branch (`spawn_split_on_card`) and growth's split rung
+(`growth_split`, before `charge_segment_as_split`) each pass their own split as
+`on_card_with(extra_mb)`, so what is freed is measured in the placement the
+loader makes. The planners of a split — `card_share_for_planning`,
+`fresh_run_layers_for_planning`, `fresh_spawn_machine_mb`, `planning_on_card` —
+read `split_budget_for_planning` (planning budget + `idle_vram_reclaimable_mb`),
+a ceiling as #125's is. Ollama does the same: a load that does not fit whole
+beside the others `needEvict`s, `findRunnerToUnload` taking an idle runner
+first, before it settles for a partial offload (`server/sched.go`).
+"Plan before destroying" still holds, in the split's own unit: a model whose
+memory adds no layer stays loaded.
+
+**A drafter is never a split's** (`split_reclaim_eligible`,
+`WorkerHandle::drafts_for_another_model`, set by `ModelProcessPool::draft`).
+Found reading the path before commit, gotcha #747's shape the other way round:
+the 70B's own drafter (Llama 3.1 8B, three times its speed, #351) sits idle on
+the card between conversations, and the split would have unloaded it for about
+four layers; reloaded as a guest it gets only the memory standing free — none,
+beside a split that fills the card. The whole-model reclaim is unchanged.
+
+Tests: `a_split_takes_idle_models_card_memory_as_far_as_it_adds_layers`,
+`nothing_is_unloaded_for_a_split_it_would_not_widen` (pure);
+`a_plan_counts_the_card_an_idle_model_gives_a_split`,
+`a_spawn_split_unloads_an_idle_model_that_adds_card_layers` (controls: in use,
+a drafter); `a_split_worker_grows_onto_the_card_an_idle_model_gives_back`. Each
+red with its fix off (the planner's budget, the growth rung, the drafter rule,
+separately). The spawn branch's wiring in `get_or_spawn` needs a real worker
+and is checked on the card, not by a unit test.
+
 ## `should_return_to_gpu` + `ModelProcessPool::worker_should_return_to_gpu`
 
 (2026-08-27) — the single answer to "is this resident worker still in the right

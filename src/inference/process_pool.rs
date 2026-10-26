@@ -192,6 +192,9 @@ struct VramReclaimCandidate {
     idle_secs: u64,
     /// A request is in flight against it right now.
     busy: bool,
+    /// It has guessed for another model's request
+    /// (`WorkerHandle::drafts_for_another_model`): never a split's (#355).
+    drafts: bool,
 }
 
 /// Choose which resident models to unload so `needed_mb` fits in `budget`.
@@ -200,9 +203,9 @@ struct VramReclaimCandidate {
 /// verified by running the node, this decides what the wiring does.
 ///
 /// Returns an EMPTY plan when the request cannot be satisfied even by
-/// reclaiming everything eligible. That is the load-bearing case: unloading
-/// models and still not fitting costs the user a cold start and buys nothing,
-/// because the model was going to the CPU either way.
+/// reclaiming everything eligible: unloading models and still not fitting
+/// WHOLE buys this admission nothing. What it buys a model the card then holds
+/// part of is [`plan_vram_reclaim_for_split`]'s question, asked next.
 fn plan_vram_reclaim(
     budget_mb: u64,
     committed_mb: u64,
@@ -235,6 +238,52 @@ fn plan_vram_reclaim(
     plan
 }
 
+/// Choose which idle models to unload so more of a model the card holds only
+/// PART of runs there (#355): `on_card_with(mb)` is how many of its layers the
+/// card/processor split puts on the card with `mb` more card memory than
+/// stands free.
+///
+/// [`plan_vram_reclaim`] frees nothing unless the model then fits WHOLE —
+/// written when a model that did not fit went to the processor whatever was
+/// freed. A split's card share grows with every layer's worth freed, and a
+/// layer on the card runs several times faster than on the processor, so an
+/// idle model kept beside a split costs every token of the split. Ollama
+/// unloads idle runners before it settles for a partial offload
+/// (`server/sched.go`: a load that would not fit whole beside the others
+/// `needEvict`s, `findRunnerToUnload` taking an idle runner first).
+///
+/// Same candidates, predicate and order (most idle first), and only as many
+/// as it takes to reach what reclaiming every eligible model would give: a
+/// model whose memory adds no layer stays loaded. Empty when none adds one.
+/// A drafter is never taken ([`split_reclaim_eligible`]).
+fn plan_vram_reclaim_for_split(
+    candidates: Vec<VramReclaimCandidate>,
+    on_card_with: impl Fn(u64) -> usize,
+) -> Vec<(ModelId, u64)> {
+    let mut eligible: Vec<VramReclaimCandidate> = candidates
+        .into_iter()
+        .filter(split_reclaim_eligible)
+        .collect();
+    eligible.sort_by_key(|a| std::cmp::Reverse(a.idle_secs));
+    let all = eligible
+        .iter()
+        .fold(0u64, |sum, c| sum.saturating_add(c.charge_mb));
+    let most = on_card_with(all);
+    if most <= on_card_with(0) {
+        return Vec::new();
+    }
+    let mut plan = Vec::new();
+    let mut freed = 0u64;
+    for c in eligible {
+        freed = freed.saturating_add(c.charge_mb);
+        plan.push((c.model, c.charge_mb));
+        if on_card_with(freed) >= most {
+            break;
+        }
+    }
+    plan
+}
+
 /// May the pool take the card back from this model for another one?
 ///
 /// **The single answer**, read by the reclaim itself ([`plan_vram_reclaim`]) and
@@ -243,6 +292,17 @@ fn plan_vram_reclaim(
 /// would plan a segment the loader turns down.
 fn vram_reclaim_eligible(c: &VramReclaimCandidate) -> bool {
     !c.busy && c.charge_mb > 0 && c.idle_secs >= vram_make_room_min_idle_secs()
+}
+
+/// May a card/processor split take the card back from this model? As
+/// [`vram_reclaim_eligible`], and never from a worker that guesses for another
+/// model (`WorkerHandle::drafts_for_another_model`, #355): a split gains a few
+/// layers where the model the drafter serves loses its speed-up. The single
+/// answer, read by the split's reclaim ([`plan_vram_reclaim_for_split`]) and by
+/// the planner's count of it
+/// (`ModelProcessPool::idle_vram_reclaimable_for_split_mb`).
+fn split_reclaim_eligible(c: &VramReclaimCandidate) -> bool {
+    vram_reclaim_eligible(c) && !c.drafts
 }
 
 /// Rounds [`ModelProcessPool::get_or_spawn`] may take before giving up: each
@@ -740,6 +800,13 @@ struct WorkerHandle {
     /// reason `context_fits` is: a worker respawned on the other device starts
     /// with no figure rather than the old device's.
     own_decode: std::sync::Mutex<OwnDecodeSpeed>,
+    /// This worker has guessed for another model's request
+    /// ([`ModelProcessPool::draft`]). A split's reclaim never takes it (#355):
+    /// the model it guesses for would trade its drafter — three times the
+    /// 70B's speed (#351) — for a few layers on the card, and the drafter,
+    /// reloaded as a guest, gets only the memory that stands free (gotcha
+    /// #747's shape, the other way round).
+    drafts_for_another_model: AtomicBool,
 }
 
 /// Longest path a Unix domain socket may have, INCLUDING its NUL terminator.
@@ -4702,6 +4769,19 @@ impl ModelProcessPool {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// The card budget a plan weighs a card/processor split of `model_id`
+    /// against ([`Self::partial_gpu_layers`]): [`Self::card_budget_for_planning`]
+    /// plus the card memory idle models hold, which the spawn's split gives it
+    /// first (`free_vram_for_split`, #355) — read by every planner of a split,
+    /// so the plan reads the card the loader will split on. A ceiling, as
+    /// [`Self::idle_vram_reclaimable_mb`] is: the reclaim stops once more
+    /// memory adds no layer, so the split it makes is the same. Drafters are
+    /// not counted, as the reclaim never takes them.
+    fn split_budget_for_planning(&self, model_id: &ModelId) -> u64 {
+        self.card_budget_for_planning(model_id)
+            .saturating_add(self.idle_vram_reclaimable_for_split_mb(model_id))
+    }
+
     /// Set the CPU thread count handed to each worker's rayon pool.
     ///
     /// Resolved from `resources.max_cpu_threads` / `node.contribution` at
@@ -5013,7 +5093,7 @@ impl ModelProcessPool {
                     model_id,
                     None,
                     estimated,
-                    self.card_budget_for_planning(model_id),
+                    self.split_budget_for_planning(model_id),
                 )
             })
             .is_some()
@@ -5274,6 +5354,55 @@ impl ModelProcessPool {
         reclaimed
     }
 
+    /// Unload the idle models [`plan_vram_reclaim_for_split`] chooses for a
+    /// card/processor split of `exclude` (#355) — the spawn's and the growth's
+    /// split rungs, before each sizes its card share. `on_card_with` is that
+    /// rung's own split, asked with more room; it is dropped before the first
+    /// unload. Returns the megabytes reclaimed.
+    async fn free_vram_for_split(
+        &self,
+        exclude: &ModelId,
+        on_card_with: impl Fn(u64) -> usize,
+    ) -> u64 {
+        let plan = plan_vram_reclaim_for_split(self.vram_reclaim_candidates(exclude), on_card_with);
+        let mut reclaimed = 0u64;
+        for (victim, charge) in plan {
+            tracing::info!(
+                model = %victim,
+                reclaimed_mb = charge,
+                for_model = %exclude,
+                "Freeing graphics memory from an idle model so more of the requested one runs \
+                 on the GPU"
+            );
+            self.unload_model(&victim).await;
+            reclaimed = reclaimed.saturating_add(charge);
+        }
+        reclaimed
+    }
+
+    /// How many of `segment`'s layers a spawn's card/processor split puts on
+    /// the card with `extra_mb` more card memory than stands free — the
+    /// spawn's question to [`Self::free_vram_for_split`] (#355). Every layer
+    /// (`usize::MAX`) once the model fits whole, where
+    /// [`Self::partial_gpu_layers`] answers `None`.
+    fn spawn_split_on_card(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        estimated: u64,
+        extra_mb: u64,
+    ) -> usize {
+        let budget = self
+            .vram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(extra_mb);
+        if budget.saturating_sub(self.vram_committed_mb()) >= estimated {
+            return usize::MAX;
+        }
+        self.partial_gpu_layers(model_id, Some(segment), estimated, budget)
+            .map_or(0, |split| split.card_share().0)
+    }
+
     /// Gather the inputs for [`should_return_to_gpu`] and ask it.
     ///
     /// Cheap enough for the request path — which is where it has to run, since
@@ -5381,6 +5510,7 @@ impl ModelProcessPool {
                     charge_mb: *e.value(),
                     idle_secs: worker.idle_secs(),
                     busy: worker.in_use(self.conversation_window()),
+                    drafts: worker.drafts_for_another_model.load(Ordering::Acquire),
                 })
             })
             .collect()
@@ -5401,6 +5531,18 @@ impl ModelProcessPool {
         self.vram_reclaim_candidates(exclude)
             .iter()
             .filter(|c| vram_reclaim_eligible(c))
+            .map(|c| c.charge_mb)
+            .sum()
+    }
+
+    /// The most graphics memory a card/processor split of `exclude` would take
+    /// back from idle models ([`split_reclaim_eligible`]: drafters kept) — the
+    /// planner's half of [`Self::free_vram_for_split`], a ceiling as
+    /// [`Self::idle_vram_reclaimable_mb`] is.
+    fn idle_vram_reclaimable_for_split_mb(&self, exclude: &ModelId) -> u64 {
+        self.vram_reclaim_candidates(exclude)
+            .iter()
+            .filter(|c| split_reclaim_eligible(c))
             .map(|c| c.charge_mb)
             .sum()
     }
@@ -6222,6 +6364,46 @@ impl ModelProcessPool {
         }
     }
 
+    /// How [`Self::charge_segment_as_split`] would place `segment` on
+    /// `handle`'s card with `extra_mb` more card memory than stands free —
+    /// `extra_mb` 0 is its own question, more is the reclaim's
+    /// (`free_vram_for_split`, #355) — with the card room it was sized
+    /// against: the budget less every charge, plus what the ranges `segment`
+    /// replaces hold. `None`: a worker in system memory, hybrid placement
+    /// switched off, geometry unreadable, or no layer fits.
+    fn growth_split(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        handle: &WorkerHandle,
+        extra_mb: u64,
+    ) -> Option<(CardSplit, u64)> {
+        if !handle.holds_gpu_memory()
+            || std::env::var("SWARMLLM_HYBRID_OFFLOAD").as_deref() == Ok("0")
+        {
+            return None;
+        }
+        let (inputs, mut layers) = self.segment_geometry(model_id, Some(segment))?;
+        // The same A/B as a spawn's (`partial_gpu_layers`).
+        if std::env::var("SWARMLLM_EXPERTS_IN_RAM").as_deref() == Ok("0") {
+            layers.experts.clear();
+        }
+        let room_mb = self
+            .vram_budget_mb
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(self.vram_committed_mb())
+            .saturating_add(handle.subsumed_charge(segment).mb)
+            .saturating_add(extra_mb);
+        let split = card_split(
+            &inputs,
+            &layers,
+            room_mb
+                .saturating_mul(1024 * 1024)
+                .saturating_add(crate::inference::split::hybrid::FORWARD_BUFFER_RESERVE_BYTES),
+        )?;
+        Some((split, room_mb))
+    }
+
     /// Charge `segment` to a live card worker as a card/processor split, when
     /// the card will not take it whole — the rung a spawn has
     /// (`partial_gpu_layers`) and growth lacked (FUTURE_WORK #265).
@@ -6262,18 +6444,9 @@ impl ModelProcessPool {
         if handle.segment_is_charged(segment) {
             return Ok(true);
         }
-        if !handle.holds_gpu_memory()
-            || std::env::var("SWARMLLM_HYBRID_OFFLOAD").as_deref() == Ok("0")
-        {
-            return Ok(false);
-        }
-        let Some((inputs, mut layers)) = self.segment_geometry(model_id, Some(segment)) else {
+        let Some((split, room_mb)) = self.growth_split(model_id, segment, handle, 0) else {
             return Ok(false);
         };
-        // The same A/B as a spawn's (`partial_gpu_layers`).
-        if std::env::var("SWARMLLM_EXPERTS_IN_RAM").as_deref() == Ok("0") {
-            layers.experts.clear();
-        }
         let (Some((_, card_per_layer_mb)), Some((_, host_per_layer_mb))) = (
             self.segment_cost_curve(model_id, true),
             self.segment_cost_curve(model_id, false),
@@ -6281,20 +6454,6 @@ impl ModelProcessPool {
             return Ok(false);
         };
         let subsumed = handle.subsumed_charge(segment);
-        let room_mb = self
-            .vram_budget_mb
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .saturating_sub(self.vram_committed_mb())
-            .saturating_add(subsumed.mb);
-        let Some(split) = card_split(
-            &inputs,
-            &layers,
-            room_mb
-                .saturating_mul(1024 * 1024)
-                .saturating_add(crate::inference::split::hybrid::FORWARD_BUFFER_RESERVE_BYTES),
-        ) else {
-            return Ok(false);
-        };
         let cost = split_growth_cost(
             split,
             segment,
@@ -6433,6 +6592,24 @@ impl ModelProcessPool {
                     "Reclaimed graphics memory from idle models so this model's worker can \
                      take on the range asked for"
                 );
+                refused = match self
+                    .charge_additional_segment(model_id, segment, &handle, requester)
+                    .await
+                {
+                    Ok(()) => return Ok(Growth::Grown(handle)),
+                    Err(r) => r,
+                };
+            }
+            // The idle models' card memory goes to the split next, as far as it
+            // puts more of the range on the card (#355) — the reclaim above
+            // frees nothing unless the range then fits whole.
+            let freed = self
+                .free_vram_for_split(model_id, |extra_mb| {
+                    self.growth_split(model_id, segment, &handle, extra_mb)
+                        .map_or(0, |(split, _)| split.card_share().0)
+                })
+                .await;
+            if freed > 0 {
                 refused = match self
                     .charge_additional_segment(model_id, segment, &handle, requester)
                     .await
@@ -6978,7 +7155,7 @@ impl ModelProcessPool {
         };
         let estimated = self.estimated_gpu_mb(model_id)?;
         let budget = self
-            .card_budget_for_planning(model_id)
+            .split_budget_for_planning(model_id)
             .saturating_add(own_card_mb);
         let split = self.partial_gpu_layers(model_id, None, estimated, budget)?;
         let (on_card, total) = split.card_share();
@@ -7088,7 +7265,7 @@ impl ModelProcessPool {
         if self.spawn_may_take_the_card(model_id) {
             let own_card_mb = self.vram_reserved_mb.get(model_id).map_or(0, |mb| *mb);
             let budget = self
-                .card_budget_for_planning(model_id)
+                .split_budget_for_planning(model_id)
                 .saturating_add(own_card_mb);
             if let Some(mb) = self.machine_mb_beside_card(model_id, run, budget) {
                 return mb;
@@ -7256,7 +7433,7 @@ impl ModelProcessPool {
             model_id,
             None,
             estimated,
-            self.card_budget_for_planning(model_id),
+            self.split_budget_for_planning(model_id),
         )
         .map(CardSplit::card_share)
     }
@@ -8275,7 +8452,19 @@ impl ModelProcessPool {
                 let budget = self
                     .vram_budget_mb
                     .load(std::sync::atomic::Ordering::Relaxed);
-                if let Some(split) =
+                // The idle models' card memory goes to the split first, as far
+                // as it puts more of this model on the card (#355): the
+                // reclaim above freed none, because the model would not fit
+                // whole even then.
+                let freed = self
+                    .free_vram_for_split(model_id, |extra_mb| {
+                        self.spawn_split_on_card(model_id, segment, estimated, extra_mb)
+                    })
+                    .await;
+                if freed > 0 && self.admit_to_gpu(model_id, estimated) {
+                    charged_vram_mb = estimated;
+                    admitted = true;
+                } else if let Some(split) =
                     self.partial_gpu_layers(model_id, Some(segment), estimated, budget)
                 {
                     match split {
@@ -9184,6 +9373,7 @@ impl ModelProcessPool {
             card_split: card_split.filter(|_| placed_on_cpu_because.is_none()),
             context_fits,
             own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
+            drafts_for_another_model: AtomicBool::new(false),
         })
     }
 
@@ -9591,6 +9781,9 @@ impl ModelProcessPool {
             self.retire_dead_worker(&model_id).await;
             return Err(SwarmError::ServiceUnavailable("worker is dead".into()));
         }
+        handle
+            .drafts_for_another_model
+            .store(true, Ordering::Release);
         let (resp_tx, mut resp_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
         let (mut guard, _) = handle.register_response(request_id, resp_tx, true);
         let attempt_token = guard.token;
@@ -11688,6 +11881,106 @@ mod tests {
             .await
             .is_ok());
         assert_ne!(h.last_used.load(Ordering::Relaxed), LONG_AGO);
+    }
+
+    /// The 70B with no worker here, on a 6,000 MB card an idle model has held
+    /// 3,138 MB of for an hour — the field's shape when a 70B split loaded
+    /// beside an idle Gemma (#355). Hands back the pool, the 70B, the idle
+    /// model and its worker.
+    async fn seventy_b_beside_an_idle_model(
+        dir: &str,
+    ) -> (ModelProcessPool, ModelId, ModelId, Arc<WorkerHandle>) {
+        let p = ModelProcessPool::new(std::path::PathBuf::from(dir));
+        p.test_card_in_play.store(true, Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        p.set_vram_budget_mb(6_000);
+        p.set_ram_budget_mb(9_000);
+        let m = ModelId("seventy-b".into());
+        p.test_footprint_inputs
+            .insert(m.clone(), seventy_b_inputs());
+        let idle = ModelId("gemma-idle".into());
+        let h = admit_and_insert_gpu_worker(&p, &idle, 3_138, std::time::Duration::from_secs(3600))
+            .await;
+        (p, m, idle, h)
+    }
+
+    /// **A plan reads the card the split will be made on** (#355): the spawn
+    /// of a split unloads idle models as far as their memory puts more layers
+    /// on the card, so every planner of a split counts that memory — its card
+    /// share for pricing, the run it offers this node. Weighed on the free
+    /// memory alone, the plan priced and sized a narrower split than the
+    /// loader makes. In use, the idle model's memory is not the split's.
+    #[tokio::test]
+    async fn a_plan_counts_the_card_an_idle_model_gives_a_split() {
+        let (p, m, _idle, h) = seventy_b_beside_an_idle_model("/tmp/swarmllm-355-plan").await;
+        let (on_card, total) = p
+            .card_share_for_planning(&m)
+            .expect("the 70B splits across the card and the processor");
+        assert_eq!(total, 80);
+        let run = p
+            .fresh_run_layers_for_planning(&m, Requester::Swarm)
+            .expect("a run is on offer");
+
+        // A drafter's memory is not the split's either.
+        h.drafts_for_another_model.store(true, Ordering::Release);
+        let (drafter_on_card, _) = p
+            .card_share_for_planning(&m)
+            .expect("still a split, on the free 2,862 MB");
+        h.drafts_for_another_model.store(false, Ordering::Release);
+
+        h.note_conversation(uuid::Uuid::new_v4());
+        let (busy_on_card, _) = p
+            .card_share_for_planning(&m)
+            .expect("still a split, on the free 2,862 MB");
+        assert_eq!(drafter_on_card, busy_on_card);
+        let busy_run = p
+            .fresh_run_layers_for_planning(&m, Requester::Swarm)
+            .expect("still a run on offer");
+        assert!(
+            on_card > busy_on_card,
+            "the idle model's memory puts more layers on the card: {on_card} vs {busy_on_card}"
+        );
+        assert!(
+            run > busy_run,
+            "less of each run is left for the machine, so a wider one is taken: {run} vs \
+             {busy_run}"
+        );
+    }
+
+    /// **A spawn's split unloads an idle model whose memory adds layers to the
+    /// card** (#355) — and leaves alone one in use, and a drafter.
+    #[tokio::test]
+    async fn a_spawn_split_unloads_an_idle_model_that_adds_card_layers() {
+        let segment = (0, 80);
+        for (case, kept) in [("idle", false), ("in-use", true), ("drafter", true)] {
+            let (p, m, idle, h) =
+                seventy_b_beside_an_idle_model(&format!("/tmp/swarmllm-355-spawn-{case}")).await;
+            match case {
+                "in-use" => h.note_conversation(uuid::Uuid::new_v4()),
+                "drafter" => h.drafts_for_another_model.store(true, Ordering::Release),
+                _ => {}
+            }
+            drop(h);
+            let estimated = p.estimate_gpu_footprint_mb(&m, Some(segment), KvCharge::Typical);
+            let beside_it = p.spawn_split_on_card(&m, segment, estimated, 0);
+            let freed = p
+                .free_vram_for_split(&m, |extra_mb| {
+                    p.spawn_split_on_card(&m, segment, estimated, extra_mb)
+                })
+                .await;
+            if kept {
+                assert_eq!(freed, 0, "{case}: never unloaded for a split");
+                assert!(p.workers.get(&idle).is_some(), "{case}");
+                continue;
+            }
+            assert_eq!(freed, 3_138);
+            assert!(p.workers.get(&idle).is_none(), "the idle model is unloaded");
+            let now = p.spawn_split_on_card(&m, segment, estimated, 0);
+            assert!(
+                now > beside_it,
+                "and the split puts more layers on the card: {now} vs {beside_it}"
+            );
+        }
     }
 
     /// **Admission weighs the card as it stands NOW, not as it stood at
@@ -13918,6 +14211,7 @@ mod tests {
             card_split,
             context_fits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             own_decode: std::sync::Mutex::new(OwnDecodeSpeed::default()),
+            drafts_for_another_model: AtomicBool::new(false),
         });
         (handle, client)
     }
@@ -16477,6 +16771,92 @@ mod admission_tests {
         assert_eq!(p.vram_reserved_mb.get(&m).map(|v| *v).unwrap_or(0), 0);
     }
 
+    /// **A split worker's growth takes an idle model's card memory first**
+    /// (#355). The reclaim before a growth frees nothing unless the range then
+    /// fits the card WHOLE, so a run that splits was sized on the free memory
+    /// alone, an idle model kept beside it — every token of the split paying
+    /// for layers on the processor the card had room for. The 30B-A3B worker
+    /// of the test above, in use, asked for 22 more layers with an idle model
+    /// holding 2,000 MB of the card for an hour.
+    #[tokio::test]
+    async fn a_split_worker_grows_onto_the_card_an_idle_model_gives_back() {
+        use crate::inference::split::RangePlacement;
+        use crate::inference::worker_ipc::recv_daemon;
+        let (p, m) = thirty_b_a3b_on_a_card("qwen3-30b-a3b-grows-reclaim", 7_000, true);
+        p.set_ram_budget_mb(100_000);
+        let idle = ModelId("idle-3b".into());
+        assert!(p.admit_to_gpu(&idle, 2_000));
+        let (ih, idle_end) = super::tests::fake_worker_handle_split_with_its_end(
+            false,
+            None,
+            false,
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(3600))
+                .expect("a clock old enough"),
+            None,
+        )
+        .await;
+        std::mem::forget(idle_end);
+        ih.charged_mb.store(2_000, Ordering::Release);
+        p.workers.insert(idle.clone(), ih);
+        let (h, mut worker_end) = super::tests::fake_worker_handle_split_with_its_end(
+            false,
+            None,
+            false,
+            std::time::Instant::now(),
+            Some(CardSplit::ExpertsInRam {
+                in_ram: 26,
+                total: 26,
+            }),
+        )
+        .await;
+        assert!(p.admit_to_gpu(&m, 3_345));
+        h.charged_mb.store(3_345, Ordering::Release);
+        h.record_charged_segment((0, 26), 0);
+        p.workers.insert(m.clone(), h.clone());
+        h.note_conversation(Uuid::new_v4());
+        let Some((
+            CardSplit::ExpertsInRam {
+                in_ram: beside_it, ..
+            },
+            _,
+        )) = p.growth_split(&m, (26, 48), &h, 0)
+        else {
+            panic!("fixture: beside the idle model the range splits by its experts");
+        };
+
+        let grown = p
+            .grow_worker(&m, (26, 48), h.clone(), Requester::Owner)
+            .await;
+        assert!(matches!(grown, Ok(Growth::Grown(_))), "{:?}", grown.err());
+        assert!(
+            p.workers.get(&idle).is_none(),
+            "the idle model gave the card back to the split"
+        );
+        let placement = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            recv_daemon(&mut worker_end),
+        )
+        .await
+        {
+            Ok(Ok((DaemonMsg::PlaceRange { placement, .. }, _))) => placement,
+            other => panic!("the worker must be told where the range goes: {other:?}"),
+        };
+        let Some(RangePlacement {
+            gpu_layers: None,
+            cpu_expert_layers: Some(in_ram),
+        }) = placement
+        else {
+            panic!("every layer on the card, some experts in RAM: {placement:?}");
+        };
+        assert!(
+            in_ram < beside_it,
+            "more of the range's experts on the card: {in_ram} in RAM, {beside_it} beside the \
+             idle model"
+        );
+        assert!(p.vram_committed_mb() <= 7_000, "{}", p.vram_committed_mb());
+    }
+
     /// **A plan weighs the card as it stands, where a spawn could follow**
     /// (#250, report #036). The planner weighed the figure the last admission
     /// had stored — taken while the card stood free — after another program
@@ -16913,6 +17293,7 @@ mod admission_tests {
             charge_mb,
             idle_secs,
             busy: false,
+            drafts: false,
         }
     }
 
@@ -16946,8 +17327,8 @@ mod admission_tests {
 
     /// The property that makes this safe to run on every refused admission:
     /// when reclaiming everything eligible would STILL not fit, nothing is
-    /// unloaded. The model is going to the CPU either way, so a cold start
-    /// bought nothing.
+    /// unloaded for the WHOLE model — what the freed memory buys a split is
+    /// asked next (`plan_vram_reclaim_for_split`, #355).
     #[test]
     fn nothing_is_unloaded_when_it_would_still_not_fit() {
         let plan = plan_vram_reclaim(6000, 5000, 5500, vec![cand("small", 1000, 3600)]);
@@ -16989,6 +17370,64 @@ mod admission_tests {
     #[test]
     fn a_model_that_already_fits_reclaims_nothing() {
         assert!(plan_vram_reclaim(8000, 1000, 2000, vec![cand("idle", 1000, 3600)]).is_empty());
+    }
+
+    /// A split's card share as `plan_vram_reclaim_for_split` is asked it: 1000
+    /// MB stand free, a layer takes 500, the card holds at most 16 of them.
+    fn layers_on_card(extra_mb: u64) -> usize {
+        ((1000 + extra_mb) / 500).min(16) as usize
+    }
+
+    /// **A split takes idle models' card memory, most idle first, as far as it
+    /// adds layers** (#355). The all-or-nothing reclaim freed nothing for a
+    /// model that would not fit whole, so a 70B split beside an idle model
+    /// put only the free memory's layers on the card. Here the two most idle
+    /// reach the card's 16 layers (1000 + 4000 + 3000 = 8000 MB); the third
+    /// would add none and stays loaded.
+    #[test]
+    fn a_split_takes_idle_models_card_memory_as_far_as_it_adds_layers() {
+        let plan = plan_vram_reclaim_for_split(
+            vec![
+                cand("recent", 5000, 600),
+                cand("stale", 4000, 7200),
+                cand("older", 3000, 3600),
+            ],
+            layers_on_card,
+        );
+        assert_eq!(
+            plan,
+            vec![
+                (ModelId("stale".into()), 4000),
+                (ModelId("older".into()), 3000)
+            ]
+        );
+    }
+
+    /// Nothing is unloaded for a split that gains no layer by it: a model
+    /// smaller than a layer, one in use, one used a moment ago — nor a drafter,
+    /// whose model would lose its speed-up for those layers.
+    #[test]
+    fn nothing_is_unloaded_for_a_split_it_would_not_widen() {
+        assert!(
+            plan_vram_reclaim_for_split(vec![cand("tiny", 400, 3600)], layers_on_card).is_empty()
+        );
+        let mut busy = cand("serving", 4000, 9999);
+        busy.busy = true;
+        assert!(plan_vram_reclaim_for_split(vec![busy], layers_on_card).is_empty());
+        let just_answered = cand(
+            "just-answered",
+            4000,
+            VRAM_MAKE_ROOM_MIN_IDLE_SECS_DEFAULT - 1,
+        );
+        assert!(plan_vram_reclaim_for_split(vec![just_answered], layers_on_card).is_empty());
+        let mut drafter = cand("drafter", 4000, 3600);
+        drafter.drafts = true;
+        assert!(plan_vram_reclaim_for_split(vec![drafter], layers_on_card).is_empty());
+        // The control: the same model idle gives the split its 8 layers.
+        assert_eq!(
+            plan_vram_reclaim_for_split(vec![cand("idle", 4000, 3600)], layers_on_card).len(),
+            1
+        );
     }
 
     /// The reported case, at the moment the user asks for the model again:
