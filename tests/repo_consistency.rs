@@ -2335,7 +2335,6 @@ fn user_settable_config_is_read_live_not_from_the_boot_snapshot() {
         // The contradiction was invisible while the scan was line-based,
         // because the one read it would have flagged is a wrapped chain.
         ".config.auto_manage.enabled",
-        ".config.auto_manage.max_shards",
         ".config.auto_manage.max_storage_mb",
         ".config.auto_manage.prune_enabled",
         ".config.node.contribution",

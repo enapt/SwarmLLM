@@ -245,13 +245,11 @@ pub(super) fn fetched_with_pool_vram(
         held_bytes: 0,
         held_shards: 0,
         budget: reading.budget(),
-        max_shards: 0,
-        max_shards_reached: false,
         reading,
     };
     let local = state.identity.node_id().clone();
     manager
-        .select_within_budget(manager.gather_candidates(&local, pool_vram_mb), &report, 0)
+        .select_within_budget(manager.gather_candidates(&local, pool_vram_mb), &report)
         .into_iter()
         .map(|c| (c.model_id, c.shard_index))
         .collect()

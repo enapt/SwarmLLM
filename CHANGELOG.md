@@ -16,6 +16,15 @@ memory that is free, and never pushes anything out. Measured on the 70B across f
 three countries: 1.9-2.0 tokens a second instead of 0.6, and the first token after 7-11 seconds
 instead of 13 (#351).
 
+**A computer no longer says its storage is full while it still has room.** A setting in the
+config file, `max_shards` under `[auto_manage]`, also limited how many parts of models a computer
+keeps, whatever storage its owner had allowed, and the dashboard could neither show nor change it:
+a computer allowed 150 GB, with that setting at 250, said its storage was full at 128 GB. Parts
+are cut to about the same size, so a count was only a second storage limit nobody could see.
+Storage is now limited only by the space the owner allows and by the disk itself; a config file
+that still sets `max_shards` there is warned about in the log and otherwise ignored. The limit
+per model, on the Models page, is unchanged (field report #039).
+
 **A computer already holding part of a large model now says no up front to a part it could not
 load.** Before a reply starts, each computer in a split is asked whether it can take its part.
 One that had already loaded other layers of the model answered only about the conversation's

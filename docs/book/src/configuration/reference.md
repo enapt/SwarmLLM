@@ -235,11 +235,10 @@ a tailnet — devices you authorised — which is why the LAN case stays opt-in.
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | boolean | `true` | Auto-download popular shards (only for models at DemandVerified+ or Pinned trust level) |
-| `max_storage_mb` | integer | `0` | Cap on shard storage held. `0` = a share of `max_disk_mb` by contribution level (25% minimal / 50% moderate / 75% maximum); a set value is honoured as written, up to `max_disk_mb` (`1` is read as `0`: up to 0.3.230 the settings API stored 1 for 0). Either way the node never takes the last 10% of the filesystem it is on (since v0.3.228) |
+| `max_storage_mb` | integer | `0` | Cap on shard storage held. `0` = a share of `max_disk_mb` by contribution level (25% minimal / 50% moderate / 75% maximum); a set value is honoured as written, up to `max_disk_mb` (`1` is read as `0`: up to 0.3.230 the settings API stored 1 for 0). Either way the node never takes the last 10% of the filesystem it is on (since v0.3.228). Storage is limited in bytes only: the count limit `max_shards`, a second storage limit the dashboard could not show (parts are cut to about the same size), was removed in v0.3.255, and a file that still sets it is warned about and otherwise ignored |
 | `interval_minutes` | integer | `5` | Check interval for new shards |
 | `interval_seconds` | integer | none | Testing override for `interval_minutes`. Takes precedence when set |
 | `model_policies` | table | `{}` | Per-model overrides keyed by model id, e.g. `[auto_manage.model_policies."llama-3.1-8b"]`, each with `enabled` (default `true`: auto-manage may download its parts), `max_shards` (default `0`: no per-model limit) and `prune_enabled` (default `true`: auto-manage may delete extra copies) |
-| `max_shards` | integer | `0` | Max shards. `0` = unlimited |
 | `max_concurrent_downloads` | integer | `3` | Max parallel downloads |
 | `prune_enabled` | boolean | `true` | Auto-remove over-replicated shards. Since v0.3.241 a model this computer holds whole keeps every part unless the storage set aside for models is 95% full, a part fetched in the last 30 minutes is not removed while that storage is under 80% full, and parts are trimmed against the highest copy count the swarm wanted in the last 24 hours, so a short dip in demand does not delete parts that are then downloaded again |
 | `min_replicas` | integer | `2` | Min network replicas before pruning |

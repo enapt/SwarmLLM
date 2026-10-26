@@ -27,40 +27,28 @@ pub(super) struct BudgetReport {
     pub held_bytes: u64,
     pub held_shards: u32,
     pub budget: super::StorageBudget,
-    pub max_shards: u32,
-    pub max_shards_reached: bool,
     /// What `budget` was computed from, so selection can judge each part at
     /// the pressure it would leave behind (`select_within_budget`).
     pub reading: super::StorageReading,
 }
 
 impl BudgetReport {
-    /// Bytes the download pass may still add. Zero when the shard-count cap
-    /// is reached, whatever the byte figures say.
+    /// Bytes the download pass may still add. Storage is limited in bytes
+    /// only: the count cap `[auto_manage] max_shards` was removed (field
+    /// report #039, 2026-10-26): parts are cut to about the same size, so a
+    /// count was a second storage limit the dashboard could not show — at 250
+    /// it said "storage is full" at 128 GB of a 150 GB budget.
     pub fn remaining_bytes(&self) -> u64 {
-        if self.max_shards_reached {
-            0
-        } else {
-            self.budget.remaining(self.held_bytes)
-        }
+        self.budget.remaining(self.held_bytes)
     }
 
     /// What the owner can do when [`Self::remaining_bytes`] is zero — about
     /// the limit that actually bound. One fixed sentence ("raise the disk
     /// limit or the contribution level in Settings") answered every case, and
-    /// a tester at `max_shards_reached=true` with an explicit
-    /// `max_storage_mb` was pointed at two settings that moved neither limit
-    /// (2026-10-06).
+    /// a tester with an explicit `max_storage_mb` was pointed at two settings
+    /// that moved neither limit (2026-10-06).
     pub fn advice_when_full(&self) -> String {
         use super::StorageLimit;
-        if self.max_shards_reached {
-            return format!(
-                "it holds {} parts and [auto_manage] max_shards = {} in config.toml allows no \
-                 more — raise it, or set it to 0 for no count limit (lowering it never deletes \
-                 parts, it only stops downloads)",
-                self.held_shards, self.max_shards
-            );
-        }
         let fix = match &self.budget.limited_by {
             StorageLimit::Explicit { .. } => {
                 "raise [auto_manage] max_storage_mb in config.toml, or set it to 0 to follow the \
@@ -85,11 +73,7 @@ impl AutoShardManager {
     /// Compute remaining download budget in bytes.
     /// What the download pass may still add, and every figure behind that
     /// answer — so a refusal can be logged with its arithmetic showing.
-    pub(super) fn remaining_budget(
-        &self,
-        config: &crate::config::AutoManageConfig,
-        local_node_id: &NodeId,
-    ) -> BudgetReport {
+    pub(super) fn remaining_budget(&self, local_node_id: &NodeId) -> BudgetReport {
         // Bytes from the DISK, count from the registry — the same split
         // `storage_budget_now` makes. The download pass and prune must refuse
         // and shed against ONE figure or they wedge exactly where they
@@ -98,13 +82,10 @@ impl AutoShardManager {
         let (_manifest_bytes, held_shards) =
             super::held_shard_bytes(&self.shared_state, local_node_id);
         let reading = super::StorageReading::now(&self.shared_state);
-        let max_shards_reached = config.max_shards > 0 && held_shards >= config.max_shards;
         BudgetReport {
             held_bytes: reading.held_bytes,
             held_shards,
             budget: reading.budget(),
-            max_shards: config.max_shards,
-            max_shards_reached,
             reading,
         }
     }
@@ -867,7 +848,6 @@ impl AutoShardManager {
         &self,
         candidates: Vec<ShardCandidate>,
         report: &BudgetReport,
-        max_shards: u32,
     ) -> Vec<ShardCandidate> {
         let mut budget_bytes = report.remaining_bytes();
         // Bytes chosen so far this cycle, so each further part is judged at
@@ -875,11 +855,6 @@ impl AutoShardManager {
         let mut chosen_bytes = 0u64;
         let shard_pins = super::manager::read_shard_pins(&self.shared_state);
         let mut selected: Vec<ShardCandidate> = Vec::new();
-        let max = if max_shards > 0 {
-            max_shards as usize
-        } else {
-            usize::MAX
-        };
 
         // Per-cycle cap scaled by ContributionMode:
         // Minimal: 1 shard/cycle regardless of network size
@@ -969,7 +944,7 @@ impl AutoShardManager {
             'outer: loop {
                 let mut any_taken = false;
                 for (mi, model_key) in model_order.iter().enumerate() {
-                    if selected.len() >= max || selected.len() >= per_cycle_cap {
+                    if selected.len() >= per_cycle_cap {
                         break 'outer;
                     }
                     let candidates_for_model = &by_model[model_key];
@@ -1200,47 +1175,54 @@ mod tests {
     use crate::config::Config;
     use crate::types::{NodeId, ShardId};
 
+    fn budget_report(
+        max_storage_mb: u64,
+        max_disk_mb: u64,
+        held_mb: u64,
+        held_shards: u32,
+    ) -> super::BudgetReport {
+        const MB: u64 = 1024 * 1024;
+        let reading = super::super::StorageReading {
+            max_storage_mb,
+            max_disk_mb,
+            contribution: swarmllm_types::ContributionMode::Moderate,
+            disk: None,
+            held_bytes: held_mb * MB,
+        };
+        super::BudgetReport {
+            held_bytes: reading.held_bytes,
+            held_shards,
+            budget: reading.budget(),
+            reading,
+        }
+    }
+
     /// A full node's advice names the limit that bound. The tester's figures:
-    /// 60 parts at `max_shards = 60`, an explicit `max_storage_mb = 28000`,
-    /// 28 220 MB held — told to raise "the disk limit or the contribution
-    /// level", neither of which moved either limit.
+    /// an explicit `max_storage_mb = 28000`, 28 220 MB held — told to raise
+    /// "the disk limit or the contribution level", neither of which moved it.
     #[test]
     fn a_full_node_is_told_about_the_limit_that_bound() {
-        const MB: u64 = 1024 * 1024;
-        let report = |max_storage_mb: u64, max_shards: u32, held_shards: u32| {
-            let reading = super::super::StorageReading {
-                max_storage_mb,
-                max_disk_mb: 50_000,
-                contribution: swarmllm_types::ContributionMode::Moderate,
-                disk: None,
-                held_bytes: 28_220 * MB,
-            };
-            super::BudgetReport {
-                held_bytes: reading.held_bytes,
-                held_shards,
-                budget: reading.budget(),
-                max_shards,
-                max_shards_reached: max_shards > 0 && held_shards >= max_shards,
-                reading,
-            }
-        };
-
-        let at_count_cap = report(28_000, 60, 60).advice_when_full();
-        assert!(at_count_cap.contains("max_shards = 60"), "{at_count_cap}");
-        assert!(!at_count_cap.contains("Settings"), "{at_count_cap}");
-
-        let explicit = report(28_000, 0, 60).advice_when_full();
+        let explicit = budget_report(28_000, 50_000, 28_220, 60).advice_when_full();
         assert!(
             explicit.starts_with("raise [auto_manage] max_storage_mb"),
             "{explicit}"
         );
 
         // No explicit figure: a share of the disk limit, which Settings sets.
-        let share = report(0, 0, 60).advice_when_full();
+        let share = budget_report(0, 50_000, 28_220, 60).advice_when_full();
         assert!(
             share.starts_with("raise the disk limit or the contribution level in Settings"),
             "{share}"
         );
+    }
+
+    /// Storage is limited in bytes alone. Field report #039: 252 parts and
+    /// 128 GB held under an explicit 150 GB — the removed count cap
+    /// (`max_shards = 250`) said "storage is full" with 22 GB to spare.
+    #[test]
+    fn how_many_parts_a_node_holds_never_limits_its_storage() {
+        let report = budget_report(150_000, 400_000, 128_000, 252);
+        assert_eq!(report.remaining_bytes(), 22_000 * 1024 * 1024);
     }
 
     /// Local holds shard 0 of a two-shard model, a connected peer holds shard 1:
@@ -1558,8 +1540,6 @@ mod fetch_what_prune_keeps {
             held_bytes: reading.held_bytes,
             held_shards: 1,
             budget: reading.budget(),
-            max_shards: 0,
-            max_shards_reached: false,
             reading,
         }
     }
@@ -1574,7 +1554,6 @@ mod fetch_what_prune_keeps {
             .select_within_budget(
                 manager.gather_candidates(&local, 0),
                 &report_holding(held_mb),
-                0,
             )
             .into_iter()
             .map(|c| (c.model_id, c.shard_index))
@@ -2105,8 +2084,6 @@ mod holes_first {
             held_bytes: reading.held_bytes,
             held_shards: 2,
             budget: reading.budget(),
-            max_shards: 0,
-            max_shards_reached: false,
             reading,
         };
         assert_eq!(report.remaining_bytes(), 300 * MIB, "fixture: 300 MB left");
@@ -2116,7 +2093,6 @@ mod holes_first {
         let chosen = manager.select_within_budget(
             vec![candidate(&hole, 500 * MIB, true), copy.clone()],
             &report,
-            0,
         );
         assert!(
             chosen.is_empty(),
@@ -2133,7 +2109,7 @@ mod holes_first {
         // A hole larger than the whole 1,000 MB budget can never land here:
         // it keeps no room and asks prune for none, so the copy is taken.
         let never = candidate(&hole, 1_200 * MIB, true);
-        let chosen = manager.select_within_budget(vec![never.clone(), copy.clone()], &report, 0);
+        let chosen = manager.select_within_budget(vec![never.clone(), copy.clone()], &report);
         assert_eq!(
             chosen
                 .iter()
@@ -2144,7 +2120,7 @@ mod holes_first {
         );
         assert_eq!(manager.first_hole_to_fetch(&[never], &report), None);
 
-        let chosen = manager.select_within_budget(vec![copy], &report, 0);
+        let chosen = manager.select_within_budget(vec![copy], &report);
         assert_eq!(
             chosen
                 .iter()

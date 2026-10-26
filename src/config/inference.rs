@@ -750,9 +750,6 @@ pub struct AutoManageConfig {
     /// How often (in minutes) the auto-manager evaluates and downloads.
     #[serde(default = "default_auto_manage_interval")]
     pub interval_minutes: u32,
-    /// Maximum number of shards to hold at once (0 = unlimited within disk budget).
-    #[serde(default)]
-    pub max_shards: u32,
     /// Override interval in seconds (for testing). Takes precedence over `interval_minutes`.
     #[serde(default)]
     pub interval_seconds: Option<u64>,
@@ -888,7 +885,6 @@ impl Default for AutoManageConfig {
             enabled: true,
             max_storage_mb: 0,
             interval_minutes: default_auto_manage_interval(),
-            max_shards: 0,
             interval_seconds: None,
             max_concurrent_downloads: default_max_concurrent_downloads(),
             default_model_shard_cap: 0,

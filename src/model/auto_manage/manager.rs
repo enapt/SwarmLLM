@@ -149,7 +149,7 @@ pub(super) fn hash_ring_position(node_bytes: &[u8; 32], virtual_node: u32) -> u3
 /// Periodically evaluates:
 /// 1. Which models are popular on the network (most holders / most shards)
 /// 2. Which shards are rarest (fewest holders) for those models
-/// 3. Whether this node has budget (disk space, max_shards) to download more
+/// 3. Whether this node has storage budget (bytes) to download more
 /// 4. Whether the global VRAM pool can run the model (deprioritize models too large to run)
 ///
 /// Then triggers HuggingFace shard downloads for the rarest shards of popular models.
@@ -911,12 +911,9 @@ impl AutoShardManager {
 
     /// Download under-replicated shards based on geo-aware scoring.
     async fn evaluate_and_download(&self) {
-        // Live, not the boot snapshot: `max_storage_mb` and `max_shards` are
-        // accepted by `PUT /api/admin/config`, and the prune pass beside this
-        // one already reads them live (gotcha #281, reached through a local
-        // binding the live-config guard cannot see).
-        let live = self.shared_state.cfg();
-        let config = &live.auto_manage;
+        // The storage budget is read live inside `remaining_budget`
+        // (`StorageReading::now`): `max_storage_mb` is accepted by
+        // `PUT /api/admin/config` (gotcha #281).
         let local_node_id = self.shared_state.identity.node_id().clone();
 
         // Clean up stale peer_shard_downloads: if a peer is now a registered
@@ -978,7 +975,7 @@ impl AutoShardManager {
         // tester hunting a phantom reservation (gotcha #448); the real answer
         // was a rule nothing had printed. Every figure the decision used is
         // on this one line, and the message says what to do about it.
-        let report = self.remaining_budget(config, &local_node_id);
+        let report = self.remaining_budget(&local_node_id);
         let budget = report.remaining_bytes();
         if budget == 0 {
             const MB: u64 = 1024 * 1024;
@@ -988,8 +985,6 @@ impl AutoShardManager {
                 held_shards = report.held_shards,
                 budget_mb = report.budget.bytes / MB,
                 budget_from = %report.budget.limited_by,
-                max_shards = report.max_shards,
-                max_shards_reached = report.max_shards_reached,
                 "AutoShardManager: this node's storage is full, so nothing more is downloaded \
                  — {}",
                 report.advice_when_full()
@@ -1037,7 +1032,7 @@ impl AutoShardManager {
         let first_hole = self.first_hole_to_fetch(&candidates, &report);
 
         // 3. Select the best candidates within budget
-        let selected = self.select_within_budget(candidates, &report, config.max_shards);
+        let selected = self.select_within_budget(candidates, &report);
         // A part no computer holds that this cycle could not fit: the room it
         // lacks is prune's to make (`prune::spare_for_a_hole`).
         let lacks = super::scoring::room_a_hole_lacks(
@@ -1399,7 +1394,7 @@ mod tests {
         // Sparse, so this costs no disk.
         write_sparse_shards(&state, &mid, 0..14, GIB);
 
-        let report = manager.remaining_budget(&live.auto_manage, &local);
+        let report = manager.remaining_budget(&local);
         assert_eq!(report.held_bytes, 14 * GIB);
         assert!(
             report.budget.bytes <= 12_500 * 1024 * 1024,
@@ -1434,36 +1429,10 @@ mod tests {
             // has the files.
             std::fs::remove_file(model_dir.join(crate::model::shard::shard_filename(i))).unwrap();
         }
-        let report = manager.remaining_budget(&live.auto_manage, &local);
+        let report = manager.remaining_budget(&local);
         assert_eq!(report.held_bytes, 4 * GIB);
         assert!(report.remaining_bytes() > 0, "{}", report.budget.limited_by);
         assert!(manager.disk_pressure() < 0.95);
-    }
-
-    #[test]
-    fn budget_zero_when_max_shards_reached() {
-        // AutoManageConfig with max_shards = 0 means unlimited
-        let config = crate::config::AutoManageConfig {
-            enabled: true,
-            max_storage_mb: 10000,
-            interval_minutes: 60,
-            max_shards: 0,
-            interval_seconds: None,
-            max_concurrent_downloads: 1,
-            default_model_shard_cap: 0,
-            model_policies: std::collections::HashMap::new(),
-            prune_enabled: true,
-            min_replicas: 2,
-            prune_cooldown_secs: 300,
-            idle_unload_secs: 1800,
-            max_holder_load_for_prune: 3,
-            parallax_auto_rebalance: true,
-            hf_watcher_enabled: false,
-            wishlist_gossip_publish: false,
-            auto_switch_quants: false,
-            on_metered_connection: crate::config::MeteredConnection::Auto,
-        };
-        assert_eq!(config.max_shards, 0); // unlimited
     }
 
     #[test]
@@ -2017,12 +1986,10 @@ mod room_for_holes {
     /// The parts the next download pass would choose, given the storage now.
     fn chosen(shape: &Shape) -> Vec<(ModelId, u32)> {
         let local = shape.state.identity.node_id().clone();
-        let report = shape
-            .manager
-            .remaining_budget(&shape.state.cfg().auto_manage, &local);
+        let report = shape.manager.remaining_budget(&local);
         shape
             .manager
-            .select_within_budget(shape.manager.gather_candidates(&local, 0), &report, 0)
+            .select_within_budget(shape.manager.gather_candidates(&local, 0), &report)
             .into_iter()
             .map(|c| (c.model_id, c.shard_index))
             .collect()
