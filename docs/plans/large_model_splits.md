@@ -37,6 +37,21 @@ in tokens a second. Nothing is lost in quality unless the user opts in:
 Today a 7B split Thailand↔Belgium runs at 2.85 tok/s plain and 5-13 tok/s with the
 continuous stream. A 4-segment intercontinental chain measured 0.35 tok/s.
 
+**The first 70B, measured 2026-10-25 (v0.3.254).** Llama-3.3-70B-Instruct Q4_K_M ran
+across four machines, none of which holds it: an 8 GB card in Thailand, a processor
+node in Thailand, an RTX 3060 in Australia and a processor in Italy. The layers went
+0-28 / 28-34 / 34-73 / 73-80.
+
+- Warm: first token 12.7-13.0 s, then 0.56-0.59 tok/s (1.7-1.8 s a token).
+- Cold: first token 45.6 s, then 0.35 tok/s.
+
+Every token was one trip round the chain, with no guessing. The drafter was refused
+for memory (FUTURE_WORK #351). The route TH→TH→AU→IT→TH puts ~0.4 s of network in each
+token, and the price was net 1.49 s + compute 1.39 s. Read against the target table,
+that is ~7× short of the processor ring and ~35× short of the continental one. The
+levers are the ones below, a drafter first. It ran only after two idle models on the
+first machine's card were unloaded by hand (#350).
+
 ## The formula, and the mistake it rules out
 
 **tok/s = E_N / P.** E_N is the number of tokens guessed right per ring pass, from a
