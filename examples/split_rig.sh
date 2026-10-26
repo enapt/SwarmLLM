@@ -335,6 +335,20 @@
 #          control: B holds no wait and drops the refusal, A waits out the
 #          chain's deadline. PASS = `B passed it on: 1`, `A took the refusal: 1`,
 #          `A timed out: 0`; the status and time are printed beside it.
+#   peerload  #353/#970's refusal path end to end: peerkv's topology, but B's
+#          WEIGHTS will not load. B also holds BUSY_MODEL whole (default
+#          tinyllama); after A has held B's advertised room for PEERLOAD_WAIT_S
+#          (default 40), B starts a long BUSY_MODEL reply (BUSY_TOKENS, default
+#          600) and, once it has loaded, A is asked one question — planned on
+#          B's room from before it was busy. Size RAM_B so B's range loads only
+#          while B is idle: for the default model, 1700 (fit 5) or 1450 (fit 2);
+#          at 2200 and above B's busy room still takes its part and answers.
+#          A holds all but B's last part, so no narrower route exists: the
+#          check is the refusal and the hold, not a narrower reply. PASS = B
+#          refused the ask up front with `counted: Loading`, A logged the same
+#          count (`counted_from=… counted=Loading`) and priced B at or below it,
+#          B was asked once, and q1 ended at once — a 503 saying the holders
+#          turned it down, never a retry loop (2026-10-26: 2.3 s).
 #   killchain FUTURE_WORK #184: refusechain's topology without the fault — a long
 #          reply whose decode steps travel A → B → C, and C's node is killed
 #          (SIGKILL, workers too) 40 results in. PASS = the reply ends within
@@ -342,7 +356,7 @@
 #          the last layers alone, so the end is a fast 503 or a salvaged partial,
 #          never the chain's deadline.
 #
-# usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece|owntiming <binary> [<binary for B>]
+# usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|owntiming <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -359,7 +373,7 @@
 #              default 400%) and reads it as its machine, so the room it advertises
 #              follows its own use, not the machine's free RAM (#162 b)
 #   EXTRA_TOML appended to EVERY node's config.toml (default: nothing)
-#   RAM_B      peerkv: B's `resources.max_ram_mb`, the same way
+#   RAM_B      peerkv, peerload: B's `resources.max_ram_mb`, the same way
 #   RAM_A      latekv: A's `resources.max_ram_mb` (EXTRA_TOML may not open
 #              [resources] beside it)
 #   MODELS_DIR where the shards come from (default: the live node's)
@@ -423,7 +437,7 @@ rig_addr() {
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|refusepiece|refusechain|killchain|owntiming) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, refusepiece, refusechain, killchain or owntiming"; exit 2 ;; esac
+case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|refusechain|killchain|owntiming) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, peerload, refusepiece, refusechain, killchain or owntiming"; exit 2 ;; esac
 # refusechain is remote's topology with one fault on C (#305).
 REFUSECHAIN=""; KILLCHAIN=""
 if [ "$MODE" = killchain ]; then
@@ -475,7 +489,7 @@ if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ 
     for s in $SHARDS; do case ",$SHARDS_A," in *",$s,"*) ;; *) WHOLE_A=0 ;; esac; done
     GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"
   fi
-elif [ "$MODE" = peerkv ] || [ "$MODE" = refusepiece ]; then
+elif [ "$MODE" = peerkv ] || [ "$MODE" = peerload ] || [ "$MODE" = refusepiece ]; then
   [ "$N" -ge 3 ] || { echo "$MODE needs a model with at least 3 shard files here; $MODEL has $N"; exit 2; }
   PREV=$(echo "$SHARDS" | tail -2 | head -1)
   SHARDS_B="${SHARDS_B:-$PREV,$LAST}"
@@ -733,6 +747,14 @@ if [ -n "${DRAFTER:-}" ]; then
   [ -f "$DSRC/manifest.json" ] || { echo "no manifest for drafter $DRAFTER in $MODELS_DIR"; exit 2; }
   mkdir -p "$BASE/A/models/$DRAFTER"
   for f in "$DSRC"/*; do ln "$f" "$BASE/A/models/$DRAFTER/" || { echo "cannot link $f"; exit 2; }; done
+fi
+if [ "$MODE" = peerload ]; then
+  # What keeps B busy: another model, held whole there.
+  BUSY_MODEL="${BUSY_MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
+  BSRC="$MODELS_DIR/$BUSY_MODEL"
+  [ -f "$BSRC/manifest.json" ] || { echo "no manifest for $BUSY_MODEL in $MODELS_DIR"; exit 2; }
+  mkdir -p "$BASE/B/models/$BUSY_MODEL"
+  for f in "$BSRC"/*; do ln "$f" "$BASE/B/models/$BUSY_MODEL/" || { echo "cannot link $f"; exit 2; }; done
 fi
 # The n-gram-only path takes every request a coordinator holding the header can
 # tokenize, and it is a SEGMENT path (its own failover covers #111 there). The
@@ -1220,6 +1242,44 @@ if [ "$MODE" = peerkv ]; then
   grep -m3 -oE 'route=[a-z_]+ segments=[0-9]+ nodes=[0-9a-f,]+' "$OUT/A.q2.log" | sed 's/^/peerkv: /'
   grep -m2 -oE 'verdict=Refused.{0,200}' "$OUT/B.q2.log" | sed 's/^/peerkv: B asked: /'
   grep -m2 -oE 'refusing this prompt before prefill.{0,200}' "$OUT/B.q2.log" | sed 's/^/peerkv: B forward: /'
+  exit 0
+fi
+if [ "$MODE" = peerload ]; then
+  KB=$(cat "$BASE/B/api_key")
+  IDB=$(curl -s -m 5 -H "Authorization: Bearer $KB" localhost:8920/api/admin/network-code \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["node_id"][:16])')
+  echo "peerload: B is $IDB; waiting ${PEERLOAD_WAIT_S:-40} s so A holds B's room from before it is busy"
+  sleep "${PEERLOAD_WAIT_S:-40}"
+  MARK_A=$(wc -l < "$BASE/A/node.log"); MARK_B=$(wc -l < "$BASE/B/node.log")
+  # B's memory is taken AFTER it advertised its room: a reply on another model.
+  curl -s -m 900 -H "Authorization: Bearer $KB" -H 'Content-Type: application/json' -o "$OUT/busy.body" \
+    localhost:8920/v1/chat/completions \
+    -d "{\"model\":\"$BUSY_MODEL\",\"max_tokens\":${BUSY_TOKENS:-600},\"temperature\":0,\"messages\":[{\"role\":\"user\",\"content\":\"Tell a long story about a lighthouse keeper and a storm.\"}]}" &
+  BUSY=$!
+  for _ in $(seq 1 120); do
+    tail -n +"$((MARK_B + 1))" "$BASE/B/node.log" | grep -aq "Model loaded model=$BUSY_MODEL" && break
+    sleep 0.5
+  done
+  echo "peerload: B busy with $BUSY_MODEL from $(date -u +%T)"
+  T0=$(date +%s.%N)
+  ask "What is the capital of France? Answer in one sentence." 16 q1 | tee "$OUT/replies.jsonl"
+  echo "peerload: q1 took $(python3 -c "print(round($(date +%s.%N) - $T0, 1))") s"
+  wait "$BUSY"
+  tail -n +"$((MARK_A + 1))" "$BASE/A/node.log" > "$OUT/A.q1.log"
+  tail -n +"$((MARK_B + 1))" "$BASE/B/node.log" > "$OUT/B.q1.log"
+  echo "peerload: B answered asks up front: $(grep -ac "answered a peer's up-front prompt admission" "$OUT/B.q1.log")," \
+    "refused on weights: $(grep -ac 'answering no before its prompt pass' "$OUT/B.q1.log")," \
+    "A re-planned: $(grep -ac 'retrying with fresh pipeline' "$OUT/A.q1.log")"
+  grep -a 'answering no before its prompt pass' "$OUT/B.q1.log" \
+    | grep -oE '(layers="\[[0-9]+\.\.[0-9]+\)"|(needed_mb|ram_budget_mb|ram_in_use_mb|layers_that_fit)=[0-9]+)' | paste -sd' ' | sed 's/^/peerload: B refused: /'
+  grep -a -oE 'verdict=Refused.{0,160}' "$OUT/B.q1.log" | sed 's/^/peerload: B answered: /'
+  grep -a 'KV admission up front' "$OUT/A.q1.log" \
+    | grep -oE '(layers_that_fit|counted_from|counted)=[A-Za-z0-9]+' | paste -sd' ' | sed 's/^/peerload: A took: /'
+  grep -a "DIAG: pipeline candidate node=$IDB" "$OUT/A.q1.log" \
+    | grep -oE '(max_hostable_layers|fresh_run_layers|held_ranges)=[^ ]+' | paste -sd' ' | sed 's/^/peerload: A priced B: /'
+  grep -a -oE 'Pipeline segment request_id=[0-9a-f-]+ segment=[0-9]+ node=[0-9a-f]+ layer_start=[0-9]+ layer_end=[0-9]+' \
+    "$OUT/A.q1.log" | sed -E 's/request_id=[0-9a-f-]+ //; s/^/peerload: /'
+  grep -a -oE 'route=[a-z_]+ segments=[0-9]+ nodes=[0-9a-f,]+' "$OUT/A.q1.log" | sed 's/^/peerload: /'
   exit 0
 fi
 if [ "$MODE" = latekv ]; then

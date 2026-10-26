@@ -316,6 +316,13 @@ red with its fix off (the planner's budget, the growth rung, the drafter rule,
 separately). The spawn branch's wiring in `get_or_spawn` needs a real worker
 and is checked on the card, not by a unit test.
 
+**On the card** (2026-10-26 13:41Z, CUDA build of `25d94f53` as the live node,
+`~/swarmllm-70b/verify355.sh`): Gemma-2-2B loaded on the card (1,781 MB) and left
+idle 2.5 min, then Llama 3.3 70B asked across this node and AU (plan here 0-21):
+"Freeing graphics memory from an idle model so more of the requested one runs on
+the GPU … reclaimed_mb=2367", then "placing its first 10 of 21 layers there" —
+against 6 of 19 beside the same idle Gemma on 10-25. Reply correct, 1.22 tokens/s.
+
 ## `should_return_to_gpu` + `ModelProcessPool::worker_should_return_to_gpu`
 
 (2026-08-27) — the single answer to "is this resident worker still in the right

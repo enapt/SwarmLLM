@@ -3587,6 +3587,21 @@ ranges); a 5-layer tail with its head is 6
 refuses 19 light layers the weights alone would admit; `Unsaid` both
 (`a_peers_count_of_what_fits_is_weighed_in_its_own_unit`).
 
+**End to end** (2026-10-26, `examples/split_rig.sh peerload`, dev build of
+`25d94f53`, Llama-3.2-3B on the processor; A holds layers 0-21, B 12-28 and
+TinyLlama whole; B starts a 600-token TinyLlama reply after A has held its room
+for 40 s, then A is asked). At `RAM_B=1700`: A priced B from its idle room
+(`max_hostable_layers=Some(14)`) and asked it for [21..28); B refused before the
+pass ("needs about 1205 MB … budget allows 1700 MB and 980 MB is already in
+use", `layers_that_fit=5`); A logged `counted_from=21 counted=Loading`, re-priced
+B at 4 (`ceiling_of_a_fit`: five middle layers, under the 7 + head the range
+needs), asked it nothing more, and answered `HoldersDeclined` in 2.3 s — B is
+busy, so "try again" is the right advice. `RAM_B=1450`: fit 2, re-priced 11 → 1,
+the same shape. The .255 field check failed on exactly this path, AU refusing
+twice. With A holding everything but B's last part, no narrower route exists,
+so this rig checks the refusal and the hold, not a narrower reply; at 2,200 MB
+and above, B's busy room still took [21..28) and answered.
+
 **What a change must keep.** A number a peer measured is kept with what it was
 measured OVER. When a bound's unit changes, every figure compared with it is
 re-read in the new unit — the refusal count was the one #353's sweep of readers
