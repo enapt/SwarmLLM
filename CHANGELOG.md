@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.256-alpha] — 2026-10-26
+
 **A large model split across computers no longer fails when one of them says it has room for only
 some of its layers.** Before a split reply starts, each computer is asked whether its part fits; one
 that says no also says how many of those layers would, and the next plan keeps it to that. Since
