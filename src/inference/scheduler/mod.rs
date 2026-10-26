@@ -460,6 +460,22 @@ fn stated_decode_ms_per_layer(us_per_layer: Option<u32>) -> Option<f32> {
         .map(|us| us.min(STATED_DECODE_US_PER_LAYER_MAX) as f32 / 1000.0)
 }
 
+/// One of a model's layers on a device stating `tokens_per_sec_7b`, in ms a
+/// token: the 7B reference's token time over its `BASELINE_LAYER_COUNT`
+/// layers, times what one of this model's layers weighs in reference layers
+/// (`layer_work`) — `UNKNOWN_COMPUTE_MS` scaled the same way for a device
+/// stating none. The one conversion from a stated speed: the routers' priors
+/// ([`NodeCandidate::prior_ms_per_layer`]) and placement's price of a chain
+/// (`auto_manage::coverage::near_chain`, #356) both read it.
+pub(crate) fn stated_layer_ms(tokens_per_sec_7b: f32, layer_work: f32) -> f32 {
+    let reference_layer_ms = if tokens_per_sec_7b > 0.0 {
+        1000.0 / tokens_per_sec_7b / parallax::BASELINE_LAYER_COUNT
+    } else {
+        parallax::UNKNOWN_COMPUTE_MS
+    };
+    reference_layer_ms * layer_work
+}
+
 impl NodeCandidate {
     /// The static price of one of THIS model's layers on this candidate, in ms
     /// per token: its 7B-reference token time spread over the reference's
@@ -482,12 +498,7 @@ impl NodeCandidate {
     /// speed already allows — a peer that wants work can only state a speed
     /// it was always able to state.
     fn prior_ms_per_layer(&self) -> f32 {
-        let reference_layer_ms = if self.est_tokens_per_sec > 0.0 {
-            1000.0 / self.est_tokens_per_sec / parallax::BASELINE_LAYER_COUNT
-        } else {
-            parallax::UNKNOWN_COMPUTE_MS
-        };
-        let stated_speed = reference_layer_ms * self.layer_work;
+        let stated_speed = stated_layer_ms(self.est_tokens_per_sec, self.layer_work);
         self.stated_ms_per_layer
             .map_or(stated_speed, |timed| timed.max(stated_speed))
     }
@@ -496,12 +507,7 @@ impl NodeCandidate {
     /// card ([`Self::card_layers`]), from `processor_tokens_per_sec`; its own
     /// timing is a floor here too.
     fn processor_prior_ms_per_layer(&self) -> f32 {
-        let reference_layer_ms = if self.processor_tokens_per_sec > 0.0 {
-            1000.0 / self.processor_tokens_per_sec / parallax::BASELINE_LAYER_COUNT
-        } else {
-            parallax::UNKNOWN_COMPUTE_MS
-        };
-        let stated_speed = reference_layer_ms * self.layer_work;
+        let stated_speed = stated_layer_ms(self.processor_tokens_per_sec, self.layer_work);
         self.stated_ms_per_layer
             .map_or(stated_speed, |timed| timed.max(stated_speed))
     }

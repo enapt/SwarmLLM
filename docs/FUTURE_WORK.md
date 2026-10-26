@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #356**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #357**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3371,7 +3371,17 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-26, ships in the next release** (#350, #355)
+**Closed 2026-10-26, ships in the next release** (#350, #355, #356)
+- #356 — **Where the swarm's graphics cards can hold a large model between them, its layers
+  are placed on cards, not processors.** Placement filled each machine's ceiling — its card
+  plus the memory beside it — with the fewest segments, never asking which device a layer
+  would run on; the 70B's split here ran 12 of this node's 21 layers on its processor. A
+  chain is now priced by the speeds its machines state, each segment's hop and each layer on
+  the card or processor it runs on (`near_chain::Planner::step_us`, `Devices::of`): where
+  the cards can carry the model a card-only chain wins once the processor layers it saves
+  outweigh its extra hops, and a complete chain moves onto cards only for a quarter off its
+  price (`worth_moving`, Petals' `balance_quality`). Machines stating no speeds plan as
+  before. Evidence: `docs/invariants/memory.md` § "Cards first".
 - #355 — **A large model split across the graphics card and the processor takes idle
   models' card memory first.** The reclaim before a load freed nothing unless the model then
   fit the card WHOLE, so a split was sized on the free memory alone with an idle model kept

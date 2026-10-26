@@ -8,20 +8,37 @@
 //! wherever they are. A large model's near chain was complete only by luck.
 //!
 //! **One plan per neighbourhood, computed alike by every machine in it.** For a
-//! model somebody asked for, that no near machine can run whole and the near
-//! machines' ceilings could carry between them, each near machine computes the
-//! same chain over the near machines — each used once, for one contiguous run
-//! of at most its ceiling — with the FEWEST SEGMENTS (within one of the least
-//! the ceilings allow), then the fewest parts to fetch, ties broken by
-//! rendezvous order, and fetches the parts of ITS segment it lacks. Prune keeps
-//! them: [`AutoShardManager::copy_in_near_chain`] is asked by `copy_kept_because`,
+//! model somebody asked for, that no near machine's card holds whole and the
+//! near machines' ceilings could carry between them, each near machine computes
+//! the same chain over the near machines — each used once, for one contiguous
+//! run of at most its ceiling — that is CHEAPEST a token by the speeds the
+//! machines state (#356; within one segment of the fewest the ceilings, or the
+//! cards, allow), then fetches the fewest parts, ties broken by rendezvous
+//! order, and fetches the parts of ITS segment it lacks. Prune keeps them:
+//! [`AutoShardManager::copy_in_near_chain`] is asked by `copy_kept_because`,
 //! which the download pass asks before every fetch (gotcha #795).
+//!
+//! **Cards first** (#356, 2026-10-26). A machine's ceiling counts the memory
+//! beside its card, whose layers run on its processor — several times slower a
+//! layer (Llama 3.3 70B here: 9 of this node's 21 layers on the card, 12 on
+//! the processor). The price counts each segment's hop (the reach's round
+//! trip) and each layer at the speed of the device it runs on, the card taking
+//! a machine's first layers as the loader does; so where the cards can carry
+//! the model, a chain on cards alone wins once the processor layers it saves
+//! outweigh its extra hops, and where they cannot, the processor fills the
+//! gap. Machines stating no speeds price every layer alike, and the cheapest
+//! chain is then the fewest segments, as before. Petals sizes a server by its
+//! accelerator's memory alone (`server.py::_choose_num_blocks`); Parallax and
+//! Helix place on GPU memory only — none of them has a processor share to
+//! weigh, so the trade against hops is ours.
 //!
 //! - **In-flight downloads count as held**, so the chain a fetch starts under is
 //!   the chain it lands under: the chosen chain's cost falls by everything this
 //!   machine fetches, any other chain's by no more.
-//! - **A chain already complete is never rebalanced**: while one exists over
-//!   what is held, only such a chain is chosen, so nothing is fetched.
+//! - **A chain already complete is rebalanced only onto cards**: while one
+//!   exists over what is held it is kept, unless a chain running fewer layers
+//!   on processors is priced at most three quarters of it ([`worth_moving`],
+//!   Petals' `balance_quality` 0.75) — fewer hops alone never move it.
 //! - **Near** is this node and each connected machine in scope whose measured
 //!   windowed-minimum round trip (`metrics.network_coord_samples`) is at most
 //!   [`NEAR_RTT_MS`] — the measurement, never the coordinate, which orders near
@@ -75,6 +92,21 @@ use super::{rendezvous, CARRIER_PATIENCE, PASSED_OVER_FOR};
 /// validated"); a chain of three near machines led by its head pays three legs
 /// a pass.
 const NEAR_RTT_MS: f32 = 30.0;
+
+/// What one more segment of a chain costs a token at each reach, in ms: the
+/// reach's round trip — a led chain pays a leg a segment, and the visit's
+/// fixed cost beside it, so the bound overstates neither. Near: at most
+/// [`NEAR_RTT_MS`]. Far: the 70B's far holders measured 300-410 ms apart
+/// (#346), the low end, so a far chain grows a segment only for 300 ms of
+/// processor layers a token saved (#356).
+const NEAR_HOP_MS: u64 = NEAR_RTT_MS as u64;
+const FAR_HOP_MS: u64 = 300;
+
+/// A complete chain moves to one priced at most this fraction of it
+/// (numerator, denominator): Petals moves a server only below a
+/// `balance_quality` of 0.75 (`block_selection.py::should_choose_other_blocks`),
+/// and here a move is a download of parts, not a reload.
+const MOVE_AT_MOST: (u64, u64) = (3, 4);
 
 /// How long a near machine keeps its place after it was last measured near —
 /// gone, or a round trip that blipped. In the simulator a neighbour dropping
@@ -137,6 +169,8 @@ struct NearChain {
     complete: bool,
     /// Which machines it was planned over.
     reach: Reach,
+    /// What it costs a token, by the machines' stated speeds (#356).
+    price: ChainPrice,
 }
 
 /// Which machines a chain is planned over.
@@ -146,6 +180,43 @@ pub(in crate::model::auto_manage) enum Reach {
     Near,
     /// Every machine in scope — the near ones could not carry the model (#346).
     Far,
+}
+
+impl Reach {
+    /// What one more segment costs a token at this reach, µs.
+    fn hop_us(self) -> u64 {
+        1000 * match self {
+            Reach::Near => NEAR_HOP_MS,
+            Reach::Far => FAR_HOP_MS,
+        }
+    }
+}
+
+/// What a chain costs a token, by the speeds its machines state (#356).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct ChainPrice {
+    /// Every segment's hop and every layer on its device, µs.
+    total_us: u64,
+    /// The layers that run on a processor beside a card, or on a machine
+    /// without one.
+    processor_layers: u32,
+}
+
+/// May a complete chain priced `held` give way to `best`, which needs parts
+/// fetched? Only onto cards — fewer processor layers — and only for a price at
+/// most [`MOVE_AT_MOST`] of it: fewer hops alone never move a chain that
+/// works, and a small gain is not worth the downloads (#356).
+fn worth_moving(held: ChainPrice, best: ChainPrice) -> bool {
+    best.processor_layers < held.processor_layers
+        && best.total_us.saturating_mul(MOVE_AT_MOST.1)
+            <= held.total_us.saturating_mul(MOVE_AT_MOST.0)
+}
+
+/// A chain [`plan_chain`] chose, and its price.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChosenChain {
+    steps: Vec<Step>,
+    price: ChainPrice,
 }
 
 /// Why a part is this node's to keep for a chain
@@ -161,7 +232,8 @@ pub(in crate::model::auto_manage) enum ChainPart {
 /// What planning over one [`Reach`] came to.
 enum Planned {
     Chain(NearChain),
-    /// A machine among them could run the model whole: carrying's to fill.
+    /// A card among them holds the model whole, or one machine running it
+    /// whole costs no more than any chain: carrying's to fill.
     OneRunsItWhole,
     /// Their ceilings could not carry it between them, or no chain over them
     /// fits their disks.
@@ -201,6 +273,13 @@ struct Machine {
     node: NodeId,
     /// Layers it could ever hold (`coverage::ceiling_layers`).
     ceiling: u32,
+    /// Of those, the layers its card holds — the first of any run it is given,
+    /// as its loader places them. `None`: its models run on its processor.
+    card: Option<u32>,
+    /// One layer a token on its card, µs, by the speed it states.
+    card_us: u64,
+    /// One layer a token on its processor, µs, by the speed it states.
+    processor_us: u64,
     /// By part position: held, or being fetched.
     has: Vec<bool>,
     /// Layers it holds, fetches not counted — what its lease renews on.
@@ -213,11 +292,73 @@ struct Machine {
     disk_bytes: u64,
 }
 
+/// What a machine's devices give a chain of one model (#356).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Devices {
+    /// The layers its card holds. `None`: its models run on its processor.
+    card: Option<u32>,
+    /// One layer a token on its card, µs.
+    card_us: u64,
+    /// One layer a token on its processor, µs.
+    processor_us: u64,
+}
+
+impl Devices {
+    /// From what a machine advertises: a card only where its models run on
+    /// it (`NodeCapability::models_run_on_card`), holding what the card's
+    /// memory takes on the model's card curve; the card at its stated speed
+    /// (`est_tokens_per_sec_7b`), its processor at the speed it states beside
+    /// the card (`processor_tokens_per_sec_7b`), or — a machine without a card
+    /// — at its stated speed. Each at `scheduler::stated_layer_ms`, the
+    /// routers' own conversion; a speed it does not state is priced as the
+    /// routers price one (`UNKNOWN_COMPUTE_MS`).
+    fn of(
+        c: &crate::types::NodeCapability,
+        num_layers: u32,
+        card_curve: Option<(u64, u64)>,
+        layer_work: f32,
+    ) -> Self {
+        let us = |tokens_per_sec_7b: f32| -> u64 {
+            let stated = if tokens_per_sec_7b.is_finite() {
+                tokens_per_sec_7b
+            } else {
+                0.0
+            };
+            (crate::inference::scheduler::stated_layer_ms(stated, layer_work) * 1000.0) as u64
+        };
+        if !c.models_run_on_card() {
+            let processor_us = us(c.est_tokens_per_sec_7b);
+            return Devices {
+                card: None,
+                card_us: processor_us,
+                processor_us,
+            };
+        }
+        let card = c
+            .gpu
+            .as_ref()
+            .zip(card_curve)
+            .and_then(|(gpu, (fixed_mb, per_layer_mb))| {
+                crate::inference::process_pool::layers_that_fit(
+                    gpu.vram_total_mb,
+                    fixed_mb,
+                    per_layer_mb,
+                )
+            })
+            .map(|layers| layers.min(num_layers));
+        Devices {
+            card: Some(card.unwrap_or(0)),
+            card_us: us(c.est_tokens_per_sec_7b),
+            processor_us: us(c.processor_tokens_per_sec_7b.unwrap_or(0.0)),
+        }
+    }
+}
+
 /// A segment: the machine (its position in the plan's list) and its layers.
 type Step = (usize, u32, u32);
 
-/// The best way on from a point: (segments, parts fetched, the first step).
-type Best = (u32, u32, Step);
+/// The best way on from a point: (price µs, parts fetched, the first step).
+type Best = (u64, u32, Step);
 
 /// The model's parts in layer order — when they tile `[0, num_layers)` with
 /// whole layers, as every manifest `shard_layout` builds does. Anything else is
@@ -261,10 +402,13 @@ fn parts_touching(manifest: &ModelManifest, segment: (u32, u32)) -> Vec<u32> {
 }
 
 /// The chain over `machines` (in rendezvous order) covering `[0, layers)`,
-/// each machine used once for one run of at most its ceiling: the fewest
-/// segments, then the fewest parts to fetch; of equals, the first in machine
-/// order, each machine's furthest end first. `may_fetch: false` plans only
-/// over what the machines have. `None`: no such chain.
+/// each machine used once for one run of at most its ceiling: the cheapest a
+/// token (#356) — each segment `hop_us`, each layer at the speed of the device
+/// it runs on, a machine's card taking the first of its run — then the fewest
+/// parts to fetch; of equals, the first in machine order, each machine's
+/// furthest end first. Where every machine prices every layer alike, the
+/// cheapest is the fewest segments, as it was before prices. `may_fetch:
+/// false` plans only over what the machines have. `None`: no such chain.
 ///
 /// `weights` weighs each run as what it loads against the average layer the
 /// ceilings count in (`process_pool::RangeWeights`): a run ending the model
@@ -278,19 +422,29 @@ fn plan_chain(
     machines: &[Machine],
     may_fetch: bool,
     weights: Option<&RangeWeights>,
-) -> Option<Vec<Step>> {
+    hop_us: u64,
+) -> Option<ChosenChain> {
     if machines.is_empty() || machines.len() > 32 || parts.is_empty() {
         return None;
     }
     let max_segments = if may_fetch {
-        let mut ceilings: Vec<u32> = machines.iter().map(|m| m.ceiling).collect();
-        ceilings.sort_unstable_by(|a, b| b.cmp(a));
-        let mut total = 0u32;
-        let fewest = ceilings.iter().position(|&c| {
-            total = total.saturating_add(c);
-            total >= layers
-        })? + 1;
-        (fewest + EXTRA_SEGMENTS).min(machines.len())
+        // The fewest machines whose figures sum to the model.
+        let fewest = |mut ceilings: Vec<u32>| -> Option<usize> {
+            ceilings.sort_unstable_by(|a, b| b.cmp(a));
+            let mut total = 0u32;
+            ceilings
+                .iter()
+                .position(|&c| {
+                    total = total.saturating_add(c);
+                    total >= layers
+                })
+                .map(|p| p + 1)
+        };
+        let all = fewest(machines.iter().map(|m| m.ceiling).collect())?;
+        // Within reach of the search too: the fewest the CARDS allow, where
+        // they can carry it between them (#356).
+        let cards = fewest(machines.iter().filter_map(|m| m.card).collect()).unwrap_or(0);
+        (all.max(cards) + EXTRA_SEGMENTS).min(machines.len())
     } else {
         machines.len()
     };
@@ -315,9 +469,12 @@ fn plan_chain(
         max_segments: max_segments as u32,
         may_fetch,
         weights,
+        hop_us,
         memo: HashMap::new(),
     };
-    planner.chain()
+    let steps = planner.chain()?;
+    let price = planner.price_of(&steps);
+    Some(ChosenChain { steps, price })
 }
 
 /// The search behind [`plan_chain`]: exact over (position, machines used).
@@ -332,8 +489,10 @@ struct Planner<'a> {
     may_fetch: bool,
     /// What a run really loads against the ceilings' average layer.
     weights: Option<&'a RangeWeights>,
-    /// (position, machines used) → the best cover of the rest: segments, parts
-    /// fetched, and its first step.
+    /// What each segment costs a token for its hop, µs.
+    hop_us: u64,
+    /// (position, machines used) → the best cover of the rest: its price,
+    /// parts fetched, and its first step.
     memo: HashMap<(u32, u32), Option<Best>>,
 }
 
@@ -344,17 +503,20 @@ impl Planner<'_> {
     }
 
     /// Where machine `i` may end a segment it starts at `x`, furthest first.
-    /// Its cost changes only where the segment reaches a new part, and a
-    /// segment ending further is never worse for the rest of the chain, so
-    /// these are the only ends worth trying: its ceiling's reach, and just
-    /// short of each part in between. Without fetching: the end of the run it
-    /// has, within its reach.
-    fn ends(&self, i: usize, x: u32) -> Vec<u32> {
+    /// Its fetch changes only where the segment reaches a new part, and its
+    /// price only where its card's layers end (`card_end`, #356): past that
+    /// point its layers run on its processor, and the rest of the chain may be
+    /// cheaper on another card. So these are the only ends worth trying: its
+    /// ceiling's reach, its card's end, and just short of each part in
+    /// between. Without fetching: the end of the run it has, within its reach,
+    /// and its card's end within that.
+    fn ends(&self, i: usize, x: u32, card_end: Option<u32>) -> Vec<u32> {
         let machine = &self.machines[i];
         let reach = self.reach(i, x);
         if reach <= x {
             return Vec::new();
         }
+        let card_end = card_end.filter(|&c| c > x && c < reach);
         let first = self.part_at(x);
         if !self.may_fetch {
             if !machine.has[first] {
@@ -367,15 +529,21 @@ impl Planner<'_> {
             {
                 last += 1;
             }
-            return vec![reach.min(self.parts[last].end)];
+            let end = reach.min(self.parts[last].end);
+            let mut ends = vec![end];
+            ends.extend(card_end.filter(|&c| c < end));
+            return ends;
         }
         let mut ends = vec![reach];
-        let starts: Vec<u32> = self.parts[first + 1..]
-            .iter()
-            .map(|p| p.start)
-            .take_while(|&start| start < reach)
-            .collect();
-        ends.extend(starts.into_iter().rev());
+        ends.extend(card_end);
+        ends.extend(
+            self.parts[first + 1..]
+                .iter()
+                .map(|p| p.start)
+                .take_while(|&start| start < reach),
+        );
+        ends.sort_unstable_by(|a, b| b.cmp(a));
+        ends.dedup();
         ends
     }
 
@@ -384,7 +552,17 @@ impl Planner<'_> {
     /// (`RangeWeights::width_in_bound`) — a run ending the model is shorter by
     /// its output head. `x` when not one layer fits.
     fn reach(&self, i: usize, x: u32) -> u32 {
-        let ceiling = self.machines[i].ceiling;
+        self.reach_within(x, self.machines[i].ceiling)
+    }
+
+    /// Where the layers machine `i`'s card holds end, on a run from `x`:
+    /// weighed as [`Self::reach`] weighs its ceiling. `None`: no card.
+    fn card_end(&self, i: usize, x: u32) -> Option<u32> {
+        self.machines[i].card.map(|card| self.reach_within(x, card))
+    }
+
+    /// The furthest a run from `x` may end within `ceiling` layers.
+    fn reach_within(&self, x: u32, ceiling: u32) -> u32 {
         let Some(weights) = self.weights else {
             return self.layers.min(x.saturating_add(ceiling));
         };
@@ -404,9 +582,40 @@ impl Planner<'_> {
         (count[hi] - count[lo], bytes[hi] - bytes[lo])
     }
 
-    /// The best cover of `[x, layers)` by machines not in `used`: (segments,
+    /// Of `[x, e)` on a machine whose card's layers end at `card_end`: the
+    /// layers on its card, and those on its processor.
+    fn by_device(x: u32, e: u32, card_end: Option<u32>) -> (u32, u32) {
+        let on_card = card_end.map_or(0, |c| c.min(e).saturating_sub(x));
+        (on_card, (e - x) - on_card)
+    }
+
+    /// What machine `i` running `[x, e)` costs a token, µs: the hop, then each
+    /// layer on the device it runs on.
+    fn step_us(&self, i: usize, x: u32, e: u32, card_end: Option<u32>) -> u64 {
+        let machine = &self.machines[i];
+        let (on_card, beside) = Self::by_device(x, e, card_end);
+        self.hop_us
+            .saturating_add(u64::from(on_card).saturating_mul(machine.card_us))
+            .saturating_add(u64::from(beside).saturating_mul(machine.processor_us))
+    }
+
+    /// What `steps` cost a token.
+    fn price_of(&self, steps: &[Step]) -> ChainPrice {
+        let mut price = ChainPrice::default();
+        for &(i, x, e) in steps {
+            let card_end = self.card_end(i, x);
+            let (_, beside) = Self::by_device(x, e, card_end);
+            price.total_us = price
+                .total_us
+                .saturating_add(self.step_us(i, x, e, card_end));
+            price.processor_layers += beside;
+        }
+        price
+    }
+
+    /// The best cover of `[x, layers)` by machines not in `used`: (price µs,
     /// parts fetched).
-    fn best(&mut self, x: u32, used: u32) -> Option<(u32, u32)> {
+    fn best(&mut self, x: u32, used: u32) -> Option<(u64, u32)> {
         if x >= self.layers {
             return Some((0, 0));
         }
@@ -414,29 +623,33 @@ impl Planner<'_> {
             return None;
         }
         if let Some(known) = self.memo.get(&(x, used)) {
-            return known.map(|(segments, fetched, _)| (segments, fetched));
+            return known.map(|(price, fetched, _)| (price, fetched));
         }
         let mut best: Option<Best> = None;
         for i in 0..self.machines.len() {
             if used & (1 << i) != 0 {
                 continue;
             }
-            for e in self.ends(i, x) {
+            let card_end = self.card_end(i, x);
+            for e in self.ends(i, x, card_end) {
                 let (fetch, bytes) = self.lacks(i, x, e);
                 if bytes > 0 && bytes >= self.machines[i].disk_bytes {
                     continue;
                 }
-                let Some((segments, fetched)) = self.best(e, used | (1 << i)) else {
+                let Some((price, fetched)) = self.best(e, used | (1 << i)) else {
                     continue;
                 };
-                let candidate = (segments + 1, fetched + fetch);
-                if best.is_none_or(|(s, f, _)| candidate < (s, f)) {
+                let candidate = (
+                    price.saturating_add(self.step_us(i, x, e, card_end)),
+                    fetched + fetch,
+                );
+                if best.is_none_or(|(p, f, _)| candidate < (p, f)) {
                     best = Some((candidate.0, candidate.1, (i, x, e)));
                 }
             }
         }
         self.memo.insert((x, used), best);
-        best.map(|(segments, fetched, _)| (segments, fetched))
+        best.map(|(price, fetched, _)| (price, fetched))
     }
 
     /// The steps of the best cover of the whole model.
@@ -453,7 +666,6 @@ impl Planner<'_> {
     }
 }
 
-/// Does `machine` lack any part `[x, e)` touches?
 /// `SWARMLLM_NEAR_CHAIN=0` plans no near chain, so nothing is fetched or kept
 /// for one: the control arm of `examples/near_chain_rig.sh`, in the same
 /// binary as the change it measures.
@@ -466,6 +678,7 @@ fn near_chains_switched_off() -> bool {
     })
 }
 
+/// Does `machine` lack any part `[x, e)` touches?
 fn lacks_any(parts: &[Part], machine: &Machine, x: u32, e: u32) -> bool {
     parts
         .iter()
@@ -523,6 +736,32 @@ impl AutoShardManager {
         }
     }
 
+    /// What `node`'s devices give a chain of a model (#356), from the
+    /// capability it advertises — this node's own last broadcast for itself,
+    /// as [`Self::advertised`] reads it, so every machine prices every other
+    /// alike. `None`: it advertises none.
+    fn advertised_devices(
+        &self,
+        node: &NodeId,
+        num_layers: u32,
+        card_curve: Option<(u64, u64)>,
+        layer_work: f32,
+    ) -> Option<Devices> {
+        let devices =
+            |c: &crate::types::NodeCapability| Devices::of(c, num_layers, card_curve, layer_work);
+        if node == self.shared_state.identity.node_id() {
+            return self
+                .shared_state
+                .local_capability
+                .load_full()
+                .map(|c| devices(&c));
+        }
+        self.shared_state
+            .peer_registry
+            .get(node)
+            .and_then(|p| p.capability.as_ref().map(devices))
+    }
+
     /// The machines `manifest`'s chain is planned over at `reach`, in
     /// rendezvous order: this node and the near ones — or every connected one
     /// in scope — not passed over. `None` when this node, or a near one,
@@ -540,6 +779,12 @@ impl AutoShardManager {
     ) -> Option<Vec<Machine>> {
         let state = &self.shared_state;
         let local = state.identity.node_id().clone();
+        // Each machine's card and speeds price the chain (#356): the card's
+        // layers by the model's card curve, each layer by what it weighs.
+        let card_curve = state
+            .model_process_pool
+            .segment_cost_curve(&manifest.id, true);
+        let layer_work = crate::inference::scheduler::layer_work_for(state, &manifest.id);
         let mut nodes = match reach {
             Reach::Near => {
                 let mut nodes = vec![local.clone()];
@@ -602,9 +847,15 @@ impl AutoShardManager {
             let disk_bytes = self
                 .advertised(&node)
                 .map_or(0, |(_, mb)| mb.saturating_mul(1024 * 1024));
+            let devices = self
+                .advertised_devices(&node, manifest.num_layers, card_curve, layer_work)
+                .unwrap_or_default();
             machines.push(Machine {
                 node,
                 ceiling,
+                card: devices.card.map(|card| card.min(ceiling)),
+                card_us: devices.card_us,
+                processor_us: devices.processor_us,
                 has,
                 held_layers,
                 has_layers,
@@ -614,7 +865,8 @@ impl AutoShardManager {
         }
         let rank = |m: &Machine| rendezvous(&manifest.id, &m.node);
         // A machine that could run the model whole survives the cut whatever
-        // it holds: it makes the model carrying's (`plan_over`), and ten
+        // it holds: it may make the model carrying's (`plan_over`, where it
+        // is the cheapest plan), and ten
         // holders of a part each must not hide it (v0.3.254's review).
         let whole = |m: &Machine| m.ceiling >= manifest.num_layers;
         machines.sort_by(|a, b| {
@@ -721,22 +973,65 @@ impl AutoShardManager {
                 on_card: false,
             });
         loop {
-            // A chain is for a model that needs a split: a machine that could
-            // run it whole is today's rules' to fill.
+            // A chain is for a model that needs a split: a card that holds
+            // it whole is today's rules' to fill. A machine that runs it whole
+            // only with its processor's help competes with the chains of cards
+            // (#356): carrying's, below, where no chain is cheaper.
             let total: u64 = machines.iter().map(|m| u64::from(m.ceiling)).sum();
-            if machines.iter().any(|m| m.ceiling >= layers) {
+            if machines
+                .iter()
+                .any(|m| m.card.is_some_and(|card| card >= layers))
+            {
                 return Some(Planned::OneRunsItWhole);
             }
             if total < u64::from(layers) {
                 return Some(Planned::CannotCarry);
             }
-            let held = plan_chain(layers, parts, &machines, false, weights.as_ref());
-            let complete = held.is_some();
-            let Some(steps) =
-                held.or_else(|| plan_chain(layers, parts, &machines, true, weights.as_ref()))
-            else {
-                return Some(Planned::CannotCarry);
+            let hop_us = reach.hop_us();
+            let held = plan_chain(layers, parts, &machines, false, weights.as_ref(), hop_us);
+            let best = plan_chain(layers, parts, &machines, true, weights.as_ref(), hop_us);
+            // One machine running it whole is carrying's where no chain costs
+            // less — priced whatever its disk, as carrying chooses who
+            // fetches. Machines stating no speeds: wherever one can, as
+            // before prices.
+            let chain_us = [held.as_ref(), best.as_ref()]
+                .into_iter()
+                .flatten()
+                .map(|c| c.price.total_us)
+                .min();
+            let whole_us = machines
+                .iter()
+                .filter(|m| m.ceiling >= layers)
+                .filter_map(|m| {
+                    let alone = Machine {
+                        disk_bytes: u64::MAX,
+                        ..m.clone()
+                    };
+                    plan_chain(layers, parts, &[alone], true, weights.as_ref(), hop_us)
+                })
+                .map(|c| c.price.total_us)
+                .min();
+            if whole_us.is_some_and(|w| chain_us.is_none_or(|c| w <= c)) {
+                return Some(Planned::OneRunsItWhole);
+            }
+            let (chosen, complete) = match (held, best) {
+                (Some(held), Some(best)) if worth_moving(held.price, best.price) => {
+                    tracing::debug!(
+                        model = %manifest.id,
+                        held_ms = held.price.total_us / 1000,
+                        held_processor_layers = held.price.processor_layers,
+                        moving_to_ms = best.price.total_us / 1000,
+                        moving_to_processor_layers = best.price.processor_layers,
+                        "a complete chain runs layers on processors that cards could run — \
+                         planning it onto the cards (#356)"
+                    );
+                    (best, false)
+                }
+                (Some(held), _) => (held, true),
+                (None, Some(best)) => (best, false),
+                (None, None) => return Some(Planned::CannotCarry),
             };
+            let steps = chosen.steps;
             let mut named = HashSet::new();
             let mut stalled = None;
             for &(i, x, e) in &steps {
@@ -763,6 +1058,7 @@ impl AutoShardManager {
                     .collect(),
                 complete,
                 reach,
+                price: chosen.price,
             };
             tracing::debug!(
                 model = %manifest.id,
@@ -770,6 +1066,8 @@ impl AutoShardManager {
                 segments = chain.segments.len(),
                 complete,
                 reach = ?reach,
+                price_ms = chain.price.total_us / 1000,
+                processor_layers = chain.price.processor_layers,
                 plan = %chain.describe(),
                 "near chain planned (Stage 3)"
             );
@@ -798,9 +1096,12 @@ impl AutoShardManager {
                 model = %manifest.id,
                 reach = ?planned.reach,
                 complete = planned.complete,
+                price_ms = planned.price.total_us / 1000,
+                processor_layers = planned.price.processor_layers,
                 plan = %planned.describe(),
-                "DIAG: a chain of machines is planned for a model none of them can run whole \
-                 (Stage 3; over every machine in scope where the near ones cannot carry it, #346)"
+                "DIAG: a chain of machines is planned for a model no card among them holds whole \
+                 (Stage 3; cards first, #356; over every machine in scope where the near ones \
+                 cannot carry it, #346)"
             );
         }
         book.named_until.retain(|_, until| now < *until);
@@ -1088,7 +1389,9 @@ mod tests {
         register_manifest_with_sized_shards, write_sparse_shards,
     };
     use super::super::super::AutoShardManager;
-    use super::{plan_chain, Machine, NearChain, Part, Reach};
+    use super::{
+        plan_chain, worth_moving, ChainPrice, Machine, NearChain, Part, RangeWeights, Reach, Step,
+    };
     use crate::config::Config;
     use crate::daemon::SharedState;
     use crate::types::{ModelId, ModelManifest, NodeId, ShardId};
@@ -1683,12 +1986,35 @@ mod tests {
         Machine {
             node: NodeId([byte; 32]),
             ceiling,
+            card: None,
+            card_us: 0,
+            processor_us: 0,
             has: has.to_vec(),
             held_layers: 0,
             has_layers: 0,
             fetching: false,
             disk_bytes: u64::MAX,
         }
+    }
+
+    /// [`plan_chain`]'s steps at a near hop. Machines stating no speeds price
+    /// a chain by its segments alone: the fewest, as before prices (#356).
+    fn plan(
+        layers: u32,
+        parts: &[Part],
+        machines: &[Machine],
+        may_fetch: bool,
+        weights: Option<&RangeWeights>,
+    ) -> Option<Vec<Step>> {
+        plan_chain(
+            layers,
+            parts,
+            machines,
+            may_fetch,
+            weights,
+            Reach::Near.hop_us(),
+        )
+        .map(|chosen| chosen.steps)
     }
 
     fn parts(layers_each: &[u32]) -> Vec<Part> {
@@ -1743,14 +2069,14 @@ mod tests {
         ];
         // Null control: counted at the average, the 7-layer machine is given
         // 73-80 — nine layers' worth with the head.
-        let unweighed = plan_chain(80, &parts, &machines, true, None).expect("a chain");
+        let unweighed = plan(80, &parts, &machines, true, None).expect("a chain");
         assert!(
             unweighed
                 .iter()
                 .any(|&(i, x, e)| i == 1 && e == 80 && weights.width_in_bound((x, e), &[]) > 7),
             "{unweighed:?}"
         );
-        let weighed = plan_chain(80, &parts, &machines, true, Some(&weights)).expect("a chain");
+        let weighed = plan(80, &parts, &machines, true, Some(&weights)).expect("a chain");
         let mut at = 0;
         for &(i, x, e) in &weighed {
             assert_eq!(x, at, "{weighed:?}");
@@ -1773,11 +2099,11 @@ mod tests {
         let held: Vec<bool> = (0..16).map(|i| (4..14).contains(&i)).collect();
         let lan_box = machine(2, 10, &held);
         assert_eq!(
-            plan_chain(16, &parts, &[here.clone(), lan_box.clone()], true, None),
+            plan(16, &parts, &[here.clone(), lan_box.clone()], true, None),
             Some(vec![(0, 0, 6), (1, 6, 16)]),
             "6 + 2 parts fetched; every other two-segment chain fetches more"
         );
-        assert_eq!(plan_chain(16, &parts, &[here, lan_box], false, None), None);
+        assert_eq!(plan(16, &parts, &[here, lan_box], false, None), None);
     }
 
     /// A segment may end inside a part: two machines able to run 12 and 20 of
@@ -1788,7 +2114,7 @@ mod tests {
         let parts = parts(&[8, 8, 8, 8]);
         let small = machine(1, 12, &[false; 4]);
         let large = machine(2, 20, &[false; 4]);
-        let chain = plan_chain(32, &parts, &[small, large], true, None).expect("a chain");
+        let chain = plan(32, &parts, &[small, large], true, None).expect("a chain");
         assert_eq!(chain.len(), 2);
         assert_eq!(chain.iter().map(|&(_, x, e)| e - x).sum::<u32>(), 32);
     }
@@ -1802,7 +2128,161 @@ mod tests {
         full.disk_bytes = 150;
         let roomy = machine(2, 20, &[false; 8]);
         let other = machine(3, 20, &[false; 8]);
-        let chain = plan_chain(32, &parts, &[full, roomy, other], true, None).expect("a chain");
+        let chain = plan(32, &parts, &[full, roomy, other], true, None).expect("a chain");
         assert!(chain.iter().all(|&(i, _, _)| i != 0), "{chain:?}");
+    }
+
+    /// A machine with a card holding `card` of its `ceiling` layers: a layer on
+    /// the card 2 ms a token, on its processor `processor_us`.
+    fn carded(byte: u8, ceiling: u32, card: u32, processor_us: u64, layers: usize) -> Machine {
+        Machine {
+            card: Some(card),
+            card_us: 2_000,
+            processor_us,
+            ..machine(byte, ceiling, &vec![false; layers])
+        }
+    }
+
+    /// #356: where the cards can carry a model, its chain runs on cards alone
+    /// — three near machines whose cards hold 10, 12 and 10 of a 32-layer
+    /// model, though two of them could carry it with the first one's
+    /// processor (20 ms a layer) running 10 layers: 3 hops of 30 ms and 32
+    /// card layers (154 ms) against 2 hops and 10 processor layers (304 ms).
+    /// Controls: at a far hop (300 ms) the extra hop costs more than the
+    /// processor layers, and the two-machine chain wins; machines stating no
+    /// speeds plan the fewest segments, as before.
+    #[test]
+    fn a_chain_runs_on_cards_where_the_cards_can_carry_it() {
+        let parts = parts(&[1; 32]);
+        let machines = [
+            carded(1, 30, 10, 20_000, 32),
+            carded(2, 12, 12, 20_000, 32),
+            carded(3, 10, 10, 20_000, 32),
+        ];
+        let near =
+            plan_chain(32, &parts, &machines, true, None, Reach::Near.hop_us()).expect("a chain");
+        assert_eq!(near.steps.len(), 3, "{near:?}");
+        assert_eq!(near.price.processor_layers, 0, "{near:?}");
+        for &(i, x, e) in &near.steps {
+            assert!(e - x <= machines[i].card.unwrap(), "{near:?}");
+        }
+        assert_eq!(near.price.total_us, 3 * 30_000 + 32 * 2_000);
+
+        let far =
+            plan_chain(32, &parts, &machines, true, None, Reach::Far.hop_us()).expect("a chain");
+        assert_eq!(
+            far.steps.len(),
+            2,
+            "control: a far hop outweighs them: {far:?}"
+        );
+        assert_eq!(far.price.processor_layers, 10, "{far:?}");
+
+        let unstated: Vec<Machine> = machines
+            .iter()
+            .map(|m| Machine {
+                card_us: 0,
+                processor_us: 0,
+                ..m.clone()
+            })
+            .collect();
+        let fewest = plan(32, &parts, &unstated, true, None).expect("a chain");
+        assert_eq!(
+            fewest.len(),
+            2,
+            "control: no speeds, fewest segments: {fewest:?}"
+        );
+    }
+
+    /// #356: a complete chain moves only onto cards — fewer layers on
+    /// processors — and only for a price at most three quarters of its own.
+    #[test]
+    fn a_complete_chain_moves_only_onto_cards_and_only_for_a_quarter_off() {
+        let held = ChainPrice {
+            total_us: 1_000_000,
+            processor_layers: 12,
+        };
+        let price = |total_us, processor_layers| ChainPrice {
+            total_us,
+            processor_layers,
+        };
+        assert!(worth_moving(held, price(750_000, 0)));
+        assert!(worth_moving(held, price(750_000, 11)));
+        assert!(!worth_moving(held, price(750_001, 0)), "too small a gain");
+        assert!(
+            !worth_moving(held, price(100_000, 12)),
+            "fewer hops alone never move a chain that works"
+        );
+        assert!(!worth_moving(held, price(100_000, 13)));
+    }
+
+    /// [`swarm`] with three near machines, each with a card holding 12 of the
+    /// model's 32 layers (card 56 tokens/s at 7B), this node and the near peer
+    /// holding a complete chain between them that runs 4 layers each on its
+    /// processor, and a third near machine holding nothing. `processor` is
+    /// the speed each states beside its card.
+    fn three_cards(processor: f32) -> (Swarm, crate::types::NodeId) {
+        let s = swarm(4.0);
+        let local = s.local();
+        holds(&s.state, &s.mid, &local, &[0, 1, 2, 3]);
+        holds(&s.state, &s.mid, &s.near, &[4, 5, 6, 7]);
+        let other = peer_with_disk(&s.state, 4, Some(ceiling_for(16)), 100_000);
+        measured(&s.state, &other, 6.0);
+        let with_card = |c: &mut crate::types::NodeCapability| {
+            c.gpu = Some(crate::types::GpuInfo {
+                name: "card".to_string(),
+                vram_total_mb: ceiling_for(12),
+                vram_available_mb: ceiling_for(12),
+                compute_capability: None,
+                memory_bandwidth_gbps: 0.0,
+            });
+            c.est_tokens_per_sec_7b = 56.0;
+            c.processor_tokens_per_sec_7b = Some(processor);
+        };
+        let mut own = (*s.state.local_capability.load_full().unwrap()).clone();
+        with_card(&mut own);
+        s.state.local_capability.store(Some(Arc::new(own)));
+        for peer in [&s.near, &other] {
+            with_card(
+                s.state
+                    .peer_registry
+                    .get_mut(peer)
+                    .unwrap()
+                    .capability
+                    .as_mut()
+                    .unwrap(),
+            );
+        }
+        (s, other)
+    }
+
+    /// #356, the user's aim (2026-10-26): once the swarm has the cards for a
+    /// model, its layers leave the processors. A complete chain running 8 of
+    /// its 32 layers on processors (1 token/s at 7B: 31 ms a layer) is planned
+    /// onto the three cards (108 ms a token against 323): of the chains on
+    /// cards alone, the one fetching least — this node keeps 0-12, the near
+    /// peer 20-32, and the third machine fetches the two parts between.
+    /// Control: processors at 6.3 tokens/s leave the move less than a quarter
+    /// off (108 ms against 113), and the chain that works is kept.
+    #[test]
+    fn a_complete_chain_moves_onto_cards_that_can_carry_it() {
+        let (s, other) = three_cards(1.0);
+        let chain = s.chain().expect("a near chain");
+        assert!(!chain.complete, "{chain:?}");
+        assert_eq!(chain.price.processor_layers, 0, "{chain:?}");
+        assert_eq!(
+            chain.segments,
+            vec![
+                (s.local(), (0, 12)),
+                (other, (12, 20)),
+                (s.near.clone(), (20, 32))
+            ]
+        );
+        assert!(s.offered().is_empty(), "this node holds its run");
+
+        let (s, _) = three_cards(6.3);
+        let chain = s.chain().expect("a near chain");
+        assert!(chain.complete, "control: a small gain keeps it: {chain:?}");
+        assert_eq!(chain.price.processor_layers, 8, "{chain:?}");
+        assert!(s.offered().is_empty());
     }
 }

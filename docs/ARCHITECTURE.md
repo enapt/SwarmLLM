@@ -1947,10 +1947,12 @@ ceiling — changes nothing.
 **Near chains** (Stage 3, `coverage/near_chain.rs`, 2026-10-21). Carrying asks whether SOME holders
 could run a model; a split is fast only when its machines are close. For an asked-for model no near
 machine (measured round trip ≤ 30 ms) can run whole and the near machines could carry between them,
-every near machine computes the same chain over them — fewest segments, then fewest parts fetched,
+every near machine computes the same chain over them — the cheapest a token by the speeds the
+machines state, each layer on the card or processor it runs on (#356: cards first where they can
+carry it; no speeds stated, the fewest segments), then fewest parts fetched,
 ties in rendezvous order, in-flight downloads counted as held — fetches its own segment's missing
 parts past the replica target and the ring, and prune keeps them below urgent pressure. A complete
-chain is never rebalanced; a near machine keeps its place 30 min after it was last measured near, a
+chain moves only onto cards, for a quarter off its price; a near machine keeps its place 30 min after it was last measured near, a
 named part is kept 24 h, a machine that never fetches its segment is passed over (#231's lease). A
 near machine holding none of the model learns its header first, since every ceiling is weighed with
 the header's cost curve. → `docs/plans/regional_pipelines.md` § Stage 3.

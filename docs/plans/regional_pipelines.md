@@ -353,7 +353,12 @@ parts to fetch, ties broken by a fixed rendezvous order (`blake3(model ‖
 node)`, #231's), and fetches the parts of ITS segment it lacks. Prune keeps a
 machine's planned segment — the same predicate the download pass asks (gotcha
 #795). A complete chain is never rebalanced: hops are fixed by placement only
-while a gap remains. "Near" is a connected machine in scope whose measured
+while a gap remains. **Since #356 (2026-10-26)** "fewest segments" is the case
+of machines stating no speeds: a chain is the CHEAPEST a token by the speeds
+they state — each segment's hop, each layer on the card or processor it runs on
+— so where the cards can carry a model its layers go to cards, and a complete
+chain moves only onto cards, at Petals' 0.75
+(`docs/invariants/memory.md` § "Cards first"). "Near" is a connected machine in scope whose measured
 windowed-minimum round trip (`metrics.network_coord_samples[..].min()`) is at
 most `NEAR_RTT_MS` — the measurement, never the coordinate, which orders near
 peers worst (§ "The soak reading").

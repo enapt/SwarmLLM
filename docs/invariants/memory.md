@@ -2566,16 +2566,18 @@ chain of nearby machines was luck. Design, simulation and the alternatives (Peta
 **The rule** (`auto_manage/coverage/near_chain.rs`). For a model somebody asked for that no near
 machine can run whole and whose near machines' ceilings could carry it between them, every near
 machine computes the SAME chain — each machine used once for one run of at most its ceiling, the
-fewest segments (within one of the least the ceilings allow), then the fewest parts fetched, ties
-in rendezvous order — and fetches its own segment's missing parts:
+cheapest a token by the speeds the machines state (#356, below; machines stating none: the fewest
+segments, within one of the least the ceilings allow), then the fewest parts fetched, ties in
+rendezvous order — and fetches its own segment's missing parts:
 
 - **One predicate for both passes, judged after the fetch** (gotcha #795): the download pass
   fetches `parts_this_node_plans` and `copy_kept_because` keeps `copy_in_near_chain`, both from
   the one chain, which counts in-flight downloads as held — the chosen chain's cost falls by all
   this machine fetches, any other's by no more, so the chain a fetch starts under is the chain it
   lands under.
-- **A complete chain is never rebalanced**: while one exists over what is held, only such a
-  chain is chosen.
+- **A complete chain is rebalanced only onto cards** (#356): while one exists over what is held
+  it is kept, unless a chain running fewer layers on processors is priced at most three quarters
+  of it — fewer hops alone never move it.
 - **Moving inputs are held** (gotcha #876): a near machine keeps its place, and its parts count,
   30 min after it was last measured near; a part this node was named for is kept 24 h after it
   was last named. In simulation a neighbour off 15 minutes in every three hours made the other
@@ -2681,10 +2683,69 @@ layers at 10:48Z from 40 at 08:38Z) — the one holder with room to spare there.
 This is Petals' placement (Borzunov et al. 2023, arXiv 2312.08361 § 3.2;
 `petals/server/block_selection.py` `choose_best_blocks`): each server one contiguous span sized to
 its memory, over the blocks the swarm covers worst. Petals moves a server only when a simulated
-rebalance gains ≥ 20%; here a complete chain is never rebalanced at all. **What it does not do**:
-weigh distance — fewest segments is the proxy, and the router prices the chain it is given; and
-agree where machines see different peers (a partial mesh): each plan's fetch is bounded by one
+rebalance leaves the old throughput below 75% of the new (`should_choose_other_blocks`,
+`balance_quality`); here a complete chain moves only onto cards, at the same threshold (#356,
+below). **What it does not do**: measure distance inside a reach — each segment is priced at the
+reach's bound (30 ms near, 300 ms far), and the router prices the chain it is given; and agree
+where machines see different peers (a partial mesh): each plan's fetch is bounded by one
 machine's ceiling, and both settle on what is then held.
+
+### Cards first: a chain is priced by the speeds its machines state (2026-10-26, #356)
+
+**Why.** A machine's ceiling (`NodeCapability::model_memory_ceiling_mb`) is its card PLUS the
+system memory the swarm may use beside it (#344), and the plan filled ceilings — fewest segments —
+without asking which device a layer would run on. A layer beside the card runs on the processor,
+several times slower: the 70B's split here (#350's live check, 2026-10-26) put 9 of this node's 21
+layers on the card and 12 on the processor, every token. With more machines, the same model fits
+on cards alone; the user's aim (2026-10-26): "once the swarm grows large enough nodes won't need
+to use both GPU and CPU — processing spread by speed".
+
+**Research.** Petals sizes a server by its accelerator's memory only
+(`server.py::_choose_num_blocks`; CPU only without a GPU), picks spans by throughput, and moves a
+server when a simulated rebalance clears `balance_quality` 0.75. Parallax (arXiv 2509.26182)
+water-fills layers by compute (`x_i = min(c_i, λ·F_i)`, memory-capped) and re-places on coverage
+loss or load imbalance; Helix (arXiv 2406.01566) solves placement once as a max-flow MILP; exo
+and llama.cpp's RPC split by memory. None has a processor share beside a card to weigh, so the
+trade between processor layers and extra hops is ours.
+
+**The rule** (`near_chain::plan_chain`, `Planner::step_us`, `Devices::of`, `worth_moving`).
+Each machine's devices come from what it advertises: a card where its models run on one
+(`models_run_on_card`), holding `layers_that_fit(gpu.vram_total_mb)` on the model's CARD curve
+(the same card figure its ceiling counts), the card's layers the first of any run it is given as
+the loader places them; card layers at `est_tokens_per_sec_7b`, the rest at
+`processor_tokens_per_sec_7b` (a machine without a card: every layer at its stated speed), each
+converted by `scheduler::stated_layer_ms` — the routers' own `prior_ms_per_layer` arithmetic,
+`UNKNOWN_COMPUTE_MS` for a speed not stated. A chain's price is each segment's hop (30 ms near, 300
+ms far: the 70B's far holders measured 300-410 ms) plus each layer on its device; the search is
+exact over (position, machines used) as before, minimising (price, parts fetched), with a card's
+end added to the ends worth trying and room for one segment past the fewest the CARDS allow. So
+where the cards can carry the model, a chain on cards alone wins once its processor layers saved
+outweigh its extra hops; where they cannot, the processor fills the gap. Machines stating no
+speeds price every layer alike: the fewest segments, unchanged. `plan_over`: a CARD that holds the
+model whole leaves it to the ordinary rules; a machine that runs it whole only with its processor
+competes: where it costs no more than any chain — priced whatever its disk, as carrying
+chooses who fetches — the model is carrying's, as before. A
+complete chain is kept unless a chain with fewer processor layers costs ≤ 3/4 of it
+(`MOVE_AT_MOST`, Petals' threshold): speeds are static tables (no jitter to chase), a move is a
+download, and the 24 h part hold already stops a flapping set re-fetching.
+
+**Evidence.** Tests `a_chain_runs_on_cards_where_the_cards_can_carry_it` (cards 10/12/10 of 32
+layers: three card segments, 154 ms, against two segments with 10 processor layers, 304 ms;
+controls: at a far hop the two-machine chain wins, and machines stating no speeds plan the
+fewest segments), `a_complete_chain_moves_only_onto_cards_and_only_for_a_quarter_off`, and
+`a_complete_chain_moves_onto_cards_that_can_carry_it` (this node and the near peer complete the
+chain with 4 processor layers each at 1 token/s: planned onto three cards, 108 ms against 323,
+the third machine fetching the two parts between; control at 6.3 tokens/s, 108 against 113: kept).
+`a_complete_near_chain_is_never_rebalanced` still holds for machines without cards, and
+`coverage::tests::the_chosen_carrier_fetches_only_what_closes_the_shortfall` pins the one-machine
+rule's disk aside (gotcha #973: priced through the plan's disk filter, a machine able to run the
+model whole with a full disk stopped counting, and a chain took carrying's case). Red checks: the
+card ignored → both card tests red; no move → both move tests red; the one machine priced by its
+disk → the carrying test red. The INFO line
+gains `price_ms` and `processor_layers` (DIAGNOSTICS.md). **Left**: within the slack a chain
+leaves, layers are not spread in proportion to speed (Parallax's water-filling) — the router
+already chooses the fastest route among holders at request time, which is where that spread
+pays.
 
 ## A split with no drafter fetches one (2026-10-22, #134)
 
