@@ -259,8 +259,9 @@ swarmllm-frontend = { path = "crates/swarmllm-frontend", default-features = fals
 # Memory-mapped I/O for fast model loading
 memmap2 = "0.9"
 
-# Compression
-zstd = "0.13"
+# Compression. 0.14.3+ for RUSTSEC-2026-0391/0398/0403/0410 (zstd-safe 8.2, zstd-sys 2.1.2);
+# 0.14 only adds API over 0.13 for what this crate calls (bulk, encode_all/decode_all, Decoder).
+zstd = "0.14.3"
 
 # Image processing (for VLM vision encoder)
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

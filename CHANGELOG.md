@@ -63,6 +63,12 @@ refused that way 3 minutes after a restart, and the computer holding all of it w
 seconds later. That answer is now given only when every part of the model has a known holder;
 otherwise the computer waits for the missing parts' holders and plans again (#358).
 
+**The compression library used for data passed between computers is updated** (zstd 0.14.3),
+for four newly reported problems in it (RUSTSEC-2026-0391, -0398, -0403, -0410). None of them
+reaches the way this program uses it: every decompression starts fresh, a failed one is thrown
+away, and the affected seekable and WebAssembly parts are not used. The compressed bytes are
+unchanged, so computers on either version still understand each other.
+
 ## [0.3.256-alpha] — 2026-10-26
 
 **A large model split across computers no longer fails when one of them says it has room for only
