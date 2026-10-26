@@ -268,6 +268,7 @@ impl PipelineExecutor {
                     ids.clone(),
                     &self.request.sampling_params,
                     self.request.cancel.clone(),
+                    super::worker_requester(&self.request),
                 )
             });
 
@@ -310,6 +311,7 @@ impl PipelineExecutor {
                     draft_key,
                     ids.clone(),
                     super::engine_drafter::release_of(self.shared_state.clone(), draft_key),
+                    super::worker_requester(&self.request),
                 );
                 if let Some(h) = read_ahead {
                     // On failure the first round reads the prompt instead; a

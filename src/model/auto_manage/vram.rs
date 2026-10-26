@@ -766,6 +766,29 @@ impl RamBudget {
             && estimate_mb <= self.live_headroom_mb
     }
 
+    /// This budget as it will read once `loading_mb` more has been loaded
+    /// first: that much less available, and the live headroom
+    /// ([`live_headroom_mb`]) taken of what is left — never the headroom less
+    /// the load, which is a fraction of what is available, not all of it. For
+    /// a question asked BEFORE a load that will happen first: a split's
+    /// drafter loads after the layers it guesses for (#351). An unreadable
+    /// machine stays unjudged.
+    pub fn after_loading(&self, loading_mb: u64) -> Self {
+        if loading_mb == 0 || self.available_mb == 0 {
+            return *self;
+        }
+        let available_mb = self.available_mb.saturating_sub(loading_mb);
+        Self {
+            available_mb,
+            live_headroom_mb: live_headroom_mb(
+                available_mb,
+                self.total_mb,
+                headroom_floor_enabled(),
+            ),
+            ..*self
+        }
+    }
+
     /// [`Self::allows`] once idle models charged `reclaimable_mb` have been
     /// unloaded — what the spawn's reclaim
     /// (`ModelProcessPool::free_ram_for_admission`) makes of both limits:

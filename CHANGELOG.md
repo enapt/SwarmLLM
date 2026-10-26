@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+**A large model split across computers can guess ahead again on the computer that asked for it.**
+A split reply goes faster when a small model on the asking computer guesses the next few words and
+the large model checks them together. That small model was always held to the memory the swarm may
+use on the computer, even when it was guessing for its owner's own question. Beside a large model
+the owner had asked for, that left it no room at all: with a 70-billion-parameter model on a
+16 GB computer, every reply was written one word at a time. It is now held to the memory of the
+person whose reply it guesses for. On a computer with a graphics card, the guessing model was
+also chosen before the large model's own layers had loaded into memory, so one too big to fit
+beside them could be picked, refused, and the reply would go unguessed; it is now chosen for the
+memory those layers leave, so a smaller one that fits is picked instead. It still takes only
+memory that is free, and never pushes anything out. Measured on the 70B across four computers in
+three countries: 1.9-2.0 tokens a second instead of 0.6, and the first token after 7-11 seconds
+instead of 13 (#351).
+
 **A computer already holding part of a large model now says no up front to a part it could not
 load.** Before a reply starts, each computer in a split is asked whether it can take its part.
 One that had already loaded other layers of the model answered only about the conversation's

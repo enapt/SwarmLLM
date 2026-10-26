@@ -260,7 +260,9 @@ Two halves.
    room left for the drafter** (`PipelineScheduler::candidates_leaving_room_for_the_drafter`
    → `ModelProcessPool::max_hostable_layers_beside_guest`): this node's bound
    cut to the most layers after whose load the drafter's admission still says
-   yes — against `DRAFTER_REQUESTER`'s cap, the one its spawn uses. It is
+   yes — against the cap its spawn uses: that of the request it guesses for
+   (`process_pool::drafter_requester`; the swarm's for every request before
+   #351, 2026-10-26). It is
    tried ONLY where every peer is held to what it offers: parallax's first
    rung (`CapacityBound::Everyone`) and greedy's strict pass
    (`greedy_assign_beside`). No route that way and each plans exactly as

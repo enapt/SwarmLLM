@@ -238,6 +238,7 @@ pub(super) fn start(
             chunk: gamma,
             ahead: (gamma * PASSES_AHEAD).min(MAX_REQUESTER_GUESSES as u32) as usize,
             stop: stop.clone(),
+            requester,
         },
         spec,
         ids.to_vec(),
@@ -269,6 +270,9 @@ struct Drafting {
     /// Guesses kept drafted past the reply.
     ahead: usize,
     stop: Arc<AtomicBool>,
+    /// Whose request the guesses are for — what the drafter's spawn is
+    /// weighed against (`EngineDrafter::new`).
+    requester: crate::inference::process_pool::Requester,
 }
 
 /// Follow the reply and keep `ahead` guesses drafted past it, sending a window
@@ -287,6 +291,7 @@ async fn guess_ahead(
         key,
         prompt_ids.clone(),
         engine_drafter::release_of(d.state.clone(), key),
+        d.requester,
     );
     // The drafter reads the prompt while the head does.
     let read = engine_drafter::read_ahead(
@@ -296,6 +301,7 @@ async fn guess_ahead(
         prompt_ids,
         &d.sampling,
         Some(d.stop.clone()),
+        d.requester,
     );
     if let Some(Ok(Ok(_))) = read.finish().await {
         drafter.prompt_read();

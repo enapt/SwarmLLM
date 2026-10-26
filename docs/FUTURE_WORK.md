@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #352**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #353**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -64,11 +64,11 @@ speed is what the swarm is for, so split speed for large models is the top track
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
-6. **#350**, **#351**, then **#318**. A model no single member can hold now answers. On
+6. **#350**, then **#318**. A model no single member can hold now answers. On
    2026-10-25, Llama-3.3-70B ran across four machines (TH, TH, AU, IT) at 0.56-0.59 tok/s warm,
    after #348 and #349 (ship in v0.3.255). It ran only once two idle models were unloaded by
-   hand: a full card hides the layers this node already holds from the re-plan (#350). It also
-   guesses nothing, because its drafter was refused for memory (#351).
+   hand: a full card hides the layers this node already holds from the re-plan (#350). With its
+   drafter loaded (#351, closed 2026-10-26) the same asks ran 1.90-1.96 tok/s.
    **#318** — a large model split across machines is too slow to use: 0.35 tok/s on a 4-segment
    intercontinental chain, 5-13 tok/s on a 7B Thailand↔Belgium with the stream. Projected
    lossless 20-31 tok/s across continents and 50-80 inside a region on cards. The stream
@@ -2183,22 +2183,6 @@ copies the one whose guess reads the fewest bytes, so a 0.5B's Q8_0 copy over it
 guessers on a card (2026-10-23, real link) the two missed alike and the Q8_0 ran +10-14%; the 1.5B
 Q8_0 beat both (#134).
 
-#### #351 — The 70B split runs with no drafter, because the 3B is refused for memory on a relaxed rung
-`P2` · perf-split · **OPEN** — 2026-10-25 · found by the 70B field check (v0.3.254)
-
-The first Llama-3.3-70B replies across four machines decoded at 0.56-0.59 tok/s warm (1695 and
-1789 ms a token; first token 12.7-13.0 s) and 0.35 cold, every token unguessed. Llama-3.2-3B
-(2290 MB) was refused for memory on the live node, because the 70B's processor-held layers had
-taken its RAM. Per token, the price was net 1.49 s + compute 1.39 s (DSD `check_fixed_ms=2897`,
-`farthest_round_trip_ms=411`). #275 leaves drafter room only on the `Everyone` rung, and this
-plan came from a relaxed one, so nothing was reserved. A drafter refused at request time also
-does not lead to a smaller one (#318's drafter acquisition, "Left of it"). Direction: when the
-chosen drafter is refused, try the family's next smaller one (Llama-3.2-1B, ~0.8 GB at Q4); on
-a relaxed rung, trade one of this node's layers for the drafter's room where that pays.
-Estimate, not measured: Leviathan's formula at a ~1.7 s round with a processor 1B (c ≈ 0.02,
-α ≈ 0.7, γ 6) gives about 2.7×, less whatever a 7-row check costs on the processor peers over a
-1-row one. Measure that cost first.
-
 #### #145 — One reply uses one row of a ring pass that could carry dozens
 `P3` · perf-split · **OPEN** — 2026-09-28 · history: archive row #145; plan: `docs/plans/wan_parallel.md`
 
@@ -3180,6 +3164,25 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   matmul plateaus at ~1.5x…"). Batching plateaus at ~1.5× because there is no quantized GEMM;
   dequantize-once measured 11.8× worse. A hand-written SIMD kernel per format and instruction
   set, aimed at the prompt pass, not decode batching.
+  **2026-10-26: it is also what a split's guesses cost on a processor.** The live node served a
+  peer's Llama-3.3-70B checks on its [0,19) (10 layers on the card, 9 on the processor). A check
+  cost about 200 ms plus about 55 ms a guessed position (2 positions 248-330 ms, 6 positions
+  444-533 ms over 19 forwards, 8 positions 518-565 ms). That is ~6 ms a processor layer a position,
+  compute-bound near what 16 AVX2 threads give. Across a 70B chain's ~50 processor-held layers it
+  holds the guesses a check pays for to ~3 (#351).
+  Prior art (read 2026-10-26): llama.cpp's CPU repack, `ggml_gemm_q4_K_8x8_q8_K`
+  (`ggml-cpu/arch/x86/repack.cpp`, PR #12332):
+  - weights are interleaved 8 columns at a time at load (`block_q4_Kx8`), activations packed
+    4 rows at a time (`block_q8_Kx4`);
+  - the 4-bit unpack runs once per tile, outside the 4-row loop that runs `maddubs`;
+  - it engages at `nrows > 3`, rows left over taking the one-row path;
+  - measured: pp512 +61% for Q4_K_M on a Ryzen 7600X, token generation −2%;
+  - there is no x86 kernel for Q6_K or Q8_0 (tinyBLAS covers Q8_0/Q4_0, not K-quants), and none
+    in Rust.
+
+  Not bit-identical to the one-row dot unless the scale arithmetic is reproduced row for row. A
+  check must stay rank-identical to a one-position step, so judge it against llama.cpp, never by
+  bytes.
 - **#211 — Runtime AVX2 dispatch in vendored candle** (archive § "CPU nodes ship with the fast
   quantized kernels compiled out"). Since 2026-08-06 every x86 asset is `x86-64-v3` with a
   `-baseline` sibling the updater picks (`update::host_asset_name`); one binary would mean
@@ -3230,6 +3233,29 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   peer exchange (from the anchor) listed QUIC first for every peer, and it reached Belgium and
   Melbourne over QUIC within a second; every remote connection of the live node was QUIC. Not
   fired — re-check `DSD: request complete` transports on field splits after .250.
+
+- **#352 — Decision models: `POST /v1/systemone`, label probabilities from one forward pass**
+  (field report #038, 2026-10-25, v0.3.251). A tester asked for the route llama.cpp added in PR
+  #29818 (merged 2026-10-02; `tools/server/server-decision.cpp`, 1,636 lines). The request is a
+  `state` plus typed `questions` (`choice` / `noul` / `score`), and the answer is one probability
+  distribution per question with `output_tokens` 0. LiteLLM proxies it, and so does `/v1/decisions`.
+  Checked 2026-10-26 (the report's "llama.cpp is the inference core" is wrong; ours is candle):
+  - Of the five models named, three are plain readouts of next-token letter logits, all `qwen35`,
+    which runs here: `ggml-org/OpenJev-GGUF` (27B), `Mapika/decider-2b-GGUF`,
+    `ZY-Lee4/QJev3.5-0.8B-GGUF`.
+  - Laya is a ModernBERT encoder (unsupported architecture). Kev-4B and JEV-9B need extra head
+    tensors.
+  - Each `<arch>.decision.type` has its own prompt rendering and calibration
+    (`.decision.temperature.*`, `.decision.score_bias.*`). The fallback PR #30113 is still a draft.
+
+  Not now: the contract is a month old and still moving, porting it is per-type rendering rather
+  than a pass-through, and it serves agent builders, not the first-hour user or the split-speed
+  track. A v1 would be one whole holder (never a split: one pass, RTT dominates), the readout types
+  only, refused with 501 like llama.cpp for any other type. Cheap part to do with it: keep repos
+  tagged `decision-model` / `typed-decisions` / `system-one` out of the chat lists
+  (`huggingface::is_embedding_repo`'s rule), and have the header refusal name a GGUF carrying
+  `.decision.type`; neither has been seen in the field. Trigger: a second request, or the
+  llama.cpp contract stable for a release cycle.
 
 ## Decided — not doing
 
@@ -3341,6 +3367,30 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-26, ships in v0.3.255** (#351)
+- #351 — **A large model split across computers guesses ahead again on the computer that asked
+  for it.** The first Llama-3.3-70B replies across four machines (TH, TH, AU, IT) ran every
+  token unguessed, 0.56-0.59 tok/s warm. Two contributors, both in what the drafter's spawn was
+  weighed against. (1) A drafter was always weighed as the SWARM's (`DRAFTER_REQUESTER`), against
+  the contribution level's RAM cap — 4997 MB at "minimal" on this 16 GB machine — while the
+  owner's own 70B layers, weighed against the owner's 12,792 MB, already held 9470 MB: the 3B's
+  reload was refused (`cap_mb=4997 committed_mb=9470`) and every later reply took the
+  copy-only path. Now `process_pool::drafter_requester` weighs it as the request it guesses for
+  (`IpcDraft::for_the_owner`, set by `EngineDrafter` from `worker_requester`); A/B
+  `SWARMLLM_DRAFTER_CAP=swarm`. (2) On a card node, a drafter bound for system memory beside a
+  plan was weighed against that memory as it stood BEFORE the plan's own share loaded: Llama
+  3.1 8B was chosen beside [0..27) — 17 of those layers in system memory — and once they loaded
+  the live headroom was 3.4 GB, so its spawn was refused and the reply ran unguessed. Now
+  `guest_would_be_admitted_beside` weighs it after that share (`machine_mb_a_plan_adds`,
+  `RamBudget::after_loading`), so the 8B is refused up front and the 3B, which fits, is chosen.
+  Measured with (1) applied by setting the owner's cap for both (2026-10-26, same four machines,
+  "why is the sky blue", 96 tokens): **1.96 and 1.90 tok/s** with the 3B guessing (77 of 113
+  guesses kept, α 0.80, γ 6-7, a check 1.5-1.6 s + 47-97 ms a position), first token 11.2 and
+  7.4 s — against 0.56-0.59 and 12.7-13.0 s. A repeated prompt is the kind case for guessing;
+  a fresh one is owed a figure. The relaxed-rung room trade the entry proposed was not needed:
+  the 3B fits beside the plan once it is weighed against the owner's cap. Evidence:
+  `docs/invariants/memory.md` § "The contribution level caps the swarm's work".
 
 **Closed 2026-10-25, ships in v0.3.255** (#348, #349)
 - #349 — **A computer already holding part of a model says no up front to a part it could not

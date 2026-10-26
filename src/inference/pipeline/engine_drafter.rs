@@ -27,6 +27,7 @@ use dashmap::DashMap;
 
 use crate::daemon::state::SharedState;
 use crate::error::SwarmError;
+use crate::inference::process_pool::Requester;
 use crate::inference::worker_ipc::IpcDraft;
 use crate::types::{ModelId, SamplingParams};
 
@@ -291,7 +292,7 @@ pub(crate) fn engine_drafter_for(
 /// is, and so what it must fit beside ([`admitted`]).
 pub(crate) struct TargetHere<'a> {
     pub ranges: &'a [(u32, u32)],
-    pub requester: crate::inference::process_pool::Requester,
+    pub requester: Requester,
 }
 
 /// The drafter [`engine_drafter_for`] would choose for `target` were there room
@@ -601,7 +602,7 @@ fn admitted(
             here.requester,
         )
     } else {
-        pool.guest_would_be_admitted(&spec.model_id, spec.layer_range, kv)
+        pool.guest_would_be_admitted(&spec.model_id, spec.layer_range, kv, here.requester)
     };
     if !fits {
         tracing::debug!(
@@ -662,7 +663,8 @@ fn largest_that_can_draft(
 /// anyway, instead of after it. A guess-free call (`gamma` 0) that leaves the
 /// prompt in the worker's cache; on success the caller marks it read with
 /// [`EngineDrafter::prompt_read`], on failure the first round reads it itself.
-/// `key` is the attempt's own ([`draft_key`]), shared with its [`EngineDrafter`].
+/// `key` is the attempt's own ([`draft_key`]), shared with its [`EngineDrafter`],
+/// and `requester` whose request it guesses for (`pipeline::worker_requester`).
 pub(super) fn read_ahead(
     state: std::sync::Arc<SharedState>,
     spec: &DrafterSpec,
@@ -670,6 +672,7 @@ pub(super) fn read_ahead(
     prompt_ids: Vec<u32>,
     sampling: &SamplingParams,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    requester: Requester,
 ) -> ReadAhead {
     let d = IpcDraft {
         request_id: key,
@@ -681,7 +684,7 @@ pub(super) fn read_ahead(
         sampling: sampling.clone(),
         history: Vec::new(),
         coupling_seed: None,
-        for_the_owner: true,
+        for_the_owner: requester == Requester::Owner,
         stop_below: None,
         tree: None,
         flow: None,
@@ -802,6 +805,12 @@ pub(super) struct EngineDrafter {
     /// flow has answered.
     flow_heard: Option<usize>,
     calls: u32,
+    /// Whose request the guesses are for (`pipeline::worker_requester`): every
+    /// call says so (`IpcDraft::for_the_owner`), and its spawn is weighed
+    /// against that requester's memory cap (`process_pool::drafter_requester`,
+    /// #351). Every call said the owner's before 2026-10-26, and every spawn
+    /// was weighed as the swarm's.
+    requester: Requester,
 }
 
 /// The probability below which a drafter stops guessing for the round
@@ -839,12 +848,13 @@ impl EngineDrafter {
     /// ids its first segment read — with the first reply token appended by
     /// [`Self::push`] once the prompt pass has sampled it.
     /// `key` and `release` are the attempt's ([`draft_key`], [`release_of`]),
-    /// shared with its [`read_ahead`].
+    /// shared with its [`read_ahead`], as is `requester`.
     pub(super) fn new(
         spec: DrafterSpec,
         key: uuid::Uuid,
         prompt_ids: Vec<u32>,
         release: Release,
+        requester: Requester,
     ) -> Self {
         Self {
             spec,
@@ -855,6 +865,7 @@ impl EngineDrafter {
             open: None,
             flow_heard: None,
             calls: 0,
+            requester,
         }
     }
 
@@ -909,7 +920,7 @@ impl EngineDrafter {
             sampling: sampling.clone(),
             history: history.to_vec(),
             coupling_seed,
-            for_the_owner: true,
+            for_the_owner: self.requester == Requester::Owner,
             stop_below: draft_confidence_floor(),
             tree: None,
             flow: None,
@@ -981,7 +992,7 @@ impl EngineDrafter {
             sampling: sampling.clone(),
             history: history.to_vec(),
             coupling_seed,
-            for_the_owner: true,
+            for_the_owner: self.requester == Requester::Owner,
             stop_below: None,
             tree: Some(crate::inference::worker_ipc::TreeAsk {
                 rows,
@@ -1075,7 +1086,7 @@ impl EngineDrafter {
             sampling: sampling.clone(),
             history: Vec::new(),
             coupling_seed,
-            for_the_owner: true,
+            for_the_owner: self.requester == Requester::Owner,
             stop_below: None,
             tree: None,
             flow: Some(crate::inference::worker_ipc::FlowAsk {
@@ -1211,6 +1222,7 @@ mod tests {
             uuid::Uuid::nil(),
             prompt.to_vec(),
             Box::new(|| Box::pin(async {})),
+            Requester::Owner,
         )
     }
 
@@ -1659,6 +1671,7 @@ mod tests {
             draft_key(),
             vec![1, 2, 3],
             flagged_release(released.clone()),
+            Requester::Owner,
         );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         assert!(!released.load(SeqCst), "not while the attempt is running");

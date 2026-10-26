@@ -3741,10 +3741,36 @@ picks one through `RamBudget::judging`. Every reader names whose request it weig
 `grow_worker`, `free_ram_for_admission`, `record_cpu_kv_budget`, the refusal's figure and note
 ("… for this computer's own requests"), and the planner's bound on this node
 (`max_hostable_layers_for_planning`, whose requester the scheduler reads with
-`pipeline::requester_for_override` — a split a peer delegated here is the swarm's). The drafter (a
-guest) and a decode batch (which does not say whose requests it carries) are weighed as the
-swarm's, the narrower cap. The live anti-swap headroom (70% of what is free now) is the machine's
+`pipeline::requester_for_override` — a split a peer delegated here is the swarm's). A decode batch (which does
+not say whose requests it carries) is weighed as the swarm's, the narrower cap. **A drafter is
+weighed as the request it guesses for** (`process_pool::drafter_requester`, 2026-10-26, #351). It
+was the swarm's for every request until then. On the live node (16 GB, contribution minimal) the
+owner's Llama-3.3-70B held 9470 MB of system memory against a swarm cap of 4997 MB, so no drafter
+could ever load beside it:
+- Llama-3.2-3B was chosen while it was still loaded and idle.
+- The target's own spawn unloaded it (`free_ram_for_admission`).
+- Its reload was refused at `cap_mb=4997` (16:33:00Z 10-25).
+- The 1B was never admitted, and every reply ran unguessed.
+
+It stays a guest: free memory only, no reclaim, the live headroom binding. `EngineDrafter`
+names the requester on every call (`IpcDraft::for_the_owner`). That flag had been `true` for
+every drafter, so a reply led for a peer also read its prompt on the owner's threads. A/B
+`SWARMLLM_DRAFTER_CAP=swarm`. The live anti-swap headroom (70% of what is free now) is the machine's
 and binds both; the advertised `model_memory_ceiling_mb` stays the swarm's, an upper bound.
+
+**Beside a card plan, a drafter bound for system memory is weighed AFTER the plan's own share of
+it loads** (`guest_would_be_admitted_beside` → `machine_mb_a_plan_adds`, `RamBudget::after_loading`;
+#351's second contributor). The card branch asked "would it fit in system memory instead?" of the
+machine as it stood, before the target's layers loaded. With the owner's cap set for both (the
+first fix's effect), the 70B's first reply after a restart chose Llama 3.1 8B (5073 MB) beside
+[0..27) — 10 layers on the card, 17 in system memory — with 13.7 GB free; once those layers
+loaded the live headroom was 3430 MB, the spawn was refused, and the reply ran unguessed
+(02:19:52Z 10-26). The next replies, with the 3B, decoded at 1.90-1.96 tok/s. `after_loading`
+takes the load from what is AVAILABLE and recomputes the 70% from what is left, never the
+headroom less the load. Only the spawn's one run counts: a later range grows the worker on the
+card, the planner's own model (`fresh_run_layers_for_planning`). Test
+`a_drafter_beside_a_card_plan_is_weighed_after_the_plans_share_of_system_memory` (the field
+figures) fails with the plan's share read as zero.
 
 **Verified on the live node** (`~/swarmllm-138e/verify4.sh`: the stage B rig's DEFAULT-config
 shape, which had refused both placements at `cap_mb=4997`; ABBA, Windows up 19.2 h, 0 driver
