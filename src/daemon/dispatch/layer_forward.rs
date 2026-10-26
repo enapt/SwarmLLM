@@ -71,9 +71,14 @@ pub(super) async fn handle_layer_forward(
             // wait ends, but not logged as one — on a node serving the middle
             // of a boomerang it happens dozens of times a reply (38 warnings
             // in one rig arm, 2026-10-09, #152).
-            Err(crate::daemon::state::forward_streams::TurnRefused::Skipped) => {
-                let reason =
-                    crate::daemon::state::forward_streams::TurnRefused::Skipped.reason(seq);
+            // So is one that stood on a guess this node's own check refused.
+            Err(
+                skipped @ (crate::daemon::state::forward_streams::TurnRefused::Skipped
+                | crate::daemon::state::forward_streams::TurnRefused::StoodOnARefusal {
+                    ..
+                }),
+            ) => {
+                let reason = skipped.reason(seq);
                 tracing::debug!(%request_id, reason, "streamed check skipped");
                 send_refusal(&network_tx, &reply_to(), request_id, answering, &reason).await;
                 return;
@@ -284,8 +289,23 @@ pub(super) async fn handle_layer_forward(
     // failure, and the TP branch's encoding failures).
     let _serving_guard = crate::daemon::state::ServingGuard::new(&shared_state, model_id.clone());
 
+    // A streamed check this node walks: how many guesses it was sent, so its
+    // answer can say whether it refused one (`forward_streams`: the turns
+    // after a refusal stood on it). A tree is never walked as a chain.
+    let walked_guesses = (turn.is_some()
+        && is_last
+        && forward.spec_walk_at_tail
+        && forward.draft_parents.is_empty()
+        && forward.draft_tree_from.is_none())
+    .then_some(forward.draft_tokens.len());
+
     // Route forward pass to subprocess via process pool
     let result = shared_state.model_process_pool.forward(forward).await;
+    if let (Some(turn), Some(guesses), Ok(answer)) = (&turn, walked_guesses, &result) {
+        if walk_refused_a_guess(guesses, answer) {
+            turn.refused_a_guess();
+        }
+    }
     // The worker is done with it: the stream's next forward may start while
     // this answer is on its way.
     drop(turn);
@@ -882,6 +902,20 @@ fn draft_tree_from_onward(
     forward
         .draft_tree_from
         .filter(|_| !chain.is_empty() && !forward.draft_parents.is_empty())
+}
+
+/// Did this node's walk of `guesses` drafts refuse one? A walked answer is
+/// the drafts kept, then the token sampled where the walk stopped
+/// (`sampling::walk_verified_positions`): all kept is `guesses + 1` tokens,
+/// so any fewer is a refusal — and the coordinator restarts after it, so
+/// every streamed check built on that chunk is wasted (`forward_streams`).
+fn walk_refused_a_guess(guesses: usize, answer: &crate::types::LayerResult) -> bool {
+    !matches!(
+        answer.finish_reason,
+        Some(crate::types::NetworkFinishReason::Error(_))
+    ) && answer.spec_logits.is_empty()
+        && !answer.token_ids.is_empty()
+        && answer.token_ids.len() <= guesses
 }
 
 /// Send a sanitized error `LayerResult` back to the originating peer when
@@ -1690,6 +1724,34 @@ mod tests {
             !crate::inference::pipeline::remote_error_means_missing_shard(&reason),
             "busy is not a missing shard — the holder claims must stay: {reason}"
         );
+    }
+
+    /// A walk of 2 guesses answers 3 tokens when it kept both, fewer when it
+    /// refused one. Only a refusal marks the stream: a whole answer, an error
+    /// and a logits answer (walked at the coordinator) say nothing here.
+    #[test]
+    fn only_a_walk_that_kept_fewer_than_every_guess_refused_one() {
+        let walked = |ids: &[u32]| {
+            let mut r = crate::types::LayerResult::error(uuid::Uuid::nil(), String::new());
+            r.finish_reason = None;
+            r.token_ids = ids.to_vec();
+            r
+        };
+        assert!(!walk_refused_a_guess(2, &walked(&[7, 8, 9])), "both kept");
+        assert!(
+            walk_refused_a_guess(2, &walked(&[7, 5])),
+            "the second refused"
+        );
+        assert!(walk_refused_a_guess(2, &walked(&[5])), "the first refused");
+        assert!(!walk_refused_a_guess(2, &walked(&[])), "no answer");
+        let failed = crate::types::LayerResult::error(uuid::Uuid::nil(), "x");
+        assert!(
+            !walk_refused_a_guess(2, &failed),
+            "an error refused nothing"
+        );
+        let mut logits = walked(&[5]);
+        logits.spec_logits = vec![vec![0.0]; 3];
+        assert!(!walk_refused_a_guess(2, &logits), "not walked here");
     }
 }
 

@@ -1269,7 +1269,9 @@ chunk, the look-ahead included (default 3), `SWARMLLM_SPEC_STREAM_WINDOW` chunks
 often a chunk's guesses AND its look-ahead were all kept (~0.25-0.35 on a 0.5B drafter for a 7B);
 each restart is logged at DEBUG (`a streamed check refused a guess`, with the turn and how many of
 its guesses were kept). On the serving node a superseded chunk is answered `streamed check N was
-skipped` and never computed. ⚠ **A rig that runs both halves on ONE card measures the stream's
+skipped` and never computed. One built on a guess the serving node's OWN walk refused is answered
+`streamed check N was skipped — check M refused a guess it was built on` before the restart arrives
+(2026-10-26; `SWARMLLM_STREAM_TAIL_SKIP=0` turns that off). ⚠ **A rig that runs both halves on ONE card measures the stream's
 cost, not its gain** — the far half's checks and this node's next chunk share the device, so the
 stream reads ~15% SLOWER there than rounds (25-27 vs 28-33 tok/s at an emulated 24 ms, 2026-09-30),
 while with the far half on other hardware it is ~15-20% faster. Put B on the processor

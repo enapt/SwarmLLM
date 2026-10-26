@@ -38,6 +38,23 @@
 //! the signal. It matters where this node is busy — the work skipped is work
 //! the restart would otherwise wait behind.
 //!
+//! **A refusal walked here skips what stood on it (2026-10-26).** Where this
+//! node walks the stream's checks (`spec_walk_at_tail`), it knows a check
+//! refused a guess the moment its forward ends — a round trip before the
+//! coordinator's restart can say so. Every later turn that does not cut the
+//! cache back was built on that guess (after a refused check the coordinator's
+//! next chunk always restarts: `dsd_stream`'s `take_answer`), so each is
+//! skipped as it comes due ([`Turn::refused_a_guess`]); the restart clears the
+//! mark when it runs, and is never skipped by it. The 70B's far end (request
+//! 344f21c8, 2026-10-26) took 1.14 s a check and the restart reached it 1.0 s
+//! after the refusal, so each miss ran one stale check: 10 of its 29 decode
+//! forwards. The saving is the far end's check time less the restart's latency,
+//! and the far end's time for other requests. A wrong LOOK-AHEAD (every guess
+//! kept, the far end's own next token different) is not visible here — only a
+//! request with penalties sends the history it would be read off — so that
+//! quarter of the restarts still waits for the coordinator. A/B
+//! `SWARMLLM_STREAM_TAIL_SKIP=0`.
+//!
 //! **A turn refused on arrival is stepped over, never waited for.** A forward
 //! the dispatcher turns away at an admission cap never reaches [`ForwardStreams::turn`],
 //! so the stream's next number would never advance past it and every later
@@ -112,6 +129,10 @@ struct Stream {
     next: tokio::sync::watch::Sender<u32>,
     /// Turns below this were superseded by a restart and are skipped.
     skip_below: AtomicU32,
+    /// The last turn whose check, walked HERE, refused a guess — `u32::MAX`
+    /// once a restart has run since. Every later turn that does not cut the
+    /// cache back was built on that guess and is skipped (module doc).
+    refused_at: AtomicU32,
     /// What decides how far `next` may move. Every change to `next` happens
     /// under this lock, so a refusal recorded, or a restart arriving, just as
     /// the turn before it ends is never missed.
@@ -136,6 +157,7 @@ impl Stream {
         let stream = Self {
             next,
             skip_below: AtomicU32::new(0),
+            refused_at: AtomicU32::new(u32::MAX),
             order: parking_lot::Mutex::new(Order::default()),
             touched_ms: AtomicU64::new(0),
         };
@@ -197,6 +219,31 @@ pub(crate) struct Turn {
     turn: u32,
 }
 
+impl Turn {
+    /// This turn's check, walked here, refused one of its guesses: every later
+    /// turn that does not restart the stream stood on that guess and is
+    /// skipped when it comes due, without waiting for the restart to say so
+    /// (module doc). Called before the turn ends, so the next turn sees it.
+    pub(crate) fn refused_a_guess(&self) {
+        if skip_on_a_refusal_here() {
+            self.stream.refused_at.store(self.turn, Ordering::Release);
+        }
+    }
+}
+
+/// `SWARMLLM_STREAM_TAIL_SKIP=0` keeps the turns after a refusal running until
+/// the coordinator's restart arrives — the behaviour before 2026-10-26, for
+/// A/B inside one binary.
+fn skip_on_a_refusal_here() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_STREAM_TAIL_SKIP").ok().as_deref(),
+            Some("0")
+        )
+    })
+}
+
 impl Drop for Turn {
     fn drop(&mut self) {
         {
@@ -218,6 +265,8 @@ pub(crate) enum TurnRefused {
     Waited,
     /// A restart later in the stream superseded it before it ran.
     Skipped,
+    /// A check before it, walked here, refused a guess it was built on.
+    StoodOnARefusal { refused_at: u32 },
 }
 
 impl TurnRefused {
@@ -235,6 +284,9 @@ impl TurnRefused {
             TurnRefused::Skipped => {
                 format!("streamed check {turn} was skipped — a later check restarted the stream")
             }
+            TurnRefused::StoodOnARefusal { refused_at } => format!(
+                "streamed check {turn} was skipped — check {refused_at} refused a guess it was built on"
+            ),
         }
     }
 }
@@ -280,19 +332,34 @@ impl ForwardStreams {
                 let mut order = stream.order.lock();
                 let next = *stream.next.borrow();
                 let superseded = turn < stream.skip_below.load(Ordering::Acquire);
-                if next == turn && !order.running {
+                // A restart cuts the cache back to rows that were kept, so
+                // only a turn that does not is built on the refused guess.
+                let refused_at = stream.refused_at.load(Ordering::Acquire);
+                let stood_on_a_refusal = !restarts && turn > refused_at;
+                let skipped = || {
                     if superseded {
+                        TurnRefused::Skipped
+                    } else {
+                        TurnRefused::StoodOnARefusal { refused_at }
+                    }
+                };
+                if next == turn && !order.running {
+                    if superseded || stood_on_a_refusal {
                         // Due, with nothing running: stepped over now, which
                         // lets the restart go.
                         stream.advance_locked(&mut order, turn.saturating_add(1));
-                        return Err(TurnRefused::Skipped);
+                        return Err(skipped());
                     }
                     order.running = true;
+                    if restarts {
+                        // What a refusal here left stale is behind it now.
+                        stream.refused_at.store(u32::MAX, Ordering::Release);
+                    }
                     drop(order);
                     return Ok(Turn { stream, turn });
                 }
-                if superseded {
-                    Err(TurnRefused::Skipped)
+                if superseded || stood_on_a_refusal {
+                    Err(skipped())
                 } else {
                     Err(TurnRefused::AlreadyRan { next })
                 }
@@ -492,6 +559,57 @@ mod tests {
         assert!(
             streams
                 .turn(id, RANGE, 4, false, STREAM_TURN_WAIT)
+                .await
+                .is_ok(),
+            "and what follows it"
+        );
+    }
+
+    /// A check walked here that refused a guess: the turns built on it are
+    /// skipped before the coordinator's restart arrives — the one waiting
+    /// while the check ran, and one arriving after — and the restart, and
+    /// what follows it, run. A walk that kept every guess skips nothing.
+    #[tokio::test]
+    async fn a_refusal_walked_here_skips_the_turns_built_on_it() {
+        let streams = Arc::new(ForwardStreams::default());
+        let id = uuid::Uuid::new_v4();
+        let kept = streams
+            .turn(id, RANGE, 0, false, STREAM_TURN_WAIT)
+            .await
+            .unwrap();
+        drop(kept);
+        let refusing = streams
+            .turn(id, RANGE, 1, false, STREAM_TURN_WAIT)
+            .await
+            .expect("a walk that kept every guess skips nothing");
+        let waiting = {
+            let streams = streams.clone();
+            tokio::spawn(async move { streams.turn(id, RANGE, 2, false, STREAM_TURN_WAIT).await })
+        };
+        tokio::task::yield_now().await;
+        refusing.refused_a_guess();
+        drop(refusing);
+        assert_eq!(
+            waiting.await.unwrap().err(),
+            Some(TurnRefused::StoodOnARefusal { refused_at: 1 }),
+            "waiting while the check ran"
+        );
+        assert_eq!(
+            streams
+                .turn(id, RANGE, 3, false, STREAM_TURN_WAIT)
+                .await
+                .err(),
+            Some(TurnRefused::StoodOnARefusal { refused_at: 1 }),
+            "arriving after it"
+        );
+        let restart = streams
+            .turn(id, RANGE, 4, true, STREAM_TURN_WAIT)
+            .await
+            .expect("the restart runs");
+        drop(restart);
+        assert!(
+            streams
+                .turn(id, RANGE, 5, false, STREAM_TURN_WAIT)
                 .await
                 .is_ok(),
             "and what follows it"

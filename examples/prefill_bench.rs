@@ -17,7 +17,9 @@
 //! for the prompt length in tokens (default 896), `SWARM_BENCH_DECODE` for
 //! how many tokens to generate afterwards (default 32) and
 //! `SWARM_BENCH_CONTEXT` for the context the model serves (a node's
-//! `inference.max_seq_len_override`; default the shipped 8192). The prompt's
+//! `inference.max_seq_len_override`; default the shipped 8192),
+//! `SWARM_BENCH_GPU_LAYERS=N` for a card/processor split (the range's first N
+//! layers on the card, as `--gpu-layers N` gives a worker). The prompt's
 //! cache is reserved whole, as a worker reserves an admitted prompt;
 //! `SWARM_BENCH_RESERVE=0` grows it a quantum at a time instead.
 //! `SWARM_BENCH_SPEC_WIDTHS=1,2,4,8` prices a K-row forward against a 1-row
@@ -145,6 +147,16 @@ fn main() -> anyhow::Result<()> {
         swarmllm::inference::split::MAX_SEQ_LEN_OVERRIDE
             .store(cap, std::sync::atomic::Ordering::Relaxed);
         println!("context override: {cap} tokens");
+    }
+    // `SWARM_BENCH_GPU_LAYERS=N` puts the range's first N layers on the card and
+    // the rest on the processor, as a worker spawned with `--gpu-layers N` does —
+    // the card/processor split a node makes for a range its card cannot hold.
+    if let Some(n) = std::env::var("SWARM_BENCH_GPU_LAYERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        swarmllm::inference::split::GPU_LAYER_LIMIT.store(n, std::sync::atomic::Ordering::Relaxed);
+        println!("card layers: {n}, the rest on the processor");
     }
 
     println!("loading {}", model_dir.display());

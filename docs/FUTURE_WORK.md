@@ -2046,7 +2046,11 @@ all: with a slow far node (~250 ms a check) at a 24 ms round trip the stream was
 rounds (+2% prose, −5% code), against +12% / +32% at 270 ms, so the round trip's share of a
 check is the input; (b) cancelling a stale chunk the far node has already
 STARTED — only unstarted ones are skipped, and two forwards of one request at a worker cross
-their replies (gotcha #180), so it needs the worker's cancel path; (c) the drafter's near
+their replies (gotcha #180), so it needs the worker's cancel path. Narrowed 2026-10-26: where the
+far node walks the checks, an unstarted chunk stood on its OWN refused walk is skipped there at
+once, without waiting a round trip for the restart (`forward_streams` `StoodOnARefusal`; the 70B
+computed 10 of 29 decode checks stale). Left: a started chunk, and a wrong look-ahead, which the
+tail is not sent; (c) the drafter's near
 layers as the verify input where the head segment is the coordinator's own; (d) mid-reply
 failover is #167. The TH↔BE two-CARD case was never measured — #151 now makes a same-build
 card split possible. A same-finetune drafter is NOT better here (coder 0.5B lost to the

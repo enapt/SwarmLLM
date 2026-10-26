@@ -3481,6 +3481,28 @@ chunks queued was refused at the per-peer cap of 4, and every chunk after the
 hole waited 60 s — a restart skips only turns that ARRIVE. A coordinator streams
 only to a peer advertising `features::STREAM_AS_ONE_WORK`.
 
+**A refusal walked at the tail skips what stood on it, before the restart
+arrives** (2026-10-26). The tail knows a check refused a guess the moment its
+own walk ends (`layer_forward::walk_refused_a_guess`: a walk of `g` guesses
+answers `g + 1` tokens only when it kept all of them), and the coordinator
+restarts after every refused check (`dsd_stream::take_answer` cuts the
+frontier back; a chunk without a look-ahead had nothing sent after it). So
+`Turn::refused_a_guess` marks the stream, and every later turn that does not
+cut the cache back is answered `StoodOnARefusal` as it comes due — the same
+refusal `Skipped` sends, so no coordinator needs anything new; the restart
+clears the mark when it runs and is never skipped by it. Measured from the
+70B reply 344f21c8 (2026-10-26, far end AU, layers 21-80 on a card + processor):
+a check took ~1.14 s there, the restart reached it ~1.0 s after the refusal
+(0.57 s of it the head preparing the restart), and 10 of the 29 decode forwards
+it computed were stale — each a full check of the far end's time spent on
+nothing, ahead of the restart in its queue. The saving per miss is the far
+end's check less the restart's latency, plus that time freed for other work;
+it grows as the far end slows relative to the round trip. Not covered: a wrong
+LOOK-AHEAD (every draft kept, the far end's own next token different — about a
+quarter of the 70B's restarts) is invisible at the tail, which is not sent the
+look-ahead; a check already running is not stopped (#149 (b)). A/B
+`SWARMLLM_STREAM_TAIL_SKIP=0`; test `a_refusal_walked_here_skips_the_turns_built_on_it`.
+
 → `docs/invariants/network.md` § "A stream of verifies runs in its order"
 
 ## A stream of checks travels a chain, and a chain that fails finishes unchained (2026-10-20, #318)
