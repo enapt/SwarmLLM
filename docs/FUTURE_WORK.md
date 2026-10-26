@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #350**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #352**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -64,7 +64,12 @@ speed is what the swarm is for, so split speed for large models is the top track
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
-6. **#318** — a large model split across machines is too slow to use: 0.35 tok/s on a 4-segment
+6. **#350**, **#351**, then **#318**. A model no single member can hold now answers. On
+   2026-10-25, Llama-3.3-70B ran across four machines (TH, TH, AU, IT) at 0.56-0.59 tok/s warm,
+   after #348 and #349 (ship in v0.3.255). It ran only once two idle models were unloaded by
+   hand: a full card hides the layers this node already holds from the re-plan (#350). It also
+   guesses nothing, because its drafter was refused for memory (#351).
+   **#318** — a large model split across machines is too slow to use: 0.35 tok/s on a 4-segment
    intercontinental chain, 5-13 tok/s on a 7B Thailand↔Belgium with the stream. Projected
    lossless 20-31 tok/s across continents and 50-80 inside a region on cards. The stream
    through a chain of machines, guessing for a user who holds none of the model and trees in
@@ -2178,6 +2183,22 @@ copies the one whose guess reads the fewest bytes, so a 0.5B's Q8_0 copy over it
 guessers on a card (2026-10-23, real link) the two missed alike and the Q8_0 ran +10-14%; the 1.5B
 Q8_0 beat both (#134).
 
+#### #351 — The 70B split runs with no drafter, because the 3B is refused for memory on a relaxed rung
+`P2` · perf-split · **OPEN** — 2026-10-25 · found by the 70B field check (v0.3.254)
+
+The first Llama-3.3-70B replies across four machines decoded at 0.56-0.59 tok/s warm (1695 and
+1789 ms a token; first token 12.7-13.0 s) and 0.35 cold, every token unguessed. Llama-3.2-3B
+(2290 MB) was refused for memory on the live node, because the 70B's processor-held layers had
+taken its RAM. Per token, the price was net 1.49 s + compute 1.39 s (DSD `check_fixed_ms=2897`,
+`farthest_round_trip_ms=411`). #275 leaves drafter room only on the `Everyone` rung, and this
+plan came from a relaxed one, so nothing was reserved. A drafter refused at request time also
+does not lead to a smaller one (#318's drafter acquisition, "Left of it"). Direction: when the
+chosen drafter is refused, try the family's next smaller one (Llama-3.2-1B, ~0.8 GB at Q4); on
+a relaxed rung, trade one of this node's layers for the drafter's room where that pays.
+Estimate, not measured: Leviathan's formula at a ~1.7 s round with a processor 1B (c ≈ 0.02,
+α ≈ 0.7, γ 6) gives about 2.7×, less whatever a 7-row check costs on the processor peers over a
+1-row one. Measure that cost first.
+
 #### #145 — One reply uses one row of a ring pass that could carry dozens
 `P3` · perf-split · **OPEN** — 2026-09-28 · history: archive row #145; plan: `docs/plans/wan_parallel.md`
 
@@ -2539,6 +2560,29 @@ weigh it — the range stays split after the card frees until the worker is reti
 not raised. None of these fails a request. Next, if a field report shows (b) or (c): keep each
 range's placement on the handle beside its charge (`RangeCharge`), and have `short_of_the_card`
 read it.
+
+#### #350 — With this node's card full, a re-plan does not reuse the layers its running worker already holds
+`P2` · memory · routing · **OPEN** — 2026-10-25 · found by the 70B field check (request `c2cde5c3`, v0.3.254 live node)
+
+The live node (8 GB card) had a running Llama-3.3-70B worker holding layers [0,19) (6236 MB) and
+an idle Gemma-2-2B on the card, so the planner's local bound read 0 layers. The first plan was
+local [0,13), AU [13,73), Proxmox [73,80). The up-front asks refused 2: AU fit 44, Proxmox was
+at its ceiling of 6. The re-plan at `PeersAtCeiling` found no route. `LocalUnbounded` then gave
+local [0,28), AU [28,63), Mac [63,80), and this node's loader refused it: "28 layers 0..28 of
+llama-3.3-70b-instruct-q4-k-m need about 14644 MB more than this node has left (its worker is
+already holding 6236 MB)". The "re-planning with fewer layers here" step that followed went
+greedy and answered `SwarmShortOfMemory`. A route did exist: the held [0,19), then AU [19,63),
+then Mac [63,80). After unloading the two idle models (`POST /api/admin/models/{id}/unload`),
+the next ask ran local 0-28 → Proxmox 28-34 → AU 34-73 → Mac 73-80.
+
+Open: (1) why `PeersAtCeiling` found no route with the held [0,19) as a vertex. AU's range
+needs a cut at 19 (`meet_held`). (2) Why Gemma, idle for over an hour, was not reclaimed for
+the running worker's growth. Reclaim (`free_vram_for_admission`) happens at admission, and the
+planner never sees memory that reclaim could free. (3) The "fewer layers here" re-plan should
+bound this node by the range its worker HOLDS, not by the plan it was refused. #291 (a) is the
+same bound seen from the other side. Next: reproduce on the split rig with a worker holding a
+prefix and the card filled by an idle model. Assert on the rung the plan came from, then on the
+reply.
 
 #### #256 — On WSL, `nvidia-smi` waits for a busy card, so a reading taken mid-reply is "unknown"
 `P3` · memory · **OPEN** — 2026-10-12 · history: #244's fix (archive § "Closed after 2026-10-02" → #244)
