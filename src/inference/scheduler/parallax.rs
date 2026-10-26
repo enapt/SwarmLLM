@@ -1158,21 +1158,47 @@ fn route_over(
     // what it had before these points existed. An enhancement that can cost you
     // the thing it enhances is not one, so when they do not fit they are simply
     // dropped and the declared boundaries stand.
+    //
+    // **And at the bound THIS pass holds it to** (FUTURE_WORK #350). The
+    // points above are cut at `max_hostable_layers`, the first pass's figure,
+    // on every pass — so the pass that allows a peer up to its ceiling could
+    // not propose the range that fills it: on 2026-10-25 a re-plan holding an
+    // AU peer to 44 layers was offered it 13-53 (its current 40), not 13-57,
+    // found no route that existed (13 held here, 44, 6 and 17 elsewhere), and
+    // the request failed "short of memory". The same for this node, whose
+    // bound is room for NEW layers: cut by what a range adds, a range reaching
+    // past what its worker holds. Asked with the vertex filter's own cap and
+    // charge (`vertex_cap`, `capacity_charge`), so a point is exactly where a
+    // vertex stops fitting. Kept beside the first-pass points, which still fit
+    // and which a narrower neighbour may need; where the two together are past
+    // the budget, this pass's alone are tried before the declared ones.
+    let vertex_cap = |c: &NodeCandidate| -> Option<f64> {
+        if &c.node_id == local_node_id {
+            // Our own loader's answer, or nothing at all under the last resort.
+            capacity
+                .binds_local()
+                .then_some(c.max_hostable_layers)
+                .flatten()
+                .map(f64::from)
+        } else {
+            // A peer is ALWAYS held to a figure it gave us; which of the two it
+            // is held to is the only thing a relaxation changes.
+            capacity.peer_cap(c)
+        }
+    };
     let declared_cost = subrange_cost(&split_points, &clamped);
     let mut with_capacity = split_points.clone();
+    let mut at_this_pass = split_points.clone();
     for c in candidates {
-        let Some(k) = c.max_hostable_layers else {
-            continue;
-        };
-        if k == 0 {
-            continue;
-        }
+        let figure = c.max_hostable_layers.filter(|&k| k > 0);
+        let cap = vertex_cap(c);
         // The widest prefix and suffix of each range it could take, each
         // weighed as what it loads (`width_in_bound`): a suffix ending the
         // model is shorter by its output head, a prefix starting it by its
         // token table (field report #039) — `k` layers from either end where
         // the header is not here, as before.
-        let fits = |range: (u32, u32)| c.width_in_bound(range) <= k;
+        let fits = |range: (u32, u32)| figure.is_some_and(|k| c.width_in_bound(range) <= k);
+        let fits_here = |range: (u32, u32)| cap.is_some_and(|k| c.capacity_charge(range) <= k);
         for &(a, b) in &c.available_ranges {
             let b = b.min(num_layers);
             if b <= a {
@@ -1180,21 +1206,37 @@ fn route_over(
             }
             // Where everything it holds fits, the scans stop at the range's
             // own ends and no boundary is added.
-            let prefix_end = c.furthest_end_in_bound(a, b, k);
-            if prefix_end > a && prefix_end < b && prefix_end < num_layers {
-                with_capacity.push(prefix_end);
+            let mut points = Vec::with_capacity(4);
+            if let Some(k) = figure {
+                points.push(c.furthest_end_in_bound(a, b, k));
+                points.push((a..b).find(|&s| fits((s, b))).unwrap_or(b));
             }
-            let suffix_start = (a..b).find(|&s| fits((s, b))).unwrap_or(b);
-            if suffix_start > a && suffix_start < b && suffix_start > 0 {
-                with_capacity.push(suffix_start);
+            let first_pass = points.len();
+            if cap.is_some() {
+                points.push((a + 1..=b).rev().find(|&e| fits_here((a, e))).unwrap_or(a));
+                points.push((a..b).find(|&s| fits_here((s, b))).unwrap_or(b));
+            }
+            for (i, p) in points.into_iter().enumerate() {
+                if p > a && p < b && p > 0 && p < num_layers {
+                    with_capacity.push(p);
+                    if i >= first_pass {
+                        at_this_pass.push(p);
+                    }
+                }
             }
         }
     }
-    with_capacity.sort_unstable();
-    with_capacity.dedup();
+    for points in [&mut with_capacity, &mut at_this_pass] {
+        points.sort_unstable();
+        points.dedup();
+    }
     if with_capacity.len() > split_points.len() {
         if capacity_points_fit_budget(&with_capacity, &clamped, MAX_SUBRANGE_VERTICES) {
             split_points = with_capacity;
+        } else if at_this_pass.len() > split_points.len()
+            && capacity_points_fit_budget(&at_this_pass, &clamped, MAX_SUBRANGE_VERTICES)
+        {
+            split_points = at_this_pass;
         } else {
             tracing::debug!(
                 declared_cost,
@@ -1228,18 +1270,7 @@ fn route_over(
         // `None` = we cannot tell what this peer can hold, which must never be
         // read as "nothing" (gotcha #330: every node before v0.3.103 gossiped
         // zero free VRAM).
-        let cap = if is_local {
-            // Our own loader's answer, or nothing at all under the last resort.
-            capacity
-                .binds_local()
-                .then_some(c.max_hostable_layers)
-                .flatten()
-                .map(f64::from)
-        } else {
-            // A peer is ALWAYS held to a figure it gave us; which of the two it
-            // is held to is the only thing a relaxation changes.
-            capacity.peer_cap(c)
-        };
+        let cap = vertex_cap(c);
         // What a range costs against that cap — `NodeCandidate::capacity_charge`,
         // the one definition: for the local node the layers it would ADD (its
         // bound is room for layers not yet loaded, #95); for a peer that
@@ -3409,6 +3440,74 @@ mod tests {
         assert!((1.3..1.6).contains(&w.excess_layers((75, 80), &[])));
         assert!(w.excess_layers((0, 80), &[]).abs() < 0.01);
         assert!(w.excess_layers((20, 40), &[]) < 0.0);
+    }
+
+    /// **A pass that holds a peer to its ceiling can cut its range there**
+    /// (FUTURE_WORK #350, request `c2cde5c3`, 2026-10-25). The re-plan after
+    /// two up-front refusals, with the live node's card full: this node's
+    /// worker held 0-13 (room for nothing new), the AU peer at most 44 layers
+    /// (its refusal), Proxmox 6, the Mac 23 with holes in what it holds. A
+    /// route existed — 0-13 here, AU 13-57, Proxmox 57-63, Mac 63-80 — but
+    /// the capacity points were cut at each peer's CURRENT figure (AU's 40,
+    /// so 53) on every pass, so the one pass allowed AU 44 layers could not
+    /// propose them, found no route, and the request failed "short of memory".
+    #[test]
+    fn a_pass_holding_a_peer_to_its_ceiling_can_cut_its_range_there() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![(0, 28)], 0, 1.0, true, false, 56.0);
+        me.node_id = local.clone();
+        me.has_gpu = true;
+        me.max_hostable_layers = Some(0);
+        me.max_hostable_layers_at_face_value = Some(0);
+        me.held_ranges = vec![held((0, 13), 13)];
+        let mut au = cand(2, vec![(13, 73)], 417, 0.0, false, false, 45.0);
+        au.max_hostable_layers = Some(40);
+        au.max_hostable_layers_at_face_value = Some(40);
+        au.max_hostable_layers_at_ceiling = Some(44);
+        let mut proxmox = cand(3, vec![(28, 80)], 3, 1.0, false, true, 3.9);
+        proxmox.max_hostable_layers = Some(6);
+        proxmox.max_hostable_layers_at_face_value = Some(6);
+        proxmox.max_hostable_layers_at_ceiling = Some(6);
+        let mut mac = cand(
+            4,
+            vec![(0, 24), (27, 59), (61, 62), (63, 80)],
+            323,
+            0.0,
+            true,
+            true,
+            13.1,
+        );
+        mac.max_hostable_layers = Some(10);
+        mac.max_hostable_layers_at_face_value = Some(10);
+        mac.max_hostable_layers_at_ceiling = Some(23);
+        let candidates = [me, au.clone(), proxmox.clone(), mac.clone()];
+        let route = |capacity: CapacityBound| {
+            route_shortest_path(80, &candidates, &local, false, false, capacity, Some(20))
+        };
+
+        // The peers' own figures leave no route: 13 held + 40 + 6 + 10 = 69.
+        assert!(route(CapacityBound::PeersAtFaceValue).is_err());
+        let segs = route(CapacityBound::PeersAtCeiling)
+            .expect("the held 0-13 and the peers' ceilings make a route");
+        let mut covered = 0;
+        for s in &segs {
+            assert_eq!(s.layer_range.0, covered, "contiguous: {segs:?}");
+            covered = s.layer_range.1;
+        }
+        assert_eq!(covered, 80);
+        // This node reuses what it holds and loads nothing new.
+        let mine: Vec<_> = segs.iter().filter(|s| s.node_id == local).collect();
+        assert_eq!(mine.len(), 1, "{segs:?}");
+        assert_eq!(mine[0].layer_range, (0, 13));
+        // And no peer is handed past its ceiling.
+        for (peer, ceiling) in [(&au, 44), (&proxmox, 6), (&mac, 23)] {
+            let given: u32 = segs
+                .iter()
+                .filter(|s| s.node_id == peer.node_id)
+                .map(|s| s.layer_range.1 - s.layer_range.0)
+                .sum();
+            assert!(given <= ceiling, "{given} > {ceiling}: {segs:?}");
+        }
     }
 
     /// How many separate runs of layers `segs` hands `node` — adjacent segments

@@ -41,6 +41,16 @@ a second plan. Each computer's part is now weighed as what loading it takes, tho
 included, both when a reply is planned and when computers share out which parts of a model to
 keep (field report #039, #353).
 
+**A large model split across computers no longer fails when the only plan left reuses the layers
+this computer already has loaded.** When computers in a split say they cannot take their parts,
+the reply is planned again, this time allowing each computer up to the most it could ever hold.
+That plan could still only cut the model where each computer's earlier, smaller figure ended, so
+it could not give a computer the larger part it was now allowed. With a 70-billion-parameter
+model, this computer's graphics card full and 13 of the model's layers already loaded here, a plan
+that reused those 13 and shared the rest between three other computers existed and was not found,
+and the reply failed with "the computers holding it have room for about 67 of its 80 layers". That
+figure was also wrong: it left out the layers already loaded here. Both are fixed (#350).
+
 **A computer already holding part of a large model now says no up front to a part it could not
 load.** Before a reply starts, each computer in a split is asked whether it can take its part.
 One that had already loaded other layers of the model answered only about the conversation's

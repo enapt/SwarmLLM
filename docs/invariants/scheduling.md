@@ -3487,6 +3487,46 @@ decides whether to plan); a refusal's `layers_that_fit`, measured from the
 asked range's start (a middle run), on which the re-plan weighs the head —
 the cautious side.
 
+## Each rung cuts its split points at the bound it applies (2026-10-26, #350)
+
+**What it replaced.** `route_over` adds a capacity split point where each
+candidate's prefix or suffix stops fitting (report #029). It cut them at
+`max_hostable_layers` — the FIRST rung's figure — on every rung, so a rung that
+relaxes a peer to its ceiling held the peer to a bound no split point marked:
+it could accept the range that filled the ceiling and never propose it.
+Request `c2cde5c3` (2026-10-25, live node, Llama 3.3 70B), the re-plan after
+two up-front refusals: this node's worker held 0-13 with the card full (room
+for 0 new layers); AU held 13-73, at most 44 layers (its refusal), current
+figure 40; Proxmox 28-80, 6; the Mac 0-24, 27-59, 61-62, 63-80, ceiling 23.
+A route existed at `PeersAtCeiling` — 0-13 here, AU 13-57, Proxmox 57-63,
+Mac 63-80 — but AU's point was 53 (13 + 40), the 13-57 vertex did not exist,
+both that rung and `LocalUnbounded`'s retry after this node's loader refused
+0-28 found "no reachable source→sink path", greedy found none either, and the
+request failed. (FUTURE_WORK's entry said the worker held 0-19; the
+candidate log reads `held_ranges=[(0, 13)]`.)
+
+**The rule.** `route_over` asks the vertex filter's own cap (`vertex_cap`:
+this node's loader answer under `binds_local`, a peer's `CapacityBound::peer_cap`)
+against its own charge (`capacity_charge`) and adds the furthest prefix and
+suffix that fit as points, BESIDE the first rung's (still valid, and a narrower
+neighbour may need them). For this node that also cuts by what a range ADDS
+beside what its worker holds, so a range can reach past the held layers by
+exactly its room. Where the two sets together are past `MAX_SUBRANGE_VERTICES`,
+this rung's alone are tried before the declared boundaries. Test:
+`a_pass_holding_a_peer_to_its_ceiling_can_cut_its_range_there`, the request's
+four candidates, red before the change with the live log's error.
+
+**The figure it was reported with.** The refusal read "room for about 67 of
+its 80 layers" — `SwarmShortOfMemory`, "retrying cannot help" — because
+`layers_offered_at` counted this node at its figure, which is room to ADD
+(`layers_it_would_add`), not a total; 67 is exactly layers 13-80. It now adds
+the layers this node's worker holds (`this_nodes_offer_counts_the_layers_its_worker_holds`).
+
+**Still open (#350 (2)).** The local bound already counts card memory an idle
+model holds (`local_layers_leaving` adds `idle_vram_reclaimable_mb`), and it
+still read 0 beside an idle Gemma-2-2B; why is unexplained — reproduce on the
+split rig before changing it.
+
 ## `inference::scheduler::delegation_target`
 
 (2026-08-18) — the single decision

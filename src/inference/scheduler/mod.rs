@@ -1368,20 +1368,38 @@ fn plan_exceeds_offered_memory(
 /// What the caller is told when a plan past these offers is refused ("room for
 /// about 17 of its 48 layers"), so it reads the same figure the plan was
 /// checked against.
-fn layers_offered(candidates: &[NodeCandidate]) -> Option<u32> {
-    layers_offered_at(candidates, |c| c.max_hostable_layers_at_face_value)
+fn layers_offered(candidates: &[NodeCandidate], local_node_id: &NodeId) -> Option<u32> {
+    layers_offered_at(candidates, local_node_id, |c| {
+        c.max_hostable_layers_at_face_value
+    })
 }
 
 /// [`layers_offered`] at any figure — what a plan that cannot be made at the
 /// holders' CEILINGS reports (`short_of_memory`), with the same arithmetic.
+///
+/// This node's figure is room to ADD beside what its worker already holds
+/// (`NodeCandidate::layers_it_would_add`), not a total, so what it carries is
+/// that room AND the layers it holds — the reading `plan_exceeds_offered_memory`
+/// leaves it out for. Counted as its room alone, a re-plan's refusal told the
+/// caller the 70B's holders had "room for about 67 of its 80 layers" while
+/// this node held the other 13 (FUTURE_WORK #350, 2026-10-25).
 fn layers_offered_at(
     candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
     figure: impl Fn(&NodeCandidate) -> Option<u32>,
 ) -> Option<u32> {
     let mut held: HashMap<&NodeId, Vec<(u32, u32)>> = HashMap::new();
     let mut offered: HashMap<&NodeId, u32> = HashMap::new();
     for c in candidates {
-        let o = figure(c)?;
+        let mut o = figure(c)?;
+        if &c.node_id == local_node_id {
+            let holds: u32 = c
+                .held_ranges
+                .iter()
+                .map(|h| h.range.1.saturating_sub(h.range.0))
+                .sum();
+            o = o.saturating_add(holds);
+        }
         held.entry(&c.node_id)
             .or_default()
             .extend(c.available_ranges.iter().copied());
@@ -1552,14 +1570,20 @@ impl FlowNetwork {
 /// The answer when no plan fits what the holders could EVER hold: not enough
 /// memory among them, and retrying cannot help (#218's variant, raised before
 /// any peer is asked rather than after one refuses).
-fn short_of_memory(candidates: &[NodeCandidate], num_layers: u32) -> SwarmError {
+fn short_of_memory(
+    candidates: &[NodeCandidate],
+    num_layers: u32,
+    local_node_id: &NodeId,
+) -> SwarmError {
     SwarmError::SwarmShortOfMemory {
         model_id: candidates
             .first()
             .map(|c| c.shard_id.model_id.0.clone())
             .unwrap_or_else(|| "this model".to_string()),
         room: crate::error::describe_offered_room(
-            layers_offered_at(candidates, |c| c.max_hostable_layers_at_ceiling),
+            layers_offered_at(candidates, local_node_id, |c| {
+                c.max_hostable_layers_at_ceiling
+            }),
             num_layers,
         ),
     }
@@ -4143,7 +4167,7 @@ impl PipelineScheduler {
             self.shared_state.note_planned_past_offered_memory(
                 request_id,
                 crate::daemon::state::OfferedMemory {
-                    layers: layers_offered(&candidates),
+                    layers: layers_offered(&candidates, local_node_id),
                     num_layers,
                 },
             );
@@ -6041,7 +6065,7 @@ impl PipelineScheduler {
             if !with_room.is_empty() {
                 options = with_room;
             } else if !respect_capacity && !options.is_empty() {
-                return Err(short_of_memory(candidates, num_layers));
+                return Err(short_of_memory(candidates, num_layers, local_node_id));
             }
 
             // If this range could reach the end, prefer nodes that can be last.
@@ -6227,7 +6251,11 @@ impl PipelineScheduler {
                                 // backstop after that. At the ceilings there is
                                 // nothing further to relax.
                                 if !respect_capacity {
-                                    return Err(short_of_memory(candidates, num_layers));
+                                    return Err(short_of_memory(
+                                        candidates,
+                                        num_layers,
+                                        local_node_id,
+                                    ));
                                 }
                                 return Err(SwarmError::PipelineError(format!(
                                     "greedy: no node can take layer {current_layer} \

@@ -67,8 +67,10 @@ speed is what the swarm is for, so split speed for large models is the top track
 6. **#350**, then **#318**. A model no single member can hold now answers. On
    2026-10-25, Llama-3.3-70B ran across four machines (TH, TH, AU, IT) at 0.56-0.59 tok/s warm,
    after #348 and #349 (ship in v0.3.255). It ran only once two idle models were unloaded by
-   hand: a full card hides the layers this node already holds from the re-plan (#350). With its
-   drafter loaded (#351, closed 2026-10-26) the same asks ran 1.90-1.96 tok/s.
+   hand: the re-plan could not cut a peer's range at its ceiling, so it missed the route through
+   the layers this node held (#350 (1), closed 2026-10-26); left open is why this node's bound
+   read 0 beside an idle model. With its drafter loaded (#351, closed 2026-10-26) the same asks
+   ran 1.90-1.96 tok/s.
    **#318** — a large model split across machines is too slow to use: 0.35 tok/s on a 4-segment
    intercontinental chain, 5-13 tok/s on a 7B Thailand↔Belgium with the stream. Projected
    lossless 20-31 tok/s across continents and 50-80 inside a region on cards. The stream
@@ -2545,28 +2547,21 @@ not raised. None of these fails a request. Next, if a field report shows (b) or 
 range's placement on the handle beside its charge (`RangeCharge`), and have `short_of_the_card`
 read it.
 
-#### #350 — With this node's card full, a re-plan does not reuse the layers its running worker already holds
-`P2` · memory · routing · **OPEN** — 2026-10-25 · found by the 70B field check (request `c2cde5c3`, v0.3.254 live node)
+#### #350 — With this node's card full, its bound reads 0 beside an idle model
+`P2` · memory · routing · **PARTIAL** — 2026-10-25 · found by the 70B field check (request `c2cde5c3`, v0.3.254 live node) · history: § "Closed 2026-10-26" → #350 (1)
 
-The live node (8 GB card) had a running Llama-3.3-70B worker holding layers [0,19) (6236 MB) and
-an idle Gemma-2-2B on the card, so the planner's local bound read 0 layers. The first plan was
-local [0,13), AU [13,73), Proxmox [73,80). The up-front asks refused 2: AU fit 44, Proxmox was
-at its ceiling of 6. The re-plan at `PeersAtCeiling` found no route. `LocalUnbounded` then gave
-local [0,28), AU [28,63), Mac [63,80), and this node's loader refused it: "28 layers 0..28 of
-llama-3.3-70b-instruct-q4-k-m need about 14644 MB more than this node has left (its worker is
-already holding 6236 MB)". The "re-planning with fewer layers here" step that followed went
-greedy and answered `SwarmShortOfMemory`. A route did exist: the held [0,19), then AU [19,63),
-then Mac [63,80). After unloading the two idle models (`POST /api/admin/models/{id}/unload`),
-the next ask ran local 0-28 → Proxmox 28-34 → AU 34-73 → Mac 73-80.
-
-Open: (1) why `PeersAtCeiling` found no route with the held [0,19) as a vertex. AU's range
-needs a cut at 19 (`meet_held`). (2) Why Gemma, idle for over an hour, was not reclaimed for
-the running worker's growth. Reclaim (`free_vram_for_admission`) happens at admission, and the
-planner never sees memory that reclaim could free. (3) The "fewer layers here" re-plan should
-bound this node by the range its worker HOLDS, not by the plan it was refused. #291 (a) is the
-same bound seen from the other side. Next: reproduce on the split rig with a worker holding a
-prefix and the card filled by an idle model. Assert on the rung the plan came from, then on the
-reply.
+Its route half closed on 2026-10-26: each rung now cuts its split points at the bound it
+applies, so the re-plan finds the route through this node's held 0-13 (the entry said 0-19; the
+candidate log reads `held_ranges=[(0, 13)]`), and the refusal no longer leaves this node's held
+layers out of "room for about N" (`docs/invariants/scheduling.md` § "Each rung cuts its split
+points at the bound it applies"). The "fewer layers here" re-plan (the entry's (3)) sees the same
+candidates and so the same route. Open: this node's bound read 0 layers with an idle
+Gemma-2-2B on the 8 GB card, although `local_layers_leaving` already counts card memory an idle
+model holds (`idle_vram_reclaimable_mb`). Whether Gemma was not reclaim-eligible, or the 70B was
+weighed in system memory (`planning_on_card` false for a model that neither fits the card whole
+nor is split by the loader), is unknown. Next: reproduce on the split rig with a worker holding a
+prefix and the card filled by an idle model; log `planning_on_card` and the reclaimable figure
+beside the bound.
 
 #### #256 — On WSL, `nvidia-smi` waits for a busy card, so a reading taken mid-reply is "unknown"
 `P3` · memory · **OPEN** — 2026-10-12 · history: #244's fix (archive § "Closed after 2026-10-02" → #244)
@@ -3368,7 +3363,20 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-26, ships in v0.3.255** (#351, #353)
+**Closed 2026-10-26, ships in v0.3.255** (#350 (1), #351, #353)
+- #350 (1) — **A re-plan finds the route through the layers this node already holds.** The 70B's
+  re-plan after two up-front refusals (request `c2cde5c3`) had a route at `PeersAtCeiling` — this
+  node's held 0-13, AU 13-57 (its ceiling for the prompt, 44), Proxmox 57-63, the Mac 63-80 — and
+  failed "short of memory", because `route_over` cut its capacity split points at
+  `max_hostable_layers`, the first rung's figure, on every rung: AU's point was 53, and the 13-57
+  vertex never existed. Now each rung cuts them at the bound it applies (`vertex_cap` against
+  `capacity_charge`, beside the first rung's points), which for this node also cuts by what a
+  range adds beside what its worker holds. And `layers_offered_at` counts this node's held layers
+  beside its room (the figure is room to ADD): the refusal read "room for about 67 of its 80
+  layers", exactly the layers it did not hold. Tests
+  `a_pass_holding_a_peer_to_its_ceiling_can_cut_its_range_there` (the request's four candidates,
+  red before the change with the live log's error),
+  `this_nodes_offer_counts_the_layers_its_worker_holds`. Residual: #350 above.
 - #353 — **A peer's range is weighed as what it loads: the output head goes with the model's
   end, the token table with its start** (field report #039). Every bound a coordinator holds a
   peer to counts layers at the file's AVERAGE (`weight_bytes_per_layer`, the ceiling's

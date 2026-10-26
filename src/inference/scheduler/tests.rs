@@ -1049,15 +1049,47 @@ fn segment(byte: u8, range: (u32, u32)) -> PipelineSegment {
 /// computer once, at the smaller of what it holds and what it offered.
 #[test]
 fn the_room_the_holders_offer_is_counted_once_each_and_capped_by_what_they_hold() {
-    assert_eq!(super::layers_offered(&qwen3_30b_holders()), Some(17));
+    let elsewhere = NodeId([0xEE; 32]);
+    assert_eq!(
+        super::layers_offered(&qwen3_30b_holders(), &elsewhere),
+        Some(17)
+    );
     // Overlapping ranges are layers held once, not twice.
     let mut twice = simple_candidate(9, vec![(0, 10), (5, 15)]);
     twice.max_hostable_layers_at_face_value = Some(40);
-    assert_eq!(super::layers_offered(&[twice.clone(), twice]), Some(15));
+    assert_eq!(
+        super::layers_offered(&[twice.clone(), twice], &elsewhere),
+        Some(15)
+    );
     // A holder that did not say leaves no total to state.
     let mut holders = qwen3_30b_holders();
     holders[2].max_hostable_layers_at_face_value = None;
-    assert_eq!(super::layers_offered(&holders), None);
+    assert_eq!(super::layers_offered(&holders, &elsewhere), None);
+}
+
+/// **This node's room is beside what its worker holds** (FUTURE_WORK #350):
+/// a full card offers no NEW layers, and still carries the 13 its worker has
+/// loaded. Counted as its room alone, the 70B's re-plan refusal read "room for
+/// about 67 of its 80 layers" — and so "retrying cannot help" — while the
+/// layers were all there. A peer's figure is already a total: unchanged.
+#[test]
+fn this_nodes_offer_counts_the_layers_its_worker_holds() {
+    let mut me = simple_candidate(1, vec![(0, 28)]);
+    me.max_hostable_layers_at_face_value = Some(0);
+    me.held_ranges = vec![crate::inference::process_pool::HeldRange {
+        range: (0, 13),
+        releasable_layers: 13,
+    }];
+    let mut rest = simple_candidate(2, vec![(13, 80)]);
+    rest.max_hostable_layers_at_face_value = Some(67);
+    let local = me.node_id.clone();
+    let holders = [me, rest];
+    assert_eq!(super::layers_offered(&holders, &local), Some(80));
+    // Null control: the same node seen as a peer offers its figure, a total.
+    assert_eq!(
+        super::layers_offered(&holders, &NodeId([0xEE; 32])),
+        Some(67)
+    );
 }
 
 /// A layer held by several computers is carried once (#346): what they carry
