@@ -6548,6 +6548,27 @@ impl ModelProcessPool {
         }
     }
 
+    /// Will the forward that names `run` replace `h` — the ladder of
+    /// [`Self::forward_would_load`] ending at its last rung: not held, not
+    /// grown beside what it holds, and nothing using it, so `grow_worker`
+    /// retires it where the run loads in its place. The card's split rung is
+    /// not weighed: where it would have taken the run, the up-front admission
+    /// this answers ([`Self::admit_prompt`]) is skipped, and each forward
+    /// admits itself as it did before #263. Synchronous header reads: call it
+    /// off the runtime's workers.
+    fn forward_replaces_the_worker(
+        &self,
+        model_id: &ModelId,
+        run: (u32, u32),
+        h: &WorkerHandle,
+        requester: Requester,
+    ) -> bool {
+        !h.segment_is_charged(run)
+            && !h.in_use(self.conversation_window())
+            && !self.growth_would_be_admitted(model_id, run, h, requester)
+            && self.a_fresh_spawn_fits_in_place_of_the_worker(model_id, run, requester)
+    }
+
     /// May `grow_worker` retire `handle`? Called under `spawn_lock`.
     ///
     /// Only the worker THIS call was given — never whichever the map holds by
@@ -6934,19 +6955,39 @@ impl ModelProcessPool {
         {
             return None;
         }
+        // An idle worker of this model gives its own memory to the run, on the
+        // card and in the machine: `grow_worker` replaces it for a range it
+        // cannot grow into — once `a_fresh_spawn_fits_in_place_of_the_worker`,
+        // which weighs exactly this, says the range loads in its place — or
+        // grows it in place with the ranges the run swallows given back
+        // (`charge_segment_as_split`'s `subsumed`). Counted as taken, a worker
+        // that filled the card — every card/processor split does — left a
+        // fresh run no card at all: the 70B's idle [0..13) worker here was
+        // never offered a wider run and the request failed, where the same
+        // node, that worker unloaded by hand, then took 28 layers (2026-10-25,
+        // #350). Ollama re-places a runner the same way: one that must be
+        // reloaded is unloaded before free GPU memory is read for its new
+        // placement (`server/sched.go`: `needsReload`, then `updateFreeSpace`).
+        let (own_card_mb, own_machine_mb) = if self.live_worker(model_id).is_some() {
+            (
+                self.vram_reserved_mb.get(model_id).map_or(0, |mb| *mb),
+                self.ram_reserved_mb.get(model_id).map_or(0, |mb| *mb),
+            )
+        } else {
+            (0, 0)
+        };
         let estimated = self.estimated_gpu_mb(model_id)?;
-        let budget = self.card_budget_for_planning(model_id);
+        let budget = self
+            .card_budget_for_planning(model_id)
+            .saturating_add(own_card_mb);
         let split = self.partial_gpu_layers(model_id, None, estimated, budget)?;
         let (on_card, total) = split.card_share();
         let total = u32::try_from(total).unwrap_or(u32::MAX);
-        // A live card worker of this model is not counted as released: it may
-        // be grown in place across the processor (`charge_segment_as_split`)
-        // rather than retired, its charge kept.
         let fits = |run: (u32, u32), split: CardSplit| {
             let host_mb = self
                 .machine_charge(model_id, run, false, Some(split), KvCharge::Typical)
                 .mb();
-            self.machine_would_take(model_id, host_mb, requester, 0)
+            self.machine_would_take(model_id, host_mb, requester, own_machine_mb)
         };
         if fits((0, total), split) {
             return Some(total);
@@ -6971,7 +7012,9 @@ impl ModelProcessPool {
         // A middle run carries neither.
         let run_at_is_taken = |run: (u32, u32)| {
             self.machine_mb_beside_card(model_id, run, budget)
-                .is_some_and(|host_mb| self.machine_would_take(model_id, host_mb, requester, 0))
+                .is_some_and(|host_mb| {
+                    self.machine_would_take(model_id, host_mb, requester, own_machine_mb)
+                })
         };
         let run_is_taken = |layers: u32| {
             [(0, layers), (total.saturating_sub(layers), total)]
@@ -7284,9 +7327,26 @@ impl ModelProcessPool {
     /// `LocalMemoryUnavailable`, which the router re-plans, with how many of
     /// the ranges' layers fit at this length recorded for that re-plan
     /// ([`Self::take_layers_fitting`]).
+    ///
+    /// **And `Ok`, unasked, when the forward will replace the worker**
+    /// ([`Self::forward_replaces_the_worker`]): its caches are not the ones the
+    /// prompt will use, and an admission marks it in use for this request
+    /// (`note_conversation`), so the forward's own retirement then refused to
+    /// replace it (`retirement_decision`: `Keep`). Request `c2cde5c3`
+    /// (2026-10-25, #350): a 70B worker idle here for 14 minutes was pinned by
+    /// the request's first attempt, which admitted the [0..13) it held, and
+    /// the re-plan's [0..28) was refused "its worker is already holding 6236
+    /// MB" — the 28 layers the same node loaded at once when the worker was
+    /// unloaded by hand. Now that the planner offers that wider run while the
+    /// worker is idle (`fresh_run_layers_for_planning`), the first plan names
+    /// it, and its admission must not pin the worker it replaces. Ollama's
+    /// scheduler has the same order: a request takes its reference on a
+    /// runner only once handed it loaded, so one waiting on a reload never
+    /// holds the runner being reloaded (`server/sched.go`, `useLoadedRunner`).
     pub async fn admit_prompt(
         &self,
         admit: IpcAdmitPrompt,
+        requester: Requester,
         cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<(), SwarmError> {
         // This node will run the prompt: the admission records. A peer's
@@ -7297,6 +7357,24 @@ impl ModelProcessPool {
         };
         let request_id = admit.request_id;
         let model_id = admit.model_id.clone();
+        let replaced = crate::inference::executor::without_starving_the_runtime(|| {
+            self.live_worker(&model_id).is_some_and(|h| {
+                admit
+                    .layer_ranges
+                    .iter()
+                    .any(|&run| self.forward_replaces_the_worker(&model_id, run, &h, requester))
+            })
+        });
+        if replaced {
+            tracing::info!(
+                %request_id,
+                model = %model_id,
+                ranges = ?admit.layer_ranges,
+                "DIAG: KV admission up front — this node's worker will be replaced to load \
+                 the plan's layers; each local segment admits itself on the new one"
+            );
+            return Ok(());
+        }
         match self.send_admission(admit, cancel).await? {
             Admission::NoWorker => Ok(()),
             Admission::Busy => {
@@ -11155,7 +11233,7 @@ mod tests {
             only_weigh: false,
         };
         let started = std::time::Instant::now();
-        let answer = p.admit_prompt(admit, None).await;
+        let answer = p.admit_prompt(admit, Requester::Swarm, None).await;
         let took = started.elapsed();
         assert!(answer.is_ok(), "{answer:?}");
         assert!(
@@ -11197,7 +11275,7 @@ mod tests {
             prompt_tokens: 6002,
             only_weigh: false,
         };
-        assert!(p.admit_prompt(admit, None).await.is_ok());
+        assert!(p.admit_prompt(admit, Requester::Swarm, None).await.is_ok());
         assert_ne!(
             h.last_used.load(Ordering::Relaxed),
             LONG_AGO,
@@ -11439,6 +11517,177 @@ mod tests {
         // Its spawn's own range, recorded at zero exactly as `get_or_spawn` does.
         h.record_charged_segment((0, 1), 0);
         (idle, wanted, h)
+    }
+
+    /// A Llama 3.3 70B-shaped model: 80 layers, ~40 GB of weights — too big
+    /// for any card here or for this machine whole.
+    pub(super) fn seventy_b_inputs() -> crate::model::auto_manage::vram::VramFootprintInputs {
+        use crate::inference::model_arch::ModelArch;
+        use crate::inference::split::hybrid::arch_supports_hybrid;
+        crate::model::auto_manage::vram::VramFootprintInputs {
+            quantized_weight_bytes: 40_000 * 1024 * 1024,
+            host_resident_bytes: 0,
+            head_bytes: 0,
+            unquantized_bytes_per_element: None,
+            vocab_size: 128_256,
+            embedding_length: 8192,
+            segment_layers: 80,
+            kv: crate::inference::split::kv_budget::KvPrice::uniform(
+                80,
+                8,
+                64,
+                128,
+                crate::inference::layers::KvAttention::Standard,
+            ),
+            rope_dim: 128,
+            effective_context: 8192,
+            is_first: true,
+            embedding_gatherable: true,
+            splits_across_devices: arch_supports_hybrid(&ModelArch::Llama),
+        }
+    }
+
+    /// The field's state at request `c2cde5c3` (2026-10-25, v0.3.254, #350):
+    /// Llama 3.3 70B's worker holding [0..13) on this node, its first 10
+    /// layers filling the card, the other 3 on the processor, nothing using
+    /// it. Hands back the pool, the model and the worker, plus the fresh run
+    /// on offer before the worker was inserted.
+    async fn seventy_b_worker_filling_the_card(
+        dir: &str,
+    ) -> (ModelProcessPool, ModelId, Arc<WorkerHandle>, Option<u32>) {
+        let p = ModelProcessPool::new(std::path::PathBuf::from(dir));
+        p.test_card_in_play.store(true, Ordering::Relaxed);
+        p.set_gpu_layers(-1);
+        p.set_vram_budget_mb(6_000);
+        p.set_ram_budget_mb(9_000);
+        let m = ModelId("seventy-b".into());
+        p.test_footprint_inputs
+            .insert(m.clone(), seventy_b_inputs());
+        let before = p.fresh_run_layers_for_planning(&m, Requester::Swarm);
+
+        let card_mb = 6_000 - 19;
+        let host_mb = 1_500;
+        assert!(
+            p.admit_to_gpu(&m, card_mb),
+            "fixture: its card share is admitted"
+        );
+        assert!(
+            p.admit_to_cpu(&m, host_mb, Requester::Swarm),
+            "fixture: its processor share is admitted"
+        );
+        let h = fake_worker_handle_split(
+            false,
+            None,
+            false,
+            std::time::Instant::now(),
+            Some(CardSplit::Layers {
+                on_card: 10,
+                total: 13,
+            }),
+        )
+        .await;
+        h.charged_mb.store(card_mb, Ordering::Release);
+        h.record_charged_segment((0, 13), card_mb);
+        p.workers.insert(m.clone(), h.clone());
+        (p, m, h, before)
+    }
+
+    /// **An idle worker's own memory is the fresh run's** (#350). In the field
+    /// state above, this node's card bound read 0 — rightly: the card was full
+    /// of the 70B's own layers, and a running worker grows on the card alone
+    /// (gotcha #806). The run a fresh worker would take in its place — what
+    /// `grow_worker` makes of a range the worker cannot grow into — read
+    /// `None`, because the split it would make was weighed with that worker's
+    /// own card memory counted as taken: no card, no split, no run. Once the
+    /// worker was unloaded by hand the same node loaded 28 layers. The run
+    /// offered is the one with no worker, which the retirement's own gate
+    /// admits; a worker in use still offers none (#93).
+    #[tokio::test]
+    async fn an_idle_workers_own_memory_is_the_fresh_runs() {
+        let (p, m, h, before) =
+            seventy_b_worker_filling_the_card("/tmp/swarmllm-350-fresh-run").await;
+        let before = before.expect("fixture: with no worker, a fresh run is on offer");
+        assert_eq!(
+            p.max_hostable_layers_for_planning(&m, Requester::Swarm),
+            Some(0),
+            "the card is full of the model's own layers: the running worker adds none"
+        );
+
+        let run = p
+            .fresh_run_layers_for_planning(&m, Requester::Swarm)
+            .expect("an idle worker's memory is the run's: a fresh run is still on offer");
+        assert_eq!(run, before, "the run its own memory makes room for");
+        assert!(run > 13, "wider than the worker holds: {run}");
+        assert!(
+            p.a_fresh_spawn_fits_in_place_of_the_worker(&m, (0, run), Requester::Swarm),
+            "and the gate the retirement asks admits it"
+        );
+
+        // In use, it cannot be replaced (#93): no fresh run.
+        h.note_conversation(uuid::Uuid::new_v4());
+        assert_eq!(p.fresh_run_layers_for_planning(&m, Requester::Swarm), None);
+    }
+
+    /// **The up-front admission leaves alone a worker its forward will
+    /// replace** (#350). In request `c2cde5c3` the first attempt's admission
+    /// marked the idle 70B worker in use for the request (`note_conversation`),
+    /// and the re-plan's [0..28) was then refused by the forward's own
+    /// retirement — `Keep`, "its worker is already holding 6236 MB". A run
+    /// the worker cannot grow into, nothing else using it, that loads in its
+    /// place, is not admitted up front: returned at once, nothing sent, the
+    /// worker not marked used. The fake worker never answers, so an admission
+    /// that IS sent waits out `UP_FRONT_ADMISSION_WAIT` — the controls: the
+    /// range it holds, and the wide run once something else uses it.
+    #[tokio::test]
+    async fn an_up_front_admission_leaves_alone_a_worker_its_forward_will_replace() {
+        let (p, m, h, _) = seventy_b_worker_filling_the_card("/tmp/swarmllm-350-up-front").await;
+        let run = p
+            .fresh_run_layers_for_planning(&m, Requester::Swarm)
+            .expect("fixture: a fresh run is on offer");
+        const LONG_AGO: u64 = 7;
+        let admit = |layer_ranges: Vec<(u32, u32)>| IpcAdmitPrompt {
+            request_id: Uuid::new_v4(),
+            model_id: m.clone(),
+            layer_ranges,
+            prompt_tokens: 52,
+            only_weigh: false,
+        };
+
+        h.last_used.store(LONG_AGO, Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        let answer = p
+            .admit_prompt(admit(vec![(0, run)]), Requester::Swarm, None)
+            .await;
+        assert!(answer.is_ok(), "{answer:?}");
+        assert!(
+            started.elapsed() < UP_FRONT_ADMISSION_WAIT,
+            "nothing was sent to the worker it will replace"
+        );
+        assert_eq!(h.last_used.load(Ordering::Relaxed), LONG_AGO);
+        assert!(
+            !h.in_use(p.conversation_window()),
+            "it is free to be replaced"
+        );
+
+        // Control: the range it holds is admitted on it, as before.
+        assert!(p
+            .admit_prompt(admit(vec![(0, 13)]), Requester::Swarm, None)
+            .await
+            .is_ok());
+        assert_ne!(
+            h.last_used.load(Ordering::Relaxed),
+            LONG_AGO,
+            "the held range's admission went to the worker"
+        );
+
+        // Control: in use by another request, the forward will not replace it.
+        h.last_used.store(LONG_AGO, Ordering::Relaxed);
+        h.note_conversation(Uuid::new_v4());
+        assert!(p
+            .admit_prompt(admit(vec![(0, run)]), Requester::Swarm, None)
+            .await
+            .is_ok());
+        assert_ne!(h.last_used.load(Ordering::Relaxed), LONG_AGO);
     }
 
     /// **Admission weighs the card as it stands NOW, not as it stood at
@@ -16053,29 +16302,7 @@ mod admission_tests {
     /// the whole model, as before.
     #[test]
     fn a_model_too_big_for_the_card_and_the_machine_is_offered_as_a_segment() {
-        use crate::inference::model_arch::ModelArch;
-        use crate::inference::split::hybrid::arch_supports_hybrid;
-        let seventy_b = crate::model::auto_manage::vram::VramFootprintInputs {
-            quantized_weight_bytes: 40_000 * 1024 * 1024,
-            host_resident_bytes: 0,
-            head_bytes: 0,
-            unquantized_bytes_per_element: None,
-            vocab_size: 128_256,
-            embedding_length: 8192,
-            segment_layers: 80,
-            kv: crate::inference::split::kv_budget::KvPrice::uniform(
-                80,
-                8,
-                64,
-                128,
-                crate::inference::layers::KvAttention::Standard,
-            ),
-            rope_dim: 128,
-            effective_context: 8192,
-            is_first: true,
-            embedding_gatherable: true,
-            splits_across_devices: arch_supports_hybrid(&ModelArch::Llama),
-        };
+        let seventy_b = super::tests::seventy_b_inputs();
         let p = pool();
         p.test_card_in_play
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -16572,7 +16799,7 @@ mod admission_tests {
             prompt_tokens: 6002,
             only_weigh: false,
         };
-        assert!(p.admit_prompt(admit, None).await.is_ok());
+        assert!(p.admit_prompt(admit, Requester::Swarm, None).await.is_ok());
         assert_eq!(p.take_layers_fitting(rid), None, "nothing refused");
 
         p.note_layers_fitting(rid, 15);

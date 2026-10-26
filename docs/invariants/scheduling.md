@@ -3600,10 +3600,69 @@ its 80 layers" — `SwarmShortOfMemory`, "retrying cannot help" — because
 (`layers_it_would_add`), not a total; 67 is exactly layers 13-80. It now adds
 the layers this node's worker holds (`this_nodes_offer_counts_the_layers_its_worker_holds`).
 
-**Still open (#350 (2)).** The local bound already counts card memory an idle
-model holds (`local_layers_leaving` adds `idle_vram_reclaimable_mb`), and it
-still read 0 beside an idle Gemma-2-2B; why is unexplained — reproduce on the
-split rig before changing it.
+## An idle worker's own memory is the fresh run's, and its own request does not pin it (2026-10-26, #350)
+
+**What it replaced.** In request `c2cde5c3` (§ "Each rung cuts its split points
+at the bound it applies") this node offered 0 layers beyond the [0..13) its 70B
+worker held. The entry blamed an idle Gemma-2-2B on the card that the bound did
+not count; **that was wrong**: node.log shows Gemma reclaimed for the 70B at
+15:56:19 ("Freeing graphics memory from an idle model … reclaimed_mb=2367"). At
+16:29 the card held only the 70B's worker — 10 of its 13 layers, filling the
+6,009 MB budget — so the card bound, what a RUNNING worker can add (gotcha #806),
+was rightly 0. Two other things failed, and a third check came back clean:
+
+1. **The fresh run counted the worker's own memory as taken.** The run a fresh
+   worker would take in its place — what `grow_worker` makes of a range the
+   worker cannot grow into, once `a_fresh_spawn_fits_in_place_of_the_worker`
+   says it loads there — was weighed against the card less every charge, the
+   worker's own included. A card/processor split always fills the card, so an
+   idle split worker never had a run on offer: `fresh_run_layers=None` on the
+   request's FIRST plan (16:29:41), with the worker idle since ~16:15. The run
+   now gets the worker's own `vram_reserved_mb` and `ram_reserved_mb` back, as
+   the retirement gate does. Ollama re-places a runner the same way: one that
+   needs a reload is unloaded before free GPU memory is read for its new
+   placement (`server/sched.go`: `needsReload`, then `updateFreeSpace`).
+2. **The request's own up-front admission pinned the worker.** Attempt 1 planned
+   the held [0..13) here; `admit_prompt` admitted it and marked the worker in
+   use for the request (`note_conversation`). The re-plan put [0..28) here
+   (`LocalUnbounded`), the growth was refused, and the retirement answered
+   `Keep` — the worker was "in use", by this same request: "28 layers 0..28 …
+   need about 14644 MB more than this node has left (its worker is already
+   holding 6236 MB)". The admission's verdict was about caches the forward was
+   going to throw away. `admit_prompt` now skips a worker its forward will
+   replace (`forward_replaces_the_worker`: not held, not grown beside what it
+   holds, nothing using it, and loading in its place), as it skips a model with
+   no worker. A worker in use by an earlier attempt of the same request is still
+   kept: the planner then offers no fresh run (it asks `in_use` too), so no plan
+   needs the retirement. Ollama never lets a request pin a runner it needs
+   reloaded: a request takes its reference (`refCount++`) only when it is handed
+   a LOADED runner — `useLoadedRunner`, or `load`'s goroutine after
+   `WaitUntilRunning` — and the `needsReload` branch skips both, so the runner's
+   count holds only OTHER requests when it is expired (`server/sched.go`,
+   `processPending`, read 2026-10-26).
+3. **`planning_on_card` was not a cause** (checked, 2026-10-26): it was
+   suspected of weighing the 70B in system memory, but `would_fit_on_gpu`
+   answers "fits" for a model whose worker holds card memory, so it read "the
+   card". A test written on that theory passed with its fix switched off and
+   was dropped.
+
+The field confirms the size: the user unloaded the 70B at 16:31 and the next
+spawn took 28 layers, 10 on the card, reclaiming an idle drafter's 2,290 MB of
+system memory.
+
+**Tests** (`process_pool`, the field's shape: an 80-layer 40 GB model, a 6,000 MB
+card, the worker's 10 layers filling it, nothing using it):
+`an_idle_workers_own_memory_is_the_fresh_runs` (the card bound stays 0; the run
+offered is the one with no worker, wider than the worker holds, admitted by the
+retirement's gate; none once the worker is in use, #93) and
+`an_up_front_admission_leaves_alone_a_worker_its_forward_will_replace` (nothing
+sent, the worker not marked used; controls: the held range, and the worker in
+use). Each was red with its own fix switched off.
+
+**Left.** The local candidate's `cold_load_ms` charges only the layers a run
+ADDS, so a run that replaces an idle worker is priced without reloading the
+layers it held — it under-prices the respawn, which matters only against a peer
+holding them warm.
 
 ## `inference::scheduler::delegation_target`
 

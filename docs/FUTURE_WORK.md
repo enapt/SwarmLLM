@@ -65,14 +65,14 @@ speed is what the swarm is for, so split speed for large models is the top track
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
-6. **#318**, with **#350**'s residual beside it. A model no single member can hold now answers:
+6. **#318**. A model no single member can hold now answers:
    Llama-3.3-70B across four machines (TH, TH, AU, IT) first ran on 2026-10-25 at 0.56-0.59 tok/s
    warm; with its drafter (#351, v0.3.255) 1.90-1.96 tok/s on a repeated question; on v0.3.256,
    1.29-1.47 tok/s on NEW questions, first token 9-10 s warm (a repeated question lets more of the
    reply be copied from text already seen; #337 is the copy side). v0.3.255's field check failed 3/3 on a peer's refusal count
-   read in the wrong unit, fixed in v0.3.256 (gotcha #970). Left on the 70B's path: why this
-   node's bound reads 0 beside an idle model (#350), and two readers of this node's own figures
-   (#354, P3, no field sign yet).
+   read in the wrong unit, fixed in v0.3.256 (gotcha #970). Left on the 70B's path: two readers of
+   this node's own figures (#354, P3, no field sign yet); #350 (this node never offered the
+   wider share its idle worker's replacement would load) closed 2026-10-26.
    **#318** — a large model split across machines is too slow to use: 0.35 tok/s on a 4-segment
    intercontinental chain, 5-13 tok/s on a 7B Thailand↔Belgium with the stream. Projected
    lossless 20-31 tok/s across continents and 50-80 inside a region on cards. The stream
@@ -2571,22 +2571,6 @@ not raised. None of these fails a request. Next, if a field report shows (b) or 
 range's placement on the handle beside its charge (`RangeCharge`), and have `short_of_the_card`
 read it.
 
-#### #350 — With this node's card full, its bound reads 0 beside an idle model
-`P2` · memory · routing · **PARTIAL** — 2026-10-25 · found by the 70B field check (request `c2cde5c3`, v0.3.254 live node) · history: § "Closed 2026-10-26" → #350 (1)
-
-Its route half closed on 2026-10-26: each rung now cuts its split points at the bound it
-applies, so the re-plan finds the route through this node's held 0-13 (the entry said 0-19; the
-candidate log reads `held_ranges=[(0, 13)]`), and the refusal no longer leaves this node's held
-layers out of "room for about N" (`docs/invariants/scheduling.md` § "Each rung cuts its split
-points at the bound it applies"). The "fewer layers here" re-plan (the entry's (3)) sees the same
-candidates and so the same route. Open: this node's bound read 0 layers with an idle
-Gemma-2-2B on the 8 GB card, although `local_layers_leaving` already counts card memory an idle
-model holds (`idle_vram_reclaimable_mb`). Whether Gemma was not reclaim-eligible, or the 70B was
-weighed in system memory (`planning_on_card` false for a model that neither fits the card whole
-nor is split by the loader), is unknown. Next: reproduce on the split rig with a worker holding a
-prefix and the card filled by an idle model; log `planning_on_card` and the reclaimable figure
-beside the bound.
-
 #### #256 — On WSL, `nvidia-smi` waits for a busy card, so a reading taken mid-reply is "unknown"
 `P3` · memory · **OPEN** — 2026-10-12 · history: #244's fix (archive § "Closed after 2026-10-02" → #244)
 
@@ -3387,6 +3371,26 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
+**Closed 2026-10-26, ships in the next release** (#350)
+- #350 — **A computer holding part of a large model offers the wider share it could load
+  once its idle worker is replaced, and its own request no longer stops that replacement.**
+  Request `c2cde5c3` (Llama 3.3 70B, v0.3.254): this node's idle worker held [0..13), its 10
+  card layers filling the card; the plan offered no wider run here, and when the re-plan put
+  [0..28) here anyway the load was refused ("its worker is already holding 6236 MB") — the
+  28 layers the same node loaded at once after the worker was unloaded by hand. Two causes:
+  the fresh run (`fresh_run_layers_for_planning`) counted the idle worker's own card and
+  system memory as taken, so an idle card/processor split was never offered a wider run; and
+  the request's first attempt admitted its prompt on that worker up front, marking it in use
+  for the request, so the forward's own retirement kept it. The run now gets the worker's
+  memory back, as the retirement gate does, and the up-front admission skips a worker its
+  forward will replace (`forward_replaces_the_worker`). **Correction**: this entry blamed an
+  idle Gemma-2-2B on the card; node.log shows it was reclaimed for the 70B at 15:56, and the
+  card bound of 0 was right. Tests `an_idle_workers_own_memory_is_the_fresh_runs`,
+  `an_up_front_admission_leaves_alone_a_worker_its_forward_will_replace`, each red with its
+  fix off. Left, minor: a run that replaces an idle worker is priced cold for only the layers
+  it adds. Evidence: `docs/invariants/scheduling.md` § "An idle worker's own memory is the
+  fresh run's, and its own request does not pin it".
+
 **Closed 2026-10-26, ships in v0.3.256** (#353's refusal count)
 - #353 (correction) — **A peer's count of what fits is weighed in its own unit.** The v0.3.255
   field check (Llama 3.3 70B, TH/TH/AU/IT, three novel prompts, all failed `HoldersDeclined`):
@@ -3427,7 +3431,7 @@ grep `^| N |`).
   layers", exactly the layers it did not hold. Tests
   `a_pass_holding_a_peer_to_its_ceiling_can_cut_its_range_there` (the request's four candidates,
   red before the change with the live log's error),
-  `this_nodes_offer_counts_the_layers_its_worker_holds`. Residual: #350 above.
+  `this_nodes_offer_counts_the_layers_its_worker_holds`. Residual: #350 above, closed the same day.
 - #353 — **A peer's range is weighed as what it loads: the output head goes with the model's
   end, the token table with its start** (field report #039). Every bound a coordinator holds a
   peer to counts layers at the file's AVERAGE (`weight_bytes_per_layer`, the ceiling's

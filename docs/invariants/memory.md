@@ -3333,6 +3333,16 @@ prompt was admitted for, under the same reservation, so it is still covered. Tes
 `a_refused_prompt_says_how_many_of_its_layers_fit`,
 `a_prompt_is_admitted_up_front_only_where_a_worker_runs_the_model`.
 
+**A worker the forward will replace is skipped (2026-10-26, #350).** An admission marks
+the worker in use for the request (`note_conversation`), and `grow_worker`'s retirement
+keeps a worker in use — so an idle worker that could not grow into the plan's range, and
+would have been replaced, was pinned by the very request that needed it replaced: a 70B's
+[0..28) refused "its worker is already holding 6236 MB" (request `c2cde5c3`). Its caches
+are not the ones the prompt will use; `forward_replaces_the_worker` (not held, not grown
+beside, nothing using it, loading in its place) answers like "no worker". Evidence and
+test: `docs/invariants/scheduling.md` § "An idle worker's own memory is the fresh run's,
+and its own request does not pin it".
+
 ## A split's peers are asked about room before the pass too (2026-10-18, FUTURE_WORK #252 (b))
 
 #263 asks this node's worker before any segment runs; a PEER's segment was still admitted only

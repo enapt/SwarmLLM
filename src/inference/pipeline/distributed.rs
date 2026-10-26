@@ -957,7 +957,11 @@ impl PipelineExecutor {
             };
             self.shared_state
                 .model_process_pool
-                .admit_prompt(admit, self.request.cancel.clone())
+                .admit_prompt(
+                    admit,
+                    super::worker_requester(&self.request),
+                    self.request.cancel.clone(),
+                )
                 .await
         };
         let theirs = super::prompt_admission::ask_peers(
