@@ -325,6 +325,11 @@ struct NodeCandidate {
     /// (`parallax::chain_is_led_by_its_head`, FUTURE_WORK #3 (a)). Default
     /// (nothing known) prices every chain as driven from here.
     ring: parallax::RingFacts,
+    /// What a range of this model really weighs on this peer against the
+    /// average its bounds count in — its end tables (field report #039).
+    /// Read only through [`Self::capacity_charge`] and
+    /// [`Self::width_in_bound`]; `None` charges the width, as before.
+    range_weights: Option<crate::inference::process_pool::RangeWeights>,
 }
 
 /// Assumed load speed for a node that has not reported its own
@@ -643,15 +648,46 @@ impl NodeCandidate {
     /// — the reused layers' share of this prompt's KV, a fraction of one new
     /// layer each, compared unrounded with an unrounded room (see
     /// [`PublishedRoom`]).
+    ///
+    /// For a peer, plus what the range's own weights cost beyond the average
+    /// layers its bounds count in ([`process_pool::RangeWeights::excess_layers`](crate::inference::process_pool::RangeWeights::excess_layers)): the
+    /// output head on a range that ends the model, the token table on one
+    /// that starts it (field report #039).
     fn capacity_charge(&self, range: (u32, u32)) -> f64 {
         let charged = self.layers_charged(range);
-        match self.published_room {
+        let base = match self.published_room {
             Some(room) => {
                 let reused = range.1.saturating_sub(range.0).saturating_sub(charged);
                 f64::from(charged) + f64::from(reused) * room.reused_share
             }
             None => f64::from(charged),
-        }
+        };
+        base + self
+            .range_weights
+            .as_ref()
+            .map_or(0.0, |w| w.excess_layers(range, &self.held_ranges))
+    }
+
+    /// `range`'s width in layers of this peer's TOTAL bounds (the ones a
+    /// count of every layer it is given is held to: `standby_has_room`,
+    /// `plan_exceeds_offered_memory`): the width plus what its own weights
+    /// cost beyond the average ([`process_pool::RangeWeights::excess_layers`](crate::inference::process_pool::RangeWeights::excess_layers), as if it
+    /// held nothing), rounded up. The width where nothing is known.
+    fn width_in_bound(&self, range: (u32, u32)) -> u32 {
+        self.range_weights.as_ref().map_or_else(
+            || range.1.saturating_sub(range.0),
+            |w| w.width_in_bound(range),
+        )
+    }
+
+    /// Where a run from `start` may end, at most `end`, for its
+    /// [`Self::width_in_bound`] to stay within `cap` — `start` when not even
+    /// one layer does.
+    fn furthest_end_in_bound(&self, start: u32, end: u32, cap: u32) -> u32 {
+        (start + 1..=end)
+            .rev()
+            .find(|&e| self.width_in_bound((start, e)) <= cap)
+            .unwrap_or(start)
     }
 }
 
@@ -1294,18 +1330,31 @@ fn primary_layer_commitments(segments: &[PipelineSegment]) -> HashMap<NodeId, u3
 /// This node is left out. Its figure is room to ADD beside what it already
 /// holds (`layers_it_would_add`), not a total, and its own loader's refusal
 /// already reaches the caller as `LocalMemoryUnavailable`.
+///
+/// Each segment is weighed as what it loads (`NodeCandidate::width_in_bound`:
+/// a range ending the model carries its output head, field report #039), as
+/// the search that made the plan weighed it.
 fn plan_exceeds_offered_memory(
     segments: &[PipelineSegment],
     candidates: &[NodeCandidate],
     local_node_id: &NodeId,
 ) -> bool {
     primary_layer_commitments(segments)
-        .iter()
-        .filter(|(node, _)| *node != local_node_id)
-        .any(|(node, &given)| {
-            candidates
+        .keys()
+        .filter(|node| *node != local_node_id)
+        .any(|node| {
+            let theirs: Vec<&NodeCandidate> =
+                candidates.iter().filter(|c| &c.node_id == node).collect();
+            let Some(weigher) = theirs.first() else {
+                return false;
+            };
+            let given: u32 = segments
                 .iter()
-                .filter(|c| &c.node_id == node)
+                .filter(|s| &s.node_id == node)
+                .map(|s| weigher.width_in_bound(s.layer_range))
+                .sum();
+            theirs
+                .iter()
                 .filter_map(|c| c.max_hostable_layers_at_face_value)
                 .max()
                 .is_some_and(|offered| given > offered)
@@ -4210,10 +4259,13 @@ impl PipelineScheduler {
     /// nothing ever calls `release_request_state` for a request that does not
     /// exist.
     ///
-    /// The charge per layer is exactly what [`max_hostable_layers`] weighs, so
-    /// the reservation and the bound cannot describe different quantities: a
-    /// cold peer pays weights plus this prompt's KV, a warm one pays the KV
-    /// alone. Segments on this node are skipped — our own loader tracks that.
+    /// The charge is what the search weighed, so the reservation and the bound
+    /// cannot describe different quantities: a cold peer pays the weights its
+    /// range loads — its ends' tables included, by the header where this node
+    /// holds it (`process_pool::bytes_added_by`, field report #039), else
+    /// [`max_hostable_layers`]' average — plus this prompt's KV, a warm one
+    /// the KV alone. Segments on this node are skipped — our own loader tracks
+    /// that.
     pub fn record_peer_commitments(
         &self,
         assignment: &PipelineAssignment,
@@ -4229,6 +4281,11 @@ impl PipelineScheduler {
         };
         let meta = self.shared_state.gguf_meta_for(model_id);
         let host_resident_bytes = meta.as_ref().map_or(0, |m| m.host_resident_bytes());
+        // What each range really loads, its ends' tables included — what the
+        // search weighed it as (`RangeWeights`, field report #039).
+        let model_weights = meta
+            .as_ref()
+            .and_then(|m| crate::inference::process_pool::ModelWeights::for_planning(m));
         let mut charges: Vec<(NodeId, u64)> = Vec::new();
         for seg in &assignment.segments {
             if seg.node_id == *local_node_id {
@@ -4254,13 +4311,29 @@ impl PipelineScheduler {
                 model_id,
                 std::time::Duration::from_secs(PEER_MODEL_WARM_TTL_SECS),
             );
-            let per_layer = if warm {
-                kv_per_layer
+            let weights = if warm {
+                0
             } else {
-                weight_bytes_per_layer(&manifest, host_resident_bytes, kv_device.on_card)
-                    .saturating_add(kv_per_layer)
+                model_weights.as_ref().map_or_else(
+                    || {
+                        layers.saturating_mul(weight_bytes_per_layer(
+                            &manifest,
+                            host_resident_bytes,
+                            kv_device.on_card,
+                        ))
+                    },
+                    |w| {
+                        crate::inference::process_pool::bytes_added_by(
+                            seg.layer_range,
+                            &[],
+                            w,
+                            manifest.num_layers,
+                            kv_device.on_card,
+                        )
+                    },
+                )
             };
-            let mb = layers.saturating_mul(per_layer) / 1_048_576;
+            let mb = layers.saturating_mul(kv_per_layer).saturating_add(weights) / 1_048_576;
             if mb > 0 {
                 // Several segments can land on one peer; charge each.
                 if let Some(entry) = charges.iter_mut().find(|(n, _)| *n == seg.node_id) {
@@ -4352,6 +4425,16 @@ impl PipelineScheduler {
             .shared_state
             .gguf_meta_for(&manifest.id)
             .map_or(0, |m| m.host_resident_bytes());
+        // The model's tensors by where the loader loads them: what a range
+        // weighs on a peer beyond the average its bounds count in — its ends'
+        // tables (`RangeWeights`, field report #039). A/B
+        // `SWARMLLM_PEER_RANGE_WEIGHTS=average` prices every range at the
+        // average, as before.
+        let model_weights = self
+            .shared_state
+            .gguf_meta_for(&manifest.id)
+            .and_then(|meta| crate::inference::process_pool::ModelWeights::for_planning(&meta))
+            .map(Arc::new);
         // What THIS prompt's KV cache costs per layer, on a card and on a
         // processor, from the model's geometry when this node holds its header.
         // `gguf_meta_for` is the only way to ask — it reads the header on a
@@ -4845,6 +4928,7 @@ impl PipelineScheduler {
                 0
             };
             let mut published_room = None;
+            let mut range_weights = None;
             // Bounded by the memory cap of whoever asked — the owner's, or the
             // swarm's for a split a peer delegated here — as the spawn will
             // weigh this request (#266).
@@ -4956,6 +5040,21 @@ impl PipelineScheduler {
                 let prompt_kv_per_layer = prompt_kv_per_layer_on(device);
                 let held_bytes_per_layer =
                     weight_bytes_per_layer(manifest, host_resident_bytes, device.on_card);
+                // Where its bounds charge weights it has not paid for: holding
+                // nothing, or naming the ranges it holds. A warm peer that
+                // names none is charged the cache alone, as before.
+                if residency == PeerResidency::Cold || !held_ranges.is_empty() {
+                    range_weights = model_weights.as_ref().map(|weights| {
+                        crate::inference::process_pool::RangeWeights {
+                            weights: Arc::clone(weights),
+                            num_layers: manifest.num_layers,
+                            average_bytes: held_bytes_per_layer,
+                            layer_price_bytes: held_bytes_per_layer
+                                .saturating_add(prompt_kv_per_layer),
+                            on_card: device.on_card,
+                        }
+                    });
+                }
                 let bound = |residency: PeerResidency, margin: f64| {
                     self.shared_state.peer_registry.get(&node_id).and_then(|p| {
                         max_hostable_layers(
@@ -5249,6 +5348,7 @@ impl PipelineScheduler {
                             .shared_state
                             .local_memory_refused_for_request(request_id),
                 ring,
+                range_weights,
             });
         }
 
@@ -5312,6 +5412,14 @@ impl PipelineScheduler {
                 has_gpu = c.has_gpu,
                 max_hostable_layers = ?c.max_hostable_layers,
                 max_hostable_layers_at_ceiling = ?c.max_hostable_layers_at_ceiling,
+                // What ending the model costs this peer's bounds beyond the
+                // average layers they count — its output head (field report
+                // #039); `None` = every range at the average, as before.
+                end_excess_layers = ?c.range_weights.as_ref().map(|w| {
+                    (w.excess_layers((w.num_layers.saturating_sub(1), w.num_layers), &[]) * 100.0)
+                        .round()
+                        / 100.0
+                }),
                 // This node only: the one run a fresh worker would split across
                 // card and processor; any further run is held to the bound above.
                 fresh_run_layers = ?c.fresh_run_layers,
@@ -6126,7 +6234,13 @@ impl PipelineScheduler {
                                      within the memory it advertises"
                                 )));
                             }
-                            range.1.min(current_layer.saturating_add(remaining))
+                            // Weighed as what the run loads: one ending the
+                            // model is shorter by its output head (field report
+                            // #039). At least one layer moves, as before.
+                            let end = range.1.min(current_layer.saturating_add(remaining));
+                            candidate
+                                .furthest_end_in_bound(current_layer, end, remaining)
+                                .max(current_layer + 1)
                         }
                         _ => range.1,
                     };
@@ -6461,11 +6575,13 @@ impl PipelineScheduler {
                         && c.available_ranges
                             .iter()
                             .any(|r| r.0 <= segment.layer_range.0 && r.1 >= segment.layer_range.1)
-                        // Holding the range is not being able to run it.
+                        // Holding the range is not being able to run it — and
+                        // running it is what it loads, its ends' tables
+                        // included (`width_in_bound`, field report #039).
                         && standby_has_room(
                             c.max_hostable_layers,
                             committed.get(&c.node_id).copied().unwrap_or(0),
-                            segment_layers,
+                            c.width_in_bound(segment.layer_range),
                         )
                         && standby_may_take(
                             c,
@@ -6591,11 +6707,12 @@ impl PipelineScheduler {
                                 .filter(|(n, _)| *n == c.node_id)
                                 .map(|(_, l)| *l)
                                 .sum::<u32>();
-                        standby_has_room(c.max_hostable_layers, already, part_layers).then_some((
-                            c,
-                            reach,
-                            part_layers,
-                        ))
+                        standby_has_room(
+                            c.max_hostable_layers,
+                            already,
+                            c.width_in_bound((frontier, reach)),
+                        )
+                        .then_some((c, reach, part_layers))
                     })
                     .max_by_key(|(_, reach, _)| *reach);
                 let Some((c, reach, part_layers)) = best else {

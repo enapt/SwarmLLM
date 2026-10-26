@@ -3426,6 +3426,67 @@ over-committed peer refuses at token 0 with the 503 the coordinator fails over
 from, instead of dying in attention 22 s in. A new admission check on the
 `Generate` path has to be asked whether the segment path got it too.
 
+## A peer's range is weighed as what it loads, its ends' tables included (2026-10-26, field report #039, #353)
+
+**What it replaced.** Every bound a coordinator holds a peer to is a count of
+the model's layers at the file's AVERAGE: `max_hostable_layers` and the
+published room divide by `weight_bytes_per_layer` (the file over its layers),
+the ceiling by `segment_cost_curve`'s slope, which keeps the tables "in its
+weights, spread evenly" (#342's residual). That is exact for a whole model —
+`delegation_target` and the whole-model disqualifier were always right — and
+wrong for a part: a range ending the model loads the whole output head, one
+starting it the whole token table, a middle one neither. Llama 3.3 70B Q4_K_M:
+506.8 MB a layer on average, an 822 MB head (`output.weight` + norm), a 564 MB
+token table. A Proxmox peer whose ceiling (its RAM cap at the reduced-hours
+level, 4096 MB) held 7 average layers was planned 73-80 by a tester's node and
+refused it up front: "needs about 4387 MB but this node's budget allows 4096
+MB". The up-front question (#345/#349) caught it and the re-plan found 75-80
+four seconds later, so the reply ran — the cost was a refusal and a re-plan on
+every cold request, and a refusal that read as a failure in the tester's log.
+
+**How others do it.** llama.cpp prices its output layer as a unit of its own,
+always whole on the last device (`common/fit.cpp`: "the last device has the
+output layer, which cannot be a partial layer"; `src/llama-model.cpp` counts
+it as one layer more than the model's, `max_offloadable_layers = n_layer + 1`),
+and measures each device's memory rather than averaging. Petals keeps the
+embeddings and the head on the client, so its servers' blocks are uniform.
+
+**The rule.** `process_pool::RangeWeights` (one per PEER candidate, built from
+the header only) gives `excess_layers(range, held)`: what loading the range
+really adds — `bytes_added_by`, the byte twin of `layers_added_by` over
+`ModelWeights` (the loader's own `segment_tensor` classification, one walk of
+the table; `segment_weights` now reads it too) — less `layers × average`, over
+one layer's price (average + this prompt's KV). About +1.4 layers for a 70B
+tail, +0.5 for its first range, −0.03 a layer in its middle, 0 for the whole
+model. It enters the ONE charge the search compares with a bound
+(`NodeCandidate::capacity_charge`), and `width_in_bound` (cold-shaped, rounded
+up) every reader of a TOTAL: parallax's capacity split points (a tail's point
+moves in by its head, or the range that fits is not even a vertex), greedy's
+run end (`furthest_end_in_bound`), both standby checks,
+`plan_exceeds_offered_memory`; `record_peer_commitments` books the real bytes.
+Auto-manage's chain planner weighs each run the same way
+(`near_chain::Planner::reach`, the ceiling's slope as the price). This node is
+untouched: its loader prices its own ranges (#342). A peer counted warm
+without naming its ranges keeps the average — its bound divides by the KV
+alone, and nothing says which layers it paid for.
+
+**Measured** (unit, the 70B's shape — 80 × 500 MB, 564 + 822 MB tables; a
+peer of 76 average layers beside a faster one holding 70-80 at 7): planned
+73-80 at the average, 75-80 weighed; with 73 a declared boundary and the
+charge removed, 73-80 again (`a_range_ending_the_model_is_weighed_with_its_output_head`
+goes red). Chain: a machine at 7 is planned 73-80 unweighed, every run within
+its machine's ceiling weighed (`a_chains_runs_are_weighed_with_the_tables_at_the_models_ends`).
+
+**What a change must keep.** A new reader of a peer's bound weighs a range by
+`capacity_charge` (a bound on NEW layers) or `width_in_bound` (a total), never
+by its width; a new bound stays in average layers or changes `RangeWeights`'
+average with it. A/B `SWARMLLM_PEER_RANGE_WEIGHTS=average` (`ModelWeights::for_planning`).
+**Still at the average**: carrying's max-flow count and the ceilings' sum a
+chain is judged carriable by (a layer and a half of slack in a count that only
+decides whether to plan); a refusal's `layers_that_fit`, measured from the
+asked range's start (a middle run), on which the re-plan weighs the head —
+the cautious side.
+
 ## `inference::scheduler::delegation_target`
 
 (2026-08-18) — the single decision

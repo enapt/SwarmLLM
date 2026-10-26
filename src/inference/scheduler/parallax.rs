@@ -1167,18 +1167,25 @@ fn route_over(
         if k == 0 {
             continue;
         }
+        // The widest prefix and suffix of each range it could take, each
+        // weighed as what it loads (`width_in_bound`): a suffix ending the
+        // model is shorter by its output head, a prefix starting it by its
+        // token table (field report #039) — `k` layers from either end where
+        // the header is not here, as before.
+        let fits = |range: (u32, u32)| c.width_in_bound(range) <= k;
         for &(a, b) in &c.available_ranges {
             let b = b.min(num_layers);
-            if b <= a || b - a <= k {
-                // It can hold everything it holds; no boundary to add.
+            if b <= a {
                 continue;
             }
-            let prefix_end = a.saturating_add(k);
-            if prefix_end > a && prefix_end < num_layers {
+            // Where everything it holds fits, the scans stop at the range's
+            // own ends and no boundary is added.
+            let prefix_end = c.furthest_end_in_bound(a, b, k);
+            if prefix_end > a && prefix_end < b && prefix_end < num_layers {
                 with_capacity.push(prefix_end);
             }
-            let suffix_start = b.saturating_sub(k);
-            if suffix_start > 0 && suffix_start < num_layers {
+            let suffix_start = (a..b).find(|&s| fits((s, b))).unwrap_or(b);
+            if suffix_start > a && suffix_start < b && suffix_start > 0 {
                 with_capacity.push(suffix_start);
             }
         }
@@ -1917,6 +1924,7 @@ mod tests {
             fresh_run_layers: None,
             card_layers: None,
             processor_tokens_per_sec: 0.0,
+            range_weights: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
             goodput_bytes_per_sec: None,
@@ -3318,6 +3326,89 @@ mod tests {
         let mut older = capped.clone();
         older.max_hostable_layers_at_ceiling = None;
         assert!(route(&[me, older], CapacityBound::PeersAtCeiling).is_ok());
+    }
+
+    /// A 70B-shaped model's weights: 80 layers of 500 MB, a 564 MB token table
+    /// and an 822 MB output head — as a peer's bounds see it, every layer at
+    /// the file's average (517 MB).
+    fn seventy_b_range_weights() -> crate::inference::process_pool::RangeWeights {
+        const MB: u64 = 1_048_576;
+        let names: Vec<String> = (0..80)
+            .map(|i| format!("blk.{i}.ffn_down.weight"))
+            .collect();
+        let mut tensors: Vec<(&str, u64)> = names.iter().map(|n| (n.as_str(), 500 * MB)).collect();
+        tensors.push(("token_embd.weight", 564 * MB));
+        tensors.push(("output.weight", 822 * MB));
+        let total: u64 = tensors.iter().map(|(_, b)| b).sum();
+        crate::inference::process_pool::RangeWeights {
+            weights: std::sync::Arc::new(
+                crate::inference::process_pool::ModelWeights::of(&tensors).expect("layers named"),
+            ),
+            num_layers: 80,
+            average_bytes: total / 80,
+            layer_price_bytes: total / 80,
+            on_card: false,
+        }
+    }
+
+    /// Field report #039 (2026-10-26, v0.3.254): a 70B was planned layers
+    /// 73-80 onto a peer whose budget held 7 of its AVERAGE layers, and the
+    /// peer refused up front — "needs about 4387 MB but this node's budget
+    /// allows 4096 MB". The average spreads the 822 MB output head over all 80
+    /// layers; the tail loads it whole. Weighed as what it loads, the tail
+    /// that fits is 75-80, and the plan gives the peer that.
+    #[test]
+    fn a_range_ending_the_model_is_weighed_with_its_output_head() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![], 0, 0.0, false, false, 4.0);
+        me.node_id = local.clone();
+        // Holds the whole model, room for 76 average layers.
+        let mut most = cand(2, vec![(0, 80)], 5, 0.0, true, true, 10.0);
+        most.max_hostable_layers = Some(76);
+        most.max_hostable_layers_at_face_value = Some(76);
+        // Holds the last ten, faster, room for 7 average layers.
+        let mut tail = cand(3, vec![(70, 80)], 5, 0.0, false, true, 100.0);
+        tail.max_hostable_layers = Some(7);
+        tail.max_hostable_layers_at_face_value = Some(7);
+        tail.max_hostable_layers_at_ceiling = Some(7);
+        let plan = |tail: &NodeCandidate, weighed: bool| {
+            let (mut most, mut tail) = (most.clone(), tail.clone());
+            if weighed {
+                most.range_weights = Some(seventy_b_range_weights());
+                tail.range_weights = Some(seventy_b_range_weights());
+            }
+            route_shortest_path(
+                80,
+                &[me.clone(), most, tail.clone()],
+                &local,
+                false,
+                true,
+                CapacityBound::Everyone,
+                None,
+            )
+            .expect("a route fits")
+            .into_iter()
+            .find(|s| s.node_id == tail.node_id)
+            .expect("the faster peer takes the tail")
+            .layer_range
+        };
+
+        // Null control: at the average, the tail it is given is 7 layers, the
+        // output head on top — the refused shape.
+        assert_eq!(plan(&tail, false), (73, 80));
+        // Weighed: 5 layers and the head, 3,322 MB, inside its 7 × 517 MB.
+        assert_eq!(plan(&tail, true), (75, 80));
+        // Where it holds exactly 73-80, a declared boundary, the range itself
+        // is refused by its charge, not only left without a split point.
+        tail.available_ranges = vec![(73, 80)];
+        assert_eq!(plan(&tail, true), (75, 80));
+
+        // And the charge itself: a tail costs it about a layer and a half more
+        // than its width, the whole model nothing more.
+        let w = seventy_b_range_weights();
+        assert!((1.3..1.6).contains(&w.excess_layers((75, 80), &[])));
+        assert!(w.excess_layers((0, 80), &[]).abs() < 0.01);
+        assert!(w.excess_layers((20, 40), &[]) < 0.0);
     }
 
     /// How many separate runs of layers `segs` hands `node` — adjacent segments
@@ -4846,6 +4937,7 @@ mod transfer_cost_tests {
             fresh_run_layers: None,
             card_layers: None,
             processor_tokens_per_sec: 0.0,
+            range_weights: None,
             prompt_memory_refused: false,
             memory_refused_this_request: false,
         }

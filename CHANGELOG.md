@@ -31,6 +31,16 @@ card or memory at once — unexpected for an owner who shares the card with othe
 activity feed and the log now say which model, which layers, and how much memory they are being
 loaded into, both when they are first loaded and when more are added (field report #039).
 
+**A split of a large model no longer asks a computer for more of the model's first or last layers
+than it can load.** Planning a split counted every layer of a model as the same size: the file's
+size divided by its layers. But the last layers load the table that turns the model's answer into
+words, and the first ones the table that reads the question in; for a 70-billion-parameter model
+those are 822 MB and 564 MB, more than an average layer each. A computer allowed 4 GB was asked
+for the model's last 7 layers, which need about 4.4 GB, said no, and the reply started only after
+a second plan. Each computer's part is now weighed as what loading it takes, those tables
+included, both when a reply is planned and when computers share out which parts of a model to
+keep (field report #039, #353).
+
 **A computer already holding part of a large model now says no up front to a part it could not
 load.** Before a reply starts, each computer in a split is asked whether it can take its part.
 One that had already loaded other layers of the model answered only about the conversation's

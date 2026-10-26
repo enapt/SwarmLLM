@@ -64,6 +64,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
+use crate::inference::process_pool::{ModelWeights, RangeWeights};
 use crate::types::{ModelId, ModelManifest, NodeId, ShardId, MMPROJ_SHARD_INDEX};
 
 use super::super::AutoShardManager;
@@ -264,11 +265,19 @@ fn parts_touching(manifest: &ModelManifest, segment: (u32, u32)) -> Vec<u32> {
 /// segments, then the fewest parts to fetch; of equals, the first in machine
 /// order, each machine's furthest end first. `may_fetch: false` plans only
 /// over what the machines have. `None`: no such chain.
+///
+/// `weights` weighs each run as what it loads against the average layer the
+/// ceilings count in (`process_pool::RangeWeights`): a run ending the model
+/// carries its output head, one starting it its token table — 822 MB and
+/// 564 MB of a 70B, a layer and a half and half of one at its average
+/// (field report #039). `None` (no header here) counts every run as its
+/// width, as before.
 fn plan_chain(
     layers: u32,
     parts: &[Part],
     machines: &[Machine],
     may_fetch: bool,
+    weights: Option<&RangeWeights>,
 ) -> Option<Vec<Step>> {
     if machines.is_empty() || machines.len() > 32 || parts.is_empty() {
         return None;
@@ -305,6 +314,7 @@ fn plan_chain(
         lacking,
         max_segments: max_segments as u32,
         may_fetch,
+        weights,
         memo: HashMap::new(),
     };
     planner.chain()
@@ -320,6 +330,8 @@ struct Planner<'a> {
     lacking: Vec<(Vec<u32>, Vec<u64>)>,
     max_segments: u32,
     may_fetch: bool,
+    /// What a run really loads against the ceilings' average layer.
+    weights: Option<&'a RangeWeights>,
     /// (position, machines used) → the best cover of the rest: segments, parts
     /// fetched, and its first step.
     memo: HashMap<(u32, u32), Option<Best>>,
@@ -339,7 +351,7 @@ impl Planner<'_> {
     /// has, within its reach.
     fn ends(&self, i: usize, x: u32) -> Vec<u32> {
         let machine = &self.machines[i];
-        let reach = self.layers.min(x.saturating_add(machine.ceiling));
+        let reach = self.reach(i, x);
         if reach <= x {
             return Vec::new();
         }
@@ -365,6 +377,24 @@ impl Planner<'_> {
             .collect();
         ends.extend(starts.into_iter().rev());
         ends
+    }
+
+    /// The furthest a run from `x` on machine `i` may end: its ceiling's worth
+    /// of layers, each run weighed as what it loads where the header is here
+    /// (`RangeWeights::width_in_bound`) — a run ending the model is shorter by
+    /// its output head. `x` when not one layer fits.
+    fn reach(&self, i: usize, x: u32) -> u32 {
+        let ceiling = self.machines[i].ceiling;
+        let Some(weights) = self.weights else {
+            return self.layers.min(x.saturating_add(ceiling));
+        };
+        // A middle run weighs less than its average layers, so it may reach a
+        // little past the ceiling's count — never twice as far.
+        let furthest = self.layers.min(x.saturating_add(ceiling.saturating_mul(2)));
+        (x + 1..=furthest)
+            .rev()
+            .find(|&e| weights.width_in_bound((x, e)) <= ceiling)
+            .unwrap_or(x)
     }
 
     /// Parts machine `i` lacks among those `[x, e)` touches, and their bytes.
@@ -676,6 +706,20 @@ impl AutoShardManager {
     ) -> Option<Planned> {
         let layers = manifest.num_layers;
         let mut machines = self.chain_machines(manifest, parts, curve, reach)?;
+        // Each run weighed as what it loads, against the average layer the
+        // ceilings count in (`carry_curve`'s, per MB): the header's tables at
+        // the model's ends (field report #039).
+        let weights = self
+            .shared_state
+            .gguf_meta_for(&manifest.id)
+            .and_then(|meta| ModelWeights::for_planning(&meta))
+            .map(|table| RangeWeights {
+                weights: std::sync::Arc::new(table),
+                num_layers: layers,
+                average_bytes: manifest.total_size_bytes / u64::from(layers.max(1)),
+                layer_price_bytes: curve.1.saturating_mul(1024 * 1024),
+                on_card: false,
+            });
         loop {
             // A chain is for a model that needs a split: a machine that could
             // run it whole is today's rules' to fill.
@@ -686,9 +730,11 @@ impl AutoShardManager {
             if total < u64::from(layers) {
                 return Some(Planned::CannotCarry);
             }
-            let held = plan_chain(layers, parts, &machines, false);
+            let held = plan_chain(layers, parts, &machines, false, weights.as_ref());
             let complete = held.is_some();
-            let Some(steps) = held.or_else(|| plan_chain(layers, parts, &machines, true)) else {
+            let Some(steps) =
+                held.or_else(|| plan_chain(layers, parts, &machines, true, weights.as_ref()))
+            else {
                 return Some(Planned::CannotCarry);
             };
             let mut named = HashSet::new();
@@ -1663,6 +1709,60 @@ mod tests {
             .collect()
     }
 
+    /// Field report #039: a 70B's chain must not give a machine whose ceiling
+    /// holds 7 of its AVERAGE layers the last 7 — they load the 822 MB output
+    /// head beside them. Weighed as what each run loads, the tail goes to a
+    /// machine with room for it, and every run fits its machine's ceiling.
+    #[test]
+    fn a_chains_runs_are_weighed_with_the_tables_at_the_models_ends() {
+        const MB: u64 = 1024 * 1024;
+        let names: Vec<String> = (0..80)
+            .map(|i| format!("blk.{i}.ffn_down.weight"))
+            .collect();
+        let mut tensors: Vec<(&str, u64)> = names.iter().map(|n| (n.as_str(), 500 * MB)).collect();
+        tensors.push(("token_embd.weight", 564 * MB));
+        tensors.push(("output.weight", 822 * MB));
+        let total: u64 = tensors.iter().map(|(_, b)| b).sum();
+        let weights = crate::inference::process_pool::RangeWeights {
+            weights: std::sync::Arc::new(
+                crate::inference::process_pool::ModelWeights::of(&tensors).expect("layers named"),
+            ),
+            num_layers: 80,
+            average_bytes: total / 80,
+            layer_price_bytes: total / 80,
+            on_card: false,
+        };
+        let parts = parts(&[1; 80]);
+        let holding = |from: u32, to: u32| -> Vec<bool> {
+            (0..80).map(|i| (from..to).contains(&i)).collect()
+        };
+        let machines = [
+            machine(1, 73, &holding(0, 73)),
+            machine(2, 7, &holding(70, 80)),
+            machine(3, 10, &holding(60, 80)),
+        ];
+        // Null control: counted at the average, the 7-layer machine is given
+        // 73-80 — nine layers' worth with the head.
+        let unweighed = plan_chain(80, &parts, &machines, true, None).expect("a chain");
+        assert!(
+            unweighed
+                .iter()
+                .any(|&(i, x, e)| i == 1 && e == 80 && weights.width_in_bound((x, e)) > 7),
+            "{unweighed:?}"
+        );
+        let weighed = plan_chain(80, &parts, &machines, true, Some(&weights)).expect("a chain");
+        let mut at = 0;
+        for &(i, x, e) in &weighed {
+            assert_eq!(x, at, "{weighed:?}");
+            assert!(
+                weights.width_in_bound((x, e)) <= machines[i].ceiling,
+                "machine {i} planned {x}..{e} past its ceiling: {weighed:?}"
+            );
+            at = e;
+        }
+        assert_eq!(at, 80, "{weighed:?}");
+    }
+
     /// The simulator's fleet: 16 one-layer parts, this machine able to run 7,
     /// the LAN box 10 and holding 4-13. Closing it takes both to move at once
     /// — the case one-at-a-time carrying never finished.
@@ -1673,11 +1773,11 @@ mod tests {
         let held: Vec<bool> = (0..16).map(|i| (4..14).contains(&i)).collect();
         let lan_box = machine(2, 10, &held);
         assert_eq!(
-            plan_chain(16, &parts, &[here.clone(), lan_box.clone()], true),
+            plan_chain(16, &parts, &[here.clone(), lan_box.clone()], true, None),
             Some(vec![(0, 0, 6), (1, 6, 16)]),
             "6 + 2 parts fetched; every other two-segment chain fetches more"
         );
-        assert_eq!(plan_chain(16, &parts, &[here, lan_box], false), None);
+        assert_eq!(plan_chain(16, &parts, &[here, lan_box], false, None), None);
     }
 
     /// A segment may end inside a part: two machines able to run 12 and 20 of
@@ -1688,7 +1788,7 @@ mod tests {
         let parts = parts(&[8, 8, 8, 8]);
         let small = machine(1, 12, &[false; 4]);
         let large = machine(2, 20, &[false; 4]);
-        let chain = plan_chain(32, &parts, &[small, large], true).expect("a chain");
+        let chain = plan_chain(32, &parts, &[small, large], true, None).expect("a chain");
         assert_eq!(chain.len(), 2);
         assert_eq!(chain.iter().map(|&(_, x, e)| e - x).sum::<u32>(), 32);
     }
@@ -1702,7 +1802,7 @@ mod tests {
         full.disk_bytes = 150;
         let roomy = machine(2, 20, &[false; 8]);
         let other = machine(3, 20, &[false; 8]);
-        let chain = plan_chain(32, &parts, &[full, roomy, other], true).expect("a chain");
+        let chain = plan_chain(32, &parts, &[full, roomy, other], true, None).expect("a chain");
         assert!(chain.iter().all(|&(i, _, _)| i != 0), "{chain:?}");
     }
 }

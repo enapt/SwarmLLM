@@ -2413,39 +2413,163 @@ pub(crate) fn segment_weights(
     is_first: bool,
     is_last: bool,
 ) -> Option<SegmentWeights> {
-    use crate::inference::split::SegmentTensor;
-    let tied = !tensors.iter().any(|(name, _)| *name == "output.weight");
-    let mut any_layer = false;
-    let mut weights = SegmentWeights {
-        total: 0,
-        host_resident: 0,
-        head: 0,
-    };
-    for &(name, bytes) in tensors {
-        let (counted, head, host) = match crate::inference::split::segment_tensor(name) {
-            SegmentTensor::Layer(idx) => {
-                any_layer = true;
-                ((start..end).contains(&idx), false, false)
-            }
-            SegmentTensor::Unplaced => (false, false, false),
-            // One tensor: a segment that is first and last shares it.
-            SegmentTensor::TokenTable => (is_first || (is_last && tied), true, false),
-            SegmentTensor::OutputHead => (is_last, true, false),
-            SegmentTensor::HostResident => (is_first, false, true),
-            SegmentTensor::BesideEmbedding => (is_first, false, false),
-            SegmentTensor::Shared => (true, false, false),
+    ModelWeights::of(tensors).map(|weights| weights.segment((start, end), is_first, is_last))
+}
+
+/// A model's tensor table sorted once by where the loader loads each tensor
+/// (`split::segment_tensor`), so [`Self::segment`] answers
+/// [`segment_weights`] for any range without walking the table again — the
+/// scheduler weighs hundreds of ranges a plan (field report #039).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ModelWeights {
+    /// `(layer, bytes)` of each layer's own tensors, by layer — sparse, so a
+    /// header's layer numbers never size an allocation.
+    layers: Vec<(usize, u64)>,
+    /// `layer_sums[k]`: the bytes of `layers[..k]`.
+    layer_sums: Vec<u64>,
+    token_table: u64,
+    /// The output head and its norm (`SegmentTensor::OutputHead`).
+    output_head: u64,
+    host_resident: u64,
+    beside_embedding: u64,
+    shared: u64,
+    /// No `output.weight`: the token table doubles as the output head.
+    tied: bool,
+}
+
+impl ModelWeights {
+    /// `None` when no tensor names a layer, so nothing can say which are whose.
+    pub(crate) fn of(tensors: &[(&str, u64)]) -> Option<Self> {
+        use crate::inference::split::SegmentTensor;
+        let mut weights = Self {
+            tied: !tensors.iter().any(|(name, _)| *name == "output.weight"),
+            ..Self::default()
         };
-        if counted {
-            weights.total = weights.total.saturating_add(bytes);
-            if head {
-                weights.head = weights.head.saturating_add(bytes);
-            }
-            if host {
-                weights.host_resident = weights.host_resident.saturating_add(bytes);
-            }
+        let mut by_layer = std::collections::BTreeMap::<usize, u64>::new();
+        for &(name, bytes) in tensors {
+            let slot = match crate::inference::split::segment_tensor(name) {
+                SegmentTensor::Layer(idx) => by_layer.entry(idx).or_insert(0),
+                SegmentTensor::Unplaced => continue,
+                SegmentTensor::TokenTable => &mut weights.token_table,
+                SegmentTensor::OutputHead => &mut weights.output_head,
+                SegmentTensor::HostResident => &mut weights.host_resident,
+                SegmentTensor::BesideEmbedding => &mut weights.beside_embedding,
+                SegmentTensor::Shared => &mut weights.shared,
+            };
+            *slot = slot.saturating_add(bytes);
+        }
+        if by_layer.is_empty() {
+            return None;
+        }
+        weights.layers = by_layer.into_iter().collect();
+        weights.layer_sums = std::iter::once(0)
+            .chain(weights.layers.iter().scan(0u64, |sum, &(_, bytes)| {
+                *sum = sum.saturating_add(bytes);
+                Some(*sum)
+            }))
+            .collect();
+        Some(weights)
+    }
+
+    /// The table a PLAN weighs a peer's ranges by — the scheduler's bounds,
+    /// its booking, auto-manage's chains — read off `meta`'s tensor table.
+    /// `None` under the A/B `SWARMLLM_PEER_RANGE_WEIGHTS=average`, which
+    /// weighs every range at the file's average layer, as before field report
+    /// #039.
+    pub(crate) fn for_planning(meta: &crate::inference::split::GgufTensorMeta) -> Option<Self> {
+        if std::env::var("SWARMLLM_PEER_RANGE_WEIGHTS").as_deref() == Ok("average") {
+            return None;
+        }
+        let tensors: Vec<(&str, u64)> = meta
+            .tensors
+            .iter()
+            .map(|(name, location)| (name.as_str(), location.size))
+            .collect();
+        Self::of(&tensors)
+    }
+
+    /// Layers `[start, end)`' own tensors.
+    fn layer_bytes(&self, start: usize, end: usize) -> u64 {
+        let at = |layer: usize| self.layers.partition_point(|&(idx, _)| idx < layer);
+        let (from, to) = (at(start), at(end.max(start)));
+        self.layer_sums[to].saturating_sub(self.layer_sums[from])
+    }
+
+    /// What `[start, end)` loads: its own layers' tensors, the token table on
+    /// the first, the output head on the last — weight-tied, the token table
+    /// again, once where one segment is both — what the loader keeps in host
+    /// memory and beside the embeddings on the first, and the small shared
+    /// tensors on every segment.
+    pub(crate) fn segment(
+        &self,
+        (start, end): (usize, usize),
+        is_first: bool,
+        is_last: bool,
+    ) -> SegmentWeights {
+        // One tensor: a segment that is first and last shares it.
+        let token_table = if is_first || (is_last && self.tied) {
+            self.token_table
+        } else {
+            0
+        };
+        let output_head = if is_last { self.output_head } else { 0 };
+        let (host_resident, beside_embedding) = if is_first {
+            (self.host_resident, self.beside_embedding)
+        } else {
+            (0, 0)
+        };
+        let head = token_table.saturating_add(output_head);
+        SegmentWeights {
+            total: self
+                .layer_bytes(start, end)
+                .saturating_add(self.shared)
+                .saturating_add(host_resident)
+                .saturating_add(beside_embedding)
+                .saturating_add(head),
+            host_resident,
+            head,
         }
     }
-    any_layer.then_some(weights)
+}
+
+/// The weights loading `range` of `weights`' `num_layers`-layer model adds
+/// to a worker holding `held`, in bytes — [`layers_added_by`] in bytes, by
+/// the same rule: an exact hit adds nothing; anything else loads as a
+/// segment of its own, its ends' tables included ([`ModelWeights::segment`]),
+/// and gives back the releasable share of each range it strictly contains.
+/// `on_card` leaves out what the loader keeps in host memory whatever the
+/// device, as a card's bound does (`scheduler::weight_bytes_per_layer`).
+pub(crate) fn bytes_added_by(
+    range: (u32, u32),
+    held: &[HeldRange],
+    weights: &ModelWeights,
+    num_layers: u32,
+    on_card: bool,
+) -> u64 {
+    if held.iter().any(|h| h.range == range) {
+        return 0;
+    }
+    let loads = |(start, end): (u32, u32)| {
+        let w = weights.segment(
+            (start as usize, end as usize),
+            start == 0,
+            end >= num_layers,
+        );
+        if on_card {
+            w.total.saturating_sub(w.host_resident)
+        } else {
+            w.total
+        }
+    };
+    let released = held
+        .iter()
+        .filter(|h| strictly_subsumes(range, h.range))
+        .fold(0u64, |acc, h| {
+            let width = h.range.1.saturating_sub(h.range.0).max(1);
+            let share = u64::from(h.releasable_layers.min(width));
+            acc.saturating_add(loads(h.range).saturating_mul(share) / u64::from(width))
+        });
+    loads(range).saturating_sub(released)
 }
 
 /// `(fixed_mb, per_layer_mb)` that `estimate` charges a MIDDLE segment of the
@@ -2576,6 +2700,68 @@ pub(crate) fn layers_added_by(range: (u32, u32), held: &[HeldRange]) -> u32 {
         .filter(|h| strictly_subsumes(range, h.range))
         .fold(0u32, |acc, h| acc.saturating_add(h.releasable_layers));
     width.saturating_sub(released)
+}
+
+/// What a range of a model really weighs on a machine, against the average
+/// every one of its bounds counts layers in.
+///
+/// A peer's bounds — the room it advertises, its published room, its ceiling
+/// — are layer counts at the file's AVERAGE layer (`weight_bytes_per_layer`,
+/// the ceiling's `segment_cost_curve`), which spreads the token table and the
+/// output head over every layer. That is exact for the whole model and wrong
+/// for a part of it: a range ending the model loads the whole head, a range
+/// starting it the whole token table, and a middle range neither. Llama 3.3
+/// 70B: 506.8 MB a layer on average; a 5-layer tail weighs 2,594 MB of layers
+/// and the 822 MB head, where 5 average layers are 2,534. A peer whose ceiling
+/// held 7 average layers was planned layers 73-80 and refused them up front —
+/// "needs about 4387 MB but this node's budget allows 4096 MB" (field report
+/// #039). llama.cpp prices its output layer as a unit of its own, kept whole
+/// on the last device (`common/fit.cpp`).
+///
+/// The scheduler keeps one per PEER (`NodeCandidate::range_weights`: none for
+/// this node, whose loader prices its own ranges, nor for a peer whose weights
+/// count as paid without saying which); auto-manage's chain planner one per
+/// model (`coverage::near_chain`). Both build it from the header only.
+#[derive(Debug, Clone)]
+pub(crate) struct RangeWeights {
+    /// The model's tensors by where the loader loads them.
+    pub(crate) weights: Arc<ModelWeights>,
+    pub(crate) num_layers: u32,
+    /// The average layer its bounds count in (`weight_bytes_per_layer`).
+    pub(crate) average_bytes: u64,
+    /// What one layer costs those bounds: the average plus this prompt's KV.
+    pub(crate) layer_price_bytes: u64,
+    /// Its layers run on its card, which keeps the host-resident tensors in
+    /// the machine's memory — as `average_bytes` leaves them out.
+    pub(crate) on_card: bool,
+}
+
+impl RangeWeights {
+    /// Layers of its bounds that running `range` costs beyond the average
+    /// layers it adds: what loading it really adds
+    /// ([`bytes_added_by`]) less `layers × average`, over the
+    /// price of a layer — about a layer and a half for a 70B's tail, half one
+    /// for its first range, a little below zero in its middle, nothing for
+    /// the whole model.
+    pub(crate) fn excess_layers(&self, range: (u32, u32), held: &[HeldRange]) -> f64 {
+        if self.layer_price_bytes == 0 {
+            return 0.0;
+        }
+        let adds = bytes_added_by(range, held, &self.weights, self.num_layers, self.on_card);
+        let layers = layers_added_by(range, held);
+        let averaged = u64::from(layers).saturating_mul(self.average_bytes);
+        (adds as f64 - averaged as f64) / self.layer_price_bytes as f64
+    }
+
+    /// `range`'s width in layers of a TOTAL bound — one a count of every layer
+    /// a machine is given is held to: the width plus
+    /// [`Self::excess_layers`] as if it held nothing, rounded up.
+    pub(crate) fn width_in_bound(&self, range: (u32, u32)) -> u32 {
+        let width = range.1.saturating_sub(range.0);
+        (f64::from(width) + self.excess_layers(range, &[]))
+            .ceil()
+            .max(0.0) as u32
+    }
 }
 
 /// One resident model-worker subprocess as the status surfaces report it.
@@ -13076,6 +13262,43 @@ mod tests {
         let small = ModelId("small".into());
         assert!(!pool.admit_to_cpu(&small, 100, Requester::Swarm));
         assert!(pool.admit_to_cpu(&small, 100, Requester::Owner));
+    }
+
+    /// `bytes_added_by` is `layers_added_by` in bytes, ends' tables included:
+    /// an exact hit adds nothing, a range containing a held one adds what the
+    /// held one did not already load, and the head goes with the model's end.
+    #[test]
+    fn bytes_added_by_counts_what_the_load_adds_with_its_ends_tables() {
+        let names: Vec<String> = (0..10).map(|i| format!("blk.{i}.attn_q.weight")).collect();
+        let mut tensors: Vec<(&str, u64)> = names.iter().map(|n| (n.as_str(), 100)).collect();
+        tensors.push(("token_embd.weight", 30));
+        tensors.push(("output.weight", 50));
+        tensors.push(("output_norm.weight", 1));
+        tensors.push(("rope_freqs.weight", 2));
+        let w = ModelWeights::of(&tensors).expect("layers named");
+        // The same answers as walking the table.
+        for (range, first, last) in [
+            ((0, 10), true, true),
+            ((3, 7), false, false),
+            ((8, 10), false, true),
+        ] {
+            assert_eq!(
+                Some(w.segment(range, first, last)),
+                segment_weights(&tensors, range, first, last)
+            );
+        }
+        assert_eq!(
+            bytes_added_by((8, 10), &[], &w, 10, false),
+            200 + 50 + 1 + 2
+        );
+        assert_eq!(bytes_added_by((0, 2), &[], &w, 10, false), 200 + 30 + 2);
+        let held = [HeldRange {
+            range: (8, 10),
+            releasable_layers: 2,
+        }];
+        assert_eq!(bytes_added_by((8, 10), &held, &w, 10, false), 0);
+        // [6..10) loads afresh and gives back [8..10): two more layers.
+        assert_eq!(bytes_added_by((6, 10), &held, &w, 10, false), 200);
     }
 
     /// The worker's own three cases, restated for the planner.

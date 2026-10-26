@@ -60,6 +60,12 @@ Where this node cannot hold every layer, each planner FIRST plans with its bound
 
 → `docs/invariants/scheduling.md` § "Room for more layers is not room for the layers already held (2026-09-24, #95)"
 
+## A peer's range is weighed as what it loads (2026-10-26, #353)
+
+Every peer bound counts layers at the file's AVERAGE, which spreads the output head and token table over all of them. **`process_pool::RangeWeights::excess_layers`** (per peer candidate, from the header) puts them back where they load — the head with the model's end, the table with its start: in `NodeCandidate::capacity_charge` (the search), `width_in_bound` (every reader of a total: split points, greedy, both standby checks, `plan_exceeds_offered_memory`), the booking, and auto-manage's chain (`near_chain::Planner::reach`). Never compare a peer's bound with a bare width. A/B `SWARMLLM_PEER_RANGE_WEIGHTS=average`.
+
+→ `docs/invariants/scheduling.md` § "A peer's range is weighed as what it loads"
+
 ## A plan that names this node for the whole model is a local generation
 
 **`pipeline::local_generate::try_local_generate_fastpath`** runs a single-segment plan assigned here through `ModelProcessPool::generate`, never a `LayerForward` per token. A missing `split_models` entry does not disqualify it — read the MANIFEST. A budget on what to OFFER must not decide how assigned work is EXECUTED.

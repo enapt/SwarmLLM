@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #353**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #354**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3368,7 +3368,29 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-26, ships in v0.3.255** (#351)
+**Closed 2026-10-26, ships in v0.3.255** (#351, #353)
+- #353 — **A peer's range is weighed as what it loads: the output head goes with the model's
+  end, the token table with its start** (field report #039). Every bound a coordinator holds a
+  peer to counts layers at the file's AVERAGE (`weight_bytes_per_layer`, the ceiling's
+  `segment_cost_curve`), which spreads a 70B's 822 MB head and 564 MB token table over all 80
+  layers: exact for the whole model, short by most of a table for a range at either end. A
+  peer whose ceiling held 7 average layers was planned 73-80 and refused it up front ("needs
+  about 4387 MB but this node's budget allows 4096 MB"); the re-plan found 75-80. Now
+  `process_pool::RangeWeights::excess_layers` — the range's own weights by the loader's
+  classification (`ModelWeights`, one walk of the header's table; `bytes_added_by`, the byte
+  twin of `layers_added_by`) less its average layers, over a layer's price — goes into
+  `NodeCandidate::capacity_charge` (the search's one charge), and `width_in_bound` into every
+  reader of a total: parallax's capacity split points, greedy's run end, both standby checks,
+  `plan_exceeds_offered_memory`; the booking books the real bytes; auto-manage's chain planner
+  (`near_chain::Planner::reach`) weighs each run the same way. This node is unchanged (its
+  loader prices its own ranges, #342); a peer counted warm without naming its ranges keeps the
+  average. A/B `SWARMLLM_PEER_RANGE_WEIGHTS=average`. Tests
+  `a_range_ending_the_model_is_weighed_with_its_output_head` (red with the charge removed),
+  `a_chains_runs_are_weighed_with_the_tables_at_the_models_ends`. Still at the average:
+  carrying's max-flow count and the ceilings' sum a chain is judged carriable by — a layer and
+  a half of slack in a count that only decides whether to plan. A refusal's `layers_that_fit`
+  is measured from the asked range's start, so it describes a middle run; the re-plan weighs
+  the head on top, on the cautious side.
 - #351 — **A large model split across computers guesses ahead again on the computer that asked
   for it.** The first Llama-3.3-70B replies across four machines (TH, TH, AU, IT) ran every
   token unguessed, 0.56-0.59 tok/s warm. Two contributors, both in what the drafter's spawn was
