@@ -2,6 +2,67 @@
 
 ## [Unreleased]
 
+## [0.3.257-alpha] — 2026-10-27
+
+**A model split between two computers far apart answers up to 18% faster.** A split reply sends
+the computer with the model's last layers a few guessed words at a time and keeps sending while
+earlier checks are on their way. When the small model making the guesses was unsure of a word, it
+stopped there, and nothing more was sent until that check came back, which between Thailand and
+Australia left the far computer idle for close to half a second each time. It now guesses every
+batch through to the end and lets the check sort out the wrong ones: Qwen2.5-Coder 7B split
+between the two answered at 7.7 tokens a second against 6.5 for a 400-token
+reply, and 6.7 against 6.0 for a 160-token one, with the same text. Every batch is now also the
+same size, the last one too, so these replies no longer ask a graphics card for a new shape of
+work late in a long session, which held some replies up for 10 to 59 seconds on this project's
+test computer (#357 follows the same stall on other paths). Where the far computer is slower
+than the round trip (Llama 3.3 70B between the same two countries, tested against a computer on
+the previous version, which does not yet skip the stale checks described below), replies were as
+fast as before and one reply in three was 10% slower; it will be measured again once that
+computer runs this version. Peers need nothing new.
+
+**A split reply wastes less of the checking computer's time.** A model split across computers
+guesses a few words ahead, and the computer holding its last layers checks those guesses, several
+checks in flight at once. When a check finds a wrong guess, the checks sent after it were built on
+that guess. That computer now skips them as soon as its own check ends, instead of working through
+them until the asking computer's correction arrives. In a 70-billion-parameter reply between
+Thailand and Australia, 10 of 29 checks had been computed for nothing; the asking computer gains
+about 0.14 s a wrong guess there. Peers need nothing new.
+
+**Where the swarm's graphics cards can hold a large model, its layers go on cards, not
+processors.** A computer's room for a model counts its graphics card and the memory beside it,
+and layers in that memory run on the processor, several times slower. Placement filled that room
+with the fewest computers and never asked which device each layer would run on. Placement now
+prices each chain of computers by the speeds they state, each layer at the speed of the device it
+would run on. A chain already in place moves only when the new one costs at most three quarters as
+much, so model parts are not downloaded again for a small gain. Computers that state no speeds
+are placed as before (#356).
+
+**A large model split between a computer's graphics card and its processor now puts more of
+itself on the card.** Before loading part of such a model, a computer freed card memory from
+idle models only when the whole model would then fit on the card. A model too big for that was
+placed with the idle model still holding its card memory: on 2026-10-25 Llama 3.3 70B put 6 of
+its 19 layers on this project's test computer's card while a Gemma 2 2B, idle for 29 minutes,
+held 2.4 GB of it. A computer now unloads idle models first, longest-idle first, but only as many
+as add layers to the card; with the same Gemma idle, the 70B then put 10 of its 21 layers on the
+card. A model that has been guessing ahead for another model's replies is never unloaded for
+this (#355).
+
+**A computer already running part of a large model can now offer to take a wider part of it.**
+With an idle worker holding the first layers of a large model, a computer counted the worker's
+own memory as taken when it worked out how much more it could load, so it never offered a wider
+share. When a new plan gave it one anyway, the reply's own earlier check had marked that worker
+busy, and the load was refused: Llama 3.3 70B's first 28 layers were refused beside an idle
+worker holding 13, and loaded at once after that worker was stopped by hand. Both now count the
+worker's memory as free for the part that replaces it (#350).
+
+**A large model asked for just after a computer starts is no longer refused as too big for the
+swarm.** In its first minutes a computer is still learning which others hold which parts of each
+model. Where the ones it knew of were full, it answered "not enough memory, trying again won't
+help" even when other parts of the model had no known holder yet: on 2026-10-26 Llama 3.3 70B was
+refused that way 3 minutes after a restart, and the computer holding all of it was seen 20
+seconds later. That answer is now given only when every part of the model has a known holder;
+otherwise the computer waits for the missing parts' holders and plans again (#358).
+
 ## [0.3.256-alpha] — 2026-10-26
 
 **A large model split across computers no longer fails when one of them says it has room for only
