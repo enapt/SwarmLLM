@@ -64,6 +64,21 @@ Client → API Server → InferenceRouter → Pipeline Assembly
 9. Identify standby nodes per segment (failover)
 10. Send PipelineAssignment, wait for ACKs, begin forwarding
 
+**Each computer's part is weighed as what loading it takes** (since 0.3.255): a part
+ending the model carries its output head and one starting it the token table, so a
+70B's last layers weigh more than its middle ones. **Before the prompt is read, every
+computer in the plan is asked whether its part fits**; one that says no also says how
+many layers would (since 0.3.256, whether it counted layers that load or layers whose
+conversation memory fits), and the next plan holds it to that.
+
+**Teams for a model no single computer holds** are planned ahead by the computers
+themselves, not per request. For a model somebody asked for that no nearby computer
+(measured within about 30 ms) can run whole, every nearby computer works out the same
+chain and fetches only its own part of it (since 0.3.247). Where the nearby computers
+cannot carry the model between them, the same chain is planned over every computer in
+reach (since 0.3.254) — slow, but it is how Llama 3.3 70B first ran, across four
+computers in Thailand, Australia and Italy.
+
 ## Failure Handling
 
 The router applies a **single retry** on transient remote failures
@@ -121,9 +136,9 @@ The RoPE column is llama.cpp's per-architecture choice (`llama_model_rope_type`)
 | **Llama 4** | Interleaved; iRoPE (NoPE every 4th) | No | MoE FFN |
 | **Qwen2 / Qwen3** | Contiguous | Yes (Qwen2) | EOS 151643+151645; per-head q/k norm (Qwen3) |
 | **Qwen2-MoE / Qwen3-MoE** | Contiguous | Yes (Qwen2-MoE) | The same layout with routed experts per layer; Qwen2-MoE adds a gated shared expert and does not renormalise its top-k weights |
-| **Qwen 3.5** | Contiguous (IMROPE over 64 of 256 dims; text positions only) | No | Dense and mixture-of-experts models: three of every four layers are Gated DeltaNet, which keeps a running state per conversation, and the fourth is gated attention. Speculative decoding is off for it (that state cannot be wound back). Since 0.3.243 a conversation's next turn starts from the state saved just before the end of the last prompt instead of reading the whole conversation again (Qwen3.5-0.8B on the processor: 16.7 s instead of 127.6 s for the second turn of a 2,416-token conversation). A card too small for the whole model takes as many layers as fit and the processor the rest (since 0.3.230), and only the attention layers are charged conversation memory. Checked against llama.cpp on Qwen3.5-0.8B and 4B, and the mixture-of-experts models (`qwen35moe`, since 0.3.235) on a small real file with the same layout as Qwen3.5-35B-A3B |
+| **Qwen 3.5** | Contiguous (IMROPE over 64 of 256 dims; text positions only) | No | Dense and mixture-of-experts models: three of every four layers are Gated DeltaNet, which keeps a running state per conversation, and the fourth is gated attention. It guesses ahead since 0.3.253: that state cannot simply be cut back, so each check keeps what it read and a wrong guess is undone by replaying the words that were right from the state as it stood before the check; a split guesses only when every computer in it runs 0.3.253 or later. Since 0.3.243 a conversation's next turn starts from the state saved just before the end of the last prompt instead of reading the whole conversation again (Qwen3.5-0.8B on the processor: 16.7 s instead of 127.6 s for the second turn of a 2,416-token conversation). A card too small for the whole model takes as many layers as fit and the processor the rest (since 0.3.230), and only the attention layers are charged conversation memory. Checked against llama.cpp on Qwen3.5-0.8B and 4B, and the mixture-of-experts models (`qwen35moe`, since 0.3.235) on a small real file with the same layout as Qwen3.5-35B-A3B |
 | **Gemma/Gemma2** | Contiguous | No | Embedding scaling (sqrt(d)), Gemma RmsNorm (+1), EOS 107, attention + final logit softcapping, Gemma chat template fallback; Gemma 2 sees only the last 4,096 positions on every other layer |
-| **Gemma 3** (text) | Contiguous; windowed layers at their own base, global layers with the file's linear scaling | No | Per-head q/k norm; five layers in six see only the last 512 (1B) or 1,024 (4B and up) positions; no softcapping. Checked against llama.cpp on the 1B and 4B. The vision part is not supported yet |
+| **Gemma 3** | Contiguous; windowed layers at their own base, global layers with the file's linear scaling | No | Per-head q/k norm; five layers in six see only the last 512 (1B) or 1,024 (4B and up) positions; no softcapping. Checked against llama.cpp on the 1B and 4B. Reads pictures since 0.3.245, all of a picture's rows at once as it was trained to: scored through llama.cpp's own picture reader, 95-97% of its words are llama.cpp's first choice. A picture request split across computers needs every one of them on 0.3.245 or later |
 | **Gemma 4** (text: 12B, 31B, 26B-A4B, E2B, E4B) | Contiguous; windowed layers turn 256 of their head at base 10,000, global layers 512 at 1,000,000 with the file's per-pair factors ("proportional") | No | Each layer has its own shape — on the 12B, five layers in six have 8 key/value heads 256 wide over the last 1,024 positions, every sixth has one head 512 wide over everything and no V projection (V is K). Q/K normed per head with weights, V without; no attention scale; a per-layer output scale; final softcap 30; its own tokenizer rules (spaces as `▁`, newline runs whole, BOS always). Checked against llama.cpp master on the 12B. The 26B-A4B runs a dense GELU feed-forward beside 128 GELU experts (8 per token) in every layer: each branch has its own norms, the router reads its own norm of the layer's input, and each expert's answer has its own scale; checked against llama.cpp master on the real Q2_K file. The E2B and E4B add two things: their last layers (20 of the E2B's 35) keep no cache of their own and attend the cache of the last earlier layer of their kind, and every layer adds an embedding of its own gated by an input built from the prompt's tokens. Because only the first layers see the tokens, these two run only on one computer holding every layer (a card and the processor of that computer may still share them). Their per-layer embedding table (1.8 GB on the E2B, 2.2 GB on the E4B) stays in the computer's memory, not on the card, so the E2B runs whole on a 4 GB card and the E4B on a 6 GB one (since 0.3.241); checked against llama.cpp master on the real E2B and E4B. The vision part is refused by name until it is built |
 | **Phi-3** | Contiguous, Su/YaRN scaling | Yes | Fused QKV/FFN tensors |
 | **Mistral** | Interleaved | No | GQA |

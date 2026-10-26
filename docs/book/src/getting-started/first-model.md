@@ -76,6 +76,14 @@ curl -X POST http://localhost:8800/api/admin/hf/download-shards \
 | 8 GB VRAM | Qwen2.5-7B Q4_K_M | ~4.5 GB |
 | 16+ GB VRAM | Qwen2.5-14B Q4_K_M | ~9 GB |
 
+**Models too big for any one computer** — a 70-billion-parameter one is about
+40 GB — run across several computers, each holding a part. Llama 3.3 70B has
+run this way on the swarm. Expect it to be slow while those computers are far
+apart: in October 2026, on computers in Thailand and Australia, a reply started
+after about 10 seconds (under a minute the first time, while the parts load)
+and arrived at about a word a second. Computers close to each other run it
+much faster.
+
 ## On-Demand Loading
 
 You do not need to pre-load models into VRAM. When you send a request for a model whose parts are on disk but not loaded, SwarmLLM automatically loads the model on the fly. If VRAM is full, the least-recently-used model is evicted to make room. The first request to a cold model may take a few extra seconds while loading completes.

@@ -33,10 +33,11 @@ residual).
 
 ## ▶ PRIORITIES — read this first
 
-Re-ranked 2026-10-17 after v0.3.241 (released 2026-10-17), which closed #265, #286-#290, #292,
-#296, #298 and #115's Gemma 4 26B-A4B, E2B and E4B, and shipped #91 (2)'s manifest digests; the
-items it filed (#291, #293-#295, #297, #299) are all P3, so no rank moved. What each release carried
-is in § "Closed" and `CHANGELOG.md`; the running log of re-rankings from 2026-10-02 to this one
+Re-ranked 2026-10-26 after v0.3.256 (released 2026-10-26). Since the 2026-10-17 ranking
+(v0.3.241), v0.3.242-v0.3.256 shipped near chains (#192 phase 1, v0.3.247), the far chain and
+max-flow carrying (#346, v0.3.254), the 70B work (#342-#345, #348, #349, #350 (1), #351, #353) and
+its unit correction (v0.3.256); item 6 is rewritten for the 70B. What
+each release carried is in § "Closed" and `CHANGELOG.md`; the running log of re-rankings from 2026-10-02 to this one
 moved word for word to the archive, § "PRIORITIES re-rank log". Only OPEN work is listed here.
 `docs/plans/` holds the multi-step designs; the entries point at them. **2026-10-20:** #318 goes
 first among P2 by the user's direction: running models too large for any one member at a usable
@@ -64,13 +65,14 @@ speed is what the swarm is for, so split speed for large models is the top track
    `net:0` (with #3). Passive: the next evidence is a field `predicted_terms` line.
 
 **P2 — speed and completeness**, ranked by how many users meet it in their first hour
-6. **#350**, then **#318**. A model no single member can hold now answers. On
-   2026-10-25, Llama-3.3-70B ran across four machines (TH, TH, AU, IT) at 0.56-0.59 tok/s warm,
-   after #348 and #349 (ship in v0.3.255). It ran only once two idle models were unloaded by
-   hand: the re-plan could not cut a peer's range at its ceiling, so it missed the route through
-   the layers this node held (#350 (1), closed 2026-10-26); left open is why this node's bound
-   read 0 beside an idle model. With its drafter loaded (#351, closed 2026-10-26) the same asks
-   ran 1.90-1.96 tok/s.
+6. **#318**, with **#350**'s residual beside it. A model no single member can hold now answers:
+   Llama-3.3-70B across four machines (TH, TH, AU, IT) first ran on 2026-10-25 at 0.56-0.59 tok/s
+   warm; with its drafter (#351, v0.3.255) 1.90-1.96 tok/s on a repeated question; on v0.3.256,
+   1.29-1.47 tok/s on NEW questions, first token 9-10 s warm (a repeated question lets more of the
+   reply be copied from text already seen; #337 is the copy side). v0.3.255's field check failed 3/3 on a peer's refusal count
+   read in the wrong unit, fixed in v0.3.256 (gotcha #970). Left on the 70B's path: why this
+   node's bound reads 0 beside an idle model (#350), and two readers of this node's own figures
+   (#354, P3, no field sign yet).
    **#318** — a large model split across machines is too slow to use: 0.35 tok/s on a 4-segment
    intercontinental chain, 5-13 tok/s on a 7B Thailand↔Belgium with the stream. Projected
    lossless 20-31 tok/s across continents and 50-80 inside a region on cards. The stream
@@ -80,7 +82,8 @@ speed is what the swarm is for, so split speed for large models is the top track
    5.01-5.05 on a real ~405 ms link, #134); a card multiplies a check's rows with llama.cpp's
    tensor-core MMQ (#325, 10-21: 2.4-3.2× faster at 9-64 rows). The regrow after a missed seed
    is sized by what it buys, and trees are on only past 300 ms (#134 (a), 10-21: +57% at 20 ms,
-   +4% at 300 on the rig). Next: near peers over far ones (#192); a drafter fed by the model's
+   +4% at 300 on the rig). Near peers over far ones shipped (#192 phase 1, v0.3.247), and where
+   no near group can carry a model, a far chain (#346, v0.3.254). Next: a drafter fed by the model's
    own state (`large_model_splits.md` build-order step 4); a tree that flows (#134 (b), built
    10-22: +11-14% over tree rounds on the card rig; its drafter's tree levels are one kernel and
    one CUDA graph since 10-22; on a thin uplink a guard holds its rows down — 5 Mbit 7.44-7.50 vs
@@ -2212,7 +2215,7 @@ Q8_0 beat both (#134).
 Every machine in a split idles ~99% of each pass. The plan — "parallelise the reply, not the
 token", within the rule that nobody holds a whole model — has its first step done (the
 continuous stream, v0.3.216) and #143 done (v0.3.221). Next in its order: multi-token-prediction
-heads at the last stage (Qwen 3.5 runs since v0.3.229 but without speculation, #228 (5); GLM-4.5+ is
+heads at the last stage (Qwen 3.5 runs since v0.3.229 and guesses with its own n-gram since v0.3.253, but MTP needs its rows kept across steps, #228 (5); GLM-4.5+ is
 unsupported), a stage batching forwards of several streams into one
 visit, multi-block attention for workers sharing a cache, outline-then-expand with a
 classifier router. Research-grade; the largest multiplier on the list

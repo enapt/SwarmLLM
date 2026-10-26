@@ -44,9 +44,12 @@ cargo dev-test --lib
 # Integration tests (must run single-threaded)
 cargo dev-test --test integration --test integration_phase10_11 --test yamux_substream -- --test-threads=1
 
-# Two packages a workspace-root `cargo test` does not run
+# Packages a workspace-root `cargo test` does not run: the types crate and
+# the three vendored crates with tests of their own
 cargo test -p swarmllm-types
 cargo test --manifest-path vendor/libp2p-request-response/Cargo.toml --lib
+cargo test --manifest-path vendor/libp2p-quic/Cargo.toml --lib --features tokio
+cargo test --manifest-path vendor/libp2p-upnp/Cargo.toml --lib --features tokio
 ```
 
 ## Code Quality

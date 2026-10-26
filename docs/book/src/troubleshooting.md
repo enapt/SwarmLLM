@@ -196,6 +196,19 @@ If the first inference request to a model takes noticeably longer than subsequen
 2. **Model too large:** Use Q4 quantization, match model size to VRAM.
 3. **Far-apart helpers:** a model split across distant computers is slow, because each word of the reply passes through every one of them. `swarmllm diagnostics` lists the slowest computers first.
 
+## "Another computer asked this one to run layers … of …"
+
+This notice (since 0.3.255) means another computer is answering a request
+with a model too big for it alone, and asked yours to run its part. The
+layers load into the amount of memory the notice names. This is the swarm
+working as intended — it is how models larger than any one computer run.
+
+How much of your computer this may take is set by **Settings → Contribution
+Level**: a lower level leaves more of it for you. On a graphics card,
+SwarmLLM uses free memory while it has work and gives it back when idle. On a
+connection your computer reports as metered (a phone hotspot, for example),
+work for other computers pauses.
+
 ## Database Corrupted
 
 ```bash

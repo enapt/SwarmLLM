@@ -182,8 +182,9 @@ plus a coordinator loop in `pipeline/dsd.rs`.
 
 - **Status:** On by default from the release after v0.3.212 (it was off in
   v0.3.212 while a failover question was open; that turned out to be the test
-  rig, FUTURE_WORK #162, which absorbed #140). It does nothing on a computer that holds no suitable
-  guessing model, and it stops guessing — and, for the next ten minutes, stays
+  rig, FUTURE_WORK #162, which absorbed #140). A computer that holds no suitable guessing model
+  fetches one the first time it splits a model without one (see *The guesser*
+  below) and does nothing until it has it; it stops guessing — and, for the next ten minutes, stays
   out of requests on the same computers — where guessing costs more than the
   round trips it saves: on two computers side by side it would otherwise have
   made replies six times slower. Measured across a real
@@ -207,8 +208,14 @@ plus a coordinator loop in `pipeline/dsd.rs`.
   computer holding both ends keeps them itself ("Start and finish on this
   computer", on by default where possible) and one holding none runs no part;
   both check in batches, as before.
-- **The guesser** is a model this computer already holds, run by SwarmLLM's
-  own engine from its parts — chosen automatically (the largest held model
+- **The guesser** is a small model of the same family, run by SwarmLLM's
+  own engine from its parts. A computer that splits a model with none fetches
+  one (since 0.3.248): the largest small model of that family which other
+  computers already share and which can guess for it — never more than 2 GiB
+  on disk, never one that is not trusted, never over a metered connection —
+  and keeps it while splits use it and for a week after the last. One holding
+  a smaller guesser fetches the larger one beside it and switches once it is
+  complete (since 0.3.251). Among the ones it holds, it is chosen automatically (the largest held model
   that shares the big model's vocabulary and is at most a quarter of its
   size — or up to half, when it is small, reading at most 2 GB a guess, and
   this computer's graphics card is in use), or named with `inference.draft_model`. A whole model file named in

@@ -930,6 +930,7 @@ histograms. Adding a field means adding it there once, not at each surface.
 - **Decryption fail** → `DIAG: decrypt FAILED — possible AAD mismatch` (manager/tensors.rs)
 - **No standby** → `DIAG: NO standby available for failed segment` (pipeline/distributed.rs) — carries `tried` (every node the segment was attempted on) and `last_failure` since 2026-09-02
 - **Departed peer** → `DIAG: peer departed with forwards outstanding — failed them so the pipeline can fail over` (network/manager/connections.rs) — fires when a peer's connection closed AND its re-dial failed while forwards were still pinned to it; the pipeline then fails over immediately instead of waiting the segment deadline
+- **Chained hop** → `DIAG: chained hop — passing the next hop's failure to the coordinator` (WARN, `request_id`, `coordinator`, `onward`, `reason`; network/manager/mod.rs) — a computer in the middle of a chain whose forward to the next one failed tells the computer that leads the request, so it re-plans now instead of waiting out a deadline. `DIAG: chained hop — the forward it handed on failed, and the coordinator cannot be reached to be told` (WARN, `request_id`, `coordinator`, `reason`) is the same failure with no way to report it: the leader learns of it only when its own deadline passes
 - **Client disconnect** → `DIAG: result_tx receiver dropped` … (router/types.rs: WARN when the client disconnected and an answer was lost, INFO when it disconnected and the request ended without one, DEBUG when dropped without a cancellation)
 - **Channel drop** → `DIAG: LayerResult delivered but pipeline receiver DROPPED` (daemon/dispatch/mod.rs)
 - **No pending channel** → `DIAG: No pending channel for LayerResult — timed out, duplicate, or hedge loser` (daemon/dispatch/mod.rs)
@@ -1068,6 +1069,7 @@ The encrypted tensor path logs at multiple levels:
 | TRACE | `DIAG: seal() success` — nonce counter, ciphertext length | session.rs |
 | TRACE | `DIAG: open() decryption success` — nonce, plaintext length | session.rs |
 | ERROR | `DIAG: seal() encryption failed` — `peer`, `nonce_counter`, `aad_len`, `plaintext_len` | crypto/session.rs |
+| WARN  | `DIAG: the peer's id carries no key to seal for — failing the tensor forward instead of sending it unsealed` — `peer_id`, `request_id`; with encryption on, a forward is sealed or not sent (#285). The failure goes through the same path as a failed seal, so a chained hop tells its coordinator | manager/tensors.rs |
 | ERROR | `DIAG: decrypt FAILED` — AAD mismatch, key mismatch, or corruption | manager/tensors.rs, session.rs |
 | ERROR | `DIAG: open() decryption FAILED` — nonce state, AAD/sealed lengths | session.rs |
 
@@ -1228,8 +1230,11 @@ now means the peer stayed connected and silent. A peer serving one of our pipeli
 | WARN  | `DIAG: KV admission — refusing this prompt before prefill: it would not fit on the device` — the 503 that re-routes; `short_by_mb` is against the reconciled budget | model_worker.rs |
 | INFO  | `DIAG: KV admission up front — this node's segments of the plan cannot hold the prompt; …` — on the COORDINATOR, `layers_that_fit`: every local segment of a split with a peer in it was weighed at once before any peer read the prompt (#263), and the re-plan holds this node to that many layers (`prompt_memory_refused=true` on its candidate line). The WARN above, on a forward with no such line before it, is a late refusal — a plan of this node alone, or a worker not running the model when the pass began | process_pool.rs |
 | INFO  | `DIAG: loading the layers a peer's split will send here, before its first forward` — `model`, `layers`; on a node a split's coordinator asked about a prompt (`PromptAdmissionAsk`) and told "go ahead": the ranges load now, beside the other machines' loads, not when the first forward arrives. Its worker logs `DIAG: model-worker: read a range ahead of its first forward` with `load_ms`. Absent on a cold peer's split = an older build, `SWARMLLM_LOAD_AHEAD=0`, a range already charged, or a part of the range not held here | process_pool.rs, model_worker.rs |
+| INFO  | `DIAG: a peer's split asks this node for more layers than a worker here would` be given memory for … — `model`, `layers` (the range asked for), `layers_that_fit` (the widest run from its start that would load), `needed_mb`, `ram_budget_mb`, `ram_in_use_mb`; on the PEER, answering a coordinator's `PromptAdmissionAsk` with no before any prompt pass (`peer_load_refusal`), a live worker's growth weighed too. Without it the first forward was refused at the spawn, which bars the peer for the whole request | process_pool.rs |
+| INFO  | `DIAG: KV admission up front — a peer refused the prompt before the pass; re-planning` — on the COORDINATOR, `request_id`, `peer`, `layers_that_fit`, `counted_from` (the layer the count starts at), `counted` (since 0.3.256: `Loading` = the widest run from the first asked layer whose weights would load, `Caches` = the asked layers whose conversation memory fits beside what is loaded, `Unsaid` = an older peer). The re-plan holds the peer to that figure in its own unit (gotcha #970) instead of barring it | pipeline/distributed.rs |
 | DEBUG | `DIAG: KV budget reconciled with the device — less room than the load-time figure` — `load_time_budget_mb`, `budget_now_mb`, `live_mb`, `cached_mb`, `device`; fires whenever the device has less room than the loader predicted (another tenant, a snapshot, the llama.cpp context — or, on a processor, the rest of the machine filling up, or this worker's own weights growing when a failover hands it more layers). `device` is `card` or `processor`; the processor arm arrived with gotcha #462. `budget_mb` in the two lines above is this figure. | split/model.rs |
 | WARN  | `DIAG: refusing to grow the KV cache past this worker's budget` — the per-chunk guard, at a growth-quantum boundary, after evicting cached prompts. `memory=Card` or `Host` says WHICH budget refused: a card/processor split is weighed in both, each against only its own layers' caches (#262) | split/executor.rs |
+| INFO  | `DIAG: prefix-cache snapshot kept in host memory — the card has no room for it beside the live cache` — `prompt_tokens`, `beside_live` (positions the card could hold), `in_host_memory`; a card's prompt-opening snapshot copied to the machine's memory because more of it fits there. Never on a processor, nor under `SWARMLLM_PREFIX_CACHE_HOME=card` | model_worker.rs |
 | INFO  | `Card/processor split: the processor-held layers' conversation cache is charged to this machine's memory, …` — at load, `processor_layers`, `budget_mb`, `kv_bytes_per_token` of the split's host side (#262). Absent on a split = a build before #262, whose card budget was charged both devices' caches (a refusal blaming "other conversations" with `live_entries=1`) | split/loader/mod.rs |
 | WARN  | `DIAG: the reply's machine failed mid-stream — continuing it on a fresh route from what the reader has received` — `error`, `continuation` (1 or 2), `tokens_sent`; the reply goes on from the text already streamed, on a fresh plan (#236). The next `remote-generate fast path: request sent` (or pipeline segment lines) names where | router/mod.rs |
 | DEBUG | `Told the peers this request ran on that it is over, so they free its memory` — `peers`, `told`; at the end of a request this node led, one `CancelInference` per peer any attempt ran a segment on (#238). On the peer: `CancelInference: nothing in flight for request` (debug) and the worker drops the cache | router/distributed_exec.rs |
@@ -1516,6 +1521,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 |-------|------|--------|
 | DEBUG | `DIAG: encode_images` | `image_count`, `patch_count`, `elapsed_ms` |
 | INFO  | `DIAG: splice_image_rows` — each image's rows placed at its marker in the prompt; absent on an image request means the picture never reached the model | `markers`, `rows_per_image`, `hidden`, `positions` |
+| INFO  | `DIAG: picture rows attend both ways` — the positions of each picture's rows, for a family whose picture rows see each other in both directions as llama.cpp's do (Gemma 3, since 0.3.245); logged by the computer leading the request, and every segment of a split applies them. Absent on a Gemma 3 picture request = its rows read in order (an older build, or `SWARMLLM_IMAGE_BOTH_WAYS=0`) | `request_id`, `pictures`, `spans` |
 | INFO  | `DIAG: precompute_vision_embeddings local` | `image_count`, `compressed_bytes` |
 | INFO  | `DIAG: precompute_vision_embeddings remote` | `remote_node` |
 
@@ -1580,6 +1586,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | INFO  | `VRAM soft-unload: other programs took graphics memory` | `model`, `total_shards`, `window_shards`, `committed_mb`, `budget_mb` — fires only when our charged card memory exceeds what the card has room for now (#248) |
 | DEBUG | `VRAM soft-unload: other programs took room, but nothing loaded can give it back now` | `committed_mb`, `budget_mb`, `in_use` |
 | DEBUG | `Not fetching a part prune would delete again once it landed` | `model`, `shard`, `holders`, `pressure_after` (gotcha #795) |
+| INFO  | `DIAG: this computer holds all but a few parts of this model — fetching them so it runs here whole` | `model`, `parts` — at most one part in eight missing (none for a model in fewer than eight parts); these parts skip the swarm's replica target, while the budget, disk and metered-connection checks still apply |
 | DEBUG | `DIAG: register_local_shard` | `model`, `shard` |
 | INFO  | `DIAG: check_and_load_model` | `model`, `available_shards`, `missing_shards`, `total_shards`, `ranges`, `ready`, `local_shard_indices` |
 | DEBUG | `Skipping model — insufficient trust for auto-manage` | `model`, `trust` |
@@ -1776,6 +1783,7 @@ that fix firing.
 |-------|------|--------|
 | DEBUG | `DIAG: key rotation tick (eviction)` | `active_sessions`, `stale_evicted` |
 | INFO  | `DIAG: key rotation tick (re-keying)` | `active_sessions`, `rekey_initiated` |
+| INFO  | `DIAG: re-keying sessions no rotation renewed` — sessions that aged out with the peer possibly still using them, re-keyed now instead of at the peer's next failed message (#304) | `aged_out`, `rekey_initiated` |
 
 ### Key Exchange (manager/identify.rs)
 

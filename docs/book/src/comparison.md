@@ -14,20 +14,25 @@ the differences are less obvious.
 | **Can the computers doing the work read your request?** | Yes, in the public swarm — so SwarmLLM has **Private Mode**, which keeps requests on your own devices (and, by default, other SwarmLLM computers on your local network) | Yes ([Petals' own wiki](https://github.com/bigscience-workshop/petals/wiki/Security,-privacy,-and-AI-safety)) | Yes (they are yours) | Yes |
 | **Rewards** | None — no token, no payment, no blockchain | Name on a monitor page | None | TAO token (real money) |
 | **How a model is split** | Pipeline (tensor parallelism exists for fast local networks but is off by default) | Pipeline | Tensor + pipeline | Subnet routing |
-| **Model families verified on real models** | Llama, Qwen 2/3, Qwen 3.5 (dense), Mistral, Gemma 2, Phi-3/4, GLM-4 (checked at every release); Gemma 3 (text) checked against llama.cpp on the 1B and 4B, Gemma 4 (text) on the 12B, the E2B, the E4B and the 26B-A4B mixture of experts. Llama 4 and Qwen 3.5's mixture-of-experts models are checked against llama.cpp on small models only; StarCoder2 and DeepSeek are not supported yet | Llama, Mixtral, Falcon, BLOOM | Llama, Mistral, Qwen, DeepSeek, LLaVA | Any (subnet-defined) |
+| **Model families verified on real models** | Llama, Qwen 2/3, Qwen 3.5 (dense), Mistral, Gemma 2, Phi-3/4, GLM-4 (checked at every release); Gemma 3 checked against llama.cpp on the 1B and 4B, its picture reading against llama.cpp's own, Gemma 4 (text) on the 12B, the E2B, the E4B and the 26B-A4B mixture of experts. Llama 4 and Qwen 3.5's mixture-of-experts models are checked against llama.cpp on small models only; StarCoder2 and DeepSeek are not supported yet | Llama, Mixtral, Falcon, BLOOM | Llama, Mistral, Qwen, DeepSeek, LLaVA | Any (subnet-defined) |
 | **Needs the whole model file?** | No — each computer downloads only its parts | Loads whole blocks | Yes | N/A |
 | **Cloud fallback** | Optional, 12 providers with your own keys | No | No | No |
-| **Images and adapters** | Vision models (LLaVA verified) and per-request LoRA on a model held whole | LoRA | Vision experimental | Subnet-specific |
+| **Images and adapters** | Vision models (LLaVA and Gemma 3 verified) and per-request LoRA on a model held whole | LoRA | Vision experimental | Subnet-specific |
 | **API** | OpenAI + Anthropic + MCP (works as a Claude Code backend) | PyTorch / Transformers | OpenAI + Claude + Ollama | Subnet-defined |
 | **Built-in app** | Dashboard, chat, setup wizard; 21 languages | Basic chatbot | Dashboard | None |
 | **SDKs** | Python and JavaScript clients in the repo (with LangChain and LlamaIndex adapters); not yet on PyPI/npm | Python | — | Python |
 
 ⚠ **Splitting a model is only fast when the computers are close.** Every
 network on this page passes your request through each computer for every word
-of the reply, so the round trip between them is paid once per word. Two
-computers on the same local network are fast; two on different continents
-are slow. SwarmLLM's plan for automatically forming teams of nearby computers
-is in [the regional pipelines plan](https://github.com/enapt/SwarmLLM/blob/main/docs/plans/regional_pipelines.md).
+of the reply, so the round trip between them is paid once per word — or once
+per few words, when a small model guesses ahead and the big one checks the
+guesses together. Two computers on the same local network are fast; two on
+different continents are slow. SwarmLLM forms these teams itself: computers
+near each other share out the parts of a model none of them can hold and plan
+one chain between them, and where too few are near, it plans across computers
+further away. That is how Llama 3.3 70B ran across Thailand, Australia and
+Italy, at 1.3-2 tokens a second. Why distance costs so much, and what is
+planned against it, is in [the regional pipelines plan](https://github.com/enapt/SwarmLLM/blob/main/docs/plans/regional_pipelines.md).
 
 Details on the others change quickly — check each project's own page before
 relying on a row.

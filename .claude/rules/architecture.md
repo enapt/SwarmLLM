@@ -172,9 +172,10 @@ deserialize on the other side. The rule that fixes this:
   advertises the matching bit before sending the new variant — an older node
   advertises `0` and is correctly skipped, so it is never handed something it
   can't decode. `features::supports(advertised, needed)` is the check;
-  `features::ALL` is what this build advertises (set in `health/monitor.rs`).
+  `features::ALL` is what this build implements; `health/monitor.rs` advertises
+  it plus the bits only its settings make true.
   The Phase-1 relay (`features::RELAY`) is the reference example: see
-  `network/manager/relay.rs::target_supports_relay`.
+  `network/manager/relay.rs::target_speaks`.
 - **`PROTOCOL_VERSION`** (`swarmllm_types`) is the wire epoch — bump ONLY on a
   genuinely breaking change (which the first rule forbids without a fallback),
   NOT for additive feature bits. Adding a `features` bit does not bump it.

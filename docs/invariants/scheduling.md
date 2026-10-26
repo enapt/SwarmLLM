@@ -4963,7 +4963,7 @@ round costs one per check.
   tree's start (`LayerForward::draft_tree_from`, trailer `0x11`), in the order sent; every forward
   carries the whole tree's shape (`0x10`), so a row reads the context and its own ancestors and a
   lost branch stays in the caches, read by nothing. This node's `FlowTree` and the drafter's
-  worker (`SplitModel::grow_flow`, a `FlowSession` per attempt) change the rows only by `FlowOp`s
+  worker (`SplitModel::grow_flow`, a `FlowGrowth` per attempt, kept in `model_worker`'s `FlowSessions`) change the rows only by `FlowOp`s
   (Push — a miss's row —, Copy — a copied run's row —, Advance, Rebase), applied alike, and by the
   drafter's proposals: a row of its tree the moment it is made (its next level reads it), pushed
   here in its order, no op.

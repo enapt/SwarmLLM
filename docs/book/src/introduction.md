@@ -7,7 +7,7 @@ This site is the full user guide and reference. For source code, releases, and i
 ## What you can do with it
 
 - **Chat with AI on your own computer** — start SwarmLLM and it opens in your browser at `localhost:8800`, shows which models fit your computer, and downloads the one you pick.
-- **Use models too big for your computer** — computers in the swarm each hold some parts of a model and work through your question together. It is fastest when they are close to each other; across continents it works, but slowly. Today the swarm runs medium-sized models; giant ones are the goal. No computer ever needs to download the whole model.
+- **Use models too big for your computer** — computers in the swarm each hold some parts of a model and work through your question together. It is fastest when they are close to each other; across continents it works, but slowly. A 70-billion-parameter model (Llama 3.3 70B) has run this way across four home computers in Thailand, Australia and Italy, none of which could hold it alone — at 1.3-2 tokens a second, because they are continents apart. Fast giant models are the goal. No computer ever needs to download the whole model.
 - **Link your own devices** — put your laptop, desktop and home server into one private group and use them together.
 - **Plug it into the apps you already use** — an OpenAI-compatible API, the Anthropic Messages API (it works as a Claude Code backend), an MCP server with seven tools, and optional routing to 12 cloud providers with your own keys.
 - **Privacy, honestly** — connections between computers are encrypted, but in the public swarm the computers doing the work see what they process, so don't send anything sensitive. On your own computer, or with Private Mode, your requests stay on your devices. [Details](./architecture/security.md).
@@ -27,7 +27,7 @@ Speed depends on your hardware and the model; current measurements and the setti
 
 ## Status
 
-An early (alpha) version that improves every week and updates itself. Splitting a model across computers works, but is only fast when those computers are close together. Every change runs through thousands of automated tests before it ships. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+An early (alpha) version that improves every week and updates itself. Splitting a model across computers works: computers near each other team up for a model none of them can hold, and where too few are near, the swarm teams up computers further away. It is only fast when those computers are close together. Every change runs through thousands of automated tests before it ships. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 
 ## Platform support
 

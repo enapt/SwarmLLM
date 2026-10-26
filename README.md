@@ -17,11 +17,14 @@ the work.
 
 **No account · No subscription · No ads · No crypto · Open source · Updates itself**
 
-**Today the swarm runs medium-sized models. The goal is giant ones — free for
-everyone.** Bigger AI models give noticeably smarter answers, but the biggest
-open ones (70 billion "parameters" and up) need equipment normally found only
-in data centres. A typical home computer can't hold one. Ten or so of them,
-each holding a part, can — and every computer that joins brings that closer.
+**A giant model has now run on the swarm.** Bigger AI models give noticeably
+smarter answers, but the biggest open ones (70 billion "parameters" and up)
+need equipment normally found only in data centres — no home computer can hold
+one. In October 2026, Llama 3.3 70B answered across four ordinary computers in
+Thailand, Australia and Italy, each holding a part of it. It is slow so far —
+about a word a second — because those computers are continents apart. **The
+goal now is giant models that are fast, free for everyone**, and every computer
+that joins near another brings that closer.
 
 **[Download](#get-started)** · **[Join the Discord](https://discord.gg/nq9be3u828)** — find people near you to team up with · **[For developers](#for-developers)**
 
@@ -97,7 +100,8 @@ are in the
 - **Use models too big for your computer.** Computers in the swarm each hold a
   part of a bigger model and work through your question together — fastest
   when they're close to each other, like your own laptop and desktop, or
-  people in the same region.
+  people in the same region. A 70-billion-parameter model has run this way
+  across three countries.
 - **Help others with what you can spare.** While SwarmLLM is open, your
   computer keeps parts of popular models and helps answer other people's
   questions — like seeding a torrent. There's no payment and no token; what
@@ -136,11 +140,11 @@ idea, applied to running AI instead of sharing files.)
 
 ## Help build the swarm
 
-How big a model the swarm can run is set by who is online. A giant model needs
-about ten ordinary computers' worth of spare room — and it only answers
-quickly when those computers are **near each other**, because your question
-passes through every one of them for every word of the reply. A team spread
-across continents works, but slowly.
+How big a model the swarm can run is set by who is online. The 70B took the
+spare room of four computers — and a model that size only answers quickly when
+those computers are **near each other**, because your question passes through
+every one of them for every word of the reply. A team spread across continents
+works — the 70B showed it — but slowly.
 
 So the swarm needs two things: **more computers, and enough of them close
 together.** No amount of code can do that part — only people can.
@@ -154,8 +158,10 @@ together.** No amount of code can do that part — only people can.
   team up.
 - **Star this page** so others can find it.
 
-**Next up:** automatically forming teams from nearby computers — the step
-that turns "enough people" into "fast giant models".
+**Already automatic:** computers near each other share out a big model's parts
+and run it together, and where there aren't enough of them nearby, the swarm
+teams up computers further away — that is how the 70B ran. **Next up:** making
+those teams fast, with the goal of answering faster than one computer alone.
 
 ## Is it private?
 
@@ -243,8 +249,9 @@ unpacked and the folder where it keeps models: `%APPDATA%\swarmllm` on Windows,
 on Linux.
 
 **Which models can I run?** Popular open models — Llama, Qwen, Mistral, Gemma,
-Phi, GLM and more. The app shows which ones your computer, or the swarm, can
-actually run.
+Phi, GLM and more, from small ones that run on a laptop up to a
+70-billion-parameter Llama shared across the swarm. The app shows which ones
+your computer, or the swarm, can actually run.
 
 ## For developers
 
