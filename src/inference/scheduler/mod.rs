@@ -306,13 +306,24 @@ struct NodeCandidate {
     processor_tokens_per_sec: f32,
     /// This node's conversation memory refused this request's prompt
     /// (`ModelProcessPool::admit_prompt`, #263), or a PEER's did when asked
-    /// before the pass (`peer_layers_fitting_for_request`, #252 (b)) — its
+    /// before the pass (`peer_prompt_fits_for_request`, #252 (b)) — its
     /// bounds then already hold the layers it said fit. Every layer a segment
     /// runs needs the prompt's cache, held weights or not, so while set
-    /// [`Self::capacity_charge`] is a range's WIDTH and `max_hostable_layers`
-    /// the most layers this node may run in all — never only the new ones,
+    /// [`Self::capacity_charge`] charges every layer a range runs — its WIDTH,
+    /// plus, for a peer, its own weights' excess (#353; never below the width
+    /// where the count was of caches, [`Self::prompt_fit_counts_caches`]) —
+    /// and `max_hostable_layers` is the most layers this node may run in all — never only the new ones,
     /// or the re-plan rebuilds the plan whose layers it already held.
     prompt_memory_refused: bool,
+    /// A PEER that refused this prompt said how many layers' CACHES fit, or
+    /// did not say which count it gave (`swarmllm_types::LayersCounted`): a
+    /// limit on how MANY layers it runs, wherever they are, every layer
+    /// costing the prompt the same. Its range is then never charged below
+    /// its width — a lighter range's weights buy its caches no room — while
+    /// a heavier one still pays its weights ([`Self::capacity_charge`],
+    /// [`Self::width_in_bound`]). Weighed by weight alone, 45 of a 70B's
+    /// lightest layers charge 42.4 (2026-10-26).
+    prompt_fit_counts_caches: bool,
     /// This node's loader or conversation memory has refused this request
     /// (`SharedState::local_memory_refused_for_request`), or a peer's
     /// conversation memory did when asked before the pass (#252 (b)). Every
@@ -662,22 +673,39 @@ impl NodeCandidate {
             }
             None => f64::from(charged),
         };
-        base + self
+        let excess = self
             .range_weights
             .as_ref()
-            .map_or(0.0, |w| w.excess_layers(range, &self.held_ranges))
+            .map_or(0.0, |w| w.excess_layers(range, &self.held_ranges));
+        if self.charged_at_least_its_width() {
+            base + excess.max(0.0)
+        } else {
+            base + excess
+        }
     }
 
     /// `range`'s width in layers of this peer's TOTAL bounds (the ones a
     /// count of every layer it is given is held to: `standby_has_room`,
     /// `plan_exceeds_offered_memory`): the width plus what its own weights
-    /// cost beyond the average ([`process_pool::RangeWeights::excess_layers`](crate::inference::process_pool::RangeWeights::excess_layers), as if it
-    /// held nothing), rounded up. The width where nothing is known.
+    /// cost beyond the average ([`process_pool::RangeWeights::excess_layers`](crate::inference::process_pool::RangeWeights::excess_layers),
+    /// beside the ranges it holds — its total counts each of their layers as
+    /// one, tables paid), rounded up. The width where nothing is known.
     fn width_in_bound(&self, range: (u32, u32)) -> u32 {
-        self.range_weights.as_ref().map_or_else(
-            || range.1.saturating_sub(range.0),
-            |w| w.width_in_bound(range),
-        )
+        let width = range.1.saturating_sub(range.0);
+        self.range_weights.as_ref().map_or(width, |w| {
+            let weighed = w.width_in_bound(range, &self.held_ranges);
+            if self.charged_at_least_its_width() {
+                weighed.max(width)
+            } else {
+                weighed
+            }
+        })
+    }
+
+    /// Whether a range is never charged below its width: this request's
+    /// prompt was refused for its CACHES ([`Self::prompt_fit_counts_caches`]).
+    fn charged_at_least_its_width(&self) -> bool {
+        self.prompt_memory_refused && self.prompt_fit_counts_caches
     }
 
     /// Where a run from `start` may end, at most `end`, for its
@@ -5212,16 +5240,37 @@ impl PipelineScheduler {
                     .map(|layers| layers.min(manifest.num_layers))
             });
             // A peer that refused this prompt when asked before the pass holds
-            // at most the layers it said its conversation memory fits, held or
-            // not, on every rung — the relaxed ones read the ceiling, so the
-            // verdict goes there (#252 (b); this node's own is
-            // `local_layers_fitting_for_request`, above).
-            let peer_prompt_fit = if is_local {
-                None
+            // at most the layers it said fit, held or not, on every rung — the
+            // relaxed ones read the ceiling, so the verdict goes there (#252
+            // (b); this node's own is `local_layers_fitting_for_request`,
+            // above). Each count is weighed in its own unit, and the tightest
+            // holds (`PeerPromptFit`): layers that LOAD are real layers from
+            // the start asked for, held to the charge of that run
+            // (`ceiling_of_a_fit`); layers whose CACHES fit are any layers,
+            // held to the count with no range charged below its width
+            // (`prompt_fit_counts_caches`); a count from an older peer, both.
+            let peer_prompt_fits = if is_local {
+                Vec::new()
             } else {
                 self.shared_state
-                    .peer_layers_fitting_for_request(request_id, &node_id)
+                    .peer_prompt_fits_for_request(request_id, &node_id)
             };
+            let prompt_fit_counts_caches = peer_prompt_fits
+                .iter()
+                .any(|fit| fit.counted != swarmllm_types::LayersCounted::Loading);
+            let peer_prompt_fit = peer_prompt_fits
+                .iter()
+                .map(|fit| {
+                    let weighed = range_weights.as_ref().map_or(fit.layers, |w| {
+                        w.ceiling_of_a_fit(fit.from, fit.layers, &held_ranges)
+                    });
+                    match fit.counted {
+                        swarmllm_types::LayersCounted::Loading => weighed,
+                        swarmllm_types::LayersCounted::Caches => fit.layers,
+                        swarmllm_types::LayersCounted::Unsaid => weighed.min(fit.layers),
+                    }
+                })
+                .min();
             let max_hostable_layers_at_ceiling = match peer_prompt_fit {
                 Some(fit) => Some(max_hostable_layers_at_ceiling.map_or(fit, |c| c.min(fit))),
                 None => max_hostable_layers_at_ceiling,
@@ -5366,6 +5415,7 @@ impl PipelineScheduler {
                 fresh_run_layers,
                 card_layers,
                 processor_tokens_per_sec,
+                prompt_fit_counts_caches,
                 prompt_memory_refused: peer_prompt_fit.is_some()
                     || is_local
                         && self
@@ -5457,8 +5507,11 @@ impl PipelineScheduler {
                 // processor, and that processor's speed (`card_layers`).
                 card_layers = ?c.card_layers,
                 processor_tokens_per_sec = c.processor_tokens_per_sec,
-                // This node only: the bound above is then ALL its layers (#263).
+                // The bound above is then ALL its layers (#263, #252 (b)).
                 prompt_memory_refused = c.prompt_memory_refused,
+                // A peer's refusal counted its caches, or did not say: no range
+                // is then charged below its width.
+                prompt_fit_counts_caches = c.prompt_fit_counts_caches,
                 // Beside the bound, because the bound is room for NEW layers:
                 // `Some(0)` next to held ranges is a node that can still run
                 // the split it is already holding (#95), not one with no room.

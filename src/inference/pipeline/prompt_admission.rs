@@ -84,6 +84,11 @@ pub(super) struct PeerRefusal {
     /// bounded and with its control characters blanked ([`peer_words`]).
     pub message: String,
     pub layers_that_fit: u32,
+    /// The first layer it was asked for, which the asked node counts
+    /// `layers_that_fit` from (`daemon::state::PeerPromptFit`).
+    pub from: u32,
+    /// What it counted.
+    pub counted: swarmllm_types::LayersCounted,
 }
 
 /// The most of a peer's refusal kept: an honest one is the itemised memory
@@ -164,6 +169,9 @@ pub(super) async fn ask_peers(
             dashmap::mapref::entry::Entry::Occupied(_) => continue,
         }
         waiters.keys.push(key);
+        let Some(&(from, _)) = layer_ranges.first() else {
+            continue;
+        };
         let message = SwarmMessage::PromptAdmissionAsk(PromptAdmissionAsk {
             request_id,
             ask_id,
@@ -187,7 +195,7 @@ pub(super) async fn ask_peers(
                 .get(&node_id)
                 .and_then(|p| p.round_trip_ms()),
         );
-        pending.push((node_id, rx));
+        pending.push((node_id, from, rx));
     }
     if pending.is_empty() {
         return Vec::new();
@@ -197,8 +205,8 @@ pub(super) async fn ask_peers(
     let asked_at = tokio::time::Instant::now();
     let deadline = asked_at + wait;
     let all_answers =
-        futures::future::join_all(pending.into_iter().map(|(node_id, rx)| async move {
-            (node_id, tokio::time::timeout_at(deadline, rx).await)
+        futures::future::join_all(pending.into_iter().map(|(node_id, from, rx)| async move {
+            (node_id, from, tokio::time::timeout_at(deadline, rx).await)
         }));
     let answers =
         match crate::inference::cancel::unless_cancelled(async { Ok(all_answers.await) }, cancel)
@@ -209,18 +217,21 @@ pub(super) async fn ask_peers(
         };
     let answered = answers
         .iter()
-        .filter(|(_, a)| matches!(a, Ok(Ok(_))))
+        .filter(|(_, _, a)| matches!(a, Ok(Ok(_))))
         .count();
     let refusals: Vec<PeerRefusal> = answers
         .into_iter()
-        .filter_map(|(node_id, answer)| match answer {
+        .filter_map(|(node_id, from, answer)| match answer {
             Ok(Ok(PromptAdmissionVerdict::Refused {
                 message,
                 layers_that_fit,
+                counted,
             })) => Some(PeerRefusal {
                 node_id,
                 message: peer_words(&message),
                 layers_that_fit,
+                from,
+                counted,
             }),
             _ => None,
         })

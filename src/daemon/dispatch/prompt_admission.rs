@@ -68,6 +68,7 @@ pub(super) fn on_ask(
         let verdict = PromptAdmissionVerdict::Refused {
             message: super::metered_refusal(),
             layers_that_fit: 0,
+            counted: swarmllm_types::LayersCounted::Loading,
         };
         answer_unweighed(&network_tx, asker, asker_peer_bytes, &ask, verdict);
         return;
@@ -90,10 +91,12 @@ pub(super) fn on_ask(
             PeerPromptWeight::DoesNotFit {
                 message,
                 layers_that_fit,
+                counted,
             } => PromptAdmissionVerdict::Refused {
                 // The words a forward's own refusal would have carried.
                 message: super::layer_forward::sanitize_peer_facing_error(&message),
                 layers_that_fit,
+                counted,
             },
         };
         let load_ahead = matches!(verdict, PromptAdmissionVerdict::Proceed)

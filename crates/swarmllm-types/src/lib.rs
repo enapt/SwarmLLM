@@ -41,12 +41,12 @@ pub use model::{
 };
 pub use network::{
     build_tag_from_hash, build_tags_conflict, AuthenticatedMessage, CancelInference, DownloadState,
-    EphemeralKeyExchange, HfSourceGossip, ManifestDigest, ManifestPull, ManifestVersion,
-    MessageTransport, ModelDemandGossip, NetworkCommand, PoolModelAvailability, PrefixBlockEntry,
-    PrefixCacheAnnounce, PromptAdmissionAnswer, PromptAdmissionAsk, PromptAdmissionVerdict,
-    PruneEvent, RebalanceEvent, RegionShardSummary, RelayedEnvelope, RequesterGuesses,
-    ResendTokens, SessionKeyConfirm, ShardAnnounce, ShardDownloadProgress, ShardRequest,
-    ShardResponse, SwarmMessage, WishlistAnnouncement, WishlistAnnouncementEntry,
+    EphemeralKeyExchange, HfSourceGossip, LayersCounted, ManifestDigest, ManifestPull,
+    ManifestVersion, MessageTransport, ModelDemandGossip, NetworkCommand, PoolModelAvailability,
+    PrefixBlockEntry, PrefixCacheAnnounce, PromptAdmissionAnswer, PromptAdmissionAsk,
+    PromptAdmissionVerdict, PruneEvent, RebalanceEvent, RegionShardSummary, RelayedEnvelope,
+    RequesterGuesses, ResendTokens, SessionKeyConfirm, ShardAnnounce, ShardDownloadProgress,
+    ShardRequest, ShardResponse, SwarmMessage, WishlistAnnouncement, WishlistAnnouncementEntry,
     BUILD_TAG_UNKNOWN, MAX_REQUESTER_GUESSES,
 };
 pub use node::{

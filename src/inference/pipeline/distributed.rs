@@ -976,7 +976,11 @@ impl PipelineExecutor {
             self.shared_state.note_peer_prompt_refusal(
                 request_id,
                 &refusal.node_id,
-                refusal.layers_that_fit,
+                crate::daemon::state::PeerPromptFit {
+                    from: refusal.from,
+                    layers: refusal.layers_that_fit,
+                    counted: refusal.counted,
+                },
             );
         }
         ours?;
@@ -987,6 +991,8 @@ impl PipelineExecutor {
             %request_id,
             peer = %refusal.node_id,
             layers_that_fit = refusal.layers_that_fit,
+            counted_from = refusal.from,
+            counted = ?refusal.counted,
             "DIAG: KV admission up front — a peer refused the prompt before the pass; re-planning"
         );
         // One class whatever the peer wrote: "this holder cannot serve", which

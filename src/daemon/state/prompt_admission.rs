@@ -22,6 +22,7 @@ use dashmap::DashMap;
 
 use super::SharedState;
 use crate::types::NodeId;
+use swarmllm_types::LayersCounted;
 
 /// The questions one peer may have weighed here in [`ASK_WINDOW`]. An honest
 /// coordinator asks once per split request it sends through this node (and
@@ -94,43 +95,84 @@ impl AskBudget {
     }
 }
 
+/// What a peer said fits when it refused a request before the pass:
+/// `layers` of the model, and what kind of count that is (`counted`).
+///
+/// - [`LayersCounted::Loading`]: the widest run from `from`, the first layer
+///   it was asked for, whose weights would load
+///   (`ModelProcessPool::peer_load_refusal`) — REAL layers there.
+/// - [`LayersCounted::Caches`]: the asked layers whose caches fit
+///   (`model_worker::layers_that_fit`) — any layers, each costing the same.
+/// - [`LayersCounted::Unsaid`]: a peer that predates the field; either.
+///
+/// **Why it is kept whole.** A peer's bounds count AVERAGE layers, and a
+/// range is weighed as what it loads (#353). Read bare, a count of layers
+/// that load was a bound in the wrong unit: an Australian peer refused
+/// [16..66) of Llama 3.3 70B saying 45 would load — 45 of the model's lighter
+/// middle layers, 21,585 MB — and the re-plan gave it [28..75), 22,740 MB,
+/// whose weighed charge (44.9) was under 45. Refused again at the same spot,
+/// and the request failed (2026-10-26, v0.3.255). The scheduler weighs each
+/// kind in its own unit (`NodeCandidate::prompt_fit_counts_caches`,
+/// `RangeWeights::ceiling_of_a_fit`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerPromptFit {
+    pub from: u32,
+    pub layers: u32,
+    pub counted: LayersCounted,
+}
+
+/// The verdicts kept per peer and request. A request is re-planned at most
+/// a few times (`router::MAX_REPLANS`), each asking a peer once; past this the
+/// loosest count goes.
+const MOST_FITS_KEPT: usize = 8;
+
 impl SharedState {
-    /// A peer refused this request's prompt when asked before the pass: of the
-    /// layers asked of it, its conversation memory holds `layers_that_fit`. The
-    /// re-plan holds that peer's TOTAL layers to it — its weights were never
-    /// the shortfall, its caches were — as #263 holds this node
-    /// (`local_layers_fitting_for_request`). The fewest kept per peer, so a
-    /// second refusal can only tighten it. Released with the request
+    /// A peer refused this request's prompt when asked before the pass, and
+    /// said what fits ([`PeerPromptFit`]). The re-plan holds that peer's TOTAL
+    /// layers to it, as #263 holds this node
+    /// (`local_layers_fitting_for_request`). One verdict per start and kind,
+    /// the fewest layers kept, so a second refusal can only tighten it;
+    /// verdicts counted otherwise are all kept, since which is tighter depends
+    /// on the weights where each was counted. Released with the request
     /// ([`SharedState::release_request_state`]).
     pub fn note_peer_prompt_refusal(
         &self,
         request_id: uuid::Uuid,
         peer: &NodeId,
-        layers_that_fit: u32,
+        said: PeerPromptFit,
     ) {
-        self.peer_prompt_refusals
-            .entry(request_id)
-            .or_default()
-            .entry(peer.clone())
-            .and_modify(|kept| *kept = (*kept).min(layers_that_fit))
-            .or_insert(layers_that_fit);
+        let mut by_peer = self.peer_prompt_refusals.entry(request_id).or_default();
+        let fits = by_peer.entry(peer.clone()).or_default();
+        match fits
+            .iter_mut()
+            .find(|fit| fit.from == said.from && fit.counted == said.counted)
+        {
+            Some(fit) => fit.layers = fit.layers.min(said.layers),
+            None => fits.push(said),
+        }
+        if fits.len() > MOST_FITS_KEPT {
+            if let Some(loosest) = (0..fits.len()).max_by_key(|&i| fits[i].layers) {
+                fits.swap_remove(loosest);
+            }
+        }
     }
 
-    /// The most layers of this request `peer` said its conversation memory
-    /// holds, if it refused the prompt when asked.
-    pub fn peer_layers_fitting_for_request(
+    /// What `peer` said fits of this request, if it refused the prompt when
+    /// asked — every verdict kept.
+    pub fn peer_prompt_fits_for_request(
         &self,
         request_id: uuid::Uuid,
         peer: &NodeId,
-    ) -> Option<u32> {
+    ) -> Vec<PeerPromptFit> {
         self.peer_prompt_refusals
             .get(&request_id)
-            .and_then(|by_peer| by_peer.get(peer).copied())
+            .and_then(|by_peer| by_peer.get(peer).cloned())
+            .unwrap_or_default()
     }
 }
 
 /// What each peer said, per request (the coordinator's side).
-pub(crate) type PeerPromptRefusals = DashMap<uuid::Uuid, HashMap<NodeId, u32>>;
+pub(crate) type PeerPromptRefusals = DashMap<uuid::Uuid, HashMap<NodeId, Vec<PeerPromptFit>>>;
 
 #[cfg(test)]
 mod tests {

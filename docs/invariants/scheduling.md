@@ -3459,8 +3459,8 @@ the table; `segment_weights` now reads it too) — less `layers × average`, ove
 one layer's price (average + this prompt's KV). About +1.4 layers for a 70B
 tail, +0.5 for its first range, −0.03 a layer in its middle, 0 for the whole
 model. It enters the ONE charge the search compares with a bound
-(`NodeCandidate::capacity_charge`), and `width_in_bound` (cold-shaped, rounded
-up) every reader of a TOTAL: parallax's capacity split points (a tail's point
+(`NodeCandidate::capacity_charge`), and `width_in_bound` (rounded up, beside the
+ranges the peer holds — see the second correction below) every reader of a TOTAL: parallax's capacity split points (a tail's point
 moves in by its head, or the range that fits is not even a vertex), greedy's
 run end (`furthest_end_in_bound`), both standby checks,
 `plan_exceeds_offered_memory`; `record_peer_commitments` books the real bytes.
@@ -3483,9 +3483,30 @@ by its width; a new bound stays in average layers or changes `RangeWeights`'
 average with it. A/B `SWARMLLM_PEER_RANGE_WEIGHTS=average` (`ModelWeights::for_planning`).
 **Still at the average**: carrying's max-flow count and the ceilings' sum a
 chain is judged carriable by (a layer and a half of slack in a count that only
-decides whether to plan); a refusal's `layers_that_fit`, measured from the
-asked range's start (a middle run), on which the re-plan weighs the head —
-the cautious side.
+decides whether to plan).
+
+⚠ **Corrected 2026-10-26.** This section first said a refusal's
+`layers_that_fit` stayed at the average "on the cautious side". It was not
+cautious: that count is of REAL layers, and once the charge was weighed a peer
+that said 45 light layers would load was given 47 heavier ones under it — the
+v0.3.255 field check failed on exactly that. § "A peer's count of what fits is
+weighed in its own unit" below.
+
+⚠ **Corrected 2026-10-26, second** (pre-release sweep of v0.3.256, code reading).
+`width_in_bound` was first written cold-shaped — `excess_layers(range, &[])`, as if
+the peer held nothing. A cold peer's total is `usable / full_price`, so that was
+right for it; a WARM peer's is `resident + extra` (`PeerResidency::Layers`), each
+loaded layer counted as ONE with its tables already paid. A peer holding 73-80 of
+the 70B with no room to spare was charged 9 of its 7 for the tail it had loaded:
+no standby from it (`find_standbys`), its plan read as past its offer
+(`plan_exceeds_offered_memory` — a later refusal then reported `SwarmShortOfMemory`,
+"retrying cannot help", for `HoldersDeclined`), greedy's run cut at 79, and
+parallax's first-pass points cut inside a held range. `RangeWeights::width_in_bound`
+now takes the held ranges as a REQUIRED argument: the candidate passes its own
+(`NodeCandidate::held_ranges`, from the same `ResidentModelLayers` report as
+`resident`), the chain planner `&[]` (a ceiling is cold). Test
+`a_range_a_peer_has_loaded_costs_its_width_in_its_total` (red with `&[]`: 9, false,
+true, 79 for 7, true, false, 80).
 
 ## Each rung cuts its split points at the bound it applies (2026-10-26, #350)
 
@@ -3515,6 +3536,63 @@ exactly its room. Where the two sets together are past `MAX_SUBRANGE_VERTICES`,
 this rung's alone are tried before the declared boundaries. Test:
 `a_pass_holding_a_peer_to_its_ceiling_can_cut_its_range_there`, the request's
 four candidates, red before the change with the live log's error.
+
+## A peer's count of what fits is weighed in its own unit (2026-10-26)
+
+**What it replaced.** A peer refusing a request up front (#252 (b), #345)
+says how many layers fit, and the re-plan held its ceiling to that count. Two
+counts reach that one figure: the widest run from the first asked layer whose
+weights would LOAD (`peer_load_refusal`, by bisection over real layers), and
+the share of the asked layers whose CACHES fit (`model_worker::layers_that_fit`,
+every layer costing the prompt the same). Both were read as a bare number of
+average layers — right while every bound charged a range its width, wrong once
+#353 weighed a range as what it loads, the same day. The v0.3.255 field check
+(live node, 07:37-07:43Z, three novel prompts to Llama 3.3 70B over TH/TH/AU/IT):
+the AU node refused [16..66) — 25,312 MB — saying 45 would load, which were
+[16..61), 21,585 MB of the model's lighter layers (460-484 MB). The re-plan
+gave it [28..75): 47 layers of 484 MB, 22,740 MB, weighed 44.86 average layers
+at the file's 506.9 — under 45. AU refused again ("needs about 24012 MB …
+allows 24000 MB") and all three requests failed `HoldersDeclined`. Read off
+the model's header (`gguf_weights.py` over `gguf_header.bin`: layers
+460.1-518.9 MB, head 822.0, table 563.6).
+
+**How others do it.** llama.cpp's `common/fit.cpp` never converts: it measures
+each device's memory for the exact layers it would place, per layer. Here the
+asked node did measure the exact run; the coordinator lost it by keeping only
+its length. A count is a measurement of a SPECIFIC run, and stays one.
+
+**The rule.** The answer says which count it is —
+`PromptAdmissionVerdict::Refused::counted` (`swarmllm_types::LayersCounted`:
+`Loading`, `Caches`, `Unsaid` from a node that predates it; a `#[serde(default)]`
+JSON field an older coordinator ignores, pinned both ways by
+`a_refusals_count_kind_crosses_between_old_and_new_nodes`) — and the
+coordinator keeps it whole with the start it was counted from
+(`daemon::state::PeerPromptFit`, every verdict per start and kind, the fewest
+layers each). `gather_candidates` weighs each in its own unit: `Loading` →
+`RangeWeights::ceiling_of_a_fit` (the charge of THAT run beside what the peer
+holds, rounded down, so anything admitted weighs no more than what loaded);
+`Caches` → the bare count, with the candidate never charging a range below its
+width (`NodeCandidate::prompt_fit_counts_caches`, in `capacity_charge` and
+`width_in_bound`: a lighter range's weights buy its caches no room); `Unsaid` →
+both. The tightest verdict holds. Without a header the bare count is used, as
+before #353.
+
+**Measured** (unit, the 70B's real per-layer sizes): the fit [16..61) is held to
+42; [28..75) (44.9) is out where 45 admitted it; every range the bound admits
+weighs at most the 21,492 MB that loaded (an exhaustive sweep of all 3,240
+ranges); a 5-layer tail with its head is 6
+(`a_fit_counted_in_real_layers_is_held_to_the_charge_of_that_run`). Through
+`gather_candidates` on an uneven 32-layer model: a `Loading` 18 from layer 8 →
+15, with the null control that 18 admits the heavier [12..30); `Caches` 18
+refuses 19 light layers the weights alone would admit; `Unsaid` both
+(`a_peers_count_of_what_fits_is_weighed_in_its_own_unit`).
+
+**What a change must keep.** A number a peer measured is kept with what it was
+measured OVER. When a bound's unit changes, every figure compared with it is
+re-read in the new unit — the refusal count was the one #353's sweep of readers
+missed, because it entered as a ceiling, not as a reader (gotcha #970). A new
+`LayersCounted` variant would make an older coordinator fail to decode the whole
+answer (read as "go ahead"): gate it on a feature bit.
 
 **The figure it was reported with.** The refusal read "room for about 67 of
 its 80 layers" — `SwarmShortOfMemory`, "retrying cannot help" — because

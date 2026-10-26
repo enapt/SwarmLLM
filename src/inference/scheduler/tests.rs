@@ -888,6 +888,7 @@ fn simple_candidate(byte: u8, ranges: Vec<(u32, u32)>) -> NodeCandidate {
         processor_tokens_per_sec: 0.0,
         range_weights: None,
         prompt_memory_refused: false,
+        prompt_fit_counts_caches: false,
         memory_refused_this_request: false,
         goodput_bytes_per_sec: None,
     }
@@ -1258,6 +1259,7 @@ fn greedy_assign_multi_range_candidate() {
             processor_tokens_per_sec: 0.0,
             range_weights: None,
             prompt_memory_refused: false,
+            prompt_fit_counts_caches: false,
             memory_refused_this_request: false,
             goodput_bytes_per_sec: None,
         },
@@ -1303,6 +1305,7 @@ fn greedy_assign_multi_range_candidate() {
             processor_tokens_per_sec: 0.0,
             range_weights: None,
             prompt_memory_refused: false,
+            prompt_fit_counts_caches: false,
             memory_refused_this_request: false,
             goodput_bytes_per_sec: None,
         },
@@ -2343,6 +2346,7 @@ fn cost_cand(
         processor_tokens_per_sec: 0.0,
         range_weights: None,
         prompt_memory_refused: false,
+        prompt_fit_counts_caches: false,
         memory_refused_this_request: false,
         goodput_bytes_per_sec: None,
     }
@@ -3752,6 +3756,7 @@ fn one_node_is_not_made_standby_for_more_layers_than_it_can_run() {
         processor_tokens_per_sec: 0.0,
         range_weights: None,
         prompt_memory_refused: false,
+        prompt_fit_counts_caches: false,
         memory_refused_this_request: false,
         goodput_bytes_per_sec: None,
     };
@@ -3860,6 +3865,7 @@ fn a_node_with_room_still_stands_in_for_every_segment() {
         processor_tokens_per_sec: 0.0,
         range_weights: None,
         prompt_memory_refused: false,
+        prompt_fit_counts_caches: false,
         memory_refused_this_request: false,
         goodput_bytes_per_sec: None,
     };
@@ -3968,6 +3974,7 @@ fn a_standby_is_chosen_by_cost_not_by_ping() {
         processor_tokens_per_sec: 0.0,
         range_weights: None,
         prompt_memory_refused: false,
+        prompt_fit_counts_caches: false,
         memory_refused_this_request: false,
         goodput_bytes_per_sec: None,
     };
@@ -8494,8 +8501,13 @@ fn a_peer_that_refused_the_prompt_up_front_is_held_to_the_layers_it_said_fit() {
         "{unrefused:?}"
     );
 
-    state.note_peer_prompt_refusal(rid, &b, 12);
-    state.note_peer_prompt_refusal(rid, &c, 20);
+    let caches = |from, layers| crate::daemon::state::PeerPromptFit {
+        from,
+        layers,
+        counted: swarmllm_types::LayersCounted::Caches,
+    };
+    state.note_peer_prompt_refusal(rid, &b, caches(0, 12));
+    state.note_peer_prompt_refusal(rid, &c, caches(0, 20));
     let after = gather(rid);
     for (node, fit) in [(&b, 12), (&c, 20)] {
         let x = of(&after, node);
@@ -8515,13 +8527,175 @@ fn a_peer_that_refused_the_prompt_up_front_is_held_to_the_layers_it_said_fit() {
 
     // Another request is untouched; a looser second verdict does not loosen.
     assert!(!of(&gather(uuid::Uuid::new_v4()), &b).prompt_memory_refused);
-    state.note_peer_prompt_refusal(rid, &b, 25);
-    assert_eq!(state.peer_layers_fitting_for_request(rid, &b), Some(12));
-    state.note_peer_prompt_refusal(rid, &b, 5);
-    assert_eq!(state.peer_layers_fitting_for_request(rid, &b), Some(5));
+    state.note_peer_prompt_refusal(rid, &b, caches(0, 25));
+    assert_eq!(
+        state.peer_prompt_fits_for_request(rid, &b),
+        vec![caches(0, 12)]
+    );
+    state.note_peer_prompt_refusal(rid, &b, caches(0, 5));
+    assert_eq!(
+        state.peer_prompt_fits_for_request(rid, &b),
+        vec![caches(0, 5)]
+    );
+    // A count from another start, or of another kind, is kept beside it:
+    // which is tighter depends on the weights where each was counted.
+    let loading = crate::daemon::state::PeerPromptFit {
+        counted: swarmllm_types::LayersCounted::Loading,
+        ..caches(0, 9)
+    };
+    state.note_peer_prompt_refusal(rid, &b, caches(16, 9));
+    state.note_peer_prompt_refusal(rid, &b, loading);
+    assert_eq!(
+        state.peer_prompt_fits_for_request(rid, &b),
+        vec![caches(0, 5), caches(16, 9), loading]
+    );
+    assert_eq!(
+        of(&gather(rid), &b).max_hostable_layers_at_ceiling,
+        Some(5),
+        "the tightest verdict holds"
+    );
 
     state.release_request_state(&rid);
-    assert_eq!(state.peer_layers_fitting_for_request(rid, &b), None);
+    assert!(state.peer_prompt_fits_for_request(rid, &b).is_empty());
+}
+
+/// **A peer's count of what fits is weighed in its own unit** (2026-10-26,
+/// v0.3.255's 70B field check). The bounds count AVERAGE layers and weigh a
+/// range as what it loads (#353); a refusal's count is of REAL layers. Here a
+/// model whose layers 8-12 are light (95 MB), 12-30 middling (115 MB), its
+/// ends heavy (135 MB), averaging 125 MB with its tables. The peer was asked
+/// [8..30) and said 18 would LOAD from 8 — [8..26), 1,990 MB.
+///
+/// - Counted as loading: held to the charge of that run (15.x → 15), so
+///   [12..30), 2,070 MB of 115 MB layers, is out (charge 16.6) — read bare,
+///   18 admitted it, the shape the field check was refused twice with — and a
+///   lighter run of 15 layers from 8 is still in.
+/// - Counted as caches: held to 18 layers wherever they are — none charged
+///   below its width, so 19 light layers (charge 16.8 by weight) are out.
+/// - Not said (an older peer): both.
+#[test]
+fn a_peers_count_of_what_fits_is_weighed_in_its_own_unit() {
+    let (state, local, b, c, model) = two_whole_model_card_peers();
+    publish_resident(&state, &b, &model, (0, 32));
+    publish_resident(&state, &c, &model, (0, 32));
+    // 4,000 MB (in 10^6 bytes) as the manifest says: 3,800 of layers, the
+    // token table 80, the output head 120.
+    const M: u64 = 1_000_000;
+    let layer_mb = |i: u32| match i {
+        8..12 => 95,
+        12..30 => 115,
+        _ => 135,
+    };
+    let mut tensors = std::collections::HashMap::new();
+    let mut offset = 0u64;
+    let mut add = |name: String, mb: u64| {
+        tensors.insert(
+            name,
+            crate::inference::split::TensorLocation {
+                offset,
+                size: mb * M,
+            },
+        );
+        offset += mb * M;
+    };
+    for i in 0..32 {
+        add(format!("blk.{i}.ffn_down.weight"), layer_mb(i));
+    }
+    add("token_embd.weight".into(), 80);
+    add("output.weight".into(), 120);
+    state.gguf_meta.insert(
+        model.clone(),
+        crate::inference::split::GgufTensorMeta {
+            tensors,
+            tensor_data_offset: 0,
+            model_name: None,
+            head_count: 32,
+            head_count_kv: 8,
+            block_count: 32,
+            embedding_length: 4096,
+            head_dim: 128,
+            rope_dim: 128,
+            rope_freq_base: 10_000.0,
+            rms_norm_eps: 1e-5,
+            expert_count: 0,
+            expert_used_count: 0,
+            architecture: "llama".into(),
+            context_length: 8192,
+            pooling_type: 0,
+            kv_layout: None,
+            shared_kv_layers: 0,
+        },
+    );
+    let scheduler =
+        PipelineScheduler::with_local_processor_speed(state.clone(), LOCAL_PROCESSOR_TPS);
+    let manifest = state.model_registry.get_manifest(&model).unwrap();
+    let candidate_after = |counted| {
+        let rid = uuid::Uuid::new_v4();
+        state.note_peer_prompt_refusal(
+            rid,
+            &b,
+            crate::daemon::state::PeerPromptFit {
+                from: 8,
+                layers: 18,
+                counted,
+            },
+        );
+        scheduler
+            .gather_candidates(
+                &manifest,
+                &local,
+                rid,
+                None.into(),
+                super::Purpose::Route,
+                &|| true,
+                crate::types::KeepAsked::Unasked,
+            )
+            .into_iter()
+            .find(|x| x.node_id == b)
+            .unwrap()
+    };
+    let within = |x: &NodeCandidate, range: (u32, u32)| {
+        let cap = x.max_hostable_layers_at_ceiling.expect("held to its word");
+        x.capacity_charge(range) <= f64::from(cap) && x.width_in_bound(range) <= cap
+    };
+
+    let loading = candidate_after(swarmllm_types::LayersCounted::Loading);
+    assert!(
+        loading.range_weights.is_some(),
+        "fixture: the header is read"
+    );
+    assert!(loading.prompt_memory_refused && !loading.prompt_fit_counts_caches);
+    assert_eq!(loading.max_hostable_layers_at_ceiling, Some(15));
+    assert!(!within(&loading, (12, 30)), "18 heavier layers than loaded");
+    assert!(
+        within(&loading, (8, 23)),
+        "a lighter run from where it counted"
+    );
+    // The null control: the bare count is the shape the field check was
+    // refused with, admitted by its charge.
+    assert!(
+        loading.capacity_charge((12, 30)) <= 18.0,
+        "fixture: read bare, 18 admits [12..30) — {}",
+        loading.capacity_charge((12, 30))
+    );
+
+    let caches = candidate_after(swarmllm_types::LayersCounted::Caches);
+    assert!(caches.prompt_memory_refused && caches.prompt_fit_counts_caches);
+    assert_eq!(caches.max_hostable_layers_at_ceiling, Some(18));
+    assert!(within(&caches, (12, 30)), "18 layers' caches, wherever");
+    assert!(!within(&caches, (8, 27)), "never 19, however light");
+    // The null control: weighed by weight alone, 19 light layers pass.
+    let mut by_weight = caches.clone();
+    by_weight.prompt_fit_counts_caches = false;
+    assert!(
+        within(&by_weight, (8, 27)),
+        "fixture: 19 light layers are light"
+    );
+
+    let unsaid = candidate_after(swarmllm_types::LayersCounted::Unsaid);
+    assert!(unsaid.prompt_fit_counts_caches);
+    assert_eq!(unsaid.max_hostable_layers_at_ceiling, Some(15));
+    assert!(!within(&unsaid, (12, 30)) && !within(&unsaid, (8, 27)));
 }
 
 /// FUTURE_WORK #3 (c): a peer this node handed a prompt's opening is credited

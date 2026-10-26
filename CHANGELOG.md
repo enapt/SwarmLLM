@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+**A large model split across computers no longer fails when one of them says it has room for only
+some of its layers.** Before a split reply starts, each computer is asked whether its part fits; one
+that says no also says how many of those layers would, and the next plan keeps it to that. Since
+0.3.255 that count was misread for models whose layers differ in size. A computer that said 45 of a
+70-billion-parameter model's lighter layers would load could be asked for 47 heavier ones instead,
+which needed 1.1 GB more: it said no again, and the reply failed. A computer now also says what ran
+out: memory to load the layers, or memory for the conversation. The plan weighs each the right way.
+Layers that load are weighed by what those same layers weigh. Conversation memory is counted in
+layers, wherever they are. Computers still on 0.3.255 or older are held to both limits. The
+mistake was in 0.3.255's change that weighs each computer's part by what loading it takes: it
+weighed the plan's parts, but read the count a computer sent back as if every layer were average
+(#353).
+
+**A computer that already has part of a large model loaded is no longer counted short of room
+for it.** The same 0.3.255 change also weighed a part a computer had ALREADY loaded as if it had
+to load it again, table included. A computer with the last 7 layers of a 70-billion-parameter
+model loaded and no room to spare was counted at 9 layers for them. It could not stand by to take
+over those layers if another computer dropped out, and a refusal from it said retrying could not
+help. A part a computer has loaded now counts as the layers it is (#353).
+
 ## [0.3.255-alpha] — 2026-10-26
 
 **A large model split across computers can guess ahead again on the computer that asked for it.**

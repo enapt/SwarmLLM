@@ -393,7 +393,7 @@ impl Planner<'_> {
         let furthest = self.layers.min(x.saturating_add(ceiling.saturating_mul(2)));
         (x + 1..=furthest)
             .rev()
-            .find(|&e| weights.width_in_bound((x, e)) <= ceiling)
+            .find(|&e| weights.width_in_bound((x, e), &[]) <= ceiling)
             .unwrap_or(x)
     }
 
@@ -1747,7 +1747,7 @@ mod tests {
         assert!(
             unweighed
                 .iter()
-                .any(|&(i, x, e)| i == 1 && e == 80 && weights.width_in_bound((x, e)) > 7),
+                .any(|&(i, x, e)| i == 1 && e == 80 && weights.width_in_bound((x, e), &[]) > 7),
             "{unweighed:?}"
         );
         let weighed = plan_chain(80, &parts, &machines, true, Some(&weights)).expect("a chain");
@@ -1755,7 +1755,7 @@ mod tests {
         for &(i, x, e) in &weighed {
             assert_eq!(x, at, "{weighed:?}");
             assert!(
-                weights.width_in_bound((x, e)) <= machines[i].ceiling,
+                weights.width_in_bound((x, e), &[]) <= machines[i].ceiling,
                 "machine {i} planned {x}..{e} past its ceiling: {weighed:?}"
             );
             at = e;

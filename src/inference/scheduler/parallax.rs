@@ -1957,6 +1957,7 @@ mod tests {
             processor_tokens_per_sec: 0.0,
             range_weights: None,
             prompt_memory_refused: false,
+            prompt_fit_counts_caches: false,
             memory_refused_this_request: false,
             goodput_bytes_per_sec: None,
         }
@@ -3440,6 +3441,61 @@ mod tests {
         assert!((1.3..1.6).contains(&w.excess_layers((75, 80), &[])));
         assert!(w.excess_layers((0, 80), &[]).abs() < 0.01);
         assert!(w.excess_layers((20, 40), &[]) < 0.0);
+    }
+
+    /// **A range a peer has LOADED costs its width in its total** (pre-release
+    /// sweep of v0.3.256). A warm peer's total counts each layer it has loaded
+    /// as one, its output head already paid (`PeerResidency::Layers`, resident
+    /// plus extra), so every reader of a total weighs a range beside what the
+    /// peer holds, as the search's own charge does. Priced as if it held
+    /// nothing, a peer holding 73-80 with no room to spare was charged 9 of
+    /// its 7 for the tail it had loaded: no standby from it, its plan read as
+    /// past its offer (a later refusal then said retrying could not help), and
+    /// greedy cut its own range short.
+    #[test]
+    fn a_range_a_peer_has_loaded_costs_its_width_in_its_total() {
+        let local = NodeId([1u8; 32]);
+        let mut tail = cand(3, vec![(70, 80)], 5, 0.0, false, true, 100.0);
+        tail.max_hostable_layers = Some(7);
+        tail.max_hostable_layers_at_face_value = Some(7);
+        tail.range_weights = Some(seventy_b_range_weights());
+        tail.held_ranges = vec![held((73, 80), 7)];
+        let on = |c: &NodeCandidate, range| PipelineSegment {
+            node_id: c.node_id.clone(),
+            shard_id: ShardId {
+                model_id: ModelId("test".into()),
+                index: 0,
+            },
+            layer_range: range,
+        };
+        let readers = |c: &NodeCandidate| {
+            (
+                c.width_in_bound((73, 80)),
+                crate::inference::scheduler::standby_has_room(
+                    c.max_hostable_layers,
+                    0,
+                    c.width_in_bound((73, 80)),
+                ),
+                crate::inference::scheduler::plan_exceeds_offered_memory(
+                    &[on(c, (73, 80))],
+                    std::slice::from_ref(c),
+                    &local,
+                ),
+                c.furthest_end_in_bound(73, 80, 7),
+            )
+        };
+        // Loaded: its width, a standby for it, inside its offer, greedy's
+        // whole run.
+        assert_eq!(readers(&tail), (7, true, false, 80));
+        // Null control: the same peer with nothing loaded pays the head — the
+        // price every reader of a total gave the range it held.
+        let mut cold = tail.clone();
+        cold.held_ranges.clear();
+        assert_eq!(readers(&cold), (9, false, true, 79));
+        // Past what it holds, the new layers still pay their own weights:
+        // 70-80 in place of 73-80 adds three middle layers, no second head.
+        assert_eq!(tail.width_in_bound((70, 80)), 10);
+        assert_eq!(cold.width_in_bound((70, 80)), 12);
     }
 
     /// **A pass that holds a peer to its ceiling can cut its range there**
@@ -5038,6 +5094,7 @@ mod transfer_cost_tests {
             processor_tokens_per_sec: 0.0,
             range_weights: None,
             prompt_memory_refused: false,
+            prompt_fit_counts_caches: false,
             memory_refused_this_request: false,
         }
     }

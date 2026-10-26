@@ -131,10 +131,13 @@ enum Admission {
 pub(crate) enum PeerPromptWeight {
     /// It would fit — or nothing here can say it would not.
     Fits,
-    /// It would not: the worker's words, and how many of the asked layers fit.
+    /// It would not: the worker's words, how many of the asked layers fit,
+    /// and whether they are the layers that LOAD from the first asked one or
+    /// the layers whose caches fit (`swarmllm_types::LayersCounted`).
     DoesNotFit {
         message: String,
         layers_that_fit: u32,
+        counted: swarmllm_types::LayersCounted,
     },
 }
 
@@ -2754,12 +2757,37 @@ impl RangeWeights {
     }
 
     /// `range`'s width in layers of a TOTAL bound — one a count of every layer
-    /// a machine is given is held to: the width plus
-    /// [`Self::excess_layers`] as if it held nothing, rounded up.
-    pub(crate) fn width_in_bound(&self, range: (u32, u32)) -> u32 {
+    /// a machine is given is held to: the width plus what its weights cost
+    /// beyond the average beside `held` ([`Self::excess_layers`]), rounded
+    /// up. A warm peer's total counts each layer it has loaded as ONE, its
+    /// tables already paid (`scheduler::PeerResidency::Layers`), so a range
+    /// it holds costs its width; a ceiling, which is cold, passes `&[]`.
+    /// Priced as if it held nothing, a tail a peer had loaded was charged its
+    /// output head again: 9 of a total of 7 (pre-release sweep of v0.3.256).
+    pub(crate) fn width_in_bound(&self, range: (u32, u32), held: &[HeldRange]) -> u32 {
         let width = range.1.saturating_sub(range.0);
-        (f64::from(width) + self.excess_layers(range, &[]))
+        (f64::from(width) + self.excess_layers(range, held))
             .ceil()
+            .max(0.0) as u32
+    }
+
+    /// A peer's word that `layers` REAL layers would load from `from`, as a
+    /// TOTAL bound: what that run is charged beside `held` — its width and
+    /// [`Self::excess_layers`], the charge a candidate refused this prompt
+    /// is held to — rounded DOWN, so a range the bound admits weighs no more
+    /// than the run that loaded (at the cost of the run's last layer where its
+    /// charge is not whole). Read bare, 45 of a 70B's lighter middle layers
+    /// admitted 47 heavier ones, 1,155 MB more than had loaded (2026-10-26,
+    /// `daemon::state::PeerPromptFit`). None is none; a run past the model's
+    /// end is cut at it.
+    pub(crate) fn ceiling_of_a_fit(&self, from: u32, layers: u32, held: &[HeldRange]) -> u32 {
+        let end = from.saturating_add(layers).min(self.num_layers);
+        if end <= from {
+            return 0;
+        }
+        let width = end - from;
+        (f64::from(width) + self.excess_layers((from, end), held))
+            .floor()
             .max(0.0) as u32
     }
 }
@@ -7348,6 +7376,7 @@ impl ModelProcessPool {
                 return PeerPromptWeight::DoesNotFit {
                     message,
                     layers_that_fit,
+                    counted: swarmllm_types::LayersCounted::Loading,
                 };
             }
             if no_worker {
@@ -7368,6 +7397,7 @@ impl ModelProcessPool {
             }) => PeerPromptWeight::DoesNotFit {
                 message,
                 layers_that_fit,
+                counted: swarmllm_types::LayersCounted::Caches,
             },
             _ => PeerPromptWeight::Fits,
         }
@@ -12638,11 +12668,13 @@ mod tests {
             PeerPromptWeight::DoesNotFit {
                 message,
                 layers_that_fit,
+                counted,
             } => {
                 assert_eq!(
                     layers_that_fit, 3,
                     "a fresh spawn in its place takes [3..6)"
                 );
+                assert_eq!(counted, swarmllm_types::LayersCounted::Loading);
                 assert!(message.contains("3 would load"), "{message}");
             }
             PeerPromptWeight::Fits => {
@@ -13299,6 +13331,70 @@ mod tests {
         assert_eq!(bytes_added_by((8, 10), &held, &w, 10, false), 0);
         // [6..10) loads afresh and gives back [8..10): two more layers.
         assert_eq!(bytes_added_by((6, 10), &held, &w, 10, false), 200);
+    }
+
+    /// A peer's word that layers LOAD, weighed as the run it counted (the
+    /// v0.3.255 70B field check, 2026-10-26). Llama 3.3 70B Q4_K_M's shape as
+    /// its header has it: layers 0-16 and 75-80 at 519 MB, 16-28 at 460,
+    /// 28-75 at 484, the head 822 MB, the token table 564 — 506.9 MB a layer
+    /// on average. The peer refused [16..66) saying 45 would load: [16..61),
+    /// 21,492 MB. The re-plan gave it [28..75), 22,748 MB, charged 44.9.
+    #[test]
+    fn a_fit_counted_in_real_layers_is_held_to_the_charge_of_that_run() {
+        const MB: u64 = 1_048_576;
+        let names: Vec<String> = (0..80)
+            .map(|i| format!("blk.{i}.ffn_down.weight"))
+            .collect();
+        let layer_mb = |i: usize| match i {
+            16..28 => 460,
+            28..75 => 484,
+            _ => 519,
+        };
+        let mut tensors: Vec<(&str, u64)> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.as_str(), layer_mb(i) * MB))
+            .collect();
+        tensors.push(("token_embd.weight", 564 * MB));
+        tensors.push(("output.weight", 822 * MB));
+        let total: u64 = tensors.iter().map(|(_, b)| b).sum();
+        let w = RangeWeights {
+            weights: Arc::new(ModelWeights::of(&tensors).expect("layers named")),
+            num_layers: 80,
+            average_bytes: total / 80,
+            layer_price_bytes: total / 80,
+            on_card: false,
+        };
+        let charge = |range: (u32, u32)| f64::from(range.1 - range.0) + w.excess_layers(range, &[]);
+
+        let ceiling = w.ceiling_of_a_fit(16, 45, &[]);
+        assert_eq!(ceiling, 42, "45 light layers weigh 42.4 average ones");
+        assert!(
+            charge((28, 75)) > f64::from(ceiling),
+            "47 heavier layers are out"
+        );
+        // The null control: read bare, the count admitted them.
+        assert!(charge((28, 75)) <= 45.0, "{}", charge((28, 75)));
+        // What the bound admits weighs no more than what loaded.
+        let fit_bytes = bytes_added_by((16, 61), &[], &w.weights, 80, false);
+        for start in 0..80u32 {
+            for end in start + 1..=80 {
+                if charge((start, end)) <= f64::from(ceiling) {
+                    assert!(
+                        bytes_added_by((start, end), &[], &w.weights, 80, false) <= fit_bytes,
+                        "[{start}..{end}) admitted past what loaded"
+                    );
+                }
+            }
+        }
+        // The function on a run with the head: 5 layers and 822 MB are 6.7
+        // average layers. (A real Loading count never reaches the model's end:
+        // the bisection stops short of a run that loads whole.)
+        assert_eq!(w.ceiling_of_a_fit(75, 5, &[]), 6);
+        // None is none; a run past the end is cut at it.
+        assert_eq!(w.ceiling_of_a_fit(16, 0, &[]), 0);
+        assert_eq!(w.ceiling_of_a_fit(75, 50, &[]), 6);
+        assert_eq!(w.ceiling_of_a_fit(90, 5, &[]), 0);
     }
 
     /// The worker's own three cases, restated for the planner.
@@ -14820,8 +14916,10 @@ mod tests {
             PeerPromptWeight::DoesNotFit {
                 message,
                 layers_that_fit,
+                counted,
             } => {
                 assert_eq!(layers_that_fit, 5, "the widest run a spawn takes");
+                assert_eq!(counted, swarmllm_types::LayersCounted::Loading);
                 assert!(
                     message.contains("needs about") && message.contains("5 would load"),
                     "the spawn's own words: {message}"

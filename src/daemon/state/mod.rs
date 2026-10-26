@@ -59,6 +59,7 @@ pub use models::{
 };
 pub use peer_outliers::PeerOutliers;
 pub use peer_speed::{PeerSpeed, WorkKind};
+pub use prompt_admission::PeerPromptFit;
 pub use relay::{
     LocalMemoryRefusal, PeerServe, RelayForwardCounter, RelayProvenFeatures, RelayRoute, ServeKind,
 };
@@ -1004,9 +1005,10 @@ pub struct SharedState {
     pub local_memory_refusals: dashmap::DashMap<uuid::Uuid, LocalMemoryRefusal>,
 
     /// What each PEER said when asked to admit a request's prompt before the
-    /// pass and refused: the most layers its conversation memory holds
-    /// (FUTURE_WORK #252 (b)). Write ONLY `note_peer_prompt_refusal`, read only
-    /// `peer_layers_fitting_for_request` (the scheduler); released by
+    /// pass and refused: the layers it said fit, each with the start it
+    /// counted from (`PeerPromptFit`; FUTURE_WORK #252 (b)). Write ONLY
+    /// `note_peer_prompt_refusal`, read only `peer_prompt_fits_for_request`
+    /// (the scheduler); released by
     /// `release_request_state`.
     pub peer_prompt_refusals: prompt_admission::PeerPromptRefusals,
 

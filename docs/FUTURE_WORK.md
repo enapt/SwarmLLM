@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #354**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #355**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1081,6 +1081,27 @@ same build check `shard_holders` applies (`expected_build_tag`), withdrawn when 
 disconnects — or have the newcomer's catch-up carry the holdings point to point, as manifests
 are. Either way a capability is a peer's claim, so it may add a holder for planning and never
 remove one. Measure the newcomer's first-plan delay before and after.
+
+#### #354 — Two plan readers misread this node's own figures: its room as a standby's total, its fresh run as no split point
+`P3` · routing · **OPEN** — 2026-10-26 · found by the pre-release sweep of v0.3.256 (code reading; no field report)
+
+Both predate v0.3.255, and neither has been seen in a field log.
+(a) `find_standbys` checks every candidate with `standby_has_room(max_hostable_layers,
+committed, width_in_bound(range))`, in both its whole-range and tiling checks. For a peer that
+figure is a total; for THIS node it is room to ADD beside what its worker holds
+(`layers_it_would_add`), and `committed` is seeded with bare primary widths. A node whose card
+is full (room 0) holding 0-13 loaded is never a standby for a peer's 0-13, though running it
+would add nothing — the "prefer local" comment there assumes it can. d5302e77 fixed the same
+reading in `layers_offered_at` (text only). Next step: for this node, charge
+`layers_it_would_add(range)` against its room less the new layers its own primaries add; a test
+with this node holding a peer's primary range loaded, red before the change.
+(b) `route_over`'s capacity split points (`fits` / `fits_here`, `parallax.rs`) are cut by
+`max_hostable_layers` and `vertex_cap`, but the vertex filter also admits a range of up to
+`fresh_run_layers` for this node (a fresh worker's ONE card/processor run). No point is proposed
+at that width, so such a vertex exists only where another boundary falls — the shards' own
+boundaries, every few layers, usually land near it. Next step: push `a + fresh_run` and
+`b − fresh_run` for this node when `capacity.binds_local()`; measure a node with no worker and
+room below its fresh run, against the vertex budget (`MAX_SUBRANGE_VERTICES`).
 
 ### Network and transport
 
@@ -3363,6 +3384,33 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
+**Closed 2026-10-26, ships in v0.3.256** (#353's refusal count)
+- #353 (correction) — **A peer's count of what fits is weighed in its own unit.** The v0.3.255
+  field check (Llama 3.3 70B, TH/TH/AU/IT, three novel prompts, all failed `HoldersDeclined`):
+  AU refused [16..66) saying 45 would load — [16..61), 21,585 MB of 460-484 MB layers — and the
+  re-plan gave it [28..75), 22,740 MB, charged 44.86 average layers under #353's weighing, so
+  under 45; refused again ("needs about 24012 MB … allows 24000 MB"). The refusal now says what
+  it counted (`PromptAdmissionVerdict::Refused::counted`, `LayersCounted::{Loading, Caches,
+  Unsaid}`, a `#[serde(default)]` JSON field); the coordinator keeps the start it was counted
+  from (`daemon::state::PeerPromptFit`) and `gather_candidates` weighs each in its own unit —
+  `Loading` by the charge of that run (`RangeWeights::ceiling_of_a_fit`, rounded down: 42 for
+  the AU run), `Caches` as a count with no range charged below its width
+  (`NodeCandidate::prompt_fit_counts_caches`), `Unsaid` both. Tests
+  `a_fit_counted_in_real_layers_is_held_to_the_charge_of_that_run` (the 70B's real sizes, every
+  admitted range weighs at most what loaded), `a_peers_count_of_what_fits_is_weighed_in_its_own_unit`
+  (through `gather_candidates`, null controls for each kind),
+  `a_refusals_count_kind_crosses_between_old_and_new_nodes`. Evidence:
+  `docs/invariants/scheduling.md` § "A peer's count of what fits is weighed in its own unit".
+- #353 (second correction) — **A range a peer has loaded costs its width in its total.**
+  `RangeWeights::width_in_bound` priced every range as if the peer held nothing, while a warm
+  peer's total (`PeerResidency::Layers`: resident + extra) counts each loaded layer as one with
+  its tables paid: a peer holding a 70B's 73-80 at a total of 7 was charged 9 — no standby from
+  it, its plan read as past its offer (a refusal then reported "retrying cannot help"), greedy's
+  run cut at 79. Held ranges are now a required argument (the candidate's own; `&[]` only for
+  the chain planner's cold ceilings). Test `a_range_a_peer_has_loaded_costs_its_width_in_its_total`
+  (red with `&[]`). Found by the pre-release sweep. Evidence: `docs/invariants/scheduling.md`
+  § "A peer's range is weighed as what it loads, its ends' tables included", "Corrected 2026-10-26, second".
+
 **Closed 2026-10-26, ships in v0.3.255** (#350 (1), #351, #353)
 - #350 (1) — **A re-plan finds the route through the layers this node already holds.** The 70B's
   re-plan after two up-front refusals (request `c2cde5c3`) had a route at `PeersAtCeiling` — this
@@ -3396,9 +3444,11 @@ grep `^| N |`).
   `a_range_ending_the_model_is_weighed_with_its_output_head` (red with the charge removed),
   `a_chains_runs_are_weighed_with_the_tables_at_the_models_ends`. Still at the average:
   carrying's max-flow count and the ceilings' sum a chain is judged carriable by — a layer and
-  a half of slack in a count that only decides whether to plan. A refusal's `layers_that_fit`
+  a half of slack in a count that only decides whether to plan. ~~A refusal's `layers_that_fit`
   is measured from the asked range's start, so it describes a middle run; the re-plan weighs
-  the head on top, on the cautious side. Greedy's running `assigned` and `find_standbys`'
+  the head on top, on the cautious side.~~ WRONG, corrected below (v0.3.256): that count is of
+  REAL layers, and weighed against the new charge it admitted heavier ranges than had fit.
+  Greedy's running `assigned` and `find_standbys`'
   `committed` tallies still add bare widths while the checks against them weigh
   `width_in_bound`, so a peer given a tail that carries the head AND another range can be
   over-committed by about a layer before the final `plan_exceeds_offered_memory`, which sums

@@ -574,13 +574,42 @@ pub enum PromptAdmissionVerdict {
     /// model yet, the worker was busy, the asker has asked a lot lately) — the
     /// segments admit it as they arrive.
     Proceed,
-    /// Its conversation memory does not hold the prompt over those ranges:
+    /// Its memory does not hold the prompt over those ranges:
     /// `layers_that_fit` of them it does, which the coordinator's re-plan
     /// holds this peer to; `message` is the refusal in the peer's words.
     Refused {
         message: String,
         layers_that_fit: u32,
+        /// What `layers_that_fit` counts. Absent from a node that predates it
+        /// (v0.3.255 and older), which reads it as [`LayersCounted::Unsaid`];
+        /// an older coordinator ignores it.
+        #[serde(default)]
+        counted: LayersCounted,
     },
+}
+
+/// What a refusal's `layers_that_fit` counts — two limits in two units, and a
+/// coordinator that cannot tell them apart holds a peer to the wrong one.
+///
+/// A coordinator counts a peer's memory in AVERAGE layers of the model, and
+/// weighs a range as what it loads: a Llama 3.3 70B's layers run 460-519 MB,
+/// its output head 822 MB. A count of layers that LOAD is a count of real
+/// layers from the first one asked for, and is weighed there; a count of
+/// layers whose CACHES fit is a count of layers wherever they are, every one
+/// costing the prompt the same. Read as one, 45 of a 70B's lightest layers
+/// admitted 47 heavier ones and the peer refused again (2026-10-26).
+///
+/// ⚠ A new variant is not decodable by an older coordinator: the whole answer
+/// would fail to decode and read as "go ahead". Gate one on a feature bit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LayersCounted {
+    /// Not said: the sender predates the field.
+    #[default]
+    Unsaid,
+    /// The widest run from the first asked layer whose weights would load.
+    Loading,
+    /// The asked layers whose conversation caches fit beside what is loaded.
+    Caches,
 }
 
 /// Regional shard summary — compact per-region model availability gossip.
@@ -1173,5 +1202,59 @@ mod requester_guesses_tests {
             window(5, &[1, 2]).guesses_after(&[10, 20], 8).is_empty(),
             "ahead of the reply"
         );
+    }
+}
+
+#[cfg(test)]
+mod prompt_admission_tests {
+    use super::*;
+
+    /// A refusal from a node that predates `counted` still decodes, as
+    /// "not said"; a newer refusal decodes on a coordinator that predates it
+    /// — reproduced against an enum of the old shape — and keeps its count.
+    #[test]
+    fn a_refusals_count_kind_crosses_between_old_and_new_nodes() {
+        let older = serde_json::json!({
+            "Refused": { "message": "no room", "layers_that_fit": 45 }
+        });
+        let decoded: PromptAdmissionVerdict =
+            serde_json::from_value(older).expect("an older refusal must still decode");
+        assert_eq!(
+            decoded,
+            PromptAdmissionVerdict::Refused {
+                message: "no room".into(),
+                layers_that_fit: 45,
+                counted: LayersCounted::Unsaid,
+            }
+        );
+
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        enum OldVerdict {
+            Proceed,
+            Refused {
+                message: String,
+                layers_that_fit: u32,
+            },
+        }
+        for counted in [LayersCounted::Loading, LayersCounted::Caches] {
+            let newer = PromptAdmissionVerdict::Refused {
+                message: "no room".into(),
+                layers_that_fit: 45,
+                counted,
+            };
+            let wire = serde_json::to_string(&newer).expect("serialize");
+            let old: OldVerdict =
+                serde_json::from_str(&wire).expect("an older node must not choke on the new field");
+            assert_eq!(
+                old,
+                OldVerdict::Refused {
+                    message: "no room".into(),
+                    layers_that_fit: 45,
+                }
+            );
+            let back: PromptAdmissionVerdict = serde_json::from_str(&wire).expect("round trip");
+            assert_eq!(back, newer);
+        }
+        let _ = OldVerdict::Proceed;
     }
 }

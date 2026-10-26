@@ -3348,8 +3348,9 @@ prompt_tokens }` to each peer whose segment runs after other work
 (`pipeline::prompt_admission::peers_to_ask`; a peer whose only segment opens the pass is not
 asked — its own forward answers as early and nobody has read the prompt yet), concurrently with
 this node's own admission, and only to a connected peer advertising `features::PROMPT_ADMISSION`
-(bit 25). A "no" carries `layers_that_fit`; the coordinator records it
-(`SharedState::note_peer_prompt_refusal`, the fewest per peer) and returns
+(bit 25). A "no" carries `layers_that_fit` and what it counts (`LayersCounted`); the coordinator
+records it with the start it was counted from (`SharedState::note_peer_prompt_refusal`, the fewest
+per start and kind — `scheduling.md` § "A peer's count of what fits is weighed in its own unit") and returns
 `ServiceUnavailable` — ALWAYS that class, whatever the peer wrote. The router re-plans (a remote
 segment was planned), and `gather_candidates` holds that peer's TOTAL layers to the figure on
 every rung (`max_hostable_layers_at_ceiling`, which `clamp_to_ceiling` applies to every bound) with
