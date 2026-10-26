@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.255-alpha] — 2026-10-26
+
 **A large model split across computers can guess ahead again on the computer that asked for it.**
 A split reply goes faster when a small model on the asking computer guesses the next few words and
 the large model checks them together. That small model was always held to the memory the swarm may
