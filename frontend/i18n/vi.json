@@ -61,6 +61,8 @@
   "activity.overflow": "{count} sự kiện cũ hơn",
   "activity.peer_connected": "Máy tính đã kết nối: {node}",
   "activity.peer_disconnected": "Máy tính đã ngắt kết nối: {node}",
+  "activity.peer_model_load": "Một máy tính khác đã yêu cầu máy này chạy các lớp {detail} của {model} — đang tải vào {count} MB bộ nhớ của máy tính này",
+  "activity.peer_model_load_card": "Một máy tính khác đã yêu cầu máy này chạy các lớp {detail} của {model} — đang tải vào {count} MB bộ nhớ của card đồ họa",
   "activity.pool_created": "Đã tạo pool thiết bị",
   "activity.pool_device_joined": "Thiết bị đã tham gia pool",
   "activity.pool_device_left": "Thiết bị đã rời pool",

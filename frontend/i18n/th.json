@@ -61,6 +61,8 @@
   "activity.overflow": "{count} เหตุการณ์เก่ากว่า",
   "activity.peer_connected": "คอมพิวเตอร์เชื่อมต่อแล้ว: {node}",
   "activity.peer_disconnected": "คอมพิวเตอร์ตัดการเชื่อมต่อแล้ว: {node}",
+  "activity.peer_model_load": "คอมพิวเตอร์เครื่องอื่นขอให้เครื่องนี้รันเลเยอร์ {detail} ของ {model} — กำลังโหลดลงในหน่วยความจำของคอมพิวเตอร์เครื่องนี้ {count} MB",
+  "activity.peer_model_load_card": "คอมพิวเตอร์เครื่องอื่นขอให้เครื่องนี้รันเลเยอร์ {detail} ของ {model} — กำลังโหลดลงในหน่วยความจำของการ์ดจอ {count} MB",
   "activity.pool_created": "สร้าง pool อุปกรณ์แล้ว",
   "activity.pool_device_joined": "อุปกรณ์เข้าร่วม pool",
   "activity.pool_device_left": "อุปกรณ์ออกจาก pool",

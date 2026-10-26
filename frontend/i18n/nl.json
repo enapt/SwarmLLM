@@ -61,6 +61,8 @@
   "activity.overflow": "{count} oudere gebeurtenissen",
   "activity.peer_connected": "Computer verbonden: {node}",
   "activity.peer_disconnected": "Computer verbroken: {node}",
+  "activity.peer_model_load": "Een andere computer vroeg deze om lagen {detail} van {model} uit te voeren — ze worden nu geladen in {count} MB van het geheugen van deze computer",
+  "activity.peer_model_load_card": "Een andere computer vroeg deze om lagen {detail} van {model} uit te voeren — ze worden nu geladen in {count} MB van het geheugen van de grafische kaart",
   "activity.pool_created": "Apparaatpool aangemaakt",
   "activity.pool_device_joined": "Apparaat aan pool toegevoegd",
   "activity.pool_device_left": "Apparaat heeft pool verlaten",

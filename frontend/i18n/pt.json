@@ -61,6 +61,8 @@
   "activity.overflow": "{count} eventos mais antigos",
   "activity.peer_connected": "Computador conectado: {node}",
   "activity.peer_disconnected": "Computador desconectado: {node}",
+  "activity.peer_model_load": "Outro computador pediu a este que execute as camadas {detail} de {model} — elas estão sendo carregadas agora em {count} MB da memória deste computador",
+  "activity.peer_model_load_card": "Outro computador pediu a este que execute as camadas {detail} de {model} — elas estão sendo carregadas agora em {count} MB da memória da placa gráfica",
   "activity.pool_created": "Grupo de dispositivos criado",
   "activity.pool_device_joined": "Dispositivo entrou no grupo",
   "activity.pool_device_left": "Dispositivo saiu do grupo",

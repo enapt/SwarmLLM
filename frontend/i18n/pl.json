@@ -61,6 +61,8 @@
   "activity.overflow": "{count} starszych zdarzeń",
   "activity.peer_connected": "Komputer połączony: {node}",
   "activity.peer_disconnected": "Komputer rozłączony: {node}",
+  "activity.peer_model_load": "Inny komputer poprosił ten o uruchomienie warstw {detail} modelu {model} — trwa ich wczytywanie do {count} MB pamięci tego komputera",
+  "activity.peer_model_load_card": "Inny komputer poprosił ten o uruchomienie warstw {detail} modelu {model} — trwa ich wczytywanie do {count} MB pamięci karty graficznej",
   "activity.pool_created": "Grupa urządzeń utworzona",
   "activity.pool_device_joined": "Urządzenie dołączyło do grupy",
   "activity.pool_device_left": "Urządzenie opuściło grupę",

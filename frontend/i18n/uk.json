@@ -61,6 +61,8 @@
   "activity.overflow": "{count} старіших подій",
   "activity.peer_connected": "Комп'ютер підключено: {node}",
   "activity.peer_disconnected": "Комп'ютер відключено: {node}",
+  "activity.peer_model_load": "Інший комп’ютер попросив цей запустити шари {detail} моделі {model} — вони завантажуються в {count} МБ пам’яті цього комп’ютера",
+  "activity.peer_model_load_card": "Інший комп’ютер попросив цей запустити шари {detail} моделі {model} — вони завантажуються в {count} МБ пам’яті відеокарти",
   "activity.pool_created": "Групу пристроїв створено",
   "activity.pool_device_joined": "Пристрій приєднався до групи",
   "activity.pool_device_left": "Пристрій покинув групу",

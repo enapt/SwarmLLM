@@ -61,6 +61,8 @@
   "activity.overflow": "{count} eski olay",
   "activity.peer_connected": "Bilgisayar bağlandı: {node}",
   "activity.peer_disconnected": "Bilgisayar bağlantısı kesildi: {node}",
+  "activity.peer_model_load": "Başka bir bilgisayar, bu bilgisayardan {model} modelinin {detail} katmanlarını çalıştırmasını istedi — şimdi yükleniyor: bu bilgisayarın belleğinde {count} MB",
+  "activity.peer_model_load_card": "Başka bir bilgisayar, bu bilgisayardan {model} modelinin {detail} katmanlarını çalıştırmasını istedi — şimdi yükleniyor: ekran kartının belleğinde {count} MB",
   "activity.pool_created": "Cihaz havuzu oluşturuldu",
   "activity.pool_device_joined": "Cihaz havuza katıldı",
   "activity.pool_device_left": "Cihaz havuzdan ayrıldı",

@@ -59,6 +59,8 @@
   var ACTIVITY_ICONS = {
     'peer_connected': '\uD83D\uDD17',      // 🔗
     'peer_disconnected': '\u26D4',          // ⛔
+    'peer_model_load': '\uD83D\uDCE5',      // 📥 another computer's request loads a model here
+    'peer_model_load_card': '\uD83D\uDCE5', // 📥
     'model_discovered': '\u2728',           // ✨
     'shard_announced': '\uD83D\uDCE1',     // 📡
     'shard_download_started': '\u2B07\uFE0F', // ⬇️

@@ -61,6 +61,8 @@
   "activity.overflow": "{count} äldre händelser",
   "activity.peer_connected": "Dator ansluten: {node}",
   "activity.peer_disconnected": "Dator frånkopplad: {node}",
+  "activity.peer_model_load": "En annan dator bad den här att köra lager {detail} av {model} — de läses in nu i {count} MB av den här datorns minne",
+  "activity.peer_model_load_card": "En annan dator bad den här att köra lager {detail} av {model} — de läses in nu i {count} MB av grafikkortets minne",
   "activity.pool_created": "Enhetspool skapad",
   "activity.pool_device_joined": "Enhet gick med i pool",
   "activity.pool_device_left": "Enhet lämnade pool",

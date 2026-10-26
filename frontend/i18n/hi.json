@@ -61,6 +61,8 @@
   "activity.overflow": "{count} पुरानी घटनाएँ",
   "activity.peer_connected": "कंप्यूटर जुड़ा: {node}",
   "activity.peer_disconnected": "कंप्यूटर अलग हुआ: {node}",
+  "activity.peer_model_load": "एक दूसरे कंप्यूटर ने इस कंप्यूटर से {model} की परतें {detail} चलाने को कहा है — उन्हें अभी इस कंप्यूटर की {count} MB मेमोरी में लोड किया जा रहा है",
+  "activity.peer_model_load_card": "एक दूसरे कंप्यूटर ने इस कंप्यूटर से {model} की परतें {detail} चलाने को कहा है — उन्हें अभी ग्राफ़िक्स कार्ड की {count} MB मेमोरी में लोड किया जा रहा है",
   "activity.pool_created": "डिवाइस पूल बनाया गया",
   "activity.pool_device_joined": "डिवाइस पूल में जुड़ा",
   "activity.pool_device_left": "डिवाइस पूल से अलग हुआ",

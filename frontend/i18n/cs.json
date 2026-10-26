@@ -61,6 +61,8 @@
   "activity.overflow": "{count} starších událostí",
   "activity.peer_connected": "Počítač připojen: {node}",
   "activity.peer_disconnected": "Počítač odpojen: {node}",
+  "activity.peer_model_load": "Jiný počítač požádal tento počítač o spuštění vrstev {detail} modelu {model} — právě je načítá do {count} MB paměti tohoto počítače",
+  "activity.peer_model_load_card": "Jiný počítač požádal tento počítač o spuštění vrstev {detail} modelu {model} — právě je načítá do {count} MB paměti grafické karty",
   "activity.pool_created": "Skupina zařízení vytvořena",
   "activity.pool_device_joined": "Zařízení se připojilo do skupiny",
   "activity.pool_device_left": "Zařízení opustilo skupinu",

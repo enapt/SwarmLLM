@@ -61,6 +61,8 @@
   "activity.overflow": "{count} старых событий",
   "activity.peer_connected": "Компьютер подключён: {node}",
   "activity.peer_disconnected": "Компьютер отключён: {node}",
+  "activity.peer_model_load": "Другой компьютер попросил этот запустить слои {detail} модели {model} — они загружаются в {count} МБ памяти этого компьютера",
+  "activity.peer_model_load_card": "Другой компьютер попросил этот запустить слои {detail} модели {model} — они загружаются в {count} МБ памяти видеокарты",
   "activity.pool_created": "Пул устройств создан",
   "activity.pool_device_joined": "Устройство добавлено в пул",
   "activity.pool_device_left": "Устройство покинуло пул",

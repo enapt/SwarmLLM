@@ -61,6 +61,8 @@
   "activity.overflow": "{count} أحداث قديمة",
   "activity.peer_connected": "اتصل الند: {node}",
   "activity.peer_disconnected": "انقطع الند: {node}",
+  "activity.peer_model_load": "طلب حاسوب آخر من هذا الحاسوب تشغيل الطبقات {detail} من {model} — يجري تحميلها الآن في {count} ميغابايت من ذاكرة هذا الحاسوب",
+  "activity.peer_model_load_card": "طلب حاسوب آخر من هذا الحاسوب تشغيل الطبقات {detail} من {model} — يجري تحميلها الآن في {count} ميغابايت من ذاكرة بطاقة الرسوميات",
   "activity.pool_created": "تم إنشاء مجموعة الأجهزة",
   "activity.pool_device_joined": "انضم جهاز إلى المجموعة",
   "activity.pool_device_left": "غادر جهاز المجموعة",

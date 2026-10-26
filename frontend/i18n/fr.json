@@ -61,6 +61,8 @@
   "activity.overflow": "{count} événements plus anciens",
   "activity.peer_connected": "Ordinateur connecté : {node}",
   "activity.peer_disconnected": "Ordinateur déconnecté : {node}",
+  "activity.peer_model_load": "Un autre ordinateur a demandé à celui-ci d'exécuter les couches {detail} de {model} — chargement en cours dans {count} Mo de la mémoire de cet ordinateur",
+  "activity.peer_model_load_card": "Un autre ordinateur a demandé à celui-ci d'exécuter les couches {detail} de {model} — chargement en cours dans {count} Mo de la mémoire de la carte graphique",
   "activity.pool_created": "Groupe d'appareils créé",
   "activity.pool_device_joined": "Appareil rejoint le groupe",
   "activity.pool_device_left": "Appareil quitté le groupe",

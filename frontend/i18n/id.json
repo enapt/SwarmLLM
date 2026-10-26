@@ -61,6 +61,8 @@
   "activity.overflow": "{count} peristiwa lebih lama",
   "activity.peer_connected": "Peer terhubung: {node}",
   "activity.peer_disconnected": "Peer terputus: {node}",
+  "activity.peer_model_load": "Komputer lain meminta komputer ini menjalankan lapisan {detail} dari {model} — sedang dimuat ke {count} MB memori komputer ini",
+  "activity.peer_model_load_card": "Komputer lain meminta komputer ini menjalankan lapisan {detail} dari {model} — sedang dimuat ke {count} MB memori kartu grafis",
   "activity.pool_created": "Pool perangkat dibuat",
   "activity.pool_device_joined": "Perangkat bergabung ke pool",
   "activity.pool_device_left": "Perangkat meninggalkan pool",

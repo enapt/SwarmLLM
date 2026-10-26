@@ -61,6 +61,8 @@
   "activity.overflow": "{count} 件の古いイベント",
   "activity.peer_connected": "コンピューターが接続しました：{node}",
   "activity.peer_disconnected": "コンピューターが切断しました：{node}",
+  "activity.peer_model_load": "別のコンピューターが、{model} の {detail} 層の実行をこのコンピューターに依頼しました — このコンピューターのメモリ {count} MB に読み込んでいます",
+  "activity.peer_model_load_card": "別のコンピューターが、{model} の {detail} 層の実行をこのコンピューターに依頼しました — グラフィックカードのメモリ {count} MB に読み込んでいます",
   "activity.pool_created": "デバイスプールが作成されました",
   "activity.pool_device_joined": "デバイスがプールに参加しました",
   "activity.pool_device_left": "デバイスがプールから離脱しました",

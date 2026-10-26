@@ -61,6 +61,8 @@
   "activity.overflow": "{count} older events",
   "activity.peer_connected": "Computer connected: {node}",
   "activity.peer_disconnected": "Computer disconnected: {node}",
+  "activity.peer_model_load": "Another computer asked this one to run layers {detail} of {model} — loading them now into {count} MB of this computer's memory",
+  "activity.peer_model_load_card": "Another computer asked this one to run layers {detail} of {model} — loading them now into {count} MB of the graphics card's memory",
   "activity.pool_created": "Device pool created",
   "activity.pool_device_joined": "Device joined pool",
   "activity.pool_device_left": "Device left pool",

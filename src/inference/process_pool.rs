@@ -1596,6 +1596,20 @@ impl WorkerHandle {
             .remove(&request_id);
     }
 
+    /// What this worker is charged now, as (graphics card, the machine's
+    /// memory) in MB: `charged_mb` goes to whichever device the spawn charged
+    /// (`charged_against_ram`), a card/processor split's processor share
+    /// (`host_share_mb`) to the machine.
+    fn card_and_machine_mb(&self) -> (u64, u64) {
+        let charged = self.charged_mb.load(Ordering::Acquire);
+        let host = self.host_share_mb.load(Ordering::Acquire);
+        if self.charged_against_ram {
+            (0, charged.saturating_add(host))
+        } else {
+            (charged, host)
+        }
+    }
+
     /// Has this worker already been charged for `segment`?
     fn segment_is_charged(&self, segment: (u32, u32)) -> bool {
         self.charged_segments
@@ -7618,6 +7632,69 @@ impl ModelProcessPool {
         let _ = self.activity_tx.set(tx);
     }
 
+    /// Tell the owner that a request from another computer is loading
+    /// `segment` of `model_id` here — `card_mb` of the graphics card's memory
+    /// and `machine_mb` of the machine's — on the log and the activity feed.
+    /// Called where such a load becomes a fact (a fresh worker spawned for the
+    /// swarm, a live one grown for it); nothing about it is decided here.
+    ///
+    /// Field report #039 (2026-10-26): a 70B's first rounds sent few, slow
+    /// forwards, so the owner's own tooling, which watches for a busy card,
+    /// did not see the swarm using it, and the node was given a 2.5 GB card
+    /// budget while another program held the card. Someone who shares their
+    /// card with other software needs to see a load as it starts, not infer
+    /// it from traffic.
+    fn tell_the_owner_of_a_load_for_another_computer(
+        &self,
+        model_id: &ModelId,
+        segment: (u32, u32),
+        card_mb: u64,
+        machine_mb: u64,
+    ) {
+        if card_mb == 0 && machine_mb == 0 {
+            return;
+        }
+        tracing::info!(
+            model = %model_id,
+            layers = format!("[{}..{})", segment.0, segment.1),
+            card_mb,
+            machine_mb,
+            "Another computer's request is loading this model's layers here"
+        );
+        let Some(tx) = self.activity_tx.get() else {
+            return;
+        };
+        // People count layers from one: [19..75) is "layers 20–75".
+        let span = format!("{}–{}", segment.0.saturating_add(1), segment.1);
+        let (kind, mb, english) = if card_mb > 0 {
+            (
+                "peer_model_load_card",
+                card_mb,
+                format!(
+                    "Another computer asked this one to run layers {span} of {} — loading \
+                     them now into {card_mb} MB of the graphics card's memory",
+                    model_id.0
+                ),
+            )
+        } else {
+            (
+                "peer_model_load",
+                machine_mb,
+                format!(
+                    "Another computer asked this one to run layers {span} of {} — loading \
+                     them now into {machine_mb} MB of this computer's memory",
+                    model_id.0
+                ),
+            )
+        };
+        let _ = tx.send(
+            crate::daemon::state::ActivityEvent::new("inference", kind, english)
+                .with_model(model_id.0.clone())
+                .with_detail_num(i64::try_from(mb).unwrap_or(i64::MAX))
+                .with_detail_str(span),
+        );
+    }
+
     /// Does a live worker hold exactly this range of this model, charged?
     /// The question a caller asks before starting something that would
     /// compete with that range's load for memory — see [`Tenancy::Guest`].
@@ -7761,11 +7838,23 @@ impl ModelProcessPool {
                 // about to load more weights, so weigh them first — and where
                 // the card will not take them, reclaim or replace the worker
                 // rather than refuse (`grow_worker`).
+                let before = handle.card_and_machine_mb();
                 match self
                     .grow_worker(model_id, segment, handle, requester)
                     .await?
                 {
-                    Growth::Grown(handle) => return Ok(Some(handle)),
+                    Growth::Grown(handle) => {
+                        let (card_mb, machine_mb) = handle.card_and_machine_mb();
+                        if requester == Requester::Swarm {
+                            self.tell_the_owner_of_a_load_for_another_computer(
+                                model_id,
+                                segment,
+                                card_mb.saturating_sub(before.0),
+                                machine_mb.saturating_sub(before.1),
+                            );
+                        }
+                        return Ok(Some(handle));
+                    }
                     // Retired: fall through to the slow path, which spawns.
                     Growth::Respawn => {}
                 }
@@ -8180,6 +8269,14 @@ impl ModelProcessPool {
                 // charged again. `charged_mb` is already set from the spawn's
                 // own admission, so the range is recorded at zero extra cost.
                 handle.record_charged_segment(segment, 0);
+                if requester == Requester::Swarm && !guest {
+                    self.tell_the_owner_of_a_load_for_another_computer(
+                        model_id,
+                        segment,
+                        charged_vram_mb,
+                        charged_ram_mb,
+                    );
+                }
                 // Only now is it a fact. The user was told when this model was
                 // demoted to the processor, so they are told when it comes
                 // back — and if admission refused it a second time they were

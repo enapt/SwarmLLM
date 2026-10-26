@@ -61,6 +61,8 @@
   "activity.overflow": "{count} 个更早事件",
   "activity.peer_connected": "电脑已连接：{node}",
   "activity.peer_disconnected": "电脑已断开：{node}",
+  "activity.peer_model_load": "另一台电脑请求这台电脑运行 {model} 的第 {detail} 层 — 正在载入这台电脑的 {count} MB 内存",
+  "activity.peer_model_load_card": "另一台电脑请求这台电脑运行 {model} 的第 {detail} 层 — 正在载入显卡的 {count} MB 显存",
   "activity.pool_created": "设备池已创建",
   "activity.pool_device_joined": "设备已加入设备池",
   "activity.pool_device_left": "设备已离开设备池",

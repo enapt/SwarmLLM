@@ -61,6 +61,8 @@
   "activity.overflow": "{count} ältere Ereignisse",
   "activity.peer_connected": "Computer verbunden: {node}",
   "activity.peer_disconnected": "Computer getrennt: {node}",
+  "activity.peer_model_load": "Ein anderer Computer hat diesen gebeten, die Schichten {detail} von {model} auszuführen — sie werden jetzt in {count} MB des Arbeitsspeichers dieses Computers geladen",
+  "activity.peer_model_load_card": "Ein anderer Computer hat diesen gebeten, die Schichten {detail} von {model} auszuführen — sie werden jetzt in {count} MB des Grafikkartenspeichers geladen",
   "activity.pool_created": "Gerätegruppe erstellt",
   "activity.pool_device_joined": "Gerät der Gruppe beigetreten",
   "activity.pool_device_left": "Gerät hat Gruppe verlassen",

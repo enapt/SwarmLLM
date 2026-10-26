@@ -25,6 +25,12 @@ Storage is now limited only by the space the owner allows and by the disk itself
 that still sets `max_shards` there is warned about in the log and otherwise ignored. The limit
 per model, on the Models page, is unchanged (field report #039).
 
+**A computer now says so when another computer's request starts loading a model on it.** When a
+split needs this computer's layers of a model, loading them can take gigabytes of its graphics
+card or memory at once — unexpected for an owner who shares the card with other programs. The
+activity feed and the log now say which model, which layers, and how much memory they are being
+loaded into, both when they are first loaded and when more are added (field report #039).
+
 **A computer already holding part of a large model now says no up front to a part it could not
 load.** Before a reply starts, each computer in a split is asked whether it can take its part.
 One that had already loaded other layers of the model answered only about the conversation's

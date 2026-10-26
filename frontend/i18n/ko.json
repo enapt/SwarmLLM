@@ -61,6 +61,8 @@
   "activity.overflow": "{count}개의 오래된 이벤트",
   "activity.peer_connected": "컴퓨터 연결됨: {node}",
   "activity.peer_disconnected": "컴퓨터 연결 해제됨: {node}",
+  "activity.peer_model_load": "다른 컴퓨터가 이 컴퓨터에 {model}의 레이어 {detail} 실행을 요청했습니다 — 지금 이 컴퓨터의 메모리 {count} MB에 불러오는 중입니다",
+  "activity.peer_model_load_card": "다른 컴퓨터가 이 컴퓨터에 {model}의 레이어 {detail} 실행을 요청했습니다 — 지금 그래픽 카드 메모리 {count} MB에 불러오는 중입니다",
   "activity.pool_created": "기기 풀이 생성되었습니다",
   "activity.pool_device_joined": "기기가 풀에 참여했습니다",
   "activity.pool_device_left": "기기가 풀에서 떠났습니다",
