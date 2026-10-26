@@ -1377,12 +1377,17 @@ fn layers_offered(candidates: &[NodeCandidate], local_node_id: &NodeId) -> Optio
 /// [`layers_offered`] at any figure — what a plan that cannot be made at the
 /// holders' CEILINGS reports (`short_of_memory`), with the same arithmetic.
 ///
-/// This node's figure is room to ADD beside what its worker already holds
-/// (`NodeCandidate::layers_it_would_add`), not a total, so what it carries is
-/// that room AND the layers it holds — the reading `plan_exceeds_offered_memory`
-/// leaves it out for. Counted as its room alone, a re-plan's refusal told the
-/// caller the 70B's holders had "room for about 67 of its 80 layers" while
-/// this node held the other 13 (FUTURE_WORK #350, 2026-10-25).
+/// This node's `max_hostable_layers` is room to ADD beside what its worker
+/// already holds (`NodeCandidate::layers_it_would_add`), not a total, so what
+/// it carries is that room AND the layers it holds — the reading
+/// `plan_exceeds_offered_memory` leaves it out for. Counted as its room alone,
+/// a re-plan's refusal told the caller the 70B's holders had "room for about 67
+/// of its 80 layers" while this node held the other 13 (FUTURE_WORK #350,
+/// 2026-10-25). The figure asked can already be a total — a fresh worker's run
+/// (`fresh_run_layers`, which its offer is the larger of), or every layer here
+/// once its conversation memory refused the prompt (`prompt_memory_refused`,
+/// #263: `min(held + room, fit)`) — so it is the larger of the two readings,
+/// and after a refusal the figure alone (the pre-release review of v0.3.255).
 fn layers_offered_at(
     candidates: &[NodeCandidate],
     local_node_id: &NodeId,
@@ -1392,13 +1397,14 @@ fn layers_offered_at(
     let mut offered: HashMap<&NodeId, u32> = HashMap::new();
     for c in candidates {
         let mut o = figure(c)?;
-        if &c.node_id == local_node_id {
+        if &c.node_id == local_node_id && !c.prompt_memory_refused {
             let holds: u32 = c
                 .held_ranges
                 .iter()
                 .map(|h| h.range.1.saturating_sub(h.range.0))
                 .sum();
-            o = o.saturating_add(holds);
+            let beside = c.max_hostable_layers.unwrap_or(0).saturating_add(holds);
+            o = o.max(beside);
         }
         held.entry(&c.node_id)
             .or_default()

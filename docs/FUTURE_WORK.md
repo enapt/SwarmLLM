@@ -3398,7 +3398,11 @@ grep `^| N |`).
   carrying's max-flow count and the ceilings' sum a chain is judged carriable by — a layer and
   a half of slack in a count that only decides whether to plan. A refusal's `layers_that_fit`
   is measured from the asked range's start, so it describes a middle run; the re-plan weighs
-  the head on top, on the cautious side.
+  the head on top, on the cautious side. Greedy's running `assigned` and `find_standbys`'
+  `committed` tallies still add bare widths while the checks against them weigh
+  `width_in_bound`, so a peer given a tail that carries the head AND another range can be
+  over-committed by about a layer before the final `plan_exceeds_offered_memory`, which sums
+  `width_in_bound` (the pre-release review of v0.3.255).
 - #351 — **A large model split across computers guesses ahead again on the computer that asked
   for it.** The first Llama-3.3-70B replies across four machines (TH, TH, AU, IT) ran every
   token unguessed, 0.56-0.59 tok/s warm. Two contributors, both in what the drafter's spawn was

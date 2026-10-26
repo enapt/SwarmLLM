@@ -1083,13 +1083,34 @@ fn this_nodes_offer_counts_the_layers_its_worker_holds() {
     let mut rest = simple_candidate(2, vec![(13, 80)]);
     rest.max_hostable_layers_at_face_value = Some(67);
     let local = me.node_id.clone();
-    let holders = [me, rest];
+    me.max_hostable_layers = Some(0);
+    let holders = [me.clone(), rest.clone()];
     assert_eq!(super::layers_offered(&holders, &local), Some(80));
     // Null control: the same node seen as a peer offers its figure, a total.
     assert_eq!(
         super::layers_offered(&holders, &NodeId([0xEE; 32])),
         Some(67)
     );
+
+    // Where the figure is already a total it is not added to again (the
+    // pre-release review of v0.3.255). The rest offers 50, so a double count
+    // shows: this node's 0..28 is the only other holder of 13..28.
+    rest.max_hostable_layers_at_face_value = Some(50);
+    // A fresh worker's run of 20 (its offer is the larger of room and run):
+    // 20 here, not 20 + 13.
+    let mut fresh = me.clone();
+    fresh.max_hostable_layers_at_face_value = Some(20);
+    assert_eq!(
+        super::layers_offered(&[fresh, rest.clone()], &local),
+        Some(70)
+    );
+    // Its conversation memory refused the prompt: the figure is
+    // `min(held + room, fit)` (#263), every layer here — 10, not 10 + 13.
+    let mut refused = me;
+    refused.prompt_memory_refused = true;
+    refused.max_hostable_layers = Some(10);
+    refused.max_hostable_layers_at_face_value = Some(10);
+    assert_eq!(super::layers_offered(&[refused, rest], &local), Some(60));
 }
 
 /// A layer held by several computers is carried once (#346): what they carry
