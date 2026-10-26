@@ -817,15 +817,32 @@ pub(super) struct EngineDrafter {
 /// (`SplitModel::draft_after`): 0.4, Hugging Face's assisted-generation choice
 /// for the same rule. `SWARMLLM_DRAFT_CONFIDENCE=<p>` sets it for an A/B inside
 /// one binary; 0 guesses every token the round asks for. Read once.
-fn draft_confidence_floor() -> Option<f32> {
+pub(super) fn draft_confidence_floor() -> Option<f32> {
+    static F: OnceLock<Option<f32>> = OnceLock::new();
+    *F.get_or_init(|| confidence_floor_from(std::env::var("SWARMLLM_DRAFT_CONFIDENCE").ok(), 0.4))
+}
+
+/// The continuous stream's floor (`dsd_stream`): none — a chunk is guessed
+/// whole. A guess the drafter is unsure of ended a round where it costs the
+/// far computer work for little, but in the stream a chunk cut short was also
+/// HELD, nothing built past it until its answer came back, and that wait cost
+/// more than the guesses it saved. On the real Thailand ↔ Australia link
+/// (`docs/plans/faster_than_local.md` § 8.6) a floor raised to 0.67 made
+/// replies 27% slower. `SWARMLLM_STREAM_DRAFT_CONFIDENCE=<p>` restores one for
+/// an A/B (0.4 is the rounds'). Read once.
+pub(super) fn stream_confidence_floor() -> Option<f32> {
     static F: OnceLock<Option<f32>> = OnceLock::new();
     *F.get_or_init(|| {
-        let p = std::env::var("SWARMLLM_DRAFT_CONFIDENCE")
-            .ok()
-            .and_then(|v| v.trim().parse::<f32>().ok())
-            .unwrap_or(0.4);
-        (p > 0.0).then_some(p)
+        confidence_floor_from(std::env::var("SWARMLLM_STREAM_DRAFT_CONFIDENCE").ok(), 0.0)
     })
+}
+
+/// A floor as a knob gives it: a probability above 0, or none.
+fn confidence_floor_from(knob: Option<String>, default: f32) -> Option<f32> {
+    let p = knob
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .unwrap_or(default);
+    (p > 0.0).then_some(p)
 }
 
 /// `SWARMLLM_FAULT_DRAFT_FAIL=<n>`: this node's in-engine drafter fails its
@@ -900,6 +917,11 @@ impl EngineDrafter {
     /// Ask the drafter's worker for `gamma` guesses following the sequence so
     /// far. `history` is the reply so far (what the penalties read) and
     /// `coupling_seed` the request's shared noise, `None` for argmax guesses.
+    /// `stop_below` ends the guesses after one the drafter gives less than
+    /// that, keeping it: a round passes [`draft_confidence_floor`], the
+    /// stream [`stream_confidence_floor`] — each caller says which, as they
+    /// pay for a short answer differently.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn draft(
         &mut self,
         state: &SharedState,
@@ -907,6 +929,7 @@ impl EngineDrafter {
         sampling: &SamplingParams,
         history: &[u32],
         coupling_seed: Option<u64>,
+        stop_below: Option<f32>,
         cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<Vec<u32>, SwarmError> {
         self.before_a_call()?;
@@ -921,7 +944,7 @@ impl EngineDrafter {
             history: history.to_vec(),
             coupling_seed,
             for_the_owner: self.requester == Requester::Owner,
-            stop_below: draft_confidence_floor(),
+            stop_below,
             tree: None,
             flow: None,
         };
@@ -1573,6 +1596,23 @@ mod tests {
             None,
             "no token types: the extra entry cannot be shown unused"
         );
+    }
+
+    /// The rounds keep 0.4 and the stream guesses a chunk whole unless a knob
+    /// says otherwise; 0 or a word is "no floor" / the default, as before.
+    #[test]
+    fn the_stream_guesses_a_chunk_whole_and_the_rounds_keep_their_floor() {
+        assert_eq!(confidence_floor_from(None, 0.4), Some(0.4));
+        assert_eq!(confidence_floor_from(None, 0.0), None);
+        assert_eq!(confidence_floor_from(Some(" 0.4 ".into()), 0.0), Some(0.4));
+        assert_eq!(confidence_floor_from(Some("0".into()), 0.4), None);
+        assert_eq!(confidence_floor_from(Some("high".into()), 0.4), Some(0.4));
+        if std::env::var_os("SWARMLLM_STREAM_DRAFT_CONFIDENCE").is_none() {
+            assert_eq!(stream_confidence_floor(), None);
+        }
+        if std::env::var_os("SWARMLLM_DRAFT_CONFIDENCE").is_none() {
+            assert_eq!(draft_confidence_floor(), Some(0.4));
+        }
     }
 
     #[test]

@@ -334,6 +334,7 @@ async fn guess_ahead(
                 &d.sampling,
                 &line.tokens,
                 d.coupling_seed,
+                super::engine_drafter::draft_confidence_floor(),
                 Some(d.stop.clone()),
             )
             .await

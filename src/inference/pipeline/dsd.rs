@@ -961,6 +961,7 @@ impl PipelineExecutor {
                         &self.request.sampling_params,
                         &generated,
                         noise.map(|n| n.seed()),
+                        super::engine_drafter::draft_confidence_floor(),
                         self.request.cancel.clone(),
                     )
                     .await

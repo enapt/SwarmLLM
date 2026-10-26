@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #357**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #358**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1389,6 +1389,22 @@ Local GPU decode runs at ~97% of llama.cpp (`docs/plans/local_decode_submissions
 is left is prompt reading, the processor half of a hybrid, and MoE placement —
 `docs/plans/faster_than_local.md` § 3 and § 4 carry the order.
 
+#### #357 — A card's first graph of a new shape, late in a worker's life, can stall one forward 10-59 s
+`P3` · perf-local · **OPEN** — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883
+
+Four of 16 split replies on 2026-10-26 (this PC, Windows up 84 h) each lost 10-59 s to ONE
+forward on the card: the worker's first CUDA graph of a 2-row chunk (`decode graph … instantiated`
++1, the launch's recording 3 → 113 ms), with a 12-14 s gap ending at a card memory reading. The
+stream no longer sends that shape (every chunk full width, § 8.6), but any path can still meet a
+shape for the first time hours into a worker's life — a tree's row count, a check's width. Under
+WSL2 fresh card memory slows with host uptime (#883: pool growth 0.3-5.7 s, 11.2 s), and CUDA maps
+a graph's memory nodes at launch ("mapping operations can be relatively expensive"). Not
+reproduced under `SWARMLLM_PROFILE=1` (the 2-row tail ran uncaptured, 2 graphs), nor in the
+8-reply A/B after it, so reproduce it first: the late shape, the worker's age, the host's uptime.
+Then the candidates the research named: allocate a graph's buffers outside the capture (llama.cpp
+and PyTorch's way), build a new shape's graph off the forward's path and run that forward
+uncaptured, or capture only a shape seen N times.
+
 #### #147 — Prompt reading on the card: the smaller items left after f16 accumulation
 `P3` · perf-local · **PARTIAL** — 2026-10-09 · history: archive row #147 and § "Prompt reading on the card (#147, 2026-09-29)"
 
@@ -2050,7 +2066,14 @@ their replies (gotcha #180), so it needs the worker's cancel path. Narrowed 2026
 far node walks the checks, an unstarted chunk stood on its OWN refused walk is skipped there at
 once, without waiting a round trip for the restart (`forward_streams` `StoodOnARefusal`; the 70B
 computed 10 of 29 decode checks stale). Left: a started chunk, and a wrong look-ahead, which the
-tail is not sent; (c) the drafter's near
+tail is not sent. And from (a), 2026-10-26 (`faster_than_local.md` § 8.6): the width was not the
+lever (4-5 guesses +1-3% over 3 on the 7B TH↔AU), the drafter's confidence floor was — a chunk it
+cut short held the stream a round trip; the stream now drafts with no floor and sends every chunk
+at full width (+18% at 400 tokens, +12% at 160). Left from it: the 70B was level on two prompts and
+10% slower on the one with the most holds against an AU without the tail skip (its check outlasts
+the round trip, so a chunk on a wrong guess queued ahead of the restart) — measure it again once AU
+runs the release; if the floor still pays where the far end's check outlasts the round trip, keep it
+for that case only; (c) the drafter's near
 layers as the verify input where the head segment is the coordinator's own; (d) mid-reply
 failover is #167. The TH↔BE two-CARD case was never measured — #151 now makes a same-build
 card split possible. A same-finetune drafter is NOT better here (coder 0.5B lost to the
@@ -3177,6 +3200,12 @@ Each has a reason it is not being built now. Pick one up only when its trigger a
   444-533 ms over 19 forwards, 8 positions 518-565 ms). That is ~6 ms a processor layer a position,
   compute-bound near what 16 AVX2 threads give. Across a 70B chain's ~50 processor-held layers it
   holds the guesses a check pays for to ~3 (#351).
+  **Corrected 2026-10-26 by a clean measurement** (`faster_than_local.md` § 8.1, idle box, min of
+  pairs, 8 threads): the cost is NOT linear in positions. Up to 4 rows a check is nearly free
+  (the 70B's layers: 1.04× at 1 row, 1.12× at 4); past that each row costs ~3-4 ms a processor
+  layer (2.09× at 8, 17.4× at 64), and our kernels match llama.cpp's at every width. The live
+  node's line above blends the flat part with the steep one (3, 7 and 9 rows on a loaded node).
+  This kernel would lower the steep part — what a TREE on a processor pays — not a chain's 3-4 rows.
   Prior art (read 2026-10-26): llama.cpp's CPU repack, `ggml_gemm_q4_K_8x8_q8_K`
   (`ggml-cpu/arch/x86/repack.cpp`, PR #12332):
   - weights are interleaved 8 columns at a time at load (`block_q4_Kx8`), activations packed

@@ -46,9 +46,10 @@
 //! found small chunks (1-4 tokens) better than large ones once several are in
 //! flight, which [`guesses_per_chunk`]'s default follows, and needs runs executed
 //! in the order sent, which the far segment's gate gives. Its early cancellation
-//! of runs already known to be wrong is not built: it pays where the far node
-//! is saturated, and here a dropped chunk is computed while that node would
-//! otherwise wait for the restarted one.
+//! of runs already known to be wrong has a counterpart since 2026-10-26: a far
+//! segment that walks a chunk and refuses a guess skips the chunks built on it
+//! until the restart arrives (`forward_streams`, `StoodOnARefusal`); a chunk
+//! already running is not stopped.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -99,6 +100,39 @@ fn knob(name: &str, default: u32, max: u32) -> u32 {
         .ok()
         .and_then(|v| v.trim().parse::<u32>().ok())
         .map_or(default, |v| v.clamp(1, max))
+}
+
+/// The guesses the next chunk carries: the stream's width, even where the
+/// reply has room for fewer. A chunk narrower than the rest is a shape the
+/// card has not run yet — on this node's near half AND the far end's — and a
+/// card's first graph of a shape late in a worker's life waited 10-59 s for
+/// fresh memory under WSL2 at 84 h uptime (2026-10-26, `faster_than_local.md`
+/// § 8.6; gotcha #883 is the same driver growing a pool): with every chunk
+/// full, the reply's last chunk was the only narrow one, and the second reply
+/// to end on one stalled there. Guesses past the reply's end are checked and
+/// thrown away (`round_tokens_for_reply` emits none). Only the positions the
+/// chain serves bound it (`positions_left`: from the chunk's first row to the
+/// smallest context any of its machines serves, `None` unknown — then the
+/// reply's room, as before), since a row past them would be refused; never
+/// fewer than the room allows. `SWARMLLM_STREAM_FULL_CHUNKS=0` sends the
+/// narrow chunk, for an A/B.
+fn chunk_guesses(width: u32, room: u32, positions_left: Option<u32>) -> u32 {
+    chunk_guesses_with(width, room, positions_left.filter(|_| full_chunks()))
+}
+
+/// [`chunk_guesses`] with its switch read: `positions_left` is `None` where
+/// the chunk is held to the reply's room.
+fn chunk_guesses_with(width: u32, room: u32, positions_left: Option<u32>) -> u32 {
+    let fitted = width.min(room);
+    if room == 0 {
+        return 0;
+    }
+    positions_left.map_or(fitted, |left| fitted.max(width.min(left)))
+}
+
+fn full_chunks() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_STREAM_FULL_CHUNKS").as_deref() != Ok("0"))
 }
 
 /// Whether a coordinator streams its checks: ON unless `SWARMLLM_SPEC_STREAM=0`
@@ -369,10 +403,13 @@ struct Frontier {
     /// A restart's cut, for both halves' caches, on the next chunk.
     truncate: Option<u32>,
     /// Nothing is built past this chunk until it is answered: it has no
-    /// look-ahead (the drafter stopped), or its look-ahead is a guess the
-    /// drafter was unsure of — it stopped short of the guesses asked for
-    /// (`draft_confidence_floor`), so a chunk built on it would most likely be
-    /// thrown away. PipeInfer's "reactive speculation" draws the same line.
+    /// look-ahead (the drafter failed or had no room), or fewer guesses than
+    /// were asked for. A guess the drafter is unsure of no longer holds the
+    /// stream — it drafts with no confidence floor
+    /// (`engine_drafter::stream_confidence_floor`). PipeInfer's "reactive
+    /// speculation" held there, and so did this stream until 2026-10-26: where
+    /// the round trip outlasts the far computer's check, each hold left that
+    /// computer idle for a round trip (`faster_than_local.md` § 8.6).
     held_by: Option<u32>,
 }
 
@@ -403,6 +440,12 @@ struct StreamRun<'a, 'r> {
     chunks: u32,
     kept_whole: u32,
     restarts: u32,
+    /// Chunks that held the stream ([`Frontier::held_by`]).
+    held: u32,
+    /// The longest conversation every machine of the chain serves for this
+    /// model, the drafter here included — `None` where one has not said
+    /// ([`StreamRun::positions_served`]).
+    positions_served: Option<u32>,
 }
 
 impl PipelineExecutor {
@@ -450,7 +493,10 @@ impl PipelineExecutor {
             chunks: 0,
             kept_whole: 0,
             restarts: 0,
+            held: 0,
+            positions_served: None,
         };
+        run.positions_served = run.positions_served();
         let outcome = run.run().await;
         tracing::info!(
             request_id = %self.request.id,
@@ -459,6 +505,7 @@ impl PipelineExecutor {
             chunks = run.chunks,
             kept_whole = run.kept_whole,
             restarts = run.restarts,
+            held = run.held,
             guesses_per_chunk = guesses_per_chunk(),
             window = chunks_in_flight(),
             "DSD: streamed checks complete"
@@ -468,6 +515,37 @@ impl PipelineExecutor {
 }
 
 impl StreamRun<'_, '_> {
+    /// The longest conversation every machine a chunk reaches serves for this
+    /// model ([`chunk_guesses`]'s bound): each peer of the run by what it
+    /// advertises (`SharedState::peer_served_context`, the context its worker
+    /// refuses above), this node's segments and its drafter by this node's own
+    /// setting, the rule its workers apply (`split::effective_context_length_with`).
+    /// `None` where any of them is unknown.
+    fn positions_served(&self) -> Option<u32> {
+        let model = &self.shape.far.shard_id.model_id;
+        let cap = self
+            .state
+            .cfg()
+            .inference
+            .max_seq_len_override
+            .map(|v| v as usize);
+        let here = |m: &crate::types::ModelId| {
+            self.state
+                .model_declared_context(m)
+                .map(|d| crate::inference::split::effective_context_length_with(d, cap))
+        };
+        let mut served = here(self.drafter.model_id())?;
+        if !self.shape.near.is_empty() || !self.shape.after.is_empty() {
+            served = served.min(here(model)?);
+        }
+        for node in std::iter::once(&self.shape.far.node_id)
+            .chain(self.shape.chain.iter().map(|h| &h.node_id))
+        {
+            served = served.min(self.state.peer_served_context(node, model)?);
+        }
+        u32::try_from(served).ok()
+    }
+
     async fn run(&mut self) -> Result<(), SwarmError> {
         let mut out: FuturesOrdered<Waiting> = FuturesOrdered::new();
         let outcome = self.run_with(&mut out).await;
@@ -540,7 +618,12 @@ impl StreamRun<'_, '_> {
             .io
             .max_tokens
             .saturating_sub(self.frontier.history.len() as u32);
-        let want = guesses_per_chunk().min(room);
+        let want = chunk_guesses(
+            guesses_per_chunk(),
+            room,
+            self.positions_served
+                .map(|served| served.saturating_sub(self.frontier.index_pos)),
+        );
         let guesses: Vec<u32> = if self.drafting_off || want == 0 {
             Vec::new()
         } else {
@@ -552,6 +635,7 @@ impl StreamRun<'_, '_> {
                     sampling,
                     &self.frontier.history,
                     self.io.noise.map(|n| n.seed()),
+                    super::engine_drafter::stream_confidence_floor(),
                     exec.request.cancel.clone(),
                 )
                 .await
@@ -738,6 +822,7 @@ impl StreamRun<'_, '_> {
         }
         if lookahead.is_none() || (guesses.len() as u32) < want {
             self.frontier.held_by = Some(seq);
+            self.held += 1;
         }
         let sent = Sent {
             seq,
@@ -1069,6 +1154,41 @@ mod tests {
         assert_eq!(
             shape(&[ME, PEER, OTHER, ME], serves_without_walking),
             Some("boomerang")
+        );
+    }
+
+    /// Every chunk is the stream's width — the last one too, past the reply's
+    /// end — unless a row would fall past what a machine of the chain serves;
+    /// never narrower than the reply's room allows, and nothing once it is full.
+    #[test]
+    fn every_chunk_is_the_streams_width_while_the_context_allows() {
+        assert_eq!(chunk_guesses_with(3, 40, Some(4000)), 3);
+        assert_eq!(
+            chunk_guesses_with(3, 2, Some(4000)),
+            3,
+            "the reply's last chunk"
+        );
+        assert_eq!(chunk_guesses_with(3, 1, Some(4000)), 3);
+        assert_eq!(
+            chunk_guesses_with(3, 2, Some(2)),
+            2,
+            "the context's last positions"
+        );
+        assert_eq!(chunk_guesses_with(3, 1, Some(2)), 2);
+        assert_eq!(
+            chunk_guesses_with(3, 2, Some(1)),
+            2,
+            "never fewer than the room"
+        );
+        assert_eq!(
+            chunk_guesses_with(3, 2, None),
+            2,
+            "unknown, or switched off: the room"
+        );
+        assert_eq!(
+            chunk_guesses_with(3, 0, Some(4000)),
+            0,
+            "a full reply sends nothing"
         );
     }
 

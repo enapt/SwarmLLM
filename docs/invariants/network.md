@@ -3503,6 +3503,43 @@ quarter of the 70B's restarts) is invisible at the tail, which is not sent the
 look-ahead; a check already running is not stopped (#149 (b)). A/B
 `SWARMLLM_STREAM_TAIL_SKIP=0`; test `a_refusal_walked_here_skips_the_turns_built_on_it`.
 
+**A chunk is guessed whole, and every chunk is the stream's width** (2026-10-26,
+`docs/plans/faster_than_local.md` § 8.6). The drafter's confidence floor (0.4)
+was set for the ROUNDS, where an unsure guess ends a round and saves the far
+end ~25% of its positions at no speed cost. In the stream it did something
+else: a chunk the floor cut short has no look-ahead, so `Frontier::held_by`
+holds the stream until its answer is back, and on a link whose round trip
+(~440 ms TH↔AU) outlasts the far end's check (30-50 ms for 14 layers on a card)
+each hold idles the far end for a round trip. Building past an unsure guess
+costs only when the guess is wrong, and then only work an idle far end had for
+free. Swept on the real link (7B, this PC's card 0-13 + coder-1.5B Q8_0 drafter,
+AU's card the rest, trees and flow off): width 4-5 gained 1-3% over 3, a floor
+of 0.67 cost 27%, no floor gained 16%. So `dsd_stream` drafts with
+`engine_drafter::stream_confidence_floor` (none; the rounds keep
+`draft_confidence_floor`, 0.4 — a REQUIRED `stop_below` on `draft()` makes each
+caller name its floor). With no floor four of 16 replies stalled 10-59 s, each
+ONE forward on this PC's card: the worker's first CUDA graph of a 2-row chunk
+(the reply's last, cut to the room left), built at 84 h of host uptime (WSL2's
+fresh card memory slows with uptime, gotcha #883); with the floor, cut chunks
+came early and their graphs were built then. So every chunk goes at full width,
+the last too (`dsd_stream::chunk_guesses`), its guesses past the reply's end
+checked and dropped by `round_tokens_for_reply` — bounded by the context the
+chain serves (`StreamRun::positions_served`: the drafter's, this node's, every
+peer's `peer_served_context`; unknown keeps the narrow tail), since the RoPE
+tables refuse rows past it. Verified, arms alternating on one binary: 7.66 vs
+6.49 tok/s at 400 tokens, 6.67 vs 5.97 at 160, `held` 0 against 37/82, the
+same replies; each worker built one card graph against 2-3 with narrow tails
+(no arm stalled that run — the stall is intermittent; the full chunks remove
+its trigger at no cost). The 70B (this node + AU, pinned) was level on two
+prompts and 10% slower on the one with the most holds (0.91 vs 1.00/1.03 tok/s)
+against an AU on v0.3.256 — without the tail skip, where its check (~1.14 s)
+outlasts the round trip and a chunk on a wrong unsure guess is computed ahead
+of the restart; re-measure once AU has the skip. A narrow shape can still first appear late on other
+paths (FUTURE_WORK #357). A/B `SWARMLLM_STREAM_DRAFT_CONFIDENCE=0.4`,
+`SWARMLLM_STREAM_FULL_CHUNKS=0`; tests
+`the_stream_guesses_a_chunk_whole_and_the_rounds_keep_their_floor`,
+`every_chunk_is_the_streams_width_while_the_context_allows`.
+
 → `docs/invariants/network.md` § "A stream of verifies runs in its order"
 
 ## A stream of checks travels a chain, and a chain that fails finishes unchained (2026-10-20, #318)

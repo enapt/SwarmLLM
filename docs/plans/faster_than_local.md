@@ -580,6 +580,172 @@ fed every request's output and keyed by request id. Its proposer shows no user o
 Inference, not read). Here the store is the owner's alone.
 Filed as FUTURE_WORK #337.
 
+## 8. Deep dive after the first 70B replies (2026-10-26)
+
+The 70B answers at 1.29-1.47 tok/s through this PC (layers 0-21) and AU (`aa3d1e66`, layers
+21-80 on an RTX 3060 and its processor). This section asks where that time goes and which
+untried ideas could move it, measured before anything is built.
+
+**8.1 A check's width on a processor — measured; llama.cpp is no faster.** `prefill_bench`'s
+`SPEC WIDTH SWEEP` (Ryzen 7 5800H, 8 threads, min of pairs) against `llama-bench -p N` on the same
+file (`~/swarmllm-bench/width1026/run2.out`; the ratio is the bench's, each width timed in pairs
+with a 1-row forward):
+
+| rows | our 8B Q4_K_M | × 1 row (paired) | our 70B, 8 layers | × 1 row (paired) | llama.cpp 8B (pp tok/s → ms) |
+|---|---|---|---|---|---|
+| 1 | 125.6 ms | 1.02 | 104.4 ms | 1.04 | 7.20 → 139 ms |
+| 2 | 139.3 | 0.98 | 98.6 | 0.98 | 10.82 → 185 |
+| 3 | 137.5 | 1.12 | 105.8 | 1.08 | 14.15 → 212 |
+| 4 | 145.0 | 1.15 | 109.6 | 1.12 | 19.75 → 203 |
+| 6 | 229.5 | 1.73 | 154.9 | 1.53 | 20.92 → 287 |
+| 8 | 260.2 | 2.04 | 204.9 | 2.09 | 22.40 → 357 |
+| 16 | 542.7 | 4.18 | 397.5 | 3.98 | 28.21 → 567 |
+| 32 | 1096.6 | 8.24 | 802.1 | 7.66 | 28.39 → 1127 |
+| 64 | 2244.4 | 16.73 | 1770.6 | 17.42 | 29.97 → 2135 |
+
+- **Up to 4 rows is nearly free; past it each row costs ~0.26 of a step** — the knee where an
+  AVX2 dot product (no VNNI on Zen 3) stops being bound by reading the weights and becomes bound
+  by the arithmetic. Our kernels match or beat llama.cpp's at every width: the vendored tiled
+  matmul already reads each weight column once for all rows (`k_quants.rs`, `vec_dot_rows_chosen`),
+  so "each guess re-reads the weights" is refuted by the code and by the curve.
+- **So a processor far end's chunk should fill the knee and stop there.** The stream's chunk is
+  3 rows (2 drafts and a look-ahead, `dsd_stream::guesses_per_chunk`); a 4th row costs ~5%.
+  A tree on a processor does not pay past ~4 rows. The old figure of "22 ms a position" came from
+  the 7B TH↔IT processor peer, past the knee.
+
+**8.2 Checks computed for nothing at the far end — built (the tail skip).** In reply 344f21c8 AU
+answered a check every ~1.14 s and was never idle (three chunks out, a ~0.43 s round trip and
+~0.5 s for this PC to draft and run its 21 layers). Of the 29 decode checks it computed, 10 stood
+on a guess an earlier check had already refused: the restart reached AU ~1.0 s after the refusal
+left it (0.57 s of that at this PC), so AU had started the next stale chunk the moment it
+answered. The stream now skips them at the tail: a check walked there that refused a guess marks
+the stream, and every later turn that is not a restart is answered as skipped
+(`forward_streams` `StoodOnARefusal`, `docs/invariants/network.md` § "A stream of verifies").
+The far end then idles until the restart arrives instead of finishing a stale check, so the
+requester gains the far end's check less the restart's latency — ~0.14 s a miss here, ~3% of the
+reply — and the far end's time is free for anyone else's work. It grows where the far end is slow
+against the round trip. A wrong look-ahead (a quarter of the restarts) is not visible at the tail.
+
+**8.3 A wide check through a card + processor far end: the card copy floors it, and trees still
+lose here.** A forward of ≥ 32 rows copies each processor-held weight to the card for the call
+(#138's op offload), so its cost should stop growing with the rows. Measured with `prefill_bench`'s
+new `SWARM_BENCH_GPU_LAYERS` (the 70B's layers 0-21, 6 on the card and 15 on the processor, as a
+worker given `--gpu-layers 6` places them; `~/swarmllm-bench/width1026/run4.out`):
+
+| rows | 1 | 4 | 8 | 16 | 24 | 32 | 48 | 64 |
+|---|---|---|---|---|---|---|---|---|
+| ms a check | 216 | 258 | 488 | 929 | 1283 | 1281 | 1285 | 1301 |
+| × 1 row (paired) | 1.00 | 1.22 | 2.15 | 3.65 | 6.03 | 5.62 | 6.00 | 6.01 |
+
+From 32 rows on, the check costs the copy — 15 layers × ~0.52 GB at ~7 GB/s, ~1.1 s — whatever the
+rows; below 32 the processor's curve (§ 8.1) reaches the same ~1.28 s at 24 rows, so the crossover
+is ~24 rows, as `(copy − step) / slope + 1` predicted. (The arm with the copy switched off,
+`SWARMLLM_PROMPT_CARD_LAYERS=0 SWARMLLM_PROMPT_CARD_PROJECTIONS=0`, read noisily — 1.5 s at 16 rows
+against 0.93 with it on, where the two paths are the same — so the processor reference is § 8.1's
+curve.) **What it decides**: a 64-row tree at 1.3 s against a 4-row chain at 0.26 s needs ~5× the
+chain's ~2.8 tokens a check (~14) to break even on compute alone; this project's own trees kept
+3.2-4.6 guesses a round (`docs/invariants/scheduling.md` § "A split checks a tree of guesses"). Not
+built. The floor is the card's link: a desktop
+copying pinned memory at ~25 GB/s would put it near 0.35 s, where a tree of tens of rows could beat
+the chain — so the lever exists only where a far end measures its own copy rate and says so.
+
+**8.4 Ideas checked and not built.**
+- **Activation sparsity (TEAL, CATS)**: skips the weight columns a token's small activations do
+  not need — lossy, and a check's rows need the UNION of their masks, which at 4 rows leaves little
+  to skip.
+- **Look-up-table kernels (T-MAC, bitnet.cpp)**: pay at 1-3 bits; our models are Q4_K.
+- **Hybrid cores**: decode threads are already calibrated per machine (`cpu_pools::calibration_for`).
+- **Tapering a tree along the chain** (a middle stage forwarding only the likeliest rows): exact,
+  but the tokens a round keeps cannot exceed what the narrowest stage passed on.
+- **Walking a tree level by level at the tail** (a cheap level, then the next): each level is a
+  round of the tail's own work, worse than one batched check.
+- **Filling the tail's idle time with alternative rows**: under the stream the tail is not idle.
+- **Drafting the restart before the refusal** (SSD / Saguaro, 2603.03251: guess the far end's
+  correction from the drafter's next-likeliest tokens and pre-draft each): saves the drafting part
+  of a restart's 0.57 s, ~3% here.
+- **A larger drafter for the 70B** (8B against the 3B): ~+9% acceptance by the 70B-family
+  tables, and it does not fit beside this PC's layers on an 8 GB card.
+
+**8.5 What is left, ranked by what it would give the 70B.**
+1. **The far end's speed.** AU's ~1.14 s for 59 layers is ~22 GB/s over ~21 GB on its
+   processor, half what such a machine should read; the cause is unknown and cannot be measured
+   from here. Placement by speed (#356) is the lever the swarm has.
+2. **The chunk's width and the drafter's floor in it** — built, see 8.6.
+3. **The restart's latency at the head** (0.57 s: drafting ~190 ms with the 3B on the processor at
+   62 ms a guess, then 21 layers). A drafter on the card would cut the drafting to ~30 ms, but on an
+   8 GB card it costs ~4 of the 70B's layers there.
+4. **A public n-gram store** (§ 7.6, the user's question of 2026-10-26: why not look common phrases
+   up instead of guessing them) — unmeasured. Checking a guess, not making it, is the cost here, and
+   the drafter already reads the whole context at ~0.77 acceptance; a looked-up phrase saves only
+   where it is right more often than the drafter, which the measurement in § 7.6 is to establish.
+
+**8.6 The stream's chunk: guessed whole, and every chunk one width — built.** The chain stream
+(what a split runs where trees do not: a drafter off the card, a far end partly on a processor —
+the 70B) was swept on the real link (this PC's card holding the 7B's layers 0-13 and the
+coder-1.5B Q8_0 drafter, AU's RTX 3060 the rest, trees and flow forced off,
+`~/swarmllm-318/streamsweep.sh`, decode tok/s, arms alternating, one binary):
+
+| arm | 400 tokens | 160 tokens |
+|---|---|---|
+| 3 guesses a chunk, floor 0.4 (as shipped) | 6.48 6.45 · 6.54 6.27 | 5.10 6.00 · 6.12 5.71 |
+| 4 guesses, floor 0.4 | 6.57 6.57 | 5.66 5.66 |
+| 5 guesses, floor 0.4 | 6.54 6.66 6.61 | 5.71 5.79 5.75 |
+| 4 guesses, floor 0.67 | 4.80 4.77 · 4.81 4.73 | 4.39 4.26 · 4.53 4.39 |
+| 3 guesses, NO floor | 7.52 7.61 · 7.48 7.33 | 6.80 · 6.42 (+2 stalled) |
+
+- **The width barely matters; the drafter's confidence floor decides.** 4-5 guesses gave 1-3% over 3.
+  Raising the floor to 0.67 cost 27%, and removing it gained 16%. The floor was put there for the
+  ROUNDS (§ "An unsure guess ends the round" in `split_speculation.md`: there it saves the far computer
+  ~25% of its positions at no speed cost). In the stream it does something else. A chunk the drafter
+  cut short HOLDS the stream: nothing is built past it until its answer is back
+  (`Frontier::held_by`, PipeInfer's "reactive speculation"). On a link whose round trip (~440 ms)
+  outlasts the far end's check (~30-50 ms for 14 layers on a card), each hold idles the far end for a
+  whole round trip. Building past the unsure guess loses only when that guess is wrong, and then only
+  the work the restart throws away, which that idle far end had for free. The stream now drafts with no
+  floor (`engine_drafter::stream_confidence_floor`; the rounds keep 0.4). `held` on the stream's line
+  counts the holds left.
+- **With no floor every chunk is the same width, and a narrow one late in a worker's life
+  stalled.** Four of the 16 no-floor replies took 10-59 s longer. Each time it was ONE forward on this
+  PC's card: the worker's first CUDA graph of a 2-row chunk (`decode graph … instantiated` +1,
+  `forward_ms=56678`), the reply's last chunk cut to the room left. With the floor, cut chunks of 1
+  and 2 rows came early and their graphs were built then. This is the WSL2 slowdown of fresh card
+  memory with host uptime (gotcha #883: a pool growth 0.3-5.7 s; here 84 h up). The stream now sends
+  every chunk at full width, the last one too, with the guesses past the reply's end checked and
+  dropped (`chunk_guesses`, bounded by the context the chain serves). The far end's card is spared the
+  narrow shape as well. A narrow shape can still first appear late on other paths: FUTURE_WORK #357.
+- **Verified** (the same link, one binary, arms alternating, 2026-10-26 17:00Z, Windows up 84.6 h,
+  `SWARMLLM_STREAM_DRAFT_CONFIDENCE=0.4,SWARMLLM_STREAM_FULL_CHUNKS=0` restoring the old stream):
+
+  | arm | 400 tokens | 160 tokens | `held` (160 / 400) |
+  |---|---|---|---|
+  | new (no floor, full chunks) | 7.81 7.80 · 7.62 7.42 (mean 7.66) | 6.87 6.82 · 6.54 6.44 (6.67) | 0 / 0 |
+  | old (floor 0.4, narrow) | 6.57 6.59 · 6.46 6.34 (6.49) | 6.11 5.82 · 6.16 5.77 (5.97) | 37 / 82 |
+  | no floor, narrow | 7.86 7.79 · 7.67 7.85 (7.79) | 6.81 6.72 · 6.79 6.44 (6.69) | 0 / 0 |
+
+  +18% at 400 tokens and +12% at 160. The replies are the same in every arm. The full-width tail
+  fired as meant: each worker built ONE card graph in the new arm and 2-3 with narrow tails. No arm
+  stalled in this run, so the stall is intermittent (4 of 16 replies in the sweep, 0 of 8 here); the
+  full chunks remove its trigger at no cost in speed.
+- **70B: level, one prompt 10% slower — against a far end WITHOUT the tail skip.** This node's
+  first layers + AU the rest (pinned with `swarm_route`; unpinned, the planner chose the Mac + AU
+  in half the arms and nothing here streamed), arms new / old / old / new, 96-token replies to
+  three new prompts, decode tok/s:
+
+  | prompt | new | old | `held` (old) |
+  |---|---|---|---|
+  | compost | 1.94 | 1.93 · 1.93 | 2 of 35 |
+  | tea | 1.34 | 1.35 · 1.31 | 9 of 43 |
+  | lighthouse | 0.91 | 1.00 · 1.03 | 24 of 49 |
+
+  The second new arm is left out: its first ask was refused (#358) and the next one loaded the
+  model. AU runs v0.3.256, which predates the tail skip (§ 8.2), and its check (~1.14 s)
+  outlasts the round trip, so its queue is full: a chunk built on a wrong unsure guess is
+  computed there in full, ahead of the restart. The hold had kept the restart from queuing behind
+  it, which pays on the prompt with the most holds. The tail skip answers such a chunk the
+  moment the refusal is walked; it reaches AU with this release, and the 70B is measured again
+  then. If the floor still pays where the far end's check outlasts the round trip, it comes back
+  for that case only (FUTURE_WORK #149).
+
 ## Sources
 
 Petals 2312.08361 · Pope et al. 2211.05102 · StagFormer 2501.15665 · Layer
