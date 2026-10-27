@@ -1414,6 +1414,28 @@ the one that writes the claim others read"). A rejected artifact that is still
 advertised is worse than one simply absent: it is a routing candidate that
 cannot serve.
 
+**Which parts this node can serve from its disk has ONE answer too** (2026-10-27, #334 (1)):
+`SharedState::parts_servable_here` — credited here in the registry, the file exactly the
+manifest's size (`shard::shard_file_is_whole`), no download of it under way. The loader
+(`auto_manage::check_and_load_model`), a peer's whole-model hand-off
+(`dispatch::remote_generate::can_serve_layer_range`) and the request gate (`parts_missing_here`)
+ask it. The three copies differed: a file within 10% of its size; the same without the
+download check; the file's existence alone. The scans and the download pass's skip check use the
+same size verdict, so a zero hash no longer has a rule of its own.
+
+The ±10% began (sweep R24, April) as `>= 90%` "looks mostly downloaded". It was never about
+real variance. A part's size is the sum of its tensors (`inference::shard_layout`). The
+HuggingFace download refuses any other length, and every download syncs a `.tmp` and renames
+it only once it checks. The accept gate (`verify_shard`) and the quarantine already required the
+exact size. So the leeway only let a cut-short file through where nothing hashes: the loader, the
+hand-off and the download pass with no manifest, which registered such a file unchecked. Where
+nothing else judges a part, the rule is libtorrent's fast-resume and the HuggingFace cache's: an
+exact length, with a hash for the bytes. Tests `a_part_is_whole_only_at_exactly_its_size`,
+`a_part_cut_short_or_being_fetched_again_is_not_servable_here`, toggled 2026-10-27:
+- the ±10% rule back fails both;
+- the download check dropped fails the second;
+- the request gate's old rule (the file exists) fails the second.
+
 → `docs/invariants/network.md`
 
 ## Destroying a shard we hold needs better evidence than a stranger's claim

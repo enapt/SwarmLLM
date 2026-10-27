@@ -155,6 +155,26 @@ impl MissingShard {
     }
 }
 
+/// Is the part file at `path` whole — exactly the `expected_size` its
+/// manifest names? **The one size verdict** (#334 (1)) for the scans, the
+/// download pass's skip check and `SharedState::parts_servable_here` — the
+/// accept gate's rule too ([`quarantine_shard_if_size_mismatch`], which moves
+/// any other length aside and, with no size to judge by, nothing).
+///
+/// Exact, never "close": a part's size is the sum of its tensors
+/// (`inference::shard_layout`), every download writes exactly that to a `.tmp`
+/// and renames only once it checks, so a file of any other length is cut
+/// short or not this part — and the hash check would refuse it anyway. A
+/// ±10% rule, left from when a check meant "looks mostly downloaded", passed a
+/// file 9% short in every place that does not hash. An `expected_size` of 0
+/// says nothing, so no file is whole against it.
+pub fn shard_file_is_whole(path: &std::path::Path, expected_size: u64) -> bool {
+    expected_size > 0
+        && std::fs::metadata(path)
+            .map(|m| m.len() == expected_size)
+            .unwrap_or(false)
+}
+
 pub fn quarantine_shard_if_size_mismatch(
     shard_path: &std::path::Path,
     expected_size: u64,
@@ -255,10 +275,11 @@ impl ShardStore {
     /// until something asks this. The health monitor asks on each announce cycle
     /// so the node stops advertising shards it cannot serve.
     ///
-    /// Existence only, deliberately: a shard mid-download occupies its final
-    /// path while still incomplete, and judging *contents* is the accept gate's
-    /// job ([`ShardStore::verify_shard`]). Absent is the one signal that cannot
-    /// be a transient.
+    /// Existence only, deliberately: judging *contents* is the accept gate's
+    /// job ([`ShardStore::verify_shard`]), and whether a part is whole the
+    /// loader's (`SharedState::parts_servable_here`). Absent is the one signal
+    /// that cannot be a transient. (A download writes beside the final path and
+    /// renames a checked `.tmp` into it.)
     pub fn shard_file_present(&self, shard_id: &crate::types::ShardId) -> bool {
         self.shard_path(&shard_id.model_id, shard_id.index).exists()
     }
@@ -1353,6 +1374,24 @@ mod size_mismatch_tests {
 
     fn write(path: &std::path::Path, len: usize) {
         std::fs::write(path, vec![0u8; len]).unwrap();
+    }
+
+    /// Whole means exactly the manifest's size (#334 (1)): a part 4% short
+    /// or long is not this part, which the ±10% rule let through wherever
+    /// nothing hashed; a size of 0 and a missing file make nothing whole.
+    #[test]
+    fn a_part_is_whole_only_at_exactly_its_size() {
+        use super::shard_file_is_whole;
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("shard_000.bin");
+        assert!(!shard_file_is_whole(&p, 1000), "no file");
+        write(&p, 1000);
+        assert!(shard_file_is_whole(&p, 1000));
+        assert!(!shard_file_is_whole(&p, 0), "a size of 0 says nothing");
+        write(&p, 960);
+        assert!(!shard_file_is_whole(&p, 1000), "cut short");
+        write(&p, 1040);
+        assert!(!shard_file_is_whole(&p, 1000), "too long");
     }
 
     /// The reported case: shard 5 of meta-llama-3.1-8b was 728,334,336 bytes

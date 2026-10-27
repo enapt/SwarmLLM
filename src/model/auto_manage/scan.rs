@@ -160,28 +160,19 @@ pub async fn rescan_local_shards(
             if !path.exists() {
                 continue;
             }
-            // SEC: skip if a download is in flight for this shard. Without
-            // this, a near-complete download (95% of target size) passes
-            // `shard_size_ok` but BLAKE3 verify reads partially-written
-            // bytes, fails, and emits a `shard_verification_failed`
-            // activity event with an error toast — false-alarm on a shard
-            // that's about to land successfully. The `check_and_load_model`
-            // path already gates on this; mirror it here.
+            // A part being downloaded again is the download's to judge: it
+            // writes beside this file and replaces it only once its bytes
+            // check, so judging the file it replaces now would report a
+            // failure for a part about to land.
             if shared
                 .models
                 .is_shard_in_progress(&model_id, shard_info.index)
             {
                 continue;
             }
-            // Skip size check when manifest has no size info (size_bytes == 0) —
-            // an empty file must not pass as a valid shard.
-            // For zero-hash placeholder manifests we require exact size match
-            // (no ±10% tolerance) since size is the only signal we have.
-            let size_ok = if shard_info.hash == [0u8; 32] {
-                super::shard_size_exact(&path, shard_info.size_bytes)
-            } else {
-                super::shard_size_ok(&path, shard_info.size_bytes)
-            };
+            // Exactly the manifest's size, hash or no hash (#334 (1)); a
+            // size of 0 says nothing and passes nothing.
+            let size_ok = crate::model::shard::shard_file_is_whole(&path, shard_info.size_bytes);
             if !size_ok {
                 // Previously a bare `continue`: the model reported a missing
                 // shard on every scan with nothing anywhere explaining why, and
@@ -530,44 +521,11 @@ pub async fn check_and_load_model(
     // one `exists()` once the map holds the entry.
     let _ = shared.gguf_meta_for(model_id);
 
-    let local_node_id = shared.identity.node_id().clone();
     let model_dir = shared.model_dir(&model_id.0);
 
-    // Find which shards we actually have on disk and are fully downloaded.
-    // A shard is considered ready only when:
-    //  1. It's in the shard registry for our node
-    //  2. The file exists on disk
-    //  3. Its size is at least 90% of the manifest's expected size (handles last-shard)
-    //  4. There's no active download in progress for it
-    let shard_store = shared.shard_store();
-    let mut local_shard_indices: Vec<u32> = manifest
-        .shards
-        .iter()
-        .filter(|s| {
-            let sid = ShardId {
-                model_id: model_id.clone(),
-                index: s.index,
-            };
-            let in_registry = shared
-                .model_registry
-                .shard_holders(&sid)
-                .contains(&local_node_id);
-            let path = shard_store.shard_path(model_id, s.index);
-            let on_disk = path.exists();
-            if !in_registry || !on_disk {
-                return false;
-            }
-            // Check file is fully downloaded (not a partial write)
-            if !super::shard_size_ok(&path, s.size_bytes) {
-                return false;
-            }
-            // Check no active download for this shard
-            let in_progress = shared.models.is_shard_in_progress(model_id, s.index);
-            !in_progress
-        })
-        .map(|s| s.index)
-        .collect();
-    local_shard_indices.sort();
+    // The parts this node can serve from its disk now — the request gate's
+    // and the whole-model hand-off's answer too (#334 (1)).
+    let local_shard_indices = shared.parts_servable_here(&manifest);
 
     if local_shard_indices.is_empty() {
         return;

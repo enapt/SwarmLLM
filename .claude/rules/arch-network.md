@@ -69,7 +69,7 @@ One writer per `shard_NNN.bin.tmp`: **`ModelMgmt::claim_shard_download`** is the
 
 ## A holder claim means VERIFIED, not transferred
 
-Nothing records a peer — or this node — as holding a shard until its BLAKE3 check has passed. **`daemon::dispatch::progress_claims_the_peer_holds_it`** is the single reading of a `ShardDownloadProgress` and requires `DownloadState::Complete`; a percentage never asserts holding (`acquisition::maybe_broadcast_shard_progress` caps at `IN_FLIGHT_MAX_PCT`). Gotchas #78, #184.
+Nothing records a peer — or this node — as holding a shard until its BLAKE3 check has passed. **`daemon::dispatch::progress_claims_the_peer_holds_it`** is the single reading of a `ShardDownloadProgress` and requires `DownloadState::Complete`; a percentage never asserts holding (`acquisition::maybe_broadcast_shard_progress` caps at `IN_FLIGHT_MAX_PCT`). Gotchas #78, #184. **`SharedState::parts_servable_here`** is the one answer to which parts this node can serve from disk (the loader, a whole-model hand-off, the request gate): credited here, no download under way, and the file EXACTLY its manifest size — **`shard::shard_file_is_whole`**, the one size verdict, never "within 10%" (#334 (1)).
 
 → `docs/invariants/network.md` § "A holder claim means VERIFIED, not transferred"
 

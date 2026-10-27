@@ -30,38 +30,6 @@ pub use vram::{
 };
 pub use wishlist::{compute_wishlist, refresh_wishlist, Wishlist, WishlistEntry, WishlistStatus};
 
-/// Returns true when a shard file on disk looks fully downloaded.
-///
-/// The check succeeds when `expected_size > 0` AND the file's metadata length
-/// is within 10% of the expected size (tolerates small compression/tail
-/// differences). A zero expected size means the manifest has no length info,
-/// in which case we refuse to validate — otherwise an empty file would pass.
-///
-/// The 10% tolerance is acceptable when there's also a non-zero BLAKE3
-/// hash to verify against. For zero-hash placeholder manifests, use
-/// `shard_size_exact` instead — without a hash to corroborate, accepting
-/// "close enough" lets a wrong-but-similar-size file register as a valid
-/// holder.
-pub(crate) fn shard_size_ok(path: &std::path::Path, expected_size: u64) -> bool {
-    expected_size > 0
-        && std::fs::metadata(path)
-            .map(|m| {
-                let actual = m.len();
-                actual >= expected_size * 9 / 10 && actual <= expected_size * 11 / 10
-            })
-            .unwrap_or(false)
-}
-
-/// Stricter sibling of `shard_size_ok` for the zero-hash placeholder path.
-/// Requires an exact byte-level size match. Used when the manifest has no
-/// hash to verify against so size is the only signal we have.
-pub(crate) fn shard_size_exact(path: &std::path::Path, expected_size: u64) -> bool {
-    expected_size > 0
-        && std::fs::metadata(path)
-            .map(|m| m.len() == expected_size)
-            .unwrap_or(false)
-}
-
 /// Share of the FILESYSTEM this node's files never take: it stays free for the
 /// OS, logs, the database, an in-flight download and whatever else the owner
 /// runs on that disk.

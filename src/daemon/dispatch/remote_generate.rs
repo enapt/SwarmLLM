@@ -790,29 +790,10 @@ fn can_serve_layer_range(
         return false;
     }
 
-    let local_node_id = shared_state.identity.node_id().clone();
-    let shard_store = shared_state.shard_store();
-    let mut local_shard_indices: Vec<u32> = manifest
-        .shards
-        .iter()
-        .filter(|s| {
-            let sid = crate::types::ShardId {
-                model_id: model_id.clone(),
-                index: s.index,
-            };
-            if !shared_state
-                .model_registry
-                .shard_holders(&sid)
-                .contains(&local_node_id)
-            {
-                return false;
-            }
-            let path = shard_store.shard_path(model_id, s.index);
-            path.exists() && crate::model::auto_manage::shard_size_ok(&path, s.size_bytes)
-        })
-        .map(|s| s.index)
-        .collect();
-    local_shard_indices.sort_unstable();
+    // The parts the loader will find whole — what `check_and_load_model`
+    // loads from (#334 (1)): this copy took a 9%-short file and a part being
+    // downloaded again.
+    let local_shard_indices = shared_state.parts_servable_here(&manifest);
     if local_shard_indices.is_empty() {
         return false;
     }

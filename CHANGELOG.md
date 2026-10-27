@@ -10,6 +10,13 @@ none at all. It could then start a download that did not fit, or offer room it d
 offer the free space of every drive added together. On Linux all of these are fixed; on Windows
 and macOS, the relative path is (#334).
 
+**A model part that is cut short is no longer loaded, or offered to another computer, as if it
+were whole.** Three places asked whether a part on disk was complete, and they did not agree:
+loading a model, accepting a whole model's request from another computer, and deciding whether
+a model kept on your computer can run. Two took a file within a tenth of its size; one asked only
+that the file existed. They now ask one question: the part is exactly its size, and is not being
+downloaded again (#334).
+
 **A computer that answers lookups for model parts can no longer pass off your peers as holders
 of parts they do not have.** Your computer finds who holds a part partly by asking the swarm's
 shared directory, and the computer answering decides which names it lists. Such a name was treated

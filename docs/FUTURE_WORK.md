@@ -278,14 +278,10 @@ paths across a cache hit.
 
 Found by the duplication pass; each copy was checked by hand. None is a one-line fix: each
 changes behaviour on some path, so each needs its own test before it is merged.
-1. **"Is this part on disk and whole?"** `auto_manage::shard_size_ok` (±10%) and
-   `shard_size_exact` exist. `scan::rescan_local_shards` picks exact for a zero hash, and the
-   download check verifies the hash where there is one. Other copies diverge:
-   - `scan::check_and_load_model` and `dispatch/remote_generate.rs` always take ±10%, so a
-     zero-hash placeholder passes there that the rescan refuses. The second one also skips
-     `is_shard_in_progress`.
-   - `SharedState::parts_missing_here` asks only that the file exists (`shard_file_present`).
-   Next: one verdict from the `ShardInfo`, with the zero-hash rule inside it.
+1. ~~**"Is this part on disk and whole?"**~~ — done 2026-10-27: `shard::shard_file_is_whole` (exact
+   size) is the one size verdict and `SharedState::parts_servable_here` the one answer for the
+   loader, a whole-model hand-off and the request gate. Evidence: `docs/invariants/network.md`
+   § "A holder claim means VERIFIED".
 2. **A layout's tensor entries**: `manifest::build_shard_infos_from_layouts` and
    `shard_loader::derive_tensor_entries` each build the running offsets. The second one's
    comment says the two must agree, and only the ignored `a_derived_tensor_table_matches_the_published_one`

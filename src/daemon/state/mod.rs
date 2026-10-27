@@ -4152,22 +4152,45 @@ impl SharedState {
         let Some(manifest) = self.model_registry.get_manifest(model_id) else {
             return Vec::new();
         };
-        let held = self
-            .model_registry
-            .local_shard_indices_in(&manifest, self.identity.node_id());
-        let store = self.shard_store();
+        let servable = self.parts_servable_here(&manifest);
         manifest
             .shards
             .iter()
             .map(|s| s.index)
-            .filter(|&index| {
-                !held.contains(&index)
-                    || !store.shard_file_present(&crate::types::ShardId {
-                        model_id: model_id.clone(),
-                        index,
-                    })
-            })
+            .filter(|index| !servable.contains(index))
             .collect()
+    }
+
+    /// The parts of `manifest` this node can serve from its own disk NOW,
+    /// sorted: credited to this node in the registry (a holder claim means
+    /// verified), its file whole (`shard::shard_file_is_whole` — exactly the
+    /// manifest's size), and no download of it under way (a part being fetched
+    /// again is replaced once the new bytes check). **The one answer** (#334
+    /// (1)) for the loader (`auto_manage::check_and_load_model`), a peer's
+    /// whole-model hand-off (`dispatch::remote_generate::can_serve_layer_range`)
+    /// and the request gate ([`Self::parts_missing_here`]) — three copies had
+    /// asked for a file within 10% of its size, the same without the download
+    /// check, and the file's existence alone.
+    pub fn parts_servable_here(&self, manifest: &crate::types::ModelManifest) -> Vec<u32> {
+        let held = self
+            .model_registry
+            .local_shard_indices_in(manifest, self.identity.node_id());
+        let store = self.shard_store();
+        let mut servable: Vec<u32> = manifest
+            .shards
+            .iter()
+            .filter(|s| {
+                held.contains(&s.index)
+                    && crate::model::shard::shard_file_is_whole(
+                        &store.shard_path(&manifest.id, s.index),
+                        s.size_bytes,
+                    )
+                    && !self.models.is_shard_in_progress(&manifest.id, s.index)
+            })
+            .map(|s| s.index)
+            .collect();
+        servable.sort_unstable();
+        servable
     }
 
     pub fn has_complete_split_model(&self, model_id: &crate::types::ModelId) -> bool {
@@ -4210,9 +4233,10 @@ impl SharedState {
     /// Whether every shard this node is supposed to hold for `model_id` is
     /// actually a file on disk.
     ///
-    /// Existence only — the same standard the swarm-announce reconcile uses.
-    /// A shard mid-download is written at its final path and is legitimately
-    /// incomplete for a while; size and hash are `verify_shard`'s job.
+    /// Existence only — the same standard the swarm-announce reconcile uses:
+    /// it asks whether the split cache's entry still has files, and the loader
+    /// then takes only the parts [`Self::parts_servable_here`] finds whole. (A
+    /// download never writes at the final path; it renames a checked `.tmp`.)
     pub fn model_shard_files_present(&self, model_id: &crate::types::ModelId) -> bool {
         let store = self.shard_store();
         let mut expected = self
@@ -4867,6 +4891,90 @@ mod manifest_persist_tests {
                 .manifest_hash,
             "the registry's CURRENT record"
         );
+    }
+}
+
+#[cfg(test)]
+mod parts_servable_tests {
+    use crate::types::*;
+
+    const PART: u64 = 1000;
+
+    fn three_parts() -> ModelManifest {
+        ModelManifest {
+            id: ModelId("servable".into()),
+            name: "Servable".into(),
+            architecture: ModelArchitecture::Llama,
+            num_layers: 3,
+            num_params_billions: 0.001,
+            quantization: Quantization::Q4KM,
+            total_size_bytes: 3 * PART,
+            shard_count: 3,
+            shards: (0..3)
+                .map(|i| ShardInfo {
+                    index: i,
+                    layer_range: (i, i + 1),
+                    size_bytes: PART,
+                    hash: [9u8; 32],
+                    tensors: vec![],
+                })
+                .collect(),
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+            mmproj: None,
+            context_length: None,
+        }
+    }
+
+    /// **One answer to "which parts can this node serve from its disk"**
+    /// (#334 (1)), for the loader, a peer's whole-model hand-off and the
+    /// request gate. Every part is credited here and on disk; one is 4%
+    /// short (a ±10% rule passed it, and the request gate asked only that
+    /// the file exists), one is being downloaded again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_part_cut_short_or_being_fetched_again_is_not_servable_here() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.node.data_dir = temp.path().join("data");
+        let db = crate::storage::db::Database::open(temp.path()).unwrap();
+        let executor = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::inference::executor::ModelExecutor::new(),
+        ));
+        let (state, _, _) = crate::daemon::SharedState::new(
+            config,
+            crate::identity::Identity::generate(),
+            db,
+            executor,
+            None,
+        );
+        let manifest = three_parts();
+        state.model_registry.register_manifest(manifest.clone());
+        let store = state.shard_store();
+        for (index, len) in [(0, PART), (1, PART * 96 / 100), (2, PART)] {
+            let path = store.shard_path(&manifest.id, index);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, vec![0u8; len as usize]).unwrap();
+            state.model_registry.record_shard_holder(
+                ShardId {
+                    model_id: manifest.id.clone(),
+                    index,
+                },
+                state.identity.node_id().clone(),
+            );
+        }
+        let _fetching = state
+            .models
+            .claim_shard_download(&ShardId {
+                model_id: manifest.id.clone(),
+                index: 2,
+            })
+            .unwrap();
+
+        assert_eq!(state.parts_servable_here(&manifest), vec![0]);
+        assert_eq!(state.parts_missing_here(&manifest.id), vec![1, 2]);
     }
 }
 
