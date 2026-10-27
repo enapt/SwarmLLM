@@ -2,6 +2,53 @@
 
 ## [Unreleased]
 
+## [0.3.258-alpha] — 2026-10-27
+
+**A model split between computers starts its reply up to 3 seconds sooner.** Before the first
+word, a computer works out which computers run which layers. For Llama 3.3 70B that took 2.7
+seconds, because it re-read the model's 7.8 MB description file 73 times along the way, once for
+every memory estimate. It now reads the file once and keeps what it learned until the file
+changes. The same plan takes 0.02-0.08 seconds, and every retry while it waits for peers gets
+the saving too (#360).
+
+**A computer that has just started, or has just reconnected, learns at once which parts of each
+model its peers hold.** It used to learn that only from each peer's full announcement, every five
+minutes or so. In those first minutes a model split between computers could be refused with "No
+reachable node holds layers …", though asking again a little later worked: Llama 3.3 70B was
+refused this way 4 minutes after a restart and 6 seconds after its far holder reconnected. Each
+computer now sends its list of parts to a peer the moment they connect, the same message over the
+same connection as before, so computers on older versions take it unchanged. When a request does
+wait for those answers, its error now names what its last attempt found missing rather than its
+first; the 70B's said 52 layers had no holder when the records for 4 were still arriving (#359).
+
+**When a model is split across computers, a reply that repeats earlier text sends about a quarter
+fewer wasted guesses.** To go faster, your computer guesses the next words by copying what followed
+the same words earlier in the conversation, and the other computers check each guess. It always
+copied from the most recent place those words appeared, even when other places they appeared went
+on differently. It now stops copying where those places disagree. On 400 recorded coding-agent
+sessions this sent 28% fewer guesses for the same number of right ones. That helps on a slow
+upload connection, and where a processor does the checking. Replies are unchanged: a guess only
+changes what gets checked, never what the model writes (#338).
+
+**A computer that runs part of a model on its graphics card and the rest on its processor is
+judged by how it runs.** Choosing who runs which layers of a split, a computer guesses how fast
+each peer is until it has timed it. A peer with a model loaded was guessed to run every layer it
+held on its graphics card. A 12 GB card in Australia holding 57 of Llama 3.3 70B's layers, about
+20 of them on the card, was guessed to run all 57 at the card's speed. Each computer now tells its
+peers how many of its loaded layers its card runs, and no card is credited with more layers than
+its memory holds, which also covers peers on older versions. Your computer's own count now
+includes layers it loaded after its first ones. Which layers a peer may be given is unchanged
+(#361).
+
+**When a model is split, your computer can now be the backup for layers it already has loaded,
+and it can take the full share of a split it is able to run.** A split names a backup for each
+computer's part, in case that computer stops answering. Your computer was judged on whether it
+had room for the part's layers, as if it had to load them again. So a computer with a full
+graphics card was never the backup for layers it was already running. Separately, when your
+computer could run a share split between its graphics card and its processor, that share was
+offered only where another computer's parts happened to end. On 2026-10-25 a Llama 3.3 70B split
+gave this computer 19 layers when it could run 22. Neither was seen to fail a request (#354).
+
 **A prompt with code or HTML in it now reaches the model the way the model's own tokenizer would
 give it.** Before a model reads a prompt, your computer turns the text into the model's tokens,
 and the markers that start and end each turn are always kept whole. Any other text in angle
@@ -11,6 +58,21 @@ the text `<0x0A>`, which reached the model as a line break. Now only what the mo
 marks as a marker is kept whole, as llama.cpp and the model's own tokenizer do. Checked on 27
 models against llama.cpp, and on Qwen, Mistral, Phi-3.5 and TinyLlama against the model's own
 tokenizer (#334).
+
+**One computer downloading model parts from yours can no longer take your whole upload limit.**
+Your computer sends parts of models to other computers within an upload limit (10 Mbps unless you
+change it). A computer asking for many parts at once could keep that limit to itself, and every
+other computer that asked was told to wait. Now no single network gets more than what a computer
+fetching parts the usual way needs (three at once), so the others are served in turn. A computer
+downloading on its own is not slowed, and one fetching many parts at once no longer gives up on a
+part while the same computer is still sending it the others (#340).
+
+**A computer that answers lookups for model parts can no longer pass off your peers as holders
+of parts they do not have.** Your computer finds who holds a part partly by asking the swarm's
+shared directory, and the computer answering decides which names it lists. Such a name was treated
+like that computer's own announcement, so a wrong one could keep a model listed that nobody holds
+and take the place of a real holder in the list. Now a name heard only from the directory is just
+a computer worth asking until it says itself that it holds the part (#341).
 
 **Your computer now reads the free space of the drive its model folder is really on.** It checks
 that drive before downloading a model part, keeps its model storage within it, and tells other
@@ -26,66 +88,6 @@ loading a model, accepting a whole model's request from another computer, and de
 a model kept on your computer can run. Two took a file within a tenth of its size; one asked only
 that the file existed. They now ask one question: the part is exactly its size, and is not being
 downloaded again (#334).
-
-**A computer that answers lookups for model parts can no longer pass off your peers as holders
-of parts they do not have.** Your computer finds who holds a part partly by asking the swarm's
-shared directory, and the computer answering decides which names it lists. Such a name was treated
-like that computer's own announcement, so a wrong one could keep a model listed that nobody holds
-and take the place of a real holder in the list. Now a name heard only from the directory is just
-a computer worth asking until it says itself that it holds the part (#341).
-
-**One computer downloading model parts from yours can no longer take your whole upload limit.**
-Your computer sends parts of models to other computers within an upload limit (10 Mbps unless you
-change it). A computer asking for many parts at once could keep that limit to itself, and every
-other computer that asked was told to wait. Now no single network gets more than what a computer
-fetching parts the usual way needs (three at once), so the others are served in turn. A computer
-downloading on its own is not slowed, and one fetching many parts at once no longer gives up on a
-part while the same computer is still sending it the others (#340).
-
-**When a model is split across computers, a reply that repeats earlier text sends about a quarter
-fewer wasted guesses.** To go faster, your computer guesses the next words by copying what followed
-the same words earlier in the conversation, and the other computers check each guess. It always
-copied from the most recent place those words appeared, even when other places they appeared went
-on differently. It now stops copying where those places disagree. On 400 recorded coding-agent
-sessions this sent 28% fewer guesses for the same number of right ones. That helps on a slow
-upload connection, and where a processor does the checking. Replies are unchanged: a guess only
-changes what gets checked, never what the model writes (#338).
-
-**A computer that has just started, or has just reconnected, learns at once which parts of each
-model its peers hold.** It used to learn that only from each peer's full announcement, every five
-minutes or so. In those first minutes a model split between computers could be refused with "No
-reachable node holds layers …", though asking again a little later worked: Llama 3.3 70B was
-refused this way 4 minutes after a restart and 6 seconds after its far holder reconnected. Each
-computer now sends its list of parts to a peer the moment they connect, the same message over the
-same connection as before, so computers on older versions take it unchanged. When a request does
-wait for those answers, its error now names what its last attempt found missing rather than its
-first; the 70B's said 52 layers had no holder when the records for 4 were still arriving (#359).
-
-**A model split between computers starts its reply up to 3 seconds sooner.** Before the first
-word, a computer works out which computers run which layers. For Llama 3.3 70B that took 2.7
-seconds, because it re-read the model's 7.8 MB description file 73 times along the way, once for
-every memory estimate. It now reads the file once and keeps what it learned until the file
-changes. The same plan takes 0.02-0.08 seconds, and every retry while it waits for peers gets
-the saving too (#360).
-
-**When a model is split, your computer can now be the backup for layers it already has loaded,
-and it can take the full share of a split it is able to run.** A split names a backup for each
-computer's part, in case that computer stops answering. Your computer was judged on whether it
-had room for the part's layers, as if it had to load them again. So a computer with a full
-graphics card was never the backup for layers it was already running. Separately, when your
-computer could run a share split between its graphics card and its processor, that share was
-offered only where another computer's parts happened to end. On 2026-10-25 a Llama 3.3 70B split
-gave this computer 19 layers when it could run 22. Neither was seen to fail a request (#354).
-
-**A computer that runs part of a model on its graphics card and the rest on its processor is
-judged by how it runs.** Choosing who runs which layers of a split, a computer guesses how fast
-each peer is until it has timed it. A peer with a model loaded was guessed to run every layer it
-held on its graphics card. A 12 GB card in Australia holding 57 of Llama 3.3 70B's layers, about
-20 of them on the card, was guessed to run all 57 at the card's speed. Each computer now tells its
-peers how many of its loaded layers its card runs, and no card is credited with more layers than
-its memory holds, which also covers peers on older versions. Your computer's own count now
-includes layers it loaded after its first ones. Which layers a peer may be given is unchanged
-(#361).
 
 ## [0.3.257-alpha] — 2026-10-27
 
