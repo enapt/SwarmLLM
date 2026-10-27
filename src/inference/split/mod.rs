@@ -48,8 +48,8 @@ pub use self::entry::{trim_split_model_cache, SplitModelEntry, SplitModelKey};
 pub(crate) use self::gguf_meta::tensor_byte_size;
 pub use self::gguf_meta::{
     ensure_gguf_header, explain_gguf_parse_error, gguf_arch_str, read_gguf_header,
-    save_gguf_header, GgufTensorMeta, GgufTokenizerMeta, ModelRefusal, SidecarSpec, TensorLocation,
-    ROPE_FREQS_FILENAME, TIED_OUTPUT_FILENAME,
+    save_gguf_header, CachedHeader, GgufTensorMeta, GgufTokenizerMeta, HeaderCache, ModelRefusal,
+    SidecarSpec, TensorLocation, ROPE_FREQS_FILENAME, TIED_OUTPUT_FILENAME,
 };
 pub(crate) use self::gguf_meta::{
     host_resident, kv_layers, kv_sources, layer_is_recurrent, query_scale, routed_expert_bytes,

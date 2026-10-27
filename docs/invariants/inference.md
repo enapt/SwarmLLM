@@ -1322,6 +1322,53 @@ means syscalls or waiting, and no amount of reading the code distinguishes
 "parses a lot of metadata" from "makes 820k read calls". A **stable** duration
 is a fixed amount of work, not contention; go and find the count.
 
+## A header read for its geometry is parsed once while its file stands
+
+(2026-10-27, FUTURE_WORK #360) — `split::HeaderCache`, read by
+`ModelProcessPool::segment_geometry` and so by every footprint estimate.
+**What it replaced**: each estimate parsed `gguf_header.bin` afresh. One plan of
+Llama 3.3 70B asks the pool for its geometry dozens of times —
+`max_hostable_layers_for_planning`, the drafter-room pass, and above all
+`fresh_run_layers_for_planning`, whose bisection prices each probe through
+`machine_mb_beside_card` (three or four estimates a probe). Each parse reads the
+7.8 MB header's 128k-token vocabulary and 280k merges to reach the tensor
+table, ~35 ms buffered. Counted on the live node with inotify (`IN_OPEN` on the
+file; `ptrace` is not allowed there and the kernel has no per-process I/O
+counters): **73 opens per plan preview, none in an idle window of the same
+length.** The preview took 2.7 s, every time; `assemble_pipeline_for`'s own
+`elapsed_ms` over 83 real 70B plans had a median of 2,042 ms. It runs on a Tokio
+worker, before every first token and again on each attempt of the wait for
+holders (#359).
+**Measured** (live node, one CUDA release build, `SWARMLLM_HEADER_CACHE` on /
+off / off / on, each arm 6 min after start so every arm planned over the same
+holders: this node [0,24) + AU [24,80)): **cache on, 0.019 and 0.017 s** the
+preview's median, ten back to back (min 0.016), **the header opened 0 times**;
+**off, 2.70 and 2.91 s** (min 2.60), 73 opens a preview — off is the official
+.257 build's 2.7 s. A preview a minute apart took 0.077-0.084 s on, 2.71-3.22 off;
+the on arm's extra ~60 ms is most likely the planner's live card reading, taken
+once per `PLANNING_CARD_READING_FOR` (not timed apart). The same poll showed
+#359's window after every restart: no route for the 70B for 2-4 min, the peers
+still on .257.
+**What a change must keep**:
+- A hit is checked against the FILE on every read (length + modification time,
+  Python's `linecache.checkcache`), so no writer of a header has to forget it.
+  A canonical-upload switch or a re-fetch replaces the file; the next read
+  parses it.
+- A stamp within `HEADER_STAMP_RACY_WITHIN` (2 s) of now, either side, is
+  parsed but not kept: a second write inside a coarse timestamp (FAT: 2 s)
+  leaves the stamp as it was — Git's "racy clean" index entry, ccache's refusal
+  of an include file newer than the compile. A stamp further AHEAD of the clock
+  is kept: a write now cannot produce it, and `duration_since`'s error is not
+  "never settled" (gotcha #192 — the first cut kept nothing dated ahead).
+- What is kept has no `tokenizer.ggml.*` ARRAY (a 70B's are ~25 MB as parsed
+  values); `vocabulary_strings` is their count, the one figure geometry read
+  from them. Anything that needs the vocabulary parses with `read_gguf_header`.
+- Bounded: 64 headers, and an entry is dropped when its file is gone.
+Tests: `header_cache_tests::*` (each guard switched off turns its own test red:
+the stamp, the racy rule, the ahead-of-the-clock case, the hit itself),
+`a_models_header_is_parsed_once_for_every_estimate_a_plan_asks` (15 estimates,
+one parse, each answer equal to a fresh parse's).
+
 ## `inference::split::GgufTensorMeta::tied_output_location`
 
 The single

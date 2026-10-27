@@ -118,6 +118,172 @@ pub fn explain_gguf_parse_error(e: &candle_core::Error) -> String {
 /// Read-ahead window for [`read_gguf_header`]. See that function for why.
 const GGUF_HEADER_READ_BUFFER_BYTES: usize = 1 << 20;
 
+/// A model's GGUF header, parsed once and kept while its file is unchanged —
+/// for code that reads a header's GEOMETRY many times (#360).
+///
+/// Planning one request for a 70B split opened its 7.8 MB `gguf_header.bin` 73
+/// times (counted with inotify on the live node, 2026-10-27; none in an idle
+/// window of the same length): every memory estimate the planner asks the pool
+/// — `fresh_run_layers_for_planning`'s bisection most of all — re-parsed the
+/// 128k-token vocabulary to read the tensor table. A plan took 2.7 s, on a
+/// runtime thread.
+///
+/// **A hit is checked against the file on every read** — its length and
+/// modification time, as Python's `linecache.checkcache` does — so a header
+/// replaced on disk (a canonical-upload switch, a re-fetch) is parsed again
+/// without any writer having to remember to forget it. A file modified within
+/// [`HEADER_STAMP_RACY_WITHIN`] of the read is parsed but not kept: a second
+/// write inside a coarse timestamp's resolution leaves the stamp unchanged,
+/// which is Git's "racy clean" entry (`Documentation/technical/racy-git.txt`)
+/// and why ccache refuses an include file newer than the compile.
+///
+/// What is kept is the header WITHOUT its tokenizer's vocabulary-sized arrays
+/// (a 70B's weigh ~25 MB as parsed values); [`CachedHeader::vocabulary_strings`]
+/// keeps the one figure geometry reads from them. Anything that needs the
+/// vocabulary itself parses the file with [`read_gguf_header`].
+/// `SWARMLLM_HEADER_CACHE=0` parses on every read, as before.
+pub struct HeaderCache {
+    entries: dashmap::DashMap<std::path::PathBuf, (HeaderStamp, std::sync::Arc<CachedHeader>)>,
+    enabled: bool,
+    parses: std::sync::atomic::AtomicU64,
+}
+
+/// A parsed header with its tokenizer's arrays left out (see [`HeaderCache`]).
+pub struct CachedHeader {
+    /// The header as [`read_gguf_header`] returned it, less every
+    /// `tokenizer.ggml.*` ARRAY (tokens, merges, scores, token types): the
+    /// tensor table and every other key are as in the file.
+    pub content_without_vocabulary: gguf_file::Content,
+    /// How many entries of `tokenizer.ggml.tokens` are strings, counted before
+    /// it was dropped — a vocabulary size for a file that declares none.
+    pub vocabulary_strings: u64,
+}
+
+/// A header file whose modification time is this close to the read, before
+/// or after it, is parsed but not kept: FAT's timestamps are 2 s apart, so two
+/// writes inside one look alike (see [`HeaderCache`]).
+pub const HEADER_STAMP_RACY_WITHIN: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The most headers one cache keeps. A node holds headers only for models it
+/// has met; a 70B's table is ~100 KB without its vocabulary.
+const MOST_CACHED_HEADERS: usize = 64;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct HeaderStamp {
+    len: u64,
+    modified: std::time::SystemTime,
+}
+
+impl Default for HeaderCache {
+    fn default() -> Self {
+        Self::with_caching(header_cache_enabled())
+    }
+}
+
+impl HeaderCache {
+    /// A cache that keeps headers (`true`) or parses on every read (`false`).
+    pub fn with_caching(enabled: bool) -> Self {
+        Self {
+            entries: dashmap::DashMap::new(),
+            enabled,
+            parses: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// The header at `path`: the kept parse while the file's stamp is the one
+    /// it was parsed at, else a fresh [`read_gguf_header`].
+    pub fn read(&self, path: &Path) -> Result<std::sync::Arc<CachedHeader>, SwarmError> {
+        let stamp = match std::fs::metadata(path) {
+            Ok(meta) => meta.modified().ok().map(|modified| HeaderStamp {
+                len: meta.len(),
+                modified,
+            }),
+            Err(e) => {
+                self.entries.remove(path);
+                return Err(SwarmError::Io(e));
+            }
+        };
+        if self.enabled {
+            if let Some(stamp) = stamp {
+                let hit = self
+                    .entries
+                    .get(path)
+                    .filter(|entry| entry.0 == stamp)
+                    .map(|entry| std::sync::Arc::clone(&entry.1));
+                if let Some(hit) = hit {
+                    return Ok(hit);
+                }
+            }
+        }
+        let content = read_gguf_header(path)?;
+        self.parses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let header = std::sync::Arc::new(CachedHeader::without_vocabulary(content));
+        // Racy only NEAR now, either side: a later write is stamped about now,
+        // so it cannot land on a stamp further off. A stamp AHEAD of the clock
+        // (skew, a copied file) is not "never settled" — `duration_since`'s
+        // error carries how far ahead (gotcha #192: that error's natural
+        // fallback is the backwards answer).
+        let settled = stamp.filter(|stamp| {
+            let distance = match std::time::SystemTime::now().duration_since(stamp.modified) {
+                Ok(age) => age,
+                Err(ahead) => ahead.duration(),
+            };
+            distance >= HEADER_STAMP_RACY_WITHIN
+        });
+        match settled {
+            Some(stamp) if self.enabled => {
+                if self.entries.len() >= MOST_CACHED_HEADERS && !self.entries.contains_key(path) {
+                    let evicted = self.entries.iter().next().map(|e| e.key().clone());
+                    if let Some(evicted) = evicted {
+                        self.entries.remove(&evicted);
+                    }
+                }
+                self.entries
+                    .insert(path.to_path_buf(), (stamp, std::sync::Arc::clone(&header)));
+            }
+            _ => {
+                self.entries.remove(path);
+            }
+        }
+        Ok(header)
+    }
+
+    /// How many times this cache has parsed a file — what a test of it counts.
+    pub fn parses(&self) -> u64 {
+        self.parses.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl CachedHeader {
+    fn without_vocabulary(mut content: gguf_file::Content) -> Self {
+        let vocabulary_strings = content
+            .metadata
+            .get("tokenizer.ggml.tokens")
+            .and_then(|v| v.to_vec().ok())
+            .map(|arr| arr.iter().filter(|v| v.to_string().is_ok()).count() as u64)
+            .unwrap_or(0);
+        content.metadata.retain(|key, value| {
+            !(key.starts_with("tokenizer.ggml.") && matches!(value, gguf_file::Value::Array(_)))
+        });
+        Self {
+            content_without_vocabulary: content,
+            vocabulary_strings,
+        }
+    }
+}
+
+/// `SWARMLLM_HEADER_CACHE=0` turns [`HeaderCache`] off (the A/B switch, #360).
+fn header_cache_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_HEADER_CACHE").ok().as_deref(),
+            Some("0")
+        )
+    })
+}
+
 /// Extract the GGUF `general.architecture` string, defaulting to `"llama"` when absent.
 pub fn gguf_arch_str(ct: &gguf_file::Content) -> String {
     ct.metadata
@@ -2447,5 +2613,152 @@ mod shared_kv_tests {
             ],
         );
         assert_eq!(kv_sources(&all), vec![Some(0), Some(1), Some(2)]);
+    }
+}
+
+#[cfg(test)]
+mod header_cache_tests {
+    use super::*;
+    use candle_core::quantized::gguf_file::Value;
+    use std::time::{Duration, SystemTime};
+
+    /// A header of `block_count` layers and a three-token vocabulary, written
+    /// to a fresh file under `tag` and dated `age` ago.
+    fn header_at(tag: &str, block_count: u32, age: Duration) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "swarmllm-header-cache-{tag}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gguf_header.bin");
+        rewrite(&path, block_count, age);
+        path
+    }
+
+    fn rewrite(path: &Path, block_count: u32, age: Duration) {
+        let word = |s: &str| Value::String(s.into());
+        let md: Vec<(&str, Value)> = vec![
+            ("general.architecture", word("llama")),
+            ("llama.block_count", Value::U32(block_count)),
+            (
+                "tokenizer.ggml.tokens",
+                Value::Array(vec![word("a"), word("b"), word("c")]),
+            ),
+            (
+                "tokenizer.ggml.scores",
+                Value::Array(vec![Value::F32(0.0); 3]),
+            ),
+            ("tokenizer.ggml.model", word("llama")),
+        ];
+        let refs: Vec<(&str, &Value)> = md.iter().map(|(k, v)| (*k, v)).collect();
+        let mut buf = std::io::Cursor::new(Vec::new());
+        gguf_file::write(&mut buf, &refs, &[]).unwrap();
+        std::fs::write(path, buf.into_inner()).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - age)
+            .unwrap();
+    }
+
+    fn layers(header: &CachedHeader) -> u32 {
+        header.content_without_vocabulary.metadata["llama.block_count"]
+            .to_u32()
+            .unwrap()
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    const AN_HOUR: Duration = Duration::from_secs(3600);
+
+    #[test]
+    fn a_header_is_parsed_once_while_its_file_is_unchanged() {
+        let path = header_at("once", 2, AN_HOUR);
+        let cache = HeaderCache::with_caching(true);
+        let first = cache.read(&path).unwrap();
+        let second = cache.read(&path).unwrap();
+        assert_eq!(cache.parses(), 1);
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert_eq!(layers(&first), 2);
+        // The vocabulary's arrays are gone, their string count and every
+        // other key kept.
+        assert_eq!(first.vocabulary_strings, 3);
+        let md = &first.content_without_vocabulary.metadata;
+        assert!(!md.contains_key("tokenizer.ggml.tokens"));
+        assert!(!md.contains_key("tokenizer.ggml.scores"));
+        assert!(md.contains_key("tokenizer.ggml.model"));
+        cleanup(&path);
+    }
+
+    /// The same length, a later write: the stamp's time is what tells them apart.
+    #[test]
+    fn a_header_replaced_on_disk_is_parsed_again() {
+        let path = header_at("replaced", 2, AN_HOUR);
+        let cache = HeaderCache::with_caching(true);
+        assert_eq!(layers(&cache.read(&path).unwrap()), 2);
+        rewrite(&path, 3, AN_HOUR / 2);
+        assert_eq!(layers(&cache.read(&path).unwrap()), 3);
+        assert_eq!(cache.parses(), 2);
+        cleanup(&path);
+    }
+
+    /// A second write inside a timestamp's resolution would leave the stamp
+    /// as it was, so a file written this moment is parsed on every read until
+    /// it has settled.
+    #[test]
+    fn a_header_written_just_now_is_not_kept() {
+        let path = header_at("racy", 2, Duration::ZERO);
+        let cache = HeaderCache::with_caching(true);
+        cache.read(&path).unwrap();
+        cache.read(&path).unwrap();
+        assert_eq!(cache.parses(), 2);
+        rewrite(&path, 2, AN_HOUR);
+        cache.read(&path).unwrap();
+        cache.read(&path).unwrap();
+        assert_eq!(cache.parses(), 3, "kept once settled");
+        cleanup(&path);
+    }
+
+    /// A stamp an hour AHEAD of the clock cannot be written again now, so it
+    /// is kept like one an hour behind — never parsed on every read (#192).
+    #[test]
+    fn a_header_dated_ahead_of_the_clock_is_kept() {
+        let path = header_at("ahead", 2, Duration::ZERO);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(SystemTime::now() + AN_HOUR)
+            .unwrap();
+        let cache = HeaderCache::with_caching(true);
+        cache.read(&path).unwrap();
+        cache.read(&path).unwrap();
+        assert_eq!(cache.parses(), 1);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_header_that_is_gone_is_forgotten() {
+        let path = header_at("gone", 2, AN_HOUR);
+        let cache = HeaderCache::with_caching(true);
+        cache.read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(cache.read(&path).is_err());
+        assert!(cache.entries.is_empty());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn switched_off_it_parses_on_every_read() {
+        let path = header_at("off", 2, AN_HOUR);
+        let cache = HeaderCache::with_caching(false);
+        cache.read(&path).unwrap();
+        cache.read(&path).unwrap();
+        assert_eq!(cache.parses(), 2);
+        assert!(cache.entries.is_empty());
+        cleanup(&path);
     }
 }

@@ -3344,6 +3344,10 @@ pub struct ModelProcessPool {
     /// `layers_refused` until the router takes them (`take_layers_fitting`).
     layers_fitting: DashMap<Uuid, (u32, std::time::Instant)>,
     data_dir: PathBuf,
+    /// Each model's header, parsed once while its file is unchanged — read
+    /// ONLY by `segment_geometry`, which every footprint estimate goes through
+    /// (a 70B plan parsed its 7.8 MB header 73 times, #360).
+    header_cache: crate::inference::split::HeaderCache,
     /// Active shard windows: which shards each model worker should load.
     /// If absent, the worker loads all on-disk shards (default behavior).
     active_shard_windows: DashMap<ModelId, Vec<u32>>,
@@ -3701,6 +3705,7 @@ impl ModelProcessPool {
             layers_refused: DashMap::new(),
             layers_fitting: DashMap::new(),
             data_dir,
+            header_cache: crate::inference::split::HeaderCache::default(),
             active_shard_windows: DashMap::new(),
             gpu_layers: std::sync::atomic::AtomicI32::new(-1),
             cpu_pinned_models: dashmap::DashSet::new(),
@@ -4463,14 +4468,14 @@ impl ModelProcessPool {
         }
         let model_dir = crate::model::shard::model_dir(&self.data_dir, &model_id.0);
         let header = model_dir.join(crate::model::shard::HEADER_FILENAME);
-        // ONE parse of the header, not two. This used to read the same file a
-        // second time through `GgufTokenizerMeta::from_gguf_file` — which
-        // materialises the entire vocabulary and merge list as owned `String`s
-        // — purely to reach `vocab.len()` as a fallback below. The token count
-        // is already in `ct`, and counting the array borrows it.
-        let ct = crate::inference::split::read_gguf_header(&header).ok()?;
-        let tensor_meta = crate::inference::split::GgufTensorMeta::from_content(&ct).ok()?;
-        let arch = crate::inference::split::gguf_arch_str(&ct);
+        // The header as last parsed, while its file is unchanged (#360): a
+        // plan asks this dozens of times, and each parse of a 70B's header
+        // read its 128k-token vocabulary to reach the tensor table. The kept
+        // copy has no vocabulary; its string count is the fallback below.
+        let cached = self.header_cache.read(&header).ok()?;
+        let ct = &cached.content_without_vocabulary;
+        let tensor_meta = crate::inference::split::GgufTensorMeta::from_content(ct).ok()?;
+        let arch = crate::inference::split::gguf_arch_str(ct);
         let md_u32 = |suffix: &str| -> Option<u64> {
             ct.metadata
                 .get(&format!("{arch}.{suffix}"))
@@ -4494,16 +4499,9 @@ impl ModelProcessPool {
                     None
                 }
             }) as u64;
-        // Counting the token array reproduces what `GgufTokenizerMeta` reported
-        // here — it collects the same entries, discarding any that are not
-        // strings — without allocating one of them.
-        let vocab = md_u32("vocab_size").unwrap_or_else(|| {
-            ct.metadata
-                .get("tokenizer.ggml.tokens")
-                .and_then(|v| v.to_vec().ok())
-                .map(|arr| arr.iter().filter(|v| v.to_string().is_ok()).count() as u64)
-                .unwrap_or(0)
-        });
+        // The token array's strings, counted when the header was parsed —
+        // what `GgufTokenizerMeta` reported here, without allocating one.
+        let vocab = md_u32("vocab_size").unwrap_or(cached.vocabulary_strings);
 
         // The model's weights, from the header's tensor table: a property of
         // the MODEL, the same on every node. They used to be the shard files
@@ -4617,7 +4615,7 @@ impl ModelProcessPool {
         // alike (FUTURE_WORK #281).
         let first_layer = segment.map_or(0, |(start, _)| start as usize);
         let kv = crate::inference::split::kv_budget::KvLayout::read(
-            &ct,
+            ct,
             &tensor_meta,
             effective_ctx as usize,
         )
@@ -4630,7 +4628,7 @@ impl ModelProcessPool {
         );
         let segment_end = first_layer + segment_layers as usize;
         let expert_bytes = (first_layer..segment_end)
-            .map(|layer| crate::inference::split::routed_expert_bytes(&ct, layer, layer + 1))
+            .map(|layer| crate::inference::split::routed_expert_bytes(ct, layer, layer + 1))
             .collect();
         // Each layer's own tensors, by the loader's classification: a
         // quantization mix gives some layers more bits than others, and a card
@@ -15145,6 +15143,44 @@ mod tests {
             .map(|(n, d, k)| (n.as_str(), d.as_slice(), *k))
             .collect();
         header_only_model(tag, model, &table)
+    }
+
+    /// A plan asks a model's geometry dozens of times, and the header is
+    /// parsed once while its file is unchanged — each answer the one a fresh
+    /// parse gives (#360: one 70B plan parsed its 7.8 MB header 73 times).
+    #[test]
+    fn a_models_header_is_parsed_once_for_every_estimate_a_plan_asks() {
+        let model = ModelId("header-parsed-once".into());
+        let data_dir = header_only_seventy_b_even_layers("parsed-once", &model);
+        let header = crate::model::shard::model_dir(&data_dir, &model.0)
+            .join(crate::model::shard::HEADER_FILENAME);
+        // Written an hour ago: a file this moment wrote is never kept.
+        std::fs::File::options()
+            .write(true)
+            .open(&header)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
+        let mut kept = ModelProcessPool::new(data_dir.clone());
+        kept.header_cache = crate::inference::split::HeaderCache::with_caching(true);
+        let mut fresh = ModelProcessPool::new(data_dir.clone());
+        fresh.header_cache = crate::inference::split::HeaderCache::with_caching(false);
+        let segments = [None, Some((0, 8)), Some((0, 3)), Some((3, 8)), Some((5, 6))];
+        for _ in 0..3 {
+            for segment in segments {
+                let (a, a_layers) = kept
+                    .segment_geometry(&model, segment)
+                    .expect("the header alone is enough");
+                let (b, b_layers) = fresh
+                    .segment_geometry(&model, segment)
+                    .expect("the header alone is enough");
+                assert_eq!(format!("{a:?}"), format!("{b:?}"), "{segment:?}");
+                assert_eq!(a_layers, b_layers, "{segment:?}");
+            }
+        }
+        assert_eq!(kept.header_cache.parses(), 1, "15 estimates, one parse");
+        assert_eq!(fresh.header_cache.parses(), 15);
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     fn header_only_seventy_b(tag: &str, model: &ModelId, tied: bool) -> std::path::PathBuf {

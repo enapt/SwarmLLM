@@ -1924,22 +1924,6 @@ Designs: `docs/plans/large_model_splits.md` (the target, the bound and the build
 `docs/plans/wan_parallel.md` (parallelise the reply, not the token), `docs/plans/regional_pipelines.md`
 (placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
 
-#### #360 — Planning one request for a 70B split takes ~2 s, on a runtime thread
-`P2` · perf-split · **OPEN** — 2026-10-27 · evidence: this entry; #359
-
-`assemble_pipeline_for`'s own `elapsed_ms` for Llama 3.3 70B over 83 plans on this node
-(2026-10-25 → 10-27, 2-4 segments): median 2,042 ms, p90 3,493, max 4,259, min 144. It is part
-of every first token (9-10 s warm, so about a fifth), it is paid again by each attempt of the
-wait for holders (1-2 s each on 2026-10-27, #359), and it runs synchronously on a Tokio worker —
-the shape #314 found able to strand the network loop when the loop was woken onto that worker.
-In the 2026-10-27 plans 2.1-2.9 s of each pass passed BEFORE the first `pipeline candidate`
-line, so the time is in building candidates, not in the search. No other model was planned as a
-split in this log, so it is not known whether it scales with layers, candidates or the header.
-**Next:** time the parts of `gather_candidates` on one 70B plan (per candidate:
-`max_hostable_layers_for_planning`, `fresh_run_layers_for_planning`, `segment_cost_curve` over the
-held parts, `RangeWeights`, the drafter-room pass) before changing anything; then cache what does
-not change between requests of one model, or move the plan off the runtime's threads.
-
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192
 
@@ -3420,7 +3404,21 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-27, ships in the next release** (#359)
+**Closed 2026-10-27, ships in the next release** (#359, #360)
+- #360 — **Planning a request for a large model split across computers takes hundredths of a
+  second, not seconds.** One plan of Llama 3.3 70B took 2.7 s (the planner's own `elapsed_ms`
+  over 83 real plans: median 2,042 ms, p90 3,493), on a Tokio worker, before every first token
+  and again on each attempt of the wait for holders. Counted with inotify on the live node: each
+  plan opened the 7.8 MB `gguf_header.bin` 73 times — every memory estimate the planner asks
+  the pool (`fresh_run_layers_for_planning`'s bisection most of all) re-parsed the header,
+  128k-token vocabulary and all, to read its tensor table. Fixed: `split::HeaderCache`, read by
+  `ModelProcessPool::segment_geometry`, keeps the header without its vocabulary arrays while the
+  file's length and modification time stand (a stamp within 2 s of now never kept — Git's racy
+  clean entry; one dated ahead of the clock kept, gotcha #192). Live A/B in one CUDA build
+  (`SWARMLLM_HEADER_CACHE` on/off/off/on, same plan in every arm): preview median 0.019 / 2.70 /
+  2.91 / 0.017 s, 0 opens on against 73. The search itself was never the cost. Evidence:
+  `docs/invariants/inference.md` § "A header read for its geometry is parsed once while its file
+  stands".
 - #359 — **A computer that has just started, or a peer that has just come back, is told at
   once which parts of which models its peers hold.** Parts lists went out on gossip only when
   they changed and in full every ~5 minutes, and nothing sent them to a newly connected peer

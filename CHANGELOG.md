@@ -12,6 +12,13 @@ same connection as before, so computers on older versions take it unchanged. Whe
 wait for those answers, its error now names what its last attempt found missing rather than its
 first; the 70B's said 52 layers had no holder when the records for 4 were still arriving (#359).
 
+**A model split between computers starts its reply up to 3 seconds sooner.** Before the first
+word, a computer works out which computers run which layers. For Llama 3.3 70B that took 2.7
+seconds, because it re-read the model's 7.8 MB description file 73 times along the way, once for
+every memory estimate. It now reads the file once and keeps what it learned until the file
+changes. The same plan takes 0.02-0.08 seconds, and every retry while it waits for peers gets
+the saving too (#360).
+
 ## [0.3.257-alpha] — 2026-10-27
 
 **A model split between two computers far apart answers up to 18% faster.** A split reply sends
