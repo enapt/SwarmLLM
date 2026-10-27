@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #359**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #361**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1924,6 +1924,22 @@ Designs: `docs/plans/large_model_splits.md` (the target, the bound and the build
 `docs/plans/wan_parallel.md` (parallelise the reply, not the token), `docs/plans/regional_pipelines.md`
 (placement by distance, #192), `docs/plans/faster_than_local.md` (the ranked list).
 
+#### #360 — Planning one request for a 70B split takes ~2 s, on a runtime thread
+`P2` · perf-split · **OPEN** — 2026-10-27 · evidence: this entry; #359
+
+`assemble_pipeline_for`'s own `elapsed_ms` for Llama 3.3 70B over 83 plans on this node
+(2026-10-25 → 10-27, 2-4 segments): median 2,042 ms, p90 3,493, max 4,259, min 144. It is part
+of every first token (9-10 s warm, so about a fifth), it is paid again by each attempt of the
+wait for holders (1-2 s each on 2026-10-27, #359), and it runs synchronously on a Tokio worker —
+the shape #314 found able to strand the network loop when the loop was woken onto that worker.
+In the 2026-10-27 plans 2.1-2.9 s of each pass passed BEFORE the first `pipeline candidate`
+line, so the time is in building candidates, not in the search. No other model was planned as a
+split in this log, so it is not known whether it scales with layers, candidates or the header.
+**Next:** time the parts of `gather_candidates` on one 70B plan (per candidate:
+`max_hostable_layers_for_planning`, `fresh_run_layers_for_planning`, `segment_cost_curve` over the
+held parts, `RangeWeights`, the drafter-room pass) before changing anything; then cache what does
+not change between requests of one model, or move the plan off the runtime's threads.
+
 #### #318 — A large model split across machines is too slow to use
 `P2` · perf-split · **OPEN** — 2026-10-20 · plan: `docs/plans/large_model_splits.md` · draws on #134, #145, #148, #149, #192
 
@@ -3403,6 +3419,26 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-27, ships in the next release** (#359)
+- #359 — **A computer that has just started, or a peer that has just come back, is told at
+  once which parts of which models its peers hold.** Parts lists went out on gossip only when
+  they changed and in full every ~5 minutes, and nothing sent them to a newly connected peer
+  (the manifests and the capability had a catch-up; the parts never did, though the comment
+  over `FULL_REANNOUNCE_EVERY_TICKS` said they were "sent our picture directly"). A planner
+  routes only to a connected peer it holds part records for, so a split asked for in that
+  window was planned without the peer, sent its own DHT query and gave up after the 1.5 s wait.
+  Seen 2026-10-27 on Llama 3.3 70B with the far holder pinned: refused 4 min after a restart
+  (the peer had been connected since second 1) and 6 s after the peer reconnected, each time
+  "No reachable node holds layers 28-79" while the second attempt lacked records for only four
+  layers; the next ask, 25 s later, ran. Fixed: each health round keeps the announcement it
+  built (`ModelMgmt::own_shard_announce`, gossiped or not), and the identify handler sends it to
+  a newly connected peer beside the capability — an existing message over the existing direct
+  path, so older peers take it unchanged (A/B `SWARMLLM_HOLDINGS_CATCH_UP=0`). The wait for
+  holders now reports its LAST attempt's gap (`retry_within_grace`), not the first's. #358
+  stopped the wrong verdict while holdings arrived; this makes them arrive. Petals waits for its
+  first full lookup before routing and refreshes on a missing block (`sequence_manager.py`).
+  Evidence: `docs/invariants/network.md` § "Gossip says what CHANGED".
 
 **Closed 2026-10-26, ships in the next release** (#350, #355, #356, #358)
 - #358 — **A large model asked for just after a computer starts is no longer refused as too

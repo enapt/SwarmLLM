@@ -1657,6 +1657,7 @@ impl SharedState {
                 canonical_builds,
                 origin_refusals: DashMap::new(),
                 canonical_holding: DashMap::new(),
+                own_shard_announce: arc_swap::ArcSwapOption::empty(),
             },
             events: EventBus {
                 dashboard_tx: broadcast::channel(32).0,

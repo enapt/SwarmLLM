@@ -355,8 +355,15 @@
 #          KILL_SLACK (default 60) s of the kill and `A timed out: 0` — C held
 #          the last layers alone, so the end is a fast 503 or a salvaged partial,
 #          never the chain's deadline.
+#   holdings FUTURE_WORK #359: split's topology on the processor. One ask, then A
+#          restarts on its own directory and is asked again the moment it sees
+#          B — minutes inside B's next full re-announce. PASS = A's FIRST plan
+#          after the restart lists B as a candidate (B sent its parts list with
+#          the connection), A logged B's announce before the ask, and the ask is
+#          a 200. Control arm: ENV_B="SWARMLLM_HOLDINGS_CATCH_UP=0" — B sends
+#          none, A's first plan has no B, and the ask leans on its DHT wait.
 #
-# usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|owntiming <binary> [<binary for B>]
+# usage: split_rig.sh split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|owntiming|holdings <binary> [<binary for B>]
 #   MODEL      model id (default: tinyllama for split, llama-3.2-3b for kill
 #              and failover)
 #   SHARDS_A   shard indices A holds, comma-separated (default 0; kill: 0,LAST)
@@ -437,7 +444,7 @@ rig_addr() {
 MODE="${1:?usage: split_rig.sh split|kill|failover|context|repeat|fetch|cache|remote|mixed|softunload <binary> [<binary for B>]}"
 BIN_A="${2:?binary}"
 BIN_B="${3:-$BIN_A}"
-case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|refusechain|killchain|owntiming) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, peerload, refusepiece, refusechain, killchain or owntiming"; exit 2 ;; esac
+case "$MODE" in split|reasoning|kill|failover|failover_mid|context|whole|continue|repeat|fetch|cache|handoffcache|splitcache|remote|mixed|disputed|spliced|disconnect|softunload|layerprice|keep|route|latekv|peerkv|peerload|refusepiece|refusechain|killchain|owntiming|holdings) ;; *) echo "mode must be split, reasoning, kill, failover, failover_mid, context, whole, continue, repeat, fetch, cache, handoffcache, splitcache, remote, mixed, disputed, spliced, disconnect, softunload, layerprice, keep, route, latekv, peerkv, peerload, refusepiece, refusechain, killchain, owntiming or holdings"; exit 2 ;; esac
 # refusechain is remote's topology with one fault on C (#305).
 REFUSECHAIN=""; KILLCHAIN=""
 if [ "$MODE" = killchain ]; then
@@ -458,7 +465,7 @@ fi
 [ -x "$BIN_A" ] && [ -x "$BIN_B" ] || { echo "binary not executable"; exit 2; }
 if [ "$MODE" = reasoning ]; then
   MODEL="${MODEL:-qwen3-1.7b-q8-0}"
-elif [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ]; then
+elif [ "$MODE" = split ] || [ "$MODE" = mixed ] || [ "$MODE" = disputed ] || [ "$MODE" = spliced ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ] || [ "$MODE" = holdings ]; then
   MODEL="${MODEL:-tinyllama-1.1b-chat-v1.0.q4-k-m}"
 elif [ "$MODE" = cache ] || [ "$MODE" = handoffcache ]; then
   MODEL="${MODEL:-qwen2.5-0.5b-instruct-fp16}"
@@ -476,11 +483,12 @@ SHARDS=$(ls "$SRC" | sed -n 's/^shard_\([0-9]*\)\.bin$/\1/p' | sed 's/^0*\([0-9]
 LAST=$(echo "$SHARDS" | tail -1)
 N=$(echo "$SHARDS" | wc -l)
 [ "$N" -ge 2 ] || { echo "$MODEL has $N shard file(s) here; a split needs at least 2"; exit 2; }
-if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ] || [ "$MODE" = reasoning ]; then
+if [ "$MODE" = split ] || [ "$MODE" = repeat ] || [ "$MODE" = disconnect ] || [ "$MODE" = keep ] || [ "$MODE" = route ] || [ "$MODE" = owntiming ] || [ "$MODE" = reasoning ] || [ "$MODE" = holdings ]; then
   SHARDS_A="${SHARDS_A:-0}"
   SHARDS_B="${SHARDS_B:-$(echo "$SHARDS" | grep -vxF -f <(echo "$SHARDS_A" | tr ',' '\n') | paste -sd,)}"
   # Processor unless asked otherwise: the reference is scored on the processor.
   [ "$MODE" = repeat ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
+  [ "$MODE" = holdings ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = disconnect ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = keep ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
   [ "$MODE" = reasoning ] && { GPU_A="${GPU_A:-0}"; GPU_B="${GPU_B:-0}"; }
@@ -966,6 +974,58 @@ try:
 except Exception: c="ERR "+raw[:300]
 print(json.dumps({"status":status,"route":hdr("x-swarm-route"),"segments":hdr("x-swarm-segments"),"content":c}))' "$OUT/$3.hdr" "$OUT/$3.body"
 }
+
+if [ "$MODE" = holdings ]; then
+  Q="What is the capital of France? Answer in one sentence."
+  ask "$Q" 24 before | tee "$OUT/holdings.jsonl" | cut -c1-200
+  B_ID=$(curl -s -m 5 -H "Authorization: Bearer $KA" localhost:8900/api/admin/peers | python3 -c 'import sys,json
+d=json.load(sys.stdin); p=d if isinstance(d,list) else d.get("peers",[]); print(p[0]["node_id"] if p else "")')
+  [ -n "$B_ID" ] || { echo "holdings: cannot read B's node id from A's peer list"; exit 1; }
+  # A restarts on its own directory (same identity, same port): its registry
+  # starts empty, and B's next full re-announce is minutes away.
+  kill "$PA"; wait "$PA" 2>/dev/null
+  cp "$BASE/A/node.log" "$OUT/A.first-run.log"
+  PA=$(start "$BASE/A" 8900 "$BIN_A" "${GPU_A:-}")
+  up "$BASE/A" 8900 || exit 1
+  T_UP=$(date +%s)
+  # Connected, by A's own log — a peer list can name B from A's cache before the
+  # link is back. Then 3 s, as a person asking right after a restart would.
+  for _ in $(seq 1 120); do grep -a -q "Peer connected.*node=$B_ID" "$BASE/A/node.log" && break; sleep 1; done
+  echo "holdings: A restarted; connected to B after $(( $(date +%s) - T_UP )) s (B=$B_ID, ENV_B=${ENV_B:-<none>})"
+  sleep 3
+  ask "$Q" 24 after | tee -a "$OUT/holdings.jsonl" | cut -c1-200
+  python3 - "$BASE/A/node.log" "$B_ID" "$OUT/holdings.jsonl" "${ENV_B:-}" <<'PY'
+import json, sys
+log = open(sys.argv[1], errors="replace").read().splitlines()
+b, asks, env_b = sys.argv[2], sys.argv[3], sys.argv[4]
+ask_at = next((i for i, l in enumerate(log) if "Chat completion request" in l), len(log))
+announced = sum("Received shard announce from peer" in l and f"node_id={b}" in l for l in log[:ask_at])
+from datetime import datetime
+at = lambda l: datetime.strptime(l[:26], "%Y-%m-%dT%H:%M:%S.%f")
+conn = next((l for l in log if "Peer connected" in l and f"node={b}" in l), None)
+ann = next((l for l in log if "Received shard announce from peer" in l and f"node_id={b}" in l), None)
+if conn and ann:
+    print(f"holdings: B's first parts list arrived {(at(ann) - at(conn)).total_seconds():.3f} s after the connection")
+plan_at = next((i for i, l in enumerate(log) if "Assembling distributed pipeline" in l), None)
+first_pass = []
+for l in log[(plan_at or len(log)) + 1:]:
+    if "pipeline candidate" in l:
+        first_pass.append(l)
+    elif first_pass and ("parallax routing" in l or "assemble_pipeline_for completed" in l
+                         or "no greedy route" in l):
+        break
+b_first = any(f"node={b}" in l for l in first_pass)
+waited = sum("Pipeline assembled after waiting for DHT provider results" in l for l in log)
+status = json.loads(open(asks).read().splitlines()[-1])["status"]
+print(f"holdings: B's parts list reached A before the ask: {announced}x")
+print(f"holdings: A's first plan after the restart lists B: {'yes' if b_first else 'no'}"
+      f" ({len(first_pass)} candidate(s)); waited for the DHT: {waited}x; after: {status}")
+control = "SWARMLLM_HOLDINGS_CATCH_UP=0" in env_b
+ok = (not b_first) if control else (b_first and announced > 0 and " 200" in status)
+print(f"holdings {'PASS' if ok else 'FAIL'}"
+      f" ({'control arm: expected no B in the first plan' if control else 'catch-up arm'})")
+PY
+fi
 
 if [ "$MODE" = keep ]; then
   keep() { curl -s -m 30 -X PUT -H "Authorization: Bearer $KA" -H 'Content-Type: application/json' \

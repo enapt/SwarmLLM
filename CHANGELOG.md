@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+**A computer that has just started, or has just reconnected, learns at once which parts of each
+model its peers hold.** It used to learn that only from each peer's full announcement, every five
+minutes or so. In those first minutes a model split between computers could be refused with "No
+reachable node holds layers …", though asking again a little later worked: Llama 3.3 70B was
+refused this way 4 minutes after a restart and 6 seconds after its far holder reconnected. Each
+computer now sends its list of parts to a peer the moment they connect, the same message over the
+same connection as before, so computers on older versions take it unchanged. When a request does
+wait for those answers, its error now names what its last attempt found missing rather than its
+first; the 70B's said 52 layers had no holder when the records for 4 were still arriving (#359).
+
 ## [0.3.257-alpha] — 2026-10-27
 
 **A model split between two computers far apart answers up to 18% faster.** A split reply sends

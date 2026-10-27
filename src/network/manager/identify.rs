@@ -561,6 +561,29 @@ impl NetworkManager {
                     None,
                 );
             }
+            // And which parts of which models this node holds, the same way.
+            // Gossip sends them on a change and in full every ~5 minutes
+            // (`FULL_REANNOUNCE_EVERY_TICKS`), and a planner only routes to a
+            // connected peer it has a holder record for — so a node that had
+            // just started, or a peer that had just come back, could not be
+            // given a split until then. Seen live 2026-10-27: a 70B refused 4
+            // minutes after a restart and again 6 s after its far holder
+            // reconnected, each time with the request's own DHT query still
+            // answering (FUTURE_WORK #359). The same existing variant over the
+            // same direct path as the capability above, which an older peer's
+            // dispatcher takes exactly as a gossiped one (authenticated
+            // sender, same checks), so no feature bit. Nothing new is told:
+            // every part held is already a DHT provider record anyone can read.
+            if holdings_catch_up_enabled() {
+                if let Some(announce) = self.shared_state.models.own_shard_announce.load_full() {
+                    self.handle_send_rr_message(
+                        peer_id.to_bytes(),
+                        crate::types::SwarmMessage::ShardAnnounce((*announce).clone()),
+                        "ShardAnnounceCatchUp",
+                        None,
+                    );
+                }
+            }
         }
         // R110: refresh swarm-capacity snapshot so the dashboard banner
         // reflects the new contributor without waiting for the next ~1.5s
@@ -605,6 +628,19 @@ fn multiaddr_is_local(a: &libp2p::Multiaddr) -> bool {
             ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00
         }
         _ => false,
+    })
+}
+
+/// `SWARMLLM_HOLDINGS_CATCH_UP=0` sends a newly connected peer no parts list,
+/// leaving it to gossip and the DHT — the behaviour before 2026-10-27, for A/B
+/// inside one binary.
+fn holdings_catch_up_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_HOLDINGS_CATCH_UP").ok().as_deref(),
+            Some("0")
+        )
     })
 }
 

@@ -334,6 +334,18 @@ pub struct ModelMgmt {
     /// canonical upload — read by the model listing and by the acquisition
     /// gate, written by `model::auto_manage::canonical`.
     pub canonical_holding: DashMap<crate::types::ModelId, crate::model::canonical::Holding>,
+    /// The parts this node holds, as its last health round described them to
+    /// the swarm: the very `ShardAnnounce` that round broadcast, or would
+    /// have, had nothing changed. Written ONLY by
+    /// `health::monitor::broadcast_capabilities` (every round; `None` while
+    /// nothing is held), read ONLY by the identify handler, which sends it to
+    /// a newly connected peer beside our capability. Gossip carries the parts
+    /// only when they change and in full every ~5 minutes, so a node that had
+    /// just started — or a peer that had just come back — knew nothing of
+    /// what its peers held until then, and a split request in that window was
+    /// planned without them (2026-10-27: a 70B refused twice, 4 min after a
+    /// restart and 6 s after a reconnect).
+    pub own_shard_announce: arc_swap::ArcSwapOption<crate::types::ShardAnnounce>,
 }
 
 /// Maximum number of `(publisher, model_id)` entries we retain from inbound
@@ -1188,6 +1200,7 @@ mod tests {
             canonical_builds: DashMap::new(),
             origin_refusals: DashMap::new(),
             canonical_holding: DashMap::new(),
+            own_shard_announce: arc_swap::ArcSwapOption::empty(),
         }
     }
 

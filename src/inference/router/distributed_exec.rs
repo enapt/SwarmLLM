@@ -448,29 +448,56 @@ async fn assemble_awaiting_dht(
         return Err(err);
     }
 
-    let deadline = std::time::Instant::now() + DHT_ASSEMBLY_GRACE;
-    while std::time::Instant::now() < deadline {
-        tokio::time::sleep(DHT_ASSEMBLY_POLL).await;
-        if let Ok(assignment) = scheduler.assemble_pipeline_for(
+    let assignment = retry_within_grace(err, DHT_ASSEMBLY_GRACE, DHT_ASSEMBLY_POLL, || {
+        scheduler.assemble_pipeline_for(
             model_id,
             local_node_id,
             request_id,
             Purpose::Route,
             prompt.clone(),
             keep,
-        ) {
-            scheduler.record_peer_commitments(&assignment, local_node_id, prompt_tokens);
-            tracing::info!(
-                %request_id,
-                model = %model_id,
-                "Pipeline assembled after waiting for DHT provider results"
-            );
-            return Ok(assignment);
+        )
+    })
+    .await?;
+    scheduler.record_peer_commitments(&assignment, local_node_id, prompt_tokens);
+    tracing::info!(
+        %request_id,
+        model = %model_id,
+        "Pipeline assembled after waiting for DHT provider results"
+    );
+    Ok(assignment)
+}
+
+/// Try `attempt` again every `poll` until it succeeds or `grace` has passed,
+/// and answer with the LATEST failure, never the first.
+///
+/// The latest attempt was planned with every holder the first one knew and
+/// whatever the DHT added since, so its gap is the real one; the first's is
+/// only what this node knew before it asked. On 2026-10-27 the first read "No
+/// reachable node holds layers 28-79" of a 70B whose far holder held all of
+/// them — the second attempt lacked records for only 37, 42, 46 and 69, the
+/// DHT's answers for those still on their way — and the hint told the owner to
+/// download what was missing. The first was kept while the errors were
+/// stringly typed and a retry could only say "No node available"; every
+/// attempt now names its own gap.
+async fn retry_within_grace<T>(
+    first: SwarmError,
+    grace: std::time::Duration,
+    poll: std::time::Duration,
+    mut attempt: impl FnMut() -> Result<T, SwarmError>,
+) -> Result<T, SwarmError> {
+    // tokio's clock, not std's: the same clock in production, and a test with
+    // the runtime's time paused can run the wait without sleeping through it.
+    let deadline = tokio::time::Instant::now() + grace;
+    let mut latest = first;
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(poll).await;
+        match attempt() {
+            Ok(done) => return Ok(done),
+            Err(later) => latest = later,
         }
     }
-    // Report the ORIGINAL error: it names the layer that had no holder, which is
-    // more useful than "we also failed 1.5s later".
-    Err(err)
+    Err(latest)
 }
 
 /// Did assembly fail because no node is known to hold what we need, as opposed
@@ -1231,6 +1258,48 @@ mod tests {
                 span: crate::error::describe_missing_layers(0, 1),
             }
         ));
+    }
+
+    /// A request that waited for holders answers with what its LAST attempt
+    /// found missing, not its first. On 2026-10-27 the first attempt of a 70B
+    /// knew none of its far holder's parts ("layers 28-79"), the second lacked
+    /// records for four single layers, and the caller was told the first —
+    /// with a hint to download 52 layers the swarm already held.
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_for_holders_reports_the_gap_its_last_attempt_found() {
+        let gap = |from: u32, to: u32| SwarmError::ModelIncompleteInSwarm {
+            model_id: "m".into(),
+            layer: from,
+            span: crate::error::describe_missing_layers(from, to),
+        };
+        let mut attempts = 0;
+        let result: Result<(), SwarmError> =
+            retry_within_grace(gap(28, 80), DHT_ASSEMBLY_GRACE, DHT_ASSEMBLY_POLL, || {
+                attempts += 1;
+                Err(gap(37, 38))
+            })
+            .await;
+        assert!(attempts >= 1, "the wait tries again before answering");
+        match result {
+            Err(SwarmError::ModelIncompleteInSwarm { span, .. }) => assert_eq!(
+                span, "layer 37",
+                "the answer is the gap the best-informed attempt found"
+            ),
+            other => panic!("expected the last attempt's gap, got {other:?}"),
+        }
+
+        // And a later success is taken as soon as it comes.
+        let mut tries = 0;
+        let ok = retry_within_grace(gap(28, 80), DHT_ASSEMBLY_GRACE, DHT_ASSEMBLY_POLL, || {
+            tries += 1;
+            if tries < 2 {
+                Err(gap(37, 38))
+            } else {
+                Ok(tries)
+            }
+        })
+        .await;
+        assert_eq!(ok.ok(), Some(2));
     }
 
     /// Only the "nothing known to serve this" failure benefits from waiting for

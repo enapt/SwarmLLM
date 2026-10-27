@@ -110,7 +110,11 @@ const WSL_FIREWALL_GRACE: std::time::Duration = std::time::Duration::from_secs(3
 /// Each holder's counter is phased independently, so a model held by several
 /// nodes is re-announced several times per cycle. A newly connected peer does
 /// NOT force one: it is sent our picture directly instead, because a broadcast
-/// cannot be addressed to the one node that needs it.
+/// cannot be addressed to the one node that needs it — the manifests by this
+/// round's catch-up (`broadcast_manifests`), the parts at identify time
+/// (`ModelMgmt::own_shard_announce`). Until 2026-10-27 the parts had no such
+/// catch-up and this sentence was true only of the manifests: a restarted node
+/// learned what a peer held only from this full round, up to 5 minutes later.
 const FULL_REANNOUNCE_EVERY_TICKS: u64 = 10;
 
 /// How long a manifest the WHOLE SWARM was just handed stays said.
@@ -1458,50 +1462,74 @@ impl HealthMonitor {
         // changes, or every 10 broadcast cycles as a full re-announce (ensures
         // late-joining peers get the full picture). At 10K peers with scaled
         // gossip interval (~240s), full re-announce happens every ~40 min.
-        if !held_models.is_empty() {
-            let current_set: std::collections::HashSet<_> = hosted_shards
-                .iter()
-                .map(|s| {
-                    (
-                        s.clone(),
-                        registry.announced_build_tag(s),
-                        registry.model_is_origin_checked(&s.model_id),
-                    )
-                })
-                .collect();
-            let shards_changed = current_set != self.last_announced_shards;
-            self.shard_announce_counter += 1;
-            // Full re-announce every `FULL_REANNOUNCE_EVERY_TICKS` broadcast
-            // cycles so late-joining peers eventually discover our shards even
-            // if nothing changed.
-            let periodic_reannounce = self
-                .shard_announce_counter
-                .is_multiple_of(FULL_REANNOUNCE_EVERY_TICKS);
-
-            if shards_changed || periodic_reannounce {
-                let shard_count = hosted_shards.len();
-                // Complete for every model represented. `shards_changed` above
-                // fires when shards are deleted, so this is what actually
-                // retracts them on peers — previously it re-sent the smaller
-                // set and receivers merged it, keeping the deleted shards.
-                //
-                // Every model this node HOLDS, offered or not: a withheld one
-                // goes out with none of its parts, which retracts them.
-                let complete_for_models: Vec<crate::types::ModelId> =
-                    held_models.iter().cloned().collect();
-                let announce = crate::model::manifest::shard_announce(
-                    &self.shared_state.model_registry,
-                    node_id,
-                    hosted_shards,
-                    complete_for_models,
-                );
-                let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
-                if let Err(e) = self.network_tx.send(msg).await {
-                    tracing::debug!(error = %e, shard_count, "DIAG: failed to broadcast shard announce");
-                }
-                self.last_announced_shards = current_set;
+        if let Some(announce) = self.shard_announce_round(node_id, hosted_shards, &held_models) {
+            let shard_count = announce.shards.len();
+            let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
+            if let Err(e) = self.network_tx.send(msg).await {
+                tracing::debug!(error = %e, shard_count, "DIAG: failed to broadcast shard announce");
             }
         }
+    }
+
+    /// This round's announcement of the parts held here, returned when it goes
+    /// on gossip: when the set changed, or every `FULL_REANNOUNCE_EVERY_TICKS`
+    /// rounds. Built EVERY round and kept in `ModelMgmt::own_shard_announce`,
+    /// whether it goes or not, so a peer connecting between full rounds is sent
+    /// this picture point to point by the identify handler — one builder, so
+    /// the copy a newcomer gets is the one the swarm gets. `None` is kept while
+    /// nothing is held.
+    fn shard_announce_round(
+        &mut self,
+        node_id: crate::types::NodeId,
+        hosted_shards: Vec<crate::types::ShardId>,
+        held_models: &std::collections::HashSet<crate::types::ModelId>,
+    ) -> Option<crate::types::ShardAnnounce> {
+        if held_models.is_empty() {
+            self.shared_state.models.own_shard_announce.store(None);
+            return None;
+        }
+        let registry = &self.shared_state.model_registry;
+        let current_set: std::collections::HashSet<_> = hosted_shards
+            .iter()
+            .map(|s| {
+                (
+                    s.clone(),
+                    registry.announced_build_tag(s),
+                    registry.model_is_origin_checked(&s.model_id),
+                )
+            })
+            .collect();
+        let shards_changed = current_set != self.last_announced_shards;
+        self.shard_announce_counter += 1;
+        // Full re-announce every `FULL_REANNOUNCE_EVERY_TICKS` broadcast
+        // cycles so late-joining peers eventually discover our shards even
+        // if nothing changed.
+        let periodic_reannounce = self
+            .shard_announce_counter
+            .is_multiple_of(FULL_REANNOUNCE_EVERY_TICKS);
+        // Complete for every model represented. `shards_changed` above
+        // fires when shards are deleted, so this is what actually
+        // retracts them on peers — previously it re-sent the smaller
+        // set and receivers merged it, keeping the deleted shards.
+        //
+        // Every model this node HOLDS, offered or not: a withheld one
+        // goes out with none of its parts, which retracts them.
+        let complete_for_models: Vec<crate::types::ModelId> = held_models.iter().cloned().collect();
+        let announce = crate::model::manifest::shard_announce(
+            registry,
+            node_id,
+            hosted_shards,
+            complete_for_models,
+        );
+        self.shared_state
+            .models
+            .own_shard_announce
+            .store(Some(std::sync::Arc::new(announce.clone())));
+        if !(shards_changed || periodic_reannounce) {
+            return None;
+        }
+        self.last_announced_shards = current_set;
+        Some(announce)
     }
 
     /// `hash` is this node's announced version of `model` — broadcast, or let
@@ -3316,6 +3344,77 @@ mod tests {
                 mmproj: None,
                 context_length: Some(4096),
             });
+    }
+
+    /// The parts list a newly connected peer is sent at identify time
+    /// (`own_shard_announce`) is this round's, kept on EVERY round — a quiet one
+    /// that gossips nothing included — and follows a change at once. A node
+    /// that had just started, or a peer back from a disconnect, otherwise knew
+    /// nothing of what its peers held until their next full round, ~5 minutes
+    /// away, and split requests in between were planned without them
+    /// (2026-10-27, a 70B refused twice).
+    #[tokio::test]
+    async fn the_parts_list_a_newcomer_is_sent_is_this_rounds() {
+        let (state, mut monitor, _rx) = monitor_for_test();
+        let node = state.identity.node_id().clone();
+        let model = crate::types::ModelId("m".into());
+        let part = |index| crate::types::ShardId {
+            model_id: model.clone(),
+            index,
+        };
+        let held: std::collections::HashSet<_> = [model.clone()].into();
+        let kept = |state: &SharedState| {
+            let announce = state
+                .models
+                .own_shard_announce
+                .load_full()
+                .expect("a node holding parts keeps a list to hand a newcomer");
+            let mut indices: Vec<u32> = announce.shards.iter().map(|s| s.index).collect();
+            indices.sort_unstable();
+            assert_eq!(
+                announce.complete_for_models,
+                vec![model.clone()],
+                "the list is complete for the model, so a newcomer drops parts we no longer hold"
+            );
+            indices
+        };
+
+        assert!(
+            monitor
+                .shard_announce_round(node.clone(), vec![part(0), part(1)], &held)
+                .is_some(),
+            "a first round is a change, and goes on gossip"
+        );
+        assert_eq!(kept(&state), vec![0, 1]);
+
+        assert!(
+            monitor
+                .shard_announce_round(node.clone(), vec![part(0), part(1)], &held)
+                .is_none(),
+            "an unchanged set between full rounds is not gossiped again"
+        );
+        assert_eq!(
+            kept(&state),
+            vec![0, 1],
+            "but a newcomer is still handed it"
+        );
+
+        assert!(monitor
+            .shard_announce_round(node.clone(), vec![part(1)], &held)
+            .is_some());
+        assert_eq!(
+            kept(&state),
+            vec![1],
+            "a change replaces the kept list at once"
+        );
+
+        assert!(monitor
+            .shard_announce_round(node, Vec::new(), &Default::default())
+            .is_none());
+        assert!(
+            state.models.own_shard_announce.load_full().is_none(),
+            "a node holding nothing hands a newcomer nothing"
+        );
     }
 
     /// #91 (2c): a restart gossips no manifest the swarm was gossiped within

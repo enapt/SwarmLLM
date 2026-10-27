@@ -4466,6 +4466,28 @@ and served nothing while spending ~2.6 Mbit/s.
   "Peer connected" between two nodes with it, ~5 s from peers without.
   BitTorrent draws the same line: BEP 3's bitfield goes to the peer that
   connected, and only per-piece `have` deltas go to everyone.
+  **So does the list of parts we hold — our bitfield, literally** (2026-10-27,
+  FUTURE_WORK #359). Until then the parts had NO catch-up: the manifests and the
+  capability went point to point, the `ShardAnnounce` only on a change and on the
+  full round (`FULL_REANNOUNCE_EVERY_TICKS`, ~5 min at ≤ 10 peers), while a
+  comment over that constant said a newcomer was "sent our picture directly".
+  The planner routes only to a connected peer it holds part records for, so a
+  node that had just started — or a peer that had just come back, whose records
+  had gone with it — planned splits without that peer for up to ~5 minutes; each
+  request sent its own DHT query and gave up after the 1.5 s wait. Measured on
+  the live node with Llama 3.3 70B pinned to this node + the Melbourne holder
+  (430 ms): refused 4 min after a restart (the peer connected 1 s after "ready")
+  and 6 s after the peer reconnected; in both the first plan had no record of
+  the peer and the second, ~2.5 s later, records for all but layers 37, 42, 46
+  and 69 of its 28-80 — the DHT's per-shard answers land piecemeal. The next ask
+  ran. Now each health round keeps the announcement it built, gossiped or not
+  (`ModelMgmt::own_shard_announce`, written only by `shard_announce_round`), and
+  the identify handler sends it beside the capability. Nothing new is told: every
+  part held is already a DHT provider record anyone can read. Petals makes the
+  same call from the other side — a client waits for its first complete lookup
+  before routing, and a missing block triggers a refresh (`sequence_manager.py`,
+  `update_period` 60 s). A/B `SWARMLLM_HOLDINGS_CATCH_UP=0`. Test:
+  `the_parts_list_a_newcomer_is_sent_is_this_rounds`.
 - **What the swarm just HEARD is not repeated** (RFC 6206, Trickle, *k* = 1).
   Every holder re-announced its manifests on its own full round, so a model
   held by *k* nodes went out *k* times per round — **87% of an idle node's
