@@ -1269,7 +1269,9 @@ chunk, the look-ahead included (default 3), `SWARMLLM_SPEC_STREAM_WINDOW` chunks
 often a chunk's guesses AND its look-ahead were all kept (~0.25-0.35 on a 0.5B drafter for a 7B);
 `held` counts chunks that came back short of the guesses asked for, after which nothing was sent until
 their answer — ~0 since 2026-10-26, when the stream stopped cutting a chunk at a guess the drafter was
-unsure of (`SWARMLLM_STREAM_DRAFT_CONFIDENCE=0.4` brings that back for an A/B);
+unsure of (`SWARMLLM_STREAM_DRAFT_CONFIDENCE=0.4` brings that back for an A/B). Since then every chunk is
+also the stream's full width, the reply's last one too, up to the positions the chain serves
+(`SWARMLLM_STREAM_FULL_CHUNKS=0` sends the narrower chunk the reply's room left, for an A/B);
 each restart is logged at DEBUG (`a streamed check refused a guess`, with the turn and how many of
 its guesses were kept). On the serving node a superseded chunk is answered `streamed check N was
 skipped` and never computed. One built on a guess the serving node's OWN walk refused is answered
