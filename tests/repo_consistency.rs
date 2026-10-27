@@ -14514,6 +14514,78 @@ fn the_zstd_cap_guard_catches_every_uncapped_form() {
     );
 }
 
+/// The free space of a disk is read in ONE place, `auto_manage::disk_space_for`
+/// (#334 (4)): the disk the path is really on, by the filesystem itself on
+/// Linux. sysinfo's disk list leaves out network and tmpfs mounts and matches a
+/// path by its spelling; summed, it is every disk's room added together. The
+/// health monitor advertised that sum to peers, and after #334 (4) fixed it
+/// there the stats payload still summed it for the setup wizard, which sized a
+/// storage budget from it (sweep 2026-10-27).
+#[test]
+fn a_disk_is_read_only_through_disk_space_for() {
+    const THE_ONE_READING: &str = "src/model/auto_manage/mod.rs";
+    let root = repo_root();
+    let mut offenders = Vec::new();
+    for path in rust_sources_under("src") {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel == THE_ONE_READING || module_file_is_test_only(&path) {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).expect("read source");
+        let sites = disk_list_sites(&src);
+        if !sites.is_empty() {
+            offenders.push(format!("{rel}: lines {sites:?}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a disk's space read from sysinfo's disk list outside \
+         `auto_manage::disk_space_for` — call it with the path whose disk you \
+         mean: {offenders:#?}"
+    );
+}
+
+/// Every use of sysinfo's disk list (`Disks::`) in production code, as 1-indexed
+/// lines. Test code and comments are skipped.
+fn disk_list_sites(src: &str) -> Vec<usize> {
+    let tests = cfg_test_spans(src);
+    let line_of = |at: usize| src[..at].matches('\n').count() + 1;
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = src[from..].find("Disks::") {
+        let at = from + rel;
+        from = at + 1;
+        let line_start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+        let in_test = tests.iter().any(|(s, e)| *s < at && at < *e);
+        if !in_test && !src[line_start..at].contains("//") {
+            out.push(line_of(at));
+        }
+    }
+    out
+}
+
+#[test]
+fn the_disk_reading_guard_catches_every_spelling() {
+    let planted = "fn a() {\n    let d = sysinfo::Disks::new_with_refreshed_list();\n}\n\
+                   use sysinfo::{Disks, System};\n\
+                   fn b() {\n    let d = Disks::new();\n}\n";
+    assert_eq!(disk_list_sites(planted), vec![2, 6]);
+    let fine = "fn a() {\n    // the old `sysinfo::Disks::new_with_refreshed_list()` sum\n    \
+                let d = disk_space_for(&dir);\n}\n\
+                fn b() {\n    let s = DiskSpace::default();\n}\n\
+                #[cfg(test)]\nmod tests {\n    fn t() {\n        \
+                let d = sysinfo::Disks::new_with_refreshed_list();\n    }\n}\n";
+    assert!(
+        disk_list_sites(fine).is_empty(),
+        "{:?}",
+        disk_list_sites(fine)
+    );
+}
+
 /// Every call of candle's `argmax` / `argmax_keepdim` in production code, as
 /// 1-indexed lines. Test code and comments are skipped.
 fn candle_argmax_sites(src: &str) -> Vec<usize> {

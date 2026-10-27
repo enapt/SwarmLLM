@@ -2279,13 +2279,14 @@ pub(crate) fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serd
         .unwrap_or_else(|| "Unknown".to_string());
     let cpu_cores = sys.cpus().len();
 
-    // Disk info — use sysinfo disks
-    let disks = sysinfo::Disks::new_with_refreshed_list();
-    let (mut total_disk_mb, mut available_disk_mb) = (0u64, 0u64);
-    for disk in disks.list() {
-        total_disk_mb += disk.total_space() / (1024 * 1024);
-        available_disk_mb += disk.available_space() / (1024 * 1024);
-    }
+    // The disk the data directory is on, read as the storage budget, the
+    // download preflight and the advertised capacity read it (#334 (4)). The
+    // sum of every disk this used to show let the setup wizard size a storage
+    // budget against room the budget never had. Unreadable is 0.
+    let disk = crate::model::auto_manage::disk_space_for(&shared_state.config.node.data_dir);
+    let mb = |bytes: u64| bytes / (1024 * 1024);
+    let total_disk_mb = disk.as_ref().map_or(0, |d| mb(d.total_bytes));
+    let available_disk_mb = disk.as_ref().map_or(0, |d| mb(d.free_bytes));
     let used_disk_mb = total_disk_mb.saturating_sub(available_disk_mb);
 
     // The card's name and size from startup detection; how much of it is in

@@ -759,6 +759,14 @@ The sixth test is the known answer: where sysinfo's list has `/`, both readings 
 size. sysinfo's `Disks::refresh` re-lists on every platform, so `Disks::new()` + `refresh` (the
 preflight's) was never blind.
 
+A fourth copy survived the fix: `api::admin::detect_hardware` still summed every disk in
+sysinfo's list for `/api/admin/stats` (sweep 2026-10-27). The setup wizard sizes its storage
+preview from that `available_disk_mb` (gotcha #448), and the dashboard's disk meter shows
+`used_disk_mb` / `total_disk_mb`, so both read a different disk from the budget they describe.
+It now reads `disk_space_for(data_dir)` for all three figures, and
+`a_disk_is_read_only_through_disk_space_for` fails the build on a `Disks::` outside
+`auto_manage/mod.rs` (with the stats copy put back it names `src/api/admin.rs`).
+
 ## `AutoShardManager::would_shed_copy` is the ONE answer to "would prune shed this copy?" — and the download pass asks it before every fetch
 
 (2026-10-06, gotcha #795.) Prune asks it of each part it holds; the download

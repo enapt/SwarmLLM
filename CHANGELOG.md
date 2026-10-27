@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+**The setup wizard and the dashboard's disk meter show the drive your models are stored on.**
+They showed every drive's space added together, so on a computer with several drives the wizard
+could suggest keeping more models than the drive holding them has room for, and the meter did not
+match what your computer actually lets itself use. They now read the same drive the storage limit,
+the download check and what other computers are told already use (#334).
+
 ## [0.3.258-alpha] — 2026-10-27
 
 **A model split between computers starts its reply up to 3 seconds sooner.** Before the first
