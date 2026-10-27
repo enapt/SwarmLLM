@@ -31,6 +31,10 @@
 //! longer matches are more likely to be predictive than shorter ones, but
 //! we'd rather emit a short candidate than nothing.
 //!
+//! The speculative loops' cascade ([`copied_run`]) weighs the matched
+//! n-gram's last 32 occurrences instead of the first one found, and ends the
+//! run where they stop agreeing (#338).
+//!
 //! # Edge cases
 //!
 //! - Match position must be strictly less than `context.len() - n` (so the
@@ -83,21 +87,25 @@ impl Default for NgramLookupConfig {
 /// Time complexity: O(searchable.len() × max_ngram_size) worst case.
 /// Practical cost on typical 2K-prompt + 100-token tail: <1ms.
 pub fn find_candidate(context: &[u32], searchable: &[u32], cfg: NgramLookupConfig) -> Vec<u32> {
-    find_match(context, searchable, cfg)
-        .map(|(from, _)| {
+    find_occurrences(context, searchable, cfg, 1)
+        .map(|(starts, _)| {
+            let from = starts[0];
             searchable[from..(from + cfg.num_pred_tokens).min(searchable.len())].to_vec()
         })
         .unwrap_or_default()
 }
 
-/// Where [`find_candidate`] finds `context`'s tail in `searchable`: the index
-/// in `searchable` its continuation starts at, and the n-gram that matched.
-fn find_match(
+/// Where [`find_candidate`] finds `context`'s tail in `searchable`: the
+/// indices in `searchable` where its continuations start — the most recent
+/// occurrence first, at most `most` of them, never empty — and the n-gram
+/// that matched (the longest with any occurrence).
+fn find_occurrences(
     context: &[u32],
     searchable: &[u32],
     cfg: NgramLookupConfig,
-) -> Option<(usize, usize)> {
-    if context.is_empty() || searchable.is_empty() {
+    most: usize,
+) -> Option<(Vec<usize>, usize)> {
+    if context.is_empty() || searchable.is_empty() || most == 0 {
         return None;
     }
     let max_n = cfg.max_ngram_size.min(context.len()).min(searchable.len());
@@ -122,6 +130,7 @@ fn find_match(
         // slice identity, so we use a value comparison: any position
         // whose window equals the needle AND whose successor would
         // produce the needle on re-search is filtered.
+        let mut starts = Vec::new();
         for start in (0..=max_start).rev() {
             let window = &searchable[start..start + n];
             if window != needle {
@@ -135,10 +144,97 @@ fn find_match(
             if candidate_start >= searchable.len() {
                 continue;
             }
-            return Some((candidate_start, n));
+            starts.push(candidate_start);
+            if starts.len() == most {
+                break;
+            }
+        }
+        if !starts.is_empty() {
+            return Some((starts, n));
         }
     }
     None
+}
+
+/// How many of the matched n-gram's most recent occurrences a copied run
+/// weighs ([`copied_run`], #338).
+pub const OCCURRENCES_WEIGHED: usize = 32;
+
+/// A copied run goes on while the token most of the occurrences still
+/// following it continue with holds at least this share of them, in percent
+/// ([`agreed_run`], #338).
+const AGREEING_PCT: usize = 67;
+
+/// `SWARMLLM_COPY_AGREEMENT=0|off|false`: a copied run is the most recent
+/// occurrence's continuation, whatever the others did (before #338), for an
+/// A/B inside one binary. Read once.
+fn copy_agreement_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_COPY_AGREEMENT").ok().as_deref(),
+            Some("0") | Some("off") | Some("false")
+        )
+    })
+}
+
+/// What the occurrences whose continuations start at `starts` (most recent
+/// first) go on with, walked together: at each token the one most of those
+/// still following continue with (a tie goes to the most recent), ended once
+/// it holds under [`AGREEING_PCT`] of them — the first token is always taken —
+/// and, once ONE occurrence is left, that one's continuation. At most `most`
+/// tokens.
+///
+/// SuffixDecoding (arXiv 2411.04975) stops a draft the same way, where the
+/// frequency its tree records for the next token falls (`min_token_prob`).
+/// Measured offline on 400 SWE-agent sessions (`docs/plans/faster_than_local.md`
+/// § 7.6): with each run capped as the flow caps it, the share of reply tokens
+/// a copy covered stayed at 64.6% while the rows copied fell from 3.29 to 2.36
+/// a reply token (−28%). Not used on the owner's earlier replies
+/// (`owner_replies`), where it saved no rows and cost 0.5 points.
+fn agreed_run(searchable: &[u32], starts: &[usize], most: usize) -> Vec<u32> {
+    let mut run = Vec::new();
+    let mut following = starts.to_vec();
+    while run.len() < most {
+        if let [only] = following[..] {
+            let rest = most - run.len();
+            run.extend(searchable.iter().skip(only).take(rest));
+            break;
+        }
+        let mut leader: Option<(u32, usize)> = None;
+        for (i, &at) in following.iter().enumerate() {
+            let Some(&token) = searchable.get(at) else {
+                continue;
+            };
+            let counted_already = following[..i]
+                .iter()
+                .any(|&before| searchable.get(before) == Some(&token));
+            if counted_already {
+                continue;
+            }
+            let votes = following
+                .iter()
+                .filter(|&&other| searchable.get(other) == Some(&token))
+                .count();
+            if leader.is_none_or(|(_, most_votes)| votes > most_votes) {
+                leader = Some((token, votes));
+            }
+        }
+        let Some((token, votes)) = leader else {
+            break;
+        };
+        // An occurrence that has ended still counts against the leader.
+        if !run.is_empty() && votes * 100 < AGREEING_PCT * following.len() {
+            break;
+        }
+        run.push(token);
+        following = following
+            .into_iter()
+            .filter(|&at| searchable.get(at) == Some(&token))
+            .map(|at| at + 1)
+            .collect();
+    }
+    run
 }
 
 /// Cascade entry point used by the speculative loop: try prompt lookup
@@ -190,7 +286,9 @@ pub struct CopiedRun {
 
 /// The cascade [`cascade_find_candidate`] runs — the prompt first, then the
 /// last `recent_gen_window` tokens of the reply — with up to `most` tokens of
-/// the run and how far its match goes back.
+/// the run and how far its match goes back. The run is what the matched
+/// n-gram's last [`OCCURRENCES_WEIGHED`] occurrences AGREE on
+/// ([`agreed_run`], #338); the match is measured back from the most recent.
 pub fn copied_run(
     context: &[u32],
     prompt_len: usize,
@@ -213,13 +311,19 @@ pub fn copied_run(
         .max(prompt_len);
     let reply = (gen_start < context.len())
         .then_some((gen_start..context.len(), NgramHitSource::Generation));
+    let weighed = if copy_agreement_on() {
+        OCCURRENCES_WEIGHED
+    } else {
+        1
+    };
     [prompt, reply]
         .into_iter()
         .flatten()
         .find_map(|(range, source)| {
             let searchable = &context[range];
-            let (from, n) = find_match(context, searchable, cfg)?;
-            let tokens = searchable[from..(from + most).min(searchable.len())].to_vec();
+            let (starts, n) = find_occurrences(context, searchable, cfg, weighed)?;
+            let from = starts[0];
+            let tokens = agreed_run(searchable, &starts, most);
             if tokens.is_empty() {
                 return None;
             }
@@ -402,6 +506,84 @@ mod tests {
         .unwrap();
         assert_eq!(run.tokens, (80u32..100).collect::<Vec<_>>());
         assert_eq!(run.matched, MATCHED_MOST);
+    }
+
+    #[test]
+    fn a_copied_run_ends_where_the_earlier_occurrences_stop_agreeing() {
+        // Four earlier occurrences of the reply's last tokens [1, 2, 3, 4],
+        // oldest first, each followed by a separator of its own.
+        let prompt: Vec<u32> = [
+            &[1, 2, 3, 4, 5, 6, 7, 8, 50, 51, 100][..],
+            &[1, 2, 3, 4, 5, 6, 7, 50, 60, 61, 101],
+            &[1, 2, 3, 4, 5, 6, 7, 9, 70, 71, 102],
+            &[1, 2, 3, 4, 5, 6, 30, 31, 80, 81, 103],
+        ]
+        .concat();
+        let mut context = prompt.clone();
+        context.extend([90u32, 1, 2, 3, 4]);
+        let run = copied_run(
+            &context,
+            prompt.len(),
+            500,
+            NgramLookupConfig::default(),
+            32,
+        )
+        .unwrap();
+        // All four go on with 5 and 6, three of four with 7 (the newest goes
+        // to 30); after 7 the three name 9, 50 and 8, one each — no
+        // agreement, so the run ends there rather than copying the newest
+        // occurrence's 30, 31, 80, ….
+        assert_eq!(run.tokens, vec![5, 6, 7]);
+        // The match is measured back from the most recent occurrence: the
+        // reply's 90 does not match the separator 102 before it.
+        assert_eq!(run.matched, 4);
+
+        // Two of three is not agreement either (under 67%).
+        let prompt: Vec<u32> = [
+            &[1, 2, 3, 4, 5, 6, 100][..],
+            &[1, 2, 3, 4, 5, 6, 101],
+            &[1, 2, 3, 4, 5, 7, 102],
+        ]
+        .concat();
+        let mut context = prompt.clone();
+        context.extend([90u32, 1, 2, 3, 4]);
+        let run = copied_run(
+            &context,
+            prompt.len(),
+            500,
+            NgramLookupConfig::default(),
+            32,
+        )
+        .unwrap();
+        // 5 by all three; then 6 by two of them against the newest's 7 —
+        // under 67%, so the run ends.
+        assert_eq!(run.tokens, vec![5]);
+    }
+
+    #[test]
+    fn a_copied_run_with_one_occurrence_copies_it_and_a_tie_goes_to_the_newest() {
+        // One occurrence: its whole continuation, as far as asked.
+        let prompt: Vec<u32> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let mut context = prompt.clone();
+        context.extend([90u32, 1, 2, 3, 4]);
+        let run = copied_run(&context, prompt.len(), 500, NgramLookupConfig::default(), 4).unwrap();
+        assert_eq!(run.tokens, vec![5, 6, 7, 8]);
+
+        // Two occurrences that disagree from the first token: the first is
+        // always taken, a tie going to the newest — which alone follows it
+        // then, so its continuation is copied as before.
+        let prompt: Vec<u32> = vec![1, 2, 3, 4, 10, 11, 12, 1, 2, 3, 4, 20, 21, 22];
+        let mut context = prompt.clone();
+        context.extend([90u32, 1, 2, 3, 4]);
+        let run = copied_run(
+            &context,
+            prompt.len(),
+            500,
+            NgramLookupConfig::default(),
+            32,
+        )
+        .unwrap();
+        assert_eq!(run.tokens, vec![20, 21, 22]);
     }
 
     #[test]

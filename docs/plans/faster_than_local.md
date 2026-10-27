@@ -539,6 +539,11 @@ times what a second branch buys for fewer rows. Three more rules on the 400 sess
   points. A low P lengthens runs: hits that agree carry a run past today's 10-token rule. One hit
   alone is cut by the length rule, as today. Rows matter only where the link's bandwidth binds; a wrong
   copy measured free on the rig (`docs/invariants/scheduling.md` § "Copied runs"). Filed as #338.
+
+  **Capped as the flow caps a run** (2026-10-27, the agreed run held to max(matched, 10) ≤ 32 too,
+  as `FlowRun::copy_ahead`'s `lead` holds it): today 64.6% / 3.29, P = 0.67 **64.6% / 2.36 (−28%)**,
+  P = 0.8 64.6% / 2.33. Shipped at P = 0.67 in `ngram_lookup::copied_run` (#338, closed): the Rust
+  function, replayed over the first 100 sessions, gives the script's own figures for both rules.
 - **The store as built** (`combo.py`, 2026-10-24): each earlier reply its own (no match or run
   across a reply's end), bounded to the newest N tokens, the lax gate over the last K hits:
 

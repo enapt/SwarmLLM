@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+**When a model is split across computers, a reply that repeats earlier text sends about a quarter
+fewer wasted guesses.** To go faster, your computer guesses the next words by copying what followed
+the same words earlier in the conversation, and the other computers check each guess. It always
+copied from the most recent place those words appeared, even when other places they appeared went
+on differently. It now stops copying where those places disagree. On 400 recorded coding-agent
+sessions this sent 28% fewer guesses for the same number of right ones. That helps on a slow
+upload connection, and where a processor does the checking. Replies are unchanged: a guess only
+changes what gets checked, never what the model writes (#338).
+
 **A computer that has just started, or has just reconnected, learns at once which parts of each
 model its peers hold.** It used to learn that only from each peer's full announcement, every five
 minutes or so. In those first minutes a model split between computers could be refused with "No

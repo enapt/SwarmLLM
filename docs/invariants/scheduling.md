@@ -5129,7 +5129,15 @@ round costs one per check.
   once a walk position, sent before the drafter's next call and within the guard's live budget.
   Its length is how far back the match goes, at least the lookup's `num_pred_tokens` and at most
   `COPY_LEAD_MOST` (32) — SuffixDecoding's (2411.04975) α·p with α = 1: a copy the walk keeps
-  following runs further ahead each time. Its rows reach the drafter's worker as `FlowOp::Copy`,
+  following runs further ahead each time. **And it ends where the earlier occurrences stop
+  agreeing** (#338, `ngram_lookup::agreed_run`): the matched n-gram's last 32 occurrences are
+  walked together, each token the one most of those still following continue with (a tie to the
+  most recent), and the run ends once that token holds under 67% of them — SuffixDecoding's
+  `min_token_prob`. Offline on 400 SWE-agent sessions, capped as above, the reply tokens a copy
+  covered stayed at 64.6% while copied rows fell 3.29 → 2.36 a reply token (−28%); the Rust
+  function replayed over 100 of them gives the script's figures (`docs/plans/faster_than_local.md`
+  § 7.6). The same lookup feeds the rounds' n-gram guesses and one computer's own
+  (`model_worker::LocalSpec`). A/B `SWARMLLM_COPY_AGREEMENT=0`. Its rows reach the drafter's worker as `FlowOp::Copy`,
   which rates each by the drafter's OWN log-probability of that token there (the least it listed
   when it did not list it), so a wrong copy's followers rank where the drafter would have put
   them and never crowd out its own guesses. Between this node and its own worker only — no wire
@@ -5185,8 +5193,8 @@ round costs one per check.
   thresholds — the last 32 occurrences vote, the leader must hold half, a bigram must have been
   seen twice, and a longer n-gram that fails ends the lookup (no fallback): the vote cut the
   store's rows 24% for 0.2 points. #338's agreement cut, which pays on the conversation's own
-  text, saved no rows on the store and cost 0.5 points (`combo.py`), so the run is today's: the
-  newest leading hit's continuation. A run never crosses a reply's end, nor a match its start.
+  text (and runs there since 2026-10-27), saved no rows on the store and cost 0.5 points
+  (`combo.py`), so the store's run is the newest leading hit's continuation. A run never crosses a reply's end, nor a match its start.
   Logged `earlier_runs` / `earlier_rows` / `earlier_walked` on the flow's line, `earlier_rounds`
   (and `earlier_checked` / `earlier_kept` in the n-gram loop) on the rounds'. A/B
   `SWARMLLM_FLOW_COPY_STORE=0`. Tests in `owner_replies` (subset rule, ids against states, owner

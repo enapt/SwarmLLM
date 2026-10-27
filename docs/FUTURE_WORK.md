@@ -2307,20 +2307,6 @@ reply whose peers changed (failover) is not kept (`PipelineExecutor::exposure_of
 - A requester guessing for the head that leads its split (`requester_guesses`) does not read it.
 - Field measurement on an agent's replayed session (the rig measures the mechanism, below).
 
-#### #338 — A copied run takes the most recent match's continuation whatever the other matches did
-`P3` · perf-split · **OPEN** — 2026-10-24 · history: `docs/plans/faster_than_local.md` § 7.6
-
-`ngram_lookup::copied_run` copies the most recent occurrence's continuation, max(matched, 10) ≤ 32
-tokens. Where the n-gram occurred several times, the other occurrences say where the run is likely
-to go wrong. Measured offline on the 400 SWE-agent sessions (`~/swarmllm-318/suffix/cut.py`, today's
-lookup reproduced at 64.6% / 3.29 copied rows a reply token): walking the last 32 occurrences
-together and ending the run once the leading next token holds under 2/3 of those still following it
-gives **64.7% for 2.62 rows (−20%)**; 4/5 gives 2.55. SuffixDecoding stops a draft the same way
-(`min_token_prob` over its tree's frequencies). Rows matter only where bandwidth binds, so it is
-worth judging on a thin uplink (`FlowGuard`'s case) — a wrong copy measured free on the rig. On
-#337's store it saved NO rows and cost 0.5 points (`combo.py`, 2026-10-24: many earlier replies
-agreeing carry a run past the length rule), so it is a question for the conversation's own text only.
-
 ### Model families and platforms
 
 #### #326 — A card newer than the release's machine code waits minutes for its first reply
@@ -3407,7 +3393,25 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-27, ships in the next release** (#354, #359, #360, #361)
+**Closed 2026-10-27, ships in the next release** (#338, #354, #359, #360, #361)
+- #338 — **A guess copied from earlier in the conversation stops where the earlier copies of
+  that text disagree.** `ngram_lookup::copied_run` copied the most recent occurrence's
+  continuation whatever the other occurrences did. It now walks the matched n-gram's last 32
+  occurrences together, each token the one most of those still following continue with (a tie
+  to the most recent), and ends the run once that token holds under 67% of them
+  (`agreed_run`; SuffixDecoding's `min_token_prob`). Offline on 400 SWE-agent sessions, each
+  run capped as the flow caps it (`~/swarmllm-318/suffix/cut.py`, cap at the length rule): the
+  reply tokens a copy covered stayed at 64.6% while copied rows fell 3.29 → 2.36 a reply token
+  (−28%). The Rust function, replayed over the first 100 sessions, gives the script's figures
+  to the digit on both rules (58.9% / 3.48 off, 58.8% / 2.50 on). One lookup serves the flow's
+  copied runs, the rounds' n-gram guesses and one computer's own (`model_worker::LocalSpec`);
+  the owner's earlier replies keep their own vote (#337: there the cut saved no rows and cost
+  0.5 points). A copy changes what is checked, never the reply. Rows cost only where bandwidth
+  binds (a thin uplink, `FlowGuard`'s case) or on a processor (rows past 4, § 8.1), so the live
+  check is the flow's `copied_rows` falling on the next real-link run. A/B
+  `SWARMLLM_COPY_AGREEMENT=0`. Test `a_copied_run_ends_where_the_earlier_occurrences_stop_agreeing`
+  (red with the cut off: the newest occurrence's `[5, 6, 30, 31, 80, 81, 103]`). Evidence:
+  `docs/plans/faster_than_local.md` § 7.6, `docs/invariants/scheduling.md` § "A tree that flows".
 - #361 — **A computer running part of a model on its graphics card and the rest on its processor
   is priced as it runs.** Found reading the 70B plans' candidate lines: the RTX 3060 in Australia
   (12 GB) held 57 of the 70B's layers, about 20 on its card, and read `card_layers=Some(59)` (66,
