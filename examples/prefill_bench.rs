@@ -129,6 +129,10 @@ fn load(model_dir: &Path) -> anyhow::Result<SplitModel> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // `RUST_LOG=info` shows what the library reports (the graph module's captures).
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
     let dir = std::env::var("SWARM_BENCH_MODEL").map_err(|_| {
         anyhow::anyhow!("set SWARM_BENCH_MODEL to a model directory holding every shard")
     })?;
@@ -363,6 +367,92 @@ fn main() -> anyhow::Result<()> {
     if let Ok(grow) = std::env::var("SWARM_BENCH_GROW") {
         tree_growth(&mut model, &device, &grow, prompt_tokens)?;
     }
+    if let Ok(spec) = std::env::var("SWARM_BENCH_LATE_SHAPE") {
+        late_shape(&mut model, &device, &spec, prompt_tokens)?;
+    }
+    Ok(())
+}
+
+/// `SWARM_BENCH_LATE_SHAPE=4x520,2,2`: a split head's life as the stream lived it on
+/// 2026-10-26 (FUTURE_WORK #357) — `N` forwards of `W` rows, each taken back by a
+/// varying number of rows as a stream's restarts take it back, then forwards of the
+/// later widths, the first of each a shape this worker has never run. Every forward is
+/// timed to the card's finish; the slow ones are printed. Four rig workers each stalled
+/// 10-59 s on their first 2-row forward after ~520 of 4-5 rows. `RUST_LOG=info` shows
+/// the graph module's report, which the closing forward (after `REPORT_EVERY`) prompts.
+fn late_shape(
+    model: &mut SplitModel,
+    device: &Device,
+    spec: &str,
+    prompt_tokens: usize,
+) -> anyhow::Result<()> {
+    let bad = || anyhow::anyhow!("SWARM_BENCH_LATE_SHAPE is WxN,L[,L…] (e.g. 4x520,2)");
+    let (head, tail) = spec.split_once(',').ok_or_else(bad)?;
+    let (w, n) = head.split_once('x').ok_or_else(bad)?;
+    let (w, n): (usize, usize) = (w.parse()?, n.parse()?);
+    let late: Vec<usize> = tail
+        .split(',')
+        .map(|l| l.trim().parse())
+        .collect::<Result<_, _>>()?;
+    let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+    let req = "late-shape".to_string();
+    let ids: Vec<i64> = (0..prompt_tokens).map(|i| (i % 20000) as i64 + 1).collect();
+    let input = Tensor::from_vec(ids, &[1, prompt_tokens], &Device::Cpu)?;
+    model
+        .forward(&input, 0, &store, &req)
+        .map_err(|e| anyhow::anyhow!("late shape prompt: {e}"))?;
+    sync(device);
+    let key = model.kv_model_key().to_string();
+    let mut pos = prompt_tokens;
+    let forward = |model: &mut SplitModel, pos: &mut usize, k: usize| -> anyhow::Result<f64> {
+        let step = Tensor::from_vec(vec![7i64; k], &[1, k], &Device::Cpu)?;
+        let t = Instant::now();
+        let out = model
+            .forward(&step, *pos, &store, &req)
+            .map_err(|e| anyhow::anyhow!("late shape forward: {e}"))?;
+        sync(device);
+        drop(out);
+        *pos += k;
+        Ok(t.elapsed().as_secs_f64() * 1e3)
+    };
+    let started = Instant::now();
+    let mut times = Vec::with_capacity(n);
+    for i in 0..n {
+        times.push(forward(model, &mut pos, w)?);
+        // A refused guess takes the cache back to what was kept (0..=W-1 of the W
+        // rows); a reply past 400 tokens starts over, as the rig's next reply did.
+        let kept = i % w;
+        let keep_to = if pos - prompt_tokens > 400 {
+            prompt_tokens
+        } else {
+            pos - w + kept + 1
+        };
+        store
+            .truncate_request_to(&key, &req, keep_to)
+            .map_err(|e| anyhow::anyhow!("late shape rewind: {e}"))?;
+        pos = keep_to;
+    }
+    let mut sorted = times.clone();
+    sorted.sort_by(f64::total_cmp);
+    println!(
+        "\nLATE SHAPE: {n} forwards of {w} rows in {:.1} s — median {:.2} ms, max {:.2} ms, \
+         over 100 ms: {}",
+        started.elapsed().as_secs_f64(),
+        sorted[n / 2],
+        sorted[n - 1],
+        times.iter().filter(|&&t| t > 100.0).count()
+    );
+    for (i, t) in times.iter().enumerate().filter(|(_, t)| **t > 100.0) {
+        println!("  forward {i} of {w} rows: {t:.1} ms");
+    }
+    for &l in &late {
+        let t = forward(model, &mut pos, l)?;
+        println!("  then {l} rows at position {}: {t:.1} ms", pos - l);
+    }
+    // One more after the graph module's report period, so its report line prints.
+    std::thread::sleep(std::time::Duration::from_secs(61));
+    let t = forward(model, &mut pos, w)?;
+    println!("  {w} rows again after 61 s idle: {t:.1} ms");
     Ok(())
 }
 

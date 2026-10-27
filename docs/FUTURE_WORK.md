@@ -1379,10 +1379,26 @@ shape for the first time hours into a worker's life — a tree's row count, a ch
 WSL2 fresh card memory slows with host uptime (#883: pool growth 0.3-5.7 s, 11.2 s), and CUDA maps
 a graph's memory nodes at launch ("mapping operations can be relatively expensive"). Not
 reproduced under `SWARMLLM_PROFILE=1` (the 2-row tail ran uncaptured, 2 graphs), nor in the
-8-reply A/B after it, so reproduce it first: the late shape, the worker's age, the host's uptime.
-Then the candidates the research named: allocate a graph's buffers outside the capture (llama.cpp
-and PyTorch's way), build a new shape's graph off the forward's path and run that forward
-uncaptured, or capture only a shape seen N times.
+8-reply A/B after it.
+**Narrowed 2026-10-27 (Windows up 93.8-94.6 h, live node stopped; `~/swarmllm-rig/graph357/`)
+— the time is NOT in any of these:**
+- graph memory nodes mapped at a graph's first launch (`first_launch_probe.cu`, 192 graphs:
+  worst 3.98 ms, pool 33.6 MB);
+- a kernel's first launch under lazy loading, in or out of a capture (`first_kernel_probe.cu`:
+  worst 5.5 ms);
+- a module's compile (`lazy_load_probe.py`: 39 ms from the driver's cache, and no cache writes
+  after 10-25 04:52 local, so nothing was compiled on 10-26);
+- the shape sequence itself, in a model of its own: `prefill_bench`'s
+  `SWARM_BENCH_LATE_SHAPE=4x520,3,2,2,1` (this 7B's layers 0-14) captures its first 2-row graph
+  after 519 4-row ones in 9.6 / 74 ms (graphs on; `run3.out`), and in 101 / 27 ms with a
+  second process keeping the card 95% busy (`run4b.out`, two rounds).
+What the bench lacks is the worker around the model: the 10-26 stalls each ended at a card
+memory reading (`kv_budget::device_free_and_total_bytes` synchronizes first) in a daemon-spawned
+worker beside the rig's other half and a drafter, both allocating. Next: the 10-26 rig itself
+(`flowsweep_hold`) with `SWARMLLM_KV_DEVICE_SYNC=0` against the default, the stalled forward's
+memory readings timed. Then the candidates the research named: allocate a graph's buffers
+outside the capture (llama.cpp and PyTorch's way), build a new shape's graph off the forward's
+path and run that forward uncaptured, or capture only a shape seen N times.
 
 #### #147 — Prompt reading on the card: the smaller items left after f16 accumulation
 `P3` · perf-local · **PARTIAL** — 2026-10-09 · history: archive row #147 and § "Prompt reading on the card (#147, 2026-09-29)"
@@ -2320,8 +2336,16 @@ MMQ 7.3 s (Q4_K) and 8.6 s (Q6_K) per weight type; with the cache filled, tens o
 user's first reply on such a card waits ~2 min before a token, with nothing on screen saying why;
 later replies, and later runs, read the driver's cache (34 MB for flash at one head width; the
 driver's cache size limit is not checked). Before the PTX went in, the same calls ran nothing
-and answered garbage. Untested: what the node's own deadlines do with a 1-2 min first forward (a
-peer's segment is timed by the coordinator), and candle's own PTX modules' JIT time. Options:
+and answered garbage. **Candle's own kernels are PTX on EVERY card** (`get_or_load_func` →
+`cuModuleLoadData`), so every card compiles them, once per module, whenever a release changes
+that module's PTX. Measured 2026-10-27 on this RTX 3070 (`~/swarmllm-rig/graph357/lazy_load_probe.py`,
+the release build's `quantized.ptx`, 5.7 MB, 129 kernels): **7.4 s** to load with the cache off
+(`CUDA_CACHE_DISABLE=1`), lazy or eager alike — the driver compiles the WHOLE module at load,
+and each function's first `cuModuleGetFunction` then costs 0.1 ms — against 39 ms from the cache.
+That module is first loaded by a card's first 1-3-row multiply (a decode step); a worker that
+has run only prompts and 4+-row checks (MMQ, machine code) meets it late. Untested: what the
+node's own deadlines do with a 1-2 min first forward (a peer's segment is timed by the
+coordinator), and the other candle modules' times. Options:
 machine code for 9.0 and 12.0 beside 8.0 in the release build (nvcc 12.8 builds sm_120; the
 flash kernels are cached across releases, so the cost is one cold build and the binary's size),
 or a warm-up at worker start that says what it is doing. No such card is here to check either
