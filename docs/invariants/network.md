@@ -4607,6 +4607,14 @@ relays is what it received.
 `NodeCapabilityUpdate` is change-gated since 2026-10-10 (on a meaningful change
 or every 5 min, KEP-589) — § "The capability, once Trickle had worked".
 
+**A table has ONE writer** (2026-10-27, #334 (2)): `LayerShardLayout::tensor_entries` places
+each tensor of a part, back to back from byte 0. The publisher's manifest
+(`build_shard_infos_from_layouts`) and the derived fallback (`derive_tensor_entries`) both call
+it; each had carried its own copy of the loop, with a comment saying the two must agree. Test
+`a_parts_tensors_run_back_to_back_and_end_at_its_size`: every entry's offset, its place in the
+original file, and the part ending at its `size_bytes` (the length `shard_file_is_whole`
+requires).
+
 → `docs/invariants/network.md`
 
 ## Single-source-of-truth helpers — Network protocol, peers and the model registry

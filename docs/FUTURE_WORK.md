@@ -282,11 +282,9 @@ changes behaviour on some path, so each needs its own test before it is merged.
    size) is the one size verdict and `SharedState::parts_servable_here` the one answer for the
    loader, a whole-model hand-off and the request gate. Evidence: `docs/invariants/network.md`
    § "A holder claim means VERIFIED".
-2. **A layout's tensor entries**: `manifest::build_shard_infos_from_layouts` and
-   `shard_loader::derive_tensor_entries` each build the running offsets. The second one's
-   comment says the two must agree, and only the ignored `a_derived_tensor_table_matches_the_published_one`
-   checks it. Next: one helper in `model::manifest` that both call. Run that test with
-   `SWARMLLM_TEST_MODEL_DIR`.
+2. ~~**A layout's tensor entries**~~ — done 2026-10-27: `LayerShardLayout::tensor_entries` is the
+   one writer of a table, called by both. Evidence: `docs/invariants/network.md` § "A manifest's
+   tensor table is DERIVED data".
 3. **A `<…>`-shaped vocabulary entry matched whole by shape**: the BPE encoder takes it up to
    20 characters, the SentencePiece one up to 30, and the SentencePiece one has no
    end-of-generation names. `split_special_tokens` is written twice (BPE, SPM). Next: read

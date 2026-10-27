@@ -547,22 +547,7 @@ pub fn build_shard_infos_from_layouts(
                 .map(|m| m.len())
                 .unwrap_or(layout.size_bytes);
 
-            // Build tensor entries with sequential shard-local offsets
-            let mut shard_offset = 0u64;
-            let tensors: Vec<crate::types::ShardTensorEntry> = layout
-                .tensors
-                .iter()
-                .map(|(name, gguf_offset, size)| {
-                    let entry = crate::types::ShardTensorEntry {
-                        name: name.clone(),
-                        gguf_offset: *gguf_offset,
-                        shard_offset,
-                        size: *size,
-                    };
-                    shard_offset += size;
-                    entry
-                })
-                .collect();
+            let tensors = layout.tensor_entries();
 
             crate::types::ShardInfo {
                 index: layout.index,

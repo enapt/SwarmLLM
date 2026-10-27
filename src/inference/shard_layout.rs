@@ -19,6 +19,32 @@ pub struct LayerShardLayout {
     pub size_bytes: u64,
 }
 
+impl LayerShardLayout {
+    /// This part's tensor table: its tensors in layout order, back to back
+    /// from byte 0 of the part file. **The one writer of a table** (#334 (2)):
+    /// the manifest a publisher builds (`model::manifest::build_shard_infos_from_layouts`)
+    /// and the table a holder derives from its header
+    /// (`daemon::shard_loader::derive_tensor_entries`) must place every tensor
+    /// alike, or the derived table reads the wrong weights and answers
+    /// confidently. The last entry ends at `size_bytes`.
+    pub fn tensor_entries(&self) -> Vec<crate::types::ShardTensorEntry> {
+        let mut shard_offset = 0u64;
+        self.tensors
+            .iter()
+            .map(|(name, gguf_offset, size)| {
+                let entry = crate::types::ShardTensorEntry {
+                    name: name.clone(),
+                    gguf_offset: *gguf_offset,
+                    shard_offset,
+                    size: *size,
+                };
+                shard_offset += size;
+                entry
+            })
+            .collect()
+    }
+}
+
 /// Group layers into `shard_count` shards of roughly equal byte size.
 ///
 /// Non-layer tensors: `token_embd*` → shard 0, `output*`/`output_norm*` → last shard.
@@ -223,4 +249,79 @@ pub fn available_layer_ranges_from_manifest(
         ranges.push((run_start, layer_bits.len()));
     }
     ranges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inference::split::TensorLocation;
+
+    /// A header of an embedding table, three layers of unequal sizes and an
+    /// output head, its tensor data starting at byte 1,000 of the file.
+    fn header() -> GgufTensorMeta {
+        let tensors = [
+            ("token_embd.weight", 0, 100),
+            ("blk.0.attn_q.weight", 100, 50),
+            ("blk.0.ffn_up.weight", 150, 70),
+            ("blk.1.attn_q.weight", 220, 60),
+            ("blk.2.attn_q.weight", 280, 80),
+            ("output.weight", 360, 40),
+        ]
+        .into_iter()
+        .map(|(name, offset, size)| (name.to_string(), TensorLocation { offset, size }))
+        .collect();
+        GgufTensorMeta {
+            tensors,
+            tensor_data_offset: 1_000,
+            model_name: None,
+            head_count: 4,
+            head_count_kv: 4,
+            block_count: 3,
+            embedding_length: 64,
+            head_dim: 16,
+            rope_dim: 16,
+            rope_freq_base: 10_000.0,
+            rms_norm_eps: 1e-5,
+            expert_count: 0,
+            expert_used_count: 0,
+            architecture: "llama".into(),
+            context_length: 2048,
+            pooling_type: 0,
+            kv_layout: None,
+            shared_kv_layers: 0,
+        }
+    }
+
+    /// **The table a part file is read by** (#334 (2)): the publisher's
+    /// manifest and a holder's derived table both come from
+    /// `tensor_entries`, so it alone decides where a tensor sits. Each part's
+    /// tensors run back to back from byte 0 and end at the part's size — the
+    /// size a part on disk must have exactly (`shard::shard_file_is_whole`) —
+    /// and each still names where the tensor sits in the original file.
+    #[test]
+    fn a_parts_tensors_run_back_to_back_and_end_at_its_size() {
+        let meta = header();
+        for parts in 1..=3 {
+            let layouts = compute_layer_shard_layouts(&meta, parts);
+            assert!(!layouts.is_empty());
+            let mut total = 0;
+            for layout in &layouts {
+                let entries = layout.tensor_entries();
+                let mut next = 0;
+                for entry in &entries {
+                    assert_eq!(entry.shard_offset, next, "{}", entry.name);
+                    assert_eq!(
+                        entry.gguf_offset,
+                        meta.tensor_data_offset + meta.tensors[&entry.name].offset,
+                        "{}",
+                        entry.name
+                    );
+                    next += entry.size;
+                }
+                assert_eq!(next, layout.size_bytes, "part {} of {parts}", layout.index);
+                total += layout.size_bytes;
+            }
+            assert_eq!(total, 400, "every tensor in exactly one part");
+        }
+    }
 }

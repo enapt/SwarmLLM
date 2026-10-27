@@ -293,30 +293,12 @@ pub(crate) fn derive_tensor_entries(
         if !sizes_agree {
             continue;
         }
-        // Offsets within a shard file run sequentially in layout order — the
-        // same rule `build_shard_infos_from_layouts` applies when it writes a
-        // table into a manifest. The two must agree or a derived table places
-        // tensors where a published one does not.
-        let mut by_index: std::collections::HashMap<u32, Vec<crate::types::ShardTensorEntry>> =
-            std::collections::HashMap::new();
-        for layout in &layouts {
-            let mut shard_offset = 0u64;
-            let entries = layout
-                .tensors
-                .iter()
-                .map(|(name, gguf_offset, size)| {
-                    let entry = crate::types::ShardTensorEntry {
-                        name: name.clone(),
-                        gguf_offset: *gguf_offset,
-                        shard_offset,
-                        size: *size,
-                    };
-                    shard_offset += size;
-                    entry
-                })
-                .collect();
-            by_index.insert(layout.index, entries);
-        }
+        // The table a published manifest carries, by the one writer of a
+        // table (`LayerShardLayout::tensor_entries`, #334 (2)).
+        let by_index: std::collections::HashMap<u32, Vec<crate::types::ShardTensorEntry>> = layouts
+            .iter()
+            .map(|layout| (layout.index, layout.tensor_entries()))
+            .collect();
         // Every shard present must be covered. A partial answer leaves some
         // shards with a table and others empty, which reads to the loader as a
         // legitimately table-less model and mmaps it wrong.

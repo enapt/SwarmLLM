@@ -342,7 +342,7 @@ GossipSub's `sent` / `sent_bytes` count ATTEMPTS per recipient, so `sum(topic.se
 
 ## A manifest's tensor table is DERIVED data, and the shard count is its OUTPUT
 
-The per-shard tensor table is ~92% of a manifest and is derived, not sent: **`daemon::shard_loader::derive_tensor_entries`** rebuilds it as a FALLBACK. ⚠ `manifest.shard_count` is the layout's OUTPUT, so the count is SEARCHED for with the published `size_bytes` as oracle; return `None` rather than a partial table; do NOT "fix" the underproduction. `a_derived_tensor_table_matches_the_published_one` (ignored; `SWARMLLM_TEST_MODEL_DIR`).
+The per-shard tensor table is ~92% of a manifest and is derived, not sent: **`daemon::shard_loader::derive_tensor_entries`** rebuilds it as a FALLBACK. Every table — published or derived — is written by **`LayerShardLayout::tensor_entries`** (#334 (2)). ⚠ `manifest.shard_count` is the layout's OUTPUT, so the count is SEARCHED for with the published `size_bytes` as oracle; return `None` rather than a partial table; do NOT "fix" the underproduction. `a_derived_tensor_table_matches_the_published_one` (ignored; `SWARMLLM_TEST_MODEL_DIR`).
 
 → `docs/invariants/network.md` § "A manifest's tensor table is DERIVED data, and the shard count is its OUTPUT"
 
