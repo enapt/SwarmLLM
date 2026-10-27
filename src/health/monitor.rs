@@ -2973,6 +2973,7 @@ mod tests {
                 layers: 28,
                 ranges: Vec::new(),
                 decode_us_per_layer: speed,
+                card_layers: None,
             }];
             c
         };
@@ -3057,6 +3058,7 @@ mod tests {
                         layers: 28,
                         ranges: Vec::new(),
                         decode_us_per_layer: None,
+                        card_layers: None,
                     })
                 }),
             ),

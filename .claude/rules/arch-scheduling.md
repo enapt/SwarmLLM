@@ -213,7 +213,10 @@ than the worker's own admission honours (`kv_budget::device_free_margin_bytes`; 
 
 **A card node's machine memory is offered BESIDE its card (2026-10-25)**: `machine_room_beside_card_mb` +
 `processor_tokens_per_sec_7b`, read only through **`NodeCapability::processor_beside_card`**, added to
-the card's bound by `scheduler::layers_beside_card` and recorded as `NodeCandidate::card_layers`. A
+the card's bound by `scheduler::layers_beside_card` and recorded as `NodeCandidate::card_layers` — for
+a warm peer, the layers its card RUNS (`ResidentModelLayers::card_layers` ← **`WorkerHandle::layers_on_card`**,
+range by range as each was placed, the one figure this node's `card_share_for_planning` reads too), never
+every layer it holds, and never more than its whole card holds (an older peer's word; #361). A
 range is then priced PER DEVICE — **`NodeCandidate::layers_by_device`**: its first `card_layers` at the
 card's speed (the loader's order), the rest at `processor_tokens_per_sec`
 (`prior_ms_per_layer_over`, `parallax::DecodePrice`, `prefill_ms_per_layer`) — never at one blended

@@ -1624,6 +1624,29 @@ impl WorkerHandle {
         !self.charged_against_ram
     }
 
+    /// How many of the layers this worker holds run on its graphics card —
+    /// **the ONE answer**, for this node's planner
+    /// ([`ModelProcessPool::card_share_for_planning`]) and for what it tells
+    /// peers (`ResidentModelLayers::card_layers`, FUTURE_WORK #361). Range by
+    /// range, as each was placed ([`RangeCharge::split`]): a split's card share,
+    /// else the whole range on a worker charged to the card and none on one in
+    /// system memory. Summed as `resident_model_layers` sums widths, so a
+    /// layer held in two ranges counts twice in both.
+    ///
+    /// Read off the spawn's split alone, a range grown later never counted; and
+    /// a peer that said nothing had every layer it held priced as the card's:
+    /// a 12 GB card holding 57 of a 70B's layers, about 20 of them on the
+    /// card, read as 59 card layers (2026-10-27).
+    fn layers_on_card(&self) -> u32 {
+        if !self.holds_gpu_memory() {
+            return 0;
+        }
+        self.charged_segments
+            .lock()
+            .map(|v| v.iter().map(RangeCharge::layers_on_card).sum())
+            .unwrap_or(0)
+    }
+
     /// **The single answer to "is this worker in use?"** — a response in flight,
     /// OR a request's conversation cache it holds between two forwards.
     ///
@@ -1761,16 +1784,25 @@ impl WorkerHandle {
             .unwrap_or_default()
     }
 
-    /// Record that this worker has been charged for `segment`, and add `mb` to
-    /// what it owes. Idempotent on the range.
+    /// Record that this worker has been charged for `segment`, wholly on the
+    /// device it is charged to, and add `mb` to what it owes. Idempotent on the
+    /// range.
     fn record_charged_segment(&self, segment: (u32, u32), mb: u64) {
-        self.record_charged_range(segment, RangeCost { mb, host_mb: 0 });
+        self.record_charged_range(segment, RangeCost { mb, host_mb: 0 }, None);
+    }
+
+    /// Record `segment` at no extra cost, placed as the spawn placed its own —
+    /// the spawn's own range, and one grown with nothing judged, which the
+    /// worker loads under the spawn's `--gpu-layers` (`split::placement_of`).
+    fn record_segment_placed_as_spawned(&self, segment: (u32, u32)) {
+        self.record_charged_range(segment, RangeCost::default(), self.card_split);
     }
 
     /// [`Self::record_charged_segment`] for a range placed on both devices:
     /// `cost.mb` joins `charged_mb` (the card's), `cost.host_mb` joins
-    /// `host_share_mb` (the machine's), so a departure releases both (#265).
-    fn record_charged_range(&self, segment: (u32, u32), cost: RangeCost) {
+    /// `host_share_mb` (the machine's), so a departure releases both (#265);
+    /// `split` says how many of its layers the card runs ([`Self::layers_on_card`]).
+    fn record_charged_range(&self, segment: (u32, u32), cost: RangeCost, split: Option<CardSplit>) {
         if let Ok(mut v) = self.charged_segments.lock() {
             if v.iter().any(|c| c.range == segment) {
                 return;
@@ -1778,6 +1810,7 @@ impl WorkerHandle {
             v.push(RangeCharge {
                 range: segment,
                 cost,
+                split,
             });
         }
         self.charged_mb.fetch_add(cost.mb, Ordering::AcqRel);
@@ -2222,11 +2255,30 @@ impl RangeCost {
     }
 }
 
-/// A range a worker has been charged for, and what it cost.
+/// A range a worker has been charged for, what it cost, and where it went.
 #[derive(Debug, Clone, Copy)]
 struct RangeCharge {
     range: (u32, u32),
     cost: RangeCost,
+    /// Its card/processor split, where it has one: the spawn's
+    /// (`WorkerHandle::card_split`) for a range placed as the spawn placed its
+    /// own, the growth's for a range grown across both devices (#265). `None`:
+    /// wholly on the device the worker is charged to.
+    split: Option<CardSplit>,
+}
+
+impl RangeCharge {
+    /// Layers of this range on the card, for a worker charged to the card:
+    /// the first `on_card` of a split (the loader's order, `--gpu-layers`
+    /// counted within the range), else all of them.
+    fn layers_on_card(&self) -> u32 {
+        let width = self.range.1.saturating_sub(self.range.0);
+        self.split.map_or(width, |split| {
+            u32::try_from(split.card_share().0)
+                .unwrap_or(u32::MAX)
+                .min(width)
+        })
+    }
 }
 
 /// What a spawn's admission charged, carried onto its worker so the release
@@ -6226,7 +6278,7 @@ impl ModelProcessPool {
             // Unreadable geometry: nothing to weigh, and refusing on a file we
             // could not read would be a worse failure than the one prevented —
             // the same treatment `admit_to_gpu` and `admit_to_cpu` give it.
-            handle.record_charged_segment(segment, 0);
+            handle.record_segment_placed_as_spawned(segment);
             // Nothing judged, so the range goes where the spawn said (#265).
             if on_gpu {
                 Self::tell_worker_where(handle, model_id, segment, None).await;
@@ -6490,7 +6542,7 @@ impl ModelProcessPool {
                 )),
             });
         }
-        handle.record_charged_range(segment, cost);
+        handle.record_charged_range(segment, cost, Some(split));
         // As `charge_additional_segment`: the net was admitted, so only what
         // the dropped ranges held beyond the discount goes back.
         let released = handle.release_subsumed_segments(segment);
@@ -6843,6 +6895,9 @@ impl ModelProcessPool {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .published(std::time::Instant::now()),
+                    // Which of them its card runs (#361) — the answer this
+                    // node's own planner reads (`card_share_for_planning`).
+                    card_layers: Some(handle.layers_on_card()),
                 });
             }
         }
@@ -6925,7 +6980,7 @@ impl ModelProcessPool {
         };
         segments
             .iter()
-            .map(|&RangeCharge { range, cost }| HeldRange {
+            .map(|&RangeCharge { range, cost, .. }| HeldRange {
                 range,
                 // What `charge_additional_segment` will actually take off its
                 // admission for this range, in layers — zero for the spawn's
@@ -7413,15 +7468,26 @@ impl ModelProcessPool {
     }
 
     /// The card's share of this model when THIS node runs it — `(layers on the
-    /// card, layers in the run)` — for pricing: the resident worker's own split,
-    /// else the one a fresh worker would make. `None` when it runs wholly on one
-    /// device. A model too big for the card was priced at the processor's speed
-    /// although the loader puts part of it on the card (FUTURE_WORK #129); the
-    /// planner blends the two speeds by this share
-    /// (`scheduler::split_tokens_per_sec`).
+    /// card, layers in the run)` — for pricing: the resident worker's own
+    /// placement over every range it holds ([`WorkerHandle::layers_on_card`],
+    /// the figure peers are told), else the split a fresh worker would make.
+    /// `None` when it runs wholly on one device. A model too big for the card
+    /// was priced at the processor's speed although the loader puts part of it
+    /// on the card (FUTURE_WORK #129); the planner blends the two speeds by
+    /// this share (`scheduler::split_tokens_per_sec`). Read off the spawn's
+    /// split alone, a range grown later never counted (#361).
     pub fn card_share_for_planning(&self, model_id: &ModelId) -> Option<(usize, usize)> {
         if let Some(worker) = self.live_worker(model_id) {
-            return worker.card_split.map(CardSplit::card_share);
+            if !worker.holds_gpu_memory() {
+                return None;
+            }
+            let held: u32 = worker
+                .charged_segments
+                .lock()
+                .map(|v| v.iter().map(|c| c.range.1.saturating_sub(c.range.0)).sum())
+                .unwrap_or(0);
+            let on_card = worker.layers_on_card();
+            return (on_card < held).then_some((on_card as usize, held as usize));
         }
         if !self.planning_on_card(model_id) {
             return None;
@@ -8748,8 +8814,9 @@ impl ModelProcessPool {
                 // first charged segment. Without recording it, every later
                 // forward for the same range would look like a new one and be
                 // charged again. `charged_mb` is already set from the spawn's
-                // own admission, so the range is recorded at zero extra cost.
-                handle.record_charged_segment(segment, 0);
+                // own admission, so the range is recorded at zero extra cost,
+                // placed by the spawn's own split.
+                handle.record_segment_placed_as_spawned(segment);
                 if requester == Requester::Swarm && !guest {
                     self.tell_the_owner_of_a_load_for_another_computer(
                         model_id,
@@ -14233,10 +14300,13 @@ mod tests {
             }),
         )
         .await;
+        // As the spawn records it (`get_or_spawn`).
+        h.record_segment_placed_as_spawned((0, 28));
         p.workers.insert(split.clone(), h);
         assert_eq!(p.card_share_for_planning(&split), Some((13, 28)));
         let whole = ModelId("whole-on-card".into());
         let h = fake_worker_handle_spawned(false, None, false, std::time::Instant::now()).await;
+        h.record_segment_placed_as_spawned((0, 28));
         p.workers.insert(whole.clone(), h);
         assert_eq!(p.card_share_for_planning(&whole), None);
 
@@ -14256,6 +14326,7 @@ mod tests {
         )
         .await;
         assert!(h.short_of_the_card());
+        h.record_segment_placed_as_spawned((0, 48));
         p.workers.insert(moe.clone(), h);
         assert_eq!(p.card_share_for_planning(&moe), Some((25, 48)));
         let summary = p
@@ -14271,6 +14342,68 @@ mod tests {
             ),
             (Some(48), Some(48), Some(23))
         );
+    }
+
+    /// **A worker's card layers are counted range by range, as each was placed**
+    /// (FUTURE_WORK #361) — the one figure this node's planner reads and its
+    /// peers are told (`ResidentModelLayers::card_layers`). Read off the
+    /// spawn's split alone, the two ranges grown later never counted (13 of
+    /// 40, against 19); a peer told nothing priced all 40 as the card's. A
+    /// worker in system memory runs none on the card.
+    #[tokio::test]
+    async fn a_workers_card_layers_count_every_range_as_it_was_placed() {
+        let p = test_pool();
+        let m = ModelId("split-14b".into());
+        let h = fake_worker_handle_split(
+            false,
+            None,
+            false,
+            std::time::Instant::now(),
+            Some(CardSplit::Layers {
+                on_card: 13,
+                total: 28,
+            }),
+        )
+        .await;
+        h.record_segment_placed_as_spawned((0, 28));
+        // Grown on the card alone (`charge_additional_segment`).
+        h.record_charged_segment((28, 32), 400);
+        // Grown across both devices, 2 of its 8 on the card (#265).
+        h.record_charged_range(
+            (32, 40),
+            RangeCost {
+                mb: 100,
+                host_mb: 300,
+            },
+            Some(CardSplit::Layers {
+                on_card: 2,
+                total: 8,
+            }),
+        );
+        assert_eq!(h.layers_on_card(), 13 + 4 + 2);
+        p.workers.insert(m.clone(), h);
+        assert_eq!(p.card_share_for_planning(&m), Some((19, 40)));
+        let told = p.resident_model_layers();
+        assert_eq!(
+            (told[0].layers, told[0].card_layers),
+            (40, Some(19)),
+            "peers are told the figure the planner reads"
+        );
+
+        // A worker charged to system memory runs nothing on the card.
+        let q = test_pool();
+        let h = fake_worker_handle_spawned(
+            false,
+            Some(CpuReason::NotEnoughVram),
+            true,
+            std::time::Instant::now(),
+        )
+        .await;
+        h.record_segment_placed_as_spawned((0, 28));
+        assert_eq!(h.layers_on_card(), 0);
+        q.workers.insert(m.clone(), h);
+        assert_eq!(q.card_share_for_planning(&m), None);
+        assert_eq!(q.resident_model_layers()[0].card_layers, Some(0));
     }
 
     /// A split asks whether this node's part runs whole on the card before it

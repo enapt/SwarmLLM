@@ -3441,6 +3441,30 @@ Tests: `the_processor_beside_a_card_is_offered_only_by_a_card_node_that_states_i
 `a_range_split_across_card_and_processor_is_priced_per_device` (the control, priced at the blend,
 routes to the farther peer), `a_model_too_big_for_the_card_and_the_machine_is_offered_as_a_segment`
 (its control, with RAM for the whole processor share, offers all 80).
+**A warm peer's card layers are the ones its card runs (2026-10-27, #361).** (1) above recorded
+the card's part as the card's bound, and for a peer with layers loaded that bound counts every
+resident layer (`max_hostable_layers`' `PeerResidency::Layers` arm: resident + what the free
+memory adds) — so a peer running a model across card and processor read as running all of it on
+the card. The 02:08Z 10-27 candidate line: the RTX 3060 in Australia (12 GB card) holding
+`[(23,80)]`, 57 layers of the 70B at ~0.53 GB each, read `card_layers=Some(59)`; others read 66,
+70 and 76 over the day. Its card holds about 20. Where the prior priced it (no measurement by this
+node, no published timing of its own), those 37 processor layers were priced at the card's speed.
+The same blind spot was on this node's side: `card_share_for_planning` read the SPAWN's split, so
+a range grown later — on the card alone, or split itself (#265) — never counted. Now ONE count:
+**`WorkerHandle::layers_on_card`**, range by range as each was placed (`RangeCharge::split`: the
+spawn's split for its own range and for one placed "as the spawn said", the growth's for a split
+growth, none for a card-only growth), read by `card_share_for_planning` and published as
+`ResidentModelLayers::card_layers` (`#[serde(default)]`, JSON gossip, no feature bit — the type's
+rule). The planner bounds a warm peer's card by `PeerResidency::Layers(card_layers)` — the KV of
+its processor layers is in system memory too — and every peer's card by its whole memory over the
+layer's weights, which is all an older peer's announcement allows (24 for that card). What a peer
+may be GIVEN is unchanged; only the speed its layers are priced at. Still a count, not a
+placement: a range starting mid-way through what it holds is priced as if its first
+`card_layers` were on the card. Petals prices a span from each server's measured throughput,
+not a device split (research changed nothing here; our analogue is the peer's own timing floor,
+`decode_us_per_layer`, which already outranks this prior). Tests:
+`a_warm_peers_card_layers_are_the_ones_its_card_runs` (scheduler),
+`a_workers_card_layers_count_every_range_as_it_was_placed` (pool).
 **Why this is not `cbbed678` again**: that pass priced local layers at a
 constant 10,000 — a penalty, not a price — so the search could not see the
 LAN split that was best and sent a request abroad. Here the local figure is

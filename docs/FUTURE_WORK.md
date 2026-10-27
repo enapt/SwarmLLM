@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #361**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #362**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3407,7 +3407,19 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-27, ships in the next release** (#354, #359, #360)
+**Closed 2026-10-27, ships in the next release** (#354, #359, #360, #361)
+- #361 — **A computer running part of a model on its graphics card and the rest on its processor
+  is priced as it runs.** Found reading the 70B plans' candidate lines: the RTX 3060 in Australia
+  (12 GB) held 57 of the 70B's layers, about 20 on its card, and read `card_layers=Some(59)` (66,
+  70 and 76 over the day) — every layer it had loaded priced at the card's speed wherever no
+  timing of it outranked the guess. This node's own count read only its first load's split, so a
+  range added later never counted. Now one count, `WorkerHandle::layers_on_card` (range by range,
+  as each was placed), read by this node's planner and sent to peers as
+  `ResidentModelLayers::card_layers`; a peer's card is held to it and to what its whole memory
+  holds (an older peer's word: 24 layers for that card). What a peer may be given is unchanged.
+  Tests `a_warm_peers_card_layers_are_the_ones_its_card_runs`,
+  `a_workers_card_layers_count_every_range_as_it_was_placed`. Evidence:
+  `docs/invariants/scheduling.md` § "A range that runs partly on a card is priced per device".
 - #354 — **This computer is planned as a stand-in for layers it already has loaded, and a
   fresh worker's full share is on offer to the planner.** Found by the v0.3.256 pre-release
   sweep, by reading the code; never seen in a field log. (a) `find_standbys` charged every

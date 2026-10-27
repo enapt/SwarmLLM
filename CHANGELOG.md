@@ -28,6 +28,16 @@ computer could run a share split between its graphics card and its processor, th
 offered only where another computer's parts happened to end. On 2026-10-25 a Llama 3.3 70B split
 gave this computer 19 layers when it could run 22. Neither was seen to fail a request (#354).
 
+**A computer that runs part of a model on its graphics card and the rest on its processor is
+judged by how it runs.** Choosing who runs which layers of a split, a computer guesses how fast
+each peer is until it has timed it. A peer with a model loaded was guessed to run every layer it
+held on its graphics card. A 12 GB card in Australia holding 57 of Llama 3.3 70B's layers, about
+20 of them on the card, was guessed to run all 57 at the card's speed. Each computer now tells its
+peers how many of its loaded layers its card runs, and no card is credited with more layers than
+its memory holds, which also covers peers on older versions. Your computer's own count now
+includes layers it loaded after its first ones. Which layers a peer may be given is unchanged
+(#361).
+
 ## [0.3.257-alpha] — 2026-10-27
 
 **A model split between two computers far apart answers up to 18% faster.** A split reply sends

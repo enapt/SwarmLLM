@@ -745,6 +745,17 @@ pub struct ResidentModelLayers {
     /// by older nodes, as `ranges` is).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_us_per_layer: Option<u32>,
+    /// How many of `layers` this node runs on its graphics card — the rest
+    /// run in its system memory, on its processor. A peer prices the first
+    /// this many of a range at the card's speed (`NodeCandidate::card_layers`),
+    /// and without it read every layer the node held as the card's: a 12 GB
+    /// card holding 57 of a 70B's layers, about 20 on the card, was priced as
+    /// 59 card layers (FUTURE_WORK #361). Summed over ranges as `layers` is.
+    ///
+    /// `None` from a node predating the field (read past by older nodes, as
+    /// `ranges` is); a peer then bounds it by the card's total memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_layers: Option<u32>,
 }
 
 /// One range a node's worker holds, and what loading a range that strictly
@@ -1313,22 +1324,25 @@ mod resident_ranges_tests {
                 },
             ],
             decode_us_per_layer: Some(1_250),
+            card_layers: Some(9),
         };
         let back: ResidentModelLayers =
             serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
         assert_eq!(back, entry);
 
-        // A worker's own decode speed (#3 (f)): an older build's entry has
-        // none, and an entry without one sends nothing an older build would
-        // have to read past.
+        // A worker's own decode speed (#3 (f)) and its card's share (#361): an
+        // older build's entry has neither, and an entry without them sends
+        // nothing an older build would have to read past.
         assert_eq!(old.resident_layers[0].decode_us_per_layer, None);
+        assert_eq!(old.resident_layers[0].card_layers, None);
         let unmeasured = ResidentModelLayers {
             decode_us_per_layer: None,
+            card_layers: None,
             ..entry
         };
-        assert!(!serde_json::to_string(&unmeasured)
-            .unwrap()
-            .contains("decode_us_per_layer"));
+        let sent = serde_json::to_string(&unmeasured).unwrap();
+        assert!(!sent.contains("decode_us_per_layer"));
+        assert!(!sent.contains("card_layers"));
 
         // A range whose sender left `releasable_layers` out releases nothing —
         // the side that cannot over-credit a peer.

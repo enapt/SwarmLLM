@@ -5243,8 +5243,32 @@ impl PipelineScheduler {
                             .min(manifest.num_layers),
                     )
                 };
-                let card_layers = (beside(DELEGATE_VRAM_MARGIN) > 0.0)
-                    .then(|| bound(residency, DELEGATE_VRAM_MARGIN).unwrap_or(0));
+                // The card's part (#361): a warm peer's layers count as the
+                // card's only as far as its card runs them — it says how many
+                // (`ResidentModelLayers::card_layers`); the rest, and their
+                // caches, are in its system memory — and no card is credited
+                // more layers than its whole memory holds, which is all an
+                // older peer's word allows. Read as the total, a 12 GB card
+                // holding 57 of a 70B's layers, ~20 on the card, priced 59 at
+                // the card's speed.
+                let card_residency =
+                    match (residency, reported.as_ref().and_then(|r| r.card_layers)) {
+                        (PeerResidency::Layers(held), Some(on_card)) => {
+                            PeerResidency::Layers(on_card.min(held))
+                        }
+                        (residency, _) => residency,
+                    };
+                let card_could_hold = self.shared_state.peer_registry.get(&node_id).and_then(|p| {
+                    let total_mb = p.capability.as_ref()?.gpu.as_ref()?.vram_total_mb;
+                    let layers = total_mb
+                        .saturating_mul(1024 * 1024)
+                        .checked_div(held_bytes_per_layer)?;
+                    Some(u32::try_from(layers).unwrap_or(u32::MAX))
+                });
+                let card_layers = (beside(DELEGATE_VRAM_MARGIN) > 0.0).then(|| {
+                    let card = bound(card_residency, DELEGATE_VRAM_MARGIN).unwrap_or(0);
+                    card_could_hold.map_or(card, |most| card.min(most))
+                });
                 // Room for NEW layers is the Cold-shaped bound over the
                 // same free memory — the advertised figure already
                 // excludes what is resident — from the same function and

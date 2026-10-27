@@ -554,6 +554,121 @@ fn a_card_node_offers_its_processors_room_beside_the_card() {
     );
 }
 
+/// **A warm peer's layers are the card's only as far as its card runs them**
+/// (FUTURE_WORK #361). The RTX 3060 in Australia (12 GB) held 57 of a 70B's 80
+/// layers, about 20 on its card, and read `card_layers=Some(59)`: every held
+/// layer priced at the card's speed (02:08Z 2026-10-27). Stating its card's
+/// share, it is priced by that share plus what the card's free memory adds; an
+/// older peer stating none is held to what its whole card could hold. Neither
+/// changes what it may be GIVEN — only the speed its layers are priced at.
+#[test]
+fn a_warm_peers_card_layers_are_the_ones_its_card_runs() {
+    const MIB: u64 = 1024 * 1024;
+    let peer = NodeId([2u8; 32]);
+    let run = |card_share: Option<u32>| {
+        let state = make_shared_state();
+        let local_id = state.identity.node_id().clone();
+        let model = ModelId("seventy".into());
+        let mut manifest = make_manifest(
+            "seventy",
+            80,
+            vec![ShardInfo {
+                index: 0,
+                layer_range: (0, 80),
+                size_bytes: 40_000 * MIB,
+                hash: [0u8; 32],
+                tensors: vec![],
+            }],
+        );
+        manifest.total_size_bytes = 40_000 * MIB;
+        state.model_registry.register_manifest(manifest);
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: model.clone(),
+                index: 0,
+            },
+            peer.clone(),
+        );
+        let mut cap = capability_with_gpu(Some(1_300));
+        cap.gpu.as_mut().unwrap().vram_total_mb = 12_288;
+        cap.node_id = peer.clone();
+        cap.est_tokens_per_sec_7b = 45.0;
+        cap.machine_room_beside_card_mb = Some(4_000);
+        cap.processor_tokens_per_sec_7b = Some(6.0);
+        cap.resident_layers = vec![swarmllm_types::ResidentModelLayers {
+            model_id: model.0.clone(),
+            layers: 57,
+            ranges: vec![swarmllm_types::ResidentLayerRange {
+                start: 23,
+                end: 80,
+                releasable_layers: 0,
+            }],
+            decode_us_per_layer: None,
+            card_layers: card_share,
+        }];
+        state.peer_registry.insert(
+            peer.clone(),
+            PeerInfo {
+                node_id: peer.clone(),
+                addresses: vec![],
+                capability: Some(cap),
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(10),
+                trust_score: 0.8,
+                peer_id_bytes: None,
+                ack_srtt_ms: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+                goodput_bytes_per_sec: None,
+                goodput_samples: 0,
+            },
+        );
+        state.connected_node_ids.insert(peer.clone());
+        let manifest = state.model_registry.get_manifest(&model).unwrap();
+        PipelineScheduler::new(state.clone())
+            .gather_candidates(
+                &manifest,
+                &local_id,
+                uuid::Uuid::new_v4(),
+                None.into(),
+                super::Purpose::Route,
+                &|| false,
+                crate::types::KeepAsked::Unasked,
+            )
+            .into_iter()
+            .find(|c| c.node_id == peer)
+            .unwrap()
+    };
+
+    let stating = run(Some(20));
+    let on_card = stating.card_layers.expect("a card node stating its room");
+    assert!(
+        (20..=22).contains(&on_card),
+        "its card's 20 and what 1,300 MB free adds, not its 57: {on_card}"
+    );
+    // The first 20 of a range it holds at the card's speed, the rest at its
+    // processor's.
+    assert_eq!(stating.layers_by_device((23, 80)), (on_card, 57 - on_card));
+
+    // An older peer says nothing of its card's share: no more than 12 GB holds.
+    let older = run(None);
+    assert_eq!(
+        older.card_layers,
+        Some((12_288 / 500) as u32),
+        "held to what its whole card could hold"
+    );
+
+    // What it may be given is its memory's, as before, in both.
+    assert_eq!(stating.max_hostable_layers, older.max_hostable_layers);
+    assert!(
+        stating.max_hostable_layers.is_some_and(|n| n >= 57),
+        "{:?}",
+        stating.max_hostable_layers
+    );
+}
+
 /// **A model kept on this computer is never planned onto a peer** (#251).
 /// Two peers hold all of it; this node holds none. Unkept, the plan uses them
 /// (the control); kept, the request is refused as `KeptOnThisComputer` — a
@@ -4242,6 +4357,7 @@ fn a_peer_that_publishes_its_ranges_is_priced_by_them() {
             layers: 12,
             ranges,
             decode_us_per_layer: None,
+            card_layers: None,
         }];
         state.peer_registry.insert(
             node.clone(),
@@ -8326,6 +8442,7 @@ fn publish_resident(state: &SharedState, node: &NodeId, model: &ModelId, range: 
             releasable_layers: 0,
         }],
         decode_us_per_layer: None,
+        card_layers: None,
     }];
 }
 
