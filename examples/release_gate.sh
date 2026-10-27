@@ -7,6 +7,7 @@
 #   env SINCE=<rev>     the previous release's tag, for the diff-scoped steps
 #                       (default: the newest v*-alpha tag that is not HEAD's)
 #   env SPEED=0         skip the speed comparison
+#   env SPEED_REPS=n    timed asks per speed arm (default 2; four arms a placement)
 # Exit: 0 = no FAIL. REVIEW lines need a reader: $OUT/summary.txt lists every verdict.
 # Run it with NO other SwarmLLM process on the machine (a rig shares the machine with
 # nothing, #708) and, on a machine that has one, under its safety kit.
@@ -122,8 +123,15 @@ grep -q '^failover: PASS' "$OUT/failover.log" && verdict failover PASS || verdic
 settle
 
 # Every sample printed, each prompt unique (#257): candidate against the previous release per
-# placement. Below 85% of the previous median is REVIEW (re-run that placement before blaming
-# the build: a dip in both arms is the machine).
+# placement. Below 85% of the previous is REVIEW (re-run that placement before blaming the
+# build: a dip in both arms is the machine).
+#
+# A/B/B/A per placement (gotcha #975): previous, candidate, candidate, previous. Until .258 the
+# previous build always ran first, and the first arm of a pair won by ~4.5% on a processor-bound
+# arm — the .257 gate's MoE "0.91x" was the order (re-run the other way round: 1.02x). The pair
+# where the candidate runs second (AB) and the one where it runs first (BA) are read apart: the
+# BUILD is the geometric mean of their ratios and the ORDER the square root of their quotient,
+# printed as "first-of-pair"; a drift linear in time cancels as well.
 if [ "${SPEED:-1}" != 0 ]; then
   step "7 speed per placement, candidate vs previous"
   PROMPT_FILE=$OUT/speed_prompt.txt
@@ -139,7 +147,7 @@ if [ "${SPEED:-1}" != 0 ]; then
     # Unbuffered, line by line: a safety kit names the step from this file's last "== " line, and
     # buffered, the arm's header arrived only when the arm ENDED — the .241 gate's driver stop blamed
     # "split/cand" for an event inside the next arm (gotcha #887). Each arm's node log is kept.
-    SWARMLLM_API_KEY_FILE="$D/api_key" python3 -u "$HERE/stream_bench.py" "$3" --port 8825 --unique --reps 3 --warmup 1 \
+    SWARMLLM_API_KEY_FILE="$D/api_key" python3 -u "$HERE/stream_bench.py" "$3" --port 8825 --unique --reps "${SPEED_REPS:-2}" --warmup 1 \
       --max-tokens 128 --prompt-file "$PROMPT_FILE" --label "$2" --json-out "$OUT/speed.jsonl" 2>&1 | grep --line-buffered -v '^    text'
     kill $P; wait $P 2>/dev/null; cp "$D/node.log" "$OUT/speed.${2//\//_}.node.log"; rm -f "$D/models"; rm -rf "$D"; settle
   }
@@ -152,23 +160,40 @@ moe|qwen3-30b-a3b-instruct-2507-q2-k|
 cpu|llama-3.2-3b-instruct-q4-k-m|[inference]\ngpu_layers = 0'}
   while IFS='|' read -r name model extra; do
     [ -n "$name" ] || continue
-    arm "$PREV" "$name/prev" "$model" "$extra"
-    arm "$CAND" "$name/cand" "$model" "$extra"
+    arm "$PREV" "$name/prev/1" "$model" "$extra"
+    arm "$CAND" "$name/cand/2" "$model" "$extra"
+    arm "$CAND" "$name/cand/3" "$model" "$extra"
+    arm "$PREV" "$name/prev/4" "$model" "$extra"
   done <<< "$PLACEMENTS"
   python3 - "$OUT/speed.jsonl" <<'PY' | tee "$OUT/speed.verdict"
-import json, statistics, sys
+import json, math, statistics, sys
 rows = [json.loads(l) for l in open(sys.argv[1])]
 worst = "PASS"
+def get(name, build, k, pos=None):
+    out = []
+    for r in rows:
+        parts = r["label"].split("/")
+        if parts[0] == name and parts[1:2] == [build] and r.get(k) and pos in (None, *parts[2:3]):
+            out.append(r[k])
+    return out
 for name in dict.fromkeys(r["label"].split("/")[0] for r in rows):
-    get = lambda arm, k: [r[k] for r in rows if r["label"] == f"{name}/{arm}" and r.get(k)]
     line = []
     for k in ("prompt_tps", "decode_tps"):
-        p, c = get("prev", k), get("cand", k)
+        p, c = get(name, "prev", k), get(name, "cand", k)
         if not p or not c:
             line.append(f"{k} MISSING prev {p} cand {c}"); worst = "FAIL"; continue
-        ratio = statistics.median(c) / statistics.median(p)
+        p1, c2, c3, p4 = (get(name, b, k, pos) for b, pos in
+                          (("prev", "1"), ("cand", "2"), ("cand", "3"), ("prev", "4")))
+        if p1 and c2 and c3 and p4:
+            ab = statistics.median(c2) / statistics.median(p1)  # candidate second
+            ba = statistics.median(c3) / statistics.median(p4)  # candidate first
+            ratio = math.sqrt(ab * ba)
+            how = f"AB {ab:.2f}x, BA {ba:.2f}x, first-of-pair {math.sqrt(ba / ab):.2f}x"
+        else:
+            ratio = statistics.median(c) / statistics.median(p)
+            how = "grouped, not A/B/B/A"
         if ratio < 0.85 and worst == "PASS": worst = "REVIEW"
-        line.append(f"{k} prev {p} cand {c} ({ratio:.2f}x)")
+        line.append(f"{k} prev {p} cand {c} ({ratio:.2f}x; {how})")
     print(f"  {name}: " + " | ".join(line))
 print(f"speed {worst}")
 PY
