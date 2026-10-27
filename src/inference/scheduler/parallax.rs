@@ -1186,12 +1186,23 @@ fn route_over(
             capacity.peer_cap(c)
         }
     };
+    // This node's other allowance: ONE run a fresh worker would split across
+    // card and processor (`fresh_run_layers`), weighed by its width — read by
+    // the vertex filter below AND cut as split points here, or a vertex that
+    // wide existed only where another holder's boundary happened to fall
+    // (FUTURE_WORK #354 (b)).
+    let fresh_run_of = |c: &NodeCandidate| -> Option<u32> {
+        (&c.node_id == local_node_id && capacity.binds_local())
+            .then_some(c.fresh_run_layers)
+            .flatten()
+    };
     let declared_cost = subrange_cost(&split_points, &clamped);
     let mut with_capacity = split_points.clone();
     let mut at_this_pass = split_points.clone();
     for c in candidates {
         let figure = c.max_hostable_layers.filter(|&k| k > 0);
         let cap = vertex_cap(c);
+        let fresh_run = fresh_run_of(c).filter(|&w| w > 0);
         // The widest prefix and suffix of each range it could take, each
         // weighed as what it loads (`width_in_bound`): a suffix ending the
         // model is shorter by its output head, a prefix starting it by its
@@ -1215,6 +1226,10 @@ fn route_over(
             if cap.is_some() {
                 points.push((a + 1..=b).rev().find(|&e| fits_here((a, e))).unwrap_or(a));
                 points.push((a..b).find(|&s| fits_here((s, b))).unwrap_or(b));
+            }
+            if let Some(w) = fresh_run {
+                points.push(a.saturating_add(w).min(b));
+                points.push(b.saturating_sub(w).max(a));
             }
             for (i, p) in points.into_iter().enumerate() {
                 if p > a && p < b && p > 0 && p < num_layers {
@@ -1266,7 +1281,6 @@ fn route_over(
     let mut vertices: Vec<Vertex> = Vec::new();
     for (cand_idx, (lo, hi)) in clamped {
         let c = &candidates[cand_idx];
-        let is_local = &c.node_id == local_node_id;
         // `None` = we cannot tell what this peer can hold, which must never be
         // read as "nothing" (gotcha #330: every node before v0.3.103 gossiped
         // zero free VRAM).
@@ -1278,15 +1292,10 @@ fn route_over(
         // any other peer the width, since its figure already folds in what it
         // has resident (`PeerResidency`).
         let charged = |range: (u32, u32)| -> f64 { c.capacity_charge(range) };
-        // This node's other allowance: ONE run a fresh worker would split across
-        // card and processor, weighed by its width (`fresh_run_layers`). A
-        // range inside it is a vertex; whether the chain keeps it to one run is
-        // the DP's to enforce, below.
-        let fresh_run = if is_local && capacity.binds_local() {
-            c.fresh_run_layers
-        } else {
-            None
-        };
+        // This node's other allowance (`fresh_run_of`, above). A range inside
+        // it is a vertex; whether the chain keeps it to one run is the DP's to
+        // enforce, below.
+        let fresh_run = fresh_run_of(c);
         let fits = |range: (u32, u32)| -> bool {
             cap.is_none_or(|k| charged(range) <= k)
                 || fresh_run.is_some_and(|w| range.1 - range.0 <= w)
@@ -3498,6 +3507,40 @@ mod tests {
         assert_eq!(cold.width_in_bound((70, 80)), 12);
     }
 
+    /// **A peer's primary uses up its total as it loads** (FUTURE_WORK #354
+    /// (a)). `find_standbys` checked each standby at what it loads but seeded
+    /// its tally with the primaries' bare widths, so a peer whose cold tail
+    /// 73-80 weighs 9 of its total of 10 — the output head — was counted 7,
+    /// and named the standby for two more layers it had no room for.
+    #[test]
+    fn a_peers_primary_is_committed_as_it_loads() {
+        let local = NodeId([1u8; 32]);
+        let mut tail = cand(3, vec![(60, 80)], 5, 0.0, false, true, 100.0);
+        tail.max_hostable_layers = Some(10);
+        tail.max_hostable_layers_at_face_value = Some(10);
+        tail.range_weights = Some(seventy_b_range_weights());
+        let primary = PipelineSegment {
+            node_id: tail.node_id.clone(),
+            shard_id: ShardId {
+                model_id: ModelId("test".into()),
+                index: 0,
+            },
+            layer_range: (73, 80),
+        };
+        let committed = crate::inference::scheduler::primary_layer_commitments(
+            &[primary],
+            std::slice::from_ref(&tail),
+            &local,
+        );
+        assert_eq!(committed[&tail.node_id], 9, "the tail and its head");
+        assert_eq!(tail.charge_in_bound((60, 62), &local), 2);
+        assert!(!crate::inference::scheduler::standby_has_room(
+            tail.max_hostable_layers,
+            committed[&tail.node_id],
+            tail.charge_in_bound((60, 62), &local),
+        ));
+    }
+
     /// **A pass that holds a peer to its ceiling can cut its range there**
     /// (FUTURE_WORK #350, request `c2cde5c3`, 2026-10-25). The re-plan after
     /// two up-front refusals, with the live node's card full: this node's
@@ -3659,6 +3702,34 @@ mod tests {
         )
         .expect("routable");
         assert_eq!(runs_and_layers(&segs, &local), (1, 32), "{segs:?}");
+    }
+
+    /// **A fresh worker's run is a split point** (FUTURE_WORK #354 (b)). The
+    /// vertex filter admits this node for any range up to `fresh_run_layers`,
+    /// but split points were cut only at its room, so a vertex that wide
+    /// existed only where another holder's boundary happened to fall. Here
+    /// this node is ten times the peer's speed, its card adds 10 layers and a
+    /// fresh worker's run takes 25; the peer holds 15-40 — so the plan stopped
+    /// this node at the peer's 15 and gave the slow peer 25 layers, not 15.
+    #[test]
+    fn a_fresh_workers_run_is_a_split_point() {
+        let local = NodeId([1u8; 32]);
+        let mut me = cand(1, vec![(0, 40)], 0, 0.0, true, true, 40.0);
+        me.node_id = local.clone();
+        me.max_hostable_layers = Some(10);
+        me.fresh_run_layers = Some(25);
+        let peer = cand(2, vec![(15, 40)], 30, 0.0, true, true, 4.0);
+        let segs = route_shortest_path(
+            40,
+            &[me, peer],
+            &local,
+            false,
+            true,
+            CapacityBound::Everyone,
+            None,
+        )
+        .expect("routable");
+        assert_eq!(runs_and_layers(&segs, &local), (1, 25), "{segs:?}");
     }
 
     /// **Once this node's conversation memory has refused a prompt, the re-plan

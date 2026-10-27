@@ -152,6 +152,23 @@ figure — hands the node both stretches; red with the one-run limit off),
 `a_worker_in_use_withdraws_the_fresh_worker_split`, and the pool's
 `a_model_the_loader_would_split_is_one_this_node_can_hold`.
 
+**The run's width is a split point too (2026-10-27, #354 (b)).** The vertex filter
+admitted a range up to `fresh_run_layers` for this node, but `route_over` proposed
+split points only at `max_hostable_layers` and the rung's `vertex_cap` — so a run
+that wide was a vertex only where another holder's boundary happened to fall. On
+2026-10-25 (15:53 UTC, Llama 3.3 70B, four candidates, this node with no worker
+and a fresh run of 22) this node was planned layers 0..19; nothing proposed 22.
+`route_over` now pushes `a + fresh_run` and `b − fresh_run` for this node's ranges
+where `capacity.binds_local()` (one closure, `fresh_run_of`, read by the points and
+the vertex filter alike), as points of the pass, so they survive the budget's
+first fallback. The budget, on that plan's candidates: the declared points cost
+88 vertices, with the two new points (6 and 22) 131, against
+`MAX_SUBRANGE_VERTICES` = 4096. In 117 logged local candidates with a fresh run
+(2026-10-25/26), 32 had a range wider than the run. Where the range is no wider
+than the run, nothing is added (02:08 UTC 10-27: range 0..28, run 32). Test
+`a_fresh_workers_run_is_a_split_point` (this node 0..40, room 10, run 25, a peer
+holding 15..40: the route is one local run of 25), red with the points removed.
+
 **On the card** (`~/swarmllm-rig-234/run.sh`, 2026-10-08, safety kit, 0 driver
 events): a node holding Qwen2.5-14B layers 0..32 and 38..48 with
 `max_gpu_vram_mb = 5000`, beside a processor node holding all 48. v0.3.230
@@ -3059,6 +3076,28 @@ request being scheduled — so within one plan it is always zero. This is the
 missing within-plan piece, and it is not double-counting for a warm peer either,
 since a warm peer's advertised free memory excludes its resident weights but not
 the KV the new segment will claim.
+
+**Each node is charged in the unit of its own bound (2026-10-27, #354 (a)).**
+`NodeCandidate::charge_in_bound` is what a range takes from `max_hostable_layers`,
+read by both standby checks (the whole range and each part of a cover), by the
+tally's commit, and by `primary_layer_commitments`, which seeds it. A peer's bound
+is a TOTAL, so a range costs what it loads (`width_in_bound`, its ends' tables
+included, #353). THIS node's bound is room to ADD (#95), so a range costs
+`layers_charged` — nothing for a range its worker holds loaded — until its
+conversation memory refused the prompt, when its bound is a total too (#263) and
+it is charged the width. Before, every check weighed this node's room against the
+range's width, and the tally was seeded with bare primary widths. A node with a
+full card holding 0..13 loaded was never a standby for a peer's 0..13, though
+running it adds nothing — the "prefer local" comment in `find_standbys` assumes it
+can — and its own loaded primaries used up room they never took. The same seed
+counted a peer's tail short of its output head: `a_peers_primary_is_committed_as_it_loads`
+(a 70B tail, 73..80, committed 9 against a total of 10, so a 2-layer standby does
+not fit), red with bare widths. `this_node_stands_in_for_a_range_it_holds_loaded`
+(this node holding 0..13 loaded, room 7, primary on 13..20; a peer primary on
+0..13): a standby for 0..13, red with width charging; its null control, the held
+range cleared, is not. Both predate v0.3.255; neither was seen in a field log —
+found by the v0.3.256 pre-release sweep. `layers_offered_at` reads the same figure
+the same way (d5302e77).
 
 ## A wait on a peer's first answer allows for its load, on every path
 

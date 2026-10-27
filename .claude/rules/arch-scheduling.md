@@ -26,7 +26,7 @@ measured at, and what a change must keep — lives in `docs/invariants/`.
 
 ## The component that will refuse must be asked while the plan can still change
 
-Admission runs at load time, too late to reshape a plan (#452). **`ModelProcessPool::max_hostable_layers_for_planning`** (+ `held_layer_ranges_for_planning`) bounds the LOCAL node from the loader's own estimator and budgets, weighed on the device the LOADER would use — never on `serves_on_cpu`, which is the SPEED answer (#444 vs #129) (`None` = unknowable, never "no room"); **`process_pool::segment_weights`** prices the segment the worker will actually map — its own layers and its ends' tables (#342; `segment_shape` only where a table names no layer) — never the whole model. On a card that bound is what a RUNNING worker can ADD — the card alone; the card/processor split is a fresh worker's, for ONE run of layers: **`fresh_run_layers_for_planning`** → `NodeCandidate::fresh_run_layers`, held to one run by the search (`parallax::local_fits`) and by `local_can_hold_every_layer` (#234), offered only where the spawn would admit its processor share for the same requester (#250) — the whole model's split, else the widest SEGMENT run whose processor share it would admit at BOTH ends of the model (2026-10-25: a 70B's whole-model split never fits, so this node was offered its card alone). An idle worker of the model gives its own card and machine memory to that run, as the retirement that replaces it does (`a_fresh_spawn_fits_in_place_of_the_worker`, #350).
+Admission runs at load time, too late to reshape a plan (#452). **`ModelProcessPool::max_hostable_layers_for_planning`** (+ `held_layer_ranges_for_planning`) bounds the LOCAL node from the loader's own estimator and budgets, weighed on the device the LOADER would use — never on `serves_on_cpu`, which is the SPEED answer (#444 vs #129) (`None` = unknowable, never "no room"); **`process_pool::segment_weights`** prices the segment the worker will actually map — its own layers and its ends' tables (#342; `segment_shape` only where a table names no layer) — never the whole model. On a card that bound is what a RUNNING worker can ADD — the card alone; the card/processor split is a fresh worker's, for ONE run of layers: **`fresh_run_layers_for_planning`** → `NodeCandidate::fresh_run_layers`, held to one run by the search (`parallax::local_fits`) and by `local_can_hold_every_layer` (#234), and proposed as a split point at both ends of each range this node holds (`route_over`'s `fresh_run_of`, the same closure as the vertex filter — else a run that wide existed only where another holder's boundary fell, #354 (b)), offered only where the spawn would admit its processor share for the same requester (#250) — the whole model's split, else the widest SEGMENT run whose processor share it would admit at BOTH ends of the model (2026-10-25: a 70B's whole-model split never fits, so this node was offered its card alone). An idle worker of the model gives its own card and machine memory to that run, as the retirement that replaces it does (`a_fresh_spawn_fits_in_place_of_the_worker`, #350).
 
 → `docs/invariants/scheduling.md` § "The component that will refuse must be asked while the plan can still change"
 
@@ -62,7 +62,7 @@ Where this node cannot hold every layer, each planner FIRST plans with its bound
 
 ## A peer's range is weighed as what it loads (2026-10-26, #353)
 
-Every peer bound counts layers at the file's AVERAGE, which spreads the output head and token table over all of them. **`process_pool::RangeWeights::excess_layers`** (per peer candidate, from the header) puts them back where they load — the head with the model's end, the table with its start: in `NodeCandidate::capacity_charge` (the search), `width_in_bound` (every reader of a total: split points, greedy, both standby checks, `plan_exceeds_offered_memory` — beside the ranges the peer HOLDS, a REQUIRED argument: a warm peer's total counts a loaded layer as one, its tables paid; only a cold ceiling passes `&[]`), the booking, and auto-manage's chain (`near_chain::Planner::reach`). Never compare a peer's bound with a bare width — nor hold it to a bare count it measured over other layers (a refusal's, below). A/B `SWARMLLM_PEER_RANGE_WEIGHTS=average`.
+Every peer bound counts layers at the file's AVERAGE, which spreads the output head and token table over all of them. **`process_pool::RangeWeights::excess_layers`** (per peer candidate, from the header) puts them back where they load — the head with the model's end, the table with its start: in `NodeCandidate::capacity_charge` (the search), `width_in_bound` (every reader of a total: split points, greedy, both standby checks and their tally through `charge_in_bound`, `plan_exceeds_offered_memory` — beside the ranges the peer HOLDS, a REQUIRED argument: a warm peer's total counts a loaded layer as one, its tables paid; only a cold ceiling passes `&[]`), the booking, and auto-manage's chain (`near_chain::Planner::reach`). Never compare a peer's bound with a bare width — nor hold it to a bare count it measured over other layers (a refusal's, below). A/B `SWARMLLM_PEER_RANGE_WEIGHTS=average`.
 
 → `docs/invariants/scheduling.md` § "A peer's range is weighed as what it loads"
 
@@ -261,9 +261,14 @@ Never read `standbys.len()` as an answer: ask `scheduler::standby_covers`, `stan
 segment_layers)` is asked of every standby candidate, beside
 `standby_covers`. The two are the same pair of questions #452 and #454 each had
 to separate: `standby_covers` asks whether a node HOLDS the range,
-`standby_has_room` whether it could RUN it.
+`standby_has_room` whether it could RUN it. **Every range — a standby's, each
+part of a cover, and the primaries that seed the tally (`primary_layer_commitments`)
+— is charged by `NodeCandidate::charge_in_bound`**, in the unit of the node's own
+bound: what it loads for a peer (a total, `width_in_bound`), what it ADDS for this
+node (room, `layers_charged`; its width once its prompt memory refused). Charged its
+width, a full card holding the range loaded was never a standby for it (#354 (a)).
 
-→ `docs/invariants/scheduling.md`
+→ `docs/invariants/scheduling.md` § "A standby is a capacity commitment, not just a coverage claim"
 
 ## A stand-in may be SEVERAL nodes, and the segment count is then read live
 

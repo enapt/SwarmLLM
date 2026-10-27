@@ -19,6 +19,15 @@ every memory estimate. It now reads the file once and keeps what it learned unti
 changes. The same plan takes 0.02-0.08 seconds, and every retry while it waits for peers gets
 the saving too (#360).
 
+**When a model is split, your computer can now be the backup for layers it already has loaded,
+and it can take the full share of a split it is able to run.** A split names a backup for each
+computer's part, in case that computer stops answering. Your computer was judged on whether it
+had room for the part's layers, as if it had to load them again. So a computer with a full
+graphics card was never the backup for layers it was already running. Separately, when your
+computer could run a share split between its graphics card and its processor, that share was
+offered only where another computer's parts happened to end. On 2026-10-25 a Llama 3.3 70B split
+gave this computer 19 layers when it could run 22. Neither was seen to fail a request (#354).
+
 ## [0.3.257-alpha] — 2026-10-27
 
 **A model split between two computers far apart answers up to 18% faster.** A split reply sends

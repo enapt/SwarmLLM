@@ -708,6 +708,25 @@ impl NodeCandidate {
         })
     }
 
+    /// What `range` takes from [`Self::max_hostable_layers`], the bound
+    /// `standby_has_room` holds a plan's every duty to — primaries and
+    /// standbys alike. THIS node's bound is room to ADD beside what its worker
+    /// holds (#95), so a range costs the layers it would add
+    /// ([`Self::layers_charged`]: none for a range it holds loaded); once its
+    /// conversation memory refused the prompt its bound is a total
+    /// (`min(held + room, fit)`, #263), as a peer's always is, and a range
+    /// costs its [`Self::width_in_bound`]. Charged its width, this node — card
+    /// full, layers 0-13 loaded — was never a standby for a peer's 0-13, which
+    /// would have added nothing (FUTURE_WORK #354 (a); `layers_offered_at`
+    /// reads the same figure the same way).
+    fn charge_in_bound(&self, range: (u32, u32), local_node_id: &NodeId) -> u32 {
+        if &self.node_id == local_node_id && !self.prompt_memory_refused {
+            self.layers_charged(range)
+        } else {
+            self.width_in_bound(range)
+        }
+    }
+
     /// Whether a range is never charged below its width: this request's
     /// prompt was refused for its CACHES ([`Self::prompt_fit_counts_caches`]).
     fn charged_at_least_its_width(&self) -> bool {
@@ -1338,15 +1357,30 @@ pub(crate) fn peer_segment_has_standby(
     !serves_something
 }
 
-/// Layers each node is already on the hook for as a PRIMARY in this plan.
+/// Layers of its bound each node is already on the hook for as a PRIMARY in
+/// this plan, each segment charged as a standby is
+/// ([`NodeCandidate::charge_in_bound`]: what it adds for this node, what it
+/// loads for a peer — a tail's output head included) — the bare width only for
+/// a node with no candidate.
 ///
 /// Seeds the running tally in `find_standbys`. A node can appear more than
 /// once: under prompt privacy the local node holds both ends of a boomerang,
-/// so it is primary twice before any standby is considered.
-fn primary_layer_commitments(segments: &[PipelineSegment]) -> HashMap<NodeId, u32> {
+/// so it is primary twice before any standby is considered. Seeded with bare
+/// widths, this node's loaded primaries used up room they never took, and a
+/// peer's tail was counted short of what it loads (#354 (a)).
+fn primary_layer_commitments(
+    segments: &[PipelineSegment],
+    candidates: &[NodeCandidate],
+    local_node_id: &NodeId,
+) -> HashMap<NodeId, u32> {
     let mut m: HashMap<NodeId, u32> = HashMap::new();
     for seg in segments {
-        let layers = seg.layer_range.1.saturating_sub(seg.layer_range.0);
+        let layers = candidates
+            .iter()
+            .find(|c| c.node_id == seg.node_id)
+            .map_or(seg.layer_range.1.saturating_sub(seg.layer_range.0), |c| {
+                c.charge_in_bound(seg.layer_range, local_node_id)
+            });
         *m.entry(seg.node_id.clone()).or_insert(0) += layers;
     }
     m
@@ -1373,7 +1407,7 @@ fn plan_exceeds_offered_memory(
     candidates: &[NodeCandidate],
     local_node_id: &NodeId,
 ) -> bool {
-    primary_layer_commitments(segments)
+    primary_layer_commitments(segments, candidates, local_node_id)
         .keys()
         .filter(|node| *node != local_node_id)
         .any(|node| {
@@ -6697,10 +6731,9 @@ impl PipelineScheduler {
         // duty, then grown as standbys are chosen, so the fourth segment's
         // standby search sees what the first three already committed. See
         // `standby_has_room`.
-        let mut committed = primary_layer_commitments(segments);
+        let mut committed = primary_layer_commitments(segments, candidates, local_node_id);
 
         for segment in segments {
-            let segment_layers = segment.layer_range.1.saturating_sub(segment.layer_range.0);
             // Collect all eligible standbys, then pick the local node first.
             // Preferring local prevents "no standby available" when a remote
             // primary returns an inference error — the local node can always
@@ -6714,11 +6747,12 @@ impl PipelineScheduler {
                             .any(|r| r.0 <= segment.layer_range.0 && r.1 >= segment.layer_range.1)
                         // Holding the range is not being able to run it — and
                         // running it is what it loads, its ends' tables
-                        // included (`width_in_bound`, field report #039).
+                        // included (`width_in_bound`, field report #039), or
+                        // for this node what it ADDS (`charge_in_bound`, #354).
                         && standby_has_room(
                             c.max_hostable_layers,
                             committed.get(&c.node_id).copied().unwrap_or(0),
-                            c.width_in_bound(segment.layer_range),
+                            c.charge_in_bound(segment.layer_range, local_node_id),
                         )
                         && standby_may_take(
                             c,
@@ -6787,8 +6821,10 @@ impl PipelineScheduler {
             });
             if let Some(backup) = eligible.first() {
                 // Decide-time accounting: this node is now on the hook for
-                // these layers as far as the rest of this plan is concerned.
-                *committed.entry(backup.node_id.clone()).or_insert(0) += segment_layers;
+                // these layers as far as the rest of this plan is concerned —
+                // the charge it was admitted at.
+                *committed.entry(backup.node_id.clone()).or_insert(0) +=
+                    backup.charge_in_bound(segment.layer_range, local_node_id);
                 standbys.push(PipelineSegment {
                     node_id: backup.node_id.clone(),
                     shard_id: backup.shard_id.clone(),
@@ -6837,22 +6873,21 @@ impl PipelineScheduler {
                             .map(|r| r.1)
                             .max()?
                             .min(segment.layer_range.1);
-                        let part_layers = reach.saturating_sub(frontier);
+                        let part_charge = c.charge_in_bound((frontier, reach), local_node_id);
                         let already = committed.get(&c.node_id).copied().unwrap_or(0)
                             + charge
                                 .iter()
                                 .filter(|(n, _)| *n == c.node_id)
                                 .map(|(_, l)| *l)
                                 .sum::<u32>();
-                        standby_has_room(
-                            c.max_hostable_layers,
-                            already,
-                            c.width_in_bound((frontier, reach)),
-                        )
-                        .then_some((c, reach, part_layers))
+                        standby_has_room(c.max_hostable_layers, already, part_charge).then_some((
+                            c,
+                            reach,
+                            part_charge,
+                        ))
                     })
                     .max_by_key(|(_, reach, _)| *reach);
-                let Some((c, reach, part_layers)) = best else {
+                let Some((c, reach, part_charge)) = best else {
                     cover.clear();
                     break;
                 };
@@ -6861,7 +6896,7 @@ impl PipelineScheduler {
                     shard_id: c.shard_id.clone(),
                     layer_range: (frontier, reach),
                 });
-                charge.push((c.node_id.clone(), part_layers));
+                charge.push((c.node_id.clone(), part_charge));
                 frontier = reach;
             }
             if !cover.is_empty() {

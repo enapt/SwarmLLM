@@ -6389,6 +6389,61 @@ fn a_standby_for_layer_zero_clears_the_prompt_trust_bar() {
     );
 }
 
+/// **This node's room is room to ADD; a range it holds loaded takes none of
+/// it** (FUTURE_WORK #354 (a)). Its `max_hostable_layers` is what it could add
+/// beside its worker (#95), but `find_standbys` charged every range its width
+/// — the standby's and the primaries it was seeded with — so this node, with
+/// layers 0-13 loaded and room for 7 more, spent its room on its own 13-20
+/// and was never a standby for a peer's 0-13, which would have added nothing.
+#[test]
+fn this_node_stands_in_for_a_range_it_holds_loaded() {
+    let state = make_shared_state();
+    let local = state.identity.node_id().clone();
+    let scheduler = PipelineScheduler::new(state);
+    let seg = |node: NodeId, range| PipelineSegment {
+        node_id: node,
+        shard_id: ShardId {
+            model_id: ModelId("test".into()),
+            index: 0,
+        },
+        layer_range: range,
+    };
+    let peer = NodeId([0xF1; 32]);
+    let tail = NodeId([0xF2; 32]);
+    let segments = vec![
+        seg(peer.clone(), (0, 13)),
+        seg(local.clone(), (13, 20)),
+        seg(tail.clone(), (20, 28)),
+    ];
+    let mut here = simple_candidate(0, vec![(0, 28)]);
+    here.node_id = local.clone();
+    here.held_ranges = vec![crate::inference::process_pool::HeldRange {
+        range: (0, 13),
+        releasable_layers: 13,
+    }];
+    here.max_hostable_layers = Some(7);
+    let mut first = simple_candidate(0xF1, vec![(0, 13)]);
+    first.max_hostable_layers = Some(13);
+    let mut last = simple_candidate(0xF2, vec![(20, 28)]);
+    last.max_hostable_layers = Some(8);
+    let candidates = vec![first, here.clone(), last];
+    let stands_in_for_the_peer = |candidates: &[NodeCandidate]| {
+        scheduler
+            .find_standbys(&segments, candidates, Some(100), 28, false)
+            .iter()
+            .any(|s| s.node_id == local && s.layer_range == (0, 13))
+    };
+    assert!(
+        stands_in_for_the_peer(&candidates),
+        "0-13 is loaded here: standing in for it adds nothing beside 13-20's seven"
+    );
+    // Null control: the same node with nothing loaded would add all 13.
+    let mut cold = here;
+    cold.held_ranges.clear();
+    let candidates = vec![candidates[0].clone(), cold, candidates[2].clone()];
+    assert!(!stands_in_for_the_peer(&candidates));
+}
+
 /// **Prompt privacy is structural: the ends stay here.** `find_standbys` took
 /// no `encrypted_pipeline` parameter at all, so a remote node could be named
 /// standby for the first segment (which reads the plaintext prompt) or the last

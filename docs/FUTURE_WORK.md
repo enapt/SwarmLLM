@@ -70,9 +70,9 @@ speed is what the swarm is for, so split speed for large models is the top track
    warm; with its drafter (#351, v0.3.255) 1.90-1.96 tok/s on a repeated question; on v0.3.256,
    1.29-1.47 tok/s on NEW questions, first token 9-10 s warm (a repeated question lets more of the
    reply be copied from text already seen; #337 is the copy side). v0.3.255's field check failed 3/3 on a peer's refusal count
-   read in the wrong unit, fixed in v0.3.256 (gotcha #970). Left on the 70B's path: two readers of
-   this node's own figures (#354, P3, no field sign yet); #350 (this node never offered the
-   wider share its idle worker's replacement would load) closed 2026-10-26.
+   read in the wrong unit, fixed in v0.3.256 (gotcha #970). Two readers of this node's own
+   figures (#354) closed 2026-10-27; #350 (this node never offered the wider share its idle
+   worker's replacement would load) closed 2026-10-26.
    **#318** — a large model split across machines is too slow to use: 0.35 tok/s on a 4-segment
    intercontinental chain, 5-13 tok/s on a 7B Thailand↔Belgium with the stream. Projected
    lossless 20-31 tok/s across continents and 50-80 inside a region on cards. The stream
@@ -1084,27 +1084,6 @@ same build check `shard_holders` applies (`expected_build_tag`), withdrawn when 
 disconnects — or have the newcomer's catch-up carry the holdings point to point, as manifests
 are. Either way a capability is a peer's claim, so it may add a holder for planning and never
 remove one. Measure the newcomer's first-plan delay before and after.
-
-#### #354 — Two plan readers misread this node's own figures: its room as a standby's total, its fresh run as no split point
-`P3` · routing · **OPEN** — 2026-10-26 · found by the pre-release sweep of v0.3.256 (code reading; no field report)
-
-Both predate v0.3.255, and neither has been seen in a field log.
-(a) `find_standbys` checks every candidate with `standby_has_room(max_hostable_layers,
-committed, width_in_bound(range))`, in both its whole-range and tiling checks. For a peer that
-figure is a total; for THIS node it is room to ADD beside what its worker holds
-(`layers_it_would_add`), and `committed` is seeded with bare primary widths. A node whose card
-is full (room 0) holding 0-13 loaded is never a standby for a peer's 0-13, though running it
-would add nothing — the "prefer local" comment there assumes it can. d5302e77 fixed the same
-reading in `layers_offered_at` (text only). Next step: for this node, charge
-`layers_it_would_add(range)` against its room less the new layers its own primaries add; a test
-with this node holding a peer's primary range loaded, red before the change.
-(b) `route_over`'s capacity split points (`fits` / `fits_here`, `parallax.rs`) are cut by
-`max_hostable_layers` and `vertex_cap`, but the vertex filter also admits a range of up to
-`fresh_run_layers` for this node (a fresh worker's ONE card/processor run). No point is proposed
-at that width, so such a vertex exists only where another boundary falls — the shards' own
-boundaries, every few layers, usually land near it. Next step: push `a + fresh_run` and
-`b − fresh_run` for this node when `capacity.binds_local()`; measure a node with no worker and
-room below its fresh run, against the vertex budget (`MAX_SUBRANGE_VERTICES`).
 
 ### Network and transport
 
@@ -3404,7 +3383,24 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-27, ships in the next release** (#359, #360)
+**Closed 2026-10-27, ships in the next release** (#354, #359, #360)
+- #354 — **This computer is planned as a stand-in for layers it already has loaded, and a
+  fresh worker's full share is on offer to the planner.** Found by the v0.3.256 pre-release
+  sweep, by reading the code; never seen in a field log. (a) `find_standbys` charged every
+  candidate a range's width against `max_hostable_layers` — a total for a peer, but for this
+  node room to ADD (#95) — and seeded its tally with bare primary widths, so a full card
+  holding 0..13 loaded was never a standby for a peer's 0..13, and a peer's tail was counted
+  short of its output head. Now `NodeCandidate::charge_in_bound` charges each node in its own
+  bound's unit (`layers_charged` here, `width_in_bound` for a peer) on every standby check, the
+  tally's commit and its seed. (b) `route_over` never proposed `fresh_run_layers` as a split
+  point, so this node's one card+processor run was as wide as it may be only where another
+  holder's boundary fell: on 2026-10-25 a 70B plan gave it 0..19 with a run of 22 on offer.
+  It now proposes both ends of each range at the run's width, the same closure as the vertex
+  filter's; on that plan the points cost 88 → 131 vertices of 4,096. Tests
+  `this_node_stands_in_for_a_range_it_holds_loaded`, `a_peers_primary_is_committed_as_it_loads`,
+  `a_fresh_workers_run_is_a_split_point`, each red with its fix off. Evidence:
+  `docs/invariants/scheduling.md` § "A standby is a capacity commitment, not just a coverage
+  claim" and § "The component that will refuse must be asked while the plan can still change".
 - #360 — **Planning a request for a large model split across computers takes hundredths of a
   second, not seconds.** One plan of Llama 3.3 70B took 2.7 s (the planner's own `elapsed_ms`
   over 83 real plans: median 2,042 ms, p90 3,493), on a Tokio worker, before every first token
