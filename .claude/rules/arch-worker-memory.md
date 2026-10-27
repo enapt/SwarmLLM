@@ -213,6 +213,7 @@ A second implementation of any of these is this codebase's most-repeated defect 
 - **Graphics memory has ONE owner: `ModelProcessPool`** — and every admission that says yes charges it, a card/processor split included (`card_share_of_split_mb`, #240).
 - **A worker's growth is weighed by the budget its spawn charged** — `WorkerHandle::holds_gpu_memory`, never `placed_on_cpu_because` (`a_live_workers_growth_is_weighed_by_the_budget_its_spawn_charged`).
 - **`model::auto_manage::storage_budget` / `held_disk_bytes`** — the ONE answer to shard storage; counted kinds must be reclaimable.
+- **`model::auto_manage::disk_space_for`** — the ONE reading of the disk a path is on (download preflight, budget, advertised free disk; #334 (4)). On Linux it asks the filesystem itself (`statvfs` of the nearest existing ancestor); never search sysinfo's disk list, which omits NFS, CIFS, autofs and tmpfs.
 - **`prune::effective_idle_secs`** — residency is a hard UPPER BOUND on "idle since".
 - **An admitted prompt is RECORDED** — claim and reservation go TOGETHER via `forget_request_bookkeeping`.
 - **`kv_budget::admit_prompt` + `PrefixCache::release`** — ONE decision per prompt.

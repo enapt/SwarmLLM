@@ -274,7 +274,7 @@ paths across a cache hit.
 ### Reliability and failover
 
 #### #334 — Four rules are computed in several places, and the copies already differ
-`P3` · reliability · **OPEN** — 2026-10-24 · history: sweep 2026-10-24 (`.claude/sweep-log.jsonl`)
+`P3` · reliability · **PARTIAL** — 2026-10-27 · history: sweep 2026-10-24 (`.claude/sweep-log.jsonl`)
 
 Found by the duplication pass; each copy was checked by hand. None is a one-line fix: each
 changes behaviour on some path, so each needs its own test before it is merged.
@@ -296,9 +296,9 @@ changes behaviour on some path, so each needs its own test before it is merged.
    end-of-generation names. `split_special_tokens` is written twice (BPE, SPM). Next: read
    llama.cpp's rule for each vocabulary type (`llama-vocab.cpp`), then one predicate. Judge it
    with `examples/tokenizer_reference.py`, because it changes what the model reads.
-4. **The disk a path is on**: `model::check_disk_space`, `auto_manage::disk_space_for` and
-   the health monitor each search for the longest mount point. With no match they pass,
-   answer `None` and sum every disk, respectively. Next: the first and last call `disk_space_for`.
+4. ~~**The disk a path is on**~~ — done 2026-10-27: `auto_manage::disk_space_for` is the one
+   reading, on Linux `statvfs` of the path, never sysinfo's list (which omits NFS, CIFS and
+   tmpfs). Evidence: `docs/invariants/memory.md` § storage budget.
 
 #### #167 — A speculative split decode has no mid-reply failover
 `P2` · reliability · **PARTIAL** — 2026-08-25 · history: archive § "Speculative distributed decode has no failover", archive row #149 item (d)

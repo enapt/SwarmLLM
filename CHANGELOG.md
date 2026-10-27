@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+**Your computer now reads the free space of the drive its model folder is really on.** It checks
+that drive before downloading a model part, keeps its model storage within it, and tells other
+computers how much room it has. When the folder was on a network drive, reached through a
+shortcut-style link, or given as a relative path (`--data-dir ./node`), it read another drive's free space instead, or
+none at all. It could then start a download that did not fit, or offer room it did not have, or
+offer the free space of every drive added together. On Linux all of these are fixed; on Windows
+and macOS, the relative path is (#334).
+
 **A computer that answers lookups for model parts can no longer pass off your peers as holders
 of parts they do not have.** Your computer finds who holds a part partly by asking the swarm's
 shared directory, and the computer answering decides which names it lists. Such a name was treated

@@ -732,6 +732,33 @@ binding the live-config guard cannot see (#281's shape); and the quarantine
 sweep named only `.quarantine`, so `.mismatched` files (2026-07-27) were
 never reclaimed — `QUARANTINE_EXTENSIONS` now lists both.
 
+**The disk the data directory is on has ONE reading too** (2026-10-27, #334 (4)):
+`auto_manage::disk_space_for`, asked by the download preflight (`model::check_disk_space`),
+the budget's free-disk clamp (`StorageReading::now`) and the free disk the capability
+advertises (`health::monitor`). There were three copies of a longest-mount-point search over
+sysinfo's disk list, and they disagreed on a path that matched nothing: the preflight passed,
+the budget had no disk limit, the monitor advertised every disk's free space added together.
+Such paths were ordinary. A relative `--data-dir` never matches an absolute mount point. A
+symlinked one matched the disk the link sits on. One on NFS, CIFS, autofs or tmpfs matched the
+disk ABOVE its mount, because sysinfo 0.38 leaves those filesystems out of its list on Linux
+(`unix/linux/disk.rs`; its `linux-netdevs` / `linux-tmpfs` features put them back) — a data
+directory on a network share was given the root disk's free space. Research: `df PATH` and
+Python's `shutil.disk_usage` ask the filesystem holding the path (`statvfs`), never a mount
+table. So on Linux the reading is `statvfs` of the nearest EXISTING ancestor (a download's
+directory is made after its check) of the path made absolute, with the figures sysinfo reads per
+mount (`f_bavail`, `f_blocks` × `f_frsize`). Elsewhere the mount search stays, over the
+absolute path: macOS's figure counts purgeable space as available, which `statvfs` does not,
+and neither platform has been measured with a change. An unreadable disk is 0 in the
+capability, as a peer with none counts. Tests `disk_space_tests::*`, toggled 2026-10-27:
+- the old code (mount search, path as spelled) fails the relative-path, preflight, tmpfs and
+  symlink tests (4 of 6);
+- the mount search on Linux with only the absolute path kept fails the tmpfs and symlink tests;
+- no ancestor walk fails the not-yet-made, preflight and symlink tests.
+
+The sixth test is the known answer: where sysinfo's list has `/`, both readings give the same
+size. sysinfo's `Disks::refresh` re-lists on every platform, so `Disks::new()` + `refresh` (the
+preflight's) was never blind.
+
 ## `AutoShardManager::would_shed_copy` is the ONE answer to "would prune shed this copy?" — and the download pass asks it before every fetch
 
 (2026-10-06, gotcha #795.) Prune asks it of each part it holds; the download

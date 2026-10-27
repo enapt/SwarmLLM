@@ -1197,20 +1197,13 @@ impl HealthMonitor {
                 let (ram_total, ram_avail) =
                     crate::daemon::machine_memory::machine_memory_mb();
 
-                let disks = sysinfo::Disks::new_with_refreshed_list();
-                let disk_avail: u64 = disks
-                    .list()
-                    .iter()
-                    .filter(|d| data_dir.starts_with(d.mount_point()))
-                    .max_by_key(|d| d.mount_point().as_os_str().len())
-                    .map(|d| d.available_space() / (1024 * 1024))
-                    .unwrap_or_else(|| {
-                        disks
-                            .list()
-                            .iter()
-                            .map(|d| d.available_space() / (1024 * 1024))
-                            .sum()
-                    });
+                // The disk the data directory is on, read as the storage
+                // budget reads it (#334 (4)). Unreadable is 0, as a peer
+                // with no capability counts: the sum of every disk this
+                // used to fall back to offered peers room on disks no part
+                // would ever be written to.
+                let disk_avail: u64 = crate::model::auto_manage::disk_space_for(&data_dir)
+                    .map_or(0, |d| d.free_bytes / (1024 * 1024));
                 (ram_total, ram_avail, disk_avail)
             })
             .await

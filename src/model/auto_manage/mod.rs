@@ -421,20 +421,191 @@ pub fn storage_budget_now(state: &crate::daemon::SharedState) -> (StorageBudget,
 }
 
 /// The filesystem holding `path` — free and total bytes — or `None` if it
-/// cannot be read.
+/// cannot be read. **The one reading of "the disk a path is on"**: the
+/// download preflight (`model::check_disk_space`), the storage budget and the
+/// free disk this node advertises all ask it (#334 (4) — three copies of a
+/// mount-point search had disagreed on what an unmatched path meant).
+///
+/// `path` need not exist yet (a download's directory is made after the check):
+/// the filesystem asked is that of its nearest existing ancestor, after a
+/// relative path is made absolute against the working directory — a relative
+/// `--data-dir` matched no mount point, so the preflight passed unchecked, the
+/// budget had no disk limit and the monitor advertised every disk's free space
+/// added together.
+///
+/// On Linux it asks the filesystem itself (`statvfs`, as `df PATH` does), never
+/// sysinfo's disk list: that list leaves out NFS, CIFS, autofs and tmpfs mounts
+/// (sysinfo 0.38 `unix/linux/disk.rs`, filtered unless its `linux-netdevs` /
+/// `linux-tmpfs` features are on) and matches a path by its spelling, so a data
+/// directory on a network share, or behind a symlink to another disk, was read
+/// as the free space of the disk above it. The figures are the ones sysinfo
+/// reads per mount (`f_bavail` and `f_blocks` × `f_frsize`). Elsewhere the
+/// longest matching mount point of the platform's own list wins (macOS reports
+/// the space "available for important usage", purgeable space included, which
+/// `statvfs` does not).
 pub fn disk_space_for(path: &std::path::Path) -> Option<DiskSpace> {
-    let mut disks = sysinfo::Disks::new_with_refreshed_list();
-    disks.refresh(true);
+    let absolute = std::path::absolute(path).ok()?;
+    let existing = absolute.ancestors().find(|p| p.exists())?;
+    filesystem_space(existing)
+}
+
+#[cfg(target_os = "linux")]
+fn filesystem_space(existing: &std::path::Path) -> Option<DiskSpace> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(existing.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    let stat = loop {
+        // SAFETY: `c_path` is NUL-terminated and outlives the call; `stat` is
+        // a writable `statvfs` the call fills in full when it returns 0.
+        if unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) } == 0 {
+            break unsafe { stat.assume_init() };
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return None;
+        }
+    };
+    let block = stat.f_frsize as u64;
+    let total_bytes = (stat.f_blocks as u64).saturating_mul(block);
+    // A filesystem of no size is a pseudo one, not a disk (sysinfo's rule too).
+    (total_bytes > 0).then(|| DiskSpace {
+        free_bytes: (stat.f_bavail as u64).saturating_mul(block),
+        total_bytes,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn filesystem_space(existing: &std::path::Path) -> Option<DiskSpace> {
+    let disks = sysinfo::Disks::new_with_refreshed_list();
     // Longest matching mount point wins, so a nested mount is preferred over `/`.
     disks
         .list()
         .iter()
-        .filter(|d| path.starts_with(d.mount_point()))
+        .filter(|d| existing.starts_with(d.mount_point()))
         .max_by_key(|d| d.mount_point().as_os_str().len())
         .map(|d| DiskSpace {
             free_bytes: d.available_space(),
             total_bytes: d.total_space(),
         })
+}
+
+#[cfg(test)]
+mod disk_space_tests {
+    use super::disk_space_for;
+    use crate::error::SwarmError;
+    use std::path::Path;
+
+    /// **The unmatched path this exists for.** A mount point is absolute and
+    /// was matched against the path's spelling, so `--data-dir ./node` matched
+    /// none: no download was checked, the budget had no disk limit, and the
+    /// advertised free disk was every disk's added together.
+    #[test]
+    fn a_relative_path_is_read_as_the_disk_it_names() {
+        let relative = disk_space_for(Path::new(".")).expect("the working directory's disk");
+        let absolute = disk_space_for(&std::env::current_dir().unwrap()).unwrap();
+        assert_eq!(relative.total_bytes, absolute.total_bytes);
+    }
+
+    /// A download's directory is made after the check, so the check reads
+    /// the disk it will be made on.
+    #[test]
+    fn a_directory_not_yet_made_is_read_as_the_disk_it_will_be_made_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let later = dir.path().join("models").join("not-yet");
+        let here = disk_space_for(dir.path()).expect("the temporary directory's disk");
+        assert_eq!(
+            disk_space_for(&later).map(|d| d.total_bytes),
+            Some(here.total_bytes)
+        );
+    }
+
+    /// The preflight refuses what the disk cannot hold, a relative directory
+    /// included — before, it passed one unchecked.
+    #[test]
+    fn the_download_preflight_refuses_what_the_disk_cannot_hold() {
+        for dir in [Path::new("."), Path::new("not-made-yet/models")] {
+            assert!(
+                matches!(
+                    crate::model::check_disk_space(dir, u64::MAX),
+                    Err(SwarmError::InsufficientDisk { .. })
+                ),
+                "{dir:?} must be checked"
+            );
+            assert!(crate::model::check_disk_space(dir, 0).is_ok());
+        }
+    }
+
+    /// `/dev/shm` when it is a filesystem of its own, else `None`.
+    #[cfg(target_os = "linux")]
+    fn a_tmpfs_of_its_own() -> Option<&'static Path> {
+        use std::os::unix::fs::MetadataExt;
+        let shm = Path::new("/dev/shm");
+        let root = std::fs::metadata("/").ok()?.dev();
+        (std::fs::metadata(shm).ok()?.dev() != root).then_some(shm)
+    }
+
+    /// The arithmetic, against a known answer: where sysinfo's disk list HAS
+    /// the disk, the two readings are the same filesystem's size.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_reading_is_the_disk_lists_where_the_list_has_the_disk() {
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let Some(listed) = disks
+            .list()
+            .iter()
+            .find(|d| d.mount_point() == Path::new("/"))
+        else {
+            eprintln!("skip: the disk list has no `/` here");
+            return;
+        };
+        assert_eq!(
+            disk_space_for(Path::new("/")).map(|d| d.total_bytes),
+            Some(listed.total_space())
+        );
+    }
+
+    /// **The list's blind spot.** sysinfo leaves tmpfs, NFS, CIFS and autofs
+    /// out of its list, so a path on one matched the mount above it and was
+    /// read as THAT disk — a data directory on a network share was given the
+    /// root disk's free space.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_filesystem_the_disk_list_leaves_out_is_read_as_itself() {
+        let Some(shm) = a_tmpfs_of_its_own() else {
+            eprintln!("skip: /dev/shm is not a filesystem of its own here");
+            return;
+        };
+        let shm_disk = disk_space_for(shm).expect("a tmpfs has a size");
+        let root_disk = disk_space_for(Path::new("/")).unwrap();
+        assert_ne!(shm_disk.total_bytes, root_disk.total_bytes);
+    }
+
+    /// A data directory behind a symlink is on the disk the link points to,
+    /// not the one the link sits on.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_symlinked_directory_is_read_as_the_disk_it_points_to() {
+        use std::os::unix::fs::MetadataExt;
+        let Some(shm) = a_tmpfs_of_its_own() else {
+            eprintln!("skip: /dev/shm is not a filesystem of its own here");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        if std::fs::metadata(dir.path()).unwrap().dev() == std::fs::metadata(shm).unwrap().dev() {
+            eprintln!("skip: the temporary directory is on /dev/shm");
+            return;
+        }
+        let link = dir.path().join("data");
+        std::os::unix::fs::symlink(shm, &link).unwrap();
+        let through_link = disk_space_for(&link.join("models")).unwrap();
+        assert_eq!(
+            through_link.total_bytes,
+            disk_space_for(shm).unwrap().total_bytes
+        );
+        assert_ne!(
+            through_link.total_bytes,
+            disk_space_for(dir.path()).unwrap().total_bytes
+        );
+    }
 }
 
 #[cfg(test)]
