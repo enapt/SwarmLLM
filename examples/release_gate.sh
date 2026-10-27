@@ -212,8 +212,12 @@ if grep -qE '^src/model/(canonical|acquisition|manifest|shard|registry|auto_mana
 else
   verdict outvoted SKIPPED "no heal/canonical/storage change"
 fi
+# Windows code is any cfg that names windows ANYWHERE in it (`any(windows, …)`) or excludes another
+# platform (`not(target_os = "linux")`, `not(unix)`): both compile on Windows. The .258 gate read
+# `cfg(not(target_os = "linux"))` (#334 (4)'s free-space path) as no Windows change and skipped this.
 if grep -qiE 'windows|update_restart|job_object|launcher' <<< "$CHANGED" \
-   || git -C "$REPO" diff "${SINCE:-HEAD}"..HEAD -- src | grep -qE '^[+-].*cfg\((target_os = "windows"|windows)'; then
+   || git -C "$REPO" diff "${SINCE:-HEAD}"..HEAD -- src \
+      | grep -qE '^[+-].*cfg\(.*(windows|not\((target_os|target_family|unix))'; then
   verdict windows REVIEW "Windows code changed: wincheck the draft's .exe files now, a real update after publishing"
 else
   verdict windows SKIPPED "no Windows code changed"
