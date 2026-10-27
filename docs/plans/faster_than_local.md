@@ -746,6 +746,22 @@ coder-1.5B Q8_0 drafter, AU's RTX 3060 the rest, trees and flow forced off,
   then. If the floor still pays where the far end's check outlasts the round trip, it comes back
   for that case only (FUTURE_WORK #149).
 
+  **Measured again with AU on v0.3.257** (2026-10-27, the same rig and prompts, pinned to this node
+  + AU with every other peer excluded, arms new · old · old · new, Windows up 90.6-91.4 h, decode
+  tok/s at 96 tokens; `~/swarmllm-70b/ab70after.out`):
+
+  | prompt | new (no floor) | old (floor 0.4) | old's held chunks |
+  |---|---|---|---|
+  | lighthouse | 1.09 · 1.13 | 0.99 · 1.05 | 28 of 52, 27 of 52 |
+  | compost | 1.90 | 1.75 · 2.01 | 7 of 35, 7 of 35 |
+  | tea | 1.47 | 1.46 · 1.54 | 9 of 40, 9 of 40 |
+
+  With the tail skip at the far end, the prompt with the most holds is now 9% FASTER without the
+  floor (both new arms above both old ones), and the other two are inside the arms' own spread;
+  `held` read 0 in every new arm. The floor does not come back. The last new arm lost compost and
+  tea: AU disconnected at 02:05:05Z, and with Proxmox, the other holder of layers 28-79, excluded
+  by the pin, both asks failed in under 5 s.
+
 ## Sources
 
 Petals 2312.08361 · Pope et al. 2211.05102 · StagFormer 2501.15665 · Layer

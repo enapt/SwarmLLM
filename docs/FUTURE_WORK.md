@@ -2069,11 +2069,11 @@ computed 10 of 29 decode checks stale). Left: a started chunk, and a wrong look-
 tail is not sent. And from (a), 2026-10-26 (`faster_than_local.md` § 8.6): the width was not the
 lever (4-5 guesses +1-3% over 3 on the 7B TH↔AU), the drafter's confidence floor was — a chunk it
 cut short held the stream a round trip; the stream now drafts with no floor and sends every chunk
-at full width (+18% at 400 tokens, +12% at 160). Left from it: the 70B was level on two prompts and
-10% slower on the one with the most holds against an AU without the tail skip (its check outlasts
-the round trip, so a chunk on a wrong guess queued ahead of the restart) — measure it again once AU
-runs the release; if the floor still pays where the far end's check outlasts the round trip, keep it
-for that case only; (c) the drafter's near
+at full width (+18% at 400 tokens, +12% at 160). On the 70B, against an AU without the tail skip,
+it was level on two prompts and 10% slower on the one with the most holds; measured again
+2026-10-27 with AU on v0.3.257 it is 9% FASTER there (lighthouse 1.09 · 1.13 vs 0.99 · 1.05 tok/s,
+`held` 0 vs 28) and level on the other two, so the floor does not come back (`faster_than_local.md`
+§ 8.6); (c) the drafter's near
 layers as the verify input where the head segment is the coordinator's own; (d) mid-reply
 failover is #167. The TH↔BE two-CARD case was never measured — #151 now makes a same-build
 card split possible. A same-finetune drafter is NOT better here (coder 0.5B lost to the
