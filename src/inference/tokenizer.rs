@@ -87,10 +87,72 @@ fn pre_tokenizer_patterns(pre_type: &str) -> Option<&'static [&'static str]> {
 /// prompt. User-defined entries are literal text (Gemma's runs of spaces and
 /// newlines), which is why the raw vocabulary string is what gets matched.
 ///
+/// UNKNOWN (2) counts too: llama.cpp's cache takes CONTROL, USER_DEFINED and
+/// UNKNOWN, so a prompt's `<unk>` is the unknown token, not three pieces.
+///
 /// An absent array (older converters) answers false, leaving the name shapes as
-/// the whole rule exactly as before.
+/// the whole rule ([`matched_whole`]).
 pub(crate) fn declared_special(token_types: &[i32], id: u32) -> bool {
-    matches!(token_types.get(id as usize), Some(3 | 4))
+    matches!(token_types.get(id as usize), Some(2..=4))
+}
+
+/// Is vocabulary entry `token` (id `id`) matched whole in a prompt, before the
+/// merges ever see the text? **The one rule, for both encoders** (#334 (3)):
+/// what the vocabulary declares ([`declared_special`]) — llama.cpp's
+/// `cache_special_tokens`, and what the model's own tokenizer matches.
+///
+/// A `<…>` SHAPE counts only for a vocabulary that declares no types at all
+/// (older converters), where it is the only signal there is. Beside a declared
+/// type, a shape matched ordinary entries no tokenizer matches whole: the `<>`
+/// of `Vec::<>::new()` in every Llama 3, Qwen, Phi-4 and GLM-4 vocabulary,
+/// Qwen's ordinary `<s>` and `<unk>`, and a SentencePiece vocabulary's byte
+/// entries — the text `<0x0A>` read as a newline. The two encoders' shapes
+/// had also differed (20 characters for BPE, 30 for SentencePiece).
+///
+/// llama.cpp's end-of-generation NAMES are not part of it, though llama.cpp
+/// master promotes them to CONTROL before it matches: on every file here the
+/// only entry that promotion reaches is an ORDINARY `</s>` (Qwen's 128247,
+/// Gemma 4's 212), which Qwen's own `tokenizer.json` splits `</`, `s`, `>` —
+/// as llama-cpp-python 0.3.16 does. A reply still hides those names
+/// ([`shown_markup`]).
+///
+/// An empty entry is never matched: it would match at every position.
+pub(crate) fn matched_whole(token: &str, id: u32, token_types: &[i32]) -> bool {
+    !token.is_empty()
+        && (declared_special(token_types, id) || (token_types.is_empty() && marker_shaped(token)))
+}
+
+/// A prompt cut at the entries matched whole ([`matched_whole`]): `(entry,
+/// true)` for each, `(text, false)` for the text between. **The one splitter,
+/// for both encoders** (#334 (3)). The earliest match wins, and of those
+/// starting there the longest — `special_tokens` is sorted longest first, and
+/// `min_by_key` keeps the first of equal positions.
+fn split_at_special_tokens(text: &str, special_tokens: &[(String, u32)]) -> Vec<(String, bool)> {
+    let mut result = Vec::new();
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        let earliest = special_tokens
+            .iter()
+            .filter_map(|(tok, _)| remaining.find(tok.as_str()).map(|pos| (pos, tok.as_str())))
+            .min_by_key(|&(pos, _)| pos);
+        let Some((pos, tok)) = earliest else {
+            result.push((remaining.to_string(), false));
+            break;
+        };
+        if pos > 0 {
+            result.push((remaining[..pos].to_string(), false));
+        }
+        result.push((tok.to_string(), true));
+        remaining = &remaining[pos + tok.len()..];
+    }
+    result
+}
+
+/// The name shape of a marker, for a vocabulary that declares no types:
+/// `<|…|>`, or `<…>` of at most 30 characters with no space.
+fn marker_shaped(token: &str) -> bool {
+    (token.starts_with("<|") && token.ends_with("|>"))
+        || (is_markup_shaped(token) && !token.contains(' ') && token.len() <= 30)
 }
 
 /// BPE tokenizer built from GGUF metadata.
@@ -187,32 +249,15 @@ impl BpeTokenizer {
             })
             .collect();
 
-        // Collect special tokens (e.g., <|im_start|>, <|im_end|>, <s>, </s>, <unk>,
-        // <bos>, <eos>, <start_of_turn>, <end_of_turn>)
-        //
-        // What the VOCABULARY declares special comes first (`declared_special`);
-        // the name shapes stay beside it, so no vocabulary that tokenized
-        // correctly before this changes. The shapes alone never saw `[gMASK]`,
-        // the first token of every GLM-4 prompt (FUTURE_WORK #97).
-        //
-        // Gemma 4 declares every marker it has, and 75 of its ORDINARY entries
-        // are `<…>`-shaped (`<table>`, `<unused5>`), which llama.cpp never
-        // matches whole in a prompt — so there the declared types are the rule,
-        // with llama.cpp's end-of-generation names, whose type it overrides to
-        // CONTROL (Gemma 4's `<eos>` is declared ordinary).
-        let by_shape = !(gemma4 && !token_types.is_empty());
+        // Collect the entries a prompt matches whole (`<|im_start|>`, `<eos>`,
+        // `[gMASK]`, …) by the one rule both encoders share: what the
+        // vocabulary declares, plus llama.cpp's end-of-generation names
+        // (`matched_whole`, #334 (3)). A declared type is what saw `[gMASK]`,
+        // the first token of every GLM-4 prompt, which no shape does
+        // (FUTURE_WORK #97).
         let mut special_tokens: Vec<(String, u32)> = token_to_id
             .iter()
-            .filter(|(t, &id)| {
-                declared_special(token_types, id)
-                    || LLAMA_CPP_END_OF_GENERATION_NAMES.contains(&t.as_str())
-                    || (by_shape
-                        && ((t.starts_with("<|") && t.ends_with("|>"))
-                            || (t.starts_with('<')
-                                && t.ends_with('>')
-                                && !t.contains(' ')
-                                && t.len() <= 20)))
-            })
+            .filter(|(t, &id)| matched_whole(t, id, token_types))
             .map(|(t, &id)| (t.clone(), id))
             .collect();
         // Sort by length descending for longest-match-first
@@ -241,7 +286,7 @@ impl BpeTokenizer {
         }
 
         // 1. Split on special tokens first
-        let segments = self.split_special_tokens(text);
+        let segments = split_at_special_tokens(text, &self.special_tokens);
         let mut all_ids = Vec::new();
 
         for (segment, is_special) in &segments {
@@ -290,44 +335,6 @@ impl BpeTokenizer {
                 _ => out.extend(self.bpe_encode_word(run)),
             }
         }
-    }
-
-    /// Split text at special token boundaries.
-    fn split_special_tokens(&self, text: &str) -> Vec<(String, bool)> {
-        let mut result = Vec::new();
-        let mut remaining = text;
-
-        while !remaining.is_empty() {
-            // Check if remaining starts with any special token
-            let mut found = false;
-            for (special, _) in &self.special_tokens {
-                if remaining.starts_with(special.as_str()) {
-                    result.push((special.clone(), true));
-                    remaining = &remaining[special.len()..];
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                // Find next special token occurrence
-                let next_pos = self
-                    .special_tokens
-                    .iter()
-                    .filter_map(|(s, _)| remaining.find(s.as_str()))
-                    .min();
-                match next_pos {
-                    Some(pos) => {
-                        result.push((remaining[..pos].to_string(), false));
-                        remaining = &remaining[pos..];
-                    }
-                    None => {
-                        result.push((remaining.to_string(), false));
-                        remaining = "";
-                    }
-                }
-            }
-        }
-        result
     }
 
     /// Pre-tokenize text using the model's regex patterns.
@@ -850,18 +857,15 @@ impl SpmTokenizer {
         // searching for one family's spelling silently disables BOS for the
         // other, which is exactly the bug this parameter exists to prevent.
 
-        // Collect special tokens (control tokens like <bos>, <start_of_turn>,
-        // etc.) — what the vocabulary declares, plus the old name shape. The
-        // shape alone missed Mistral v0.3's `[INST]` / `[/INST]`, which open and
-        // close every turn, and Gemma's user-defined whitespace runs, which
-        // SentencePiece always matches whole (FUTURE_WORK #97).
+        // Collect the entries a prompt matches whole by the one rule both
+        // encoders share (`matched_whole`, #334 (3)). A declared type is what
+        // sees Mistral v0.3's `[INST]` / `[/INST]`, which open and close every
+        // turn, and Gemma's user-defined whitespace runs, which SentencePiece
+        // always matches whole (FUTURE_WORK #97); no name shape does.
         let mut special_tokens: Vec<(String, u32)> = tokens
             .iter()
             .enumerate()
-            .filter(|(i, t)| {
-                declared_special(token_types, *i as u32)
-                    || (t.starts_with('<') && t.ends_with('>') && !t.contains(' ') && t.len() <= 30)
-            })
+            .filter(|(i, t)| matched_whole(t, *i as u32, token_types))
             .map(|(i, t)| (t.clone(), i as u32))
             .collect();
         // Sort by length descending for greedy matching
@@ -912,7 +916,7 @@ impl SpmTokenizer {
         let mut after_special: Option<u32> = None;
 
         // Split text around special tokens first
-        let segments = self.split_special_tokens(text);
+        let segments = split_at_special_tokens(text, &self.special_tokens);
         for (segment, is_special) in segments {
             if is_special {
                 if let Some(&(id, _)) = self.piece_to_id.get(&segment) {
@@ -944,37 +948,6 @@ impl SpmTokenizer {
                 };
                 result.extend(self.spm_encode(&normalized));
                 after_special = None;
-            }
-        }
-        result
-    }
-
-    /// Split text around special tokens, returning (segment, is_special) pairs.
-    fn split_special_tokens(&self, text: &str) -> Vec<(String, bool)> {
-        let mut result = Vec::new();
-        let mut remaining = text;
-        while !remaining.is_empty() {
-            // Find the earliest special token match
-            let mut best_match: Option<(usize, &str, u32)> = None;
-            for (tok, id) in &self.special_tokens {
-                if let Some(pos) = remaining.find(tok.as_str()) {
-                    if best_match.is_none() || pos < best_match.unwrap().0 {
-                        best_match = Some((pos, tok.as_str(), *id));
-                    }
-                }
-            }
-            match best_match {
-                Some((pos, tok, _)) => {
-                    if pos > 0 {
-                        result.push((remaining[..pos].to_string(), false));
-                    }
-                    result.push((tok.to_string(), true));
-                    remaining = &remaining[pos + tok.len()..];
-                }
-                None => {
-                    result.push((remaining.to_string(), false));
-                    break;
-                }
             }
         }
         result
@@ -1568,6 +1541,86 @@ mod declared_special_tests {
         let blind = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, None, &[]);
         let ids = blind.encode("[INST]a    b");
         assert!(!ids.contains(&3) && !ids.contains(&4), "{ids:?}");
+    }
+
+    /// **One rule for both encoders** (#334 (3)): beside declared types, a
+    /// `<…>` SHAPE matches nothing whole. The `<>` of `Vec::<>::new()` is an
+    /// ordinary entry in every Llama 3, Qwen, Phi-4 and GLM-4 vocabulary, and
+    /// Qwen's `<s>` and `</s>` are ordinary text — its own `tokenizer.json`
+    /// and llama.cpp split all three. A SentencePiece byte entry written as
+    /// text (`<0x0A>`) is that text, not a newline. UNKNOWN is declared
+    /// special, as llama.cpp's cache counts it. A vocabulary that declares no
+    /// types keeps the shapes, the only signal it has.
+    #[test]
+    fn an_ordinary_entry_shaped_like_a_marker_is_merged_like_any_text() {
+        // A byte-level vocabulary with no merges makes the expected ids
+        // arithmetic: printable ASCII is its own byte-level character.
+        let mut vocab: Vec<String> = (0u8..=127).map(|b| (b as char).to_string()).collect();
+        vocab.push("<>".into()); // 128, NORMAL
+        vocab.push("<s>".into()); // 129, NORMAL
+        vocab.push("</s>".into()); // 130, NORMAL — and a llama.cpp end-of-generation name
+        vocab.push("<|im_start|>".into()); // 131, CONTROL
+        vocab.push("<unk>".into()); // 132, UNKNOWN
+        let mut types = vec![1i32; vocab.len()];
+        types[131] = 3;
+        types[132] = 2;
+        let text = "<|im_start|>f::<>()<s>x</s><unk>";
+        let bytes = |s: &str| s.bytes().map(i64::from).collect::<Vec<_>>();
+
+        let bpe = SplitTokenizer::from_bpe(&vocab, &[], "", "gpt2", false, None, &types);
+        let expected = [vec![131], bytes("f::<>()<s>x</s>"), vec![132]].concat();
+        assert_eq!(bpe.encode(text), expected);
+
+        // THE CONTROL: the same entries with no declared types, by shape.
+        let typeless = SplitTokenizer::from_bpe(&vocab, &[], "", "gpt2", false, None, &[]);
+        let by_shape = [vec![131], bytes("f::"), vec![128], bytes("()"), vec![129]].concat();
+        assert_eq!(
+            typeless.encode(text),
+            [by_shape, bytes("x"), vec![130, 132]].concat()
+        );
+
+        // SentencePiece, the same rule.
+        let toks: Vec<String> = [
+            "<unk>", "<s>", "</s>", "<0x0A>", "<", ">", "0", "x", "A", "a",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let scores = vec![0.0; toks.len()];
+        let mut types = vec![1i32; toks.len()];
+        types[0] = 2;
+        types[1] = 3;
+        types[2] = 3;
+        types[3] = 6;
+        let spm = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, None, &types);
+        assert_eq!(spm.encode("a<0x0A></s>"), vec![9, 4, 6, 7, 6, 8, 5, 2]);
+        let typeless = SplitTokenizer::from_sentencepiece(&toks, &scores, false, false, None, &[]);
+        assert_eq!(typeless.encode("a<0x0A></s>"), vec![9, 3, 2]);
+    }
+
+    /// The one splitter (#334 (3)): the earliest entry wins, and of two
+    /// starting at the same place the longer — `<|im_start|>` over `<|im`.
+    /// An empty entry, which would match everywhere, is never matched.
+    #[test]
+    fn a_prompt_is_cut_at_the_earliest_then_longest_entry() {
+        let specials = [
+            ("<|im_start|>".to_string(), 1),
+            ("<|im".to_string(), 2),
+            ("end".to_string(), 3),
+        ];
+        let cut = |s: &str, special: bool| (s.to_string(), special);
+        assert_eq!(
+            split_at_special_tokens("a<|im_start|>b end<|im", &specials),
+            vec![
+                cut("a", false),
+                cut("<|im_start|>", true),
+                cut("b ", false),
+                cut("end", true),
+                cut("<|im", true),
+            ]
+        );
+        assert!(!matched_whole("", 0, &[3]));
+        assert!(!matched_whole("", 0, &[]));
     }
 
     /// Phi-3's own tokenizer strips the whitespace after its turn markers and
@@ -2172,7 +2225,7 @@ mod gemma4_tests {
     fn gemma4(model: &str) -> SplitTokenizer {
         let entries: [(&str, i32); 19] = [
             ("<pad>", 3),
-            ("<eos>", 1), // declared ordinary, as in the real vocabulary
+            ("<eos>", 3),
             ("<bos>", 3),
             ("a", 1),
             ("b", 1),
@@ -2216,9 +2269,9 @@ mod gemma4_tests {
         assert_ne!(gemma4("llama").encode("a b"), tok.encode("a b"));
     }
 
-    /// Only what the vocabulary declares is matched whole — `<|channel>` —
-    /// plus `<eos>`, which llama.cpp treats as control whatever it is declared;
-    /// an ordinary `<y>` is merged from its pieces like any other text.
+    /// Only what the vocabulary declares is matched whole — `<|channel>`,
+    /// `<eos>`; an ordinary `<y>` is merged from its pieces like any other
+    /// text.
     #[test]
     fn declared_markers_are_matched_whole_and_ordinary_markup_is_merged() {
         let tok = gemma4("gemma4");
@@ -2252,8 +2305,8 @@ mod gemma4_tests {
 /// (FUTURE_WORK #97).
 ///
 /// What it ASSERTS is what is unambiguous:
-/// - for every model, the special tokens (CONTROL / USER_DEFINED in the
-///   vocabulary's own `token_type`) appear in the same order, and BOS agrees;
+/// - for every model, the special tokens (UNKNOWN / CONTROL / USER_DEFINED in
+///   the vocabulary's own `token_type`) appear in the same order, and BOS agrees;
 /// - for a GPT-2-style BPE vocabulary, the WHOLE sequence agrees.
 ///
 /// What it only REPORTS is SentencePiece whitespace, where llama.cpp is no

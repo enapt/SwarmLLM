@@ -996,11 +996,12 @@ for word.
 
 ## A special token is what the vocabulary says it is — and a prompt gets ONE BOS (2026-09-24, FUTURE_WORK #97)
 
-**`tokenizer::declared_special`** — CONTROL (3) or USER_DEFINED (4) in the
-GGUF's `tokenizer.ggml.token_type` — decides which vocabulary entries are
-matched whole in the text before the merge algorithm runs, on BOTH encoder
-paths, beside the old name shapes (`<…>`, `<|…|>`) so no vocabulary that was
-right changes. **`gguf_meta::add_bos_by_llama_cpp_rules`** decides whether a
+**`tokenizer::matched_whole`** decides which vocabulary entries are matched
+whole in the text before the merge algorithm runs, on BOTH encoder paths: what
+the GGUF's `tokenizer.ggml.token_type` declares — UNKNOWN (2), CONTROL (3) or
+USER_DEFINED (4), **`tokenizer::declared_special`** — and the old name shapes
+(`<…>`, `<|…|>`) only for a vocabulary that declares no types (2026-10-27, §
+"One rule for both encoders" below). **`gguf_meta::add_bos_by_llama_cpp_rules`** decides whether a
 prompt gets a BOS, and **`SplitTokenizer::encode`** gives none to a text that
 already opens with one.
 
@@ -1061,6 +1062,60 @@ NAME. Ours against HF:
   a `phi3` GGUF with a GPT-2 vocabulary (Phi-4-mini) never reaches this encoder.
   Checked three ways: ours = HF = llama.cpp with its name rule forced on
   (`kv_overrides general.name`), 8/8 each.
+
+**One rule for both encoders (2026-10-27, FUTURE_WORK #334 (3)).** Three rules
+became `matched_whole` and two splitters `split_at_special_tokens`. The BPE
+encoder had matched the declared types, llama.cpp's end-of-generation names and
+any `<|…|>` or `<…>` of at most 20 characters (no shape for Gemma 4); the
+SentencePiece one the declared types and any `<…>` of at most 30. llama.cpp's
+rule (`llama-vocab.cpp`, master of 2026-09-25): `cache_special_tokens` takes
+UNKNOWN, CONTROL and USER_DEFINED, and `tokenizer_st_partition` matches them —
+no shape at all.
+
+- **What changed, counted over every local vocabulary** (old rule against new):
+  only NORMAL (1) and BYTE (6) entries stop being matched whole, and nothing
+  becomes newly whole. The 256 byte entries of every SentencePiece vocabulary
+  (the TEXT `<0x0A>` had reached the model as a newline); `<>`, `<?>`, `<()>`,
+  `<?>>` in every vocabulary (`<=>` in Gemma 3, `</>` and `<_>` in Gemma 2);
+  Qwen's `<s>` and `<unk>`; Phi-4-mini's `<|endoftextNN|>` placeholders.
+- **Against llama.cpp** (llama-cpp-python 0.3.16, 403 cases over 27 models: each
+  chat template plus Rust generics, C++ templates, HTML, `<unused5> <table>
+  <eos> <bos> <s> </s> <unk> …`, think/tool and image/FIM markers). Before, every
+  GPT-2-style vocabulary failed `Vec::<>::new()` — ours `::` `<>` `::`,
+  llama.cpp's `::<` `>::` — and every Qwen also failed the `<s>` line. After,
+  every GPT-2-style vocabulary agrees in full (Llama 3.x, the 70B, xLAM, Phi-4,
+  GLM-4, Qwen 2.5/3: 15/15 each). SentencePiece whitespace, only reported:
+  Gemma 2 13 → 14/14, Mistral 9 → 10/14, Phi-3.5 9 → 10/15, TinyLlama 6/15.
+  Against each model's own `tokenizer.json` (`tokenizer_hf_reference.py`):
+  Mistral 12 → 13/14 (the 14th a text opening with spaces, as before),
+  Phi-3.5 14 → 15/15, TinyLlama 14 → 15/15. The harness keeps these lines
+  (`examples/tokenizer_reference.py` RAW, and it skips an embedding model —
+  llama.cpp appends an EOS to its every text — and a family the pinned
+  llama.cpp cannot load). `~/swarmllm-ref/cases.jsonl` fails 16 cases on HEAD
+  and after alike: its reference is the doubled BOS fixed 2026-09-24 —
+  `cases2.jsonl` replaced it.
+- **End-of-generation NAMES are not matched by name.** llama.cpp master promotes
+  them to CONTROL before it matches (the EOG loop, warning "this is probably a
+  bug in the model"). On every file here (Qwen 2.5/3, xLAM, Gemma 4, llama.cpp's
+  own Gemma 4 vocabulary) the only entry that promotion reaches is an ORDINARY
+  `</s>`, added to the list for PaddleOCR: Qwen's 128247, Gemma 4's 212. Qwen's
+  own `tokenizer.json` splits it `</`, `s`, `>` (it has no `</s>`, `<s>` or `<unk>`
+  among its added tokens), and so does llama-cpp-python 0.3.16. The Gemma 4 test's
+  premise that its `<eos>` is declared ordinary holds for no file found: it is
+  CONTROL in all three. A reply still hides those names (`shown_markup`), as
+  llama.cpp renders them.
+- **llama.cpp's FIM/EOT name promotions are not mirrored either**: it applies
+  them only when a file declares no such id, and on every local file each of
+  those names that exists is already declared special.
+- **An empty entry is never matched**: it matches at every position, and both
+  old splitters looped forever on one declared special.
+- **Each part switched off, its test red**: a shape beside declared types →
+  `an_ordinary_entry_shaped_like_a_marker_is_merged_like_any_text`,
+  `declared_markers_are_matched_whole_and_ordinary_markup_is_merged` and the
+  reference (39 cases); the end-of-generation names promoted → the first and
+  the reference (the 16 Qwen-vocabulary `</s>` cases); UNKNOWN undeclared → the
+  first; an empty entry matched, or the shorter entry at a position →
+  `a_prompt_is_cut_at_the_earliest_then_longest_entry`.
 
 **The harness is the part to keep.** No weights are read: each model gets a
 SPARSE GGUF (header + a hole to the real size), because llama.cpp checks tensor

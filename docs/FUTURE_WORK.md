@@ -273,27 +273,6 @@ paths across a cache hit.
 
 ### Reliability and failover
 
-#### #334 — Four rules are computed in several places, and the copies already differ
-`P3` · reliability · **PARTIAL** — 2026-10-27 · history: sweep 2026-10-24 (`.claude/sweep-log.jsonl`)
-
-Found by the duplication pass; each copy was checked by hand. None is a one-line fix: each
-changes behaviour on some path, so each needs its own test before it is merged.
-1. ~~**"Is this part on disk and whole?"**~~ — done 2026-10-27: `shard::shard_file_is_whole` (exact
-   size) is the one size verdict and `SharedState::parts_servable_here` the one answer for the
-   loader, a whole-model hand-off and the request gate. Evidence: `docs/invariants/network.md`
-   § "A holder claim means VERIFIED".
-2. ~~**A layout's tensor entries**~~ — done 2026-10-27: `LayerShardLayout::tensor_entries` is the
-   one writer of a table, called by both. Evidence: `docs/invariants/network.md` § "A manifest's
-   tensor table is DERIVED data".
-3. **A `<…>`-shaped vocabulary entry matched whole by shape**: the BPE encoder takes it up to
-   20 characters, the SentencePiece one up to 30, and the SentencePiece one has no
-   end-of-generation names. `split_special_tokens` is written twice (BPE, SPM). Next: read
-   llama.cpp's rule for each vocabulary type (`llama-vocab.cpp`), then one predicate. Judge it
-   with `examples/tokenizer_reference.py`, because it changes what the model reads.
-4. ~~**The disk a path is on**~~ — done 2026-10-27: `auto_manage::disk_space_for` is the one
-   reading, on Linux `statvfs` of the path, never sysinfo's list (which omits NFS, CIFS and
-   tmpfs). Evidence: `docs/invariants/memory.md` § storage budget.
-
 #### #167 — A speculative split decode has no mid-reply failover
 `P2` · reliability · **PARTIAL** — 2026-08-25 · history: archive § "Speculative distributed decode has no failover", archive row #149 item (d)
 
@@ -3369,7 +3348,19 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-27, ships in the next release** (#338, #340, #341, #354, #359, #360, #361)
+**Closed 2026-10-27, ships in the next release** (#334, #338, #340, #341, #354, #359, #360, #361)
+- #334 — **Four rules computed in several places are each computed once.** Whether a part on
+  disk is whole (`shard::shard_file_is_whole`, exact size; `SharedState::parts_servable_here` for
+  the loader, a whole-model hand-off and the request gate — two copies took a file within a tenth
+  of its size, one only that it existed); a part's tensor table (`LayerShardLayout::tensor_entries`,
+  publisher and holder); the disk a path is on (`auto_manage::disk_space_for`, `statvfs` of the
+  path on Linux — sysinfo's list omits NFS, CIFS and tmpfs); and what a prompt matches whole
+  (`tokenizer::matched_whole` + `split_at_special_tokens`, both encoders: the vocabulary's declared
+  types, a `<…>` shape only where it declares none — the shape had matched `<>` in code on every
+  GPT-2-style vocabulary, Qwen's ordinary `<s>`, and SentencePiece byte entries). Evidence:
+  `docs/invariants/network.md` § "A holder claim means VERIFIED" and § "A manifest's tensor table
+  is DERIVED data", `docs/invariants/memory.md` § storage budget, `docs/invariants/inference.md` §
+  "A special token is what the vocabulary says it is".
 - #341 — **A DHT record no longer passes for a computer's own word that it holds a part.** A
   `GetProviders` answer lists whichever keys the answering node chooses (libp2p-kad 0.48 checks an
   ADD_PROVIDER against its sender, not an answer's providers), and `merge_dht_providers` wrote

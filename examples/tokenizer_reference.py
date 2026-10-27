@@ -42,6 +42,15 @@ RAW = [
     "   leading and    irregular\twhitespace\n\nand blank lines   ",
     "def factorial(n):\n    if n == 0:\n        return 1\n    return n * factorial(n - 1)\n",
     "<div class=\"x\">a<br>b</div> [INST] [/INST] [gMASK] <|im_start|>",
+    # Text shaped like a marker that a vocabulary holds as an ORDINARY entry
+    # (#334 (3)): code, HTML, other families' marker names, byte-entry names.
+    "let v: Vec<u8> = Vec::<>::new(); a <=> b; x <<y>> z; Option<()>; f::<>()",
+    "template <typename T> class Foo<T> {}; std::map<int,int> m; if (a<b && c>d) {}",
+    "<html><body><table><tr><td>1</td></tr></table></body></html> <s>old</s> <0x0A>",
+    "<unused5> <table> <eos> <bos> <s> </s> <unk> <pad> <mask> <sep> <cls>",
+    "<think>reason</think> <tool_call>{}</tool_call> <|fake_marker|> <|endoftext|>",
+    "<|im_start|>user\nhi<|im_end|> <|eot_id|> <end_of_turn> <|end|> <|user|>",
+    "<start_of_image> <image> <img> <audio> <|vision_start|> <fim_prefix> <|fim_middle|>",
 ]
 
 
@@ -76,8 +85,19 @@ try:
                 continue
             vocab = os.path.join(tmp, name + ".gguf")
             sparse_gguf(model_dir, vocab)
-            llm = Llama(model_path=vocab, vocab_only=True, verbose=False)
+            try:
+                llm = Llama(model_path=vocab, vocab_only=True, verbose=False)
+            except ValueError as e:
+                # A family newer than the pinned llama-cpp-python (Qwen 3.5,
+                # Gemma 4): its reference is llama.cpp master instead.
+                print(f"{name}: SKIPPED, this llama.cpp cannot load it: {e}")
+                continue
             md = llm.metadata
+            if any(k.endswith(".pooling_type") and str(v) != "0" for k, v in md.items()):
+                # llama.cpp appends an EOS to an embedding model's every text;
+                # this node refuses such a model for chat (`GgufTensorMeta::refusal`).
+                print(f"{name}: SKIPPED, an embedding model")
+                continue
             bos_id = int(md["tokenizer.ggml.bos_token_id"]) if "tokenizer.ggml.bos_token_id" in md else None
             piece = lambda i: llm.detokenize([i], special=True).decode(errors="replace")
             bos = piece(bos_id) if bos_id is not None else ""

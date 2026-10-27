@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+**A prompt with code or HTML in it now reaches the model the way the model's own tokenizer would
+give it.** Before a model reads a prompt, your computer turns the text into the model's tokens,
+and the markers that start and end each turn are always kept whole. Any other text in angle
+brackets that matched a vocabulary entry was kept whole as well: the `<>` of code such as
+`Vec::<>::new()` or `new ArrayList<>()`, the `<s>` of HTML's strikethrough on Qwen models, and
+the text `<0x0A>`, which reached the model as a line break. Now only what the model's vocabulary
+marks as a marker is kept whole, as llama.cpp and the model's own tokenizer do. Checked on 27
+models against llama.cpp, and on Qwen, Mistral, Phi-3.5 and TinyLlama against the model's own
+tokenizer (#334).
+
 **Your computer now reads the free space of the drive its model folder is really on.** It checks
 that drive before downloading a model part, keeps its model storage within it, and tells other
 computers how much room it has. When the folder was on a network drive, reached through a
