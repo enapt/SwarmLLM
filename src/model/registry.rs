@@ -103,6 +103,17 @@ struct HolderRecord {
     /// against the model's origin (`ShardAnnounce::origin_checked_models`).
     /// Only a first-hand announcement sets or clears it.
     checked: bool,
+    /// The holder said so itself — its announcement, its capability, this
+    /// node's own registration — rather than a DHT provider record naming it
+    /// (#341). A `GetProviders` answer lists whichever keys the answering node
+    /// chooses: libp2p-kad 0.48 checks an inbound ADD_PROVIDER against its
+    /// sender (`behaviour.rs`, "Only accept a provider record from a
+    /// legitimate peer") but passes an answer's providers on as given. So a
+    /// record only the DHT vouches for is a place to ask and nothing more: no
+    /// standing on a full list, not counted by `part_has_a_holder_where`, aged
+    /// out whoever it names. Set by any first-hand claim, never cleared by a
+    /// DHT sighting.
+    first_hand: bool,
 }
 
 /// How many distinct full hashes are remembered per part
@@ -848,6 +859,25 @@ impl ModelRegistry {
         build: u64,
         checked: Option<bool>,
     ) -> bool {
+        self.record_holder(shard_id, node_id, build, checked, true)
+    }
+
+    /// The one writer of a holder record. `first_hand` is false only for a
+    /// DHT provider record (`merge_dht_providers`), which never clears a
+    /// retraction, claims no standing for the node it names, and refreshes
+    /// only a record the DHT alone vouches for: a holder's own record is kept
+    /// fresh by its own announcements, and a provider record outlives the fact
+    /// by hours. A first-hand claim on a DHT-only record makes it first-hand,
+    /// and that counts as a new holder (the return value).
+    #[track_caller]
+    fn record_holder(
+        &self,
+        shard_id: ShardId,
+        node_id: NodeId,
+        build: u64,
+        checked: Option<bool>,
+        first_hand: bool,
+    ) -> bool {
         // Read before any guard on `shard_holders` is taken.
         if Some(&node_id) != self.local_node_id.as_ref()
             && self
@@ -860,10 +890,11 @@ impl ModelRegistry {
         // A first-hand claim supersedes any earlier retraction: the node is
         // telling us it has the shard now. Only this path clears it — the DHT
         // merge must not, or a stale provider record would undo a retraction.
-        let undid_a_retraction = self
-            .retracted_claims
-            .remove(&(shard_id.clone(), node_id.clone()))
-            .is_some();
+        let undid_a_retraction = first_hand
+            && self
+                .retracted_claims
+                .remove(&(shard_id.clone(), node_id.clone()))
+                .is_some();
         // Name the CALL SITE when that happens, because it is the one fact an
         // investigation on 2026-09-16 could not get by reading.
         //
@@ -898,13 +929,18 @@ impl ModelRegistry {
         // guard held: the hook reads other maps (#339). A claim from a node
         // not connected here may take only a stale record's place, so only
         // those holders are asked about, and a flood of strangers' claims
-        // costs no lookup per holder.
+        // costs no lookup per holder. A DHT record stands nowhere (#341): its
+        // node is judged a stranger as a claimant and as a holder.
         let now = Instant::now();
-        let newcomer = self.standing(&node_id);
+        let newcomer = if first_hand {
+            self.standing(&node_id)
+        } else {
+            None
+        };
         let newcomer_connected = newcomer.is_some();
         let mut asked_full = false;
         let standing: HashMap<NodeId, Option<u64>> = {
-            let asked: Vec<NodeId> = self
+            let asked: Vec<(NodeId, bool)> = self
                 .shard_holders
                 .get(&shard_id)
                 .filter(|h| h.len() >= MAX_HOLDERS_PER_SHARD && !h.contains_key(&node_id))
@@ -916,14 +952,18 @@ impl ModelRegistry {
                                 && (newcomer_connected
                                     || now.saturating_duration_since(rec.seen) >= self.stale_after)
                         })
-                        .map(|(nid, _)| nid.clone())
+                        .map(|(nid, rec)| (nid.clone(), rec.first_hand))
                         .collect()
                 })
                 .unwrap_or_default();
             asked
                 .into_iter()
-                .map(|nid| {
-                    let standing = self.standing(&nid);
+                .map(|(nid, first_hand)| {
+                    let standing = if first_hand {
+                        self.standing(&nid)
+                    } else {
+                        None
+                    };
                     (nid, standing)
                 })
                 .collect()
@@ -936,7 +976,11 @@ impl ModelRegistry {
         // none must NOT erase what we already learned, or a single older-peer
         // re-announce would blank a known build.
         if let Some(existing) = holders.get_mut(&node_id) {
-            existing.seen = Instant::now();
+            let confirmed = first_hand && !existing.first_hand;
+            if first_hand || !existing.first_hand {
+                existing.seen = Instant::now();
+            }
+            existing.first_hand |= first_hand;
             if let Some(checked) = checked {
                 existing.checked = checked;
             }
@@ -946,8 +990,9 @@ impl ModelRegistry {
                 drop(entry);
                 self.note_build_tag(&shard_id, &node_id, was, build);
             }
-            // Reverse index already has this entry, so nothing changed.
-            return false;
+            // The reverse index already has this entry: new only where the
+            // holder confirmed what the DHT alone had said.
+            return confirmed;
         }
 
         // At capacity (#339): see `holder_to_give_up`. Evicting the oldest for
@@ -982,6 +1027,7 @@ impl ModelRegistry {
                 since: now,
                 build,
                 checked: checked.unwrap_or(false),
+                first_hand,
             },
         );
         let announced_build = build;
@@ -1472,8 +1518,10 @@ impl ModelRegistry {
             .collect()
     }
 
-    /// Merge holders discovered via DHT provider queries into the cache.
-    /// Updates timestamps for existing entries and adds new ones (with eviction).
+    /// Merge holders discovered via DHT provider queries into the cache, as
+    /// places to ask (#341): each is recorded as the DHT's word, not the
+    /// holder's (`HolderRecord::first_hand`), so it gives the node it names no
+    /// standing until that node's own announcement confirms it.
     pub fn merge_dht_providers(&self, shard_id: &ShardId, providers: &[NodeId]) {
         for node_id in providers {
             // The holder's own word beats the DHT's memory of it. A provider
@@ -1483,7 +1531,13 @@ impl ModelRegistry {
             if self.claim_was_retracted(shard_id, node_id) {
                 continue;
             }
-            self.record_shard_holder(shard_id.clone(), node_id.clone());
+            self.record_holder(
+                shard_id.clone(),
+                node_id.clone(),
+                swarmllm_types::BUILD_TAG_UNKNOWN,
+                None,
+                false,
+            );
         }
     }
 
@@ -1804,15 +1858,21 @@ impl ModelRegistry {
             .map(|m| m.shards.iter().map(|s| s.index).collect())
     }
 
-    /// Is this part held, of any build, by a node `counts` vouches for? The
-    /// holders are copied out first, so `counts` may read other maps.
+    /// Is this part held, of any build, by a node `counts` vouches for, on
+    /// that node's own word? A record only the DHT vouches for is not counted
+    /// (#341). The holders are copied out first, so `counts` may read other
+    /// maps.
     pub fn part_has_a_holder_where(
         &self,
         shard_id: &ShardId,
         counts: impl Fn(&NodeId) -> bool,
     ) -> bool {
         let holders: Vec<NodeId> = match self.shard_holders.get(shard_id) {
-            Some(holders) => holders.keys().cloned().collect(),
+            Some(holders) => holders
+                .iter()
+                .filter(|(_, rec)| rec.first_hand)
+                .map(|(nid, _)| nid.clone())
+                .collect(),
             None => return false,
         };
         holders.iter().any(counts)
@@ -1880,13 +1940,15 @@ impl ModelRegistry {
     /// [`STALE_HOLDER_AFTER`] whose node this one does not know (#339) — a key that announced once and was
     /// never a peer, whose records nothing else would ever clear (the stale-peer
     /// sweep and a disconnect clear only peers). A real holder refreshes its own
-    /// on every full re-announce. Returns how many went.
+    /// on every full re-announce. A record only the DHT vouches for goes when
+    /// stale whoever it names, a connected peer included (#341). Returns how
+    /// many went.
     pub fn age_out_holders(&self) -> usize {
         let now = Instant::now();
         let stale =
             |rec: &HolderRecord| now.saturating_duration_since(rec.seen) >= self.stale_after;
         let local = self.local_node_id.as_ref();
-        let candidates: Vec<(ShardId, NodeId)> = self
+        let candidates: Vec<(ShardId, NodeId, bool)> = self
             .shard_holders
             .iter()
             .flat_map(|e| {
@@ -1894,22 +1956,26 @@ impl ModelRegistry {
                 e.value()
                     .iter()
                     .filter(|(node, rec)| Some(*node) != local && stale(rec))
-                    .map(|(node, _)| (shard.clone(), node.clone()))
+                    .map(|(node, rec)| (shard.clone(), node.clone(), rec.first_hand))
                     .collect::<Vec<_>>()
             })
             .collect();
         // Asked with no guard held: the hook reads other maps.
         let mut known: HashMap<NodeId, bool> = HashMap::new();
         let mut removed = 0;
-        for (shard, node) in candidates {
-            let connected = *known
-                .entry(node.clone())
-                .or_insert_with(|| self.standing(&node).is_some());
+        for (shard, node, first_hand) in candidates {
+            // A record only the DHT vouches for goes whoever it names (#341):
+            // a connected holder announces its parts itself.
+            let connected = first_hand
+                && *known
+                    .entry(node.clone())
+                    .or_insert_with(|| self.standing(&node).is_some());
             if connected {
                 continue;
             }
             let gone = match self.shard_holders.get_mut(&shard) {
-                // Re-read under the guard: a claim may have refreshed it.
+                // Re-read under the guard: a claim may have refreshed it (a
+                // holder confirming a DHT record refreshes it too).
                 Some(mut holders) if holders.get(&node).is_some_and(stale) => {
                     holders.remove(&node);
                     // The reverse index under the same guard, as a claim updates it.
@@ -3737,6 +3803,7 @@ mod tests {
                         since: now,
                         build: swarmllm_types::BUILD_TAG_UNKNOWN,
                         checked: false,
+                        first_hand: true,
                     },
                 )
             })
@@ -3949,6 +4016,104 @@ mod tests {
             1,
             "a re-announced holding must clear the retraction"
         );
+    }
+
+    /// #341: a `GetProviders` answer names whatever keys the answering node
+    /// likes, so a record only the DHT vouches for gives the node it names — a
+    /// connected peer included — no standing until that node says so itself.
+    #[test]
+    fn a_dht_record_is_a_place_to_ask_not_the_holders_word() {
+        let local = key(0);
+        let peer = key(1);
+        let registry = connected_to(&local, [(peer.clone(), 1)]);
+        let part = part0();
+
+        registry.merge_dht_providers(&part, std::slice::from_ref(&peer));
+        assert!(
+            registry.shard_holders(&part).contains(&peer),
+            "a place to ask"
+        );
+        assert!(
+            !registry.part_has_a_holder_where(&part, |_| true),
+            "the DHT's word counted as the holder's"
+        );
+        // Aged out though the peer is connected: it announces its parts itself.
+        backdate(&registry, &part, &peer, Duration::from_secs(61));
+        assert_eq!(registry.age_out_holders(), 1);
+        assert!(registry.shards_for_node(&peer).is_empty());
+
+        // Its own word makes it a holder, counted, and that is news.
+        registry.merge_dht_providers(&part, std::slice::from_ref(&peer));
+        assert!(registry.record_shard_holder(part.clone(), peer.clone()));
+        assert!(!registry.record_shard_holder(part.clone(), peer.clone()));
+        assert!(registry.part_has_a_holder_where(&part, |_| true));
+        backdate(&registry, &part, &peer, Duration::from_secs(61));
+        registry.merge_dht_providers(&part, std::slice::from_ref(&peer));
+        assert!(registry.part_has_a_holder_where(&part, |_| true));
+        assert_eq!(
+            registry.age_out_holders(),
+            0,
+            "a connected holder's own record"
+        );
+
+        // A DHT sighting keeps no holder's own record fresh: that is the
+        // holder's to do, and a provider record outlives the fact by hours.
+        let far = key(2);
+        registry.record_shard_holder(part.clone(), far.clone());
+        backdate(&registry, &part, &far, Duration::from_secs(61));
+        registry.merge_dht_providers(&part, std::slice::from_ref(&far));
+        assert_eq!(registry.age_out_holders(), 1);
+        assert!(registry.shards_for_node(&far).is_empty());
+    }
+
+    /// #341 on a full list: a DHT record naming a connected peer was that
+    /// peer's connected claim, and took a fresh stranger's place.
+    #[test]
+    fn a_dht_record_naming_a_connected_peer_takes_no_place_on_a_full_list() {
+        let local = key(0);
+        let peer = key(999);
+        let registry = connected_to(&local, [(peer.clone(), 999)]);
+        let part = part0();
+        fill(&registry, &part, &local);
+        let before: HashSet<NodeId> = registry.shard_holders(&part).into_iter().collect();
+
+        registry.merge_dht_providers(&part, std::slice::from_ref(&peer));
+        let after: HashSet<NodeId> = registry.shard_holders(&part).into_iter().collect();
+        assert_eq!(after, before, "the DHT's word took a holder's place");
+        assert!(
+            registry.record_shard_holder(part.clone(), peer),
+            "its own word does"
+        );
+    }
+
+    /// ... and on a full list a record only the DHT vouches for is a
+    /// stranger's place, given up before any holder's own record.
+    #[test]
+    fn a_dht_only_record_is_given_up_before_a_holders_own() {
+        let local = key(0);
+        let registry = connected_to(&local, (1..=60).map(|i| (key(i), u64::from(i))));
+        let part = part0();
+        registry.record_shard_holder(part.clone(), local.clone());
+        registry.merge_dht_providers(&part, &[key(1)]);
+        for i in 2..MAX_HOLDERS_PER_SHARD as u32 {
+            registry.record_shard_holder(part.clone(), key(i));
+        }
+        for i in 1..MAX_HOLDERS_PER_SHARD as u32 {
+            arrived(
+                &registry,
+                &part,
+                &key(i),
+                Duration::from_secs(u64::from(100 - i)),
+            );
+        }
+
+        // Every holder connected, each its own network: "the newest goes"
+        // would give up key(49); the DHT's record goes instead.
+        assert!(registry.record_shard_holder(part.clone(), key(55)));
+        let after: HashSet<NodeId> = registry.shard_holders(&part).into_iter().collect();
+        assert!(!after.contains(&key(1)), "the DHT-only record was given up");
+        assert!((2..MAX_HOLDERS_PER_SHARD as u32).all(|i| after.contains(&key(i))));
+        assert!(after.contains(&key(55)));
     }
 
     /// The other way a holder tells us it lost a shard: it fails a live request

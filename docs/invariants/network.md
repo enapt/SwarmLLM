@@ -5999,10 +5999,30 @@ relay-reachable (`scheduler`), and a download ranks unregistered holders last
 on as many networks, each connected, still look like as many peers (Bitcoin's limit too): with
 every network holding one place the rule is "the newest goes", so one place a list can flap
 between an attacker's fresh key and an honest newcomer (second review, finding 2); established
-holders are untouched. One key's records are bounded by `MOST_PARTS_A_HOLDER` (#333). A holder
-named by a DHT provider record is recorded as that key's claim with no connection and no
-signature, so a node near a key can name this node's CONNECTED peers as holders of a part they
-lack — pre-existing, FUTURE_WORK #341.
+holders are untouched. One key's records are bounded by `MOST_PARTS_A_HOLDER` (#333).
+
+**A DHT provider record is the DHT's word, not the holder's** (2026-10-27, #341). A
+`GetProviders` answer lists whichever keys the answering node chooses — libp2p-kad 0.48 checks an
+inbound ADD_PROVIDER against its sender (`behaviour.rs`, "Only accept a provider record from a
+legitimate peer") but hands an answer's `provider_peers` on as given — and `merge_dht_providers`
+wrote them through the same writer as a holder's own announcement. So a node near a key could name
+this node's CONNECTED peers as holders of a part they lack: on a full list the record was judged a
+connected claim (it took a fresh stranger's place), #333's `holder_counts` let it keep a
+peer-learned model from being forgotten, and the stale-record sweep kept it for as long as the
+peer stayed connected. Now every record says whose word it is (`HolderRecord::first_hand`, set by
+every first-hand claim — the announcement, a capability, this node's own registration — never
+cleared by a DHT sighting; the one writer is `record_holder`). A DHT record stands nowhere: as a
+claimant it is a stranger, on a full list its holder is judged a stranger (given up before any
+holder's own record), `part_has_a_holder_where` does not count it, and `age_out_holders` forgets
+it when stale whoever it names — a connected holder announces its parts itself, on connecting
+(#359) and at every full re-announce. It refreshes only a record the DHT alone vouches for: a
+holder's own record is kept fresh by its own announcements, and a provider record outlives the
+fact by hours. It is still a place to ask (`shard_holders`), which is what a lookup is for: the
+router fires one per split (`dht_query_tx`) and takes only connected holders anyway (gotcha #83).
+The holder's own claim on such a record confirms it and counts as a new holder. Left for #177: the
+records still count as copies wherever `shard_holders` is counted (prune's `would_shed_copy`, a
+hole, the rebalancer), and prune's redundancy reads the DHT's uncapped count
+(`global_holder_count`, one answer's `providers.len()`).
 
 **Tests** (`model::registry`, `daemon::state::peer_models`), each red with its safeguard
 switched off (14 switches, 2026-10-25):
@@ -6018,3 +6038,7 @@ connected peer's record, never none),
 the reverse index, no empty list left), `a_registered_node_that_is_not_connected_keeps_nothing`
 (#333 counting `peer_registry`),
 `a_holders_standing_is_its_connection_and_the_network_it_comes_from` (`connected_networks` read).
+#341, each red with its line switched off (2026-10-27): `a_dht_record_is_a_place_to_ask_not_the_holders_word`
+(not counted, aged out though connected, confirmed by the holder's word, no refresh of a holder's
+own record), `a_dht_record_naming_a_connected_peer_takes_no_place_on_a_full_list` (the claimant a
+stranger), `a_dht_only_record_is_given_up_before_a_holders_own` (the holder a stranger).

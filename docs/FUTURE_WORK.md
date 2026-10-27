@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #362**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #363**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1290,7 +1290,14 @@ Enable gossipsub peer scoring only after deriving parameters from measured deliv
 a real multi-node swarm, with permissive thresholds and a per-peer score metric so a wrongly
 penalised slow or CGNAT peer is visible — the risk is the mesh partitioning itself. Second
 half: DHT provider records are add-only and can outlive the fact by up to their 12 h TTL (see #49); a
-capability challenge before trusting one would address it. No incident is known.
+capability challenge before trusting one would address it. No incident is known. Since #341 a
+DHT-named holder has no standing (not counted by `holder_counts`, a stranger on a full list,
+aged out), but it still counts as a COPY wherever `shard_holders` is counted — prune's
+`would_shed_copy`, a hole (`scoring::fills_a_hole`), the rebalancer — and prune's redundancy reads
+the DHT's uncapped count (`global_holder_count`: one `GetProviders` answer's `providers.len()`, which
+the answering node chooses). A node near a key could make a part look copied enough to shed, or a
+hole look filled. Next: count copies from first-hand records only (`HolderRecord::first_hand`),
+keeping DHT records as places to ask, and bound the uncapped count by what was verified.
 
 #### #315 — Two key exchanges in flight to one peer: the first answer meets the second secret
 `P4` · crypto · **OPEN** — 2026-10-20 · history: #304's security review (LOW, pre-existing)
@@ -2904,23 +2911,12 @@ Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the 
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
 
-#### #341 — A DHT provider record makes any key a holder, a connected peer's included
-`P3` · network · **OPEN** — 2026-10-25 · history: #339's second security review
+#### #362 — A peer identified while the peer map is full stays "connected" after it leaves
+`P4` · network · **OPEN** — 2026-10-25 · history: #339's second security review (low), split out of #341
 
-`network/manager/dht.rs` (`handle_dht_providers_found`, ~243-270) turns every PeerId a
-`GetProviders` answer names into a holder record through `merge_dht_providers` → the same
-`record_shard_holder` a first-hand claim uses: no connection to that node and no signature of
-its. A node near a key in the DHT can therefore name this node's CONNECTED peers as holders of a
-part they do not hold. Since #339 such a record carries the connected peer's standing: on a full
-list it is judged a connected claim, and #333's `holder_counts` lets it keep a peer-learned
-model from being forgotten. Routing and downloads ask the named peer, which answers that it
-lacks the part (a wasted request). Next: record a DHT-learned holder as such
-(`HolderRecord::first_hand`, set only by the holder's own announcement, as `checked` is) and
-give it no standing — never counted by `holder_counts`, never a connected claim on a full list —
-until the holder's own announcement confirms it. Checked at the same review, low: a peer
-identified while `peer_to_node` is at `MAX_PEER_TO_NODE` stays in `connected_node_ids` after its
-last close (`connections.rs` finds no node id to clean up); `cleanup_stale_peer_id_map` and the
-10,000 cap keep it far from reach.
+A peer identified while `peer_to_node` is at `MAX_PEER_TO_NODE` stays in `connected_node_ids` after
+its last close: `connections.rs` finds no node id to clean up. `cleanup_stale_peer_id_map` and the
+10,000 cap keep it far from reach. No incident is known.
 
 #### #317 — Another program can hold `[::1]` on the node's port while the node runs
 `P3` · api · **OPEN** — 2026-10-20 · history: found with #255's key proof
@@ -3379,7 +3375,22 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-27, ships in the next release** (#338, #340, #354, #359, #360, #361)
+**Closed 2026-10-27, ships in the next release** (#338, #340, #341, #354, #359, #360, #361)
+- #341 — **A DHT record no longer passes for a computer's own word that it holds a part.** A
+  `GetProviders` answer lists whichever keys the answering node chooses (libp2p-kad 0.48 checks an
+  ADD_PROVIDER against its sender, not an answer's providers), and `merge_dht_providers` wrote
+  them through the holder's own writer: a node near a key could name this node's CONNECTED peers
+  as holders of a part they lack — judged a connected claim on a full list, counted by #333's
+  `holder_counts`, kept by the stale sweep while the peer stayed connected. Every record now says
+  whose word it is (`HolderRecord::first_hand`, one writer `record_holder`): a DHT record is a
+  stranger as claimant and as holder, not counted, aged out whoever it names, refreshes no
+  holder's own record, and stays a place to ask; the holder's own claim confirms it, as news.
+  Tests `a_dht_record_is_a_place_to_ask_not_the_holders_word`,
+  `a_dht_record_naming_a_connected_peer_takes_no_place_on_a_full_list`,
+  `a_dht_only_record_is_given_up_before_a_holders_own` — six lines, each switched off, each red.
+  Left: DHT records still count as copies (prune, holes) and prune reads the DHT's uncapped count
+  → #177; the review's unrelated low finding → #362. Evidence: `docs/invariants/network.md` § "A
+  full holder list takes a stranger's claim only in a stale record's place".
 - #340 — **One computer downloading model parts from yours can no longer take your whole upload
   limit.** Since #335 every part a node serves books its share of ONE upload timeline, released
   within 20 s or answered busy; first come, first served, a peer asking again as fast as it was

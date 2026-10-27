@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+**A computer that answers lookups for model parts can no longer pass off your peers as holders
+of parts they do not have.** Your computer finds who holds a part partly by asking the swarm's
+shared directory, and the computer answering decides which names it lists. Such a name was treated
+like that computer's own announcement, so a wrong one could keep a model listed that nobody holds
+and take the place of a real holder in the list. Now a name heard only from the directory is just
+a computer worth asking until it says itself that it holds the part (#341).
+
 **One computer downloading model parts from yours can no longer take your whole upload limit.**
 Your computer sends parts of models to other computers within an upload limit (10 Mbps unless you
 change it). A computer asking for many parts at once could keep that limit to itself, and every
