@@ -763,9 +763,11 @@ fn a_model_kept_on_this_computer_is_never_planned_onto_a_peer() {
 /// graphics budget is never registered (`auto_manage::scan`), and the gate
 /// asked for a registration: a 14B with all 16 parts on disk was refused in
 /// 26 ms while it ran here with the setting off. A part gone from disk is
-/// still refused, and the refusal names it.
+/// still refused, and the refusal names it. Each part is written at the size
+/// its manifest names: a part cut short is not whole (#334 (1)).
 #[test]
 fn a_kept_model_held_whole_runs_here_without_a_registration() {
+    const PART: &[u8] = b"part";
     let data = tempfile::tempdir().unwrap();
     let dir = data.path().to_path_buf();
     let state = make_shared_state_with(|c| c.node.data_dir = dir);
@@ -774,7 +776,7 @@ fn a_kept_model_held_whole_runs_here_without_a_registration() {
     let shard = |index: u32, layer_range: (u32, u32)| ShardInfo {
         index,
         layer_range,
-        size_bytes: 1_000_000_000,
+        size_bytes: PART.len() as u64,
         hash: [0u8; 32],
         tensors: vec![],
     };
@@ -791,7 +793,7 @@ fn a_kept_model_held_whole_runs_here_without_a_registration() {
         };
         let path = store.shard_path(&model, index);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"part").unwrap();
+        std::fs::write(&path, PART).unwrap();
         state
             .model_registry
             .record_shard_holder(id, local_id.clone());
