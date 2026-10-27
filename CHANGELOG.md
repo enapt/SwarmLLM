@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+**One computer downloading model parts from yours can no longer take your whole upload limit.**
+Your computer sends parts of models to other computers within an upload limit (10 Mbps unless you
+change it). A computer asking for many parts at once could keep that limit to itself, and every
+other computer that asked was told to wait. Now no single network gets more than what a computer
+fetching parts the usual way needs (three at once), so the others are served in turn. A computer
+downloading on its own is not slowed, and one fetching many parts at once no longer gives up on a
+part while the same computer is still sending it the others (#340).
+
 **When a model is split across computers, a reply that repeats earlier text sends about a quarter
 fewer wasted guesses.** To go faster, your computer guesses the next words by copying what followed
 the same words earlier in the conversation, and the other computers check each guess. It always

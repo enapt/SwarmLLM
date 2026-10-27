@@ -903,8 +903,13 @@ impl Default for AutoManageConfig {
     }
 }
 
+/// Parts a node fetches at once by default. A holder's upload share per
+/// network is sized from it (`upload_pacer::NETWORK_HOLDS_AT_MOST`, #340), so
+/// a node fetching this many is never answered busy for its share.
+pub const DEFAULT_MAX_CONCURRENT_DOWNLOADS: usize = 3;
+
 fn default_max_concurrent_downloads() -> usize {
-    3
+    DEFAULT_MAX_CONCURRENT_DOWNLOADS
 }
 
 fn default_idle_unload_secs() -> u64 {

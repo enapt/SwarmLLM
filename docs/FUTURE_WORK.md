@@ -2904,20 +2904,6 @@ Credits are DORMANT — they gate nothing, and `credits_stay_dormant` fails the 
 starts. Read `docs/CREDITS_DESIGN.md` before touching them; the credit items below are
 preconditions for ever switching enforcement on, not work for now.
 
-#### #340 — One peer can take a node's whole upload limit by downloading as fast as it is answered
-`P3` · network · **OPEN** — 2026-10-24 · history: v0.3.252 pre-release review (#335)
-
-Since #335 every part a node serves books its share of ONE upload timeline
-(`network::manager::upload_pacer`), released within 20 s or answered busy. Nothing gives a peer
-a share of it: a peer asking for real bytes as fast as it is answered keeps the queue full, and
-every other downloader is answered busy, waits, and after 16 busy answers in a row takes the
-ordinary retry path (another holder, or HuggingFace). It costs that peer the limit's bandwidth
-(1.25 MB/s at the default 10 Mbps). Before #335 the same peer could fill the inbound queue
-(`MAX_INBOUND_SHARD_FETCHES`) the same way, so this is not new in kind. libtorrent bounds it with
-unchoke slots: a few peers served at a time, rotated. Next: a per-peer bound on the share booked
-ahead (e.g. no peer past half of `RELEASED_WITHIN`), measured on the `split_rig.sh fetch` rig
-with two downloaders.
-
 #### #341 — A DHT provider record makes any key a holder, a connected peer's included
 `P3` · network · **OPEN** — 2026-10-25 · history: #339's second security review
 
@@ -3393,7 +3379,25 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-27, ships in the next release** (#338, #354, #359, #360, #361)
+**Closed 2026-10-27, ships in the next release** (#338, #340, #354, #359, #360, #361)
+- #340 — **One computer downloading model parts from yours can no longer take your whole upload
+  limit.** Since #335 every part a node serves books its share of ONE upload timeline, released
+  within 20 s or answered busy; first come, first served, a peer asking again as fast as it was
+  answered kept it full and everyone else was answered busy. Now each share is booked with the
+  requester's NETWORK (`PeerRemote::group` — a key costs nothing to make) and no network holds
+  more than `NETWORK_HOLDS_AT_MOST`, what a node fetching at the default concurrency books (3 × 4 s
+  = 12 of the 20 s; libtorrent's `bandwidth_manager` shares one limit among peers the same way).
+  Found on the way: half the window (the first bound) turned a node's third part away every round,
+  its parts raced for the next free share, and one lost 16 times in a minute and left a holder
+  that was sending that node its other parts — so a downloader's count of busy answers now
+  restarts whenever the holder it waits on lands another of its parts. Rig (`split_rig.sh fetch`,
+  C on a network namespace of its own, arms alternating): with the bound C was never answered
+  busy, 0.22 MB/s and its first chunk at 11.8-14.0 s; without, busy 10 and 5 times, 0.09-0.13
+  MB/s, first chunk at 19.8-25.9 s; the link full either way, B's parts never restarted. A/B
+  `SWARMLLM_UPLOAD_SHARE=0`. Tests `one_network_never_holds_more_than_its_share_of_the_window`,
+  `a_node_fetching_at_the_default_concurrency_is_never_answered_busy` (red at 10 s),
+  `a_part_waiting_on_a_holder_that_serves_its_siblings_keeps_waiting`. Evidence:
+  `docs/invariants/network.md` § "Every part this node serves shares ONE upload limit".
 - #338 — **A guess copied from earlier in the conversation stops where the earlier copies of
   that text disagree.** `ngram_lookup::copied_run` copied the most recent occurrence's
   continuation whatever the other occurrences did. It now walks the matched n-gram's last 32

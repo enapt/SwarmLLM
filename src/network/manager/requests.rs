@@ -297,23 +297,35 @@ impl NetworkManager {
                 // share ends — fewer bytes than asked where the limit is low,
                 // busy where the queue would keep the downloader past its
                 // patience. It was a wait per request, so N parts at once went
-                // up at N times the limit.
+                // up at N times the limit. No network holds more than half of
+                // it (#340), counted by the connection's own network.
+                let from = super::upload_pacer::network_share_on().then(|| {
+                    self.peer_remote_addrs
+                        .get(&peer)
+                        .map_or(crate::network::helpers::NetGroup::UNADDRESSED, |r| r.group)
+                });
                 let (prepared, release) = match self.prepare_shard_read(&shard_req) {
                     Some((path, offset, asked, model_id, shard_index)) => {
-                        match self
-                            .upload_pacer
-                            .reserve(std::time::Instant::now(), asked, bw_limit)
-                        {
+                        match self.upload_pacer.reserve(
+                            std::time::Instant::now(),
+                            asked,
+                            bw_limit,
+                            from,
+                        ) {
                             super::upload_pacer::Grant::Serve { bytes, release } => {
                                 (Some((path, offset, bytes, model_id, shard_index)), release)
                             }
-                            super::upload_pacer::Grant::Busy { retry_after } => {
+                            super::upload_pacer::Grant::Busy {
+                                retry_after,
+                                network_share,
+                            } => {
                                 tracing::debug!(
                                     %peer,
                                     model = %shard_req.shard_id.model_id,
                                     index = shard_req.shard_id.index,
                                     retry_after_ms = retry_after.as_millis() as u64,
                                     upload_mbps = bw_limit,
+                                    network_share,
                                     "ShardTransfer: the upload limit is spoken for — replying busy"
                                 );
                                 self.answer_part_request_busy(channel, &peer, retry_after);
@@ -884,8 +896,10 @@ impl NetworkManager {
                                 .insert(shard_id.clone(), std::time::Instant::now());
                             // A holder that served a chunk is not busy, and
                             // busy answers count only while nothing lands
-                            // (#335): a long part on a busy swarm may take many.
+                            // (#335): a long part on a busy swarm may take many
+                            // — nothing from that holder, of any part (#340).
                             self.shard_busy_holders.remove(&shard_id);
+                            self.note_chunk_landed_from(&peer);
 
                             let next_req = crate::types::ShardRequest {
                                 shard_id: shard_id.clone(),
@@ -906,6 +920,7 @@ impl NetworkManager {
                         self.shard_download_progress.remove(&shard_id);
                         self.shard_p2p_retries.remove(&shard_id);
                         self.shard_busy_holders.remove(&shard_id);
+                        self.note_chunk_landed_from(&peer);
                         self.shard_last_progress_at.remove(&shard_id);
                         // Allow future P2P attempts for this shard if it gets re-downloaded later.
                         self.shared_state.models.shard_p2p_failed.remove(&shard_id);

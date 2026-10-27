@@ -199,6 +199,13 @@
 #          lifts the limit LIVE so every part lands and is hash-checked. Under
 #          16 Mbps an answer is cut and more than five parts at once are
 #          answered BUSY; both nodes log at debug so the busy answers count.
+#          FETCH_OTHER=<part> (needs RIG_NETNS=1): a second downloader, C, in a
+#          network namespace of its own on a veth pair (10.77.0.2, A seen at
+#          10.77.0.1) — another computer to A — asks for that part when the
+#          window opens, while B's parts hold A's limit (#340: no network holds
+#          more than 12 of A's 20 s). Prints C's first chunk, both nodes'
+#          shares of the window and A's busy answers to each, by why.
+#          ENV_A=SWARMLLM_UPLOAD_SHARE=0 is the arm without the bound.
 #   cache  the field report of 2026-09-26: an agent's SECOND turn on a node
 #          that runs the model on its processor. A and B each hold every part
 #          (processor by default, so A's router is consulted and nothing
@@ -537,6 +544,11 @@ elif [ "$MODE" = fetch ]; then
   EXTRA_TOML="${EXTRA_TOML:-$'[resources]\nmax_bandwidth_mbps = '"${FETCH_MBPS:-10000}"}"
   if [ -n "${FETCH_MBPS:-}" ]; then
     ENV_A="${ENV_A:-} SWARMLLM_LOGGING_LEVEL=debug"; ENV_B="${ENV_B:-} SWARMLLM_LOGGING_LEVEL=debug"
+    ENV_C="${ENV_C:-} SWARMLLM_LOGGING_LEVEL=debug"
+  fi
+  if [ -n "${FETCH_OTHER:-}" ]; then
+    [ -n "${RIG_IN_NETNS:-}" ] || { echo "FETCH_OTHER needs RIG_NETNS=1 (127.0.0.3 must be the rig's own)"; exit 2; }
+    [ -n "${FETCH_MBPS:-}" ] || { echo "FETCH_OTHER needs FETCH_MBPS (a limit to share)"; exit 2; }
   fi
 elif [ "$MODE" = failover ] || [ "$MODE" = context ]; then
   # B's range must need TWO nodes to cover it, so C stops one shard short.
@@ -715,23 +727,30 @@ start() { # dir port bin gpu [memory limit]
   # ENV_A / ENV_B / …: VAR=value words for this node alone (a fault on one hop).
   local env_var="ENV_$(basename "$1")" own=() words=()
   if [ -n "${!env_var:-}" ]; then read -r -a words <<< "${!env_var}"; own=(env "${words[@]}"); fi
+  # NETNS_C: C runs in a network of its own (FETCH_OTHER). nsenter execs the
+  # node, so $! is still the node's pid.
+  local ns=()
+  [ "$(basename "$1")" = C ] && [ -n "${NETNS_C:-}" ] && ns=(nsenter -t "$NETNS_C" -n)
   if [ -n "$4" ]; then
-    SWARMLLM_INFERENCE_GPU_LAYERS="$4" SWARMLLM_NODE_DATA_DIR="$1" "${own[@]}" "${scope[@]}" "${pin[@]}" "$3" run -p "$2" > "$1/node.log" 2>&1 &
+    SWARMLLM_INFERENCE_GPU_LAYERS="$4" SWARMLLM_NODE_DATA_DIR="$1" "${ns[@]}" "${own[@]}" "${scope[@]}" "${pin[@]}" "$3" run -p "$2" > "$1/node.log" 2>&1 &
   else
-    SWARMLLM_NODE_DATA_DIR="$1" "${own[@]}" "${scope[@]}" "${pin[@]}" "$3" run -p "$2" > "$1/node.log" 2>&1 &
+    SWARMLLM_NODE_DATA_DIR="$1" "${ns[@]}" "${own[@]}" "${scope[@]}" "${pin[@]}" "$3" run -p "$2" > "$1/node.log" 2>&1 &
   fi
   echo $!
 }
+in_c() { if [ -n "${NETNS_C:-}" ]; then nsenter -t "$NETNS_C" -n "$@"; else "$@"; fi; } # C's own network
 up() { # dir port
+  local at=()
+  [ "$(basename "$1")" = C ] && at=(in_c)
   for _ in $(seq 1 90); do
-    [ -f "$1/api_key" ] && curl -s -m 3 "localhost:$2/health" >/dev/null 2>&1 && return 0
+    [ -f "$1/api_key" ] && "${at[@]}" curl -s -m 3 "localhost:$2/health" >/dev/null 2>&1 && return 0
     sleep 2
   done
   echo "node on $2 never came up — see $1/node.log"; return 1
 }
 # Kill only what this script started (gotcha #283), and keep the logs.
 cleanup() {
-  kill ${PA:-} ${PB:-} ${PC:-} ${PD:-} ${PE:-} 2>/dev/null; sleep 3
+  kill ${PA:-} ${PB:-} ${PC:-} ${PD:-} ${PE:-} ${NETNS_C:-} 2>/dev/null; sleep 3
   for n in A B C D E; do cp "$BASE/$n/node.log" "$OUT/$n.log" 2>/dev/null; done
   rm -rf "$BASE/A" "$BASE/B" "$BASE/C" "$BASE/D" "$BASE/E"
   [ "$OUT" = "$BASE/out" ] || rmdir "$BASE" 2>/dev/null
@@ -853,6 +872,24 @@ fi
 PB=$(SWARMLLM_TEST_TENSOR_DELAY_MS="${DELAY_B:-0}" start "$BASE/B" 8920 "$BIN_B" "${GPU_B:-}")
 up "$BASE/B" 8920 || exit 1
 PEERS_EXPECTED=1
+if [ "$MODE" = fetch ] && [ -n "${FETCH_OTHER:-}" ]; then
+  # C is another computer: a network namespace of its own, on a veth pair to the
+  # rig's. On loopback it was not — A saw C's dials from 127.0.0.1, B's
+  # network, whatever C's listen address (TCP and QUIC, #340's first rigs).
+  unshare -n sleep 100000 & NETNS_C=$!
+  for _ in $(seq 1 50); do
+    [ "$(readlink "/proc/$NETNS_C/ns/net")" != "$(readlink /proc/self/ns/net)" ] && break; sleep 0.1
+  done
+  { ip link add vA type veth peer name vC && ip link set vC netns "$NETNS_C" \
+      && ip addr add 10.77.0.1/24 dev vA && ip link set vA up \
+      && in_c ip link set lo up && in_c ip addr add 10.77.0.2/24 dev vC && in_c ip link set vC up; } \
+    || { echo "cannot give C a network of its own (veth)"; exit 2; }
+  echo "rig: C on a network of its own (10.77.0.2): $(in_c ping -c 2 -q 10.77.0.1 | tail -1)"
+  make_node "$BASE/C" 0 "\"${ADDR/127.0.0.1/10.77.0.1}\""
+  PC=$(start "$BASE/C" 8940 "$BIN_B" "${GPU_C:-0}")
+  up "$BASE/C" 8940 || exit 1
+  PEERS_EXPECTED=2
+fi
 if [ "$MODE" = continue ]; then
   make_node "$BASE/C" "$SHARDS_C" "\"$ADDR\""
   PC=$(start "$BASE/C" 8940 "$BIN_A" "${GPU_C:-0}")
@@ -1890,11 +1927,37 @@ if [ "$MODE" = fetch ]; then
   done
   if [ -n "${FETCH_MBPS:-}" ]; then
     # The window opens 10 s in, so every part's first request is out; B's
-    # received-chunk lines (debug) are the bytes A sent it.
-    sleep 10; w0=$(date -u +%Y-%m-%dT%H:%M:%S); sleep "${FETCH_LIMITED_FOR:-120}"; w1=$(date -u +%Y-%m-%dT%H:%M:%S)
-    awk -v a="$w0" -v b="$w1" '$1 >= a && $1 < b' "$BASE/B/node.log" | grep -a "Received shard data chunk" \
+    # received-chunk lines (debug) are the bytes A sent it — less the busy
+    # answers, logged as a 4-byte chunk of size u64::MAX (`chunks`).
+    chunks() { grep -a "Received shard data chunk" "$@" | grep -av 'total_size=18446744073709551615'; }
+    sleep 10; w0=$(date -u +%Y-%m-%dT%H:%M:%S)
+    if [ -n "${FETCH_OTHER:-}" ]; then
+      KC=$(cat "$BASE/C/api_key"); asked_c=$(date +%s.%N)
+      echo "fetch: asking C (10.77.0.2) for part $FETCH_OTHER: $(in_c curl -s -m 30 -X POST -H "Authorization: Bearer $KC" \
+        "localhost:8940/api/admin/models/$MODEL/shards/$FETCH_OTHER/download")"
+    fi
+    sleep "${FETCH_LIMITED_FOR:-120}"; w1=$(date -u +%Y-%m-%dT%H:%M:%S)
+    awk -v a="$w0" -v b="$w1" '$1 >= a && $1 < b' "$BASE/B/node.log" | chunks \
       | grep -o 'bytes=[0-9]*' | cut -d= -f2 | awk -v s="${FETCH_LIMITED_FOR:-120}" -v m="$FETCH_MBPS" -v n="$want" \
         '{b+=$1; c++} END {printf "fetch: under A'"'"'s %d Mbps limit (%.2f MB/s), %d parts at once: B took in %.1f MB in %d s = %.2f MB/s (%d answers)\n", m, m*0.125, n, b/1e6, s, b/1e6/s, c}'
+    if [ -n "${FETCH_OTHER:-}" ]; then
+      awk -v a="$w0" -v b="$w1" '$1 >= a && $1 < b' "$BASE/C/node.log" | chunks \
+        | grep -o 'bytes=[0-9]*' | cut -d= -f2 | awk -v s="${FETCH_LIMITED_FOR:-120}" \
+          '{b+=$1; c++} END {printf "fetch: C, one part, took in %.1f MB in the same %d s = %.2f MB/s (%d answers)\n", b/1e6, s, b/1e6/s, c}'
+      first_c=$(chunks "$BASE/C/node.log" | head -1 | cut -d' ' -f1)
+      if [ -n "$first_c" ]; then
+        echo "fetch: C's first chunk $(python3 -c "import sys,datetime as d; t=d.datetime.fromisoformat(sys.argv[1].rstrip('Z')).replace(tzinfo=d.timezone.utc).timestamp(); print(f'{t-float(sys.argv[2]):.1f}')" "$first_c" "$asked_c") s after it asked"
+      else
+        echo "fetch: C received NO chunk in the window"
+      fi
+      ID_B=$(grep -a -m1 -oE "Initializing network peer_id=12D3Koo[A-Za-z0-9]+" "$BASE/B/node.log" | cut -d= -f2)
+      ID_C=$(grep -a -m1 -oE "Initializing network peer_id=12D3Koo[A-Za-z0-9]+" "$BASE/C/node.log" | cut -d= -f2)
+      for who in B:"$ID_B" C:"$ID_C"; do
+        busy=$(grep -a "limit is spoken for" "$BASE/A/node.log" | grep -a "${who#*:}")
+        echo "fetch: A answered ${who%%:*} busy $(printf '%s' "$busy" | grep -ac 'network_share=true')x for its network's share, $(printf '%s' "$busy" | grep -ac 'network_share=false')x for the whole queue"
+      done
+      echo "fetch: A saw C's connection from: $(grep -a "$ID_C" "$BASE/A/node.log" | grep -aoE '/ip4/[0-9.]+/(tcp|udp)' | sort | uniq -c | tr '\n' ' ')"
+    fi
     echo "fetch: A answered busy $(grep -ac 'replying busy' "$BASE/A/node.log")x; B asked again at its offset $(grep -ac 'asking again at the same offset' "$BASE/B/node.log")x, let a moved-on transfer be $(grep -ac 'transfer has moved on' "$BASE/B/node.log")x, took the retry path (a part started again) $(awk -v t="$since" '$1 >= t' "$BASE/B/node.log" | grep -ac 'retry_shard_or_fallback entered')x"
     # An older B is never sent the busy marker: it would read its size as too
     # large and drop the part (FUTURE_WORK #335).
@@ -1903,9 +1966,12 @@ if [ "$MODE" = fetch ]; then
       -d '{"max_bandwidth_mbps": 10000}' localhost:8900/api/admin/config | head -c 120)"
   fi
   for _ in $(seq 1 1200); do
-    [ "$(grep -acE "P2P shard download complete|did not arrive intact|failed hash verification" "$BASE/B/node.log")" -ge "$want" ] && break
+    [ "$(grep -acE "P2P shard download complete|did not arrive intact|failed hash verification" "$BASE/B/node.log")" -ge "$want" ] \
+      && { [ -z "${FETCH_OTHER:-}" ] || grep -qaE "P2P shard download complete|did not arrive intact|failed hash verification" "$BASE/C/node.log"; } \
+      && break
     sleep 1
   done
+  [ -n "${FETCH_OTHER:-}" ] && echo "fetch: C's part: $(grep -aE "P2P shard download complete|failed hash verification|did not arrive intact" "$BASE/C/node.log" | head -1 | cut -c1-160)"
   grep -aE "P2P shard download complete|failed hash verification|did not arrive intact|removed while it was being checked" "$BASE/B/node.log" | cut -c1-200
   echo "fetch: $(grep -ac 'P2P shard download complete' "$BASE/B/node.log") of $want part(s) landed and checked"
   echo "fetch: event-loop stalls on B since the request:"

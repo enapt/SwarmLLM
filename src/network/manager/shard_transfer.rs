@@ -390,6 +390,26 @@ impl NetworkManager {
         false
     }
 
+    /// A chunk of one of this node's parts landed from `peer`. Every other
+    /// part waiting on that holder starts its count of busy answers again
+    /// (#340): a holder shares its upload among networks, so a node fetching
+    /// more parts from it than its share carries has some waiting while the
+    /// others land, and each such part raced its siblings for the next free
+    /// share. Counted as a holder that stayed busy, one part lost 16 times in a
+    /// minute and left a holder that was sending this node its other parts
+    /// (rig, 2026-10-27).
+    pub(super) fn note_chunk_landed_from(&mut self, peer: &libp2p::PeerId) {
+        if self.shard_busy_holders.is_empty() {
+            return;
+        }
+        let Some(holder) = self.peer_to_node.get(peer).map(|r| r.clone()) else {
+            return;
+        };
+        for busy in self.shard_busy_holders.values_mut() {
+            busy.holder_is_serving_us(&holder);
+        }
+    }
+
     /// A holder answered a part request BUSY (#335): its upload limit is
     /// spoken for. Keep the bytes already written and ask again at the same
     /// offset — a holder that is not busy at once, else the first to come free
@@ -649,7 +669,8 @@ pub(super) async fn read_shard_chunk_async(
 /// The shortest wait before asking a busy holder again, whatever it named.
 const BUSY_WAIT_LEAST: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Busy answers in a row — no chunk landing between — one transfer takes
+/// Busy answers in a row — no chunk landing between, of this part or of
+/// another from the same holder (#340) — one transfer takes
 /// before it is handled as a failure. Each wait is at most
 /// `upload_pacer::RELEASED_WITHIN`, so a part gives up on holders that stay
 /// busy within ~5 min.
@@ -678,6 +699,15 @@ impl BusyHolders {
 
     fn busy_at(&self, holder: &crate::types::NodeId, at: std::time::Instant) -> bool {
         self.until.iter().any(|(n, u)| n == holder && *u > at)
+    }
+
+    /// `holder` landed a chunk of another of this node's parts: a holder that
+    /// is sending this node bytes has not "stayed busy", so the count starts
+    /// again (#340).
+    fn holder_is_serving_us(&mut self, holder: &crate::types::NodeId) {
+        if self.until.iter().any(|(n, _)| n == holder) {
+            self.answers = 0;
+        }
     }
 }
 
@@ -758,6 +788,26 @@ mod tests {
             next_ask(&busy, std::slice::from_ref(&b), now),
             NextAsk::At(now + Duration::from_secs(7), vec![b])
         );
+    }
+
+    /// #340: a part waiting on a holder that lands this node's other parts
+    /// has not met a holder that stayed busy — its count starts again — while
+    /// a holder it is not waiting on changes nothing.
+    #[test]
+    fn a_part_waiting_on_a_holder_that_serves_its_siblings_keeps_waiting() {
+        use crate::types::NodeId;
+        use std::time::{Duration, Instant};
+        let (a, b) = (NodeId([1; 32]), NodeId([2; 32]));
+        let now = Instant::now();
+        let mut busy = BusyHolders::default();
+        for i in 0..MOST_BUSY_ANSWERS {
+            busy.note(a.clone(), now + Duration::from_secs(u64::from(i)));
+        }
+        busy.holder_is_serving_us(&b);
+        assert_eq!(busy.answers, MOST_BUSY_ANSWERS, "not a holder it waits on");
+        busy.holder_is_serving_us(&a);
+        assert_eq!(busy.answers, 0);
+        assert!(busy.busy_at(&a, now), "the wait itself stands");
     }
 
     /// The serve side clamps to `SHARD_CHUNK_SIZE`, and a requester walks the

@@ -5280,10 +5280,51 @@ when its share ends.
   (pre-release review of v0.3.252, confirmed in code before it shipped). A busy answer books
   nothing. The limit is read live (`cfg()`) per request. The pending-answer ticket's TTL (60 s)
   stays above the release bound plus the disk read.
-- **Still open: one peer can take the whole limit by downloading** (#340). The shared timeline
-  has no per-peer share, so a peer asking for real bytes as fast as it is answered holds the
-  queue and others are answered busy. It costs that peer the limit's bandwidth (1.25 MB/s at the
-  default) and was possible before #335 too (filling `MAX_INBOUND_SHARD_FETCHES`).
+- **No network holds more of the queue than a node fetching parts the usual way** (2026-10-27,
+  #340). First come, first served, a peer asking for real bytes as fast as it is answered kept the
+  timeline full and every other downloader was answered busy (possible before #335 too, by filling
+  `MAX_INBOUND_SHARD_FETCHES`). Now every share is booked with the requester's network
+  (`PeerRemote::group`, the `NetGroup` this project counts every multipliable share by: a key costs
+  nothing to make, #299, #339), and a network whose shares left plus the new one would pass
+  `NETWORK_HOLDS_AT_MOST` is answered busy — `Grant::Busy::network_share`, logged — for the wait
+  until its own oldest share that leaves room ends (its shares run in order, so that is exact).
+  Reference: libtorrent shares its one limit among peers (`bandwidth_manager` hands each queued
+  peer its part of a tick's quota) and serves a few at a time (unchoke slots); a time budget per
+  network is that idea on one timeline. **The bound is what a node fetching at the default
+  concurrency books** — `DEFAULT_MAX_CONCURRENT_DOWNLOADS` (3) × `ANSWER_HOLDS_AT_MOST` (4 s) =
+  12 s of `RELEASED_WITHIN`'s 20, leaving two answers' room for everyone else (both asserted at
+  compile time) — so such a node is never bounded
+  (`a_node_fetching_at_the_default_concurrency_is_never_answered_busy`, red at 10 s). The first
+  bound was half the window, 10 s: the rig's B, six parts at once, had three of them answered
+  busy every round, each told to come back when its network's next share ended, and all three
+  raced for that one share; part 5 lost 16 times in a row in 60 s (06:45:07 → 06:46:06), took the
+  ordinary retry path ("every holder stayed busy") and left a holder that was sending B its other
+  five parts. The same arm without the bound took the retry path 0 times. So **a downloader's
+  count of busy answers restarts whenever the holder it waits on lands another of its parts**
+  (`NetworkManager::note_chunk_landed_from`, `BusyHolders::holder_is_serving_us`;
+  `a_part_waiting_on_a_holder_that_serves_its_siblings_keeps_waiting`): that holder is serving
+  it, not staying busy, and the wait goes to another holder only when one is free
+  (`next_ask`). **A lone downloader loses nothing**: its next share is booked while the link is
+  still busy with the last (`a_lone_network_keeps_the_link_busy`: twelve 4 s shares back to back
+  at 1.25 MB/s). **An answer of no bytes goes at once** (`asked == 0`): it holds no share, and
+  waiting behind the others it sat in the inbound queue for up to 20 s, where enough of them
+  answered every other downloader busy. A/B `SWARMLLM_UPLOAD_SHARE=0`.
+  **Measured** (2026-10-27, `split_rig.sh fetch` with `RIG_NETNS=1 FETCH_MBPS=8 FETCH_SHARD="1 2 3 4
+  5 6" FETCH_OTHER=7 FETCH_LIMITED_FOR=90`, the coder-7B's parts, arms share/noshare/noshare/share
+  in one binary, `~/swarmllm-rig/share340/run.sh`): B asks six parts at once, C — in a network
+  namespace of its own on a veth pair, 10.77.0.2, so another network to A — one part when the
+  window opens. **With the bound** C was never answered busy, took in 0.22 MB/s both times (B
+  0.76) and had its first chunk 11.8 and 14.0 s after asking; B was answered busy 63 times for its
+  network's share, asked again at its offset each time, and took the retry path 0 times. **Without
+  it** C was answered busy 10 and 5 times for the whole queue, took in 0.09 and 0.13 MB/s (B 0.89
+  and 0.84), and had its first chunk 25.9 and 19.8 s after asking. The link stayed full either way
+  (0.97-0.98 MB/s of 1.00). Every part landed and passed its hash check once the limit was lifted
+  live (B's event loop logged stalls of up to 0.1-1.1 s in every arm, all 19-40 s after the lift,
+  while six parts finished at full speed beside an unrelated build: none in the window). A one-part downloader gets one answer per queued share of the other network's, 4 s in every
+  ~16 s here, not half the link: a fair queue would reorder shares already promised to a sleeping
+  answer. The first rigs were not valid: C on another loopback address (127.0.0.3) still reached A
+  from 127.0.0.1, B's network, over TCP and over QUIC, so C was bounded with B; and the rig counted
+  a busy answer (a 4-byte "chunk" of size `u64::MAX`) as C's first chunk.
 
 **Measured** (2026-10-24, `split_rig.sh fetch` with `RIG_NETNS=1 FETCH_MBPS=8 FETCH_SHARD="1 2 3 4 5 6
 7"`, the coder-7B's parts, both nodes on this build): seven parts asked at once under A's 8 Mbps
