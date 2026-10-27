@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #363**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #364**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -270,6 +270,27 @@ one isolated node, the same request four times with the cache on, restarted betw
 the replies' md5s compared; and `examples/logits_reference_probe.rs` with
 `LOGITS_PROBE_DECODE` 2 vs 3. Until then: on a card, generated text cannot compare two code
 paths across a cache hit.
+
+#### #363 — A held part a little off an adopted manifest's size is set aside, not kept as disputed
+`P3` · wrong-answers · **OPEN** — 2026-10-27 · history: the v0.3.258 pre-release review (note 1)
+
+Since #334 (1) the rescan (`auto_manage/scan.rs`) treats a part on disk that is not EXACTLY the
+manifest's size as not whole and moves it aside (`quarantine_shard_if_size_mismatch` →
+`.bin.mismatched`, deleted after 24 h by `sweep_expired_quarantine`, at once over budget). Before,
+a part within a tenth of the size went on to the hash check, where `ModelRegistry::mismatch_policy`
+KEEPS bytes condemned only by a hash the publisher never backed (`OnMismatch::KeepBytes` →
+disputed, announced under the bytes' own build tag); a part a tenth or more off was already set
+aside, so the protection never covered size fully. Where it bites: a node with NO origin
+knowledge adopts a peer's manifest of a slightly different build (`register_manifest`: "with no
+origin knowledge we … adopt as before"), whose parts differ by a few percent — its own copy is now
+deleted within a day and the build its manifest names fetched, where before it was kept as
+disputed. Not seen in the field; the reviewer could not construct a case that loses the swarm's
+only copy of a build. The trade-off a fix must keep: a part cut short (a crashed copy, gotcha
+#448's ~1 GB of truncated transfers) must still be set aside and repaired, never kept under its
+name for ever. Shape: route a size mismatch through `mismatch_policy` too — `Quarantine` when the
+manifest's hash is origin-backed, else hash the bytes and keep them as disputed only if they
+match a build some holder or origin names; a truncated file matches none. Verify with a rig that
+plants another build's manifest on a peer-only node.
 
 ### Reliability and failover
 
