@@ -37,18 +37,6 @@
       return session.claude_code;
     },
 
-    // Show the project picker bar
-    showProjectPicker: function() {
-      var bar = document.getElementById('cc-project-bar');
-      if (bar) bar.style.display = '';
-    },
-
-    // Hide the project picker bar
-    hideProjectPicker: function() {
-      var bar = document.getElementById('cc-project-bar');
-      if (bar) bar.style.display = 'none';
-    },
-
     // Create a Claude Code backend session
     createSession: async function(sessionId, model, workingDir, permissionMode) {
       var body = {
@@ -1553,18 +1541,6 @@
       return commands.filter(function(cmd) {
         return cmd.toLowerCase().indexOf(lower) === 0;
       }).map(function(cmd) { return '/' + cmd; });
-    },
-
-    // Check backend session status. Returns 'active', 'suspended', 'expired', or null.
-    checkSessionStatus: async function(sessionId) {
-      try {
-        var resp = await App.authFetch('/api/claude-code/session/' + encodeURIComponent(sessionId), {
-          method: 'GET', _timeout: 5000,
-        });
-        if (!resp.ok) return null;
-        var data = await resp.json();
-        return data.state || null;
-      } catch (_e) { return null; }
     },
 
     // Update the project picker bar visibility based on current model

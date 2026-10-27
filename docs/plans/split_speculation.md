@@ -554,9 +554,14 @@ changed from the design above:
   restarts the stream, and every earlier turn not yet started there is answered
   unrun — PipeInfer's early cancellation (arXiv 2407.11798), signalled by the
   restart itself. Without it the shared-card rig ran 17.8 tok/s against 25-27.
-- **No chunk is built past an unsure guess**: when the drafter stops short of the
-  guesses asked for (its confidence floor), the look-ahead is that unsure guess and
-  the next chunk waits for its answer — PipeInfer's "reactive speculation".
+- **No chunk is built past an unsure guess** — so it was built, and so it stood
+  until 2026-10-26: when the drafter stopped short of the guesses asked for (its
+  0.4 confidence floor), the look-ahead was that unsure guess and the next chunk
+  waited for its answer, PipeInfer's "reactive speculation". Since v0.3.257 the
+  stream drafts with no floor and every chunk is its full width; a chunk holds the
+  stream only where the drafter failed or the context ran out (`Frontier::held_by`).
+  The rounds keep the floor. Measured: 7B between Thailand and Australia 7.66 vs
+  6.49 tok/s, `held` 0 vs 37 of 82 chunks (`faster_than_local.md` § 8.6).
 
 **Measured** (Qwen2.5-Coder-7B, 0.5B drafter, greedy, emulated 24 ms round trip,
 129-token replies ×3, one binary):

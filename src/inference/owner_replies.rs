@@ -210,11 +210,6 @@ impl Exposure {
         }
     }
 
-    /// The peers reached.
-    pub fn peers(&self) -> &[NodeId] {
-        &self.seen_by
-    }
-
     /// Whether a run copied from a reply seen as `self` may be sent as
     /// `shown`: every peer it would reach saw the reply, and every peer it
     /// would reach as ids knew the reply as ids.
