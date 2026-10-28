@@ -649,6 +649,26 @@ config. All three paths call it with the file (`config::read_config_file`, the
 same `parse_config_file` as the save's base). `a_reload_makes_every_setting_in_the_file_live`
 fails with the old handler (the cap stays 0, not 37). The argument above still
 holds: the file is the only source either way.
+
+**And it sets what a subsystem keeps outside `cfg()` (2026-10-28).** Two
+settings act through a copy: the threads a worker spawns with
+(`ModelProcessPool::set_cpu_threads` / `set_owner_prefill_threads` — the spawn
+path cannot reach `SharedState`) and the switch `AutoShardManager` reads
+(`models.auto_manage_enabled`). Both were set only in the dashboard save, from
+the REQUEST — so the reload above, though it made the file live, reached
+neither: its reply listed a hand-edited contribution level as applied while the
+next worker kept the old threads, and `[auto_manage] enabled` changed `cfg()`
+alone. The save had a fault of its own: it stored the requested switch, so on an
+anchor (whose `apply_live_config` forces auto-manage off) a Settings toggle
+turned auto-manage on, and a save whose disk write failed flipped it anyway.
+Found by the v0.3.259 pre-release review reading the reload against the save.
+Now `make_config_live` → `apply_what_subsystems_hold` sets both from the live
+config it has just stored (after the command-line facts), and wakes the
+auto-manage pass when the switch turns on or the metered rule changes; startup
+derives the threads through the same `set_worker_threads_from`. Test
+`a_config_made_live_sets_what_subsystems_keep_outside_it` (red with the call
+removed). **A new copy of a setting outside `cfg()` is set there**, never in a
+handler.
 - The staging-and-rename half (a bare `std::fs::write` truncates first, and a
   crash mid-save left a file the daemon refuses to start on) was fixed earlier
   and is separate; keep both.

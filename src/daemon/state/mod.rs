@@ -1836,37 +1836,8 @@ impl SharedState {
                         .and_then(|s| crate::model::auto_manage::vram_budget_ceiling(&s))
                 }));
         }
-        // CPU parallelism, resolved the same way. Without this a single request
-        // took every core on the machine whatever the contribution level said —
-        // measured at 529-534% of 600% on a 6-core node set to Minimal.
-        {
-            let (physical_cores, logical_cores) =
-                crate::config::ResourceConfig::detect_cpu_topology();
-            let threads = state.config.resources.inference_cpu_threads(
-                physical_cores,
-                logical_cores,
-                state.config.node.contribution.clone(),
-            );
-            state.model_process_pool.set_cpu_threads(threads);
-            // The owner's own prompts are not the swarm's work: read on every
-            // physical core unless an explicit `max_cpu_threads` says otherwise
-            // (FUTURE_WORK #119, `cpu_pools::in_phase_pool`).
-            let owner_threads = state
-                .config
-                .resources
-                .owner_prefill_threads(physical_cores, logical_cores);
-            state
-                .model_process_pool
-                .set_owner_prefill_threads(owner_threads);
-            tracing::info!(
-                contribution = ?state.config.node.contribution,
-                physical_cores,
-                logical_cores,
-                inference_cpu_threads = threads,
-                owner_prompt_threads = owner_threads,
-                "Inference CPU parallelism set from the contribution level"
-            );
-        }
+        // CPU parallelism, resolved the same way.
+        state.set_worker_threads_from(&state.config);
         // The CPU-side sibling. `resources.max_ram_mb` has been documented in
         // the shipped config as "0 = auto (50% of system RAM)" since before any
         // code read it — the setting was inert, so a user capping RAM to protect
@@ -2037,13 +2008,79 @@ impl SharedState {
     ///
     /// The two reloads used to push only those figures, so a hand edit of any
     /// other setting stayed out of `cfg()` until a dashboard save, while the
-    /// reload's reply listed it as applied (sweep 2026-10-27).
+    /// reload's reply listed it as applied (sweep 2026-10-27). It also sets what
+    /// a subsystem keeps outside `cfg()` (`apply_what_subsystems_hold`).
     pub fn make_config_live(&self, config: Config) -> bool {
         let params = crate::config::OperationalParams::from_config(&config);
-        let changed = params != crate::config::OperationalParams::from_config(&self.cfg());
+        let previous = self.cfg();
+        let changed = params != crate::config::OperationalParams::from_config(&previous);
         self.apply_live_config(config);
+        self.apply_what_subsystems_hold(&previous);
         self.apply_config_reload(params);
         changed
+    }
+
+    /// What a subsystem keeps OUTSIDE `cfg()`, set from the config just made
+    /// live: the threads a worker is spawned with and the switch auto-manage
+    /// reads. Both used to be set only by the dashboard save, from the request,
+    /// so a reload's reply listed the contribution level as applied while the
+    /// threads waited for the next save, a reload's `[auto_manage] enabled` was
+    /// never seen, and a save turned an anchor's forced-off auto-manage back on
+    /// (v0.3.259 pre-release review). Read from the live config, AFTER
+    /// [`Self::apply_live_config`], so the command-line facts hold here too.
+    fn apply_what_subsystems_hold(&self, previous: &Config) {
+        let live = self.cfg();
+        self.set_worker_threads_from(&live);
+        let enabled = live.auto_manage.enabled;
+        let was = self
+            .models
+            .auto_manage_enabled
+            .swap(enabled, std::sync::atomic::Ordering::AcqRel);
+        // Wake the pass so a switch turned on, or a metered pause lifted, takes
+        // effect now rather than at its next interval.
+        if (enabled && !was)
+            || live.auto_manage.on_metered_connection != previous.auto_manage.on_metered_connection
+        {
+            self.models.auto_manage_notify.notify_one();
+        }
+    }
+
+    /// The processor threads a worker is spawned with, from `config`'s
+    /// contribution level or its explicit `max_cpu_threads`, and those the
+    /// owner's own prompts are read on. The pool keeps them as copies (its spawn
+    /// path cannot reach `SharedState`), so every config that takes effect sets
+    /// them here — at startup and in [`Self::make_config_live`]. Without them a
+    /// single request took every core whatever the contribution level said —
+    /// measured at 529-534% of 600% on a 6-core node set to Minimal. Workers
+    /// already running keep the pool they were given: recycling one would drop
+    /// whatever it is answering.
+    fn set_worker_threads_from(&self, config: &Config) {
+        let (physical_cores, logical_cores) = crate::config::ResourceConfig::detect_cpu_topology();
+        let threads = config.resources.inference_cpu_threads(
+            physical_cores,
+            logical_cores,
+            config.node.contribution.clone(),
+        );
+        // The owner's own prompts are not the swarm's work: read on every
+        // physical core unless an explicit `max_cpu_threads` says otherwise
+        // (FUTURE_WORK #119, `cpu_pools::in_phase_pool`).
+        let owner_threads = config
+            .resources
+            .owner_prefill_threads(physical_cores, logical_cores);
+        let before = self.model_process_pool.cpu_threads();
+        self.model_process_pool.set_cpu_threads(threads);
+        self.model_process_pool
+            .set_owner_prefill_threads(owner_threads);
+        if before != threads.max(1) {
+            tracing::info!(
+                contribution = ?config.node.contribution,
+                physical_cores,
+                logical_cores,
+                inference_cpu_threads = threads,
+                owner_prompt_threads = owner_threads,
+                "Inference CPU parallelism set from the contribution level"
+            );
+        }
     }
 
     /// Notify the subscribers of hot-reloaded operational params. Outside tests
@@ -6423,6 +6460,45 @@ mod live_config_tests {
         wants.auto_manage.enabled = true;
         plain.apply_live_config(wants);
         assert!(plain.cfg().auto_manage.enabled);
+    }
+
+    /// A config made live — a save, a reload or SIGHUP — also sets what the
+    /// pool and auto-manage keep outside `cfg()`: the threads the next worker
+    /// spawns with and the auto-manage switch. Only the dashboard save set them,
+    /// from its request, so a reload of a hand-edited contribution level or
+    /// `[auto_manage] enabled` reached neither (v0.3.259 pre-release review),
+    /// and a save turned an anchor's forced-off auto-manage back on.
+    #[test]
+    fn a_config_made_live_sets_what_subsystems_keep_outside_it() {
+        use std::sync::atomic::Ordering;
+        let state = test_state();
+        let (_, logical) = crate::config::ResourceConfig::detect_cpu_topology();
+        let before = state.model_process_pool.cpu_threads();
+        let asked = if before == 1 { 2 } else { 1 };
+        let mut file = (**state.cfg()).clone();
+        file.resources.max_cpu_threads = asked as u32;
+        let flipped = !state.models.auto_manage_enabled.load(Ordering::Acquire);
+        file.auto_manage.enabled = flipped;
+        state.make_config_live(file);
+        assert_eq!(
+            state.model_process_pool.cpu_threads(),
+            asked.clamp(1, logical),
+            "the next worker spawns with the file's threads"
+        );
+        assert_eq!(
+            state.models.auto_manage_enabled.load(Ordering::Acquire),
+            flipped,
+            "auto-manage reads the file's switch"
+        );
+
+        // An anchor's file asking for auto-manage leaves its switch off.
+        let mut started = crate::config::Config::default();
+        started.apply_anchor_mode();
+        let anchor = state_started_with(started);
+        let mut file = (**anchor.cfg()).clone();
+        file.auto_manage.enabled = true;
+        anchor.make_config_live(file);
+        assert!(!anchor.models.auto_manage_enabled.load(Ordering::Acquire));
     }
 
     /// The whole point: a setting changed while the node runs must be visible to

@@ -1667,45 +1667,18 @@ pub async fn update_config(
                 ))));
             }
         };
-        config.node.contribution = mode.clone();
-        // The level itself goes live with the whole config at the end of this
-        // handler. What needs doing *here* is the part re-reading cannot do:
-
-        // Inference thread count is handed to a worker when it spawns, so
-        // re-deriving it here means the next worker picks up the new level.
-        // Workers already running keep the pool they were given — recycling a
-        // live worker would drop whatever it is currently answering.
-        let (physical_cores, logical_cores) = crate::config::ResourceConfig::detect_cpu_topology();
-        let threads =
-            config
-                .resources
-                .inference_cpu_threads(physical_cores, logical_cores, mode.clone());
-        state
-            .shared_state
-            .model_process_pool
-            .set_cpu_threads(threads);
-        tracing::info!(
-            contribution = ?mode,
-            inference_cpu_threads = threads,
-            "Contribution level changed — applied to the running daemon"
-        );
+        // Goes live with the whole config at the end of this handler, and
+        // `make_config_live` re-derives the threads the next worker spawns with.
+        config.node.contribution = mode;
     }
     if let Some(auto) = body.contribution_auto {
         config.node.contribution_auto = auto;
     }
     apply_numeric_limits(&mut config, &body);
     if let Some(auto_manage) = body.auto_manage_shards {
+        // The switch AutoShardManager reads is set, and the pass woken, by
+        // `make_config_live` from the config it makes live — an anchor's stays off.
         config.auto_manage.enabled = auto_manage;
-        // Update the runtime atomic so AutoShardManager picks it up immediately
-        state
-            .shared_state
-            .models
-            .auto_manage_enabled
-            .store(auto_manage, std::sync::atomic::Ordering::Release);
-        if auto_manage {
-            // Wake the AutoShardManager so it evaluates promptly
-            state.shared_state.models.auto_manage_notify.notify_one();
-        }
         state.shared_state.emit_activity(
             crate::daemon::state::ActivityEvent::new(
                 "system",
@@ -1720,10 +1693,9 @@ pub async fn update_config(
     }
     if let Some(metered) = body.auto_manage_on_metered {
         // Read by `SharedState::metered_hold` before the next automatic
-        // download, and by `metered_hold_now` at once for peers' requests; wake
-        // the pass so a pause lifted takes effect now.
+        // download, and by `metered_hold_now` at once for peers' requests;
+        // `make_config_live` wakes the pass so a pause lifted takes effect now.
         config.auto_manage.on_metered_connection = metered;
-        state.shared_state.models.auto_manage_notify.notify_one();
     }
     if let Some(shard_size) = body.shard_size_mb {
         if !(crate::config::SHARD_SIZE_MIN_MB..=crate::config::SHARD_SIZE_MAX_MB)

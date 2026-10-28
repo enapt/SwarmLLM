@@ -4846,6 +4846,11 @@ impl ModelProcessPool {
             .store(threads.max(1), std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// The thread count the next worker is spawned with (0 before startup sets it).
+    pub(crate) fn cpu_threads(&self) -> usize {
+        self.cpu_threads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Threads a worker reads the machine OWNER's own prompts on
     /// (`ResourceConfig::owner_prefill_threads`), passed to each worker as
     /// `SWARMLLM_OWNER_PREFILL_THREADS`. Swarm work stays at `set_cpu_threads`.
