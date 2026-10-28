@@ -3340,6 +3340,55 @@ The first token of the 1,800-token prompt came LATER in the guessing arms (3.47-
 prefix-cache snapshot, copied before the first token on every path, took 0.9-1.4 s there against
 0.25-0.53 s in the tails (round 4's second tail also 0.6-1.3 s, so not the placement alone).
 
+**A third of the model on the card** (round 7, `ab6.sh`: `card_hog.py` holding 1,800 MiB, the
+floor lowered to a fifth; arms tail, guess, guess, tail; Windows up 8.5 h): both placements held 15
+of 48, the guessing arms' run 5..38. Decode came out even: code 4.67 against 4.64 tok/s, summary
+4.54 against 4.56, prose 5.10 against 5.12 (0.99-1.01x). With 33 of 48 skipped the card's guess
+agreed 30% of the time (26-27 of 98-103 kept, ~91 rounds a reply) at 34-36 ms a guess — MORE than
+the 21-30 ms at 21 of 48, on fewer layers (open, FUTURE_WORK #366) — so the count checked one
+guess a round, and it paid only for itself. Nothing lost, so the floor stays at a fifth; what
+would turn it into a gain is a better guess (the stand-in below) or a cheaper one.
+
+**The same third, guessing through a stand-in for the run** (round 8, `ab7.sh`, same card hold,
+Windows up 9.4-10 h; arms none, stand-in, stand-in, none, `SWARMLLM_CARD_GUESS_STAND_IN=none` the
+switch; 2 timed requests per prompt per arm). `split::RunStandIn` fits the run's effect from the
+hidden states every real step and check already computes where the run starts and ends — a linear
+kernel ridge over the last 256 positions, kept current a row at a time (sliding-window kernel RLS,
+Van Vaerenbergh et al., ICASSP 2006) — and the card's first guess adds it where the run is
+skipped. The card's guesses were kept 0.42-0.59 of the time against 0.28-0.36, and decode rose on
+code 3.90-4.96 → 6.05-6.58 tok/s (median 1.35x) and on the 1,800-token summary 4.05-4.54 →
+4.43-5.68 (1.11x); prose stayed level (4.83-5.42 against 4.50-5.42) — the speculation gate kept most
+prose requests plain in every arm (one guessing prose request an arm). The stand-in cost 109-192 ms
+over a 160-token reply from a short prompt, 507-577 ms from the long one — 383-389 ms of that at the
+prompt (an 8-token reply's whole count), where its first read of the card waits for the prompt pass's
+queued card work, which the first token waits for anyway (0.35 s on the batched path, which keeps no
+stand-in); the rest its window, full from the first round. A guess still cost 26-38 ms. The probe beside it
+(`skip_agreement_probe` `PROBE_BRIDGE=1`, arm `online` = the library's stand-in): first-guess
+agreement 22% → 38%, tokens kept a round 0.26 → 0.62 on the 14B at this block; 3% → 25-28% and
+0.03 → 0.47-0.55 on Llama 3.1 8B and Mistral 7B with 25 of 32 skipped. On the ~1,800-token prompts a
+ridge map over EVERY position (`linear@0.3`) did better still (53-56% / 1.09-1.41 against the
+window's 28-34% / 0.48-0.70) — more of a long context is worth fitting from; its refit is a
+5,120-wide solve, ~1 s on this card, so it is not the worker's.
+
+**At the default placement it still adds** (round 9, `ab8.sh`: ab7 with no card hold, so the
+placement is the node's own — 26 of 48 on the card, layers 5..27 on the processor, 25 in the first
+arm; Windows up ~10.3 h; arms none, stand-in, stand-in, none; 2 timed requests per prompt per arm).
+Medians: code 10.19 → 11.84 tok/s (1.16x; none 9.73-11.48, stand-in 11.46-12.28), the 1,759-token
+summary 10.05 → 12.11 (1.21x; 9.31-10.54 against 11.82-12.59), prose 9.95 → 10.45 (1.05x; 9.09-10.8
+against 10.44-12.16). Acceptance with the stand-in 0.76-0.83 / 0.77-0.86 / 0.64-0.76 (code /
+summary / prose) against 0.67-0.84 / 0.56-0.76 / 0.52-0.74 without; a guess 17.7-20.6 ms in both;
+the stand-in 70-114 ms a reply from a short prompt and 808-844 ms from the long one (its window
+fills at the prompt, which waits for the pass's queued card work). Every prose request guessed
+here, unlike round 8's. Replies: one near-tie each on code and summary (the code one the same
+"missing values appropriately." as round 8); prose differs between every arm — the first arm's 25
+layers flip "In the heart" / "In the quiet" at the second word as round 5's tail and middle
+placements did, and the 26-layer arms part at "lived a lighthouse keeper named Eliza" / "lived
+Eliza, a lighthouse keeper" (none / stand-in) and "wind" / "winds" (the two stand-in arms) — a
+check's row moves with its width (§ "A recurrent state is taken back…" names the 4-row kernel
+switch), so which near-tie flips follows what was guessed. Scored against llama.cpp
+(`score_against_reference.py`, the whole 14B file): all twelve replies, plain arms and stand-in
+arms alike, rank every token 1 or 2, the largest gap 0.17-0.41 logits a reply.
+
 **Prior art.** Skipping layers to self-draft is LayerSkip (arxiv 2404.16710), SWIFT (2410.06916,
 already here as `swift_decode_loop`), Draft & Verify, CLaSp (2505.24196), KNN-SSD (2505.16162);
 S3D (2405.20314) skips middle layers for low-memory cards and found the same shape — early and
@@ -3425,6 +3474,35 @@ window slid in place (#281 (1)) nothing rewrote `[0, pos)` of a live buffer, so 
 was harmless; from then on, the next slide rewrote the saved prompt the next turn would restore —
 no error, a wrong context. Hydration was never affected (it appends into a fresh `LayerKv`).
 Test, red with `contiguous()`: `a_snapshot_of_a_one_head_cache_does_not_share_the_live_buffer`.
+
+**A prompt's snapshot is copied once the reply is done** (2026-10-28, `prompt_saved_when_done`).
+llama.cpp's server saves a slot's prompt to its host cache only when the slot is next used
+(`tools/server/server-context.cpp:1647` at 4b1a27f); here the copy sat between the prompt pass and
+the first token on both generate paths. Moved after `GenerateDone` (`handle_generate`) and into
+`finalize_slot` (`Slot::save_when_done`, the batched path) wherever the prompt's positions are still
+whole at the end: decode only appends and a rejected guess is cut back no further than the prompt's
+end — not a cache that slides (`SplitModel::any_cache_slides`), nor a recurrent model, which saves
+inside the pass. **Measured** (round 8, `ab7.sh`, Qwen2.5-14B Q4_K_M, 15 of 48 on the card,
+1,800-token prompts each new, 8 tokens, `stream_bench.py --gap 4`, arms done/end/end/done, 4
+requests each): the copy itself is 0.47-0.92 s (569 MB to host RAM; `copy_ms`), and the time from
+the prompt pass returning to the first token fell from 0.69-0.93 s to 0.35-0.44 s (what is left is
+the card finishing the pass, read when the first token is sampled). But the pass itself ran 0.25 s
+slower in the deferred arms (median 3.16 s against 2.91; 3.04-3.83 against 2.72-3.24, both arm
+positions), so the first token improved only 3.92 → 3.80 s at the median, 3.77 → 3.57 s at best.
+Why a pass after a deferred copy is slower is open. **Back to back the copy is not hidden**
+(gotcha #986): a request arriving while the last one's copy runs waits for it — the first
+measurement read that wait as a regression. **Moved to the reply's end, the copy must still be
+made however the reply ends** (review of the change, before it shipped): taken only on the clean
+exit, a reply that failed — above all one cancelled inside a step, the user who stops a reply and
+asks again — lost the prompt a retry would have reused, where the old copy had already been made.
+`prompt_outlives` is the one answer on all three exits (the sequential reply, a failed batched
+tick, a batched slot that ended in error): every error the worker survives, since a failed step
+puts the caches back where it began; none after one that ruined the device. And a copy made after
+the reply keeps no reserve for it beside the live cache (`ReplyAhead::Done`). A/B
+`SWARMLLM_PROMPT_SAVE=at-prompt-end`. Tests:
+`a_prompts_positions_outlive_its_reply_only_where_no_cache_slides`,
+`a_prompt_left_for_the_replys_end_outlives_every_error_the_worker_survives`,
+`a_snapshot_taken_after_the_reply_keeps_no_room_for_it`.
 
 ## A blocked GQA attention call is grouped per block, never expanded (2026-09-26)
 

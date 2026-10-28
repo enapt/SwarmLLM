@@ -1324,8 +1324,8 @@ impl SplitModel {
     /// and dropped, and the next call cuts the drafter's cache back as always.
     /// Ties between equal maxima may break differently from the host's
     /// first-index rule; a guess is only a guess, and the check decides.
-    /// With `skips`, each step runs without those layers
-    /// ([`Self::card_guesses`]).
+    /// With `skips`, each step runs without those layers, their run stood in
+    /// for by the bridge where one is given ([`Self::card_guesses`]).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn argmax_guesses_on_card(
         &mut self,
@@ -1336,7 +1336,7 @@ impl SplitModel {
         gamma: usize,
         temperature: f32,
         stop_below: Option<f32>,
-        skips: Option<&[bool]>,
+        skips: Option<(&[bool], Option<&super::SkipBridge>)>,
     ) -> Result<Vec<u32>, SwarmError> {
         use candle_core::Tensor;
         // A read-ahead (`engine_drafter::read_ahead`) asks for no guesses: the
@@ -1374,8 +1374,16 @@ impl SplitModel {
             if j + 1 < gamma {
                 let next = best.reshape((1, 1)).map_err(SwarmError::internal)?;
                 logits = match skips {
-                    Some(skips) => {
-                        self.forward_with_skip_mask(&next, first + j, kv, request_id, skips)?
+                    Some((mask, Some(bridge))) => self.forward_with_skip_bridge(
+                        &next,
+                        first + j,
+                        kv,
+                        request_id,
+                        mask,
+                        bridge,
+                    )?,
+                    Some((mask, None)) => {
+                        self.forward_with_skip_mask(&next, first + j, kv, request_id, mask)?
                     }
                     None => self.forward(&next, first + j, kv, request_id)?,
                 };
@@ -1407,7 +1415,9 @@ impl SplitModel {
     /// greedy pick and the next step's input there, all read back once
     /// ([`Self::argmax_guesses_on_card`]); the guesses' cache entries are cut
     /// back to `index_pos` before it returns, so the check starts from the
-    /// cache a step would.
+    /// cache a step would. With `bridge`, the skipped run is stood in for
+    /// (`stand_in::RunStandIn`) rather than taken to add nothing.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn card_guesses(
         &mut self,
         kv: &KvCacheStore,
@@ -1416,25 +1426,30 @@ impl SplitModel {
         token: u32,
         gamma: usize,
         skips: &[bool],
+        bridge: Option<&super::SkipBridge>,
     ) -> Result<Vec<u32>, SwarmError> {
         if gamma == 0 {
             return Ok(Vec::new());
         }
         let input = self.token_tensor(token)?;
-        let guessed = self
-            .forward_with_skip_mask(&input, index_pos, kv, request_id, skips)
-            .and_then(|logits| {
-                self.argmax_guesses_on_card(
-                    kv,
-                    request_id,
-                    index_pos + 1,
-                    logits,
-                    gamma,
-                    0.0,
-                    None,
-                    Some(skips),
-                )
-            });
+        let first = match bridge {
+            Some(bridge) => {
+                self.forward_with_skip_bridge(&input, index_pos, kv, request_id, skips, bridge)
+            }
+            None => self.forward_with_skip_mask(&input, index_pos, kv, request_id, skips),
+        };
+        let guessed = first.and_then(|logits| {
+            self.argmax_guesses_on_card(
+                kv,
+                request_id,
+                index_pos + 1,
+                logits,
+                gamma,
+                0.0,
+                None,
+                Some((skips, bridge)),
+            )
+        });
         // Cut back whether or not the guesses came: a check never starts on a
         // guess's cache.
         let key = self.kv_model_key().to_string();

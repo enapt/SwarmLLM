@@ -15,6 +15,17 @@ times as fast (#366). Models whose layers share their memory of the conversation
 and E4B) or carry it forward step by step (Qwen 3.5) keep the old placement, since the card
 cannot guess for them.
 
+**When only a small part of such a model fits on the card, its guesses now land far more often.**
+With a third of the model on the card, a guess skips two thirds of it and used to be right about
+a third of the time, so guessing only paid for itself. The card now learns, while it writes, a
+small stand-in for the layers its guesses skip, from the work the model does on every word anyway,
+and adds it to each guess: guesses are kept about half the time instead of a third. Measured with a
+third of a 14B model on an 8 GB card: code 1.35 times as fast, a long summary 1.1 times, prose
+unchanged. With about half of it on the card, where guesses already land more often, it still
+adds: code 1.16 times as fast, the long summary 1.2 times, prose 1.05 times (10.2 → 11.8,
+10.1 → 12.1 and 10.0 → 10.5 tokens a second). The card now guesses with as little as a fifth of
+the model on it (#366).
+
 **Guessing ahead no longer switches itself off for good after one reply it could not speed up.**
 A model stops guessing when its guesses rarely land, but it only measured the replies it guessed
 on, so a single poor reply kept guessing off for as long as the model stayed loaded. It now tries again after

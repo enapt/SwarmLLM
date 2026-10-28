@@ -36,14 +36,33 @@
 //! the card guesses today), `mean` (the block's mean effect so far), `prev`
 //! (its effect at the latest real position) and `recall@λ` (the mean plus a
 //! linear kernel ridge over the last `PROBE_WINDOW` positions, 256, by the
-//! cosine of their hidden states where the block starts). It also prints how
+//! cosine of their hidden states where the block starts), and `linear@λ` (a
+//! ridge map over EVERY real position so far, the prompt's included, refitted
+//! every `PROBE_REFIT` tokens), and `online` (the library's
+//! `split::RunStandIn`, which the worker's card guesses read: `recall@0.3`'s
+//! arithmetic kept current a row at a time, over the same `PROBE_WINDOW` — it
+//! should agree with `recall@0.3` to rounding; `PROBE_STANDS=a,b` runs only
+//! those named, and `online` alone is the cheap way to try a long window,
+//! since `recall` inverts its window whole at every position). It also prints how
 //! far each stand-in's estimate of the block's effect lands from the effect
 //! the next real forward measures (`err`, relative; `none` is 1).
+//!
+//! Two more ask whether a stand-in can outlive its conversation — what a node
+//! would carry from the replies it wrote before (FUTURE_WORK #366 (1)):
+//! `prior@λ` is a ridge map fitted ONLY on the earlier prompts' real
+//! positions (prompt and reply, in `PROBE_PROMPTS` order; the first prompt has
+//! none, so it guesses as `none`), and `pooled@λ` the same map with this
+//! conversation's positions so far added, refitted every `PROBE_REFIT`
+//! tokens. Both keep sufficient statistics (`ΦᵀΦ`, `ΦᵀΔ`, the sums), never
+//! the rows, so the carried state is two hidden × hidden matrices however
+//! long the history.
 
 use std::path::PathBuf;
 
 use candle_core::{DType, Tensor};
-use swarmllm::inference::split::{GgufTensorMeta, KvCacheStore, SkipBridge, SplitModel};
+use swarmllm::inference::split::{
+    GgufTensorMeta, KvCacheStore, RunStandIn, SkipBridge, SplitModel,
+};
 use swarmllm_types::{ModelManifest, ShardTensorEntry};
 
 fn env_usize(key: &str, default: usize) -> usize {
@@ -119,6 +138,19 @@ enum Stand {
     Mean,
     Prev,
     Recall(f64),
+    /// A linear map fitted over EVERY real position so far — the prompt's
+    /// included — by ridge regression (`ridge_by_cg`), refitted every
+    /// `PROBE_REFIT` tokens (16): what a node could fit from the hidden states
+    /// each check hands back, with no copy of the skipped layers.
+    Linear(f64),
+    /// `split::RunStandIn`: `Recall(0.3)` kept current a row at a time.
+    Online,
+    /// A ridge map fitted only on the EARLIER prompts' real positions
+    /// (`Carried`), once per prompt.
+    Prior(f64),
+    /// `Prior`'s statistics plus this conversation's positions so far,
+    /// refitted every `PROBE_REFIT` tokens.
+    Pooled(f64),
 }
 
 struct Candidate {
@@ -207,7 +239,16 @@ fn main() -> anyhow::Result<()> {
             ("prev".to_string(), Stand::Prev),
             ("recall@0.3".to_string(), Stand::Recall(0.3)),
             ("recall@3".to_string(), Stand::Recall(3.0)),
+            ("linear@0.3".to_string(), Stand::Linear(0.3)),
+            ("linear@3".to_string(), Stand::Linear(3.0)),
+            ("online".to_string(), Stand::Online),
+            ("prior@0.3".to_string(), Stand::Prior(0.3)),
+            ("pooled@0.3".to_string(), Stand::Pooled(0.3)),
         ] {
+            let only = std::env::var("PROBE_STANDS").unwrap_or_default();
+            if !only.is_empty() && !only.split(',').any(|s| s == name) {
+                continue;
+            }
             let mut c = mk(name, block_start..block_start + skip);
             c.stand = stand;
             candidates.push(c);
@@ -230,6 +271,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     let key = model.kv_model_key().to_string();
+    let mut carried: Option<Carried> = None;
     for (pi, prompt) in prompts.iter().enumerate() {
         let store = KvCacheStore::new(std::time::Duration::from_secs(3600));
         let req = format!("skip-probe-{pi}");
@@ -239,7 +281,17 @@ fn main() -> anyhow::Result<()> {
         let capture: std::collections::HashSet<usize> = [block_start - 1, block_start + skip - 1]
             .into_iter()
             .collect();
-        let mut history = History::default();
+        let mut history = History {
+            online: bridge_mode
+                .then(|| {
+                    let mut skips = vec![false; layers];
+                    skips[block_start..block_start + skip].fill(true);
+                    RunStandIn::for_run(&skips, model.device()).map(|s| s.with_window(window))
+                })
+                .flatten()
+                .map(std::cell::RefCell::new),
+            ..History::default()
+        };
         let logits = if bridge_mode {
             let (logits, caught) = model.forward_capturing(
                 &model.tensor_from_ids(&ids)?,
@@ -263,7 +315,7 @@ fn main() -> anyhow::Result<()> {
             let run_end = block_start + skip;
             let bridges: Vec<Option<SkipBridge>> = candidates
                 .iter()
-                .map(|c| history.bridge(c.stand, run_end, window))
+                .map(|c| history.bridge(c.stand, run_end, window, carried.as_ref()))
                 .collect::<anyhow::Result<_>>()?;
             for (c, cand) in candidates.iter().enumerate() {
                 let mut chain = Vec::with_capacity(gamma);
@@ -317,6 +369,13 @@ fn main() -> anyhow::Result<()> {
             };
             tok = argmax(&l)?;
             reply.push(tok);
+        }
+        if let (Some(phi), Some(delta)) = (&history.phi, &history.delta) {
+            let this = Carried::of(phi, delta)?;
+            match carried.as_mut() {
+                Some(c) => c.merge(&this)?,
+                None => carried = Some(this),
+            }
         }
         let mut this_prompt = String::new();
         for (c, cand) in candidates.iter_mut().enumerate() {
@@ -380,6 +439,62 @@ fn main() -> anyhow::Result<()> {
 struct History {
     phi: Option<Tensor>,
     delta: Option<Tensor>,
+    /// `Linear` fits by λ's bits: the history length fitted at, the mean
+    /// effect, the map `[hidden, hidden]`.
+    fits: std::cell::RefCell<std::collections::HashMap<u64, (usize, Tensor, Tensor)>>,
+    eye: std::cell::RefCell<Option<Tensor>>,
+    /// The library's stand-in for the same block, fed the same forwards.
+    online: Option<std::cell::RefCell<RunStandIn>>,
+    /// `Prior` fits by λ's bits (once a prompt) and `Pooled` fits by λ's
+    /// bits (the history length fitted at): the mean effect, the map.
+    prior_fits: std::cell::RefCell<std::collections::HashMap<u64, (Tensor, Tensor)>>,
+    pooled_fits: std::cell::RefCell<std::collections::HashMap<u64, (usize, Tensor, Tensor)>>,
+}
+
+/// What a node would carry from the conversations it served before this one
+/// (bridge mode): the block's sufficient statistics over every real position
+/// of the earlier prompts — `ΦᵀΦ`, `ΦᵀΔ`, `Σφ`, `ΣΔ` and the count.
+struct Carried {
+    g: Tensor,
+    c: Tensor,
+    sum_phi: Tensor,
+    sum_delta: Tensor,
+    n: usize,
+}
+
+impl Carried {
+    fn of(phi: &Tensor, delta: &Tensor) -> anyhow::Result<Self> {
+        let pt = phi.t()?.contiguous()?;
+        Ok(Self {
+            g: pt.matmul(&phi.contiguous()?)?,
+            c: pt.matmul(&delta.contiguous()?)?,
+            sum_phi: phi.sum(0)?,
+            sum_delta: delta.sum(0)?,
+            n: phi.dim(0)?,
+        })
+    }
+
+    fn merge(&mut self, more: &Carried) -> anyhow::Result<()> {
+        self.g = (&self.g + &more.g)?;
+        self.c = (&self.c + &more.c)?;
+        self.sum_phi = (&self.sum_phi + &more.sum_phi)?;
+        self.sum_delta = (&self.sum_delta + &more.sum_delta)?;
+        self.n += more.n;
+        Ok(())
+    }
+
+    /// The ridge map of these statistics, Δ centred on its mean as `Linear`
+    /// centres it: `(G + λI)·W = C − Σφ ⊗ mean(Δ)`. Returns `(mean, W)`.
+    fn fit(&self, lambda: f64) -> anyhow::Result<(Tensor, Tensor)> {
+        let base = (&self.sum_delta / self.n.max(1) as f64)?;
+        let d = base.dim(0)?;
+        let outer = self
+            .sum_phi
+            .reshape((d, 1))?
+            .matmul(&base.reshape((1, d))?)?;
+        let b = (&self.c - outer)?;
+        Ok((base, ridge_by_cg_gram(&self.g, &b, lambda)?))
+    }
 }
 
 impl History {
@@ -408,6 +523,9 @@ impl History {
         skip: usize,
     ) -> anyhow::Result<()> {
         let (phi, delta) = Self::rows(caught, start, skip)?;
+        if let Some(online) = &self.online {
+            online.borrow_mut().learn(caught, phi.dim(0)?)?;
+        }
         let join = |old: Option<Tensor>, new: Tensor| -> anyhow::Result<Tensor> {
             Ok(match old {
                 Some(o) => Tensor::cat(&[&o, &new], 0)?,
@@ -425,6 +543,7 @@ impl History {
         stand: Stand,
         run_end: usize,
         window: usize,
+        carried: Option<&Carried>,
     ) -> anyhow::Result<Option<SkipBridge>> {
         let (Some(phi), Some(delta)) = (&self.phi, &self.delta) else {
             return Ok(None);
@@ -457,6 +576,79 @@ impl History {
                     weights: inv.matmul(&r.contiguous()?)?,
                 })
             }
+            Stand::Online => match &self.online {
+                Some(online) => {
+                    let mut online = online.borrow_mut();
+                    online.refresh()?;
+                    online.bridge().cloned()
+                }
+                None => None,
+            },
+            Stand::Prior(lambda) => {
+                let Some(carried) = carried else {
+                    return Ok(None);
+                };
+                let mut fits = self.prior_fits.borrow_mut();
+                let key = lambda.to_bits();
+                if let std::collections::hash_map::Entry::Vacant(slot) = fits.entry(key) {
+                    slot.insert(carried.fit(lambda)?);
+                }
+                let (base, w) = &fits[&key];
+                Some(self.as_map(run_end, base, w)?)
+            }
+            Stand::Pooled(lambda) => {
+                let refit = env_usize("PROBE_REFIT", 16).max(1);
+                let mut fits = self.pooled_fits.borrow_mut();
+                let key = lambda.to_bits();
+                if fits.get(&key).is_none_or(|(at, ..)| n >= at + refit) {
+                    let mut all = Carried::of(phi, delta)?;
+                    if let Some(carried) = carried {
+                        all.merge(carried)?;
+                    }
+                    let (base, w) = all.fit(lambda)?;
+                    fits.insert(key, (n, base, w));
+                }
+                let (_, base, w) = &fits[&key];
+                Some(self.as_map(run_end, base, w)?)
+            }
+            Stand::Linear(lambda) => {
+                let refit = env_usize("PROBE_REFIT", 16).max(1);
+                let mut fits = self.fits.borrow_mut();
+                let key = lambda.to_bits();
+                if fits.get(&key).is_none_or(|(at, ..)| n >= at + refit) {
+                    let base = mean()?;
+                    let r = delta.broadcast_sub(&base)?;
+                    let w = ridge_by_cg(phi, &r, lambda)?;
+                    fits.insert(key, (n, base, w));
+                }
+                let (_, base, w) = &fits[&key];
+                let mut eye = self.eye.borrow_mut();
+                if eye.is_none() {
+                    *eye = Some(Tensor::eye(w.dim(0)?, DType::F32, w.device())?);
+                }
+                // `φ·Iᵀ·W + base`: the map as `Recall`'s arithmetic.
+                Some(SkipBridge::Recall {
+                    run_end,
+                    base: base.clone(),
+                    features: eye.clone().expect("set above"),
+                    weights: w.clone(),
+                })
+            }
+        })
+    }
+
+    /// A hidden × hidden map `W` and mean effect as a bridge: `φ·Iᵀ·W + base`,
+    /// `Recall`'s arithmetic.
+    fn as_map(&self, run_end: usize, base: &Tensor, w: &Tensor) -> anyhow::Result<SkipBridge> {
+        let mut eye = self.eye.borrow_mut();
+        if eye.is_none() {
+            *eye = Some(Tensor::eye(w.dim(0)?, DType::F32, w.device())?);
+        }
+        Ok(SkipBridge::Recall {
+            run_end,
+            base: base.clone(),
+            features: eye.clone().expect("set above"),
+            weights: w.clone(),
         })
     }
 
@@ -476,6 +668,40 @@ impl History {
                 .broadcast_add(base)?,
         })
     }
+}
+
+/// The ridge map `W` (`[hidden, hidden]`) minimising `‖Φ·W − R‖² + λ‖W‖²`
+/// over every history row: `(ΦᵀΦ + λI)·W = ΦᵀR`, solved by conjugate
+/// gradients column by column on the rows' device (`PROBE_CG_ITERS`, 60;
+/// stopping early regularises further). Primal, so its cost is the hidden
+/// width's, whatever the history's length.
+fn ridge_by_cg(phi: &Tensor, r: &Tensor, lambda: f64) -> anyhow::Result<Tensor> {
+    let pt = phi.t()?.contiguous()?;
+    ridge_by_cg_gram(
+        &pt.matmul(&phi.contiguous()?)?,
+        &pt.matmul(&r.contiguous()?)?,
+        lambda,
+    )
+}
+
+/// `ridge_by_cg` from its statistics: `(G + λI)·W = B`.
+fn ridge_by_cg_gram(g: &Tensor, b: &Tensor, lambda: f64) -> anyhow::Result<Tensor> {
+    let apply = |p: &Tensor| -> candle_core::Result<Tensor> { g.matmul(p)? + (p * lambda)? };
+    let mut w = b.zeros_like()?;
+    let mut res = b.clone();
+    let mut p = res.clone();
+    let mut rs = res.sqr()?.sum_keepdim(0)?;
+    for _ in 0..env_usize("PROBE_CG_ITERS", 60) {
+        let ap = apply(&p)?;
+        let alpha = rs.broadcast_div(&p.mul(&ap)?.sum_keepdim(0)?.clamp(1e-20, f64::MAX)?)?;
+        w = (w + p.broadcast_mul(&alpha)?)?;
+        res = (res - ap.broadcast_mul(&alpha)?)?;
+        let rs_new = res.sqr()?.sum_keepdim(0)?;
+        let beta = rs_new.broadcast_div(&rs.clamp(1e-30, f64::MAX)?)?;
+        p = (&res + p.broadcast_mul(&beta)?)?;
+        rs = rs_new;
+    }
+    Ok(w)
 }
 
 /// `(K + λI)⁻¹` by Gauss-Jordan in f64, row-major f32 out. `K` is a Gram

@@ -126,6 +126,31 @@ pub(super) struct SkipLayers<'a> {
     bridge: Option<&'a SkipBridge>,
 }
 
+/// The hidden states a forward keeps ([`SplitModel::forward_keeping`]): after
+/// each layer in `layers`, its last `last` positions — copied where that is
+/// fewer than the forward read, so a prompt pass does not hold a
+/// prompt-wide buffer per layer to the end of the forward (37 MB on the card
+/// for a 14B's 1,800-token prompt) when a stand-in keeps 256 rows
+/// (`stand_in::RunStandIn`).
+#[derive(Clone, Copy)]
+pub struct Capture<'a> {
+    pub layers: &'a std::collections::HashSet<usize>,
+    pub last: usize,
+}
+
+impl Capture<'_> {
+    fn kept_of(&self, hidden: &Tensor) -> Result<Tensor, SwarmError> {
+        let positions = hidden.dim(1).map_err(SwarmError::internal)?;
+        if self.last >= positions {
+            return Ok(hidden.clone());
+        }
+        hidden
+            .narrow(1, positions - self.last, self.last)
+            .and_then(|t| t.force_contiguous())
+            .map_err(SwarmError::internal)
+    }
+}
+
 /// A stand-in for a skipped run of layers ([`SplitModel::forward_with_skip_bridge`]):
 /// what the run would have added to the hidden state, estimated from the
 /// real forwards before it, so a card guessing alone is not handed the hidden
@@ -133,6 +158,7 @@ pub(super) struct SkipLayers<'a> {
 /// (Chen et al., ICLR 2025, arxiv 2403.19135) found that deleting a block of
 /// layers without a stand-in costs far more than replacing it with a small
 /// trained network; this one is fitted per conversation, with no training.
+#[derive(Clone)]
 pub enum SkipBridge {
     /// A constant: `h + shift`, `shift` `[hidden]` — e.g. the run's mean
     /// effect, or its effect at the latest real position.
@@ -177,7 +203,9 @@ impl SkipBridge {
                 let f = features.to_device(h.device())?;
                 let w = weights.to_device(h.device())?;
                 let base = base.to_device(h.device())?;
-                let effect = phi.matmul(&f.t()?.contiguous()?)?.matmul(&w)?;
+                // `Fᵀ` as a transposed view: the matmul reads it in place, where
+                // a copy cost the window's whole table per guess.
+                let effect = phi.matmul(&f.t()?)?.matmul(&w)?;
                 (rows + effect)?
                     .broadcast_add(&base)?
                     .reshape((b, t, d))?
@@ -539,6 +567,33 @@ impl SplitModel {
         )
     }
 
+    /// A forward that keeps the hidden states `capture` names ([`Capture`]),
+    /// with logits at every position where `all_positions` (a speculative
+    /// check, as [`Self::forward_verify_all_positions`]) — what a card's
+    /// stand-in for the run it skips is fitted from
+    /// (`stand_in::RunStandIn::learn`).
+    pub fn forward_keeping(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        capture: Capture<'_>,
+        all_positions: bool,
+    ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
+        self.forward_inner_impl(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            None,
+            Some(capture),
+            false,
+            all_positions,
+            None,
+        )
+    }
+
     /// Forward pass with pre-embedded hidden states (local embedding privacy).
     ///
     /// The input tensor is already in hidden-state space (shape [1, seq, hidden_dim])
@@ -726,7 +781,10 @@ impl SplitModel {
             kv_cache_store,
             request_id,
             lora_adapter,
-            capture_layers,
+            capture_layers.map(|layers| Capture {
+                layers,
+                last: usize::MAX,
+            }),
             false,
             false,
             None,
@@ -815,7 +873,7 @@ impl SplitModel {
         kv_cache_store: &KvCacheStore,
         request_id: &str,
         lora_adapter: Option<&LoraAdapter>,
-        capture_layers: Option<&std::collections::HashSet<usize>>,
+        capture_layers: Option<Capture<'_>>,
         skip_embedding: bool,
         all_positions: bool,
         skip_mask: Option<SkipLayers<'_>>,
@@ -1245,7 +1303,7 @@ impl SplitModel {
         kv_cache_store: &KvCacheStore,
         request_id: &str,
         lora_adapter: Option<&LoraAdapter>,
-        capture_layers: Option<&std::collections::HashSet<usize>>,
+        capture_layers: Option<Capture<'_>>,
         skip_embedding: bool,
         all_positions: bool,
         skip_mask: Option<SkipLayers<'_>>,
@@ -1820,12 +1878,12 @@ impl SplitModel {
                 }
 
                 // Capture hidden state if requested (zero overhead when not capturing)
-                if let Some(layers_to_capture) = capture_layers {
-                    if layers_to_capture.contains(&abs_layer) {
+                if let Some(capture) = capture_layers {
+                    if capture.layers.contains(&abs_layer) {
                         // A captured layer needs the value itself, so its closing
                         // add is taken here rather than fused forward.
                         let taken = hidden.into_tensor().map_err(SwarmError::internal)?;
-                        captured.insert(abs_layer, taken.clone());
+                        captured.insert(abs_layer, capture.kept_of(&taken)?);
                         hidden = Residual::Ready(taken);
                     }
                 }

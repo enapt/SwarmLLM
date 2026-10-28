@@ -304,7 +304,7 @@ llama.cpp's op offload (`ggml_backend_sched` "1.off"): a forward of ≥ `PROMPT_
 
 ## A whole model's processor run sits early in the middle, so its card can guess (2026-10-28)
 
-**`hybrid::processor_run(len, on_card, card_may_guess)` is the one answer to which layers a split keeps on the processor**: where the card could guess without the run — **`hybrid::card_may_guess`**, off the header: the whole model, every layer keeping its own cache (`kv_layers`; not Qwen 3.5's recurrent layers, not Gemma 4 E2B/E4B's shared ones) — the run starts at `round(0.1 · len)` (`PROCESSOR_RUN_STARTS_AT`) so the card holds both ends; anything else, or a card holding under two fifths (`CARD_GUESS_MIN_SHARE`), keeps the card-first tail. Every reader asks it — the loader (`LayerPlacement::split`'s `processor` range, KV over both card ends), `plan_gpu_layers`, the pool's charges (`LayerBytes::card_may_guess` → `ram_charged_share`, `card_share_of_split_mb`). Then the card guesses where the n-gram finds nothing (`model_worker::CardGuesses`): `SplitModel::card_guess_skips` (None for recurrent state, a run that lends its keys, a tail run) → `SplitModel::card_guesses` (guesses skip the run, cache cut back before the check) → `ngram_spec_round`, the count from `best_gamma_beside_a_step` with its REQUIRED `draft_ms_each` at the card's own acceptance. ⚠ **A forward reports only the processor layers it RUNS** (`SplitModel::cpu_layers_run`, gotcha #983 — a guess reported as a processor token chose ONE thread), and **a speculating loop steps plainly until the decode width settles** (`SplitModel::decode_width_settled`, gotcha #984). Card-first, a guess agreed 0-14%; from a tenth in, 50-91% (`examples/skip_agreement_probe.rs`); a 14B split decoded 1.35-1.73x against the tail with the checks on every core (`cpu_pools::checks_on_the_owners_pool`; A/B in the evidence) — and a guessing worker must keep speculating: the diversion gate drifts back (`drift_toward_retrying`, gotcha #985). A/B `SWARMLLM_PROCESSOR_RUN=tail`, `SWARMLLM_CARD_GUESSES=0`.
+**`hybrid::processor_run(len, on_card, card_may_guess)` is the one answer to which layers a split keeps on the processor**: where the card could guess without the run — **`hybrid::card_may_guess`**, off the header: the whole model, every layer keeping its own cache (`kv_layers`; not Qwen 3.5's recurrent layers, not Gemma 4 E2B/E4B's shared ones) — the run starts at `round(0.1 · len)` (`PROCESSOR_RUN_STARTS_AT`) so the card holds both ends; anything else, or a card holding under a fifth (`CARD_GUESS_MIN_SHARE`), keeps the card-first tail. Every reader asks it — the loader (`LayerPlacement::split`'s `processor` range, KV over both card ends), `plan_gpu_layers`, the pool's charges (`LayerBytes::card_may_guess` → `ram_charged_share`, `card_share_of_split_mb`). Then the card guesses where the n-gram finds nothing (`model_worker::CardGuesses`): `SplitModel::card_guess_skips` (None for recurrent state, a run that lends its keys, a tail run) → `SplitModel::card_guesses` (guesses skip the run, cache cut back before the check) → `ngram_spec_round`, the count from `best_gamma_beside_a_step` with its REQUIRED `draft_ms_each` at the card's own acceptance. **The guess adds a stand-in where the run is skipped** — `split::RunStandIn` (`stand_in.rs`), fitted from the hidden states every real step and check computes at the run's ends (`forward_keeping` + `Capture`; the prompt pass captures the stand-in's own `window()`), learned from a round's COMMITTED positions only, dropped for the reply on any error, never a reason to fail one; a third of the 14B on the card: 1.11-1.35x over guessing with nothing in the gap; at the default placement (26 of 48) 1.05-1.21x. A/B `SWARMLLM_CARD_GUESS_STAND_IN=none`. ⚠ **A forward reports only the processor layers it RUNS** (`SplitModel::cpu_layers_run`, gotcha #983 — a guess reported as a processor token chose ONE thread), and **a speculating loop steps plainly until the decode width settles** (`SplitModel::decode_width_settled`, gotcha #984). Card-first, a guess agreed 0-14%; from a tenth in, 50-91% (`examples/skip_agreement_probe.rs`); a 14B split decoded 1.35-1.73x against the tail with the checks on every core (`cpu_pools::checks_on_the_owners_pool`; A/B in the evidence) — and a guessing worker must keep speculating: the diversion gate drifts back (`drift_toward_retrying`, gotcha #985). A/B `SWARMLLM_PROCESSOR_RUN=tail`, `SWARMLLM_CARD_GUESSES=0`.
 
 → `docs/invariants/inference.md` § "A whole model's processor-held layers sit early in the middle, so the card can guess"
 
@@ -322,7 +322,20 @@ COPIES (`force_contiguous`)**: `contiguous()` hands back the live buffer for a
 one-KV-head view, which a window's in-place slide then rewrites (gotcha #874). **A kept request's snapshot
 never leaves the node** (`Entry::kept_here`: an empty manifest, so never
 announced or exported; an entry covering a kept one inherits it; the keep is a
-REQUIRED `KeepAsked` argument of `insert_from_kv`, #251 (2b)).
+REQUIRED `KeepAsked` argument of `insert_from_kv`, #251 (2b)). **A prompt's
+end-of-pass snapshot is copied once the REPLY is done** (2026-10-28,
+`model_worker::prompt_saved_when_done`; llama.cpp saves at slot reuse): after
+`GenerateDone` in `handle_generate`, in `finalize_slot` on the batched path
+(`Slot::save_when_done`) — never between the prompt pass and the first token
+(0.5-0.9 s of a 14B split's 1,800-token prompt; the first token gained only
+0.12 s at the median, as the next pass ran 0.25 s slower — open). Not where a cache slides
+(`SplitModel::any_cache_slides`: the opening may be gone by then) nor a
+recurrent model (saved inside the pass). **It is taken however the reply ends
+while the worker survives** — an error, a cancel landing inside a step, a failed
+batched tick (`model_worker::prompt_outlives`, asked by all three) — and sized with
+no reply reserve (`ReplyAhead::Done`, a REQUIRED argument of every sizing). A
+request that arrives back to back waits for the rest of the copy. A/B
+`SWARMLLM_PROMPT_SAVE=at-prompt-end`.
 
 → `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes"
 

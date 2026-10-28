@@ -114,6 +114,10 @@ pub struct Slot {
     /// for a model with recurrent layers — `take_prefill_chunk` never takes a
     /// chunk across it, so one chunk ENDS there.
     pub save_at: usize,
+    /// The prompt pass reached its end with its snapshot left for when the
+    /// reply is done (`model_worker::prompt_saved_when_done`): the slot's
+    /// finish copies it, before its caches are freed.
+    pub save_when_done: bool,
 }
 
 impl Slot {
@@ -404,6 +408,7 @@ mod tests {
             matched_stop_sequence: None,
             keep_here: false,
             save_at: usize::MAX,
+            save_when_done: false,
         }
     }
 
@@ -450,6 +455,7 @@ mod tests {
             matched_stop_sequence: None,
             keep_here: false,
             save_at: usize::MAX,
+            save_when_done: false,
         }
     }
 

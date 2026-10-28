@@ -770,7 +770,9 @@ into a cache of another dtype),
 `gguf_meta.rs` (GGUF header parsing), `shard_reader.rs` (multi-shard virtual reader),
 `rope.rs` (RoPE precomputation), `prefix_cache.rs` (cross-request prefix-KV reuse),
 `per_layer.rs` (Gemma 4 E2B/E4B's per-layer inputs, built beside the token
-embedding from a table kept in the machine's memory).
+embedding from a table kept in the machine's memory), `stand_in.rs` (what stands in
+for the processor's run while a card/processor split's card guesses alone: a
+sliding-window kernel ridge fitted from the reply's own real forwards).
 
 ```
 Client → API Server → InferenceRouter → Pipeline Assembly

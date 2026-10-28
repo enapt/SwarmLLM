@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #367**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #368**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1385,32 +1385,57 @@ unchanged. Found on the way and fixed in the same change: a guess was timed as a
 (one thread chosen, gotcha #983); guessing starved the decode-width calibration of plain steps
 (#984); the speculation gate latched off for the worker's life after one poor reply (#985); and the
 middle run first needed HALF the model on the card, so the same machine guessed at 25 layers and
-not at 23 (`hybrid::CARD_GUESS_MIN_SHARE`, now two fifths; at 21 of 48: 1.17-1.56x against the
+not at 23 (`hybrid::CARD_GUESS_MIN_SHARE`, now a fifth; at 21 of 48: 1.17-1.56x against the
 tail). The middle run applies only where the
 card can guess (`hybrid::card_may_guess`: not Qwen 3.5, not Gemma 4 E2B/E4B) and never beside
 experts kept in RAM.
 
 **What is left, best first:**
-1. **A stand-in for the skipped run** — skipping it agrees 77% on Qwen 2.5 but 50% on Llama 3.1 and
-   28% on Mistral. LLM-Streamline (arxiv 2403.19135) found a replaced block recovers most of what a
-   deleted one loses; a stand-in fitted from the conversation's own forwards (`split::SkipBridge`,
-   `skip_agreement_probe` `PROBE_BRIDGE=1`). **Measured 2026-10-28** (2 prompts × 64 tokens each; the 14B
-   skips 21 of 48 from layer 5 as the node does, the 8B and 7B skip 14 of 32 from layer 3), first-guess
-   agreement and tokens kept a round, nothing in the gap → `recall@0.3` (the block's mean effect plus a
-   kernel ridge over the last 256 positions by the cosine of their hidden states): Qwen2.5-14B 71% / 1.54
-   → 70% / 1.76 (+14%); Llama 3.1 8B 50% / 0.79 → 62% / 1.12 (+42%); Mistral 7B 28% / 0.34 → 65% / 1.73
-   (5x; its two prompts 83% and 47%, a small sample). The mean alone helps little and the last
-   position's effect (`prev`) is worse than nothing everywhere. Next: put `recall@0.3` into
-   `card_guesses` and A/B it end to end — it matters most where a model skips a larger share of
-   itself (a smaller card, a 70B).
+1. **A stand-in for the skipped run — shipped 2026-10-28 for a window of 256; a longer one is
+   next.** `split::RunStandIn`: a linear kernel ridge from the run's input to its effect over the
+   last 256 positions, fitted from every real forward and kept current a row at a time (sliding-window
+   kernel RLS). A third of the 14B on the card: decode 1.35x on code, 1.11x on a long summary, prose
+   level, against guessing with nothing in the gap; at the default placement (26 of 48) 1.16x, 1.21x
+   and 1.05x (`docs/invariants/inference.md`, rounds 8-9). **Left:
+   fit from the whole conversation.** On ~1,700-2,100-token prompts with 69-78% skipped, first-guess
+   agreement / tokens kept a round by window (round 9, `PROBE_STANDS=online PROBE_WINDOW=…`):
+   Qwen2.5-14B 33% / 0.48 at 256 → 47% / 0.73 at 1,024 → 67% / 1.41 at 2,048; Llama 3.1 8B 34% /
+   0.69 → 47% / 1.02 → 63% / 1.36; Mistral 7B 28% / 0.70 → 33% / 0.77 → 52% / 1.25 (short prompts
+   unchanged: their window already holds everything). What stops it shipping: the prompt's rebuild
+   is O(m³) in f64 on the host (~0.5-1.5 s at 1,024-2,048 before the first token) and each round
+   re-solves the weights O(m²·hidden) on the card. Both have a shape: the weights change by a
+   rank-one term per row with the inverse (`(r − kᵀα)/s` down the new row, `u·(kᵀα − r)/s` added
+   to the rest), O(m·hidden) on the card; the long prompt's inverse built off the first token's
+   path (a background thread, the decode starting from the last 256 rows) or by Newton-Schulz on
+   the card. The other form is primal RLS (Sherman-Morrison on a hidden × hidden inverse, the
+   probe's `linear@λ` map kept current): O(hidden²) a row whatever the conversation's length, but
+   2 · hidden² · 4 bytes held (210 MB at 5,120 — about one of the 14B's layers off the card; 537 MB
+   at a 70B's 8,192). The dual costs O(m · hidden) a row and m² held, so it is the cheaper below
+   m ≈ hidden — every conversation measured here. The primal statistics can also outlive the
+   conversation, summed over every reply the node writes for the model, as a prior the window
+   corrects (ReplaceMe, arXiv 2505.02819: a full map wants ~hidden² / samples-per-row positions;
+   `docs/plans/split_speculation.md` § "Second survey").
 2. **Guess while the processor checks** — the card is idle through the check's ~130 ms on the
    processor; it could keep guessing past the round's last guess (PEARL's post-verify), ready if the
-   check keeps everything.
-3. **The guess forward as a CUDA graph** — a split's forwards are not captured; the card's 27 layers
-   run op by op (~20 ms against ~8 a captured 7B step).
+   check keeps everything. Now the better lever than item 3: a guess costs 26-38 ms at 15 of 48 on
+   the card (20-30 at 21) though its forward is QUEUED in 4-5 ms (round 8's `SWARMLLM_PROFILE=1`
+   arm, 94 guess forwards; without `SWARMLLM_PROFILE_SYNC` the stage timers read enqueue time), so
+   the rest is the card running or waking. A card idle through the processor's 150-200 ms check may
+   clock down (gotcha #756's shape: an idle card is slower on its own): the safety kit's 10 s samples
+   of the SM clock through round 8's decode arms read ≤ 630 MHz in 108 of 121 (210, idle, in 53),
+   over 1,200 in 8 — and the prompt passes the same hour reached 1,530-1,755 MHz at 80-88 W —
+   suggestive, not proof at that rate.
+   Measure it first (time a guess right after another guess against one after a check); a guess run
+   beside the check would hide it either way.
+3. **The guess forward as a CUDA graph** — a split's forwards are not captured; the card's layers
+   run op by op. Not the guess's cost on its own (item 2): its launches take 4-5 ms.
 4. **Across computers**: a node holding a model's first and last layers ("Start and finish on this
    computer") can guess the same way, skipping the peers' layers — a check per round trip instead
-   of a token. Needs a probe of how far a model can skip (14B: 91% at 29%, 77% at 44%, 58% at 56%).
+   of a token — through a stand-in fitted from the hidden states it already sends and receives,
+   so it needs no far-layer weights. Probed 2026-10-28 with the stand-in at a 69-78% skip: 25-38%
+   first-guess agreement, 0.47-0.62 tokens kept a round (nothing in the gap: 3-22% / 0.03-0.26).
+   Design and what porting it needs: `docs/plans/split_speculation.md` § "Guess at the head through
+   a stand-in for the far layers".
 5. **A mixture-of-experts model by use, not by layer**: Qwen3-30B-A3B reuses 44% of the previous
    token's experts per layer (chance 6%); a card holding 46% of the experts by recency per layer
    would serve 91% of expert reads against 46% by layer (`SWARMLLM_TRACE_EXPERTS` +
@@ -1422,6 +1447,21 @@ experts kept in RAM.
    kernel to write zero for it. A miss handled on the processor reads the ids back (one sync per
    layer, no CUDA graph); one read by the card straight from pinned host memory over PCIe would keep
    the step capturable. Measure the miss traffic before choosing.
+
+#### #367 — A long prompt's snapshot copy costs 0.15-2.1 s where its memory traffic is ~0.1 s, and the next request waits for it
+`P2` · perf-local · **OPEN** — 2026-10-28 · evidence: `docs/invariants/inference.md` § "One prefix-cache snapshot is sized by bytes" (the deferred-copy paragraph)
+
+The same 1,800-token prompt's snapshot (Qwen2.5-14B Q4_K_M, 15 of 48 on the card: 569 MB, 486 of it
+the processor layers' f32 cache, all kept in host RAM under WSL2) was copied in 155-680 ms in one pair
+of arms and 864-2,074 ms in the other (round 8, `ab7.sh`, Windows up 9.4-10 h, arms in ABBA order:
+both slow arms ran without the card's stand-in, both fast ones with it — two arms each cannot tell
+that from the host's memory state), 470-924 ms in the first-token arms. Reading and writing 569 MB is
+~0.1 s; #258's rig measured 59-169 ms off the card, 662-924 ms right after a build filled the page
+cache. Since the copy waits for the reply (`prompt_saved_when_done`), a request sent straight after
+the last one — an agent's next turn — waits for it: those arms' first token of the long prompt was
+5.0-5.9 s against 3.1-3.6 s. **Next**: time the copy's parts (`SnapshotCost`, the host allocation,
+the card's device-to-host read) at both speeds; whether freed snapshots' host buffers are reused or
+the copy faults fresh pages (an allocation of 569 MB under WSL2 is 146K first touches).
 
 #### #357 — A card's first graph of a new shape, late in a worker's life, can stall one forward 10-59 s
 `P3` · perf-local · **OPEN** — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883

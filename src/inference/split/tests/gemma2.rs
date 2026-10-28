@@ -727,6 +727,69 @@ fn held_from(model: &SplitModel, kv: &KvCacheStore, id: &str) -> Vec<usize> {
         .collect()
 }
 
+/// **A prompt's snapshot can wait for the reply only where no cache slides**
+/// (`SplitModel::any_cache_slides` → `model_worker::prompt_saved_when_done`).
+/// Without a window, every layer's first `n` positions after a reply grew and
+/// a rejected guess was cut back are bit for bit what the prompt pass wrote;
+/// a windowed layer's cache drops part of the prompt while the reply grows.
+#[test]
+fn a_prompts_positions_outlive_its_reply_only_where_no_cache_slides() {
+    // Under one 512-position quantum after the prompt, past it after the reply.
+    let (n, reply) = (500, 40);
+    let a = Tensor::randn(0f32, 1.0, (1, n + reply, 256), &Device::Cpu).unwrap();
+    let rows = |model: &SplitModel, kv: &KvCacheStore| -> Vec<Vec<f32>> {
+        let key = KvCacheStore::cache_key(&model.kv_model_key, "r");
+        let entry = kv.get_entry(&key).unwrap();
+        let mut out = Vec::new();
+        for layer in entry.layers.iter().flatten() {
+            let dim = layer.k_cache().dim();
+            for t in [layer.k().unwrap().unwrap(), layer.v().unwrap().unwrap()] {
+                let t = t.narrow(dim, 0, n - layer.held_from()).unwrap();
+                out.push(t.flatten_all().unwrap().to_vec1::<f32>().unwrap());
+            }
+        }
+        out
+    };
+    for (windows, slides) in [(vec![None, None], false), (vec![Some(5), None], true)] {
+        let mut model = gemma2_model_of_context(2, 1024);
+        set_windows(&mut model, &windows);
+        assert_eq!(model.any_cache_slides(), slides, "{windows:?}");
+        let kv = KvCacheStore::new(std::time::Duration::from_secs(600));
+        read_then_decode(&mut model, &kv, &a.narrow(1, 0, n).unwrap(), 64, 0, "r");
+        assert_eq!(
+            held_from(&model, &kv, "r"),
+            [0, 0],
+            "nothing slid in the prompt"
+        );
+        let at_prompt_end = rows(&model, &kv);
+        // The reply, a step at a time; then a check of three positions of
+        // which one is kept, cut back as a rejected guess is.
+        for i in 0..reply - 3 {
+            let step = a.narrow(1, n + i, 1).unwrap();
+            model.forward(&step, n + i, &kv, "r").unwrap();
+        }
+        let check = a.narrow(1, n + reply - 3, 3).unwrap();
+        model.forward(&check, n + reply - 3, &kv, "r").unwrap();
+        kv.truncate_request_to(&model.kv_model_key, "r", n + reply - 2)
+            .unwrap();
+        if slides {
+            assert!(
+                held_from(&model, &kv, "r")[0] > 0,
+                "the windowed layer dropped the prompt's opening during the reply"
+            );
+        } else {
+            assert_eq!(rows(&model, &kv), at_prompt_end, "the prompt's rows moved");
+        }
+    }
+    // With sliding off, a window keeps everything, and the save may wait.
+    let mut model = gemma2_model_of_context(2, 1024);
+    set_windows(&mut model, &[Some(5), None]);
+    crate::inference::split::kv_cache::NO_SLIDE_IN_TEST.with(|c| c.set(true));
+    let slides = model.any_cache_slides();
+    crate::inference::split::kv_cache::NO_SLIDE_IN_TEST.with(|c| c.set(false));
+    assert!(!slides);
+}
+
 /// A windowed layer whose cache has dropped every position its window no
 /// longer reads gives the same output as one that kept them all — on the
 /// prompt pass, the decode steps after it, and a batched step — and only the

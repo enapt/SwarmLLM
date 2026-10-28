@@ -145,15 +145,20 @@ pub(crate) const PROCESSOR_RUN_STARTS_AT: f64 = 0.1;
 
 /// The least share of a whole model's layers the card holds for its
 /// processor run to move into the middle ([`processor_run`]); below it the
-/// run stays the tail. Two fifths, so a guess skips at most three fifths of
-/// the model: the 14B's first guesses agreed 58% with 56% of it skipped
-/// (`examples/skip_agreement_probe.rs`, 2026-10-28), and one guess pays from
-/// about 35% (a check of two positions ~170 ms plus a ~20 ms guess against a
-/// ~144 ms step). The first version asked for half, and the 14B on this 8 GB
-/// card lands at 23-25 of 48 by how much of the card the desktop holds, so
-/// the same machine guessed one day and not the next (2026-10-28, 23 layers:
-/// the tail, 6.08 tok/s against 7.76 at 25).
-pub(crate) const CARD_GUESS_MIN_SHARE: f64 = 0.4;
+/// run stays the tail. A fifth, so a guess skips at most four fifths of the
+/// model. The first version asked for half, and the 14B on this 8 GB card
+/// lands at 23-25 of 48 by how much of the card the desktop holds, so the
+/// same machine guessed one day and not the next (2026-10-28, 23 layers: the
+/// tail, 6.08 tok/s against 7.76 at 25); two fifths followed, guessing at 21
+/// of 48 1.17-1.56x against the tail. At 15 of 48 (a third) the middle run
+/// decoded level with the tail, 0.99-1.01x: a guess skipping 33 layers agreed
+/// 30% of the time, so the count checked one a round and it paid for itself
+/// (round 7, `docs/invariants/inference.md`) — nothing lost where it does not
+/// win, and the stand-in for the skipped run (`split::RunStandIn`) lifts
+/// such a guess 2.4x (`examples/skip_agreement_probe.rs`). At the floor a
+/// guess needs the stand-in: Llama 3.1 8B with 25 of 32 skipped agreed 3%
+/// with nothing in the gap, 25% through it.
+pub(crate) const CARD_GUESS_MIN_SHARE: f64 = 0.2;
 
 /// The layers of a segment of `len` the processor holds when `on_card` of
 /// them go on the card — offsets into the segment, one contiguous run. The
@@ -968,7 +973,7 @@ mod tests {
     /// **A whole model's processor run sits a tenth of the way in** (2026-10-28):
     /// the card keeps the model's first layers AND its last, which is what lets
     /// it guess without the run. A segment that is not a whole model, a card
-    /// holding under two fifths of the layers (`CARD_GUESS_MIN_SHARE`), and a
+    /// holding under a fifth of the layers (`CARD_GUESS_MIN_SHARE`), and a
     /// count covering everything keep the old answer.
     #[test]
     fn a_whole_models_processor_run_sits_early_in_the_middle() {
@@ -978,11 +983,12 @@ mod tests {
         assert_eq!(processor_run(28, 16, true), 3..15);
         // Not a whole model: the tail, card-first, whatever the count.
         assert_eq!(processor_run(48, 27, false), 27..48);
-        // Under two fifths on the card: a guess would skip too much, so the tail.
-        assert_eq!(processor_run(48, 19, true), 19..48);
-        // Two fifths and up still guess — 23 of 48 is where this 8 GB card
-        // lands on a day the desktop holds more of it.
-        assert_eq!(processor_run(48, 20, true), 5..33);
+        // Under a fifth on the card: a guess would skip too much, so the tail.
+        assert_eq!(processor_run(48, 9, true), 9..48);
+        // A fifth and up still guess — 12 of 48 is a larger model's share on
+        // this 8 GB card, 23 where the 14B lands on a busy desktop.
+        assert_eq!(processor_run(48, 10, true), 5..43);
+        assert_eq!(processor_run(48, 12, true), 5..41);
         assert_eq!(processor_run(48, 23, true), 5..30);
         // Everything on the card: no run at all, never a run past the end.
         assert!(processor_run(48, 48, true).is_empty());
@@ -1013,7 +1019,7 @@ mod tests {
         assert_eq!(plan_gpu_layers(650 * MB, &weights, 0, false), 6);
         // Holding both ends: 6 on the card is layers 0 and 5..10 (800 MB), 5
         // is layers 0 and 6..10 (700 MB), 4 is layers 0 and 7..10 (600 MB) —
-        // the most that fit, still two fifths (`CARD_GUESS_MIN_SHARE`).
+        // the most that fit, over a fifth (`CARD_GUESS_MIN_SHARE`).
         assert_eq!(plan_gpu_layers(650 * MB, &weights, 0, true), 4);
         // 7 on the card is layers 0 and 4..10: 900 MB.
         assert_eq!(plan_gpu_layers(900 * MB, &weights, 0, true), 7);

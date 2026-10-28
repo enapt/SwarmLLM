@@ -15962,7 +15962,9 @@ mod tests {
         // Weight-tied, the head IS the token table, and the loader loads it
         // once. Held whole, the card's run holds it from layer 0: the card is
         // charged it once — beyond its run, only the output norm — and the
-        // machine is not charged it at all.
+        // machine is not charged it at all. One layer of eight on the card:
+        // under `hybrid::CARD_GUESS_MIN_SHARE`, so the processor's run is the
+        // tail and the card's run is layer 0 alone.
         let tied = ModelId("seventy-b-shaped-tied-head".into());
         let data_dir = header_only_seventy_b("tied-head", &tied, true);
         let p = ModelProcessPool::new(data_dir.clone());
@@ -15970,18 +15972,19 @@ mod tests {
         let norm_mb = (8192u64 * 4).div_ceil(1024 * 1024);
         let table_mb = (8192u64 * 64_000 / 256 * 144 + 8192 * 4).div_ceil(1024 * 1024);
         let whole = CardSplit::Layers {
-            on_card: 2,
+            on_card: 1,
             total: 8,
         };
+        const { assert!((1.0 / 8.0) < crate::inference::split::hybrid::CARD_GUESS_MIN_SHARE) };
         assert_eq!(
             p.card_share_of_split_mb(&tied, (0, 8), whole),
-            p.estimate_gpu_footprint_mb(&tied, Some((0, 2)), KvCharge::Typical) + norm_mb,
+            p.estimate_gpu_footprint_mb(&tied, Some((0, 1)), KvCharge::Typical) + norm_mb,
             "the token table is charged to the card once"
         );
         assert_eq!(
             p.machine_charge(&tied, (0, 8), false, Some(whole), KvCharge::Typical)
                 .share_mb,
-            p.estimate_cpu_footprint_mb(&tied, Some((2, 8)), KvCharge::Typical) - table_mb
+            p.estimate_cpu_footprint_mb(&tied, Some((1, 8)), KvCharge::Typical) - table_mb
         );
         // Its last four: the card's run holds no table, so the head is beside.
         assert_eq!(

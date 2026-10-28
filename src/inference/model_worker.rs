@@ -625,6 +625,7 @@ pub async fn run_worker(
         // be discarded by the reader actor.
         if !cancelled.is_empty() {
             if !slot_table.is_empty() {
+                let range = slot_table.current_layer_range();
                 for slot in slot_table.take_matching(|s| cancelled.contains_key(&s.request_id)) {
                     tracing::info!(
                         request_id = %slot.request_id,
@@ -632,6 +633,10 @@ pub async fn run_worker(
                         "model-worker: dropping cancelled decode slot"
                     );
                     cancelled.remove(&slot.request_id);
+                    // A retried request still finds its prompt.
+                    let model = range.and_then(|(ls, le)| models.get(&(ls, le, 0, 1)));
+                    save_slot_prompt_when_done(&mut writer, &kv_store, &prefix_cache, model, &slot)
+                        .await;
                     kv_store.clear_request(&slot.model_key, &slot.req_id_str);
                 }
             }
@@ -709,7 +714,21 @@ pub async fn run_worker(
                     &mut slot_table,
                     SlotTable::new(batch_generate_max_slots as usize),
                 );
+                // Each slot's prompt is still whole (`prompt_outlives`).
+                let range = drained.current_layer_range();
+                let failure = e.to_string();
                 for slot in drained.into_active() {
+                    if prompt_outlives(Some(failure.as_str())) {
+                        let model = range.and_then(|(ls, le)| models.get(&(ls, le, 0, 1)));
+                        save_slot_prompt_when_done(
+                            &mut writer,
+                            &kv_store,
+                            &prefix_cache,
+                            model,
+                            &slot,
+                        )
+                        .await;
+                    }
                     send_worker_error(
                         &mut writer,
                         slot.request_id,
@@ -718,8 +737,13 @@ pub async fn run_worker(
                     .await;
                 }
             }
+            // Read before the drain: an emptied table forgets its range.
+            let range = slot_table.current_layer_range();
             for finished in slot_table.drain_finished() {
-                if let Err(e) = finalize_slot(&mut writer, &kv_store, finished).await {
+                let model = range.and_then(|(ls, le)| models.get(&(ls, le, 0, 1)));
+                if let Err(e) =
+                    finalize_slot(&mut writer, &kv_store, &prefix_cache, model, finished).await
+                {
                     tracing::warn!(error = %e, "model-worker: finalize_slot failed");
                 }
             }
@@ -2661,7 +2685,7 @@ async fn handle_forward(
         .filter(|_| fwd.sequence_num == 0 && final_piece)
     {
         let held = kv_store.request_positions(&model_key, &req_id_str);
-        let room = snapshot_room(model, kv_store, prefix_cache, held);
+        let room = snapshot_room(model, kv_store, prefix_cache, held, ReplyAhead::ToDecode);
         let blocks = prefix_cache.insert_chain_from_kv(
             &model_key,
             &req_id_str,
@@ -3194,16 +3218,28 @@ fn ngram_spec_round(
     generated: &[u32],
     sampling: &crate::types::SamplingParams,
     force_attn: bool,
+    capture: Option<&std::collections::HashSet<usize>>,
 ) -> Result<SpecRound, SwarmError> {
     let started = std::time::Instant::now();
+    let capture = capture.map(|layers| crate::inference::split::Capture {
+        layers,
+        last: usize::MAX,
+    });
     // No match: do exactly what the plain loop does. A miss must cost nothing
     // beyond the lookup itself, or speculation becomes a tax on the workloads
     // it cannot help.
     if draft.is_empty() {
         let input = model.token_tensor(next_token)?;
-        let logits = tokio::task::block_in_place(|| {
+        let (logits, caught) = tokio::task::block_in_place(|| {
             let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
-            model.forward(&input, index_pos, kv_store, req_id_str)
+            match capture {
+                Some(capture) => model
+                    .forward_keeping(&input, index_pos, kv_store, req_id_str, capture, false)
+                    .map(|(logits, caught)| (logits, Some(caught))),
+                None => model
+                    .forward(&input, index_pos, kv_store, req_id_str)
+                    .map(|logits| (logits, None)),
+            }
         })?;
         let (tok, _) = crate::inference::tensor_util::sample_token_with_logprob_history(
             &logits, sampling, generated,
@@ -3215,6 +3251,7 @@ fn ngram_spec_round(
             ms: started.elapsed().as_secs_f64() * 1000.0,
             proposed: 0,
             accepted: 0,
+            caught,
         });
     }
 
@@ -3222,9 +3259,16 @@ fn ngram_spec_round(
     ids.push(next_token);
     ids.extend_from_slice(draft);
     let input = model.tensor_from_ids(&ids)?;
-    let all = tokio::task::block_in_place(|| {
+    let (all, caught) = tokio::task::block_in_place(|| {
         let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
-        model.forward_verify_all_positions(&input, index_pos, kv_store, req_id_str)
+        match capture {
+            Some(capture) => model
+                .forward_keeping(&input, index_pos, kv_store, req_id_str, capture, true)
+                .map(|(all, caught)| (all, Some(caught))),
+            None => model
+                .forward_verify_all_positions(&input, index_pos, kv_store, req_id_str)
+                .map(|all| (all, None)),
+        }
     })?;
 
     use candle_core::IndexOp;
@@ -3263,6 +3307,7 @@ fn ngram_spec_round(
         ms,
         proposed: draft.len(),
         accepted,
+        caught,
     })
 }
 
@@ -3283,6 +3328,9 @@ struct SpecRound {
     proposed: usize,
     /// Guesses accepted.
     accepted: usize,
+    /// The hidden states the forward was asked to keep, every position it
+    /// read (`[1, positions, hidden]`); the first `committed` are the reply's.
+    caught: Option<std::collections::HashMap<usize, candle_core::Tensor>>,
 }
 
 /// One request's local speculation on the decode loop: what the lookup
@@ -3421,9 +3469,24 @@ struct Traced {
 /// are right far more often. A count of zero fades the acceptance toward its
 /// prior, so a reply that turns guessable is tried again.
 /// `SWARMLLM_CARD_GUESSES=0` turns it off.
+///
+/// **The skipped run is stood in for** ([`split::RunStandIn`], 2026-10-28):
+/// every real forward of the reply keeps the hidden state where the run
+/// starts and where it ends — the prompt pass its last
+/// [`split::STAND_IN_WINDOW`] positions, each step and check the positions it
+/// commits — and a guess adds the run's effect estimated from them, where it
+/// passed the hidden state on as if the run wrote nothing. A stand-in that
+/// fails is dropped for the reply, never the reply.
+/// `SWARMLLM_CARD_GUESS_STAND_IN=none` guesses without one.
+///
+/// [`split::RunStandIn`]: crate::inference::split::RunStandIn
+/// [`split::STAND_IN_WINDOW`]: crate::inference::split::STAND_IN_WINDOW
 struct CardGuesses {
     /// The layers a guess skips, over absolute layer indices.
     skips: Vec<bool>,
+    /// What the skipped run did at this reply's real positions; `None` where
+    /// it is off, or failed.
+    stand_in: Option<crate::inference::split::RunStandIn>,
     acceptance: crate::inference::dsd_controller::AcceptanceEstimate,
     /// One guess's time on the card, read back with the round's guesses.
     guess_ms: crate::inference::dsd_controller::RecentMedian,
@@ -3445,6 +3508,7 @@ impl CardGuesses {
         }
         Some(Self {
             skips: model.card_guess_skips()?,
+            stand_in: None,
             acceptance: crate::inference::dsd_controller::AcceptanceEstimate::recent(),
             guess_ms: Default::default(),
             rounds: 0,
@@ -3460,6 +3524,27 @@ impl CardGuesses {
 fn card_guesses_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("SWARMLLM_CARD_GUESSES").as_deref() != Ok("0"))
+}
+
+/// `SWARMLLM_CARD_GUESS_STAND_IN=none`: a card's guess passes the skipped
+/// run's input on unchanged, as before the stand-in ([`CardGuesses`]), for
+/// A/B inside one binary.
+fn card_stand_in_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_CARD_GUESS_STAND_IN").as_deref() != Ok("none"))
+}
+
+/// The stand-in a reply's card guesses will read, made before its prompt
+/// pass so the pass can keep what it is fitted from: where the reply will be
+/// speculated (`speculating`), its card can guess and the stand-in is on.
+fn card_stand_in_for(
+    model: &crate::inference::split::SplitModel,
+    speculating: bool,
+) -> Option<crate::inference::split::RunStandIn> {
+    if !speculating || local_guess_gamma_fixed() || !card_guesses_on() || !card_stand_in_on() {
+        return None;
+    }
+    crate::inference::split::RunStandIn::for_run(&model.card_guess_skips()?, model.device())
 }
 
 impl LocalSpec {
@@ -3511,6 +3596,15 @@ impl LocalSpec {
 
     const FIRST_PROBE_AFTER: u32 = 8;
     const MOST_PROBE_AFTER: u32 = 64;
+
+    /// Hand the card's guesses the stand-in the prompt pass fed
+    /// ([`card_stand_in_for`]); dropped where the card makes none.
+    fn with_stand_in(mut self, stand_in: Option<crate::inference::split::RunStandIn>) -> Self {
+        if let Some(card) = self.card.as_mut() {
+            card.stand_in = stand_in;
+        }
+        self
+    }
 
     /// Did a check made against the count's advice pay — write more tokens
     /// than steps would have in its time?
@@ -3575,8 +3669,16 @@ impl LocalSpec {
             .median()
             .map_or("-".to_string(), |m| format!("{m:.1}"));
         let card = self.card.as_ref().map_or(String::new(), |c| {
+            let stand_in = c.stand_in.as_ref().map_or(" stand-in none".to_string(), |s| {
+                format!(
+                    " stand-in rows {} rebuilds {} ms {:.1}",
+                    s.rows(),
+                    s.rebuilds,
+                    s.ms
+                )
+            });
             format!(
-                " card rounds {} guessed {} kept {} declined {} guess {} ms alpha {:.2} next {}",
+                " card rounds {} guessed {} kept {} declined {} guess {} ms alpha {:.2} next {}{stand_in}",
                 c.rounds,
                 c.proposed,
                 c.accepted,
@@ -3674,6 +3776,14 @@ impl LocalSpec {
             if gamma > 0 {
                 if let Some(card) = self.card.as_mut() {
                     let started = std::time::Instant::now();
+                    if let Some(Err(e)) = card.stand_in.as_mut().map(|s| s.refresh()) {
+                        tracing::warn!(error = %e, "card guesses: stand-in dropped for this reply");
+                        card.stand_in = None;
+                    }
+                    let bridge = card
+                        .stand_in
+                        .as_ref()
+                        .and_then(crate::inference::split::RunStandIn::bridge);
                     found = tokio::task::block_in_place(|| {
                         let _g =
                             crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
@@ -3684,6 +3794,7 @@ impl LocalSpec {
                             next_token,
                             gamma,
                             &card.skips,
+                            bridge,
                         )
                     })?;
                     found.truncate(gamma);
@@ -3709,8 +3820,20 @@ impl LocalSpec {
             generated,
             sampling,
             force_attn,
+            self.card
+                .as_ref()
+                .and_then(|c| c.stand_in.as_ref())
+                .map(crate::inference::split::RunStandIn::capture_layers),
         )?;
         *index_pos += round.committed;
+        if let (Some(caught), Some(card)) = (round.caught.as_ref(), self.card.as_mut()) {
+            if let Some(stand_in) = card.stand_in.as_mut() {
+                if let Err(e) = stand_in.learn(caught, round.committed) {
+                    tracing::warn!(error = %e, "card guesses: stand-in dropped for this reply");
+                    card.stand_in = None;
+                }
+            }
+        }
         let one_off = model.one_off_forwards() > one_offs_before;
         self.one_offs += u64::from(one_off);
         #[cfg(test)]
@@ -3786,6 +3909,29 @@ fn local_guess_gamma_fixed() -> bool {
 /// The most a reply is reserved, and all of it when the reply's length is not
 /// known — a segment's prompt pass, which never sees `max_tokens`.
 const REPLY_RESERVE_POSITIONS: usize = crate::inference::layers::KV_CACHE_GROWTH_TOKENS;
+
+/// Whether a reply is still to be decoded beside a prompt snapshot being
+/// sized — a REQUIRED argument of every sizing ([`save_prompt_opening`],
+/// [`snapshot_room`]). A snapshot copied before the reply leaves its live
+/// cache a growth quantum to claim; one copied once the reply is out
+/// ([`prompt_saved_when_done`]) needs none, its live cache about to be freed —
+/// kept, the reserve shortened that snapshot on a tight card or evicted
+/// another prompt's to make room for a reply already written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplyAhead {
+    ToDecode,
+    Done,
+}
+
+impl ReplyAhead {
+    /// Positions kept beside the live cache for the reply.
+    fn reserve_positions(self) -> usize {
+        match self {
+            Self::ToDecode => REPLY_RESERVE_POSITIONS,
+            Self::Done => 0,
+        }
+    }
+}
 
 /// The least a reply's reserve leaves for a speculative round to write past
 /// the reply before it is truncated back — n-gram drafts
@@ -3936,6 +4082,7 @@ fn snapshot_room(
     kv_store: &KvCacheStore,
     prefix_cache: &PrefixCache,
     prompt_tokens: usize,
+    reply: ReplyAhead,
 ) -> SnapshotRoom {
     let home = SnapshotHome::for_device(model.device());
     if home == SnapshotHome::HostRam {
@@ -3944,7 +4091,7 @@ fn snapshot_room(
             max_positions: host_ram_positions(model, prefix_cache, prompt_tokens),
         };
     }
-    let beside = positions_beside_live(model, kv_store, prefix_cache, prompt_tokens);
+    let beside = positions_beside_live(model, kv_store, prefix_cache, prompt_tokens, reply);
     let room = room_off_the_card_if_more(
         beside,
         prompt_tokens,
@@ -3996,6 +4143,7 @@ fn room_off_the_card_if_more(
 /// `PrefixCache::save_point` (#228). Both generate paths call it, so the plan
 /// of where the copy goes and the charge for it are one decision. Returns the
 /// blocks to announce (none for a kept request or a recurrent model's state).
+#[allow(clippy::too_many_arguments)]
 fn save_prompt_opening(
     model: &SplitModel,
     kv_store: &KvCacheStore,
@@ -4004,8 +4152,9 @@ fn save_prompt_opening(
     req_id: &str,
     tokens: &[u32],
     keep: KeepAsked,
+    reply: ReplyAhead,
 ) -> Vec<crate::types::PrefixBlockEntry> {
-    let room = snapshot_room(model, kv_store, prefix_cache, tokens.len());
+    let room = snapshot_room(model, kv_store, prefix_cache, tokens.len(), reply);
     let manifest = prefix_cache.insert_from_kv(model_key, req_id, kv_store, tokens, room, keep);
     // A snapshot kept beside the live cache is device memory the head-room
     // guard must see.
@@ -4013,6 +4162,43 @@ fn save_prompt_opening(
         kv_store.set_external_reserved(prefix_cache.bytes_in(SnapshotHome::BesideLive) as u64);
     }
     manifest
+}
+
+/// Is a prompt's end-of-pass snapshot copied once the REPLY is done, rather
+/// than between the prompt pass and the first token? llama.cpp's server saves
+/// a slot's prompt to its host cache only when the slot is next used
+/// (`tools/server/server-context.cpp:1647` at 4b1a27f), so neither the first
+/// token nor the reply waits on the copy. Here the copy sat before the first
+/// token on both generate paths: 0.5-0.9 s of a 14B's 1,800-token prompt on
+/// a card/processor split. Deferred, the first token came 0.12 s sooner at the
+/// median — the next prompt pass ran 0.25 s slower, cause open (2026-10-28,
+/// round 8 — `docs/invariants/inference.md`). It can wait wherever the prompt's
+/// positions are still whole at the end: decode only appends, and a rejected
+/// guess is cut back no further than the prompt's end — except a windowed
+/// cache that slides ([`SplitModel::any_cache_slides`]), which may have
+/// dropped the prompt's opening by then. A recurrent model saves short of the
+/// prompt's end, inside the pass (`PrefixCache::save_point`), and is not
+/// asked. `SWARMLLM_PROMPT_SAVE=at-prompt-end` is the old order, the A/B.
+fn prompt_saved_when_done(model: &SplitModel) -> bool {
+    static AT_PROMPT_END: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let at_prompt_end = *AT_PROMPT_END
+        .get_or_init(|| std::env::var("SWARMLLM_PROMPT_SAVE").as_deref() == Ok("at-prompt-end"));
+    !at_prompt_end && !model.any_cache_slides()
+}
+
+/// Are a request's caches still whole after its reply ended with `error`, so
+/// a prompt snapshot left for the reply's end ([`prompt_saved_when_done`]) is
+/// still taken? Yes for every error this worker survives — a cancel landing
+/// inside a step included: a failed step puts the caches back where it began,
+/// so the prompt's positions are the prompt pass's, and a retried request
+/// finds its prompt as it did when the copy came before the first token. No
+/// after an error that ruined the device ([`worker_error_is_fatal`]). The ONE
+/// answer for both generate paths: the sequential reply, a failed decode tick
+/// and a batched slot that ended in error.
+///
+/// [`worker_error_is_fatal`]: crate::inference::worker_ipc::worker_error_is_fatal
+fn prompt_outlives(error: Option<&str>) -> bool {
+    error.is_none_or(|e| !crate::inference::worker_ipc::worker_error_is_fatal(e))
 }
 
 /// Positions of a card's snapshot that fit in host RAM beside the
@@ -4067,6 +4253,7 @@ fn positions_beside_live(
     kv_store: &KvCacheStore,
     prefix_cache: &PrefixCache,
     prompt_tokens: usize,
+    reply: ReplyAhead,
 ) -> usize {
     if !prefix_cache_charged() {
         return usize::MAX;
@@ -4083,12 +4270,13 @@ fn positions_beside_live(
     if growth.per_position() == 0 {
         return usize::MAX;
     }
-    // The live figure carries one growth quantum of reserve for the reply
-    // about to be decoded: a snapshot sized to the last byte left this
+    // The live figure carries one growth quantum of reserve for a reply
+    // still to be decoded: a snapshot sized to the last byte left this
     // request unable to claim its next quantum mid-reply (measured: the
     // reply cut at token 32, the quantum boundary after a 7649-token prompt).
+    // None once the reply is out (`ReplyAhead::Done`).
     let live = allocated.saturating_add(
-        growth.bytes_between(prompt_tokens, prompt_tokens + REPLY_RESERVE_POSITIONS),
+        growth.bytes_between(prompt_tokens, prompt_tokens + reply.reserve_positions()),
     );
     let plan = crate::inference::split::kv_budget::plan_snapshot(
         budget,
@@ -4825,6 +5013,18 @@ mod reply_reserve_tests {
         assert_eq!(admitted_positions(20, 1), 512);
     }
 
+    /// A prompt snapshot sized before its reply keeps the reply a quantum
+    /// beside the live cache; one copied once the reply is out
+    /// (`prompt_saved_when_done`) keeps none for a reply already written.
+    #[test]
+    fn a_snapshot_taken_after_the_reply_keeps_no_room_for_it() {
+        assert_eq!(
+            ReplyAhead::ToDecode.reserve_positions(),
+            REPLY_RESERVE_POSITIONS
+        );
+        assert_eq!(ReplyAhead::Done.reserve_positions(), 0);
+    }
+
     /// With a budget of a quantum or more the reserve is the quantum it always
     /// was, so a long reply is admitted exactly as before — `round_up(p +
     /// 512) == round_up(p) + 512` for every prompt length.
@@ -5222,6 +5422,14 @@ async fn handle_generate(
         && gen.sampling.max_tokens >= (swift_cfg.gamma + 1);
     let force_attn = force_standard_attn || swift_active;
 
+    // Draft-free speculation on the local path. `ngram_spec_eligible` owns
+    // the conditions, and the admission gate asks it the same question, so
+    // the two cannot disagree about which requests get here.
+    let speculating = ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg) && !swift_active;
+    // The card's stand-in for the run its guesses skip is fitted from the
+    // prompt's last positions first (`CardGuesses`).
+    let mut stand_in = card_stand_in_for(model, speculating);
+
     // Prefill — block_in_place for CPU-bound inference
     let mut manifest = Vec::new();
     let prefill = tokio::task::block_in_place(|| {
@@ -5238,14 +5446,37 @@ async fn handle_generate(
                 &req_id_str,
                 &prompt_ids[..at],
                 keep,
+                ReplyAhead::ToDecode,
             );
             from = at;
         }
         let rest = model.tensor_from_ids(&prompt_ids[from..])?;
-        model.forward(&rest, from, kv_store, &req_id_str)
+        match stand_in.as_ref() {
+            Some(s) => {
+                let capture = crate::inference::split::Capture {
+                    layers: s.capture_layers(),
+                    last: s.window(),
+                };
+                model
+                    .forward_keeping(&rest, from, kv_store, &req_id_str, capture, false)
+                    .map(|(logits, caught)| (logits, Some(caught)))
+            }
+            None => model
+                .forward(&rest, from, kv_store, &req_id_str)
+                .map(|logits| (logits, None)),
+        }
     });
     let logits = match prefill {
-        Ok(l) => l,
+        Ok((l, caught)) => {
+            if let (Some(s), Some(caught)) = (stand_in.as_mut(), caught) {
+                let rows = caught.values().next().map_or(0, |t| t.dim(1).unwrap_or(0));
+                if let Err(e) = s.learn(&caught, rows) {
+                    tracing::warn!(error = %e, "card guesses: stand-in dropped for this reply");
+                    stand_in = None;
+                }
+            }
+            l
+        }
         Err(e) if crate::inference::split::kv_cache::forward_was_cancelled(&e) => {
             // The client left during the prompt pass. Not an error: the
             // reply was never wanted. Clean up as a finished request does.
@@ -5277,9 +5508,11 @@ async fn handle_generate(
     // After prefill the KV cache holds exactly `prompt_tokens` positions.
     // Snapshot it into the prefix cache so future prompts sharing this
     // prefix skip the prefill work — unless the pass saved short of the end
-    // above. insert_from_kv is a no-op when the prompt is shorter than the
+    // above, or the copy waits for the reply (`prompt_saved_when_done`).
+    // insert_from_kv is a no-op when the prompt is shorter than the
     // configured floor or the cache is off.
-    if save_at == prompt_tokens {
+    let save_when_done = save_at == prompt_tokens && prompt_saved_when_done(model);
+    if save_at == prompt_tokens && !save_when_done {
         manifest = save_prompt_opening(
             model,
             kv_store,
@@ -5288,6 +5521,7 @@ async fn handle_generate(
             &req_id_str,
             &prompt_ids,
             keep,
+            ReplyAhead::ToDecode,
         );
     }
     if !manifest.is_empty() {
@@ -5302,227 +5536,266 @@ async fn handle_generate(
         .await;
     }
 
-    let use_logprobs = gen.sampling.logprobs;
-    let (mut next_token, mut token_logprob) =
-        crate::inference::tensor_util::sample_token_with_logprob(&logits, &gen.sampling)?;
+    // The reply, as one block: however it ends, the prompt's snapshot left
+    // for its end is copied below before the error, if any, goes back.
+    let replied: Result<(), SwarmError> = async {
+        let use_logprobs = gen.sampling.logprobs;
+        let (mut next_token, mut token_logprob) =
+            crate::inference::tensor_util::sample_token_with_logprob(&logits, &gen.sampling)?;
 
-    // SYNC: token loop logic must match executor.rs generate_stream_inner.
-    // Changes to EOS/stop handling must be applied to both.
-    let eos = model.eos_tokens().to_vec();
-    let stop_sequences = &gen.sampling.stop;
-    let mut generated: Vec<u32> = Vec::new();
-    let mut accumulated_text = String::new();
-    // Bytes of a codepoint the previous token did not finish. Same lifetime as
-    // `accumulated_text`: it belongs to THIS generation and must not be shared.
-    let mut utf8_carry: Vec<u8> = Vec::new();
-    let mut index_pos = prompt_tokens;
-    let mut finish_reason = "length".to_string();
-    let mut matched_stop_sequence: Option<String> = None;
+        // SYNC: token loop logic must match executor.rs generate_stream_inner.
+        // Changes to EOS/stop handling must be applied to both.
+        let eos = model.eos_tokens().to_vec();
+        let stop_sequences = &gen.sampling.stop;
+        let mut generated: Vec<u32> = Vec::new();
+        let mut accumulated_text = String::new();
+        // Bytes of a codepoint the previous token did not finish. Same lifetime as
+        // `accumulated_text`: it belongs to THIS generation and must not be shared.
+        let mut utf8_carry: Vec<u8> = Vec::new();
+        let mut index_pos = prompt_tokens;
+        let mut finish_reason = "length".to_string();
+        let mut matched_stop_sequence: Option<String> = None;
 
-    if swift_active {
-        let calibrator = SwiftCalibrator::new(
-            model.total_layers,
-            swift_cfg.skip_ratio,
-            swift_cfg.calibration_tokens,
-        );
-        let (outcome, matched) = swift_decode_loop(
+        if swift_active {
+            let calibrator = SwiftCalibrator::new(
+                model.total_layers,
+                swift_cfg.skip_ratio,
+                swift_cfg.calibration_tokens,
+            );
+            let (outcome, matched) = swift_decode_loop(
+                writer,
+                model,
+                kv_store,
+                &req_id_str,
+                request_id,
+                &gen,
+                &eos,
+                stop_sequences,
+                use_logprobs,
+                swift_cfg.gamma as usize,
+                &calibrator,
+                &mut next_token,
+                token_logprob,
+                &mut index_pos,
+                &mut generated,
+                &mut accumulated_text,
+                &mut utf8_carry,
+            )
+            .await?;
+            finish_reason = outcome;
+            if matched.is_some() {
+                matched_stop_sequence = matched;
+            }
+            tracing::info!(
+                request_id = %request_id,
+                rounds = calibrator.rounds(),
+                acceptance_rate = calibrator.acceptance_rate(),
+                num_candidates = calibrator.num_candidates(),
+                selected = ?calibrator.selected_candidate(),
+                "DIAG: SWIFT session complete"
+            );
+        } else {
+            // Draft-free speculation on the local path (`speculating`, above).
+            //
+            // Works at ANY temperature: sampling each position with the real
+            // sampler and keeping a draft only when it matches is the
+            // speculative-sampling rejection rule itself, not an approximation of
+            // it. See the note on `ngram_spec_eligible`.
+            // Only built when it will be used — it copies the whole prompt.
+            let mut spec = speculating.then(|| {
+                LocalSpec::new(*ngram_cfg, &prompt_ids, model, local_guess_gamma_fixed())
+                    .with_stand_in(stand_in.take())
+            });
+
+            for _ in 0..gen.sampling.max_tokens {
+                // This loop owns the worker's main loop for its whole duration, so
+                // the cancelled set (written by the reader task) is the only way a
+                // daemon-side abandonment reaches us. Checking per token bounds
+                // wasted compute to one forward instead of the full max_tokens.
+                if cancelled.remove(&request_id).is_some() {
+                    tracing::info!(
+                        %request_id,
+                        generated = generated.len(),
+                        "model-worker: generation cancelled by daemon"
+                    );
+                    finish_reason = "cancelled".to_string();
+                    break;
+                }
+                if eos.contains(&next_token) {
+                    finish_reason = "stop".to_string();
+                    break;
+                }
+
+                let text = decode_token(model, next_token, &mut utf8_carry);
+                accumulated_text.push_str(&text);
+
+                // Check user-provided stop sequences
+                if let Some(matched) = crate::inference::sampling::find_stop_sequence(
+                    &accumulated_text,
+                    stop_sequences,
+                ) {
+                    matched_stop_sequence = Some(matched.to_string());
+                    finish_reason = "stop".to_string();
+                    break;
+                }
+
+                generated.push(next_token);
+
+                send_worker(
+                    writer,
+                    &WorkerMsg::Token {
+                        request_id,
+                        token_id: next_token,
+                        text,
+                        is_eos: false,
+                        logprob: if use_logprobs { token_logprob } else { None },
+                    },
+                    &[],
+                )
+                .await
+                .map_err(|e| SwarmError::Internal(format!("send Token: {e}")))?;
+
+                if let Some(spec) = spec.as_mut() {
+                    next_token = spec.next(
+                        model,
+                        kv_store,
+                        &model_key_string,
+                        &req_id_str,
+                        &mut index_pos,
+                        next_token,
+                        &generated,
+                        &gen.sampling,
+                        force_attn,
+                    )?;
+                    token_logprob = None;
+                } else {
+                    let input = model.token_tensor(next_token)?;
+                    let logits = tokio::task::block_in_place(|| {
+                        let _g =
+                            crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
+                        model.forward(&input, index_pos, kv_store, &req_id_str)
+                    })?;
+                    // Pass `generated` so frequency_penalty / presence_penalty
+                    // are honored against the completion-so-far per OpenAI spec.
+                    let (tok, lp) =
+                        crate::inference::tensor_util::sample_token_with_logprob_history(
+                            &logits,
+                            &gen.sampling,
+                            &generated,
+                        )?;
+                    next_token = tok;
+                    token_logprob = lp;
+                    index_pos += 1;
+                }
+            }
+
+            if let Some(spec) = spec.filter(|s| s.rounds > 0) {
+                let tokens_per_round = spec.produced as f64 / spec.rounds as f64;
+                // Steers the next admission decision — see
+                // `spec_payoff_justifies_diverting`.
+                record_spec_payoff(tokens_per_round);
+                tracing::debug!(
+                    request_id = %request_id,
+                    rounds = spec.rounds,
+                    drafted = spec.produced,
+                    accepted = spec.accepted,
+                    rejected = spec.rejected,
+                    paused_rounds = spec.backoff.paused_rounds,
+                    tokens_per_round,
+                    learned = %spec.summary(),
+                    "DIAG: local n-gram speculation complete"
+                );
+            }
+
+            // The loop samples one token ahead: when it exits on `length`,
+            // `next_token` holds a candidate that was never sent.
+            //
+            // That candidate is the (max_tokens + 1)-th token and sending it
+            // unconditionally — as this did, to "avoid the off-by-one" — created
+            // one instead. Measured 2026-08-05: EVERY request returned exactly
+            // `max_tokens + 1` completion tokens (1->2, 2->3, 5->6, 8->9, 16->17).
+            // `max_tokens` is a hard limit people size cost and latency against, so
+            // exceeding it is not a rounding detail; on a cloud-proxied request it
+            // is billable.
+            //
+            // Kept, but bounded: it may only ever top the reply UP TO the limit,
+            // never past it. If a future change does leave the loop one short, this
+            // still covers it; if it does not, this does nothing.
+            //
+            // Both decode paths carried this pattern and both are verified exact
+            // (`continuous_batching` false and true, confirmed from the worker's own
+            // `BatchGenerate configured enabled=` line rather than assumed).
+            if finish_reason == "length"
+                && (generated.len() as u32) < gen.sampling.max_tokens
+                && gen.sampling.max_tokens > 0
+                && !eos.contains(&next_token)
+            {
+                let text = decode_token(model, next_token, &mut utf8_carry);
+                generated.push(next_token);
+                send_worker(
+                    writer,
+                    &WorkerMsg::Token {
+                        request_id,
+                        token_id: next_token,
+                        text,
+                        is_eos: false,
+                        logprob: if use_logprobs { token_logprob } else { None },
+                    },
+                    &[],
+                )
+                .await
+                .map_err(|e| SwarmError::Internal(format!("send final Token: {e}")))?;
+            }
+        }
+
+        // Send GenerateDone
+        send_worker(
             writer,
+            &WorkerMsg::GenerateDone {
+                request_id,
+                prompt_tokens,
+                completion_tokens: generated.len(),
+                finish_reason,
+                matched_stop_sequence,
+            },
+            &[],
+        )
+        .await
+        .map_err(|e| SwarmError::Internal(format!("send GenerateDone: {e}")))?;
+        Ok(())
+    }
+    .await;
+
+    // The prompt's snapshot, copied now that the reply is out — or has ended
+    // any way this worker survives ([`prompt_outlives`]). Its first
+    // `prompt_tokens` positions are the prompt pass's: decode only appends
+    // and a rejected guess is cut back no further than the prompt's end.
+    let failure = replied.as_ref().err().map(ToString::to_string);
+    if save_when_done && prompt_outlives(failure.as_deref()) {
+        let blocks = save_prompt_opening(
             model,
             kv_store,
+            prefix_cache,
+            &model_key_string,
             &req_id_str,
-            request_id,
-            &gen,
-            &eos,
-            stop_sequences,
-            use_logprobs,
-            swift_cfg.gamma as usize,
-            &calibrator,
-            &mut next_token,
-            token_logprob,
-            &mut index_pos,
-            &mut generated,
-            &mut accumulated_text,
-            &mut utf8_carry,
-        )
-        .await?;
-        finish_reason = outcome;
-        if matched.is_some() {
-            matched_stop_sequence = matched;
-        }
-        tracing::info!(
-            request_id = %request_id,
-            rounds = calibrator.rounds(),
-            acceptance_rate = calibrator.acceptance_rate(),
-            num_candidates = calibrator.num_candidates(),
-            selected = ?calibrator.selected_candidate(),
-            "DIAG: SWIFT session complete"
+            &prompt_ids,
+            keep,
+            ReplyAhead::Done,
         );
-    } else {
-        // Draft-free speculation on the local path. `ngram_spec_eligible` owns
-        // the conditions, and the admission gate asks it the same question, so
-        // the two cannot disagree about which requests get here.
-        //
-        // Works at ANY temperature: sampling each position with the real
-        // sampler and keeping a draft only when it matches is the
-        // speculative-sampling rejection rule itself, not an approximation of
-        // it. See the note on `ngram_spec_eligible`.
-        // Only built when it will be used — it copies the whole prompt.
-        let mut spec = (ngram_spec_eligible(&gen.sampling, ngram_cfg, swift_cfg) && !swift_active)
-            .then(|| LocalSpec::new(*ngram_cfg, &prompt_ids, model, local_guess_gamma_fixed()));
-
-        for _ in 0..gen.sampling.max_tokens {
-            // This loop owns the worker's main loop for its whole duration, so
-            // the cancelled set (written by the reader task) is the only way a
-            // daemon-side abandonment reaches us. Checking per token bounds
-            // wasted compute to one forward instead of the full max_tokens.
-            if cancelled.remove(&request_id).is_some() {
-                tracing::info!(
-                    %request_id,
-                    generated = generated.len(),
-                    "model-worker: generation cancelled by daemon"
-                );
-                finish_reason = "cancelled".to_string();
-                break;
-            }
-            if eos.contains(&next_token) {
-                finish_reason = "stop".to_string();
-                break;
-            }
-
-            let text = decode_token(model, next_token, &mut utf8_carry);
-            accumulated_text.push_str(&text);
-
-            // Check user-provided stop sequences
-            if let Some(matched) =
-                crate::inference::sampling::find_stop_sequence(&accumulated_text, stop_sequences)
-            {
-                matched_stop_sequence = Some(matched.to_string());
-                finish_reason = "stop".to_string();
-                break;
-            }
-
-            generated.push(next_token);
-
-            send_worker(
+        if !blocks.is_empty() {
+            let _ = send_worker(
                 writer,
-                &WorkerMsg::Token {
-                    request_id,
-                    token_id: next_token,
-                    text,
-                    is_eos: false,
-                    logprob: if use_logprobs { token_logprob } else { None },
+                &WorkerMsg::PrefixManifestUpdate {
+                    model_id: model_id.clone(),
+                    blocks,
                 },
                 &[],
             )
-            .await
-            .map_err(|e| SwarmError::Internal(format!("send Token: {e}")))?;
-
-            if let Some(spec) = spec.as_mut() {
-                next_token = spec.next(
-                    model,
-                    kv_store,
-                    &model_key_string,
-                    &req_id_str,
-                    &mut index_pos,
-                    next_token,
-                    &generated,
-                    &gen.sampling,
-                    force_attn,
-                )?;
-                token_logprob = None;
-            } else {
-                let input = model.token_tensor(next_token)?;
-                let logits = tokio::task::block_in_place(|| {
-                    let _g = crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
-                    model.forward(&input, index_pos, kv_store, &req_id_str)
-                })?;
-                // Pass `generated` so frequency_penalty / presence_penalty
-                // are honored against the completion-so-far per OpenAI spec.
-                let (tok, lp) = crate::inference::tensor_util::sample_token_with_logprob_history(
-                    &logits,
-                    &gen.sampling,
-                    &generated,
-                )?;
-                next_token = tok;
-                token_logprob = lp;
-                index_pos += 1;
-            }
-        }
-
-        if let Some(spec) = spec.filter(|s| s.rounds > 0) {
-            let tokens_per_round = spec.produced as f64 / spec.rounds as f64;
-            // Steers the next admission decision — see
-            // `spec_payoff_justifies_diverting`.
-            record_spec_payoff(tokens_per_round);
-            tracing::debug!(
-                request_id = %request_id,
-                rounds = spec.rounds,
-                drafted = spec.produced,
-                accepted = spec.accepted,
-                rejected = spec.rejected,
-                paused_rounds = spec.backoff.paused_rounds,
-                tokens_per_round,
-                learned = %spec.summary(),
-                "DIAG: local n-gram speculation complete"
-            );
-        }
-
-        // The loop samples one token ahead: when it exits on `length`,
-        // `next_token` holds a candidate that was never sent.
-        //
-        // That candidate is the (max_tokens + 1)-th token and sending it
-        // unconditionally — as this did, to "avoid the off-by-one" — created
-        // one instead. Measured 2026-08-05: EVERY request returned exactly
-        // `max_tokens + 1` completion tokens (1->2, 2->3, 5->6, 8->9, 16->17).
-        // `max_tokens` is a hard limit people size cost and latency against, so
-        // exceeding it is not a rounding detail; on a cloud-proxied request it
-        // is billable.
-        //
-        // Kept, but bounded: it may only ever top the reply UP TO the limit,
-        // never past it. If a future change does leave the loop one short, this
-        // still covers it; if it does not, this does nothing.
-        //
-        // Both decode paths carried this pattern and both are verified exact
-        // (`continuous_batching` false and true, confirmed from the worker's own
-        // `BatchGenerate configured enabled=` line rather than assumed).
-        if finish_reason == "length"
-            && (generated.len() as u32) < gen.sampling.max_tokens
-            && gen.sampling.max_tokens > 0
-            && !eos.contains(&next_token)
-        {
-            let text = decode_token(model, next_token, &mut utf8_carry);
-            generated.push(next_token);
-            send_worker(
-                writer,
-                &WorkerMsg::Token {
-                    request_id,
-                    token_id: next_token,
-                    text,
-                    is_eos: false,
-                    logprob: if use_logprobs { token_logprob } else { None },
-                },
-                &[],
-            )
-            .await
-            .map_err(|e| SwarmError::Internal(format!("send final Token: {e}")))?;
+            .await;
         }
     }
 
-    // Send GenerateDone
-    send_worker(
-        writer,
-        &WorkerMsg::GenerateDone {
-            request_id,
-            prompt_tokens,
-            completion_tokens: generated.len(),
-            finish_reason,
-            matched_stop_sequence,
-        },
-        &[],
-    )
-    .await
-    .map_err(|e| SwarmError::Internal(format!("send GenerateDone: {e}")))?;
-
+    replied?;
     // Free KV cache for this request to prevent VRAM leak across requests
     kv_store.clear_request(model.kv_model_key(), &req_id_str);
 
@@ -6389,6 +6662,7 @@ async fn try_register_generate_slot(
         matched_stop_sequence: None,
         keep_here: gen.keep_here,
         save_at: PrefixCache::save_point(prompt_tokens, model.carries_recurrent_state()),
+        save_when_done: false,
     };
     let prompt_len = slot.prompt_tokens;
     let remaining_after_prefix = prompt_len.saturating_sub(prefix_len);
@@ -6641,7 +6915,13 @@ async fn step_decode_pool(
                 // end, or short of it for a recurrent model (#228) — saves the
                 // opening the caches now hold.
                 let read_to = step.pos + step.chunk_len;
-                if read_to == slot.save_at {
+                if read_to == slot.save_at
+                    && read_to == slot.prompt_tokens
+                    && prompt_saved_when_done(model)
+                {
+                    // Copied by the slot's finish, once its reply is out.
+                    slot.save_when_done = true;
+                } else if read_to == slot.save_at {
                     let manifest = save_prompt_opening(
                         model,
                         kv_store,
@@ -6650,6 +6930,7 @@ async fn step_decode_pool(
                         &slot.req_id_str,
                         &slot.prompt_ids[..read_to],
                         KeepAsked::kept_if(slot.keep_here),
+                        ReplyAhead::ToDecode,
                     );
                     if !manifest.is_empty() {
                         pending_announces.push((slot.model_id.clone(), manifest));
@@ -6899,31 +7180,66 @@ async fn step_decode_pool(
     Ok(())
 }
 
-/// Wrap up a finished slot: send GenerateDone + free its per-request KV.
-/// The off-by-one Token (when finish="length") is already emitted inside
-/// `step_decode_pool` so this is purely bookkeeping.
+/// Copy the prompt snapshot a slot's pass left for when its reply is done
+/// (`Slot::save_when_done`, `prompt_saved_when_done`) and announce its blocks
+/// — for a finished slot and an abandoned one alike, before its caches are
+/// freed. `model` is the table's (`None` once nothing names it: no copy).
+async fn save_slot_prompt_when_done(
+    writer: &mut IpcWriter,
+    kv_store: &KvCacheStore,
+    prefix_cache: &PrefixCache,
+    model: Option<&SplitModel>,
+    slot: &Slot,
+) {
+    let Some(model) = model.filter(|_| slot.save_when_done) else {
+        return;
+    };
+    let blocks = save_prompt_opening(
+        model,
+        kv_store,
+        prefix_cache,
+        &slot.model_key,
+        &slot.req_id_str,
+        &slot.prompt_ids[..slot.prompt_tokens],
+        KeepAsked::kept_if(slot.keep_here),
+        ReplyAhead::Done,
+    );
+    if !blocks.is_empty() {
+        let _ = send_worker(
+            writer,
+            &WorkerMsg::PrefixManifestUpdate {
+                model_id: slot.model_id.clone(),
+                blocks,
+            },
+            &[],
+        )
+        .await;
+    }
+}
+
+/// Wrap up a finished slot: send GenerateDone, copy a prompt snapshot left
+/// for the reply's end, free its per-request KV. The off-by-one Token (when
+/// finish="length") is already emitted inside `step_decode_pool`.
 async fn finalize_slot(
     writer: &mut IpcWriter,
     kv_store: &Arc<KvCacheStore>,
+    prefix_cache: &PrefixCache,
+    model: Option<&SplitModel>,
     slot: Slot,
 ) -> Result<(), SwarmError> {
     let generated_count = slot.generated_count();
-    let Slot {
-        request_id,
-        req_id_str,
-        model_key,
-        prompt_tokens,
-        finish_reason,
-        error_message,
-        matched_stop_sequence,
-        ..
-    } = slot;
-    let finish_label = finish_reason.unwrap_or("length").to_string();
+    let request_id = slot.request_id;
+    let finish_label = slot.finish_reason.unwrap_or("length").to_string();
 
     if finish_label == "error" {
-        let message = error_message
+        let message = slot
+            .error_message
+            .clone()
             .unwrap_or_else(|| "BatchGenerate slot failed without a recorded message".to_string());
         let fatal = crate::inference::worker_ipc::worker_error_is_fatal(&message);
+        if prompt_outlives(Some(message.as_str())) {
+            save_slot_prompt_when_done(writer, kv_store, prefix_cache, model, &slot).await;
+        }
         send_worker(
             writer,
             &WorkerMsg::Error {
@@ -6939,7 +7255,7 @@ async fn finalize_slot(
         )
         .await
         .map_err(|e| SwarmError::Internal(format!("send Error: {e}")))?;
-        kv_store.clear_request(&model_key, &req_id_str);
+        kv_store.clear_request(&slot.model_key, &slot.req_id_str);
         return Ok(());
     }
 
@@ -6947,17 +7263,18 @@ async fn finalize_slot(
         writer,
         &WorkerMsg::GenerateDone {
             request_id,
-            prompt_tokens,
+            prompt_tokens: slot.prompt_tokens,
             completion_tokens: generated_count,
             finish_reason: finish_label,
-            matched_stop_sequence,
+            matched_stop_sequence: slot.matched_stop_sequence.clone(),
         },
         &[],
     )
     .await
     .map_err(|e| SwarmError::Internal(format!("send GenerateDone: {e}")))?;
 
-    kv_store.clear_request(&model_key, &req_id_str);
+    save_slot_prompt_when_done(writer, kv_store, prefix_cache, model, &slot).await;
+    kv_store.clear_request(&slot.model_key, &slot.req_id_str);
     Ok(())
 }
 
@@ -8941,5 +9258,34 @@ mod up_front_admission_tests {
             !asked.get(),
             "a copy that may not leave the card never asks"
         );
+    }
+}
+
+#[cfg(test)]
+mod prompt_outlives_tests {
+    use super::prompt_outlives;
+    use crate::inference::split::kv_cache::CANCELLED_MID_FORWARD;
+
+    /// A prompt snapshot left for the reply's end is taken however the reply
+    /// ends while the worker survives — above all a cancel landing inside a
+    /// step, the user who stops a reply and asks again — and never after an
+    /// error that ruined the device. Copied before the first token, as it was
+    /// until 2026-10-28, the snapshot outlived every later failure; moved to
+    /// the reply's end, it was taken only by a reply that finished cleanly.
+    #[test]
+    fn a_prompt_left_for_the_replys_end_outlives_every_error_the_worker_survives() {
+        assert!(prompt_outlives(None));
+        let cancelled =
+            crate::error::SwarmError::Inference(CANCELLED_MID_FORWARD.to_string()).to_string();
+        assert!(prompt_outlives(Some(&cancelled)), "{cancelled}");
+        assert!(prompt_outlives(Some(
+            "send Token: Broken pipe (os error 32)"
+        )));
+        assert!(!prompt_outlives(Some(
+            "Forward: Cuda(DriverError(CUDA_ERROR_ILLEGAL_ADDRESS, \"an illegal memory access was encountered\"))"
+        )));
+        assert!(!prompt_outlives(Some(
+            "Forward: Cuda(DriverError(CUDA_ERROR_OUT_OF_MEMORY, \"out of memory\"))"
+        )));
     }
 }

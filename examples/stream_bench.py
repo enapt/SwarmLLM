@@ -29,6 +29,10 @@ ap.add_argument("--temperature", type=float, default=0.0)
 ap.add_argument("--prompt-file", default=None)
 ap.add_argument("--unique", action="store_true")
 ap.add_argument("--json-out", default=None)
+# Seconds idle before each request after the first, as a person reading the
+# last reply leaves: work a node does once a reply is sent (a prompt's
+# snapshot, 2026-10-28) lands on the next request only back to back.
+ap.add_argument("--gap", type=float, default=0.0)
 args = ap.parse_args()
 if args.prompt_file:
     args.prompt = open(args.prompt_file).read()
@@ -135,6 +139,8 @@ mem0 = gpu_mem()
 print(f"== {args.label or args.model} | model={args.model} max_tokens={args.max_tokens} reps={args.reps} gpu_mem_before={mem0} MiB", flush=True)
 results = []
 for i in range(-args.warmup, args.reps):
+    if args.gap > 0 and i > -args.warmup:
+        time.sleep(args.gap)
     r = one(i)
     tag = "warmup" if i < 0 else f"rep {i+1}"
     if "error" in r and r["error"] and "rep" not in r:

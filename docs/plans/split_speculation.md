@@ -939,6 +939,70 @@ sets itself); DSD replies 117-118/120 against plain 116-118; no drafter → iden
 the drafter stays a guest (7B kept on the card). DSD guessed actively where its checks were
 dear (the failover arms: 100-108 guesses a request) and chose zero where they were not.
 
+## Guess at the head through a stand-in for the far layers (2026-10-28)
+
+**The idea.** A node that starts and finishes a chain ("Start and finish on this computer") holds
+the model's first layers, its last layers and the output head. It could guess the next tokens on
+its own by running its two ends with the far layers SKIPPED — and every round trip already hands
+it the far layers' exact input and output for each position kept (it sent `h_a`, it receives
+`h_b`). Fit a stand-in for the far run from those pairs, add it where the run is skipped, and the
+head guesses with no drafter, no download and no weights of the far layers — the one thing the
+shadow (Phase 4) could not be, since no design may need a user to hold the far layers even at low
+bit (user, 2026-09-28). Built on one machine first: a card/processor split's card guesses by
+skipping the processor's run, through `split::RunStandIn` (linear kernel ridge over the last 256
+positions, kept current a row at a time — sliding-window kernel RLS, Van Vaerenbergh et al.,
+ICASSP 2006; FUTURE_WORK #366). No published method fits a stand-in for skipped layers online
+(searched 2026-10-28: SWIFT and CLaSp choose which layers to skip, KNN-SSD retrieves a skip set,
+LayerSkip and Kangaroo train; LLM-Streamline trains a replacement offline). `faster_than_local.md`
+§ 6.6 parked the mirror image — the far end approximating the head's layers.
+
+**Measured** (`examples/skip_agreement_probe.rs` `PROBE_BRIDGE=1`, 64 greedy tokens a prompt, the
+block from about a tenth of the depth; first-guess agreement / tokens kept a round of four):
+
+| model, skipped | nothing in the gap | stand-in (window) | ridge map over every position |
+|---|---|---|---|
+| Qwen2.5-14B, 21 of 48 (44%) | 71% / 1.54 | 70% / 1.76 | — |
+| Qwen2.5-14B, 33 of 48 (69%) | 22% / 0.26 | 38% / 0.62 | 42% / 0.80 |
+| Llama 3.1 8B, 25 of 32 (78%) | 3% / 0.03 | 25% / 0.47 | 30% / 0.57 |
+| Mistral 7B, 25 of 32 (78%) | 3% / 0.03 | 28% / 0.55 | 31% / 0.67 |
+
+A 0.5B drafter's first guess agrees ~72% with a 7B (§ "Draft on your own card"). **So the head's own
+guess beats a drafter only where the head holds about half the model or more** — a two-machine
+chain, or a 14B on a card and a processor — and where the family has no small sibling to draft
+with; across a long chain where the head holds a fifth, the drafter stays the guesser. The
+whole-history map wins on long conversations — an agent's session is long — and so does the
+stand-in fitted from all of it: on the ~1,700-2,100-token prompts a window of 2,048 kept 1.25-1.41
+tokens a round at 52-67% first-guess agreement (14B, Llama 3.1 8B, Mistral 7B) against 0.48-0.70
+at 256 (FUTURE_WORK #366 item 1 says what it costs and how to cut it).
+
+**What porting it to a chain needs** (not built): the coordinator's two end segments run in
+separate workers (`ensure_split_model_entry`, keyed by range), so a guess is two local hops — the
+first segment's forward, the stand-in, the last segment's — beside a check of γ+1 positions in one
+round trip; the pairs to fit from are the hidden states `forward_through_segments` already sends
+and receives. It would join the continuous stream (`dsd_stream.rs`) as a drafter with its own
+acceptance, chosen against the small drafter by tokens per millisecond, as `CardGuesses` is beside
+the n-gram (`model_worker::LocalSpec`).
+
+**Second survey (2026-10-28, for the chain).** Still no online fit anywhere. The nearest are
+offline: PPSD (arXiv 2509.19368) drafts from an early-exit head on the first pipeline stages,
+trained by KL self-distillation — 2.01x on LLaMA-2 70B at ~57% acceptance, 3.08x on 13B; FlowSpec
+(2507.02620) drafts on device 0 with an EAGLE-2 head while the rest of the chain verifies tree
+segments — 1.28-1.79x over plain pipelining on five Jetson boards on a LAN; Kangaroo (2404.18911) is
+a shallow prefix plus a trained adapter, and stops guessing when its top-1 probability falls
+below a line. On replacing a block with a linear map: ReplaceMe (2505.02819) fits one hidden ×
+hidden map by least squares on a calibration set and keeps ~90% of Llama 3 8B's benchmark score
+with a quarter of its layers removed (identity in their place: perplexity past 2,000), and its
+data need scales as ~hidden² / samples-per-row — 256 positions are far short of what a full map
+wants, which is why the window sweep above gained so much from 2,048. LLM-Streamline (2403.19135)
+trains a substitute layer on hidden-state error: 93% kept on classification, 70-77% on generation.
+**Three details to carry into the chain's guesser:** (1) a prior that outlives the conversation —
+the primal sufficient statistics (XᵀX, XᵀY, FUTURE_WORK #366 (1)) summed over every conversation
+this node serves for the model, solved off the reply's path, with the window's stand-in fitted to
+what the prior leaves; (2) choose λ and the window by tokens kept, never by hidden-state error,
+which tracks generation poorly (LLM-Streamline; PPSD and Kangaroo train on the output's
+distribution); (3) Kangaroo's confidence stop — each guess past a doubtful one spends a slot of a
+round trip that costs a network hop.
+
 ## What the literature says (survey 2026-09-27)
 
 The survey found no method that makes a WAN split fast without speculation. It

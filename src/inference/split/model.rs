@@ -972,6 +972,20 @@ impl SplitModel {
             .any(|l| matches!(l, super::LayerVariant::Qwen35Ssm { .. }))
     }
 
+    /// Can a layer's cache drop positions its window no longer reads while a
+    /// reply grows (`LayerKv::slide_beyond`, #281)? Read off
+    /// [`Self::cache_layouts`], whose window is the one a cache KEEPS
+    /// (`kv_cache::window_kept`): none on a model without windows, none with
+    /// `SWARMLLM_KV_WINDOW_SLIDE=0`, none for a cache kept with the f16 mirror.
+    /// Where none can, the prompt's positions are still whole when the reply is
+    /// done (`model_worker::prompt_saved_when_done`).
+    pub(crate) fn any_cache_slides(&self) -> bool {
+        self.cache_layouts()
+            .iter()
+            .flatten()
+            .any(|layout| layout.window.is_some())
+    }
+
     /// The layers a guess on this model's CARD skips — the run the processor
     /// holds — where the card can guess the next tokens on its own
     /// (`model_worker::LocalSpec`, 2026-10-28): a whole model split between

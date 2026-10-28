@@ -19,6 +19,7 @@ mod per_layer;
 mod prefix_cache;
 mod rope;
 mod shard_reader;
+mod stand_in;
 #[cfg(test)]
 pub(crate) mod tests;
 mod token_embedding;
@@ -45,7 +46,7 @@ pub use super::tokenizer::{BpeTokenizer, SplitTokenizer, SpmTokenizer};
 pub use self::draft::{FlowGrowth, FlowStep, TreeGrowth};
 pub use self::entry::BatchItem;
 pub use self::entry::{trim_split_model_cache, SplitModelEntry, SplitModelKey};
-pub use self::executor::SkipBridge;
+pub use self::executor::{Capture, SkipBridge};
 pub(crate) use self::gguf_meta::tensor_byte_size;
 pub use self::gguf_meta::{
     ensure_gguf_header, explain_gguf_parse_error, gguf_arch_str, read_gguf_header,
@@ -66,6 +67,7 @@ pub use self::prefix_cache::{
     PrefixCache, SnapshotHome, SnapshotRoom, KV_SNAPSHOT_MAGIC, KV_SNAPSHOT_VERSION,
 };
 pub use self::shard_reader::{resolve_sidecars, SidecarTensor};
+pub use self::stand_in::{RunStandIn, STAND_IN_WINDOW};
 pub(crate) use self::token_embedding::table_supports_row_gather;
 
 /// Context length served by default, for a model that declares at least this
