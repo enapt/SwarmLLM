@@ -291,6 +291,12 @@ fn median_ns(v: &[u64]) -> Option<u64> {
 }
 
 impl Calibration {
+    /// A width is chosen — or never will be, its lock poisoned
+    /// ([`decode_width_settled`]).
+    fn settled(&self) -> bool {
+        self.chosen.load(Ordering::Relaxed) != 0 || self.state.is_poisoned()
+    }
+
     fn new(candidates: Vec<usize>) -> Self {
         let n = candidates.len();
         Self {
@@ -605,6 +611,24 @@ fn calibration_for(cpu_layers: usize) -> Option<Arc<Calibration>> {
         .for_depth(cpu_layers)
 }
 
+/// Has decode at this processor depth settled on its width — or is there no
+/// width to settle (see [`calibration_for`])?
+///
+/// The calibration is fed only by plain one-token steps (`in_phase_pool`), and
+/// a worker that speculates takes few of them: with the card guessing beside
+/// the n-gram (`model_worker::CardGuesses`), a 14B split took none in three
+/// replies, so every plain step it did take rotated through the candidate
+/// widths, one in four on a single thread (318 ms against 144 at four), and the
+/// speculation controller priced its guesses against that mix. A speculating
+/// loop asks this first and steps plainly until it is true — the few tokens the
+/// calibration was always meant to cost, once per worker and depth. A
+/// calibration whose lock is poisoned never settles (`Calibration::record`
+/// gives up on it), so it counts as settled: otherwise that worker would
+/// never speculate again.
+pub(crate) fn decode_width_settled(cpu_layers: usize) -> bool {
+    calibration_for(cpu_layers).is_none_or(|c| c.settled())
+}
+
 /// `SWARMLLM_DECODE_INSTALL=0` runs decode at the global pool's width from the
 /// calling thread again (see [`pool_for`]), for A/B inside one binary.
 fn env_decode_install() -> bool {
@@ -782,6 +806,11 @@ pub(crate) fn in_phase_pool<R: Send>(
             return pool.install(f);
         }
     }
+    if cpu_layers > 0 && seq_len > 1 && for_the_owner && checks_on_the_owners_pool() {
+        if let Some(pool) = owner_prefill_pool() {
+            return pool.install(f);
+        }
+    }
     if seq_len > DECODE_SHAPED_MAX_TOKENS || cpu_layers == 0 {
         return f();
     }
@@ -821,6 +850,36 @@ pub(crate) fn in_phase_pool<R: Send>(
     };
     calib.record(idx, started.elapsed().as_nanos() as u64);
     out
+}
+
+/// Whether the owner's forwards of a few positions — a speculative check, a
+/// short prompt — run on the owner's pool (every physical core) rather than
+/// the decode width calibrated on ONE position. llama.cpp gives every forward
+/// of more than one token `n_threads_batch` (`llama_context::graph_compute`,
+/// `batched = n_tokens > 1`, read at `4b1a27f`). A split's check on this
+/// machine cost ~96 ms plus ~37 ms per position at the 3-4 threads one token
+/// calibrates to (2026-10-28): the weights stream once, each extra position
+/// is compute, and compute scales with cores where bandwidth does not. The
+/// microbench under [`DECODE_SHAPED_MAX_TOKENS`] compared 8 threads with 16 on
+/// a projection that fits in L3, never 4 with 8 on one that streams — the
+/// owner's pool is every PHYSICAL core, never the SMT siblings that lost there.
+///
+/// Measured 2026-10-28 (`~/swarmllm-gate/deep/cg/ab4.sh`, one CUDA binary,
+/// arms narrow, owner, owner, narrow; Qwen2.5-14B Q4_K_M split 24 of 48 on an
+/// RTX 3070 Laptop with the card guessing, Ryzen 7 5800H): a check's extra
+/// position cost 9-19 ms on every core against 34-54 ms at the 4 threads one
+/// token settles on, so the speculation controller bought more guesses (127-140
+/// a reply against 93-105) and decode rose 8.09 → 9.75-9.87 tok/s on code,
+/// 7.70 → 8.25-8.64 on a summary, 8.32 → 8.80-9.24 on prose. A/B
+/// `SWARMLLM_CHECK_POOL=narrow`.
+fn checks_on_the_owners_pool() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("SWARMLLM_CHECK_POOL").ok().as_deref(),
+            Some("narrow")
+        )
+    })
 }
 
 /// Longest query block still treated as decode-shaped, i.e. narrow-pool work.
@@ -1249,6 +1308,35 @@ mod tests {
         );
     }
 
+    /// A speculating loop steps plainly until decode's width settles (gotcha
+    /// #984, `decode_width_settled`) — so a calibration that can never settle,
+    /// its lock poisoned by a panic, must count as settled or that worker never
+    /// speculates again.
+    #[test]
+    fn a_width_is_settled_once_chosen_or_once_it_never_can_be() {
+        let calib = Calibration::new(vec![4, 3, 2, 1]);
+        assert!(!calib.settled(), "nothing timed yet, nothing chosen");
+        for _ in 0..SAMPLES_PER_CANDIDATE {
+            for (idx, ms) in [5u64, 2, 2, 1].iter().enumerate() {
+                calib.record(idx, ms * 1_000_000);
+            }
+        }
+        assert!(calib.settled(), "a chosen width is settled");
+
+        let poisoned = Arc::new(Calibration::new(vec![4, 3, 2, 1]));
+        let holder = poisoned.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = holder.state.lock();
+            panic!("a thread dies holding the calibration's lock");
+        })
+        .join();
+        assert_eq!(poisoned.chosen.load(Ordering::Relaxed), 0);
+        assert!(
+            poisoned.settled(),
+            "a calibration that can never choose held speculation off for good"
+        );
+    }
+
     /// The default contribution's case (#137): decode's width equals the
     /// global pool's, and that width must still be a POOL — run from the
     /// calling thread, every parallel op is injected from outside rayon
@@ -1347,11 +1435,13 @@ mod tests {
         );
     }
 
-    /// The owner's prompt is read on the owner's width; the swarm's prompt and
-    /// every decode step are not. Asserted on the pool the work RAN on
-    /// (`current_num_threads` inside it), not on a speed.
+    /// The owner's prompt — and the owner's check of a few positions
+    /// (`checks_on_the_owners_pool`, as llama.cpp's `n_threads_batch`) — run on
+    /// the owner's width; the swarm's work and every one-token decode step do
+    /// not. Asserted on the pool the work RAN on (`current_num_threads` inside
+    /// it), not on a speed.
     #[test]
-    fn only_the_owners_prompt_is_read_on_the_owners_width() {
+    fn only_the_owners_prompts_and_checks_run_on_the_owners_width() {
         let global = rayon::current_num_threads();
         let wide = global + 2;
         set_owner_prefill_threads_for_test(wide);
@@ -1366,7 +1456,17 @@ mod tests {
             global,
             "the swarm's prompt: the contribution level"
         );
-        assert_ne!(width(16, true), wide, "decode-shaped work is never widened");
+        assert_ne!(width(1, true), wide, "a decode token is never widened");
+        assert_eq!(
+            width(4, true),
+            wide,
+            "the owner's check of a few positions: every core"
+        );
+        assert_ne!(
+            width(4, false),
+            wide,
+            "the swarm's check: the contribution level"
+        );
         assert_eq!(
             in_phase_pool(128, 0, true, rayon::current_num_threads),
             global,

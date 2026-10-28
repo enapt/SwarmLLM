@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #366**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #367**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -1368,6 +1368,60 @@ reported.
 Local GPU decode runs at ~97% of llama.cpp (`docs/plans/local_decode_submissions.md`); what
 is left is prompt reading, the processor half of a hybrid, and MoE placement —
 `docs/plans/faster_than_local.md` § 3 and § 4 carry the order.
+
+#### #366 — A model split between the card and the processor decodes at the processor's pace; the card can guess for it
+`P2` · perf-local · **PARTIAL** — 2026-10-28 · evidence: `docs/invariants/inference.md` § "A whole model's processor-held layers sit early in the middle, so the card can guess"
+
+A whole model too big for the card runs most of each step on the processor: Qwen2.5-14B Q4_K_M, 25-27 of
+48 layers on an RTX 3070 Laptop, spends ~20 ms of a ~150 ms step on the card. **Shipped 2026-10-28**:
+the processor run sits early in the middle (`hybrid::processor_run`), so the card holds both ends of
+the model and guesses the next tokens alone where the n-gram finds nothing to copy
+(`model_worker::CardGuesses`), checked several at a time by the whole model, the owner's checks on
+every core (`cpu_pools::checks_on_the_owners_pool`, as llama.cpp's `n_threads_batch`). Measured on
+Qwen2.5-14B Q4_K_M, 23-24 of 48 on an RTX 3070 Laptop, one binary by env switch: decode 5.61 →
+9.71 tok/s on code, 5.63 → 8.23 on a 1,800-token summary, 6.48 → 8.77 on prose (1.35-1.73x; the
+card's guesses alone 1.15-1.43x, every core on the checks another 1.11-1.23x), first token
+unchanged. Found on the way and fixed in the same change: a guess was timed as a processor token
+(one thread chosen, gotcha #983); guessing starved the decode-width calibration of plain steps
+(#984); the speculation gate latched off for the worker's life after one poor reply (#985); and the
+middle run first needed HALF the model on the card, so the same machine guessed at 25 layers and
+not at 23 (`hybrid::CARD_GUESS_MIN_SHARE`, now two fifths; at 21 of 48: 1.17-1.56x against the
+tail). The middle run applies only where the
+card can guess (`hybrid::card_may_guess`: not Qwen 3.5, not Gemma 4 E2B/E4B) and never beside
+experts kept in RAM.
+
+**What is left, best first:**
+1. **A stand-in for the skipped run** — skipping it agrees 77% on Qwen 2.5 but 50% on Llama 3.1 and
+   28% on Mistral. LLM-Streamline (arxiv 2403.19135) found a replaced block recovers most of what a
+   deleted one loses; a stand-in fitted from the conversation's own forwards (`split::SkipBridge`,
+   `skip_agreement_probe` `PROBE_BRIDGE=1`). **Measured 2026-10-28** (2 prompts × 64 tokens each; the 14B
+   skips 21 of 48 from layer 5 as the node does, the 8B and 7B skip 14 of 32 from layer 3), first-guess
+   agreement and tokens kept a round, nothing in the gap → `recall@0.3` (the block's mean effect plus a
+   kernel ridge over the last 256 positions by the cosine of their hidden states): Qwen2.5-14B 71% / 1.54
+   → 70% / 1.76 (+14%); Llama 3.1 8B 50% / 0.79 → 62% / 1.12 (+42%); Mistral 7B 28% / 0.34 → 65% / 1.73
+   (5x; its two prompts 83% and 47%, a small sample). The mean alone helps little and the last
+   position's effect (`prev`) is worse than nothing everywhere. Next: put `recall@0.3` into
+   `card_guesses` and A/B it end to end — it matters most where a model skips a larger share of
+   itself (a smaller card, a 70B).
+2. **Guess while the processor checks** — the card is idle through the check's ~130 ms on the
+   processor; it could keep guessing past the round's last guess (PEARL's post-verify), ready if the
+   check keeps everything.
+3. **The guess forward as a CUDA graph** — a split's forwards are not captured; the card's 27 layers
+   run op by op (~20 ms against ~8 a captured 7B step).
+4. **Across computers**: a node holding a model's first and last layers ("Start and finish on this
+   computer") can guess the same way, skipping the peers' layers — a check per round trip instead
+   of a token. Needs a probe of how far a model can skip (14B: 91% at 29%, 77% at 44%, 58% at 56%).
+5. **A mixture-of-experts model by use, not by layer**: Qwen3-30B-A3B reuses 44% of the previous
+   token's experts per layer (chance 6%); a card holding 46% of the experts by recency per layer
+   would serve 91% of expert reads against 46% by layer (`SWARMLLM_TRACE_EXPERTS` +
+   `examples/expert_locality.py`). Fiddler / HOBBIT / ExpertFlow are the prior art. What the code
+   allows (mapped 2026-10-28): the card's expert kernel finds an expert at `base + id × stride`
+   (`moe_gguf.cu`, `moe_wmma_gguf.cu`) and skips an id outside `[0, num_experts)`, so a per-layer bank
+   of slots plus an id → slot table on the card needs no new indexing. A skipped id's output row is
+   left UNWRITTEN today (`moe_card.rs` allocates without zeroing), so a miss handled elsewhere needs the
+   kernel to write zero for it. A miss handled on the processor reads the ids back (one sync per
+   layer, no CUDA graph); one read by the card straight from pinned host memory over PCIe would keep
+   the step capturable. Measure the miss traffic before choosing.
 
 #### #357 — A card's first graph of a new shape, late in a worker's life, can stall one forward 10-59 s
 `P3` · perf-local · **OPEN** — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883

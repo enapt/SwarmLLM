@@ -372,14 +372,22 @@ pub fn best_gamma_overall(
 /// yet timed is priced through the step ([`CheckCost::predict_beside_a_step`]).
 /// Zero is an answer (SmartSpec, as [`best_gamma_for_check`]); ties go to the
 /// smaller γ.
+///
+/// `draft_ms_each` is what one guess costs to make before the check: nothing
+/// for a guess copied out of the conversation (the n-gram lookup), a card
+/// forward for one the card makes on its own (`model_worker::CardGuesses`,
+/// 2026-10-28). Required, so a source that pays for its guesses cannot be
+/// priced as one that does not.
 pub fn best_gamma_beside_a_step(
     alpha: f64,
     step_ms: Option<f64>,
     check: &CheckCost,
     max: u32,
+    draft_ms_each: f64,
 ) -> Option<u32> {
     let step_ms = step_ms?;
     check.predict(2)?;
+    let each = draft_ms_each.max(0.0);
     let cost = |g: u32| {
         let forward = match g {
             0 => step_ms,
@@ -387,7 +395,7 @@ pub fn best_gamma_beside_a_step(
                 .predict_beside_a_step(1 + g, step_ms)
                 .unwrap_or(step_ms),
         };
-        forward.max(0.1)
+        forward.max(0.1) + each * f64::from(g)
     };
     Some(
         (0..=max)
@@ -622,15 +630,21 @@ mod tests {
             check.record(p, 19.5 + 0.1 * f64::from(p));
         }
         let step = Some(7.7);
-        assert_eq!(best_gamma_beside_a_step(0.5, step, &check, 7), Some(0));
-        assert_eq!(best_gamma_beside_a_step(0.95, step, &check, 7), Some(7));
+        assert_eq!(best_gamma_beside_a_step(0.5, step, &check, 7, 0.0), Some(0));
+        assert_eq!(
+            best_gamma_beside_a_step(0.95, step, &check, 7, 0.0),
+            Some(7)
+        );
         // A captured check of a few positions, nearly a step: guess at once —
         // four, where a fifth guess kept half the time adds less than its row.
         let mut captured = CheckCost::default();
         for p in [2u32, 8, 4, 8] {
             captured.record(p, 8.6 + 0.2 * f64::from(p));
         }
-        assert_eq!(best_gamma_beside_a_step(0.5, step, &captured, 7), Some(4));
+        assert_eq!(
+            best_gamma_beside_a_step(0.5, step, &captured, 7, 0.0),
+            Some(4)
+        );
         // Checks of one width only, all as wide as the round may guess (a
         // request's first, Qwen3.5-4B on the processor): no slope yet, so a
         // narrower check is priced through the step — dearer than it is, and
@@ -639,7 +653,7 @@ mod tests {
         let mut one_width = CheckCost::default();
         one_width.record(11, 305.0);
         assert_eq!(
-            best_gamma_beside_a_step(0.5, Some(95.0), &one_width, 10),
+            best_gamma_beside_a_step(0.5, Some(95.0), &one_width, 10, 0.0),
             Some(1)
         );
         assert_eq!(
@@ -659,11 +673,36 @@ mod tests {
         remote.record(11, 420.0);
         assert_eq!(remote.predict_beside_a_step(2, 95.0), remote.predict(2));
         // Nothing timed yet: no answer, the caller explores.
-        assert_eq!(best_gamma_beside_a_step(0.5, None, &check, 7), None);
+        assert_eq!(best_gamma_beside_a_step(0.5, None, &check, 7, 0.0), None);
         assert_eq!(
-            best_gamma_beside_a_step(0.5, step, &CheckCost::default(), 7),
+            best_gamma_beside_a_step(0.5, step, &CheckCost::default(), 7, 0.0),
             None
         );
+    }
+
+    /// A guess the card makes on its own costs a card forward, and the count
+    /// pays for it (2026-10-28): a 14B split's step of 150 ms, a check a few
+    /// rows wider barely dearer (the processor reads its weights once for
+    /// every row), a guess 20 ms. At the card's measured agreement (≈ 0.77)
+    /// several guesses still pay; at a fifth of it none do — where free
+    /// guesses would still buy one.
+    #[test]
+    fn guesses_that_cost_a_forward_each_are_bought_only_while_they_pay() {
+        let mut check = CheckCost::default();
+        for p in [2u32, 3, 4, 5, 6] {
+            check.record(p, 150.0 + 6.0 * f64::from(p));
+        }
+        let step = Some(150.0);
+        let paid = best_gamma_beside_a_step(0.77, step, &check, 7, 20.0).unwrap();
+        assert!((3..=7).contains(&paid), "{paid}");
+        assert_eq!(
+            best_gamma_beside_a_step(0.2, step, &check, 7, 20.0),
+            Some(0)
+        );
+        assert!(best_gamma_beside_a_step(0.2, step, &check, 7, 0.0).unwrap() >= 1);
+        // Dearer guesses buy fewer of them.
+        let dear = best_gamma_beside_a_step(0.77, step, &check, 7, 60.0).unwrap();
+        assert!(dear < paid, "{dear} vs {paid}");
     }
 
     /// The recent estimate follows a reply that turns to copying, and one that

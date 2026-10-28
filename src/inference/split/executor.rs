@@ -118,6 +118,75 @@ impl Staged {
     }
 }
 
+/// The layers a forward skips ([`SplitModel::forward_with_skip_mask`]), and
+/// what stands in for their run where it ends.
+#[derive(Clone, Copy)]
+pub(super) struct SkipLayers<'a> {
+    mask: &'a [bool],
+    bridge: Option<&'a SkipBridge>,
+}
+
+/// A stand-in for a skipped run of layers ([`SplitModel::forward_with_skip_bridge`]):
+/// what the run would have added to the hidden state, estimated from the
+/// real forwards before it, so a card guessing alone is not handed the hidden
+/// state as if those layers wrote nothing (2026-10-28, probe). LLM-Streamline
+/// (Chen et al., ICLR 2025, arxiv 2403.19135) found that deleting a block of
+/// layers without a stand-in costs far more than replacing it with a small
+/// trained network; this one is fitted per conversation, with no training.
+pub enum SkipBridge {
+    /// A constant: `h + shift`, `shift` `[hidden]` — e.g. the run's mean
+    /// effect, or its effect at the latest real position.
+    Shift { run_end: usize, shift: Tensor },
+    /// Linear kernel ridge over earlier positions: `h + base + φ(h)·Fᵀ·W`,
+    /// where `φ(h) = h / ‖h‖`, `features` (`F`, `[n, hidden]`) are the
+    /// earlier positions' φ at the run's start, `base` (`[hidden]`) their
+    /// mean effect and `weights` (`W`, `[n, hidden]`) `(F·Fᵀ + λI)⁻¹ ·
+    /// (Δ − base)` for their effects `Δ`.
+    Recall {
+        run_end: usize,
+        base: Tensor,
+        features: Tensor,
+        weights: Tensor,
+    },
+}
+
+impl SkipBridge {
+    /// The absolute layer index just past the run it stands in for.
+    pub fn run_end(&self) -> usize {
+        match self {
+            Self::Shift { run_end, .. } | Self::Recall { run_end, .. } => *run_end,
+        }
+    }
+
+    fn apply(&self, h: &Tensor) -> candle_core::Result<Tensor> {
+        match self {
+            Self::Shift { shift, .. } => {
+                let shift = shift.to_device(h.device())?.to_dtype(h.dtype())?;
+                h.broadcast_add(&shift)
+            }
+            Self::Recall {
+                base,
+                features,
+                weights,
+                ..
+            } => {
+                let (b, t, d) = h.dims3()?;
+                let rows = h.reshape((b * t, d))?.to_dtype(candle_core::DType::F32)?;
+                let norm = rows.sqr()?.sum_keepdim(1)?.sqrt()?.clamp(1e-6, f64::MAX)?;
+                let phi = rows.broadcast_div(&norm)?;
+                let f = features.to_device(h.device())?;
+                let w = weights.to_device(h.device())?;
+                let base = base.to_device(h.device())?;
+                let effect = phi.matmul(&f.t()?.contiguous()?)?.matmul(&w)?;
+                (rows + effect)?
+                    .broadcast_add(&base)?
+                    .reshape((b, t, d))?
+                    .to_dtype(h.dtype())
+            }
+        }
+    }
+}
+
 impl SplitModel {
     /// Build an ADDITIVE causal mask: `0.0` where a query may attend, `-inf`
     /// where it may not.
@@ -410,9 +479,64 @@ impl SplitModel {
             None,
             false,
             false,
-            Some(skip_mask),
+            Some(SkipLayers {
+                mask: skip_mask,
+                bridge: None,
+            }),
         )?;
         Ok(output)
+    }
+
+    /// [`Self::forward_with_skip_mask`] with the skipped run's effect stood in
+    /// for by `bridge` ([`SkipBridge`]) where the run ends, instead of passing
+    /// the hidden state through unchanged. Read by
+    /// `examples/skip_agreement_probe.rs` to measure whether a stand-in fitted
+    /// from the real forwards raises how often the card's guess agrees.
+    pub fn forward_with_skip_bridge(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        skip_mask: &[bool],
+        bridge: &SkipBridge,
+    ) -> Result<Tensor, SwarmError> {
+        let (output, _) = self.forward_inner_impl(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            None,
+            None,
+            false,
+            false,
+            Some(SkipLayers {
+                mask: skip_mask,
+                bridge: Some(bridge),
+            }),
+        )?;
+        Ok(output)
+    }
+
+    /// A forward that also returns the hidden state after each layer in
+    /// `layers` (absolute indices), `[1, positions, hidden]` on the device
+    /// that layer ran on — what a [`SkipBridge`] is fitted from.
+    pub fn forward_capturing(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        layers: &std::collections::HashSet<usize>,
+    ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
+        self.forward_inner(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            None,
+            Some(layers),
+        )
     }
 
     /// Forward pass with pre-embedded hidden states (local embedding privacy).
@@ -694,12 +818,14 @@ impl SplitModel {
         capture_layers: Option<&std::collections::HashSet<usize>>,
         skip_embedding: bool,
         all_positions: bool,
-        skip_mask: Option<&[bool]>,
+        skip_mask: Option<SkipLayers<'_>>,
     ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
         // Query positions, i.e. which phase this is. Dim 1 is `seq_len` for
         // both token ids [1, seq] and pre-embedded hidden states [1, seq, d].
         let seq_len = input.dim(1).unwrap_or(1);
-        let cpu_layers = self.cpu_layer_count();
+        // The processor layers this forward RUNS — a skipped one does no work
+        // (`cpu_layers_run`).
+        let cpu_layers = self.cpu_layers_run(skip_mask.map(|s| s.mask));
         // Whose prompt this is decides how many cores may read it — the
         // owner's on every one, the swarm's within the contribution level.
         let for_the_owner = kv_cache_store.serves_the_owner(request_id);
@@ -1122,7 +1248,7 @@ impl SplitModel {
         capture_layers: Option<&std::collections::HashSet<usize>>,
         skip_embedding: bool,
         all_positions: bool,
-        skip_mask: Option<&[bool]>,
+        skip_mask: Option<SkipLayers<'_>>,
         mut recording: Option<RecordedStep<'_>>,
     ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
         // Skip the clock_gettime syscall when DEBUG tracing is off — fires per
@@ -1498,10 +1624,16 @@ impl SplitModel {
 
                 // SWIFT skip: identity pass-through, no attention, no MLP, no KV write.
                 // Never a layer another reads its keys from (`lends_its_kv`).
-                if let Some(mask) = skip_mask {
-                    if mask.get(abs_layer).copied().unwrap_or(false)
+                // Where a bridge stands in for the run, it is added as the run ends.
+                if let Some(skip) = skip_mask {
+                    if skip.mask.get(abs_layer).copied().unwrap_or(false)
                         && !self.lends_its_kv(layer_idx)
                     {
+                        if let Some(bridge) = skip.bridge.filter(|b| b.run_end() == abs_layer + 1) {
+                            let h = hidden.into_tensor().map_err(SwarmError::internal)?;
+                            hidden =
+                                Residual::Ready(bridge.apply(&h).map_err(SwarmError::internal)?);
+                        }
                         continue;
                     }
                 }
@@ -1513,11 +1645,15 @@ impl SplitModel {
                 // a model on one device pays a single `get` returning `None` per
                 // layer and nothing else — this is the decode hot path.
                 //
-                // The split is contiguous and card-first, so this fires at most
-                // once per forward: one copy of the hidden state (a few KB while
-                // decoding, a few MB during prefill) and one of the mask. That is
-                // the whole per-token cost of hybrid placement, and it is why the
-                // boundary has to stay contiguous.
+                // The processor holds ONE contiguous run of layers
+                // (`hybrid::processor_run`), so this fires at most twice per
+                // forward — into the run and, for a whole model whose run sits
+                // in the middle, back out of it: a copy of the hidden state (a
+                // few KB while decoding, a few MB during prefill) and of the
+                // mask each time. That is the whole per-token cost of hybrid
+                // placement, and it is why the run has to stay contiguous. A
+                // card guess skips the run (`skip_mask` above), so it never
+                // crosses.
                 // A processor layer of a prompt chunk runs whole on the card
                 // (#138 (1c)), so the activation and its mask go there instead.
                 let card_layer = match layer {
@@ -2024,7 +2160,7 @@ impl SplitModel {
     /// Does another layer of this segment read layer `layer_idx`'s KV cache
     /// (Gemma 4's shared-KV layers)? Such a layer is never skipped — the
     /// layers reading it would find its cache short.
-    fn lends_its_kv(&self, layer_idx: usize) -> bool {
+    pub(super) fn lends_its_kv(&self, layer_idx: usize) -> bool {
         self.layers.iter().any(|l| match l {
             LayerVariant::Dense(lw) => lw.kv_source == Some(layer_idx),
             _ => false,

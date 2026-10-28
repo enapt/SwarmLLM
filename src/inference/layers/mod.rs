@@ -1559,6 +1559,36 @@ pub(crate) fn topk_cpu(
 /// is a device→host copy, two host→device copies and a softmax launch per
 /// token per layer.
 ///
+/// `SWARMLLM_TRACE_EXPERTS=<file>`: every one-token routing call on the
+/// processor (`MoeFfn::route`) appends the experts it chose as one line, so a
+/// decode step writes one line per mixture-of-experts layer, in the order the
+/// forward runs them. How often consecutive tokens reuse experts, and what a
+/// card holding experts by use rather than by layer would hit, are read off
+/// such a trace (`docs/DIAGNOSTICS.md` § "Which experts a reply uses"). Read
+/// once; unset, a routing call pays one load of a `OnceLock`.
+fn trace_experts(ids: &[usize]) {
+    use std::io::Write;
+    static SINK: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+        std::sync::OnceLock::new();
+    let sink = SINK.get_or_init(|| {
+        let path = std::env::var_os("SWARMLLM_TRACE_EXPERTS")?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+            .map(std::sync::Mutex::new)
+    });
+    if let Some(file) = sink {
+        let mut sorted = ids.to_vec();
+        sorted.sort_unstable();
+        let line: Vec<String> = sorted.iter().map(usize::to_string).collect();
+        if let Ok(mut f) = file.lock() {
+            let _ = writeln!(f, "{}", line.join(" "));
+        }
+    }
+}
+
 /// The softmax-over-k of the default policy is computed here the way
 /// `candle_nn::ops::softmax` computes it (max, `exp(x - max)` in order, an
 /// in-order sum, divide), so on the processor the weights are the bits the
@@ -1983,8 +2013,12 @@ impl MoeFfn {
                 scale.map_or(0, <[f32]>::len)
             );
         }
+        let one_token = scores_host.len() == n_experts;
         for (pos, token_scores) in scores_host.chunks_exact(n_experts).enumerate() {
             let (indices, weights) = topk_host(token_scores, self.n_experts_used, self.routing);
+            if one_token {
+                trace_experts(&indices);
+            }
             for (expert_idx, w) in indices.into_iter().zip(weights) {
                 let w = scale.map_or(w, |s| w * s[expert_idx]);
                 expert_batches[expert_idx].push((pos, w));
@@ -3878,9 +3912,10 @@ pub(crate) fn shared_history(
 }
 
 /// A layer's history, cut to its window, where its queries are. A card /
-/// processor split places layers card-first and a shared layer's source comes
-/// before it ([`shared_history`]), so the split can leave a shared layer on
-/// the processor reading a cache held on the card: that history crosses each
+/// processor split can leave a shared layer and its source ([`shared_history`])
+/// on different devices — a processor-held layer of the card-first tail
+/// reading a cache on the card (a model whose layers share caches never gets
+/// a middle processor run: `hybrid::card_may_guess`): that history crosses each
 /// forward — as llama.cpp's scheduler copies an input held by another backend
 /// — and arrives at f32, the storage a processor cache keeps ([`kv_storage`]).
 /// A view is copied out first (`to_device` on a view moves its whole buffer);

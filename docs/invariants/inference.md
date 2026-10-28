@@ -157,6 +157,13 @@ Three things a change here must keep:
   lets one request find out, and the answer steers the rest. With it, both
   workloads beat either fixed policy — open-ended 8-way 11.03 s against 12.48 s
   batched, copy-heavy 8-way 3.37 s against 5.52 s.
+  **A refusal must not be forever** (2026-10-28, gotcha #985): only a diverted
+  request records a payoff, so one reply below the bar kept every later request
+  of the worker in the batch — a 14B split's prose reply at 1.37 a round turned
+  the card's guesses off for the code after it (8.94 → 6.73 tok/s between two
+  identical arms). Each refused solo request moves the payoff 0.02 back toward
+  the bar, never past it (`drift_toward_retrying`), so one request measures
+  again every 7th to 23rd solo request; a burst still diverts at most one.
 - **It is not bit-identical** (gotcha #370). Do not describe it as such.
 - **A miss is not free** (gotcha #371): the forward the draft provokes costs
   even when nothing is accepted, which is what `SpecBackoff` exists for. Measure
@@ -3221,6 +3228,148 @@ layer an attention layer's KV, where three in four are DeltaNet with a fixed sta
 — 805 MB too much for the 9B at the admission context. All three ask
 `split::layers_keeping_kv` now, from the tensor table (`blk.N.ssm_alpha.weight`,
 the loader's own test, `split::layer_is_recurrent`).
+
+## A whole model's processor-held layers sit early in the middle, so the card can guess (2026-10-28)
+
+**The rule.** A card/processor split whose card could guess without its processor run —
+`hybrid::card_may_guess`, read off the header: the WHOLE model (first and last segment), every
+layer keeping a cache of its own (`kv_layers`) — puts that one run early in the middle — from
+`round(0.1 · layers)`, clamped to `1..=on_card` (`hybrid::processor_run`,
+`PROCESSOR_RUN_STARTS_AT`) — so the card holds the model's first tenth AND its last layers. Any
+other segment keeps llama.cpp's card-first tail, and so do Qwen 3.5 (recurrent layers: a guess
+cannot be taken back out of their state) and Gemma 4 E2B/E4B (shared layers read caches the
+skipped run would never write): the card refuses to guess for both (`card_guess_skips`), so a
+middle run bought them nothing and cost a layer or two of card — the first version moved them
+too, caught by `an_e2b_on_a_small_card_keeps_its_per_layer_table_in_the_machine`. Where the card
+holds less than two fifths of the layers (`CARD_GUESS_MIN_SHARE`), the run stays at the tail too: a
+middle run would leave the card too few layers to guess with. The first version asked for half;
+the 14B on this 8 GB card lands at 23-25 of 48 depending on how much of the card the desktop
+holds, and at 23 it fell back to the tail (6.08 tok/s on prose against 7.76 at 25). The probe's
+14B still agreed 58% with 56% skipped, and one guess pays from about 35% (a two-position check
+~170 ms plus a ~20 ms guess against a ~144 ms step). Every reader of a split's shape asks `processor_run`: the loader
+(`LayerPlacement::split`'s `processor` range, the card's KV over both card ends, the run's own
+bytes off the card's weight figure — `layers_own_bytes`), the planner (`plan_gpu_layers`, which
+charges the card both ends of the model), and the pool's charge (`LayerBytes::card_may_guess` →
+`ram_charged_share`, `card_share_of_split_mb` → `vram::estimate_worker_vram_mb_without`). A/B
+`SWARMLLM_PROCESSOR_RUN=tail`.
+
+**Why.** On one computer a split's step is bound by the processor: a 14B Q4_K_M split 27 card /
+21 processor on an RTX 3070 Laptop + Ryzen 7 5800H spends ~20 ms of a ~150 ms step on the card.
+The card can run its OWN layers alone — token table, card layers, output head — and guess the
+next token in that ~20 ms; the whole model checks several such guesses in one forward, and the
+processor's k-quant matmul reads each weight once for every row of it. A check is NOT nearly a
+step, though: the worker's own fit read ~96 ms + ~33-40 ms a position against a 144 ms step (four
+threads), so each guess must be kept often enough to pay its row — which is why the count is
+priced (`best_gamma_beside_a_step`) rather than fixed. That only works if the card's layers, run
+without the processor's, still predict the model. Card-first they do not: the guess is then the
+model's first half and its output head.
+
+**Measured** (`examples/skip_agreement_probe.rs`, teacher-forced on the card: the full model's
+greedy reply is fed, and at every position the card-only forward guesses γ = 4 tokens ahead; first%
+= the first guess equals the full model's next token, run = mean guesses accepted of 4; two
+prompts, code and prose, 48-64 tokens each; 2026-10-28):
+
+| model (layers, skipped) | tail (card-first) | best middle start | the rule's start |
+|---|---|---|---|
+| Qwen2.5-Coder-7B (28, 12) | 2.6% / 0.03 | mid@5: 82.8% / 2.11 | mid@3: ≥ 76% |
+| Qwen2.5-14B (48, 21) | 0% | mid@4: 78.1% / 1.72; mid@7: 77.3% / 1.93 | mid@5 |
+| Qwen2.5-14B (48, 14) | 6.2% / 0.06 | mid@7: 90.6% / 2.72 | mid@5: ~86% |
+| Qwen2.5-14B (48, 27) | 0% | mid@4: 61.5% / 1.05 | mid@5 |
+| Llama-3.1-8B (32, 14) | 10.2% | mid@3: 50.0% / 0.79 | mid@3 |
+| GLM-4-9B (40, 18) | 3.9% | mid@3: 67.2% / 1.26 | mid@4: ~60% |
+| Mistral-7B (32, 14) | 14.1% | ~28% / 0.34, flat | — |
+
+Agreement falls as the run moves deeper (14B skipping 14: 85% at mid@13, 68% at mid@22, 38% at
+mid@31) and as more layers are skipped. The early layers carry the most: starting the run at
+layer 1 is within a few points of the best on every family, at layer 0 it is not measured
+(the token table's own layer is never skipped).
+
+**Where it sits is free.** A step does the same work wherever the run sits; the hidden state
+crosses the boundary twice instead of once (a few KB while decoding). The card's share is
+charged per layer by its own weights, so a model whose last layers are heavier (Q4_K_M gives the
+ends more bits) gets one or two fewer card layers than card-first near the half line — the
+`a_whole_models_card_is_charged_both_ends` test pins the arithmetic.
+
+**Measured end to end** (2026-10-28, `~/swarmllm-gate/deep/cg/ab.sh`: one CUDA binary, arms by env
+switch in the order tail, mid, guess, guess, mid, tail, each a fresh node on port 8825 with updates
+off and the live node stopped; Qwen2.5-14B Q4_K_M, 25 of 48 layers on an RTX 3070 Laptop, the
+processor holding 5..28 in the middle arms and 25..48 at the tail; 160 greedy tokens, two runs per
+prompt per arm; decode tok/s, median of four):
+
+| prompt | tail | mid, no guesses | mid + card guesses | vs tail |
+|---|---|---|---|---|
+| prose, 88 tokens | 5.81 | 6.01 | 7.76 | 1.34x |
+| code, 94 tokens | 6.76 | 6.96 | 10.70 | 1.58x |
+| summary, 1,800 tokens | 6.06 | 6.19 | 8.81 | 1.45x |
+
+The card guessed in 50-92 rounds a reply at 18-28 ms a guess, its guesses kept at α 0.52-0.89; time
+to the first token did not move (0.96-1.17 s; 2.96-3.63 s for the long prompt). The middle run
+alone is free to slightly faster (+2-3%). This ran before the decode-width settle gate below, and
+an earlier version of this paragraph called its guessing columns a floor for that reason. **They
+were not**: with the gate, on 24 card layers instead of 25 (round 4, `ab3.sh`, the processor
+5..29), the arm that guessed throughout gave 1.18x prose, 1.38x code, 1.28x summary — one more
+skipped layer, guesses kept 41-45% on prose against 49-58%. (Round 4's other guessing arm stopped
+speculating after its first reply — the diversion gate's latch, gotcha #985 — and measured
+nothing about guessing.)
+
+**With every core on the checks** (round 5, `ab4.sh`: arms narrow, owner, owner, narrow, then a
+tail and a guessing arm, every arm 23-24 of 48 on the card, code prompted first so the gate stays
+open — all 12 requests of each guessing arm speculated; medians of four runs, the last pair two):
+
+| prompt | tail | guess, checks at 4 threads | guess, checks on every core | vs tail |
+|---|---|---|---|---|
+| code | 5.61 | 7.88 | 9.71 | 1.73x |
+| summary, 1,800 tokens | 5.63 | 7.40 | 8.23 | 1.46x |
+| prose | 6.48 | 7.73 | 8.77 | 1.35x |
+
+A check's extra position cost 9-19 ms on every core against 34-54 ms at four threads, and the
+controller bought more guesses with it (127-140 a reply against 93-105;
+`cpu_pools::checks_on_the_owners_pool`, `docs/invariants/memory.md`).
+Replies: each arm repeats itself (tail1 = tail6); the middle placement changes the arithmetic of the
+layers that moved, so its greedy reply may part from the tail's at a near-tie (judge against
+llama.cpp, never byte-equality).
+
+**Under half the model on the card** (round 6, `ab5.sh`: `card_hog.py` holding 500 MiB of the card
+as a busier desktop would; every-core checks; arms tail, guess, guess, tail): the guessing arms
+held 21 of 48 with the processor 5..32 — a split the half rule kept at the tail — the tails 21-22.
+Code 4.94 → 7.72 tok/s (1.56x), summary 5.13 → 7.36 (1.43x), prose 5.71 → 6.69 (1.17x); 11 of 12
+requests speculated in each guessing arm (the gate refused one and drifted back, gotcha #985). At
+19 of 48 (800 MiB held) the run stays the tail: under `CARD_GUESS_MIN_SHARE`, not measured.
+The first token of the 1,800-token prompt came LATER in the guessing arms (3.47-3.65 s against
+3.06-3.15), though their prompt pass was faster (2.1-2.4 s against 2.7-2.9): the prompt's
+prefix-cache snapshot, copied before the first token on every path, took 0.9-1.4 s there against
+0.25-0.53 s in the tails (round 4's second tail also 0.6-1.3 s, so not the placement alone).
+
+**Prior art.** Skipping layers to self-draft is LayerSkip (arxiv 2404.16710), SWIFT (2410.06916,
+already here as `swift_decode_loop`), Draft & Verify, CLaSp (2505.24196), KNN-SSD (2505.16162);
+S3D (2405.20314) skips middle layers for low-memory cards and found the same shape — early and
+late layers matter most. None places a card/processor split so the CARD can draft while the
+processor is the bottleneck; llama.cpp, vLLM and ExLlama all offload card-first.
+
+**What a change must keep.**
+- A guess never runs a processor layer: `SplitModel::card_guess_skips` refuses a model whose
+  run lends its keys to another layer (Gemma 4 E2B/E4B), one with recurrent state (a guess cannot
+  be taken back out of it), a run at the tail, or a model on one device.
+- The guesses' cache entries are cut back before the check (`SplitModel::card_guesses` truncates
+  to the round's start whether or not the guesses came), so the check reads exactly a step's
+  cache — a skipped layer wrote nothing, a card layer's guessed rows are gone.
+- The count is priced with the guesses' card time (`best_gamma_beside_a_step`'s REQUIRED
+  `draft_ms_each`), at the card source's OWN acceptance, never the n-gram's.
+- **A forward reports to the decode-thread calibration only the processor layers it RUNS**
+  (`SplitModel::cpu_layers_run`, asked by `forward_inner_impl`; gotcha #983). Reported as the
+  model's full processor count, the card's 20-25 ms guesses were timed as processor tokens
+  (`4:207ms 3:8ms 2:13ms 1:7ms`), the calibration chose ONE thread, and steps went 144 → 384 ms:
+  the first A/B read the guessing arm at 3.3-3.8 tok/s against 6.5-7.1 without it. A guess
+  skipping the whole run reports 0 and runs untimed on the global pool (`in_phase_pool`).
+- **A speculating loop steps plainly until the decode width has settled**
+  (`cpu_pools::decode_width_settled`, asked at the top of `LocalSpec::next`; its steps are not
+  recorded as the step price either). The calibration learns only from plain one-token steps, and
+  a loop that guesses nearly every round takes almost none: with the fix above alone, the 14B's
+  calibration settled only in the ninth reply, its plain steps meanwhile rotating through the
+  widths (one in four on a single thread, 309-318 ms) and the step the guesses were priced
+  against reading 157-204 ms instead of 144.
+- `test-split --gpu-layers N` on a whole model now places the run in the middle; the loader logs
+  `processor_from`/`processor_to`.
 
 ## One prefix-cache snapshot is sized by bytes, and keeps the opening (2026-09-26)
 

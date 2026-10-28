@@ -2010,8 +2010,15 @@ logical cores: the plateau argument, and llama.cpp's default.
 control `SWARMLLM_OWNER_PREFILL_THREADS=0`): 2,427 tokens 35.5 → 49.5 tok/s
 (+39%); 6,911 tokens 28.8 → 32.4 (+12%). The long prompt barely scales where
 llama.cpp gains 49% for the same 4→8 — attention there is the next lever.
-Tests: `only_the_owners_prompt_is_read_on_the_owners_width` (asserts the pool
-the work RAN on; fails with the branch disabled),
+**The owner's check of a few positions too** (2026-10-28,
+`cpu_pools::checks_on_the_owners_pool`): a speculative check streams the weights
+once and pays compute per extra position, which scales with cores — llama.cpp
+gives every forward of more than one token `n_threads_batch`. On a 14B split it
+cost 9-19 ms a position on every core against 34-54 at the 4 decode threads, and
+decode rose 1.09-1.21x (`docs/invariants/inference.md` § the card guesses). A
+one-token step keeps the calibrated width. A/B `SWARMLLM_CHECK_POOL=narrow`.
+Tests: `only_the_owners_prompts_and_checks_run_on_the_owners_width` (asserts the
+pool the work RAN on; fails with the branch disabled),
 `an_owner_request_is_marked_per_request_and_released_with_it`,
 `the_owners_prompt_is_read_on_every_core_unless_the_operator_said_otherwise`.
 

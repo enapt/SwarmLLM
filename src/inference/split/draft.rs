@@ -703,6 +703,7 @@ impl SplitModel {
                 gamma,
                 sampling.temperature,
                 stop_below,
+                None,
             );
         }
         let mut history = history.to_vec();
@@ -1323,6 +1324,8 @@ impl SplitModel {
     /// and dropped, and the next call cuts the drafter's cache back as always.
     /// Ties between equal maxima may break differently from the host's
     /// first-index rule; a guess is only a guess, and the check decides.
+    /// With `skips`, each step runs without those layers
+    /// ([`Self::card_guesses`]).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn argmax_guesses_on_card(
         &mut self,
@@ -1333,6 +1336,7 @@ impl SplitModel {
         gamma: usize,
         temperature: f32,
         stop_below: Option<f32>,
+        skips: Option<&[bool]>,
     ) -> Result<Vec<u32>, SwarmError> {
         use candle_core::Tensor;
         // A read-ahead (`engine_drafter::read_ahead`) asks for no guesses: the
@@ -1369,7 +1373,12 @@ impl SplitModel {
             ids.push(best.clone());
             if j + 1 < gamma {
                 let next = best.reshape((1, 1)).map_err(SwarmError::internal)?;
-                logits = self.forward(&next, first + j, kv, request_id)?;
+                logits = match skips {
+                    Some(skips) => {
+                        self.forward_with_skip_mask(&next, first + j, kv, request_id, skips)?
+                    }
+                    None => self.forward(&next, first + j, kv, request_id)?,
+                };
             }
         }
         let mut guesses: Vec<u32> = Tensor::stack(&ids, 0)
@@ -1389,6 +1398,48 @@ impl SplitModel {
             }
         }
         Ok(guesses)
+    }
+
+    /// `gamma` guesses at what follows `token` at `index_pos`, made on the
+    /// card alone by skipping the layers `skips` names — the run the
+    /// processor holds (`SplitModel::card_guess_skips`) — and checked by the
+    /// whole model next (`model_worker::LocalSpec`). Each guess is the card's
+    /// greedy pick and the next step's input there, all read back once
+    /// ([`Self::argmax_guesses_on_card`]); the guesses' cache entries are cut
+    /// back to `index_pos` before it returns, so the check starts from the
+    /// cache a step would.
+    pub(crate) fn card_guesses(
+        &mut self,
+        kv: &KvCacheStore,
+        request_id: &str,
+        index_pos: usize,
+        token: u32,
+        gamma: usize,
+        skips: &[bool],
+    ) -> Result<Vec<u32>, SwarmError> {
+        if gamma == 0 {
+            return Ok(Vec::new());
+        }
+        let input = self.token_tensor(token)?;
+        let guessed = self
+            .forward_with_skip_mask(&input, index_pos, kv, request_id, skips)
+            .and_then(|logits| {
+                self.argmax_guesses_on_card(
+                    kv,
+                    request_id,
+                    index_pos + 1,
+                    logits,
+                    gamma,
+                    0.0,
+                    None,
+                    Some(skips),
+                )
+            });
+        // Cut back whether or not the guesses came: a check never starts on a
+        // guess's cache.
+        let key = self.kv_model_key().to_string();
+        kv.truncate_request_to(&key, request_id, index_pos)?;
+        guessed
     }
 }
 

@@ -29,7 +29,9 @@ pub async fn test_split_inference(
     if let Some(n) = gpu_layers.filter(|&n| n > 0) {
         let n = n as usize;
         swarmllm::inference::split::GPU_LAYER_LIMIT.store(n, std::sync::atomic::Ordering::Relaxed);
-        println!("Placing the first {n} layers on the graphics card, the rest on the processor");
+        // A whole model's processor-held run sits early in the middle
+        // (`hybrid::processor_run`); the loader logs which layers it took.
+        println!("Placing {n} layers on the graphics card, the rest on the processor");
     }
     // `--cpu-moe-layers`, read through the `CPU_EXPERT_LAYERS` the loader
     // obeys (#138 (3)).

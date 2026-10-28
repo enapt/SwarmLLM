@@ -75,6 +75,22 @@ fn cache_len(model: &SplitModel, kv: &KvCacheStore, req: &str) -> usize {
         .map_or(0, |l| l.current_seq_len())
 }
 
+/// A forward that skips layers reports only the processor layers it RUNS to
+/// the decode-thread calibration (`SplitModel::cpu_layers_run`, read where
+/// every forward picks its pool). A card guess skips all of them; reported as
+/// a full processor token (7-13 ms against ~150 for a real one) it taught the
+/// calibration that one thread was as fast as four, and a 14B split's every
+/// later step ran on one (2026-10-28).
+#[test]
+fn a_skipped_layer_is_not_reported_as_processor_work() {
+    let model = make_test_split_model(4, 128);
+    assert_eq!(model.cpu_layers_run(None), 4);
+    assert_eq!(model.cpu_layers_run(Some(&[false, true, true, false])), 2);
+    assert_eq!(model.cpu_layers_run(Some(&[true; 4])), 0, "a card guess");
+    // A mask shorter than the model skips nothing past its end.
+    assert_eq!(model.cpu_layers_run(Some(&[true])), 3);
+}
+
 #[test]
 fn incremental_drafting_guesses_what_a_fresh_read_guesses() {
     let mut model = whole_model();
@@ -287,7 +303,7 @@ fn guesses_chosen_where_the_logits_are_match_the_host_loop() {
             .forward(&model.tensor_from_ids(&seq).unwrap(), 0, &kv2, "c")
             .unwrap();
         let card = model
-            .argmax_guesses_on_card(&kv2, "c", seq.len(), logits, 5, 0.0, floor)
+            .argmax_guesses_on_card(&kv2, "c", seq.len(), logits, 5, 0.0, floor, None)
             .unwrap();
         assert_eq!(card, host, "floor {floor:?}");
     }
@@ -307,7 +323,7 @@ fn a_read_ahead_asks_the_card_path_for_nothing_and_gets_nothing() {
         .forward(&model.tensor_from_ids(&seq).unwrap(), 0, &kv, "r")
         .unwrap();
     let guesses = model
-        .argmax_guesses_on_card(&kv, "r", seq.len(), logits, 0, 0.0, Some(0.4))
+        .argmax_guesses_on_card(&kv, "r", seq.len(), logits, 0, 0.0, Some(0.4), None)
         .unwrap();
     assert!(guesses.is_empty());
     assert_eq!(

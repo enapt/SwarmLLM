@@ -860,16 +860,17 @@ fn set_worker_force_cpu(gpu_layers: i32) {
         tracing::info!("model-worker: gpu_layers = 0 — loading models on CPU");
     } else if gpu_layers > 0 {
         // A positive count is now a real instruction, not something to warn
-        // about and ignore: the first `gpu_layers` layers of this worker's
-        // window go on the card and the rest on the processor. Until hybrid
+        // about and ignore: `gpu_layers` layers of this worker's window go on
+        // the card and the rest on the processor — which ones,
+        // `hybrid::processor_run` says, and the loader logs. Until hybrid
         // placement existed this could only be honoured as "all of them",
         // which is why it used to warn.
         crate::inference::split::GPU_LAYER_LIMIT
             .store(gpu_layers as usize, std::sync::atomic::Ordering::Relaxed);
         tracing::info!(
             gpu_layers,
-            "model-worker: placing the first {gpu_layers} layers of this window on the \
-             graphics card and the rest on the processor"
+            "model-worker: placing {gpu_layers} layers of this window on the graphics card \
+             and the rest on the processor"
         );
     }
 }
@@ -3035,9 +3036,36 @@ fn blend_spec_payoff(prev_x100: u32, tokens_per_round: f64) -> u32 {
 /// to it.
 ///
 /// Unknown means "let one request find out": the first generation after start
-/// diverts, measures, and the answer steers everything after it.
+/// diverts, measures, and the answer steers everything after it — but not for
+/// good. Only a diverted request records a payoff, so a refusal was a latch:
+/// a 14B split's first reply, prose at 1.37 tokens a round, turned speculation
+/// (and the card's guesses with it) off for every later request of that
+/// worker, code at 1.4x included (2026-10-28, gotcha #985). Each refused solo
+/// request now moves the payoff back toward the bar ([`drift_toward_retrying`]),
+/// so a poor stretch is measured again by ONE request rather than kept for the
+/// worker's life. vLLM decides by concurrency instead
+/// (`speculative_disable_by_batch_size`), never by a latched payoff.
 fn spec_payoff_justifies_diverting() -> bool {
-    payoff_justifies_diverting(SPEC_PAYOFF_X100.load(std::sync::atomic::Ordering::Relaxed))
+    use std::sync::atomic::Ordering;
+    let seen = SPEC_PAYOFF_X100.load(Ordering::Relaxed);
+    if payoff_justifies_diverting(seen) {
+        return true;
+    }
+    SPEC_PAYOFF_X100.store(drift_toward_retrying(seen), Ordering::Relaxed);
+    false
+}
+
+/// How far one refused solo request moves the payoff back up, ×100: from 1.37
+/// tokens a round, every 7th solo request measures again; from 1.05 (nothing to
+/// copy, no card to guess), every 23rd.
+const SPEC_PAYOFF_DRIFT_X100: u32 = 2;
+
+/// The payoff after one more refusal — never past the bar, so the request that
+/// reaches it measures, and its own result decides what follows.
+fn drift_toward_retrying(seen_x100: u32) -> u32 {
+    seen_x100
+        .saturating_add(SPEC_PAYOFF_DRIFT_X100)
+        .min(SPEC_PAYOFF_WORTH_DIVERTING_X100)
 }
 
 /// The decision itself. Pure, for the same reason `blend_spec_payoff` is.
@@ -3296,6 +3324,9 @@ struct SpecRound {
 /// [`Self::MOST_PROBE_AFTER`] — `SpecBackoff`'s doubling. The split path's
 /// counterpart re-tries a remembered zero after `dsd_controller::REPROBE_AFTER`.
 /// `SWARMLLM_LOCAL_GUESS_GAMMA=fixed` checks every guess as before.
+///
+/// **Where the conversation offers nothing to copy, a split's card guesses on
+/// its own** ([`CardGuesses`], 2026-10-28).
 struct LocalSpec {
     cfg: crate::inference::ngram_lookup::NgramLookupConfig,
     /// Prompt then reply, in order, so its tail is always the most recent token.
@@ -3334,6 +3365,9 @@ struct LocalSpec {
     probe_after: u32,
     /// Checks made that way.
     probes: u64,
+    /// The card's own guesses, for a whole model split between the card and
+    /// the processor; `None` elsewhere.
+    card: Option<CardGuesses>,
     /// Every round, as the test prints it.
     #[cfg(test)]
     trace: Vec<Traced>,
@@ -3356,6 +3390,76 @@ struct Traced {
     one_off: bool,
     accepted: usize,
     produced: Vec<u32>,
+}
+
+/// A split's card guessing the next tokens on its own, for [`LocalSpec`]
+/// (2026-10-28).
+///
+/// A whole model split between the card and the processor leaves the card
+/// idle for most of every step: a 14B with 27 of its 48 layers on an RTX 3070
+/// spends ~20 ms of a 150 ms step there, the rest reading the processor's 21.
+/// Run the card's layers alone — the token table, the card's layers, the
+/// output head, skipping the processor's run (`SplitModel::card_guess_skips`)
+/// — and the card writes a fair guess at the next token in that 20 ms; the
+/// whole model then checks several such guesses in one step, and the
+/// processor reads its weights once for every row it checks (the vendored
+/// k-quant matmul is column-outer). Skipping ~44% of the layers, the card's
+/// guess agreed with the whole model's next token 77-83% of the time on Qwen
+/// 2.5 (7B, 14B), 50-67% on Llama 3.1 8B and GLM-4 9B, ~28% on Mistral 7B —
+/// and 0-14% on all of them with the skipped layers at the END, which is why
+/// a whole model's processor run sits early in the middle
+/// (`hybrid::processor_run`; probe `examples/skip_agreement_probe.rs`).
+///
+/// Self-speculation by skipping layers is LayerSkip's, SWIFT's and Draft &
+/// Verify's idea; S3D (arxiv 2405.20314) skips middle layers for low-memory
+/// cards. What is ours is choosing the skipped layers as the ones the
+/// processor holds, so the guess runs where the split leaves capacity idle.
+///
+/// The count is the step-beside one ([`LocalSpec::guesses`]'s), with each
+/// guess's card time charged (`best_gamma_beside_a_step`'s `draft_ms_each`)
+/// at this source's own acceptance — never the n-gram's, whose copied runs
+/// are right far more often. A count of zero fades the acceptance toward its
+/// prior, so a reply that turns guessable is tried again.
+/// `SWARMLLM_CARD_GUESSES=0` turns it off.
+struct CardGuesses {
+    /// The layers a guess skips, over absolute layer indices.
+    skips: Vec<bool>,
+    acceptance: crate::inference::dsd_controller::AcceptanceEstimate,
+    /// One guess's time on the card, read back with the round's guesses.
+    guess_ms: crate::inference::dsd_controller::RecentMedian,
+    rounds: u64,
+    proposed: u64,
+    accepted: u64,
+    /// Rounds that found guessing on the card not worth its time.
+    declined: u64,
+}
+
+impl CardGuesses {
+    /// Guesses made before any check has been timed: enough to fit the
+    /// check's line from, few enough to cost little where they miss.
+    const FIRST_GUESSES: usize = 3;
+
+    fn for_model(model: &crate::inference::split::SplitModel) -> Option<Self> {
+        if !card_guesses_on() {
+            return None;
+        }
+        Some(Self {
+            skips: model.card_guess_skips()?,
+            acceptance: crate::inference::dsd_controller::AcceptanceEstimate::recent(),
+            guess_ms: Default::default(),
+            rounds: 0,
+            proposed: 0,
+            accepted: 0,
+            declined: 0,
+        })
+    }
+}
+
+/// `SWARMLLM_CARD_GUESSES=0`: a split's card makes no guesses of its own
+/// ([`CardGuesses`]), for A/B inside one binary.
+fn card_guesses_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SWARMLLM_CARD_GUESSES").as_deref() != Ok("0"))
 }
 
 impl LocalSpec {
@@ -3397,6 +3501,7 @@ impl LocalSpec {
             declined_run: 0,
             probe_after: Self::FIRST_PROBE_AFTER,
             probes: 0,
+            card: (!fixed).then(|| CardGuesses::for_model(model)).flatten(),
             #[cfg(test)]
             trace: Vec::new(),
             #[cfg(test)]
@@ -3434,8 +3539,30 @@ impl LocalSpec {
             self.step_ms.median(),
             &self.check,
             u32::try_from(most).unwrap_or(u32::MAX),
+            0.0,
         )
         .map_or(most, |g| g as usize)
+    }
+
+    /// How many guesses the card makes this round ([`CardGuesses`]): none
+    /// before a plain step has been timed, [`CardGuesses::FIRST_GUESSES`]
+    /// before a check has, then the count that pays with each guess's card
+    /// time charged — zero included.
+    fn card_guess_count(&self, room: usize) -> usize {
+        let Some(card) = self.card.as_ref() else {
+            return 0;
+        };
+        let Some(step) = self.step_ms.median() else {
+            return 0;
+        };
+        crate::inference::dsd_controller::best_gamma_beside_a_step(
+            card.acceptance.alpha(),
+            Some(step),
+            &self.check,
+            u32::try_from(room).unwrap_or(u32::MAX),
+            card.guess_ms.median().unwrap_or(0.0),
+        )
+        .map_or(CardGuesses::FIRST_GUESSES.min(room), |g| g as usize)
     }
 
     /// What the guessing learned, for the request's closing line.
@@ -3447,8 +3574,22 @@ impl LocalSpec {
             .step_ms
             .median()
             .map_or("-".to_string(), |m| format!("{m:.1}"));
+        let card = self.card.as_ref().map_or(String::new(), |c| {
+            format!(
+                " card rounds {} guessed {} kept {} declined {} guess {} ms alpha {:.2} next {}",
+                c.rounds,
+                c.proposed,
+                c.accepted,
+                c.declined,
+                c.guess_ms
+                    .median()
+                    .map_or("-".to_string(), |m| format!("{m:.1}")),
+                c.acceptance.alpha(),
+                self.card_guess_count(self.room()),
+            )
+        });
         format!(
-            "rounds {} accepted {} rejected {} declined {} probes {} one-off {} step {step} ms check {fit} ms alpha {:.2} next {}",
+            "rounds {} accepted {} rejected {} declined {} probes {} one-off {} step {step} ms check {fit} ms alpha {:.2} next {}{card}",
             self.rounds,
             self.accepted,
             self.rejected,
@@ -3480,8 +3621,16 @@ impl LocalSpec {
         if let Some(tok) = self.pending.pop_front() {
             return Ok(tok);
         }
-        let room = self.room();
-        let found = if self.backoff.should_draft() && room > 0 {
+        // Until the processor's decode width has settled, step plainly: the
+        // calibration learns only from plain steps, and a step taken at a width
+        // under trial is not the step the guesses are priced against
+        // (`cpu_pools::decode_width_settled`).
+        let settling = !self.fixed && !model.decode_width_settled();
+        #[cfg(test)]
+        let settling = settling && self.script.is_none();
+        let room = if settling { 0 } else { self.room() };
+        // `room` first: a settling step is no paused round.
+        let mut found = if room > 0 && self.backoff.should_draft() {
             let (mut found, _source) = crate::inference::ngram_lookup::cascade_find_candidate(
                 &self.ctx,
                 self.prompt_len,
@@ -3514,6 +3663,41 @@ impl LocalSpec {
         let one_offs_before = model.one_off_forwards();
         #[cfg(test)]
         let began_at = *index_pos;
+        // Nothing to copy: the card guesses on its own, where it can.
+        let mut card_round = false;
+        let mut card_declined = false;
+        let card_due = found.is_empty() && self.card.is_some() && !settling;
+        #[cfg(test)]
+        let card_due = card_due && self.script.is_none();
+        if card_due {
+            let gamma = self.card_guess_count(room);
+            if gamma > 0 {
+                if let Some(card) = self.card.as_mut() {
+                    let started = std::time::Instant::now();
+                    found = tokio::task::block_in_place(|| {
+                        let _g =
+                            crate::inference::attn_kernel::ForceStandardAttnGuard::new(force_attn);
+                        model.card_guesses(
+                            kv_store,
+                            req_id_str,
+                            *index_pos,
+                            next_token,
+                            gamma,
+                            &card.skips,
+                        )
+                    })?;
+                    found.truncate(gamma);
+                    worth = found.len();
+                    if worth > 0 {
+                        card.guess_ms
+                            .record(started.elapsed().as_secs_f64() * 1000.0 / worth as f64);
+                    }
+                    card_round = worth > 0;
+                }
+            } else {
+                card_declined = self.step_ms.median().is_some() && self.check.fit().is_some();
+            }
+        }
         let round = ngram_spec_round(
             model,
             kv_store,
@@ -3543,13 +3727,24 @@ impl LocalSpec {
         self.accepted += round.accepted as u64;
         self.rejected += u64::from(round.accepted < round.proposed);
         match round.positions {
-            _ if one_off => {}
+            _ if one_off || settling => {}
             1 => self.step_ms.record(round.ms),
             p => self
                 .check
                 .record(u32::try_from(p).unwrap_or(u32::MAX), round.ms),
         }
-        if round.proposed > 0 {
+        if let Some(card) = self.card.as_mut().filter(|_| card_round || card_declined) {
+            if card_round {
+                card.rounds += 1;
+                card.proposed += round.proposed as u64;
+                card.accepted += round.accepted as u64;
+                card.acceptance
+                    .record(round.accepted as u32, round.proposed as u32);
+            } else {
+                card.declined += 1;
+                card.acceptance.fade();
+            }
+        } else if round.proposed > 0 {
             self.backoff.record(round.accepted > 0);
             self.acceptance
                 .record(round.accepted as u32, round.proposed as u32);
@@ -8336,6 +8531,34 @@ mod spec_payoff_tests {
             payoff_justifies_diverting(v),
             "must follow the workload back up, not latch off"
         );
+    }
+
+    /// The test above feeds the blend samples, but a refused worker records
+    /// none: only a diverted request measures. Refusals alone must bring ONE
+    /// request back to measure (gotcha #985 — a 14B split's prose reply at
+    /// 1.37 a round kept every later request off the card's guesses), and no
+    /// further than the bar, so that request's own result decides.
+    #[test]
+    fn refusals_alone_bring_one_request_back_to_measure() {
+        for (start, at_most) in [(137, 7), (105, 23), (1, 75)] {
+            let mut v = start;
+            let mut refused = 0;
+            while !payoff_justifies_diverting(v) {
+                v = drift_toward_retrying(v);
+                refused += 1;
+                assert!(
+                    refused <= at_most,
+                    "from {start}, still refused after {refused} solo requests"
+                );
+            }
+            assert_eq!(v, SPEC_PAYOFF_WORTH_DIVERTING_X100, "drifted past the bar");
+        }
+        // A measured poor reply puts it back below the bar, so the next
+        // stretch is refused again.
+        assert!(!payoff_justifies_diverting(blend_spec_payoff(
+            SPEC_PAYOFF_WORTH_DIVERTING_X100,
+            1.0
+        )));
     }
 
     /// 0 means "not measured". A measured-as-poor workload must never be

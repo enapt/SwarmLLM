@@ -29,12 +29,23 @@
 //! transient activation and attention-score buffers a forward pass allocates,
 //! which scale with the prefill chunk and the head count, not with depth.
 //!
-//! **The split is contiguous and card-first**, matching llama.cpp: layers
-//! `[0, n)` of the segment on the card, `[n, end)` on the processor. Contiguous
-//! is what keeps the cost at **one** device transition per forward — the same
-//! reasoning as #425's shard contiguity, one level down. Which end holds the
-//! card does not affect compute (dense layers cost the same), so matching the
-//! convention everyone else uses is worth more than a private optimum.
+//! **The processor holds ONE contiguous run of layers** — at most two device
+//! transitions per forward, a few KB each while decoding. For a segment that
+//! is not a whole model the run is the tail, card-first as llama.cpp places
+//! it: layers `[0, n)` on the card, `[n, end)` on the processor.
+//!
+//! **A whole model's run sits early in the middle** ([`processor_run`],
+//! 2026-10-28): the card keeps the model's first tenth AND its last layers,
+//! so it can guess the next tokens on its own by skipping the processor's
+//! layers while the processor is the bottleneck of every step
+//! (`model_worker::LocalSpec`'s card guesses). Card-first, a guess without
+//! the processor's layers agreed with the full model's next token 0-14% of
+//! the time; with the run starting a tenth of the way in, 77-82% on Qwen2.5
+//! 7B and 14B, 67% on GLM-4-9B, 50% on Llama-3.1-8B, 28% on Mistral-7B —
+//! teacher-forced, 44% of the layers skipped (`examples/skip_agreement_probe.rs`;
+//! `docs/invariants/inference.md` § "A whole model's processor-held layers
+//! sit early in the middle"). Where those layers sit does not change a
+//! step's work.
 
 use candle_core::{Device, Tensor};
 
@@ -120,13 +131,111 @@ pub(crate) fn split_room_bytes(card: SplitCard) -> u64 {
         .min(super::kv_budget::weights_and_caches_room(load_reads))
 }
 
-/// How many of a segment's FIRST layers fit in `room_bytes` of card:
-/// `0..=layer_weights.len()`. `room_bytes` is what the layers' own weights and
-/// caches may take — [`split_room_bytes`] of the card, less the tables the
-/// segment's ends put there first (`process_pool::split_for_card`).
+/// Where the share of a whole model's layers that starts its processor-held
+/// run sits: a tenth of the way in. Across five families (2026-10-28,
+/// `examples/skip_agreement_probe.rs`, 44-45% of the layers skipped) the best
+/// start for a card guessing without that run was 0.075-0.18 of the depth,
+/// and a tenth was within a few points of each family's best: Qwen2.5-7B
+/// 81.2% first guesses agreed at it (best 82.8), Qwen2.5-14B 77-78% (best
+/// 78.1), Llama-3.1-8B 50.0% (best), GLM-4-9B ~61% (best 67.2 at 0.075).
+/// Earlier and the card's own early layers are too few (mid@1: 61.7% on the
+/// 14B); much later and the run swallows the late layers every family needs
+/// (GLM-4 at 0.22: 13%).
+pub(crate) const PROCESSOR_RUN_STARTS_AT: f64 = 0.1;
+
+/// The least share of a whole model's layers the card holds for its
+/// processor run to move into the middle ([`processor_run`]); below it the
+/// run stays the tail. Two fifths, so a guess skips at most three fifths of
+/// the model: the 14B's first guesses agreed 58% with 56% of it skipped
+/// (`examples/skip_agreement_probe.rs`, 2026-10-28), and one guess pays from
+/// about 35% (a check of two positions ~170 ms plus a ~20 ms guess against a
+/// ~144 ms step). The first version asked for half, and the 14B on this 8 GB
+/// card lands at 23-25 of 48 by how much of the card the desktop holds, so
+/// the same machine guessed one day and not the next (2026-10-28, 23 layers:
+/// the tail, 6.08 tok/s against 7.76 at 25).
+pub(crate) const CARD_GUESS_MIN_SHARE: f64 = 0.4;
+
+/// The layers of a segment of `len` the processor holds when `on_card` of
+/// them go on the card — offsets into the segment, one contiguous run. The
+/// ONE answer for the pool that sizes and charges a split
+/// (`process_pool::split_for_card`, `CardSplit::processor_run`) and the loader
+/// that places it ([`LayerPlacement::split`]); both pass the same facts, so
+/// both agree.
+///
+/// A segment whose card could guess without the run ([`card_may_guess`]: the
+/// model's first AND last layers, every one keeping a cache of its own) puts
+/// the run early in the middle, from [`PROCESSOR_RUN_STARTS_AT`] of its depth,
+/// so its card keeps both ends and can guess without the run (module docs);
+/// only while the card holds [`CARD_GUESS_MIN_SHARE`] of the layers — below
+/// that a guess skips too much to be kept, and the run stays the tail. Any other segment,
+/// or `SWARMLLM_PROCESSOR_RUN=tail`, takes the tail, card-first, as before
+/// 2026-10-28.
+pub(crate) fn processor_run(
+    len: usize,
+    on_card: usize,
+    card_may_guess: bool,
+) -> std::ops::Range<usize> {
+    let on_card = on_card.min(len);
+    let tail = on_card..len;
+    if !card_may_guess
+        || on_card == len
+        || (on_card as f64) < (len as f64) * CARD_GUESS_MIN_SHARE
+        || !processor_run_in_the_middle()
+    {
+        return tail;
+    }
+    let start = ((len as f64) * PROCESSOR_RUN_STARTS_AT).round() as usize;
+    // At least one layer before it on the card, and never past where the
+    // tail would start: the run is `len - on_card` long.
+    let start = start.clamp(1, on_card);
+    start..start + (len - on_card)
+}
+
+/// Could a segment's card guess the next tokens without its processor run —
+/// what [`processor_run`] moves the run into the middle for? Only for the
+/// whole model (`is_first && is_last`: a guess starts at the token table and
+/// ends at the output head), and only where every layer keeps a cache of its
+/// own ([`super::kv_layers`]): a recurrent layer (Qwen 3.5's DeltaNet) cannot
+/// take back a guess, and a layer reading another's cache (Gemma 4 E2B/E4B)
+/// would read rows the skipped run never wrote — `SplitModel::card_guess_skips`
+/// refuses both at run time, so a middle run would buy them nothing and cost
+/// a layer or two of card (the heavier ends of a Q4_K_M file). Read off the
+/// header, so the pool (`process_pool::LayerBytes::card_may_guess`) and the
+/// loader ask the same thing.
+pub(crate) fn card_may_guess(
+    ct: &candle_core::quantized::gguf_file::Content,
+    layer_start: usize,
+    layer_end: usize,
+    is_first: bool,
+    is_last: bool,
+) -> bool {
+    is_first
+        && is_last
+        && super::kv_layers(ct, layer_start, layer_end).count()
+            == layer_end.saturating_sub(layer_start)
+}
+
+/// `SWARMLLM_PROCESSOR_RUN=tail`: every split puts its processor-held layers
+/// at the tail, as before 2026-10-28 — the A/B for [`processor_run`]. Read
+/// once per process; a worker inherits the daemon's environment, so the pool
+/// and the loader read the same answer.
+fn processor_run_in_the_middle() -> bool {
+    static MIDDLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MIDDLE.get_or_init(|| std::env::var("SWARMLLM_PROCESSOR_RUN").as_deref() != Ok("tail"))
+}
+
+/// How many of a segment's layers fit in `room_bytes` of card:
+/// `0..=layer_weights.len()`, the card holding every layer outside
+/// [`processor_run`] of that count. `room_bytes` is what the layers' own
+/// weights and caches may take — [`split_room_bytes`] of the card, less the
+/// tables the segment's ends put there first (`process_pool::split_for_card`).
 ///
 /// Zero means the processor takes the whole segment, which is the old
 /// behaviour and still correct when nothing fits.
+///
+/// **The most layers whose set fits**, counted down from all of them: a
+/// whole model's card holds both ends, whose layers Q4_K_M gives more bits,
+/// so which layers a count puts on the card is part of its price.
 ///
 /// Each layer is charged its OWN weights (`layer_weights[i]`, the header's
 /// tensors of that layer) and its share of the segment's caches at the context
@@ -148,33 +257,34 @@ pub(crate) fn plan_gpu_layers(
     room_bytes: u64,
     layer_weights: &[u64],
     segment_kv_bytes: u64,
+    card_may_guess: bool,
 ) -> usize {
     // An unpriced segment is placed nowhere: no weights is "not known", never
     // "free".
     if layer_weights.iter().all(|&bytes| bytes == 0) {
         return 0;
     }
+    let len = layer_weights.len();
     // A layer on the card brings its KV with it; one on the processor does not.
     // Folding KV in here is what removes the need for a flat reserve.
-    let kv_per_layer = segment_kv_bytes.div_ceil(layer_weights.len() as u64);
-    let mut placed = 0u64;
-    layer_weights
-        .iter()
-        .take_while(|&&weights| {
-            // Checked, not saturated: a sum past `u64::MAX` saturated to it
-            // and then "fitted" a room of `u64::MAX` (gotcha #855's class).
-            match placed
-                .checked_add(weights)
-                .and_then(|sum| sum.checked_add(kv_per_layer))
-            {
-                Some(sum) if sum <= room_bytes => {
-                    placed = sum;
-                    true
-                }
-                _ => false,
-            }
-        })
-        .count()
+    let kv_per_layer = segment_kv_bytes.div_ceil(len as u64);
+    // What `on_card` layers cost the card, `None` past `u64::MAX` — checked,
+    // not saturated: a sum saturated to `u64::MAX` then "fitted" a room of
+    // `u64::MAX` (gotcha #855's class).
+    let card_bytes = |on_card: usize| -> Option<u64> {
+        let run = processor_run(len, on_card, card_may_guess);
+        layer_weights
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !run.contains(i))
+            .try_fold(0u64, |sum, (_, &weights)| {
+                sum.checked_add(weights)?.checked_add(kv_per_layer)
+            })
+    };
+    (1..=len)
+        .rev()
+        .find(|&on_card| card_bytes(on_card).is_some_and(|bytes| bytes <= room_bytes))
+        .unwrap_or(0)
 }
 
 /// How many of a segment's `segment_layers` go on the loader's `device` (the card): the pool's
@@ -275,8 +385,9 @@ pub(crate) fn arch_supports_hybrid(arch: &crate::inference::model_arch::ModelArc
 pub(crate) struct LayerPlacement {
     /// Absolute index of this segment's first layer.
     layer_start: usize,
-    /// How many of the segment's layers, from the start, go on the card.
-    gpu_layers: usize,
+    /// The segment's layers the processor holds, as offsets into it
+    /// ([`processor_run`]); empty for a segment wholly on one device.
+    processor: std::ops::Range<usize>,
     /// The card, when any layer is going there.
     gpu: Option<Device>,
     /// Where everything else goes.
@@ -316,7 +427,7 @@ impl LayerPlacement {
         let on_gpu = device.is_cuda();
         Ok(Self {
             layer_start,
-            gpu_layers: if on_gpu { usize::MAX } else { 0 },
+            processor: 0..0,
             gpu: if on_gpu { Some(device.clone()) } else { None },
             cpu: if on_gpu { Device::Cpu } else { device },
             rope_gpu: if on_gpu {
@@ -330,18 +441,19 @@ impl LayerPlacement {
         })
     }
 
-    /// Split: the first `gpu_layers` on the card, the rest on the processor.
+    /// Split: the segment's `processor` layers (offsets, [`processor_run`])
+    /// on the processor, the rest on the card.
     pub(crate) fn split(
         layer_start: usize,
         gpu: Device,
-        gpu_layers: usize,
+        processor: std::ops::Range<usize>,
         cos: Tensor,
         sin: Tensor,
     ) -> candle_core::Result<Self> {
         let rope_cpu = (cos.to_device(&Device::Cpu)?, sin.to_device(&Device::Cpu)?);
         Ok(Self {
             layer_start,
-            gpu_layers,
+            processor,
             gpu: Some(gpu),
             cpu: Device::Cpu,
             rope_gpu: Some((cos, sin)),
@@ -393,7 +505,7 @@ impl LayerPlacement {
         let Some(offset) = abs_layer.checked_sub(self.layer_start) else {
             return false;
         };
-        self.gpu.is_some() && offset < self.gpu_layers
+        self.gpu.is_some() && !self.processor.contains(&offset)
     }
 
     /// The device layer `abs_layer` loads onto.
@@ -444,9 +556,10 @@ impl LayerPlacement {
             .collect()
     }
 
-    /// Is this segment actually split across two devices?
+    /// Is this segment of `layer_count` layers actually split across two
+    /// devices — does its processor run hold any of them?
     pub(crate) fn is_hybrid(&self, layer_count: usize) -> bool {
-        self.gpu.is_some() && self.gpu_layers < layer_count
+        self.gpu.is_some() && self.processor.start < self.processor.end.min(layer_count)
     }
 
     /// The card, when some of this segment's weights sit on the processor —
@@ -489,6 +602,7 @@ mod tests {
             split_room_bytes(SplitCard::room(4990 * MB)),
             &even(weights, total),
             segment_kv(total, 1024, KvStorage::F32, 4096),
+            false,
         );
         assert!(n > 0, "still placing nothing on a card with room");
         assert!(n < total, "claimed to fit a segment that does not fit");
@@ -533,6 +647,7 @@ mod tests {
             split_room_bytes(SplitCard::room(8 * GB)),
             &even(2 * GB, 28),
             segment_kv(28, 512, KvStorage::F32, 4096),
+            false,
         );
         assert_eq!(n, 28);
     }
@@ -544,7 +659,8 @@ mod tests {
             plan_gpu_layers(
                 split_room_bytes(SplitCard::room(256 * MB)),
                 &even(8 * GB, 32),
-                segment_kv(32, 1024, KvStorage::F32, 4096)
+                segment_kv(32, 1024, KvStorage::F32, 4096),
+                false
             ),
             0
         );
@@ -553,7 +669,8 @@ mod tests {
             plan_gpu_layers(
                 0,
                 &even(8 * GB, 32),
-                segment_kv(32, 1024, KvStorage::F32, 4096)
+                segment_kv(32, 1024, KvStorage::F32, 4096),
+                false
             ),
             0
         );
@@ -598,6 +715,7 @@ mod tests {
                 split_room_bytes(SplitCard::room(6 * GB)),
                 &even(4 * GB, 32),
                 segment_kv(32, 1024, KvStorage::F32, ctx),
+                false,
             )
         };
         let short = args(2048);
@@ -617,11 +735,13 @@ mod tests {
             split_room_bytes(SplitCard::room(6 * GB)),
             &even(4 * GB, 32),
             segment_kv(32, 1024, KvStorage::F32, 8192),
+            false,
         );
         let mirrored = plan_gpu_layers(
             split_room_bytes(SplitCard::room(6 * GB)),
             &even(4 * GB, 32),
             segment_kv(32, 1024, KvStorage::F32Mirrored, 8192),
+            false,
         );
         assert!(mirrored <= plain, "mirroring must not increase the plan");
         // And the half cache, at a third of the mirrored layout's bytes, leaves
@@ -630,6 +750,7 @@ mod tests {
             split_room_bytes(SplitCard::room(6 * GB)),
             &even(4 * GB, 32),
             segment_kv(32, 1024, KvStorage::F16, 8192),
+            false,
         );
         assert!(
             half > mirrored,
@@ -646,7 +767,7 @@ mod tests {
         let sin = cos.clone();
         // `Device::Cpu` stands in for the card here: the placement logic is
         // about indices, and a machine running these tests has no GPU.
-        let p = LayerPlacement::split(10, Device::Cpu, 3, cos, sin).unwrap();
+        let p = LayerPlacement::split(10, Device::Cpu, 3..usize::MAX, cos, sin).unwrap();
         // Absolute indices 10,11,12 are the segment's first three.
         assert!(p.on_gpu(10) && p.on_gpu(11) && p.on_gpu(12));
         assert!(!p.on_gpu(13), "boundary is off by one");
@@ -663,7 +784,7 @@ mod tests {
         let cos = Tensor::zeros((4, 2), candle_core::DType::F32, &Device::Cpu).unwrap();
         // `Device::Cpu` stands in for the card, as above: `split` records it
         // as the card, and the rule is about indices.
-        let p = LayerPlacement::split(10, Device::Cpu, 3, cos.clone(), cos.clone())
+        let p = LayerPlacement::split(10, Device::Cpu, 3..usize::MAX, cos.clone(), cos.clone())
             .unwrap()
             .with_experts_on_the_processor(2);
         // Layers 10, 11: on the card, experts in RAM. 12: on the card, experts
@@ -684,7 +805,7 @@ mod tests {
         assert!(!p.experts_in_ram(9), "a layer below the segment wrapped");
         assert!(p.card_beside_the_processor(5).is_some());
 
-        let whole = LayerPlacement::split(0, Device::Cpu, usize::MAX, cos.clone(), cos.clone())
+        let whole = LayerPlacement::split(0, Device::Cpu, 0..0, cos.clone(), cos.clone())
             .unwrap()
             .with_experts_on_the_processor(1);
         assert!(
@@ -696,7 +817,7 @@ mod tests {
             "the processor-held experts are given the card for a prompt"
         );
         assert!(
-            LayerPlacement::split(0, Device::Cpu, usize::MAX, cos.clone(), cos.clone())
+            LayerPlacement::split(0, Device::Cpu, 0..0, cos.clone(), cos.clone())
                 .unwrap()
                 .card_beside_the_processor(4)
                 .is_none(),
@@ -727,7 +848,7 @@ mod tests {
         ))
         .unwrap();
         // `Device::Cpu` stands in for the card, as above: layers 0-2 "on the card".
-        let p = LayerPlacement::split(0, Device::Cpu, 3, global.clone(), global)
+        let p = LayerPlacement::split(0, Device::Cpu, 3..usize::MAX, global.clone(), global)
             .unwrap()
             .with_windowed_rope(window, windowed.clone(), windowed)
             .unwrap();
@@ -745,6 +866,58 @@ mod tests {
         }
     }
 
+    /// A middle run is for a card that could guess without it: the whole
+    /// model, every layer keeping its own cache. Gemma 4 E2B (shared caches)
+    /// and Qwen 3.5 (recurrent layers) keep the card-first tail — the card
+    /// refuses to guess for them (`SplitModel::card_guess_skips`), so the
+    /// middle bought them nothing and cost card layers.
+    #[test]
+    fn only_a_whole_model_whose_layers_keep_their_own_caches_may_guess() {
+        use candle_core::quantized::gguf_file::{Content, TensorInfo, Value, VersionedMagic};
+        let header = |arch: &str, metadata: Vec<(&str, Value)>, tensors: &[&str]| Content {
+            magic: VersionedMagic::GgufV3,
+            metadata: std::iter::once(("general.architecture", Value::String(arch.into())))
+                .chain(metadata)
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+            tensor_infos: tensors
+                .iter()
+                .map(|n| {
+                    (
+                        n.to_string(),
+                        TensorInfo {
+                            ggml_dtype: candle_core::quantized::GgmlDType::F32,
+                            shape: candle_core::Shape::from(1usize),
+                            offset: 0,
+                        },
+                    )
+                })
+                .collect(),
+            tensor_data_offset: 0,
+        };
+        let plain = header("qwen2", vec![("qwen2.block_count", Value::U32(4))], &[]);
+        assert!(card_may_guess(&plain, 0, 4, true, true));
+        assert!(!card_may_guess(&plain, 0, 4, true, false), "no output head");
+        assert!(!card_may_guess(&plain, 0, 4, false, true), "no token table");
+
+        let recurrent = header(
+            "qwen35",
+            vec![("qwen35.block_count", Value::U32(4))],
+            &["blk.1.ssm_alpha.weight"],
+        );
+        assert!(!card_may_guess(&recurrent, 0, 4, true, true));
+
+        let shared = header(
+            "gemma4",
+            vec![
+                ("gemma4.block_count", Value::U32(4)),
+                ("gemma4.attention.shared_kv_layers", Value::U32(2)),
+            ],
+            &[],
+        );
+        assert!(!card_may_guess(&shared, 0, 4, true, true));
+    }
+
     #[test]
     fn a_uniform_placement_is_never_hybrid() {
         let cos = Tensor::zeros((4, 2), candle_core::DType::F32, &Device::Cpu).unwrap();
@@ -758,11 +931,14 @@ mod tests {
 
     #[test]
     fn degenerate_inputs_do_not_panic_or_wrap() {
-        assert_eq!(plan_gpu_layers(u64::MAX, &[0; 8], 0), 0, "unpriced");
-        assert_eq!(plan_gpu_layers(0, &[], 1), 0, "no layers");
+        assert_eq!(plan_gpu_layers(u64::MAX, &[0; 8], 0, false), 0, "unpriced");
+        assert_eq!(plan_gpu_layers(0, &[], 1, false), 0, "no layers");
         // Never more layers than the segment has, however large the budget.
-        assert_eq!(plan_gpu_layers(u64::MAX, &[1; 8], 0), 8);
-        assert_eq!(plan_gpu_layers(u64::MAX, &[u64::MAX; 3], u64::MAX), 0);
+        assert_eq!(plan_gpu_layers(u64::MAX, &[1; 8], 0, false), 8);
+        assert_eq!(
+            plan_gpu_layers(u64::MAX, &[u64::MAX; 3], u64::MAX, false),
+            0
+        );
     }
 
     /// **Each layer is charged its own weights** (#343): the card takes the
@@ -774,18 +950,91 @@ mod tests {
         let budget = 450 * MB;
         // 300 + 100 fits 450, a third layer does not; averaged at 150, three did.
         let heavy_first = [300 * MB, 100 * MB, 100 * MB, 100 * MB];
-        assert_eq!(plan_gpu_layers(budget, &heavy_first, 0), 2);
-        assert_eq!(plan_gpu_layers(budget, &even(600 * MB, 4), 0), 3);
+        assert_eq!(plan_gpu_layers(budget, &heavy_first, 0, false), 2);
+        assert_eq!(plan_gpu_layers(budget, &even(600 * MB, 4), 0, false), 3);
         // Light first: three fit in 350; averaged at 150, only two did.
         let budget = 350 * MB;
         let heavy_last = [100 * MB, 100 * MB, 100 * MB, 300 * MB];
-        assert_eq!(plan_gpu_layers(budget, &heavy_last, 0), 3);
-        assert_eq!(plan_gpu_layers(budget, &even(600 * MB, 4), 0), 2);
+        assert_eq!(plan_gpu_layers(budget, &heavy_last, 0, false), 3);
+        assert_eq!(plan_gpu_layers(budget, &even(600 * MB, 4), 0, false), 2);
         // A layer's cache comes with it: 40 MB of cache a layer moves the
         // heavy opening's line to one.
         assert_eq!(
-            plan_gpu_layers(budget + 100 * MB, &heavy_first, 4 * 40 * MB),
+            plan_gpu_layers(budget + 100 * MB, &heavy_first, 4 * 40 * MB, false),
             1
         );
+    }
+
+    /// **A whole model's processor run sits a tenth of the way in** (2026-10-28):
+    /// the card keeps the model's first layers AND its last, which is what lets
+    /// it guess without the run. A segment that is not a whole model, a card
+    /// holding under two fifths of the layers (`CARD_GUESS_MIN_SHARE`), and a
+    /// count covering everything keep the old answer.
+    #[test]
+    fn a_whole_models_processor_run_sits_early_in_the_middle() {
+        // The 14B on an 8 GB card: 27 of 48 on the card, 21 on the processor.
+        assert_eq!(processor_run(48, 27, true), 5..26);
+        // Qwen2.5-7B with 16 of 28 on the card.
+        assert_eq!(processor_run(28, 16, true), 3..15);
+        // Not a whole model: the tail, card-first, whatever the count.
+        assert_eq!(processor_run(48, 27, false), 27..48);
+        // Under two fifths on the card: a guess would skip too much, so the tail.
+        assert_eq!(processor_run(48, 19, true), 19..48);
+        // Two fifths and up still guess — 23 of 48 is where this 8 GB card
+        // lands on a day the desktop holds more of it.
+        assert_eq!(processor_run(48, 20, true), 5..33);
+        assert_eq!(processor_run(48, 23, true), 5..30);
+        // Everything on the card: no run at all, never a run past the end.
+        assert!(processor_run(48, 48, true).is_empty());
+        assert!(processor_run(48, 60, true).is_empty());
+        // A short model keeps at least one layer before the run.
+        assert_eq!(processor_run(4, 3, true), 1..2);
+        // Every answer is one run of `len - on_card` inside the segment.
+        for len in 1..100 {
+            for on_card in 0..=len {
+                for whole in [false, true] {
+                    let run = processor_run(len, on_card, whole);
+                    assert_eq!(run.len(), len - on_card, "{len} {on_card} {whole}");
+                    assert!(run.end <= len, "{len} {on_card} {whole}: {run:?}");
+                }
+            }
+        }
+    }
+
+    /// **The card is charged the layers it HOLDS** — a whole model's card
+    /// holds both ends, which Q4_K_M gives more bits — so a count is priced
+    /// by its own set, never the first `n` layers'.
+    #[test]
+    fn a_whole_models_card_is_charged_both_ends() {
+        // Ten layers; the last is heavy. Card-first, six light layers fit 650
+        // MB; holding both ends, the card holds the heavy last one too.
+        let mut weights = vec![100 * MB; 10];
+        weights[9] = 300 * MB;
+        assert_eq!(plan_gpu_layers(650 * MB, &weights, 0, false), 6);
+        // Holding both ends: 6 on the card is layers 0 and 5..10 (800 MB), 5
+        // is layers 0 and 6..10 (700 MB), 4 is layers 0 and 7..10 (600 MB) —
+        // the most that fit, still two fifths (`CARD_GUESS_MIN_SHARE`).
+        assert_eq!(plan_gpu_layers(650 * MB, &weights, 0, true), 4);
+        // 7 on the card is layers 0 and 4..10: 900 MB.
+        assert_eq!(plan_gpu_layers(900 * MB, &weights, 0, true), 7);
+        assert_eq!(plan_gpu_layers(899 * MB, &weights, 0, true), 6);
+    }
+
+    /// The loader's placement of a whole model: card, processor run, card —
+    /// and a layer below the segment never on the card.
+    #[test]
+    fn a_middle_run_puts_both_ends_on_the_card() {
+        let cos = Tensor::zeros((4, 2), candle_core::DType::F32, &Device::Cpu).unwrap();
+        // `Device::Cpu` stands in for the card, as above.
+        let p = LayerPlacement::split(0, Device::Cpu, processor_run(10, 6, true), cos.clone(), cos)
+            .unwrap();
+        let on: Vec<bool> = (0..10).map(|l| p.on_gpu(l)).collect();
+        assert_eq!(
+            on,
+            [true, false, false, false, false, true, true, true, true, true],
+            "run {:?}",
+            processor_run(10, 6, true)
+        );
+        assert!(p.is_hybrid(10));
     }
 }

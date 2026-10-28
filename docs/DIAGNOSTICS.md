@@ -652,6 +652,52 @@ their check — high on a card where a check costs several steps) and `probes`
 `SWARMLLM_LOCAL_GUESS_GAMMA=fixed` checks every guess, the rule before. A request
 that is not alone on the worker joins the batch instead and logs nothing.
 
+### A split's card guessing on its own (2026-10-28)
+
+A whole model split between the card and the processor keeps its processor layers early in the
+middle, so the card can guess the next tokens alone where the conversation offers nothing to copy
+(`model_worker::CardGuesses`). The same `learned=` line ends with the card's account:
+
+```bash
+grep "local n-gram speculation complete" node.log | grep -o "card rounds.*"
+# card rounds 41 guessed 152 kept 118 declined 0 guess 19.8 ms alpha 0.78 next 4
+```
+
+`kept / guessed` is the card's agreement with the whole model; `guess` is one guess's card time,
+which the count charges (`next` is the count it would choose now — 0 means guessing on the card
+does not pay at this agreement). No `card rounds` at all: the model is not a whole model split
+between card and processor, its run sits at the tail (the loader's `Hybrid placement` line names
+`processor_from`/`processor_to`; from 0.1 of the depth on a whole model), it keeps recurrent state
+(Qwen 3.5) or lets layers share caches (Gemma 4 E2B/E4B — `hybrid::card_may_guess`), or
+`SWARMLLM_CARD_GUESSES=0`. `SWARMLLM_PROCESSOR_RUN=tail` restores the card-first placement, under
+which the card cannot guess.
+
+**A guessing arm slower than expected: read the calibration FIRST.** The processor's decode
+width is calibrated from plain steps, once per worker; guessing arms have had it wrong twice
+(gotchas #983, #984):
+
+```bash
+grep "Decode thread width calibrated" node.log
+# … decode_threads=4 offered=4 measured=4:144ms 3:148ms 2:166ms 1:318ms   — compare across arms
+```
+
+`decode_threads=1` beside 7-13 ms samples is a guess timed as a processor token (#983); NO line
+after several replies is a loop that never takes a plain step (#984 — it now steps plainly until
+the line appears, within the first reply).
+
+**How well would the card guess for a model?** `examples/skip_agreement_probe.rs` measures it
+before any code changes: teacher-forced on the card, the full model's greedy reply is fed and at
+every position the card-only forward guesses γ ahead, for the tail and for runs starting at each
+depth. `PROBE_GGUF=<file> PROBE_DEVICE=cuda PROBE_SKIP=<layers> PROBE_GAMMA=4 PROBE_N=48`; read
+`first%` (first guess right) and `run/round` (guesses kept of γ). Results per family:
+`docs/invariants/inference.md` § "A whole model's processor-held layers sit early in the middle".
+
+**Which experts a reply uses** (mixture-of-experts, for an expert cache): `SWARMLLM_TRACE_EXPERTS=<file>`
+makes every one-token routing call append `layer expert…` to the file (`MoeFfn::route`); feed it to
+`examples/expert_locality.py --layers L --experts E --tokens N --prompts P` for the reuse between
+tokens and the hit rate of a card holding a fraction of the experts by recency (LRU per layer) or
+by static popularity. Diagnostic only: never on in a benchmark.
+
 ### Across computers (DSD) — on by default since v0.3.213 (off in v0.3.212)
 
 With `speculative_decoding` and `decentralized_spec_decoding` on, a split request

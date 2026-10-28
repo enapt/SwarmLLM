@@ -278,6 +278,38 @@ impl SplitModel {
             .count()
     }
 
+    /// Has this segment's plain decode step settled on its processor width
+    /// (`cpu_pools::decode_width_settled` at [`Self::cpu_layer_count`])? A
+    /// speculating loop steps plainly until it has (gotcha #984).
+    pub(crate) fn decode_width_settled(&self) -> bool {
+        crate::inference::cpu_pools::decode_width_settled(self.cpu_layer_count())
+    }
+
+    /// How many layers THIS forward runs on the processor: [`Self::cpu_layer_count`]
+    /// less the ones `skips` passes over ([`Self::forward_with_skip_mask`] —
+    /// a card guess skips all of them, SWIFT some). What a forward reports to
+    /// the decode-thread calibration (`cpu_pools::in_phase_pool`): a skipped
+    /// layer does no work, and a card guess reported as a full processor
+    /// token — 7-13 ms against ~150 for a real one — taught the calibration
+    /// that one thread was as fast as four, so every real step of a 14B split
+    /// then ran on one (2026-10-28: steps 188 → 384 ms; gotcha #432's shape).
+    pub(super) fn cpu_layers_run(&self, skips: Option<&[bool]>) -> usize {
+        let Some(skips) = skips else {
+            return self.cpu_layer_count();
+        };
+        let skipped = |i: usize| {
+            skips.get(self.layer_start + i).copied().unwrap_or(false) && !self.lends_its_kv(i)
+        };
+        let processor_only = self.device.is_cpu() && self.layer_devices.is_empty();
+        self.layers
+            .iter()
+            .enumerate()
+            .filter(|(i, layer)| {
+                !skipped(*i) && (processor_only || self.works_on_the_processor(*i, layer))
+            })
+            .count()
+    }
+
     /// Does layer `i` of this segment work on the processor — held there, or
     /// its experts kept in RAM? Never asked of a processor-only segment.
     fn works_on_the_processor(&self, i: usize, layer: &super::LayerVariant) -> bool {
@@ -938,6 +970,47 @@ impl SplitModel {
         self.layers
             .iter()
             .any(|l| matches!(l, super::LayerVariant::Qwen35Ssm { .. }))
+    }
+
+    /// The layers a guess on this model's CARD skips — the run the processor
+    /// holds — where the card can guess the next tokens on its own
+    /// (`model_worker::LocalSpec`, 2026-10-28): a whole model split between
+    /// the card and the processor whose card holds layers past the run
+    /// (`hybrid::processor_run` puts a whole model's run early in the middle).
+    /// A mask over absolute layer indices, as
+    /// [`Self::forward_with_skip_mask`] reads it; `None` where a guess cannot
+    /// be made or would not be kept:
+    ///
+    /// * not a whole model, or not split — a guess needs the token table and
+    ///   the output head, and only a split leaves the card idle while the
+    ///   processor works;
+    /// * the run at the tail (card-first): a guess is then the card's first
+    ///   layers and the head, which agreed with the full model's next token
+    ///   0-14% of the time (`examples/skip_agreement_probe.rs`);
+    /// * recurrent state (Qwen 3.5): γ one-position guesses cannot be taken
+    ///   back out of it, only one check ([`Self::carries_recurrent_state`]);
+    /// * a run layer another layer reads its keys from: the guess would run
+    ///   it, on the processor.
+    pub(crate) fn card_guess_skips(&self) -> Option<Vec<bool>> {
+        if !self.is_first()
+            || !self.is_last()
+            || !self.device.is_cuda()
+            || self.layer_devices.is_empty()
+            || self.carries_recurrent_state()
+        {
+            return None;
+        }
+        let on_processor: Vec<bool> = self.layer_devices.iter().map(Device::is_cpu).collect();
+        let last_of_run = on_processor.iter().rposition(|&cpu| cpu)?;
+        if last_of_run + 1 >= on_processor.len() {
+            return None;
+        }
+        if (0..on_processor.len()).any(|i| on_processor[i] && self.lends_its_kv(i)) {
+            return None;
+        }
+        let mut skips = vec![false; self.layer_start + on_processor.len()];
+        skips[self.layer_start..].copy_from_slice(&on_processor);
+        Some(skips)
     }
 
     /// Build an input tensor from an already-tokenized token id slice.

@@ -432,6 +432,20 @@ pub fn estimate_worker_vram_mb(i: &VramFootprintInputs) -> u64 {
 
 /// [`estimate_worker_vram_mb`] with the KV cache charged as `kv` says.
 pub fn estimate_worker_vram_mb_for(i: &VramFootprintInputs, kv: KvCharge) -> u64 {
+    estimate_worker_vram_mb_without(i, None, kv)
+}
+
+/// [`estimate_worker_vram_mb_for`] of a segment less a run of its layers the
+/// card does not hold (`without`, that run's own inputs): its weights and its
+/// caches as the card would keep them. What a card/processor split whose
+/// processor holds a run in the MIDDLE of a whole model puts on the card
+/// (`hybrid::processor_run`; `process_pool::card_share_of_split_mb`) —
+/// taken off the segment's figure in bytes, so the share rounds once.
+pub fn estimate_worker_vram_mb_without(
+    i: &VramFootprintInputs,
+    without: Option<&VramFootprintInputs>,
+    kv: KvCharge,
+) -> u64 {
     // A CUDA worker reads embedding rows on demand too, through an on-device
     // gather, so it no longer materialises the table either — 720 MB on
     // meta-llama-3.1-8b. See `token_embedding`.
@@ -440,14 +454,22 @@ pub fn estimate_worker_vram_mb_for(i: &VramFootprintInputs, kv: KvCharge) -> u64
     // runtime head-room check that refuses gracefully if a conversation
     // outgrows it — see `ADMISSION_KV_CONTEXT` — and kept the way the card
     // will keep it, read in the card's prompt forwards.
-    resident_footprint_on(
-        i,
-        i.embedding_gatherable,
-        kv.positions(i),
-        crate::inference::prefill_pacer::PromptReader::Card,
-    )
-    .total_bytes()
-    .saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
+    let on_card = |i: &VramFootprintInputs| {
+        resident_footprint_on(
+            i,
+            i.embedding_gatherable,
+            kv.positions(i),
+            crate::inference::prefill_pacer::PromptReader::Card,
+        )
+    };
+    let taken_off = without.map_or(0, |run| {
+        let run = on_card(run);
+        run.weights_bytes.saturating_add(run.kv_bytes)
+    });
+    on_card(i)
+        .total_bytes()
+        .saturating_sub(taken_off)
+        .saturating_add(CUDA_PROCESS_OVERHEAD_BYTES)
         / (1024 * 1024)
 }
 

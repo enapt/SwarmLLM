@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+**A model too big for your graphics card writes 1.3 to 1.7 times as fast when it is split
+between the card and your processor.** Such a model spends most of every step on the slower
+processor while the card waits. The split now keeps the model's first and last layers on the
+card, so the card can guess the next few words on its own in the time the processor takes for
+one, and the whole model checks several guesses in a single step, keeping only the ones it
+agrees with. Those checks now use every processor core, as llama.cpp's do. Measured on an 8 GB
+laptop card with a 14B model, about half its layers on the card: 5.6 → 9.7 tokens a second
+writing code, 5.6 → 8.2 summarising a long text, 6.5 → 8.8 writing prose. With less of it on
+the card (21 of 48 layers, other programs holding part of the card) it is still 1.2 to 1.6
+times as fast (#366). Models whose layers share their memory of the conversation (Gemma 4 E2B
+and E4B) or carry it forward step by step (Qwen 3.5) keep the old placement, since the card
+cannot guess for them.
+
+**Guessing ahead no longer switches itself off for good after one reply it could not speed up.**
+A model stops guessing when its guesses rarely land, but it only measured the replies it guessed
+on, so a single poor reply kept guessing off for as long as the model stayed loaded. It now tries again after
+a handful of requests, or a few dozen after a very poor reply.
+
 **A model split between your graphics card and your processor puts as much on the card as it
 did before v0.3.259, and writes about 10% faster than on v0.3.259.** v0.3.259's fix for large
 models on 12 GB cards sized the card's share from a cautious estimate of the free graphics

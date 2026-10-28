@@ -1,0 +1,515 @@
+//! How well does a model guess its own next tokens with a block of its layers
+//! skipped — the guesser a card/processor split could run on its idle card,
+//! skipping the layers the processor holds (deep dive 2026-10-28).
+//!
+//! The full model writes a greedy reply. At every position, with the full
+//! model's cache for everything before it, each candidate skip set guesses
+//! `GAMMA` tokens in a chain (its own cache for its own guesses, as a drafter
+//! would), and the probe counts how many of them the full model's reply
+//! agrees with, in a row. The cache is cut back after every chain, so each
+//! position is guessed from exactly the state a check would start from — a
+//! broken drafting loop cannot make a skip set look worse than it is
+//! (SWIFT's "accept rate effectively zero", FUTURE_WORK_ARCHIVE 2026-08-06).
+//!
+//! Candidates, each skipping `SKIP` layers (default 44% of them, a 14B's
+//! processor share on an 8 GB card):
+//! * `tail` — the last `SKIP` layers: the card-first placement every split
+//!   uses today, guessing from the card's layers and the output head;
+//! * `mid@s` — the block `[s, s + SKIP)`, every `STEP`-th start: a placement
+//!   that keeps the model's first AND last layers on the card.
+//!
+//! ```bash
+//! PROBE_GGUF=~/swarmllm-ref/qwen2.5-coder-7b-instruct-q4-k-m.gguf PROBE_DEVICE=cuda \
+//!   cargo run --release --no-default-features --features dev --example skip_agreement_probe
+//! ```
+//! `PROBE_MODEL=<model directory>` loads a model a node holds as shards instead;
+//! `PROBE_GPU_LAYERS=n` keeps only n layers on the card (a model too big for it);
+//! `PROBE_PROMPTS=<file>` holds rendered prompts separated by a line `=====`
+//! (default: a code request and a prose one in ChatML); `PROBE_N` reply tokens
+//! (default 96); `PROBE_GAMMA` (4); `PROBE_SKIP` layers; `PROBE_STEP` (2).
+//!
+//! `PROBE_BRIDGE=1` instead fixes ONE block — `[PROBE_START, + SKIP)`, the
+//! start defaulting to a tenth of the depth as `hybrid::processor_run` places
+//! a whole model's processor run — and compares what stands in for it while
+//! the card guesses (`split::SkipBridge`), each fitted from the real forwards
+//! before the position guessed: `none` (the hidden state passes through, as
+//! the card guesses today), `mean` (the block's mean effect so far), `prev`
+//! (its effect at the latest real position) and `recall@λ` (the mean plus a
+//! linear kernel ridge over the last `PROBE_WINDOW` positions, 256, by the
+//! cosine of their hidden states where the block starts). It also prints how
+//! far each stand-in's estimate of the block's effect lands from the effect
+//! the next real forward measures (`err`, relative; `none` is 1).
+
+use std::path::PathBuf;
+
+use candle_core::{DType, Tensor};
+use swarmllm::inference::split::{GgufTensorMeta, KvCacheStore, SkipBridge, SplitModel};
+use swarmllm_types::{ModelManifest, ShardTensorEntry};
+
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn expand(p: &str) -> PathBuf {
+    match (p.strip_prefix("~/"), std::env::var("HOME")) {
+        (Some(rest), Ok(home)) => PathBuf::from(home).join(rest),
+        _ => PathBuf::from(p),
+    }
+}
+
+fn load_from_model_dir(dir: &std::path::Path, force_cpu: bool) -> anyhow::Result<SplitModel> {
+    swarmllm::inference::split::ensure_gguf_header(dir)
+        .map_err(|e| anyhow::anyhow!("gguf header: {e}"))?;
+    let manifest: ModelManifest =
+        serde_json::from_slice(&std::fs::read(dir.join("manifest.json"))?)?;
+    let mut shards: Vec<(u32, PathBuf, Vec<ShardTensorEntry>)> = Vec::new();
+    for shard in &manifest.shards {
+        let path = dir.join(format!("shard_{:03}.bin", shard.index));
+        anyhow::ensure!(path.exists(), "missing {}", path.display());
+        shards.push((shard.index, path, shard.tensors.clone()));
+    }
+    shards.sort_by_key(|(i, _, _)| *i);
+    let entries: Vec<Vec<ShardTensorEntry>> = shards.iter().map(|s| s.2.clone()).collect();
+    let files: Vec<(u32, PathBuf)> = shards.into_iter().map(|(i, p, _)| (i, p)).collect();
+    let layers = manifest.num_layers as usize;
+    let load = if force_cpu {
+        SplitModel::load_from_shards_cpu
+    } else {
+        SplitModel::load_from_shards
+    };
+    load(
+        dir,
+        files,
+        &entries,
+        manifest.total_size_bytes,
+        0,
+        layers,
+        true,
+        true,
+    )
+    .map_err(|e| anyhow::anyhow!("load: {e}"))
+}
+
+/// The first of equal maxima, as `sampling::argmax` picks.
+fn argmax(logits: &candle_core::Tensor) -> anyhow::Result<u32> {
+    let v: Vec<f32> = logits
+        .to_dtype(candle_core::DType::F32)?
+        .flatten_all()?
+        .to_vec1()?;
+    let mut best = 0usize;
+    for (i, &x) in v.iter().enumerate() {
+        if x > v[best] {
+            best = i;
+        }
+    }
+    Ok(best as u32)
+}
+
+const DEFAULT_PROMPTS: &str = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWrite a Python function that reads a CSV file of orders with columns id, customer, amount and date, and returns the total amount per customer per month. Use type hints, a docstring, and handle malformed rows by skipping them with a warning.<|im_end|>\n<|im_start|>assistant\n
+=====
+<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nExplain to someone with no science background how a vaccine teaches the immune system to recognise a virus, in three short paragraphs.<|im_end|>\n<|im_start|>assistant\n";
+
+/// What stands in for the skipped block while a candidate guesses.
+#[derive(Clone, Copy)]
+enum Stand {
+    None,
+    Mean,
+    Prev,
+    Recall(f64),
+}
+
+struct Candidate {
+    name: String,
+    mask: Vec<bool>,
+    stand: Stand,
+    /// Summed relative error of its estimate of the block's effect, and how
+    /// many it made (bridge mode).
+    err: f64,
+    errs: usize,
+    /// First guesses the full model agreed with.
+    first: usize,
+    /// Guesses accepted in a row, summed over positions.
+    run: usize,
+    /// Positions guessed.
+    tried: usize,
+}
+
+fn main() -> anyhow::Result<()> {
+    let model_dir = std::env::var("PROBE_MODEL").ok().map(|p| expand(&p));
+    let force_cpu = std::env::var("PROBE_DEVICE").as_deref() != Ok("cuda");
+    if let Some(n) = std::env::var("PROBE_GPU_LAYERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        swarmllm::inference::split::GPU_LAYER_LIMIT.store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+    let (mut model, layers) = match &model_dir {
+        Some(dir) => {
+            let m = load_from_model_dir(dir, force_cpu)?;
+            let manifest: ModelManifest =
+                serde_json::from_slice(&std::fs::read(dir.join("manifest.json"))?)?;
+            (m, manifest.num_layers as usize)
+        }
+        None => {
+            let gguf = expand(
+                &std::env::var("PROBE_GGUF")
+                    .map_err(|_| anyhow::anyhow!("set PROBE_GGUF or PROBE_MODEL"))?,
+            );
+            let layers = GgufTensorMeta::from_gguf_file(&gguf)?.block_count;
+            (
+                SplitModel::load_from_gguf(&gguf, 0, layers, true, true, force_cpu)?,
+                layers,
+            )
+        }
+    };
+    let n = env_usize("PROBE_N", 96);
+    let gamma = env_usize("PROBE_GAMMA", 4).max(1);
+    let skip = env_usize("PROBE_SKIP", (layers as f64 * 0.44).round() as usize).min(layers - 2);
+    let step = env_usize("PROBE_STEP", 2).max(1);
+    let prompts_text = match std::env::var("PROBE_PROMPTS") {
+        Ok(p) => std::fs::read_to_string(expand(&p))?,
+        Err(_) => DEFAULT_PROMPTS.replace("\\n", "\n"),
+    };
+    let prompts: Vec<String> = prompts_text
+        .split("\n=====\n")
+        .map(|s| s.trim_start_matches('\n').to_string())
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+
+    let mut candidates: Vec<Candidate> = Vec::new();
+    let mk = |name: String, range: std::ops::Range<usize>| {
+        let mut mask = vec![false; layers];
+        for i in range {
+            mask[i] = true;
+        }
+        Candidate {
+            name,
+            mask,
+            stand: Stand::None,
+            err: 0.0,
+            errs: 0,
+            first: 0,
+            run: 0,
+            tried: 0,
+        }
+    };
+    let bridge_mode = std::env::var("PROBE_BRIDGE").is_ok_and(|v| v == "1");
+    let block_start = env_usize("PROBE_START", ((layers as f64) * 0.1).round() as usize)
+        .clamp(1, layers - skip - 1);
+    let window = env_usize("PROBE_WINDOW", 256).max(1);
+    if bridge_mode {
+        for (name, stand) in [
+            ("none".to_string(), Stand::None),
+            ("mean".to_string(), Stand::Mean),
+            ("prev".to_string(), Stand::Prev),
+            ("recall@0.3".to_string(), Stand::Recall(0.3)),
+            ("recall@3".to_string(), Stand::Recall(3.0)),
+        ] {
+            let mut c = mk(name, block_start..block_start + skip);
+            c.stand = stand;
+            candidates.push(c);
+        }
+    } else if skip > 0 {
+        // `PROBE_SKIP=0` only writes the replies, one token a forward — what an
+        // expert trace (`SWARMLLM_TRACE_EXPERTS`) is read off.
+        candidates.push(mk("tail".into(), layers - skip..layers));
+        let mut s = 1;
+        while s + skip < layers {
+            candidates.push(mk(format!("mid@{s}"), s..s + skip));
+            s += step;
+        }
+    }
+    println!(
+        "{layers} layers, skipping {skip} ({:.0}%), {} candidates, gamma {gamma}, {n} tokens a prompt, {} prompt(s)",
+        100.0 * skip as f64 / layers as f64,
+        candidates.len(),
+        prompts.len()
+    );
+
+    let key = model.kv_model_key().to_string();
+    for (pi, prompt) in prompts.iter().enumerate() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(3600));
+        let req = format!("skip-probe-{pi}");
+        let ids = model.encode_ids(prompt);
+        store.set_reserved_positions(&req, ids.len() + n + gamma + 1);
+        let t0 = std::time::Instant::now();
+        let capture: std::collections::HashSet<usize> = [block_start - 1, block_start + skip - 1]
+            .into_iter()
+            .collect();
+        let mut history = History::default();
+        let logits = if bridge_mode {
+            let (logits, caught) = model.forward_capturing(
+                &model.tensor_from_ids(&ids)?,
+                0,
+                &store,
+                &req,
+                &capture,
+            )?;
+            history.push(&caught, block_start, skip)?;
+            logits
+        } else {
+            model.forward(&model.tensor_from_ids(&ids)?, 0, &store, &req)?
+        };
+        let mut tok = argmax(&logits)?;
+        // reply[i] is the token at position ids.len() + i.
+        let mut reply: Vec<u32> = vec![tok];
+        // Each candidate's chain guessed at each reply index.
+        let mut chains: Vec<Vec<Vec<u32>>> = vec![Vec::new(); candidates.len()];
+        for i in 0..n {
+            let p = ids.len() + i;
+            let run_end = block_start + skip;
+            let bridges: Vec<Option<SkipBridge>> = candidates
+                .iter()
+                .map(|c| history.bridge(c.stand, run_end, window))
+                .collect::<anyhow::Result<_>>()?;
+            for (c, cand) in candidates.iter().enumerate() {
+                let mut chain = Vec::with_capacity(gamma);
+                let mut t = tok;
+                for g in 0..gamma {
+                    let input = model.token_tensor(t)?;
+                    let l = match &bridges[c] {
+                        Some(b) => model.forward_with_skip_bridge(
+                            &input,
+                            p + g,
+                            &store,
+                            &req,
+                            &cand.mask,
+                            b,
+                        )?,
+                        None => {
+                            model.forward_with_skip_mask(&input, p + g, &store, &req, &cand.mask)?
+                        }
+                    };
+                    t = argmax(&l)?;
+                    chain.push(t);
+                }
+                store.truncate_request_to(&key, &req, p)?;
+                chains[c].push(chain);
+            }
+            let l = if bridge_mode {
+                let (l, caught) = model.forward_capturing(
+                    &model.token_tensor(tok)?,
+                    p,
+                    &store,
+                    &req,
+                    &capture,
+                )?;
+                // How far each stand-in's estimate lands from the effect this
+                // real forward measured, before it joins the history.
+                let (h_in, delta) = History::rows(&caught, block_start, skip)?;
+                for (c, cand) in candidates.iter_mut().enumerate() {
+                    let est = match &bridges[c] {
+                        Some(b) => History::estimate(b, &h_in)?,
+                        None => h_in.zeros_like()?,
+                    };
+                    let num = (est - &delta)?.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt();
+                    let den = delta.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt().max(1e-6);
+                    cand.err += f64::from(num / den);
+                    cand.errs += 1;
+                }
+                history.push(&caught, block_start, skip)?;
+                l
+            } else {
+                model.forward(&model.token_tensor(tok)?, p, &store, &req)?
+            };
+            tok = argmax(&l)?;
+            reply.push(tok);
+        }
+        let mut this_prompt = String::new();
+        for (c, cand) in candidates.iter_mut().enumerate() {
+            let (first_before, run_before, tried_before) = (cand.first, cand.run, cand.tried);
+            for (i, chain) in chains[c].iter().enumerate() {
+                // The chain guessed at reply index i follows reply[i]: its
+                // guesses are reply[i+1..].
+                let truth = &reply[i + 1..];
+                let ok = chain.iter().zip(truth).take_while(|(a, b)| a == b).count();
+                cand.tried += 1;
+                cand.first += usize::from(ok > 0);
+                cand.run += ok;
+            }
+            let tried = (cand.tried - tried_before).max(1) as f64;
+            this_prompt.push_str(&format!(
+                "  {:<10} {:>7.1}% {:>10.2}{}\n",
+                cand.name,
+                100.0 * (cand.first - first_before) as f64 / tried,
+                (cand.run - run_before) as f64 / tried,
+                if bridge_mode {
+                    format!("   err {:.3}", cand.err / cand.errs.max(1) as f64)
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        println!(
+            "prompt {pi}: {} prompt tokens, {n} reply tokens, {:.1} s",
+            ids.len(),
+            t0.elapsed().as_secs_f64()
+        );
+        print!("{this_prompt}");
+    }
+    if bridge_mode {
+        println!(
+            "block {block_start}..{} skipped, stand-ins:",
+            block_start + skip
+        );
+    }
+    println!("{:<10} {:>8} {:>10}", "skip", "first%", "run/round");
+    for cand in &candidates {
+        println!(
+            "{:<10} {:>7.1}% {:>10.2}{}",
+            cand.name,
+            100.0 * cand.first as f64 / cand.tried.max(1) as f64,
+            cand.run as f64 / cand.tried.max(1) as f64,
+            if bridge_mode {
+                format!("   err {:.3}", cand.err / cand.errs.max(1) as f64)
+            } else {
+                String::new()
+            }
+        );
+    }
+    Ok(())
+}
+
+/// The block's start and effect at every real position so far (bridge mode),
+/// `[n, hidden]` f32 on the card: `phi` the hidden state where the block
+/// starts, normalised; `delta` what the block added to it.
+#[derive(Default)]
+struct History {
+    phi: Option<Tensor>,
+    delta: Option<Tensor>,
+}
+
+impl History {
+    /// `(φ(h_in), Δ)` rows off a capturing forward, `[positions, hidden]`.
+    fn rows(
+        caught: &std::collections::HashMap<usize, Tensor>,
+        start: usize,
+        skip: usize,
+    ) -> anyhow::Result<(Tensor, Tensor)> {
+        let h_in = &caught[&(start - 1)];
+        let dev = h_in.device().clone();
+        let h_in = h_in.squeeze(0)?.to_dtype(DType::F32)?;
+        let h_out = caught[&(start + skip - 1)]
+            .to_device(&dev)?
+            .squeeze(0)?
+            .to_dtype(DType::F32)?;
+        let delta = (&h_out - &h_in)?;
+        let norm = h_in.sqr()?.sum_keepdim(1)?.sqrt()?.clamp(1e-6, f64::MAX)?;
+        Ok((h_in.broadcast_div(&norm)?, delta))
+    }
+
+    fn push(
+        &mut self,
+        caught: &std::collections::HashMap<usize, Tensor>,
+        start: usize,
+        skip: usize,
+    ) -> anyhow::Result<()> {
+        let (phi, delta) = Self::rows(caught, start, skip)?;
+        let join = |old: Option<Tensor>, new: Tensor| -> anyhow::Result<Tensor> {
+            Ok(match old {
+                Some(o) => Tensor::cat(&[&o, &new], 0)?,
+                None => new,
+            })
+        };
+        self.phi = Some(join(self.phi.take(), phi)?);
+        self.delta = Some(join(self.delta.take(), delta)?);
+        Ok(())
+    }
+
+    /// The bridge a stand-in makes of the history; `None` for `none`.
+    fn bridge(
+        &self,
+        stand: Stand,
+        run_end: usize,
+        window: usize,
+    ) -> anyhow::Result<Option<SkipBridge>> {
+        let (Some(phi), Some(delta)) = (&self.phi, &self.delta) else {
+            return Ok(None);
+        };
+        let n = delta.dim(0)?;
+        let mean = || -> anyhow::Result<Tensor> { Ok(delta.mean(0)?) };
+        Ok(match stand {
+            Stand::None => None,
+            Stand::Mean => Some(SkipBridge::Shift {
+                run_end,
+                shift: mean()?,
+            }),
+            Stand::Prev => Some(SkipBridge::Shift {
+                run_end,
+                shift: delta.get(n - 1)?,
+            }),
+            Stand::Recall(lambda) => {
+                let from = n.saturating_sub(window);
+                let m = n - from;
+                let f = phi.narrow(0, from, m)?.contiguous()?;
+                let base = mean()?;
+                let r = delta.narrow(0, from, m)?.broadcast_sub(&base)?;
+                let k: Vec<Vec<f32>> = f.matmul(&f.t()?.contiguous()?)?.to_vec2()?;
+                let inv = invert_with_ridge(&k, lambda);
+                let inv = Tensor::from_vec(inv, (m, m), f.device())?;
+                Some(SkipBridge::Recall {
+                    run_end,
+                    base,
+                    features: f,
+                    weights: inv.matmul(&r.contiguous()?)?,
+                })
+            }
+        })
+    }
+
+    /// What `bridge` estimates the block adds at positions whose normalised
+    /// start is `phi` — the arithmetic `SkipBridge` applies, on `phi`'s rows.
+    fn estimate(bridge: &SkipBridge, phi: &Tensor) -> anyhow::Result<Tensor> {
+        Ok(match bridge {
+            SkipBridge::Shift { shift, .. } => phi.zeros_like()?.broadcast_add(shift)?,
+            SkipBridge::Recall {
+                base,
+                features,
+                weights,
+                ..
+            } => phi
+                .matmul(&features.t()?.contiguous()?)?
+                .matmul(weights)?
+                .broadcast_add(base)?,
+        })
+    }
+}
+
+/// `(K + λI)⁻¹` by Gauss-Jordan in f64, row-major f32 out. `K` is a Gram
+/// matrix of unit vectors, so with λ > 0 it is well conditioned.
+fn invert_with_ridge(k: &[Vec<f32>], lambda: f64) -> Vec<f32> {
+    let m = k.len();
+    let mut a: Vec<Vec<f64>> = (0..m)
+        .map(|i| {
+            let mut row: Vec<f64> = k[i].iter().map(|&v| f64::from(v)).collect();
+            row[i] += lambda;
+            row.extend((0..m).map(|j| if i == j { 1.0 } else { 0.0 }));
+            row
+        })
+        .collect();
+    for col in 0..m {
+        let pivot = (col..m)
+            .max_by(|&x, &y| a[x][col].abs().total_cmp(&a[y][col].abs()))
+            .unwrap_or(col);
+        a.swap(col, pivot);
+        let d = a[col][col];
+        for v in a[col].iter_mut() {
+            *v /= d;
+        }
+        let pivot_row = a[col].clone();
+        for (r, row) in a.iter_mut().enumerate() {
+            let f = row[col];
+            if r != col && f != 0.0 {
+                for (v, p) in row.iter_mut().zip(&pivot_row) {
+                    *v -= f * p;
+                }
+            }
+        }
+    }
+    a.iter()
+        .flat_map(|row| row[m..].iter().map(|&v| v as f32))
+        .collect()
+}

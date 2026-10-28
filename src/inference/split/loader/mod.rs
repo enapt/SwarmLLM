@@ -80,6 +80,21 @@ pub(super) struct SplitLoadOptions<'a> {
 /// card to a CPU fallback (reported 2026-08-01).
 pub const EMBEDDING_DTYPE: candle_core::DType = candle_core::DType::F16;
 
+/// The bytes of the tensors that belong to layers `layer_start..layer_end`
+/// alone — what moving those layers off the card takes off it
+/// ([`segment_weight_bytes`] counts a segment's ends and shared tensors
+/// beside them).
+fn layers_own_bytes(ct: &gguf_file::Content, layer_start: usize, layer_end: usize) -> u64 {
+    ct.tensor_infos
+        .iter()
+        .filter(|(name, _)| {
+            matches!(super::segment_tensor(name),
+                super::SegmentTensor::Layer(idx) if (layer_start..layer_end).contains(&idx))
+        })
+        .map(|(_, info)| super::tensor_byte_size(info))
+        .fold(0u64, u64::saturating_add)
+}
+
 /// Sum the on-device byte cost of the tensors this segment will load.
 ///
 /// Only the segment's own layers count — a node holding layers 8..16 never
@@ -1236,15 +1251,38 @@ impl SplitModel {
             device.is_cuda(),
             segment_layer_count,
         );
+        // Which of them the processor holds: one run of offsets into the
+        // segment — the tail, or for a whole model whose card could guess
+        // (`hybrid::card_may_guess`) a run early in the middle, so its card
+        // keeps both ends and can guess without the run
+        // (`hybrid::processor_run`, the pool's own answer for the same count).
+        // Empty where the card holds every layer, or on the processor.
+        //
         // How many of those card-held layers, from the start, keep their
         // routed experts in the machine's memory (#138 (3)) — on a card, for
         // an architecture whose split has been checked, never more than the
         // card holds. The SAME count the placement below acts on and the card
-        // budget takes those experts' bytes off by.
+        // budget takes those experts' bytes off by. They are counted from the
+        // segment's FIRST layers, which a middle run would partly take, so a
+        // load keeping experts in RAM keeps the tail: the pool never asks for
+        // both (`CardSplit::ExpertsInRam` holds every layer on the card); only
+        // `test-split --gpu-layers N --cpu-moe-layers M` by hand does.
         let experts_in_ram_layers = match cpu_expert_layers {
             Some(n) if hybrid_ok && device.is_cuda() => n.min(device_layers),
             _ => 0,
         };
+        let processor_run = super::hybrid::processor_run(
+            segment_layer_count,
+            device_layers,
+            experts_in_ram_layers == 0
+                && super::hybrid::card_may_guess(
+                    &ct,
+                    layer_start,
+                    layer_start + segment_layer_count,
+                    is_first,
+                    is_last,
+                ),
+        );
         let experts_in_ram_bytes = crate::inference::split::routed_expert_bytes(
             &ct,
             layer_start,
@@ -1265,8 +1303,18 @@ impl SplitModel {
             positions => positions,
         };
         // The cache ON `device`, needed by both devices' guards below — a
-        // card's guard must not count the cache of layers it does not hold.
-        let growth = kv_growth_over(layer_start, layer_start + device_layers, device.is_cuda());
+        // card's guard must not count the cache of layers it does not hold:
+        // those before the processor's run and those after it.
+        let growth = kv_growth_over(
+            layer_start,
+            layer_start + processor_run.start,
+            device.is_cuda(),
+        )
+        .plus(kv_growth_over(
+            layer_start + processor_run.end,
+            layer_start + segment_layer_count,
+            device.is_cuda(),
+        ));
         // A card/processor split's OTHER memory (#262): the processor-held
         // layers keep their caches in the machine's, which the card's budget
         // neither covers nor may be charged with. The daemon's figure when it
@@ -1279,8 +1327,8 @@ impl SplitModel {
         let mut host_kv_growth = KvGrowth::default();
         if device.is_cuda() && device_layers < segment_layer_count {
             host_kv_growth = kv_growth_over(
-                layer_start + device_layers,
-                layer_start + segment_layer_count,
+                layer_start + processor_run.start,
+                layer_start + processor_run.end,
                 false,
             );
             host_kv_budget_bytes = super::cpu_kv_budget_bytes().or_else(|| {
@@ -1310,17 +1358,23 @@ impl SplitModel {
                         info.shape.dims(),
                     )
                 });
-            // The weights THE CARD holds: its layers, less the experts kept in
-            // the machine's memory, plus the embedding and head this segment
-            // carries (both load on `device` in a hybrid split too).
+            // The weights THE CARD holds: its layers — every one outside the
+            // processor's run —, less the experts kept in the machine's
+            // memory, plus the embedding and head this segment carries (both
+            // load on `device` in a hybrid split too).
             let weight_bytes = segment_weight_bytes(
                 &ct,
                 layer_start,
-                layer_start + device_layers,
+                layer_start + segment_layer_count,
                 is_first,
                 is_last,
                 rows_on_demand,
             )
+            .saturating_sub(layers_own_bytes(
+                &ct,
+                layer_start + processor_run.start,
+                layer_start + processor_run.end,
+            ))
             .saturating_sub(experts_in_ram_bytes);
 
             // A missing nvidia-smi means "unknown", never "zero" — a budget
@@ -1613,15 +1667,23 @@ impl SplitModel {
         let placement = match device_layers < segment_layer_count {
             true => {
                 let n = device_layers;
+                let run = (
+                    layer_start + processor_run.start,
+                    layer_start + processor_run.end,
+                );
                 tracing::info!(
                     gpu_layers = n,
                     segment_layers = segment_layer_count,
-                    "Hybrid placement: first {n} layers on the graphics card, rest on the processor"
+                    processor_from = run.0,
+                    processor_to = run.1,
+                    "Hybrid placement: {n} layers on the graphics card, layers {}..{} on the processor",
+                    run.0,
+                    run.1
                 );
                 super::hybrid::LayerPlacement::split(
                     layer_start,
                     device.clone(),
-                    n,
+                    processor_run.clone(),
                     cos.clone(),
                     sin.clone(),
                 )
