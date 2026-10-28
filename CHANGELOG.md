@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+**A large model split between your graphics card and your processor loads again on cards with
+12 GB or more.** On v0.3.258, Llama 3.3 70B on a 64 GB computer with a 12 GB card was refused:
+the split put more of the model on the card than the loader lets it hold, so the loader left no
+room for the conversation, moved the whole model to the processor, and the processor alone did
+not have the memory. The split now leaves the card the share the loader keeps free, a layer or
+three fewer on the card, and the model runs as it did on v0.3.256 (#364). The gap grew with the
+card, and appeared in v0.3.257, when a split started taking the memory of idle models.
+
 **Reloading the config file now applies every setting in it.** If you edit `config.toml` by
 hand and reload it (Settings' reload, `POST /api/admin/config/reload`, or `kill -HUP`), only five
 request and timing limits took effect; a changed contribution level, disk or graphics-card limit,

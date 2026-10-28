@@ -3860,6 +3860,39 @@ the cache, after the ends' tables and the shared tensors are paid. llama.cpp's o
 place, never by an average. On this laptop's segment both rules give 10 (10.09 layers of room
 exactly, 10.4 averaged): the fix moves the line where a segment sits near it.
 
+**A split's room is the share its LOAD takes, not the budget less a reserve (2026-10-28, field
+report on v0.3.258, FUTURE_WORK #364).** `plan_gpu_layers` filled the pool's room less
+`FORWARD_BUFFER_RESERVE_BYTES` (384 MB) with layers and their caches at the full context, while the
+loader lets weights and caches take `VRAM_HEADROOM_PCT` (85%) of the free memory it reads and,
+past that, gives the cache nothing and refuses the card (`kv_headroom_bytes` → 0 →
+`NO_KV_CACHE_ROOM_MARKER` → the whole model pinned to the processor). Two rules for one line, and
+the gap grows with the card: 15% of free memory against the pool's reserve (5-10% of the card,
+512-2048 MB) plus 384 MB — ~230 MB on this laptop's 8 GB card (the 10-25 case above had 29 MiB to
+spare), ~730 MB on 12 GB, ~1.9 GB on 24 GB. A tester's RTX 3060 (11,902 MB, 11,384 free, room
+10,890) was given 17 of the 70B's 80 layers: 9,912 MiB of weights with the token table and head
+(the file's sizes: 17 layers + 822 + 564 = 9,912.6 MiB) and 544 MiB of cache, inside 10,890 less
+384; the load allowed 9,676 and refused, and the processor alone could not take the 43 GB model
+(70% of 53.8 GB available). It showed on v0.3.258 and not .256 because .257 gave a split the card
+memory idle models held (#355): on .256 an idle Qwen 3.5 0.8B and Llama 3.2 1B (2,835 MB) stayed,
+the split was 11 layers and 7,036 MB, and 85% of the 8,549 MB left free covered it with 230 MB of
+cache — a shortfall that shrinks with the free memory (the arithmetic on the report's figures; no
+run on that machine). Now **`hybrid::split_room_bytes`** is the room both of the pool's placements
+fill (`split_for_card` → `plan_gpu_layers`, which takes a ROOM, and `experts_in_ram_for_card`): the
+smaller of the budget less the reserve and `kv_budget::weights_and_caches_room` — the loader's own
+statement of its line, which `kv_headroom_bytes` reads too. The share is taken of the pool's room,
+which stands in for the free memory the load reads and is never more than it: the room is free
+memory less the pool's reserve (≥ 512 MB), which covers the new worker's CUDA context (~320 MB,
+`CUDA_PROCESS_OVERHEAD_BYTES`), and the cache at the full context is charged on top, so even a
+context larger than the reserve leaves a shorter conversation, never none. The same card now
+takes 14 layers (8,474 MiB with the tables, 448 MiB of cache, inside 85% of 10,890). llama.cpp
+keeps a fixed 1 GiB of free memory per device for the same reason (`common/fit.cpp`,
+`--fit-target`). Test `a_card_split_leaves_the_card_what_its_load_keeps_back` (the file's own
+layer sizes; red with the old room: 17 layers, the load's budget 0 of the 544 MiB needed).
+⚠ **Whole-card admission is not covered**: it weighs `estimate_gpu_footprint_mb` (weights, the
+cache at `ADMISSION_KV_CONTEXT`, 320 MB) against the budget, so a model whose weights fall between
+85% of free memory and the budget less that is admitted whole and refused at load — on a 24 GB card
+a 32B Q4_K_M (19.85 GB) beside 1 GB of desktop use. → FUTURE_WORK #322.
+
 **The planning curve keeps the tables spread (decided 2026-10-25, #343).** `cost_curve_of` gives
 every layer 1/L of both tables (17 MiB on the 70B), so a first or last run held wholly on a card
 is offered up to a layer more than its spawn places (the spawn splits it, priced a little slow),

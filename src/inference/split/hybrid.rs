@@ -51,7 +51,39 @@ use candle_core::{Device, Tensor};
 /// symmetric trade and this is set generously.
 pub(crate) const FORWARD_BUFFER_RESERVE_BYTES: u64 = 384 * 1024 * 1024;
 
-/// How many of a segment's FIRST layers fit on the card: `0..=layer_weights.len()`.
+/// What a card/processor split may fill with weights and conversation caches
+/// of `budget_bytes` of card: the smaller of the budget less
+/// [`FORWARD_BUFFER_RESERVE_BYTES`] and the loader's own share
+/// (`kv_budget::weights_and_caches_room`). Read by both of the pool's
+/// placements (`process_pool::split_for_card` → [`plan_gpu_layers`], and the
+/// experts-in-RAM rung), so neither offers the card more than its load takes.
+///
+/// **The loader's share is the binding term on any card with more than
+/// ~2.5 GB of room**, and the one that refuses: past it the load gives the
+/// conversation cache nothing and moves the whole model to the processor. A
+/// 70B split on a 12 GB card was given 17 layers — 9,912 MB of weights,
+/// inside its 10,890 MB room less the reserve and the 544 MB cache — where the
+/// load let weights and caches take 9,676 MB (field report, v0.3.258). It
+/// showed once v0.3.257 gave a split the card memory idle models held (#355):
+/// a split beside them was smaller, and so was the shortfall.
+///
+/// The share is taken of `budget_bytes`, which stands in for the free memory
+/// the load will read and is never more than it: the pool's room is the card's
+/// free memory less a reserve of at least 512 MB
+/// (`ResourceConfig::inference_vram_budget_mb`), which covers the new worker's
+/// own CUDA context (~320 MB, `vram::CUDA_PROCESS_OVERHEAD_BYTES`). llama.cpp
+/// keeps a fixed margin of free memory per device for the same reason
+/// (`common/fit.cpp`, `--fit-target`, 1 GiB).
+pub(crate) fn split_room_bytes(budget_bytes: u64) -> u64 {
+    budget_bytes
+        .saturating_sub(FORWARD_BUFFER_RESERVE_BYTES)
+        .min(super::kv_budget::weights_and_caches_room(budget_bytes))
+}
+
+/// How many of a segment's FIRST layers fit in `room_bytes` of card:
+/// `0..=layer_weights.len()`. `room_bytes` is what the layers' own weights and
+/// caches may take — [`split_room_bytes`] of the card, less the tables the
+/// segment's ends put there first (`process_pool::split_for_card`).
 ///
 /// Zero means the processor takes the whole segment, which is the old
 /// behaviour and still correct when nothing fits.
@@ -73,7 +105,7 @@ pub(crate) const FORWARD_BUFFER_RESERVE_BYTES: u64 = 384 * 1024 * 1024;
 /// llama.cpp's own fitting (`common/fit.cpp`, `llama_params_fit_impl`) weighs
 /// each candidate count by the tensors it would place, never by an average.
 pub(crate) fn plan_gpu_layers(
-    budget_bytes: u64,
+    room_bytes: u64,
     layer_weights: &[u64],
     segment_kv_bytes: u64,
 ) -> usize {
@@ -82,7 +114,6 @@ pub(crate) fn plan_gpu_layers(
     if layer_weights.iter().all(|&bytes| bytes == 0) {
         return 0;
     }
-    let usable = budget_bytes.saturating_sub(FORWARD_BUFFER_RESERVE_BYTES);
     // A layer on the card brings its KV with it; one on the processor does not.
     // Folding KV in here is what removes the need for a flat reserve.
     let kv_per_layer = segment_kv_bytes.div_ceil(layer_weights.len() as u64);
@@ -90,8 +121,18 @@ pub(crate) fn plan_gpu_layers(
     layer_weights
         .iter()
         .take_while(|&&weights| {
-            placed = placed.saturating_add(weights).saturating_add(kv_per_layer);
-            placed <= usable
+            // Checked, not saturated: a sum past `u64::MAX` saturated to it
+            // and then "fitted" a room of `u64::MAX` (gotcha #855's class).
+            match placed
+                .checked_add(weights)
+                .and_then(|sum| sum.checked_add(kv_per_layer))
+            {
+                Some(sum) if sum <= room_bytes => {
+                    placed = sum;
+                    true
+                }
+                _ => false,
+            }
         })
         .count()
 }
@@ -405,7 +446,7 @@ mod tests {
         let total = 48;
         let weights = 9347 * MB;
         let n = plan_gpu_layers(
-            4990 * MB,
+            split_room_bytes(4990 * MB),
             &even(weights, total),
             segment_kv(total, 1024, KvStorage::F32, 4096),
         );
@@ -449,7 +490,7 @@ mod tests {
     fn a_segment_that_fits_entirely_goes_entirely_to_the_card() {
         // 2 GB of weights, 8 GB budget: everything, and never more than exists.
         let n = plan_gpu_layers(
-            8 * GB,
+            split_room_bytes(8 * GB),
             &even(2 * GB, 28),
             segment_kv(28, 512, KvStorage::F32, 4096),
         );
@@ -461,7 +502,7 @@ mod tests {
         // The whole budget is swallowed by the forward-buffer reserve.
         assert_eq!(
             plan_gpu_layers(
-                256 * MB,
+                split_room_bytes(256 * MB),
                 &even(8 * GB, 32),
                 segment_kv(32, 1024, KvStorage::F32, 4096)
             ),
@@ -485,7 +526,7 @@ mod tests {
     fn a_longer_context_costs_layers_on_the_card() {
         let args = |ctx| {
             plan_gpu_layers(
-                6 * GB,
+                split_room_bytes(6 * GB),
                 &even(4 * GB, 32),
                 segment_kv(32, 1024, KvStorage::F32, ctx),
             )
@@ -504,12 +545,12 @@ mod tests {
         // The f16 flash mirror is real graphics memory (see `LayerKv`), so a
         // model maintaining one must not be planned as though it were free.
         let plain = plan_gpu_layers(
-            6 * GB,
+            split_room_bytes(6 * GB),
             &even(4 * GB, 32),
             segment_kv(32, 1024, KvStorage::F32, 8192),
         );
         let mirrored = plan_gpu_layers(
-            6 * GB,
+            split_room_bytes(6 * GB),
             &even(4 * GB, 32),
             segment_kv(32, 1024, KvStorage::F32Mirrored, 8192),
         );
@@ -517,7 +558,7 @@ mod tests {
         // And the half cache, at a third of the mirrored layout's bytes, leaves
         // room for more of the model on the card (FUTURE_WORK #194).
         let half = plan_gpu_layers(
-            6 * GB,
+            split_room_bytes(6 * GB),
             &even(4 * GB, 32),
             segment_kv(32, 1024, KvStorage::F16, 8192),
         );
@@ -661,13 +702,13 @@ mod tests {
     /// layer too few.
     #[test]
     fn the_card_is_charged_its_own_layers_not_their_average() {
-        let budget = FORWARD_BUFFER_RESERVE_BYTES + 450 * MB;
+        let budget = 450 * MB;
         // 300 + 100 fits 450, a third layer does not; averaged at 150, three did.
         let heavy_first = [300 * MB, 100 * MB, 100 * MB, 100 * MB];
         assert_eq!(plan_gpu_layers(budget, &heavy_first, 0), 2);
         assert_eq!(plan_gpu_layers(budget, &even(600 * MB, 4), 0), 3);
         // Light first: three fit in 350; averaged at 150, only two did.
-        let budget = FORWARD_BUFFER_RESERVE_BYTES + 350 * MB;
+        let budget = 350 * MB;
         let heavy_last = [100 * MB, 100 * MB, 100 * MB, 300 * MB];
         assert_eq!(plan_gpu_layers(budget, &heavy_last, 0), 3);
         assert_eq!(plan_gpu_layers(budget, &even(600 * MB, 4), 0), 2);

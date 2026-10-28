@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #364**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #365**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -2548,6 +2548,18 @@ at the refusal at `info`, then decide whether `card_verdict` charges the margin 
 ladder would split the range instead of loading it with no cache). The refusal's advice also
 blames other programs when this node's own weights fill the card.
 
+**2026-10-28, the split half closed (#364), this half left.** The line the loader holds a card
+to is `kv_budget::weights_and_caches_room` — weights and caches within 85% of the free memory
+the load reads, the rest kept back, the cache given nothing past it — and #364 made both split
+placements fill that share (`hybrid::split_room_bytes`). A model or range admitted WHOLE is
+still weighed as `estimate_gpu_footprint_mb` (weights + the cache at `ADMISSION_KV_CONTEXT` +
+320 MB) against the budget (free memory less a 5-10% reserve, 512-2048 MB), so weights between
+85% of free memory and the budget less the rest are admitted and then refused at load, the
+model pinned to the processor: on a 24 GB card, a 32B Q4_K_M (19.85 GB) beside 1 GB of other
+use. Next: the admission's verdict asks the loader's line too, for the weights the card would
+hold — one predicate for `card_verdict`, `fits_in_budget` (the planner) and the promotion — and
+a refusal of that kind goes down the spawn's ladder to a split.
+
 #### #297 — Auto-manage prices a card by the file's size, so Gemma 4's E2B/E4B read heavier than they run
 `P3` · memory · **OPEN** — 2026-10-17 · history: #296's review
 
@@ -3368,6 +3380,18 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-28, ships in the next release** (#364)
+- #364 — **A card/processor split fills only the share of the card its load takes** (field
+  report, v0.3.258: Llama 3.3 70B on a 64 GB computer with an RTX 3060 refused, where .256 ran it
+  locally). The split filled the pool's room less a 384 MB reserve; the loader lets weights and
+  caches take 85% of the free memory it reads and refused the card past that — 9,912 MB of
+  weights against 9,676 — pinning the model to a processor that could not hold it. Both
+  placements now fill `hybrid::split_room_bytes`, the smaller of the two lines, the loader's
+  stated once (`kv_budget::weights_and_caches_room`). It showed once #355 gave a split idle
+  models' card memory. Test `a_card_split_leaves_the_card_what_its_load_keeps_back`. Whole-card
+  admission keeps the gap → #322. Evidence: `docs/invariants/memory.md` § "A split's processor share
+  is charged to the machine", its paragraph "A split's room is the share its LOAD takes".
 
 **Closed 2026-10-27, ships in the next release** (#334, #338, #340, #341, #354, #359, #360, #361)
 - #334 — **Four rules computed in several places are each computed once.** Whether a part on

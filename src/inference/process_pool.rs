@@ -2979,8 +2979,11 @@ fn split_for_card(
         .card_weight_bytes()
         .saturating_sub(laid)
         .max(inputs.head_bytes);
+    // The room is the loader's share of the card, never the budget less a
+    // reserve alone — past its share the load refuses the card outright
+    // (`hybrid::split_room_bytes`, field report v0.3.258).
     let n = crate::inference::split::hybrid::plan_gpu_layers(
-        available_bytes.saturating_sub(up_front),
+        crate::inference::split::hybrid::split_room_bytes(available_bytes).saturating_sub(up_front),
         layer_weights,
         card_kv_bytes_of_split(inputs),
     );
@@ -3105,9 +3108,11 @@ impl CardSplit {
 /// of 128 experts, so the processor's share is small, while a whole layer
 /// there also runs attention over the conversation.
 ///
-/// Charged by the same terms as [`split_for_card`] — the reserve for a
-/// forward's transient buffers and the KV cache at the model's full context —
-/// so the two placements promise a conversation the same room.
+/// Charged by the same terms as [`split_for_card`] — the KV cache at the
+/// model's full context, in the card room the load takes
+/// (`hybrid::split_room_bytes`: the loader's share, never more than the budget
+/// less a forward's transient buffers) — so the two placements promise a
+/// conversation the same room.
 /// `expert_bytes[i]` is layer `i` of the segment's routed-expert bytes
 /// (`split::routed_expert_bytes`), exact per layer: a quantization mix gives
 /// some layers' experts more bits than others.
@@ -3123,8 +3128,7 @@ fn experts_in_ram_for_card(
         return None;
     }
     let kv = card_kv_bytes_of_split(inputs);
-    let usable = available_bytes
-        .saturating_sub(crate::inference::split::hybrid::FORWARD_BUFFER_RESERVE_BYTES);
+    let usable = crate::inference::split::hybrid::split_room_bytes(available_bytes);
     let mut on_card = inputs.card_weight_bytes().saturating_add(kv);
     // At least one: this is asked only of a segment admission found too large
     // for the card whole.
@@ -15427,6 +15431,64 @@ mod tests {
         assert_eq!(
             split_for_card(&spread, &[130 * MIB; 10], room),
             Some((6, 10))
+        );
+    }
+
+    /// **A card split leaves the card what its load keeps back** (field
+    /// report, v0.3.258): Llama 3.3 70B Q4_K_M on an RTX 3060 with 10,890 MB
+    /// of room and 11,384 MB free was split 17 of 80 layers — 9,912 MB of
+    /// weights with the token table and output head, the 544 MB cache of
+    /// 8,192 tokens and the forward reserve inside the room. The load lets
+    /// weights and caches take 85% of the free memory it reads
+    /// (`kv_budget::weights_and_caches_room`), found no room for any
+    /// conversation, and moved the whole model to the processor, where it did
+    /// not fit. The file's own sizes (`gguf_header.bin`): Q4_K_M's heavier
+    /// layers are the first and last eight and every third between.
+    #[test]
+    fn a_card_split_leaves_the_card_what_its_load_keeps_back() {
+        use crate::inference::split::kv_budget::kv_headroom_bytes;
+        const MIB: u64 = 1024 * 1024;
+        let layer = |i: usize| {
+            if !(10..70).contains(&i) || i.is_multiple_of(3) {
+                544_079_872u64
+            } else {
+                482_410_496
+            }
+        };
+        let weights: Vec<u64> = (0..80).map(layer).collect();
+        // The output head, its norm and `rope_freqs`, and the token table: the
+        // tensors no layer names, which go on the card first.
+        let ends = 861_880_320 + 32_768 + 256 + 591_003_648;
+        let inputs = crate::model::auto_manage::vram::VramFootprintInputs {
+            quantized_weight_bytes: weights.iter().sum::<u64>() + ends,
+            head_bytes: 861_880_320 + 591_003_648,
+            ..seventy_b_inputs()
+        };
+        let room = 10_890 * MIB;
+        let (on_card, total) = split_for_card(&inputs, &weights, room).expect("it splits");
+        assert_eq!(total, 80);
+        let card_weights = ends + weights[..on_card].iter().sum::<u64>();
+        // What a card layer's cache costs at 8,192 tokens, kept as this build
+        // keeps it — a card build's half cache, 32 MiB (the report's 544 MB
+        // for 17 layers), and f32 where the card's kernels are not built.
+        let per_layer_cache = card_kv_bytes_of_split(&inputs) / 80;
+        let cache = per_layer_cache * on_card as u64;
+        // The load's verdict, on the least free memory it can read: the
+        // room, which is the free memory less the pool's reserve.
+        let budget = kv_headroom_bytes(card_weights, room);
+        assert!(
+            budget >= cache,
+            "{on_card} layers, {} MB of weights: the load leaves {} MB of the {} MB a full \
+             conversation needs",
+            card_weights / MIB,
+            budget / MIB,
+            cache / MIB
+        );
+        // And not one layer short of what the load would take.
+        let one_more = card_weights + weights[on_card];
+        assert!(
+            kv_headroom_bytes(one_more, room) < cache + per_layer_cache,
+            "{on_card} layers leave room for another"
         );
     }
 

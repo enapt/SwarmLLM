@@ -514,7 +514,22 @@ pub(crate) fn mla_kv_elems(
 /// RUNTIME budget: the loader records it on the model and every forward checks
 /// against it before claiming another growth quantum.
 pub(crate) fn kv_headroom_bytes(weight_bytes: u64, free_vram_bytes: u64) -> u64 {
-    (free_vram_bytes / 100 * VRAM_HEADROOM_PCT).saturating_sub(weight_bytes)
+    weights_and_caches_room(free_vram_bytes).saturating_sub(weight_bytes)
+}
+
+/// What a load lets a model's weights and conversation caches take of
+/// `free_vram_bytes`, the card's free memory as the load reads it — the line
+/// past which [`kv_headroom_bytes`] leaves the cache nothing and the loader
+/// refuses the card (`worker_ipc::NO_KV_CACHE_ROOM_MARKER`).
+///
+/// **The one statement of that line**, asked by the card/processor split's
+/// placement too (`hybrid::split_room_bytes`). A split placed by the pool's
+/// own reserve alone filled the card past it: Llama 3.3 70B on a 12 GB card
+/// was given 9,912 MB of weights where the load allowed weights and caches
+/// 9,676 MB of 11,384 free, and the whole model went to the processor, where
+/// it did not fit (field report, v0.3.258).
+pub(crate) fn weights_and_caches_room(free_vram_bytes: u64) -> u64 {
+    free_vram_bytes / 100 * VRAM_HEADROOM_PCT
 }
 
 /// What the card keeps free beyond the KV cache when the budget is reconciled
