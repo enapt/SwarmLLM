@@ -3837,6 +3837,19 @@ steps were captured. The gate itself asks the driver (`cuStreamIsCapturing`) abo
 capture runs on, as candle's own `layout_params` does. (Explained 2026-10-22: the captured steps
 ran the vector kernel and the uncaptured ones MMQ — next section.)
 
+**Upstream's out-of-bounds fix does not reach our dense path** (checked 2026-10-28). llama.cpp
+fc9ce6b (#29953, 10-08) fixed MMQ reading past `src1_q8_1`: the tail was sized by
+`ggml_cuda_mmq_get_J_max` (rounded DOWN) while the launch chose its tile width rounding up; it also
+padded `ids_dst` (MoE only). Our entry chooses the width at launch (≤ 128, the same choice) and sizes
+the tail as a fixed 128 rows of `block_q8_1_mmq` (`mmq_entry.cu::swarm_mmq_q8_1_bytes`). The kernel's
+unguarded y read is `roundup(J·36, nthreads)` ints from the last tile's start, so the worst over-read
+is `roundup(128·36, 256) − 36` = 4,572 ints = 127 rows — one row inside the tail, for 128, 256 or 512
+threads (all divide 4,608). The `dst` write and the stream-k fixup are guarded by `j_max`; `ids_dst`
+is null in our path. Nothing else between 4b1a27fa0eb8 and 2026-10-28 is a fix our Ampere path needs;
+the only Ampere-eligible speed change is the fused gate/up prompt matmul (c49edf0, #29948: +1.3% on
+an RTX 4090 at pp16384, unmeasured on sm_86) — not taken. ⚠ A tile wider than 128, or a tail sized
+any other way, must re-derive the bound.
+
 ### A few rows: the line per type and size, inside a capture too (2026-10-22, #134 (b))
 
 **What it replaced.** The rule above stopped at a capture, and since 2026-10-22 a drafter's tree
