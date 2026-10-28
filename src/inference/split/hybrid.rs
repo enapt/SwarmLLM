@@ -51,11 +51,43 @@ use candle_core::{Device, Tensor};
 /// symmetric trade and this is set generously.
 pub(crate) const FORWARD_BUFFER_RESERVE_BYTES: u64 = 384 * 1024 * 1024;
 
+/// The card a card/processor split is sized against: the pool's ROOM for it
+/// (its card budget less every charge) and, where the worker that will load
+/// the split has read the card first (`DaemonMsg::ReadCardFree`, #365), the
+/// free memory that load reads — the figure the loader's line is drawn on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SplitCard {
+    /// The pool's room for the split, in bytes.
+    pub(crate) room_bytes: u64,
+    /// The card's free memory as the worker's load will read it, in bytes;
+    /// `None` where no worker was asked (a plan, a growth).
+    pub(crate) load_reads_free_bytes: Option<u64>,
+}
+
+impl SplitCard {
+    /// A split with no worker to ask: the room stands in for the load's
+    /// reading ([`split_room_bytes`] says why that is safe and what it costs).
+    pub(crate) fn room(room_bytes: u64) -> Self {
+        Self {
+            room_bytes,
+            load_reads_free_bytes: None,
+        }
+    }
+
+    /// A spawn whose worker read the card before loading anything.
+    pub(crate) fn read_by_the_load(room_bytes: u64, free_bytes: u64) -> Self {
+        Self {
+            room_bytes,
+            load_reads_free_bytes: Some(free_bytes),
+        }
+    }
+}
+
 /// What a card/processor split may fill with weights and conversation caches
-/// of `budget_bytes` of card: the smaller of the budget less
-/// [`FORWARD_BUFFER_RESERVE_BYTES`] and the loader's own share
-/// (`kv_budget::weights_and_caches_room`). Read by both of the pool's
-/// placements (`process_pool::split_for_card` → [`plan_gpu_layers`], and the
+/// of `card`: the smaller of the room less [`FORWARD_BUFFER_RESERVE_BYTES`]
+/// and the loader's own share (`kv_budget::weights_and_caches_room`) of the
+/// free memory the load reads. Read by both of the pool's placements
+/// (`process_pool::split_for_card` → [`plan_gpu_layers`], and the
 /// experts-in-RAM rung), so neither offers the card more than its load takes.
 ///
 /// **The loader's share is the binding term on any card with more than
@@ -67,17 +99,25 @@ pub(crate) const FORWARD_BUFFER_RESERVE_BYTES: u64 = 384 * 1024 * 1024;
 /// showed once v0.3.257 gave a split the card memory idle models held (#355):
 /// a split beside them was smaller, and so was the shortfall.
 ///
-/// The share is taken of `budget_bytes`, which stands in for the free memory
-/// the load will read and is never more than it: the pool's room is the card's
-/// free memory less a reserve of at least 512 MB
+/// **Where the load's reading is not known the share is taken of the room**,
+/// which stands in for it and is never more than it: the pool's room is the
+/// card's free memory less a reserve of at least 512 MB
 /// (`ResourceConfig::inference_vram_budget_mb`), which covers the new worker's
-/// own CUDA context (~320 MB, `vram::CUDA_PROCESS_OVERHEAD_BYTES`). llama.cpp
-/// keeps a fixed margin of free memory per device for the same reason
-/// (`common/fit.cpp`, `--fit-target`, 1 GiB).
-pub(crate) fn split_room_bytes(budget_bytes: u64) -> u64 {
-    budget_bytes
+/// own CUDA context. Safe, and short: on this node's 8 GB card the load read
+/// 670 MB more than the room (the desktop's 751 MB counted against the budget,
+/// the worker's context ~150 MB), so a 14B split put 23-24 of 48 layers on the
+/// card where the load took 27 — decode 0.92x, a 30B-A3B's experts-in-RAM
+/// 0.89x (#365, 2026-10-28). The reading cannot be predicted to that
+/// precision — a 12 GB card read only 494 MB more than its room — so a spawn
+/// ASKS its worker before the load (`process_pool` `refit_split_to_the_load`),
+/// as Ollama's server asks its runner to fit a layout before it allocates
+/// (`llm.LoadOperationFit`, v0.11.5) and llama.cpp's own fitting reads the
+/// device it is about to fill (`common/fit.cpp`, `--fit-target`).
+pub(crate) fn split_room_bytes(card: SplitCard) -> u64 {
+    let load_reads = card.load_reads_free_bytes.unwrap_or(card.room_bytes);
+    card.room_bytes
         .saturating_sub(FORWARD_BUFFER_RESERVE_BYTES)
-        .min(super::kv_budget::weights_and_caches_room(budget_bytes))
+        .min(super::kv_budget::weights_and_caches_room(load_reads))
 }
 
 /// How many of a segment's FIRST layers fit in `room_bytes` of card:
@@ -446,7 +486,7 @@ mod tests {
         let total = 48;
         let weights = 9347 * MB;
         let n = plan_gpu_layers(
-            split_room_bytes(4990 * MB),
+            split_room_bytes(SplitCard::room(4990 * MB)),
             &even(weights, total),
             segment_kv(total, 1024, KvStorage::F32, 4096),
         );
@@ -490,7 +530,7 @@ mod tests {
     fn a_segment_that_fits_entirely_goes_entirely_to_the_card() {
         // 2 GB of weights, 8 GB budget: everything, and never more than exists.
         let n = plan_gpu_layers(
-            split_room_bytes(8 * GB),
+            split_room_bytes(SplitCard::room(8 * GB)),
             &even(2 * GB, 28),
             segment_kv(28, 512, KvStorage::F32, 4096),
         );
@@ -502,7 +542,7 @@ mod tests {
         // The whole budget is swallowed by the forward-buffer reserve.
         assert_eq!(
             plan_gpu_layers(
-                split_room_bytes(256 * MB),
+                split_room_bytes(SplitCard::room(256 * MB)),
                 &even(8 * GB, 32),
                 segment_kv(32, 1024, KvStorage::F32, 4096)
             ),
@@ -519,6 +559,35 @@ mod tests {
         );
     }
 
+    /// **A split fills the share its load reads** (#365): on this node's 8 GB
+    /// card a 14B's spawn had 6,621 MB of room and its load read 7,291 MB
+    /// free (2026-10-28). Where no worker was asked the room stands in for the
+    /// reading; asked, the share is the load's line on what it read — never
+    /// past the room less the forward reserve, and smaller where the card was
+    /// taken after the room was read.
+    #[test]
+    fn a_split_fills_the_share_its_load_reads() {
+        let room = 6_621 * MB;
+        let unasked = split_room_bytes(SplitCard::room(room));
+        let read = split_room_bytes(SplitCard::read_by_the_load(room, 7_291 * MB));
+        assert_eq!(unasked, room / 100 * 85);
+        assert_eq!(read, 7_291 * MB / 100 * 85);
+        assert!(
+            read > unasked + 500 * MB,
+            "the load's reading gave the split {} MB more",
+            (read - unasked) / MB
+        );
+        assert_eq!(
+            split_room_bytes(SplitCard::read_by_the_load(room, 20 * GB)),
+            room - FORWARD_BUFFER_RESERVE_BYTES,
+            "a reading past the room leaves the pool's own line standing"
+        );
+        assert!(
+            split_room_bytes(SplitCard::read_by_the_load(room, 5_000 * MB)) < unasked,
+            "a card taken since the room was read shrinks the share"
+        );
+    }
+
     /// KV is charged per layer placed, not as a lump — so asking for a longer
     /// conversation must move layers off the card, never leave the plan
     /// unchanged. This is the property that replaces llama.cpp's flat reserve.
@@ -526,7 +595,7 @@ mod tests {
     fn a_longer_context_costs_layers_on_the_card() {
         let args = |ctx| {
             plan_gpu_layers(
-                split_room_bytes(6 * GB),
+                split_room_bytes(SplitCard::room(6 * GB)),
                 &even(4 * GB, 32),
                 segment_kv(32, 1024, KvStorage::F32, ctx),
             )
@@ -545,12 +614,12 @@ mod tests {
         // The f16 flash mirror is real graphics memory (see `LayerKv`), so a
         // model maintaining one must not be planned as though it were free.
         let plain = plan_gpu_layers(
-            split_room_bytes(6 * GB),
+            split_room_bytes(SplitCard::room(6 * GB)),
             &even(4 * GB, 32),
             segment_kv(32, 1024, KvStorage::F32, 8192),
         );
         let mirrored = plan_gpu_layers(
-            split_room_bytes(6 * GB),
+            split_room_bytes(SplitCard::room(6 * GB)),
             &even(4 * GB, 32),
             segment_kv(32, 1024, KvStorage::F32Mirrored, 8192),
         );
@@ -558,7 +627,7 @@ mod tests {
         // And the half cache, at a third of the mirrored layout's bytes, leaves
         // room for more of the model on the card (FUTURE_WORK #194).
         let half = plan_gpu_layers(
-            split_room_bytes(6 * GB),
+            split_room_bytes(SplitCard::room(6 * GB)),
             &even(4 * GB, 32),
             segment_kv(32, 1024, KvStorage::F16, 8192),
         );

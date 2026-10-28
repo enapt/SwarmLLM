@@ -1484,6 +1484,11 @@ ModelProcessPool.forward()   ──socket──▶   runs forward passes / decod
   request id a router retry reuses (#749), and the model loads as a pool GUEST
   (`Tenancy::Guest`: free memory only, #747).
 - `DaemonMsg::Unload` — drop a layer range within the worker (partial memory reclaim)
+- `DaemonMsg::ReadCardFree` → `WorkerMsg::CardFree` — the card's free memory as a load
+  in this worker will read it, asked by a card/processor split's spawn right after
+  `Ready` and before anything loads, so the split is sized by the figure the loader's
+  line is drawn on (`process_pool::refit_split_to_the_load`, #365); the daemon then
+  sends `PlaceRange` for the spawn's range when the reading puts more on the card
 - `DaemonMsg::CancelRequest` — abandon a request the daemon no longer wants a reply for
 - `DaemonMsg::ReleaseRequestKv` — the request is over; free the KV cache it holds
   (2026-09-12, report #019). The `Generate` handlers clear their own on the way

@@ -7014,6 +7014,18 @@ async fn handle_daemon_msg(
                 "model-worker: placing a later range where the daemon found room for it"
             );
         }
+        DaemonMsg::ReadCardFree => {
+            // Before anything loads: the spawn of a card/processor split sizes
+            // it by what the load will read (#365).
+            let free_bytes = crate::inference::split::card_free_for_a_load();
+            tracing::info!(
+                free_mb = free_bytes.map(|b| b / (1024 * 1024)),
+                "model-worker: read the card's free memory for the daemon's split"
+            );
+            if let Err(e) = send_worker(writer, &WorkerMsg::CardFree { free_bytes }, &[]).await {
+                tracing::warn!(error = %e, "model-worker: could not report the card's free memory");
+            }
+        }
         DaemonMsg::LoadRange {
             model_id,
             layer_start,

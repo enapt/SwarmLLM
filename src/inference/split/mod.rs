@@ -56,6 +56,7 @@ pub(crate) use self::gguf_meta::{
     segment_tensor, SegmentTensor, SlidingWindow, PER_LAYER_TOKEN_TABLE,
 };
 pub use self::kv_cache::{KvCacheStore, KvOccupancy};
+pub(crate) use self::loader::card_free_for_a_load;
 pub use self::model::SplitModel;
 pub(crate) use self::per_layer::PerLayerInputs;
 pub use self::prefix_cache::{

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+**A model split between your graphics card and your processor puts as much on the card as it
+did before v0.3.259, and writes about 10% faster than on v0.3.259.** v0.3.259's fix for large
+models on 12 GB cards sized the card's share from a cautious estimate of the free graphics
+memory. On an 8 GB card that left three of a 14B model's layers on the slower processor though
+the card had room for them. The node now asks the model's own process how much graphics memory
+it sees before anything loads, and places the model on that reading, still inside the share the
+loader keeps free, so the large-model fix stands. Measured on an 8 GB card: Qwen2.5-14B is back
+to 27 of its 48 layers on the card and replies 1.10x as fast; Qwen3-30B-A3B keeps three fewer
+layers' experts in system memory (#365).
 
 ## [0.3.259-alpha] — 2026-10-28
 

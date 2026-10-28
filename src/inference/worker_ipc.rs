@@ -61,6 +61,14 @@ pub enum DaemonMsg {
         layer_end: usize,
         placement: Option<crate::inference::split::RangePlacement>,
     },
+    /// Read the card's free memory as a load in this worker would read it
+    /// (`split::card_free_for_a_load`), before anything is loaded — sent by
+    /// the spawn of a card/processor split right after `Ready`, so the daemon
+    /// sizes the split by the figure the load's line is drawn on rather than
+    /// by its own room (#365). Answered with `WorkerMsg::CardFree`. Sent only
+    /// by a daemon to a worker spawned from its own binary or a newer one, so
+    /// no worker that cannot read it ever receives it.
+    ReadCardFree,
     /// Read a range's layers now, before any forward names them — sent when a
     /// peer's split asks about a prompt this node's range will run
     /// (`ModelProcessPool::load_ahead_for_a_peer`), so the machines of a cold
@@ -268,6 +276,10 @@ pub enum WorkerMsg {
     /// ⚠ Sent only when the daemon said it reads it
     /// ([`DAEMON_READS_CONTEXT_FITS`]) — see `CardAllocationProbe`.
     ContextFits { tokens: Option<u32> },
+    /// The answer to `DaemonMsg::ReadCardFree`: the card's free memory as a
+    /// load here reads it, in bytes; `None` without a card or a reading.
+    /// Sent only in answer to that message, so only to a daemon that reads it.
+    CardFree { free_bytes: Option<u64> },
     /// Error for a specific request.
     ///
     /// `fatal` marks a failure that corrupted or exhausted the worker's device
@@ -872,6 +884,7 @@ enum WorkerMsgTag {
     CardAllocationProbe,
     ModelLoadTimed,
     ContextFits,
+    CardFree,
     Error,
     PrefixManifestUpdate,
     PrefixFetchProbe,
@@ -1147,6 +1160,7 @@ mod tests {
                 WorkerMsg::CardAllocationProbe { .. } => WorkerMsgTag::CardAllocationProbe,
                 WorkerMsg::ModelLoadTimed { .. } => WorkerMsgTag::ModelLoadTimed,
                 WorkerMsg::ContextFits { .. } => WorkerMsgTag::ContextFits,
+                WorkerMsg::CardFree { .. } => WorkerMsgTag::CardFree,
                 WorkerMsg::Error { .. } => WorkerMsgTag::Error,
                 WorkerMsg::PrefixManifestUpdate { .. } => WorkerMsgTag::PrefixManifestUpdate,
                 WorkerMsg::PrefixFetchProbe { .. } => WorkerMsgTag::PrefixFetchProbe,
@@ -1167,6 +1181,10 @@ mod tests {
                 tokens: Some(4_608),
             },
             WorkerMsg::ContextFits { tokens: None },
+            WorkerMsg::CardFree {
+                free_bytes: Some(7_291 << 20),
+            },
+            WorkerMsg::CardFree { free_bytes: None },
             WorkerMsg::Drafted {
                 request_id: Uuid::nil(),
                 tokens: vec![],

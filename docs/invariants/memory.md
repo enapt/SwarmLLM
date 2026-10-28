@@ -3898,6 +3898,42 @@ applying the 85% to the pool's ROOM**: a whole placement sits too close to the l
 room's caution in layers (3-4 on this 8 GB card, #365); a whole placement pays it with the card. #322 has the
 measurement and the rescoped fix: the load's own refusal sends the model to the split rung.
 
+**A spawn's split is sized by the free memory its worker READS (2026-10-28, FUTURE_WORK #365).** The
+room above is never more than the load's reading, and on this laptop it was 670 MB less: v0.3.259
+planned a Qwen2.5-14B split on a 6,621 MB budget (8,192 less the desktop's 751, counted as other, less
+the pool's 820 MB reserve), its worker's load read 7,291 MB free (the worker's own CUDA context takes
+~150 MB of what the reserve stands for), and 85% of the room put 23-24 of 48 layers on the card where
+the load takes 27 — the cache it then sized held ~14,800 tokens for an 8,192-token context; decode
+0.92x against v0.3.258 (A/B/B/A of the two released builds, fresh boot, 07:05-07:19Z). No better guess
+closes it: the field report's 12 GB card read only 494 MB more than its room, so "room + reserve − a
+context" over-reads that card for any reserve above 814 MB. So the spawn ASKS. `spawn_worker` sends
+`DaemonMsg::ReadCardFree` before the reader actor owns the connection; the worker opens its card
+(`load_device` — the primary context its load then uses) and answers `WorkerMsg::CardFree` with the
+loader's own reading (`card_free_bytes`: the driver's free memory plus the pool's reusable bytes);
+`refit_split_to_the_load` gives back the spawn's card charge, sizes the split again
+(`SplitCard::read_by_the_load`: the room less the 384 MB forward reserve, capped at 85% of the
+reading) and takes it only when it leaves less in the machine than was charged — more on the card,
+inside the budget the spawn was weighed against, so no admission can refuse it. It moves both
+charges, sets the handle's split and sends `PlaceRange` for the segment before anything loads (a
+`PendingSpawnCharge` covers that send). Ollama does the same in two steps (`LoadOperationFit`, the
+runner reports, `LoadOperationAlloc`); llama.cpp's `--fit` reads the device itself. A worker that does
+not answer in 20 s, or a reading no larger than the room, keeps the first plan, and a late answer is
+dropped by the reader (`worker_msg_request_id` → `None`). The load-time fit the entry first proposed
+was not built: it moves a charge AFTER admission, from the reader actor, outside the spawn lock that
+decided it. **Measured inside ONE binary** (`SWARMLLM_SPLIT_READS_CARD=0` against unset, A/B/B/A,
+live node stopped, Windows up 2.5 h, `~/swarmllm-gate/365/ab2.sh`): the 14B 24 → 27 layers (v0.3.258's),
+cache 14,961 → 8,920 tokens, decode 5.88/5.85 → 6.38/6.25 tok/s (1.10x; AB 1.11, BA 1.09), prompt
+1.04x; Qwen3-30B-A3B Q2_K 29 → 26 layers' experts in RAM (v0.3.258's; 6,046 → 5,421 MB), decode 1.00x
+(AB 0.93, BA 1.07 — this model's single runs span 17-21 tok/s on one placement, so the run cannot
+resolve it). The worker's reading and the load's were the same figure in every arm (7,284-7,293 MB).
+⚠ A first A/B against the v0.3.258 RELEASE read 1.11x too, but proved nothing: a native local build
+against a portable release, and the old binary installed v0.3.259 over itself mid-run (gotcha #982).
+Not covered, nothing measured short: a growth onto the card (`growth_split`) and the scheduler's plan
+still size on the room — there is no worker to ask. Tests `a_split_spawn_fills_the_card_its_worker_reads`,
+`a_split_spawn_keeps_fewer_experts_in_ram_where_its_worker_reads_more`,
+`a_split_spawn_reads_the_card_its_worker_will_load_on`, `a_split_fills_the_share_its_load_reads` — each
+red with the reading ignored or never asked.
+
 **The planning curve keeps the tables spread (decided 2026-10-25, #343).** `cost_curve_of` gives
 every layer 1/L of both tables (17 MiB on the 70B), so a first or last run held wholly on a card
 is offered up to a layer more than its spawn places (the spawn splits it, priced a little slow),

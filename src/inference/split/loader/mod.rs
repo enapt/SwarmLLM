@@ -902,6 +902,35 @@ pub(super) fn load_device(force_cpu: bool) -> Device {
     device
 }
 
+/// The card's free memory as a load on `device` reads it: what `nvidia-smi`
+/// reports free, plus what this worker's own pool keeps to hand out again
+/// (`cuda_pool::reusable_bytes` — a range loaded into a worker that has
+/// already served). The figure the loader's line is drawn on
+/// (`kv_budget::kv_headroom_bytes`). `None` when it cannot be read: unknown,
+/// never zero.
+fn card_free_bytes(device: &Device) -> Option<u64> {
+    crate::model::auto_manage::vram::query_gpu_vram_free_mb().map(|free_mb| {
+        free_mb
+            .saturating_mul(1024 * 1024)
+            .saturating_add(crate::inference::cuda_pool::reusable_bytes(device))
+    })
+}
+
+/// The card's free memory as a load in this worker would read it NOW, before
+/// anything is loaded (`DaemonMsg::ReadCardFree`, #365): the card picked the
+/// way a load picks it ([`load_device`] — the worker's own context is part of
+/// what the load finds taken) and read the way the loader reads it
+/// ([`card_free_bytes`]). The daemon sizes a card/processor split by it, so
+/// the split it sends fills the share the load will take. `None` without a
+/// card.
+pub(crate) fn card_free_for_a_load() -> Option<u64> {
+    let device = load_device(false);
+    if !device.is_cuda() {
+        return None;
+    }
+    card_free_bytes(&device)
+}
+
 impl SplitModel {
     /// Load a partial model from a GGUF file, only loading the specified layer range.
     ///
@@ -1297,13 +1326,10 @@ impl SplitModel {
             // A missing nvidia-smi means "unknown", never "zero" — a budget
             // of zero would refuse every request, which is far worse than the
             // no-budget behaviour that preceded this.
-            if let Some(free_mb) = crate::model::auto_manage::vram::query_gpu_vram_free_mb() {
-                // nvidia-smi counts what this worker's own pool keeps as used;
-                // it is this process's to allocate (a range loaded into a
-                // worker that has already served, `inference::cuda_pool`).
-                let free_bytes = free_mb
-                    .saturating_mul(1024 * 1024)
-                    .saturating_add(crate::inference::cuda_pool::reusable_bytes(&device));
+            // The ONE reading a split's spawn sized it by too
+            // (`card_free_for_a_load`, #365).
+            if let Some(free_bytes) = card_free_bytes(&device) {
+                let free_mb = free_bytes / (1024 * 1024);
                 let budget = super::kv_budget::kv_headroom_bytes(weight_bytes, free_bytes);
                 kv_budget_bytes = Some(budget);
                 kv_growth = growth;
