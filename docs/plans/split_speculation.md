@@ -1001,7 +1001,11 @@ this node serves for the model, solved off the reply's path, with the window's s
 what the prior leaves; (2) choose λ and the window by tokens kept, never by hidden-state error,
 which tracks generation poorly (LLM-Streamline; PPSD and Kangaroo train on the output's
 distribution); (3) Kangaroo's confidence stop — each guess past a doubtful one spends a slot of a
-round trip that costs a network hop.
+round trip that costs a network hop. **(1) measured on one machine (round 10):** a map fitted on
+the earlier conversations plus this one kept 1.10-1.39x the shipped window's tokens a round over
+six short conversations, on Qwen2.5-14B, Llama 3.1 8B and Mistral 7B, ahead on 5 of 6 in each
+(FUTURE_WORK #366 (1) has the table) — for a chain, a head that has served the model before
+guesses well from its first token.
 
 ## What the literature says (survey 2026-09-27)
 

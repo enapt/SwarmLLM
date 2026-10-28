@@ -1414,7 +1414,20 @@ experts kept in RAM.
    m ≈ hidden — every conversation measured here. The primal statistics can also outlive the
    conversation, summed over every reply the node writes for the model, as a prior the window
    corrects (ReplaceMe, arXiv 2505.02819: a full map wants ~hidden² / samples-per-row positions;
-   `docs/plans/split_speculation.md` § "Second survey").
+   `docs/plans/split_speculation.md` § "Second survey"). **Measured (round 10, 2026-10-28,
+   `~/swarmllm-gate/deep/probe7.sh`)**: seven conversations a model in one order — the
+   ~1,800-token summary, then six short asks (Rust, an explanation, prose, an email, a Python
+   class, arithmetic), 64 greedy tokens each; `prior@0.3` fits only the EARLIER conversations,
+   `pooled@0.3` those plus this one so far (refitted every 16 tokens, 60 conjugate-gradient
+   steps), against the shipped window (`online`). Tokens kept a round over the six short ones:
+   Qwen2.5-14B with 33 of 48 skipped 0.31 none / 0.48 online / 0.42 prior / 0.53 pooled; with 21
+   of 48 (the default placement) 1.56 / 1.73 / 1.73 / 1.97; Llama 3.1 8B with 25 of 32 0.03 /
+   0.32 / 0.14 / 0.38; Mistral 7B 0.04 / 0.22 / 0.20 / 0.31 — pooled ahead of the window on 5 of 6
+   in every model, 1.10-1.39x. The first conversation (no prior) reads exactly as none and
+   linear, so the mechanism is the carried statistics. Hidden-state error ranks them the other
+   way (pooled 0.83-0.94, the window 0.66-1.05 relative): judge a stand-in by tokens kept. One
+   order and six short asks — the next step is the worker's form (the prior solved off the
+   reply's path, the window fitted to what it leaves) measured in decode.
 2. **Guess while the processor checks** — the card is idle through the check's ~130 ms on the
    processor; it could keep guessing past the round's last guess (PEARL's post-verify), ready if the
    check keeps everything. Now the better lever than item 3: a guess costs 26-38 ms at 15 of 48 on
