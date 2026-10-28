@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #365**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #366**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -92,10 +92,13 @@ speed is what the swarm is for, so split speed for large models is the top track
    reply ranks on the card and rates its guesses by the shared noise — misses 35 → 24 a 400-token
    reply; next better guesses: the drafter's size on a far link and the far end's dead draws
    recycled, `faster_than_local.md` § 6).
-7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
+7. **#365** — a split's card share is sized by a guess at the load's free memory: v0.3.259's #364
+   left 3-4 layers off this 8 GB card (14B split decode 0.92x, MoE 0.89x vs .258). The load fits
+   its own share (llama.cpp's `--fit`), which also closes #322's whole-card half.
+8. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
-8. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
+9. **#91** — an idle node's upload (the complaint that uninstalls a P2P app): 5.5 KB/s on the .241
    fleet (6.7 on .240, 8.8 on .239), measured 2026-10-17. Manifests now arrive about once an hour
    (0.83 a minute before (2)), and a restart no longer re-gossips them ((2c), v0.3.242). The part
    that is not gossip is 2.5 KB/s on 10-18 (4.1 out), and our own direct messages are only 0.19 of it
@@ -106,7 +109,7 @@ speed is what the swarm is for, so split speed for large models is the top track
    v0.3.244) read on the field 10-19: upload 2.4 KB/s, Kademlia answers 0.51 KB/s, every one a
    `find_node` — peers' routing-table refreshes. (2h) refreshes every 10 min instead of 5 (released in
    v0.3.245); next, re-read once the fleet runs it, then the answers' size.
-9. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
+10. **#3**, **#180** — the routing cost model mis-prices a split by regime, which keeps partial
     ranges off. Fit on three peers 2026-10-18: a short reply's `max_tokens` now caps the passes
     (16-token replies 0.49 → 0.97 of their price), a long one is priced at its model's mean
     reply length (160-token replies were 2.5x their price), and a chain its head leads is priced
@@ -117,17 +120,17 @@ speed is what the swarm is for, so split speed for large models is the top track
     rounds it takes, a guessed token not crossing alone (#3 (d), 0.49 → 0.77 of its price on the
     drafter rig), 10-19, all in v0.3.244; next, a chain driven from here (#3 (a2)). Never tune the
     constant.
-10. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
+11. **#10**, **#171** — conversation prefixes across computers (no digests gossiped, caches end at
     the 10-minute expiry), and a split's prompt pieces chained between two peers.
-11. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
+12. **#138**, **#129** — a model that does not fit the card (MoE and a split's prompt stages
     shipped in v0.3.235-v0.3.237; the entries hold what is left), and a near-fit model sent far.
-12. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25; the drafter's paths and MTP still stay off — a checkpoint replayed across steps, #228 (5).
-13. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
+13. **#228** — Qwen 3.5 guesses ahead on one computer (processor and card) and through a split's n-gram loop (bit 33) since 2026-10-25; the drafter's paths and MTP still stay off — a checkpoint replayed across steps, #228 (5).
+14. **#30** — the plaintext-prompt trust bar sits at the score an unknown peer starts on: a policy
     decision, with research, when picked up.
-14. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
+15. **#326** — on a card newer than a release's machine code (Hopper, Blackwell: RTX 50-series),
     the first reply waits ~2 min while the driver compiles flash attention's PTX (MMQ's ~8 s a
     weight type), then it is cached. Correct since the PTX went in (before: wrong output).
-15. **#336** — `strict: true` and tool calls are not enforced, so an agent driving a small model
+16. **#336** — `strict: true` and tool calls are not enforced, so an agent driving a small model
     meets malformed calls (filed 2026-10-24; constrained decoding, `faster_than_local.md` § 7.1).
 
 Everything else is ranked in its own entry. **P3** is narrow or cosmetic, **P4** is process,
@@ -270,6 +273,46 @@ one isolated node, the same request four times with the cache on, restarted betw
 the replies' md5s compared; and `examples/logits_reference_probe.rs` with
 `LOGITS_PROBE_DECODE` 2 vs 3. Until then: on a card, generated text cannot compare two code
 paths across a cache hit.
+
+#### #365 — A split's card share is sized by a guess at the load's free memory; the load should fit it
+`P2` · speed · **OPEN** — 2026-10-28 · history: the v0.3.259 post-reboot card arms; absorbs #322's rescoped half
+
+**Measured.** #364 (v0.3.259) fills a card/processor split to `hybrid::split_room_bytes` — 85% of
+the pool's ROOM (budget less charges) — because past 85% of the free memory the LOAD reads the
+loader gives the cache nothing and pins the model to the processor. The room stands in for that
+reading and is never more than it, which is safe and, on this 8 GB laptop, ~600 MB short: A/B/B/A
+on a fresh boot (07:05-07:19Z 10-28, live node stopped, `~/swarmllm-gate/v0.3.259-alpha_split_moe.sh`),
+Qwen2.5-14B split **decode 0.92x** (AB 0.95, BA 0.89; .258 put 27 of 48 layers on the card and the
+load still covered the 8,192-token context with 8,501-9,258 tokens, .259 put 23-24 and left
+~14,800 tokens' worth unused), Qwen3-30B-A3B Q2_K experts-in-RAM **decode 0.89x** (AB 0.95, BA
+0.84), card memory ~600 MB lower in every .259 arm. The gate's 0.85 line passed both.
+
+**Why a better guess is not the fix.** The pool cannot predict the load's reading to the precision
+the line needs: here it read ~835 MB more than the room, on the field report's 12 GB card (#364)
+only 494 MB more; "room + reserve − the 320 MB context" over-reads the second for any reserve above
+814 MB. The same gap is why #322's admission half was withdrawn (that entry has the GLM-4-9B case).
+And the load's reading moves after admission: all three whole-card refusals in this node's log came
+with 1.4-3.9 GB of headroom at admission (#322).
+
+**Design: the load fits its own card share, as llama.cpp does** (`common/fit.cpp`, `--fit` on by
+default: the fit reads the device's free memory, keeps a 1 GiB margin, shrinks the context first —
+to 4,096 in its README's example — and only then moves layers off the device). In
+`split/loader/mod.rs` the card's layer count (`device_layers`) and the free reading (the budget
+block before any weight loads) are both known before a tensor is read, so the loader can keep the
+planned layers while their weights and the cache for `ADMISSION_KV_CONTEXT` (4,096) sit inside
+`kv_budget::weights_and_caches_room(free)`, else move the LAST card layers to the processor until
+they do — a whole placement of a hybrid-capable architecture becoming a split the same way (#322's
+case), never past what the machine's memory takes (`host_free_and_total_bytes`, the split's host
+budget). It reports what it placed (a new side-band `WorkerMsg`, gated like `ContextFits` by a
+`DAEMON_READS_*` variable — a newer worker beside an older daemon fits nothing); the pool moves the
+charge between the card and the machine and records the split on the handle, and promotion leaves
+such a worker alone until the card budget has grown by the share it gave up (else it retires,
+respawns whole, and the load fits it again). With the load guaranteeing the line, the pool's plan
+can fill the room less the forward reserve again, as .258 did (keep `split_room_bytes` as the one
+place). A refusal remains only where nothing fits: no layer, or no machine memory for the rest.
+Verify on the card: the 14B and the MoE arms back at .258's layers and speed, the field report's
+arithmetic (`a_card_split_leaves_the_card_what_its_load_keeps_back`) as a load-side test, and a
+whole load made to cross the line by memory taken after admission.
 
 #### #363 — A held part a little off an adopted manifest's size is set aside, not kept as disputed
 `P3` · wrong-answers · **OPEN** — 2026-10-27 · history: the v0.3.258 pre-release review (note 1)
@@ -2559,6 +2602,29 @@ model pinned to the processor: on a 24 GB card, a 32B Q4_K_M (19.85 GB) beside 1
 use. Next: the admission's verdict asks the loader's line too, for the weights the card would
 hold — one predicate for `card_verdict`, `fits_in_budget` (the planner) and the promotion — and
 a refusal of that kind goes down the spawn's ladder to a split.
+
+**2026-10-28, later: the admission half of that "Next" is WITHDRAWN — it would split models that
+load whole today.** Checked against this node's own loads before writing it. The pool's room (budget
+less charges) is not the free memory the load reads, and the line sits inside that difference: the
+10-18 12:19:49Z GLM-4-9B whole load was admitted at 6,354 MB into a 6,490 MB room, read 7,149 MB
+free at load (659 MB more), held 5,872 MB of weights — 82% of what the load read, 90.5% of the room
+— and got a 5,239-token cache, more than the 4,096 admission charges. The loader's 85% applied to
+the room refuses it whole whether it is asked of the estimate less the process (6,034 > 5,516) or of
+the weights alone (5,872 > 5,516): the model would be split onto the processor. An optimistic
+stand-in (room + reserve − the 320 MB context) is not safe either: on the field report's 12 GB card
+(#364) the load read only 494 MB more than the room (11,384 vs 10,890), less than that stand-in adds
+for any reserve over 814 MB. The room cannot carry a line this sharp; only the load's own reading can.
+**And the gap has never been observed here**: all three whole-card refusals in this node's log
+(Mistral 7B 09-23 11:17:58Z, Gemma 2 2B 09-24 09:57:05Z, GLM-4-9B [1..39) 09-26 11:39:50Z) were
+admitted with 1,401, 3,116 and 3,888 MB of headroom — the card was taken between admission and load
+(rig nodes on this machine those days), which no admission rule sees. llama.cpp decides the same
+question with the load's own reading, by fitting first (`common/fit.cpp`, `--fit` on by default, a
+1 GiB margin, context shrunk before layers move off the card). **Next (rescoped)**: the loader's
+refusal of a WHOLE placement (`PermanentGpuFailure::NoKvCacheRoom` on a worker with no card split)
+sends the model down the spawn's ladder to the split rung, sized from a fresh card reading, instead
+of pinning it whole to the processor (`classify_worker_error` → `cpu_pinned_models`); the mark lifts
+where the pin does, and promotion counts it as a reason still holding. A refused split keeps the
+processor pin. P3 still: three refusals in five weeks, all during rig work.
 
 #### #297 — Auto-manage prices a card by the file's size, so Gemma 4's E2B/E4B read heavier than they run
 `P3` · memory · **OPEN** — 2026-10-17 · history: #296's review

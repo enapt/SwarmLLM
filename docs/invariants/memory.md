@@ -3891,7 +3891,12 @@ layer sizes; red with the old room: 17 layers, the load's budget 0 of the 544 Mi
 ⚠ **Whole-card admission is not covered**: it weighs `estimate_gpu_footprint_mb` (weights, the
 cache at `ADMISSION_KV_CONTEXT`, 320 MB) against the budget, so a model whose weights fall between
 85% of free memory and the budget less that is admitted whole and refused at load — on a 24 GB card
-a 32B Q4_K_M (19.85 GB) beside 1 GB of desktop use. → FUTURE_WORK #322.
+a 32B Q4_K_M (19.85 GB) beside 1 GB of desktop use. → FUTURE_WORK #322. ⚠ **Do not close it by
+applying the 85% to the pool's ROOM**: a whole placement sits too close to the line for that stand-in
+— a GLM-4-9B load here held 82% of what the load read and 90.5% of the room, and served with a
+5,239-token cache (2026-10-18); the room-based line would have split it. A split pays the
+room's caution in layers (3-4 on this 8 GB card, #365); a whole placement pays it with the card. #322 has the
+measurement and the rescoped fix: the load's own refusal sends the model to the split rung.
 
 **The planning curve keeps the tables spread (decided 2026-10-25, #343).** `cost_curve_of` gives
 every layer 1/L of both tables (17 MiB on the 70B), so a first or last run held wholly on a card
