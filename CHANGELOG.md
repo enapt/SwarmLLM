@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+
+## [0.3.259-alpha] — 2026-10-28
+
 **A large model split between your graphics card and your processor loads again on cards with
 12 GB or more.** On v0.3.258, Llama 3.3 70B on a 64 GB computer with a 12 GB card was refused:
 the split put more of the model on the card than the loader lets it hold, so the loader left no
