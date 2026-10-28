@@ -17,13 +17,14 @@
 //!   request fires, skip the scheduling decision (~10-50 ms saved on
 //!   TTFT).
 //!
-//! # Scope of this commit
+//! # What runs today
 //!
-//! Ships the **session-end recorder** + **idle-time predictor** +
-//! **candidate-token learner** as standalone, testable units. The
-//! actual prefetch dispatch (running activations forward, calling
-//! scheduler, gossiping warming) is a series of follow-on commits;
-//! each can plug into this orchestrator.
+//! The **session-end recorder**, **idle-time predictor** and
+//! **candidate-token learner**, behind `inference.prefetch_enabled` (off by
+//! default). The router asks [`PrefetchOrchestrator::should_prefetch`] and
+//! LOGS the decision; nothing yet runs activations forward, plans ahead or
+//! warms gossip — that compute is listed in `docs/ARCHITECTURE.md` §
+//! "Deferred Items", and each piece would plug into this orchestrator.
 //!
 //! Why this design: novel features are best built BOTTOM-UP. The
 //! predictor + learner unit can be exercised in isolation (no
@@ -201,15 +202,6 @@ impl PrefetchOrchestrator {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Record that a previously-dispatched prefetch was actually
-    /// used by a subsequent request — the cached activations were
-    /// hit. Drives the hit-rate calculation that throttles useless
-    /// prefetch storms.
-    pub fn record_useful(&self) {
-        self.useful
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
     /// Metrics snapshot for the admin dashboard.
     pub fn metrics(&self) -> PrefetchMetrics {
         PrefetchMetrics {
@@ -315,6 +307,21 @@ pub struct PrefetchMetrics {
 
 /// Public Arc handle — daemon state holds one, all paths share it.
 pub type PrefetchHandle = Arc<PrefetchOrchestrator>;
+
+/// Only the tests mark a prefetch useful: nothing runs one yet (the router logs
+/// what it WOULD prefetch; the compute is in `docs/ARCHITECTURE.md` § "Deferred
+/// Items"), so in production `useful` stays 0 and the hit-rate throttle caps how
+/// often that decision is logged. Kept after every production item (gotcha #952).
+#[cfg(test)]
+impl PrefetchOrchestrator {
+    /// Record that a previously-dispatched prefetch was used by a later
+    /// request — its cached activations were hit. Drives the hit rate that
+    /// throttles useless prefetch storms.
+    pub fn record_useful(&self) {
+        self.useful
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 #[cfg(test)]
 mod tests {
