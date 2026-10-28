@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.260-alpha] — 2026-10-29
+
 **A model too big for your graphics card writes 1.3 to 1.7 times as fast when it is split
 between the card and your processor.** Such a model spends most of every step on the slower
 processor while the card waits. The split now keeps the model's first and last layers on the
