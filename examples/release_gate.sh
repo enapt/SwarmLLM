@@ -139,8 +139,10 @@ if [ "${SPEED:-1}" != 0 ]; then
   arm() { # binary label model extra_toml
     local D; D=$(mktemp -d); ln -s "$HOME/.local/share/swarmllm/models" "$D/models"
     # Off the swarm by the pool scope, which is what the planner reads — the gossip id alone
-    # leaves a node that times a PEER's card wherever a peer is faster (gotcha #536).
-    printf '[auto_manage]\nenabled = false\nprune_enabled = false\n\n[network]\nbootstrap_peers = []\ndisable_default_bootstrap = true\nenable_mdns = false\ngossip_network_id = "swarmllm-gate-speed"\n\n[pool]\nprivate_mode = true\nprivate_mode_allow_lan = false\noffline_mode = true\n\n[ui]\nopen_browser_on_start = false\n%b\n' "$4" > "$D/config.toml"
+    # leaves a node that times a PEER's card wherever a peer is faster (gotcha #536). Updates
+    # off: an older binary than the latest PUBLISHED release installs it over its own file
+    # (offline_mode does not stop that), so its later arms run the new build (gotcha #982).
+    printf '[auto_manage]\nenabled = false\nprune_enabled = false\n\n[network]\nbootstrap_peers = []\ndisable_default_bootstrap = true\nenable_mdns = false\ngossip_network_id = "swarmllm-gate-speed"\n\n[pool]\nprivate_mode = true\nprivate_mode_allow_lan = false\noffline_mode = true\n\n[updates]\nmode = "off"\n\n[ui]\nopen_browser_on_start = false\n%b\n' "$4" > "$D/config.toml"
     SWARMLLM_NODE_DATA_DIR="$D" "$1" run -p 8825 > "$D/node.log" 2>&1 &
     local P=$!
     for _ in $(seq 1 90); do [ -f "$D/api_key" ] && curl -s -m 3 localhost:8825/health > /dev/null && break; sleep 2; done
