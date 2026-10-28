@@ -1381,7 +1381,6 @@ impl SplitModel {
         // Get or create the per-request cache entry, extract the layer caches,
         // then drop the DashMap guard before running the (potentially slow) forward pass.
         // Use mem::take instead of clone to avoid copying the KV cache Vec.
-        #[allow(unused_mut)]
         let (mut layer_kv_caches, mut layer_ssm_states): (
             Vec<Option<LayerKv>>,
             Vec<Option<SsmState>>,

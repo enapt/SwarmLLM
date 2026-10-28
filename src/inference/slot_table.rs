@@ -263,10 +263,6 @@ impl SlotTable {
         }
     }
 
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-
     /// Layer range this table is currently pinned to, if any. Diagnostic only.
     pub fn layer_range(&self) -> Option<(usize, usize)> {
         self.layer_range

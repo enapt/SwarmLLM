@@ -725,6 +725,7 @@ impl SplitModel {
     }
 
     /// `(calls, fell_back)` for `forward_batch` since this model was loaded.
+    #[cfg(test)]
     pub fn batch_stats(&self) -> (u64, u64) {
         (self.batch_calls, self.batch_fellback)
     }

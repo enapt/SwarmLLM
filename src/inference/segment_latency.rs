@@ -76,6 +76,7 @@ impl SegmentLatencyTracker {
     }
 
     /// The stats for `key`, or `None` if nothing has been observed.
+    #[cfg(test)]
     pub fn get(&self, key: &SegmentKey) -> Option<LatencyStats> {
         self.stats.get(key).map(|e| *e.value())
     }
@@ -89,7 +90,9 @@ impl SegmentLatencyTracker {
             // `observe` stamps it.
             s.last_observed_at_ms == 0 || now_ms.saturating_sub(s.last_observed_at_ms) < max_age_ms
         });
-        before - self.stats.len()
+        // Saturating: `observe` may insert between the two readings, and the
+        // count would wrap (a release build) or panic the health task (a dev one).
+        before.saturating_sub(self.stats.len())
     }
 
     /// Sample-weighted latency per holder, collapsed across (model, segment):

@@ -271,8 +271,8 @@ pub fn sample_token(logits: &Tensor, temperature: f32, top_p: f32) -> Result<u32
 /// pass an empty history. For decode loops with non-zero penalties,
 /// use `sample_token_with_params_history`.
 ///
-/// Converts the tensor to a flat `Vec<f32>` and delegates to
-/// `sampling::sample_token`.
+/// Converts the tensor to a flat `Vec<f32>` and delegates, through
+/// `sample_token_with_params_history`, to `sampling::sample_token_with_history`.
 pub fn sample_token_with_params(
     logits: &Tensor,
     params: &crate::types::SamplingParams,

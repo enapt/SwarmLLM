@@ -3000,7 +3000,9 @@ promises its full context (the #104 rule, `split_for_card`'s terms).
 `experts_in_ram_for_card` first: the fewest FIRST layers whose routed experts,
 kept in RAM, leave weights − those experts + every layer's cache at the full
 `effective_context` within the card's room less
-`FORWARD_BUFFER_RESERVE_BYTES`. Only a model with no experts, or one that does
+`FORWARD_BUFFER_RESERVE_BYTES` — since 2026-10-28 the smaller of that and the
+loader's 85% line, `hybrid::split_room_bytes` (#364, `memory.md` § "A split's
+room is the share its LOAD takes"). Only a model with no experts, or one that does
 not fit even with every layer's experts in RAM, falls back to
 `split_for_card`. The per-layer expert bytes come from the header in the same
 read as the footprint (`segment_geometry`, `split::routed_expert_bytes` — the

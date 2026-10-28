@@ -138,7 +138,6 @@ pub fn effective_context_length_with(declared: usize, override_cap: Option<usize
 pub static MAX_SEQ_LEN_OVERRIDE: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// Read the current override (None when 0 — unset).
 /// KV-cache budget handed to a CPU worker by the daemon at spawn
 /// (`--kv-budget-bytes`), process-global like the override above. `0` = none
 /// (no budget → no runtime guard, the pre-2026-08-21 behaviour). Computed by
@@ -260,6 +259,7 @@ pub(crate) fn placement_of(layer_start: usize, layer_end: usize) -> RangePlaceme
         })
 }
 
+/// Read the CPU worker's KV-cache budget (None when 0 — unset).
 pub fn cpu_kv_budget_bytes() -> Option<u64> {
     match CPU_KV_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed) {
         0 => None,
@@ -267,6 +267,7 @@ pub fn cpu_kv_budget_bytes() -> Option<u64> {
     }
 }
 
+/// Read the current context override (None when 0 — unset).
 pub fn max_seq_len_override() -> Option<usize> {
     let v = MAX_SEQ_LEN_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
     if v == 0 {

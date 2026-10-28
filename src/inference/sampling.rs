@@ -309,7 +309,8 @@ fn apply_top_p_with_ctx(logits: &mut [f32], p: f32, ctx: &mut SamplingContext) {
 /// Repetition penalties (frequency_penalty / presence_penalty) are NOT
 /// applied here — pass `generated_ids` via `sample_token_with_history`
 /// in decode loops that need them. This signature stays history-free
-/// for tests and one-shot validation paths.
+/// for tests.
+#[cfg(test)]
 pub fn sample_token(logits: &mut [f32], params: &SamplingParams) -> u32 {
     let mut ctx = SamplingContext::new(logits.len());
     sample_token_with_ctx(logits, params, &[], &mut ctx, None)

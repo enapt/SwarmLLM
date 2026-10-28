@@ -83,37 +83,6 @@ pub(crate) fn failure_worth_listing(
     })
 }
 
-/// Classify a router error as a transient remote failure that warrants a
-/// single retry with a fresh pipeline assembly.
-///
-/// Targets:
-/// - "peer never acknowledged" — RR_ACK_TIMEOUT_SECS sweep fired
-///   (libp2p rr silent-drop or peer died without TCP RST).
-/// - "remote-generate timed out" — first-token wait exceeded.
-/// - "OutboundFailure" — explicit libp2p delivery failure.
-///
-/// On retry the scheduler re-runs from scratch. A peer that actually *died*
-/// leaves `connected_node_ids` and so is not selected again.
-///
-/// That guarantee is weaker for a holder reachable only through a relay
-/// (NETWORKING_PLAN §4 Phase 1 tier): it was never in `connected_node_ids` to
-/// begin with, so a stale-but-unexpired relay route can see the same holder
-/// re-picked. Acceptable as it stands — a relayed holder carries a latency
-/// penalty so any directly-connected holder outranks it, and when it is the
-/// *only* holder of a shard, retrying it is better than failing outright.
-///
-/// A **missing-shard** error also qualifies, for a different reason. It is not
-/// transient in itself — that holder really does not have the data — but the
-/// pipeline path both retracts the stale claim AND blacklists the holder for
-/// this request id before returning, so by the time we retry the routing input
-/// has been corrected and the scheduler must pick someone else.
-///
-/// The blacklist is what makes the retry actually work. Retraction alone is
-/// futile: the DHT still advertises the holder, so the retry's assembly —
-/// especially one that waits for DHT results — re-learns the claim and picks
-/// the same dead peer. Observed live 2026-07-26 doing exactly that, failing
-/// twice with the identical error. If nothing else can serve the shard the
-/// retry fails with "no node available", which is the accurate message.
 /// Did a REMOTE peer tell us it could not serve the request?
 ///
 /// A peer whose model worker is dead, cannot be spawned, or dropped the
@@ -152,6 +121,37 @@ pub(crate) fn is_transient_remote_failure_for_test(err: &SwarmError) -> bool {
     is_transient_remote_failure(err)
 }
 
+/// Classify a router error as a transient remote failure that warrants a
+/// single retry with a fresh pipeline assembly.
+///
+/// Targets:
+/// - "peer never acknowledged" — RR_ACK_TIMEOUT_SECS sweep fired
+///   (libp2p rr silent-drop or peer died without TCP RST).
+/// - "remote-generate timed out" — first-token wait exceeded.
+/// - "OutboundFailure" — explicit libp2p delivery failure.
+///
+/// On retry the scheduler re-runs from scratch. A peer that actually *died*
+/// leaves `connected_node_ids` and so is not selected again.
+///
+/// That guarantee is weaker for a holder reachable only through a relay
+/// (NETWORKING_PLAN §4 Phase 1 tier): it was never in `connected_node_ids` to
+/// begin with, so a stale-but-unexpired relay route can see the same holder
+/// re-picked. Acceptable as it stands — a relayed holder carries a latency
+/// penalty so any directly-connected holder outranks it, and when it is the
+/// *only* holder of a shard, retrying it is better than failing outright.
+///
+/// A **missing-shard** error also qualifies, for a different reason. It is not
+/// transient in itself — that holder really does not have the data — but the
+/// pipeline path both retracts the stale claim AND blacklists the holder for
+/// this request id before returning, so by the time we retry the routing input
+/// has been corrected and the scheduler must pick someone else.
+///
+/// The blacklist is what makes the retry actually work. Retraction alone is
+/// futile: the DHT still advertises the holder, so the retry's assembly —
+/// especially one that waits for DHT results — re-learns the claim and picks
+/// the same dead peer. Observed live 2026-07-26 doing exactly that, failing
+/// twice with the identical error. If nothing else can serve the shard the
+/// retry fails with "no node available", which is the accurate message.
 fn is_transient_remote_failure(err: &SwarmError) -> bool {
     let msg = err.to_string();
     msg.contains("never acknowledged")
