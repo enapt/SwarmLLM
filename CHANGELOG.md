@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+**Reloading the config file now applies every setting in it.** If you edit `config.toml` by
+hand and reload it (Settings' reload, `POST /api/admin/config/reload`, or `kill -HUP`), only five
+request and timing limits took effect; a changed contribution level, disk or graphics-card limit,
+bandwidth cap or any other setting waited for the next time you saved Settings, though the reload
+said it was applied. The reload now makes the whole file the running configuration, as a save does.
+
 **The setup wizard and the dashboard's disk meter show the drive your models are stored on.**
 They showed every drive's space added together, so on a computer with several drives the wizard
 could suggest keeping more models than the drive holding them has room for, and the meter did not

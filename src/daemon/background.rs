@@ -1351,10 +1351,10 @@ pub(super) fn spawn_sighup_handler(
                         "SIGHUP received — reloading config from {}",
                         config_path.display()
                     );
-                    match crate::config::reload_operational_params(&config_path) {
-                        Ok(params) => {
-                            let old = crate::config::OperationalParams::from_config(&config);
-                            if params != old {
+                    match crate::config::read_config_file(&config_path) {
+                        Ok(reread) => {
+                            let params = crate::config::OperationalParams::from_config(&reread);
+                            if shared_state.make_config_live(reread) {
                                 tracing::info!(
                                     ?params,
                                     "Config reloaded with changes"
@@ -1364,7 +1364,6 @@ pub(super) fn spawn_sighup_handler(
                                     "Config reloaded — no changes detected"
                                 );
                             }
-                            shared_state.apply_config_reload(params);
                         }
                         Err(e) => {
                             tracing::error!(

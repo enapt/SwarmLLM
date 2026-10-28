@@ -124,7 +124,7 @@ The daemon must write **only values that differ from the compiled default**.
 
 ## A partial config update builds on the FILE, not on what the daemon remembers
 
-`api::admin::base_for_partial_update` is the base for `PUT /api/admin/config`: the parsed `config.toml` when it parses, the live config otherwise — never `cfg()`, never a refusal. ⚠ `apply_live_config` has exactly one production caller besides `reload_config`; a second writer needs this rule revisited. Command-line overrides of a live setting (`--no-update-check`, `--anchor`) must be re-applied inside `apply_live_config` from the boot snapshot (FUTURE_WORK #107).
+`api::admin::base_for_partial_update` is the base for `PUT /api/admin/config`: the parsed `config.toml` when it parses, the live config otherwise — never `cfg()`, never a refusal. ⚠ **`SharedState::make_config_live` is the live config's one production writer** — the dashboard save, `reload_config` and SIGHUP, each with the file it wrote or re-read (`config::read_config_file`); a writer that is not the file needs this rule revisited. Test `a_reload_makes_every_setting_in_the_file_live`. Command-line overrides of a live setting (`--no-update-check`, `--anchor`) must be re-applied inside `apply_live_config` from the boot snapshot (FUTURE_WORK #107).
 
 → `docs/invariants/state-and-config.md` § "A partial config update builds on the FILE, not on what the daemon remembers"
 

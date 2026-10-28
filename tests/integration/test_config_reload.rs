@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use swarmllm::config::{reload_operational_params, Config, OperationalParams};
+use swarmllm::config::{read_config_file, Config, OperationalParams};
 use swarmllm::daemon::SharedState;
 use swarmllm::identity::Identity;
 use swarmllm::inference::executor::ModelExecutor;
@@ -35,7 +35,7 @@ max_peers = 50
 "#;
     std::fs::write(&config_path, initial_toml).unwrap();
 
-    let params1 = reload_operational_params(&config_path).unwrap();
+    let params1 = OperationalParams::from_config(&read_config_file(&config_path).unwrap());
     assert_eq!(params1.max_concurrent_requests, 8);
     assert_eq!(params1.max_batch_size, 4);
     assert_eq!(params1.session_timeout_secs, 600);
@@ -56,7 +56,7 @@ max_peers = 100
     std::fs::write(&config_path, updated_toml).unwrap();
 
     // Reload should pick up the new values
-    let params2 = reload_operational_params(&config_path).unwrap();
+    let params2 = OperationalParams::from_config(&read_config_file(&config_path).unwrap());
     assert_eq!(params2.max_concurrent_requests, 16);
     assert_eq!(params2.max_batch_size, 8);
     assert_eq!(params2.auto_manage_interval_minutes, 15);
@@ -75,12 +75,12 @@ async fn test_config_reload_invalid_rejected() {
     // Write invalid TOML
     std::fs::write(&config_path, "this is not valid { toml [[[").unwrap();
 
-    let result = reload_operational_params(&config_path);
+    let result = read_config_file(&config_path);
     assert!(result.is_err());
 
     // Missing file should also fail
     let missing_path = dir.path().join("nonexistent.toml");
-    let result = reload_operational_params(&missing_path);
+    let result = read_config_file(&missing_path);
     assert!(result.is_err());
 }
 

@@ -2027,7 +2027,27 @@ impl SharedState {
         self.config_watch_tx.subscribe()
     }
 
-    /// Apply hot-reloaded operational params and notify subscribers.
+    /// Make `config` — `config.toml` as just written or re-read — the live
+    /// config, and wake the subsystems that must resize something rather than
+    /// re-read it (the router's concurrency and batch limits, auto-manage's
+    /// interval, the session timeout). The one way a config takes effect while
+    /// the node runs: a dashboard save, `POST /api/admin/config/reload` and
+    /// SIGHUP. Returns whether one of those operational figures changed against
+    /// the live config it replaced.
+    ///
+    /// The two reloads used to push only those figures, so a hand edit of any
+    /// other setting stayed out of `cfg()` until a dashboard save, while the
+    /// reload's reply listed it as applied (sweep 2026-10-27).
+    pub fn make_config_live(&self, config: Config) -> bool {
+        let params = crate::config::OperationalParams::from_config(&config);
+        let changed = params != crate::config::OperationalParams::from_config(&self.cfg());
+        self.apply_live_config(config);
+        self.apply_config_reload(params);
+        changed
+    }
+
+    /// Notify the subscribers of hot-reloaded operational params. Outside tests
+    /// only [`Self::make_config_live`] calls it, beside the live config's swap.
     pub fn apply_config_reload(&self, params: crate::config::OperationalParams) {
         let _ = self.config_watch_tx.send(params);
     }

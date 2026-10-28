@@ -42,9 +42,12 @@ impl OperationalParams {
     }
 }
 
-/// Reload only operational (hot-reloadable) parameters from the config file.
-/// Returns the new params or an error if the file cannot be read/parsed.
-pub fn reload_operational_params(config_path: &Path) -> Result<OperationalParams, SwarmError> {
+/// Re-read `config.toml` while the node runs, for a reload
+/// (`POST /api/admin/config/reload`, SIGHUP) to make live through
+/// `SharedState::make_config_live`, as a dashboard save does with the file it
+/// writes. An error when the file is missing or does not parse; the running
+/// config is then left as it is.
+pub fn read_config_file(config_path: &Path) -> Result<Config, SwarmError> {
     if !config_path.exists() {
         return Err(SwarmError::Config(format!(
             "Config file not found: {}",
@@ -52,10 +55,8 @@ pub fn reload_operational_params(config_path: &Path) -> Result<OperationalParams
         )));
     }
     let contents = std::fs::read_to_string(config_path).map_err(SwarmError::Io)?;
-    let config = parse_config_file(&contents, "config.toml").map_err(|e| {
-        SwarmError::Config(format!("Failed to parse {}: {e}", config_path.display()))
-    })?;
-    Ok(OperationalParams::from_config(&config))
+    parse_config_file(&contents, "config.toml")
+        .map_err(|e| SwarmError::Config(format!("Failed to parse {}: {e}", config_path.display())))
 }
 
 /// Top-level configuration for the SwarmLLM daemon.
@@ -1410,7 +1411,7 @@ auto_relay = false
     }
 
     #[test]
-    fn reload_operational_params_from_file() {
+    fn read_config_file_reads_the_operational_params() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         let toml_str = r#"
@@ -1426,7 +1427,7 @@ interval_minutes = 10
 max_peers = 100
 "#;
         std::fs::write(&config_path, toml_str).unwrap();
-        let params = reload_operational_params(&config_path).unwrap();
+        let params = OperationalParams::from_config(&read_config_file(&config_path).unwrap());
         assert_eq!(params.max_concurrent_requests, 20);
         assert_eq!(params.max_batch_size, 4);
         assert_eq!(params.session_timeout_secs, 300);
@@ -1434,13 +1435,13 @@ max_peers = 100
     }
 
     #[test]
-    fn reload_operational_params_missing_file() {
-        let result = reload_operational_params(Path::new("/nonexistent/config.toml"));
+    fn read_config_file_refuses_a_missing_file() {
+        let result = read_config_file(Path::new("/nonexistent/config.toml"));
         assert!(result.is_err());
     }
 
     #[test]
-    fn reload_operational_params_partial_config() {
+    fn read_config_file_keeps_defaults_for_what_it_omits() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         // Only override one field — rest should use defaults
@@ -1449,7 +1450,7 @@ max_peers = 100
 max_concurrent_requests = 42
 "#;
         std::fs::write(&config_path, toml_str).unwrap();
-        let params = reload_operational_params(&config_path).unwrap();
+        let params = OperationalParams::from_config(&read_config_file(&config_path).unwrap());
         assert_eq!(params.max_concurrent_requests, 42);
         // Defaults for others
         assert_eq!(params.max_batch_size, 8);

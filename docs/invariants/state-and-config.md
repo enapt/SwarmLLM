@@ -629,6 +629,26 @@ especially when the claim is "there are other callers", which is a grep.
 - **Consequence, and it is intended**: a hand edit now takes effect on the next
   dashboard save rather than waiting for a reload. Taking effect is strictly
   better than being destroyed.
+
+### The reload never made the file live (fixed 2026-10-27)
+
+The argument above assumed `reload_config` called `apply_live_config`. It never
+did: since the live config was added (`fd9e6fff`, 2026-08-09) both reloads —
+`POST /api/admin/config/reload` and SIGHUP — pushed only the five
+`OperationalParams` to their subscribers. A hand-edited cap, contribution level
+or any other setting stayed out of `cfg()` until the next dashboard save, while
+the reload's reply listed the contribution and the caps as `applied` (read from
+the unchanged `cfg()`). `changed` was also judged against the BOOT snapshot, so
+every reload after the first edit said it changed. Found by the 2026-10-27
+sweep reading the handler against its own doc comment.
+
+Now **`SharedState::make_config_live`** is the one writer: it swaps the live
+config (`apply_live_config`, which keeps the command-line facts) and wakes the
+subsystems, and says whether an operational figure changed against the LIVE
+config. All three paths call it with the file (`config::read_config_file`, the
+same `parse_config_file` as the save's base). `a_reload_makes_every_setting_in_the_file_live`
+fails with the old handler (the cap stays 0, not 37). The argument above still
+holds: the file is the only source either way.
 - The staging-and-rename half (a bare `std::fs::write` truncates first, and a
   crash mid-save left a file the daemon refuses to start on) was fixed earlier
   and is separate; keep both.
@@ -664,8 +684,9 @@ the change they just made in the dashboard.
 Building it from `cfg()` destroyed any hand edit made while the daemon ran, which
 is the documented way to set what the dashboard does not expose
 (`bootstrap_peers`). Re-reading is correct rather than a trade-off because
-**`apply_live_config` has exactly one production caller besides `reload_config`,
-and it is this handler** — so no runtime state lives outside the document, and
+**the live config's one production writer, `SharedState::make_config_live`, is
+called only with the file** (this handler, `reload_config`, SIGHUP; the reloads
+never called it until 2026-10-27) — so no runtime state lives outside the document, and
 the only way file and live config diverge is an edit worth keeping. A second
 production writer would break that argument: add one and this rule needs
 revisiting, not just extending.

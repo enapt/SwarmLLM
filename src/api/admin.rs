@@ -1638,12 +1638,12 @@ pub async fn update_config(
     // edit and the operator's work was gone — silently, under a "Settings
     // saved" toast.
     //
-    // Re-reading is safe because **this handler is the only thing in the daemon
-    // that changes the live config** (`apply_live_config` has exactly one other
-    // production caller, `reload_config`, which reads this same file; the rest
-    // are tests). So there is no runtime state living outside the document that
-    // re-reading could drop — the only way file and live config diverge is an
-    // edit we want to keep.
+    // Re-reading is safe because **nothing but this file changes the live
+    // config**: `SharedState::make_config_live` is its only production writer,
+    // called here and by the two reloads (`reload_config`, SIGHUP), which read
+    // this same file. So there is no runtime state living outside the document
+    // that re-reading could drop — the only way file and live config diverge is
+    // an edit we want to keep.
     //
     // A file we cannot parse is NOT a reason to refuse the save: the operator
     // is mid-edit, or it was already broken, and losing the change they just
@@ -1841,15 +1841,11 @@ pub async fn update_config(
     // Make the saved config the LIVE one. This is what turns "saved" into
     // "applied": every runtime path reads `shared_state.cfg()`, so one store
     // here covers each setting rather than needing a per-setting mirror added
-    // whenever somebody notices another one doing nothing.
-    state.shared_state.apply_live_config(config.clone());
-
-    // ...and wake the subsystems that must *react* rather than merely re-read:
-    // the router resizes its concurrency and batch limits, auto-manage retimes
-    // its interval. Re-reading alone cannot resize a semaphore already built.
-    state
-        .shared_state
-        .apply_config_reload(crate::config::OperationalParams::from_config(&config));
+    // whenever somebody notices another one doing nothing. It also wakes the
+    // subsystems that must *react* rather than merely re-read: the router
+    // resizes its concurrency and batch limits, auto-manage retimes its
+    // interval. Re-reading alone cannot resize a semaphore already built.
+    state.shared_state.make_config_live(config);
 
     Ok(Json(serde_json::json!({ "status": "ok" })))
 }
@@ -1879,7 +1875,7 @@ pub async fn reload_config(
     // SwarmError::Config is reserved for startup-only errors per the rule in
     // .claude/rules/arch-errors.md and would otherwise leak the unhelpful
     // "invalid_request_error" type for what is really a config-file issue.
-    let params = crate::config::reload_operational_params(&config_path).map_err(|e| match e {
+    let config = crate::config::read_config_file(&config_path).map_err(|e| match e {
         crate::error::SwarmError::Config(msg) if msg.starts_with("Config file not found") => {
             ApiError(crate::error::SwarmError::NotFound(msg))
         }
@@ -1892,10 +1888,8 @@ pub async fn reload_config(
         other => ApiError(other),
     })?;
 
-    let old = crate::config::OperationalParams::from_config(&state.config);
-    let changed = params != old;
-
-    state.shared_state.apply_config_reload(params.clone());
+    let params = crate::config::OperationalParams::from_config(&config);
+    let changed = state.shared_state.make_config_live(config);
 
     if changed {
         tracing::info!(?params, "Config reloaded with changes via API");
@@ -1904,10 +1898,9 @@ pub async fn reload_config(
     }
 
     // Report what this call actually did, split from what it could not do.
-    // The previous response listed `max_peers` and the contribution/VRAM
-    // settings alongside the rest as though reloading had applied them; none of
-    // them was wired to anything, and `max_peers` cannot be — libp2p's
-    // connection limits are fixed when the swarm is built.
+    // `max_peers` cannot be applied — libp2p's connection limits are fixed when
+    // the swarm is built. The contribution and the caps are read live through
+    // `cfg()`, which the reload has just replaced with the file.
     let live = state.shared_state.cfg();
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -3160,6 +3153,47 @@ bootstrap_peers = ["/ip4/10.0.0.7/tcp/8810"]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reload makes the FILE the live config, every setting in it — not only
+    /// the five operational figures the subsystems are woken for. Hand-edited,
+    /// a bandwidth cap stayed out of `cfg()` while the reload's reply listed
+    /// it as applied; and `changed` was judged against the boot snapshot, so
+    /// every later reload of the same file said it changed (sweep 2026-10-27).
+    #[tokio::test]
+    async fn a_reload_makes_every_setting_in_the_file_live() {
+        let mut app = crate::api::route_test_support::test_app();
+        let dir = tempfile::tempdir().unwrap();
+        app.state.config.node.data_dir = dir.path().to_path_buf();
+        assert_ne!(
+            app.state.shared_state.cfg().resources.max_bandwidth_mbps,
+            37
+        );
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[resources]\nmax_bandwidth_mbps = 37\n\n[inference]\nmax_concurrent_requests = 3\n",
+        )
+        .unwrap();
+
+        let Ok(Json(reply)) = reload_config(State(app.state.clone())).await else {
+            panic!("the reload refused a valid file");
+        };
+        let live = app.state.shared_state.cfg();
+        assert_eq!(
+            live.resources.max_bandwidth_mbps, 37,
+            "the hand edit is live"
+        );
+        assert_eq!(reply["applied"]["max_bandwidth_mbps"], 37);
+        assert_eq!(live.inference.max_concurrent_requests, 3);
+        assert_eq!(reply["changed"], true);
+
+        let Ok(Json(again)) = reload_config(State(app.state.clone())).await else {
+            panic!("the second reload refused the same file");
+        };
+        assert_eq!(
+            again["changed"], false,
+            "the same file again changes nothing"
+        );
+    }
 
     /// The copy repair's liveness line: a pass that started after the last one
     /// finished is RUNNING, and says since when — the reading #217 needed from a
