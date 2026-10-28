@@ -4,6 +4,12 @@
 
 ## [0.3.260-alpha] — 2026-10-29
 
+**All together, against v0.3.259: a 14B model split between an 8 GB laptop graphics card and
+its processor summarises a long document 2.3 times as fast — 5.2 → 12.1 tokens a second — and
+starts answering almost a second sooner (3.9 → 3.0 seconds).** Measured on this release's own build against the
+previous one, each run twice in both orders. Models that fit whole on the card, mixtures of
+experts and processor-only models run as fast as before.
+
 **A model too big for your graphics card writes 1.3 to 1.7 times as fast when it is split
 between the card and your processor.** Such a model spends most of every step on the slower
 processor while the card waits. The split now keeps the model's first and last layers on the
