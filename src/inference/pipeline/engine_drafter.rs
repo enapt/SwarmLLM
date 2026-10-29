@@ -1608,6 +1608,8 @@ mod tests {
             ("qwen2.5-14b-instruct-q4-k-m", "qwen2.5-instruct"),
             ("qwen2.5-3b-instruct-q4-k-m", "qwen2.5-instruct"),
             ("qwen2.5-0.5b-instruct-fp16", "qwen2.5-instruct"),
+            ("qwen2.5-0.5b-instruct-q8-0", "qwen2.5-instruct"),
+            ("qwen2.5-coder-1.5b-instruct-q8-0", "qwen2.5-coder-instruct"),
             ("qwen2.5-coder-3b-instruct-q4-k-m", "qwen2.5-coder-instruct"),
             ("qwen2.5-coder-7b-instruct-q4-k-m", "qwen2.5-coder-instruct"),
             (
@@ -1669,6 +1671,19 @@ mod tests {
             for_target("qwen2.5-14b-instruct-q4-k-m", without_the_general_3b),
             coder_3b,
             "a larger drafter of another line still drafts"
+        );
+        // The 0.5B pair, both Q8_0 — ids that end in a two-token tag, `q8-0`.
+        let general_0_5b = "qwen2.5-0.5b-instruct-q8-0";
+        let small = vec![
+            (
+                sized(30, 500),
+                ModelId("qwen2.5-coder-0.5b-instruct-q8-0".into()),
+            ),
+            (sized(30, 520), ModelId(general_0_5b.into())),
+        ];
+        assert_eq!(
+            for_target("qwen2.5-14b-instruct-q4-k-m", small),
+            general_0_5b
         );
     }
 

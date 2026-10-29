@@ -5626,7 +5626,10 @@ holding a drafter of another line fetches one the same size of the target's
 (`HeldDrafter::beaten_by`) — a different model, never another copy. The line is read from the model
 id (`release_line`): the general uploads' headers have no `general.basename` and name themselves
 `qwen2.5-3b-instruct` where the coder's say `Qwen2.5 Coder 3B Instruct AWQ`; a misread line only
-loses the tie, the order before. Literature: DistillSpec (Zhou et al., ICLR 2024, arXiv 2310.08461)
+loses the tie, the order before. An id spells a two-token tag with a hyphen (`q8-0`, `q6-k`,
+`iq4-xs`), and until the pre-release review the quantisation was stripped only as one token or
+three, so every Q8_0 drafter — the 0.5B and 1.5B ones here — kept its tag and matched no target
+(gotcha #991; `quant::inferred_base_name` now tries the last two). Literature: DistillSpec (Zhou et al., ICLR 2024, arXiv 2310.08461)
 names alignment of the drafter with the target the main lever and gains 10-45% over standard
 speculation by distilling the drafter toward it; a sibling fine-tuned as the target was is part of
 that alignment at no cost.

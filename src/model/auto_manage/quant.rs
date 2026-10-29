@@ -257,18 +257,20 @@ pub fn inferred_base_name(name: &str) -> String {
             }
         }
     }
-    // Multi-token quant tags like `q4_k_m` — try the last 3 segments
-    // joined together (covers `q4`, `k`, `m`).
+    // Multi-token quant tags: `q4_k_m` is three segments (`q4`, `k`, `m`),
+    // `q8_0` / `q6_k` / `iq4_xs` two. A model id spells them with `-`
+    // (`q8-0`), so a two-token tag is neither its last segment nor its
+    // last three (gotcha #991; `Quantization::parse` learned the same
+    // spelling on 2026-07-26, this splitter did not).
     let segs: Vec<&str> = core.split(['-', '.', '_'][..].as_ref()).collect();
-    let n = segs.len();
-    if n >= 3 {
-        let tail = format!("{}{}{}", segs[n - 3], segs[n - 2], segs[n - 1]);
-        if Quantization::parse(&tail) != Quantization::Unknown {
-            let cutoff = core
-                .rfind(segs[n - 3])
-                .map(|i| i.saturating_sub(1))
-                .unwrap_or(core.len());
-            return core[..cutoff].to_string();
+    for take in [3, 2] {
+        let Some(tail) = segs.len().checked_sub(take).map(|start| &segs[start..]) else {
+            continue;
+        };
+        if Quantization::parse(&tail.concat()) != Quantization::Unknown {
+            // The tag's segments and the delimiters between them, from the end.
+            let tag_len = tail.iter().map(|s| s.len()).sum::<usize>() + take - 1;
+            return core[..(core.len() - tag_len).saturating_sub(1)].to_string();
         }
     }
     core.to_string()
@@ -591,6 +593,26 @@ mod tests {
             inferred_base_name("phi-3.5-mini-instruct.Q4_K_M"),
             "phi-3.5-mini-instruct"
         );
+    }
+
+    /// A model id spells `Q8_0` as `q8-0` (sanitisation turns `_` into `-`),
+    /// so a two-token tag reads as neither its last token nor the last three
+    /// (gotcha #991) — and these are the small drafters' usual ids.
+    #[test]
+    fn base_name_strips_a_two_token_tag_an_id_spells_with_hyphens() {
+        for (id, base) in [
+            ("qwen2.5-1.5b-instruct-q8-0", "qwen2.5-1.5b-instruct"),
+            ("llama-3.2-1b-instruct-q8-0", "llama-3.2-1b-instruct"),
+            (
+                "qwen3-30b-a3b-instruct-2507-q2-k",
+                "qwen3-30b-a3b-instruct-2507",
+            ),
+            ("qwen2.5-7b-instruct-iq4-xs", "qwen2.5-7b-instruct"),
+            ("qwen2.5-7b-instruct-q4-k-m", "qwen2.5-7b-instruct"),
+            ("qwen3-0.6b-q8-0", "qwen3-0.6b"),
+        ] {
+            assert_eq!(inferred_base_name(id), base, "{id}");
+        }
     }
 
     #[test]
