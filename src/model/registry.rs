@@ -24,11 +24,13 @@ pub(crate) const MOST_PARTS_A_HOLDER: usize = 4096;
 /// its node is not connected here, a claim from another such node may take its
 /// place in a full list (`holder_to_give_up`), and it is aged out
 /// ([`ModelRegistry::age_out_holders`]). Three of the slowest full re-announce
-/// periods any node runs: `health::monitor` re-announces every
-/// `FULL_REANNOUNCE_EVERY_TICKS` (10) broadcast rounds, and a round comes every
-/// 1-10 ticks of 30 s with the ANNOUNCER's peer count (≤ 50 min) — a far
-/// holder's period is its own, not ours, so the bound is the worst case.
-const STALE_HOLDER_AFTER: Duration = Duration::from_secs(3 * 10 * 10 * 30);
+/// periods any node runs: `health::monitor` repeats an unchanged parts list no
+/// sooner than `FULL_REANNOUNCE_EVERY_TICKS` (10) broadcast rounds — a round
+/// comes every 1-10 ticks of 30 s with the ANNOUNCER's peer count — and at a
+/// wait that doubles to at most 40 min while nothing changes (`QuietRepeat`,
+/// 2026-10-29), so ≤ 50 min; a far holder's period is its own, not ours, so the
+/// bound is the worst case. `health::monitor`'s tests hold the repeat to it.
+pub(crate) const STALE_HOLDER_AFTER: Duration = Duration::from_secs(3 * 10 * 10 * 30);
 
 /// How long a holder's own retraction outranks a DHT provider record naming it.
 ///

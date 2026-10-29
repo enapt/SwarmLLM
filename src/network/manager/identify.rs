@@ -562,8 +562,9 @@ impl NetworkManager {
                 );
             }
             // And which parts of which models this node holds, the same way.
-            // Gossip sends them on a change and in full every ~5 minutes
-            // (`FULL_REANNOUNCE_EVERY_TICKS`), and a planner only routes to a
+            // Gossip sends them on a change and in full again at a wait that
+            // starts near 5 minutes and doubles while nothing changes
+            // (`health::monitor::QuietRepeat`), and a planner only routes to a
             // connected peer it has a holder record for — so a node that had
             // just started, or a peer that had just come back, could not be
             // given a split until then. Seen live 2026-10-27: a 70B refused 4

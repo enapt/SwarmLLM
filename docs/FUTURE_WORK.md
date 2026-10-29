@@ -1290,9 +1290,20 @@ forwarding — `swarm/regions` 546, `swarm/health` 457, `swarm/pools` 78, `swarm
 and delivered by kind: `NodeCapabilityUpdate` 2.1 a minute at ~11.6 KB each (406 B/s), `ShardAnnounce`
 1.2 a minute at ~12.7 KB (254 B/s), `HealthPing` 14 a minute (~330 B). So the models topic's cost is
 peers' ~12 KB capability and parts messages (a peer holding 14 models / 96 parts) forwarded to the
-mesh. **Next**: what a `NodeCapabilityUpdate` carries that makes it 11.6 KB and whether each one says
-what CHANGED (`docs/invariants/network.md` § "Gossip says what CHANGED"); its cadence per peer (~one
-every 3.3 min each). **(2c) fixed 2026-10-17, released in v0.3.242**: a restart gossiped every
+mesh. **Read 2026-10-29**: a capability is that size because it carries its whole `hosted_shards`
+list (two peers hold ~300 parts; nothing caps it below the receiver's 1,024) — the same list the
+`ShardAnnounce` carries — plus up to 32 observed latencies at ~160 B (a `NodeId` serializes as a JSON
+array of 32 numbers). Both repeated unchanged every 5 minutes: 7 peers' fixed repeats are 1.4 a
+minute of each, so nearly every parts list and two thirds of the capabilities were repeats. **Fixed
+2026-10-29 (2i): an unchanged capability or parts list repeats at a wait that doubles, 5 → 10 → 20 →
+40 min, and a change resets it** (`health::monitor::QuietRepeat`, RFC 6206's Trickle; the parts list
+never sooner than 10 rounds, so the 50-minute worst case `STALE_HOLDER_AFTER` is three of holds;
+A/B `SWARMLLM_QUIET_REPEAT=fixed`; `docs/invariants/network.md` § "An unchanged announcement is
+repeated less often"). ~1.5 repeats an hour of each instead of 12; estimated ~1.9 KB/s less
+forwarded once the swarm takes the release — re-read the field after it. **Left (2j)**: a
+capability still carries the whole parts list beside the `ShardAnnounce`; dropping it needs a
+feature bit (the API's peer listings and `resolver.rs` read `cap.hosted_shards`, older peers
+need it) — weigh after the re-read. **(2c) fixed 2026-10-17, released in v0.3.242**: a restart gossiped every
 manifest it holds in full, twice, a few seconds apart (§ Closed). Left: the
 mesh is still sized once at startup, from peers ever met rather than reachable now (a rig first
 before going further: a thinner mesh partitions sooner); (3) a both-direction traffic ceiling at the transport

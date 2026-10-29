@@ -5828,6 +5828,56 @@ gossiping, a future-dated record kept, a record past the window kept):
 `a_round_with_no_peer_connected_gossips_no_manifest`,
 `a_stored_record_is_kept_only_where_this_boots_clock_can_hold_it`.
 
+## An unchanged announcement is repeated less often the longer it stays unchanged (2026-10-29, FUTURE_WORK #91)
+
+### What was measured
+
+Field re-read on v0.3.261 (release node, 7 peers, idle, 14:56-15:56Z): peer lookups had halved
+since 10-16 ((2h) held), but upload had DOUBLED, 2410 → 4921 B/s, all of it gossip forwarding on
+`swarm/models` (2908 B/s sent there, 0.6 messages a minute of it our own). The first copies
+received: `NodeCapabilityUpdate` 2.1 a minute at ~11.6 KB, `ShardAnnounce` 1.2 a minute at
+~12.7 KB, each forwarded ~4 times. Both had grown with what peers hold — two hold ~300 parts,
+and a capability carries its whole `hosted_shards` list, as the parts list does. The capability
+repeated every `CAPABILITY_HEARTBEAT` (5 min) and the parts list every
+`FULL_REANNOUNCE_EVERY_TICKS` rounds (5 min on a swarm this size): 7 peers' fixed repeats are
+1.4 a minute of each, so nearly every parts list received and two thirds of the capabilities
+were repeats of something unchanged.
+
+### What it replaced
+
+A fixed repeat, for ever. What the repeat is still FOR: repairing a gossip message lost in
+flight — a newcomer is caught up point to point at identify (#120, #359), nothing ages a
+capability out (re-checked 2026-10-29: no reader of a capability's age exists), and figures
+inside a deadband are never further off than the band, which is measured from what was last
+SENT. The parts list's repeat also keeps a far holder's record of us fresh against
+`STALE_HOLDER_AFTER`. Repair matters most just after a change, and an unchanged picture needs
+it less the longer it has stood — which is RFC 6206's Trickle timer: Imin after an
+inconsistency, doubled each interval up to Imax. Here without its suppression (k = ∞): each
+announcement is this node's own, and no one else can say it for us.
+
+**`health::monitor::QuietRepeat`** is the one wait, for both: `CAPABILITY_HEARTBEAT` (5 min)
+after a change, doubled by each repeat up to `QUIET_REPEAT_MOST` (40 min). The capability's
+gate (`capability_needs_broadcast`) returns the wait that follows each publish; the parts
+list's (`parts_repeat_due`) still never repeats sooner than 10 rounds, so a busy swarm's
+slower rounds stretch it as before — and since 40 < 50, the slowest period any node runs is
+still 10 rounds of 5 minutes, and `STALE_HOLDER_AFTER` (3 × 50 min) still holds. The first
+list of a run always goes, an all-withheld one too (it retracts what peers recorded before a
+restart; the round-counter version waited for round 10 to send it).
+
+What it costs: a peer's displayed uptime lags by up to 40 minutes (`api/admin.rs` and
+`api/identity.rs` are its only readers); the observed-latency hint each capability carries
+reaches peers ~8x less often at steady state — it never ranks a peer
+(`a_gossiped_figure_does_not_rank_a_peer_we_have_never_used`), and an identical snapshot
+merged every 5 minutes was re-weighting one figure. Steady state: ~1.5 repeats an hour of
+each instead of 12. Estimated from the field figures: ~1.2 capabilities and ~1 parts list a
+minute fewer received, ~1.9 KB/s less forwarded — as the swarm takes the release.
+
+Tests (each red under `SWARMLLM_QUIET_REPEAT=fixed`, the A/B arm):
+`an_unchanged_capability_is_repeated_less_often_the_longer_it_stays_unchanged`,
+`a_changed_capability_goes_at_once_and_its_repeat_is_quick_again`,
+`an_unchanged_parts_list_is_repeated_less_often_the_longer_it_stays_unchanged`; the bound
+`no_repeat_waits_past_a_third_of_the_time_a_holder_record_goes_stale` (rounds of 1-10 ticks).
+
 ## A size the other computer chose is checked before it sizes anything (2026-10-24)
 
 **The defect, four times over.** Each site took a number from a peer's bytes and let it decide
@@ -6010,6 +6060,9 @@ for addresses.
   periods any node runs (`health::monitor` re-announces in full every
   `FULL_REANNOUNCE_EVERY_TICKS` (10) broadcast rounds; a round comes every 1-10 ticks of 30 s
   with the ANNOUNCER's peer count, so ≤ 50 min) — a far holder's period is its own, not ours.
+  Since 2026-10-29 an unchanged list waits at least 10 rounds AND a wait doubling to 40 min
+  (`QuietRepeat`, § "An unchanged announcement is repeated less often"), so ≤ 50 min still;
+  `no_repeat_waits_past_a_third_of_the_time_a_holder_record_goes_stale` holds it to the bound.
 - **The age-out**: every `FULL_REANNOUNCE_EVERY_TICKS` health-monitor ticks,
   `ModelRegistry::age_out_holders` forgets every record past the bound whose node is not
   connected — collected first, standing asked with no guard, each record re-checked stale under

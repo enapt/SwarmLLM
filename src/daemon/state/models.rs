@@ -340,7 +340,8 @@ pub struct ModelMgmt {
     /// `health::monitor::broadcast_capabilities` (every round; `None` while
     /// nothing is held), read ONLY by the identify handler, which sends it to
     /// a newly connected peer beside our capability. Gossip carries the parts
-    /// only when they change and in full every ~5 minutes, so a node that had
+    /// only when they change and in full again at a wait that starts near 5
+    /// minutes and doubles while nothing changes (`QuietRepeat`), so a node that had
     /// just started — or a peer that had just come back — knew nothing of
     /// what its peers held until then, and a split request in that window was
     /// planned without them (2026-10-27: a 70B refused twice, 4 min after a

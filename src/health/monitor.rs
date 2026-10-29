@@ -23,14 +23,15 @@ pub struct HealthMonitor {
     /// than left standing until the full re-announce — and whether its model
     /// went out as checked against the origin, so a copy the heal has just
     /// checked tells peers on the next tick too.
-    /// Full re-announce only when set changes or every FULL_REANNOUNCE ticks.
+    /// Gossiped when the set changes, or as a repeat (`parts_repeat_due`).
     last_announced_shards: std::collections::HashSet<(crate::types::ShardId, u64, bool)>,
     /// Models withheld from the swarm at the last broadcast
     /// (`ModelRegistry::model_is_withheld`), so the DHT is told when one stops
     /// or starts being offered.
     last_withheld_models: std::collections::HashSet<crate::types::ModelId>,
-    /// Counter for periodic full re-announce (ensures late-joining peers get data).
-    shard_announce_counter: u64,
+    /// When the parts list last went on gossip, how many broadcast rounds ago,
+    /// and how long an unchanged one waits after it ([`QuietRepeat`]).
+    parts_sent: Option<(std::time::Instant, u64, QuietRepeat)>,
     /// `manifest_hash` of each model as this node last put it on the wire (or
     /// let stand as already heard), and since when, so a manifest is
     /// re-broadcast when it CHANGES rather than every tick. See
@@ -56,10 +57,14 @@ pub struct HealthMonitor {
     /// `manifest_heard` saw it (`SharedState::persist_manifests_heard`). Zero
     /// at boot: what was just read back is what is stored.
     manifests_heard_stored: u64,
-    /// When the capability last went on the wire and what it said, so it is
-    /// published when it says something new or `CAPABILITY_HEARTBEAT` has
-    /// passed, not every tick (`capability_needs_broadcast`).
-    last_published_capability: Option<(std::time::Instant, crate::types::NodeCapability)>,
+    /// When the capability last went on the wire, what it said and how long an
+    /// unchanged one waits after it, so it is published when it says something
+    /// new or that wait has passed, not every tick (`capability_needs_broadcast`).
+    last_published_capability: Option<(
+        std::time::Instant,
+        crate::types::NodeCapability,
+        QuietRepeat,
+    )>,
     /// Per-acquisition liveness tracker: model_id → (last bytes seen, when seen).
     /// If bytes don't advance for STALL_THRESHOLD, the acquisition is reconciled
     /// against disk (mark Complete if shards present, Failed otherwise).
@@ -99,13 +104,14 @@ const WSL_FIREWALL_GRACE: std::time::Duration = std::time::Duration::from_secs(3
 /// How many gossip-broadcast rounds between full re-announcements.
 ///
 /// Shard announcements and model manifests are both delta-broadcast — sent when
-/// they change — with a full re-send every this many rounds so a peer that
-/// joined during a quiet spell still converges. **One constant for both**,
+/// they change — with a full re-send no sooner than this many rounds so a peer
+/// that joined during a quiet spell still converges. **One constant for both**,
 /// because they answer the same question about the same tick and a reader
 /// comparing them should not have to check whether two `10`s mean the same
-/// thing. At the ≤10-peer cadence of one round per 30 s that is a full picture
-/// every 5 minutes; a node with many peers broadcasts less often and the
-/// interval scales with it.
+/// thing. At the ≤10-peer cadence of one round per 30 s that is 5 minutes; a
+/// node with many peers broadcasts less often and the interval scales with it.
+/// The parts list's repeat then also waits for [`QuietRepeat`] (5 minutes after
+/// a change, doubling to 40 while nothing changes, #91).
 ///
 /// Each holder's counter is phased independently, so a model held by several
 /// nodes is re-announced several times per cycle. A newly connected peer does
@@ -206,9 +212,97 @@ fn manifest_round_is_full(counter: u64) -> bool {
 /// (checked 2026-10-10 — the only readers of how long ago a peer spoke are the
 /// 90 s eviction and the dashboard's healthy flag, both on `last_seen`). So a
 /// slower repeat drops no peer; it only bounds how stale a figure that moved
-/// less than its deadband may get. A peer's displayed uptime lags by up to
-/// this much.
+/// less than its deadband may get — and a deadband is measured from what was
+/// last SENT, so that figure is never further off than its band however long
+/// the repeat waits. A peer's displayed uptime lags by up to the wait.
+///
+/// The wait is this long only just after the capability CHANGED: each repeat
+/// of an unchanged one doubles it, up to [`QUIET_REPEAT_MOST`]
+/// ([`QuietRepeat`], 2026-10-29).
 const CAPABILITY_HEARTBEAT: Duration = Duration::from_secs(5 * 60);
+
+/// The longest an unchanged capability or parts list waits before it goes out
+/// again, once it has gone unchanged long enough (RFC 6206's `Imax`).
+///
+/// 40 minutes because the parts list's repeat is also what keeps a FAR
+/// holder's record of us fresh: `model::registry::STALE_HOLDER_AFTER` (2.5 h) is
+/// three of the slowest periods any node ran before this — 10 rounds of up to
+/// 5 minutes each, 50 minutes. Never sooner than 10 rounds, at most 40
+/// minutes, so the slowest period is still 50 and the bound still holds.
+const QUIET_REPEAT_MOST: Duration = Duration::from_secs(40 * 60);
+
+/// When an announcement that has NOT changed goes out again: this node's
+/// capability and its parts list (FUTURE_WORK #91, 2026-10-29).
+///
+/// RFC 6206's Trickle timer, without its suppression (each is this node's own
+/// and nobody else says it): the repeat waits [`CAPABILITY_HEARTBEAT`] (Imin)
+/// after the announcement last CHANGED, and each repeat doubles the wait, up to
+/// [`QUIET_REPEAT_MOST`] (Imax). A change goes out at once, as before, and
+/// starts the wait again. What the repeat is for is repairing a message lost in
+/// flight — a newcomer is caught up point to point (`identify.rs`), and nothing
+/// ages a capability out — and a loss is likeliest to matter just after a
+/// change, which is when the repeat stays quick.
+///
+/// Measured before it (2026-10-29, v0.3.261, 7 peers, idle): upload had doubled
+/// since 10-16 to 4.9 KB/s, all of it `swarm/models` forwarding. Received first
+/// copies: capabilities 2.1 a minute at ~11.6 KB (their `hosted_shards` holds
+/// up to ~300 parts), parts lists 1.2 a minute at ~12.7 KB — the fixed 5-minute
+/// repeat of 7 peers is 1.4 a minute of each. At steady state the backoff sends
+/// ~1.5 repeats an hour instead of 12.
+///
+/// A/B `SWARMLLM_QUIET_REPEAT=fixed`: every repeat waits `CAPABILITY_HEARTBEAT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuietRepeat {
+    /// How long after the last time it went out the next repeat waits.
+    wait: Duration,
+}
+
+impl QuietRepeat {
+    /// The wait after a change — or after the first announcement.
+    fn after_a_change() -> Self {
+        Self {
+            wait: CAPABILITY_HEARTBEAT,
+        }
+    }
+
+    /// The wait after an unchanged repeat went out: twice the last one, at
+    /// most [`QUIET_REPEAT_MOST`].
+    fn after_a_repeat(self) -> Self {
+        if quiet_repeat_is_fixed() {
+            return Self::after_a_change();
+        }
+        Self {
+            wait: self.wait.saturating_mul(2).min(QUIET_REPEAT_MOST),
+        }
+    }
+
+    /// Has the wait passed, `since_sent` after it last went out?
+    fn due(self, since_sent: Duration) -> bool {
+        since_sent >= self.wait
+    }
+}
+
+/// `SWARMLLM_QUIET_REPEAT=fixed` — the A/B arm of [`QuietRepeat`]: every repeat
+/// waits `CAPABILITY_HEARTBEAT`, as before 2026-10-29.
+fn quiet_repeat_is_fixed() -> bool {
+    static FIXED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FIXED.get_or_init(|| std::env::var("SWARMLLM_QUIET_REPEAT").is_ok_and(|v| v == "fixed"))
+}
+
+/// Why a repeat of an unchanged capability went out — the word the publish's
+/// DIAG line carries (`examples/capability_gate_rig.sh` reads it).
+const CAPABILITY_REPEAT: &str = "heartbeat";
+
+/// Is an unchanged parts list due to go out again, `rounds_since` broadcast
+/// rounds and `since_sent` after it last went?
+///
+/// Never sooner than `FULL_REANNOUNCE_EVERY_TICKS` rounds — a busy swarm's
+/// rounds are slower, and its period with them — nor sooner than the repeat's
+/// wait. The slowest period is therefore what it always was, 10 rounds of up
+/// to 5 minutes, since the wait never passes 40 (`QUIET_REPEAT_MOST`).
+fn parts_repeat_due(rounds_since: u64, since_sent: Duration, repeat: QuietRepeat) -> bool {
+    rounds_since >= FULL_REANNOUNCE_EVERY_TICKS && repeat.due(since_sent)
+}
 
 /// How far a memory figure (free card memory, the RAM budget, free RAM where a
 /// peer reads it) must move from what was last PUBLISHED before it is news.
@@ -378,23 +472,29 @@ fn capability_news(
     }
 }
 
-/// Does the capability go on the wire this round, and why? `last` is when it
-/// was last published and what it said; `None` before the first, which always
-/// goes. `None` back means stay quiet.
+/// Does the capability go on the wire this round, why, and how long will an
+/// unchanged one wait after it? `last` is when it was last published, what it
+/// said and the wait that publish set ([`QuietRepeat`]); `None` before the
+/// first, which always goes. `None` back means stay quiet.
 fn capability_needs_broadcast(
-    last: Option<&(std::time::Instant, crate::types::NodeCapability)>,
+    last: Option<&(
+        std::time::Instant,
+        crate::types::NodeCapability,
+        QuietRepeat,
+    )>,
     now: &crate::types::NodeCapability,
     at: std::time::Instant,
-) -> Option<String> {
-    let Some((sent_at, sent)) = last else {
-        return Some("first".to_string());
+) -> Option<(String, QuietRepeat)> {
+    let Some((sent_at, sent, repeat)) = last else {
+        return Some(("first".to_string(), QuietRepeat::after_a_change()));
     };
     let news = capability_news(sent, now);
     if !news.is_empty() {
-        return Some(news.join(","));
+        return Some((news.join(","), QuietRepeat::after_a_change()));
     }
-    (at.saturating_duration_since(*sent_at) >= CAPABILITY_HEARTBEAT)
-        .then(|| "heartbeat".to_string())
+    repeat
+        .due(at.saturating_duration_since(*sent_at))
+        .then(|| (CAPABILITY_REPEAT.to_string(), repeat.after_a_repeat()))
 }
 
 /// This node's claim of which HuggingFace upload `model` is — what
@@ -563,7 +663,7 @@ impl HealthMonitor {
             shutdown_rx,
             last_announced_shards: std::collections::HashSet::new(),
             last_withheld_models: std::collections::HashSet::new(),
-            shard_announce_counter: 0,
+            parts_sent: None,
             last_announced_manifests: std::collections::HashMap::new(),
             manifest_announce_counter: 0,
             peers_told_about_manifests: std::collections::HashMap::new(),
@@ -1434,7 +1534,7 @@ impl HealthMonitor {
             .local_capability
             .store(Some(std::sync::Arc::new(cap.clone())));
         let at = std::time::Instant::now();
-        if let Some(why) =
+        if let Some((why, repeat)) =
             capability_needs_broadcast(self.last_published_capability.as_ref(), &cap, at)
         {
             let msg = NetworkCommand::Broadcast(SwarmMessage::NodeCapabilityUpdate(cap.clone()));
@@ -1443,9 +1543,10 @@ impl HealthMonitor {
                     tracing::debug!(
                         target: "swarmllm::health::monitor",
                         why = %why,
+                        next_repeat_s = repeat.wait.as_secs(),
                         "DIAG: capability published"
                     );
-                    self.last_published_capability = Some((at, cap));
+                    self.last_published_capability = Some((at, cap, repeat));
                 }
                 Err(e) => {
                     tracing::debug!(error = %e, "DIAG: failed to broadcast capability update")
@@ -1453,11 +1554,11 @@ impl HealthMonitor {
             }
         }
 
-        // Delta-compressed shard announcements: only broadcast when shard set
-        // changes, or every 10 broadcast cycles as a full re-announce (ensures
-        // late-joining peers get the full picture). At 10K peers with scaled
-        // gossip interval (~240s), full re-announce happens every ~40 min.
-        if let Some(announce) = self.shard_announce_round(node_id, hosted_shards, &held_models) {
+        // The parts list goes on gossip when it changes, and an unchanged one
+        // again at a wait that doubles while nothing changes
+        // (`parts_repeat_due`); a newcomer is sent it at identify time.
+        if let Some(announce) = self.shard_announce_round(node_id, hosted_shards, &held_models, at)
+        {
             let shard_count = announce.shards.len();
             let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
             if let Err(e) = self.network_tx.send(msg).await {
@@ -1467,17 +1568,18 @@ impl HealthMonitor {
     }
 
     /// This round's announcement of the parts held here, returned when it goes
-    /// on gossip: when the set changed, or every `FULL_REANNOUNCE_EVERY_TICKS`
-    /// rounds. Built EVERY round and kept in `ModelMgmt::own_shard_announce`,
-    /// whether it goes or not, so a peer connecting between full rounds is sent
-    /// this picture point to point by the identify handler — one builder, so
-    /// the copy a newcomer gets is the one the swarm gets. `None` is kept while
-    /// nothing is held.
+    /// on gossip: when the set changed, or as a repeat once
+    /// [`parts_repeat_due`] says so (`at` is this round's time). Built EVERY
+    /// round and kept in `ModelMgmt::own_shard_announce`, whether it goes or
+    /// not, so a peer connecting between full rounds is sent this picture point
+    /// to point by the identify handler — one builder, so the copy a newcomer
+    /// gets is the one the swarm gets. `None` is kept while nothing is held.
     fn shard_announce_round(
         &mut self,
         node_id: crate::types::NodeId,
         hosted_shards: Vec<crate::types::ShardId>,
         held_models: &std::collections::HashSet<crate::types::ModelId>,
+        at: std::time::Instant,
     ) -> Option<crate::types::ShardAnnounce> {
         if held_models.is_empty() {
             self.shared_state.models.own_shard_announce.store(None);
@@ -1495,13 +1597,17 @@ impl HealthMonitor {
             })
             .collect();
         let shards_changed = current_set != self.last_announced_shards;
-        self.shard_announce_counter += 1;
-        // Full re-announce every `FULL_REANNOUNCE_EVERY_TICKS` broadcast
-        // cycles so late-joining peers eventually discover our shards even
-        // if nothing changed.
-        let periodic_reannounce = self
-            .shard_announce_counter
-            .is_multiple_of(FULL_REANNOUNCE_EVERY_TICKS);
+        // An unchanged list goes again to repair a gossip message lost in
+        // flight, and to keep a far holder's record of us from going stale
+        // (`STALE_HOLDER_AFTER`) — at a wait that doubles while nothing changes.
+        if let Some((_, rounds_since, _)) = self.parts_sent.as_mut() {
+            *rounds_since += 1;
+        }
+        let repeat_due = self
+            .parts_sent
+            .is_some_and(|(sent_at, rounds_since, repeat)| {
+                parts_repeat_due(rounds_since, at.saturating_duration_since(sent_at), repeat)
+            });
         // Complete for every model represented. `shards_changed` above
         // fires when shards are deleted, so this is what actually
         // retracts them on peers — previously it re-sent the smaller
@@ -1520,9 +1626,15 @@ impl HealthMonitor {
             .models
             .own_shard_announce
             .store(Some(std::sync::Arc::new(announce.clone())));
-        if !(shards_changed || periodic_reannounce) {
-            return None;
-        }
+        let repeat = match self.parts_sent {
+            // The first list of this run always goes — an all-withheld one too,
+            // which retracts what peers recorded before a restart.
+            None => QuietRepeat::after_a_change(),
+            Some(_) if shards_changed => QuietRepeat::after_a_change(),
+            Some((_, _, repeat)) if repeat_due => repeat.after_a_repeat(),
+            Some(_) => return None,
+        };
+        self.parts_sent = Some((at, 0, repeat));
         self.last_announced_shards = current_set;
         Some(announce)
     }
@@ -2949,8 +3061,12 @@ mod tests {
         );
         let at = std::time::Instant::now();
         assert!(
-            capability_needs_broadcast(Some(&(at, sent.clone())), &now, at + PING_INTERVAL)
-                .is_none(),
+            capability_needs_broadcast(
+                Some(&(at, sent.clone(), QuietRepeat::after_a_change())),
+                &now,
+                at + PING_INTERVAL
+            )
+            .is_none(),
             "one round after the last publish, an unchanged capability stays quiet"
         );
     }
@@ -3097,10 +3213,19 @@ mod tests {
             let mut now = capability_for_test();
             change(&mut now);
             assert!(!capability_news(&sent, &now).is_empty(), "{label} is news");
-            assert!(
-                capability_needs_broadcast(Some(&(at, sent.clone())), &now, at + PING_INTERVAL)
-                    .is_some(),
-                "{label} goes out on the next round"
+            // However long the repeat would wait: news is not a repeat.
+            let waiting_longest = QuietRepeat {
+                wait: QUIET_REPEAT_MOST,
+            };
+            assert_eq!(
+                capability_needs_broadcast(
+                    Some(&(at, sent.clone(), waiting_longest)),
+                    &now,
+                    at + PING_INTERVAL
+                )
+                .map(|(_, repeat)| repeat),
+                Some(QuietRepeat::after_a_change()),
+                "{label} goes out on the next round, and the repeat after it is quick again"
             );
         }
     }
@@ -3112,22 +3237,78 @@ mod tests {
     fn the_capability_goes_out_first_and_then_at_the_heartbeat() {
         let cap = capability_for_test();
         let at = std::time::Instant::now();
+        let why = |published: Option<(String, QuietRepeat)>| published.map(|(why, _)| why);
         assert_eq!(
-            capability_needs_broadcast(None, &cap, at).as_deref(),
+            why(capability_needs_broadcast(None, &cap, at)).as_deref(),
             Some("first")
         );
-        let sent = Some((at, cap.clone()));
+        let sent = Some((at, cap.clone(), QuietRepeat::after_a_change()));
         assert_eq!(
-            capability_needs_broadcast(
+            why(capability_needs_broadcast(
                 sent.as_ref(),
                 &cap,
                 at + CAPABILITY_HEARTBEAT.saturating_sub(PING_INTERVAL)
-            ),
+            )),
             None
         );
         assert_eq!(
-            capability_needs_broadcast(sent.as_ref(), &cap, at + CAPABILITY_HEARTBEAT).as_deref(),
+            why(capability_needs_broadcast(
+                sent.as_ref(),
+                &cap,
+                at + CAPABILITY_HEARTBEAT
+            ))
+            .as_deref(),
             Some("heartbeat")
+        );
+    }
+
+    /// When an unchanged capability goes out, round by round, over three hours
+    /// with nothing changing — and after a change in the middle of them.
+    fn capability_publish_minutes(change_at_minute: Option<u64>) -> Vec<u64> {
+        let start = std::time::Instant::now();
+        let mut last: Option<(
+            std::time::Instant,
+            crate::types::NodeCapability,
+            QuietRepeat,
+        )> = None;
+        let mut minutes = Vec::new();
+        for round in 0..(3 * 60 * 60 / PING_INTERVAL.as_secs()) {
+            let at = start + PING_INTERVAL * round as u32;
+            let minute = round * PING_INTERVAL.as_secs() / 60;
+            let mut cap = capability_for_test();
+            if change_at_minute.is_some_and(|m| minute >= m) {
+                cap.can_serve_inference = false;
+            }
+            if let Some((_, repeat)) = capability_needs_broadcast(last.as_ref(), &cap, at) {
+                minutes.push(minute);
+                last = Some((at, cap, repeat));
+            }
+        }
+        minutes
+    }
+
+    /// FUTURE_WORK #91, 2026-10-29: an unchanged capability is repeated at a
+    /// wait that doubles — 5, 10, 20, then every 40 minutes (RFC 6206's
+    /// Trickle) — not every 5 minutes for ever: 7 peers' fixed repeats were
+    /// 1.4 of the 2.1 capabilities a minute an idle node received, each
+    /// ~11.6 KB and forwarded ~4 times.
+    #[test]
+    fn an_unchanged_capability_is_repeated_less_often_the_longer_it_stays_unchanged() {
+        assert_eq!(
+            capability_publish_minutes(None),
+            [0, 5, 15, 35, 75, 115, 155],
+            "first, then waits of 5, 10, 20 and 40 minutes"
+        );
+    }
+
+    /// A change goes out on the round it happens, and starts the wait again:
+    /// a lost message is likeliest to matter just after a change, so that is
+    /// when the repeat is quick.
+    #[test]
+    fn a_changed_capability_goes_at_once_and_its_repeat_is_quick_again() {
+        assert_eq!(
+            capability_publish_minutes(Some(50)),
+            [0, 5, 15, 35, 50, 55, 65, 85, 125, 165],
         );
     }
 
@@ -3140,11 +3321,13 @@ mod tests {
         now.can_serve_inference = false;
         now.gpu.as_mut().unwrap().vram_available_mb -= 1_000;
         let at = std::time::Instant::now();
-        let mut why: Vec<String> = capability_needs_broadcast(Some(&(at, sent)), &now, at)
-            .expect("both are news")
-            .split(',')
-            .map(str::to_string)
-            .collect();
+        let mut why: Vec<String> =
+            capability_needs_broadcast(Some(&(at, sent, QuietRepeat::after_a_change())), &now, at)
+                .expect("both are news")
+                .0
+                .split(',')
+                .map(str::to_string)
+                .collect();
         why.sort();
         assert_eq!(why, ["can_serve_inference", "gpu"]);
     }
@@ -3376,9 +3559,10 @@ mod tests {
             indices
         };
 
+        let t0 = std::time::Instant::now();
         assert!(
             monitor
-                .shard_announce_round(node.clone(), vec![part(0), part(1)], &held)
+                .shard_announce_round(node.clone(), vec![part(0), part(1)], &held, t0)
                 .is_some(),
             "a first round is a change, and goes on gossip"
         );
@@ -3386,7 +3570,12 @@ mod tests {
 
         assert!(
             monitor
-                .shard_announce_round(node.clone(), vec![part(0), part(1)], &held)
+                .shard_announce_round(
+                    node.clone(),
+                    vec![part(0), part(1)],
+                    &held,
+                    t0 + PING_INTERVAL
+                )
                 .is_none(),
             "an unchanged set between full rounds is not gossiped again"
         );
@@ -3397,7 +3586,7 @@ mod tests {
         );
 
         assert!(monitor
-            .shard_announce_round(node.clone(), vec![part(1)], &held)
+            .shard_announce_round(node.clone(), vec![part(1)], &held, t0 + PING_INTERVAL * 2)
             .is_some());
         assert_eq!(
             kept(&state),
@@ -3406,12 +3595,90 @@ mod tests {
         );
 
         assert!(monitor
-            .shard_announce_round(node, Vec::new(), &Default::default())
+            .shard_announce_round(
+                node,
+                Vec::new(),
+                &Default::default(),
+                t0 + PING_INTERVAL * 3
+            )
             .is_none());
         assert!(
             state.models.own_shard_announce.load_full().is_none(),
             "a node holding nothing hands a newcomer nothing"
         );
+    }
+
+    /// The minutes at which a parts list goes on gossip over `hours`, with a
+    /// broadcast round every `round` and, from `change_at_minute`, one part
+    /// fewer.
+    fn parts_publish_minutes(
+        round: Duration,
+        hours: u64,
+        change_at_minute: Option<u64>,
+    ) -> Vec<u64> {
+        let (state, mut monitor, _rx) = monitor_for_test();
+        let node = state.identity.node_id().clone();
+        let model = crate::types::ModelId("m".into());
+        let part = |index| crate::types::ShardId {
+            model_id: model.clone(),
+            index,
+        };
+        let held: std::collections::HashSet<_> = [model.clone()].into();
+        let start = std::time::Instant::now();
+        let mut minutes = Vec::new();
+        for n in 0..(hours * 60 * 60 / round.as_secs()) {
+            let minute = n * round.as_secs() / 60;
+            let parts = if change_at_minute.is_some_and(|m| minute >= m) {
+                vec![part(1)]
+            } else {
+                vec![part(0), part(1)]
+            };
+            let at = start + round * n as u32;
+            if monitor
+                .shard_announce_round(node.clone(), parts, &held, at)
+                .is_some()
+            {
+                minutes.push(minute);
+            }
+        }
+        minutes
+    }
+
+    /// FUTURE_WORK #91, 2026-10-29: an unchanged parts list is repeated at a
+    /// wait that doubles — 5, 10, 20, then every 40 minutes (RFC 6206's
+    /// Trickle) — not every 10 rounds (5 minutes on a small swarm) for ever:
+    /// that repeat of 7 peers was nearly every one of the 1.2 lists a minute,
+    /// ~12.7 KB each, an idle node received. A change goes at once and starts
+    /// the wait again.
+    #[tokio::test]
+    async fn an_unchanged_parts_list_is_repeated_less_often_the_longer_it_stays_unchanged() {
+        assert_eq!(
+            parts_publish_minutes(PING_INTERVAL, 3, None),
+            [0, 5, 15, 35, 75, 115, 155]
+        );
+        assert_eq!(
+            parts_publish_minutes(PING_INTERVAL, 3, Some(50)),
+            [0, 5, 15, 35, 50, 55, 65, 85, 125, 165],
+            "a change goes on the round it happens, and its repeat is quick again"
+        );
+    }
+
+    /// The repeat is also what keeps a far holder's record of us fresh, and a
+    /// record no claim refreshes goes stale after `STALE_HOLDER_AFTER`, sized
+    /// as three of the slowest periods any node ran. Whatever the round —
+    /// every tick on a small swarm, every 10 ticks on a large one — no gap
+    /// between two lists may be longer than a third of it.
+    #[tokio::test]
+    async fn no_repeat_waits_past_a_third_of_the_time_a_holder_record_goes_stale() {
+        for ticks_a_round in 1..=10u32 {
+            let round = PING_INTERVAL * ticks_a_round;
+            let minutes = parts_publish_minutes(round, 12, None);
+            let longest = minutes.windows(2).map(|w| w[1] - w[0]).max().unwrap();
+            assert!(
+                Duration::from_secs(longest * 60) * 3 <= crate::model::registry::STALE_HOLDER_AFTER,
+                "a round every {round:?}: the longest gap is {longest} min"
+            );
+        }
     }
 
     /// #91 (2c): a restart gossips no manifest the swarm was gossiped within
