@@ -1936,9 +1936,30 @@ model, and a chain its head leads, keep `forward_passes()`.
 
 - **Counted where a round LEAVES, whichever path ran**: `RequestTrace::
   note_decode_round` at `forward_through_segments` past the prompt pass (the
-  plain loop), `forward_verify_through_segments` with any guesses (the drafter's
-  rounds, the n-gram loop's hits and misses), and `dsd_stream`'s chunk. A new
-  path that sends through those is counted without knowing it.
+  plain loop) and `forward_verify_through_segments` with any guesses (the
+  drafter's rounds, the n-gram loop's hits and misses). A new path that sends
+  through those is counted without knowing it.
+- **A path whose forwards OVERLAP counts the round trips it WAITED** (2026-10-29):
+  the flowing tree (`dsd_flow`) and the continuous stream (`dsd_stream`) count,
+  when they end, their decode time over the least time any forward took to be
+  answered, at most one a forward (`split_rounds::round_trips_waited` →
+  `SharedState::note_decode_rounds`). Counted one a forward — as both were — the
+  14B's flow over TH ↔ AU (~420 ms, 0.5B drafter, `fr/real_link_{finishhere,leaf369}`)
+  read 0.44-0.63 tokens a round on prose and 1.1-1.7 on code: floored to 1, a
+  split that ran at 7-9 and 17-22 tokens a second was priced at ~2, and since
+  the figure is per model one such reply among four tree-round replies took
+  their ~4 tokens a round to 1.7. Counted as waited, the same replies read
+  3.2-4.3 and 7.7-10.3 (37-50 and 15-21 rounds at a least answer of 405-474 ms),
+  which at the plan's round of hop + one pass (~450 ms) is the speed they ran
+  at; with the far card saturated (this node 12 of 48 layers, answers queued up
+  to 2.2 s, `fr/real_link_flow`) 1.6-1.8 and 4.3-4.4, so a queue is charged as
+  rounds, not hidden. The LEAST answer, not a mean: a queued answer's time is
+  the queue's, which the count must show. What a change must keep: the count is
+  in the PRICE's unit (a round = one crossing + one pass), so read the plan's
+  round cost against the least answer before changing either; and at most one
+  round a forward, so no reply is priced slower than the old count priced it.
+  The figure stays per model: a lopsided split's low yield prices an even split
+  of the same model too (`split_rounds` module doc).
 - **Recorded once per finished attempt** by `PipelineExecutor::execute`
   (`note_split_rounds`: tokens over rounds + 1, the prompt pass yielding the
   first token, so a plain loop reads exactly 1) — only for two or more segments,

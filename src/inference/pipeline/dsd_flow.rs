@@ -692,6 +692,10 @@ struct FlowRun<'a, 'r> {
     near_ms: f64,
     waiting_ms: f64,
     answers: u32,
+    /// The least time a forward took to be answered, whether the guard runs
+    /// or not — the unit the flow's rounds are counted in when it ends
+    /// (`split_rounds::round_trips_waited`).
+    least_answer_ms: Option<f64>,
     /// The tree's start every segment has been ANSWERED at: the caches hold
     /// the reply up to it whatever is still on its way. A rebase builds only
     /// on one settled — `forward_streams`' premise for a restart is that every
@@ -827,6 +831,7 @@ impl PipelineExecutor {
             near_ms: 0.0,
             waiting_ms: 0.0,
             answers: 0,
+            least_answer_ms: None,
             settled_base: start_pos as usize,
             unsettled: false,
             bonus_waiting: None,
@@ -849,6 +854,14 @@ impl PipelineExecutor {
         let emitted_before = run.reply.generated.len();
         let outcome = run.run_with().await;
         let flowed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        // The rounds the price will read for this reply (FUTURE_WORK #3 (d)):
+        // the round trips the flow waited, its forwards overlapping.
+        let rounds_waited = crate::daemon::state::split_rounds::round_trips_waited(
+            flowed_ms,
+            run.least_answer_ms,
+            run.forwards,
+        );
+        run.state.note_decode_rounds(self.request.id, rounds_waited);
         // A failed flow leaves no forward on its way where anything follows
         // it — a chain (`dsd_stream`'s rule) or the rounds finishing the reply
         // (`rounds_may_finish`): each still out is answered first.
@@ -900,7 +913,8 @@ impl PipelineExecutor {
             guard_least = format_args!("{}x{}", run.guard.least_width, run.guard.least_live),
             guard_at_end = format_args!("{}x{}", run.guard.at().width, run.guard.at().live),
             guard_cuts = run.guard.cuts,
-            least_answer_ms = format_args!("{:.0}", run.guard.least_delay_ms.unwrap_or(0.0)),
+            least_answer_ms = format_args!("{:.0}", run.least_answer_ms.unwrap_or(0.0)),
+            rounds_waited,
             queue_ms_most = format_args!("{:.0}", run.guard.queue_ms_most),
             copy = run.copy.is_some(),
             copied_runs = run.copied_runs,
@@ -1247,9 +1261,10 @@ impl FlowRun<'_, '_> {
         self.sent = self.flow.len();
         self.forwards += 1;
         self.rows_sent += rows.tokens.len() as u32;
-        // Each forward is counted a round (FUTURE_WORK #3 (d)), so a flow's
-        // yield reads lower than it is, never higher.
-        self.state.note_decode_round(request_id);
+        // No round is counted here: forwards overlap, so the flow counts the
+        // round trips it waited when it ends (`split_rounds::
+        // round_trips_waited`, FUTURE_WORK #3 (d)) — one a forward read a
+        // 14B's 7-9 tokens a second as 2.
         let index_pos = rows.index_pos as u32;
         let count = rows.tokens.len();
         let tree = |forward: &mut crate::types::LayerForward| {
@@ -1629,6 +1644,7 @@ impl FlowRun<'_, '_> {
             .saturating_duration_since(sent.started)
             .as_secs_f64()
             * 1000.0;
+        self.least_answer_ms = Some(self.least_answer_ms.map_or(delay_ms, |l| l.min(delay_ms)));
         if sent.alone && current && sent.lead == 0 {
             // A check's cost runs to its draws: this node's layers after the
             // peers' too, where they draw.

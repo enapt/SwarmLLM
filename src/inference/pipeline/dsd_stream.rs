@@ -442,6 +442,11 @@ struct StreamRun<'a, 'r> {
     restarts: u32,
     /// Chunks that held the stream ([`Frontier::held_by`]).
     held: u32,
+    /// The least time a chunk took to come back, read as it is taken — the
+    /// unit the stream's rounds are counted in when it ends
+    /// (`split_rounds::round_trips_waited`). Taken in order, a chunk may sit
+    /// behind the one before it; the least is one that did not.
+    least_answer_ms: Option<f64>,
     /// The longest conversation every machine of the chain serves for this
     /// model, the drafter here included — `None` where one has not said
     /// ([`StreamRun::positions_served`]).
@@ -494,15 +499,27 @@ impl PipelineExecutor {
             kept_whole: 0,
             restarts: 0,
             held: 0,
+            least_answer_ms: None,
             positions_served: None,
         };
         run.positions_served = run.positions_served();
+        let started = std::time::Instant::now();
         let outcome = run.run().await;
+        // The rounds the price will read for this reply (FUTURE_WORK #3 (d)):
+        // the round trips the stream waited, its chunks overlapping.
+        let rounds_waited = crate::daemon::state::split_rounds::round_trips_waited(
+            started.elapsed().as_secs_f64() * 1000.0,
+            run.least_answer_ms,
+            run.turn,
+        );
+        run.state.note_decode_rounds(self.request.id, rounds_waited);
         tracing::info!(
             request_id = %self.request.id,
             shape = shape_name,
             peers,
             chunks = run.chunks,
+            rounds_waited,
+            least_answer_ms = format_args!("{:.0}", run.least_answer_ms.unwrap_or(0.0)),
             kept_whole = run.kept_whole,
             restarts = run.restarts,
             held = run.held,
@@ -687,10 +704,9 @@ impl StreamRun<'_, '_> {
             SwarmError::Internal("a streamed reply ran past its checks' numbering".into())
         })?;
         self.turn += 1;
-        // A chunk is a round of the reply (FUTURE_WORK #3 (d)) — counted as
-        // one although it overlaps the chunks still in flight, so a stream's
-        // yield reads lower than it is, never higher.
-        self.state.note_decode_round(request_id);
+        // No round is counted here: chunks overlap, so the stream counts the
+        // round trips it waited when it ends (`split_rounds::
+        // round_trips_waited`, FUTURE_WORK #3 (d)).
 
         // This node's own layers before the peer's, one segment after another.
         let mut activations = super::pack_verify_tokens_to_le_bytes(&rows);
@@ -975,11 +991,13 @@ impl StreamRun<'_, '_> {
                 .acceptance
                 .record(kept_guesses as u32, guessed as u32);
         }
+        let answered_ms = sent.started.elapsed().as_secs_f64() * 1000.0;
+        self.least_answer_ms = Some(
+            self.least_answer_ms
+                .map_or(answered_ms, |l| l.min(answered_ms)),
+        );
         if sent.alone {
-            self.reply.check.record(
-                sent.rows as u32,
-                sent.started.elapsed().as_secs_f64() * 1000.0,
-            );
+            self.reply.check.record(sent.rows as u32, answered_ms);
         }
         self.chunks += 1;
         if whole {

@@ -289,9 +289,10 @@ pub struct RequestTrace {
     /// with a relaxed load per token instead of taking a lock.
     ttft_us: AtomicU64,
     /// Rounds this request's decode sent through the first segment of a
-    /// split it drove — a plain step, a guess check, a stream's chunk — every
-    /// attempt (`note_decode_round`). An atomic for the reason `ttft_us` is
-    /// one: it is stamped once a round.
+    /// split it drove — a plain step, a guess check — and the round trips a
+    /// flow or a stream waited, counted when it ends — every attempt
+    /// (`note_decode_round`, `note_decode_rounds`). An atomic for the reason
+    /// `ttft_us` is one: it is stamped once a round.
     decode_rounds: AtomicU32,
     inner: Mutex<TraceInner>,
     /// The reply text the reader has been sent, and how many events carried
@@ -526,12 +527,20 @@ impl RequestTrace {
     }
 
     /// One round of a split's decode left for the first segment — a plain
-    /// step, a guess check or a stream's chunk. Called where each leaves
+    /// step or a guess check. Called where each leaves
     /// (`forward_through_segments` past the prompt pass,
-    /// `forward_verify_through_segments`, `dsd_stream`'s chunk), never by a
-    /// path's own loop, so a new path that sends through them is counted.
+    /// `forward_verify_through_segments`), never by a path's own loop, so a
+    /// new path that sends through them is counted.
     pub fn note_decode_round(&self) {
-        self.decode_rounds.fetch_add(1, Ordering::Relaxed);
+        self.note_decode_rounds(1);
+    }
+
+    /// `rounds` at once: what a path whose forwards overlap (the flow, the
+    /// continuous stream) waited, counted when it ends
+    /// (`split_rounds::round_trips_waited`) — one a forward would read its
+    /// yield at a fraction of what it is.
+    pub fn note_decode_rounds(&self, rounds: u32) {
+        self.decode_rounds.fetch_add(rounds, Ordering::Relaxed);
     }
 
     /// Rounds counted so far, every attempt — `PipelineExecutor::execute`

@@ -1614,14 +1614,24 @@ most misses are wrong guesses — the walk outran the tree (`misses_at_a_leaf`) 
 reply in either. What differs: this node's last layers cost ~21 ms a forward (5.2-5.7 s of a
 ~21 s prose reply, 2.2-2.4 s on code), awaited inside the flow's loop and run serially with the
 drafter on one card (two processes on one card time-slice, gotcha #759), and this shape sent
-fewer forwards (252-261 a prose reply against 292-322). Next, if the residual holds on a third
-sample: overlap those layers with the drafting rather than awaiting them in the loop, and read
-whether the forwards a reply come back level.
+fewer forwards (252-261 a prose reply against 292-322). A third sample kept the gap (TAG=rounds369,
+Windows up 23.9 h: 7.71 / 17.1 against 9.16 / 20.98; over three runs ~1.13x prose, ~1.22x code).
+No lever is known: running those layers beside the drafting puts two processes on one card, which
+time-slice and measured a LOSS (gotcha #759, `arch-scheduling.md` § "A tree flows").
 
 **Also open here:** (b) the flow's speed depends on the load split — with this machine holding 12
 of 48 layers the peer (36 layers + the 152k-vocab head) saturated (queue up to 2.2 s, 18-39 ms a
-row) and the flow ran 7.8-8.4 / 3.2-3.4 tok/s; check what placement by speed (#356) gives a card
-head with room before trusting the default shape's figure as what users get.
+row) and the flow ran 7.8-8.4 / 3.2-3.4 tok/s. **Narrowed 2026-10-29: the planner could not see a
+flow's speed at all.** It prices a split by the tokens a round its model's splits yielded
+(#3 (d)), and the flow counted every FORWARD a round: 0.44-0.63 tokens a round on prose, floored
+to 1, so the even split's 7-9 tok/s was priced at ~2 and a split never beat running here; being
+per model, one flow also dragged the model's tree-round figure from ~4 to 1.7. The flow and the
+stream now count the round trips they waited (`split_rounds::round_trips_waited`: decode over
+least answer — 3.2-4.3 prose and 7.7-10.3 code at the even split, 1.6-1.8 and 4.3-4.4 saturated;
+`docs/invariants/scheduling.md` § "A split is priced for the rounds it takes"). Left: the figure
+is per MODEL, so it cannot tell the even split from the lopsided one — check which split point
+the search gives a card head with a drafter beside a far card before trusting 29.6 as what users
+get, now that the price it compares reads the flow.
 
 #### #357 — A card's first graph of a new shape, late in a worker's life, can stall one forward 10-59 s
 `P3` · perf-local · **OPEN** — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883

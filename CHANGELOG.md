@@ -13,8 +13,19 @@ first and last layers on an 8 GB laptop graphics card in Thailand and its middle
 graphics card in Australia (about 420 ms there and back): code 15.3 → 18.1 tokens a second, prose
 6.4 → 7.6. Replies are the model's own, checked token by token against llama.cpp. Splitting the
 same model the default way, with the other computer finishing each word, is still a little faster
-(about 1.1 times on prose and 1.2 on code, over two runs); closing that gap is next.
-`SWARMLLM_FLOW_FINISH_HERE=0` turns it off (#369).
+(about 1.1 times on prose and 1.2 on code, over two runs). `SWARMLLM_FLOW_FINISH_HERE=0` turns it
+off (#369).
+
+**Your computer now knows how fast a split with a small guessing model really runs when it
+decides where to run a reply.** It weighs running a model itself against splitting it with other
+computers by how many tokens each exchange with them produced in that model's recent splits. A
+split whose guesses flow sends many exchanges at once, and each one was counted as if the reply
+had waited for it: a 14B split between Thailand and Australia that wrote prose at 7 to 9 tokens a
+second was priced at about 2, so it never looked better than running at home, and it made that
+model's other splits look slower too. Such a reply is now counted by the round trips it actually
+waited — on the same runs 3.2 to 4.3 tokens an exchange on prose and 7.7 to 10.3 on code, against
+under 1 before — while a split whose far computer was overloaded still reads slow (1.6 to 1.8).
+The figure is kept per model, from the last 32 splits (#369).
 
 **If your models folder is a link to another drive, the node now measures that drive.** The
 dashboard's disk meter, the storage limit for automatic downloads and the free space told to

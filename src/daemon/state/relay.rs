@@ -665,8 +665,18 @@ impl super::SharedState {
     /// first segment (`RequestTrace::note_decode_round`, FUTURE_WORK #3 (d)).
     /// A no-op without a live trace, as `record_segment_timing` is.
     pub fn note_decode_round(&self, request_id: uuid::Uuid) {
+        self.note_decode_rounds(request_id, 1);
+    }
+
+    /// `rounds` rounds at once — the round trips a path whose forwards
+    /// overlap waited, counted when it ends (`RequestTrace::
+    /// note_decode_rounds`, `split_rounds::round_trips_waited`).
+    pub fn note_decode_rounds(&self, request_id: uuid::Uuid, rounds: u32) {
+        if rounds == 0 {
+            return;
+        }
         if let Some(t) = self.active_traces.get(&request_id) {
-            t.note_decode_round();
+            t.note_decode_rounds(rounds);
         }
     }
 
