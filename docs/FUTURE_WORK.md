@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #368**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #369**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3601,6 +3601,22 @@ archive under the named heading. Reopen one only with the evidence its line name
 Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 19-28 were
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
+
+**Closed 2026-10-29, ships in the next release** (#368)
+- #368 — **A `models` folder linked to another drive is measured on that drive** (field report
+  of 2026-10-28, v0.3.259, a Mac mini: data directory on a 229 GB SSD at 93%, `models` linked to
+  a 9.1 TB drive holding a 70B). The storage budget, the dashboard's disk meter and the free disk
+  advertised to peers asked `disk_space_for` about the DATA directory while what is held is
+  counted under `models/` — budgeted, shown and advertised the SSD's ~18 GB free, seeding capped
+  by a disk that held no models. Off Linux the mount search also matched the path's spelling, so
+  even the download preflight (a path under `models/`) read the disk the link sits on. Now
+  `auto_manage::models_disk` is the one answer, asked of the directory `held_disk_bytes` counts,
+  and `disk_space_for` follows a path through any link first (Windows' `\\?\C:\` answer
+  spelled back as `C:\`). Guard `the_models_disk_is_asked_of_the_models_directory`; tests
+  `a_models_directory_linked_to_another_disk_is_read_as_that_disk` (fails with the data
+  directory asked), `a_path_through_a_link_on_its_own_disk_is_read_as_that_disk`. On Windows, natively (a data
+  folder on C:, `models` a junction to D:): v0.3.259 reported C:'s 541,181 MB free, the fix D:'s
+  19,162. macOS not run here. Evidence: `docs/invariants/memory.md` § "…and the disk the MODELS are on".
 
 **Closed 2026-10-28, ships in the next release** (#365)
 - #365 — **A card/processor split puts on the card what its load can hold** (v0.3.259's #364

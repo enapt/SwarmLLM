@@ -2244,11 +2244,12 @@ pub(crate) fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serd
         .unwrap_or_else(|| "Unknown".to_string());
     let cpu_cores = sys.cpus().len();
 
-    // The disk the data directory is on, read as the storage budget, the
-    // download preflight and the advertised capacity read it (#334 (4)). The
-    // sum of every disk this used to show let the setup wizard size a storage
-    // budget against room the budget never had. Unreadable is 0.
-    let disk = crate::model::auto_manage::disk_space_for(&shared_state.config.node.data_dir);
+    // The disk the MODELS are on, read as the storage budget and the
+    // advertised capacity read it (`auto_manage::models_disk`; #334 (4), #368:
+    // a `models` link to another drive showed the data directory's). The sum of every disk this used to show let the setup
+    // wizard size a storage budget against room the budget never had.
+    // Unreadable is 0.
+    let disk = crate::model::auto_manage::models_disk(&shared_state.config.node.data_dir);
     let mb = |bytes: u64| bytes / (1024 * 1024);
     let total_disk_mb = disk.as_ref().map_or(0, |d| mb(d.total_bytes));
     let available_disk_mb = disk.as_ref().map_or(0, |d| mb(d.free_bytes));

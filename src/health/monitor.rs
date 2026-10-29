@@ -1197,12 +1197,13 @@ impl HealthMonitor {
                 let (ram_total, ram_avail) =
                     crate::daemon::machine_memory::machine_memory_mb();
 
-                // The disk the data directory is on, read as the storage
-                // budget reads it (#334 (4)). Unreadable is 0, as a peer
-                // with no capability counts: the sum of every disk this
-                // used to fall back to offered peers room on disks no part
-                // would ever be written to.
-                let disk_avail: u64 = crate::model::auto_manage::disk_space_for(&data_dir)
+                // The disk the models are on, read as the storage budget
+                // reads it (`auto_manage::models_disk`; #334 (4), #368).
+                // Unreadable is 0, as a peer with no
+                // capability counts: the sum of every disk this used to fall
+                // back to offered peers room on disks no part would ever be
+                // written to.
+                let disk_avail: u64 = crate::model::auto_manage::models_disk(&data_dir)
                     .map_or(0, |d| d.free_bytes / (1024 * 1024));
                 (ram_total, ram_avail, disk_avail)
             })

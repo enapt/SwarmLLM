@@ -767,6 +767,35 @@ It now reads `disk_space_for(data_dir)` for all three figures, and
 `a_disk_is_read_only_through_disk_space_for` fails the build on a `Disks::` outside
 `auto_manage/mod.rs` (with the stats copy put back it names `src/api/admin.rs`).
 
+**…and the disk the MODELS are on is asked of the models directory** (2026-10-29, #368). One
+reading of "the disk a path is on" was not enough: its three readers of "the models' disk" — the
+budget's clamp, the dashboard meter, the advertised free disk — asked it about the DATA
+directory, while what is held is counted under `models/` (`held_disk_bytes`). A field report
+(v0.3.259, 2026-10-28): a Mac mini's data directory on a 229 GB SSD at 93%, `models` a link to a
+9.1 TB drive holding a 70B — budgeted, shown and advertised the SSD's ~18 GB free, its seeding
+capped by a disk that held no models. Off Linux a second fault hid behind the first: the mount
+search matched the path's SPELLING, so even a path under `models/` (the download preflight) read
+the disk the link sits on — 10-27's "a symlinked one matched the disk the link sits on" was fixed
+for Linux only (`statvfs` follows links; the list search does not). Now **`models_disk`** is the
+one answer, asked of `models_root(data_dir)` — the directory `held_disk_bytes` counts — and
+`disk_space_for` follows a path through any link (`std::fs::canonicalize`) before asking. On
+Windows `canonicalize` answers a verbatim path (`\\?\C:\…`), which no mount point (`C:\`) is a
+prefix of — every reading would have been `None` — so a verbatim DISK prefix is spelled back as a
+drive (`as_a_mount_point_spells_it`, dunce's rule; a `\\?\UNC\` share is left alone, no mount is
+listed for it either way). Verified 2026-10-29:
+- Linux, toggled: `models_disk` asking the data directory fails
+  `a_models_directory_linked_to_another_disk_is_read_as_that_disk` (a `models` link to
+  `/dev/shm`) and `the_models_disk_is_asked_of_the_models_directory`, which names the line; the
+  guard's planted forms (wrapped across lines, bare, in a comment, a destination, the answer
+  itself) are pinned by `the_models_disk_guard_catches_a_data_directory_however_it_is_wrapped`.
+- Windows, natively (`~/swarmllm-gate/deep/fr/wdisk.sh`: a data folder on C:, `models` a
+  junction to D:, the node's `/api/admin/stats`): the published v0.3.259 reports C:'s free space
+  (541,181 MB) beside D:'s 19,163 — the report reproduced; the fix (`4130e0a1` + this change,
+  MinGW cross-build) reports D:'s: 19,162 MB free of 976,759. Windows clippy (`--all-targets`)
+  caught an import used only by the Linux test (gotcha #264's shape) before it shipped.
+- macOS: not run here (no machine); it runs the same non-Linux search over the resolved path that
+  the Windows run exercises.
+
 ## `AutoShardManager::would_shed_copy` is the ONE answer to "would prune shed this copy?" — and the download pass asks it before every fetch
 
 (2026-10-06, gotcha #795.) Prune asks it of each part it holds; the download

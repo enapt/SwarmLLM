@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+**If your models folder is a link to another drive, the node now measures that drive.** The
+dashboard's disk meter, the storage limit for automatic downloads and the free space told to
+other computers all read the drive holding SwarmLLM's own folder, not the drive the models are
+stored on. On a Mac mini whose models folder pointed to a 10 TB external drive, the node believed
+it had the internal drive's 18 GB left and held back from storing parts it had room for. All
+three now read the drive the models folder leads to, on Linux, macOS and Windows (#368).
+
 **A model split across computers with "Start and finish on this computer" on now writes up to
 1.5 times as fast over a real connection.** With that setting your computer runs the model's
 first and last layers and another computer runs the middle, so every word cost a trip there and

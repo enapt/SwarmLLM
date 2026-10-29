@@ -262,7 +262,7 @@ impl StorageReading {
             max_storage_mb: live.auto_manage.max_storage_mb,
             max_disk_mb: live.resources.max_disk_mb,
             contribution: state.contribution(),
-            disk: disk_space_for(&state.config.node.data_dir),
+            disk: models_disk(&state.config.node.data_dir),
             held_bytes: held_disk_bytes(&state.config.node.data_dir),
         }
     }
@@ -355,7 +355,7 @@ pub fn held_shard_bytes(
 /// (`docs/FUTURE_WORK.md` item 49). `shard::cleanup_orphaned_model_files`,
 /// called from the prune cycle, is the other half and must stay.
 pub fn held_disk_bytes(data_dir: &std::path::Path) -> u64 {
-    let models_dir = data_dir.join("models");
+    let models_dir = models_root(data_dir);
     let Ok(entries) = std::fs::read_dir(&models_dir) else {
         return 0;
     };
@@ -411,10 +411,57 @@ pub fn storage_budget_now(state: &crate::daemon::SharedState) -> (StorageBudget,
 /// longest matching mount point of the platform's own list wins (macOS reports
 /// the space "available for important usage", purgeable space included, which
 /// `statvfs` does not).
+///
+/// The path is followed through any link to where it leads before the disk is
+/// asked: elsewhere than Linux a mount point is matched by the path's SPELLING,
+/// so a `models` link to another drive was read as the drive the link sits on
+/// (#368, a Mac mini's `models -> /Volumes/10TB/…`).
 pub fn disk_space_for(path: &std::path::Path) -> Option<DiskSpace> {
     let absolute = std::path::absolute(path).ok()?;
     let existing = absolute.ancestors().find(|p| p.exists())?;
-    filesystem_space(existing)
+    let resolved = std::fs::canonicalize(existing)
+        .map(as_a_mount_point_spells_it)
+        .unwrap_or_else(|_| existing.to_path_buf());
+    filesystem_space(&resolved)
+}
+
+/// This node's models directory — where `held_disk_bytes` counts what is held
+/// and [`models_disk`] reads the room left, so the two always describe one disk.
+fn models_root(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("models")
+}
+
+/// **The disk this node's models are stored on** — the one answer for the
+/// storage budget ([`StorageReading::now`]), the dashboard's disk meter and the
+/// free disk advertised to peers. Asked of the MODELS directory, never the data
+/// directory: `models` may be a link to another disk (#368, a field report of
+/// 2026-10-28): a Mac mini's data directory sat on a 229 GB SSD, 93% used,
+/// with `models` linked to a 9.1 TB drive holding a 70B — the node was
+/// budgeted, shown and advertised the SSD's ~18 GB free, while what it HELD was
+/// counted on the other drive.
+pub fn models_disk(data_dir: &std::path::Path) -> Option<DiskSpace> {
+    disk_space_for(&models_root(data_dir))
+}
+
+/// `canonicalize`'s answer spelled as the disk list spells a mount point. On
+/// Windows it answers a verbatim path (`\\?\C:\…`), which no mount point
+/// (`C:\`) is a prefix of, so every reading would be `None`; a verbatim DISK
+/// prefix is written back as a drive (dunce's rule). Anything else is kept —
+/// a share (`\\?\UNC\…`) has no mount in the list either way.
+fn as_a_mount_point_spells_it(path: std::path::PathBuf) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let mut parts = path.components();
+        if let Some(Component::Prefix(prefix)) = parts.next() {
+            if let Prefix::VerbatimDisk(drive) = prefix.kind() {
+                let mut plain = std::path::PathBuf::from(format!("{}:\\", char::from(drive)));
+                plain.extend(parts.filter(|c| !matches!(c, Component::RootDir)));
+                return plain;
+            }
+        }
+    }
+    path
 }
 
 #[cfg(target_os = "linux")]
@@ -573,6 +620,48 @@ mod disk_space_tests {
             through_link.total_bytes,
             disk_space_for(dir.path()).unwrap().total_bytes
         );
+    }
+
+    /// **#368's shape**: the data directory on one disk, its
+    /// `models` a link to another. The models' disk is the one the link leads
+    /// to — the disk `held_disk_bytes` counts on — never the data directory's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_models_directory_linked_to_another_disk_is_read_as_that_disk() {
+        use std::os::unix::fs::MetadataExt;
+        let Some(shm) = a_tmpfs_of_its_own() else {
+            eprintln!("skip: /dev/shm is not a filesystem of its own here");
+            return;
+        };
+        let data_dir = tempfile::tempdir().unwrap();
+        if std::fs::metadata(data_dir.path()).unwrap().dev()
+            == std::fs::metadata(shm).unwrap().dev()
+        {
+            eprintln!("skip: the temporary directory is on /dev/shm");
+            return;
+        }
+        let elsewhere = tempfile::tempdir_in(shm).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), data_dir.path().join("models")).unwrap();
+        let models = super::models_disk(data_dir.path()).expect("the models' disk");
+        assert_eq!(models.total_bytes, disk_space_for(shm).unwrap().total_bytes);
+        assert_ne!(
+            models.total_bytes,
+            disk_space_for(data_dir.path()).unwrap().total_bytes
+        );
+    }
+
+    /// A path reached through a link on its OWN disk still finds that disk —
+    /// the resolved spelling must match a mount point as the plain one did
+    /// (on Windows `canonicalize` answers `\\?\C:\…`, which matches none).
+    #[cfg(unix)]
+    #[test]
+    fn a_path_through_a_link_on_its_own_disk_is_read_as_that_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+        let plain = disk_space_for(dir.path()).expect("the temporary directory's disk");
+        let linked = disk_space_for(&dir.path().join("link")).expect("read through the link");
+        assert_eq!(linked.total_bytes, plain.total_bytes);
     }
 }
 

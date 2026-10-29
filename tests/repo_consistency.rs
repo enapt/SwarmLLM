@@ -14549,6 +14549,98 @@ fn a_disk_is_read_only_through_disk_space_for() {
     );
 }
 
+/// #368 (2026-10-28): the storage budget, the dashboard's disk
+/// meter and the free disk advertised to peers asked `disk_space_for` about the
+/// DATA directory, so a `models` link to another drive was budgeted, shown and
+/// advertised as the data directory's drive — while what it held was counted on
+/// the other. The one answer is `auto_manage::models_disk`; no production code
+/// asks `disk_space_for` about a data directory (a download's destination,
+/// under `models/`, is asked directly).
+#[test]
+fn the_models_disk_is_asked_of_the_models_directory() {
+    let root = repo_root();
+    let mut offenders = Vec::new();
+    for path in rust_sources_under("src") {
+        if module_file_is_test_only(&path) {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let src = std::fs::read_to_string(&path).expect("read source");
+        let sites = data_dir_disk_sites(&src);
+        if !sites.is_empty() {
+            offenders.push(format!("{rel}: lines {sites:?}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "`disk_space_for` asked about a data directory — the models may be on \
+         another disk; ask `auto_manage::models_disk`: {offenders:#?}"
+    );
+}
+
+/// The guard above sees the call however rustfmt wraps it, and passes the
+/// forms that are right.
+#[test]
+fn the_models_disk_guard_catches_a_data_directory_however_it_is_wrapped() {
+    let wrapped =
+        "fn f(state: &S) {\n    let d = crate::model::auto_manage::disk_space_for(\n        \
+                   &state.config.node.data_dir,\n    );\n}\n";
+    assert_eq!(data_dir_disk_sites(wrapped), vec![2]);
+    let bare = "fn f(data_dir: &Path) -> u64 {\n    disk_space_for(&data_dir).map_or(0, |d| d.free_bytes)\n}\n";
+    assert_eq!(data_dir_disk_sites(bare), vec![2]);
+    let the_answer = "fn models_disk(data_dir: &Path) -> Option<DiskSpace> {\n    \
+                      disk_space_for(&models_root(data_dir))\n}\n";
+    assert!(data_dir_disk_sites(the_answer).is_empty());
+    let a_destination = "fn g(dest_dir: &Path) {\n    check(disk_space_for(dest_dir));\n}\n";
+    assert!(data_dir_disk_sites(a_destination).is_empty());
+    let in_a_comment = "/// e.g. `disk_space_for(&state.config.node.data_dir)`\nfn h() {}\n";
+    assert!(data_dir_disk_sites(in_a_comment).is_empty());
+}
+
+/// Production calls of `disk_space_for(` whose argument names a data
+/// directory (and not the models directory under it), as 1-indexed lines.
+/// The argument is read to its matching parenthesis, across lines.
+fn data_dir_disk_sites(src: &str) -> Vec<usize> {
+    const CALL: &str = "disk_space_for(";
+    let tests = cfg_test_spans(src);
+    let line_of = |at: usize| src[..at].matches('\n').count() + 1;
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = src[from..].find(CALL) {
+        let at = from + rel;
+        from = at + 1;
+        let open = at + CALL.len() - 1;
+        let mut depth = 0usize;
+        let mut end = src.len();
+        for (i, ch) in src[open..].char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let argument = &src[open..end];
+        let line_start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+        let in_test = tests.iter().any(|(s, e)| *s < at && at < *e);
+        let commented = src[line_start..at].contains("//");
+        let a_data_dir = argument.contains("data_dir") && !argument.contains("models_root(");
+        if !in_test && !commented && a_data_dir {
+            out.push(line_of(at));
+        }
+    }
+    out
+}
+
 /// Every use of sysinfo's disk list (`Disks::`) in production code, as 1-indexed
 /// lines. Test code and comments are skipped.
 fn disk_list_sites(src: &str) -> Vec<usize> {
