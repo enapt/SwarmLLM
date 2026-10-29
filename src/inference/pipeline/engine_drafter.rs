@@ -603,7 +603,7 @@ fn chosen(
 }
 
 /// Would the drafter's worker load once the target's layers `here` are loaded
-/// (`ModelProcessPool::guest_would_be_admitted_beside`)? Asked before the
+/// (`ModelProcessPool::guest_fit_beside`)? Asked before the
 /// choice, so a drafter the node has no memory for gives way to a smaller one,
 /// or to none (#275). Measured on a node without a graphics card holding 28
 /// layers of Qwen3-30B-A3B (6,967 of a 7,995 MB budget): Qwen3-1.7B was chosen
@@ -612,6 +612,9 @@ fn chosen(
 /// loads, not those loaded so far: on a cold start those are fewer, or none,
 /// and the same refusal came after the choice. A/B
 /// `SWARMLLM_DRAFTER_BESIDE=loaded` weighs it beside what is loaded now.
+///
+/// Where it would load decides too: a drafter in system memory guesses at the
+/// processor's pace, and is held to [`may_guess_there`].
 fn admitted(
     state: &SharedState,
     target: &ModelId,
@@ -624,8 +627,8 @@ fn admitted(
     }
     let kv = crate::model::auto_manage::vram::KvCharge::Conversation(conversation);
     let pool = &state.model_process_pool;
-    let fits = if beside_the_plan() {
-        pool.guest_would_be_admitted_beside(
+    let fit = if beside_the_plan() {
+        pool.guest_fit_beside(
             &spec.model_id,
             spec.layer_range,
             kv,
@@ -634,17 +637,63 @@ fn admitted(
             here.requester,
         )
     } else {
-        pool.guest_would_be_admitted(&spec.model_id, spec.layer_range, kv, here.requester)
+        pool.guest_fit(&spec.model_id, spec.layer_range, kv, here.requester)
     };
-    if !fits {
+    if !fit.admitted() {
         tracing::debug!(
             target_model = %target,
             drafter = %spec.model_id,
             beside = if beside_the_plan() { "the plan's layers" } else { "the layers loaded now" },
             "this node's memory has no room for the drafter — not choosing it"
         );
+        return false;
     }
-    fits
+    let reads = size_proxy(state, &spec.model_id).map_or(u64::MAX, |s| s.reads);
+    if !may_guess_there(fit, reads) {
+        tracing::debug!(
+            target_model = %target,
+            drafter = %spec.model_id,
+            reads_a_guess = reads,
+            "the drafter would guess on this node's processor, where a guess reading that much is too slow — not choosing it"
+        );
+        return false;
+    }
+    true
+}
+
+/// The most a drafter may read a guess where it guesses on the PROCESSOR —
+/// in system memory, whatever the size of its target (#373): the small
+/// drafter's own figure ([`SMALL_DRAFTER_READS`], ~60 ms a guess on this
+/// project's test machine).
+///
+/// The size rule ([`within_reach`]) is a fraction of the target — a quarter of
+/// a 70B is a 10 GB drafter — and was measured with the drafter on the CARD,
+/// in the flow, where its guesses are not what the reply waits on. On the
+/// processor they are: the continuous stream (`dsd_stream`) builds each chunk
+/// by drafting it, and a chunk waits for its guesses. Llama-3.3-70B split this
+/// machine [0,16) + the Australian RTX 3060 [16,80), the drafter on the
+/// processor (2026-10-30, six arms alternating, one binary, route pinned): the
+/// 8B Llama-3.1 that size-first chose guessed at 136 ms against the 3B's 60, was
+/// kept no more often (0.699-0.792 against 0.730-0.814, the same prompts), and
+/// three replies of 96 tokens decoded in 160.2-161.1 s against 133.8-141.6
+/// (~1.17x). Offline, over 747 of the 70B's own tokens, the 8B took
+/// its first choice 0.855 of the time against the 3B's 0.846. "Decoding
+/// Speculative Decoding" (Yan, Agarwal, Venkataraman 2024, arXiv 2402.01528)
+/// found the same with a 65B target: the drafter's latency, not its
+/// language-modelling accuracy, decides the speed-up.
+const PROCESSOR_DRAFTER_MOST_READS: u64 = SMALL_DRAFTER_READS;
+
+/// May a drafter reading `reads` a guess guess where `fit` puts it:
+/// anywhere on a card, in system memory only up to
+/// [`PROCESSOR_DRAFTER_MOST_READS`]. `SWARMLLM_PROCESSOR_DRAFTER_READS=any`
+/// lifts the bound — the choice before #373, for an A/B inside one binary.
+fn may_guess_there(fit: crate::inference::process_pool::GuestFit, reads: u64) -> bool {
+    static ANY: OnceLock<bool> = OnceLock::new();
+    let any = *ANY.get_or_init(|| {
+        std::env::var("SWARMLLM_PROCESSOR_DRAFTER_READS").is_ok_and(|v| v.trim() == "any")
+    });
+    any || fit != crate::inference::process_pool::GuestFit::InSystemMemory
+        || reads <= PROCESSOR_DRAFTER_MOST_READS
 }
 
 /// `SWARMLLM_DRAFTER_ADMISSION=0` chooses a drafter without asking whether it
@@ -1479,6 +1528,73 @@ mod tests {
             largest_that_can_draft("", 30, DRAFTER_MAX_FRACTION, held(), any).is_none(),
             "nothing within half a tiny target's size"
         );
+    }
+
+    /// **A drafter that would guess on the processor reads no more a guess than
+    /// a small one** (#373). The field case: Llama-3.3-70B (80 × 8192²) with
+    /// Llama-3.1-8B (32 × 4096² — exactly a tenth, ~4.4 GB a guess) and
+    /// Llama-3.2-3B (28 × 3072², ~1.65 GB) held. Both are within a quarter, and
+    /// size first chose the 8B; landing in system memory, it guessed at 136 ms
+    /// against the 3B's 60 and its replies took ~1.17x as long. On the card
+    /// it is still the 8B — the rule there is unchanged.
+    #[test]
+    fn a_drafter_on_the_processor_reads_no_more_a_guess_than_a_small_one() {
+        use crate::inference::process_pool::GuestFit;
+        let target = 80 * 8192u64.pow(2);
+        let held = || {
+            vec![
+                (
+                    DrafterSize {
+                        size: 32 * 4096u64.pow(2),
+                        reads: 4_400_000_000,
+                    },
+                    ModelId("meta-llama-3.1-8b-instruct-q4-k-m".into()),
+                ),
+                (
+                    DrafterSize {
+                        size: 28 * 3072u64.pow(2),
+                        reads: 1_650_000_000,
+                    },
+                    ModelId("llama-3.2-3b-instruct-q4-k-m".into()),
+                ),
+            ]
+        };
+        let reads_of = |m: &ModelId| {
+            held()
+                .into_iter()
+                .find(|(_, id)| id == m)
+                .map_or(u64::MAX, |(d, _)| d.reads)
+        };
+        let landing = |fit: GuestFit| {
+            move |m: ModelId| may_guess_there(fit, reads_of(&m)).then(|| spec(&m.0))
+        };
+        let chosen = |fit| {
+            largest_that_can_draft("", target, DRAFTER_MAX_FRACTION, held(), landing(fit))
+                .map(|s| s.model_id.0)
+        };
+        assert_eq!(
+            chosen(GuestFit::InSystemMemory).as_deref(),
+            Some("llama-3.2-3b-instruct-q4-k-m"),
+            "in system memory the 8B's guesses read too much: the 3B drafts"
+        );
+        assert_eq!(
+            chosen(GuestFit::OnCard).as_deref(),
+            Some("meta-llama-3.1-8b-instruct-q4-k-m"),
+            "on the card the largest within reach still drafts"
+        );
+        assert!(may_guess_there(
+            GuestFit::InSystemMemory,
+            PROCESSOR_DRAFTER_MOST_READS
+        ));
+        assert!(!may_guess_there(
+            GuestFit::InSystemMemory,
+            PROCESSOR_DRAFTER_MOST_READS + 1
+        ));
+        assert!(
+            !may_guess_there(GuestFit::InSystemMemory, u64::MAX),
+            "reads unknown is a large drafter"
+        );
+        assert!(may_guess_there(GuestFit::OnCard, u64::MAX));
     }
 
     /// A drafter reading more a guess than one fetched may is held to a

@@ -267,7 +267,7 @@ layers onto the peer's card.
 Two halves.
 
 1. **The drafter is chosen only if it would load now**
-   (`ModelProcessPool::guest_would_be_admitted`, asked by
+   (`ModelProcessPool::guest_fit`, asked by
    `engine_drafter::engine_drafter_for`): the guest's own way through
    `get_or_spawn_once`, charging nothing, with the same arithmetic
    (`card_verdict` / `ram_verdict`, which `admit_to_gpu` / `admit_to_cpu` now
@@ -397,8 +397,8 @@ leave.
 **The rule.** `engine_drafter_for` takes the plan's ranges for this node and
 their requester (`TargetHere`, built in `dsd.rs` from the assignment and
 `pipeline::worker_requester`) — REQUIRED, so no caller can ask the old question.
-`ModelProcessPool::guest_would_be_admitted_beside` asks the spawn's question
-(`guest_would_be_admitted`) and then the planner's own: do the layers the plan
+`ModelProcessPool::guest_fit_beside` asks the spawn's question
+(`guest_fit`) and then the planner's own: do the layers the plan
 ADDS here (`layers_added_by` against `held_layer_ranges_for_planning`) fit within
 `max_hostable_layers_beside_guest`? A plan the planner cut passes by
 construction — its room is priced at the whole reply reserve, never below the
@@ -443,7 +443,7 @@ loaded layers and refuse alike: 2.65-2.93 tok/s in every arm.
   whatever the room, so its offer alone calls for the cut and the cut withdraws
   it (`leaving_room_here`, which now decides and builds the cut, never raising
   this node's room). A card plan past the room still has a drafter where system
-  memory takes it (`guest_would_be_admitted_beside`), as every card plan did
+  memory takes it (`guest_fit_beside`), as every card plan did
   before. SpecExec (arXiv 2406.02532) makes the same trade on consumer cards:
   the drafter keeps the card, the target's layers go elsewhere. Tests:
   `room_is_left_on_the_card_beside_the_layers_for_their_drafter`,
@@ -5615,6 +5615,41 @@ Planner, request and download pass choose through the one `largest_that_can_draf
 left (#275) is the drafter's that will be chosen. A/B `SWARMLLM_DRAFTER_MAX_FRACTION=4` (the rule
 before, on a card). Tests: `the_largest_small_drafter_within_half_its_target_is_chosen` (red at 4),
 `a_large_drafter_is_held_to_a_quarter_of_its_target`, `a_node_without_a_card_holds_every_drafter_to_a_quarter`.
+**A drafter in system memory reads at most 2 GiB a guess, whatever its target** (2026-10-30,
+#373, `engine_drafter::may_guess_there`, `ModelProcessPool::guest_fit_beside` → `GuestFit`). The
+fractions above scale with the target: a quarter of Llama-3.3-70B (80 × 8192²) is a 10 GB drafter,
+and Llama-3.1-8B (32 × 4096², exactly a tenth) was chosen on this card node from 10-29 18:06Z —
+its worker in system memory, the card full of the 70B's [0,16). Same binary
+(`~/swarmllm-70b/swarmllm-pg`), route pinned (`SWARM_ROUTE` exclude 99aafc41 + 96842635,
+`pretend_peer_holds` aa3d1e66 = shards 15-78: this node [0,16) + the AU RTX 3060 [16,80)), the
+continuous stream, 3 guesses a chunk, window 3, arms ABCCBA (`~/swarmllm-70b/ab70d3.sh`, 19:46-20:39Z
+10-29, Windows up 36.9-37.6 h, 0 driver events); the 3B forced with `SWARMLLM_DRAFTER_MAX_FRACTION=16`
+and checked by the `drafter=` field of every reply (=10 kept the 8B on the exact tie, gotcha #994):
+
+| drafter (in system memory) | ms a guess | decode s, three 96-token replies | kept a guess |
+|---|---|---|---|
+| **Llama-3.2-3B Q4_K_M** (~1.65 GB a guess) | 52-62 | **133.8, 141.6** (pre-draft on: 135.9, 136.7) | 0.730-0.814 |
+| Llama-3.1-8B Q4_K_M (~4.4 GB) | 130-139 | 160.2, 161.1 | 0.699-0.792 |
+
+The stream builds each chunk by drafting it, so with the 8B three chunks (3 × 136 ms + this node's
+16 layers each) outlast the ~1.25 s round trip and the window is never full. Same shape as the
+everything-on-the-processor rig above (a dearer guesser that guesses no better can only lose
+there), and as "Decoding Speculative Decoding" (Yan, Agarwal, Venkataraman 2024, arXiv 2402.01528,
+LLaMA-65B/OPT-66B targets): the drafter's latency, not its accuracy, decides the speed-up. Offline
+over 747 of the 70B's own tokens the 8B took its first choice 0.855 against the 3B's 0.846
+(`~/swarmllm-70b/ranks70.out`). A drafter on a card keeps the fractions. A/B
+`SWARMLLM_PROCESSOR_DRAFTER_READS=any`. Tests
+`a_drafter_on_the_processor_reads_no_more_a_guess_than_a_small_one`,
+`a_guests_admission_says_where_it_would_land`.
+
+**Guessing the next chunks while the window is full does not pay at 3 guesses** (same run): the
+drafter growing a tree of the oldest chunk's likeliest refusals while the far end checked
+(Speculative Speculative Decoding, arXiv 2603.03251) fired only once the drafter had idle time —
+0-1 trees a reply with the 8B, 5-22 with the 3B, 9-21 chunks a reply taking guesses from them —
+and ran past its time budget by up to 141 ms; the replies took 136.3 s against 137.7 (two arms
+each, within the arms' spread). Not shipped; the patch is kept (`~/swarmllm-70b/predraft_dsd_stream.patch`)
+for a wider chunk, where the simulation put its gain (5 guesses + ranks 2-3: +16-22% if the far
+end's check is flat in rows).
 **A node already holding a smaller drafter fetches the larger one beside it** (#331, 2026-10-24):
 `drafter_to_acquire` answers the held drafter AND the next step, and prune keeps both until the
 larger one is held and chosen — `docs/invariants/memory.md` § "A split with no drafter fetches one".

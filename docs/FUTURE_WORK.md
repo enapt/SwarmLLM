@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #373**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #374**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -3757,6 +3757,25 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
+**Closed 2026-10-30, ships in the next release** (#373)
+- #373 — **A drafter that guesses on the processor is the small one, not the largest that fits.**
+  The drafter is chosen by size — the largest held within a fraction of its target (a quarter, or
+  half for a small one where a card is in play) — a rule measured with the drafter on the CARD, in
+  the flow, where its guesses are not what the reply waits on. A quarter of a 70B is a 10 GB
+  drafter: for Llama-3.3-70B this machine chose Llama-3.1-8B, whose worker landed in system memory
+  beside the 70B's layers filling the card, and guessed at 136 ms against Llama-3.2-3B's 60. The
+  continuous stream builds every chunk by drafting it, so the reply waited on it: six arms
+  alternating on the real link (this node [0,16) + the Australian RTX 3060 [16,80), route pinned,
+  one binary), three replies of 96 tokens decoded in 160.2-161.1 s with the 8B against 133.8-141.6
+  with the 3B (~1.17x), and the 8B was kept no more often (0.699-0.792 against 0.730-0.814). The
+  pool's guest admission now says where the drafter would land (`ModelProcessPool::guest_fit` /
+  `guest_fit_beside` → `GuestFit`), and one landing in system memory may read at most 2 GiB a guess
+  (`engine_drafter::may_guess_there`), whatever its target. A/B `SWARMLLM_PROCESSOR_DRAFTER_READS=any`.
+  Tests `a_drafter_on_the_processor_reads_no_more_a_guess_than_a_small_one`,
+  `a_guests_admission_says_where_it_would_land`. The same evening, guessing the next chunks while
+  the window was full (Speculative Speculative Decoding, arXiv 2603.03251) fired with the 3B but
+  gained ~1% at 3 guesses a chunk (136.3 against 137.7 s, two arms each) — not shipped.
+
 **Closed 2026-10-29, ships in the next release** (#368, #370, #371, #312, #3 (g), #3 (h) network half, #3 (i))
 - #3 (i) — **A machine's back-to-back segments are priced as the one run its card loads.** The
   search cuts a node's range wherever another holder's range begins or ends — at every split point
@@ -4153,7 +4172,7 @@ grep `^| N |`).
   plan was weighed against that memory as it stood BEFORE the plan's own share loaded: Llama
   3.1 8B was chosen beside [0..27) — 17 of those layers in system memory — and once they loaded
   the live headroom was 3.4 GB, so its spawn was refused and the reply ran unguessed. Now
-  `guest_would_be_admitted_beside` weighs it after that share (`machine_mb_a_plan_adds`,
+  `guest_fit_beside` weighs it after that share (`machine_mb_a_plan_adds`,
   `RamBudget::after_loading`), so the 8B is refused up front and the 3B, which fits, is chosen.
   Measured with (1) applied by setting the owner's cap for both (2026-10-26, same four machines,
   "why is the sky blue", 96 tokens): **1.96 and 1.90 tok/s** with the 3B guessing (77 of 113
@@ -5455,7 +5474,7 @@ grep `^| N |`).
   far.** It loads after them, so on a cold start "would it load now" said yes beside nothing:
   seen choosing Qwen3-1.7B beside 14 held layers of Qwen3-30B-A3B, refused at its spawn once the
   plan grew them to 28, and that reply ran with no guessing at all. The choice now asks the
-  planner's question of the plan it made (`ModelProcessPool::guest_would_be_admitted_beside`:
+  planner's question of the plan it made (`ModelProcessPool::guest_fit_beside`:
   the layers the plan ADDS within `max_hostable_layers_beside_guest`), so such a drafter gives
   way to a smaller one or to the n-gram loop. vLLM likewise loads the drafter beside the target
   before it sizes caches. A/B `SWARMLLM_DRAFTER_BESIDE=loaded`. (3)-(4) stay open as #275.
@@ -5465,7 +5484,7 @@ grep `^| N |`).
   where the peers offer room.** The drafter was chosen by size and asked for memory only at its
   spawn, after the planner had given this node's memory to the target's layers: 28 layers of
   Qwen3-30B-A3B here (6,967 of 7,995 MB) left Qwen3-1.7B (2,899 MB) refused on every request.
-  Now (a) a drafter that would not load is not chosen (`guest_would_be_admitted`), so the n-gram
+  Now (a) a drafter that would not load is not chosen (`guest_fit`), so the n-gram
   loop runs instead — 2.75-3.07 tok/s against 2.51-2.83 for the refused drafter; (b) each
   planner first tries a plan with this node's bound cut to leave the drafter room
   (`candidates_leaving_room_for_the_drafter`), ONLY where every peer is held to what it offers.

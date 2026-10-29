@@ -2397,7 +2397,7 @@ one run read as "not loaded" and lose only the overlap.
 - Residual: a guest placed on the processor stays there until it is unloaded
   idle, even if the card frees up; promoting it would mean taking memory.
 - **A guest is asked before it is chosen, and a split leaves it room**
-  (2026-10-14, #275): `guest_would_be_admitted` walks this ladder charging
+  (2026-10-14, #275): `guest_fit` walks this ladder charging
   nothing, and the planner cuts this node's layers to what leaves the drafter
   room (`max_hostable_layers_beside_guest`). Subordinate still — the room is
   made by the PLAN, never by a reclaim. Evidence and measurements:
@@ -4091,7 +4091,7 @@ every drafter, so a reply led for a peer also read its prompt on the owner's thr
 and binds both; the advertised `model_memory_ceiling_mb` stays the swarm's, an upper bound.
 
 **Beside a card plan, a drafter bound for system memory is weighed AFTER the plan's own share of
-it loads** (`guest_would_be_admitted_beside` → `machine_mb_a_plan_adds`, `RamBudget::after_loading`;
+it loads** (`guest_fit_beside` → `machine_mb_a_plan_adds`, `RamBudget::after_loading`;
 #351's second contributor). The card branch asked "would it fit in system memory instead?" of the
 machine as it stood, before the target's layers loaded. With the owner's cap set for both (the
 first fix's effect), the 70B's first reply after a restart chose Llama 3.1 8B (5073 MB) beside

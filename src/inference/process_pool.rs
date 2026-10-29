@@ -3384,6 +3384,24 @@ fn models_named(list: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// Where a guest's spawn would put it, if anywhere
+/// ([`ModelProcessPool::guest_fit`], [`ModelProcessPool::guest_fit_beside`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GuestFit {
+    /// It would not be given a worker.
+    Refused,
+    /// On the graphics card.
+    OnCard,
+    /// In system memory: every guess reads its weights through the processor.
+    InSystemMemory,
+}
+
+impl GuestFit {
+    pub(crate) fn admitted(self) -> bool {
+        self != Self::Refused
+    }
+}
+
 /// Whether loading a model may take memory from other models, and how long a
 /// conversation its cache is charged for — a REQUIRED argument of
 /// `ModelProcessPool::get_or_spawn`, so no load can leave either out.
@@ -3426,7 +3444,7 @@ impl Tenancy {
 }
 
 /// Whose memory cap a drafter's load is weighed against
-/// ([`ModelProcessPool::draft`], [`ModelProcessPool::guest_would_be_admitted`],
+/// ([`ModelProcessPool::draft`], [`ModelProcessPool::guest_fit`],
 /// the planner's room beside it): that of the request it guesses for. A
 /// drafter guessing for the owner's reply is part of serving the owner's
 /// request, and the contribution level caps the swarm's work, not the owner's
@@ -6131,32 +6149,45 @@ impl ModelProcessPool {
     /// `kv` is the conversation the guest would be charged for — the spawn's
     /// own charge ([`Tenancy::kv_charge`]) where the reply is known — and
     /// `requester` whose request it guesses for ([`drafter_requester`]).
-    pub(crate) fn guest_would_be_admitted(
+    ///
+    /// And WHERE ([`GuestFit`]): on the card, or in system
+    /// memory, where every guess reads the drafter's weights through the
+    /// processor (`engine_drafter::admitted` holds such a drafter to what a
+    /// guess there may read, #373). A live worker is where it runs
+    /// ([`Self::runs_whole_on_the_card`], the reading `dsd` logs as
+    /// `drafter_on_card`).
+    pub(crate) fn guest_fit(
         &self,
         model_id: &ModelId,
         segment: (u32, u32),
         kv: KvCharge,
         requester: Requester,
-    ) -> bool {
+    ) -> GuestFit {
         if let Some(handle) = self.live_worker(model_id) {
-            return handle.segment_is_charged(segment);
+            return if !handle.segment_is_charged(segment) {
+                GuestFit::Refused
+            } else if self.runs_whole_on_the_card(model_id) {
+                GuestFit::OnCard
+            } else {
+                GuestFit::InSystemMemory
+            };
         }
         if self.spawn_failures.get(model_id).is_some_and(|e| {
             let (at, count) = *e;
             at.elapsed() < spawn_failure_cooldown(count)
         }) {
-            return false;
+            return GuestFit::Refused;
         }
         if !self.guest_charges_ram(model_id, segment, kv) {
-            return true;
+            return GuestFit::OnCard;
         }
-        !matches!(
-            self.ram_verdict(
-                self.estimate_cpu_footprint_mb(model_id, Some(segment), kv),
-                drafter_requester(requester)
-            ),
-            Verdict::Refused { .. }
-        )
+        match self.ram_verdict(
+            self.estimate_cpu_footprint_mb(model_id, Some(segment), kv),
+            drafter_requester(requester),
+        ) {
+            Verdict::Refused { .. } => GuestFit::Refused,
+            _ => GuestFit::InSystemMemory,
+        }
     }
 
     /// May a spawn of this model use the card at all, room aside — a card, a
@@ -6194,7 +6225,7 @@ impl ModelProcessPool {
 
     /// [`Self::max_hostable_layers_for_planning`] with room left beside the
     /// layers for `guest`'s `guest_range` — the split drafter (#275) — weighed as
-    /// that guest's own spawn will weigh it ([`Self::guest_would_be_admitted`]),
+    /// that guest's own spawn will weigh it ([`Self::guest_fit`]),
     /// after the layers are loaded, in the memory the layers are planned in: on
     /// the card against what then stands free there ([`Self::card_verdict`]),
     /// else in system memory against the cap of the request it guesses for
@@ -6257,7 +6288,7 @@ impl ModelProcessPool {
         self.local_layers_leaving(model_id, false, requester, Some(guest_mb))
     }
 
-    /// [`Self::guest_would_be_admitted`] once the layers a plan gives this node
+    /// [`Self::guest_fit`] once the layers a plan gives this node
     /// of `target` — `ranges`, loaded for `requester` — are loaded too: the
     /// planner's own question ([`Self::max_hostable_layers_beside_guest`] over
     /// what those ranges ADD, [`layers_added_by`]), asked of the plan it made.
@@ -6270,7 +6301,9 @@ impl ModelProcessPool {
     /// round: the drafter is loaded beside the target before the memory left
     /// for caches is measured (v1 `GPUModelRunner.load_model` →
     /// `drafter.load_model`, then `Worker.determine_available_memory`).
-    pub(crate) fn guest_would_be_admitted_beside(
+    ///
+    /// And WHERE ([`GuestFit`]).
+    pub(crate) fn guest_fit_beside(
         &self,
         guest: &ModelId,
         guest_range: (u32, u32),
@@ -6278,20 +6311,18 @@ impl ModelProcessPool {
         target: &ModelId,
         ranges: &[(u32, u32)],
         requester: Requester,
-    ) -> bool {
-        if !self.guest_would_be_admitted(guest, guest_range, kv, requester) {
-            return false;
-        }
-        // Admitted now and already loaded: its memory is charged.
-        if self.live_worker(guest).is_some() {
-            return true;
+    ) -> GuestFit {
+        let now = self.guest_fit(guest, guest_range, kv, requester);
+        // Refused now, or admitted and already loaded: its memory is charged.
+        if now == GuestFit::Refused || self.live_worker(guest).is_some() {
+            return now;
         }
         let held = self.held_layer_ranges_for_planning(target);
         let adds = ranges
             .iter()
             .fold(0u32, |n, r| n.saturating_add(layers_added_by(*r, &held)));
         if adds == 0 {
-            return true;
+            return now;
         }
         let room = self.max_hostable_layers_beside_guest(target, requester, guest, guest_range, kv);
         // A card plan whose guest goes to system memory — it may not use the
@@ -6324,7 +6355,11 @@ impl ModelProcessPool {
                 in_system_memory = in_ram,
                 "the layers this plan loads here leave the drafter no room on the card"
             );
-            return in_ram;
+            return if in_ram {
+                GuestFit::InSystemMemory
+            } else {
+                GuestFit::Refused
+            };
         }
         match room {
             Some(room) if adds > room => {
@@ -6335,9 +6370,9 @@ impl ModelProcessPool {
                     room_beside_drafter = room,
                     "the layers this plan loads here leave no room for the drafter"
                 );
-                false
+                GuestFit::Refused
             }
-            _ => true,
+            _ => now,
         }
     }
 
@@ -12839,7 +12874,8 @@ mod tests {
             admit_and_insert_cpu_worker(&pool, &target, target_mb, false).await;
 
             assert_eq!(
-                pool.guest_would_be_admitted(&drafter, range, KvCharge::Typical, Requester::Swarm),
+                pool.guest_fit(&drafter, range, KvCharge::Typical, Requester::Swarm)
+                    .admitted(),
                 room,
                 "beside {target_mb} MB"
             );
@@ -12885,11 +12921,14 @@ mod tests {
         pool.workers.insert(target.clone(), h);
 
         assert!(
-            pool.guest_would_be_admitted(&drafter, range, KvCharge::Typical, Requester::Owner),
+            pool.guest_fit(&drafter, range, KvCharge::Typical, Requester::Owner)
+                .admitted(),
             "the owner's reply's drafter is weighed against the owner's cap"
         );
         assert!(
-            !pool.guest_would_be_admitted(&drafter, range, KvCharge::Typical, Requester::Swarm),
+            !pool
+                .guest_fit(&drafter, range, KvCharge::Typical, Requester::Swarm)
+                .admitted(),
             "a swarm reply's drafter stays within the contribution level"
         );
         assert_eq!(pool.ram_committed_mb(), 9470, "asking charged nothing");
@@ -12952,7 +12991,8 @@ mod tests {
             let p = pool_with("/tmp/swarmllm-beside-guest-load");
             admit_and_insert_cpu_worker(&p, &target, 300 + 249 * layers as u64, false).await;
             assert_eq!(
-                p.guest_would_be_admitted(&drafter, range, KvCharge::Typical, Requester::Swarm),
+                p.guest_fit(&drafter, range, KvCharge::Typical, Requester::Swarm)
+                    .admitted(),
                 admitted,
                 "the drafter beside {layers} layers"
             );
@@ -13040,7 +13080,7 @@ mod tests {
         // Asked of a plan before it loads: within the room the drafter goes
         // to the card; past it, to system memory if that has room for it.
         let plan_of = |p: &ModelProcessPool, layers: u32| {
-            p.guest_would_be_admitted_beside(
+            p.guest_fit_beside(
                 &drafter,
                 range,
                 KvCharge::Typical,
@@ -13048,6 +13088,7 @@ mod tests {
                 &[(0, layers)],
                 Requester::Swarm,
             )
+            .admitted()
         };
         let roomy = pool_with("/tmp/swarmllm-beside-guest-card-plan");
         roomy.set_ram_budget_mb(7_995);
@@ -13127,7 +13168,8 @@ mod tests {
             admit_and_insert_cpu_worker(&p, &idle, 4_000, false).await;
             admit_and_insert_cpu_worker(&p, &target, 300 + 249 * layers as u64, false).await;
             assert_eq!(
-                p.guest_would_be_admitted(&drafter, range, KvCharge::Typical, Requester::Swarm),
+                p.guest_fit(&drafter, range, KvCharge::Typical, Requester::Swarm)
+                    .admitted(),
                 admitted,
                 "the drafter beside {layers} layers and the idle model"
             );
@@ -13157,28 +13199,19 @@ mod tests {
             .insert(drafter.clone(), qwen3_1_7b());
         let h = admit_and_insert_cpu_worker(&pool, &drafter, 3_900, false).await;
         h.record_charged_segment((0, 28), 0);
-        assert!(pool.guest_would_be_admitted(
-            &drafter,
-            (0, 28),
-            KvCharge::Typical,
-            Requester::Swarm
-        ));
-        assert!(!pool.guest_would_be_admitted(
-            &drafter,
-            (0, 14),
-            KvCharge::Typical,
-            Requester::Swarm
-        ));
+        assert!(pool
+            .guest_fit(&drafter, (0, 28), KvCharge::Typical, Requester::Swarm)
+            .admitted());
+        assert!(!pool
+            .guest_fit(&drafter, (0, 14), KvCharge::Typical, Requester::Swarm)
+            .admitted());
 
         let crashed = ModelId("crashing-0.5b".into());
         pool.spawn_failures
             .insert(crashed.clone(), (std::time::Instant::now(), 1));
-        assert!(!pool.guest_would_be_admitted(
-            &crashed,
-            (0, 24),
-            KvCharge::Typical,
-            Requester::Swarm
-        ));
+        assert!(!pool
+            .guest_fit(&crashed, (0, 24), KvCharge::Typical, Requester::Swarm)
+            .admitted());
     }
 
     /// **A drafter is charged the cache of the reply it guesses for, not a
@@ -13226,7 +13259,8 @@ mod tests {
             let p = pool_with("/tmp/swarmllm-guest-reply-load");
             admit_and_insert_cpu_worker(&p, &target, 300 + 249 * layers as u64, false).await;
             assert_eq!(
-                p.guest_would_be_admitted(&drafter, range, short, Requester::Swarm),
+                p.guest_fit(&drafter, range, short, Requester::Swarm)
+                    .admitted(),
                 admitted,
                 "the reply's drafter beside {layers} layers"
             );
@@ -13393,17 +13427,12 @@ mod tests {
         );
         let kv = KvCharge::Conversation(512);
         let beside = |guest: &ModelId, layers: u32| {
-            pool.guest_would_be_admitted_beside(
-                guest,
-                (0, layers),
-                kv,
-                &target,
-                &plan,
-                Requester::Owner,
-            )
+            pool.guest_fit_beside(guest, (0, layers), kv, &target, &plan, Requester::Owner)
+                .admitted()
         };
         assert!(
-            pool.guest_would_be_admitted(&large, (0, 32), kv, Requester::Owner),
+            pool.guest_fit(&large, (0, 32), kv, Requester::Owner)
+                .admitted(),
             "as the machine stands, before the plan loads, the 8B would load"
         );
         assert!(!beside(&large, 32), "beside the plan's layers it would not");
@@ -13415,8 +13444,60 @@ mod tests {
         add_reserved(&pool.vram_reserved_mb, &target, 7_000);
         add_reserved(&pool.ram_reserved_mb, &target, plan_mb);
         available.fetch_sub(plan_mb, Ordering::Relaxed);
-        assert!(!pool.guest_would_be_admitted(&large, (0, 32), kv, Requester::Owner));
-        assert!(pool.guest_would_be_admitted(&small, (0, 28), kv, Requester::Owner));
+        assert!(!pool
+            .guest_fit(&large, (0, 32), kv, Requester::Owner)
+            .admitted());
+        assert!(pool
+            .guest_fit(&small, (0, 28), kv, Requester::Owner)
+            .admitted());
+    }
+
+    /// **The guest's admission says WHERE it lands** (#373): the drafter's
+    /// choice holds one guessing on the processor to what a guess there may
+    /// read (`engine_drafter::may_guess_there`), so the placement it is told
+    /// must be the spawn's. A machine with room to spare, a plan of [0..27) of a
+    /// 70B filling the card: the 8B is admitted beside it IN SYSTEM MEMORY — the
+    /// field case, which guessed at 136 ms a token — and with the card free a
+    /// small drafter lands on the card.
+    #[tokio::test]
+    async fn a_guests_admission_says_where_it_would_land() {
+        use crate::model::auto_manage::vram::RamBudget;
+        let target = ModelId("llama-3.3-70b-instruct-q4-k-m".into());
+        let large = ModelId("meta-llama-3.1-8b-instruct-q4-k-m".into());
+        let small = ModelId("qwen3-1.7b-q8-0".into());
+        let pool = ModelProcessPool::new(std::path::PathBuf::from(
+            "/tmp/swarmllm-guest-fit-says-where",
+        ));
+        pool.test_card_in_play.store(true, Ordering::Relaxed);
+        pool.set_gpu_layers(-1);
+        pool.set_vram_budget_mb(7_000);
+        pool.set_ram_budget_provider(Box::new(|| {
+            Some(RamBudget::from_machine(40_000, 0, 65_536, 50_000).with_owners_cap(40_000))
+        }));
+        pool.test_footprint_inputs
+            .insert(target.clone(), llama_3_3_70b());
+        pool.test_footprint_inputs
+            .insert(large.clone(), llama_3_1_8b());
+        pool.test_footprint_inputs
+            .insert(small.clone(), qwen3_1_7b());
+        let kv = KvCharge::Conversation(512);
+        let plan = [(0u32, 27u32)];
+        assert_eq!(
+            pool.guest_fit_beside(&large, (0, 32), kv, &target, &plan, Requester::Owner),
+            GuestFit::InSystemMemory,
+            "the plan fills the card: the 8B loads in system memory"
+        );
+        assert!(
+            pool.guest_fit_beside(&large, (0, 32), kv, &target, &plan, Requester::Owner)
+                .admitted(),
+            "the yes/no answer agrees"
+        );
+        assert_eq!(
+            pool.guest_fit(&small, (0, 28), kv, Requester::Owner),
+            GuestFit::OnCard,
+            "nothing on the card yet: a small drafter lands there"
+        );
+        assert_eq!(pool.ram_committed_mb(), 0, "asking charged nothing");
     }
 
     /// **A drafter is judged beside the layers its plan loads here, not those
@@ -13447,26 +13528,30 @@ mod tests {
             .max_hostable_layers_beside_guest(&target, Requester::Swarm, &drafter, range, kv)
             .expect("room is left");
         assert!(
-            cold.guest_would_be_admitted(&drafter, range, kv, Requester::Swarm),
+            cold.guest_fit(&drafter, range, kv, Requester::Swarm)
+                .admitted(),
             "beside nothing loaded, the drafter would load now"
         );
         for (layers, after_the_load) in [(room, true), (room + 1, false)] {
             assert_eq!(
-                cold.guest_would_be_admitted_beside(
+                cold.guest_fit_beside(
                     &drafter,
                     range,
                     kv,
                     &target,
                     &[(0, layers)],
                     Requester::Swarm
-                ),
+                )
+                .admitted(),
                 after_the_load,
                 "a plan loading {layers} layers here"
             );
             let loaded = pool_with("/tmp/swarmllm-guest-plan-loaded");
             admit_and_insert_cpu_worker(&loaded, &target, 300 + 249 * layers as u64, false).await;
             assert_eq!(
-                loaded.guest_would_be_admitted(&drafter, range, kv, Requester::Swarm),
+                loaded
+                    .guest_fit(&drafter, range, kv, Requester::Swarm)
+                    .admitted(),
                 after_the_load,
                 "its spawn after those {layers} layers load agrees"
             );
@@ -13487,14 +13572,8 @@ mod tests {
             (vec![(0, 14), (14, 15 + more)], false),
         ] {
             assert_eq!(
-                warm.guest_would_be_admitted_beside(
-                    &drafter,
-                    range,
-                    kv,
-                    &target,
-                    &ranges,
-                    Requester::Swarm
-                ),
+                warm.guest_fit_beside(&drafter, range, kv, &target, &ranges, Requester::Swarm)
+                    .admitted(),
                 fits,
                 "beside 14 held layers, a plan of {ranges:?}"
             );
