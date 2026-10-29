@@ -5595,6 +5595,42 @@ change: the 7B (4.7 GB) is past `MOST_DRAFTER_BYTES_TO_FETCH` (2 GB), so `larges
 already picks the 3B. Every draw the 3B's first choice replays 26.4 (+33%) — as for the 7B target,
 the headroom is a drafter that agrees with the target more, not a larger one.
 
+**A drafter that agrees with the target more is one trained AS the target was** (2026-10-29, #370).
+Every drafter ranked above was a coder model; the 14B is the general Instruct. The general Qwen2.5
+1.5B (Q8_0) and 3B (Q4_K_M) and the coder 0.5B, ranked the same way (`run_general.sh`, `run_c05.sh`;
+chat = the four chat prompts, 1,438 positions; code = the six code-writing ones, 2,406):
+
+| drafter | chat first choice | code first choice | replayed chat / code tok/s |
+|---|---|---|---|
+| coder 0.5B Q8_0 | 0.592 | 0.820 | — |
+| general 0.5B Q8_0 | 0.691 | 0.827 | 8.30 / 22.88 |
+| coder 1.5B Q8_0 | 0.698 | 0.858 | 9.23 / 25.27 |
+| general 1.5B Q8_0 | 0.745 | 0.868 | 10.39 / 25.33 |
+| coder 3B Q4_K_M | 0.745 | 0.868 | 10.92 / 27.40 |
+| general 3B Q4_K_M | 0.784 | 0.879 | 11.78 / 26.31 |
+
+The general one wins at every size, by 4-10 points in chat and ~1 in code; the general 1.5B equals the
+coder 3B. Replayed (`sim_general.py`, the halves doubled as above) the coder 3B keeps a 4% lead on
+code — its code guesses are more confident, so the tree goes deeper under them — and the general one
+leads chat by 8%; by time a token over both, the general one is ~4% ahead. On the REAL TH↔AU link
+(binary `cb68c5ca`, the default shape at 24 of 48 layers here, arms alternating in one run, Windows up
+24.6-25.0 h, 0 driver events): the 0.5B pair in the FLOW (`TAG=drafterline05`) — prose 7.67 / 8.73
+tok/s against 6.32 / 6.53, misses 17-20 a reply against 30-35, round trips waited 45 against 54-58;
+code 20.4 / 28.8 against 20.7 / 22.2, misses 1-2 and 16-18 round trips both (the spread is the link's).
+The 3B pair (`TAG=drafterline`) did not fit on this 8 GB card beside 24 layers (2.7 GB of it held by
+the desktop) and ran the continuous stream with the drafter on the processor (62 ms a guess): prose
+4.18-4.38 against 3.43-3.61 (123 of 207 guesses kept against 107 of 222; 77 round trips against
+100), code 7.28-7.91 against 7.26-7.90 (148 of 174 kept both). So the line breaks a TIE in size and
+nothing more: size still decides first (the coder 3B replays ahead of the general 1.5B), and a node
+holding a drafter of another line fetches one the same size of the target's
+(`HeldDrafter::beaten_by`) — a different model, never another copy. The line is read from the model
+id (`release_line`): the general uploads' headers have no `general.basename` and name themselves
+`qwen2.5-3b-instruct` where the coder's say `Qwen2.5 Coder 3B Instruct AWQ`; a misread line only
+loses the tie, the order before. Literature: DistillSpec (Zhou et al., ICLR 2024, arXiv 2310.08461)
+names alignment of the drafter with the target the main lever and gains 10-45% over standard
+speculation by distilling the drafter toward it; a sibling fine-tuned as the target was is part of
+that alignment at no cost.
+
 **The flow has its own distance line: 150 ms, not the tree rounds' 300** (2026-10-23,
 `FLOW_LEAST_ROUND_TRIP_MS`). The 300 ms line (`TREES_LEAST_ROUND_TRIP_MS`) was set for tree ROUNDS
 before the flow existed, and the flow inherited it, so every link under 300 ms — most links between

@@ -3683,7 +3683,23 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-29, ships in the next release** (#368)
+**Closed 2026-10-29, ships in the next release** (#368, #370)
+- #370 — **Of two drafters the same size, the one of the target's own release line guesses**
+  (found 2026-10-29 while ranking drafters for #369's prose: every drafter ranked for the 14B
+  Instruct had been a CODER model). Ranked offline on the 14B's own replies, the general Qwen2.5
+  sibling took the target's first choice more often at every size — chat 0.691 / 0.745 / 0.784
+  (0.5B / 1.5B / 3B) against the coder's 0.592 / 0.698 / 0.745, code ~1 point — and on the real
+  TH↔AU link the 0.5B pair in the flow ran prose 7.7-8.7 against 6.3-6.5 tok/s (misses 17-20
+  against 30-35), the 3B pair on the stream 4.2-4.4 against 3.4-3.6; code level.
+  `engine_drafter::largest_that_can_draft` breaks a tie in size by `release_line` (the id less
+  its size and quantisation — the headers do not carry it), before the bytes read; a node holding
+  one of another line fetches the same size of the target's (`HeldDrafter::beaten_by`), never
+  another copy. Size still first. Tests
+  `of_two_drafters_the_same_size_the_one_of_the_targets_line_drafts`,
+  `a_drafter_of_the_targets_line_is_fetched_beside_one_the_same_size_of_another`,
+  `a_release_line_is_the_id_less_its_size_and_quantisation`. Evidence:
+  `docs/invariants/scheduling.md` § "A drafter that agrees with the target more is one trained AS
+  the target was".
 - #368 — **A `models` folder linked to another drive is measured on that drive** (field report
   of 2026-10-28, v0.3.259, a Mac mini: data directory on a 229 GB SSD at 93%, `models` linked to
   a 9.1 TB drive holding a 70B). The storage budget, the dashboard's disk meter and the free disk

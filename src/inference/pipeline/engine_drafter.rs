@@ -460,10 +460,14 @@ fn next_drafter_step(
     held: Option<&ModelId>,
     may_fetch: impl Fn(&crate::types::ModelManifest) -> bool,
 ) -> DrafterStep {
+    let target_line = release_line(target);
     let to_beat = match held {
         None => None,
         Some(held) => match size_proxy(state, held) {
-            Some(size) => Some(size.size),
+            Some(size) => Some(HeldDrafter {
+                size: size.size,
+                of_the_targets_line: release_line(held) == target_line,
+            }),
             // Chosen, so sized a moment ago: a header gone since cannot be
             // compared with — keep it, fetch nothing.
             None => return DrafterStep::Nothing,
@@ -495,6 +499,7 @@ fn next_drafter_step(
         likely.into_iter().map(|m| m.id).collect(),
         |m| state.gguf_meta_for(m).is_some(),
         || size_proxy(state, target).map(|s| s.size),
+        &target_line,
         small_drafter_fraction(state),
         to_beat,
         |m| size_proxy(state, m),
@@ -502,18 +507,39 @@ fn next_drafter_step(
     )
 }
 
+/// The drafter held here, as a fetch must beat it.
+#[derive(Clone, Copy, Debug)]
+struct HeldDrafter {
+    /// Its [`size_proxy`].
+    size: u64,
+    /// Whether it is of the target's own [`release_line`].
+    of_the_targets_line: bool,
+}
+
+impl HeldDrafter {
+    /// Is a drafter of `size`, of the target's line or not, worth fetching
+    /// beside this one: LARGER, or the same size where this one is of another
+    /// line and that one of the target's — a different model, guessing as the
+    /// target does more often ([`release_line`]), never another copy of this one.
+    fn beaten_by(&self, size: u64, of_the_targets_line: bool) -> bool {
+        size > self.size || (size == self.size && of_the_targets_line && !self.of_the_targets_line)
+    }
+}
+
 /// [`drafter_to_acquire`]'s decision over the `likely` candidates, largest on
 /// disk first: their missing headers first ([`MOST_DRAFTER_HEADERS_A_PASS`] of
 /// them), then the largest that can draft ([`largest_that_can_draft`], a
 /// small one up to `1 / small_fraction`) against the target's size, which
-/// needs only the target's own header — of those larger than `to_beat`, the
-/// size of the drafter held here.
+/// needs only the target's own header — of those that beat `to_beat`, the
+/// drafter held here ([`HeldDrafter::beaten_by`]).
+#[allow(clippy::too_many_arguments)]
 fn acquisition_among(
     likely: Vec<ModelId>,
     has_header: impl Fn(&ModelId) -> bool,
     target_size: impl FnOnce() -> Option<u64>,
+    target_line: &str,
     small_fraction: u64,
-    to_beat: Option<u64>,
+    to_beat: Option<HeldDrafter>,
     size: impl Fn(&ModelId) -> Option<DrafterSize>,
     can_draft: impl FnMut(ModelId) -> Option<DrafterSpec>,
 ) -> DrafterStep {
@@ -532,9 +558,11 @@ fn acquisition_among(
     let sized: Vec<(DrafterSize, ModelId)> = likely
         .into_iter()
         .filter_map(|m| size(&m).map(|s| (s, m)))
-        .filter(|(s, _)| to_beat.is_none_or(|held| s.size > held))
+        .filter(|(s, m)| {
+            to_beat.is_none_or(|held| held.beaten_by(s.size, release_line(m) == target_line))
+        })
         .collect();
-    match largest_that_can_draft(target_size, small_fraction, sized, can_draft) {
+    match largest_that_can_draft(target_line, target_size, small_fraction, sized, can_draft) {
         Some(spec) => DrafterStep::Fetch(spec.model_id),
         None => DrafterStep::Nothing,
     }
@@ -565,9 +593,13 @@ fn chosen(
         .into_iter()
         .filter_map(|m| size_proxy(state, &m).map(|size| (size, m)))
         .collect();
-    largest_that_can_draft(target_size, small_drafter_fraction(state), sized, |m| {
-        spec_for(state, target, m).filter(&keep)
-    })
+    largest_that_can_draft(
+        &release_line(target),
+        target_size,
+        small_drafter_fraction(state),
+        sized,
+        |m| spec_for(state, target, m).filter(&keep),
+    )
 }
 
 /// Would the drafter's worker load once the target's layers `here` are loaded
@@ -637,23 +669,56 @@ fn beside_the_plan() -> bool {
 
 /// Of `candidates`, the largest [`within_reach`] of `target_size` — a small
 /// one up to `1 / small_fraction` of it ([`small_drafter_fraction`]) — that
-/// `can_draft` accepts. Of two the same size — copies of one model at
-/// different precisions — the one reading fewer bytes a guess; then the model
-/// id, so the choice does not depend on map order.
+/// `can_draft` accepts. Of two the same size, the one of the target's own
+/// release line (`target_line`, [`release_line`]); then — copies of one model
+/// at different precisions — the one reading fewer bytes a guess; then the
+/// model id, so the choice does not depend on map order.
 fn largest_that_can_draft(
+    target_line: &str,
     target_size: u64,
     small_fraction: u64,
     mut candidates: Vec<(DrafterSize, ModelId)>,
     mut can_draft: impl FnMut(ModelId) -> Option<DrafterSpec>,
 ) -> Option<DrafterSpec> {
     candidates.retain(|(d, _)| within_reach(d, target_size, small_fraction));
-    candidates.sort_by(|a, b| {
-        b.0.size
-            .cmp(&a.0.size)
-            .then_with(|| a.0.reads.cmp(&b.0.reads))
-            .then_with(|| a.1 .0.cmp(&b.1 .0))
+    candidates.sort_by_cached_key(|(d, m)| {
+        (
+            std::cmp::Reverse(d.size),
+            release_line(m) != target_line,
+            d.reads,
+            m.0.clone(),
+        )
     });
     candidates.into_iter().find_map(|(_, m)| can_draft(m))
+}
+
+/// The release line a model id names: its base name with the quantisation
+/// gone ([`crate::model::auto_manage::quant::inferred_base_name`], the one
+/// reading of a quant tag) and its size label too — `qwen2.5-14b-instruct-q4-k-m`
+/// and `qwen2.5-3b-instruct-q4-k-m` are both `qwen2.5-instruct`,
+/// `qwen2.5-coder-3b-instruct-q4-k-m` is `qwen2.5-coder-instruct`.
+///
+/// A drafter trained as its target was agrees with it more often at the same
+/// size (2026-10-29, `~/swarmllm-318/ranks14/`, the 14B's own greedy replies as
+/// the truth, 3,844 positions): Qwen2.5-3B-Instruct took the 14B Instruct's
+/// first choice 0.784 of the time in chat and 0.879 in code against
+/// Qwen2.5-Coder-3B's 0.745 and 0.868 — the general 1.5B equalled the coder
+/// 3B. So the line breaks a tie in size, never more: the coder 3B still beat
+/// the general 1.5B replayed on the long link. The headers cannot say it: the
+/// general uploads carry no `general.basename` and name themselves
+/// `qwen2.5-3b-instruct` where the coder's say `Qwen2.5 Coder 3B Instruct AWQ`.
+/// Read from the id, a line it misreads only loses the tie — the order before.
+fn release_line(model: &ModelId) -> String {
+    let is_size_label = |token: &str| {
+        token
+            .strip_suffix(['b', 'm'])
+            .is_some_and(|n| !n.is_empty() && n.parse::<f64>().is_ok())
+    };
+    crate::model::auto_manage::quant::inferred_base_name(&model.0)
+        .split('-')
+        .filter(|token| !is_size_label(token))
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// Have the drafter's worker read the prompt NOW — spawned beside the target's
@@ -1391,19 +1456,19 @@ mod tests {
             ]
         };
         let any = |m: ModelId| Some(spec(&m.0));
-        let chosen = largest_that_can_draft(360, DRAFTER_MAX_FRACTION, held(), any);
+        let chosen = largest_that_can_draft("", 360, DRAFTER_MAX_FRACTION, held(), any);
         assert_eq!(chosen.unwrap().model_id.0, "q-3b");
-        let chosen = largest_that_can_draft(360, DRAFTER_MAX_FRACTION, held(), |m| {
+        let chosen = largest_that_can_draft("", 360, DRAFTER_MAX_FRACTION, held(), |m| {
             (m.0 != "q-3b").then(|| spec(&m.0))
         });
         assert_eq!(chosen.unwrap().model_id.0, "q-1.5b");
-        let chosen = largest_that_can_draft(360, DRAFTER_MAX_FRACTION, held(), |m| {
+        let chosen = largest_that_can_draft("", 360, DRAFTER_MAX_FRACTION, held(), |m| {
             (m.0 == "q-0.5b").then(|| spec(&m.0))
         });
         assert_eq!(chosen.unwrap().model_id.0, "q-0.5b");
-        assert!(largest_that_can_draft(360, DRAFTER_MAX_FRACTION, held(), |_| None).is_none());
+        assert!(largest_that_can_draft("", 360, DRAFTER_MAX_FRACTION, held(), |_| None).is_none());
         assert_eq!(
-            largest_that_can_draft(360, 4, held(), any)
+            largest_that_can_draft("", 360, 4, held(), any)
                 .unwrap()
                 .model_id
                 .0,
@@ -1411,7 +1476,7 @@ mod tests {
             "SWARMLLM_DRAFTER_MAX_FRACTION=4 is the rule before"
         );
         assert!(
-            largest_that_can_draft(30, DRAFTER_MAX_FRACTION, held(), any).is_none(),
+            largest_that_can_draft("", 30, DRAFTER_MAX_FRACTION, held(), any).is_none(),
             "nothing within half a tiny target's size"
         );
     }
@@ -1441,9 +1506,9 @@ mod tests {
             ]
         };
         let any = |m: ModelId| Some(spec(&m.0));
-        let chosen = largest_that_can_draft(1258, DRAFTER_MAX_FRACTION, held(), any);
+        let chosen = largest_that_can_draft("", 1258, DRAFTER_MAX_FRACTION, held(), any);
         assert_eq!(chosen.unwrap().model_id.0, "q-3b");
-        let chosen = largest_that_can_draft(1500, DRAFTER_MAX_FRACTION, held(), any);
+        let chosen = largest_that_can_draft("", 1500, DRAFTER_MAX_FRACTION, held(), any);
         assert_eq!(chosen.unwrap().model_id.0, "q-7b", "360 × 4 ≤ 1,500");
         let size = |reads| DrafterSize { size: 150, reads };
         assert!(within_reach(
@@ -1531,8 +1596,149 @@ mod tests {
                 ModelId("qwen2.5-0.5b-a-no-header".into()),
             ),
         ];
-        let chosen = largest_that_can_draft(360, DRAFTER_MAX_FRACTION, held, |m| Some(spec(&m.0)));
+        let chosen =
+            largest_that_can_draft("", 360, DRAFTER_MAX_FRACTION, held, |m| Some(spec(&m.0)));
         assert_eq!(chosen.unwrap().model_id.0, "qwen2.5-0.5b-instruct-q8-0");
+    }
+
+    /// A model's release line is its id less the quantisation and the size.
+    #[test]
+    fn a_release_line_is_the_id_less_its_size_and_quantisation() {
+        for (id, line) in [
+            ("qwen2.5-14b-instruct-q4-k-m", "qwen2.5-instruct"),
+            ("qwen2.5-3b-instruct-q4-k-m", "qwen2.5-instruct"),
+            ("qwen2.5-0.5b-instruct-fp16", "qwen2.5-instruct"),
+            ("qwen2.5-coder-3b-instruct-q4-k-m", "qwen2.5-coder-instruct"),
+            ("qwen2.5-coder-7b-instruct-q4-k-m", "qwen2.5-coder-instruct"),
+            (
+                "meta-llama-3.1-8b-instruct-q4-k-m",
+                "meta-llama-3.1-instruct",
+            ),
+            ("qwen3-30b-a3b-q4-k-m", "qwen3-a3b"),
+        ] {
+            assert_eq!(release_line(&ModelId(id.into())), line, "{id}");
+        }
+    }
+
+    /// Of two drafters the same size, the one of the target's own line drafts
+    /// — Qwen2.5-3B-Instruct for Qwen2.5-14B-Instruct took the target's first
+    /// choice 0.784 of the time in chat against Qwen2.5-Coder-3B's 0.745
+    /// (2026-10-29) — and the coder's for a coder target. The line breaks a
+    /// tie in size, never more: a LARGER drafter of another line still drafts.
+    /// It comes before the bytes read: those choose between copies of ONE model.
+    #[test]
+    fn of_two_drafters_the_same_size_the_one_of_the_targets_line_drafts() {
+        let sized = |size, reads| DrafterSize { size, reads };
+        let general_3b = "qwen2.5-3b-instruct-q4-k-m";
+        let coder_3b = "qwen2.5-coder-3b-instruct-q4-k-m";
+        let general_1_5b = "qwen2.5-1.5b-instruct-q8-0";
+        let held = || {
+            vec![
+                (sized(151, 1_900), ModelId(coder_3b.into())),
+                (sized(151, 2_000), ModelId(general_3b.into())),
+                (sized(66, 1_600), ModelId(general_1_5b.into())),
+            ]
+        };
+        let any = |m: ModelId| Some(spec(&m.0));
+        let for_target = |target: &str, held| {
+            largest_that_can_draft(
+                &release_line(&ModelId(target.into())),
+                1258,
+                DRAFTER_MAX_FRACTION,
+                held,
+                any,
+            )
+            .unwrap()
+            .model_id
+            .0
+        };
+        assert_eq!(
+            for_target("qwen2.5-14b-instruct-q4-k-m", held()),
+            general_3b,
+            "the target's line, though it reads more a guess"
+        );
+        assert_eq!(
+            for_target("qwen2.5-coder-14b-instruct-q4-k-m", held()),
+            coder_3b
+        );
+        let without_the_general_3b = held()
+            .into_iter()
+            .filter(|(_, m)| m.0 != general_3b)
+            .collect();
+        assert_eq!(
+            for_target("qwen2.5-14b-instruct-q4-k-m", without_the_general_3b),
+            coder_3b,
+            "a larger drafter of another line still drafts"
+        );
+    }
+
+    /// A node holding a drafter of another line fetches one the same size of
+    /// the target's own; one holding the target's line fetches nothing the
+    /// same size — and neither fetches another copy of what it holds.
+    #[test]
+    fn a_drafter_of_the_targets_line_is_fetched_beside_one_the_same_size_of_another() {
+        let id = |s: &str| ModelId(s.into());
+        let general_3b = "qwen2.5-3b-instruct-q4-k-m";
+        let coder_3b_q8 = "qwen2.5-coder-3b-instruct-q8-0";
+        let likely = || vec![id(general_3b), id(coder_3b_q8)];
+        let size = |m: &ModelId| {
+            Some(DrafterSize {
+                size: 151,
+                reads: if m.0 == general_3b { 1_900 } else { 3_300 },
+            })
+        };
+        let can_draft = |m: ModelId| Some(spec(&m.0));
+        let every = |_: &ModelId| true;
+        let line = release_line(&id("qwen2.5-14b-instruct-q4-k-m"));
+        let held = |of_the_targets_line| {
+            Some(HeldDrafter {
+                size: 151,
+                of_the_targets_line,
+            })
+        };
+        assert_eq!(
+            acquisition_among(
+                likely(),
+                every,
+                || Some(1258),
+                &line,
+                2,
+                held(false),
+                size,
+                can_draft
+            ),
+            DrafterStep::Fetch(id(general_3b)),
+            "the coder 3B held: the general one, the target's line"
+        );
+        assert_eq!(
+            acquisition_among(
+                likely(),
+                every,
+                || Some(1258),
+                &line,
+                2,
+                held(true),
+                size,
+                can_draft
+            ),
+            DrafterStep::Nothing,
+            "the general 3B held: nothing the same size, the coder's copy least of all"
+        );
+        let coder_line = release_line(&id("qwen2.5-coder-14b-instruct-q4-k-m"));
+        assert_eq!(
+            acquisition_among(
+                vec![id(coder_3b_q8)],
+                every,
+                || Some(1258),
+                &coder_line,
+                2,
+                held(true),
+                size,
+                can_draft
+            ),
+            DrafterStep::Nothing,
+            "a coder target holding the coder 3B: its Q8_0 copy is never worth a fetch"
+        );
     }
 
     /// Layers × width² sized Qwen3-30B-A3B at 201 M — under a quarter's reach of
@@ -1762,6 +1968,7 @@ mod tests {
                 likely(),
                 only(&[]),
                 || Some(360),
+                "",
                 DRAFTER_MAX_FRACTION,
                 None,
                 size,
@@ -1775,6 +1982,7 @@ mod tests {
                 likely(),
                 only(&["3b", "1.5b"]),
                 || Some(360),
+                "",
                 DRAFTER_MAX_FRACTION,
                 None,
                 size,
@@ -1789,6 +1997,7 @@ mod tests {
                 likely(),
                 every,
                 || Some(360),
+                "",
                 DRAFTER_MAX_FRACTION,
                 None,
                 size,
@@ -1802,6 +2011,7 @@ mod tests {
                 likely(),
                 every,
                 || None,
+                "",
                 DRAFTER_MAX_FRACTION,
                 None,
                 size,
@@ -1815,6 +2025,7 @@ mod tests {
                 vec![id("3b")],
                 only(&["3b"]),
                 || Some(360),
+                "",
                 DRAFTER_MAX_FRACTION,
                 None,
                 size,
@@ -1852,12 +2063,16 @@ mod tests {
         let headers =
             |have: &'static [&'static str]| move |m: &ModelId| have.contains(&m.0.as_str());
         let every = headers(&["3b", "1.5b-q8", "1.5b-q4"]);
-        let held_0_5b = Some(19);
+        let held_0_5b = Some(HeldDrafter {
+            size: 19,
+            of_the_targets_line: true,
+        });
         assert_eq!(
             acquisition_among(
                 likely(),
                 headers(&["3b"]),
                 || Some(360),
+                "",
                 4,
                 held_0_5b,
                 size,
@@ -1867,17 +2082,38 @@ mod tests {
             "a held drafter does not skip the headers"
         );
         assert_eq!(
-            acquisition_among(likely(), every, || Some(360), 4, held_0_5b, size, can_draft),
+            acquisition_among(
+                likely(),
+                every,
+                || Some(360),
+                "",
+                4,
+                held_0_5b,
+                size,
+                can_draft
+            ),
             DrafterStep::Fetch(id("1.5b-q4")),
             "larger than the 0.5B held; of its two copies the one reading less"
         );
         assert_eq!(
-            acquisition_among(likely(), every, || Some(360), 4, Some(66), size, can_draft),
+            acquisition_among(
+                likely(),
+                every,
+                || Some(360),
+                "",
+                4,
+                Some(HeldDrafter {
+                    size: 66,
+                    of_the_targets_line: true
+                }),
+                size,
+                can_draft
+            ),
             DrafterStep::Nothing,
             "a 1.5B held: a copy of the same size is never worth a fetch"
         );
         assert_eq!(
-            acquisition_among(likely(), every, || Some(360), 4, None, size, can_draft),
+            acquisition_among(likely(), every, || Some(360), "", 4, None, size, can_draft),
             DrafterStep::Fetch(id("1.5b-q4")),
             "control: nothing held, the same choice"
         );

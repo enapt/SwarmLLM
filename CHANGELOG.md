@@ -27,6 +27,18 @@ waited — on the same runs 3.2 to 4.3 tokens an exchange on prose and 7.7 to 10
 under 1 before — while a split whose far computer was overloaded still reads slow (1.6 to 1.8).
 The figure is kept per model, from the last 32 splits (#369).
 
+**A split guesses with a small model trained the way the big one was, which writes prose up to a
+quarter faster over a long connection.** When your computer helps a split along by guessing the
+next words with a small model, it picks the largest small model of the same family it holds. Of
+two the same size it now picks the one released alongside the model being split: a general model
+guesses for a general model, a coding one for a coding one. Before, which of the two guessed came
+down to file details such as which read fewer bytes, and a computer that already held a coding
+model never fetched the better match. Measured with Qwen2.5 14B Instruct split between Thailand and Australia: guessing
+with the general 0.5B, prose ran 7.7 to 8.7 tokens a second against 6.3 to 6.5 with the coding
+0.5B (about half as many wrong guesses); with the 3B models, 4.2 to 4.4 against 3.4 to 3.6. Code
+ran the same either way. A larger guessing model is still chosen before a better-matched smaller
+one (#370).
+
 **If your models folder is a link to another drive, the node now measures that drive.** The
 dashboard's disk meter, the storage limit for automatic downloads and the free space told to
 other computers all read the drive holding SwarmLLM's own folder, not the drive the models are
