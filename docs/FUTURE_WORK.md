@@ -89,9 +89,10 @@ the top track (`docs/plans/large_model_splits.md`).
    check takes a second (the stream ran 3 guesses a chunk), and whether its 1B on the card beats
    the 3B on the processor (`faster_than_local.md` § 8, the 70B deep dive). The track's history
    (near chains #192, the far chain #346, trees #134, the stream, tensor-core MMQ #325, requester
-   guesses) is in the #318 entry and § "Closed". **Holding the parts**: a full machine never gives
-   back a small model's spare copy for a part of a large model the swarm is short of (#371); a
-   6 GB laptop in Europe held 14 models and no part of the 70B.
+   guesses) is in the #318 entry and § "Closed". **Holding the parts**: since #371 (closed
+   2026-10-29) a full machine gives back a spare copy for its part of a chain and for a part of a
+   large model too few computers hold; whether the 6 GB laptop in Europe that held 14 models and no
+   part of the 70B takes some is read from its `hosted_models` after the next release.
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
@@ -1028,34 +1029,6 @@ speed-up. Then add a bounded multiplicative term to scoring — and to retention
 `prune.rs`, or it loops — for parts this node lacks, can fit, and where its MEASURED speed
 (`PeerSpeed::ranking_ms_per_layer`, not the advertised figure) clearly beats the holders'.
 Must not make fast nodes hoover up the swarm (cap it; keep `spread_bonus` multiplicative).
-
-#### #371 — A full machine never gives back a small model's spare copy for a part of a large model the swarm is short of
-`P2` · storage · **OPEN** — 2026-10-29 · related: #346 (far chains, its residual), #170, #4
-
-Seen on v0.3.261 (2026-10-29). An RTX 4050 laptop (6 GB card) in Europe holds 14 models in 96
-parts: small ones, and 14 of the 16 parts of Qwen2.5-14B. It holds no part of Llama 3.3 70B,
-which the network map lists as a coverage gap in both European regions it could be in, while
-the 70B runs on two machines and has few holders. On a full machine the download pass stops
-(`auto_manage/manager.rs`, "this node's storage is full"). The only room prune makes is for a
-part NO computer holds (`scoring::room_a_hole_lacks` → `prune::spare_for_a_hole`). A part a
-planned chain of machines names this machine for (#346) is not such a part, and neither is a
-scarce large model's part held once or twice. So a machine fills with copies of models any
-single computer runs, and the parts only a split can use go unhosted — the opposite of what
-the swarm is for (#318). Which gate bound on that machine is inferred, not observed (its log
-is not ours): storage most likely, then, for a model it holds no part of, the hash ring
-(`scoring.rs`, "not assigned on consistent hash ring").
-
-Precedent: Petals places a server over the run of blocks whose weakest block has the least
-throughput in the swarm, and moves it only when a simulated rebalance raises the swarm's
-minimum enough (`src/petals/server/block_selection.py`: `choose_best_blocks`,
-`should_choose_other_blocks`, `balance_quality`). Shape of a fix: widen the make-room path from
-holes to (a) a part a planned chain names this machine for and (b) a part of a model no machine
-in scope runs whole whose holders are under target; give back only copies
-`prune::copy_kept_because` would already shed, held by more than `max(min_replicas, 2)`
-machines and not loaded; and keep a margin so the download and prune passes cannot trade the
-same bytes back and forth (#170's warning). First, read what such a machine logs ("storage is
-full", "near chain planned", the hash-ring line at debug): this node with a small storage
-budget, or a rig.
 
 #### #190 — A GPU node with every layer but no room for the request runs it locally instead of using an idle peer
 `P3` · routing · **PARTIAL** — 2026-08-03 · history: archive § "Full local coverage bypasses the network, even with no headroom" (its heading says FIXED; its body says the fix was REVERTED)
@@ -3704,7 +3677,32 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-29, ships in the next release** (#368, #370)
+**Closed 2026-10-29, ships in the next release** (#368, #370, #371)
+- #371 — **A full machine makes room for its part of a chain, and for a part of a large model too
+  few computers hold** (user, 2026-10-29: "it should probably have pruned if needed and downloaded
+  the parts for larger (or more popular) models"; field: an RTX 4050 laptop in Europe held 14 models
+  in 96 parts and no part of a Llama 3.3 70B the network map listed as a gap in its region). A full
+  node made room only for a part NO computer held (#170's hole rule), and returned before it
+  planned its own part of a chain — the header learning came after the storage check — while the
+  planner, reading the filesystem's free disk rather than the budget, kept naming it until its
+  lease lapsed. Now each candidate says why it may ask (`manager::RoomFor`: a hole; this node's
+  part of a chain or of carrying; `Scarce` — of an asked-for model, held by one computer, or under
+  its target where only a split can run it, `coverage::only_a_split_runs`), the strongest first in
+  the sort and the tiers; the download pass notes room for the first (`room_wanted`, header learned
+  first), and prune gives back a copy kept only by the count or the region rule (`spare_for_room`)
+  with more than two other holders — for a scarce part, three more than it has (`floor_for_room`),
+  so each trade lowers the sum of squared holder counts and trades between full machines cannot
+  cycle, the hysteresis Petals gets from `balance_quality` — never a copy of the wanted part's own
+  model. Only a hole that did not fit holds the cycle's lower tiers back; the lack is measured
+  against the noted part after the cycle's choices (`scoring::room_lacked_after` — a review found a
+  part held once stalling every further copy where prune could free nothing). Tests
+  `a_full_node_gives_back_a_copy_three_holders_richer_for_a_part_one_computer_holds`
+  (its control: three holders, nothing given back), `a_copy_of_the_wanted_parts_own_model_is_never_given_back`,
+  `near_chain::a_full_node_makes_room_for_its_part_of_the_chain`,
+  `the_room_a_part_lacks_is_measured_after_what_the_cycle_chose`. Evidence:
+  `docs/invariants/memory.md` § "A full node makes room for its planned part". Field check owed:
+  `bf7b3263`'s `hosted_models` on the release (`/api/admin/peers`), and `wants a place here` in a
+  full node's log.
 - #370 — **Of two drafters the same size, the one of the target's own release line guesses**
   (found 2026-10-29 while ranking drafters for #369's prose: every drafter ranked for the 14B
   Instruct had been a CODER model). Ranked offline on the 14B's own replies, the general Qwen2.5

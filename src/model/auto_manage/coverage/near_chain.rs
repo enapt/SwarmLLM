@@ -1545,6 +1545,94 @@ mod tests {
         assert!(s.offered().is_empty(), "nobody asked");
     }
 
+    /// #371: a node with no storage left takes its part of the chain its
+    /// machines plan. The download pass notes the room the chain's part
+    /// lacks, prune gives back a copy of another model three computers hold,
+    /// and the next cycle fetches the part. Before, a full node returned
+    /// before it looked at the chain: its segment never came, and the chain
+    /// waited on it until the node was passed over.
+    #[tokio::test]
+    async fn a_full_node_makes_room_for_its_part_of_the_chain() {
+        use super::super::super::manager::RoomFor;
+        use super::super::part_rank_weight;
+        let s = fleet(4.0);
+        let local = s.local();
+        let mut config = Config::clone(&s.state.cfg());
+        config.auto_manage.max_storage_mb = 1_000;
+        config.node.contribution = crate::types::ContributionMode::Minimal;
+        s.state.apply_live_config(config);
+        // Two of another model's four parts fill the budget; two computers
+        // 300 ms away hold all four — so the region rule, not the count, keeps
+        // this node's copies — each ranked above this node on both parts.
+        let ranges = [(0, 4), (4, 8), (8, 12), (12, 16)];
+        let copies = register_manifest_with_sized_shards(&s.state, "copies", 16, &ranges, PART);
+        holds(&s.state, &copies, &local, &[0, 1]);
+        write_sparse_shards(&s.state, &copies, [0, 1], PART);
+        let part = |index| ShardId {
+            model_id: copies.clone(),
+            index,
+        };
+        let above: Vec<NodeId> = (0u32..1_000_000)
+            .map(|i| NodeId(*blake3::hash(&i.to_le_bytes()).as_bytes()))
+            .filter(|n| {
+                (0..2).all(|i| part_rank_weight(&part(i), n) > part_rank_weight(&part(i), &local))
+            })
+            .take(2)
+            .collect();
+        for id in &above {
+            let mut info = crate::types::PeerInfo {
+                node_id: id.clone(),
+                ..s.state.peer_registry.get(&s.far).unwrap().clone()
+            };
+            info.latency_ms = Some(300);
+            info.capability = None;
+            s.state.peer_registry.insert(id.clone(), info);
+            s.state.connected_node_ids.insert(id.clone());
+            holds(&s.state, &copies, id, &[0, 1, 2, 3]);
+        }
+        let parts_of_copies_here = || {
+            (0..4)
+                .filter(|&i| s.state.shard_store().shard_path(&copies, i).exists())
+                .collect::<Vec<u32>>()
+        };
+        assert_eq!(
+            s.manager.remaining_budget(&local).remaining_bytes(),
+            0,
+            "fixture: no storage left"
+        );
+
+        s.later();
+        s.manager.evaluate_and_download().await;
+        let room = s
+            .manager
+            .room_wanted_now()
+            .expect("this node's part of the chain asks for room");
+        assert_eq!(
+            (room.why, room.model, room.bytes),
+            (RoomFor::Placed, s.mid.clone(), PART)
+        );
+        s.manager.evaluate_and_prune().await;
+        assert_eq!(
+            parts_of_copies_here().len(),
+            1,
+            "one copy given back, for the room the part lacks and no more"
+        );
+
+        s.later();
+        let report = s.manager.remaining_budget(&local);
+        let next: Vec<(ModelId, u32)> = s
+            .manager
+            .select_within_budget(s.manager.gather_candidates(&local, 0), &report)
+            .into_iter()
+            .map(|c| (c.model_id, c.shard_index))
+            .collect();
+        assert_eq!(next.len(), 1, "one part a cycle at this contribution");
+        assert!(
+            next[0].0 == s.mid && next[0].1 <= 2,
+            "the room goes to this node's segment (parts 0-2): {next:?}"
+        );
+    }
+
     /// Prune keeps this node's segment of a near chain and sheds what lies
     /// outside it, below urgent disk pressure; an urgent disk takes it. A
     /// MIDDLE part: prompt privacy keeps the ends anyway (gotcha #876's

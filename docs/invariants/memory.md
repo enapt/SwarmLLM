@@ -1121,14 +1121,14 @@ while 63 of the 70B's 79 parts were on no computer. Read once its limit was rais
 five holders each, and of 21 of 28 it was the only CLOSE one (the others 200-400 ms away): the
 region rule held them, not the count. Now the download pass, finding the first hole it cannot fit
 (at `budget == 0` too, before the early return), notes the room it lacks — its size less what is
-left, plus anything held past the budget (`scoring::room_a_hole_lacks`) — in
-`AutoShardManager::room_for_holes`; it alone writes it, every cycle, clearing it once a hole is
-chosen or none is offered, and a note older than `ROOM_FOR_HOLES_KEPT` (600 s, two cycles) gives
+left, plus anything held past the budget (`scoring::room_lacked`, then `room_a_hole_lacks`) — in
+`AutoShardManager::room_wanted` (then `room_for_holes`); it alone writes it, every cycle, clearing it once a hole is
+chosen or none is offered, and a note older than `ROOM_WANTED_KEPT` (600 s, two cycles) gives
 nothing back. The hole is one `gather_candidates` OFFERS this node, so the hash ring and the trust
 gate apply: a node holding none of the model makes room only for the parts the ring assigns it
 (another node is assigned the rest), one holding part of it for any of its gaps. While it stands, `copy_kept_because` sheds a copy kept ONLY for how many copies there
 are or where they are (the replica count, the last close holder in this region) when
-`prune::spare_for_a_hole` holds: more than `floor_for_a_hole` live holders counting this node
+`prune::spare_for_room` (then `spare_for_a_hole`) holds: more than `floor_for_room` live holders counting this node
 (`min_replicas`, never under two — two other copies remain), this node not among the first that
 many holders in rendezvous order (`coverage::kept_by_rank`, `blake3(model ‖ 0 ‖ index ‖ node)` —
 without it each of three full holders counts one copy to spare and gives its own back in the same
@@ -1145,12 +1145,53 @@ so while the room is noted the download pass does not fetch a spare copy back (g
 the room would fill with copies before the hole could use it. Petals moves a server only when no
 block is left uncovered (`block_selection.should_choose_other_blocks`); this keeps two copies
 besides. Past the region rule deliberately: the last close copy of a runnable model costs a slower
-reply, a hole costs every reply. Tests: `room_for_holes::*` in `manager.rs` (the live shape end to
-end through both passes: red with `spare_for_a_hole` false — nothing is given back; the floor
+reply, a hole costs every reply. Tests: `room_wanted::*` in `manager.rs` (the live shape end to
+end through both passes: red with `spare_for_room` false — nothing is given back; the floor
 with one other holder; a model missing parts of its own keeps its copies; a holder ranked among the
 kept gives nothing back — the far computers are drawn until the ranking holds, since a test node's
 id is random), and
 `a_hole_that_does_not_fit_keeps_the_room_from_further_copies`.
+
+**A full node makes room for its planned part, and for a part too few computers hold (2026-10-29,
+#371).** A hole was the only part a full node made room for. An RTX 4050 laptop in Europe held 14
+models in 96 parts — small ones, and 14 of the 14B's 16 — and no part of a Llama 3.3 70B the network
+map listed as a gap in its region, while the 70B ran on two machines with one or two holders a part:
+copies of models any single computer runs filled it, and the parts only a split can use went
+unhosted. The early return at `budget == 0` also came BEFORE `learn_headers_near_chains_need`, so a
+full node never even planned its part of a chain, while the planner — which reads the filesystem's
+free disk, not the storage budget — went on naming it until its lease lapsed (`CARRIER_PATIENCE`).
+Now each candidate carries `ShardCandidate::asks_room: Option<RoomFor>`, ordered weakest first so
+the sort and the tiers of `select_within_budget` put the strongest reason first: `Hole`; `Placed`
+(this node's part of a planned chain, near or far, or of carrying — `parts_this_node_plans`,
+`parts_this_node_carries`); `Scarce` (`scoring::is_scarce`: of a model somebody asked for, held or
+being fetched by ONE computer, or under its replica target where only a split can run it —
+`coverage::only_a_split_runs`: no machine in scope states a ceiling holding every layer; unknown is
+no). The download pass notes room for the FIRST that asks (`first_part_wanting_room`, header
+learned before the full check), with its model and floor (`RoomWanted`), the lack measured against
+THAT part after the cycle's choices (`scoring::room_lacked_after`). Only a hole that did not fit, with
+no hole chosen, still stops the tiers below (2026-10-25's rule). A review of #371 found the first
+draft extended that stop to every reason and measured the lack before the cycle's choices: a part
+one computer holds — common in a small swarm — held a node's further copies back for good wherever
+prune could free nothing, and any smaller part asking room, chosen beside it, hid a larger one's
+lack. Measured after the choices, what prune frees covers the part whatever the tiers below took,
+so the stop is no longer what makes the room land. Prune's `spare_for_room` is the hole
+rule's with two additions: never a copy of the wanted part's own model (no gap opened in this
+node's run of it), and for `Scarce` a floor of `wanted_holders + 2` (`floor_for_room`) — a copy is
+given back only from a part with at least three more live holders than the wanted one has, so each
+such trade lowers the sum of squared holder counts by at least 4 and no run of trades between full
+machines can return to where it started. That is the hysteresis Petals gets from `balance_quality`
+(`should_choose_other_blocks` moves a server only where the swarm's weakest span gains enough); a
+hole's or a planned part's floor stays two others, since a plan decides those and the copy given
+back is wanted by neither. Several full machines deciding at once can overshoot by one round —
+each gives back down to the floor, never past it, since the first `floor` holders by rendezvous
+keep theirs — and the next trades close the gap to two; churn, bounded, not a cycle (review,
+2026-10-29). The same review asked to keep the region rule for `Scarce`; declined: on a full
+machine the region rule is what keeps its copies (21 of 28 on 10-25), so a reason held to copies
+the count keeps would seldom make room. The hash ring still spreads `Scarce` parts of a model a node holds none
+of, so full machines do not all trade for the same part. Tests:
+`a_full_node_gives_back_a_copy_three_holders_richer_for_a_part_one_computer_holds` (its control:
+three holders, room noted, nothing given back), `a_copy_of_the_wanted_parts_own_model_is_never_given_back`,
+and `near_chain::a_full_node_makes_room_for_its_part_of_the_chain`.
 
 ## `model::auto_manage::prune::effective_idle_secs` — residency is a hard UPPER BOUND on "idle since", and the worker's own `last_used` is the signal that moves
 

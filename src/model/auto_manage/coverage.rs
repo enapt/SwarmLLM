@@ -223,7 +223,7 @@ impl AutoShardManager {
     /// Is `model_id` a model being assembled — asked for, a part of it on a
     /// live computer and another part on none? The model whose missing parts
     /// come first (`scoring::fills_a_hole`); prune never gives back a copy of
-    /// one to make room for another's (`prune::spare_for_a_hole`). Only live
+    /// one to make room for another's (`prune::spare_for_room`). Only live
     /// holders count: a part listed for a computer that is gone is missing.
     pub(super) fn model_has_holes(&self, model_id: &ModelId) -> bool {
         if !self.asked_for(model_id) {
@@ -296,6 +296,24 @@ impl AutoShardManager {
             }
         }
         total >= manifest.num_layers
+    }
+
+    /// Can only a split run `manifest` — could no machine in scope, this node
+    /// included, hold it whole by the ceiling it states? Unknown (no header
+    /// here, or a machine stating no ceiling) is "cannot tell", so no: a part
+    /// of it is then scarce only where one computer holds it
+    /// (`scoring::is_scarce`, #371).
+    pub(super) fn only_a_split_runs(&self, manifest: &ModelManifest) -> bool {
+        if manifest.num_layers == 0 {
+            return false;
+        }
+        let Some(curve) = self.carry_curve(&manifest.id) else {
+            return false;
+        };
+        self.machines_in_scope().iter().all(|node| {
+            self.ceiling_layers(node, manifest, curve)
+                .is_some_and(|layers| layers < manifest.num_layers)
+        })
     }
 
     /// Does `manifest` need a carrier: asked for, its holders short of it,
@@ -572,7 +590,7 @@ pub(super) fn part_rank_weight(part: &ShardId, node: &NodeId) -> [u8; 32] {
 
 /// Is `node` among the first `keep` of `part`'s `holders` in rendezvous order
 /// ([`part_rank_weight`])? Every computer reading the same holders ranks them
-/// alike, so when copies are given back for a hole (`prune::spare_for_a_hole`)
+/// alike, so when copies are given back to make room (`prune::spare_for_room`)
 /// the first `keep` never give theirs back, and the part keeps them however
 /// many holders decide in the same minute. Without it, each of three full
 /// holders could count three copies, one to spare, and give its own back at

@@ -1,6 +1,6 @@
 use crate::types::{ModelId, NodeId, ShardId};
 
-use super::manager::{hash_ring_position, AutoShardManager, ShardCandidate};
+use super::manager::{hash_ring_position, AutoShardManager, RoomFor, ShardCandidate};
 use super::vram::estimate_model_vram_mb;
 
 /// How much more a shard is worth when it EXTENDS a run this node already
@@ -387,7 +387,12 @@ impl AutoShardManager {
             let model_popularity = (all_holders.len() as f64).max(1.0);
             // Asked for, and part of it already here or on a peer: a model
             // being assembled, whose missing parts come first (`fills_a_hole`).
-            let assembling_an_asked_model = !all_holders.is_empty() && self.asked_for(&manifest.id);
+            let asked_for = self.asked_for(&manifest.id);
+            let assembling_an_asked_model = !all_holders.is_empty() && asked_for;
+            // Only a split can run it: no machine in scope could hold it whole
+            // (`coverage::only_a_split_runs`). Its parts short of their target
+            // may ask a full node for room (`is_scarce`, #371).
+            let only_a_split_runs = asked_for && self.only_a_split_runs(&manifest);
 
             // VRAM fitness: does the global pool have enough VRAM to actually run this model?
             // Don't block downloads, but deprioritize models the pool can't run yet.
@@ -751,6 +756,19 @@ impl AutoShardManager {
                     * carry_bonus
                     + jitter;
 
+                // Why a full node may make room for it (#371): a hole first,
+                // then this node's part of a planned chain or of carrying, then
+                // a part too few computers hold.
+                let asks_room = if fills_a_hole {
+                    Some(RoomFor::Hole)
+                } else if carried_part || near_part {
+                    Some(RoomFor::Placed)
+                } else if is_scarce(asked_for, holder_count, target_replicas, only_a_split_runs) {
+                    Some(RoomFor::Scarce)
+                } else {
+                    None
+                };
+
                 candidates.push(ShardCandidate {
                     model_id: manifest.id.clone(),
                     model_name: manifest.name.clone(),
@@ -758,7 +776,7 @@ impl AutoShardManager {
                     shard_size_bytes: shard.size_bytes,
                     holder_count,
                     score,
-                    fills_a_hole,
+                    asks_room,
                 });
             }
 
@@ -792,15 +810,16 @@ impl AutoShardManager {
                         shard_size_bytes: mmproj_info.size_bytes,
                         holder_count,
                         score: mmproj_score,
-                        fills_a_hole: false,
+                        asks_room: None,
                     });
                 }
             }
         }
 
-        // Holes first, then by score descending (best candidates first).
+        // Parts the swarm is short of first, the strongest reason first
+        // (`RoomFor`: holes above all), then by score descending.
         candidates.sort_by(|a, b| {
-            b.fills_a_hole.cmp(&a.fills_a_hole).then(
+            b.asks_room.cmp(&a.asks_room).then(
                 b.score
                     .partial_cmp(&a.score)
                     .unwrap_or(std::cmp::Ordering::Equal),
@@ -905,21 +924,38 @@ impl AutoShardManager {
         // in rotation instead of pure score-descending. This ensures shards from
         // different models are downloaded in the same cycle when possible.
         //
-        // In two tiers: the parts that fill a hole (`fills_a_hole`) across every
-        // model first, then the rest — so a cycle's few slots go to a part no
-        // computer holds before a further copy of one some computer does.
+        // In tiers, one per reason a part may ask for room (`RoomFor`), the
+        // strongest first — the parts that fill a hole (`fills_a_hole`) across
+        // every model, then this node's parts of a chain or of carrying, then
+        // parts too few computers hold — and the further copies last, so a
+        // cycle's few slots go to a part the swarm is short of before a further
+        // copy of one it is not.
         //
-        // A hole the budget could not fit, with no hole chosen, keeps what is
-        // left for itself: the copies are not looked at this cycle. Filled with
-        // copies, the room prune makes for the hole (`prune::spare_for_a_hole`)
-        // would be taken before the hole could use it.
-        let (holes, copies): (Vec<ShardCandidate>, Vec<ShardCandidate>) =
-            candidates.into_iter().partition(|c| c.fills_a_hole);
-        let mut a_hole_did_not_fit = false;
-        for (holes_tier, tier) in [(true, holes), (false, copies)] {
-            if !holes_tier && a_hole_did_not_fit && !selected.iter().any(|c| c.fills_a_hole) {
-                break;
+        // A HOLE the budget could not fit, with no hole chosen, keeps what is
+        // left for itself (2026-10-25): the tiers below are not looked at this
+        // cycle — a hole costs every reply, so the cycle's leftover waits for
+        // it. A planned or scarce part does not hold the tiers below back: the
+        // room it lacks is measured after the cycle's choices
+        // (`room_lacked_after`), so what prune frees covers it whatever they
+        // took, and a node prune can make no room on (every copy kept for what
+        // it does) still fetches (review of #371: a part one computer holds is
+        // common in a small swarm, and held the tiers below back for good).
+        let mut tiers: Vec<(Option<RoomFor>, Vec<ShardCandidate>)> = [
+            Some(RoomFor::Hole),
+            Some(RoomFor::Placed),
+            Some(RoomFor::Scarce),
+            None,
+        ]
+        .into_iter()
+        .map(|reason| (reason, Vec::new()))
+        .collect();
+        for candidate in candidates {
+            if let Some((_, tier)) = tiers.iter_mut().find(|(r, _)| *r == candidate.asks_room) {
+                tier.push(candidate);
             }
+        }
+        for (reason, tier) in tiers {
+            let mut a_hole_did_not_fit = false;
             let mut by_model: std::collections::HashMap<String, Vec<ShardCandidate>> =
                 std::collections::HashMap::new();
             let mut model_order: Vec<String> = Vec::new();
@@ -967,7 +1003,7 @@ impl AutoShardManager {
                             );
                             continue;
                         }
-                        if candidate.fills_a_hole
+                        if reason == Some(RoomFor::Hole)
                             && candidate.shard_size_bytes > budget_bytes
                             && could_ever_hold(candidate.shard_size_bytes, report)
                         {
@@ -1000,6 +1036,9 @@ impl AutoShardManager {
                 if !any_taken {
                     break;
                 }
+            }
+            if a_hole_did_not_fit && !selected.iter().any(|c| c.asks_room == reason) {
+                break;
             }
         }
 
@@ -1111,59 +1150,103 @@ pub(super) fn fills_a_hole(assembling_an_asked_model: bool, holder_count: usize)
     assembling_an_asked_model && holder_count == 0
 }
 
-/// The room the first part that fills a hole (`first_hole_bytes`) still lacks
-/// on this node after a cycle's choice: `None` when a hole was chosen (it is
-/// being fetched) or none was offered, else its size less what storage had
-/// left (`remaining_bytes`), plus whatever this node holds past its budget
-/// (`over_budget_bytes` — giving back only the part's size would leave it
-/// still over). What the download pass notes for prune
-/// (`AutoShardManager::room_for_holes`).
+/// Is a part SCARCE — a reason it may ask a full node for room
+/// ([`RoomFor::Scarce`], #371)? Of a model somebody asked for, held (or being
+/// fetched) by ONE computer — whose leaving makes it a hole — or by fewer than
+/// its replica target (`target_replicas`) where only a split can run the model
+/// (`only_a_split_runs`): every holder of such a part serves that part alone,
+/// and the swarm's copies of models any computer runs whole crowd it out (a
+/// 4050 held 14 such models and none of a 70B, 2026-10-29). Prune gives back
+/// only copies with at least three more holders for it
+/// (`prune::floor_for_room`). A part no computer holds is a hole, not this.
+pub(super) fn is_scarce(
+    asked_for: bool,
+    holder_count: usize,
+    target_replicas: usize,
+    only_a_split_runs: bool,
+) -> bool {
+    asked_for
+        && holder_count > 0
+        && (holder_count == 1 || (only_a_split_runs && holder_count < target_replicas))
+}
+
 /// Could this node ever hold a part of `bytes` — does it fit the whole storage
-/// budget, with nothing else held? A hole larger than that is no hole THIS
-/// node can fill: it neither keeps a cycle's room from further copies nor asks
-/// prune for room ([`AutoShardManager::first_hole_to_fetch`]). Counted, every
-/// cycle skipped the copies and gave back a spare one for a part that could
-/// never land (pre-release review, 2026-10-25).
+/// budget, with nothing else held? A part larger than that is no part THIS
+/// node can take: it neither keeps a cycle's room from further copies nor asks
+/// prune for room ([`AutoShardManager::first_part_wanting_room`]). Counted,
+/// every cycle skipped the copies and gave back a spare one for a part that
+/// could never land (pre-release review, 2026-10-25).
 pub(super) fn could_ever_hold(bytes: u64, report: &BudgetReport) -> bool {
     bytes <= report.budget.bytes
 }
 
-pub(super) fn room_a_hole_lacks(
-    first_hole_bytes: Option<u64>,
-    chose_a_hole: bool,
+/// The room the first part that asks for it (`wanting_bytes`,
+/// [`AutoShardManager::first_part_wanting_room`]) still lacks on this node
+/// after a cycle's choice: `None` when THAT part was chosen (it is being
+/// fetched) or none was offered, else its size less what storage has left
+/// once the cycle's choices are counted (`remaining_bytes`), plus whatever
+/// this node holds past its budget (`over_budget_bytes` — giving back only the
+/// part's size would leave it still over). What the download pass notes for
+/// prune (`AutoShardManager::room_wanted`).
+pub(super) fn room_lacked(
+    wanting_bytes: Option<u64>,
+    chosen: bool,
     remaining_bytes: u64,
     over_budget_bytes: u64,
 ) -> Option<u64> {
-    if chose_a_hole {
+    if chosen {
         return None;
     }
-    first_hole_bytes
+    wanting_bytes
         .map(|bytes| bytes.saturating_add(over_budget_bytes))
         .and_then(|needed| needed.checked_sub(remaining_bytes))
         .filter(|&lacks| lacks > 0)
 }
 
-impl AutoShardManager {
-    /// The size of the first part offered that fills a hole, could ever fit
-    /// this node's storage ([`could_ever_hold`]) and is not being fetched here
-    /// already — what the room a hole lacks is measured by.
-    pub(super) fn first_hole_to_fetch(
-        &self,
-        candidates: &[ShardCandidate],
-        report: &BudgetReport,
-    ) -> Option<u64> {
-        candidates
+/// [`room_lacked`] for a cycle that chose `selected` out of
+/// `remaining_bytes`: the wanting part counts as chosen only if IT was — a
+/// smaller part asking for room, chosen beside it, does not close its lack —
+/// and what the others take is counted before its lack is (review of #371:
+/// measured on the room left before them, the room prune made was eaten by
+/// the further copies the same cycle chose, and the part never fitted).
+pub(super) fn room_lacked_after(
+    wanting: Option<&ShardCandidate>,
+    selected: &[ShardCandidate],
+    remaining_bytes: u64,
+) -> Option<u64> {
+    let chosen = wanting.is_some_and(|part| {
+        selected
             .iter()
-            .find(|c| {
-                c.fills_a_hole
-                    && c.shard_size_bytes > 0
-                    && could_ever_hold(c.shard_size_bytes, report)
-                    && !self
-                        .shared_state
-                        .models
-                        .is_shard_in_progress(&c.model_id, c.shard_index)
-            })
-            .map(|c| c.shard_size_bytes)
+            .any(|c| c.model_id == part.model_id && c.shard_index == part.shard_index)
+    });
+    let taken: u64 = selected.iter().map(|c| c.shard_size_bytes).sum();
+    room_lacked(
+        wanting.map(|c| c.shard_size_bytes),
+        chosen,
+        remaining_bytes.saturating_sub(taken),
+        0,
+    )
+}
+
+impl AutoShardManager {
+    /// The first part offered that asks for room ([`RoomFor`] — candidates
+    /// come strongest reason first), could ever fit this node's storage
+    /// ([`could_ever_hold`]) and is not being fetched here already — what the
+    /// room noted for prune is measured by, and held to.
+    pub(super) fn first_part_wanting_room<'a>(
+        &self,
+        candidates: &'a [ShardCandidate],
+        report: &BudgetReport,
+    ) -> Option<&'a ShardCandidate> {
+        candidates.iter().find(|c| {
+            c.asks_room.is_some()
+                && c.shard_size_bytes > 0
+                && could_ever_hold(c.shard_size_bytes, report)
+                && !self
+                    .shared_state
+                    .models
+                    .is_shard_in_progress(&c.model_id, c.shard_index)
+        })
     }
 }
 
@@ -1948,6 +2031,7 @@ mod holes_first {
         fetched_with_pool_vram, holds, make_test_manager_with_config, peer_with_disk,
         register_manifest_with_sized_shards, write_sparse_shards,
     };
+    use super::RoomFor;
     use crate::config::Config;
     use crate::types::{ContributionMode, ModelId};
 
@@ -2001,7 +2085,7 @@ mod holes_first {
             candidates
                 .iter()
                 .find(|c| &c.model_id == mid && c.shard_index == index)
-                .map(|c| (c.score, c.fills_a_hole))
+                .map(|c| (c.score, c.asks_room == Some(RoomFor::Hole)))
         };
         let (copy_score, copy_fills) = offered(&small, 1).expect("the small model's part 1");
         let (hole_score, hole_fills) = offered(&large, 2).expect("the large model's part 2");
@@ -2028,25 +2112,21 @@ mod holes_first {
         );
     }
 
-    /// What the download pass notes for prune: the size a hole lacks beyond
-    /// what storage has left, plus anything held past the budget; nothing
-    /// once a hole is chosen or when none is offered.
+    /// What the download pass notes for prune: the size a part asking for room
+    /// lacks beyond what storage has left, plus anything held past the budget;
+    /// nothing once such a part is chosen or when none is offered.
     #[test]
-    fn the_room_a_hole_lacks_is_its_size_less_what_is_left() {
-        use super::room_a_hole_lacks;
-        assert_eq!(room_a_hole_lacks(Some(500), false, 300, 0), Some(200));
-        assert_eq!(room_a_hole_lacks(Some(500), false, 0, 100), Some(600));
-        assert_eq!(room_a_hole_lacks(Some(500), false, 500, 0), None, "it fits");
+    fn the_room_a_part_lacks_is_its_size_less_what_is_left() {
+        use super::room_lacked;
+        assert_eq!(room_lacked(Some(500), false, 300, 0), Some(200));
+        assert_eq!(room_lacked(Some(500), false, 0, 100), Some(600));
+        assert_eq!(room_lacked(Some(500), false, 500, 0), None, "it fits");
         assert_eq!(
-            room_a_hole_lacks(Some(500), true, 0, 0),
+            room_lacked(Some(500), true, 0, 0),
             None,
             "a hole was chosen"
         );
-        assert_eq!(
-            room_a_hole_lacks(None, false, 0, 0),
-            None,
-            "no hole offered"
-        );
+        assert_eq!(room_lacked(None, false, 0, 0), None, "no hole offered");
     }
 
     /// A hole the budget cannot fit keeps what is left for itself: with 300 MB
@@ -2068,7 +2148,7 @@ mod holes_first {
             shard_size_bytes: size,
             holder_count: usize::from(!fills_a_hole),
             score: 1.0,
-            fills_a_hole,
+            asks_room: fills_a_hole.then_some(super::super::manager::RoomFor::Hole),
         };
         let reading = StorageReading {
             max_storage_mb: 1_000,
@@ -2101,7 +2181,9 @@ mod holes_first {
         );
 
         assert_eq!(
-            manager.first_hole_to_fetch(&[candidate(&hole, 500 * MIB, true)], &report),
+            manager
+                .first_part_wanting_room(&[candidate(&hole, 500 * MIB, true)], &report)
+                .map(|c| c.shard_size_bytes),
             Some(500 * MIB),
             "the hole asks prune for room"
         );
@@ -2118,7 +2200,28 @@ mod holes_first {
             vec![small.clone()],
             "a hole this node could never hold does not stop the copy"
         );
-        assert_eq!(manager.first_hole_to_fetch(&[never], &report), None);
+        assert!(manager
+            .first_part_wanting_room(std::slice::from_ref(&never), &report)
+            .is_none());
+
+        // A part ONE computer holds (#371) holds nothing back: the room it
+        // lacks is measured after the cycle's choices (`room_lacked_after`),
+        // so the copy may take what is left — else a node prune can make no
+        // room on would never fetch again (review of #371).
+        let scarce = ShardCandidate {
+            holder_count: 1,
+            asks_room: Some(RoomFor::Scarce),
+            ..candidate(&hole, 500 * MIB, false)
+        };
+        let chosen = manager.select_within_budget(vec![scarce, copy.clone()], &report);
+        assert_eq!(
+            chosen
+                .iter()
+                .map(|c| c.model_id.clone())
+                .collect::<Vec<_>>(),
+            vec![small.clone()],
+            "a part one computer holds does not keep the room from the copy"
+        );
 
         let chosen = manager.select_within_budget(vec![copy], &report);
         assert_eq!(
@@ -2129,5 +2232,44 @@ mod holes_first {
             vec![small],
             "control: with no hole waiting, the copy is taken"
         );
+    }
+
+    /// The room the strongest part asking for it lacks is measured against
+    /// THAT part, after what the cycle chose: a smaller part asking room,
+    /// chosen beside it, does not close its lack, and what the others took is
+    /// counted. Before (review of #371), either one chosen hid a larger hole's
+    /// need, and the lack read off the room left before the cycle's copies was
+    /// eaten by them.
+    #[test]
+    fn the_room_a_part_lacks_is_measured_after_what_the_cycle_chose() {
+        use super::room_lacked_after;
+        use super::ShardCandidate;
+        let part = |model: &str, mib: u64, why: Option<RoomFor>| ShardCandidate {
+            model_id: ModelId(model.into()),
+            model_name: model.into(),
+            shard_index: 0,
+            shard_size_bytes: mib * MIB,
+            holder_count: 1,
+            score: 1.0,
+            asks_room: why,
+        };
+        let hole = part("large", 500, Some(RoomFor::Hole));
+        let held_once = part("small", 100, Some(RoomFor::Scarce));
+        let copy = part("copy", 150, None);
+        assert_eq!(
+            room_lacked_after(Some(&hole), &[held_once, copy.clone()], 300 * MIB),
+            Some(450 * MIB),
+            "500 MB less the 50 MB the cycle's choices left"
+        );
+        assert_eq!(
+            room_lacked_after(Some(&hole), std::slice::from_ref(&hole), 600 * MIB),
+            None,
+            "the part itself was chosen"
+        );
+        assert_eq!(
+            room_lacked_after(Some(&hole), &[], 300 * MIB),
+            Some(200 * MIB)
+        );
+        assert_eq!(room_lacked_after(None, &[copy], 300 * MIB), None);
     }
 }
