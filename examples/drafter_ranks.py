@@ -10,17 +10,25 @@ ranks; on the refrigerator prompt it reproduced the real Thailand-Australia link
 four drafters (2026-10-24).
 
   1. ids <dir> <name> <prompt file>: the target's greedy reply from the node on localhost:8800
-     (`SWARM_RANKS_MODEL`, default qwen2.5-coder-7b-instruct-q4-k-m), chat-templated, tokenized by
-     a vocabulary-only GGUF (`SWARM_RANKS_VOCAB`) -> <dir>/<name>.ids.json + .meta.json
+     (`SWARM_RANKS_MODEL`, default qwen2.5-coder-7b-instruct-q4-k-m; `SWARM_RANKS_MAX_TOKENS`,
+     default 400), chat-templated by the template of a GGUF of the target's family
+     (`SWARM_RANKS_VOCAB`, read vocabulary-only), tokenized by it -> <dir>/<name>.ids.json + .meta.json
   2. per model, examples/logits_reference_probe.rs on those ids: LOGITS_PROBE_MODEL=<model dir>
      LOGITS_PROBE_IDS=<dir>/<name>.ids.json LOGITS_PROBE_DECODE=0 LOGITS_PROBE_CHUNK=512
      LOGITS_PROBE_KEEP_LAST=<reply tokens + 1> LOGITS_PROBE_OUT=<dir>/<name>_<tag> (no dot in the
      tag: the probe replaces the extension), then
-     reduce <dir> <name> <tag> [truth tag] — the target first, with no truth tag; deletes the .f32
+     reduce <dir> <name> <tag> [truth tag] — the target first, with no truth tag; deletes the .f32.
+     Truth tag `ids`: the reply's own tokens are the target's choices (a greedy reply is its first
+     choice at every position) — for a target no one computer may hold whole, such as a 70B,
+     whose logits cannot be read here. Probe the drafter with KEEP_LAST = reply tokens + 1.
   3. report <dir> <tag,...> <name,...>: P[rank], calibration bins, the log-loss by temperature
   4. sim <dir> <tag> <call ms> <name,...> [key=value ...]: tok/s, misses and tokens a forward on
      the trace (keys: run()'s levels, rows, live_most; temp=<one of TEMPS>; perfect=1 makes every
      draw the drafter's first choice). <call ms> is a 3-level drafter call as the real flow logs it.
+  5. chain <dir> <tag,...> <name,...> [draft=<ms a guess> fixed=<ms a check> row=<ms a row>]: the
+     tokens a check of a CHAIN of g guesses yields, g = 1..8, replayed on the ranks (a hit is rank
+     0), and tok/s for checks that wait for the drafter — what the continuous stream and the rounds
+     get where trees are off (a drafter or a segment off the card, e.g. the 70B).
 Needs numpy (and llama_cpp for `ids`).
 """
 import json
@@ -35,6 +43,36 @@ import flow_rows_sim  # noqa: E402
 
 TEMPS = (0.5, 0.7, 0.85, 1.0, 1.2, 1.5, 2.0)
 QWEN25_REAL_VOCAB = 151665  # the rest of a Qwen2.5 output row is padding
+QWEN25_PADDED_VOCABS = (151936, 152064)
+
+
+def real_vocab(vocab):
+    """The columns of an output row that are tokens — a Qwen2.5 row is padded past them."""
+    return QWEN25_REAL_VOCAB if vocab in QWEN25_PADDED_VOCABS else vocab
+
+
+def chat_head(tok, prompt):
+    """The prompt as the target's chat template renders it, from the vocabulary GGUF's own
+    template (HF's conventions: bos_token, add_generation_prompt); Qwen2.5's literal head where the
+    file carries none, as before."""
+    template = tok.metadata.get("tokenizer.chat_template")
+    if not template:
+        return ("<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful "
+                f"assistant.<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
+    import datetime
+    import jinja2
+
+    def raise_exception(message):
+        raise ValueError(message)
+
+    env = jinja2.Environment(trim_blocks=True, lstrip_blocks=True)
+    env.globals["raise_exception"] = raise_exception
+    env.globals["strftime_now"] = lambda fmt: datetime.datetime.now().strftime(fmt)
+    bos = tok.metadata.get("tokenizer.ggml.bos_token_id")
+    bos_text = tok.detokenize([int(bos)], special=True).decode() if bos is not None else ""
+    return env.from_string(template).render(
+        messages=[{"role": "user", "content": prompt}], add_generation_prompt=True,
+        bos_token=bos_text)
 
 
 def ids(d, name, prompt_file):
@@ -45,15 +83,15 @@ def ids(d, name, prompt_file):
         "SWARM_RANKS_VOCAB", "~/swarmllm-ref/qwen2.5-coder-7b-instruct-q4-k-m.gguf"))
     key = open(os.path.expanduser("~/.local/share/swarmllm/api_key")).read().strip()
     prompt = open(prompt_file).read()
-    body = json.dumps({"model": model, "max_tokens": 400, "temperature": 0,
+    max_tokens = int(os.environ.get("SWARM_RANKS_MAX_TOKENS", "400"))
+    body = json.dumps({"model": model, "max_tokens": max_tokens, "temperature": 0,
                        "messages": [{"role": "user", "content": prompt}]}).encode()
     req = urllib.request.Request("http://localhost:8800/v1/chat/completions", data=body, headers={
         "Authorization": f"Bearer {key}", "Content-Type": "application/json"})
-    reply = json.load(urllib.request.urlopen(req, timeout=600))["choices"][0]["message"]["content"]
-    # Qwen2.5's template with no system message of the caller's.
-    head = ("<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful "
-            f"assistant.<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
+    reply = json.load(urllib.request.urlopen(req, timeout=1800))["choices"][0]["message"]["content"]
     tok = Llama(model_path=vocab, vocab_only=True, verbose=False)
+    # The template with no system message of the caller's.
+    head = chat_head(tok, prompt)
     p_ids = tok.tokenize(head.encode(), add_bos=False, special=True)
     r_ids = tok.tokenize(reply.encode(), add_bos=False, special=False)
     json.dump(p_ids + r_ids, open(f"{d}/{name}.ids.json", "w"))
@@ -66,12 +104,25 @@ def reduce(d, name, tag, truth_tag=None):
     meta = json.load(open(f"{d}/{name}_{tag}.json"))
     n, vocab = meta["positions"], meta["vocab"]
     rows = np.fromfile(f"{d}/{name}_{tag}.f32", dtype="<f4").reshape(n, vocab)
-    rows = rows[:, :QWEN25_REAL_VOCAB].astype(np.float64)
+    rows = rows[:, :real_vocab(vocab)].astype(np.float64)
+    if truth_tag == "ids":
+        # Position i predicts token i + 1: the kept rows begin at the prompt's last token, and the
+        # last one predicts past the reply, where the reply's tokens say nothing.
+        reply = json.load(open(f"{d}/{name}.meta.json"))["reply_tokens"]
+        assert n == reply + 1, f"probe with KEEP_LAST = {reply + 1}, not {n}"
+        n, rows = reply, rows[:reply]
+    # A flat row ranks every token 0 and reads as a perfect drafter: the sparse "vocab" GGUFs in
+    # ~/swarmllm-ref/vocab/ are 4.6 GB on paper, a few MB on disk, every weight zero (2026-10-29).
+    flat = int((rows.max(axis=1) == rows.min(axis=1)).sum())
+    assert flat == 0, f"{name}_{tag}: {flat} of {n} rows are flat — does the model file hold its weights?"
     top = np.argsort(-rows, axis=1)[:, :16]
     m = rows.max(axis=1, keepdims=True)
     out = {"top": top}
-    if truth_tag:
+    if truth_tag == "ids":
+        truth = np.array(json.load(open(f"{d}/{name}.ids.json"))[-n:])
+    elif truth_tag:
         truth = np.load(f"{d}/{name}_{truth_tag}.npz")["top"][:, 0]
+    if truth_tag:
         assert len(truth) == n, "the drafter and the target read different positions"
         t_logit = rows[np.arange(n), truth]
         out["rank"] = (rows > t_logit[:, None]).sum(axis=1)
@@ -126,6 +177,36 @@ def sim(d, tag, call_ms, names, *opts):
               f"tokens a forward {m['tok_fw']:.2f}  waiting {m['wait']:.2f} s")
 
 
+def chain_tokens(rank, guesses):
+    """Tokens a chain check of `guesses` yields over one reply, replayed in order: the guesses kept
+    up to the first miss, plus the target's own token there (or after the last guess)."""
+    pos, checks = 0, 0
+    while pos < len(rank):
+        kept = 0
+        while kept < guesses and pos + kept < len(rank) and rank[pos + kept] == 0:
+            kept += 1
+        pos += kept + 1
+        checks += 1
+    return len(rank) / max(checks, 1)
+
+
+def chain(d, tags, names, *opts):
+    kw = {k: float(v) for k, v in (o.split("=", 1) for o in opts)}
+    for tag in tags:
+        zs = load(d, tag, names)
+        if not zs:
+            continue
+        hits = float(np.mean(np.concatenate([z["rank"] for z in zs.values()]) == 0))
+        print(f"\n== {tag}: alpha (first choice is the target's) {hits:.3f} over {','.join(zs)}")
+        for g in range(1, 9):
+            per = float(np.mean([chain_tokens(z["rank"], g) for z in zs.values()]))
+            line = f"  {g} guesses: {per:.2f} tokens a check"
+            if {"draft", "fixed", "row"} <= kw.keys():
+                ms = kw["fixed"] + kw["row"] * (g + 1) + kw["draft"] * g
+                line += f"  {1000 * per / ms:.2f} tok/s at {ms:.0f} ms a check"
+            print(line)
+
+
 if __name__ == "__main__":
     cmd, args = sys.argv[1], sys.argv[2:]
     if cmd == "ids":
@@ -136,5 +217,7 @@ if __name__ == "__main__":
         report(args[0], args[1].split(","), args[2].split(","))
     elif cmd == "sim":
         sim(args[0], args[1], args[2], args[3].split(","), *args[4:])
+    elif cmd == "chain":
+        chain(args[0], args[1].split(","), args[2].split(","), *args[3:])
     else:
         sys.exit(__doc__)
