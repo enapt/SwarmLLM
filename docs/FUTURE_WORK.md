@@ -8,7 +8,7 @@ long since shipped without their entries being updated.
 ## How to use this file
 
 - **Numbers are stable.** An item keeps its `#NNN` for life; a new item takes the next free
-  number (**next free: #370**). Numbers below #165 come from the old triage index; #165 and
+  number (**next free: #372**). Numbers below #165 come from the old triage index; #165 and
   up were given on 2026-10-02 to open items that had no number. Several old entries were
   merged into one — the entry says which numbers it absorbed, and § "Closed" lists every
   number that is no longer open, with where it went.
@@ -80,12 +80,18 @@ the top track (`docs/plans/large_model_splits.md`).
    prose; a chain that starts and finishes here flows since v0.3.261 (#369, ~1.2x its tree
    rounds, still ~1.1-1.2x behind the default shape). Prose is held by the drafter's
    first-choice rate: the general 0.5B misses 17-20 times a 160-token reply where the coder's
-   0.5B missed 30-35 (#370). **Next**: tokens a round past the drafter (`large_model_splits.md`
+   0.5B missed 30-35 (#370). Three cards chained (this one, an RTX 4050 laptop in Europe at
+   ~230 ms, the 3060) flowed at 12.4-14.3 tok/s on code and 4.4-4.9 on prose, against 15.7-20.9
+   and 6.1-7.3 for the two-card split run alongside (2026-10-29, v0.3.261, four runs each): the
+   check crosses three links (~600 ms against ~480) and a chain's window of 8 forwards carried
+   7-12 rows each against 18-25, so a third machine pays only where it holds what two cannot. **Next**: tokens a round past the drafter (`large_model_splits.md`
    step 4, a drafter fed by the model's own state); for the 70B, more tokens a check where a
    check takes a second (the stream ran 3 guesses a chunk), and whether its 1B on the card beats
    the 3B on the processor (`faster_than_local.md` § 8, the 70B deep dive). The track's history
    (near chains #192, the far chain #346, trees #134, the stream, tensor-core MMQ #325, requester
-   guesses) is in the #318 entry and § "Closed".
+   guesses) is in the #318 entry and § "Closed". **Holding the parts**: a full machine never gives
+   back a small model's spare copy for a part of a large model the swarm is short of (#371); a
+   6 GB laptop in Europe held 14 models and no part of the 70B.
 7. **#115** — the rest of Gemma 4: its image reader and its drafters, refused by name today,
    never loaded wrong. (Gemma 3 reads pictures as llama.cpp does since 2026-10-19; Gemma 4's
    E2B/E4B run since 2026-10-17 and fit a 4 GB / 6 GB card whole since #296.)
@@ -1022,6 +1028,34 @@ speed-up. Then add a bounded multiplicative term to scoring — and to retention
 `prune.rs`, or it loops — for parts this node lacks, can fit, and where its MEASURED speed
 (`PeerSpeed::ranking_ms_per_layer`, not the advertised figure) clearly beats the holders'.
 Must not make fast nodes hoover up the swarm (cap it; keep `spread_bonus` multiplicative).
+
+#### #371 — A full machine never gives back a small model's spare copy for a part of a large model the swarm is short of
+`P2` · storage · **OPEN** — 2026-10-29 · related: #346 (far chains, its residual), #170, #4
+
+Seen on v0.3.261 (2026-10-29). An RTX 4050 laptop (6 GB card) in Europe holds 14 models in 96
+parts: small ones, and 14 of the 16 parts of Qwen2.5-14B. It holds no part of Llama 3.3 70B,
+which the network map lists as a coverage gap in both European regions it could be in, while
+the 70B runs on two machines and has few holders. On a full machine the download pass stops
+(`auto_manage/manager.rs`, "this node's storage is full"). The only room prune makes is for a
+part NO computer holds (`scoring::room_a_hole_lacks` → `prune::spare_for_a_hole`). A part a
+planned chain of machines names this machine for (#346) is not such a part, and neither is a
+scarce large model's part held once or twice. So a machine fills with copies of models any
+single computer runs, and the parts only a split can use go unhosted — the opposite of what
+the swarm is for (#318). Which gate bound on that machine is inferred, not observed (its log
+is not ours): storage most likely, then, for a model it holds no part of, the hash ring
+(`scoring.rs`, "not assigned on consistent hash ring").
+
+Precedent: Petals places a server over the run of blocks whose weakest block has the least
+throughput in the swarm, and moves it only when a simulated rebalance raises the swarm's
+minimum enough (`src/petals/server/block_selection.py`: `choose_best_blocks`,
+`should_choose_other_blocks`, `balance_quality`). Shape of a fix: widen the make-room path from
+holes to (a) a part a planned chain names this machine for and (b) a part of a model no machine
+in scope runs whole whose holders are under target; give back only copies
+`prune::copy_kept_because` would already shed, held by more than `max(min_replicas, 2)`
+machines and not loaded; and keep a margin so the download and prune passes cannot trade the
+same bytes back and forth (#170's warning). First, read what such a machine logs ("storage is
+full", "near chain planned", the hash-ring line at debug): this node with a small storage
+budget, or a rig.
 
 #### #190 — A GPU node with every layer but no room for the request runs it locally instead of using an idle peer
 `P3` · routing · **PARTIAL** — 2026-08-03 · history: archive § "Full local coverage bypasses the network, even with no headroom" (its heading says FIXED; its body says the fix was REVERTED)
