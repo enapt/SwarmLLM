@@ -1628,10 +1628,19 @@ to 1, so the even split's 7-9 tok/s was priced at ~2 and a split never beat runn
 per model, one flow also dragged the model's tree-round figure from ~4 to 1.7. The flow and the
 stream now count the round trips they waited (`split_rounds::round_trips_waited`: decode over
 least answer — 3.2-4.3 prose and 7.7-10.3 code at the even split, 1.6-1.8 and 4.3-4.4 saturated;
-`docs/invariants/scheduling.md` § "A split is priced for the rounds it takes"). Left: the figure
-is per MODEL, so it cannot tell the even split from the lopsided one — check which split point
-the search gives a card head with a drafter beside a far card before trusting 29.6 as what users
-get, now that the price it compares reads the flow.
+`docs/invariants/scheduling.md` § "A split is priced for the rounds it takes"). **Which split
+point users get (read 2026-10-29, code only):** none, for this pair — a machine that can run the
+model whole plans no chain (`near_chain::compute_near_chain` → `OneRunsItWhole`), and a 12 GB
+card holds the 14B, so it is handed over whole; the 29.6 is the rig's pinned shape, not a
+placement. Where a chain IS planned, `plan_chain` fills each machine to its ceiling in turn
+(Petals' rule; ties go to the furthest end) and the router offers only held ranges
+(`partial_ranges` off), so balance is never chosen; the router's per-model figure scales every
+split segment alike (`rounds_entered`), so it decides split-or-not, never where. Summing the
+segments is right for rounds and the stream, and for a flow until one side saturates — the only
+saturated case measured (36 layers + head on the far card) is not one placement builds here. Left:
+a balance term for a cards-only chain whose reply flows, once a placement that saturates one side
+is seen on a real chain (a model needing about one and a half cards, planned over three, is the
+shape with room to spare).
 
 #### #357 — A card's first graph of a new shape, late in a worker's life, can stall one forward 10-59 s
 `P3` · perf-local · **OPEN** — 2026-10-26 · evidence: `faster_than_local.md` § 8.6; gotcha #883
