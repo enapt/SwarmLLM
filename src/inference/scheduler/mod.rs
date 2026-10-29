@@ -2491,10 +2491,11 @@ fn cheapest_whole_model_peer<'a>(
 ///
 /// And the arithmetic shows what the veto actually blocked. An unpriced peer
 /// taking `L` layers is charged `UNKNOWN_COMPUTE_MS * L * ASSUMED_FORWARD_PASSES`
-/// = 1600·L ms, plus `2 * latency * ASSUMED_FORWARD_PASSES` of network; a local
+/// = 1600·L ms, plus one round trip × `ASSUMED_FORWARD_PASSES` of network; a local
 /// processor at `e` tokens/sec is charged `2000·L/e`. Ignoring network the peer
-/// wins only below **e = 1.25 tok/s**, and a peer 500 ms away needs the local
-/// node under ~0.5 tok/s before it wins at all. So the search reaches for an
+/// wins only below **e = 1.25 tok/s**, and a peer 500 ms away taking 32 layers
+/// needs the local node under ~0.8 tok/s before it wins at all (~0.55 while the
+/// round trip was charged twice, #3 (h)). So the search reaches for an
 /// unmeasured peer only when running here would take many minutes — which is
 /// the one case where trying the unknown is warranted, and the only case the
 /// veto had any effect on. The threshold is derived from the cost model rather

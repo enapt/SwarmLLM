@@ -42,7 +42,7 @@ use super::NodeCandidate;
 /// Per-vertex cost components. All in milliseconds.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct VertexCost {
-    /// `2 * latency_ms` for remote peers, 0 for local — multiplied by the
+    /// One round trip (`latency_ms`) for remote peers, 0 for local — multiplied by the
     /// request's passes (`NodeCandidate::forward_passes`: `ASSUMED_FORWARD_PASSES`
     /// or a smaller `max_tokens`) when the segment is entered mid-chain, since
     /// the coordinator round-trips into it per token.
@@ -582,7 +582,7 @@ fn vertex_cost_as(
 
     // When we have an observed per-layer latency, it already includes the peer's
     // segment wall-clock round-trip (compute + peer-side load). Fold the whole
-    // `segment_ms` into `compute_ms` and skip the static `2 * latency_ms` network
+    // `segment_ms` into `compute_ms` and skip the static round-trip network
     // term to avoid double-counting. When we don't have an observation yet, use
     // the traditional two-part cost (network + static compute estimate).
     let (base_network_ms, per_layer_ms) = if let Some(obs_per_layer) = observation {
@@ -616,10 +616,20 @@ fn vertex_cost_as(
         };
         (per_visit, obs_per_layer)
     } else {
+        // ONE round trip a pass: `latency_ms` is already a round trip
+        // (`PeerInfo::round_trip_ms`, what one exchange with the peer costs),
+        // and a pass driven from here crosses it once — the forward out, the
+        // result back — as Petals charges `rtt / 2` an edge
+        // (`sequence_manager.py`, `_rtt_to_delay`) and `led_hop_ms` half the
+        // coordinates' round trip a hop. It was `2 * latency_ms`, written as
+        // though the figure were one way: the 70B's checks to a 3060 in
+        // Australia answered in 1,145 ms at the least, its ~400 ms round trip
+        // inside that once, and were priced 800 ms of network a pass on top of
+        // the compute (FUTURE_WORK #3 (h), 2026-10-29).
         let network = if is_local || in_led_chain {
             0.0
         } else {
-            2.0 * c.latency_ms as f32
+            c.latency_ms as f32
         };
         // The static prior, priced as one of THIS model's layers (#250), on
         // the device each layer of the range runs on.
@@ -726,7 +736,7 @@ fn vertex_cost_as(
     //   choose.
     // - **It charges the inbound direction only.** The return payload varies by
     //   shape (a mid-chain segment returns hidden states, the last returns
-    //   tokens) and `2 * latency_ms` already carries the round trip. A
+    //   tokens) and the network term already carries the round trip. A
     //   conservative, clearly-stated term beats a speculative one on a cost
     //   model whose calibration is itself an open question
     //   (`ASSUMED_FORWARD_PASSES`, see docs/FUTURE_WORK.md).
@@ -2019,16 +2029,16 @@ mod tests {
         let chain = halves(2, 3);
         assert!(chain_is_led_by_its_head(&chain, &cands, &local));
         let led = chain_cost_terms(&chain, &cands, &local, 32, None);
-        // The head is handed the request once (2 × 400, as a whole-model
-        // hand-off is), and each of 64 passes crosses A → B and B → A at half
-        // their 40 ms round trip.
-        assert_eq!(led.network_ms, 800.0 + 64.0 * (20.0 + 20.0));
+        // The head is handed the request once (one 400 ms round trip, as a
+        // whole-model hand-off is), and each of 64 passes crosses A → B and
+        // B → A at half their 40 ms round trip.
+        assert_eq!(led.network_ms, 400.0 + 64.0 * (20.0 + 20.0));
         // Compute is the same work wherever it is driven from.
         assert_eq!(led.compute_ms, UNKNOWN_COMPUTE_MS * 32.0 * 64.0);
 
         // Driven from here, each half was a round trip from here per pass —
         // what this morning's chains were priced at, 4-10x their time.
-        let driven = 64.0 * 2.0 * (2.0 * 400.0);
+        let driven = 64.0 * 2.0 * 400.0;
         let priced_as_before = |cands: &[NodeCandidate]| {
             assert!(!chain_is_led_by_its_head(&chain, cands, &local));
             assert_eq!(
@@ -2066,7 +2076,7 @@ mod tests {
         let (local, mut cands) = two_close_peers_far_from_here();
         // A third peer holds the whole model and runs it at 40 ms a layer:
         // 81,920 ms over 64 passes. The halves cost 25 ms a layer, 51,200, plus
-        // their hops: 3,360 led by A, 102,400 driven from here.
+        // their hops: 2,960 led by A, 51,200 driven from here.
         let mut whole = cand(4, vec![(0, 32)], 400, 0.0, true, true, 0.0);
         whole.observed_delegated_ms_per_layer = Some(40.0);
         cands.push(whole);
@@ -2089,7 +2099,7 @@ mod tests {
         // The price it was chosen at is the price every gate reads.
         assert_eq!(
             chain_cost_ms(&halves(2, 3), &cands, &local, 32, None),
-            UNKNOWN_COMPUTE_MS * 32.0 * 64.0 + 800.0 + 64.0 * 40.0
+            UNKNOWN_COMPUTE_MS * 32.0 * 64.0 + 400.0 + 64.0 * 40.0
         );
 
         // Not a request the hand-off takes: driven from here, the halves cost
@@ -2131,10 +2141,10 @@ mod tests {
             .collect::<Vec<_>>()
         };
         // At their stated speed (1000 / 56 / 32 ms a layer) the led halves cost
-        // 1,143 ms of compute and 3,360 of hops: cheaper than the whole copy.
+        // 1,143 ms of compute and 2,960 of hops: cheaper than the whole copy.
         let stated = 1000.0 / 56.0 / BASELINE_LAYER_COUNT * 32.0 * 64.0;
         assert!(
-            (chain_cost_ms(&halves(2, 3), &cands, &local, 32, None) - (stated + 3_360.0)).abs()
+            (chain_cost_ms(&halves(2, 3), &cands, &local, 32, None) - (stated + 2_960.0)).abs()
                 < 0.5
         );
         assert_eq!(route(&cands), vec![(2, (0, 16)), (3, (16, 32))]);
@@ -2144,7 +2154,7 @@ mod tests {
             c.stated_ms_per_layer = Some(1000.0 / 56.0 / BASELINE_LAYER_COUNT * 8.0);
         }
         let timed = chain_cost_ms(&halves(2, 3), &cands, &local, 32, None);
-        assert!((timed - (8.0 * stated + 3_360.0)).abs() < 0.5, "{timed}");
+        assert!((timed - (8.0 * stated + 2_960.0)).abs() < 0.5, "{timed}");
         assert_eq!(route(&cands), vec![(4, (0, 32))]);
 
         // A figure FASTER than the stated speed is no discount.
@@ -2153,7 +2163,7 @@ mod tests {
         }
         assert_eq!(route(&cands), vec![(2, (0, 16)), (3, (16, 32))]);
         assert!(
-            (chain_cost_ms(&halves(2, 3), &cands, &local, 32, None) - (stated + 3_360.0)).abs()
+            (chain_cost_ms(&halves(2, 3), &cands, &local, 32, None) - (stated + 2_960.0)).abs()
                 < 0.5
         );
 
@@ -2188,9 +2198,36 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(shape(&segs), shape(&halves(2, 3)));
+        // Two peers driven from here, each a round trip a pass.
         assert_eq!(
             chain_cost_terms(&segs, &cands, &local, 32, None).network_ms,
-            64.0 * 2.0 * (2.0 * 400.0)
+            64.0 * 2.0 * 400.0
+        );
+    }
+
+    /// **#3 (h)**: `latency_ms` is a ROUND trip (`PeerInfo::round_trip_ms`),
+    /// and a pass driven from here crosses it once — so an unmeasured peer is
+    /// charged one round trip a pass, the unit its measured figure is charged
+    /// in. The 70B's shape on 2026-10-29: [0,16) here, [16,80) on a 3060 in
+    /// Australia ~400 ms away, never measured (its checks are many tokens and
+    /// record no sample); its checks answered in 1,145 ms at the least, the
+    /// round trip inside that once, and were priced 800 ms of network a pass.
+    #[test]
+    fn an_unmeasured_peer_driven_from_here_is_charged_one_round_trip_a_pass() {
+        let local = NodeId([1; 32]);
+        let au = cand(3, vec![(16, 80)], 400, 0.0, false, true, 0.0);
+        let priced = vertex_cost(&au, (16, 80), &local, 80, None);
+        assert_eq!(priced.network_ms, 400.0 * au.forward_passes());
+
+        // The same peer once measured, its visit costing exactly the round
+        // trip beside its layers: the network term is the same figure — the
+        // prior and the measurement speak one unit.
+        let mut measured = au.clone();
+        measured.observed_latency_ms_per_layer = Some(4.0);
+        measured.observed_fixed_ms_per_visit = Some(400.0);
+        assert_eq!(
+            vertex_cost(&measured, (16, 80), &local, 80, None).network_ms,
+            priced.network_ms
         );
     }
 

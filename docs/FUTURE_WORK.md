@@ -737,12 +737,15 @@ publish `inference_rps`, and a coordinator takes it as a floor under the stated 
 auto-update, priced a model's first four replies at 64 passes and its first four splits at one
 round a token (the 70B's first three splits after .261's update: predicted 128.6 / 138.6 / 130.4 s,
 took 74.7 / 56.8 / 54.9 s, 2.2 tokens a round charged as one) — **fixed 2026-10-29** (§ Closed):
-kept across restarts (`daemon::state::recent_by_model`); (h) OPEN, found reading (g): the 70B's
+kept across restarts (`daemon::state::recent_by_model`); (h) found reading (g): the 70B's
 ROUND itself is priced ~1.95 s (net 800 + compute 1,145 ms a pass) against ~1.12 s measured (a
-least answer of 1,145 ms, ~420 ms of it the link) — every 70B plan carries it, so it moves no
-choice between them, only against a route of another shape; read which term over-charges
-(the coordinates' round trip under the stream's queued forwards, the AU processor layers' prior)
-before touching either.
+least answer of 1,145 ms, ~400 ms of it the link). ~~The network half~~ — **fixed 2026-10-29**
+(§ Closed): an unmeasured peer was charged `2 * latency_ms` a pass, and `latency_ms` is already a
+round trip. OPEN: the compute half — the prior is pessimistic by design, but a model that runs
+only with guesses (the 70B streams every reply) never earns a measured figure for its peers, since
+a check of K rows records no sample (`forward_verify_through_segments`: K rows would read K times
+slow per layer); a check's time is exactly a ROUND's cost, which is what `rounds_entered`
+multiplies, so record it as a round's sample rather than a layer's.
 
 `scheduler/parallax.rs` charges a remote hop a flat `ASSUMED_FORWARD_PASSES = 64.0`. The error
 grows with reply length — 1.0 at 8 tokens, 2.4-3.3 at 120-239 — and biases every delegation
@@ -3693,7 +3696,18 @@ Every number that is no longer open, with how it closed. Numbers 6-9, 13-16 and 
 retired before the 2026-09-09 index existed. The history of each is in the archive (rows:
 grep `^| N |`).
 
-**Closed 2026-10-29, ships in the next release** (#368, #370, #371, #3 (g))
+**Closed 2026-10-29, ships in the next release** (#368, #370, #371, #3 (g), #3 (h) network half)
+- #3 (h), network half — **An unmeasured peer is charged its round trip once a pass, not twice.**
+  `parallax::vertex_cost_as` priced a peer with no measured figure at `2 * latency_ms` of network a
+  pass, but `latency_ms` is `PeerInfo::round_trip_ms` — already the whole round trip — and a pass
+  driven from here crosses it once. Llama-3.3-70B split with a 3060 in Australia: its checks
+  answered in 1,145 ms at the least, the ~400 ms round trip inside that once, and were priced 800 ms
+  of network a pass on top of the compute. A measured peer, a led chain's hops and Petals'
+  `_rtt_to_delay` all charged one round trip already; only the prior was in another unit. The
+  same figure prices a whole-model hand-off's one trip and a led chain's head, now one round trip
+  where it was two. The search's lean toward running here over an unmeasured far peer shrinks accordingly (a peer 500 ms
+  away taking 32 layers now wins below ~0.8 tok/s here, ~0.55 before). Test
+  `an_unmeasured_peer_driven_from_here_is_charged_one_round_trip_a_pass`.
 - #3 (g) — **A restart no longer prices a model's first replies and splits at the guesses.** The
   mean reply length (#3 (b)) and the tokens a split's round yields (#3 (d)) were memory only and
   trusted after four, so every restart — every node at every release's auto-update — priced the

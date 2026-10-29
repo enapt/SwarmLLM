@@ -785,7 +785,11 @@ work local, which is the opposite of what pipeline parallelism is for. Do NOT tu
 constant before establishing which half is wrong — the forward-pass count, or the
 per-token `2 * latency` — and note `ack_srtt_ms` is already measured on real forwards
 where `latency_ms` is a ping. See `docs/FUTURE_WORK.md` #3 ("The routing cost model's
-network term overestimates a boomerang").
+network term overestimates a boomerang"). **Established since: both halves were wrong.**
+The passes, by the reply's length and the rounds a split takes (#3 (b), (d), (g)); and
+the per-token term counted the round trip TWICE — `latency_ms` is already a round trip,
+so it is now one a pass (#3 (h), 2026-10-29, § "An unmeasured peer is charged one round
+trip a pass").
 
 **From the rules file (moved 2026-10-02):**
 
@@ -906,9 +910,10 @@ good one". A veto on top means it can never do the job it was raised to do.
 
 **And the arithmetic says what the veto blocked.** An unpriced peer over `L`
 layers costs `UNKNOWN_COMPUTE_MS * L * ASSUMED_FORWARD_PASSES` (1600·L ms) plus
-`2 * latency * ASSUMED_FORWARD_PASSES`; a local processor at `e` tok/s costs
-`2000·L/e`. The peer wins only below **e = 1.25 tok/s** ignoring network, and
-below **~0.5 tok/s** for a peer 500 ms away. The search therefore reaches for an
+one round trip × `ASSUMED_FORWARD_PASSES` (two until #3 (h)); a local processor at
+`e` tok/s costs `2000·L/e`. The peer wins only below **e = 1.25 tok/s** ignoring
+network, and below **~0.8 tok/s** for a peer 500 ms away taking 32 layers (~0.55
+while the round trip was charged twice). The search therefore reaches for an
 unmeasured peer only when running here would take minutes — the one case where
 trying the unknown is warranted.
 
@@ -1716,7 +1721,7 @@ start at layer 0, because a first segment receives the PROMPT
 (`ActivationUnits::PromptBytes`) rather than hidden states — three orders of
 magnitude smaller — and charging a transfer that does not happen would penalise
 exactly the split the search should be free to choose. Only the inbound
-direction is charged: the return payload varies by shape, `2 * latency_ms`
+direction is charged: the return payload varies by shape, the network term
 already carries the round trip, and a conservative stated term beats a
 speculative one on a cost model whose own calibration is an open question
 (`ASSUMED_FORWARD_PASSES`, `docs/FUTURE_WORK.md`).
@@ -2040,6 +2045,44 @@ priced as before, the prediction records 3.00),
 check count, the request gate, the split gate). `split_rounds`:
 `a_models_splits_yield_their_tokens_over_their_rounds`,
 `a_round_is_never_priced_at_less_than_a_token`, `only_the_most_recent_splits_count`.
+
+## An unmeasured peer is charged one round trip a pass (2026-10-29, #3 (h))
+
+`parallax::vertex_cost_as` prices a peer with no measured figure from priors:
+compute from the device-class prior, network from `NodeCandidate::latency_ms` —
+which `get_peer_metrics` fills from **`PeerInfo::round_trip_ms`**, "what one
+exchange with this peer costs" (the forward's acknowledgement time, else the idle
+ping; one exchange under V1Lazy, gotcha #742). A pass driven from here crosses it
+ONCE: the forward out, the peer's compute, the result back. The prior charged
+`2 * latency_ms`, written as though the figure were one way, and the comments
+around it ("`2 * latency_ms` already carries the round trip") said so.
+
+- **Measured**: Llama-3.3-70B, [0,16) here + [16,80) on a 3060 in Australia
+  (request 729234a2, 2026-10-29 10:4xZ, v0.3.261): 44 rounds in 49.5 s, 1,125 ms
+  a round; the least answer to a check 1,145 ms with the coordinates' least
+  round trip 400 ms inside it once. Priced 800 ms of network a pass
+  (`predicted_terms=net:51200` over 64 passes, `latency_ms` 400) beside
+  1,145 ms of compute.
+- **Every other branch already spoke one round trip**: a measured peer's visit
+  (`observed_fixed_ms_per_visit`, which carries our round trip once — the
+  led-peer test's "500 ms, 400 of it our round trip"), a led chain's hops (half
+  the coordinates' round trip a hop, closing hop included), and Petals'
+  `_rtt_to_delay` (`rtt / 2` an edge, client → server → client = one RTT,
+  `client/routing/sequence_manager.py`). Only the prior was in another unit, so
+  a peer's network term HALVED the moment it was first measured. The same prior
+  priced a whole-model hand-off's one trip and a led chain's head (once a
+  request): one round trip now, where it was two.
+- **Why it mattered more than it looked**: a model that runs only with guesses —
+  the 70B streams every reply — never earns a measured figure for its peers
+  (`forward_verify_through_segments` records a sample only for a ONE-token check;
+  K rows over the same layers would read K times slow), so its price is the
+  prior for good.
+- **Left (#3 (h))**: the compute prior (1,145 ms a pass against ~745 measured
+  less the link) is pessimistic BY DESIGN — "an unmeasured node does not outrank
+  a measured good one"; and a speculating model's peers are never measured at
+  all. Test `an_unmeasured_peer_driven_from_here_is_charged_one_round_trip_a_pass`
+  (also: the prior and a measured visit of exactly the round trip charge the same
+  network).
 
 ## A chain its head will lead is priced as its head leading it
 
