@@ -1504,7 +1504,9 @@ experts kept in RAM.
    machine, A on the card with layers 0-12 + 35-48, B on the processor with 12-35 (`fr/round18.sh`,
    ABBA): decode 1.34-1.48x with each of B's sends held 50 ms, 1.08-1.20x with none; 33-55% of the
    guesses kept, γ 0-3; replies part from one-at-a-time only at near-ties (scored against
-   llama.cpp). Evidence: `docs/invariants/inference.md` § "A chain that starts and finishes here
+   llama.cpp). **On a real link** (`fr/real_link.sh`, B = a swarm peer's RTX 3060 in Australia, RTT
+   ~420 ms): code 2.04 → 4.00 tok/s (1.96x), prose 2.04 → 3.05 (1.50x) — the prose reply each
+   node's first, guessed with an empty prior. Evidence: `docs/invariants/inference.md` § "A chain that starts and finishes here
    guesses through a stand-in for its far run". **Left, best first:** (a) a TREE of the head's
    guesses — its top few at each position, one forward a level on the card; B already reads trees
    (`DRAFT_TREES`), and on a real link a round trip dominates the check's extra rows, so coverage
@@ -1512,6 +1514,11 @@ experts kept in RAM.
    capture it as a graph (item 3's shape); (c) where the head holds less of the model the stand-in
    guesses worse (69-78% skipped kept 0.47-0.62 a round in the probe), so a drafter stays the
    guesser there — choose between them by their measured kept-per-round, not by fraction held.
+   Today a held drafter always wins: DSD runs first and the n-gram loop (where the far run
+   guesses) only without one, and a split with none asks for one (#134) — so measure the two on
+   the same link before building (a) for anything but the models no drafter fits; (d) the prior
+   lives in the worker's memory, so every restart and update starts the first reply cold — keeping
+   it would write rows derived from users' conversations to disk, which needs its own decision.
 5. **A mixture-of-experts model by use, not by layer**: Qwen3-30B-A3B reuses 44% of the previous
    token's experts per layer (chance 6%); a card holding 46% of the experts by recency per layer
    would serve 91% of expert reads against 46% by layer (`SWARMLLM_TRACE_EXPERTS` +

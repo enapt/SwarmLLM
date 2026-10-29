@@ -3553,6 +3553,21 @@ the whole guesser lives in the worker and nothing changes on the wire:
   round, and the card's row moves with it (a k-quant goes to MMQ from 4 rows, § "A few rows: the
   line per type and size, inside a capture too").
 
+**Measured on a real link** (`~/swarmllm-gate/deep/fr/real_link.sh`, 2026-10-29 02:38-02:51Z, the
+same binary, arms off on on off, a fresh node each): A = this machine with the same ends on the
+card; B = a swarm peer's RTX 3060 in Australia (v0.3.259, min RTT 416-432 ms) holding the middle,
+pinned with `pretend_peer_holds` and every other peer excluded, rebuilt before each ask; every ask
+logged `route=distributed segments=3 nodes=<A>,aa3d1e66,<A>`. Two prompts a node (prose first,
+then code, 160 greedy tokens): **code 2.05 / 2.03 → 4.01 / 3.98 tok/s (1.96x), prose 2.05 / 2.03 →
+3.17 / 2.93 (1.50x)**. With B on a card the round trip is nearly the whole step (off: one token a
+~490 ms round), so every kept guess is close to a whole token's time saved. Mechanism: prose 91-100
+rounds, 252-260 guessed, 56-57 kept, γ 2-3, 18.9-19.6 ms a guess (the card is never left idle long
+enough to slow); code 67-69 rounds, 239-249 guessed. The prose reply is each node's FIRST, so it is
+guessed with an empty prior (the prior lives in the worker's memory, and a restart or an update
+empties it); the code reply guesses with the prose reply absorbed. Scored against llama.cpp:
+on-arm replies 1-13 of 160 not rank 1, worst rank 2 (once 4, gap 0.12), largest gap 0.17-0.43;
+the control's 4-10, worst rank 2, gap 0.13-0.40 (`fr/real_link/score/score.out`).
+
 **What a change must keep.** The guess cuts both caches back on every exit; learning reads only
 committed positions; a request learning one is never batched; nothing here may need the far
 layers' weights or a new wire message.

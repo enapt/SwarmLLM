@@ -10,14 +10,15 @@ it had the internal drive's 18 GB left and held back from storing parts it had r
 three now read the drive the models folder leads to, on Linux, macOS and Windows (#368).
 
 **A model split across computers with "Start and finish on this computer" on now writes up to
-1.5 times as fast over a real connection.** With that setting your computer runs the model's
+twice as fast over a real connection.** With that setting your computer runs the model's
 first and last layers and another computer runs the middle, so every word cost a trip there and
 back. Your computer now guesses the next few words on its own — skipping the other computer's
 layers with a small stand-in it learns from the work passing through it anyway — and the other
 computer checks them all in one trip, keeping only the ones the whole model agrees with. Nothing
-more is downloaded or sent. Measured with a 14B model, its ends on an 8 GB laptop graphics card
-and its middle on a second node's processor: 1.3 to 1.5 times as fast with 50 ms added between
-the two, 1.1 to 1.2 times with none. Replies are the model's own: where one differs from writing
+more is downloaded or sent. Measured with a 14B model, its ends on an 8 GB laptop graphics card in
+Thailand and its middle on a volunteer's graphics card in Australia (about 420 ms there and back):
+code 2.0 → 4.0 tokens a second, prose 2.0 → 3.0. With the middle on a processor on the same desk,
+1.3 to 1.5 times as fast with 50 ms added between the two, 1.1 to 1.2 times with none. Replies are the model's own: where one differs from writing
 a word at a time, it is at a near-tie between two words, checked against llama.cpp. The gain
 grows with distance, since each kept guess saves a whole trip. `SWARMLLM_FAR_RUN_GUESSES=0` turns
 it off (#366).
